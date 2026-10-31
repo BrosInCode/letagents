@@ -1,0 +1,273 @@
+/*
+ * Wake rules read as a quiet state, not an alert: neutral colour, one glyph,
+ * and motion only when a person changes something.
+ */
+.wake-rules {
+  display: grid;
+  gap: 8px;
+}
+.wake-rules ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.wake-rules time,
+.wake-rule-copy strong {
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+.wake-rules-active {
+  position: relative;
+  display: grid;
+  gap: 8px;
+}
+.wake-rule {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  gap: 11px;
+  align-items: start;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--text) 7.5%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--text) 2.6%, transparent);
+}
+.wake-rule-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text-secondary) 12%, transparent);
+  color: var(--text-secondary);
+}
+.wake-rule-copy {
+  min-width: 0;
+}
+.wake-rule-kicker {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.64rem;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.wake-rule-copy strong {
+  display: block;
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 640;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.wake-rule-note {
+  display: block;
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+.wake-rule-meta {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-tertiary);
+  font-size: 0.69rem;
+  line-height: 1.4;
+}
+.wake-rule-error {
+  display: block;
+  margin-top: 6px;
+  color: var(--red-text);
+  font-size: 0.71rem;
+  line-height: 1.4;
+}
+.wake-rule[data-state="cancelled"] {
+  border-style: dashed;
+  background: transparent;
+}
+.wake-rule[data-state="cancelled"] .wake-rule-copy strong {
+  color: var(--text-secondary);
+  text-decoration: line-through;
+  text-decoration-color: color-mix(in srgb, var(--text-secondary) 45%, transparent);
+}
+
+.wake-rule-action {
+  align-self: center;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  border-radius: 9px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.72rem;
+  font-weight: 650;
+  cursor: pointer;
+  transition:
+    transform 120ms var(--ease-out),
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+.wake-rule-action[data-tone="undo"] {
+  border-color: color-mix(in srgb, var(--blue) 38%, transparent);
+  color: var(--blue);
+}
+@media (hover: hover) and (pointer: fine) {
+  .wake-rule-action:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text) 6%, transparent);
+    color: var(--text);
+  }
+  .wake-rule-action[data-tone="undo"]:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--blue) 10%, transparent);
+    color: var(--blue);
+  }
+}
+.wake-rule-action:active:not(:disabled) {
+  transform: scale(0.97);
+}
+.wake-rule-action:focus-visible,
+.wake-rules-recent summary:focus-visible,
+.wake-rules-recent-time:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+.wake-rule-action:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+/* A person's cancel or undo is the only change that moves a row. */
+.wake-rule-enter-active {
+  transition: opacity 220ms var(--ease-out), transform 220ms var(--ease-out);
+}
+.wake-rule-enter-from {
+  opacity: 0;
+  transform: translateY(4px) scale(0.98);
+}
+.wake-rule-leave-active {
+  position: absolute;
+  inset-inline: 0;
+  pointer-events: none;
+  transition: opacity 150ms ease-in, transform 150ms ease-in;
+}
+.wake-rule-leave-to {
+  opacity: 0;
+  transform: scale(0.99);
+}
+.wake-rule-move {
+  transition: transform 220ms var(--ease-out);
+}
+
+.wake-rules-recent summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 4px 2px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 0.64rem;
+  font-weight: 760;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  list-style: none;
+  cursor: pointer;
+}
+.wake-rules-recent summary::-webkit-details-marker {
+  display: none;
+}
+.wake-rules-recent summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  rotate: -45deg;
+  transition: rotate 160ms var(--ease-out);
+}
+.wake-rules-recent[open] summary::before {
+  rotate: 45deg;
+}
+.wake-rules-recent summary span {
+  color: var(--text-tertiary);
+  letter-spacing: 0;
+}
+.wake-rules-recent li {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 9px;
+  align-items: center;
+  padding: 7px 2px;
+  color: var(--text-tertiary);
+  font-size: 0.73rem;
+  line-height: 1.4;
+}
+.wake-rules-recent li[data-status="fired"] > .wake-glyph {
+  color: var(--text-secondary);
+}
+.wake-rules-recent-copy {
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.wake-rules-recent-copy strong {
+  flex-shrink: 0;
+  color: var(--text-secondary);
+  font-weight: 650;
+}
+.wake-rules-recent-copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wake-rules-recent-time {
+  min-height: 0;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: 0.69rem;
+  line-height: 1.4;
+}
+/* An inline link: compact row, generous target. Hosts may size buttons for touch. */
+.wake-rules button.wake-rules-recent-time {
+  position: relative;
+  min-height: 0;
+  cursor: pointer;
+}
+.wake-rules button.wake-rules-recent-time::after {
+  content: "";
+  position: absolute;
+  inset: -8px -6px;
+}
+@media (hover: hover) and (pointer: fine) {
+  button.wake-rules-recent-time:hover {
+    color: var(--text);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wake-rule-enter-active,
+  .wake-rule-leave-active,
+  .wake-rule-move {
+    transition: opacity 150ms ease;
+  }
+  .wake-rule-enter-from,
+  .wake-rule-leave-to {
+    transform: none;
+  }
+  .wake-rules-recent summary::before {
+    transition: none;
+  }
+}
+@media (prefers-contrast: more) {
+  .wake-rule {
+    border-color: color-mix(in srgb, var(--text) 28%, transparent);
+  }
+}

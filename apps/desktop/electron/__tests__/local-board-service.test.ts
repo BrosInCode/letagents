@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { join } from "node:path";
 import { writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { join } from "node:path";
+import { connectDaemon, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
 import { randomUUID } from "node:crypto";
 import { createElectronTestEnv } from "./harness.js";
+import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
 const { DaemonControlSocket } = await import(new URL("../../daemon/control-socket.ts", import.meta.url).href);
 import { runWithLocalBoardOwner, requestLocalBoard, onLocalBoardChanged } from "../../../../shared/local-board-owner.mjs";
 
 const env = createElectronTestEnv({ prefix: "local-board-service-", paths: ["state", "chatStorage", "localChatDb"] });
 const store = await import("../main/rooms/local-store.js");
 const service = await import("../main/rooms/local-board-service.js");
-const socketPath = join(env.tempDir, "board.sock");
+// A socket file on POSIX, a named pipe with its proof on Windows.
+const boardEndpoint = daemonEndpoint(env.tempDir);
+const socketPath = boardEndpoint.connectPath;
 process.env.LETAGENTS_BOARD_SOCKET_PATH = socketPath;
 let generation = 1;
 let active = true;
@@ -27,7 +30,7 @@ const makeSocket = () => new DaemonControlSocket(socketPath, async (request: { m
   mutations++;
   await beforeMutation?.();
   return owned(() => service.executeLocalBoardMutation(request.params));
-});
+}, undefined, undefined, { peerProofPath: boardEndpoint.proofPath });
 let socket = makeSocket();
 await owned(() => store.getLocalTaskDatabase());
 await socket.start();
@@ -105,7 +108,9 @@ test("standalone worker identity is checked at the owner, after request delivery
   const worker = { session_id: "worker-session", session_token: "private-test-token", room_id: room,
     agent_key: "local/worker", agent_instance_id: `worker_${"a".repeat(32)}`, actor_label: "Canonical worker", ended_at: null };
   const state = { agent_sessions: { [worker.session_id]: worker } };
-  await writeFile(env.statePath!, JSON.stringify(state));
+  // The owner reads this file only when it is private to the account (Windows: an explicit ACL).
+  const writeState = async (value: unknown) => { await writeFile(env.statePath!, JSON.stringify(value)); await protectOwnerPrivate(env.statePath!, "file", { force: true }); };
+  await writeState(state);
   const extra = { domain: "mcp", statePath: env.statePath, worker };
   const task = await mutate("addLocalTask", [room, { title: "Worker task" }], extra) as { id: string };
   await assert.rejects(mutate("updateLocalTask", [room, task.id, { status: "accepted" }], {
@@ -114,7 +119,7 @@ test("standalone worker identity is checked at the owner, after request delivery
   await assert.rejects(mutate("updateLocalTask", [room, task.id, { status: "accepted" }], {
     ...extra, worker: { ...worker, agent_instance_id: "not-the-registered-instance" },
   }), /authority ended|connection was replaced/);
-  beforeMutation = async () => { await writeFile(env.statePath!, JSON.stringify({ agent_sessions: {} })); };
+  beforeMutation = async () => { await writeState({ agent_sessions: {} }); };
   try {
     await assert.rejects(mutate("updateLocalTask", [room, task.id, { status: "accepted" }], extra), /authority ended/);
   } finally { beforeMutation = null; }
@@ -130,8 +135,8 @@ test("a caller disconnect does not cancel or retry an admitted mutation", async 
   const blocked = new Promise<void>(resolve => { release = resolve; });
   beforeMutation = async () => { admitted(); await blocked; };
   const before = mutations;
-  const client = createConnection(socketPath);
-  await new Promise<void>(resolve => client.once("connect", resolve));
+  const client = connectDaemon(socketPath);
+  await new Promise<void>((resolve, reject) => { client.once("connect", () => resolve()); client.once("error", reject); });
   client.write(`${JSON.stringify({ version: 3, id: randomUUID(), method: "local_board.mutate", params: {
     domain: "desktop", operation: "addLocalTask", args: [room, { title: "Only once" }], databasePath: env.localChatDbPath,
   } })}\n`);

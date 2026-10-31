@@ -221,6 +221,7 @@ function onBackdropClick(event: MouseEvent) {
 .task-dialog-body { display: grid; grid-template-columns: minmax(0, 1fr) 200px; gap: 28px; min-width: 0; }
 .task-dialog h3 { margin: 0 0 12px; color: var(--text-secondary); font-size: 0.75rem; font-weight: 550; letter-spacing: 0; }
 .task-dialog p { margin: 0; font-size: 0.875rem; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
+.task-dialog-description { min-width: 0; }
 .task-dialog-properties { display: grid; align-content: start; gap: 18px; margin: 0; border-left: 1px solid var(--border); padding-left: 24px; }
 .task-dialog dt { color: var(--text-secondary); font-size: 0.75rem; margin-bottom: 6px; }
 .task-dialog dd { margin: 0; font-size: 0.8125rem; overflow-wrap: anywhere; }
@@ -239,14 +240,15 @@ function onBackdropClick(event: MouseEvent) {
 @media (hover: hover) and (pointer: fine) { .task-dialog button:hover:not(:disabled) { background: var(--accent-hover); } }
 @media (max-width: 600px) {
   .task-dialog { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
-  .task-dialog-content { padding: 20px; gap: 24px; }
+  .task-dialog-content { padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom)); gap: 24px; }
+  .task-title-field input { min-height: 44px; font-size: 16px; }
   .task-dialog-header { gap: 16px; }
   .task-dialog-body { grid-template-columns: minmax(0, 1fr); gap: 24px; }
   .task-dialog-properties { grid-template-columns: repeat(2, minmax(0, 1fr)); border-left: 0; padding: 20px 0 0; border-top: 1px solid var(--border); }
   .task-dialog button, .task-dialog-links a { min-height: 44px; }
   .task-dialog .task-dialog-close { flex-basis: 44px; width: 44px; }
   .task-dialog-footer { flex-direction: column; align-items: stretch; gap: 12px; padding-top: 16px; }
-  .task-dialog-secondary { justify-content: space-between; gap: 12px; }
+  .task-dialog-secondary { justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
   .task-dialog-secondary button { min-width: 0; text-align: left; }
   .task-dialog-secondary button.cancel { text-align: right; }
 }

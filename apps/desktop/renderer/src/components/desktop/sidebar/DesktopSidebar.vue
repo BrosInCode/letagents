@@ -10,7 +10,7 @@
     @drop.prevent="cancelSidebarDrag"
   >
     <p id="sidebar-room-reorder-instructions" class="sr-only">
-      Drag rooms to reorder them. Press Option plus Up or Down Arrow to move the focused room.
+      Drag rooms to reorder them. Press {{ reorderModifierLabel }} plus Up or Down Arrow to move the focused room.
     </p>
     <p class="sr-only" role="status" aria-live="polite">{{ reorderAnnouncement }}</p>
     <div class="sidebar-topbar" :data-selection-active="selectionActive">
@@ -76,8 +76,9 @@
           :data-active="searchOpen"
           :aria-expanded="zenMode ? switcherOpen : searchOpen"
           :aria-controls="zenMode ? undefined : 'sidebar-room-search'"
-          :aria-label="searchOpen ? 'Close room search' : 'Search rooms'"
-          :title="searchOpen ? 'Close room search' : 'Search rooms'"
+          :aria-label="zenMode ? 'Switch rooms' : (searchOpen ? 'Close room search' : 'Search rooms')"
+          :title="zenMode ? `Switch rooms (${switchShortcutLabel})` : (searchOpen ? 'Close room search' : `Search rooms (${switchShortcutLabel} switches rooms)`)"
+          :aria-keyshortcuts="zenMode ? switchAriaKeyShortcuts : undefined"
           data-testid="sidebar-search-button"
           @click="zenMode ? openRoomSwitcher() : toggleSearch()"
         >
@@ -145,10 +146,10 @@
               <House v-else />
             </span>
             <span class="sidebar-search-result-copy">
-              <strong>{{ result.entry.title }}</strong>
+              <strong>{{ sidebarRoomTitle(result.entry) }}</strong>
               <small>{{ result.context }}</small>
             </span>
-            <span v-if="result.entry.hasUnread" class="room-unread-dot" aria-label="Unread messages"></span>
+            <RoomUnreadBadge :count="result.entry.unreadCount || 0" :marked-unread="result.entry.hasUnread" />
           </button>
         </div>
         <p v-else-if="searchQuery.trim()" class="sidebar-search-empty">
@@ -211,6 +212,9 @@
             {{ rentalRequestCount > 99 ? '99+' : rentalRequestCount }}
           </span>
         </button>
+        <button v-if="!selectionActive" class="sidebar-cta sidebar-rent-cta" type="button" :data-active="activeEntry.type === 'my-work'" data-testid="sidebar-my-work" @click="$emit('open-my-work')">
+          <span class="cta-plus" aria-hidden="true"><ListTodo /></span><span>My work</span>
+        </button>
         <button v-if="!selectionActive" class="sidebar-cta sidebar-rent-cta" type="button" :data-active="activeEntry.type === 'messages'" data-testid="sidebar-messages" @click="$emit('open-messages')">
           <span class="cta-plus" aria-hidden="true"><MessageSquare /></span><span>Messages</span><span v-if="messagesUnread" class="sidebar-rent-count" :aria-label="`${messagesUnread} unread messages`">{{ messagesUnread > 99 ? '99+' : messagesUnread }}</span>
         </button>
@@ -268,6 +272,7 @@
                 :draggable="parentReorderEnabled"
                 type="button"
                 :data-testid="`pinned-room-${project.parent.id}`"
+                :title="sidebarProjectDetails(project)"
                 @click="handleProjectActivation($event, project)"
                 @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
                 @dragstart="startParentDrag($event, project)"
@@ -290,14 +295,10 @@
                 <span class="pinned-main">
                   <span class="room-title-line">
                     <span class="pinned-title">{{ project.roomName }}</span>
-                    <span
-                      v-if="project.parent.hasUnread"
-                      class="room-unread-dot"
-                      aria-label="Unread messages"
-                      title="Unread messages"
-                    ></span>
+                    <RoomMutedIcon :room-identifier="project.parent.roomIdentifier" />
+                    <SidebarRoomActivity :activity="sidebarGroupActivity(project, projectIsCollapsed(project.id))" />
+                    <RoomUnreadBadge :count="project.parent.unreadCount || 0" :marked-unread="project.parent.hasUnread" />
                   </span>
-                  <span class="pinned-meta">{{ projectSubtitle(project) }}</span>
                 </span>
               </button>
               <button
@@ -415,6 +416,7 @@
                 :draggable="parentReorderEnabled"
                 type="button"
                 :data-testid="`room-parent-${project.parent.id}`"
+                :title="sidebarProjectDetails(project)"
                 @click="handleProjectActivation($event, project)"
                 @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
                 @dragstart="startParentDrag($event, project)"
@@ -438,16 +440,10 @@
                   <span class="project-copy">
                     <span class="room-title-line">
                       <span class="project-name">{{ project.roomName }}</span>
-                      <span
-                        v-if="project.parent.hasUnread"
-                        class="room-unread-dot"
-                        aria-label="Unread messages"
-                        title="Unread messages"
-                      ></span>
+                      <RoomMutedIcon :room-identifier="project.parent.roomIdentifier" />
+                      <SidebarRoomActivity :activity="sidebarGroupActivity(project, projectIsCollapsed(project.id))" />
+                      <RoomUnreadBadge :count="project.parent.unreadCount || 0" :marked-unread="project.parent.hasUnread" />
                     </span>
-                    <small>
-                      {{ projectSubtitle(project) }}
-                    </small>
                   </span>
                 </span>
               </button>
@@ -627,14 +623,16 @@
     <SidebarRoomSwitcher
       :open="switcherOpen"
       :projects="projectEntries"
-      :active-project-id="zenProject?.id || null"
+      :active-project-id="zenMode ? zenProject?.id || null : null"
       :active-entry-id="activeEntry.id"
+      :zen-mode="zenMode"
       @close="switcherOpen = false"
       @select="selectSwitchedRoom"
     />
 </template>
 
 <script setup lang="ts">
+import RoomUnreadBadge from "./RoomUnreadBadge.vue";
 import {
   Archive,
   ArrowLeftRight,
@@ -644,6 +642,7 @@ import {
   CircleCheck,
   ChevronRight,
   Copy,
+  Dot,
   Download,
   ExternalLink,
   GitBranch,
@@ -651,6 +650,7 @@ import {
   Inbox,
   House,
   ListChecks,
+  ListTodo,
   MessageSquare,
   Pencil,
   Pin,
@@ -663,6 +663,7 @@ import {
 } from "@lucide/vue";
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch, type Component } from "vue";
 import { copyTextToClipboard } from "../../../domain/clipboard";
+import { isMacPlatform } from "../../../domain/room-switcher-shortcut";
 import { desktopUpdateSidebarPresentation } from "../../../domain/desktop-update-status";
 import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import {
@@ -691,9 +692,23 @@ import {
   type SidebarRoomMenuActionId,
 } from "../../../domain/sidebar-context-menu";
 import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/DesktopContextMenu.vue";
+import RoomMutedIcon from "./RoomMutedIcon.vue";
+import { roomNotificationPreferences, roomNotificationState } from "../../../composables/useRoomNotificationPreferences";
+import { roomNotificationMenuItems, roomNotificationMenuChange } from "../../../domain/room-notification-menu";
 import { sidebarProjectForEntry } from "../../../domain/sidebar-zen-mode";
+import {
+  canOpenRoomSwitcher,
+  getRoomSwitcherAriaKeyShortcuts,
+  getRoomSwitcherShortcutLabel,
+} from "../../../domain/room-switcher-shortcut";
+import {
+  coordinateRoomSwitcherFocus,
+  focusSwitchedRoomOnceRendered,
+} from "../../../domain/room-switcher-focus";
 import SidebarRoomSwitcher from "./SidebarRoomSwitcher.vue";
 import SidebarChildRoom from "./SidebarChildRoom.vue";
+import SidebarRoomActivity from "./SidebarRoomActivity.vue";
+import { sidebarGroupActivity, sidebarProjectDetails, sidebarRoomTitle } from "../../../domain/sidebar-room-display";
 import SidebarAccountMenu from "./SidebarAccountMenu.vue";
 import type { ProjectGroup, SidebarEntry, SystemEntry, RoomEntry } from "../types";
 import { desktopIpc } from "../../../ipc/index.js";
@@ -703,6 +718,7 @@ const props = defineProps<{
   activeEntry: SidebarEntry;
   primaryRoom: RoomEntry;
   projectEntries: ProjectGroup[];
+  revealRequest?: { entryId: string; sequence: number } | null;
   settingsEntry: SystemEntry;
   pinnedCollapsed: boolean;
   roomsCollapsed: boolean;
@@ -724,6 +740,7 @@ const emit = defineEmits<{
   "open-rent": [];
   "open-needs-you": [];
   "open-messages": [];
+  "open-my-work": [];
   "open-updates": [];
   "open-settings": [];
   "connect-account": [];
@@ -732,6 +749,7 @@ const emit = defineEmits<{
   "archive-focus-room": [entry: RoomEntry];
   "conclude-focus-room": [entry: RoomEntry];
   "mark-room-read": [entry: RoomEntry];
+  "mark-room-unread": [entry: RoomEntry];
   "pin-room": [entry: RoomEntry];
   "rename-room": [entry: RoomEntry];
   "start-selection": [entry?: RoomEntry];
@@ -763,6 +781,7 @@ type SidebarDropTarget =
   | { kind: "parent"; projectId: string; placement: SidebarRoomDropPlacement }
   | { kind: "child"; projectId: string; entryId: string; placement: SidebarRoomDropPlacement };
 
+const reorderModifierLabel = isMacPlatform() ? "Option" : "Alt";
 const roomContextMenu = ref<RoomContextMenu | null>(null);
 const backgroundContextMenu = ref<{ x: number; y: number } | null>(null);
 const sidebarElement = ref<HTMLElement | null>(null);
@@ -777,7 +796,8 @@ const zenProject = computed(() => activeProject.value
 const displayedProjects = computed(() => zenMode.value
   ? zenProject.value ? [zenProject.value] : []
   : props.projectEntries);
-const switchShortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ K" : "Ctrl K";
+const switchShortcutLabel = getRoomSwitcherShortcutLabel();
+const switchAriaKeyShortcuts = getRoomSwitcherAriaKeyShortcuts();
 
 watch(activeProject, (project, previous) => {
   if (!project || project.id === previous?.id) return;
@@ -818,20 +838,36 @@ function toggleZenMode(): void {
 }
 function openRoomSwitcher(): void {
   if (props.batchActionBusy || props.selectionActive) return;
+  cancelPendingSwitcherFocus?.();
+  cancelPendingSwitcherFocus = null;
   closeRoomContextMenu();
   closeBackgroundContextMenu();
   switcherOpen.value = true;
 }
+let cancelPendingSwitcherFocus: (() => void) | null = null;
+
 function selectSwitchedRoom(entry: RoomEntry): void {
   switcherOpen.value = false;
+  cancelPendingSwitcherFocus?.();
   emit("select-entry", entry);
+  cancelPendingSwitcherFocus = coordinateRoomSwitcherFocus({
+    currentRoomId: () => props.activeEntry.id,
+    chosenRoomId: entry.id,
+    startFocus: (isCurrent, onComplete) => focusSwitchedRoomOnceRendered({ isCurrent, onComplete }),
+    watchRoomId: (onChange) => watch(
+      () => props.activeEntry.id,
+      (newId) => { onChange(newId); },
+      { flush: "sync" },
+    ),
+    nextTick,
+  });
 }
 function handleRoomSwitcherShortcut(event: KeyboardEvent): void {
-  const sidebar = sidebarElement.value;
-  if (!zenMode.value || !sidebar || sidebar.closest("[inert]") || !sidebar.getClientRects().length) return;
-  if (event.defaultPrevented || event.altKey || event.shiftKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "k") return;
-  // A different dialog owns its keyboard input. Never open a second modal over it.
-  if (!switcherOpen.value && document.querySelector('[role="dialog"][aria-modal="true"]')) return;
+  if (!canOpenRoomSwitcher({
+    event,
+    hasOpenModal: () => Boolean(document.querySelector('[role="dialog"][aria-modal="true"]')),
+    isSwitcherOpen: switcherOpen.value,
+  })) return;
   event.preventDefault();
   openRoomSwitcher();
 }
@@ -852,6 +888,7 @@ function revealFocusedNavigationItem(): void {
 }
 onMounted(() => {
   window.addEventListener("keydown", handleRoomSwitcherShortcut);
+  requestActiveEntryReveal(props.activeEntry.id);
   navigationHeightQuery = window.matchMedia("(max-height: 640px)");
   navigationHeightQuery.addEventListener("change", revealFocusedNavigationItem);
 });
@@ -859,6 +896,7 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleRoomSwitcherShortcut);
   navigationHeightQuery?.removeEventListener("change", revealFocusedNavigationItem);
   cancelAnimationFrame(navigationFocusFrame);
+  cancelPendingSwitcherFocus?.();
 });
 
 const searchButton = ref<HTMLButtonElement | null>(null);
@@ -951,6 +989,7 @@ const roomMenuIcons: Record<SidebarRoomMenuActionId, Component> = {
   "open-room": House,
   "select-room": ListChecks,
   "mark-room-read": Check,
+  "mark-room-unread": Dot,
   "pin-room": Pin,
   "rename-room": Pencil,
   "copy-room-url": Copy,
@@ -963,6 +1002,9 @@ const roomMenuIcons: Record<SidebarRoomMenuActionId, Component> = {
 };
 
 function roomMenuGroupsFor(entry: RoomEntry, projectId: string | null): DesktopContextMenuItem[][] {
+  const notificationState = roomNotificationState(entry.roomIdentifier || "");
+  const localOnly = /^local[_-]|^git-room:local:/i.test(entry.roomIdentifier || "") || entry.gitRoom?.accessMode === "local";
+  const unavailable = localOnly ? "Notification settings require a cloud room." : !props.authStatus?.authenticated ? "Sign in to manage your notifications." : "";
   const project = projectId
     ? props.projectEntries.find((candidate) => candidate.id === projectId && projectChildRooms(candidate).length)
     : null;
@@ -972,9 +1014,15 @@ function roomMenuGroupsFor(entry: RoomEntry, projectId: string | null): DesktopC
     hasProjectChildren: Boolean(project),
     projectCollapsed: Boolean(project && projectIsCollapsed(project.id)),
     canManageRooms: props.authStatus?.authenticated === true,
+    notificationItems: [
+      ...(unavailable ? [{ id: "notification-unavailable", label: unavailable, disabled: true }] : []),
+      ...roomNotificationMenuItems(notificationState.preference, Boolean(unavailable) || notificationState.busy || notificationState.loading),
+      ...(notificationState.error && !unavailable ? [{ id: "notification-retry", label: "Could not load or save. Retry" }] : []),
+    ],
   }).map((group) => group.map((item) => ({
     ...item,
-    icon: item.id === "pin-room" && entry.pinned ? PinOff : roomMenuIcons[item.id],
+    icon: item.id === "pin-room" && entry.pinned ? PinOff : item.id === "notifications" ? undefined : roomMenuIcons[item.id],
+    children: item.children?.map((child) => ({ ...child, icon: child.checked ? Check : undefined })),
   })));
 }
 
@@ -1003,6 +1051,7 @@ const backgroundContextMenuItemGroups = computed<DesktopContextMenuItem[][]>(() 
 );
 
 function openRoomContextMenu(event: MouseEvent, entry: RoomEntry, projectId: string | null = null): void {
+  if (entry.roomIdentifier) void roomNotificationPreferences.refresh(entry.roomIdentifier);
   backgroundContextMenu.value = null;
   roomContextMenu.value = roomMenuGroupsFor(entry, projectId).length
     ? { entry, projectId, x: event.clientX, y: event.clientY }
@@ -1036,10 +1085,20 @@ function closeBackgroundContextMenu(): void {
 function handleRoomContextMenuSelect(item: DesktopContextMenuItem): void {
   const menu = roomContextMenu.value;
   if (!menu) return;
+  if (item.id === "notification-retry" && menu.entry.roomIdentifier) {
+    void roomNotificationPreferences.refresh(menu.entry.roomIdentifier);
+    return;
+  }
+  const preferenceChange = roomNotificationMenuChange(item.id);
+  if (preferenceChange && menu.entry.roomIdentifier) {
+    void roomNotificationPreferences.update(menu.entry.roomIdentifier, preferenceChange);
+    return;
+  }
   const actions: Record<SidebarRoomMenuActionId, () => void> = {
     "open-room": () => emit("select-entry", menu.entry),
     "select-room": () => startSelection(menu.entry),
     "mark-room-read": () => emit("mark-room-read", menu.entry),
+    "mark-room-unread": () => emit("mark-room-unread", menu.entry),
     "pin-room": () => emit("pin-room", menu.entry),
     "rename-room": () => emit("rename-room", menu.entry),
     "copy-room-url": () =>
@@ -1078,20 +1137,6 @@ function handleBackgroundContextMenuSelect(item: DesktopContextMenuItem): void {
 async function copyText(value: string | null): Promise<void> {
   if (!value) return;
   await copyTextToClipboard(value);
-}
-
-function projectSubtitle(project: ProjectGroup): string {
-  const branchCount = project.branchRooms.length;
-  const focusCount = project.focusRooms.length;
-  if (project.parent.gitRoom && branchCount) {
-    const branchLabel = `${branchCount} ${branchCount === 1 ? "branch" : "branches"}`;
-    const focusLabel = focusCount ? ` · ${focusCount} focus ${focusCount === 1 ? "room" : "rooms"}` : "";
-    return `${project.parent.meta} · ${branchLabel}${focusLabel}`;
-  }
-  if (focusCount) {
-    return `${focusCount} focus ${focusCount === 1 ? "room" : "rooms"}`;
-  }
-  return project.parent.meta;
 }
 
 function projectChildRooms(project: ProjectGroup | null | undefined): RoomEntry[] {
@@ -1569,6 +1614,60 @@ function revealSearchResult(entry: RoomEntry): void {
   if (!project.parent.pinned && props.roomsCollapsed) emit("toggle-rooms-collapsed");
   if (projectIsCollapsed(project.id)) emit("toggle-project", project.id);
 }
+
+// Opening a room from anywhere (the switcher, Inbox, a mention, a
+// notification) brings its row into view, opening its collapsed group if the
+// row is inside one. A row already on screen, such as one just clicked, does
+// not move the list, and a background refresh keeps the same id, so it does
+// nothing either.
+let pendingActiveReveal: string | null = null;
+function sidebarRow(entryId: string): HTMLElement | null {
+  return Array.from(sidebarElement.value?.querySelectorAll<HTMLElement>("[data-sidebar-entry-id]") || [])
+    .find((element) => element.dataset.sidebarEntryId === entryId && element.getClientRects().length > 0) ?? null;
+}
+function requestActiveEntryReveal(entryId: string | null | undefined): void {
+  pendingActiveReveal = props.activeEntry.type === "room" && entryId ? entryId : null;
+  void revealActiveEntry();
+}
+async function revealActiveEntry(): Promise<void> {
+  const entryId = pendingActiveReveal;
+  if (!entryId || !sidebarElement.value || searchOpen.value) return;
+  let row = sidebarRow(entryId);
+  if (!row) {
+    const entry = props.projectEntries.flatMap((project) => [project.parent, ...projectChildRooms(project)])
+      .find((candidate) => candidate.id === entryId);
+    // The room list may not have it yet; the next list change tries again.
+    if (!entry) return;
+    revealSearchResult(entry);
+    await nextTick();
+    if (pendingActiveReveal !== entryId) return;
+    row = sidebarRow(entryId);
+    if (!row) return;
+  }
+  pendingActiveReveal = null;
+  row.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+}
+watch(() => props.activeEntry.id, (entryId) => requestActiveEntryReveal(entryId), { flush: "post" });
+watch(() => props.projectEntries, () => { if (pendingActiveReveal) void revealActiveEntry(); }, { flush: "post" });
+watch(searchOpen, (open) => { if (!open && pendingActiveReveal) void nextTick(revealActiveEntry); });
+
+// New room navigation also clears the search and promotes the project.
+watch(() => props.revealRequest, async (request, _previous, onCleanup) => {
+  if (!request) return;
+  let cancelled = false;
+  onCleanup(() => { cancelled = true; });
+  const entry = props.projectEntries.flatMap((project) => [project.parent, ...projectChildRooms(project)])
+    .find((candidate) => candidate.id === request.entryId);
+  if (!entry) return;
+  searchQuery.value = "";
+  searchOpen.value = false;
+  revealSearchResult(entry);
+  await nextTick();
+  if (cancelled || props.activeEntry.id !== request.entryId) return;
+  const row = Array.from(sidebarElement.value?.querySelectorAll<HTMLElement>("[data-sidebar-entry-id]") || [])
+    .find((element) => element.dataset.sidebarEntryId === request.entryId);
+  row?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+}, { flush: "post" });
 
 function searchResultId(entryId: string): string {
   return `sidebar-room-search-result-${encodeURIComponent(entryId)}`;

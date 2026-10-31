@@ -1,9 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import { and, eq, gt, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
+import type { PgUpdateSetSource } from "drizzle-orm/pg-core";
 
 import { db } from "./client.js";
-import { task_leases, workflow_effects } from "./schema.js";
+import { repositoryRoomIds } from "./github/repository-rooms.js";
+import { task_leases, tracker_connections, workflow_effects } from "./schema.js";
 import type { WorkflowEffect, WorkflowEffectKind, WorkflowEffectRow, WorkflowEffectState } from "./types.js";
 
 export class WorkflowEffectIdempotencyConflictError extends Error {
@@ -12,6 +14,15 @@ export class WorkflowEffectIdempotencyConflictError extends Error {
   constructor(key: string) {
     super(`Idempotency key '${key}' is already bound to a different workflow effect request.`);
     this.name = "WorkflowEffectIdempotencyConflictError";
+  }
+}
+
+export class WorkflowEffectConnectionUnavailableError extends Error {
+  readonly code = "workflow_effect_connection_unavailable";
+
+  constructor() {
+    super("The tracker connection for this effect does not exist, belongs to another account, or does not match the provider.");
+    this.name = "WorkflowEffectConnectionUnavailableError";
   }
 }
 
@@ -106,67 +117,173 @@ export async function reserveWorkflowEffect(
     if (!lease) throw new WorkflowEffectLeaseStaleError();
     await input.on_lease_locked_for_test?.();
 
-    const [inserted] = await tx
-      .insert(workflow_effects)
-      .values({
-        id: `effect_${randomUUID()}`,
-        room_id: input.room_id,
-        task_id: input.task_id,
-        lease_id: input.lease_id,
-        kind: input.kind,
-        provider: input.provider,
-        idempotency_key: input.idempotency_key,
-        correlation_key: correlationKey,
-        request_fingerprint: requestFingerprint,
-        request_payload: input.request_payload,
-        state: "pending",
-        attempt_count: quarantined ? 0 : 1,
-        max_attempts: input.max_attempts ?? 3,
-        processing_token: processingToken,
-        processing_started_at: processingToken ? now : null,
-        next_attempt_at: null,
-        external_id: null,
-        external_url: null,
-        response_payload: null,
-        last_error: null,
-        quarantined_at: quarantined ? now : null,
-        quarantine_reason: input.quarantine_reason ?? null,
-        created_by: input.created_by,
-        created_at: now,
-        updated_at: now,
-        completed_at: null,
-      })
-      .onConflictDoNothing({
-        target: [workflow_effects.room_id, workflow_effects.idempotency_key],
-      })
-      .returning();
+    return insertOrLoadEffect(tx, {
+      ...input,
+      correlation_key: correlationKey,
+      request_fingerprint: requestFingerprint,
+      processing_token: processingToken,
+      now,
+    });
+  });
+}
 
-    if (inserted) {
-      return {
-        effect: toWorkflowEffect(inserted),
-        claimed: Boolean(processingToken),
-        processing_token: processingToken,
-      };
-    }
+type EffectTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-    const [existing] = await tx
-      .select()
-      .from(workflow_effects)
+function isCorrelationConflict(error: unknown): boolean {
+  for (let current: unknown = error; current && typeof current === "object"; current = (current as { cause?: unknown }).cause) {
+    const record = current as { code?: unknown; constraint?: unknown };
+    if (record.code === "23505" && record.constraint === "workflow_effects_provider_correlation_uq") return true;
+  }
+  return false;
+}
+
+async function insertOrLoadEffect(tx: EffectTransaction, input: {
+  room_id: string;
+  task_id: string;
+  lease_id: string | null;
+  kind: WorkflowEffectKind;
+  provider: WorkflowEffect["provider"];
+  idempotency_key: string;
+  correlation_key: string;
+  request_fingerprint: string;
+  request_payload: Record<string, unknown>;
+  created_by: string;
+  quarantine_reason?: string | null;
+  max_attempts?: number;
+  processing_token: string | null;
+  now: string;
+}): Promise<{ effect: WorkflowEffect; claimed: boolean; processing_token: string | null }> {
+  const now = input.now;
+  const processingToken = input.processing_token;
+  const quarantined = Boolean(input.quarantine_reason);
+  const correlationKey = input.correlation_key;
+  const requestFingerprint = input.request_fingerprint;
+  const insert = (target: EffectTransaction) => target
+    .insert(workflow_effects)
+    .values({
+      id: `effect_${randomUUID()}`,
+      room_id: input.room_id,
+      task_id: input.task_id,
+      lease_id: input.lease_id,
+      kind: input.kind,
+      provider: input.provider,
+      idempotency_key: input.idempotency_key,
+      correlation_key: correlationKey,
+      request_fingerprint: requestFingerprint,
+      request_payload: input.request_payload,
+      state: "pending",
+      attempt_count: quarantined ? 0 : 1,
+      max_attempts: input.max_attempts ?? 3,
+      processing_token: processingToken,
+      processing_started_at: processingToken ? now : null,
+      next_attempt_at: null,
+      external_id: null,
+      external_url: null,
+      response_payload: null,
+      last_error: null,
+      quarantined_at: quarantined ? now : null,
+      quarantine_reason: input.quarantine_reason ?? null,
+      created_by: input.created_by,
+      created_at: now,
+      updated_at: now,
+      completed_at: null,
+    })
+    .onConflictDoNothing({
+      target: [workflow_effects.room_id, workflow_effects.idempotency_key],
+    })
+    .returning();
+  let inserted: typeof workflow_effects.$inferSelect | undefined;
+  try {
+    // A concurrent reservation of the same key can reach the
+    // (provider, correlation_key) index before the conflict target. The
+    // correlation key is derived from room, kind and idempotency key, so that
+    // violation means the same logical effect: load it below. The savepoint
+    // keeps the transaction usable; any other error still raises.
+    [inserted] = await tx.transaction((savepoint) => insert(savepoint));
+  } catch (error) {
+    if (!isCorrelationConflict(error)) throw error;
+  }
+
+  if (inserted) {
+    return {
+      effect: toWorkflowEffect(inserted),
+      claimed: Boolean(processingToken),
+      processing_token: processingToken,
+    };
+  }
+
+  const [existing] = await tx
+    .select()
+    .from(workflow_effects)
+    .where(and(
+      eq(workflow_effects.room_id, input.room_id),
+      eq(workflow_effects.idempotency_key, input.idempotency_key),
+    ))
+    .limit(1);
+  if (!existing) throw new Error("Workflow effect conflict row could not be loaded.");
+  if (
+    existing.request_fingerprint !== requestFingerprint
+    || existing.task_id !== input.task_id
+    || existing.kind !== input.kind
+    || existing.provider !== input.provider
+  ) {
+    throw new WorkflowEffectIdempotencyConflictError(input.idempotency_key);
+  }
+  return { effect: toWorkflowEffect(existing), claimed: false, processing_token: null };
+}
+
+export interface ReserveTrackerWorkflowEffectInput {
+  room_id: string;
+  task_id: string;
+  connection_id: string;
+  /**
+   * The account the caller resolved the connection from (for rules, the
+   * owner who attached it to the room). The connection must belong to it, so
+   * a connection id from elsewhere cannot write as another account.
+   */
+  connection_account_id: string;
+  kind: "tracker_transition" | "tracker_comment";
+  provider: "jira" | "linear";
+  idempotency_key: string;
+  request_payload: Record<string, unknown>;
+  created_by: string;
+  quarantine_reason?: string | null;
+  max_attempts?: number;
+  now?: Date;
+}
+
+/**
+ * Reserve a tracker write. The connection row is share-locked so it cannot be
+ * deleted between the check and the reservation; the payload names it, and
+ * the fingerprint binds the key, target and connection to the idempotency key.
+ */
+export async function reserveTrackerWorkflowEffect(
+  input: ReserveTrackerWorkflowEffectInput,
+): Promise<{ effect: WorkflowEffect; claimed: boolean; processing_token: string | null }> {
+  const now = (input.now ?? new Date()).toISOString();
+  const requestPayload = { ...input.request_payload, connection_id: input.connection_id };
+  const quarantined = Boolean(input.quarantine_reason);
+  return db.transaction(async (tx) => {
+    const [connection] = await tx
+      .select({ id: tracker_connections.id })
+      .from(tracker_connections)
       .where(and(
-        eq(workflow_effects.room_id, input.room_id),
-        eq(workflow_effects.idempotency_key, input.idempotency_key),
+        eq(tracker_connections.id, input.connection_id),
+        eq(tracker_connections.provider, input.provider),
+        eq(tracker_connections.account_id, input.connection_account_id),
       ))
+      .for("share")
       .limit(1);
-    if (!existing) throw new Error("Workflow effect conflict row could not be loaded.");
-    if (
-      existing.request_fingerprint !== requestFingerprint
-      || existing.task_id !== input.task_id
-      || existing.kind !== input.kind
-      || existing.provider !== input.provider
-    ) {
-      throw new WorkflowEffectIdempotencyConflictError(input.idempotency_key);
-    }
-    return { effect: toWorkflowEffect(existing), claimed: false, processing_token: null };
+    if (!connection) throw new WorkflowEffectConnectionUnavailableError();
+    return insertOrLoadEffect(tx, {
+      ...input,
+      lease_id: null,
+      request_payload: requestPayload,
+      correlation_key: workflowEffectCorrelationKey(input),
+      request_fingerprint: workflowEffectRequestFingerprint(requestPayload),
+      processing_token: quarantined ? null : randomUUID(),
+      now,
+    });
   });
 }
 
@@ -261,7 +378,7 @@ async function finishWithToken(input: {
   token: string;
   state: WorkflowEffectState;
   now?: Date;
-  values: Partial<typeof workflow_effects.$inferInsert>;
+  values: PgUpdateSetSource<typeof workflow_effects>;
 }): Promise<WorkflowEffect | null> {
   const at = (input.now ?? new Date()).toISOString();
   const [row] = await db
@@ -312,6 +429,7 @@ export function markWorkflowEffectFailed(input: {
   error: string;
   next_attempt_at: Date | null;
   now?: Date;
+  exhaust?: boolean;
 }): Promise<WorkflowEffect | null> {
   return finishWithToken({
     id: input.id,
@@ -322,6 +440,7 @@ export function markWorkflowEffectFailed(input: {
       last_error: input.error,
       next_attempt_at: input.next_attempt_at?.toISOString() ?? null,
       completed_at: null,
+      ...(input.exhaust ? { attempt_count: sql`${workflow_effects.max_attempts}` } : {}),
     },
   });
 }
@@ -357,6 +476,7 @@ export function releaseWorkflowEffectLookup(input: {
       last_error: input.error,
       next_attempt_at: input.next_attempt_at.toISOString(),
       completed_at: null,
+      lookup_count: sql`${workflow_effects.lookup_count} + 1`,
     },
   });
 }
@@ -424,4 +544,76 @@ export async function pruneSettledWorkflowEffects(input: {
     RETURNING ${workflow_effects.id}
   `);
   return result.rows.length;
+}
+
+/** The marker the broker writes into every review it publishes. */
+const REVIEW_EFFECT_MARKER = /<!-- letagents-effect:(lae_[0-9a-f]{32}) -->/;
+const REVIEW_EFFECT_MARKER_SQL = "<!-- letagents-effect:(lae_[0-9a-f]{32}) -->";
+
+/**
+ * Whether a GitHub approval may take a task out of blocked. Only the review
+ * the journal published for a review lease on this task counts, and only
+ * when it approves the pull request's current head and no other reviewer's
+ * request for changes still stands. Anyone who can review the repository can
+ * approve it on GitHub; that alone must not undo a reviewer's requested
+ * changes, nor can a copied journal marker stand in for the journal's review.
+ * Requested changes from a review lease that has since ended or been handed
+ * off no longer stand: that reviewer gave up the review.
+ */
+export async function journalApprovalSettlesRequestedChanges(input: {
+  room_id: string;
+  task_id: string;
+  pull_number: number;
+  head_sha: string | null | undefined;
+  review_id: string;
+  review_body: string | null | undefined;
+  reviewer_login: string | null | undefined;
+  /** The GitHub App's own login (`<slug>[bot]`): the broker publishes as the App. */
+  app_login: string | null | undefined;
+}): Promise<boolean> {
+  const correlationKey = input.review_body?.match(REVIEW_EFFECT_MARKER)?.[1];
+  const appLogin = input.app_login?.toLowerCase();
+  if (!correlationKey || !input.head_sha || !appLogin || input.reviewer_login?.toLowerCase() !== appLogin) return false;
+  const [effect] = (await db.execute<{ external_id: string | null; request_payload: Record<string, unknown>; agent_key: string }>(sql`
+    SELECT effect.external_id, effect.request_payload, lease.agent_key
+      FROM workflow_effects AS effect
+      JOIN task_leases AS lease ON lease.id = effect.lease_id
+     WHERE effect.provider = 'github' AND effect.correlation_key = ${correlationKey}
+       AND effect.kind = 'github_review_verdict' AND effect.state <> 'failed'
+       AND effect.room_id = ${input.room_id} AND effect.task_id = ${input.task_id}
+       AND lease.kind = 'review' AND lease.room_id = ${input.room_id} AND lease.task_id = ${input.task_id}
+     LIMIT 1
+  `)).rows;
+  if (!effect
+    || effect.request_payload.verdict !== "approve"
+    || Number(effect.request_payload.pull_number) !== input.pull_number
+    || String(effect.request_payload.expected_head_sha ?? "").toLowerCase() !== input.head_sha.toLowerCase()
+    || (effect.external_id && effect.external_id !== input.review_id)) return false;
+
+  // Each reviewer's latest decisive review. A journal review belongs to the
+  // agent whose lease published it, since the App posts every one.
+  const standing = await db.execute<{ reviewer: string; state: string; lease_active: boolean | null }>(sql`
+    SELECT DISTINCT ON (reviewer) reviewer, state, lease_active FROM (
+      SELECT COALESCE(lease.agent_key, 'github:' || lower(COALESCE(review.actor_login, ''))) AS reviewer,
+             lower(review.state) AS state, review.event_order_at, review.created_at, review.id,
+             CASE WHEN lease.id IS NULL THEN NULL
+               ELSE lease.status = 'active' AND (lease.expires_at IS NULL OR lease.expires_at > now()) END AS lease_active
+        FROM github_room_events AS review
+        LEFT JOIN workflow_effects AS effect
+          ON effect.provider = 'github'
+         AND effect.correlation_key = substring(review.metadata->>'body' from ${REVIEW_EFFECT_MARKER_SQL})
+         AND effect.state <> 'failed'
+         AND lower(COALESCE(review.actor_login, '')) = ${appLogin}
+         AND (effect.external_id IS NULL
+           OR effect.external_id = substring(review.github_object_url from '#pullrequestreview-([0-9]+)$'))
+        LEFT JOIN task_leases AS lease ON lease.id = effect.lease_id
+       WHERE review.event_type = 'pull_request_review'
+         AND review.github_object_id = ${String(input.pull_number)}
+         AND lower(review.state) IN ('approved', 'changes_requested', 'dismissed')
+         AND review.room_id IN ${repositoryRoomIds(input.room_id)}
+    ) AS decisive
+    ORDER BY reviewer, event_order_at DESC, created_at DESC, id DESC
+  `);
+  return !standing.rows.some((row) => row.reviewer !== effect.agent_key && row.state === "changes_requested"
+    && row.lease_active !== false);
 }

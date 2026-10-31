@@ -173,16 +173,9 @@ function messageTimestamp(message: OpenCodeMessage): number | null {
   return null;
 }
 
-export function assistantsFor(
-  messages: OpenCodeMessage[],
-  userMessageId: string,
-): OpenCodeMessage[] {
+function chronological(messages: OpenCodeMessage[]): OpenCodeMessage[] {
   return messages
     .map((message, index) => ({ message, index }))
-    .filter(({ message }) => {
-      const info = record(message.info);
-      return info?.role === "assistant" && info.parentID === userMessageId;
-    })
     .sort((left, right) => {
       const leftTimestamp = messageTimestamp(left.message);
       const rightTimestamp = messageTimestamp(right.message);
@@ -194,6 +187,58 @@ export function assistantsFor(
       return left.index - right.index;
     })
     .map(({ message }) => message);
+}
+
+/**
+ * A user message OpenCode adds itself while it compacts a long session
+ * (1.18.20 `SessionCompaction`): the compaction request, which carries a
+ * `compaction` part, and, once its summary succeeds, either a synthetic
+ * "continue" message or a replay of the prompt it compacted. Both follow
+ * the summary step immediately, and only a successful summary adds one.
+ */
+function compactionUserMessage(ordered: OpenCodeMessage[], index: number): boolean {
+  if (record(ordered[index]?.info)?.role !== "user") return false;
+  if ((ordered[index]!.parts ?? []).some((part) => record(part)?.type === "compaction")) return true;
+  const previous = record(ordered[index - 1]?.info);
+  return previous?.role === "assistant" && previous.summary === true && !previous.error;
+}
+
+/**
+ * The user messages whose replies belong to one room turn: its prompt, and
+ * every compaction message OpenCode added after it before the next prompt.
+ * The model's later steps answer those messages, not the prompt, yet they
+ * are still that turn's work. A supervised session gets prompts only from
+ * the adapter, one turn at a time. The prompt must be in `messages`.
+ */
+export function turnUserMessageIds(messages: OpenCodeMessage[], userMessageId: string): Set<string> {
+  const ids = new Set([userMessageId]);
+  const ordered = chronological(messages);
+  const start = ordered.findIndex((message) => {
+    const info = record(message.info);
+    return info?.role === "user" && info.id === userMessageId;
+  });
+  if (start < 0) return ids;
+  for (let index = start + 1; index < ordered.length; index += 1) {
+    const info = record(ordered[index]!.info);
+    if (info?.role !== "user") continue;
+    if (!compactionUserMessage(ordered, index) || !nonEmptyString(info.id)) break;
+    ids.add(info.id);
+  }
+  return ids;
+}
+
+/** `knownTurnUserIds` keeps compaction messages found earlier, once the prompt has left the page. */
+export function assistantsFor(
+  messages: OpenCodeMessage[],
+  userMessageId: string,
+  knownTurnUserIds: Iterable<string> = [],
+): OpenCodeMessage[] {
+  const turn = turnUserMessageIds(messages, userMessageId);
+  for (const id of knownTurnUserIds) turn.add(id);
+  return chronological(messages).filter((message) => {
+    const info = record(message.info);
+    return info?.role === "assistant" && typeof info.parentID === "string" && turn.has(info.parentID);
+  });
 }
 
 export function messageText(message: OpenCodeMessage | null): string | null {
@@ -245,8 +290,14 @@ export function messageFinishReason(message: OpenCodeMessage | null): string | n
 export function finalAssistantFor(
   messages: OpenCodeMessage[],
   userMessageId: string,
+  knownTurnUserIds: Iterable<string> = [],
 ): OpenCodeMessage | null {
-  const completed = assistantsFor(messages, userMessageId).filter(messageCompleted);
+  const completed = assistantsFor(messages, userMessageId, knownTurnUserIds).filter((message) => {
+    const info = record(message.info);
+    // A compaction summary describes the conversation; it answers nothing,
+    // although a failed one still ends the turn with its error.
+    return messageCompleted(message) && (info?.summary !== true || Boolean(info.error));
+  });
   return completed
     .filter((message) => messageFinishReason(message) !== "tool-calls")
     .at(-1)
@@ -303,6 +354,10 @@ const HEALTH_REQUEST_TIMEOUT_MS = 2_000;
 const CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const ABORT_REQUEST_TIMEOUT_MS = 10_000;
 const EVENT_STREAM_HEADER_TIMEOUT_MS = 10_000;
+// Linking a permission to its turn after a compaction needs the turn's prompt
+// in one transcript page. This read happens only when a step's parent is not
+// the expected prompt, so it may be larger than a turn snapshot.
+const PERMISSION_TURN_TRANSCRIPT_LIMIT = 128;
 
 /**
  * Typed control client for one authenticated OpenCode server.
@@ -380,11 +435,17 @@ export class OpenCodeServerClient {
     return requests.filter((request) => request.sessionID === sessionId);
   }
 
-  /** Historical linkage only: this never proves the request is still pending or authorizes a reply. */
+  /**
+   * Historical linkage only: this never proves the request is still pending or authorizes a reply.
+   * `roomTurnId` names the turn the caller expects. A step that answers a
+   * message OpenCode added while compacting is linked to that turn only when
+   * the transcript proves the message follows its prompt.
+   */
   async correlatePermissionTurn(
     sessionId: string,
     expectedRequest: OpenCodePermissionRequest,
     assertCurrentInstance?: () => void,
+    roomTurnId?: string,
   ): Promise<OpenCodePermissionTurnCorrelation> {
     const unproven = { outcome: "correlation_unproven" } as const;
     try {
@@ -405,9 +466,16 @@ export class OpenCodeServerClient {
       assertCurrentInstance?.();
       const user = record(parent?.info);
       if (user?.id !== parentId || user.sessionID !== sessionId || user.role !== "user") return unproven;
+      let providerTurnId = parentId;
+      if (nonEmptyString(roomTurnId) && roomTurnId !== parentId) {
+        // Only the transcript's order shows which prompt a compaction message follows.
+        const transcript = await this.messages(sessionId, PERMISSION_TURN_TRANSCRIPT_LIMIT);
+        assertCurrentInstance?.();
+        if (turnUserMessageIds(transcript, roomTurnId).has(parentId)) providerTurnId = roomTurnId;
+      }
       return {
         outcome: "correlated", requestId: expected.id, providerContinuationId: sessionId,
-        providerTurnId: parentId, assistantMessageId: messageID, callId: callID,
+        providerTurnId, assistantMessageId: messageID, callId: callID,
       };
     } catch {
       // Missing messages, transport uncertainty, and stale instance fences are

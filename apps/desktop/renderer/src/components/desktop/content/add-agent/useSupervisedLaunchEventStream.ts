@@ -33,14 +33,19 @@ export function useSupervisedLaunchEventStream() {
     }
   }
 
-  function subscribe(launchId: string): void {
+  /**
+   * Listen for a launch's events. Re-attaching to a launch that already ran
+   * replays its history; a launch this click is about to request has none,
+   * so `replay: false` saves that read.
+   */
+  function subscribe(launchId: string, options: { replay?: boolean } = {}): void {
     unsubscribe();
     activeLaunchId.value = launchId;
     events.value = [];
     unsubscribeListener = desktopIpc.supervisor.onLaunchEvent?.((event) => {
       if (event.launchId === activeLaunchId.value) append(event);
     }) ?? null;
-    void replay(launchId);
+    if (options.replay !== false) void replay(launchId);
   }
 
   function clear(): void {

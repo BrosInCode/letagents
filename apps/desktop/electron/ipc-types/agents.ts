@@ -12,14 +12,11 @@ export type DesktopAgentProviderId =
 
 export type DesktopAgentProviderCapability =
   | "external_mcp"
-  | "desktop_managed_runtime"
   | "supervised_runtime"
   | "installable_runtime"
   | "auth_preflight"
   | "turn_control"
-  | "reasoning_stream"
-  /** Each durable entry owns an independently addressable provider runtime. */
-  | "concurrent_supervised_agents";
+  | "reasoning_stream";
 
 export type DesktopAgentProviderStatus =
   | "missing_runtime"
@@ -46,7 +43,7 @@ export interface DesktopAgentProvider {
    * Durable room-ingress owner selected when this provider is admitted to the
    * supervisor. Null means the provider is not available through that engine.
    */
-  supervisedDeliveryMode?: Extract<DesktopManagedAgentDeliveryMode, "mcp_polling" | "daemon_inbox"> | null;
+  supervisedDeliveryMode?: DesktopManagedAgentDeliveryMode | null;
   runtimeCommand: string | null;
   /** Official user-run install command for an external provider runtime. */
   runtimeInstallCommand?: string | null;
@@ -65,9 +62,7 @@ export interface DesktopAgentProviderPreflightInput {
   /** The room is genuinely repo-less: skip the "choose a repo" gate and let the
    * agent start in a private, daemon-provisioned scratch workspace. */
   roomOnly?: boolean | null;
-  launchMode?: "legacy" | "supervised" | null;
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
-  cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
   model?: string | null;
   modelSource?: DesktopAgentProviderModelSource | null;
   effort?: DesktopManagedAgentEffort | null;
@@ -107,33 +102,8 @@ export interface DesktopAgentProviderSetupResult {
   detail: string | null;
 }
 
-export type DesktopManagedAgentSessionStatus =
-  | "starting"
-  | "running"
-  | "completed"
-  | "blocked"
-  | "interrupted"
-  | "failed"
-  | "unknown";
-
-export type DesktopManagedAgentFailureCode =
-  | "quota_exhausted"
-  | "authentication_required"
-  | "model_unavailable"
-  | "configuration_error"
-  | "provider_error";
-
-export interface DesktopManagedAgentFailure {
-  code: DesktopManagedAgentFailureCode;
-  message: string;
-  retryable: boolean;
-  eventId: string | null;
-  occurredAt: string;
-}
-
 export type DesktopManagedAgentDeliveryMode =
   | "mcp_polling"
-  | "desktop_events"
   | "daemon_inbox";
 
 export type DesktopManagedAgentEffort =
@@ -158,6 +128,11 @@ export interface DesktopAgentProviderModelOption {
   label: string;
   isDefault?: boolean;
   source: DesktopAgentProviderModelSource;
+  /**
+   * Open Model only: the reasoning efforts the endpoint lists for this exact
+   * model. Absent or empty means the model takes no effort setting.
+   */
+  supportedEfforts?: DesktopManagedAgentEffort[];
 }
 
 export type DesktopAgentProviderModelsStatus =
@@ -171,13 +146,6 @@ export interface DesktopAgentProviderModelsResult {
   models: DesktopAgentProviderModelOption[];
   defaultModel: string | null;
   error: string | null;
-}
-
-export interface DesktopManagedAgentActiveWork {
-  kind: "message" | "task_update";
-  eventId: string | null;
-  startedAt: string;
-  summary: string | null;
 }
 
 export type DesktopManagedAgentPermissionProfileId =
@@ -206,36 +174,6 @@ export interface DesktopManagedAgentPermissionProfile {
   risk: DesktopManagedAgentPermissionProfileRisk;
   detail: string | null;
   isDefault: boolean;
-}
-
-export type DesktopManagedAgentPermissionDecisionBehavior = "allow" | "deny";
-
-export interface DesktopManagedAgentPermissionRequest {
-  id: string;
-  providerId: DesktopAgentProviderId;
-  sessionId: string;
-  toolName: string;
-  toolUseId: string | null;
-  title: string;
-  description: string | null;
-  inputSummary: string | null;
-  decisionReason: string | null;
-  roomMessageId: string | null;
-  requestedAt: string;
-}
-
-export interface DesktopManagedAgentPermissionDecisionInput {
-  requestId: string;
-  sessionId?: string | null;
-  behavior: DesktopManagedAgentPermissionDecisionBehavior;
-  message?: string | null;
-}
-
-export interface DesktopManagedAgentPermissionDecisionResult {
-  requestId: string;
-  accepted: boolean;
-  message: string;
-  session: DesktopManagedAgentSession | null;
 }
 
 export type DesktopManagedAgentChangeFileStatus =
@@ -298,80 +236,6 @@ export interface DesktopManagedAgentPublicChangeSummary {
   error: string | null;
 }
 
-export interface DesktopManagedAgentSession {
-  id: string;
-  providerId: DesktopAgentProviderId;
-  runtime: string;
-  roomIdentifier: string;
-  roomDisplayName: string | null;
-  repoRootPath: string;
-  repoBranch: string | null;
-  status: DesktopManagedAgentSessionStatus;
-  deliveryMode: DesktopManagedAgentDeliveryMode;
-  permissionProfileId: DesktopManagedAgentPermissionProfileId;
-  permissionProfile: DesktopManagedAgentPermissionProfile;
-  cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
-  model?: string | null;
-  effort?: DesktopManagedAgentEffort | null;
-  canStop: boolean;
-  agentSessionId: string | null;
-  actorLabel: string | null;
-  agentKey: string | null;
-  displayName: string | null;
-  ownerLabel: string | null;
-  ideLabel: string | null;
-  reasoningSessionId: string | null;
-  activeWork: DesktopManagedAgentActiveWork | null;
-  pendingPermissionRequests: DesktopManagedAgentPermissionRequest[];
-  startedAt: string;
-  updatedAt: string;
-  lastError: string | null;
-  failure?: DesktopManagedAgentFailure | null;
-  /** Daemon manifest owner. Presence disables legacy lifecycle controls. */
-  supervisorEntryId?: string | null;
-}
-
-export interface DesktopManagedAgentStartInput {
-  providerId: DesktopAgentProviderId;
-  roomIdentifier: string;
-  roomGitRoom?: DesktopGitRoomInfo | null;
-  roomDisplayName?: string | null;
-  repoRootPath: string;
-  deliveryMode?: DesktopManagedAgentDeliveryMode;
-  permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
-  cursorMcpPolicy?: DesktopCursorMcpPolicy | null;
-  model?: string | null;
-  modelSource?: DesktopAgentProviderModelSource | null;
-  effort?: DesktopManagedAgentEffort | null;
-  stopPhrase?: string | null;
-  maxMinutes?: number | null;
-  /** Internal desktop bridge field; renderer legacy starts leave this absent. */
-  supervisorEntryId?: string | null;
-}
-
-export interface DesktopManagedAgentRetryInput {
-  sessionId: string;
-}
-
-export interface DesktopManagedAgentStartResult {
-  session: DesktopManagedAgentSession;
-  reused: boolean;
-  message: string;
-}
-
-export interface DesktopManagedAgentStopInput {
-  sessionId?: string | null;
-  roomIdentifier?: string | null;
-  stopMode?: "turn" | "worker";
-  shutdownServer?: boolean;
-}
-
-export interface DesktopManagedAgentInspectResult {
-  session: DesktopManagedAgentSession;
-  serverReachable: boolean;
-  recentItems: Array<Record<string, unknown>>;
-}
-
 export type DesktopSupervisorDesiredState = "running" | "paused" | "stopped";
 export type DesktopSupervisorObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
 export type DesktopSupervisorCondition = "none" | "quarantined" | "coordination_blocked" | "auth_blocked" | "budget_blocked" | "security_blocked";
@@ -426,6 +290,13 @@ export interface DesktopSupervisorStateSnapshot {
   entries: DesktopSupervisorManifestEntry[];
 }
 
+/** Read-only service observation. Null state means unavailable, not an empty fleet. */
+export interface DesktopSupervisorServiceSnapshot {
+  status: DesktopSupervisorDaemonStatus | null;
+  state: DesktopSupervisorStateSnapshot | null;
+  observedAt: string;
+}
+
 /** One human retirement request. The renderer supplies the stable operation
  * id before dispatch so a completion event cannot race ahead of correlation. */
 export interface DesktopSupervisorRetirementInput {
@@ -475,14 +346,59 @@ export interface DesktopSupervisorAgentConfiguration {
   providerLaunchPolicy: unknown;
   configRevision: number;
   runtimeConfigurationRevision: number;
+  /**
+   * Whether this agent may use the owner's own provider setup, and whether it
+   * can at all: never for a rented agent, and not for an agent app that has
+   * no setup of the owner's to load. `pending` means a process that started
+   * before the last change would still run the other way until it restarts.
+   * Absent from an older background service.
+   */
+  homeHarness?: { enabled: boolean; pending: boolean; availability: "available" | "rental" | "unsupported" | "polling" };
+  /**
+   * The owner says this agent's model reads images, so the agent is given the
+   * images people attach to the message that wakes it. Present only for an
+   * agent app that asks (Open Model); the others decide for themselves. It
+   * applies the next time the agent starts. Absent from an older background service.
+   */
+  imageInput?: boolean;
+  /**
+   * Whether other members of the agent's room see its live activity, and
+   * whether it can be shared at all: not for a rented agent, and not for an
+   * agent that fetches its own room messages. Absent from an older
+   * background service.
+   */
+  liveSharing?: { enabled: boolean; availability: "available" | "rental" | "polling" };
 }
+
+/** Changed on its own, by the owner in the desktop app, never as part of a saved draft. */
+export interface DesktopSupervisorAgentLiveSharingInput {
+  entryId: string;
+  daemonGeneration: number;
+  enabled: boolean;
+}
+
+/** Changed on its own, by the owner in the desktop app, never as part of a saved draft. */
+export interface DesktopSupervisorAgentHomeHarnessInput {
+  entryId: string;
+  daemonGeneration: number;
+  expectedRevision: number;
+  enabled: boolean;
+}
+
+/**
+ * Turning it off also restarts an idle agent that still has the owner's
+ * setup, so `restart` says what happened to the running process: restarted,
+ * left alone because it is working, or not restarted for another reason.
+ */
+export type DesktopSupervisorAgentHomeHarnessResult = DesktopSupervisorAgentConfigurationUpdateResult
+  & { restart?: "restarting" | "busy" | "not_restarted" };
 
 export interface DesktopSupervisorAgentConfigurationUpdateInput {
   entryId: string;
   daemonGeneration: number;
   expectedRevision: number;
   /** User-editable values only. Native provider policy is daemon-owned. */
-  configuration: Pick<DesktopSupervisorAgentConfiguration, "model" | "reasoningEffort" | "charter" | "permissionProfileId">;
+  configuration: Pick<DesktopSupervisorAgentConfiguration, "model" | "reasoningEffort" | "charter" | "permissionProfileId" | "imageInput">;
 }
 export type DesktopSupervisorAgentConfigurationUpdateResult =
   | { outcome: "updated"; configuration: DesktopSupervisorAgentConfiguration }
@@ -608,7 +524,48 @@ export interface DesktopRoomAgentDeliveryReceipt {
   failureCode: "provider_continuation_missing" | null;
   terminalReason: "upgrade_authority_unavailable" | null;
   updatedAt: string;
+  /** Set on a follow-up of failed work, which has no room message of its own. */
+  followUp?: DesktopRoomAgentFollowUp;
   timeline: DesktopRoomAgentCausalEvent[];
+}
+
+/**
+ * Where an agent's follow-up of failed work stands, and the room message that work began with (null when that
+ * receipt is no longer kept). `scheduled`: the agent tries again by itself at a saved time. `waiting_for_owner`:
+ * the follow-up is blocked. `ended`: it ended with nothing started, and the receipt's error says why.
+ */
+export interface DesktopRoomAgentFollowUp {
+  forMessageId: string | null;
+  state: "scheduled" | "waiting_for_owner" | "ended";
+  /**
+   * Why it waits for its owner or ended. Absent while it waits for its time, and from a daemon that does not say. Anything
+   * that reads this must treat an absent reason as one that it cannot rely on: the note stays.
+   */
+  reason?: DesktopRoomAgentFollowUpReason;
+  /**
+   * For a note that asks its owner to send a message: whether a turn has started for a message of a person that came after the follow-up.
+   * Absent from a daemon that does not say, and then the note stays.
+   */
+  laterPersonTurn?: boolean;
+  scheduled: DesktopRoomAgentScheduledRetry | null;
+}
+
+/**
+ * `ended` has one of the first six. `waiting_for_owner` has one of the last three; `other` is a block with no reason of
+ * its own, and its text says what it is.
+ */
+export type DesktopRoomAgentFollowUpReason = "stopped_by_owner" | "skipped" | "agent_changed" | "task_not_held" | "uncertain_action"
+  | "uncertain_resolved" | "attempts_failed" | "ownership_unverified" | "other";
+
+/** An automatic attempt that waits for its time. The time is the daemon's saved one, so it holds across restarts. */
+export interface DesktopRoomAgentScheduledRetry {
+  /** When the attempt starts, in milliseconds since the epoch. */
+  atMs: number;
+  /** Which automatic attempt this is, from 1, and how many there are in all. */
+  attempt: number;
+  attempts: number;
+  /** What the agent tries again after: a short provider fault, or a turn that ended without a reply. */
+  kind: "provider_fault" | "no_reply";
 }
 
 /** Four independent truths; no field is inferred from another. */
@@ -643,6 +600,51 @@ export interface DesktopRoomAgentStateProjection {
   };
 }
 
+/**
+ * The agent's oldest unsettled room message is blocked; later messages wait
+ * behind it until a person retries or skips it. `condition` stays about the
+ * runtime, so read this for message-level attention.
+ */
+export interface DesktopRoomAgentDeliveryAttention {
+  reason: "message_blocked";
+  sourceMessageId: string;
+  blockedSince: string;
+  detail: string | null;
+  /** Messages waiting behind the blocked one. */
+  waitingCount: number;
+  /** The message reached the provider, or may have. */
+  providerWorkStarted: boolean;
+  /** What Retry delivery does: re-read the saved turn (never rerun it), post the saved reply, start the turn, or restore the conversation first. */
+  retry: "reread_saved_turn" | "publish_saved_reply" | "start_turn" | "restore_conversation";
+  /** The supervisor accepts Skip now. Skipping never reruns the turn and drops any answer it had. */
+  canSkip: boolean;
+  skipUnavailableReason: string | null;
+}
+
+/** A daemon provider launch phase; see daemon/turn-start-latency.ts LaunchPhase. */
+export type DesktopSupervisorLaunchPhase = "prepare" | "slot_wait" | "admission" | "process" | "bootstrap" | "install";
+
+/**
+ * Live start-up progress of an agent's latest provider launch in the running
+ * daemon. Memory only: absent after a daemon restart. No content or error text.
+ */
+export interface DesktopSupervisorLaunchProgress {
+  /** 1, or one more than the failed launch this one retries. */
+  attempt: number;
+  startedAt: string;
+  state: "running" | "launched" | "failed";
+  /** The phase in progress; null once the launch ended. */
+  current: DesktopSupervisorLaunchPhase | null;
+  /** Phases in the order they ran; `ms` is null for the one in progress. */
+  phases: Array<{ phase: DesktopSupervisorLaunchPhase; startedAt: string; ms: number | null }>;
+  endedAt: string | null;
+  /** The first visible output after the launch. */
+  firstOutputAt: string | null;
+  failure: { phase: DesktopSupervisorLaunchPhase; action: "sign_in" | "install" | "retry" } | null;
+  /** Launches that start first while this one waits for a launch slot. */
+  slotAhead: number | null;
+}
+
 export interface DesktopSupervisorManifestEntry {
   /** Opaque exact native process birth, used only to fence cached read evidence. */
   runtimeGenerationId?: string | null;
@@ -670,6 +672,17 @@ export interface DesktopSupervisorManifestEntry {
   deliveryMode: DesktopManagedAgentDeliveryMode;
   /** Read-only daemon-owned custody; selecting delivery mode cannot enable it. */
   pollingContract?: "custodial_polling_v1" | null;
+  /**
+   * Read-only: this agent uses its owner's own provider setup ("on"), will
+   * once it restarts, or still does until it restarts. Absent means off.
+   */
+  homeHarness?: "on" | "after_restart" | "until_restart";
+  /**
+   * Read-only: the owner saved another access level (permission mode) after
+   * this agent's process started, and the process has not been replaced yet.
+   * The daemon replaces it as soon as the agent is idle. Absent means none.
+   */
+  permissionPending?: true;
   createdBy: string;
   createdAt: string;
   /** User-selected source checkout. Distinct from the daemon's private work-attempt workspace. */
@@ -687,6 +700,8 @@ export interface DesktopSupervisorManifestEntry {
   nativeLiveness: DesktopSupervisorLivenessAxis;
   /** Ephemeral native compaction; not a readiness or room-turn claim. */
   providerProgress?: { state: "compacting"; startedAt: string } | null;
+  /** Live start-up progress of the latest launch; null when the daemon has none. */
+  launchProgress?: DesktopSupervisorLaunchProgress | null;
   /** First time this entry reached ready (bound + reachable + running +
    * unblocked); set once, never cleared. Null/absent if it never reached ready. */
   readyReachedAt?: string | null;
@@ -697,6 +712,8 @@ export interface DesktopSupervisorManifestEntry {
   lastTurnControlSequence: number;
   /** Additive causal projection for daemon-owned bounded room delivery. */
   roomAgentState?: DesktopRoomAgentStateProjection | null;
+  /** Set while this agent's oldest unsettled room message is blocked and needs a person. */
+  deliveryAttention?: DesktopRoomAgentDeliveryAttention | null;
   deliveryReceipts?: DesktopRoomAgentDeliveryReceipt[];
   turnControl: {
     actionId: string;
@@ -733,6 +750,8 @@ export interface DesktopSupervisorCreateInput {
   displayName: string;
   providerId: DesktopAgentProviderId;
   model?: string | null;
+  /** Null or absent uses the provider's own default. */
+  reasoningEffort?: DesktopManagedAgentEffort | null;
   charter: string;
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
   /** Opaque, provider-native CLI/app-server options. The daemon forwards this unchanged. */
@@ -832,6 +851,7 @@ export interface DesktopSupervisorContinuationRepair {
   attempt_count: number; last_error: string | null; created_at: string; updated_at: string;
 }
 export interface DesktopSupervisorAgentInspectorDetail {
+  usage?: import("../../shared/provider-usage.js").InspectorUsage | null;
   /** Optional on older supervisors; bounded room text captured before native dispatch. */
   prepared_context?: import("../../shared/message-outcome.js").PreparedRoomContext | null;
   latest_intervention?: import("../../shared/message-outcome.js").MessageIntervention | null;
@@ -864,6 +884,7 @@ export interface DesktopOpenModelSettingsStatus {
   savedAt: string | null;
   settingsPath: string;
   error: string | null;
+  contextWindow?: number | null;
 }
 
 export interface DesktopOpenModelSaveSettingsInput {
@@ -871,4 +892,12 @@ export interface DesktopOpenModelSaveSettingsInput {
   model?: string | null;
   /** A string saves a new key, null clears the saved key, undefined keeps the current key. */
   apiKey?: string | null;
+  contextWindow?: number | null;
+}
+
+export interface DesktopAgentCommitIdentitySettings {
+  /** True when the owner chose to keep the host's own Git identity for agent commits. */
+  useHostGitIdentity: boolean;
+  /** The signed-in GitHub account's noreply identity, or null when no GitHub account is known. */
+  githubIdentity: { name: string; email: string } | null;
 }

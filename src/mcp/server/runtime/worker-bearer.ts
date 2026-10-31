@@ -1,5 +1,6 @@
 import { isLocalRoomApi } from "../../../../shared/room-api-origin.mjs";
 import { getDaemonToolExecutionContext } from "./daemon-tool-context.js";
+import { currentSessionScope } from "./session-scope.js";
 export const LETAGENTS_SUPERVISED_BOUNDED_TURNS_ENV = "LETAGENTS_SUPERVISED_BOUNDED_TURNS";
 
 export type WorkerBearerRuntime =
@@ -22,6 +23,8 @@ export class WorkerBearerRuntimeConfigurationError extends Error {
 
 export function getWorkerBearerRuntime(): WorkerBearerRuntime {
   if (getDaemonToolExecutionContext()) return { mode: "supervised" };
+  // A remote session acts as its account; the API process env does not apply.
+  if (currentSessionScope()) return { mode: "owner" };
   const bearer = process.env.LETAGENTS_AGENT_SESSION_BEARER?.trim();
   const supervised = process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() === "1";
   const profile = process.env.LETAGENTS_EXECUTION_PROFILE?.trim();
@@ -90,6 +93,7 @@ export function requireValidWorkerBearerRuntime(): WorkerBearerRuntime {
 }
 
 export function isCustodialPolling(): boolean {
+  if (currentSessionScope()) return false;
   return process.env.LETAGENTS_EXECUTION_PROFILE?.trim() === "supervised_mcp_polling";
 }
 

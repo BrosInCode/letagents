@@ -191,6 +191,13 @@
   -webkit-line-clamp: 2;
 }
 
+/* What the level withholds is the point of the card, so it is never clamped. */
+.desktop-add-agent-permission-options small.desktop-add-agent-permission-limits {
+  display: block;
+  color: var(--text-secondary);
+  -webkit-line-clamp: unset;
+}
+
 @media (max-width: 800px) {
   .desktop-add-agent-permission-options {
       grid-template-columns: 1fr;

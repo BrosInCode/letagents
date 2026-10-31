@@ -17,9 +17,13 @@
       @click="$emit('select')"
     >
       <span class="desktop-task-card-header">
-        <span class="desktop-task-id" :title="task.id">{{ shortTaskId(task.id) }}</span>
+        <span v-if="ticket" class="desktop-task-ticket">
+          <span class="desktop-task-provider-chip" :data-provider="ticket.provider">{{ ticket.providerLabel }}</span>
+          <span class="desktop-task-id" :title="`${ticket.key} (${task.id})`">{{ ticket.key }}</span>
+        </span>
+        <span v-else class="desktop-task-id" :title="task.id">{{ shortTaskId(task.id) }}</span>
         <span class="desktop-task-updated" :title="`Updated ${task.updatedAt || task.createdAt}`">
-          {{ relativeTime(task.updatedAt || task.createdAt) }}
+          {{ relativeTime(task.updatedAt || task.createdAt, now) }}
         </span>
       </span>
       <span class="desktop-task-card-title">{{ task.title }}</span>
@@ -28,6 +32,13 @@
           <i aria-hidden="true"><UserRound v-if="!task.assignee" :size="12" /><template v-else>{{ ownerInitial }}</template></i>
           <strong :title="`Owner: ${ownerName}`">{{ ownerName }}</strong>
         </span>
+        <span
+          v-if="ticket && ticketState"
+          class="desktop-task-ticket-state"
+          :data-ticket-state="task.ticketState"
+          :title="`${ticket.providerLabel} state: ${ticketState}. The column is the work state.`"
+          data-testid="room-board-ticket-state"
+        >{{ ticketState }}</span>
       </span>
     </button>
 
@@ -88,6 +99,11 @@ import { computed } from "vue";
 import { CircleCheck, GitPullRequest, Link, LockKeyhole, ScanEye, UserRound } from "@lucide/vue";
 import type { DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 import { compactPerson, readableStatus, relativeTime, shortTaskId, staleSummary } from "./formatters";
+import { useNow } from "../../../../composables/useNow";
+import { ticketRefParts, ticketStateLabel } from "./ticket-ref";
+
+// Labels such as "2m ago" move on with the shared clock even when the data is unchanged.
+const now = useNow(30_000);
 import {
   secondaryLeases,
   executionAuthorityState,
@@ -112,6 +128,8 @@ const emit = defineEmits<{
   "select": [];
 }>();
 
+const ticket = computed(() => ticketRefParts(props.task.externalRef));
+const ticketState = computed(() => ticketStateLabel(props.task.ticketState));
 const taskWorkLease = computed(() => workLease(props.task));
 const authority = computed(() => executionAuthorityState(props.task));
 const taskSecondaryLeases = computed(() => secondaryLeases(props.task));
@@ -138,3 +156,9 @@ function onCardClick(event: MouseEvent): void {
   emit("select");
 }
 </script>
+
+<style scoped>
+.desktop-task-ticket { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+/* Chip and pill colours are shared in styles/task-board/task-detail-panel.css. */
+.desktop-task-ticket-state { margin-left: auto; white-space: nowrap; }
+</style>

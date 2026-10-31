@@ -24,6 +24,7 @@ export interface ActivityParticipant {
   runtime: string | null;
   repoBranch: string | null;
   activityState: ActivityState | null;
+  freshness?: DesktopAgentPresence["freshness"] | null;
   status: DesktopAgentPresence["status"] | null;
   statusText: string | null;
   livenessObservation: DesktopAgentPresence["livenessObservation"];

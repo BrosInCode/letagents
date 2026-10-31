@@ -10,6 +10,7 @@ import {
   BoardIntentClaimConflictError,
   BoardIntentApprovalConsumptionError,
   LeaseFenceStaleError,
+  claimBoardIntentEscalationTx,
   countBoardIntents,
   createBoardIntent,
   denyBoardIntent,
@@ -30,6 +31,7 @@ import {
   type Project,
   getBoardGovernanceSnapshot,
 } from "../../db.js";
+import { db } from "../../db/client.js";
 import { isBoardManagerFailoverMode } from "../../../shared/board-manager-failover.js";
 import { type AuthenticatedRequest } from "../../http/helpers.js";
 import {
@@ -38,9 +40,12 @@ import {
 } from "../../request/agent-identity.js";
 import { resolveGitRoomProjectRole } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
+import { registerJevLinkRoutes, respondToJevLinkIntentDecision, type JevLinkDecisions } from "./jev-links.js";
 
 export interface RoomBoardRouteDeps {
   taskEvents?: EventEmitter;
+  /** PR6: Jev link decisions; defaults to the server's service. */
+  jevLinks?: () => Promise<JevLinkDecisions>;
   ensureTaskGitRoomForActiveWorkLease?(input: { parentRoomId: string; taskId: string }): Promise<unknown>;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(
@@ -66,6 +71,7 @@ export interface RoomBoardRouteDeps {
     body: Record<string, unknown>;
   }): Promise<ResolvedRequestAgentIdentity | null | "responded">;
   getActiveBoardManagerForRoom?(roomId: string): Promise<BoardManagerAssignment | null>;
+  getRoomBoardSettingsForRoom?(roomId: string): Promise<{ manager_mode: string }>;
   getNotificationTask?(roomId: string, taskId: string): Promise<{ title: string } | null>;
   emitProjectMessage?(
     projectId: string,
@@ -186,22 +192,60 @@ async function readableIntentAction(deps: RoomBoardRouteDeps, intent: BoardInten
   return `${intent.action_type === "task_close" ? "close" : "update"} ${task}`;
 }
 
+/**
+ * A request the Board Manager made itself. It cannot approve those (task
+ * creation aside: that only adds a proposed task), so they go to a person.
+ */
+export function isBoardManagerOwnRequest(
+  intent: Pick<BoardIntent, "action_type" | "proposer_agent_session_id" | "proposer_actor_key">,
+  manager: Pick<BoardManagerAssignment, "agent_session_id" | "agent_key"> | null,
+): boolean {
+  if (!manager || intent.action_type === "task_create") return false;
+  return Boolean(manager.agent_session_id && intent.proposer_agent_session_id === manager.agent_session_id)
+    || Boolean(manager.agent_key && intent.proposer_actor_key === manager.agent_key);
+}
+
+/** What the Board Manager is told when it asks for something only a person can approve. */
+export const BOARD_MANAGER_OWN_REQUEST_NEXT_STEP =
+  "You are the Board Manager, and a Board Manager cannot approve its own request, so a person decides it. "
+  + "It is waiting in the room owner's Needs you. Leave it pending (do not deny it) and carry on with other work; "
+  + "you will get a room message when it is decided.";
+
 export async function emitBoardIntentManagerNotification(input: {
   deps: RoomBoardRouteDeps;
   project: Project;
   intent: BoardIntent;
   activeManager: BoardManagerAssignment | null;
-}): Promise<{ delivered: boolean; target_manager_agent_session_id: string | null; message_id: string | null }> {
+}): Promise<{ delivered: boolean; target_manager_agent_session_id: string | null; message_id: string | null; routed_to_person?: true }> {
+  const ownRequest = isBoardManagerOwnRequest(input.intent, input.activeManager);
   if (!input.deps.emitProjectMessage) {
     return {
       delivered: false,
-      target_manager_agent_session_id: input.activeManager?.agent_session_id ?? null,
+      target_manager_agent_session_id: ownRequest ? null : input.activeManager?.agent_session_id ?? null,
       message_id: null,
+      ...(ownRequest ? { routed_to_person: true as const } : {}),
     };
   }
 
   const proposer = safeNotificationFragment(input.intent.proposer_actor_label, "a participant");
   const summary = intentSummary(input.intent);
+  if (ownRequest) {
+    // Not addressed to the manager: it cannot decide this, and a wake would only queue another turn.
+    const action = await readableIntentAction(input.deps, input.intent);
+    const name = notificationName(input.intent.proposer_actor_label, "The Board Manager");
+    const message = await input.deps.emitProjectMessage(
+      input.project.id,
+      "letagents",
+      `[status] ${proposer} is the Board Manager and cannot approve its own request: ${summary}. `
+        + `Intent ${input.intent.id}: a room admin needs to approve or deny it under Board Manager > Requests.`,
+      {
+        source: "system",
+        client_message_id: `board_intent:${input.intent.id}:person_notify`,
+        display_text: `${name} (Board Manager) wants to ${action}. A Board Manager can't approve its own request, so a person needs to decide it.`,
+      }
+    );
+    return { delivered: Boolean(message.id), target_manager_agent_session_id: null, message_id: message.id ?? null, routed_to_person: true };
+  }
   const managerMention = input.activeManager ? mentionAgentKey(input.activeManager.agent_key) : null;
   const text = input.activeManager
     ? `${managerMention ?? safeNotificationFragment(input.activeManager.actor_label, "Board Manager")} New board intent from ${proposer}: ${summary}. Intent ${input.intent.id}: use approve_board_intent or deny_board_intent to decide it.`
@@ -300,6 +344,8 @@ export function registerRoomBoardRoutes(
 ): void {
   const resolveBoardWorkerIdentity = deps.resolveOptionalWorkerIdentity ?? resolveOptionalWorkerIdentity;
   const getActiveBoardManagerForRoom = deps.getActiveBoardManagerForRoom ?? getActiveBoardManager;
+  const getRoomBoardSettingsForRoom = deps.getRoomBoardSettingsForRoom ?? getRoomBoardSettings;
+  registerJevLinkRoutes(app, deps);
 
   app.get(/^\/rooms\/(.+)\/board-governance$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
@@ -440,9 +486,18 @@ export function registerRoomBoardRoutes(
       res.status(400).json({ error: "action_type is invalid" });
       return;
     }
-    const payload = normalizePayload(body.payload);
-    if (!payload) {
+    const submittedPayload = normalizePayload(body.payload);
+    if (!submittedPayload) {
       res.status(400).json({ error: "payload must be an object" });
+      return;
+    }
+    // The payload is what gets approved and executed; the task column must
+    // name the same task so decisions and supersession agree on it.
+    const payloadTaskId = typeof submittedPayload.task_id === "string" ? submittedPayload.task_id.trim() || null : null;
+    const payload = payloadTaskId ? { ...submittedPayload, task_id: payloadTaskId } : submittedPayload;
+    const bodyTaskId = deps.normalizeOptionalString(body.task_id);
+    if (payloadTaskId && bodyTaskId && payloadTaskId !== bodyTaskId) {
+      res.status(400).json({ error: "task_id must match payload.task_id" });
       return;
     }
     if (body.action_type === "task_create") {
@@ -463,7 +518,7 @@ export function registerRoomBoardRoutes(
     const intent = await createBoardIntent({
       room_id: project.id,
       action_type: body.action_type,
-      task_id: deps.normalizeOptionalString(body.task_id),
+      task_id: bodyTaskId ?? payloadTaskId,
       payload,
       proposer_actor_label: requesterLabel(req, body, workerIdentity),
       proposer_actor_key: workerIdentity ? workerIdentity.agent_key : deps.normalizeOptionalString(body.actor_key),
@@ -480,10 +535,14 @@ export function registerRoomBoardRoutes(
       intent,
       activeManager,
     });
+    const routedToPerson = managerNotification.routed_to_person === true && intent.status === "pending";
+    // Recorded as escalated, so the vacancy sweep never announces it a second time.
+    if (routedToPerson) await claimBoardIntentEscalationTx(db, { room_id: project.id, intent_id: intent.id });
     res.status(201).json({
       room_id: project.id,
       intent,
       manager_notification: managerNotification,
+      ...(routedToPerson ? { decided_by: "person", next_step: BOARD_MANAGER_OWN_REQUEST_NEXT_STEP } : {}),
     });
   });
 
@@ -520,6 +579,47 @@ export function registerRoomBoardRoutes(
       room_id: project.id,
       intent_id: intentId,
     });
+    // PR6: a person decides a Jev link, and the server runs what they approve.
+    if (existingIntent?.action_type === "tracker_jev_link") {
+      await respondToJevLinkIntentDecision({
+        req, res, project, intent: existingIntent, decision: "approve", decisionBy, reason, workerIdentity, deps,
+      });
+      return;
+    }
+    let approvingManagerAssignmentId: string | null = null;
+    if (workerIdentity) {
+      const approvingManager = await getActiveBoardManagerForRoom(project.id);
+      if (approvingManager?.agent_session_id !== workerIdentity.agent_session_id) {
+        res.status(403).json({ error: "Only the active Board Manager can decide board intents with worker credentials." });
+        return;
+      }
+      // The approval stays usable only while this assignment is the live manager.
+      approvingManagerAssignmentId = approvingManager.id;
+      // With manager mode off, a manager assignment left in place carries no authority.
+      if ((await getRoomBoardSettingsForRoom(project.id)).manager_mode === "off") {
+        res.status(403).json({
+          error: "Board Manager mode is off, so a person must decide board requests.",
+          code: "board_manager_mode_off",
+        });
+        return;
+      }
+      // A manager cannot approve its own request. Task creation is exempt: it
+      // only adds a proposed task, which workers may add directly anyway.
+      if (existingIntent && isBoardManagerOwnRequest(existingIntent, approvingManager)) {
+        res.status(403).json({
+          error: `A Board Manager cannot approve its own request; a person must decide it. ${BOARD_MANAGER_OWN_REQUEST_NEXT_STEP}`,
+          code: "board_intent_self_approval",
+        });
+        return;
+      }
+    }
+    if (existingIntent?.status === "superseded") {
+      res.status(409).json({
+        error: `Board intent ${intentId} no longer applies. ${existingIntent.decision_reason ?? ""}`.trim(),
+        code: "board_intent_superseded",
+      });
+      return;
+    }
     if (existingIntent?.action_type === "task_claim") {
       const isolation = await deps.enforceFocusParentBoardWriteIsolation?.({ req, targetProject: project });
       if (isolation?.kind === "deny") {
@@ -629,6 +729,7 @@ export function registerRoomBoardRoutes(
       intent_id: intentId,
       decision_by: decisionBy,
       reason,
+      manager_assignment_id: approvingManagerAssignmentId,
     });
     if (!approved) {
       res.status(404).json({ error: "Pending board intent not found" });
@@ -675,6 +776,15 @@ export function registerRoomBoardRoutes(
     }
 
     const existingIntent = await getBoardIntent({ room_id: project.id, intent_id: intentId });
+    if (existingIntent?.action_type === "tracker_jev_link") {
+      await respondToJevLinkIntentDecision({
+        req, res, project, intent: existingIntent, decision: "deny",
+        decisionBy: requesterLabel(req, body, workerIdentity),
+        reason: deps.normalizeOptionalString(body.reason),
+        workerIdentity, deps,
+      });
+      return;
+    }
     if (existingIntent?.status === "denied") {
       const proposerNotification = await emitBoardIntentDecisionNotification({ deps, project, intent: existingIntent });
       res.json({ room_id: project.id, intent: existingIntent, proposer_notification: proposerNotification });

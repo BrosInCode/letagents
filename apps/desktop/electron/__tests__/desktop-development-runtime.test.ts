@@ -48,7 +48,11 @@ test("desktop development builds every runtime before starting its watchers and 
     desktopManifest.scripts?.["serve:electron"],
     "wait-on tcp:5174 ../../dist/mcp/server.js dist-electron/main.js dist-daemon/main.js && cross-env LETAGENTS_DESKTOP_DEV_SERVER_URL=http://127.0.0.1:5174 electron .",
   );
-  assert.match(desktopManifest.scripts?.["test:electron"] ?? "", /--test-concurrency=1/);
+  assert.equal(
+    desktopManifest.scripts?.["test:electron"],
+    "npm run test:electron:files -- electron/__tests__/*.test.ts",
+  );
+  assert.match(desktopManifest.scripts?.["test:electron:files"] ?? "", /--test-concurrency=1/);
 });
 
 const bootstrapUrl = new URL("../../../../scripts/ensure-desktop-dependencies.mjs", import.meta.url);

@@ -23,20 +23,19 @@ describe("desktop sidebar overflow contract", () => {
       /class="sidebar-actions"[\s\S]*?class="sidebar-cta"[\s\S]*?<\/div>\s*<div class="sidebar-room-sections"/,
     );
     assert.match(sidebarStyles, /\.sidebar-navigation\s*\{[\s\S]*?grid-template-rows: auto minmax\(0, 1fr\);/);
-    assert.match(sidebarStyles, /\.sidebar-room-sections\s*\{[\s\S]*?min-height: 0;[\s\S]*?overflow: hidden;/);
+    assert.match(sidebarStyles, /\.sidebar-room-sections\s*\{[^}]*min-height: 0;[^}]*overflow-y: auto;/);
     assert.match(
       sidebarSource,
       /class="sidebar-navigation"\s+@contextmenu\.prevent="openBackgroundContextMenu"/,
     );
   });
 
-  it("gives large pinned groups their own bounded scroll area", () => {
-    assert.match(sidebarRoomStyles, /\.project-list,\s*\.pinned-list\s*\{[\s\S]*?overflow-y: auto;/);
-    assert.match(sidebarRoomStyles, /\.sidebar-pinned-section\s*\{[\s\S]*?max-height: 50%;[\s\S]*?overflow: hidden;/);
-    assert.match(
-      sidebarRoomStyles,
-      /\.sidebar-room-sections:has\([\s\S]*?> \.sidebar-section\[data-empty="true"\][\s\S]*?\) > \.sidebar-pinned-section\s*\{\s*max-height: 100%;/,
-    );
+  it("scrolls pinned rooms and rooms together, so neither is clipped in a box of its own", () => {
+    const lists = /\.project-list,\s*\.pinned-list\s*\{([^}]*)\}/.exec(sidebarRoomStyles)?.[1] ?? "";
+    assert.ok(lists, "the room lists have a rule");
+    assert.doesNotMatch(lists, /overflow-y: auto|mask-image/, "a list never scrolls or fades on its own");
+    const pinned = /\.sidebar-pinned-section\s*\{([^}]*)\}/.exec(sidebarRoomStyles)?.[1] ?? "";
+    assert.doesNotMatch(pinned, /max-height/, "pinned rooms are never capped to part of the sidebar");
     assert.match(sidebarSource, /class="sidebar-section"\s+:data-empty="!roomProjectEntries\.length"/);
   });
 

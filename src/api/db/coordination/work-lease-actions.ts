@@ -1,4 +1,4 @@
-import { and, eq, lte, or, sql } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 
 import {
   ACTIVE_AGENT_DELIVERY_WINDOW_MS,
@@ -7,7 +7,7 @@ import {
 import { db } from "../client.js";
 import { room_agent_delivery_sessions, task_leases, tasks } from "../schema.js";
 import { toTask, toTaskLease } from "../mappers.js";
-import { assertConsumeBoardIntentApproval } from "./board-intents.js";
+import { assertConsumeBoardIntentApproval, supersedeBoardIntentsForTask } from "./board-intents.js";
 import {
   resolveTaskAssignmentState,
   type TaskAssignmentPatch,
@@ -24,6 +24,7 @@ import type {
 } from "../types.js";
 import { parseScopedId } from "../utils.js";
 import { createTaskLeaseRow } from "./lease-rows.js";
+import { expireStaleTaskLeases } from "./task-leases.js";
 
 type TaskWorkLeaseActionResult = {
   task: Task | null;
@@ -63,11 +64,24 @@ export async function applyTaskWorkLeaseAction(input: {
     return actionConflict("task_not_found");
   }
 
-  const now = new Date().toISOString();
-  const deliveryFreshCutoff = new Date(
-    Date.parse(now) - ACTIVE_AGENT_DELIVERY_WINDOW_MS
-  ).toISOString();
+  // Expire stale leases before the transaction, not inside it. The sweep locks
+  // other tasks' leases, and holding them while waiting for this lease's lock
+  // would deadlock a board-intent claim, which sweeps and then takes that lock.
+  await expireStaleTaskLeases(input.room_id);
   return db.transaction(async (tx) => {
+    // The lock every lease-guarded write and every rebind takes first. A fenced
+    // task write in flight finishes before this moves the lease, and the two
+    // never lock the lease and the task in opposite orders.
+    await tx.execute(
+      sql`SELECT pg_advisory_xact_lock(hashtextextended(${`task_lease:${input.active_lease_id}`}, 0))`
+    );
+    // Read the clock after the wait: a lease that expired meanwhile counts as
+    // expired, and updated_at never goes back past the write we waited for.
+    const now = new Date().toISOString();
+    const deliveryFreshCutoff = new Date(
+      Date.parse(now) - ACTIVE_AGENT_DELIVERY_WINDOW_MS
+    ).toISOString();
+
     const [taskRow] = (await tx
       .select()
       .from(tasks)
@@ -105,21 +119,6 @@ export async function applyTaskWorkLeaseAction(input: {
       }
     }
 
-    await tx
-      .update(task_leases)
-      .set({
-        status: "expired",
-        updated_at: now,
-      })
-      .where(
-        and(
-          eq(task_leases.room_id, input.room_id),
-          eq(task_leases.status, "active" as TaskLeaseStatus),
-          sql`${task_leases.expires_at} IS NOT NULL`,
-          lte(task_leases.expires_at, now)
-        )
-      );
-
     const [releasedLeaseRow] = (await tx
       .update(task_leases)
       .set({
@@ -148,7 +147,19 @@ export async function applyTaskWorkLeaseAction(input: {
       return actionConflict("lease_not_active");
     }
 
-    const assignment = resolveTaskAssignmentState(taskRow, input.task_updates);
+    // Lock the task after the lease (the order lease adoption uses) and work
+    // from that locked state, so the approval is compared with the task as it
+    // is written, not as first read.
+    const [lockedTaskRow] = (await tx
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.room_id, input.room_id), eq(tasks.number, taskNumber)))
+      .for("update")) as TaskRow[];
+    if (!lockedTaskRow) {
+      return actionConflict("task_not_found");
+    }
+
+    const assignment = resolveTaskAssignmentState(lockedTaskRow, input.task_updates);
 
     const [updatedTaskRow] = (await tx
       .update(tasks)
@@ -166,7 +177,10 @@ export async function applyTaskWorkLeaseAction(input: {
     }
 
     if (input.board_intent_approval) {
-      await assertConsumeBoardIntentApproval(input.board_intent_approval, tx);
+      await assertConsumeBoardIntentApproval({
+        ...input.board_intent_approval,
+        task_state: { status: lockedTaskRow.status, assignee_agent_key: lockedTaskRow.assignee_agent_key },
+      }, tx);
     }
 
     let newLeaseRow: TaskLeaseRow | null = null;
@@ -186,6 +200,14 @@ export async function applyTaskWorkLeaseAction(input: {
         .returning()) as TaskLeaseRow[];
       newLeaseRow = createdLeaseRow ?? null;
     }
+
+    // The named lease is gone, and the task may have changed hands or status.
+    await supersedeBoardIntentsForTask({
+      room_id: input.room_id,
+      task_changed: updatedTaskRow.status !== lockedTaskRow.status
+        || updatedTaskRow.assignee_agent_key !== lockedTaskRow.assignee_agent_key,
+      task: { id: input.task_id, status: updatedTaskRow.status, assignee_agent_key: updatedTaskRow.assignee_agent_key },
+    }, tx);
 
     return {
       task: toTask(updatedTaskRow),

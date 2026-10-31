@@ -1,3 +1,4 @@
+import "./isolated-home.js";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
@@ -14,8 +15,10 @@ import {
   type OpenModelProviderAdapterDependencies,
 } from "../main/agents/open-model-provider-adapter.js";
 import {
+  PROCESS_ENDED_DURING_TURN,
   ProviderTurnControlError,
   type ProviderHandle,
+  type ProviderRoomTurnRequest,
   type ProviderRoomTurnResult,
   type ProviderSpawnRequest,
   type ProviderStreamEvent,
@@ -31,8 +34,15 @@ import {
   parseOpenCodePermissionEvent,
   type OpenCodePermissionRequest,
 } from "../main/agents/opencode-server-client.js";
-import { seedOpenCodeConfigHome, shieldOwnerInstructions } from "../main/agents/opencode-launch-contract.js";
+import { clearOpenModelEffortCatalogCacheForTest } from "../main/agents/open-model-efforts.js";
+import { OPEN_MODEL_OPENCODE_PROVIDER_ID, seedOpenCodeConfigHome, shieldOwnerInstructions } from "../main/agents/opencode-launch-contract.js";
 import { OPENCODE_RUNTIME_VERSION } from "../main/agents/opencode-runtime.js";
+import { NO_REPLY_FAILURE } from "../../../../shared/room-turn-no-reply.mjs";
+import { writePrivateFileAtomically } from "../../../../shared/owner-private-fs.mjs";
+import { ProviderInstallError } from "../../../../shared/provider-executable.mjs";
+
+/** Windows starts the sealed MCP runtime; a test has no packaged one. */
+const testMcpRuntime = () => ({ entryPath: join(tmpdir(), "letagents-mcp-entry.js"), readRoots: [] });
 
 type LaunchRecord = {
   binary: string;
@@ -72,6 +82,7 @@ function createHarness() {
   let assistantText = "OpenCode bounded reply.";
   let includeAssistantText = true;
   let holdTurnOpen = false;
+  let configBody: Record<string, unknown> = { model: "letagents-open-model/qwen/qwen3-coder" };
   let nativeStatus: Record<string, unknown> = { type: "busy" };
   let statusReads = 0;
   let statusReadsHeldAfterAbort = 0;
@@ -86,10 +97,13 @@ function createHarness() {
   const permissionReplies: Array<{ requestId: string; reply: string }> = [];
   const eventStreams = new Set<{ send(event: Record<string, unknown>): void; close(): void }>();
   let eventConnections = 0;
+  const gitProbes: Array<{ workspace: string; environment: NodeJS.ProcessEnv }> = [];
+  let gitProblem: string | null = null;
 
   const neverExits = new Promise<ProviderProcessExit>(() => {});
   observedProcessExit = neverExits;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     launch(input) {
       launches.push(input);
       const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
@@ -109,6 +123,7 @@ function createHarness() {
     discoverRuntimeConnection: async () => null,
     async fetch(input, init) {
       const url = new URL(input);
+      if (url.pathname.endsWith("/models")) return json({ data: [{ id: "qwen/qwen3-coder", context_length: 262144 }] });
       const authorization = new Headers(init?.headers).get("authorization");
       assert.match(authorization ?? "", /^Basic /);
       if (url.pathname === "/global/health") return json({ healthy: true, version: "1.18.20" });
@@ -154,9 +169,7 @@ function createHarness() {
           headers: { "content-type": "text/event-stream" },
         });
       }
-      if (url.pathname === "/config") {
-        return json({ model: "letagents-open-model/qwen/qwen3-coder" });
-      }
+      if (url.pathname === "/config") return json(configBody);
       if (url.pathname === "/session" && init?.method === "POST") {
         const id = nextSession === 1 ? "session-open-model-1" : `session-open-model-${nextSession}`;
         nextSession += 1;
@@ -216,10 +229,16 @@ function createHarness() {
       assert.fail(`Unexpected OpenCode request: ${init?.method ?? "GET"} ${url.pathname}`);
     },
     now: () => "2026-07-28T00:00:00.000Z",
+    async probeGit(workspace, environment) {
+      gitProbes.push({ workspace, environment });
+      return gitProblem;
+    },
   };
 
   return {
     dependencies,
+    gitProbes,
+    set gitProblem(value: string | null) { gitProblem = value; },
     launches,
     promptBodies,
     signals,
@@ -257,6 +276,9 @@ function createHarness() {
       holdTurnOpen = true;
       transcriptWhileBusy = true;
     },
+    becomeIdleWithoutEvent() {
+      holdTurnOpen = false;
+    },
     /** OpenCode is waiting out a backoff before it re-sends a failed model request. */
     holdTurnInRetry() {
       holdTurnOpen = true;
@@ -283,6 +305,10 @@ function createHarness() {
     },
     setStreamEvents(events: Array<Record<string, unknown>>) {
       streamEvents = events;
+    },
+    /** What a running OpenCode serves from `/config`. */
+    setConfig(value: Record<string, unknown>) {
+      configBody = value;
     },
     setPromptFailure(error: Error) {
       promptFailure = error;
@@ -320,13 +346,13 @@ function spawnRequest(overrides: Partial<ProviderSpawnRequest> = {}): ProviderSp
       apiKey: "provider-api-key-must-stay-out-of-config",
       baseUrl: "https://openrouter.ai/api/v1",
       model: "qwen/qwen3-coder",
+      contextWindow: 262144,
     },
     ...overrides,
   };
 }
 
-async function spawnAdapter(overrides: Partial<ProviderSpawnRequest> = {}) {
-  const harness = createHarness();
+async function spawnAdapter(overrides: Partial<ProviderSpawnRequest> = {}, harness = createHarness()) {
   const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-adapter-"));
   const adapter = new OpenModelProviderAdapter({
     binary: "/opt/letagents/opencode",
@@ -354,6 +380,19 @@ function openCodeStyleAscendingId(timestampMs: number, counter: number): string 
   return `msg_${timeBytes.toString("hex")}00000000000000`;
 }
 
+/** A completed model step that ended on one tool call, in the given state. */
+function toolStep(turnId: string, id: string, created: number, text: string, status: "running" | "completed"): TranscriptMessage {
+  return {
+    info: { id, role: "assistant", parentID: turnId, time: { created, completed: created + 1 } },
+    parts: [
+      { id: `${id}-text`, type: "text", text },
+      { id: `${id}-tool`, type: "tool", tool: "bash", callID: `${id}-call`,
+        state: { status, input: { command: "ls" }, time: { start: created }, ...(status === "completed" ? { output: "files" } : {}) } },
+      { id: `${id}-finish`, type: "step-finish", reason: "tool-calls" },
+    ],
+  };
+}
+
 function assistantMessage(
   turnId: string,
   id: string,
@@ -371,6 +410,18 @@ function assistantMessage(
     parts: [
       ...(text === null ? [] : [{ id: `${id}-text`, type: "text", text }]),
       { id: `${id}-finish`, type: "step-finish", reason },
+    ],
+  };
+}
+
+/** What OpenCode keeps when a model spends its whole output budget reasoning: no text part. */
+function outputLimitedAssistant(turnId: string, id: string, created: number): TranscriptMessage {
+  return {
+    info: { id, role: "assistant", parentID: turnId, time: { created, completed: created + 1 }, finish: "length" },
+    parts: [
+      { id: `${id}-start`, type: "step-start" },
+      { id: `${id}-reasoning`, type: "reasoning", text: "Reviewing every file in the pull request first." },
+      { id: `${id}-finish`, type: "step-finish", reason: "length" },
     ],
   };
 }
@@ -402,8 +453,8 @@ test("Open Model preserves GitHub CLI config discovery while isolating OpenCode 
     process.env.GITHUB_TOKEN = "github-token-must-not-be-inherited";
     for (const [explicit, xdg, expected] of [
       ["/tmp/custom-gh", "/tmp/user-config", "/tmp/custom-gh"],
-      [null, "/tmp/user-config", "/tmp/user-config/gh"],
-      [null, null, "/tmp/github-user-home/.config/gh"],
+      [null, "/tmp/user-config", join("/tmp/user-config", "gh")],
+      [null, null, join("/tmp/github-user-home", ".config", "gh")],
     ]) {
       if (explicit) process.env.GH_CONFIG_DIR = explicit; else delete process.env.GH_CONFIG_DIR;
       if (xdg) process.env.XDG_CONFIG_HOME = xdg; else delete process.env.XDG_CONFIG_HOME;
@@ -489,6 +540,54 @@ test("Open Model launches a dedicated OpenCode server without putting the provid
   );
 });
 
+test("Open Model launches OpenCode so a denied tool call does not end the turn", async () => {
+  const { harness } = await spawnAdapter({
+    permissionProfileId: "ask_before_write",
+    launchPolicy: { permission: { "*": "allow", edit: "ask", bash: "ask" } },
+  });
+  const config = JSON.parse(harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as Record<string, unknown>;
+  assert.deepEqual(config.experimental, { continue_loop_on_deny: true });
+});
+
+test("Open Model sends the chosen effort only while the endpoint lists it for the model", async () => {
+  clearOpenModelEffortCatalogCacheForTest();
+  const efforts = (listed: string[] | null | "unreadable") => {
+    const harness = createHarness();
+    const base = harness.dependencies.fetch!;
+    harness.dependencies.fetch = async (input, init) => new URL(input).pathname.endsWith("/models")
+      ? listed === "unreadable" ? new Response("down", { status: 503 }) : Response.json({ data: [{ id: "openai/gpt-oss-120b", context_length: 131072, ...(listed ? { reasoning: { supported_efforts: listed } } : {}) }] })
+      : base(input, init);
+    return harness;
+  };
+  const request = (baseUrl: string): Partial<ProviderSpawnRequest> => ({
+    model: "openai/gpt-oss-120b",
+    reasoningEffort: "high",
+    providerCredential: { apiKey: null, baseUrl, model: "openai/gpt-oss-120b", contextWindow: 131072 },
+  });
+  const modelOptions = (harness: ReturnType<typeof createHarness>) => {
+    const config = JSON.parse(harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
+      provider: Record<string, { models: Record<string, { options: unknown }> }>;
+    };
+    return config.provider[OPEN_MODEL_OPENCODE_PROVIDER_ID]!.models["openai/gpt-oss-120b"]!.options;
+  };
+
+  const listed = await spawnAdapter(request("https://listed.example.test/v1"), efforts(["low", "medium", "high"]));
+  assert.deepEqual(modelOptions(listed.harness), { reasoningEffort: "high" });
+  assert.equal(listed.handle.launchNotices?.length ?? 0, 0);
+
+  const unlisted = await spawnAdapter(request("https://unlisted.example.test/v1"), efforts(null));
+  assert.deepEqual(modelOptions(unlisted.harness), {});
+  assert.deepEqual(unlisted.handle.launchNotices, [
+    "Reasoning effort high not used: the endpoint does not list it for this model, so the model's default applies.",
+  ]);
+
+  // A /models read that fails says nothing new: the effort checked when it was chosen is kept.
+  const unreadable = await spawnAdapter(request("https://unreadable.example.test/v1"), efforts("unreadable"));
+  assert.deepEqual(modelOptions(unreadable.harness), { reasoningEffort: "high" });
+  assert.equal(unreadable.handle.launchNotices?.length ?? 0, 0);
+  clearOpenModelEffortCatalogCacheForTest();
+});
+
 test("Open Model launches ask-before-write with native shell and edit approvals", async () => {
   const { harness } = await spawnAdapter({
     permissionProfileId: "ask_before_write",
@@ -546,7 +645,7 @@ test("Open Model freezes lifecycle authority across spawn, attach, and resume", 
   await assert.rejects(adapter.spawn(spawnRequest({
     workAttemptId: "typed-non-daemon",
     lifecycleAuthorityMode: "typed",
-    deliveryMode: "desktop_events",
+    deliveryMode: "mcp_polling",
   })), /Typed Open Model lifecycle authority requires daemon-inbox delivery/);
   assert.equal(harness.launches.length, 1);
 });
@@ -795,6 +894,148 @@ test("Open Model runs one bounded OpenCode prompt and returns the exact assistan
   assert.deepEqual(lifecycleFrames.map((event) => event.nativeEventId),
     lifecycleFacts.map((event) => event.fact.nativeEventId),
     "typed and legacy shadow witnesses use the same exact native checkpoints");
+});
+
+/** A PNG signature and a few more bytes, as a view into a larger buffer the way a download slice would be. */
+function pngView() {
+  const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 250, 251]);
+  const backing = new Uint8Array([9, 9, ...bytes, 9]);
+  return { bytes, view: backing.subarray(2, 2 + bytes.length) };
+}
+
+function imageTurn(png = pngView()): ProviderRoomTurnRequest {
+  return {
+    inboxItemId: "inbox-open-model-images",
+    actionId: "action-open-model-images",
+    sourceMessage: { id: "message-1", text: "What is in these?" },
+    activation: { decision: "activate" },
+    attachments: [
+      { index: 1, fileName: "notes.pdf", mimeType: "application/pdf", sizeBytes: 500, status: "cannot_read_pdf", category: "file" },
+      { index: 2, fileName: 'shot "1".png', mimeType: "image/png", sizeBytes: png.bytes.length, status: "image",
+        image: { mimeType: "image/png", data: png.view } },
+      { index: 3, fileName: "staged.png", mimeType: "image/png", sizeBytes: 10, status: "image",
+        image: { mimeType: "image/png", path: "/scratch/turn-1/image-2.png" } },
+    ],
+  };
+}
+
+function launchedModalities(harness: ReturnType<typeof createHarness>) {
+  const config = JSON.parse(harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as {
+    provider: Record<string, { models: Record<string, { modalities?: unknown }> }>;
+  };
+  return config.provider["letagents-open-model"]!.models["qwen/qwen3-coder"]!.modalities;
+}
+
+test("Open Model sends included images as labelled data-URL file parts when its owner says the model reads images", async () => {
+  const { adapter, handle, harness } = await spawnAdapter({ imageInput: true });
+  assert.deepEqual(launchedModalities(harness), { input: ["text", "image"], output: ["text"] },
+    "the runtime is started with image input for this model");
+  assert.equal(adapter.roomTurnImageDelivery(handle), "memory");
+  const png = pngView();
+
+  const result = await adapter.runRoomTurn(handle, imageTurn(png));
+
+  assert.equal(result.outcome, "reply");
+  assert.equal(harness.promptBodies.length, 1);
+  const [prompt, ...rest] = harness.promptBodies[0]!.parts as Array<Record<string, unknown>>;
+  assert.equal(prompt!.type, "text");
+  assert.match(String(prompt!.text), /Included after this text as image 1\./);
+  assert.match(String(prompt!.text), /Attachment 1: "notes\.pdf" \(application\/pdf, 500 bytes\)\. Not given: this agent cannot read PDFs\./);
+  assert.deepEqual(rest, [
+    { type: "text", text: 'Image 1: "shot \\"1\\".png"' },
+    { type: "file", mime: "image/png", filename: 'shot "1".png', url: `data:image/png;base64,${Buffer.from(png.bytes).toString("base64")}` },
+  ], "only the image with bytes in memory is sent, after its label; the view's own bytes only");
+  assert.equal(JSON.stringify(rest).includes("notes.pdf"), false, "a file that is not an image is only a note in the text");
+  assert.equal(JSON.stringify(rest).includes("/scratch/turn-1"), false, "a file path is never sent to OpenCode");
+});
+
+test("Open Model sends only the prompt text, even when attachments carry bytes, unless its owner says the model reads images", async () => {
+  for (const overrides of [{}, { imageInput: false }] as Array<Partial<ProviderSpawnRequest>>) {
+    const { adapter, handle, harness } = await spawnAdapter(overrides);
+    assert.equal(launchedModalities(harness), undefined, "the runtime is not told this model reads images");
+    assert.equal(adapter.roomTurnImageDelivery(handle), null);
+
+    await adapter.runRoomTurn(handle, imageTurn());
+
+    const parts = harness.promptBodies[0]!.parts as Array<Record<string, unknown>>;
+    assert.equal(parts.length, 1, "a model that cannot read images gets no file part");
+    assert.equal(parts[0]!.type, "text");
+    assert.equal(JSON.stringify(parts).includes("data:image"), false);
+  }
+});
+
+test("Open Model sends no image parts when the turn has no included image bytes", async () => {
+  const { adapter, handle, harness } = await spawnAdapter({ imageInput: true });
+  await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-open-model-no-bytes", actionId: "action-open-model-no-bytes",
+    sourceMessage: {}, activation: {},
+    attachments: [
+      { index: 1, fileName: "staged.png", mimeType: "image/png", sizeBytes: 10, status: "image",
+        image: { mimeType: "image/png", path: "/scratch/turn-1/image-1.png" } },
+      { index: 2, fileName: "huge.png", mimeType: "image/png", sizeBytes: 11 * 1024 * 1024, status: "too_large" },
+    ],
+  });
+  assert.equal((harness.promptBodies[0]!.parts as unknown[]).length, 1);
+});
+
+test("Open Model image delivery follows its own current handle and nothing else", async () => {
+  const withImages = await spawnAdapter({ imageInput: true });
+  const without = await spawnAdapter({ imageInput: false });
+  assert.equal(withImages.adapter.roomTurnImageDelivery(withImages.handle), "memory");
+  assert.equal(without.adapter.roomTurnImageDelivery(without.handle), null);
+  assert.equal(withImages.adapter.roomTurnImageDelivery(without.handle), null, "a handle this adapter does not hold is not trusted");
+  assert.equal(withImages.adapter.roomTurnImageDelivery({ workAttemptId: "unknown" } as ProviderHandle), null);
+});
+
+test("Open Model reattaches with image input exactly as the running runtime was configured", async () => {
+  const born = await spawnAdapter({ imageInput: true });
+  const launched = JSON.parse(born.harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as Record<string, unknown>;
+  const reattach = async (served: Record<string, unknown>) => {
+    born.harness.setConfig(served);
+    const replacement = new OpenModelProviderAdapter({
+      binary: "/opt/letagents/opencode",
+      runtimeRoot: born.runtimeRoot,
+      dependencies: born.harness.dependencies,
+      startTimeoutMs: LAUNCH_BUDGET_MS,
+      turnTimeoutMs: 100,
+    });
+    const attached = await replacement.attach({
+      workAttemptId: born.handle.workAttemptId,
+      providerContinuationId: born.handle.providerContinuationId!,
+      providerConnection: null,
+    });
+    assert.ok(attached && !("state" in attached));
+    return { replacement, attached };
+  };
+
+  const same = await reattach(launched);
+  assert.equal(same.replacement.roomTurnImageDelivery(same.attached), "memory", "the served configuration lists image input");
+  await same.replacement.runRoomTurn(same.attached, imageTurn());
+  const parts = born.harness.promptBodies.at(-1)!.parts as Array<Record<string, unknown>>;
+  assert.deepEqual(parts.slice(1).map(part => part.type), ["text", "file"]);
+
+  // A runtime started before the owner turned image input on keeps its old configuration.
+  const old = await reattach({ model: "letagents-open-model/qwen/qwen3-coder" });
+  assert.equal(old.replacement.roomTurnImageDelivery(old.attached), null);
+  const before = born.harness.promptBodies.length;
+  await old.replacement.runRoomTurn(old.attached, imageTurn());
+  assert.equal((born.harness.promptBodies.at(-1)!.parts as unknown[]).length, 1);
+  assert.equal(born.harness.promptBodies.length, before + 1);
+
+  // The spawn request's setting does not outlive the runtime: a runtime that was started without image input stays without.
+  const plain = await spawnAdapter({ imageInput: false });
+  plain.harness.setConfig(JSON.parse(plain.harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}"));
+  const replacement = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode", runtimeRoot: plain.runtimeRoot, dependencies: plain.harness.dependencies,
+    startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 100,
+  });
+  const attached = await replacement.attach({
+    workAttemptId: plain.handle.workAttemptId,
+    providerContinuationId: plain.handle.providerContinuationId!,
+    providerConnection: null,
+  });
+  assert.ok(attached && !("state" in attached));
+  assert.equal(replacement.roomTurnImageDelivery(attached), null);
 });
 
 test("Open Model does not mint lifecycle evidence when native prompt dispatch is rejected", async () => {
@@ -1069,7 +1310,7 @@ test("Open Model does not mistake prompt materialization lag for an empty comple
   assert.equal(harness.messageReads, 2);
 });
 
-test("Open Model classifies the exact no-reply sentinel and unreadable completion without rerunning", async () => {
+test("Open Model classifies the exact no-reply sentinel and a finished empty answer without rerunning", async () => {
   const sentinel = await spawnAdapter();
   sentinel.harness.setAssistantText("LETAGENTS_NO_ROOM_REPLY");
   const noReply = await sentinel.adapter.runRoomTurn(sentinel.handle, {
@@ -1081,19 +1322,409 @@ test("Open Model classifies the exact no-reply sentinel and unreadable completio
   assert.equal(noReply.outcome, "no_reply");
   assert.equal(sentinel.harness.promptBodies.length, 1);
 
-  const unreadable = await spawnAdapter();
-  unreadable.harness.omitAssistantText();
-  const missingText = await unreadable.adapter.runRoomTurn(unreadable.handle, {
-    inboxItemId: "inbox-unreadable",
+  const empty = await spawnAdapter();
+  empty.harness.omitAssistantText();
+  const missingText = await empty.adapter.runRoomTurn(empty.handle, {
+    inboxItemId: "inbox-empty",
     sourceMessage: { text: "reply" },
     activation: { decision: "activate" },
-    actionId: "unreadable",
+    actionId: "empty",
   });
-  assert.equal(missingText.outcome, "unreadable");
-  assert.equal(unreadable.harness.promptBodies.length, 1);
+  assert.deepEqual(missingText, {
+    turnId: String(empty.harness.promptBodies[0]?.messageID),
+    providerContinuationId: empty.handle.providerContinuationId,
+    outcome: "failed",
+    text: null,
+    evidence: "transcript",
+    error: NO_REPLY_FAILURE.emptyAnswer,
+  });
+  assert.equal(empty.harness.promptBodies.length, 1);
 });
 
-test("Open Model checkpoints an exact terminal provider rejection before surfacing it", async () => {
+test("Open Model settles a turn that hit its output limit before writing text, and a re-read agrees", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  const checkpointed: ProviderRoomTurnResult[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.setTranscriptFactories([(turnId) => [outputLimitedAssistant(turnId, "assistant-length", 10)]]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-output-limit",
+    sourceMessage: { text: "review the pull request" },
+    activation: { decision: "activate" },
+    actionId: "output-limit",
+  }, { checkpointTerminalResult: async (terminal) => { checkpointed.push(terminal); } });
+
+  const turnId = String(harness.promptBodies[0]?.messageID);
+  const settled = {
+    turnId,
+    providerContinuationId: handle.providerContinuationId,
+    outcome: "failed",
+    text: null,
+    evidence: "transcript",
+    error: NO_REPLY_FAILURE.outputLimit,
+  };
+  assert.deepEqual(result, settled);
+  assert.deepEqual(checkpointed, [settled], "the exact terminal is checkpointed before the adapter returns");
+  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"
+    && fact.providerTurnId === turnId && fact.turnOutcome === "failed"));
+
+  // Retry delivery re-reads the same completed turn. It must reach the same
+  // settled answer, not "unreadable", and never prompt the model again.
+  const reread = await adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-output-limit", providerTurnId: turnId });
+  assert.deepEqual(reread, settled);
+  assert.equal(harness.promptBodies.length, 1);
+});
+
+test("Open Model does not settle an earlier empty step while the turn's last step is unfinished", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.setTranscriptFactories([(turnId) => [
+    outputLimitedAssistant(turnId, "assistant-length", 10),
+    { info: { id: "assistant-next", role: "assistant", parentID: turnId, time: { created: 20 } }, parts: [] },
+  ]]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-unfinished",
+    sourceMessage: { text: "review the pull request" },
+    activation: { decision: "activate" },
+    actionId: "unfinished",
+  });
+
+  assert.deepEqual(result, {
+    turnId: String(harness.promptBodies[0]?.messageID),
+    outcome: "unreadable",
+    text: null,
+    evidence: "none",
+  });
+});
+
+test("Open Model reads the answer a turn gives after OpenCode compacts it, without streaming the summary", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const streamed: ProviderStreamEvent[] = [];
+  adapter.onStream(handle, (event) => streamed.push(event));
+  harness.setTranscriptFactories([(turnId) => compactedTurnTranscript(turnId, {
+    after: [assistantMessage("msg_continue", "msg_after", 40, "Answer written after the compaction.")],
+  })]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-compacted",
+    sourceMessage: { text: "wire the reviewed modules" },
+    activation: { decision: "activate" },
+    actionId: "compacted",
+  });
+
+  assert.deepEqual(result, { turnId: String(harness.promptBodies[0]?.messageID), outcome: "reply",
+    text: "Answer written after the compaction.", evidence: "transcript" });
+  assert.equal(harness.promptBodies.length, 1);
+  assert.doesNotMatch(JSON.stringify(streamed), /PRIVATE-COMPACTION-SUMMARY/, "the summary is OpenCode's record, not the agent's words");
+  assert.match(JSON.stringify(streamed), /Answer written after the compaction/);
+
+  // With no answer after the compaction, the summary is still not the reply.
+  const unanswered = await spawnAdapter();
+  unanswered.harness.setTranscriptFactories([(turnId) => compactedTurnTranscript(turnId, {
+    after: [assistantWithTool("msg_continue", "msg_denied", 40, { status: "error", input: { filePath: "src/app.mjs" },
+      error: "The user rejected permission to use this specific tool call." }, "call_denied", "write")],
+  })]);
+  const settled = await unanswered.adapter.runRoomTurn(unanswered.handle, {
+    inboxItemId: "inbox-compacted-denied",
+    sourceMessage: { text: "wire the reviewed modules" },
+    activation: { decision: "activate" },
+    actionId: "compacted-denied",
+  });
+  assert.equal(settled.outcome, "failed");
+  assert.equal(settled.error, NO_REPLY_FAILURE.deniedTool);
+});
+
+test("Open Model follows a turn's steps live across an OpenCode compaction", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const session = handle.providerContinuationId!;
+  const toolEvents: Array<Record<string, unknown>> = [];
+  const streamed: ProviderStreamEvent[] = [];
+  let afterCompletedLive!: () => void;
+  const afterCompleted = new Promise<void>((resolve) => { afterCompletedLive = resolve; });
+  adapter.onStream(handle, (event) => {
+    streamed.push(event);
+    if (event.kind !== "tool_lifecycle") return;
+    const payload = event.payload as Record<string, unknown>;
+    toolEvents.push(payload);
+    if (payload.callID === "call_after" && payload.status === "completed") afterCompletedLive();
+  });
+  const afterStep = (status: "running" | "completed") => assistantWithTool("msg_continue", "msg_after", 40,
+    { status, input: { filePath: "src/app.mjs" }, ...(status === "completed" ? { output: "written" } : {}) }, "call_after", "write");
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([
+    (turnId) => compactedTurnTranscript(turnId).slice(0, 2),
+    (turnId) => compactedTurnTranscript(turnId, { after: [afterStep("running")] }),
+    (turnId) => compactedTurnTranscript(turnId, { after: [afterStep("completed"),
+      assistantMessage("msg_continue", "msg_final", 50, "Rewired after the compaction.")] }),
+  ]);
+  const initialRead = harness.nextMessageRead();
+  const turn = adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-compacting",
+    sourceMessage: { text: "wire the reviewed modules" },
+    activation: { decision: "activate" },
+    actionId: "compacting",
+  });
+  await initialRead;
+  // The summary step streams while OpenCode compacts; none of it is the agent's.
+  harness.sendEvent({ type: "message.updated", properties: { sessionID: session, info: { id: "msg_summary", role: "assistant",
+    parentID: "msg_compaction", summary: true, mode: "compaction", sessionID: session, time: { created: 21 } } } });
+  harness.sendEvent({ type: "message.part.updated", properties: { sessionID: session, part: {
+    id: "msg_summary-live", messageID: "msg_summary", sessionID: session, type: "text", text: "PRIVATE-LIVE-SUMMARY" } } });
+  harness.sendEvent({ type: "message.part.delta", properties: { sessionID: session, messageID: "msg_summary",
+    partID: "msg_summary-live", field: "text", delta: "PRIVATE-LIVE-DELTA" } });
+  // A step that answers OpenCode's own "continue" message, then its tool finishing.
+  harness.sendEvent({ type: "message.updated", properties: { sessionID: session,
+    info: { id: "msg_after", role: "assistant", parentID: "msg_continue", sessionID: session, time: { created: 40 } } } });
+  harness.sendEvent({ type: "message.part.updated", properties: { sessionID: session, part: {
+    id: "msg_after-tool", messageID: "msg_after", sessionID: session, type: "tool", tool: "write", callID: "call_after",
+    state: { status: "completed", input: { filePath: "src/app.mjs" }, output: "written" } } } });
+  let timer: NodeJS.Timeout | undefined;
+  const live = await Promise.race([afterCompleted.then(() => true),
+    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 2_000); })]);
+  clearTimeout(timer);
+  harness.completeTurn();
+  const result = await turn;
+
+  assert.equal(live, true, "the step after the compaction is followed while the turn runs");
+  assert.doesNotMatch(JSON.stringify(streamed), /PRIVATE-(LIVE|COMPACTION)-/, "no part of the summary is streamed as the agent's words");
+  assert.deepEqual(toolEvents.filter((event) => event.callID === "call_after").map((event) => event.status), ["running", "completed"]);
+  assert.equal(result.outcome, "reply");
+  assert.equal(result.text, "Rewired after the compaction.");
+});
+
+type ToolOutcome = "denied" | "ran";
+
+function toolPart(messageId: string, callId: string, outcome: ToolOutcome, session?: string): Record<string, unknown> {
+  return { id: `${callId}-part`, messageID: messageId, ...(session ? { sessionID: session } : {}), type: "tool", tool: "bash", callID: callId,
+    state: outcome === "denied"
+      ? { status: "error", input: { command: "gh pr view 4" }, error: "The user rejected permission to use this specific tool call." }
+      : { status: "completed", input: { command: "git status" }, output: "clean", metadata: { exit: 0 } } };
+}
+
+/** One model step of a turn: its tool calls finish in order, then the step ends. */
+function stepEvents(session: string, turnId: string, step: number, calls: readonly ToolOutcome[]): Array<Record<string, unknown>> {
+  const id = `assistant-step-${step}`;
+  const info = { id, role: "assistant", parentID: turnId, sessionID: session, time: { created: 10 + step } };
+  return [
+    { type: "message.updated", properties: { sessionID: session, info } },
+    ...calls.map((outcome, call) => ({ type: "message.part.updated",
+      properties: { sessionID: session, part: toolPart(id, `call-${step}-${call}`, outcome, session) } })),
+    { type: "message.updated", properties: { sessionID: session, info: { ...info, time: { created: 10 + step, completed: 10 + step } } } },
+  ];
+}
+
+/** The same step as the transcript keeps it. */
+function stepMessage(turnId: string, step: number, calls: readonly ToolOutcome[]): TranscriptMessage {
+  const id = `assistant-step-${step}`;
+  return { info: { id, role: "assistant", parentID: turnId, time: { created: 10 + step, completed: 10 + step } },
+    parts: [...calls.map((outcome, call) => toolPart(id, `call-${step}-${call}`, outcome)),
+      { id: `${id}-finish`, type: "step-finish", reason: "tool-calls" }] };
+}
+
+/** Runs a held-open turn through `steps`, then ends it unless the adapter already did. */
+async function runSteps(steps: ReadonlyArray<readonly ToolOutcome[]>) {
+  const harness = createHarness();
+  // Long enough that only the denial bound, or the test, ends the turn.
+  const adapter = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-denials-")), dependencies: harness.dependencies,
+    startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 10_000 });
+  const handle = await adapter.spawn(spawnRequest());
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([() => [], (turnId) => [...steps.map((calls, step) => stepMessage(turnId, step, calls)),
+    assistantMessage(turnId, "assistant-final", 90, "Answered without the denied calls.")]]);
+  const initialRead = harness.nextMessageRead();
+  const turn = adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-denials",
+    sourceMessage: { text: "check the pull request" },
+    activation: { decision: "activate" },
+    actionId: "denials",
+  });
+  await initialRead;
+  const turnId = String(harness.promptBodies[0]?.messageID);
+  steps.forEach((calls, step) => { for (const event of stepEvents(handle.providerContinuationId!, turnId, step, calls)) harness.sendEvent(event); });
+  let timer: NodeJS.Timeout | undefined;
+  const endedByAdapter = await Promise.race([turn.then(() => true),
+    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 300); })]);
+  clearTimeout(timer);
+  if (!endedByAdapter) harness.completeTurn();
+  return { adapter, handle, harness, observations, turnId, endedByAdapter, result: await turn };
+}
+
+test("Open Model ends a turn whose model keeps retrying denied tool calls, three steps in a row", async () => {
+  const { adapter, handle, harness, observations, turnId, endedByAdapter, result } = await runSteps([["denied"], ["denied", "denied"], ["denied"]]);
+  const settled = { turnId, providerContinuationId: handle.providerContinuationId, outcome: "failed", text: null,
+    evidence: "transcript", error: NO_REPLY_FAILURE.deniedTool };
+  assert.equal(endedByAdapter, true);
+  assert.deepEqual(harness.aborts, [handle.providerContinuationId]);
+  assert.deepEqual(result, settled);
+  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"
+    && fact.providerTurnId === turnId && fact.turnOutcome === "failed"));
+
+  // A re-read finds the three denied steps and the step the abort ended.
+  harness.setTranscriptFactories([(id) => [stepMessage(id, 0, ["denied"]), stepMessage(id, 1, ["denied", "denied"]), stepMessage(id, 2, ["denied"]),
+    { info: { id: "assistant-step-3", role: "assistant", parentID: id, time: { created: 13, completed: 14 },
+      error: { name: "MessageAbortedError", data: { message: "Aborted" } } }, parts: [] }]]);
+  assert.deepEqual(await adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-denials", providerTurnId: turnId }), settled,
+    "the re-read reports the denials, not the abort that ended the turn");
+});
+
+test("Open Model treats one step's parallel denials as one refusal", async () => {
+  // One Deny rejects every request pending in the session.
+  const { harness, endedByAdapter, result } = await runSteps([["denied", "denied", "denied"], ["denied", "denied"]]);
+  assert.equal(endedByAdapter, false);
+  assert.deepEqual(harness.aborts, []);
+  assert.equal(result.text, "Answered without the denied calls.");
+});
+
+test("Open Model lets a turn go on when a step runs a tool among its denied calls", async () => {
+  const { harness, endedByAdapter, result } = await runSteps([["denied"], ["denied"], ["denied", "ran"], ["denied"], ["denied"]]);
+  assert.equal(endedByAdapter, false);
+  assert.deepEqual(harness.aborts, []);
+  assert.equal(result.text, "Answered without the denied calls.");
+});
+
+test("Open Model recovering a turn does not stop a model writing its answer after denied steps", async () => {
+  const harness = createHarness();
+  const adapter = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-answering-")), dependencies: harness.dependencies,
+    startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 10_000 });
+  const handle = await adapter.spawn(spawnRequest());
+  const denied = (turnId: string) => [stepMessage(turnId, 0, ["denied"]), stepMessage(turnId, 1, ["denied"]), stepMessage(turnId, 2, ["denied"])];
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([
+    (turnId) => [...denied(turnId), { info: { id: "assistant-answer", role: "assistant", parentID: turnId, time: { created: 20 } },
+      parts: [{ id: "answer-text", type: "text", text: "Answering without the pull request check" }] }],
+    (turnId) => [...denied(turnId), assistantMessage(turnId, "assistant-answer", 20, "Answering without the pull request check.")],
+  ]);
+  const read = harness.nextMessageRead();
+  const turn = adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-answering", providerTurnId: "turn-recovery" });
+  await read;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  harness.completeTurn();
+  const result = await turn;
+  assert.deepEqual(harness.aborts, []);
+  assert.equal(result.text, "Answering without the pull request check.");
+});
+
+test("Open Model settles a turn that stopped on a denied tool call", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  const checkpointed: ProviderRoomTurnResult[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.setTranscriptFactories([(turnId) => [assistantWithTool(turnId, "assistant-denied", 10, {
+    status: "error", input: { command: "gh pr view 4" }, error: "The user rejected permission to use this specific tool call.",
+  })]]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-denied",
+    sourceMessage: { text: "check the pull request" },
+    activation: { decision: "activate" },
+    actionId: "denied",
+  }, { checkpointTerminalResult: async (terminal) => { checkpointed.push(terminal); } });
+
+  const turnId = String(harness.promptBodies[0]?.messageID);
+  const settled = { turnId, providerContinuationId: handle.providerContinuationId, outcome: "failed", text: null,
+    evidence: "transcript", error: NO_REPLY_FAILURE.deniedTool };
+  assert.deepEqual(result, settled);
+  assert.deepEqual(checkpointed, [settled]);
+  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"
+    && fact.providerTurnId === turnId && fact.turnOutcome === "failed"));
+  assert.deepEqual(await adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-denied", providerTurnId: turnId }), settled,
+    "a re-read reaches the same settled answer");
+  assert.equal(harness.promptBodies.length, 1);
+
+  // A tool that failed on its own is not a denial; that turn stays unreadable as before.
+  const failed = await spawnAdapter();
+  failed.harness.setTranscriptFactories([(id) => [assistantWithTool(id, "assistant-failed", 10, {
+    status: "error", input: { command: "npm test" }, error: "Command exited with code 1",
+  })]]);
+  assert.equal((await failed.adapter.runRoomTurn(failed.handle, { inboxItemId: "inbox-failed-tool",
+    sourceMessage: { text: "run tests" }, activation: { decision: "activate" }, actionId: "failed-tool" })).outcome, "unreadable");
+});
+
+for (const ending of ["output limit", "denied tool call"] as const) test(`an Open Model turn that ended on its ${ending} settles its room message and the next one is delivered`, async () => {
+  const { SupervisedAgentDelivery } = await import(new URL("../../daemon/supervised-agent-delivery.ts", import.meta.url).href);
+  const { SupervisedAgentInboxStore } = await import(new URL("../../daemon/supervised-agent-inbox-store.ts", import.meta.url).href);
+  const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
+  const harness = createHarness();
+  const root = await mkdtemp(join(tmpdir(), "letagents-open-model-delivery-"));
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot: join(root, "runtime"),
+    dependencies: harness.dependencies,
+    startTimeoutMs: LAUNCH_BUDGET_MS,
+    turnTimeoutMs: 100,
+  });
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const handle = await router.spawn({ provider: "open-model", ...spawnRequest() });
+  // The first room message gets the ending seen in the field; the second gets
+  // an ordinary reply.
+  harness.setTranscriptFactories([(turnId) => harness.promptBodies.length === 1
+    ? [ending === "output limit" ? outputLimitedAssistant(turnId, "assistant-length", 10)
+      : assistantWithTool(turnId, "assistant-denied", 10, { status: "error", input: { command: "gh pr view 4" },
+        error: "The user rejected permission to use this specific tool call." })]
+    : [assistantMessage(turnId, "assistant-reply", 20, "Second message answered.")]]);
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const published: string[] = [];
+  let recoveries = 0;
+  const recoverRoomTurn = adapter.recoverRoomTurn.bind(adapter);
+  adapter.recoverRoomTurn = async (...args) => { recoveries += 1; return recoverRoomTurn(...args); };
+  const delivery = new SupervisedAgentDelivery(store, router, {
+    poll: async () => ({}),
+    publish: async (input: { roomId: string; text: string }) => {
+      published.push(input.text);
+      return { messageId: `reply-${published.length}`, roomId: input.roomId };
+    },
+  }, async () => true);
+  const agent = {
+    agentId: "open-model-agent", roomId: "room", provider: "open-model", deliveryMode: "daemon_inbox" as const,
+    apiUrl: "https://letagents.test", agentSessionId: "worker-session", bearer: "memory",
+    executionGenerationId: "generation-1", daemonGeneration: 1, handle,
+    workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId,
+    providerConnection: handle.providerConnection,
+  };
+  try {
+    await delivery.pump(agent);
+    for (const id of ["1", "2"]) {
+      await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: id,
+        messages: [{ source_message_id: id, source_message: { id }, activation: {} }] });
+    }
+    await delivery.pump(agent);
+
+    const receipts = await store.receipts(agent.agentId);
+    assert.deepEqual(receipts.map((item: { state: string }) => item.state), ["acknowledged_failed", "acknowledged"]);
+    assert.equal(receipts[0].last_error, ending === "output limit" ? NO_REPLY_FAILURE.outputLimit : NO_REPLY_FAILURE.deniedTool);
+    assert.equal(receipts[0].attempt_count, 1);
+    assert.equal(receipts[0].timeline.some((event: { phase: string }) => ["result_unreadable", "blocked"].includes(event.phase)), false);
+    assert.deepEqual(published, ["Second message answered."]);
+    assert.equal(harness.promptBodies.length, 2, "each room message reached the model exactly once");
+    assert.equal(recoveries, 0, "a settled answer is never re-read");
+  } finally {
+    await delivery.fenceAndDrain();
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+const promotionEndedMessage = "The free promotion for DeepSeek V4.1 Flash Uncensored has ended. This one-time notice is to let you know that if you keep using this model, requests will be charged to your credit balance. Retry to continue.";
+for (const { name, message, expectedDetail } of [
+  { name: "promotion ended", message: promotionEndedMessage, expectedDetail: `: ${promotionEndedMessage}` },
+  {
+    name: "insufficient credits",
+    message: "This request requires more credits. Visit https://provider.invalid/key/secret-id.",
+    expectedDetail: ": This request requires more credits. Visit provider settings",
+  },
+  { name: "missing explanation", message: undefined, expectedDetail: ". The provider did not include an explanation." },
+  { name: "blank explanation", message: "  \n  ", expectedDetail: ". The provider did not include an explanation." },
+  {
+    name: "sensitive and lengthy explanation",
+    message: `Payment notice. api_key=private-credential-value Authorization: Bearer private-bearer-value https://provider.invalid/secret-link ${"extra ".repeat(100)}`,
+    expectedDetail: `: ${`Payment notice. api_key=[REDACTED] Authorization: Bearer [REDACTED] provider settings ${"extra ".repeat(100)}`.slice(0, 320)}`,
+  },
+]) test(`Open Model checkpoints the provider's 402 explanation before surfacing it: ${name}`, async () => {
   const { adapter, handle, harness } = await spawnAdapter();
   const observations: NativeExecutionObservation[] = [];
   let checkpointed: ProviderRoomTurnResult | null = null;
@@ -1109,7 +1740,7 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
           name: "APIError",
           data: {
             statusCode: 402,
-            message: "This request requires more credits. Visit https://provider.invalid/key/secret-id.",
+            message,
           },
         },
       },
@@ -1117,6 +1748,7 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
     }],
   ]);
 
+  const expectedError = `Open Model request was rejected by the provider (HTTP 402)${expectedDetail}`;
   await assert.rejects(
     adapter.runRoomTurn(handle, {
       inboxItemId: "inbox-provider-error",
@@ -1128,8 +1760,8 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
     }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
-      assert.match(error.message, /provider account could not cover this turn's output budget \(HTTP 402\)/);
-      assert.doesNotMatch(error.message, /secret-id|provider\.invalid/);
+      assert.equal(error.message, expectedError);
+      assert.doesNotMatch(error.message, /secret-id|provider\.invalid|private-credential|private-bearer|secret-link|https?:\/\//);
       assert.equal(
         (error as Error & { roomTurnRecoveryOutcome?: string }).roomTurnRecoveryOutcome,
         "terminal_failure",
@@ -1144,7 +1776,7 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
     outcome: "failed",
     text: null,
     evidence: "transcript",
-    error: "Open Model request was rejected because the model provider account could not cover this turn's output budget (HTTP 402). Add provider credit or choose another model, then retry the unfinished work in LetAgents.",
+    error: expectedError,
   });
   const terminal = observations.find(({ fact }) =>
     fact.domain === "turn" && fact.kind === "state_changed" && fact.state === "terminal");
@@ -1152,7 +1784,10 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
   assert.equal(terminal.fact.sideEffects, "none");
   assert.equal(terminal.fact.providerTurnId, turnId);
   assert.equal(terminal.fact.providerContinuationId, handle.providerContinuationId);
-  assert.equal(harness.promptBodies.length, 1);
+  await assert.rejects(adapter.recoverRoomTurn(handle, {
+    inboxItemId: "inbox-provider-error", providerTurnId: turnId,
+  }), { message: expectedError });
+  assert.equal(harness.promptBodies.length, 1, "a rejected turn is never replayed automatically");
 });
 
 test("Open Model preserves safe 403 explanations in terminal checkpoints without blaming the API key", async () => {
@@ -1851,6 +2486,39 @@ test("Open Model keeps OpenCode's project search inside a room's scratch workspa
   assert.equal(worktree.harness.launches[0]?.env.OPENCODE_DISABLE_PROJECT_CONFIG, undefined);
 });
 
+test("Open Model reports, and does not fail on, a scratch workspace whose Git OpenCode cannot run", async (t) => {
+  const warnings: unknown[][] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => { warnings.push(args); });
+  const working = await spawnAdapter({ workspaceKind: "room_scratch" });
+  t.after(() => rm(working.runtimeRoot, { recursive: true, force: true }));
+  const probe = working.harness.gitProbes[0]!;
+  const launched = working.harness.launches[0]!;
+  assert.equal(working.harness.gitProbes.length, 1);
+  assert.equal(probe.workspace, launched.cwd, "the check runs in the workspace OpenCode opens");
+  // The launch's own environment, not the daemon's: its config home is private to the runtime.
+  assert.equal(probe.environment.XDG_CONFIG_HOME, launched.env.XDG_CONFIG_HOME);
+  assert.notEqual(probe.environment.XDG_CONFIG_HOME, process.env.XDG_CONFIG_HOME);
+  assert.equal(probe.environment.PATH, launched.env.PATH);
+  assert.equal(working.handle.launchNotices?.length ?? 0, 0);
+  assert.equal(warnings.length, 0);
+
+  const harness = createHarness();
+  harness.gitProblem = "the Xcode command line tools are not installed (xcode-select -p failed), so /usr/bin/git cannot run";
+  const broken = await spawnAdapter({ workspaceKind: "room_scratch" }, harness);
+  t.after(() => rm(broken.runtimeRoot, { recursive: true, force: true }));
+  assert.equal(broken.harness.launches.length, 1, "the launch goes ahead");
+  assert.deepEqual(broken.handle.launchNotices, [
+    "Plugin boundary not in effect: the Xcode command line tools are not installed (xcode-select -p failed), so /usr/bin/git cannot run. OpenCode cannot see this room's workspace repository, so plugins in folders above the workspace can load into it.",
+  ]);
+  assert.equal(warnings.length, 1);
+  assert.equal(warnings[0]?.[0], "[open_model_workspace_boundary]");
+
+  // A Git worktree needs no check: its repository is the owner's.
+  const worktree = await spawnAdapter({ workspaceKind: "git_worktree" });
+  t.after(() => rm(worktree.runtimeRoot, { recursive: true, force: true }));
+  assert.equal(worktree.harness.gitProbes.length, 0);
+});
+
 test("Open Model does not launch into a workspace whose kind it was not told", async (t) => {
   const harness = createHarness();
   const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-unknown-workspace-"));
@@ -1966,7 +2634,8 @@ test("Open Model reattaching through a sidecar outside its runtime directory wri
   assert.ok(connection?.kind === "opencode_server");
   assert.ok(handle.providerContinuationId);
   const foreignAuthPath = join(foreign, "server-auth.json");
-  await writeFile(foreignAuthPath, await readFile(connection.serverAuthPath, "utf8"), { mode: 0o600 });
+  // A password sidecar is read only while it is private (on Windows, its own DACL).
+  await writePrivateFileAtomically(foreignAuthPath, await readFile(connection.serverAuthPath, "utf8"));
   const kept = join(foreign, "config", "opencode", "AGENTS.md", "nested", "keep.txt");
   await mkdir(join(kept, ".."), { recursive: true });
   await writeFile(kept, "not ours");
@@ -2212,6 +2881,7 @@ test("Open Model durably fences the crash window between detached launch and PID
   const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
   let launches = 0;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     ...harness.dependencies,
     launch() {
       launches += 1;
@@ -2250,6 +2920,30 @@ test("Open Model durably fences the crash window between detached launch and PID
   assert.equal(launches, 1, "intent-only recovery must not launch a replacement");
 });
 
+test("Open Model clears its exact intent when the launch is refused before any process starts", async (t) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-refused-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const request = spawnRequest({ cwd: runtimeRoot });
+  const refusal = new ProviderInstallError("opencode.cmd", "its program is missing.");
+  const refusedAdapter = () => new OpenModelProviderAdapter({
+    binary: "opencode",
+    runtimeRoot,
+    dependencies: {
+      resolveMcpRuntime: testMcpRuntime,
+      allocatePort: async () => 43822,
+      launch: () => { throw refusal; },
+    },
+    startTimeoutMs: LAUNCH_BUDGET_MS,
+    turnTimeoutMs: 100,
+  });
+
+  await assert.rejects(refusedAdapter().spawn(request), (error) => error === refusal);
+  const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
+  assert.equal((JSON.parse(await readFile(authPath, "utf8")) as { startupIntent?: unknown }).startupIntent, undefined);
+  // The next try gives the same reason, not "an operator must verify the prior runtime is gone".
+  await assert.rejects(refusedAdapter().spawn(request), (error) => error === refusal);
+});
+
 test("Open Model clears its exact intent after a real no-pid launch failure", async (t) => {
   const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-no-pid-"));
   t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
@@ -2257,7 +2951,7 @@ test("Open Model clears its exact intent after a real no-pid launch failure", as
   const missingBinaryAdapter = new OpenModelProviderAdapter({
     binary: join(runtimeRoot, "missing-opencode"),
     runtimeRoot,
-    dependencies: { allocatePort: async () => 43821 },
+    dependencies: { resolveMcpRuntime: testMcpRuntime, allocatePort: async () => 43821 },
     startTimeoutMs: LAUNCH_BUDGET_MS,
     turnTimeoutMs: 100,
   });
@@ -2302,6 +2996,7 @@ test("Open Model serializes A/B startup ownership for the same runtime path", as
     binary: "/opt/letagents/opencode",
     runtimeRoot,
     dependencies: {
+      resolveMcpRuntime: testMcpRuntime,
       ...harness.dependencies,
       launch(input) {
         launches += 1;
@@ -2359,6 +3054,7 @@ test("Open Model persists an ambiguous startup birth and fences replacement unti
   let priorIdentity: string | null | undefined = "opencode-birth-6104";
   let failSessionCreation = true;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     ...harness.dependencies,
     launch() {
       launches += 1;
@@ -2449,6 +3145,7 @@ test("Open Model persists and fences a fresh pid whose birth is initially unveri
   let launches = 0;
   let firstIdentity: string | null | undefined;
   const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     ...harness.dependencies,
     launch() {
       launches += 1;
@@ -2504,6 +3201,7 @@ test("fresh launch cleanup never signals a recycled or unverifiable pid", async 
   const exited = new Promise<ProviderProcessExit>(() => {});
   const signals: Array<NodeJS.Signals> = [];
   const dependencies = {
+    resolveMcpRuntime: testMcpRuntime,
     getProcessIdentity: () => "replacement-birth",
     signalProcess: (_pid: number, signal: NodeJS.Signals) => { signals.push(signal); },
   };
@@ -2787,6 +3485,110 @@ test("OpenCode permission correlation snapshots native request identity before a
   assert.deepEqual(await client.correlatePermissionTurn("ses_a", expected), { outcome: "correlated", requestId: "per_a",
     providerContinuationId: "ses_a", providerTurnId: "msg_user", assistantMessageId: "msg_assistant", callId: "call_a" });
   assert.deepEqual(paths, ["/session/ses_a/message/msg_assistant", "/session/ses_a/message/msg_user"]);
+});
+
+/**
+ * What OpenCode 1.18.20 writes when it compacts a session in the middle of a
+ * turn: its compaction request, the summary step, then either a synthetic
+ * "continue" message or (after an overflow) a replay of the prompt. Later
+ * steps answer that last message, not the prompt that started the turn.
+ */
+function compactedTurnTranscript(turnId: string, options: {
+  replay?: boolean; failedSummary?: boolean; promptBeforeCompaction?: string;
+  after?: TranscriptMessage[]; sessionID?: string;
+} = {}): TranscriptMessage[] {
+  const followUp = options.replay ? "msg_replay" : "msg_continue";
+  const prompt = userMessage(turnId);
+  prompt.parts.push({ type: "text", text: "room prompt" });
+  return [
+    prompt,
+    assistantWithTool(turnId, "msg_before", 10, { status: "completed", input: { command: "git merge" }, output: "merged" }, "call_before"),
+    ...(options.promptBeforeCompaction ? [{ info: { id: options.promptBeforeCompaction, role: "user", time: { created: 15 } },
+      parts: [{ type: "text", text: "a later room prompt" }] }] : []),
+    { info: { id: "msg_compaction", role: "user", time: { created: 20 } },
+      parts: [{ type: "compaction", auto: true, overflow: Boolean(options.replay) }] },
+    { info: { id: "msg_summary", role: "assistant", parentID: "msg_compaction", mode: "compaction", agent: "compaction",
+      summary: true, time: { created: 21, completed: 22 },
+      ...(options.failedSummary ? { error: { name: "ContextOverflowError", data: { message: "too large" } } } : {}) },
+    parts: [{ id: "msg_summary-text", type: "text", text: "PRIVATE-COMPACTION-SUMMARY" },
+      { id: "msg_summary-finish", type: "step-finish", reason: options.failedSummary ? "error" : "stop" }] },
+    { info: { id: followUp, role: "user", time: { created: 30 } },
+      parts: options.replay ? [{ type: "text", text: "room prompt" }]
+        : [{ type: "text", synthetic: true, metadata: { compaction_continue: true }, text: "Continue if you have next steps." }] },
+    ...(options.after ?? []),
+  ].map((message) => {
+    if (options.sessionID) message.info.sessionID = options.sessionID;
+    return message as TranscriptMessage;
+  });
+}
+
+test("OpenCode permission correlation links a step after a compaction to the room turn it continues", async () => {
+  for (const replay of [false, true]) {
+    const followUp = replay ? "msg_replay" : "msg_continue";
+    const assistant = assistantWithTool(followUp, "msg_assistant", 40,
+      { status: "running", input: { filePath: "src/app.mjs" } }, "call_a", "write");
+    assistant.info.sessionID = "ses_a";
+    Object.assign(assistant.parts[0]!, { sessionID: "ses_a", messageID: "msg_assistant" });
+    const transcript = compactedTurnTranscript("msg_user", { replay, sessionID: "ses_a", after: [assistant] });
+    const byId = new Map(transcript.map((message) => [String(message.info.id), message]));
+    const reads: string[] = []; let fences = 0;
+    const client = nativeClient(async (input) => {
+      const url = new URL(input); reads.push(`${url.pathname}${url.search}`);
+      if (url.pathname === "/session/ses_a/message") return json(transcript);
+      const found = byId.get(decodeURIComponent(url.pathname.split("/").at(-1)!));
+      return found ? json(found) : json({ error: "missing" }, 404);
+    });
+    const expected = { ...permissionFixture(), permission: "edit" };
+
+    assert.deepEqual(await client.correlatePermissionTurn("ses_a", expected), { outcome: "correlated", requestId: "per_a",
+      providerContinuationId: "ses_a", providerTurnId: followUp, assistantMessageId: "msg_assistant", callId: "call_a" },
+    "without an expected turn, the parent message is all the linkage there is");
+    assert.equal(reads.length, 2);
+
+    reads.length = 0;
+    assert.deepEqual(await client.correlatePermissionTurn("ses_a", expected, () => { fences += 1; }, "msg_user"), {
+      outcome: "correlated", requestId: "per_a", providerContinuationId: "ses_a", providerTurnId: "msg_user",
+      assistantMessageId: "msg_assistant", callId: "call_a" }, `${followUp} belongs to the prompt it follows`);
+    assert.deepEqual(reads, ["/session/ses_a/message/msg_assistant", `/session/ses_a/message/${followUp}`,
+      "/session/ses_a/message?limit=128"]);
+    assert.equal(fences, 4, "the transcript read is fenced too");
+
+    reads.length = 0;
+    assert.equal((await client.correlatePermissionTurn("ses_a", expected, undefined, followUp) as { providerTurnId?: string }).providerTurnId,
+      followUp, "an exact parent needs no transcript");
+    assert.equal(reads.length, 2);
+  }
+});
+
+test("OpenCode permission correlation does not carry a step across another prompt or a failed compaction", async () => {
+  const cases: Array<[string, Parameters<typeof compactedTurnTranscript>[1]]> = [
+    ["a later prompt", { promptBeforeCompaction: "msg_user_2" }],
+    ["a failed summary", { failedSummary: true }],
+  ];
+  for (const [name, options] of cases) {
+    const assistant = assistantWithTool("msg_continue", "msg_assistant", 40, { status: "running", input: {} }, "call_a", "write");
+    assistant.info.sessionID = "ses_a";
+    Object.assign(assistant.parts[0]!, { sessionID: "ses_a", messageID: "msg_assistant" });
+    const transcript = compactedTurnTranscript("msg_user", { ...options, sessionID: "ses_a", after: [assistant] });
+    const byId = new Map(transcript.map((message) => [String(message.info.id), message]));
+    const client = nativeClient(async (input) => {
+      const url = new URL(input);
+      if (url.pathname === "/session/ses_a/message") return json(transcript);
+      const found = byId.get(decodeURIComponent(url.pathname.split("/").at(-1)!));
+      return found ? json(found) : json({ error: "missing" }, 404);
+    });
+    const correlation = await client.correlatePermissionTurn("ses_a", permissionFixture(), undefined, "msg_user");
+    assert.equal((correlation as { providerTurnId?: string }).providerTurnId, "msg_continue", name);
+  }
+  // A transcript that cannot be read proves nothing.
+  const { assistant, user } = permissionTurnMessages();
+  const client = nativeClient(async (input) => {
+    const url = new URL(input);
+    if (url.pathname === "/session/ses_a/message") return json({ error: "gone" }, 500);
+    return json(url.pathname.endsWith("msg_assistant") ? assistant : user);
+  });
+  assert.deepEqual(await client.correlatePermissionTurn("ses_a", permissionFixture(), undefined, "msg_other"),
+    { outcome: "correlation_unproven" });
 });
 
 test("Open Model permission correlation fences process and continuation loss before and during either exact read", async (t) => {
@@ -3317,7 +4119,7 @@ test("Open Model emits exact structural tool outcomes before display without pro
   assert.deepEqual(harness.aborts, []);
 });
 
-test("Open Model typed turns preserve native model errors, next-turn reuse, and unreadable/no-reply outcomes", async () => {
+test("Open Model typed turns preserve native model errors, next-turn reuse, and empty/no-reply outcomes", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
   const observations: NativeExecutionObservation[] = [];
   adapter.onExecution(handle, (event) => observations.push(event));
@@ -3329,9 +4131,9 @@ test("Open Model typed turns preserve native model errors, next-turn reuse, and 
   assert.equal(noReply.outcome, "no_reply");
   assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.providerTurnId === noReply.turnId && fact.turnOutcome === "completed"));
   harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant_empty", 30, null)]]);
-  const unreadable = await adapter.runRoomTurn(handle, { inboxItemId: "empty", sourceMessage: {}, activation: {}, actionId: "empty" });
-  assert.equal(unreadable.outcome, "unreadable");
-  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.providerTurnId === unreadable.turnId && fact.turnOutcome === "unreadable"));
+  const empty = await adapter.runRoomTurn(handle, { inboxItemId: "empty", sourceMessage: {}, activation: {}, actionId: "empty" });
+  assert.equal(empty.outcome, "failed", "a finished step without text cannot become readable on a re-read");
+  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.providerTurnId === empty.turnId && fact.turnOutcome === "failed"));
   assert.equal(observations.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"), false);
   assert.equal(harness.launches.length, 1);
 });
@@ -3351,6 +4153,188 @@ test("Open Model session errors do not invent an exact typed or legacy terminal"
   assert.equal(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"), false);
   assert.equal(stream.some((event) => event.lifecycleProjectionOnly && event.nativeLifecyclePhase === "turn_terminal"), false);
 });
+
+test("an idle session error cannot publish an earlier tool step before its failure is persisted", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([(turnId) => {
+    const earlier = assistantWithTool(turnId, "earlier", 10, { status: "completed", input: {}, output: "done" });
+    earlier.parts.push({ id: "progress", type: "text", text: "Checking the files." });
+    return [earlier, { info: { id: "failed-not-yet-persisted", role: "assistant", parentID: turnId, time: { created: 20 } }, parts: [] }];
+  }]);
+  const initial = harness.nextMessageRead();
+  const turn = adapter.runRoomTurn(handle, { inboxItemId: "error-race", sourceMessage: {}, activation: {}, actionId: "error-race" });
+  await initial;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  // Native error delivery can make status idle before the failed assistant is saved.
+  harness.becomeIdleWithoutEvent();
+  harness.sendEvent({ type: "session.error", properties: { sessionID: handle.providerContinuationId,
+    error: { name: "APIError", data: { statusCode: 403, message: "Forbidden" } } } });
+  const result = await turn;
+  assert.equal(result.outcome, "unreadable");
+  assert.equal(result.text, null);
+  assert.equal(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"), false);
+});
+
+test("an Open Model turn whose last step ended on tool calls is recorded as ended once its session reports idle", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  const turnFacts = (turnId: string) => observations.flatMap(({ fact }) => fact.domain === "turn" && fact.providerTurnId === turnId
+    ? [[fact.state, "turnOutcome" in fact ? fact.turnOutcome : undefined]] : []);
+
+  // The model answers and calls a tool in its last step; the session then goes idle.
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant-final", 10, "Answered, and posted it with a tool.", "tool-calls")]]);
+  harness.setStreamEvents([{ type: "session.idle", properties: { sessionID: handle.providerContinuationId } }]);
+  const first = await adapter.runRoomTurn(handle, { inboxItemId: "tool-ending", sourceMessage: {}, activation: {}, actionId: "tool-ending" });
+  assert.equal(first.outcome, "reply", "the turn settles with its answer, as before");
+  assert.deepEqual(turnFacts(first.turnId).at(-1), ["terminal", "completed"],
+    "and its ending is recorded: left open, it would refuse the agent's next turn in the record");
+
+  // The same last step with nothing readable: the turn is over all the same.
+  harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant-tool-only", 20, null, "tool-calls")]]);
+  harness.setStreamEvents([{ type: "session.idle", properties: { sessionID: handle.providerContinuationId } }]);
+  const second = await adapter.runRoomTurn(handle, { inboxItemId: "tool-only-ending", sourceMessage: {}, activation: {}, actionId: "tool-only-ending" });
+  assert.equal(second.outcome, "unreadable");
+  assert.deepEqual(turnFacts(second.turnId).at(-1), ["terminal", "unreadable"]);
+
+  // A last step whose tool call never returned: what the model said before the call is not its answer.
+  harness.setTranscriptFactories([(turnId) => [toolStep(turnId, "assistant-tool-running", 30, "I will inspect the files.", "running")]]);
+  harness.setStreamEvents([{ type: "session.idle", properties: { sessionID: handle.providerContinuationId } }]);
+  const third = await adapter.runRoomTurn(handle, { inboxItemId: "tool-running", sourceMessage: {}, activation: {}, actionId: "tool-running" });
+  assert.equal(third.outcome, "interrupted", "the turn has no answer");
+  assert.equal(third.text, null, "and the text before the call is not published as one");
+  assert.deepEqual(turnFacts(third.turnId).at(-1), ["terminal", "interrupted"], "its ending says it was cut off, not completed");
+  assert.equal(observations.filter(({ fact }) => fact.domain === "turn" && fact.state === "terminal").length, 3, "one ending per turn");
+});
+
+test("a re-read Open Model turn the record still holds open is recorded as ended when its last step ended on tool calls", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  const endings = () => observations.flatMap(({ fact }) => fact.domain === "turn" && fact.state === "terminal"
+    ? [[fact.providerTurnId, "turnOutcome" in fact ? fact.turnOutcome : undefined]] : []);
+
+  // The owner's shape: the turn's only step called a tool and nothing followed; the session is not busy.
+  harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant-tool-only", 10, null, "tool-calls")]]);
+  const first = await adapter.runRoomTurn(handle, { inboxItemId: "left-open", sourceMessage: {}, activation: {}, actionId: "left-open" });
+  assert.equal(first.outcome, "unreadable");
+  assert.deepEqual(endings(), [], "a missing status entry alone still invents no ending");
+
+  const plain = await adapter.recoverRoomTurn(handle, { inboxItemId: "left-open", providerTurnId: first.turnId });
+  assert.equal(plain.outcome, "unreadable");
+  assert.deepEqual(endings(), [], "and neither does a re-read the daemon did not ask to close");
+
+  const closing = await adapter.recoverRoomTurn(handle, { inboxItemId: "left-open", providerTurnId: first.turnId, recordEnding: true });
+  assert.equal(closing.outcome, "unreadable", "the answer read back is the same");
+  assert.deepEqual(endings(), [[first.turnId, "unreadable"]], "but the record's open turn is closed, so the next turn is accepted");
+
+  await adapter.recoverRoomTurn(handle, { inboxItemId: "left-open", providerTurnId: first.turnId, recordEnding: true });
+  assert.equal(endings().length, 1, "once");
+});
+
+for (const ending of ["idle", "reread", "open"] as const) {
+  const title = ending === "idle" ? "is closed in the record when OpenCode reports the session idle, and the next turn is recorded"
+    : ending === "reread" ? "is closed in the record when the daemon re-reads it as a turn its record holds open, and the next turn is recorded"
+      : "stays open in the record on a re-read the daemon did not ask to close, and refuses the next turn";
+  test(`an Open Model turn whose last step ended on tool calls ${title}`, async () => {
+    // The real adapter over the fake OpenCode server, feeding the real execution capture and shadow store.
+    const { DatabaseSync } = await import("node:sqlite");
+    const { DaemonStateSchema } = await import(new URL("../../daemon/daemon-state-database.ts", import.meta.url).href);
+    const { ExecutionCaptureCoordinator } = await import(new URL("../../daemon/execution-capture-coordinator.ts", import.meta.url).href);
+    const { ExecutionShadowStore, executionRuntimeStorageIdentity } = await import(new URL("../../daemon/execution-shadow-store.ts", import.meta.url).href);
+    const { adapter, handle, harness } = await spawnAdapter({ lifecycleAuthorityMode: "typed" });
+    const at = "2026-08-31T00:00:00.000Z";
+    const attempt = handle.workAttemptId;
+    const generation = "generation-open-model-1";
+    const connection = handle.providerConnection!;
+    const db = new DatabaseSync(":memory:");
+    db.exec("PRAGMA foreign_keys=ON");
+    new DaemonStateSchema().createSchema(db);
+    db.exec(`INSERT INTO agent_identities VALUES('agent','owner','${at}',0);
+      INSERT INTO agent_configurations(agent_id,provider,charter,delivery_mode,provider_launch_policy_present,provider_launch_policy_undefined,config_revision,runtime_configuration_revision)
+        VALUES('agent','open-model','charter','daemon_inbox',0,0,1,1);
+      INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
+        VALUES('${attempt}','task','lease',1,'/private/workspace','repo','remote','revision','/private/bare','active','${at}');
+      INSERT INTO work_attempt_executions VALUES('${generation}','${attempt}','${at}','test',1,NULL);`);
+    db.prepare(`INSERT INTO runtime_deployments(agent_id,observed_state,workspace_path_present,work_attempt_id_present,work_attempt_id,
+      provider_ref_present,provider_work_attempt_id,provider_continuation_id,provider_connection_kind,provider_connection_pid,
+      provider_process_identity_present,provider_process_identity,provider_execution_generation_id,workplace_liveness_present,native_liveness_present,activity_present)
+      VALUES('agent','idle',0,1,?,1,?,?,'opencode_server',?,1,?,?,0,0,0)`)
+      .run(attempt, attempt, handle.providerContinuationId, connection.pid, connection.processIdentity!, generation);
+    new ExecutionShadowStore(db).registerRuntime({ agentId: "agent", executionGenerationId: generation,
+      runtimeGenerationId: executionRuntimeStorageIdentity("agent", generation, "opencode_server", connection.pid!, connection.processIdentity!),
+      provider: "open-model", authorityMode: "typed", configRevision: 1, createdAtMs: Date.parse(at) });
+    const current = { workAttemptId: attempt, pid: handle.pid, providerContinuationId: handle.providerContinuationId,
+      providerConnection: connection, observedState: "idle" as const, appliedConfigurationRevision: 1 };
+    const diagnostics: string[] = [];
+    const capture = new ExecutionCaptureCoordinator(db, {
+      provider: { onExecution: (_handle: object, listener: (event: NativeExecutionObservation) => void) => adapter.onExecution(handle, listener) },
+      currentHandle: () => current, daemonGeneration: () => 1, diagnostic: (_id: string, code: string) => diagnostics.push(code),
+    });
+    capture.install(Object.freeze({ nonce: Symbol("installation"), listenerLeaseNonce: Symbol("lease"), entryId: "agent", handle: current,
+      executionGenerationId: generation, workAttemptId: attempt, providerContinuationId: handle.providerContinuationId!,
+      providerConnection: { ...connection }, configurationRevision: 1, authorityMode: "typed" }));
+    /** The daemon saves which message a native turn belongs to when the adapter reports the turn started. */
+    const bindTurn = async (turnId: string) => {
+      const order = Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1;
+      db.prepare(`INSERT INTO supervised_agent_inbox(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
+        VALUES(?,'agent','room',?,'{}','{}',?,'awaiting_result',1,?,?,?,?,?)`).run(turnId, `message-${order}`, order, `action-${order}`, `reply-${order}`, turnId, at, at);
+      db.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,'agent','room',?,?,?,?)").run(turnId, attempt, generation, handle.providerContinuationId, turnId);
+      capture.refresh("agent");
+    };
+    const settle = async () => { for (let turn = 0; turn < 20; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve)); };
+    const turns = () => db.prepare("SELECT provider_turn_id,state FROM execution_turns ORDER BY rowid").all().map((turn) => ({ ...turn }));
+    const run = (inboxItemId: string) => adapter.runRoomTurn(handle, { inboxItemId, sourceMessage: {}, activation: {}, actionId: inboxItemId },
+      { beforeNativeDispatch: async () => {}, checkpointTurnStarted: bindTurn });
+    try {
+      // The owner's shape: the turn's only step called a tool, and nothing followed it.
+      harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant-tool-only", 10, null, "tool-calls")]]);
+      if (ending === "idle") {
+        harness.holdTurnOpenWithTranscript();
+        harness.setStreamEvents([{ type: "session.idle", properties: { sessionID: handle.providerContinuationId } }]);
+      }
+      const one = await run("inbox-1");
+      assert.equal(one.outcome, "unreadable");
+      await settle();
+      assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: ending === "idle" ? "terminal" : "active" }]);
+      if (ending !== "idle") {
+        // The daemon re-reads an unreadable turn once before it blocks the message.
+        const reread = await adapter.recoverRoomTurn(handle, { inboxItemId: "inbox-1", providerTurnId: one.turnId,
+          ...(ending === "reread" ? { recordEnding: true } : {}) });
+        assert.equal(reread.outcome, "unreadable");
+        await settle();
+      }
+      db.prepare("UPDATE supervised_agent_inbox SET state='blocked' WHERE inbox_item_id=?").run(one.turnId);
+      const closed = ending !== "open";
+      assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: closed ? "terminal" : "active" }]);
+
+      // The next turn.
+      harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant-next", 20, "Answered.")]]);
+      harness.setStreamEvents([{ type: "session.idle", properties: { sessionID: handle.providerContinuationId } }]);
+      const two = await run("inbox-2");
+      assert.equal(two.outcome, "reply");
+      await settle();
+      const position = { ...db.prepare("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers").get()! };
+      const stops = diagnostics.filter((code) => ["source_gap", "invalid_observation", "retention_limit"].includes(code));
+      if (closed) {
+        assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: "terminal" }, { provider_turn_id: two.turnId, state: "terminal" }],
+          "the next turn is recorded");
+        assert.equal(position.max, position.last, "with no gap");
+        assert.deepEqual(stops, [], "and the record never stops");
+      } else {
+        assert.deepEqual(turns(), [{ provider_turn_id: one.turnId, state: "active" }], "the open turn refuses the next one");
+        assert.ok(Number(position.max) > Number(position.last), "and the record has a gap from here on");
+        assert.ok(stops.includes("invalid_observation"));
+      }
+    } finally {
+      capture.close();
+    }
+  });
+}
 
 test("Open Model does not invent a typed terminal from the legacy tool-child session fallback", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
@@ -3527,7 +4511,7 @@ test("Open Model completed shell tools use native metadata exit codes and never 
 });
 
 test("Open Model generic process errors are degraded; actual exit or independently proven disappearance is hard evidence", async () => {
-  for (const kind of ["error", "error_with_death", "exit"] as const) {
+  for (const kind of ["error", "error_with_death", "exit", "unkillable"] as const) {
     const harness = createHarness();
     let settleExit!: (exit: ProviderProcessExit) => void;
     const exited = new Promise<ProviderProcessExit>((resolve) => { settleExit = resolve; });
@@ -3540,13 +4524,16 @@ test("Open Model generic process errors are degraded; actual exit or independent
     const handle = await adapter.spawn(spawnRequest());
     const observations: NativeExecutionObservation[] = [];
     adapter.onExecution(handle, (event) => observations.push(event));
-    if (kind === "error_with_death") gone = true;
-    settleExit(kind === "exit" ? { type: "exit", code: 1, signal: null } : { type: "error", error: new Error("private transport failure") });
+    if (kind === "error_with_death" || kind === "unkillable") gone = true;
+    settleExit(kind === "exit" ? { type: "exit", code: 1, signal: null }
+      : { type: "error", error: new Error("private transport failure"), ...(kind === "unkillable" ? { treeMayRun: true } : {}) });
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(observations.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"), kind !== "error");
-    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "lost"), kind !== "error");
-    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "degraded"), kind === "error");
+    const proven = kind === "error_with_death" || kind === "exit";
+    assert.equal(observations.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"), proven);
+    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "lost"), proven);
+    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "degraded"), !proven);
     assert.doesNotMatch(JSON.stringify(observations), /private transport failure/);
+    if (kind === "unkillable") await assert.rejects(adapter.spawn(spawnRequest()), /did not end, so LetAgents will not start another/);
   }
 });
 
@@ -3585,4 +4572,710 @@ test("Open Model typed facts reject contradictory session evidence even when a l
   }]);
   await adapter.runRoomTurn(handle, { inboxItemId: "foreign-rows", sourceMessage: {}, activation: {}, actionId: "foreign-rows" });
   assert.equal(observations.some(({ fact }) => fact.domain === "execution" || (fact.domain === "turn" && fact.state === "terminal")), false);
+});
+
+/**
+ * A real daemon supervising one Open Model agent: the real adapter, action
+ * router, delivery, execution capture and stores, over a fake OpenCode. Only
+ * the room, the server and the OpenCode processes are doubles. Every fake
+ * process serves the sessions the agent's runtime directory keeps, as a real
+ * one does, and starts a session of its own.
+ */
+async function openModelDaemonFixture(options: { permissionProfileId?: string } = {}) {
+  const { SupervisorDaemon } = await import(new URL("../../daemon/main.ts", import.meta.url).href);
+  const { WorkDurabilityStore } = await import(new URL("../../daemon/durability-store.ts", import.meta.url).href);
+  const { DAEMON_PROTOCOL_VERSION } = await import(new URL("../../daemon/types.ts", import.meta.url).href);
+  const { ProviderActionPortRouter } = await import(new URL("../../daemon/provider-action-port-router.ts", import.meta.url).href);
+  // The daemon's own endpoint: a socket file on POSIX, a named pipe with its proof on Windows.
+  const { connectDaemon, daemonEndpoint } = await import(new URL("../../../../shared/daemon-endpoint.mjs", import.meta.url).href);
+  const { DatabaseSync } = await import("node:sqlite");
+  const root = await mkdtemp(join(tmpdir(), "open-model-daemon-"));
+  const id = "open_model_agent";
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: daemonEndpoint(root).listenPath, peerProofPath: daemonEndpoint(root).proofPath,
+    manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+  };
+  const request = (method: string, params?: unknown) => new Promise<{ ok: boolean; result?: any; error?: string }>((resolve, reject) => {
+    const socket = connectDaemon(paths.socketPath);
+    let received = "";
+    socket.setEncoding("utf8");
+    socket.once("error", reject);
+    socket.on("data", (chunk: string) => {
+      received += chunk;
+      if (!received.includes("\n")) return;
+      socket.end();
+      resolve(JSON.parse(received.slice(0, received.indexOf("\n"))));
+    });
+    socket.on("connect", () => socket.write(`${JSON.stringify({ version: DAEMON_PROTOCOL_VERSION, id: "test", method, params })}\n`));
+  });
+  const eventually = async (check: () => Promise<boolean> | boolean, label: string, timeoutMs = 15_000) => {
+    const deadline = Date.now() + timeoutMs;
+    while (!await check()) {
+      if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  };
+  const workAttemptId = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const workspace = join(root, "worktrees", "repo", workAttemptId);
+  await mkdir(join(root, "repos", "repo.git"), { recursive: true });
+  await mkdir(workspace, { recursive: true });
+  await writeFile(join(workspace, ".letagents-work-attempt.json"), JSON.stringify({ version: 1, repo: "repo",
+    work_attempt_id: workAttemptId, task_id: id, remote_url: "https://example.invalid/repo", resolved_revision: "a".repeat(40),
+    bare_path: join(root, "repos", "repo.git") }));
+  const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(root, "worktrees"));
+  const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace, workAttemptId });
+  await durability.close();
+
+  type FakeProcess = { pid: number; port: number; alive: boolean; exited: Promise<ProviderProcessExit>; end(exit: ProviderProcessExit): void };
+  /** One turn of a session: the prompt's own message id, what the session keeps of the answer, and the process that is running it. */
+  type FakeTurn = { id: string; sessionId: string; assistants: TranscriptMessage[]; runningOn: number | null };
+  const processes: FakeProcess[] = [];
+  /** How each process was launched, in the order they were: the access level it runs with is in its config. */
+  const launches: LaunchRecord[] = [];
+  /** Kept in the agent's runtime directory: every process reads all of them. */
+  const sessions = new Map<string, FakeTurn[]>();
+  const turns: FakeTurn[] = [];
+  const streams = new Set<{ port: number; send(event: Record<string, unknown>): void; close(): void }>();
+  /** Permission requests a process is waiting on, and the answers it was given. */
+  const pendingPermissions: Array<{ port: number; request: OpenCodePermissionRequest }> = [];
+  const permissionReplies: Array<{ id: string; reply: string }> = [];
+  let nextPort = 43_821;
+  const refused = () => Object.assign(new Error("connect ECONNREFUSED"), { code: "ECONNREFUSED" });
+  const dependencies: OpenModelProviderAdapterDependencies = {
+    resolveMcpRuntime: testMcpRuntime,
+    launch(input) {
+      launches.push(input);
+      let resolveExit!: (exit: ProviderProcessExit) => void;
+      const process: FakeProcess = { pid: 6_101 + processes.length, port: nextPort - 1, alive: true,
+        exited: new Promise((resolve) => { resolveExit = resolve; }),
+        end: (exit) => {
+          if (!process.alive) return;
+          process.alive = false;
+          for (const stream of [...streams]) if (stream.port === process.port) stream.close();
+          resolveExit(exit);
+        } };
+      processes.push(process);
+      const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+      Object.assign(child, { pid: process.pid, unref() {} });
+      return { child, exited: process.exited };
+    },
+    getProcessIdentity: (pid) => processes.find((process) => process.pid === pid)?.alive ? `opencode-birth-${pid}` : null,
+    observeProcessExit: (pid) => processes.find((process) => process.pid === pid)?.exited ?? Promise.resolve({ type: "exit", code: 1, signal: null }),
+    signalProcess: (pid, signal) => processes.find((process) => process.pid === pid)?.end({ type: "exit", code: null, signal }),
+    allocatePort: async () => nextPort++,
+    discoverRuntimeConnection: async () => null,
+    async fetch(input, init) {
+      const url = new URL(input);
+      if (url.pathname.endsWith("/models")) return json({ data: [{ id: "qwen/qwen3-coder", context_length: 262144 }] });
+      const process = processes.find((candidate) => candidate.port === Number(url.port));
+      if (!process?.alive) throw refused();
+      if (url.pathname === "/global/health") return json({ healthy: true, version: "1.18.20" });
+      if (url.pathname === "/permission") return json(pendingPermissions.filter((pending) => pending.port === process.port).map((pending) => pending.request));
+      const [, permissionId] = url.pathname.match(/^\/permission\/([^/]+)\/reply$/) ?? [];
+      if (permissionId && init?.method === "POST") {
+        const index = pendingPermissions.findIndex((pending) => pending.port === process.port && pending.request.id === decodeURIComponent(permissionId));
+        if (index < 0) return json({ error: "not pending" }, 404);
+        const [answered] = pendingPermissions.splice(index, 1);
+        permissionReplies.push({ id: answered!.request.id, reply: String((JSON.parse(String(init.body)) as { reply: string }).reply) });
+        return json(true);
+      }
+      if (url.pathname === "/config") return json({ model: "letagents-open-model/qwen/qwen3-coder" });
+      if (url.pathname === "/event") {
+        const encoder = new TextEncoder();
+        let connection: { port: number; send(event: Record<string, unknown>): void; close(): void };
+        return new Response(new ReadableStream<Uint8Array>({
+          start(controller) {
+            connection = { port: process.port,
+              send(event) { controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); },
+              close() { if (streams.delete(connection)) controller.close(); } };
+            streams.add(connection);
+            connection.send({ type: "server.connected", properties: {} });
+            init?.signal?.addEventListener("abort", () => connection.close(), { once: true });
+          },
+          cancel() { streams.delete(connection); },
+        }), { status: 200, headers: { "content-type": "text/event-stream" } });
+      }
+      if (url.pathname === "/session" && init?.method === "POST") {
+        const sessionId = `session-open-model-${sessions.size + 1}`;
+        sessions.set(sessionId, []);
+        return json({ id: sessionId });
+      }
+      if (url.pathname === "/session") return json([...sessions.keys()].map((sessionId) => ({ id: sessionId })));
+      if (url.pathname === "/session/status") {
+        // A process knows only the turns it runs itself.
+        return json(Object.fromEntries(turns.filter((turn) => turn.runningOn === process.port).map((turn) => [turn.sessionId, { type: "busy" }])));
+      }
+      const [, messageSessionId, messageId] = url.pathname.match(/^\/session\/([^/]+)\/message\/([^/]+)$/) ?? [];
+      if (messageSessionId) {
+        // One message by its id, as the permission lookup reads it.
+        const sessionId = decodeURIComponent(messageSessionId);
+        const wanted = decodeURIComponent(messageId!);
+        const found = (sessions.get(sessionId) ?? []).flatMap((turn) => [userMessage(turn.id), ...turn.assistants])
+          .find((message) => message.info.id === wanted);
+        return found
+          ? json({ info: { ...found.info, sessionID: sessionId }, parts: found.parts.map((part) => ({ ...part, sessionID: sessionId, messageID: wanted })) })
+          : json({ error: "no such message" }, 404);
+      }
+      const [, sessionId, action] = url.pathname.match(/^\/session\/([^/]+)\/([^/]+)$/) ?? [];
+      const session = sessionId ? sessions.get(decodeURIComponent(sessionId)) : undefined;
+      if (session && action === "prompt_async" && init?.method === "POST") {
+        const turn: FakeTurn = { id: String((JSON.parse(String(init.body)) as { messageID: string }).messageID),
+          sessionId: decodeURIComponent(sessionId!), assistants: [], runningOn: process.port };
+        session.push(turn);
+        turns.push(turn);
+        return new Response(null, { status: 204 });
+      }
+      if (session && action === "message") return json(session.flatMap((turn) => [userMessage(turn.id), ...turn.assistants]));
+      if (session && action === "abort" && init?.method === "POST") {
+        for (const turn of session) turn.runningOn = null;
+        return json(true);
+      }
+      assert.fail(`Unexpected OpenCode request: ${init?.method ?? "GET"} ${url.pathname}`);
+    },
+    now: () => new Date().toISOString(),
+    probeGit: async () => null,
+  };
+  const makeAdapter = () => new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot: join(root, "runtime"),
+    dependencies, startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 30_000 });
+  const roomMessages: Array<Record<string, unknown>> = [];
+  const published: string[] = [];
+  let mints = 0;
+  // A daemon that starts again on the same files gets a new adapter: only the fake processes outlive it.
+  const makeDaemon = () => new SupervisorDaemon(paths, "darwin", new ProviderActionPortRouter({ "open-model": async () => makeAdapter() }), true,
+    50, undefined, {}, {
+      poll: async ({ afterMessageId, signal }: { afterMessageId: string | null; signal: AbortSignal }) => {
+        const from = afterMessageId ? roomMessages.findIndex((message) => message.id === afterMessageId) + 1 : 0;
+        if (roomMessages.length > from) return { messages: roomMessages.slice(from) };
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, 20);
+          signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
+        });
+        return { messages: [] };
+      },
+      publish: async (input: { text: string; roomId: string }) => {
+        published.push(input.text);
+        return { messageId: `msg_${900 + published.length}`, roomId: input.roomId };
+      },
+    }, {
+      listWorkLeases: async () => [], readWorkLease: async () => null,
+      attestWorkLease: async () => { throw new Error("unused"); },
+      rebindWorkLease: async () => { throw new Error("unused"); },
+      createWorkerSession: async () => {
+        mints += 1;
+        return { sessionId: `${id}-session`, bearer: `${id}-bearer-${mints}`, bearerId: `${id}-bearer-id-${mints}`,
+          expiresAt: new Date(Date.now() + 24 * 60 * 60_000).toISOString() };
+      },
+    });
+  let daemon = makeDaemon();
+  const read = <T>(sql: string): T[] => {
+    const database = new DatabaseSync(paths.manifestPath, { readOnly: true });
+    try { return database.prepare(sql).all(id).map((row) => ({ ...row })) as T[]; } finally { database.close(); }
+  };
+  const cleanup = async () => {
+    for (const process of processes) process.end({ type: "exit", code: null, signal: "SIGTERM" });
+    await daemon.stop();
+    await rm(root, { recursive: true, force: true });
+  };
+  try {
+    await daemon.start();
+    (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    type Receipt = { source_message_id: string; state: string; last_error: string | null; provider_turn_id: string | null };
+    const inboxOf = () => (daemon as unknown as { supervisedInbox: {
+      bootstrapCursor(input: { agent_id: string; room_id: string; last_observed_message_id: string | null }): Promise<unknown>;
+      receipts(agentId: string): Promise<Receipt[]>;
+    } }).supervisedInbox;
+    const inbox = { bootstrapCursor: (input: Parameters<ReturnType<typeof inboxOf>["bootstrapCursor"]>[0]) => inboxOf().bootstrapCursor(input),
+      receipts: (agentId: string) => inboxOf().receipts(agentId) };
+    assert.equal((await request("manifest.put", { entry: {
+      id, room_id: "room_1", display_name: "Agent", provider: "open-model", model: "qwen/qwen3-coder", charter: "test",
+      desired_state: "running", observed_state: "absent", condition: "none", permission_profile_id: options.permissionProfileId ?? "full_access",
+      created_by: "test", created_at: "2026-01-01T00:00:00.000Z", delivery_mode: "daemon_inbox",
+      workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
+    } })).ok, true);
+    await inbox.bootstrapCursor({ agent_id: id, room_id: "room_1", last_observed_message_id: null });
+    /** What the desktop app hands every daemon it starts: the agent's credential and the grant it works under. */
+    const handOverSecrets = async () => {
+      const daemonGeneration = (await request("daemon.status")).result.generation;
+      // A key of the test's own making, for a provider that is never called.
+      assert.equal((await request("supervisor.install_open_model_credential", { entry_id: id, api_key: "test-key-for-the-fake-provider",
+        base_url: "https://openrouter.ai/api/v1", model: "qwen/qwen3-coder", daemon_generation: daemonGeneration })).ok, true);
+      assert.equal((await request("supervisor.install_host_grant", {
+        entry_id: id, room_id: "room_1", agent_key: "owner/agent", grant_id: `grant-${id}`,
+        supervisor_grant: `${id}-parent`, grant_generation: 1, api_url: "https://letagents.example", daemon_generation: daemonGeneration,
+        host_id: "host-1", installation_id: "installation-1", grant_expires_at: new Date(Date.now() + 2 * 60 * 60_000).toISOString(),
+      })).ok, true);
+    };
+    await handOverSecrets();
+    const view = async () => (await request("manifest.list")).result[0] as {
+      observed_state: string; condition: string; last_error: string | null; activity?: Array<{ summary: string }>; permission_pending?: true;
+      room_agent_state: { ingress: { state: string }; inbox: { state: string; detail: string | null } };
+    };
+    await eventually(() => processes.length === 1, "OpenCode is launched");
+    await eventually(async () => (await view())?.room_agent_state?.ingress.state === "observing", "the agent listens to its room");
+    const receipt = async (messageId: string) => (await inbox.receipts(id)).find((item) => item.source_message_id === messageId);
+    type HostApprovals = {
+      list(roomId: string): Promise<Array<{ status: string; detail: string | null; reference: Record<string, unknown> | null; presentation: unknown }>>;
+      decide(input: unknown): Promise<string>;
+    };
+    let asks = 0;
+    return { id, request, eventually, view, read, published, roomMessages, turns, sessions, processes, receipt, cleanup,
+      daemon: () => daemon,
+      get hostApprovals() { return (daemon as unknown as { hostApprovals: HostApprovals }).hostApprovals; },
+      permissionReplies,
+      /** The background service stops and starts again on the same files. Agent processes keep running, as they do when it is updated. */
+      restartDaemon: async () => {
+        await daemon.stop();
+        daemon = makeDaemon();
+        await daemon.start();
+        (daemon as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+        await handOverSecrets();
+      },
+      /** The access level the nth process was launched with, as OpenCode reads it. */
+      launchedPermission: (index: number) => (JSON.parse(launches[index]?.env.OPENCODE_CONFIG_CONTENT ?? "{}") as { permission?: unknown }).permission,
+      /** The newest process asks its owner to allow a shell command the turn's model wants to run. */
+      ask: (turn: FakeTurn, command = "git status") => {
+        asks += 1;
+        const assistant = assistantWithTool(turn.id, `assistant-ask-${asks}`, 10 + asks, { status: "running", input: { command } }, `call-ask-${asks}`);
+        turn.assistants.push(assistant);
+        const port = turn.runningOn!;
+        const native: OpenCodePermissionRequest = { id: `per_ask_${asks}`, sessionID: turn.sessionId, permission: "bash", patterns: [command],
+          metadata: { command }, always: [], tool: { messageID: `assistant-ask-${asks}`, callID: `call-ask-${asks}` } };
+        pendingPermissions.push({ port, request: native });
+        for (const stream of streams) if (stream.port === port) stream.send({ type: "permission.asked", properties: native });
+        return native;
+      },
+      receipts: () => inbox.receipts(id),
+      /** Send the agent its nth room message and wait until its process has been given the prompt. */
+      begin: async (ordinal: number) => {
+        // Unless it was sent earlier and has been waiting behind the message before it.
+        if (!roomMessages.some((message) => message.id === `msg_${ordinal}`)) {
+          roomMessages.push({ id: `msg_${ordinal}`, sender: "someone", text: `request ${ordinal}`, activation: { for_current_agent: { decision: "activate" } } });
+        }
+        await eventually(async () => turns.length === ordinal && Boolean((await receipt(`msg_${ordinal}`))?.provider_turn_id), `msg_${ordinal} starts its turn`).catch(async (error) => {
+          const current = await view();
+          const row = await receipt(`msg_${ordinal}`);
+          throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error}); agent is ${current.observed_state}/${current.condition} (${current.last_error}); inbox ${current.room_agent_state.inbox.state} (${current.room_agent_state.inbox.detail})`);
+        });
+        return turns[ordinal - 1]!;
+      },
+      /** The turn ends in its session with these assistant messages, and the process that ran it reports the session idle. */
+      end: (turn: FakeTurn, assistants: TranscriptMessage[]) => {
+        turn.assistants = assistants;
+        const port = turn.runningOn;
+        turn.runningOn = null;
+        for (const stream of streams) if (stream.port === port) stream.send({ type: "session.idle", properties: { sessionID: turn.sessionId } });
+      },
+      /**
+       * From here on a convergence pass that has not begun waits until the
+       * returned function lets it go, as passes wait for each other and for
+       * the network. What delivery does by itself between two messages is
+       * then all that happens between them.
+       */
+      holdConvergence: () => {
+        const execution = (daemon as unknown as { providerExecution: { converge(...args: unknown[]): Promise<void> } }).providerExecution;
+        const converge = execution.converge.bind(execution);
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => { release = resolve; });
+        execution.converge = async (...args: unknown[]) => { await held; return converge(...args); };
+        return () => { execution.converge = converge; release(); };
+      },
+      /** The agent's newest process ends now, as it does when it crashes: what its session holds of a running turn stays as it is. */
+      exitProcess: () => {
+        const process = processes.at(-1)!;
+        for (const turn of turns) if (turn.runningOn === process.port) turn.runningOn = null;
+        process.end({ type: "exit", code: 1, signal: null });
+      },
+      /** The turns in the agent's execution record, its recovery boundaries, and whether the record has a gap. */
+      recorded: () => ({
+        turns: read<{ provider_turn_id: string; state: string }>("SELECT provider_turn_id,state FROM execution_turns WHERE agent_id=? ORDER BY created_at_ms,rowid"),
+        boundaries: read<{ n: number }>("SELECT COUNT(*) AS n FROM agent_runtime_recoveries WHERE agent_id=? AND phase='complete'")[0]!.n,
+        gaps: read<{ last: number; max: number }>("SELECT last_source_sequence AS last, max_observed_sequence AS max FROM execution_observers WHERE agent_id=?")
+          .filter((observer) => observer.max !== observer.last).length,
+      }) };
+  } catch (error) {
+    await cleanup();
+    throw error;
+  }
+}
+
+/** What an OpenCode session holds of a turn whose process ended under it, and how the message then settles. */
+const OPEN_MODEL_SESSION_AFTER_EXIT = {
+  "its answer": { settles: "acknowledged", reason: null,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [assistantMessage(turnId, `assistant-${ordinal}`, 10, `Recovered ${ordinal}.`)] },
+  "the provider's error": { settles: "acknowledged_failed", reason: /provider failure/i,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [{ info: { id: `assistant-${ordinal}`, role: "assistant", parentID: turnId,
+      time: { created: 10, completed: 11 }, error: { name: "APIError", data: { message: "Exact provider failure." } } }, parts: [] }] },
+  "a step that never finished": { settles: "acknowledged_failed", reason: PROCESS_ENDED_DURING_TURN,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [{ info: { id: `assistant-${ordinal}`, role: "assistant", parentID: turnId,
+      time: { created: 10 } }, parts: [{ id: `text-${ordinal}`, type: "text", text: "Half of" }] }] },
+  "nothing but the prompt": { settles: "acknowledged_failed", reason: PROCESS_ENDED_DURING_TURN, assistants: (): TranscriptMessage[] => [] },
+  "a step whose tool call never returned": { settles: "acknowledged_failed", reason: PROCESS_ENDED_DURING_TURN,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [toolStep(turnId, `assistant-${ordinal}`, 10, "I will inspect the files.", "running")] },
+  "a tool call that returned, with no step after it": { settles: "acknowledged_failed", reason: PROCESS_ENDED_DURING_TURN,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [toolStep(turnId, `assistant-${ordinal}`, 10, "I will inspect the files.", "completed")] },
+  // The last step ended at the output limit before it wrote anything.
+  "a last step cut off at the output limit with no text": { settles: "acknowledged_failed", reason: NO_REPLY_FAILURE.outputLimit,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [{ info: { id: `assistant-${ordinal}`, role: "assistant", parentID: turnId,
+      time: { created: 10, completed: 11 } }, parts: [{ id: `finish-${ordinal}`, type: "step-finish", reason: "length" }] }] },
+  // A tool call the owner's policy refused ends the turn there, whatever the model said before it.
+  "a refused tool call after some narration": { settles: "acknowledged_failed", reason: NO_REPLY_FAILURE.deniedTool,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [{ info: { id: `assistant-${ordinal}`, role: "assistant", parentID: turnId,
+      time: { created: 10, completed: 11 } }, parts: [{ id: `text-${ordinal}`, type: "text", text: "I will list the files." },
+      { id: `tool-${ordinal}`, type: "tool", tool: "bash", callID: `call-${ordinal}`,
+        state: { status: "error", input: { command: "ls" }, error: "The user rejected permission to use this specific tool call", time: { start: 10, end: 11 } } },
+      { id: `finish-${ordinal}`, type: "step-finish", reason: "tool-calls" }] }] },
+  // OpenCode goes on after a step it could not read a finish reason for.
+  "a finished step with text, and a later step begun": { settles: "acknowledged_failed", reason: PROCESS_ENDED_DURING_TURN,
+    assistants: (turnId: string, ordinal: number): TranscriptMessage[] => [
+      { info: { id: `assistant-${ordinal}`, role: "assistant", parentID: turnId, time: { created: 10, completed: 11 } },
+        parts: [{ id: `text-${ordinal}`, type: "text", text: "Half an answer." }, { id: `finish-${ordinal}`, type: "step-finish", reason: "unknown" }] },
+      { info: { id: `assistant-${ordinal}-next`, role: "assistant", parentID: turnId, time: { created: 12 } }, parts: [] }] },
+} as const;
+
+for (const [left, session] of Object.entries(OPEN_MODEL_SESSION_AFTER_EXIT)) {
+  test(`an Open Model agent whose process ends during two turns in a row, leaving ${left} in the session, settles both without a person and answers its next message`, async () => {
+    const { ACTIVITY_RECORD_CONTINUED_NOTICE } = await import(new URL("../../daemon/runtime-recovery-journal.ts", import.meta.url).href);
+    const agent = await openModelDaemonFixture();
+    let letConverge = () => {};
+    try {
+      for (const ordinal of [1, 2]) {
+        const turn = await agent.begin(ordinal);
+        await agent.eventually(() => agent.recorded().turns.at(-1)?.state === "active" && agent.recorded().turns.length === ordinal,
+          `turn ${ordinal} is recorded as started`);
+        letConverge();
+        turn.assistants = session.assistants(turn.id, ordinal);
+        // The next message is already waiting behind this one: it is dispatched the moment this one settles.
+        agent.roomMessages.push({ id: `msg_${ordinal + 1}`, sender: "someone", text: `request ${ordinal + 1}`, activation: { for_current_agent: { decision: "activate" } } });
+        await agent.eventually(async () => Boolean(await agent.receipt(`msg_${ordinal + 1}`)), `msg_${ordinal + 1} waits in the agent's inbox`);
+        agent.exitProcess();
+        await agent.eventually(() => agent.processes.length === ordinal + 1, `process ${ordinal + 1} replaces it`);
+        // No later pass of the daemon comes between this message settling and the next one starting.
+        letConverge = agent.holdConvergence();
+        await agent.eventually(async () => (await agent.receipt(`msg_${ordinal}`))?.state === session.settles, `msg_${ordinal} settles ${session.settles}`).catch(async (error) => {
+          const row = await agent.receipt(`msg_${ordinal}`);
+          const current = await agent.view();
+          throw new Error(`${(error as Error).message}: row is ${row?.state} (${row?.last_error}); agent is ${current.observed_state}/${current.condition} (${current.last_error})`);
+        });
+        const reason = (await agent.receipt(`msg_${ordinal}`))!.last_error;
+        if (typeof session.reason === "string") assert.equal(reason, session.reason, "the room and the owner read why the message has no answer");
+        else if (session.reason) assert.match(reason ?? "", session.reason, "the provider's own reason stays on the message");
+      }
+      // The third process takes the next message, in a session of its own.
+      const third = await agent.begin(3);
+      await agent.eventually(() => agent.recorded().turns.length === 3, "turn 3 is recorded as started");
+      letConverge();
+      agent.end(third, [assistantMessage(third.id, "assistant-3", 10, "Answer 3.")]);
+      await agent.eventually(async () => (await agent.receipt("msg_3"))?.state === "acknowledged", "msg_3 is answered");
+
+      assert.deepEqual(agent.published, left === "its answer" ? ["Recovered 1.", "Recovered 2.", "Answer 3."] : ["Answer 3."],
+        "an answer the session kept is delivered; a turn that was cut off is never run again");
+      assert.deepEqual(agent.turns.map((turn) => turn.sessionId), ["session-open-model-1", "session-open-model-2", "session-open-model-3"],
+        "every process ran its turn in its own session, and each earlier turn was read where it ran");
+      assert.equal(agent.turns.length, 3, "no prompt was sent twice");
+      await agent.eventually(() => agent.recorded().turns.at(-1)?.state === "terminal", "the third turn is recorded to its end");
+      const record = agent.recorded();
+      // An ended process's turn cannot be given an ending by a process that
+      // did not run it: it stays lost, behind the boundary that lets the
+      // record go on, and its message carries what was read.
+      assert.deepEqual(record.turns.map((turn) => turn.state), ["lost", "lost", "terminal"]);
+      assert.equal(record.boundaries, 2, "one boundary for each ended process");
+      assert.equal(record.gaps, 0, "the record has no gap");
+      const current = await agent.view();
+      assert.equal(current.condition, "none", current.last_error ?? "");
+      assert.equal(current.room_agent_state.inbox.state, "empty", "nothing waits behind a message that needs a person");
+      assert.ok(current.activity?.some((event) => event.summary === ACTIVITY_RECORD_CONTINUED_NOTICE), "the owner reads that part of the record is missing");
+    } finally {
+      letConverge();
+      await agent.cleanup();
+    }
+  });
+}
+
+type OpenModelDaemonAgent = Awaited<ReturnType<typeof openModelDaemonFixture>>;
+
+/** The owner saves a new permission mode. A running process keeps the one it started with. */
+async function ownerSavesPermissionMode(agent: OpenModelDaemonAgent, permissionProfileId: string): Promise<void> {
+  const daemonGeneration = (await agent.request("daemon.status")).result.generation;
+  const saved = (await agent.request("supervisor.get_agent_configuration", { entry_id: agent.id, daemon_generation: daemonGeneration })).result;
+  const updated = await agent.request("supervisor.update_agent_configuration", { entry_id: agent.id, daemon_generation: daemonGeneration,
+    expected_revision: saved.config_revision,
+    configuration: { model: saved.model, reasoning_effort: saved.reasoning_effort, charter: saved.charter, permission_profile_id: permissionProfileId } });
+  assert.equal(updated.result.outcome, "updated", updated.error);
+  assert.equal(updated.result.configuration.config_revision, saved.config_revision + 1);
+}
+
+/** The model of `turn` asks to run a command. The owner sees one card for it, allows it once, and the process is told so. */
+async function ownerAllowsTheCommand(agent: OpenModelDaemonAgent, turn: Awaited<ReturnType<OpenModelDaemonAgent["begin"]>>): Promise<void> {
+  const { createHash } = await import("node:crypto");
+  const asked = agent.ask(turn, "git status");
+  await agent.eventually(async () => (await agent.hostApprovals.list("room_1")).some((card) => card.status === "pending"), "the request is a card the owner can answer")
+    .catch(async (error) => {
+      const cards = await agent.hostApprovals.list("room_1");
+      throw new Error(`${(error as Error).message}: cards are ${JSON.stringify(cards.map((card) => [card.status, card.detail]))}`);
+    });
+  const cards = (await agent.hostApprovals.list("room_1")).filter((card) => card.status === "pending");
+  assert.equal(cards.length, 1);
+  const card = cards[0]!;
+  assert.ok(card.reference, "the request is journaled, so a decision can name it");
+  assert.equal(agent.read<{ state: string }>("SELECT state FROM execution_approval_requests WHERE agent_id=?").at(-1)?.state, "requested");
+  assert.equal(await agent.hostApprovals.decide({ expected: card.reference, decisionId: "decision-allow-once", actorId: "host-owner",
+    decision: "allow_once", projectionSha256: createHash("sha256").update(JSON.stringify(card.presentation)).digest("hex") }), "resolved");
+  assert.deepEqual(agent.permissionReplies, [{ id: asked.id, reply: "once" }], "the process was told to go ahead, once");
+  assert.equal(agent.read<{ state: string }>("SELECT state FROM execution_approval_requests WHERE agent_id=?").at(-1)?.state, "resolved");
+}
+
+test("an Open Model agent whose process crashed after its owner changed its permission mode still gets answerable approval cards", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  try {
+    // The owner saves the new mode while a turn runs, so the process has not been replaced when it crashes.
+    await agent.begin(1);
+    await ownerSavesPermissionMode(agent, "ask_before_write");
+    // The next message waits behind the one the process is running when it crashes.
+    agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2", activation: { for_current_agent: { decision: "activate" } } });
+    agent.exitProcess();
+    await agent.eventually(() => agent.processes.length === 2, "a replacement process starts");
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "the cut-off message settles");
+    await ownerAllowsTheCommand(agent, await agent.begin(2));
+  } finally { await agent.cleanup(); }
+});
+
+test("an Open Model agent that was paused and resumed after its owner changed its permission mode still gets answerable approval cards", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  try {
+    const first = await agent.begin(1);
+    // The new mode waits for the turn to end; the owner pauses the agent before it does.
+    await ownerSavesPermissionMode(agent, "auto_review");
+    assert.equal((await agent.request("manifest.set_desired_state", { id: agent.id, desired_state: "paused" })).ok, true);
+    await agent.eventually(async () => (await agent.view()).observed_state === "paused", "the agent is paused");
+    assert.equal((await agent.request("manifest.set_desired_state", { id: agent.id, desired_state: "running" })).ok, true);
+    await agent.eventually(() => agent.processes.length === 2, "a new process starts on resume");
+    assert.equal(first.runningOn === agent.processes[1]!.port, false, "the first turn did not move to it");
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged_failed", "the turn the pause cut off settles, and is not run again");
+    await ownerAllowsTheCommand(agent, await agent.begin(2));
+  } finally { await agent.cleanup(); }
+});
+
+test("an Open Model agent asks its owner about a command while the mode the owner saved waits for the turn to end, and the owner's answer is accepted", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  try {
+    const first = await agent.begin(1);
+    await ownerSavesPermissionMode(agent, "ask_before_write");
+    assert.equal((await agent.view()).permission_pending, true, "the saved mode is not the one the process runs");
+    // A saved mode that has not been applied does not make the owner's own answer wrong.
+    await ownerAllowsTheCommand(agent, first);
+    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
+    await agent.eventually(() => agent.processes.length === 2, "the process is replaced when the turn ends");
+  } finally { await agent.cleanup(); }
+});
+
+const FULL_ACCESS = { "*": "allow" };
+const ASK_BEFORE_WRITE = { "*": "allow", edit: "ask", bash: "ask" };
+
+test("an idle Open Model agent is restarted at once with the permission mode its owner saved, and takes its next message under it", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  const releaseConvergence = agent.holdConvergence();
+  try {
+    const first = await agent.begin(1);
+    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered");
+    assert.equal((await agent.view()).permission_pending, undefined, "nothing is pending before the owner saves");
+
+    await ownerSavesPermissionMode(agent, "ask_before_write");
+    // Between the save and the restart the owner is shown that the new level is not applied yet.
+    assert.equal((await agent.view()).permission_pending, true, "the saved mode is pending until the process is replaced");
+    assert.equal(agent.processes.length, 1);
+
+    releaseConvergence();
+    await agent.eventually(() => agent.processes.length === 2, "the idle process is replaced without a pause and resume");
+    await agent.eventually(async () => (await agent.view()).permission_pending === undefined, "nothing is pending once the new process has the mode");
+    assert.equal(agent.processes[0]!.alive, false, "the old process is gone");
+    assert.deepEqual(agent.launchedPermission(0), FULL_ACCESS);
+    assert.deepEqual(agent.launchedPermission(1), ASK_BEFORE_WRITE, "the replacement is launched with the saved mode");
+
+    // The next message runs on the new process.
+    const second = await agent.begin(2);
+    assert.equal(second.runningOn, agent.processes[1]!.port, "the next turn runs under the saved mode");
+    assert.equal(agent.processes.length, 2, "and nothing is restarted again");
+  } finally { releaseConvergence(); await agent.cleanup(); }
+});
+
+test("an Open Model agent in the middle of a turn finishes it under the old mode, and the queued message waits for the replacement", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  try {
+    const first = await agent.begin(1);
+    // The next message is already waiting behind the turn that is running.
+    agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2", activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => Boolean(await agent.receipt("msg_2")), "msg_2 waits in the agent's inbox");
+
+    await ownerSavesPermissionMode(agent, "ask_before_write");
+    assert.equal((await agent.view()).permission_pending, true);
+    // A turn is never interrupted for it, however long the daemon tries.
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.equal(agent.processes.length, 1, "the process is not replaced while its turn runs");
+    assert.equal(agent.processes[0]!.alive, true);
+    assert.equal(first.runningOn, agent.processes[0]!.port, "the turn is still running on it");
+    assert.equal((await agent.view()).permission_pending, true, "and the owner is still told the new level waits");
+
+    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "the turn finishes under the old mode");
+    await agent.eventually(() => agent.processes.length === 2, "the process is replaced when its turn ends");
+    const second = await agent.begin(2);
+    assert.equal(second.runningOn, agent.processes[1]!.port, "the queued message is delivered to the replacement, never to the old process");
+    assert.equal(agent.processes[0]!.alive, false);
+    assert.deepEqual(agent.launchedPermission(1), ASK_BEFORE_WRITE);
+    await agent.eventually(async () => (await agent.view()).permission_pending === undefined, "nothing is pending once the replacement runs");
+  } finally { await agent.cleanup(); }
+});
+
+test("an Open Model agent whose background service restarted between its owner's save and the restart is still replaced with the saved mode", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  try {
+    const first = await agent.begin(1);
+    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "msg_1 is answered");
+    // The service goes down before it gets to replace the process.
+    (agent.daemon() as unknown as { runtimeConfigurationApply: { refreshManaged(): Promise<void> } }).runtimeConfigurationApply.refreshManaged = async () => undefined;
+    await ownerSavesPermissionMode(agent, "ask_before_write");
+    assert.equal((await agent.view()).permission_pending, true);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal(agent.processes.length, 1, "nothing replaced the process yet");
+
+    await agent.restartDaemon();
+    await agent.eventually(() => agent.processes.length === 2, "the service that starts next replaces the process");
+    await agent.eventually(async () => (await agent.view()).permission_pending === undefined, "and nothing is pending after that");
+    assert.deepEqual(agent.launchedPermission(1), ASK_BEFORE_WRITE);
+    const second = await agent.begin(2);
+    assert.equal(second.runningOn, agent.processes[1]!.port, "the next turn runs under the saved mode");
+  } finally { await agent.cleanup(); }
+});
+
+test("an Open Model agent whose background service restarted in the middle of its turn is replaced with the saved mode when that turn ends", async () => {
+  const agent = await openModelDaemonFixture({ permissionProfileId: "full_access" });
+  try {
+    const first = await agent.begin(1);
+    agent.roomMessages.push({ id: "msg_2", sender: "someone", text: "request 2", activation: { for_current_agent: { decision: "activate" } } });
+    await agent.eventually(async () => Boolean(await agent.receipt("msg_2")), "msg_2 waits in the agent's inbox");
+    await ownerSavesPermissionMode(agent, "ask_before_write");
+
+    await agent.restartDaemon();
+    // The process and its turn outlive the service. The saved mode is still waiting for them.
+    await agent.eventually(async () => (await agent.view()).permission_pending === true, "the service that starts next still knows the saved mode is waiting");
+    await new Promise((resolve) => setTimeout(resolve, 1_500));
+    assert.equal(agent.processes.length, 1, "the turn that is running is not interrupted");
+    assert.equal(agent.processes[0]!.alive, true);
+
+    agent.end(first, [assistantMessage(first.id, "assistant-1", 10, "Done 1.")]);
+    await agent.eventually(async () => (await agent.receipt("msg_1"))?.state === "acknowledged", "the turn finishes under the old mode");
+    await agent.eventually(() => agent.processes.length === 2, "the process is replaced when the turn ends");
+    const second = await agent.begin(2);
+    assert.equal(second.runningOn, agent.processes[1]!.port, "the queued message runs under the saved mode");
+    assert.deepEqual(agent.launchedPermission(1), ASK_BEFORE_WRITE);
+    await agent.eventually(async () => (await agent.view()).permission_pending === undefined, "nothing is pending after that");
+  } finally { await agent.cleanup(); }
+});
+
+
+test("Open Model launch passes discovered model-specific limits to OpenCode", async () => {
+  const credential = { ...spawnRequest().providerCredential!, contextWindow: undefined };
+  const { harness } = await spawnAdapter({ providerCredential: credential });
+  const config = JSON.parse(harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT!);
+  assert.deepEqual(config.provider["letagents-open-model"].models[credential.model].limit, { context: 262144, output: 8192 });
+});
+
+test("Open Model observes overflow compaction until the replay answers, without publishing an unreadable result", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const session = handle.providerContinuationId!;
+  const events: ProviderStreamEvent[] = [];
+  const terminals: ProviderRoomTurnResult[] = [];
+  let phase: "overflow" | "compacting" | "done" = "overflow";
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([(turnId) => {
+    const messages = compactedTurnTranscript(turnId, { replay: true, sessionID: session,
+      after: [assistantMessage("msg_replay", "msg_answer", 40, "Recovered answer.")] });
+    if (phase === "overflow") return messages.slice(0, 2);
+    if (phase === "compacting") {
+      messages[3]!.info.time = { created: 21 };
+      messages[3]!.parts = [];
+      return messages.slice(0, 4);
+    }
+    return messages;
+  }]);
+  let progress!: () => void;
+  const compacting = new Promise<void>((resolve) => { progress = resolve; });
+  adapter.onStream(handle, (event) => {
+    events.push(event);
+    if (event.method === "letagents/compaction" && event.summary === "Compacting conversation") progress();
+  });
+  const initial = harness.nextMessageRead();
+  const turn = adapter.runRoomTurn(handle, { inboxItemId: "overflow", sourceMessage: {}, activation: {}, actionId: "overflow" },
+    { checkpointTerminalResult: async (result) => { terminals.push(result); } });
+  await initial;
+  const overflowRead = harness.nextMessageRead();
+  harness.sendEvent({ type: "session.error", properties: { sessionID: session,
+    error: { name: "ContextOverflowError", data: { message: "input exceeds context length" } } } });
+  await overflowRead;
+  assert.equal(terminals.length, 0);
+  phase = "compacting";
+  harness.sendEvent({ type: "message.updated", properties: { info: { id: "msg_summary", role: "assistant",
+    parentID: "msg_compaction", summary: true, mode: "compaction", sessionID: session, time: { created: 21 } } } });
+  await compacting;
+  assert.equal(adapter.compactionProgress(handle.workAttemptId)?.state, "compacting");
+  assert.equal(terminals.length, 0, "compaction is still part of the original turn");
+  phase = "done";
+  harness.completeTurn();
+  const result = await turn;
+  assert.equal(result.outcome, "reply");
+  assert.equal(result.text, "Recovered answer.");
+  assert.equal(terminals.length, 1);
+  assert.equal(adapter.compactionProgress(handle.workAttemptId), null);
+  assert.equal(harness.promptBodies.length, 1, "only OpenCode replays its own prompt");
+  assert.ok(events.some((event) => event.summary?.includes("context limit reached")));
+  assert.doesNotMatch(JSON.stringify(events), /PRIVATE-COMPACTION-SUMMARY/);
+});
+
+test("Open Model restores compaction progress on a result re-read and preserves a failed summary's error", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const turnId = "msg_existing";
+  let failed = false;
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([() => {
+    const messages = compactedTurnTranscript(turnId, { failedSummary: failed, sessionID: handle.providerContinuationId! }).slice(0, 4);
+    if (!failed) { messages[3]!.info.time = { created: 21 }; messages[3]!.parts = []; }
+    return messages;
+  }]);
+  let progress!: () => void;
+  const compacting = new Promise<void>((resolve) => { progress = resolve; });
+  adapter.onStream(handle, (event) => { if (event.summary === "Compacting conversation") progress(); });
+  const results: ProviderRoomTurnResult[] = [];
+  const turn = adapter.recoverRoomTurn(handle, { inboxItemId: "recover-compaction", providerTurnId: turnId },
+    { checkpointTerminalResult: async (result) => { results.push(result); } });
+  const failure = assert.rejects(turn, /too large/);
+  await compacting;
+  assert.equal(adapter.compactionProgress(handle.workAttemptId)?.state, "compacting");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  failed = true;
+  harness.completeTurn();
+  await failure;
+  assert.equal(results[0]?.outcome, "failed");
+  assert.match(results[0]?.outcome === "failed" ? results[0].error ?? "" : "", /too large/);
+  assert.equal(adapter.compactionProgress(handle.workAttemptId), null);
+  assert.equal(harness.promptBodies.length, 0);
+});
+
+test("Open Model opens staged room files only when its running runtime may read outside its project", async () => {
+  const full = await spawnAdapter({ permissionProfileId: "full_access" });
+  const auto = await spawnAdapter({ permissionProfileId: "auto_review",
+    launchPolicy: { permission: { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" } } });
+  assert.deepEqual(full.adapter.roomTurnFileAccess(full.handle), { text: true, pdf: false });
+  assert.equal(auto.adapter.roomTurnFileAccess(auto.handle), null, "Auto refuses every folder outside the project");
+  assert.equal(full.adapter.roomTurnFileAccess(auto.handle), null, "a handle this adapter does not hold is not trusted");
+  // After a daemon restart the served configuration decides.
+  full.harness.setConfig({ model: "letagents-open-model/qwen/qwen3-coder", permission: { "*": "allow", external_directory: "deny" } });
+  const replacement = new OpenModelProviderAdapter({ binary: "/opt/letagents/opencode", runtimeRoot: full.runtimeRoot,
+    dependencies: full.harness.dependencies, startTimeoutMs: LAUNCH_BUDGET_MS, turnTimeoutMs: 100 });
+  const attached = await replacement.attach({ workAttemptId: full.handle.workAttemptId,
+    providerContinuationId: full.handle.providerContinuationId!, providerConnection: null });
+  assert.ok(attached && !("state" in attached));
+  assert.equal(replacement.roomTurnFileAccess(attached), null);
 });

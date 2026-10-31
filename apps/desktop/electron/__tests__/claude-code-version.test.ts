@@ -1,5 +1,6 @@
+import "./isolated-home.js";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -11,7 +12,13 @@ import {
   requireSupportedClaudeCodeVersion,
   resolveClaudeCodeExecutable,
 } from "../main/agents/claude-code-version.js";
+import { clearProbeCache } from "../main/agents/provider-probe-cache.js";
+import { writeFakeProvider } from "./platform.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
+
+// Every preflight case below fakes the Claude CLI with different output; no
+// case may be answered from a probe that an earlier case memoised.
+test.beforeEach(() => clearProbeCache());
 
 test("Claude Code version readiness accepts supported output and rejects old or unreadable runtimes", () => {
   assert.equal(MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION, "2.1.70");
@@ -42,24 +49,21 @@ test("Claude Code executable resolution has one explicit precedence", () => {
 
 for (const approval of [false, true]) test(`Claude Code ${approval ? "tool approval" : "runtime"} preflight gives an update message before auth or launch`, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-claude-version-"));
-  const bin = join(root, "claude");
   const priorBin = process.env.LETAGENTS_CLAUDE_CODE_BIN;
-  await writeFile(
-    bin,
+  const bin = writeFakeProvider(
+    join(root, "claude"),
     [
-      "#!/usr/bin/env node",
       `if (process.argv[2] === '--version') { console.log('${approval ? "2.1.220" : "2.1.69"} (Claude Code)'); process.exit(0); }`,
       "process.stderr.write('auth and launch must not be reached');",
       "process.exit(9);",
       "",
     ].join("\n"),
-    { mode: 0o755 },
   );
   process.env.LETAGENTS_CLAUDE_CODE_BIN = bin;
   try {
     const result = await runDesktopAgentProviderPreflight(
       "claude-code",
-      { repoRootPath: root, ...(approval ? { launchMode: "supervised" as const, permissionProfileId: "ask_before_write" as const } : {}) },
+      { repoRootPath: root, ...(approval ? { permissionProfileId: "ask_before_write" as const } : {}) },
       { commandTimeoutMs: 0 },
     );
     assert.equal(result.status, "error");
@@ -81,18 +85,15 @@ test("Claude Code preflight truthfully includes the managed LetAgents connection
   const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
   t.mock.method(supervisorDaemonClient, "isRuntimeEnvironmentCurrent", async () => true);
   const root = await mkdtemp(join(tmpdir(), "letagents-claude-ready-"));
-  const bin = join(root, "claude");
   const priorBin = process.env.LETAGENTS_CLAUDE_CODE_BIN;
-  await writeFile(
-    bin,
+  const bin = writeFakeProvider(
+    join(root, "claude"),
     [
-      "#!/usr/bin/env node",
       "if (process.argv[2] === '--version') { console.log('2.1.220 (Claude Code)'); process.exit(0); }",
       "if (process.argv[2] === 'auth' && process.argv[3] === 'status') { console.log('signed in'); process.exit(0); }",
       "process.exit(9);",
       "",
     ].join("\n"),
-    { mode: 0o755 },
   );
   process.env.LETAGENTS_CLAUDE_CODE_BIN = bin;
   try {

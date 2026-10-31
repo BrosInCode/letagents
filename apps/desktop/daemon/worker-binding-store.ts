@@ -1,6 +1,7 @@
+import { RoomLatencyTrace } from "./room-latency-trace.js";
 import { roomApiOrigin, isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, link, open, readFile, readdir, rename, unlink } from "node:fs/promises";
+import { link, open, readFile, readdir, rename, unlink } from "node:fs/promises";
 import { basename, dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { cursorLaneRetirementSchema, type CursorLaneRetirement } from "./runtime-recovery-journal.js";
@@ -14,6 +15,7 @@ import {
   RETAINED_WORKER_BINDING_PUBLICATIONS_PER_ENTRY,
   WORKER_BINDING_PUBLICATIONS_PRUNE_INTERVAL,
 } from "./worker-binding-retention.js";
+import { ownerPrivatePlatform, privateEntryCreated, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
 
 export interface WorkerSessionBinding {
   entry_id: string;
@@ -84,6 +86,16 @@ export class WorkerBindingStore {
     list: "SELECT * FROM worker_session_bindings ORDER BY entry_id",
     binding: "SELECT * FROM worker_session_bindings WHERE entry_id=?",
     epoch: "SELECT binding_epoch FROM worker_session_bindings WHERE entry_id=?",
+    // Run on every publication (each heartbeat). Statements finish synchronously.
+    watermark: "SELECT binding_epoch, last_sequence, last_observed_at_ms FROM worker_binding_watermarks WHERE entry_id=?",
+    advanceBinding: "UPDATE worker_session_bindings SET last_sequence=?, last_observed_at_ms=?, updated_at=? WHERE entry_id=? AND binding_epoch=?",
+    upsertWatermark: `INSERT INTO worker_binding_watermarks (entry_id, binding_epoch, last_sequence, last_observed_at_ms, updated_at) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(entry_id) DO UPDATE SET binding_epoch=MAX(worker_binding_watermarks.binding_epoch, excluded.binding_epoch),
+        last_sequence=MAX(worker_binding_watermarks.last_sequence, excluded.last_sequence),
+        last_observed_at_ms=MAX(worker_binding_watermarks.last_observed_at_ms, excluded.last_observed_at_ms),
+        updated_at=CASE WHEN excluded.last_observed_at_ms >= worker_binding_watermarks.last_observed_at_ms THEN excluded.updated_at ELSE worker_binding_watermarks.updated_at END`,
+    reservePublication: "INSERT INTO worker_binding_publications (reservation_id, entry_id, binding_epoch, execution_generation_id, agent_session_id, sequence, observed_at, observed_at_ms, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?)",
+    finalizePublication: "UPDATE worker_binding_publications SET state=?, finalized_at=? WHERE reservation_id=? AND state='reserved'",
   });
   /** Publications finalized for an entry since its journal was last compacted. */
   private readonly publicationsSinceCompaction = new Map<string, number>();
@@ -514,9 +526,9 @@ export class WorkerBindingStore {
       const epoch = this.readBindingEpoch(database, entryId);
       const now = Date.now(); const candidate = Number.isFinite(observedAtMs) ? Math.min(Math.floor(observedAtMs), now) : now;
       const effective = Math.max(candidate, prior.last_observed_at_ms + 1); const sequence = Math.max(prior.last_sequence + 1, effective); const observedAt = new Date(effective).toISOString(); const id = randomUUID();
-      run(database.prepare("UPDATE worker_session_bindings SET last_sequence=?, last_observed_at_ms=?, updated_at=? WHERE entry_id=? AND binding_epoch=?"), sequence, effective, observedAt, entryId, epoch);
+      run(this.reads.get(database, "advanceBinding"),sequence, effective, observedAt, entryId, epoch);
       this.upsertWatermark(database, entryId, epoch, sequence, effective, observedAt);
-      run(database.prepare("INSERT INTO worker_binding_publications (reservation_id, entry_id, binding_epoch, execution_generation_id, agent_session_id, sequence, observed_at, observed_at_ms, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?)"), id, entryId, epoch, prior.execution_generation_id, prior.agent_session_id, sequence, observedAt, effective, observedAt);
+      run(this.reads.get(database, "reservePublication"), id, entryId, epoch, prior.execution_generation_id, prior.agent_session_id, sequence, observedAt, effective, observedAt);
       return { reservationId: id, binding: { ...prior, last_sequence: sequence, last_observed_at_ms: effective, updated_at: observedAt }, bindingEpoch: epoch, sequence, observedAt, observedAtMs: effective };
     }, { captureAgentId: false }));
   }
@@ -527,7 +539,7 @@ export class WorkerBindingStore {
       // durable failed reservation, but only an explicit server rejection may
       // revoke authority; timeout/throw must leave it usable.
       const state = outcome === "accepted" ? "accepted" : "failed"; const now = new Date().toISOString();
-      run(database.prepare("UPDATE worker_binding_publications SET state=?, finalized_at=? WHERE reservation_id=? AND state='reserved'"), state, now, reservation.reservationId);
+      run(this.reads.get(database, "finalizePublication"), state, now, reservation.reservationId);
       // Rejection revokes only the exact still-current authority and only if no
       // later reservation exists. A delayed N response can never erase N+1.
       if (outcome === "rejected") {
@@ -553,7 +565,7 @@ export class WorkerBindingStore {
       if (prior.execution_generation_id !== input.fromExecutionGenerationId) throw new Error("Worker binding generation rollover does not match its terminal predecessor.");
       const epoch = this.readBindingEpoch(database, input.entryId);
       const effective = Math.max(Date.now(), prior.last_observed_at_ms + 1); const sequence = Math.max(prior.last_sequence + 1, effective); const observedAt = new Date(effective).toISOString(); const id = randomUUID();
-      run(database.prepare("UPDATE worker_session_bindings SET last_sequence=?, last_observed_at_ms=?, updated_at=? WHERE entry_id=? AND binding_epoch=?"), sequence, effective, observedAt, input.entryId, epoch);
+      run(this.reads.get(database, "advanceBinding"),sequence, effective, observedAt, input.entryId, epoch);
       this.upsertWatermark(database, input.entryId, epoch, sequence, effective, observedAt);
       run(database.prepare("INSERT INTO worker_generation_verifications (reservation_id, entry_id, binding_epoch, from_execution_generation_id, to_execution_generation_id, agent_session_id, sequence, observed_at, observed_at_ms, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?)"), id, input.entryId, epoch, input.fromExecutionGenerationId, input.toExecutionGenerationId, input.agentSessionId, sequence, observedAt, effective, observedAt);
       return { kind: "reserved", reservation: { reservationId: id, binding: { ...prior, last_sequence: sequence, last_observed_at_ms: effective, updated_at: observedAt }, bindingEpoch: epoch, sequence, observedAt, observedAtMs: effective } };
@@ -603,15 +615,11 @@ export class WorkerBindingStore {
   private read(database: DatabaseSync, entryId: string): WorkerSessionBinding | null { const row = this.reads.get(database, "binding").get(entryId) as Row | undefined; return row ? rowToBinding(row) : null; }
   private readBindingEpoch(database: DatabaseSync, entryId: string): number { return Number((this.reads.get(database, "epoch").get(entryId) as Row).binding_epoch); }
   private readWatermark(database: DatabaseSync, entryId: string): { binding_epoch: number; last_sequence: number; last_observed_at_ms: number } | null {
-    const row = database.prepare("SELECT binding_epoch, last_sequence, last_observed_at_ms FROM worker_binding_watermarks WHERE entry_id=?").get(entryId) as Row | undefined;
+    const row = this.reads.get(database, "watermark").get(entryId) as Row | undefined;
     return row ? { binding_epoch: Number(row.binding_epoch), last_sequence: Number(row.last_sequence), last_observed_at_ms: Number(row.last_observed_at_ms) } : null;
   }
   private upsertWatermark(database: DatabaseSync, entryId: string, bindingEpoch: number, lastSequence: number, lastObservedAtMs: number, updatedAt: string): void {
-    run(database.prepare(`INSERT INTO worker_binding_watermarks (entry_id, binding_epoch, last_sequence, last_observed_at_ms, updated_at) VALUES (?, ?, ?, ?, ?)
-      ON CONFLICT(entry_id) DO UPDATE SET binding_epoch=MAX(worker_binding_watermarks.binding_epoch, excluded.binding_epoch),
-        last_sequence=MAX(worker_binding_watermarks.last_sequence, excluded.last_sequence),
-        last_observed_at_ms=MAX(worker_binding_watermarks.last_observed_at_ms, excluded.last_observed_at_ms),
-        updated_at=CASE WHEN excluded.last_observed_at_ms >= worker_binding_watermarks.last_observed_at_ms THEN excluded.updated_at ELSE worker_binding_watermarks.updated_at END`), entryId, bindingEpoch, lastSequence, lastObservedAtMs, updatedAt);
+    run(this.reads.get(database, "upsertWatermark"), entryId, bindingEpoch, lastSequence, lastObservedAtMs, updatedAt);
   }
   private readSupervisedWorkerMintState(database: DatabaseSync, agentId: string): SupervisedWorkerMintState | null {
     const row = database.prepare("SELECT * FROM supervised_worker_mint_states WHERE agent_id=?").get(agentId) as Row | undefined;
@@ -624,7 +632,23 @@ export class WorkerBindingStore {
     } : null;
   }
   private validate(input: WorkerSessionBindingInput): void { for (const field of ["entry_id", "room_id", "work_attempt_id", "execution_generation_id", "agent_session_id", "agent_session_token", "api_url"] as const) if (!input[field]?.trim()) throw new Error(`Worker binding ${field} is required.`); if (input.credential_ref !== undefined && !input.credential_ref.trim()) throw new Error("Worker binding credential_ref is required when supplied."); const url = new URL(input.api_url); if (!isLocalRoomApi(input.api_url) && url.protocol !== "http:" && url.protocol !== "https:") throw new Error("Worker binding api_url must use HTTP or HTTPS."); }
-  private async withMutation<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> { const previous = this.mutations; let release!: () => void; this.mutations = new Promise((resolve) => { release = resolve; }); await previous; try { return await operation(await this.getDatabase()); } finally { release(); } }
+  private async withMutation<T>(operation: (database: DatabaseSync) => Promise<T>): Promise<T> {
+    const timing = new RoomLatencyTrace("worker_binding_store");
+    const previous = this.mutations;
+    let release!: () => void;
+    this.mutations = new Promise((resolve) => { release = resolve; });
+    await previous;
+    timing.mark("queue_wait");
+    try {
+      const database = await this.getDatabase();
+      timing.mark("database");
+      return await operation(database);
+    } finally {
+      release();
+      timing.mark("operation");
+      timing.finish();
+    }
+  }
   private async transaction<T>(database: DatabaseSync, operation: () => T, notification?: DaemonCommitNotification): Promise<T> {
     let open = false; let committed = false; let result!: T;
     const commit = async () => {
@@ -792,7 +816,7 @@ export class WorkerBindingStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
       throw error;
     }
-    await chmod(backup, 0o600);
+    await protectOwnerPrivate(backup, "file");
     if (isRedactedLegacyBackup(raw, expectedChecksum)) return true;
     // Builds before the SQLite credential-custody hardening retained the
     // exact imported v1 JSON as their migration backup. Its checksum is the
@@ -818,6 +842,7 @@ export class WorkerBindingStore {
     let handle: Awaited<ReturnType<typeof open>> | null = null;
     try {
       handle = await open(temporary, "wx", 0o600);
+      await privateEntryCreated(temporary, "file");
       await handle.writeFile(redactedLegacyBackup(raw, expectedChecksum), "utf8");
       await handle.sync();
     } finally { await handle?.close(); }
@@ -832,8 +857,25 @@ export class WorkerBindingStore {
       if (checksumOf(current) !== expectedChecksum) {
         throw new Error("Legacy worker binding migration integrity error: migrated backup changed during redaction.");
       }
-      await rename(temporary, backup);
-      await chmod(backup, 0o600);
+      // Windows refuses to replace a file another opener is reading or replacing at the same moment (EPERM,
+      // EBUSY). Try again briefly; an opener that won meanwhile has installed the identical redacted proof.
+      for (let attempt = 0; ; attempt += 1) {
+        // Checked again right before each try: what the last look saw may have changed during the wait.
+        if (attempt > 0) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          const raced = await this.readOwnerOnly(backup);
+          if (raced === undefined) throw new Error("Legacy worker binding migration integrity error: exact backup disappeared during redaction.");
+          if (isRedactedLegacyBackup(raced, expectedChecksum)) return;
+          if (checksumOf(raced) !== expectedChecksum) {
+            throw new Error("Legacy worker binding migration integrity error: migrated backup changed during redaction.");
+          }
+        }
+        try { await rename(temporary, backup); break; } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (process.platform !== "win32" || !["EPERM", "EBUSY", "EACCES"].includes(code ?? "") || attempt >= 20) throw error;
+        }
+      }
+      await protectOwnerPrivate(backup, "file");
       await this.syncDirectory(dirname(backup));
       const converted = await this.readOwnerOnly(backup);
       if (converted === undefined || !isRedactedLegacyBackup(converted, expectedChecksum)) {
@@ -850,6 +892,7 @@ export class WorkerBindingStore {
     let handle: Awaited<ReturnType<typeof open>> | null = null;
     try {
       handle = await open(temporary, "wx", 0o600);
+      await privateEntryCreated(temporary, "file");
       // Recovery evidence proves the exact imported source without retaining
       // its bearer token in a second filesystem artifact.
       await handle.writeFile(redactedLegacyBackup(raw, expectedChecksum), "utf8");
@@ -872,9 +915,9 @@ export class WorkerBindingStore {
 
   private async readOwnerOnly(path: string): Promise<string | undefined> {
     try {
-      await chmod(path, 0o600);
+      await protectOwnerPrivate(path, "file");
       const raw = await readFile(path, "utf8");
-      await chmod(path, 0o600);
+      await protectOwnerPrivate(path, "file");
       return raw;
     } catch (error: unknown) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -893,7 +936,7 @@ export class WorkerBindingStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
-    await chmod(holding, 0o600);
+    await protectOwnerPrivate(holding, "file");
     await this.syncDirectory(dirname(holding));
     return holding;
   }
@@ -934,7 +977,7 @@ export class WorkerBindingStore {
     const evidence = await this.collectClaimedEvidence(true);
     const expectedPrefix = /\.corrupt\.([0-9a-f]{16})$/.exec(quarantine)?.[1];
     for (const claimed of evidence) await this.moveClaimedToQuarantine(claimed, quarantine, expectedPrefix);
-    await chmod(quarantine, 0o600).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+    await protectOwnerPrivate(quarantine, "file").catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
   }
 
   private async collectClaimedEvidence(includePublic: boolean): Promise<string[]> {
@@ -981,7 +1024,7 @@ export class WorkerBindingStore {
       // link(2) is no-replace: a concurrent B remains at source and A stays
       // claimed for later recovery instead of being silently overwritten.
       await link(claimed, this.legacyJsonPath);
-      await chmod(this.legacyJsonPath, 0o600);
+      await protectOwnerPrivate(this.legacyJsonPath, "file");
       await unlink(claimed);
       await this.syncDirectory(dirname(claimed));
     } catch (error: unknown) {
@@ -997,7 +1040,7 @@ export class WorkerBindingStore {
         // hard-link + unlink is an exclusive move: no pre-existing artifact
         // is overwritten, even under simultaneous openers.
         await link(path, destination);
-        await chmod(destination, 0o600);
+        await protectOwnerPrivate(destination, "file");
         await unlink(path);
         await this.syncDirectory(dirname(destination));
         return destination;
@@ -1009,9 +1052,11 @@ export class WorkerBindingStore {
   }
 
   private async chmodIfPresent(path: string): Promise<void> {
-    await chmod(path, 0o600).catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
+    await protectOwnerPrivate(path, "file").catch((error: unknown) => { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; });
   }
   private async syncDirectory(path: string): Promise<void> {
+    // Windows cannot fsync a folder handle; NTFS journals the rename itself.
+    if (ownerPrivatePlatform() === "win32") return;
     const handle = await open(path, "r");
     try { await handle.sync(); } finally { await handle.close(); }
   }
@@ -1047,7 +1092,7 @@ export class WorkerBindingStore {
     const adopted = `${this.legacyJsonPath}.claimed.recovered.${randomUUID()}`;
     try { await rename(claimed, adopted); }
     catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("Legacy worker binding orphan claim disappeared during recovery."); throw error; }
-    await chmod(adopted, 0o600);
+    await protectOwnerPrivate(adopted, "file");
     await this.syncDirectory(dirname(adopted));
     return adopted;
   }

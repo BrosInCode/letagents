@@ -1,3 +1,5 @@
+import { findTaskByTicketKeys } from "../../connectors/key-task-resolution.js";
+import { getDefaultTrackerSync } from "../../connectors/sync.js";
 import {
   findTaskByPrUrl,
   findTaskByWorkflowArtifactMatches,
@@ -49,4 +51,11 @@ export const { resolveLinkedTaskForRepoRoomEvent } = createRepoRoomEventTaskReso
     return undefined;
   },
   getTaskById,
+  // A ticket the event names is imported when the room's filters allow it.
+  findTaskByTicketKeys: (projectId, inputs) => {
+    const sync = getDefaultTrackerSync();
+    return findTaskByTicketKeys(projectId, inputs, sync
+      ? { importTicket: (roomId, matches) => sync.importTicketForRoom(roomId, matches) }
+      : {});
+  },
 });

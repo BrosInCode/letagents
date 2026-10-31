@@ -19,6 +19,9 @@ import {
   type AuthenticatedRequest,
 } from "../http/helpers.js";
 import { resolveRequestAuth } from "../request/auth.js";
+import { isRepoBackedRoomId } from "./room-ids.js";
+
+export { isRepoBackedRoomId };
 
 export type RoomAccessAccount = Pick<
   SessionAccount | OwnerTokenAccount,
@@ -52,10 +55,6 @@ export interface ProjectRepoAccessDeps {
     freshCollaboratorCheck?: boolean;
     throwOnIndeterminate?: boolean;
   }): Promise<RepoRoomAccessDecision>;
-}
-
-export function isRepoBackedRoomId(roomId: string): boolean {
-  return /^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(roomId);
 }
 
 export function getProjectAccessRoomId(project: Project): string {
@@ -127,7 +126,7 @@ export async function resolveProjectRepoAccessTarget(
   return null;
 }
 
-export function getPublicBaseUrl(): string {
+function getPublicBaseUrl(): string {
   const configuredBaseUrl = process.env.LETAGENTS_BASE_URL || process.env.PUBLIC_API_URL;
   if (configuredBaseUrl?.trim()) {
     return configuredBaseUrl.replace(/\/+$/, "");
@@ -136,7 +135,7 @@ export function getPublicBaseUrl(): string {
   return `http://localhost:${process.env.PORT || "3001"}`;
 }
 
-export function buildDeviceFlowUrl(roomName: string): string {
+function buildDeviceFlowUrl(roomName: string): string {
   const url = new URL("/auth/device/start", `${getPublicBaseUrl()}/`);
   url.searchParams.set("room_id", roomName);
   return url.toString();
@@ -407,6 +406,17 @@ export async function requireGitRoomParticipant(
 }
 
 /**
+ * True when the entry check of this same request already made the exact
+ * decision the live recheck would make now. Rooms without a repository use no
+ * visibility or collaborator cache: the request middleware resolved the
+ * credential moments ago and anonymous readers are admitted as they are, so
+ * the first live body needs no second database read.
+ */
+export function liveRecheckIsFreshAtEntry(req: AuthenticatedRequest): boolean {
+  return requestUsesRepoAuthorization.get(req) === false;
+}
+
+/**
  * Re-resolves the exact bearer/cookie and bypasses collaborator caches for a
  * live delivery lease. It has no Response side effects, so it is safe after
  * SSE headers have already been committed.
@@ -415,8 +425,22 @@ export async function reauthorizeGitRoomParticipant(
   req: AuthenticatedRequest,
   project: Project,
 ): Promise<boolean> {
-  if (requestUsesRepoAuthorization.get(req) === false) return true;
+  const humanCredential = req.authKind === "session" || req.authKind === "owner_token";
+  // Unset for worker bearers and for routes that never ran the entry check.
+  const mayUseRepoAuthorization = requestUsesRepoAuthorization.get(req) !== false;
+  // Public and ad-hoc rooms admit anonymous readers, so an anonymous entry has
+  // nothing to re-resolve there. A human credential presented at entry must
+  // still name the same account: a session or owner token revoked after entry
+  // must not keep an open stream alive by degrading to that anonymous access.
+  if (!mayUseRepoAuthorization && !humanCredential) return true;
   const fresh = await resolveRequestAuth(req);
+  if (
+    humanCredential
+    && (fresh.authKind !== req.authKind || fresh.account?.account_id !== req.sessionAccount?.account_id)
+  ) {
+    return false;
+  }
+  if (!mayUseRepoAuthorization) return true;
   if (fresh.authKind === "agent_session") {
     return fresh.agentSession?.room_id === project.id;
   }

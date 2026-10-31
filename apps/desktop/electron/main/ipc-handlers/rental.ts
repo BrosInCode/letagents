@@ -19,6 +19,7 @@ import { apiUrl } from "../paths.js";
 import { emitRoomStreamEvent, getActiveRoomIdentifier } from "../room-stream.js";
 import { supervisorDaemonClient } from "../supervisor-daemon.js";
 import { emitToMainWindow } from "../window.js";
+import { supervisedAgentsSupported } from "../platform-capabilities.js";
 
 export function registerDesktopRentalDomainIpcHandlers(targetIpcMain: IpcMain): () => void {
   const renterTriggerRuntime = new RenterTriggerRuntime({
@@ -63,7 +64,11 @@ export function registerDesktopRentalDomainIpcHandlers(targetIpcMain: IpcMain): 
       else await rentalProviderEventPoller.stop();
     },
   );
+  // Lending and renting agents run them under the supervisor. Where agents are
+  // unsupported, every rental channel answers the existing { enabled: false }.
+  const rentalSupported = supervisedAgentsSupported();
   registerDesktopRentalIpcHandlers(targetIpcMain, {
+    enabled: rentalSupported ? undefined : false,
     renterTriggerRuntime,
     apiClient: rentalApiClient,
     launchCoordinator: rentalLaunchCoordinator,
@@ -71,7 +76,7 @@ export function registerDesktopRentalDomainIpcHandlers(targetIpcMain: IpcMain): 
   });
   let started = false;
   return () => {
-    if (started) return;
+    if (started || !rentalSupported) return;
     started = true;
     void rentalLaunchCoordinator.recover().catch((error) => {
       console.warn(`Rental launch recovery unavailable: ${error instanceof Error ? error.message : String(error)}`);

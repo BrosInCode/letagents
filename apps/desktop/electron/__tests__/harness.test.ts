@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
@@ -55,4 +57,41 @@ test("createElectronTestEnv supports extra env files and cleanup keys", () => {
   assert.equal(process.env.LETAGENTS_AGENT_ATTACHMENTS_DIR, undefined);
   assert.equal(process.env.LETAGENTS_CURSOR_SOURCE_HOME, undefined);
   assert.equal(process.env.LETAGENTS_STATE_PATH, undefined);
+});
+
+test("createElectronTestEnv points HOME at a folder inside its temp directory", () => {
+  const env = createElectronTestEnv({
+    prefix: "letagents-harness-home-",
+    paths: [],
+    autoCleanup: false,
+  });
+
+  try {
+    assert.equal(env.homeDir, join(env.tempDir, "home"));
+    assert.equal(process.env.HOME, env.homeDir);
+    assert.equal(homedir(), env.homeDir);
+    assert.ok(existsSync(env.homeDir!));
+  } finally {
+    env.cleanup();
+  }
+
+  assert.equal(existsSync(env.tempDir), false, "the scratch home goes with the temp directory");
+});
+
+test("createElectronTestEnv leaves HOME alone when isolateHome is false", () => {
+  const before = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  const env = createElectronTestEnv({
+    prefix: "letagents-harness-nohome-",
+    paths: [],
+    isolateHome: false,
+    autoCleanup: false,
+  });
+
+  try {
+    assert.equal(env.homeDir, null);
+    assert.equal(process.env.HOME, before.HOME);
+    assert.equal(process.env.USERPROFILE, before.USERPROFILE);
+  } finally {
+    env.cleanup();
+  }
 });

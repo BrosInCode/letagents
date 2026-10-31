@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, statSync, watch, type FSWatcher } from "node:fs";
+import { existsSync, lstatSync, readdirSync, statSync, watch, type FSWatcher } from "node:fs";
 import { join, resolve } from "node:path";
 
 import type { RepoStatus } from "../ipc-types.js";
@@ -18,12 +18,35 @@ import { emitToMainWindow, getMainWindow } from "./window.js";
 
 const repoStatusReconciliationMs = 60_000;
 const repoStatusChangeDebounceMs = 250;
+/**
+ * The reconciliation tick is a cheap `git status` (which itself promotes to a
+ * HEAD/ref refresh when the commit, branch or upstream moved). It becomes a
+ * full rebuild when repository metadata changed since the previous tick
+ * (HEAD, packed-refs, config, the worktrees directory or the `.git` entry),
+ * and unconditionally every tenth tick as a backstop for anything else.
+ */
+const repoStatusFullReconciliationEveryTicks = 10;
+/**
+ * Directory names that are worth asking Git about. An event below one of
+ * these, or below any top-level directory, is dropped when Git ignores that
+ * directory (for example node_modules or dist rewrites during a build).
+ */
+const commonGeneratedDirectoryNames = new Set([
+  "node_modules", "dist", "build", "out", "target", "coverage", ".next", ".nuxt",
+  ".turbo", ".cache", ".vite", ".parcel-cache", ".venv", "__pycache__", "tmp",
+]);
+const ignoredDirectoryCacheLimit = 512;
 
 type RepoStatusWatchHooks = {
   buildRepoStatus: typeof buildRepoStatus;
   refreshRepoStatus: typeof refreshRepoStatus;
   emitToMainWindow: typeof emitToMainWindow;
   getMainWindow: () => RepoStatusWatchWindowState | null;
+  /** Resolves true when Git ignores the directory (relative to the root). */
+  isIgnoredDirectory: (rootPath: string, relativeDirectory: string) => Promise<boolean>;
+  /** The file-system watch, and the platform whose events it reports. */
+  watch: typeof watch;
+  platform: NodeJS.Platform;
 };
 
 type RepoStatusWatchTarget = {
@@ -52,13 +75,31 @@ type ActiveRepoStatusWatch = {
   lastStatusFingerprint: string | null;
   windowState: RepoStatusWatchWindowState | null;
   windowResumeListener: (() => void) | null;
+  metadataPaths: string[];
+  metadataFingerprint: string | null;
+  ticksSinceFullReconciliation: number;
+  ignoredDirectories: Map<string, Promise<boolean>>;
 };
+
+async function gitIgnoresDirectory(rootPath: string, relativeDirectory: string): Promise<boolean> {
+  try {
+    // The trailing slash asks about the directory even after it was deleted.
+    // Exit 0 = ignored, 1 = not ignored; any failure keeps the event.
+    await runGitStdout(rootPath, ["check-ignore", "-q", "--", `${relativeDirectory}/`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const defaultRepoStatusWatchHooks: RepoStatusWatchHooks = {
   buildRepoStatus,
   refreshRepoStatus,
   emitToMainWindow,
   getMainWindow,
+  isIgnoredDirectory: gitIgnoresDirectory,
+  watch,
+  platform: process.platform,
 };
 
 let repoStatusWatchHooks = defaultRepoStatusWatchHooks;
@@ -82,7 +123,7 @@ export async function startRepoStatusWatch(rootPath: string): Promise<RepoStatus
     abortController.signal.throwIfAborted();
     if (requestId !== watchRequestId) return status;
 
-    const watchTargets = await repoStatusWatchTargets(status, abortController.signal);
+    const { targets: watchTargets, metadataPaths } = await repoStatusWatchTargets(status, abortController.signal);
     abortController.signal.throwIfAborted();
     if (requestId !== watchRequestId) return status;
 
@@ -103,6 +144,10 @@ export async function startRepoStatusWatch(rootPath: string): Promise<RepoStatus
       lastStatusFingerprint: repoStatusWatchFingerprint(status),
       windowState: repoStatusWatchHooks.getMainWindow(),
       windowResumeListener: null,
+      metadataPaths,
+      metadataFingerprint: repoMetadataFingerprint(metadataPaths),
+      ticksSinceFullReconciliation: 0,
+      ignoredDirectories: new Map(),
     };
     activeWatch = watchState;
     handedOff = true;
@@ -113,7 +158,7 @@ export async function startRepoStatusWatch(rootPath: string): Promise<RepoStatus
     watchState.watchers = openWatchers(watchTargets, watchState);
     attachWindowResumeListener(watchState);
     watchState.intervalTimer = setInterval(() => {
-      void requestRepoStatusRefresh(watchState, { full: true }, false);
+      void requestRepoStatusRefresh(watchState, reconciliationInvalidation(watchState), false);
     }, repoStatusReconciliationMs);
 
     // Listener installation is the race boundary. A full rebuild is intentional
@@ -131,6 +176,51 @@ export async function startRepoStatusWatch(rootPath: string): Promise<RepoStatus
     }
     if (!handedOff) abortController.abort();
   }
+}
+
+function reconciliationInvalidation(watchState: ActiveRepoStatusWatch): RepoStatusInvalidation {
+  const fingerprint = repoMetadataFingerprint(watchState.metadataPaths);
+  const metadataChanged = fingerprint !== watchState.metadataFingerprint;
+  watchState.metadataFingerprint = fingerprint;
+  watchState.ticksSinceFullReconciliation += 1;
+  if (
+    metadataChanged
+    || watchState.ticksSinceFullReconciliation >= repoStatusFullReconciliationEveryTicks
+  ) {
+    watchState.ticksSinceFullReconciliation = 0;
+    return { full: true };
+  }
+  return { status: true };
+}
+
+function fileSignature(path: string): string | null {
+  try {
+    const info = lstatSync(path, { bigint: true });
+    return [info.dev, info.ino, info.size, info.mtimeNs, info.ctimeNs].join(":");
+  } catch {
+    return null;
+  }
+}
+
+/** Cheap identity of the metadata a full rebuild depends on (no Git spawn). */
+function repoMetadataFingerprint(paths: readonly string[]): string {
+  return paths.map((path) => {
+    try {
+      const info = lstatSync(path, { bigint: true });
+      return [info.dev, info.ino, info.mode, info.size, info.mtimeNs, info.ctimeNs].join(":");
+    } catch {
+      return "-";
+    }
+  }).join("|");
+}
+
+/** Test-only: run one reconciliation tick now. */
+export async function runRepoStatusReconciliationTickForTest(): Promise<RepoStatusInvalidation | null> {
+  const watchState = activeWatch;
+  if (!watchState) return null;
+  const invalidation = reconciliationInvalidation(watchState);
+  await requestRepoStatusRefresh(watchState, invalidation, false);
+  return invalidation;
 }
 
 export function stopRepoStatusWatch(): void {
@@ -217,21 +307,45 @@ function openWatchers(
   watchState: ActiveRepoStatusWatch,
 ): FSWatcher[] {
   const watchers: FSWatcher[] = [];
+  // Last seen metadata of each watched file, taken when its watcher opens.
+  const fileSignatures = new Map<string, string | null>();
   for (const target of targets) {
+    if (target.reopenOnRename) fileSignatures.set(target.path, fileSignature(target.path));
     try {
       const listener = (eventType: string, filename: string | Buffer | null) => {
+        if (isWindowsFolderChangeEcho(target, eventType, filename, repoStatusWatchHooks.platform)) return;
         const invalidation = classifyWatchEvent(target, filename);
         if (!invalidation) return;
+        if (target.reopenOnRename && eventType !== "rename") {
+          // macOS reports a "change" on .git/index whenever `git status` reads
+          // it, without any write. Without this check every status refresh
+          // triggered the next one, about four git spawns a second forever.
+          const signature = fileSignature(target.path);
+          if (signature !== null && signature === fileSignatures.get(target.path)) return;
+          fileSignatures.set(target.path, signature);
+        }
         if (eventType === "rename" && target.reopenOnRename) {
           // File targets may be atomically replaced. Re-open descriptors after
           // the resulting refresh so the watcher follows the new inode.
           watchState.watchersNeedReopen = true;
         }
+        const ignoredCandidates = target.workingTree && !invalidation.static && !invalidation.full
+          ? ignoredDirectoryCandidates(filename)
+          : [];
+        if (ignoredCandidates === null) {
+          // A changed .gitignore can change every answer below.
+          watchState.ignoredDirectories.clear();
+        } else if (ignoredCandidates.length) {
+          void anyIgnoredDirectory(watchState, target.path, ignoredCandidates).then((ignored) => {
+            if (!ignored) void requestRepoStatusRefresh(watchState, invalidation, true);
+          });
+          return;
+        }
         void requestRepoStatusRefresh(watchState, invalidation, true);
       };
       let watcher: FSWatcher;
       try {
-        watcher = watch(
+        watcher = repoStatusWatchHooks.watch(
           target.path,
           { persistent: false, recursive: target.recursive },
           listener,
@@ -240,7 +354,7 @@ function openWatchers(
         if (!target.recursive) throw error;
         // Older runtimes/platforms may not support recursive watching. Keep a
         // direct watcher and let the reconciliation pass cover nested misses.
-        watcher = watch(target.path, { persistent: false }, listener);
+        watcher = repoStatusWatchHooks.watch(target.path, { persistent: false }, listener);
       }
       watcher.on("error", () => {
         watchState.watchersNeedReopen = true;
@@ -253,6 +367,81 @@ function openWatchers(
     }
   }
   return watchers;
+}
+
+/**
+ * Directories that may hide this working-tree event: the top-level directory
+ * and any common generated directory on the path. Returns null for a
+ * .gitignore change (which resets the answers), [] when nothing applies.
+ */
+function ignoredDirectoryCandidates(filename: string | Buffer | null): string[] | null {
+  if (filename === null) return [];
+  const segments = String(filename).replaceAll("\\", "/").split("/").filter(Boolean);
+  if (segments.at(-1) === ".gitignore") return null;
+  if (segments.length < 2) return [];
+  const candidates = [segments[0]!];
+  for (let index = 1; index < segments.length - 1; index += 1) {
+    if (commonGeneratedDirectoryNames.has(segments[index]!)) {
+      candidates.push(segments.slice(0, index + 1).join("/"));
+    }
+  }
+  return candidates;
+}
+
+async function anyIgnoredDirectory(
+  watchState: ActiveRepoStatusWatch,
+  rootPath: string,
+  candidates: readonly string[],
+): Promise<boolean> {
+  const answers = candidates.map((candidate) => {
+    let answer = watchState.ignoredDirectories.get(candidate);
+    if (!answer) {
+      if (watchState.ignoredDirectories.size >= ignoredDirectoryCacheLimit) {
+        watchState.ignoredDirectories.clear();
+      }
+      answer = repoStatusWatchHooks.isIgnoredDirectory(rootPath, candidate).catch(() => false);
+      watchState.ignoredDirectories.set(candidate, answer);
+    }
+    return answer;
+  });
+  return (await Promise.all(answers)).some(Boolean);
+}
+
+export function ignoredDirectoryCandidatesForTest(filename: string | null): string[] | null {
+  return ignoredDirectoryCandidates(filename);
+}
+
+/**
+ * Windows reports a "change" on a folder when an entry inside it is added,
+ * removed or renamed (and, where last-access updates are on, read), even to a
+ * non-recursive watcher of the folder above. Such an echo carries nothing:
+ * where the entry itself is watched it arrives as its own event, and adding
+ * or removing the folder arrives as "rename". Without this check a write in a
+ * linked worktree's metadata folder reached the `worktrees` watcher as a ref
+ * and worktree change, and a folder below the working tree reached the
+ * working-tree watcher as an unignored top-level event. Only one-segment
+ * names are looked at: a deeper folder echo already maps to an ignored folder
+ * or to the same invalidation as the event inside it, and this keeps the stat
+ * off the hot path. A worktree folder whose HEAD appears after the targets
+ * were listed waits for the full reconciliation tick. Git directory watchers are
+ * left alone: they classify each entry by its name. Other platforms report no
+ * such echo, and their events are not inspected here.
+ */
+function isWindowsFolderChangeEcho(
+  target: RepoStatusWatchTarget,
+  eventType: string,
+  filename: string | Buffer | null,
+  platform: NodeJS.Platform,
+): boolean {
+  if (platform !== "win32" || eventType !== "change" || filename === null) return false;
+  if (target.reopenOnRename || target.gitDirectory) return false;
+  const name = String(filename);
+  if (/[\\/]/.test(name)) return false;
+  try {
+    return lstatSync(join(target.path, name)).isDirectory();
+  } catch {
+    return false;
+  }
 }
 
 function classifyWatchEvent(
@@ -436,13 +625,18 @@ async function performRepoStatusRefresh(
   ).catch(() => null);
   if (!status || activeWatch !== watchState) return;
   watchState.status = status;
+  // Ignore rules may live in .git/info/exclude or core.excludesFile, which no
+  // working-tree event reports; every full rebuild asks Git afresh.
+  if (invalidation.full) watchState.ignoredDirectories.clear();
 
   if (shouldRefreshWatchTargets(invalidation) || watchState.watchersNeedReopen) {
-    const nextWatchTargets = await repoStatusWatchTargets(
+    const { targets: nextWatchTargets, metadataPaths } = await repoStatusWatchTargets(
       status,
       watchState.abortController.signal,
     );
     if (activeWatch !== watchState) return;
+    watchState.metadataPaths = metadataPaths;
+    watchState.metadataFingerprint = repoMetadataFingerprint(metadataPaths);
     const nextWatchTargetsKey = repoStatusWatchTargetsKey(nextWatchTargets);
     if (watchState.watchersNeedReopen || nextWatchTargetsKey !== watchState.watchTargetsKey) {
       closeWatchers(watchState);
@@ -471,8 +665,8 @@ function shouldRefreshWatchTargets(invalidation: RepoStatusInvalidation): boolea
 async function repoStatusWatchTargets(
   status: RepoStatus,
   signal: AbortSignal,
-): Promise<RepoStatusWatchTarget[]> {
-  if (!status.isGitRepo || !status.rootPath) return [];
+): Promise<{ targets: RepoStatusWatchTarget[]; metadataPaths: string[] }> {
+  if (!status.isGitRepo || !status.rootPath) return { targets: [], metadataPaths: [] };
   const [
     indexPath,
     packedRefsPath,
@@ -497,8 +691,15 @@ async function repoStatusWatchTargets(
     status.upstream ? gitPath(status.rootPath, `refs/remotes/${status.upstream}`, signal) : null,
   ]);
   const linkedWorktreeMetadataTargets = worktreeMetadataTargets(worktreesPath);
+  const metadataPaths = [
+    join(status.rootPath, ".git"),
+    status.gitHeadPath,
+    packedRefsPath,
+    configPath,
+    worktreesPath,
+  ].filter((path): path is string => Boolean(path)).map((path) => resolve(path));
 
-  return coalesceWatchTargets([
+  const targets = coalesceWatchTargets([
     watchTarget(status.rootPath, true, { status: true }, { workingTree: true }),
     watchTarget(status.gitHeadPath, false, { head: true }),
     watchTarget(indexPath, false, { status: true }),
@@ -528,6 +729,7 @@ async function repoStatusWatchTargets(
       watchTarget(path, false, invalidation)
     )),
   ]);
+  return { targets, metadataPaths };
 }
 
 function watchTarget(

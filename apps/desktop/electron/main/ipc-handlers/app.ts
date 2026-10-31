@@ -13,23 +13,33 @@ import type {
   DesktopAppInfo,
   DesktopOpenModelSaveSettingsInput,
   DesktopOpenModelSettingsStatus,
+  DesktopAgentCommitIdentitySettings,
   DesktopUpdateStatus,
 } from "../../ipc-types.js";
 import { getAppAgentSettingsStatus, saveAppAgentSettings } from "../app-agent/settings.js";
 import { listDesktopAppAgentActions, runDesktopAppAgent } from "../app-agent/runner.js";
 import { getOpenModelSettingsStatus, saveOpenModelSettings } from "../agents/open-model-settings.js";
+import {
+  getManagedAgentCommitIdentitySettings,
+  setManagedAgentCommitUsesHostIdentity,
+} from "../agents/managed-agent-commit-identity.js";
 import { openDesktopCredentialStorage } from "../credential-storage.js";
 import { openAllowedExternalUrl, openExternalWebUrl } from "../external-url.js";
 import { getGitHubPullRequestStats } from "../github-pr-stats.js";
 import {
   getDesktopNotificationStatus,
+  setDesktopNotificationBadgeCount,
   setDesktopNotificationsEnabled,
   takePendingDesktopNotificationActivation,
 } from "../notifications.js";
 import { apiUrl, workspaceRoot } from "../paths.js";
+import { supervisedAgentsSupported, type DesktopPlatformCapabilities } from "../platform-capabilities.js";
 import { desktopUpdater } from "../updates.js";
 
 const { app } = electron as typeof import("electron");
+
+/** `supervisedAgentsSupported` is false where agents cannot run. */
+type DesktopAppInfoWithCapabilities = DesktopAppInfo & Pick<DesktopPlatformCapabilities, "supervisedAgentsSupported">;
 
 const reviewSenders = new Set<number>();
 
@@ -64,10 +74,11 @@ export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
   });
   targetIpcMain.handle(
     "desktop:app:get-info",
-    async (): Promise<DesktopAppInfo> => ({
+    async (): Promise<DesktopAppInfoWithCapabilities> => ({
       appName: "LetAgents Desktop",
       appVersion: app.getVersion(),
       platform: process.platform,
+      supervisedAgentsSupported: supervisedAgentsSupported(),
       versions: {
         electron: process.versions.electron,
         chrome: process.versions.chrome,
@@ -90,6 +101,10 @@ export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
     "desktop:updates:install",
     async (): Promise<DesktopUpdateStatus> => desktopUpdater.install(),
   );
+  targetIpcMain.handle("desktop:notifications:set-badge-count", (event, count: unknown) => {
+    assertHostApprovalSender(event);
+    setDesktopNotificationBadgeCount(count);
+  });
   targetIpcMain.handle("desktop:notifications:get-status", async () => getDesktopNotificationStatus());
   targetIpcMain.handle(
     "desktop:notifications:set-enabled",
@@ -153,5 +168,14 @@ export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
       _event,
       input: DesktopOpenModelSaveSettingsInput,
     ): Promise<DesktopOpenModelSettingsStatus> => saveOpenModelSettings(input),
+  );
+  targetIpcMain.handle(
+    "desktop:agent-commit-identity:get-settings",
+    async (): Promise<DesktopAgentCommitIdentitySettings> => getManagedAgentCommitIdentitySettings(),
+  );
+  targetIpcMain.handle(
+    "desktop:agent-commit-identity:set-use-host-git-identity",
+    async (_event, useHostGitIdentity: unknown): Promise<DesktopAgentCommitIdentitySettings> =>
+      setManagedAgentCommitUsesHostIdentity(useHostGitIdentity === true),
   );
 }

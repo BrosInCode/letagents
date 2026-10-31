@@ -6,19 +6,15 @@ export function formatDisplayBytes(bytes: number): string {
 }
 
 export function attachmentName(attachment: DesktopRoomMessageAttachment): string {
-  return attachment.fileName || attachment.name || "attachment";
+  return attachment.fileName;
 }
 
 export function attachmentMimeType(attachment: DesktopRoomMessageAttachment): string {
-  return attachment.mimeType || "application/octet-stream";
+  return attachment.mimeType;
 }
 
 export function attachmentHref(attachment: DesktopRoomMessageAttachment): string {
-  if (attachment.url) return attachment.url;
-  if (attachment.downloadUrl) return attachment.downloadUrl;
-  if (attachment.dataUrl) return attachment.dataUrl;
-  if (attachment.contentBase64) return `data:${attachmentMimeType(attachment)};base64,${attachment.contentBase64}`;
-  return "#";
+  return attachment.href || "#";
 }
 
 export function attachmentKey(attachment: DesktopRoomMessageAttachment): string {
@@ -42,4 +38,24 @@ export function attachmentDisplayMeta(attachment: DesktopRoomMessageAttachment):
 
 export function isImageAttachment(attachment: DesktopRoomMessageAttachment): boolean {
   return attachmentMimeType(attachment).startsWith("image/") && attachmentHref(attachment) !== "#";
+}
+
+/**
+ * An HTML file opens as an interactive demo in its own locked window. Files
+ * agents attached before HTML had a type arrive as octet-stream, so the name decides.
+ */
+export function isHtmlDemoAttachment(attachment: DesktopRoomMessageAttachment): boolean {
+  const href = attachmentHref(attachment);
+  if (!href.startsWith("letagents-attachment://")) return false;
+  const mimeType = attachmentMimeType(attachment).toLowerCase();
+  return mimeType === "text/html"
+    || mimeType === "application/xhtml+xml"
+    || (mimeType === "application/octet-stream" && /\.html?$/i.test(attachmentName(attachment)));
+}
+
+/** Main's reason a demo did not open, without Electron's IPC wrapper. */
+export function htmlDemoErrorText(error: unknown): string {
+  const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+  const text = raw.replace(/^Error invoking remote method '[^']*':\s*/, "").replace(/^(?:[A-Za-z]*Error:\s*)+/, "").trim();
+  return text || "The demo could not open.";
 }

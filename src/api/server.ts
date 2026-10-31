@@ -3,12 +3,21 @@ import { createApiApp } from "./server/app.js";
 import { startRoomEventBridge, stopRoomEventBridge } from "./server/event-bridge.js";
 import { startLivenessSweep, stopLivenessSweep } from "./server/liveness.js";
 import { startJevRoutingWorker } from "./messages/jev-routing-worker.js";
+import { startRoomHistoryWorker } from "./history-summary/worker.js";
+import { startReplyTurnHoldSweep, stopReplyTurnHoldSweep } from "./server/reply-turn-holds.js";
+import { startAttachmentUploadCleanup, stopAttachmentUploadCleanup } from "./server/attachment-upload-cleanup.js";
+import { startLiveActivityCleanup, stopLiveActivityCleanup } from "./server/live-activity-cleanup.js";
 import { startDesktopPushWorker } from "./notifications/worker.js";
+import { startWakeRuleScheduler } from "./wake-rules/scheduler.js";
+import { startTrackerSyncWorker } from "./connectors/sync.js";
+import { githubRoomEvents, taskEvents, wakeRuleEvents } from "./server/events.js";
 import { assertMessageThreadProjectionReady } from "./db/messages/projection-readiness.js";
 import { closeApiRouteEventBroker } from "./server/routes.js";
 import { pool } from "./db/client.js";
 import { waitForSseCleanupDrain } from "./http/sse.js";
+import { releaseAgentProcessConnectionsForShutdown } from "./rooms/agent-process-connections.js";
 import { drainRoomAgentDeliveryLeases } from "./rooms/agent-delivery.js";
+import { settleReplyTurnWakes } from "./db/messages/reply-turns.js";
 import {
   closeHttpServerIntake,
   createGracefulShutdownController,
@@ -27,8 +36,19 @@ startRoomEventBridge();
 // Announces worker-agent deaths and recoveries into rooms. Started from the
 // server entry point only, so tests and embedders opt in explicitly.
 startLivenessSweep();
+// Releases sequential reply turns whose deadline passed (same opt-in rule).
+startReplyTurnHoldSweep();
+// Removes staged attachment uploads that expired unclaimed (same opt-in rule).
+startAttachmentUploadCleanup();
+// Removes live sessions whose agent stopped publishing (same opt-in rule).
+startLiveActivityCleanup();
 const stopDesktopPushWorker = startDesktopPushWorker();
 const stopJevRoutingWorker = startJevRoutingWorker();
+// Writes room history summaries when the server holds a summarizer key.
+const stopRoomHistoryWorker = startRoomHistoryWorker();
+const stopWakeRuleScheduler = startWakeRuleScheduler({ taskEvents, githubRoomEvents, wakeRuleEvents });
+// Polls room ticket filters; idle without a connector key or any filter.
+const stopTrackerSyncWorker = startTrackerSyncWorker();
 process.once("exit", closeApiRouteEventBroker);
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
@@ -47,13 +67,19 @@ const stopIntake = () => closeHttpServerIntake(server);
 const shutdown = createGracefulShutdownController({
   stopIntake,
   stopWorkers: async () => {
-    await Promise.all([stopLivenessSweep(), stopDesktopPushWorker(), stopJevRoutingWorker()]);
+    await Promise.all([stopLivenessSweep(), stopReplyTurnHoldSweep(), stopAttachmentUploadCleanup(), stopLiveActivityCleanup(), stopDesktopPushWorker(), stopJevRoutingWorker(), stopRoomHistoryWorker(), stopWakeRuleScheduler(), stopTrackerSyncWorker()]);
   },
   stopBridge: stopRoomEventBridge,
-  closeBroker: async () => { closeApiRouteEventBroker(); await closeConversationChanges(); },
+  closeBroker: async () => {
+    closeApiRouteEventBroker();
+    releaseAgentProcessConnectionsForShutdown();
+    await closeConversationChanges();
+  },
   drainConnections: async () => {
     await waitForSseCleanupDrain();
     await drainRoomAgentDeliveryLeases();
+    // Delivery drains can release reply turns; their wakes read the database.
+    await settleReplyTurnWakes();
   },
   closeDatabase: () => pool.end(),
   forceClose: () => server.closeAllConnections?.(),

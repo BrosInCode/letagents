@@ -1,3 +1,4 @@
+import type { RoomGif } from "../../../../../shared/room-expressions.mjs";
 import { shallowRef } from "vue";
 import type { DesktopRoomMessage } from "../../../electron/ipc-types";
 import { desktopIpc } from "../ipc/index.js";
@@ -10,6 +11,7 @@ interface OutgoingMessage {
   replyTo: string | null;
   threadRootId: string | null;
   attachments: Array<{ upload_id: string }>;
+  gif?: RoomGif | null;
   message: DesktopRoomMessage;
   inFlight: boolean;
   confirmed: boolean;
@@ -53,6 +55,7 @@ export function enqueueDesktopMessage(input: {
   replyTo: string | null;
   threadRootId: string | null;
   attachments: Array<{ upload_id: string }>;
+  gif?: RoomGif | null;
   replyPreview: DesktopRoomMessage["replyTo"];
   onConfirmed: (message: DesktopRoomMessage) => void;
 }): string {
@@ -66,6 +69,7 @@ export function enqueueDesktopMessage(input: {
     confirmed: false,
     message: {
       id, clientMessageId, sender: "You", text: input.text,
+      ...(input.gif ? { gif: input.gif } : {}),
       attachments: [], agentPromptKind: null, source: "browser",
       timestamp: new Date().toISOString(), actorLabel: null, agentIdentity: null,
       threadRootId: input.threadRootId || id, threadReplyToId: input.replyTo,
@@ -85,7 +89,7 @@ export async function retryDesktopOutgoingMessage(clientMessageId: string): Prom
   changed();
   try {
     const result = await desktopIpc.room.sendMessage(
-      entry.roomIdentifier, entry.text, entry.replyTo, entry.attachments, entry.threadRootId, entry.clientMessageId, entry.messageNamespace,
+      entry.roomIdentifier, entry.text, entry.replyTo, entry.attachments, entry.threadRootId, entry.clientMessageId, entry.messageNamespace, entry.gif,
     );
     // Sign-out or a stream acknowledgement may have removed the entry.
     if (!desktopMessageOutbox.value.includes(entry)) return;
@@ -102,4 +106,22 @@ export async function retryDesktopOutgoingMessage(clientMessageId: string): Prom
     entry.inFlight = false;
     changed();
   }
+}
+
+/** Only a known pre-commit refusal permits changing an accepted send. */
+export async function sendDesktopOutgoingWithoutGif(clientMessageId: string): Promise<void> {
+  const entry = desktopMessageOutbox.value.find(item => item.clientMessageId === clientMessageId);
+  if (!entry || entry.inFlight || entry.confirmed || !entry.gif || (!entry.text.trim() && !entry.attachments.length)
+    || !entry.message.outgoing?.error?.includes("expressions_disabled:")) return;
+  entry.gif = null;
+  entry.message = { ...entry.message, gif: null };
+  await retryDesktopOutgoingMessage(clientMessageId);
+}
+
+/** An explicitly refused GIF-only send is safe to discard; an uncertain send is not. */
+export function discardRefusedDesktopGif(clientMessageId: string): void {
+  desktopMessageOutbox.value = desktopMessageOutbox.value.filter(entry =>
+    entry.clientMessageId !== clientMessageId || entry.inFlight || entry.confirmed || !entry.gif
+    || Boolean(entry.text.trim()) || entry.attachments.length > 0
+    || !entry.message.outgoing?.error?.includes("expressions_disabled:"));
 }

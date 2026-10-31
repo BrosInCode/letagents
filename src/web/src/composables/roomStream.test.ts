@@ -58,7 +58,7 @@ function assertStreamUrl(
   assert.equal(url.searchParams.get('event_cursor'), eventCursor, message)
   assert.deepEqual(
     [...url.searchParams.keys()].sort(),
-    eventCursor ? ['event_cursor', 'stream_capability'] : ['stream_capability'],
+    eventCursor ? ['event_cursor', 'stream_capability', 'stream_capability'] : ['stream_capability', 'stream_capability'],
     message,
   )
 }
@@ -72,6 +72,7 @@ function assertStreamUrl(
 const { createRoomStream } = await import('./room/stream.js')
 const { lastMessageInfoInvalidation, invalidationCoversMessage } = await import('../components/room/messageInfoInvalidation.js')
 const { lastAgentApprovalInvalidation } = await import('./roomAgentApprovalInvalidation.js')
+const { lastWakeRuleInvalidation } = await import('./roomWakeRuleInvalidation.js')
 
 test('message-info null preserves room scope, refresh signaling, and the subscribed cursor without a gap', () => {
   let reconciles = 0
@@ -202,14 +203,77 @@ test('resource pointers negotiate once, advance inertly, and fail closed when ma
   lastAgentApprovalInvalidation.value = null
 })
 
-test('room stream forwards typed GitHub event invalidations', () => {
+test('wake-rule pointers re-read the room\'s rules, wait behind a gap snapshot, and follow a repair', async () => {
+  assert.equal(parseRoomResourceInvalidation({
+    room_id: 'room_wake', resource: 'wake_rules',
+  }).status, 'supported')
+
+  let releaseSnapshot!: () => void
+  const snapshotGate = new Promise<void>((resolve) => { releaseSnapshot = resolve })
+  let snapshotStarted = false
+  let renders = 0
+  const stream = createRoomStream({
+    setConnectionState: () => {},
+    setStreaming: () => {},
+    appendMessage: () => { renders += 1; return true },
+    onGitHubMessage: () => { renders += 1 },
+    onGitHubEvent: () => { renders += 1 },
+    onTaskLifecycleMessage: () => { renders += 1 },
+    onArtifactUpdate: () => { renders += 1 },
+    onAgentActivityMessage: () => { renders += 1 },
+    onParticipantActivityMessage: () => { renders += 1 },
+    upsertTask: () => { renders += 1 },
+    upsertReasoningSession: () => { renders += 1 },
+    removeReasoningSession: () => { renders += 1 },
+    getMessageCursor: () => null,
+    resyncMessages: async (_roomIdentifier, after) => ({ success: true, cursor: after }),
+    reconcileFullState: async () => {
+      snapshotStarted = true
+      await snapshotGate
+      return true
+    },
+  })
+
+  try {
+    stream.start('room_wake')
+    const source = FakeEventSource.instances.at(-1)!
+    source.dispatch(ROOM_RESOURCE_INVALIDATION_CAPABILITY, {
+      room_id: 'room_wake', resource: 'wake_rules',
+    }, 'broker_1')
+    assert.equal(lastWakeRuleInvalidation.value?.roomId, 'room_wake')
+    assert.equal(renders, 0, 'the pointer carries no content to render')
+    const afterPointer = lastWakeRuleInvalidation.value
+
+    source.dispatch('room_sync', { gap: true, event_cursor: 'broker_2' })
+    await waitFor(() => snapshotStarted)
+    source.dispatch(ROOM_RESOURCE_INVALIDATION_CAPABILITY, {
+      room_id: 'room_wake', resource: 'wake_rules',
+    }, 'broker_3')
+    assert.equal(lastWakeRuleInvalidation.value, afterPointer, 'a pointer over a gap waits for the repaired snapshot')
+
+    releaseSnapshot()
+    await waitFor(() => lastWakeRuleInvalidation.value !== afterPointer)
+    assert.equal(lastWakeRuleInvalidation.value?.roomId, 'room_wake', 'rules changed during the gap are re-read')
+
+    stream.stop()
+    stream.start('room_wake')
+    assertStreamUrl(FakeEventSource.instances.at(-1)!, 'room_wake', 'broker_3')
+  } finally {
+    stream.stop()
+    lastWakeRuleInvalidation.value = null
+  }
+})
+
+test('room stream forwards full GitHub updates without refetch and still accepts legacy invalidations', () => {
+  const githubPayloads: unknown[] = []
   const githubEventRooms: Array<string | null | undefined> = []
   const stream = createRoomStream({
     setConnectionState: () => {},
     setStreaming: () => {},
     appendMessage: () => true,
     onGitHubMessage: () => {},
-    onGitHubEvent: (roomIdentifier) => {
+    onGitHubEvent: (roomIdentifier, event) => {
+      githubPayloads.push(event)
       githubEventRooms.push(roomIdentifier)
     },
     onTaskLifecycleMessage: () => {},
@@ -237,7 +301,10 @@ test('room stream forwards typed GitHub event invalidations', () => {
     event_type: 'pull_request',
   })
 
-  assert.deepEqual(githubEventRooms, ['focus_27'])
+  const payload = {room_id:'focus_27',id:'job-update',event_type:'workflow_job',action:'in_progress',created_at:'2026-10-11T10:00:00Z',metadata:{run_id:'90',job_id:'19'}}
+  source.dispatch('github_event', payload)
+  assert.deepEqual(githubEventRooms, ['focus_27', 'focus_27'])
+  assert.deepEqual(githubPayloads, [undefined, payload])
   stream.stop()
   assert.equal(source.closed, true)
 })
@@ -698,3 +765,51 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     await new Promise<void>((resolve) => setImmediate(resolve))
   }
 }
+
+test('typing is immediate through bootstrap, cleared on stream failure, never advances durable cursors', async () => {
+  const { effectScope, ref } = await import('vue');
+  const { useAuth } = await import('./useAuth.js');
+  const { useRoomTyping } = await import('./roomTyping.js');
+  const previousWindow = (globalThis as any).window, previousFetch = globalThis.fetch;
+  (globalThis as any).window = { addEventListener() {}, removeEventListener() {}, localStorage: globalThis.localStorage };
+  globalThis.fetch = async () => new Response(JSON.stringify({ authenticated: true, account: { id: 'bea', login: 'bea' } }), { status: 200 });
+  const scope = effectScope();
+  await useAuth().checkSession();
+  const typing = scope.run(() => useRoomTyping(ref('typing-room')))!;
+  let messages = 0, repairs = 0;
+  const stream = createRoomStream({
+    setConnectionState() {}, setStreaming() {}, appendMessage() { messages++; return true },
+    onGitHubMessage() {}, onGitHubEvent() {}, onTaskLifecycleMessage() {}, onArtifactUpdate() {},
+    onAgentActivityMessage() {}, onParticipantActivityMessage() {}, upsertTask() {},
+    upsertReasoningSession() {}, removeReasoningSession() {}, getMessageCursor: () => null,
+    resyncMessages: async (_r, after) => ({ success: true, cursor: after }),
+    reconcileFullState: async () => { repairs++; return true },
+  });
+  try {
+    const barrier = stream.start('typing-room', true);
+    const source = FakeEventSource.instances.at(-1)!;
+    assert.ok(new URL(source.url, 'https://test').searchParams.getAll('stream_capability').includes('room_typing_v1'));
+    const signal = { room_id: 'typing-room', account_id: 'ada', name: 'Ada', client_id: 'composer_web_test', sequence: 1, typing: true, ttl_ms: 5000, expires_at: Date.now() - 60000 };
+    source.dispatch('room_typing_v1', signal, 'forbidden_cursor');
+    assert.equal(typing.label.value, 'Ada is typing…', 'not buffered behind history');
+    source.dispatchRaw('room_typing_v1', 'malformed', 'also_forbidden');
+    source.dispatch('room_typing_v1', { ...signal, account_id: 'bea', name: 'Bea' });
+    assert.equal(typing.label.value, 'Ada is typing…', 'account self filter');
+    source.dispatch('room_sync', { room_id: 'typing-room', checkpoint: null, event_cursor: 'real_cursor', gap: false });
+    stream.finishBootstrap('typing-room', true);
+    await barrier;
+    assert.equal(messages, 0);
+    assert.equal(repairs, 0);
+    source.onerror?.();
+    assert.equal(typing.label.value, '');
+    stream.start('typing-room');
+    const replacement = FakeEventSource.instances.at(-1)!;
+    assertStreamUrl(replacement, 'typing-room', 'real_cursor');
+    assert.equal(typing.label.value, '', 'no replay');
+    source.dispatch('room_typing_v1', { ...signal, sequence: 2 });
+    assert.equal(typing.label.value, '', 'retired stream is ignored');
+  } finally {
+    stream.stop(); scope.stop();
+    (globalThis as any).window = previousWindow; globalThis.fetch = previousFetch;
+  }
+});

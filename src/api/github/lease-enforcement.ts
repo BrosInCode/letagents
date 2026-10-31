@@ -2,6 +2,7 @@ import type { CoordinationDecisionResult, CoordinationLeaseLike } from "../coord
 import type { GitHubAppConfig } from "./config.js";
 import { githubRequestJson, mintInstallationToken } from "./app-client.js";
 import type { RepoPullRequestRef } from "../repo-workflow.js";
+import { leasedBranchRef } from "../../../shared/agent-branch.mjs";
 
 // Re-exported for existing importers; the implementation now lives in app-client.
 export { createGitHubAppJwt } from "./app-client.js";
@@ -50,16 +51,6 @@ function normalizeBranchRef(value: string | null | undefined): string | null {
     return null;
   }
   return trimmed.replace(/^refs\/heads\//, "");
-}
-
-function slugifyBranchSegment(value: string): string {
-  const slug = value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64);
-  return slug || "agent";
 }
 
 function isProtectedBranchRef(
@@ -120,7 +111,7 @@ export function buildLeasedBranchRef(input: {
   taskId: string;
   agentKey: string;
 }): string {
-  return `letagents/${input.taskId}/${slugifyBranchSegment(input.agentKey)}`;
+  return leasedBranchRef(input.taskId, input.agentKey);
 }
 
 export function buildGitHubLeaseEnforcementPlan(input: {

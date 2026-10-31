@@ -13,16 +13,19 @@
       :owner-options="ownerOptions"
       :status-filter="statusFilter"
       :status-options="statusOptions"
+      :show-source-filter="showSourceFilter"
+      :source-filter="sourceFilter"
       :sort="sort"
       :busy="busyAction !== null"
       :manager-mode="boardManagerMode"
       :manager-title="boardManagerTitle"
-      :pending-intent-count="boardPendingIntentCount"
+      :pending-intent-count="pendingIntentCount"
       :governance-open="governanceOpen"
       @update:search-query="searchQuery = $event"
       @update:active-filter="setActiveFilter"
       @update:owner-filter="ownerFilter = $event"
       @update:status-filter="setStatusFilter"
+      @update:source-filter="setSourceFilter"
       @update:sort="setSort"
       @clear-filters="clearFilters"
       @open-governance="openGovernance"
@@ -68,6 +71,8 @@
       :review-assignment-candidates="modalReviewAssignmentCandidates"
       :selected-reviewer="modalSelectedReviewer"
       :can-edit="canEditTasks"
+      :room-identifier="roomIdentifier"
+      :ticket-keys="ticketKeys"
       @save="saveModalTask"
       @close="clearTaskSelection"
       @assign-review="assignModalReview"
@@ -75,6 +80,7 @@
       @update:selected-reviewer="setModalReviewer"
       @view-events="emit('view-events', $event)"
       @view-artifacts="emit('view-artifacts', $event)"
+      @open-thread="emit('open-thread', $event)"
     />
 
     <RoomBoardCreateTaskDialog
@@ -96,7 +102,9 @@
       :active-section="activeGovernanceSection"
       :selected-candidate-id="selectedCandidateId"
       :live-agents="liveBoardManagerAgents"
+      :show-ticket-settings="showTicketSettings"
       @close="closeGovernance"
+      @open-ticket-settings="openTicketSettings"
       @update:active-section="activeGovernanceSection = $event"
       @update:selected-candidate-id="selectedCandidateId = $event"
       @assign-manager="handleAssignManager"
@@ -110,8 +118,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
-import type { TaskContentPatch } from '../../../../../../../shared/task-markdown-editing.mjs';
+import { computed, ref, watch } from "vue";
+import type { TaskEditPatch } from './room-board/ticket-ref';
 import type {
   DesktopAgentPresence,
   DesktopBoardSettingsSummary,
@@ -123,6 +131,7 @@ import {
   type BoardEmptyStateAction,
 } from "./room-board/board-presentation";
 import { activeBoardManagerAgents } from "./room-board/governance-presentation";
+import { boardMayShowTicketSettings, roomShowsTicketSettings } from "./room-board/ticket-settings";
 import RoomBoardCreateTaskDialog from "./room-board/RoomBoardCreateTaskDialog.vue";
 import RoomBoardEmptyState from "./room-board/RoomBoardEmptyState.vue";
 import RoomBoardGovernancePanel from "./room-board/RoomBoardGovernancePanel.vue";
@@ -135,12 +144,16 @@ import { useRoomBoardController } from "./room-board/useRoomBoardController";
 import { useRoomBoardPresentation } from "./room-board/useRoomBoardPresentation";
 
 const props = defineProps<{
+  /** Cloud rooms only: local rooms cannot store ticket keys. */
+  ticketKeys?: boolean;
   roomIdentifier: string;
   tasks: DesktopTaskSummary[];
   boardSettings?: DesktopBoardSettingsSummary | null;
   presence: DesktopAgentPresence[];
   workers: WorkerSnapshot[];
   selectedTaskId?: string | null;
+  /** Opens Manager at this section once, e.g. from an Inbox board request. */
+  governanceSection?: "pending" | null;
   canEditTasks?: boolean;
 }>();
 
@@ -148,8 +161,12 @@ const emit = defineEmits<{
   "task-updated": [task: DesktopTaskSummary];
   "refresh-room": [];
   "update:selected-task-id": [taskId: string | null];
+  "update:governance-section": [section: null];
   "view-events": [taskId: string];
   "view-artifacts": [taskId: string];
+  "open-thread": [threadRootId: string];
+  /** Opens Room settings at one section. */
+  "open-room-settings": [section: "tickets"];
 }>();
 
 const {
@@ -182,14 +199,19 @@ const {
   selectTask,
   setActiveFilter,
   setSort,
+  setSourceFilter,
   setStatusFilter,
+  showSourceFilter,
   sort,
+  sourceFilter,
   statusFilter,
   statusOptions,
   toggleGroup,
   visibleGroups,
   visibleTaskCount,
-} = useRoomBoardPresentation(props, emit);
+} = useRoomBoardPresentation(props, emit, {
+  dropTargets: (task) => actionsFor(task).flatMap((action) => action.targetStatus ? [action.targetStatus] : []),
+});
 
 const isCreateTaskDialogOpen = ref(false);
 const modalTaskActions = computed(() => modalTask.value ? actionsFor(modalTask.value) : []);
@@ -217,13 +239,35 @@ const {
   setManagerMode,
   decideIntent,
   loadGovernance,
-} = useBoardGovernance(props.roomIdentifier);
+  pendingIntentCount,
+} = useBoardGovernance(props.roomIdentifier, () => props.boardSettings);
+
+watch(() => props.governanceSection, (section) => {
+  if (!section) return;
+  activeGovernanceSection.value = section;
+  emit("update:governance-section", null);
+  void openGovernance();
+}, { immediate: true });
+
+// Board manager links to the room's ticket filters only where Room settings shows them.
+const showTicketSettings = ref(false);
+let ticketSettingsCheck = 0;
+watch(() => [governanceOpen.value, props.roomIdentifier, props.ticketKeys] as const, async ([open, roomIdentifier, ticketKeys]) => {
+  // Hidden until this room's answer arrives; a later check makes an earlier one stale.
+  const check = ++ticketSettingsCheck;
+  showTicketSettings.value = false;
+  if (!open || !ticketKeys || !boardMayShowTicketSettings(props.tasks)) return;
+  const shows = await roomShowsTicketSettings(roomIdentifier);
+  if (check === ticketSettingsCheck) showTicketSettings.value = shows;
+}, { immediate: true });
+
+function openTicketSettings(): void {
+  closeGovernance();
+  emit("open-room-settings", "tickets");
+}
 
 const liveBoardManagerAgents = computed(() => activeBoardManagerAgents(props.presence));
 const boardManagerMode = computed(() => props.boardSettings?.managerMode || "manager_optional");
-const boardPendingIntentCount = computed(() =>
-  Math.max(0, props.boardSettings?.pendingIntentCount || 0)
-);
 const boardManagerLabel = computed(() => {
   const settings = props.boardSettings;
   if (boardManagerMode.value === "off") return "Manager off";
@@ -239,7 +283,7 @@ const boardManagerLabel = computed(() => {
 });
 const boardManagerTitle = computed(() => {
   const settings = props.boardSettings;
-  const pending = boardPendingIntentCount.value;
+  const pending = pendingIntentCount.value;
   const pendingText = pending === 1 ? "1 pending intent" : `${pending} pending intents`;
   if (!settings?.activeManager) return `${boardManagerLabel.value}. ${pendingText}.`;
   return `${boardManagerLabel.value}: ${settings.activeManager.actorLabel}. ${pendingText}.`;
@@ -284,7 +328,7 @@ function setModalReviewer(value: string): void {
   if (modalTask.value) setSelectedReviewer(modalTask.value.id, value);
 }
 
-async function saveModalTask(input: TaskContentPatch, onSettled: (saved: boolean) => void): Promise<void> {
+async function saveModalTask(input: TaskEditPatch, onSettled: (saved: boolean) => void): Promise<void> {
   const task = modalTask.value;
   onSettled(Boolean(task && await saveTaskContent(task, input)));
 }
@@ -305,7 +349,7 @@ async function handleApproveIntent(intentId: string): Promise<void> {
   if (await decideIntent(intentId, "approve")) emit("refresh-room");
 }
 
-async function handleDenyIntent(intentId: string): Promise<void> {
-  if (await decideIntent(intentId, "deny")) emit("refresh-room");
+async function handleDenyIntent(intentId: string, reason: string | null): Promise<void> {
+  if (await decideIntent(intentId, "deny", reason)) emit("refresh-room");
 }
 </script>

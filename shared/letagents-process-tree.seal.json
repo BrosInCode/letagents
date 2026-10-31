@@ -1,0 +1,12 @@
+{
+  "file": "letagents-process-tree.exe",
+  "source": "apps/desktop/native/win-process-tree/letagents-process-tree.c",
+  "sourceSha256": "a7a347dcad78ce8ef685de40b0832c3968ec9c2f148223671d1adf21220d2159",
+  "builds": {
+    "x64": {
+      "sha256": "a6d8c4f9efb9aee98bbd0d47f5e16fdb1581d4d0135b006aaedd594f11be0adf",
+      "vcToolsVersion": "14.51.36231",
+      "windowsSdkVersion": "10.0.26100.0"
+    }
+  }
+}

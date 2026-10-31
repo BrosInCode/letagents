@@ -13,12 +13,15 @@ import { ExecutionShadowStore, executionRuntimeStorageIdentity } from "../execut
 import { archiveRetiredRuntimes, prepareRetiredRuntimePlan } from "../runtime-recovery-journal.js";
 import type { DaemonManifestEntry } from "../types.js";
 import type { ProcessIdentity } from "../process-identity.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { assertOwnerPrivate } from "../../electron/__tests__/platform.js";
+import { WAIT_SCALE } from "./helpers/daemon-fixture.js";
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-binding-sqlite-"));
   const database = join(root, "daemon-state.sqlite");
   const legacy = join(root, "daemon-worker-bindings.json");
-  return { root, database, legacy, cleanup: () => rm(root, { recursive: true, force: true }) };
+  return { root, database, legacy, cleanup: () => removeTestDirectory(root) };
 }
 function input(entry_id = "agent_a", generation = "run_1", session = "session_a") {
   return { entry_id, room_id: "room", work_attempt_id: "attempt", execution_generation_id: generation, agent_session_id: session, agent_session_token: `token-${session}`, api_url: "https://letagents.test" };
@@ -106,7 +109,7 @@ test("slow native publication does not block another binding checkpoint or publi
   } finally { await env.cleanup(); }
 });
 
-test("a paused commit fence holds no SQLite writer lock for an independent store", { timeout: 5_000 }, async () => {
+test("a paused commit fence holds no SQLite writer lock for an independent store", { timeout: 5_000 * WAIT_SCALE }, async () => {
   const env = await fixture(); try {
     let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
     const fenced = new WorkerBindingStore(env.legacy, async (commit) => { await gate; await commit(); }, env.database);
@@ -132,7 +135,7 @@ test("simultaneously released fenced stores and a raw writer do not deadlock", a
   } finally { await env.cleanup(); }
 });
 
-test("a child-process raw SQLite writer overlaps fenced binding commits", { timeout: 10_000 }, async () => {
+test("a child-process raw SQLite writer overlaps fenced binding commits", { timeout: 10_000 * WAIT_SCALE }, async () => {
   const env = await fixture();
   let child: ReturnType<typeof spawn> | null = null;
   let a: WorkerBindingStore | null = null;
@@ -196,7 +199,7 @@ test("synchronized fresh multi-process importers converge through WAL and schema
       await Promise.all(children.map((child) => new Promise<void>((resolve, reject) => child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`fresh importer exited ${code}`))))));
     }
     assertRedactedBackup(await readFile(`${env.legacy}.migrated-backup`, "utf8"), legacyRaw("agent_a"));
-    assert.equal((await stat(`${env.legacy}.migrated-backup`)).mode & 0o777, 0o600);
+    await assertOwnerPrivate(`${env.legacy}.migrated-backup`, "file");
   } finally { await env.cleanup(); }
 });
 
@@ -469,11 +472,11 @@ test("a durable backup exists before the migration record and an A→B swap quar
     const backup = `${env.legacy}.migrated-backup`;
     assert.equal(backupWasDurableBeforeRecord, true, "the crash-window hook observes A's fsynced backup before the record commits");
     assertRedactedBackup(await readFile(backup, "utf8"), rawA);
-    assert.equal((await stat(backup)).mode & 0o777, 0o600);
+    await assertOwnerPrivate(backup, "file");
     const unexpected = (await readdir(env.root)).filter((name) => name.startsWith("daemon-worker-bindings.json.unexpected."));
     assert.equal(unexpected.length, 1);
     assert.equal(await readFile(join(env.root, unexpected[0]!), "utf8"), rawB);
-    assert.equal((await stat(join(env.root, unexpected[0]!))).mode & 0o777, 0o600);
+    await assertOwnerPrivate(join(env.root, unexpected[0]!), "file");
     const reopened = new WorkerBindingStore(env.legacy, undefined, env.database);
     assert.equal((await reopened.list()).map((binding) => binding.entry_id).join(","), "agent_a");
     await reopened.close();
@@ -588,7 +591,7 @@ test("concurrent failed-import cleanup requires exact retained quarantine eviden
       assert.equal((await readdir(env.root)).filter(name => name.includes(".claimed.")).length, 0);
       if (retained !== "missing") {
         assert.equal(await readFile(quarantine, "utf8"), retained === "matching" ? malformed : "different evidence");
-        assert.equal((await stat(quarantine)).mode & 0o777, 0o600);
+        await assertOwnerPrivate(quarantine, "file");
       }
     } finally {
       release();
@@ -686,8 +689,8 @@ test("a mismatched pre-existing backup fails closed without replacing either pri
     await reopened.close();
     assert.equal(await readFile(`${env.legacy}.migrated-backup`, "utf8"), rawB);
     assert.equal(await readFile(env.legacy, "utf8"), rawA);
-    assert.equal((await stat(`${env.legacy}.migrated-backup`)).mode & 0o777, 0o600);
-    assert.equal((await stat(env.legacy)).mode & 0o777, 0o600);
+    await assertOwnerPrivate(`${env.legacy}.migrated-backup`, "file");
+    await assertOwnerPrivate(env.legacy, "file");
   } finally { await env.cleanup(); }
 });
 
@@ -707,7 +710,7 @@ test("reopen upgrades an exact pre-redaction migration backup without losing com
     assert.equal((await reopened.get("agent_a"))?.agent_session_id, "session_a");
     await reopened.close();
     assertRedactedBackup(await readFile(`${env.legacy}.migrated-backup`, "utf8"), raw);
-    assert.equal((await stat(`${env.legacy}.migrated-backup`)).mode & 0o777, 0o600);
+    await assertOwnerPrivate(`${env.legacy}.migrated-backup`, "file");
   } finally { await env.cleanup(); }
 });
 
@@ -743,7 +746,7 @@ test("concurrent valid legacy importers converge on one exact private backup", a
     await one.close(); await two.close();
     const backup = `${env.legacy}.migrated-backup`;
     assertRedactedBackup(await readFile(backup, "utf8"), rawA);
-    assert.equal((await stat(backup)).mode & 0o777, 0o600);
+    await assertOwnerPrivate(backup, "file");
     await assert.rejects(() => readFile(env.legacy, "utf8"), { code: "ENOENT" });
   } finally { await env.cleanup(); }
 });

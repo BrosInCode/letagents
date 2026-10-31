@@ -6,8 +6,11 @@ registerLocalBoardOwner(() => {});
 import assert from "node:assert/strict";
 import test from "node:test";
 import { randomUUID } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
-import { createElectronTestEnv } from "./harness.js";
+import { mkdir, readFile } from "node:fs/promises";
+import { assertOwnerPrivateFile, createElectronTestEnv } from "./harness.js";
+import { DAEMON_STATE_DIR_ENV, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
+import { protectOwnerPrivate } from "../../../../shared/owner-private-fs.mjs";
+import { testDaemonEndpoint } from "./platform.js";
 
 const environment = createElectronTestEnv({ prefix: "local-supervision-",
   paths: ["state", "chatStorage", "localChatDb", "localProfile"],
@@ -19,12 +22,14 @@ const { getStoredAgentSession } = await import("../main/agents/state.js");
 const { prepareLocalSupervisorGrant, revokeLocalSupervisorEntry } = await import("../main/rooms/local-supervision-authority.js");
 const { requestLocalSupervisor, executeLocalSupervisorTool } = await import("../main/rooms/local-supervision-runtime.js");
 const boardService = await import("../main/rooms/local-board-service.js");
-process.env.LETAGENTS_BOARD_SOCKET_PATH = join(environment.tempDir, "board.sock");
-const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_PATH, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
+// A socket file on POSIX, a named pipe with its proof on Windows.
+const boardEndpoint = daemonEndpoint(environment.tempDir);
+process.env.LETAGENTS_BOARD_SOCKET_PATH = boardEndpoint.connectPath;
+const boardSocket = new DaemonControlSocket(boardEndpoint.listenPath, (request: { method: string; params?: unknown }, signal: AbortSignal) => {
   if (request.method === "local_board.watch") return boardService.watchLocalBoard(request.params, 1, signal);
   if (request.method === "local_board.mutate") return boardService.executeLocalBoardMutation(request.params);
   throw new Error("Unknown fixture request");
-});
+}, undefined, undefined, { peerProofPath: boardEndpoint.proofPath });
 await boardSocket.start();
 test.beforeEach(() => registerLocalBoardOwner(() => {}));
 test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
@@ -67,7 +72,7 @@ test("local worker authority is scoped, stable, private, and independent of clou
   assert.equal(getStoredAgentSession(oak.session.session_id)?.agent_key, oak.grant.agentKey);
   assert.equal(getStoredAgentSession(oak.session.session_id)?.session_token, "");
   assert.ok(!(await readFile(environment.statePath!, "utf8")).includes(oak.session.worker_bearer));
-  assert.equal((await stat(`${environment.localChatDbPath}.supervisor-key`)).mode & 0o777, 0o600);
+  assertOwnerPrivateFile(`${environment.localChatDbPath}.supervisor-key`, environment.tempDir);
   await setChatStorageMode("cloud");
   assert.equal((await oak.request("join")).room_id, roomId);
   await createLocalRoom({ roomIdentifier: "local_other" });
@@ -208,7 +213,9 @@ test("separate local writers racing to claim a task create exactly one work leas
       try { await claimLocalTaskWorkLease(${JSON.stringify(roomId)}, ${JSON.stringify(task.id)}, ${JSON.stringify(identity)}); }
       catch (error) { process.stderr.write(String(error)); process.exitCode = 2; }
       process.stdin.destroy();
-    `], { stdio: ["pipe", "pipe", "pipe"] });
+    `], { stdio: ["pipe", "pipe", "pipe"],
+      // A Windows pipe client finds the proof file from the state folder it names.
+      env: { ...process.env, [DAEMON_STATE_DIR_ENV]: environment.tempDir } });
     let errors = "";
     child.stderr.on("data", chunk => { errors += String(chunk); });
     return { child, ready: new Promise<void>((resolve, reject) => {
@@ -560,7 +567,10 @@ test("daemon restart restores local authority and the unread cursor without clou
   const { productionSupervisedDeliveryHttp } = await import(new URL("../../daemon/cloud-http.ts", import.meta.url).href);
   const roomId = "github.com/example/restart-messages";
   await createLocalRoom({ roomIdentifier: roomId });
-  const paths = { lockPath: join(environment.tempDir, "d.lock"), socketPath: join(environment.tempDir, "d.sock"),
+  // Its own folder: the board service above already holds this test's endpoint.
+  const daemonRoot = join(environment.tempDir, "daemon-root");
+  await mkdir(daemonRoot, { recursive: true }); await protectOwnerPrivate(daemonRoot, "directory", { force: true });
+  const paths = { lockPath: join(daemonRoot, "d.lock"), ...testDaemonEndpoint(daemonRoot),
     manifestPath: join(environment.tempDir, "daemon.sqlite"), auditPath: join(environment.tempDir, "audit.log"),
     attemptsPath: join(environment.tempDir, "attempts.sqlite"), attemptsRoot: join(environment.tempDir, "attempts"),
     workspaceRoot: join(environment.tempDir, "workspaces") };
@@ -737,4 +747,176 @@ test("local assignee closes reviewed merged work through discovered update_task 
   const closed = await oak.tool("update_task", { task_id: task.id, status: "done" });
   assert.equal(closed.task.status, "done");
   assert.equal((await oak.tool("get_board", {})).tasks.find((entry: { id: string }) => entry.id === task.id).status, "done");
+});
+
+test("a local room's image reaches the daemon from its stored file, bounded and inside the local files folder", async () => {
+  const { mkdir, writeFile, symlink } = await import("node:fs/promises");
+  const { pathToFileURL } = await import("node:url");
+  const { productionSupervisedDeliveryHttp } = await import(new URL("../../daemon/cloud-http.ts", import.meta.url).href);
+  const { RoomTurnAttachmentStager, RoomAttachmentDownloadError } = await import(new URL("../../daemon/room-turn-attachments.ts", import.meta.url).href);
+  const roomId = "local_images";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "images");
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  const filesDir = join(process.env.LETAGENTS_LOCAL_FILES_DIR!, roomId);
+  await mkdir(filesDir, { recursive: true });
+  const stored = join(filesDir, "a1-shot.png");
+  await writeFile(stored, png);
+  const outside = join(environment.tempDir, "outside.png");
+  await writeFile(outside, png);
+  const linked = join(filesDir, "linked.png");
+  await symlink(outside, linked);
+  const file = (id: string, path: string) => ({ id, file_name: `${id}.png`, mime_type: "image/png", size_bytes: png.byteLength,
+    url: pathToFileURL(path).toString(), download_url: pathToFileURL(path).toString() });
+  const otherRoomDir = join(process.env.LETAGENTS_LOCAL_FILES_DIR!, "local_images_other");
+  await mkdir(otherRoomDir, { recursive: true });
+  const otherRoomFile = join(otherRoomDir, "theirs.png");
+  await writeFile(otherRoomFile, png);
+  const big = join(filesDir, "big.png");
+  await writeFile(big, Buffer.concat([png, Buffer.alloc(11 * 1024 * 1024)]));
+  const fifo = join(filesDir, "pipe.png");
+  (await import("node:child_process")).execFileSync("mkfifo", [fifo]);
+  const wrapped = png.toString("base64").replace(/(.{8})/g, "$1\r\n");
+  const message = await addLocalChatMessage(roomId, { sender: "You", source: "browser", text: "@Oak what is in these?", attachments: [
+    file("local:stored", stored), file("local:outside", outside), file("local:linked", linked),
+    { id: "legacy-inline", file_name: "old.png", mime_type: "image/png", size_bytes: png.byteLength, data_url: `data:image/png;base64,${png.toString("base64")}` },
+    { id: "legacy-text", file_name: "old.txt", mime_type: "image/png", data_url: `data:text/plain;base64,${png.toString("base64")}` },
+    file("local:pipe", fifo),
+    { id: "messages", file_name: "reserved.png", mime_type: "image/png", content_base64: wrapped },
+    { ...file("local:gone", join(filesDir, "gone.png")), data_url: `data:image/png;base64,${png.toString("base64")}` },
+    file("local:other-room", otherRoomFile),
+    { ...file("local:big", big), size_bytes: png.byteLength + 11 * 1024 * 1024 },
+  ] });
+  const polled = (await oak.request("messages")).messages.find((item: { id: string }) => item.id === message.id);
+  assert.equal(polled.attachments[0].data_url, null, "a file row's message page carries no inline copy");
+  const download = (attachmentId: string, overrides: Record<string, unknown> = {}) => productionSupervisedDeliveryHttp.downloadAttachment!({
+    roomId, apiUrl: origin, bearer: oak.session.worker_bearer, messageId: message.id, attachmentId, maxBytes: 1024,
+    signal: AbortSignal.timeout(10_000), ...overrides });
+  const reason = (error: unknown) => error instanceof RoomAttachmentDownloadError ? (error as { reason: string }).reason : null;
+  const unavailable = (error: unknown) => reason(error) === "unavailable";
+  const tooLarge = (error: unknown) => reason(error) === "too_large";
+
+  assert.deepEqual(Buffer.from(await download("local:stored")), png);
+  assert.deepEqual(Buffer.from(await download("legacy-inline")), png, "an older row's inline image copy is decoded");
+  await assert.rejects(download("local:stored", { maxBytes: png.byteLength - 1 }), tooLarge);
+  await assert.rejects(download("legacy-inline", { maxBytes: 4 }), tooLarge);
+  assert.deepEqual(Buffer.from(await download("messages", { maxBytes: png.byteLength })), png,
+    "an id that is a route word, and wrapped base64 that just fits, still read");
+  // A named pipe is refused at once instead of waiting for a writer; a file row never falls back to its old inline copy.
+  // A file in another room's folder is not this room's, even inside the local files folder.
+  for (const id of ["local:outside", "local:linked", "legacy-text", "local:missing", "local:pipe", "local:gone", "local:other-room"]) {
+    await assert.rejects(download(id), unavailable, id);
+  }
+  await assert.rejects(download("local:stored", { messageId: "msg_999" }), unavailable);
+  const route = (path: string, init: RequestInit = {}) => requestLocalSupervisor(`${origin}/rooms/${roomId}/messages/${message.id}/${path}`,
+    { ...init, headers: { authorization: `Bearer ${oak.session.worker_bearer}` } });
+  assert.equal((await route("attachments/local%3Astored")).status, 400, "the caller must say how much it can take");
+  assert.equal((await route("attachments/local%3Astored?max_bytes=0")).status, 400);
+  assert.equal((await route("attachments/local%3Astored?max_bytes=1024", { method: "POST" })).status, 404);
+  assert.equal((await route("attachments/local%3Astored/extra?max_bytes=1024")).status, 200, "an extra part is a messages read, not a file");
+  assert.equal((await route("attachments/local%3Astored/extra?max_bytes=1024")).headers.get("content-type")?.startsWith("application/json"), true);
+  assert.equal((await route("attachments/local%3Astored?max_bytes=1024")).headers.get("content-type"), "application/octet-stream");
+  assert.equal((await route("attachments/local%3Abig?max_bytes=999999999999")).status, 413, "no caller reads more than the 10 MB image limit");
+  await assert.rejects(download("local:big", { maxBytes: 20 * 1024 * 1024 }), tooLarge);
+
+  // A tool read of an older inline row gives the agent metadata, not base64.
+  const read = await oak.tool("read_messages", {});
+  const listed = read.messages.find((item: { id: string }) => item.id === message.id);
+  assert.ok(!JSON.stringify(read).includes(png.toString("base64").slice(0, 16)), "no inline copy in a tool result");
+  assert.deepEqual(listed.attachments.find((item: { id: string }) => item.id === "legacy-inline"),
+    { id: "legacy-inline", file_name: "old.png", mime_type: "image/png", size_bytes: png.byteLength, url: null, download_url: null });
+
+  // Authority stays the worker's room: another room's worker and a revoked bearer read nothing, and neither is a room refusal.
+  await createLocalRoom({ roomIdentifier: "local_images_other" });
+  const elm = await worker("local_images_other", "Elm", "images_other");
+  await assert.rejects(download("local:stored", { bearer: elm.session.worker_bearer }), unavailable);
+  await assert.rejects(download("local:stored", { bearer: "not-a-bearer" }), unavailable);
+
+  // The stager gives a local image to the provider exactly as it gives a hosted one.
+  const stager = new RoomTurnAttachmentStager(join(environment.tempDir, "room-turn-attachments"));
+  const prepared = await stager.prepare({ delivery: "memory", localRoom: true, sourceMessage: polled, sourceMessageId: message.id,
+    roomId, apiUrl: origin, bearer: oak.session.worker_bearer, http: productionSupervisedDeliveryHttp, signal: AbortSignal.timeout(10_000) });
+  assert.deepEqual(prepared.attachments.map((item: { status: string }) => item.status),
+    ["image", "unavailable", "unavailable", "image", "unavailable", "unavailable", "image", "unavailable", "unavailable", "too_large"]);
+  assert.deepEqual(Buffer.from(prepared.attachments[0].image.data), png);
+  await prepared.release();
+});
+
+test("a local thread reply's agent reads the thread's earlier images through the local thread route", async () => {
+  const { mkdir, writeFile } = await import("node:fs/promises");
+  const { pathToFileURL } = await import("node:url");
+  const { productionSupervisedDeliveryHttp } = await import(new URL("../../daemon/cloud-http.ts", import.meta.url).href);
+  const { RoomTurnAttachmentStager, recentRoomImageMessages } = await import(new URL("../../daemon/room-turn-attachments.ts", import.meta.url).href);
+  const roomId = "local_thread_images";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "thread_images");
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52]);
+  const filesDir = join(process.env.LETAGENTS_LOCAL_FILES_DIR!, roomId);
+  await mkdir(filesDir, { recursive: true });
+  const stored = join(filesDir, "bug.png");
+  await writeFile(stored, png);
+  const root = await addLocalChatMessage(roomId, { sender: "Ada", source: "browser", text: "The login page is broken", attachments: [
+    { id: "local:bug", file_name: "bug.png", mime_type: "image/png", size_bytes: png.byteLength,
+      url: pathToFileURL(stored).toString(), download_url: pathToFileURL(stored).toString() },
+  ] });
+  const reply = await addLocalChatMessage(roomId, { sender: "Grace", source: "browser", text: "Same here", reply_to: root.id, thread_root_id: root.id });
+  const ask = await addLocalChatMessage(roomId, { sender: "Ada", source: "browser", text: "@Oak please fix this", reply_to: root.id, thread_root_id: root.id });
+  const later = await addLocalChatMessage(roomId, { sender: "Grace", source: "browser", text: "after", reply_to: root.id, thread_root_id: root.id });
+  const read = (overrides: Record<string, unknown> = {}) => productionSupervisedDeliveryHttp.thread!({ roomId, apiUrl: origin,
+    bearer: oak.session.worker_bearer, rootMessageId: root.id, beforeMessageId: ask.id, limit: 5, signal: AbortSignal.timeout(10_000), ...overrides });
+  const thread = await read();
+  assert.equal(thread?.root.id, root.id);
+  assert.deepEqual(thread?.replies.map((message: { id: string }) => message.id), [reply.id], "only replies before the activating one");
+  assert.ok(!JSON.stringify(thread).includes(png.toString("base64").slice(0, 12)), "no inline file bytes");
+  assert.ok(!thread?.replies.some((message: { id: string }) => message.id === later.id));
+
+  // Another room's worker, a bad bearer and a missing root read nothing; none is a room refusal.
+  await createLocalRoom({ roomIdentifier: "local_thread_images_other" });
+  const elm = await worker("local_thread_images_other", "Elm", "thread_images_other");
+  assert.equal(await read({ bearer: elm.session.worker_bearer }), null);
+  assert.equal(await read({ bearer: "not-a-bearer" }), null);
+  assert.equal(await read({ rootMessageId: "msg_99999" }), null);
+  const route = (path: string, init: RequestInit = {}) => requestLocalSupervisor(`${origin}/rooms/${roomId}/messages/${path}`,
+    { ...init, headers: { authorization: `Bearer ${oak.session.worker_bearer}` } });
+  assert.equal((await route(`${root.id}/thread`, { method: "PUT" })).status, 404);
+
+  // The stager reads the root's image from local storage, named by its sender.
+  const sourceMessage = { ...ask, thread_root_id: root.id };
+  const recentMessages = recentRoomImageMessages({ sourceMessage, sourceMessageId: ask.id, context: [], thread, agentSessionId: oak.session.session_id });
+  const stager = new RoomTurnAttachmentStager(join(environment.tempDir, "room-turn-attachments"));
+  const prepared = await stager.prepare({ delivery: "memory", localRoom: true, sourceMessage, sourceMessageId: ask.id, recentMessages,
+    roomId, apiUrl: origin, bearer: oak.session.worker_bearer, http: productionSupervisedDeliveryHttp, signal: AbortSignal.timeout(10_000) });
+  assert.deepEqual(prepared.attachments.map((item: { status: string; origin?: { messageId: string; sender: string } }) =>
+    [item.origin?.messageId, item.origin?.sender, item.status]), [[root.id, "Ada", "image"]]);
+  assert.deepEqual(Buffer.from(prepared.attachments[0].image.data), png);
+  await prepared.release();
+});
+
+test("a local room's log file reaches the agent as a staged copy, read from its stored file", async () => {
+  const { mkdir, writeFile, readFile: read } = await import("node:fs/promises");
+  const { pathToFileURL } = await import("node:url");
+  const { productionSupervisedDeliveryHttp } = await import(new URL("../../daemon/cloud-http.ts", import.meta.url).href);
+  const { RoomTurnAttachmentStager } = await import(new URL("../../daemon/room-turn-attachments.ts", import.meta.url).href);
+  const roomId = "local_files";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "files");
+  const log = Buffer.from("step 1 ok\nstep 2 failed\n");
+  const filesDir = join(process.env.LETAGENTS_LOCAL_FILES_DIR!, roomId);
+  await mkdir(filesDir, { recursive: true });
+  const stored = join(filesDir, "build.log");
+  await writeFile(stored, log);
+  const message = await addLocalChatMessage(roomId, { sender: "You", source: "browser", text: "@Oak why?", attachments: [
+    { id: "local:log", file_name: "build.log", mime_type: "text/plain", size_bytes: log.byteLength,
+      url: pathToFileURL(stored).toString(), download_url: pathToFileURL(stored).toString() },
+    { id: "legacy-log", file_name: "old.log", mime_type: "text/plain", size_bytes: log.byteLength, content_base64: log.toString("base64") },
+  ] });
+  const polled = (await oak.request("messages")).messages.find((item: { id: string }) => item.id === message.id);
+  const stager = new RoomTurnAttachmentStager(join(environment.tempDir, "room-turn-files"));
+  const prepared = await stager.prepare({ delivery: "memory", fileAccess: { text: true, pdf: false }, localRoom: true,
+    sourceMessage: polled, sourceMessageId: message.id, roomId, apiUrl: origin, bearer: oak.session.worker_bearer,
+    http: productionSupervisedDeliveryHttp, signal: AbortSignal.timeout(10_000) });
+  assert.deepEqual(prepared.attachments.map((item: { status: string }) => item.status), ["file", "file"],
+    "an older row's inline copy of a text file reads too");
+  for (const item of prepared.attachments) assert.deepEqual(await read(item.file.path), log);
+  await prepared.release();
 });

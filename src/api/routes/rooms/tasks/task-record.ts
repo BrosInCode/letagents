@@ -3,8 +3,10 @@ import type { Express } from "express";
 import {
   BoardIntentApprovalConsumptionError,
   getActiveTaskLeases,
+  getTaskMentions,
   LeaseFenceStaleError,
   TaskContentConflictError,
+  TaskExternalRefConflictError,
   type BoardIntentConsumptionInput,
   type TaskStatus,
 } from "../../../db.js";
@@ -13,6 +15,9 @@ import {
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import { validateTaskWorkflowArtifactsInput } from "../../../repo-workflow.js";
+import { ImportedCardBusyError } from "../../../connectors/card-merge.js";
+import { normalizeExternalRef } from "../../../connectors/key-detectors.js";
+import { getTaskTicketDetails } from "../../../connectors/ticket-details.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import { recordBoardIntentConsumptionFailure } from "../../../tasks/board-intent-audit.js";
 import {
@@ -52,6 +57,42 @@ export function registerTaskRecordRoutes(
     res.json({ ...taskWithDetails, room_id: project.id });
   });
 
+  /** Room messages that mention the card's ticket key, newest first. */
+  app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)\/mentions$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const taskId = (req.params as Record<string, string>)[1] ?? "";
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const task = await deps.getTaskById(project.id, taskId);
+    if (!task) {
+      res.status(404).json({ error: "Task not found" });
+      return;
+    }
+
+    const mentions = await getTaskMentions(project.id, task.id);
+    res.json({ room_id: project.id, task_id: task.id, mentions });
+  });
+
+  /** The tracker record behind a card that names a ticket in a room that imports it. */
+  app.get(/^\/rooms\/(.+)\/tasks\/([^/]+)\/ticket$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const taskId = (req.params as Record<string, string>)[1] ?? "";
+
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const ticket = await getTaskTicketDetails(project.id, taskId);
+    res.json({ room_id: project.id, task_id: taskId, ticket });
+  });
+
   app.patch(/^\/rooms\/(.+)\/tasks\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
     const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
@@ -79,6 +120,9 @@ export function registerTaskRecordRoutes(
     }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    // Any participant or worker may link a card to its ticket, as on create:
+    // agents must be able to do it. Title and description stay admin-only.
+    const editsExternalRef = Object.prototype.hasOwnProperty.call(requestBody, "external_ref");
     const editsContent = Object.prototype.hasOwnProperty.call(requestBody, "title")
       || Object.prototype.hasOwnProperty.call(requestBody, "description");
     if (editsContent && !(await deps.requireAdmin(req, res, project))) return;
@@ -105,6 +149,19 @@ export function registerTaskRecordRoutes(
       return;
     }
     const { updates } = patch;
+    if (editsExternalRef) {
+      const raw = requestBody.external_ref;
+      if (raw === null || raw === "") {
+        updates.external_ref = null;
+      } else {
+        const externalRef = typeof raw === "string" ? normalizeExternalRef(raw) : null;
+        if (!externalRef) {
+          res.status(400).json({ error: "external_ref must be a ticket key such as jira:HT-1234 or linear:ENG-12, or null." });
+          return;
+        }
+        updates.external_ref = externalRef;
+      }
+    }
     const actorLabel = workerIdentity?.actor_label ?? patch.actorLabel;
     const actorKey = workerIdentity?.agent_key ?? patch.actorKey;
     const actorInstanceId = workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id);
@@ -114,10 +171,21 @@ export function registerTaskRecordRoutes(
 
     let auditActorKey = actorKey;
     let boardIntentApproval: BoardIntentConsumptionInput | null = null;
+    const boardIntentId = deps.normalizeOptionalString(requestBody.board_intent_id);
     try {
       const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
+      // A worker bearer never holds admin authority. It may present the board
+      // intent approved for its own session instead, which authorizes exactly
+      // that status change (checked and consumed with the write) and nothing more.
+      const authorizeWithApprovedBoardIntent = Boolean(updates.status && adminOnlyStatuses.has(updates.status)
+        && req.authKind === "agent_session" && workerIdentity && boardIntentId);
       if (updates.status && adminOnlyStatuses.has(updates.status)) {
-        if (workerIdentity && (updates.status === "accepted" || updates.status === "cancelled")) {
+        if (authorizeWithApprovedBoardIntent) {
+          if (Object.keys(updates).some((key) => key !== "status" && key !== "pr_url")) {
+            res.status(403).json({ error: "An approved board intent authorizes only its exact status change." });
+            return;
+          }
+        } else if (workerIdentity && (updates.status === "accepted" || updates.status === "cancelled")) {
           if (Object.keys(updates).some((key) => key !== "status")) {
             res.status(403).json({ error: "Board Manager task decisions can only change status." });
             return;
@@ -137,7 +205,8 @@ export function registerTaskRecordRoutes(
         updates.assignee === undefined &&
         updates.assignee_agent_key === undefined &&
         updates.pr_url === undefined &&
-        updates.workflow_artifacts === undefined;
+        updates.workflow_artifacts === undefined &&
+        updates.external_ref === undefined;
 
       if (isReviewChangeRequest && !reviewDecisionOnly) {
         res.status(409).json({
@@ -230,25 +299,42 @@ export function registerTaskRecordRoutes(
         actorKey: verifiedActorKey,
         actorInstanceId,
         actorSessionId: workerIdentity?.agent_session_id ?? null,
-        boardIntentId: deps.normalizeOptionalString(requestBody.board_intent_id),
+        boardIntentId,
         boardApprovalToken: deps.normalizeOptionalString(requestBody.board_approval_token),
+        authorizeWithApprovedBoardIntent,
       });
       if (coordination.kind === "deny") {
-        res.status(409).json({ error: coordination.error, code: coordination.code });
+        res.status(authorizeWithApprovedBoardIntent ? 403 : 409).json({ error: coordination.error, code: coordination.code });
         return;
       }
       boardIntentApproval = coordination.boardIntentApproval ?? null;
 
-      const updated = await deps.updateTask(
-        project.id,
-        taskId,
-        updates,
-        {
-          boardIntentApproval,
-          workLeaseCreation: coordination.workLeaseCreation ?? null,
-          leaseFence: coordination.leaseFence ?? null,
-        }
-      );
+      const updateOptions = {
+        boardIntentApproval,
+        workLeaseCreation: coordination.workLeaseCreation ?? null,
+        leaseFence: coordination.leaseFence ?? null,
+      };
+      const linkedRef = updates.external_ref && updates.external_ref !== task.external_ref ? updates.external_ref : null;
+      let mergedTaskId: string | null = null;
+      let updated: Awaited<ReturnType<typeof deps.updateTask>>;
+      if (linkedRef && deps.updateTaskLinkingTicket) {
+        // A card sync imported for this ticket folds into this card, which
+        // keeps the key, in one transaction with the rest of this update.
+        const link = await deps.updateTaskLinkingTicket(
+          { room_id: project.id, task_id: taskId, external_ref: linkedRef, updates },
+          (patch, tx) => deps.updateTask(project.id, taskId, patch, updateOptions, tx),
+        );
+        updated = link.task;
+        mergedTaskId = link.merged_task_id;
+      } else {
+        updated = await deps.updateTask(project.id, taskId, updates, updateOptions);
+      }
+      if (updated && linkedRef && !mergedTaskId && deps.refreshLinkedTicket) {
+        // Reads the tracker; the card shows its ticket state once that lands.
+        void deps.refreshLinkedTicket(project.id, linkedRef).catch(() => {
+          console.warn("Linked ticket refresh failed", { roomId: project.id, taskId });
+        });
+      }
       if (updated && updates.status && updates.status !== task.status) {
         try {
           await deps.emitTaskLifecycleStatusMessage(project.id, updated, {
@@ -268,9 +354,23 @@ export function registerTaskRecordRoutes(
         } catch {
           console.warn("Task Git room enrichment failed after committed update", { roomId: project.id, taskId });
         }
-        let taskWithDetails: typeof updated | Awaited<ReturnType<typeof attachTaskDetails>> = updated;
+        // A pull request that merged before it was linked moves the task now.
+        let settled = updated;
+        if (updates.pr_url !== undefined || updates.workflow_artifacts !== undefined || updates.status !== undefined || mergedTaskId) {
+          try {
+            settled = (await deps.replayStoredPullRequestMerge?.({ project, task: updated, actorLabel })) ?? updated;
+          } catch (error) {
+            // The worker's write is committed. A failed replay cannot undo it.
+            console.warn("Stored merge replay failed after committed update", {
+              roomId: project.id,
+              taskId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
+        let taskWithDetails: typeof updated | Awaited<ReturnType<typeof attachTaskDetails>> = settled;
         try {
-          taskWithDetails = await attachTaskDetails(project.id, updated);
+          taskWithDetails = await attachTaskDetails(project.id, settled);
         } catch {
           // Preserve the committed result without inventing unknown lease/lock state.
           console.warn("Task detail enrichment failed after committed update", { roomId: project.id, taskId });
@@ -280,11 +380,27 @@ export function registerTaskRecordRoutes(
         } catch {
           console.warn("Task event delivery failed after committed update", { roomId: project.id, taskId });
         }
-        res.json({ ...taskWithDetails, room_id: project.id });
+        if (mergedTaskId) {
+          try {
+            deps.taskEvents.emit("task:removed", { projectId: project.id, taskId: mergedTaskId });
+          } catch {
+            console.warn("Task removal event failed after a ticket merge", { roomId: project.id, taskId: mergedTaskId });
+          }
+        }
+        // merged_task_id names the imported card this link removed from the board.
+        res.json({ ...taskWithDetails, room_id: project.id, ...(mergedTaskId ? { merged_task_id: mergedTaskId } : {}) });
       } else {
         res.status(404).json({ error: "Task not found" });
       }
     } catch (error) {
+      if (error instanceof TaskExternalRefConflictError) {
+        res.status(409).json({ error: error.message, code: error.code, task_id: error.existingTaskId });
+        return;
+      }
+      if (error instanceof ImportedCardBusyError) {
+        res.status(409).json({ error: error.message, code: error.code, task_id: error.importedTaskId });
+        return;
+      }
       if (error instanceof LeaseFenceStaleError || error instanceof TaskContentConflictError) {
         res.status(409).json({ error: error.message, code: error.code });
         return;

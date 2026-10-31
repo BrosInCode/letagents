@@ -1,3 +1,4 @@
+import { toRaw } from "vue";
 import type {
   DesktopRoomAgentTurnState,
   DesktopSupervisorActivityEvent,
@@ -10,13 +11,17 @@ import {
   canReconnectRoomAgent,
   canRecoverSavedRoomAgent,
   roomAgentRecoveryAction,
+  roomAgentSandboxStartupBlocked,
 } from "./room-agent-delivery";
 import {
   agentCompactionProgress,
   humanFacingSupervisorActivitySummary,
   isHumanVisibleSupervisorActivity,
 } from "./managed-agents";
+import { ownerSetupStartHint, startRefusalReason } from "./agent-home-harness";
+import { CLAUDE_USAGE_LIMIT_REASON, claudeUsageLimitReached } from "./claude-usage-limit";
 import { supervisedAgentDisplayLabel } from "./codenames";
+import { agentInspectorRuntimeControlMatchesFence, type AgentInspectorWorkResource } from "./agent-inspector-work";
 
 export type AgentInspectorOverallState =
   | "retired"
@@ -296,6 +301,8 @@ export interface AgentInspectorProjection {
   actions: AgentInspectorActionAvailability[];
   mentionInsertText: string | null;
   resourceFreshness: "fresh" | "stale";
+  /** Fresh exact runtime observation; overrides retained native progress hints. */
+  runtimeExited?: boolean;
   entry: DesktopSupervisorManifestEntry;
 }
 
@@ -326,6 +333,8 @@ export function agentInspectorLiveAnnouncement(
 
 export interface AgentInspectorProjectionOptions {
   roomId: string | null;
+  workResource?: AgentInspectorWorkResource;
+  daemonGeneration?: number | null;
   tasks?: readonly DesktopTaskSummary[];
   deliveryRetryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
@@ -333,6 +342,8 @@ export interface AgentInspectorProjectionOptions {
   resourceFreshness?: "fresh" | "stale";
   mentionInsertTextByEntryId?: ReadonlyMap<string, string>;
   deliveryRetryingKeys?: ReadonlySet<string>;
+  /** Entries this desktop has asked to pause and whose request is still open. */
+  pauseRequestedEntryIds?: ReadonlySet<string>;
 }
 
 const ACTIVE_TURN_STATES = new Set(["dispatching", "responding", "publishing", "retrying"]);
@@ -389,17 +400,55 @@ function hasValidCredential(entry: DesktopSupervisorManifestEntry): boolean {
     && entry.roomAgentState?.inbox.state !== "waiting_for_desktop_credentials";
 }
 
+/** Only a trailing `Startup observations: key=value; key=value.` list. */
+const STARTUP_OBSERVATION = String.raw`[\w.]+=[^;\s]+(?: \([^)]*\))?`;
+const STARTUP_OBSERVATIONS_TAIL = new RegExp(
+  String.raw`\s*Startup observations:\s*${STARTUP_OBSERVATION}(?:;\s*${STARTUP_OBSERVATION})*\.?\s*$`,
+  "i",
+);
+
 function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
   const detail = entry.lastError?.trim() || null;
   if (!detail) return null;
+  if (roomAgentSandboxStartupBlocked(entry)) {
+    const recovery = roomAgentRecoveryAction(entry);
+    const nextStep = recovery === "recovery_options" ? " Use Recovery options to restart and resume."
+      : recovery === "recover" ? " Recover the agent to restart and resume." : "";
+    return `Agent startup needs attention. Review the startup error.${nextStep}`;
+  }
+  // A refused start leads with what the launch said, not with the scheduler's prefix.
+  const refusal = startRefusalReason(detail);
+  if (refusal) return refusal;
   if (/saved OpenCode process is no longer running|previous provider runtime is unavailable/i.test(detail)) {
     return "The provider process stopped. Recover the agent to continue with the same identity and workspace.";
   }
   if (/durable execution generation remains live without an attachable provider handle/i.test(detail)) {
     return "LetAgents is verifying whether the previous provider process is still running.";
   }
-  if (/daemon-safe bootstrap turn \(failed_response\).*assistant_error=rate_limit/i.test(detail)) {
-    return "Claude's usage limit was reached. LetAgents retries automatically once the limit resets.";
+  if (claudeUsageLimitReached(detail)) {
+    // The daemon checks again by itself when the limit resets; the owner can also ask for a check now.
+    const recovery = roomAgentRecoveryAction(entry);
+    const nextStep = recovery === "recovery_options" ? " To try again now, open Recovery options."
+      : recovery === "recover" ? " To try again now, recover the agent." : "";
+    return `${CLAUDE_USAGE_LIMIT_REASON}${nextStep}`;
+  }
+  // The daemon deliberately does not retry a startup deadline: a stalled
+  // resume can spend tokens on every attempt.
+  const startupDeadline = /Claude CLI did not (?:report its stream-json init message|complete its daemon-safe bootstrap turn) \((compaction_)?deadline\)/i
+    .exec(detail);
+  if (startupDeadline) {
+    // Compaction extends the startup budget, so only a plain deadline has one
+    // duration to report.
+    const budgetMs = startupDeadline[1] ? 0 : Number(/\bbudget_ms=(\d+)/.exec(detail)?.[1] ?? 0);
+    const seconds = budgetMs > 0 ? Math.max(1, Math.round(budgetMs / 1000)) : 0;
+    const duration = seconds ? `within ${seconds} ${seconds === 1 ? "second" : "seconds"}` : "in time";
+    // Name only the recovery control the header actually offers.
+    const recovery = roomAgentRecoveryAction(entry);
+    const nextStep = recovery === "recovery_options" ? " Open Recovery options to restart it."
+      : recovery === "recover" ? " Recover the agent to try again." : "";
+    // With the owner's own setup on, say which of their servers did not start, or that one may be the cause.
+    const ownerSetup = ownerSetupStartHint(detail);
+    return `Claude didn’t finish starting ${duration}.${ownerSetup ? ` ${ownerSetup}` : ""}${nextStep}`;
   }
   if (/waiting for desktop credential handoff/i.test(detail)) {
     return "Waiting for the desktop app to restore this agent’s room access.";
@@ -419,22 +468,26 @@ function lifecycleDetail(entry: DesktopSupervisorManifestEntry): string | null {
   if (/could not be authenticated; refusing to start a competing runtime/i.test(detail)) {
     return "LetAgents can’t confirm the previous provider process stopped, so it won’t start a competing one. Recover the agent to relaunch it.";
   }
-  return detail;
+  // Startup key=value observations belong in Diagnostics, which keeps the
+  // retained error verbatim; they are not a headline.
+  return detail.replace(STARTUP_OBSERVATIONS_TAIL, "") || detail;
 }
 
 export function agentInspectorOverallState(entry: DesktopSupervisorManifestEntry): AgentInspectorOverallState {
   const room = entry.roomAgentState;
-  if (entry.desiredState === "stopped" || entry.observedState === "stopped" || entry.observedState === "stopping") {
-    return "retired";
-  }
+  if (entry.desiredState === "stopped") return "retired";
+  // A pause stops the provider process, so a paused agent passes through
+  // observed stopping before it settles. That is still a pause, not retirement.
   if (entry.desiredState === "paused" || entry.observedState === "paused" || entry.observedState === "pausing") {
     return "paused";
   }
+  if (entry.observedState === "stopped" || entry.observedState === "stopping") return "retired";
   if (room?.inbox.state === "restoring_conversation") return "restoring_conversation";
   if (roomAccessRecoveryIsActive(entry)) return "recovering";
   if (
     entry.condition !== "none"
     || entry.observedState === "failed"
+    || Boolean(entry.deliveryAttention)
     || room?.ingress.state === "blocked"
     || room?.inbox.state === "blocked"
     || room?.turn.state === "failed"
@@ -483,6 +536,11 @@ function overallPresentation(state: AgentInspectorOverallState): { label: string
     case "disconnected": return { label: "Disconnected", detail: "The provider is not currently reachable." };
   }
 }
+
+const pausingPresentation = {
+  label: "Pausing…",
+  detail: "Stopping room delivery. New room work is held until you resume the agent.",
+};
 
 function turnStartedAt(entry: DesktopSupervisorManifestEntry): string | null {
   const turn = entry.roomAgentState?.turn;
@@ -552,6 +610,8 @@ function nowProjection(
       kind: "attention",
       label: overallState === "reconnecting" ? "Reconnecting" : "Needs attention",
       summary: lifecycleDetail(entry)
+        // A room that refuses the agent is why its messages are only queued.
+        || (entry.roomAgentState?.ingress.state === "blocked" ? entry.roomAgentState.ingress.detail : null)
         || entry.roomAgentState?.inbox.detail
         || entry.roomAgentState?.ingress.detail
         || entry.roomAgentState?.connection.detail
@@ -826,6 +886,87 @@ export function projectAgentInspectorTurnControl(
 }
 
 /**
+ * A request from outside the Inspector (an Activity row, the composer) to open
+ * the Overview correction box for one exact live turn. It never applies the
+ * correction itself: the person still reviews the text and chooses Apply, so
+ * the Inspector's turn fences stay the only path to the provider.
+ */
+export interface AgentInspectorCorrectionRequest {
+  /** Distinguishes repeated requests for the same agent and turn. */
+  id: number;
+  entryId: string;
+  /** Prefill applies only while this exact provider turn is still the live one. */
+  providerTurnId: string | null;
+  text: string;
+}
+
+/** A busy agent a person can correct now instead of queueing a room message. */
+export interface AgentCorrectionTarget {
+  entryId: string;
+  displayName: string;
+  mentionInsertText: string;
+}
+
+/** Composer text handed to a correction, and the draft (and its room) it came from. */
+export interface ComposerCorrectionHandoff {
+  entryId: string;
+  text: string;
+  draft: string;
+  draftNamespace: string | null;
+}
+
+const correctionBoxTexts = new WeakMap<object, string>();
+
+/**
+ * What the correction box shows for a hand-over: the handed-over text at
+ * first, then whatever the person left in the box. The box remounts on every
+ * Inspector tab switch; that must neither empty it nor undo their edits.
+ */
+export function correctionBoxText(request: AgentInspectorCorrectionRequest): string {
+  const identity = toRaw(request);
+  return correctionBoxTexts.has(identity) ? correctionBoxTexts.get(identity)! : request.text;
+}
+
+export function rememberCorrectionBoxText(request: AgentInspectorCorrectionRequest, text: string): void {
+  correctionBoxTexts.set(toRaw(request), text);
+}
+
+export function agentCorrectionTargets(
+  projections: readonly Pick<AgentInspectorProjection, "entryId" | "displayName" | "mentionInsertText" | "turnControl">[],
+): AgentCorrectionTarget[] {
+  return projections.flatMap((projection) =>
+    projection.turnControl?.status === "ready" && projection.turnControl.canCorrect && projection.mentionInsertText
+      ? [{ entryId: projection.entryId, displayName: projection.displayName, mentionInsertText: projection.mentionInsertText }]
+      : []);
+}
+
+/**
+ * The one busy agent a draft @-mentions, and the draft without that mention.
+ * A correction reaches one agent's private session, so a draft that also
+ * mentions anyone else (another agent, a person, @everyone) stays a room
+ * message: moving it would hide that part from the people it was for.
+ */
+export function mentionedCorrectionTarget(
+  draft: string,
+  targets: readonly AgentCorrectionTarget[],
+): { target: AgentCorrectionTarget; text: string } | null {
+  const mentioned = targets.filter((target) => new RegExp(`(^|\\s)@${escapeRegExp(target.mentionInsertText)}${MENTION_END}`, "i").test(draft));
+  if (mentioned.length !== 1) return null;
+  const target = mentioned[0]!;
+  // The mention addressed the room; a correction already reaches the agent.
+  const mention = new RegExp(`(^|\\s)@${escapeRegExp(target.mentionInsertText)}[,;:]?${MENTION_END}\\s*`, "gi");
+  const text = draft.replace(mention, "$1").trim();
+  if (!text || /(^|\s)@[^\s@]/.test(text)) return null;
+  return { target, text };
+}
+
+const MENTION_END = "(?=$|[\\s.,;:!?)])";
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/**
  * A push or poll may replace the selected entry while an IPC request is away.
  * An idle/null turn is allowed after a successful stop; a different live turn
  * proves that the response belongs to stale work and must not update the UI.
@@ -920,6 +1061,12 @@ function actionAvailability(
     && missingContinuationReceipt.attemptCount === 0
     && !missingContinuationReceipt.providerTurnId,
   );
+  // The supervisor decides whether any other blocked message may be skipped.
+  const attention = entry.deliveryAttention ?? null;
+  const skipSourceMessageId = safeToRestoreOrSkip
+    ? missingContinuationReceipt?.sourceMessageId
+    : attention?.canSkip ? attention.sourceMessageId : undefined;
+  const retryKind = attention && attention.sourceMessageId === blockedReceipt?.sourceMessageId ? attention.retry : null;
   const stateDependentActionsAvailable = resourceFreshness === "fresh";
   const canStopTurn = turnControl?.canStop === true;
   const canRestartRuntime = stateDependentActionsAvailable && entry.deliveryMode === "daemon_inbox"
@@ -932,14 +1079,15 @@ function actionAvailability(
     { kind: "reconnect", label: "Reconnect", available: stateDependentActionsAvailable && canReconnectRoomAgent(entry) },
     { kind: "recover", label: "Recover agent", available: stateDependentActionsAvailable && canRecoverSavedRoomAgent(entry) },
     { kind: "recovery_options", label: "Recovery options", available: stateDependentActionsAvailable && roomAgentRecoveryAction(entry) === "recovery_options" },
-    { kind: "reconnect_runtime", label: "Reconnect", available: canRestartRuntime && entry.desiredState === "running" && !entry.runtimeRecovery },
+    { kind: "reconnect_runtime", label: "Reconnect", available: canRestartRuntime && entry.desiredState === "running" && !entry.runtimeRecovery && !roomAgentSandboxStartupBlocked(entry) },
     { kind: "restart_runtime", label: entry.runtimeRecovery?.mode === "resume" ? "Continue restart" : "Restart and resume", available: canRestartRuntime && (!entry.runtimeRecovery || entry.runtimeRecovery.mode === "resume"), danger: true },
     { kind: "fresh_runtime", label: entry.runtimeRecovery?.mode === "fresh" ? "Continue fresh start" : "Start fresh", available: canRestartRuntime && (!entry.runtimeRecovery || entry.runtimeRecovery.mode === "fresh"), danger: true },
     { kind: "stop_turn", label: "Stop current turn", available: stateDependentActionsAvailable && canStopTurn },
     { kind: "retry_turn_control", label: "Retry previous turn control", available: stateDependentActionsAvailable && turnControl?.canRetry === true },
     {
       kind: "retry_delivery",
-      label: "Retry delivery",
+      label: retryKind === "reread_saved_turn" ? "Read the reply again"
+        : retryKind === "publish_saved_reply" ? "Post the saved reply" : "Retry delivery",
       available: Boolean(
         stateDependentActionsAvailable
         && deliveryRetryAvailable
@@ -958,8 +1106,8 @@ function actionAvailability(
     {
       kind: "skip_message",
       label: "Skip message",
-      available: Boolean(stateDependentActionsAvailable && roomDeliverySkipAvailable && safeToRestoreOrSkip && !recoveryIsActive),
-      sourceMessageId: missingContinuationReceipt?.sourceMessageId,
+      available: Boolean(stateDependentActionsAvailable && roomDeliverySkipAvailable && skipSourceMessageId && !recoveryIsActive),
+      sourceMessageId: skipSourceMessageId,
     },
     { kind: "retire_agent", label: "Retire agent", available: stateDependentActionsAvailable && entry.desiredState !== "stopped", danger: true },
   ];
@@ -992,7 +1140,8 @@ function continuationRecovery(
         ? "The provider remains connected while LetAgents verifies and repairs the missing conversation."
         : "Couldn’t restore this agent’s Codex conversation.",
     canRestore: actions.some((action) => action.kind === "restore_conversation" && action.available),
-    canSkip: actions.some((action) => action.kind === "skip_message" && action.available),
+    canSkip: actions.some((action) => action.kind === "skip_message" && action.available
+      && action.sourceMessageId === receipt.sourceMessageId),
   };
 }
 
@@ -1001,10 +1150,27 @@ export function projectAgentInspector(
   options: AgentInspectorProjectionOptions,
 ): AgentInspectorProjection | null {
   if (!options.roomId || entry.roomId !== options.roomId) return null;
-  const overallState = agentInspectorOverallState(entry);
-  const presentation = overallPresentation(overallState);
+  // Pause drains room delivery before it saves the paused state, which can
+  // take a while mid-turn. The drained delivery would read as disconnected
+  // meanwhile, so this desktop's open request decides the state until then.
+  const pausing = entry.desiredState === "running" && Boolean(options.pauseRequestedEntryIds?.has(entry.id));
   const resourceFreshness = options.resourceFreshness ?? "fresh";
-  const now = nowProjection(resourceFreshness === "fresh" ? entry : { ...entry, providerProgress: null }, overallState);
+  const detail = options.workResource?.detail;
+  // Overview and Diagnostics must use the same exact runtime observation.
+  // Retained PIDs and an unreachable control channel are not proof of exit.
+  const providerStopped = resourceFreshness === "fresh" && options.workResource?.status === "ready"
+    && entry.deliveryMode === "daemon_inbox"
+    && entry.desiredState === "running" && !entry.runtimeRecovery
+    && detail?.entry_id === entry.id && detail.room_id === entry.roomId
+    && detail.runtime_control?.runtime_state === "exited"
+    && agentInspectorRuntimeControlMatchesFence(detail.runtime_control, entry.executionGenerationId,
+      options.daemonGeneration ?? null, entry.runtimeGenerationId);
+  const overallState = pausing ? "paused" : providerStopped ? "needs_attention" : agentInspectorOverallState(entry);
+  const presentation = pausing ? pausingPresentation : overallPresentation(overallState);
+  const now: AgentInspectorNowProjection | null = providerStopped && !pausing
+    ? { kind: "attention", label: "Agent stopped", summary: "Open Recovery options to restart this agent with its saved conversation.",
+      observedAt: detail?.runtime_control?.observed_at ?? null }
+    : nowProjection(resourceFreshness === "fresh" ? entry : { ...entry, providerProgress: null }, overallState);
   const mentionInsertText = options.mentionInsertTextByEntryId?.get(entry.id) ?? null;
   const rawTurnControl = projectAgentInspectorTurnControl(entry);
   // A stale Inspector keeps its last meaningful explanation but never offers a
@@ -1027,7 +1193,10 @@ export function projectAgentInspector(
     resourceFreshness,
     mentionInsertText,
     turnControl,
-  );
+  ).map(action => providerStopped && !pausing
+    ? action.kind === "reconnect" || action.kind === "reconnect_runtime" ? { ...action, available: false }
+      : action.kind === "recovery_options" ? { ...action, available: true } : action
+    : action);
   return {
     entryId: entry.id,
     roomId: entry.roomId,
@@ -1039,7 +1208,7 @@ export function projectAgentInspector(
     charter: entry.charter,
     overallState,
     overallLabel: presentation.label,
-    overallDetail: resourceFreshness === "fresh" && agentCompactionProgress(entry)
+    overallDetail: resourceFreshness === "fresh" && !providerStopped && agentCompactionProgress(entry)
       ? "Compacting conversation" : presentation.detail,
     deliveryProgress: deliveryProgress(
       entry,
@@ -1055,6 +1224,7 @@ export function projectAgentInspector(
     actions,
     mentionInsertText,
     resourceFreshness,
+    runtimeExited: providerStopped && !pausing,
     entry,
   };
 }

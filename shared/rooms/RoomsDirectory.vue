@@ -271,7 +271,7 @@
                 </template></svg
             ></span>
             <span class="rooms-entry-copy"
-              ><span class="rooms-entry-title">{{ room.title }}</span
+              ><span class="rooms-entry-title">{{ room.title }}<span v-if="room.hasUnread" class="rooms-unread-dot" aria-label="Unread messages"> ●</span></span
               ><span class="rooms-entry-description"
                 ><span class="rooms-mobile-kind"
                   >{{ roomKindLabel(room) }} · </span

@@ -1,4 +1,4 @@
-import { computed, onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
+import { onMounted, onUnmounted, ref, watch, type Ref } from 'vue'
 import type { OutgoingMessageAttachment } from '@/composables/useRoom'
 
 const KEEP_POLLING_INTERVAL_MS = 20_000
@@ -12,33 +12,16 @@ type SubmitComposerMessage = (
 ) => Promise<boolean>
 
 export function useComposerPrompts(input: {
+  enabled?: Ref<boolean>
   roomIdentifier: Ref<string>
   submitComposerMessage: SubmitComposerMessage
 }) {
   const menuEl = ref<HTMLDivElement | null>(null)
   const menuOpen = ref(false)
   const autoKeepPolling = ref(false)
-  const injectPrompt = ref(false)
 
   let keepPollingTimer: ReturnType<typeof setInterval> | null = null
   let keepPollingInFlight = false
-
-  const promptMode = computed(() => {
-    if (autoKeepPolling.value && injectPrompt.value) return 'auto+inject'
-    if (autoKeepPolling.value) return 'auto'
-    if (injectPrompt.value) return 'inject'
-    return 'off'
-  })
-
-  const promptLabel = computed(() => {
-    const labels: Record<string, string> = {
-      off: 'Inject',
-      auto: 'Auto poll',
-      inject: 'Inject on',
-      'auto+inject': 'Auto + inject',
-    }
-    return labels[promptMode.value] || 'Inject'
-  })
 
   function prefsKey(): string {
     const room = input.roomIdentifier.value
@@ -49,21 +32,19 @@ export function useComposerPrompts(input: {
     try {
       localStorage.setItem(prefsKey(), JSON.stringify({
         autoKeepPolling: autoKeepPolling.value,
-        injectPrompt: injectPrompt.value,
       }))
     } catch { /* silent */ }
   }
 
   function loadPrefs() {
+    if (input.enabled?.value === false) return
     try {
       const raw = localStorage.getItem(prefsKey())
       if (!raw) return
       const saved = JSON.parse(raw)
       autoKeepPolling.value = Boolean(saved.autoKeepPolling)
-      injectPrompt.value = Boolean(saved.injectPrompt)
     } catch {
       autoKeepPolling.value = false
-      injectPrompt.value = false
     }
   }
 
@@ -86,7 +67,7 @@ export function useComposerPrompts(input: {
 
   function startKeepPollingLoop(sendImmediately = true) {
     stopKeepPollingLoop()
-    if (!autoKeepPolling.value || !input.roomIdentifier.value) return
+    if (input.enabled?.value === false || !autoKeepPolling.value || !input.roomIdentifier.value) return
 
     if (sendImmediately) {
       void sendAutoPollingPrompt()
@@ -106,11 +87,6 @@ export function useComposerPrompts(input: {
     } else {
       stopKeepPollingLoop()
     }
-  }
-
-  function toggleInjectPrompt() {
-    injectPrompt.value = !injectPrompt.value
-    persistPrefs()
   }
 
   function handleDocClick(e: MouseEvent) {
@@ -144,11 +120,7 @@ export function useComposerPrompts(input: {
     menuEl,
     menuOpen,
     autoKeepPolling,
-    injectPrompt,
-    promptMode,
-    promptLabel,
     toggleAutoKeepPolling,
-    toggleInjectPrompt,
     stopKeepPollingLoop,
   }
 }

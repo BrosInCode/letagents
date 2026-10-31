@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { roomShellSource } from "./room-shell-source";
 
 function source(relative: string): string {
   return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
 }
 
-const shell = source("../src/components/desktop/content/DesktopRoomShell.vue");
+const shell = roomShellSource();
 const activity = source("../src/components/desktop/content/RoomActivityTabView.vue");
 const chatMessage = source("../src/components/desktop/content/DesktopChatMessage.vue");
 const host = source("../src/components/desktop/content/agent-inspector/AgentInspectorHost.vue");
@@ -25,12 +26,22 @@ test("one agent inspector owns every selected detail surface", () => {
 });
 
 test("Activity opens the exact shared Inspector for supervised and generic participants", () => {
-  assert.match(activity, /@click="selectInspectorAgent\(agent\)"/);
+  assert.match(activity, /@select="selectRosterAgent"/);
+  assert.match(activity, /if \(native\) selectInspectorAgent\(native\)/);
   assert.match(activity, /supervisedAgentInspectorRequest\(agent\.entry/);
-  assert.match(activity, /@click="selectParticipantAgent\(agent\)"/);
+  assert.match(activity, /if \(legacy\) selectParticipantAgent\(legacy\)/);
   assert.match(activity, /participantAgentInspectorRequest\(activityParticipantToAgentTarget\(agent\)\)/);
   assert.match(activity, /useRoomActivityViewModel\(props, \{ autoSelectLive: false \}\)/);
   assert.match(shell, /:agent-projections="agentInspectorProjections"/);
+});
+
+test("the room shell runs Pause through the room's pause tracker and shows its state", () => {
+  // Mounting the shell needs the whole room; the tracker itself is tested
+  // behaviourally in agent-inspector.test.ts.
+  assert.match(shell, /const agentPauseRequests = useAgentPauseRequests\(supervisorEntries\);/);
+  assert.match(shell, /pauseRequestedEntryIds: agentPauseRequests\.entryIds\.value,/);
+  assert.match(shell, /intent\.kind === "pause"\) \{\s*updated = await agentPauseRequests\.run\(\s*intent\.entryId,\s*\(\) => desktopIpc\.supervisor\.setDesiredState\(intent\.entryId, "paused"\),/);
+  assert.match(shell, /intent\.kind === "resume"\) \{\s*agentPauseRequests\.clear\(intent\.entryId\);/);
 });
 
 test("Chat carries the clicked canonical message into exact supervised identity resolution", () => {
@@ -45,13 +56,11 @@ test("Chat carries the clicked canonical message into exact supervised identity 
   assert.doesNotMatch(identity, /displayName.*resolveSupervisorEntryIdForPublishedMessage|actorLabel.*resolveSupervisorEntryIdForPublishedMessage/);
 });
 
-test("the shared Inspector keeps external and exact local-managed participants distinct", () => {
-  assert.match(host, /projectAgentInspectorParticipant\(\s*props\.selection,\s*props\.managedSessions,\s*props\.roomIdentifier\s*\)/);
-  assert.match(participantProjection, /selection\.kind === "external"/);
-  assert.match(participantSurface, /projection\.kind === 'local_managed'/);
-  assert.match(participantSurface, /participant-inspector-stop-turn/);
-  assert.match(participantSurface, /participant-inspector-retry/);
-  assert.match(participantSurface, /participant-inspector-stop-worker/);
+test("the shared Inspector shows an external participant read-only and never builds one from a local session", () => {
+  assert.match(host, /projectAgentInspectorParticipant\(props\.selection\)/);
+  assert.match(participantProjection, /selection\.kind !== "external"\) return null/);
+  assert.doesNotMatch(host, /managedSessions|session-updated/);
+  assert.doesNotMatch(participantSurface, /local_managed|participant-inspector-stop-turn|participant-inspector-retry|participant-inspector-stop-worker/);
   assert.match(identity, /Only a completed list operation can authoritatively classify the target[\s\S]*resource\.state === "ready"/);
   assert.match(identity, /resource\.state === "error"[\s\S]*unavailableReason: "load_error"/);
   assert.doesNotMatch(identity, /displayName.*resolveSupervisorEntryId|sender.*resolveSupervisorEntryId/);

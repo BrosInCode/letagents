@@ -11,12 +11,14 @@ in `shared/permission-review.mjs`.
 ## Where it is used
 
 Open Model agents, when their owner chooses the **Auto** access level. Claude
-and Codex have their own review and use that instead.
+and Codex have their own review and use that instead, with one exception:
+see [Claude commands that only read](#claude-commands-that-only-read).
 
 | Request from the agent | Who decides |
 |---|---|
 | Edit a file inside the project | The desktop. It runs unless the file is one of the kinds listed below. Nothing is sent anywhere. |
-| Run a command | The fixed rules on the desktop, then the server's review |
+| Routine work on its own branches | The fixed rules on the desktop. Nothing is sent anywhere. See [Routine work](#routine-work-on-the-agents-own-branches). |
+| Run any other command | The fixed rules on the desktop, then the server's review |
 | Open anything outside the project | OpenCode refuses it |
 | Anything else | A person |
 
@@ -40,7 +42,13 @@ the place a file is moved to:
   `Makefile`, a `justfile`, a `Taskfile`, `pyproject.toml`, `Cargo.toml`,
   `go.mod`, `tsconfig.json`, `lefthook.yml`, anything inside `node_modules`,
   and the settings file of a test runner, linter, or bundler, such as
-  `jest.config.js`.
+  `jest.config.js`;
+- has the name Git runs a hook by, in any folder, because `core.hooksPath`
+  may name any folder: `pre-commit`, `prepare-commit-msg`, `commit-msg`,
+  `pre-merge-commit`, `pre-push`, `pre-rebase`, `pre-auto-gc`,
+  `applypatch-msg`, `pre-applypatch`, `reference-transaction`,
+  `push-to-checkout`, `fsmonitor-watchman`, and any `post-` name without an
+  extension, such as `post-commit`, `post-merge`, or `post-checkout`.
 
 A request must also say which file it means twice, as OpenCode does. One that
 does not asks a person.
@@ -62,9 +70,9 @@ does under Ask before writes. So an agent under Auto can read a credentials
 file inside the project and can reach the web.
 
 The server needs `TYPESAFE_API_KEY` or `AI_GATEWAY_API_KEY`, the same
-credential Smart conversation routing uses. Without one, every command asks a
-person, as Ask before writes does. Review does not depend on
-`LETAGENTS_JEV_ROUTING`.
+credential Smart conversation routing uses. Without one, every command that
+needs the server's review asks a person, as Ask before writes does. Review
+does not depend on `LETAGENTS_JEV_ROUTING`.
 
 ## How a command is decided
 
@@ -83,20 +91,97 @@ person, as Ask before writes does. Review does not depend on
 
 Automatic review never denies a command. It allows it or hands it to a person.
 
+## Routine work on the agent's own branches
+
+Jev's question calls a change to files, or a call to a network service,
+something a person decides. For an agent that works on its own branch, some of
+both is routine, and asking about it made Auto ask about almost every command
+an agent ran. The fixed rules decide these on their own, and send nothing:
+
+- **Reading pull requests and issues:** `gh pr view`, `gh pr list`,
+  `gh pr diff`, `gh pr checks`, `gh pr status`, `gh issue view`, and
+  `gh issue list`, with `--json` and a `--jq` filter that does not read the
+  environment or a file. No `--repo`, no `--web`, and no `--search`: `gh` puts
+  search text inside parentheses that the text can close, so a search can
+  reach any repository. A label is quoted by `gh`, and an author is a login.
+- **Staging and committing:** `git add` with files named one by one (no
+  folder, pattern, `.`, `-A`, or name that starts with a dot) or `-u`, and
+  `git commit` with `-m`, or `--amend --no-edit`. Not with `-c`, which can
+  credit the commit to someone else or change what Git runs.
+- **Fetching:** `git fetch origin` with branch names. Not a pull request's
+  ref.
+- **Its own branches:** `git checkout -b`, `git switch -c`, and `git switch`
+  to an existing branch, when the branch is one LetAgents leases to this
+  agent: `letagents/<task>/<agent>`, named for the agent's key. Not
+  `git checkout <branch>`: when no branch has that name and a folder does, it
+  restores the folder and stays on the branch it was on.
+- **Merging, and starting a branch:** from `origin`'s copy of its default
+  branch (such as `origin/main`, read from `refs/remotes/origin/HEAD`), from
+  the agent's own branches, or from where the agent is. Another branch may
+  bring in settings or hooks that the agent could not have edited without
+  asking. That includes the local default branch, which holds whatever was
+  committed or merged on it here, and `FETCH_HEAD`, which may hold anyone's
+  code.
+- **Pushing:** `git push origin <source>:<branch>`, or
+  `<source>:refs/heads/<branch>`, when that branch is the agent's own. The
+  push names where it goes, so no branch checked out, upstream, or push
+  setting decides it. A push that does not name its destination, such as
+  `git push origin HEAD`, asks. So do force, deletion, tags, and skipped
+  hooks.
+
+Everything else in such a command, the reading and the project's checks, still
+goes to Jev, each part as written. A command with no routine part goes to Jev
+whole, as before. So these still ask a person: `gh pr create`, `gh pr merge`,
+`gh pr comment`, `gh api`, any push to another branch, `git reset`,
+`git rebase`, removing files, and anything the rules cannot read.
+
+These commands run Git hooks and filters, as a person's commands do. An edit
+to a hook always asks: one in `.git/hooks` or a dot folder such as `.husky`
+by its folder, and one in any other folder by its name, since
+`core.hooksPath` may name any folder. The rules do not read Git's settings,
+so a hook manager that runs a script under another name, or a filter a
+setting names, is not recognised; the project's own checks run what the
+agent wrote, as before.
+
+## Claude commands that only read
+
+Claude asks before a command it cannot show only reads, and it often cannot
+read joined commands. Under **Ask before writes** and **Auto**, a Claude
+command runs without asking when the fixed rules show that every part of it
+only reads files inside the project, the repository's history, or this
+repository's pull requests and issues, however the parts are joined (`&&`,
+`||`, `;`, `|`, or a new line): Ask before writes promises that. Nothing is
+sent anywhere.
+
+It still asks when Claude names a path outside the project (shown as Blocked
+path), when the command changes folder (`cd`, or `git -C` with any folder but
+the project itself, which may be another repository with its own hooks), runs
+in the background, writes through a redirect, or runs the project's own code,
+such as `npm test` or `node --check`, which may write anything.
+
+Reading files the agent itself created outside the project, such as
+screenshots in `/tmp`, still asks. Nothing proves which process created a file
+in a shared temporary folder: other agents, other tools, and the owner write
+there too. A safe rule needs a folder only this agent writes to; see the
+limits below.
+
 ## What the fixed rules allow
 
 The rules name what is allowed. A shell and its programs can spell a
 forbidden thing in more ways than a list of forbidden things can hold.
 
 - **Programs:** file readers (`ls`, `cat`, `head`, `tail`, `wc`, `grep`, `rg`,
-  `find`, `sort`, `diff`, and a few more), Git commands that only look, and
-  the tools that run a project's checks (`npm test`, `npm run <script>`,
-  `node <file>`, `pytest`, `go test`, `cargo test`, `make <target>`,
-  `tsc --noEmit`, `jest`, and similar). Any other program goes to a person.
+  `find`, `sort`, `diff`, `sed -n` with a range of lines to print, and a few
+  more), Git commands that only look, and the tools that run a project's
+  checks (`npm test`, `npm run <script>`, `node <file>`, `node --check`,
+  `pytest`, `go test`, `cargo test`, `make <target>`, `tsc --noEmit`, `jest`,
+  and similar). Any other program goes to a person, except the routine work
+  above.
 - **Options:** each program has its own list. An option that is not on it
   goes to a person, however it is spelled.
 - **Words:** letters, digits, and a few marks that mean nothing to a shell. A
-  word may be quoted only as a whole.
+  word may be quoted only as a whole, or after the `=` of an option, as in
+  `--format='%h %an'`.
 - **Joining:** `&&`, `||`, `;`, `|`, and a new line. Each command joined this
   way must be allowed on its own.
 - **Output:** `2>&1` and sending output to `/dev/null`.
@@ -110,8 +195,8 @@ program, a wrapper such as `env` or `timeout`, a path outside the project,
 or is inside `.git`, and any program that runs code when it is on the
 receiving end of a pipe.
 
-The programs `mkdir`, `cp`, `mv`, `rm`, `touch`, and `git add` are not on the
-list. Neither are the options known to write, such as `prettier --write`,
+The programs `mkdir`, `cp`, `mv`, `rm`, and `touch` are not on the list, and
+`git add` is only the routine work above. Neither are the options known to write, such as `prettier --write`,
 `eslint --fix`, and `sort -o`. Test runners still write their own caches and
 new snapshot files.
 
@@ -178,7 +263,9 @@ nothing.
   choose a working folder inside the project, and the request does not say
   which. `cat config` run inside `.git` reads a file the rules would refuse
   by name, and `npm test` run inside an installed package runs that
-  package's script.
+  package's script. A push run inside another repository nested in the
+  project goes to that repository's `origin`, still only to a branch named for
+  the agent.
 - **A name can lie.** Jev allowed `node scripts/list-files.js` and
   `node scripts/run-tests.js` on their names alone. A harmful script with a
   harmless name would run.
@@ -212,6 +299,10 @@ nothing.
 - **One answer covers a whole request.** A request may hold up to 16
   commands. The evaluation has ten commands that join several. Four of them
   reached Jev, and none joins more than three.
+- **Files an agent creates outside the project ask to be read.** A private
+  temporary folder for each agent, set as its `TMPDIR` and readable without
+  asking, would let it read back its own screenshots safely. It does not
+  exist yet.
 - **The test set is small and hand-written.** It shows the design works on
   common commands. It does not measure a rate for real sessions.
 

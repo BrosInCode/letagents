@@ -1,0 +1,25 @@
+{
+  "issues": [
+    {
+      "id": "10104",
+      "key": "HT-1260",
+      "fields": {
+        "summary": "Dunning emails go out twice",
+        "status": { "name": "To Do", "id": "1", "statusCategory": { "key": "new", "name": "To Do" } },
+        "assignee": { "accountId": "5b10ac8d82e05b22cc7d4ef5", "displayName": "Emmy May" },
+        "updated": "2026-10-17T08:00:00.000+0000"
+      }
+    },
+    {
+      "id": "10105",
+      "key": "HT-1261",
+      "fields": {
+        "summary": "Refund webhook retries forever",
+        "status": { "name": "Done", "id": "10002", "statusCategory": { "key": "done", "name": "Done" } },
+        "assignee": null,
+        "updated": "2026-10-16T08:00:00.000+0000"
+      }
+    }
+  ],
+  "isLast": true
+}

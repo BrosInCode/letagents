@@ -42,6 +42,13 @@ export interface RoomTaskRouteDeps {
   getTaskById: typeof import("../../../db.js").getTaskById;
   getTaskOwnershipState: typeof import("../../../db.js").getTaskOwnershipState;
   updateTask: typeof import("../../../db.js").updateTask;
+  /**
+   * Ticket connectors PR3: an update that links a card to a ticket an
+   * imported card holds folds that card in, in the update's transaction.
+   */
+  updateTaskLinkingTicket?: typeof import("../../../connectors/card-merge.js").updateTaskLinkingTicket;
+  /** Binds a newly linked card to its ticket when the room's filter matches it. Best effort. */
+  refreshLinkedTicket?: (roomId: string, externalRef: string) => Promise<void>;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(
     roomId: string,
@@ -112,6 +119,7 @@ export interface RoomTaskRouteDeps {
     actorSessionId: string | null;
     boardIntentId?: string | null;
     boardApprovalToken?: string | null;
+    authorizeWithApprovedBoardIntent?: boolean;
   }): Promise<TaskCoordinationGuardDecision>;
   enforceFocusParentBoardWriteIsolation(input: {
     req: AuthenticatedRequest;
@@ -123,4 +131,13 @@ export interface RoomTaskRouteDeps {
     taskId: string;
   }): Promise<EnsureTaskGitRoomResult>;
   emitProjectMessage(projectId: string, sender: string, text: string): Promise<unknown>;
+  /**
+   * Applies the stored merge of a pull request the task now holds the link to.
+   * Resolves to the task when it moved, null when nothing applied.
+   */
+  replayStoredPullRequestMerge?(input: {
+    project: Project;
+    task: Task;
+    actorLabel: string | null;
+  }): Promise<Task | null>;
 }

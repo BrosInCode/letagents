@@ -17,14 +17,17 @@ export type BoardIntentActionType =
   | "task_claim"
   | "task_close"
   | "task_override"
-  | "task_update";
+  | "task_update"
+  /** Ticket connectors PR6: "Move KEY to STATUS?" after Jev linked a pull request. A person decides it. */
+  | "tracker_jev_link";
 
 export type BoardIntentStatus =
   | "pending"
   | "approved"
   | "denied"
   | "expired"
-  | "used";
+  | "used"
+  | "superseded";
 
 export type { BoardManagerFailoverMode } from "../../../shared/board-manager-failover.js";
 import type { BoardManagerFailoverMode } from "../../../shared/board-manager-failover.js";
@@ -75,6 +78,9 @@ export interface BoardIntent {
   expires_at: string | null;
   escalated_at: string | null;
   auto_approved: boolean;
+  approved_task_status: string | null;
+  approved_task_assignee_agent_key: string | null;
+  approved_manager_assignment_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -141,6 +147,9 @@ export interface BoardIntentRow {
   escalated_at: string | null;
   escalation_check_at: string | null;
   auto_approved: boolean;
+  approved_task_status: string | null;
+  approved_task_assignee_agent_key: string | null;
+  approved_manager_assignment_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -173,7 +182,8 @@ export interface BoardGovernanceCapabilities {
 export type BoardGovernanceAuditKind =
   | "coordination_event"
   | "manager_assignment"
-  | "board_intent_decision";
+  | "board_intent_decision"
+  | "tracker_rule_run";
 
 export interface BoardGovernanceAuditEntry {
   id: string;

@@ -9,9 +9,11 @@ import {
   getPullRequestWorkflowRef,
   toGitHubRoutingContext,
 } from "../github/repo-event-task-resolution.js";
-import type {
-  RepoRoomEvent,
-  TaskWorkflowArtifactMatch,
+import {
+  buildRepoRoomEventArtifactMatches,
+  projectRepoRoomEvent,
+  type RepoRoomEvent,
+  type TaskWorkflowArtifactMatch,
 } from "../repo-workflow.js";
 
 function makeTask(id: string, overrides: Partial<Task> = {}): Task {
@@ -418,4 +420,178 @@ test("a matching focus-room lease wins over an unrelated task number in PR prose
   assert.equal(resolution.matchedByWorkflowArtifact, true);
   assert.equal(resolution.matchedByTaskReference, false);
   assert.deepEqual(taskByIdCalls, []);
+});
+
+function makeParticipantEvent(overrides: Partial<RepoRoomEvent> = {}): RepoRoomEvent {
+  return {
+    provider: "github",
+    kind: "pull_request_participant",
+    action: "review_requested",
+    repositoryFullName: "BrosInCode/letagents",
+    senderLogin: "lerato",
+    pullRequest: {
+      number: 88,
+      title: "Review pings",
+      url: "https://github.com/BrosInCode/letagents/pull/88",
+      body: "adds review request pings",
+      headRef: "lerato/review-pings",
+    },
+    participant: {
+      role: "reviewer",
+      change: "added",
+      login: "katrin",
+      github_user_id: "424242",
+      team_slug: null,
+      team_name: null,
+    },
+    ...overrides,
+  } as RepoRoomEvent;
+}
+
+test("a review request event matches its task by the PR URL like a pull_request event", async () => {
+  const task = makeTask("task_8");
+  const { artifactMatchCalls, prUrlCalls, resolver } = createHarness({ prUrlTask: task });
+  const event = makeParticipantEvent();
+
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(project, event);
+
+  assert.equal(resolution.task, task);
+  assert.equal(resolution.matchedByWorkflowArtifact, true);
+  assert.equal(artifactMatchCalls.length, 1);
+  assert.equal(artifactMatchCalls[0]?.matches.some((match) => match.kind === "pull_request"), true);
+  assert.deepEqual(prUrlCalls, [
+    { projectId: "github.com/brosincode/letagents", prUrl: "https://github.com/BrosInCode/letagents/pull/88" },
+  ]);
+});
+
+test("a review request event matches a task through its PR workflow artifact", async () => {
+  const task = makeTask("task_9");
+  const { resolver } = createHarness({ artifactTask: task });
+
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(project, makeParticipantEvent({
+    action: "assigned",
+    participant: {
+      role: "assignee",
+      change: "added",
+      login: "katrin",
+      github_user_id: "424242",
+      team_slug: null,
+      team_name: null,
+    },
+  } as Partial<RepoRoomEvent>));
+
+  assert.equal(resolution.task, task);
+  assert.equal(resolution.matchedByWorkflowArtifact, true);
+});
+
+test("a review request event has the PR match and no task projection, so it cannot change a task", () => {
+  const event = makeParticipantEvent();
+
+  assert.deepEqual(
+    buildRepoRoomEventArtifactMatches(event).map((match) => match.kind),
+    buildRepoRoomEventArtifactMatches(makePullRequestEvent({
+      pullRequest: (event as Extract<RepoRoomEvent, { kind: "pull_request_participant" }>).pullRequest,
+    })).map((match) => match.kind),
+  );
+  // No lease or coordination decision: the workflow ref is null, so the webhook projection skips the lease check.
+  assert.equal(getPullRequestWorkflowRef(event), null);
+  // No status change: the board projection ignores the kind.
+  for (const currentStatus of ["accepted", "in_progress", "in_review", "done"] as const) {
+    assert.equal(projectRepoRoomEvent({ event, currentStatus }), null);
+  }
+});
+
+function createTicketKeyHarness(input: { keyTask?: Task; artifactTask?: Task; leaseTask?: Task }) {
+  const keyCalls: Array<{ branchRef?: string | null; title?: string | null; body?: string | null }> = [];
+  const resolver = createRepoRoomEventTaskResolver({
+    findTaskByWorkflowArtifactMatches: async () => input.artifactTask,
+    findTaskByPrUrl: async () => undefined,
+    findTaskByActiveWorkflowLease: async () => input.leaseTask,
+    getTaskById: async () => undefined,
+    findTaskByTicketKeys: async (_projectId, inputs) => {
+      keyCalls.push(inputs);
+      return input.keyTask;
+    },
+  });
+  return { keyCalls, resolver };
+}
+
+test("a pull request from branch HT-1234-proration resolves to the card that names jira:HT-1234", async () => {
+  const card = makeTask("task_7", { external_ref: "jira:HT-1234" });
+  const { keyCalls, resolver } = createTicketKeyHarness({ keyTask: card });
+
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(project, makePullRequestEvent({
+    pullRequest: {
+      number: 88,
+      title: "Round proration",
+      url: "https://github.com/BrosInCode/letagents/pull/88",
+      body: "Fixes the rounding.",
+      headRef: "HT-1234-proration",
+    },
+  } as Partial<RepoRoomEvent>));
+
+  assert.equal(resolution.task?.id, "task_7");
+  assert.equal(resolution.matchedByWorkflowArtifact, true);
+  assert.equal(resolution.matchedByTicketKey, true);
+  assert.deepEqual(keyCalls, [{ branchRef: "HT-1234-proration", title: "Round proration", body: "Fixes the rounding.", pullRequestUrl: "https://github.com/BrosInCode/letagents/pull/88" }]);
+});
+
+test("a URL or lease match wins over a key match, so existing links do not move", async () => {
+  const urlCard = makeTask("task_1");
+  const keyCard = makeTask("task_2", { external_ref: "jira:HT-1" });
+  const event = makePullRequestEvent({
+    pullRequest: { number: 1, title: "HT-1", url: "https://github.com/BrosInCode/letagents/pull/1", headRef: "HT-1-x" },
+  } as Partial<RepoRoomEvent>);
+
+  const byUrl = createTicketKeyHarness({ artifactTask: urlCard, keyTask: keyCard });
+  const urlResolution = await byUrl.resolver.resolveLinkedTaskForRepoRoomEvent(project, event);
+  assert.equal(urlResolution.task?.id, "task_1");
+  assert.equal(urlResolution.matchedByTicketKey, undefined);
+  assert.equal(byUrl.keyCalls.length, 0);
+
+  const byLease = createTicketKeyHarness({ leaseTask: urlCard, keyTask: keyCard });
+  assert.equal((await byLease.resolver.resolveLinkedTaskForRepoRoomEvent(project, event)).task?.id, "task_1");
+  assert.equal(byLease.keyCalls.length, 0);
+});
+
+test("a branch push resolves by key from the branch name alone", async () => {
+  const card = makeTask("task_3", { external_ref: "jira:HT-9" });
+  const { keyCalls, resolver } = createTicketKeyHarness({ keyTask: card });
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(project, {
+    provider: "github",
+    kind: "push",
+    repositoryFullName: "BrosInCode/letagents",
+    push: { ref: "feature/HT-9-x", refType: "branch", commits: [] },
+  } as unknown as RepoRoomEvent);
+  assert.equal(resolution.task?.id, "task_3");
+  assert.equal(resolution.matchedByTicketKey, true);
+  assert.deepEqual(keyCalls, [{ branchRef: "feature/HT-9-x" }]);
+});
+
+test("without a key match a pull request stays unlinked", async () => {
+  const { resolver } = createTicketKeyHarness({});
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(project, makePullRequestEvent());
+  assert.equal(resolution.task, undefined);
+});
+
+test("a later event for a pull request a key linked keeps the key's quiet handling", async () => {
+  const url = "https://github.com/BrosInCode/letagents/pull/88";
+  const keyLinked = makeTask("task_7", {
+    external_ref: "jira:HT-1234",
+    workflow_artifacts: [{ provider: "github", kind: "pull_request", number: 88, url, state: "open", linked_by: "ticket_key" }],
+  });
+  const merged = makePullRequestEvent({
+    action: "closed",
+    pullRequest: { number: 88, title: "Round proration", url, merged: true, headRef: "HT-1234-proration" },
+  } as Partial<RepoRoomEvent>);
+  const { resolver } = createTicketKeyHarness({ artifactTask: keyLinked });
+  const resolution = await resolver.resolveLinkedTaskForRepoRoomEvent(project, merged);
+  assert.equal(resolution.task?.id, "task_7");
+  assert.equal(resolution.matchedByTicketKey, true);
+
+  const explicit = makeTask("task_8", {
+    workflow_artifacts: [{ provider: "github", kind: "pull_request", number: 88, url, state: "open" }],
+  });
+  const plain = await createTicketKeyHarness({ artifactTask: explicit }).resolver.resolveLinkedTaskForRepoRoomEvent(project, merged);
+  assert.equal(plain.matchedByTicketKey, undefined);
 });

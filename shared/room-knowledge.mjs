@@ -47,13 +47,25 @@ export function createKnowledgeRecord(room_id, type, input, author, now = new Da
     archived: false, response: null };
 }
 
+/** What a request closed without an answer records as its response. */
+export const ATTENTION_CLOSED_RESPONSE = 'Closed without an answer.';
+
+/**
+ * A person answers an open request, or closes it (`close: true`) without a
+ * decision. A closed request keeps `response`, marked `closed: true`, so it
+ * leaves Needs you like an answered one and the agent that asked stops
+ * waiting. A close records ATTENTION_CLOSED_RESPONSE unless the caller gives
+ * the reason as `response`.
+ */
 export function reviseKnowledgeRecord(record, input, actor, now = new Date().toISOString()) {
   if (input.expected_version !== record.version) throw new RoomKnowledgeError('This changed since you opened it. Refresh to see the latest version.', 409);
   if (actor.kind !== 'human') throw new RoomKnowledgeError('Only a human can revise shared memory or answer a request.', 403);
   if (record.type === 'attention') {
-    if (record.response) throw new RoomKnowledgeError('This request has already been answered.', 409);
-    return { ...record, version: record.version + 1, updated_at: now, updated_by: actor,
-      response: { body: text(input.response, 'Response', 8000, true), actor, at: now } };
+    if (record.response) throw new RoomKnowledgeError(record.response.closed ? 'This request has already been closed.' : 'This request has already been answered.', 409);
+    const response = input.close === true
+      ? { body: input.response === undefined ? ATTENTION_CLOSED_RESPONSE : text(input.response, 'Response', 8000, true), actor, at: now, closed: true }
+      : { body: text(input.response, 'Response', 8000, true), actor, at: now };
+    return { ...record, version: record.version + 1, updated_at: now, updated_by: actor, response };
   }
   if (input.archived !== undefined && typeof input.archived !== 'boolean') throw new RoomKnowledgeError('Archived must be true or false.');
   const content = input.archived !== undefined ? {} : parseKnowledgeInput('memory', input);
@@ -68,7 +80,51 @@ export function assertKnowledgeReplay(existing, candidate) {
   }
 }
 
+const REQUEST_NOTICE_BODY_LIMIT = 400;
+const ATTENTION_CATEGORY_LABELS = { question: 'Question', decision: 'Decision', approval: 'Approval', review: 'Review' };
+
+/**
+ * The room message that shows a new request where it was asked. People and
+ * other agents read it in the room; the answer is given in Inbox.
+ */
+export function formatAttentionRequest(record) {
+  const body = Array.from(record.body);
+  const shown = body.length > REQUEST_NOTICE_BODY_LIMIT ? `${body.slice(0, REQUEST_NOTICE_BODY_LIMIT).join('').trimEnd()}…` : record.body;
+  return `Needs you · ${ATTENTION_CATEGORY_LABELS[record.category] ?? record.category}: ${record.title}\n\n${shown}\n\nWaiting for an answer in Inbox (${record.id}).`;
+}
+
+/** The `@agent:` handle an answer uses to wake the agent that asked. */
+export function attentionResponseHandle(agentKey) {
+  return String(agentKey ?? '').trim().replace(/[A-Z]/g, c => c.toLowerCase()).replace(/[^a-z0-9_.:/-]+/g, '');
+}
+
 export function formatAttentionResponse(record) {
-  const handle = record.author.kind === 'agent' ? record.author.id.trim().replace(/[A-Z]/g, c => c.toLowerCase()).replace(/[^a-z0-9_.:/-]+/g, '') : '';
+  const handle = record.author.kind === 'agent' ? attentionResponseHandle(record.author.id) : '';
   return `${handle ? `@agent:${handle}\n\n` : ''}Human response (${record.id}):\n\n${record.response.body}`;
+}
+
+const ATTENTION_RESPONSE_TEXT = /^(?:@agent:([a-z0-9_.:/-]+)\n\n)?Human response \([a-zA-Z0-9_-]{8,80}\):\n\n([\s\S]+)$/;
+// A room display name used as a mention: never markdown, never spaces, and
+// no underscore that could open emphasis (leading, or doubled anywhere).
+const MENTION_NAME = /^(?!_)(?!.*__)[A-Za-z0-9._:-]{1,64}$/;
+// Answers that open with a block (fence, list, heading, quote, table, rule or
+// indented code) keep it as a block instead of joining the mention's line.
+const OPENS_WITH_BLOCK = /^(?: {4}|\t| {0,3}(?:`{3}|~{3}|[-*+](?:\s|$)|\d{1,9}[.)](?:\s|$)|#{1,6}(?:\s|$)|>|\||(?:[-*_] *){3,}$))/;
+
+/**
+ * What people see for a message formatAttentionResponse wrote. The handle and
+ * request id route the answer to the agent that asked; the room reads it as a
+ * reply to that agent by name, or to a neutral @agent when the room no longer
+ * lists it (the visible mention is the record of who was woken). Null for any
+ * other text.
+ */
+export function attentionResponseDisplayText(text, agentName) {
+  const match = ATTENTION_RESPONSE_TEXT.exec(typeof text === 'string' ? text : '');
+  if (!match) return null;
+  const answer = match[2];
+  if (!match[1]) return answer;
+  const name = String(agentName(match[1]) ?? '').trim();
+  const mention = `@${MENTION_NAME.test(name) ? name : 'agent'}`;
+  // trimEnd: a CRLF line keeps its \r, and trailing space must not hide a rule.
+  return OPENS_WITH_BLOCK.test(answer.split('\n', 1)[0].trimEnd()) ? `${mention}\n\n${answer}` : `${mention} ${answer}`;
 }

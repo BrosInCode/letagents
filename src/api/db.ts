@@ -6,8 +6,6 @@ export type { BoardIntent, BoardIntentActionType, BoardIntentConsumptionInput, B
 export { listActiveBoardManagerAssignments, promoteBoardManagerTx, releaseBoardManagerAssignmentTx, listActiveBoardManagerCandidates, recordBoardManagerAssignedEvent, recordBoardManagerReleasedEvent } from "./db/coordination.js";
 export { assertBoardIntentAutoApprovalEligibilityTx, BoardIntentAutoApprovalIneligibleError, claimBoardIntentEscalationTx, countRecentAutoApprovedIntents, listEscalationCandidateBoardIntents, markBoardIntentAutoApprovedTx } from "./db/coordination.js";
 export type { EscalationCandidateBoardIntent } from "./db/coordination.js";
-export { listStalledRoomCandidates, markRoomStallNudgedTx } from "./db/coordination.js";
-export type { StalledRoomCandidate } from "./db/coordination.js";
 export type { ActiveBoardManagerAssignmentCandidate } from "./db/coordination.js";
 export type { GitHubWebhookDelivery, Account, Session, SessionAccount, OwnerToken, OwnerTokenAccount, AuthState, AgentIdentity } from "./db/types.js";
 export type { RoomAgentPresence, RoomAgentRegistrationLiveness, RoomAgentLivenessObservation, RoomAgentDeliverySession, RoomAgentSession, RoomAgentSessionBearer, SupervisorHostGrant, CreatedRoomAgentSession, RoomParticipant, RoomActivityActorCount } from "./db/types.js";
@@ -27,23 +25,23 @@ export { createProject, createProjectWithName, getOrCreateProjectByName, getOrCr
 export { getProjectById, rotateProjectCode, updateProjectDisplayName, createRoomAlias } from "./db/rooms.js";
 export { getFocusRoomsForParent, getActiveFocusRoomForTask, getFocusRoomByKey, activateFocusRoom, archiveFocusRoom, claimGitRefFocusRoomLifecycleEvent, concludeFocusRoom, updateFocusRoomSettings, createFocusRoomFromIntent, createFocusRoomForTask } from "./db/focus-rooms.js";
 export { getGitHubRepositoryLinkById, upsertGitHubRepositoryLink, migrateGitHubRepositoryCanonicalRoom, upsertGitHubAppInstallation, markGitHubAppInstallationUninstalled, setGitHubAppInstallationSuspended, upsertGitHubAppRepository, markGitHubAppRepositoryRemoved } from "./db/github/index.js";
-export { getGitHubAppRepositoryByFullName, getGitHubAppRepositoryByRoomId, getGitHubAppInstallationById, recordGitHubWebhookDelivery, markGitHubWebhookDeliveryProcessed, insertGitHubRoomEvent, updateGitHubRoomEventLinkedTaskId, getGitHubRoomEvents, hasGitHubRoomActivationEventAfter } from "./db/github/index.js";
+export { getGitHubAppRepositoryByFullName, getGitHubAppRepositoryByRoomId, getGitHubAppInstallationById, recordGitHubWebhookDelivery, markGitHubWebhookDeliveryProcessed, insertGitHubRoomEvent, updateGitHubRoomEventLinkedTaskId, claimGitHubRoomEventForTask, releaseGitHubRoomEventFromTask, getLatestPullRequestRoomEvent, getGitHubRoomEvents, hasGitHubRoomActivationEventAfter } from "./db/github/index.js";
 export { getTasksGitHubArtifactStatus } from "./db/github/index.js";
 export { buildManualGitHubRepoRoomBindingInput, ensureGitHubRepoRoomBinding, getGitRoomBindingForRoom, getGitRoomBindingsForRooms, normalizeGitRoomVisibility, upsertGitRoomBinding } from "./db/git-room-bindings.js";
 export { buildRoomSharedArtifactIdentityKey, getRoomSharedArtifactByIdentityKey, getRoomSharedArtifacts, linkRoomSharedArtifactToTask, preserveManualRoomSharedArtifactInput, publishWorkerArtifactFenced, syncRoomSharedArtifactsForTask, upsertRoomSharedArtifact } from "./db/room-shared-artifacts.js";
 export { addMessage, addMessageWithCreateStatus, getMessageStreamCheckpoint, getMessages, getLatestMessages, getMessageById, getMessageRecipientAgentKeys, getMessageRecipientAgentTargets, getMessagesBefore, getMessagesAfter, getMessageThread, getMessageThreads, markMessageThreadRead, hydrateMessageReplies, getMessageThreadReadOverlays, getMessageAccountAgentRoutingById, getRoomMessageCountsBySender, getMessageAttachment, createMessageAttachmentUpload } from "./db/messages.js";
-export type { MessageCreateTransaction } from "./db/messages.js";
+export type { AddMessageOptions, MessageCreateTransaction } from "./db/messages.js";
 export type { MessageThreadInboxFilter, MessageThreadInboxItem, MessageThreadInboxPage } from "./db/messages.js";
 export type { MessageThreadReadOverlay, MessageThreadReadTarget } from "./db/messages.js";
-export { getMessageAttachmentUpload, deletePendingMessageAttachmentUpload, hasMessagesFromSender } from "./db/messages.js";
+export { getMessageAttachmentUpload, deleteExpiredPendingMessageAttachmentUpload, listExpiredPendingMessageAttachmentUploads, deletePendingMessageAttachmentUpload, hasMessagesFromSender } from "./db/messages.js";
 export { upsertRoomAgentPresence, upsertRoomAgentLivenessObservation, heartbeatNativeHarnessTaskLeases, recordNativeHarnessActivity, markRoomAgentDeliveryConnected, markRoomAgentDeliveryHeartbeat, upsertDesktopRoomAgentDeliveryHeartbeat, upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat, pauseDesktopRoomAgentDelivery, isStaleDesktopRoomAgentDeliverySignalError, markRoomAgentDeliveryDisconnected, forceDisconnectRoomAgentDeliverySession, getRoomAgentDeliverySessions, getReachableWorkerDeliverySessionForAgentSession, pruneStaleRoomAgentDeliveryInstances } from "./db/presence.js";
 export { setRoomLiveAgentSuppressed, getRoomAgentPresence, getRoomAgentPresenceSnapshot } from "./db/presence.js";
-export { listLivenessAnnouncementCandidates, getLivenessAnnouncementCandidate, markAgentOfflineAnnounced, markAgentRecoveryAnnounced, getRoomLiveAgentSuppressionActorLabels } from "./db/presence.js";
+export { getLivenessAnnouncementCandidate } from "./db/presence.js";
 export type { LivenessAnnouncementCandidate } from "./db/presence.js";
 export { upsertRoomParticipant, getParticipantOwnersProvenByMessages, claimRoomParticipantOwner, getRoomParticipants, getRoomParticipantsForRooms, setRoomParticipantsHidden } from "./db/participants.js";
-export { createReasoningSession, getReasoningSessions, getRoomReasoningSessionCountsByActor, getReasoningSessionById, getReasoningSessionUpdates, appendReasoningSessionUpdate, updateReasoningSession } from "./db/reasoning.js";
+export { createReasoningSession, getReasoningSessions, getRoomReasoningSessionCountsByActor, getReasoningSessionById, getReasoningSessionUpdates, appendReasoningSessionUpdate, updateReasoningSession, createLiveActivitySession, updateLiveActivitySession, deleteLiveActivitySessions, deleteStaleLiveActivitySessions, LIVE_ACTIVITY_UPDATE_ROWS_PER_SESSION, LiveActivityWorkerEndedError, type LiveActivitySnapshot } from "./db/reasoning.js";
 export { createAuthState, consumeAuthState, upsertAccount, createSession, refreshProviderAccessTokenForAccount, getSessionAccountByToken, deleteSessionByToken, createOwnerToken } from "./db/auth.js";
-export { getOwnerTokenAccountByToken, deleteOwnerTokenById, registerAgentIdentity, getAgentIdentityByCanonicalKey, getAgentIdentitiesForOwner, createRoomAgentSession, createFencedRoomAgentSession, createOrRotateSupervisorWorkerSession, SupervisorGrantFenceStaleError, isSupervisorGrantFenceStaleError, SupervisorGrantProvisionConflictError, isSupervisorGrantProvisionConflictError, isActiveRoomAgentSessionStaleForRegistration, isActiveAgentInstanceConflictError, getActiveRoomAgentSessionsForWorkerIdentity, getRoomAgentSessionByCredentials, getSupervisorRoomAgentSession, getRoomAgentSessionBearerByToken, rotateRoomAgentSessionBearer, revokeRoomAgentSessionBearer, getLastEndedWorkerSessionDisplayName, getRoomWorkerNameHolders, isWorkerDisplayNameExhaustedError, touchRoomAgentSession, createSupervisorHostGrant, getSupervisorHostGrantByToken, getSupervisorHostGrantById, rotateSupervisorHostGrant, advanceSupervisorHostGrantGeneration, revokeSupervisorHostGrant } from "./db/auth.js";
+export { getOwnerTokenAccountByToken, deleteOwnerTokenById, registerAgentIdentity, getAgentIdentityByCanonicalKey, getAgentIdentitiesForOwner, createRoomAgentSession, createFencedRoomAgentSession, createOrRotateSupervisorWorkerSession, SupervisorGrantFenceStaleError, isSupervisorGrantFenceStaleError, SupervisorGrantProvisionConflictError, isSupervisorGrantProvisionConflictError, isActiveRoomAgentSessionStaleForRegistration, isActiveAgentInstanceConflictError, getActiveRoomAgentSessionsForWorkerIdentity, getRoomAgentSessionByCredentials, getSupervisorRoomAgentSession, getRoomAgentSessionBearerByToken, rotateRoomAgentSessionBearer, revokeRoomAgentSessionBearer, getLastEndedWorkerSessionDisplayName, getRoomWorkerNameHolders, openRoomAgentProcessConnection, refreshRoomAgentProcessConnection, closeRoomAgentProcessConnection, recordRoomAgentProcessExit, isEndedRoomAgentSessionCredential, isWorkerDisplayNameExhaustedError, touchRoomAgentSession, createSupervisorHostGrant, getSupervisorHostGrantByToken, getSupervisorHostGrantById, rotateSupervisorHostGrant, advanceSupervisorHostGrantGeneration, revokeSupervisorHostGrant } from "./db/auth.js";
 export {
   endRoomAgentSession,
   assignProjectAdmin,
@@ -58,12 +56,13 @@ export {
   revokeSupervisorGrantsForRepositoryAccessChange,
 } from "./db/supervisor-grant-revocation.js";
 export type { SupervisorGrantOwnerAccount } from "./db/supervisor-grant-revocation.js";
-export { isValidTransition, getTasksForRooms, createTask, approveTaskCreateBoardIntent, acceptProposedTaskTx, normalizeTaskCreateBoardIntentPayload, getTasks, getOpenTasks, getTaskById, getTaskOwnershipState, findTaskByPrUrl, findTaskByClientId, findTaskBySourceMessageId } from "./db/tasks.js";
+export { isValidTransition, getTasksForRooms, createTask, ReservedTaskCreatorError, approveTaskCreateBoardIntent, acceptProposedTaskTx, normalizeTaskCreateBoardIntentPayload, getTasks, getOpenTasks, getTaskById, getTaskOwnershipState, findTaskByPrUrl, findTaskByClientId, findTaskBySourceMessageId } from "./db/tasks.js";
 export { findTaskByWorkflowArtifactMatches, updateTask, setTaskAssignmentStateForLeaseAction, TaskContentConflictError } from "./db/tasks.js";
 export { expireStaleTaskLeases, createTaskLease, getActiveTaskLeases, upsertStaleTaskPromptMute, getStaleTaskPromptMutes, clearStaleTaskPromptMute, revokeTaskLease, releaseTaskLease } from "./db/coordination.js";
 export { applyTaskWorkLeaseAction, updateTaskLeaseWorkflowRefs, createTaskLock, getActiveTaskLocks, clearTaskLock, createCoordinationEvent } from "./db/coordination.js";
 export { rebindTaskLease, assertLeaseEpochCurrentTx, acquireLeaseFenceTx, recordRebindAttestation, LeaseFenceStaleError, isRebindAttestationCause, isUuidShapedExecutionId, REBIND_ATTESTATION_CAUSES } from "./db/coordination.js";
 export {
+  WorkflowEffectConnectionUnavailableError,
   WorkflowEffectIdempotencyConflictError,
   WorkflowEffectLeaseStaleError,
   claimAmbiguousWorkflowEffect,
@@ -76,7 +75,9 @@ export {
   markWorkflowEffectSucceeded,
   pruneSettledWorkflowEffects,
   releaseWorkflowEffectLookup,
+  reserveTrackerWorkflowEffect,
   reserveWorkflowEffect,
+  journalApprovalSettlesRequestedChanges,
   workflowEffectCorrelationKey,
   workflowEffectRequestFingerprint,
 } from "./db/workflow-effects.js";
@@ -139,3 +140,4 @@ export {
 } from "./db/coordination.js";
 
 export { approveTaskClaimBoardIntent, BoardIntentClaimConflictError } from "./db/coordination/board-intent-claim.js";
+export { findTaskByExternalRefs, getRoomExternalRefScope, getTaskMentions, TaskExternalRefConflictError, type TaskMention } from "./db/task-external-refs.js";

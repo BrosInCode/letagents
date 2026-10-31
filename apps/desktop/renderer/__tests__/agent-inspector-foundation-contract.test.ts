@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { roomShellSource } from "./room-shell-source";
 
 function source(relative: string): string {
   return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
 }
 
-const shell = source("../src/components/desktop/content/DesktopRoomShell.vue");
+const shell = roomShellSource();
 const activity = source("../src/components/desktop/content/RoomActivityTabView.vue");
 const host = source("../src/components/desktop/content/agent-inspector/AgentInspectorHost.vue");
 const actions = source("../src/components/desktop/content/agent-inspector/AgentInspectorLifecycleActions.vue");
@@ -31,14 +32,14 @@ test("the Inspector is the single selected-agent detail owner after cutover", ()
 
 test("the Inspector has one exclusive surface for durable, external, loading, error, and ambiguous selections", () => {
   assert.match(host, /AgentInspectorParticipantSurface/);
-  assert.match(host, /projectAgentInspectorParticipant\(\s*props\.selection,\s*props\.managedSessions,\s*props\.roomIdentifier\s*\)/);
+  assert.match(host, /projectAgentInspectorParticipant\(props\.selection\)/);
   assert.match(host, /surfaceComponentType/);
   assert.match(participantProjection, /selection\.kind === "resolving"/);
   assert.match(participantProjection, /unavailableReason === "load_error"/);
   assert.match(participantProjection, /selection\.kind === "external"/);
-  assert.match(participantSurface, /Room participant/);
+  assert.match(participantSurface, /shared\.ownerLabel/);
   assert.doesNotMatch(participantSurface, /useManagedAgentSessionsContext/);
-  assert.match(participantSurface, /desktopIpc\.workers\.stopManagedAgent/);
+  assert.doesNotMatch(participantSurface, /desktopIpc\.workers/);
   assert.doesNotMatch(participantSurface, /aria-live/);
   assert.doesNotMatch(activity, /v-if="selectedTruthfulAgent" class="desktop-activity-detail"/);
   assert.doesNotMatch(activity, /selectedLegacyTruthfulAgent|selectedTruthfulAgent/);
@@ -51,22 +52,23 @@ test("unavailable agent details stay product-safe and can retry the background s
   assert.match(statusSurface, /v-if="canRetry"/);
   assert.match(statusSurface, /@click="emit\('retry'\)"/);
   assert.match(shell, /@retry="retryAgentInspectorState"/);
-  assert.match(shell, /function retryAgentInspectorState\(\)[\s\S]{0,300}supervisorEntriesError\.value = null;[\s\S]{0,120}refreshManagedAgentSessions\(\)/);
+  assert.match(shell, /function retryAgentInspectorState\(\)[\s\S]{0,300}supervisorEntriesError\.value = null;[\s\S]{0,120}refreshSupervisorEntries\(\)/);
 });
 
 test("Activity opens the exact shared projection only after an explicit click", () => {
-  assert.match(activity, /@click="selectInspectorAgent\(agent\)"/);
+  assert.match(activity, /@select="selectRosterAgent"/);
+  assert.match(activity, /nativeById\.value\.get\(id\)/);
+  assert.match(activity, /if \(native\) selectInspectorAgent\(native\)/);
   assert.match(activity, /supervisedAgentInspectorRequest\(agent\.entry/);
   assert.match(activity, /autoSelectLive: false/);
-  assert.match(activity, /watch\(inspectorTruthfulAgents[\s\S]{0,300}selectedTruthfulId\.value = null/);
   assert.match(shell, /:agent-projections="agentInspectorProjections"/);
 });
 
 test("Mention uses the shared room candidate path and exact durable agent key", () => {
   assert.match(composer, /function focusWithMention\(mentionText: string\)/);
-  assert.match(composer, /defineExpose\(\{ focusWithMention \}\)/);
+  assert.match(composer, /defineExpose\(\{ focusWithMention[,\s}]/);
   assert.match(chat, /function focusComposerWithMention\(mentionText: string\)/);
-  assert.match(chat, /defineExpose\(\{ openThread, focusComposerWithMention \}\)/);
+  assert.match(chat, /defineExpose\(\{ openThread: revealThread, focusComposerWithMention \}\)/);
   assert.match(shell, /candidate\.agentKey === projection\.agentKey/);
   assert.match(shell, /roomMentionCandidates\(\s*roomParticipants\.value,/);
   assert.match(shell, /focusComposerWithMention\(mention\.insertText\)/);
@@ -148,4 +150,15 @@ test("Inspector controls keep a 44px minimum interaction target", () => {
   assert.match(styles, /\.agent-inspector-surface button \{ min-height: 44px; \}/);
   assert.match(styles, /\.agent-inspector-tabs button \{[^}]*min-height: 44px/);
   assert.match(styles, /\.agent-inspector-field input, \.agent-inspector-field select, \.agent-inspector-field textarea \{[^}]*min-height: 44px/);
+});
+
+test("an approval card its agent waits on stops the turn through the inspector's own stop control", () => {
+  assert.match(chat, /@stop-agent-turn="\(agentId, approvalId\) => emit\('stop-agent-turn', agentId, approvalId\)"/);
+  assert.match(shell, /@stop-agent-turn="stopAgentTurnForApproval"/);
+  const handler = /async function stopAgentTurnForApproval\(entryId: string, approvalId: string\)[\s\S]*?\n\}/.exec(shell)?.[0] ?? "";
+  // The card may predate the agent's current turn: read approvals again, and
+  // stop only while that request still waits in the agent's current session.
+  assert.match(handler, /await desktopIpc\.supervisor\?\.listHostApprovals\?\.\(roomId\)[\s\S]*hostApprovalStopsTurn\(approval, firstSeenAt, Date\.now\(\), entry\.providerContinuationId\)/);
+  assert.match(handler, /hostApprovalStopsTurn[\s\S]*void refreshHostApprovals\(roomId\);\s*return;/, "a card that no longer matches only refreshes");
+  assert.match(handler, /return;[\s\S]*openAgentDetailRequest\(supervisedAgentInspectorRequest\(entry[\s\S]*runAgentInspectorAction\(\{ entryId, roomId, kind: "stop_turn" \}\)/);
 });

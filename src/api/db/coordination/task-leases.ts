@@ -91,8 +91,9 @@ export async function releaseTaskLease(
   // when the caller passes the lease identity it observed, the CAS + the shared
   // task_lease:<id> advisory lock linearize it against a concurrent rebind or
   // release so a stale predecessor's release becomes a no-op (returns null)
-  // instead of acting on state that moved under it. Review leases are
-  // non-rebindable so their epoch is a static 0 consistency assertion; the
+  // instead of acting on state that moved under it. A review lease keeps its
+  // epoch when it follows its reviewer to a new session (the session fence
+  // catches that), so its epoch is a static consistency assertion; the
   // status=active guard alone also closes the read-then-release TOCTOU.
   fence?: {
     kind?: TaskLeaseKind;

@@ -18,11 +18,19 @@ export function useNavbarState() {
     mobileMenuOpen.value = !mobileMenuOpen.value
   }
 
+  function closeOnDesktop() {
+    if (window.innerWidth > 760) closeMobileMenu()
+  }
+
   onMounted(() => {
     updateScrolledState()
     window.addEventListener('scroll', updateScrolledState, { passive: true })
+    window.addEventListener('resize', closeOnDesktop)
   })
-  onUnmounted(() => window.removeEventListener('scroll', updateScrolledState))
+  onUnmounted(() => {
+    window.removeEventListener('scroll', updateScrolledState)
+    window.removeEventListener('resize', closeOnDesktop)
+  })
   watch(() => route.fullPath, closeMobileMenu)
 
   return {

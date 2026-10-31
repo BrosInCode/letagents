@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
+import { letagentsHomePath } from "../../../../shared/letagents-home.mjs";
 import { Buffer } from "node:buffer";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { Agent } from "undici";
@@ -14,6 +14,7 @@ import type {
   DesktopAuthStatus,
   DesktopPendingDeviceAuth,
 } from "../ipc-types.js";
+import { recordManagedAgentCommitAccount } from "./agents/managed-agent-commit-identity.js";
 import { apiUrl } from "./paths.js";
 import { desktopSmokeAuthStatus, isDesktopSmokeCheck } from "./smoke.js";
 
@@ -84,7 +85,7 @@ function desktopUserDataPath(): string {
     return userDataPath;
   }
 
-  const fallbackPath = join(homedir(), ".letagents", "desktop");
+  const fallbackPath = letagentsHomePath("desktop");
   if (!warnedAboutUserDataFallback) {
     console.warn(
       "[desktop-auth] Electron userData path unavailable; storing auth state in ~/.letagents/desktop."
@@ -217,19 +218,17 @@ function decryptTokenFromStorage(
   const encryptedToken = parsed.encryptedToken || null;
   if (!encryptedToken) return null;
 
-  if (
-    !encryptedToken.startsWith("safe:") ||
-    !desktopSecretStorage().isEncryptionAvailable()
-  ) {
-    return null;
-  }
+  if (!encryptedToken.startsWith("safe:")) return null;
 
   try {
+    if (!desktopSecretStorage().isEncryptionAvailable()) throw new Error();
     return desktopSecretStorage().decryptString(
       Buffer.from(encryptedToken.slice("safe:".length), "base64"),
     );
   } catch {
-    return null;
+    // Keep the entire read retryable. A partially decrypted session must not
+    // enter the cache or overwrite unreadable ciphertext during account refresh.
+    throw new AuthStorageUnavailableError("System credential storage is temporarily unavailable.");
   }
 }
 
@@ -266,6 +265,35 @@ function emptyStoredAuth(): StoredDesktopAuth {
  */
 let cachedAuth: StoredDesktopAuth | null = null;
 let authGeneration = 0;
+/**
+ * Short negative cache for a failed credential decrypt only.
+ *
+ * Problem: when the Keychain is locked or fails, nothing is cached, so every
+ * concurrent `apiFetch` retried the decrypt (a prompt storm).
+ * Rule: after a decrypt failure, answer "signed out" without another decrypt for
+ * `decryptFailureTtlMs` (default 2 s). Other failures (disk errors, bad JSON) are
+ * not covered and still retry at once. A successful read, any write, sign-out, or
+ * any change of `authGeneration` clears it. It never holds a token, so it cannot
+ * keep anyone signed in.
+ */
+let decryptFailureUntil = 0;
+let decryptFailureTtlMs = 2_000;
+class AuthStorageUnavailableError extends Error {}
+
+function bumpAuthGeneration(): number {
+  decryptFailureUntil = 0;
+  return ++authGeneration;
+}
+
+export function resetStoredAuthCacheForTest(): void {
+  cachedAuth = null;
+  decryptFailureUntil = 0;
+}
+
+export function setStoredAuthDecryptFailureTtlMsForTest(ms: number): void {
+  decryptFailureTtlMs = ms;
+  decryptFailureUntil = 0;
+}
 let authMutation: Promise<unknown> = Promise.resolve();
 
 // Keep filesystem mutations ordered, including cancellation during a write.
@@ -276,9 +304,28 @@ function serializeAuthMutation<T>(operation: () => Promise<T>): Promise<T> {
 }
 
 export async function readStoredAuth(): Promise<StoredDesktopAuth> {
+  return readStoredAuthInternal(false);
+}
+
+/**
+ * Read for a read-modify-write. It never uses the negative cache, so an update
+ * does not act on an empty copy only because a decrypt failed a moment ago.
+ * `preserveSecrets` is for updates that keep the existing secrets (an account
+ * refresh): they throw on a decrypt failure instead of building a write from an
+ * empty copy. Sign-in, cancel, completion and clear updates do not need the old
+ * secrets. On a decrypt failure they proceed from an empty copy and may replace
+ * the file, which is the only recovery when the file can never be decrypted again
+ * (changed Keychain key, reset item).
+ */
+async function readStoredAuthForUpdate(preserveSecrets: boolean): Promise<StoredDesktopAuth> {
+  return readStoredAuthInternal(true, preserveSecrets);
+}
+
+async function readStoredAuthInternal(forUpdate: boolean, preserveSecrets = false): Promise<StoredDesktopAuth> {
   if (cachedAuth) {
     return cachedAuth;
   }
+  if (!forUpdate && Date.now() < decryptFailureUntil) return emptyStoredAuth();
   const generation = authGeneration;
   try {
     const raw = await readFile(getAuthStorePath(), "utf8");
@@ -295,8 +342,13 @@ export async function readStoredAuth(): Promise<StoredDesktopAuth> {
       savedAt: parsed.savedAt || new Date(0).toISOString(),
     };
     if (generation === authGeneration) cachedAuth = storedAuth;
+    decryptFailureUntil = 0;
     return storedAuth;
   } catch (error) {
+    if (error instanceof AuthStorageUnavailableError) {
+      if (generation === authGeneration) decryptFailureUntil = Date.now() + decryptFailureTtlMs;
+      if (forUpdate && preserveSecrets) throw error;
+    }
     // Only a missing file (= signed out) is a cacheable outcome. A transient
     // read failure (EPERM/EIO disk hiccup at startup, etc.) must NOT latch the
     // app signed-out until restart — leave the cache cold so the next call
@@ -332,14 +384,27 @@ async function writeStoredAuth(nextAuth: StoredDesktopAuth): Promise<void> {
   // readStoredAuth (e.g. the Authorization header on the next apiFetch) reflects
   // this mutation without another disk read + keychain decrypt.
   cachedAuth = { ...nextAuth };
+  decryptFailureUntil = 0;
+  await mirrorAgentCommitAccount(nextAuth.account);
+}
+
+/** Managed agents commit as this account's GitHub noreply identity. */
+async function mirrorAgentCommitAccount(account: DesktopAuthAccount | null): Promise<void> {
+  try {
+    await recordManagedAgentCommitAccount(account);
+  } catch (error) {
+    // Agents then keep the previous identity; sign-in itself must not fail.
+    console.warn("[desktop-auth] Could not record the agent commit identity:", error);
+  }
 }
 
 async function updateStoredAuth(
   update: Partial<StoredDesktopAuth>,
   generation = authGeneration,
+  options: { preserveSecrets?: boolean } = {},
 ): Promise<StoredDesktopAuth> {
   return serializeAuthMutation(async () => {
-    const current = await readStoredAuth();
+    const current = await readStoredAuthForUpdate(options.preserveSecrets === true);
     if (generation !== authGeneration) return current;
     const nextAuth: StoredDesktopAuth = {
       ...current,
@@ -358,11 +423,12 @@ async function updateStoredAuth(
 }
 
 export async function clearStoredAuth(): Promise<void> {
-  ++authGeneration;
+  bumpAuthGeneration();
   return serializeAuthMutation(async () => {
     await rm(getAuthStorePath(), { force: true });
     // Sign-out must also remove the token used by subsequent API requests.
     cachedAuth = emptyStoredAuth();
+    await mirrorAgentCommitAccount(null);
   });
 }
 
@@ -426,7 +492,7 @@ export async function getDesktopAuthStatus(): Promise<DesktopAuthStatus> {
     }>("/auth/session");
     const account = normalizeAuthAccount(session.account);
     if (session.authenticated && session.credential_type === "session" && account) {
-      const nextAuth = await updateStoredAuth({ account }, generation);
+      const nextAuth = await updateStoredAuth({ account }, generation, { preserveSecrets: true });
       return buildAuthStatus({ storedAuth: nextAuth });
     }
 
@@ -546,13 +612,14 @@ export async function apiFetch<T>(
     );
   }
 
+  if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
 }
 
 export async function startDeviceAuthFlow(
   roomIdentifier?: string | null,
 ): Promise<DesktopAuthStartResult> {
-  const generation = ++authGeneration;
+  const generation = bumpAuthGeneration();
   const trimmedRoomIdentifier = roomIdentifier?.trim() || null;
   const verifier = randomBytes(32).toString("hex");
   const path = "/auth/app/start";
@@ -578,7 +645,7 @@ export async function startDeviceAuthFlow(
 }
 
 export async function cancelDeviceAuthFlow(): Promise<DesktopAuthStatus> {
-  const generation = ++authGeneration;
+  const generation = bumpAuthGeneration();
   const storedAuth = await updateStoredAuth({ pendingDeviceAuth: null, appLoginVerifier: null }, generation);
   return buildAuthStatus({ storedAuth });
 }
@@ -684,7 +751,7 @@ async function exchangeDeviceAuthFlow(
         await revokeAuthTokens([response.app_session, response.agent_token]);
         return stalePollResult();
       }
-      ++authGeneration;
+      bumpAuthGeneration();
       authAuthorizedHandler?.();
       return {
         status: "authorized",

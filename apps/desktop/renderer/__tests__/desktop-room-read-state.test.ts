@@ -4,13 +4,16 @@ import { describe, it } from "node:test";
 import type {
   DesktopAccountFocusRoomEntry,
   DesktopAccountRoomEntry,
+  DesktopRoomMessage,
 } from "../../electron/ipc-types";
 import {
   deriveSidebarLatestMessages,
-  hasUnreadRoomActivity,
+  countUnreadRoomMessages,
+  isRoomBeingRead,
   markRoomRead,
   noRoomMessageId,
   readStoredRoomMessageIds,
+  roomReadMarkerKey,
   seedRoomReadMarker,
 } from "../src/domain/desktop-room-read-state";
 
@@ -69,42 +72,6 @@ function focusRoom(
 }
 
 describe("desktop room read state", () => {
-  it("does not show historical unread state before a room has a local baseline", () => {
-    assert.equal(
-      hasUnreadRoomActivity({
-        activeRoomIdentifier: "room_a",
-        latestMessageId: "msg_2",
-        readMarkers: {},
-        roomIdentifier: "room_b",
-      }),
-      false,
-    );
-  });
-
-  it("shows unread when a tracked inactive room has a newer latest message", () => {
-    assert.equal(
-      hasUnreadRoomActivity({
-        activeRoomIdentifier: "room_a",
-        latestMessageId: "msg_2",
-        readMarkers: { room_b: "msg_1" },
-        roomIdentifier: "room_b",
-      }),
-      true,
-    );
-  });
-
-  it("never shows unread on the active room", () => {
-    assert.equal(
-      hasUnreadRoomActivity({
-        activeRoomIdentifier: "ROOM_B",
-        latestMessageId: "msg_2",
-        readMarkers: { room_b: "msg_1" },
-        roomIdentifier: "room_b",
-      }),
-      false,
-    );
-  });
-
   it("baselines newly discovered rooms without replacing existing read cursors", () => {
     const seeded = seedRoomReadMarker({}, "ROOM_B", "msg_1");
     assert.deepEqual(seeded, {
@@ -123,15 +90,7 @@ describe("desktop room read state", () => {
     const seeded = seedRoomReadMarker({}, "room_b", null);
 
     assert.deepEqual(seeded.readMarkers, { room_b: noRoomMessageId });
-    assert.equal(
-      hasUnreadRoomActivity({
-        activeRoomIdentifier: "room_a",
-        latestMessageId: "msg_1",
-        readMarkers: seeded.readMarkers,
-        roomIdentifier: "room_b",
-      }),
-      true,
-    );
+
   });
 
   it("marks a room read at its latest message id", () => {
@@ -229,5 +188,138 @@ describe("deriveSidebarLatestMessages", () => {
 
     assert.deepEqual(Object.keys(result.latestMessages), ["room_a"]);
     assert.deepEqual(result.uncoveredRoomIdentifiers, []);
+  });
+});
+
+function unreadMessage(number: number, overrides: Partial<DesktopRoomMessage> = {}): DesktopRoomMessage {
+  return { id: `msg_${number}`, sender: "Agent", source: "agent", text: "New reply", agentPromptKind: null, ...overrides } as DesktopRoomMessage;
+}
+
+describe("unread message counts", () => {
+  it("counts actual messages across pages, including replies, excluding own messages and hidden prompts", async () => {
+    const cursors: Array<string | null> = [];
+    const result = await countUnreadRoomMessages({
+      readMessageId: "msg_10", latestMessageId: "msg_30", ownSenderNames: ["Emmy"], isCurrent: () => true,
+      loadPage: async (after) => {
+        cursors.push(after);
+        return after === "msg_10"
+          ? { messages: [unreadMessage(12), unreadMessage(15, { source: "browser", sender: "Emmy" }), unreadMessage(18, { agentPromptKind: "auto", text: "" })], hasMore: true }
+          : { messages: [unreadMessage(22, { threadRootId: "msg_1" }), unreadMessage(30), unreadMessage(31)], hasMore: false };
+      },
+    });
+    assert.equal(result?.count, 3);
+    assert.deepEqual(cursors, ["msg_10", "msg_18"]);
+  });
+
+  it("catches up incrementally without recounting already observed messages", async () => {
+    const result = await countUnreadRoomMessages({
+      readMessageId: "msg_1", latestMessageId: "msg_50", previous: { readMessageId: "msg_1", latestMessageId: "msg_40", count: 12 },
+      ownSenderNames: [], isCurrent: () => true,
+      loadPage: async (after) => {
+        assert.equal(after, "msg_40");
+        return { messages: [unreadMessage(42), unreadMessage(42), unreadMessage(50)], hasMore: false };
+      },
+    });
+    assert.equal(result?.count, 14);
+  });
+
+  it("clears read rooms without fetching and handles first messages after an empty baseline", async () => {
+    const cleared = await countUnreadRoomMessages({
+      readMessageId: "msg_50", latestMessageId: "msg_50", ownSenderNames: [], isCurrent: () => true,
+      loadPage: async () => { throw new Error("must not fetch read history"); },
+    });
+    assert.equal(cleared?.count, 0);
+    const first = await countUnreadRoomMessages({
+      readMessageId: noRoomMessageId, latestMessageId: "msg_4", ownSenderNames: [], isCurrent: () => true,
+      loadPage: async (after) => { assert.equal(after, null); return { messages: [unreadMessage(4)], hasMore: false }; },
+    });
+    assert.equal(first?.count, 1);
+  });
+
+  it("drops stale history and rejects a non-advancing page", async () => {
+    let current = true;
+    assert.equal(await countUnreadRoomMessages({
+      readMessageId: "msg_1", latestMessageId: "msg_3", ownSenderNames: [], isCurrent: () => current,
+      loadPage: async () => { current = false; return { messages: [unreadMessage(3)], hasMore: false }; },
+    }), null);
+    await assert.rejects(countUnreadRoomMessages({
+      readMessageId: "msg_1", latestMessageId: "msg_3", ownSenderNames: [], isCurrent: () => true,
+      loadPage: async () => ({ messages: [unreadMessage(1)], hasMore: true }),
+    }), /did not advance/);
+  });
+
+  it("excludes hidden GitHub events and recounts when their visibility changes", async () => {
+    const messages = [
+      unreadMessage(22375, { source: "github", sender: "github", text: "PR #1600 opened" }),
+      unreadMessage(22376, { source: "agent", sender: "GitHub", text: "PR #1600 merged" }),
+    ];
+    const cursors: Array<string | null> = [];
+    const input = {
+      readMessageId: "msg_22374", latestMessageId: "msg_22376", ownSenderNames: [], isCurrent: () => true,
+      loadPage: async (after: string | null) => {
+        cursors.push(after);
+        return { messages, hasMore: false };
+      },
+    };
+    const hidden = await countUnreadRoomMessages(input);
+    assert.equal(hidden?.count, 0, "the two GitHub events must not create unread messages");
+    const shown = await countUnreadRoomMessages({ ...input, githubEventsVisible: true, previous: hidden! });
+    assert.equal(shown?.count, 2, "explicitly visible GitHub events still count");
+    const hiddenAgain = await countUnreadRoomMessages({ ...input, githubEventsVisible: false, previous: shown! });
+    assert.equal(hiddenAgain?.count, 0, "a cached visible count cannot survive hiding events");
+    assert.deepEqual(cursors, ["msg_22374", "msg_22374", "msg_22374"]);
+  });
+
+  it("advances over pages of hidden GitHub checks and still counts subsequent replies", async () => {
+    const cursors: Array<string | null> = [];
+    const result = await countUnreadRoomMessages({
+      readMessageId: "msg_1", latestMessageId: "msg_6", ownSenderNames: [], githubEventsVisible: true, isCurrent: () => true,
+      loadPage: async (after) => {
+        cursors.push(after);
+        return after === "msg_1"
+          ? {
+            messages: ["success", "skipped", "neutral"].map((conclusion, index) => unreadMessage(index + 2, {
+              source: "github", sender: "github",
+              text: `Check "build" (GitHub Actions) ${conclusion} in BrosInCode/letagents https://github.com/BrosInCode/letagents/actions/runs/1`,
+            })),
+            hasMore: true,
+          }
+          : { messages: [unreadMessage(6, { threadRootId: "msg_1" })], hasMore: false };
+      },
+    });
+    assert.equal(result?.count, 1, "checks that chat always hides never count, even with GitHub events enabled");
+    assert.deepEqual(cursors, ["msg_1", "msg_4"]);
+  });
+
+  it("only treats a loaded, focused and visible room as being read", () => {
+    const reading = { hidden: false, focused: true, activeRoomIdentifier: "ROOM_A", snapshotRoomIdentifier: "room_a" };
+    assert.equal(isRoomBeingRead(reading), true);
+    assert.equal(isRoomBeingRead({ ...reading, hidden: true }), false);
+    assert.equal(isRoomBeingRead({ ...reading, focused: false }), false);
+    assert.equal(isRoomBeingRead({ ...reading, activeRoomIdentifier: null }), false);
+    assert.equal(isRoomBeingRead({ ...reading, snapshotRoomIdentifier: "room_b" }), false);
+  });
+});
+
+describe("independent local and cloud unread histories", () => {
+  it("does not reuse cloud latest IDs or cursors for a room stored locally", () => {
+    const result = deriveSidebarLatestMessages({
+      accountRooms: [accountRoom("room_a", { latestMessageId: "msg_100" })],
+      sidebarRoomIdentifiers: ["room_a"], localRoomIdentifiers: ["ROOM_A"],
+    });
+    assert.deepEqual(result.latestMessages, {});
+    assert.deepEqual(result.uncoveredRoomIdentifiers, ["room_a"]);
+    const cloudKey = roomReadMarkerKey("ROOM_A", "cloud")!;
+    const localKey = roomReadMarkerKey("ROOM_A", "local")!;
+    const markers = markRoomRead({ [cloudKey]: "msg_100" }, localKey, "msg_5").readMarkers;
+    assert.equal(markers[cloudKey], "msg_100");
+    assert.equal(markers[localKey], "msg_5");
+  });
+
+  it("a stale loaded snapshot cannot undo explicit mark-as-read", () => {
+    const markers = { room_a: "msg_100" };
+    assert.deepEqual(markRoomRead(markers, "room_a", "msg_80"), { changed: false, readMarkers: markers });
+    assert.deepEqual(markRoomRead(markers, "room_a", null), { changed: false, readMarkers: markers });
+    assert.equal(markRoomRead(markers, "room_a", "msg_101").readMarkers.room_a, "msg_101");
   });
 });

@@ -1,5 +1,8 @@
-import { and, desc, eq, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
 
+import { TRACKER_SYNC_EVENT_TYPE } from "../../../../shared/ticket-connectors.mjs";
+
+import { PARTICIPANT_PULL_REQUEST_ACTION_LIST } from "../../github/room-events/pull-request.js";
 import { db } from "../client.js";
 import { github_room_events, tasks } from "../schema.js";
 import type { GitHubRoomEventMetadata } from "../schema.js";
@@ -14,9 +17,16 @@ const FAILED_CHECK_CONCLUSIONS = new Set([
 ]);
 const DECISIVE_REVIEW_STATES = new Set(["approved", "changes_requested", "dismissed"]);
 
+/**
+ * The newest 500 GitHub events of the room's cards, folded into each card's
+ * PR, check and review status. `taskNumbers` narrows the read to those cards
+ * (My work asks only for the cards on its page).
+ */
 export async function getTasksGitHubArtifactStatus(
-  roomId: string
+  roomId: string,
+  taskNumbers?: readonly number[],
 ): Promise<Map<string, TaskGitHubArtifactStatus>> {
+  if (taskNumbers && !taskNumbers.length) return new Map();
   const queryResults = await db
     .select({
       event: github_room_events,
@@ -27,6 +37,7 @@ export async function getTasksGitHubArtifactStatus(
       tasks,
       and(
         eq(tasks.room_id, roomId),
+        taskNumbers ? inArray(tasks.number, [...taskNumbers]) : undefined,
         or(
           eq(github_room_events.linked_task_id, sql`'task_' || ${tasks.number}`),
           eq(github_room_events.github_object_url, tasks.pr_url),
@@ -34,7 +45,9 @@ export async function getTasksGitHubArtifactStatus(
         )
       )
     )
-    .where(eq(github_room_events.room_id, roomId))
+    // Tracker events carry no PR, check or review state; left in, a busy
+    // ticket would push those out of the newest 500.
+    .where(and(eq(github_room_events.room_id, roomId), ne(github_room_events.event_type, TRACKER_SYNC_EVENT_TYPE)))
     .orderBy(desc(github_room_events.event_order_at))
     .limit(500);
 
@@ -54,7 +67,9 @@ function applyGitHubRoomEvent(
 ): void {
   const status = getOrCreateStatus(statusMap, taskId);
 
-  if (event.event_type === "pull_request" && status.pr_state === null) {
+  // Reviewer and assignee rows carry the PR state but not a PR action, so they never set the status.
+  const isParticipantAction = (PARTICIPANT_PULL_REQUEST_ACTION_LIST as readonly string[]).includes(event.action);
+  if (event.event_type === "pull_request" && !isParticipantAction && status.pr_state === null) {
     applyPullRequestEvent(status, event);
   }
 

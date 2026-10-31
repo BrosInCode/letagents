@@ -66,6 +66,13 @@ export function inspectClaudeCodeVersion(output: string, approvalProfileLabel: s
   return { version: parsed.version, supported: true, error: null };
 }
 
+/** Whether `claude --version` output names this version or a newer one. Unreadable output is not. */
+export function claudeCodeVersionAtLeast(output: string, version: string): boolean {
+  const parsed = parseVersion(output.trim());
+  const minimum = parseVersion(version);
+  return Boolean(parsed && minimum && compareVersions(parsed, minimum) >= 0);
+}
+
 export function requireSupportedClaudeCodeVersion(output: string, approvalProfileLabel: string | null = null): string {
   const readiness = inspectClaudeCodeVersion(output, approvalProfileLabel);
   if (!readiness.supported || !readiness.version) {

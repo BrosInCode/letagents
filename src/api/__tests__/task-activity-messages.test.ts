@@ -12,6 +12,7 @@ interface EmittedMessage {
   options?: {
     source?: string;
     agent_prompt_kind?: AgentPromptKind | null;
+    notify_github_users?: Array<{ login: string; github_user_id: string | null }>;
   };
 }
 
@@ -138,6 +139,35 @@ test("emitTaskAnchoredMessage skips parent anchor for hard-isolated GitHub focus
 
   assert.deepEqual(emitted.map((entry) => entry.projectId), ["focus_1"]);
   assert.equal(emitted[0]?.options?.source, "github");
+});
+
+test("emitTaskAnchoredMessage passes notify_github_users to the focus-room message, not the anchor", async () => {
+  const focusRoom = makeFocusRoom({ focus_parent_visibility: "major_activity" });
+  const { emitted, emitters } = createHarness({ activeFocusRoom: focusRoom });
+  const notify = [{ login: "katrin", github_user_id: "424242" }];
+
+  await emitters.emitTaskAnchoredMessage("parent", "github", "@katrin review requested", task, {
+    parent_activity: "GitHub activity",
+    parent_event_kind: "major_activity",
+    notify_github_users: notify,
+  });
+
+  assert.deepEqual(emitted.map((entry) => entry.projectId), ["focus_1", "parent"]);
+  assert.deepEqual(emitted[0]?.options?.notify_github_users, notify);
+  assert.equal("notify_github_users" in (emitted[1]?.options ?? {}), false);
+});
+
+test("emitTaskAnchoredMessage passes notify_github_users to the parent-room message without focus", async () => {
+  const { emitted, emitters } = createHarness();
+  const notify = [{ login: "katrin", github_user_id: null }];
+
+  await emitters.emitTaskAnchoredMessage("parent", "github", "@katrin assigned", task, {
+    notify_github_users: notify,
+  });
+
+  assert.equal(emitted.length, 1);
+  assert.equal(emitted[0]?.projectId, "parent");
+  assert.deepEqual(emitted[0]?.options?.notify_github_users, notify);
 });
 
 test("emitTaskLifecycleStatusMessage reuses task status formatting", async () => {

@@ -1,8 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { link, lstat, mkdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, rm, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { renameWithRetryAsync } from "../../../../../shared/rename-retry.mjs";
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
+import { daemonStateDirEnvironment, environmentValue, windowsSystemEnvironment } from "./windows-child-environment.js";
 
 export const OPEN_MODEL_OPENCODE_PROVIDER_ID = "letagents-open-model";
 export const OPENCODE_SERVER_USERNAME = "opencode";
@@ -163,8 +165,8 @@ export async function seedOpenCodeConfigHome(
  * drop both.
  *
  * Only that one file is covered. OpenCode still reads what the owner keeps
- * under `~/.opencode`. Its climb out of a workspace that is not a Git
- * repository is narrowed by `workspaceOpenCodeEnvironment`.
+ * under `~/.opencode`. What it reads above a room's scratch workspace is
+ * covered by `workspaceOpenCodeEnvironment`.
  *
  * The file is made empty on every call, whatever was there. Anything else
  * at that path is replaced, not written through, so a link named `AGENTS.md`
@@ -187,11 +189,13 @@ export async function shieldOwnerInstructions(configHome: string): Promise<void>
   const staged = join(directory, `.AGENTS.md.${randomBytes(6).toString("hex")}.shield`);
   try {
     await writeFile(staged, "", { encoding: "utf8", mode: 0o600, flag: "wx" });
-    await rename(staged, target).catch(async (error) => {
+    // Windows refuses a rename over a file that another launch of this runtime is
+    // renaming or reading at that moment (EPERM); the bounded retry waits it out.
+    await renameWithRetryAsync(staged, target).catch(async (error) => {
       // A rename replaces a file or a link, but not a directory.
       if (!existing?.isDirectory()) throw error;
       await rm(target, { recursive: true, force: true });
-      await rename(staged, target);
+      await renameWithRetryAsync(staged, target);
     });
   } finally {
     await unlink(staged).catch(() => undefined);
@@ -202,17 +206,27 @@ export async function shieldOwnerInstructions(configHome: string): Promise<void>
  * Keeps OpenCode inside a room's scratch workspace.
  *
  * OpenCode looks for project files from the working directory up to the
- * root of its Git repository. A scratch workspace has no repository, so the
- * search climbs to the file system root: it reads `AGENTS.md`, `CLAUDE.md`,
- * `opencode.json` and `.opencode` directories from every directory above,
- * and the workspace lies under the owner's home. A scratch workspace has no
- * project files of its own, so the search is switched off for it.
+ * root of its Git repository. The daemon makes every scratch workspace the
+ * root of its own empty repository (`ensureScratchWorkspaceRepository` in
+ * `shared/scratch-workspace-repository.mjs`), so that search ends at the
+ * workspace. Without the repository it climbed to the file system root and
+ * imported plugins from any `.opencode` directory on the way, and plugins
+ * named by an `opencode.json` there, into the server process that holds the
+ * provider key; no launch setting stops that on 1.18.20. The repository is
+ * in the workspace and not in the `room-only` directory above it: there,
+ * every other room's workspace would be inside the project, and
+ * `external_directory: "deny"` would no longer refuse them.
  *
- * The setting does not cover plugins. OpenCode 1.18.20 has a second search
- * with no switch, and it still imports plugins from a `.opencode` directory
- * above the workspace and plugins named by an `opencode.json` there, inside
- * the server process. Only a project root at or above the workspace stops
- * that search, and for OpenCode a project root is a Git repository.
+ * The workspace still launches with project configuration switched off. It
+ * has no project files of its own to lose. If OpenCode cannot run Git, it
+ * does not see the repository and searches up to the file system root
+ * again, so the plugin boundary is not in effect; the setting then still
+ * keeps out the instruction files, agent definitions and package installs
+ * above the workspace, but not plugins. Each scratch launch checks Git with
+ * `probeScratchWorkspaceGit` and reports a problem as a launch notice, shown
+ * in the agent's activity, without failing.
+ * Neither covers a plugin in the workspace's own `.opencode` directory, or
+ * `~/.opencode`, which OpenCode reads for every workspace.
  *
  * A Git worktree is untouched: there the search stops at the repository root.
  * The kind is never guessed. A launch that does not say which it is would
@@ -236,6 +250,7 @@ export function supervisedOpenCodeMcpEnvironment(
     LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
     LETAGENTS_SUPERVISOR_ENTRY_ID: request.supervisorEntryId || "",
     LETAGENTS_SUPERVISOR_DAEMON_SOCKET: request.supervisorSocketPath || "",
+    ...daemonStateDirEnvironment(request.supervisorSocketPath),
     LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: request.workAttemptId,
     LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID:
       request.supervisorExecutionGenerationId || "",
@@ -262,12 +277,25 @@ export function supervisedOpenCodeMcpEnvironment(
 
 export function openCodeConfig(input: {
   model: string;
+  limits: { context: number; output: number };
   baseUrl: string;
   pluginUrl: string;
   cwd: string;
   mcpCommand: string[];
   mcpEnvironment: Record<string, string>;
   permissionProfileId?: SupervisedOpenCodePermissionProfileId;
+  /**
+   * The owner says this model reads images. OpenCode takes an image only for
+   * a model whose configuration lists image input; for any other model it
+   * puts an error text in the image's place. `attachment` alone does not do it.
+   */
+  imageInput?: boolean;
+  /**
+   * The effort the endpoint listed for this model and the owner chose. The
+   * OpenAI-compatible provider sends `options.reasoningEffort` as the request's
+   * `reasoning_effort`. None leaves the endpoint's own default.
+   */
+  reasoningEffort?: "low" | "medium" | "high" | "xhigh" | null;
 }): OpenCodeConfig {
   return {
     $schema: "https://opencode.ai/config.json",
@@ -278,6 +306,10 @@ export function openCodeConfig(input: {
     model: `${OPEN_MODEL_OPENCODE_PROVIDER_ID}/${input.model}`,
     plugin: [input.pluginUrl],
     permission: supervisedOpenCodePermissionPolicy(input.permissionProfileId ?? "full_access"),
+    // A denied tool call is an ordinary tool result: the model reads the
+    // refusal and goes on. By default OpenCode ends the turn there, with no
+    // reply, which used to leave the agent's room queue waiting.
+    experimental: { continue_loop_on_deny: true },
     provider: {
       [OPEN_MODEL_OPENCODE_PROVIDER_ID]: {
         id: OPEN_MODEL_OPENCODE_PROVIDER_ID,
@@ -294,12 +326,10 @@ export function openCodeConfig(input: {
             temperature: true,
             tool_call: true,
             release_date: "2025-01-01",
-            limit: {
-              context: 1_000_000,
-              output: SUPERVISED_OPEN_MODEL_OUTPUT_TOKEN_LIMIT,
-            },
+            limit: input.limits,
             cost: { input: 0, output: 0 },
-            options: {},
+            options: input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {},
+            ...(input.imageInput === true ? { modalities: { input: ["text", "image"], output: ["text"] } } : {}),
           },
         },
       },
@@ -327,13 +357,19 @@ export function openCodeAuthContent(apiKey: string | null): string {
 export function minimalOpenCodeEnvironment(
   source: NodeJS.ProcessEnv,
   extra: Record<string, string>,
+  commitEnvironment: Record<string, string> = {},
+  platform: NodeJS.Platform = process.platform,
 ): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {};
+  // Windows: what any program there needs to start and reach the network.
+  const environment: NodeJS.ProcessEnv = windowsSystemEnvironment(source, platform);
   for (const key of INHERITED_ENVIRONMENT_KEYS) {
-    if (source[key] !== undefined) environment[key] = source[key];
+    const value = environmentValue(source, key, platform);
+    if (value !== undefined) environment[key] = value;
   }
   return {
     ...environment,
+    // The owner's GitHub noreply identity, when the workspace would commit as the host's global one.
+    ...commitEnvironment,
     // The supervised provider is fully declared in OPENCODE_CONFIG_CONTENT,
     // so OpenCode's models.dev catalog refresh is dead weight: on degraded
     // networks it stalls startup and floods the log with fetch timeouts.
@@ -346,6 +382,29 @@ export function minimalOpenCodeEnvironment(
     OPENCODE_DISABLE_EXTERNAL_SKILLS: "1",
     ...extra,
   };
+}
+
+/** Whether a running OpenCode runtime was started with image input for its configured Open Model. */
+export function parseConfiguredOpenModelImageInput(config: OpenCodeConfig): boolean {
+  const model = parseConfiguredOpenModel(config);
+  const record = (value: unknown) => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  const models = record(record(record(config.provider)?.[OPEN_MODEL_OPENCODE_PROVIDER_ID])?.models);
+  const input = record(record(model === null ? null : models?.[model])?.modalities)?.input;
+  return Array.isArray(input) && input.includes("image");
+}
+
+/**
+ * Whether the runtime's own permission lets its agent read a file outside
+ * its project without a question. Only a plain "allow" counts: a rule
+ * object, "ask", or no rule at all (OpenCode then asks) does not.
+ */
+export function parseConfiguredOpenModelExternalReads(config: OpenCodeConfig): boolean {
+  const permission = (config as { permission?: unknown }).permission;
+  if (typeof permission === "string") return permission === "allow";
+  if (!permission || typeof permission !== "object" || Array.isArray(permission)) return false;
+  const rules = permission as Record<string, unknown>;
+  const rule = (name: string) => rules[name] ?? rules["*"];
+  return rule("external_directory") === "allow" && rule("read") === "allow";
 }
 
 export function parseConfiguredOpenModel(config: OpenCodeConfig): string | null {

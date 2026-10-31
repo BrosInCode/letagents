@@ -1,4 +1,4 @@
-import type { MarketplaceEntry, NeedsYouEntry, SystemEntry } from "../components/desktop/types";
+import type { MarketplaceEntry, MyWorkEntry, NeedsYouEntry, SystemEntry } from "../components/desktop/types";
 
 export const rentMarketplaceEntry: MarketplaceEntry = {
   id: "marketplace:rent",
@@ -65,4 +65,42 @@ export const systemEntries: SystemEntry[] = [
   diagnosticsEntry,
 ];
 
+export const myWorkEntry: MyWorkEntry = { id: "my-work", type: "my-work", title: "My work", description: "Your tickets and cards across rooms", sectionLabel: "LetAgents" };
+
 export const needsYouEntry: NeedsYouEntry = { id: "inbox:needs-you", type: "inbox", title: "Inbox", description: "Requests and updates across your rooms", sectionLabel: "LetAgents" };
+
+/**
+ * Open the room behind an Inbox item. A room the sidebar lists opens at once,
+ * as a click there does, and loads in place; only a room it does not list
+ * waits for its snapshot before the view changes.
+ */
+export async function openInboxRoom<Entry>(roomIdentifier: string, navigation: {
+  findEntry: (roomIdentifier: string) => Entry | null;
+  selectEntry: (entry: Entry) => void;
+  openBySnapshot: (roomIdentifier: string) => Promise<void>;
+}): Promise<void> {
+  const entry = navigation.findEntry(roomIdentifier);
+  if (entry) navigation.selectEntry(entry);
+  else await navigation.openBySnapshot(roomIdentifier);
+}
+
+/**
+ * Remembers the room an Inbox item opened in place, so a failed load of that
+ * room is reported once instead of leaving its placeholder in silence. Loads
+ * the Inbox did not start are left as they were.
+ */
+export function inboxRoomOpenReporter(report: (error: unknown) => void) {
+  let pending: string | null = null;
+  return {
+    opened(entryId: string): void { pending = entryId; },
+    async load<T>(entryId: string, load: () => Promise<T>): Promise<T> {
+      const fromInbox = pending === entryId;
+      if (fromInbox) pending = null;
+      try { return await load(); }
+      catch (error) {
+        if (fromInbox) report(error);
+        throw error;
+      }
+    },
+  };
+}

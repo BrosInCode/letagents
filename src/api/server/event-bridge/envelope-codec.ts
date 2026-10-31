@@ -94,7 +94,14 @@ const REF_BUILDERS: Record<string, RefBuilder> = {
     const number = parseScopedId(stringField(message, "id") ?? "", "msg");
     return roomId && number ? { room_id: roomId, number } : null;
   },
-  "messages:message:routed": (data) => REF_BUILDERS["messages:message:created"]!(data),
+  "messages:message:routed": (data) => {
+    const ref = REF_BUILDERS["messages:message:created"]!(data);
+    const wakeAgentKeys = asRecord(data)?.wakeAgentKeys;
+    // A reply-turn wake keeps its audience across instances.
+    return ref && Array.isArray(wakeAgentKeys)
+      ? { ...ref, wake_agent_keys: wakeAgentKeys.filter((key) => typeof key === "string") }
+      : ref;
+  },
   "tasks:task:updated": (data) => {
     const event = asRecord(data);
     const roomId = roomIdField(event, "projectId");
@@ -137,7 +144,11 @@ export const REF_HYDRATORS: Record<string, RefHydrator> = {
     const number = typeof ref.number === "number" ? ref.number : null;
     if (!roomId || !number) return null;
     const message = await getMessageById(roomId, formatMessageId(number));
-    return message ? { projectId: roomId, message, recipientAgentTargets: await getMessageRecipientAgentTargets(roomId, number) } : null;
+    if (!message) return null;
+    if (Array.isArray(ref.wake_agent_keys)) {
+      return { projectId: roomId, message, recipientAgentTargets: [], wakeAgentKeys: ref.wake_agent_keys };
+    }
+    return { projectId: roomId, message, recipientAgentTargets: await getMessageRecipientAgentTargets(roomId, number) };
   },
   "tasks:task:updated": async (ref) => {
     const roomId = stringField(ref, "room_id");

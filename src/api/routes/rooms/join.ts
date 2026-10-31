@@ -5,6 +5,7 @@ import { parseGitHubRefRoomLocator } from "../../github/git-room-routing.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import type { ProjectRepoAccessDecision } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
+import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
 
@@ -119,7 +120,11 @@ export function registerRoomJoinRoutes(
       req.headers["x-forwarded-for"]?.toString().split(",")[0]?.trim() ??
       req.socket.remoteAddress ??
       "unknown";
-    if (!checkJoinRateLimit(ip)) {
+    // Remote MCP sessions' in-process calls have no client address; they get
+    // a budget per account. Every other caller keeps the address key.
+    const internal = inProcessPrincipal(req);
+    const rateLimitKey = internal ? `account:${internal.account.account_id}` : ip;
+    if (!checkJoinRateLimit(rateLimitKey)) {
       res.status(429).json({
         error: "Too many join attempts. Please slow down.",
         code: "RATE_LIMITED",

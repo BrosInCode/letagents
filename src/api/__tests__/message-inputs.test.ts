@@ -141,7 +141,7 @@ test("parseCreateMessageBody treats null and missing optional fields as absent",
 });
 
 test("public messages cannot preempt cloud answers while local answer sync remains supported", () => {
-  for (const key of ["internal:attention-response:request-0001", " internal:attention-response:request-0001 "]) {
+  for (const key of ["internal:attention-response:request-0001", " internal:attention-response:request-0001 ", "internal:attention-request:request-0001"]) {
     assert.throws(() => parseCreateMessageBody({ client_message_id: key }), /reserved namespace/);
   }
   const localKey = "attention-response:request-0001";

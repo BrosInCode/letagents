@@ -130,6 +130,26 @@ function supervisorEntrySignature(entry: DesktopSupervisorManifestEntry): string
 }
 
 /**
+ * The previous list when the two lists differ only in activity events.
+ * The room timeline renders no activity (start-up rows read launch progress,
+ * provider labels read identity), so an activity push must not redraw it.
+ */
+export function supervisorEntriesIgnoringActivity(
+  previous: DesktopSupervisorManifestEntry[] | undefined,
+  next: DesktopSupervisorManifestEntry[],
+): DesktopSupervisorManifestEntry[] {
+  if (!previous || previous.length !== next.length) return next;
+  const same = next.every((entry, index) => {
+    const before = previous[index]!;
+    if (entry === before) return true;
+    const { activity: _nextActivity, ...nextRest } = entry;
+    const { activity: _beforeActivity, ...beforeRest } = before;
+    return JSON.stringify(nextRest) === JSON.stringify(beforeRest);
+  });
+  return same ? previous : next;
+}
+
+/**
  * Fold a pushed state snapshot into the retained entries.
  *
  * Returns the *same array* when nothing a view renders changed, and reuses the

@@ -1,4 +1,5 @@
 @import "./styles/01-base.css";
+@import "../../../../shared/code-block.css";
 @import "./styles/app-shell/layout.css";
 @import "./styles/app-shell/shared-primitives.css";
 @import "./styles/app-shell/context-menu.css";
@@ -17,11 +18,11 @@
 @import "./styles/10-activity.css";
 @import "./styles/agent-management.css";
 @import "./styles/app-agent.css";
-@import "./styles/11-room-events.css";
 @import "./styles/surfaces/shared-surfaces.css";
 @import "./styles/surfaces/focus-room.css";
 @import "./styles/surfaces/settings.css";
 @import "./styles/surfaces/auth-onboarding.css";
 @import "./styles/surfaces/mcp-onboarding.css";
 @import "./styles/surfaces/first-run.css";
+@import "./styles/surfaces/agent-asks.css";
 @import "./styles/12-responsive.css";

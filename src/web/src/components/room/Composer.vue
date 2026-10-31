@@ -1,21 +1,6 @@
 <template>
-  <form class="composer" @submit.prevent="handleSend">
-    <div class="composer-pills-row">
-      <div class="composer-identity">
-        <span class="composer-sender-label">
-          Sending as <strong>{{ senderName }}</strong>
-        </span>
-        <button
-          v-if="!isSignedIn"
-          class="composer-signin-btn"
-          type="button"
-          @click="emit('signIn')"
-        >
-          Sign in
-        </button>
-      </div>
-      <span class="composer-shortcut-hint">⏎ to send · ⇧⏎ new line</span>
-    </div>
+  <form class="composer" :class="{ 'inline-thread-composer': inlineThread }" @submit.prevent="handleSend">
+    <PresenceChips v-if="!inlineThread" :chips="presenceChips" />
     <div
       class="composer-card"
       :data-drag-active="isDragActive"
@@ -34,24 +19,26 @@
           :preview-text="replyPreviewText"
           @clear="emit('clearReply')"
         />
-        <textarea
-          ref="textareaEl"
-          class="message-textarea"
-          placeholder="Write a message…"
-          aria-label="Write a message"
-          v-model="text"
-          role="combobox"
-          aria-autocomplete="list"
-          :aria-expanded="mentionMenuOpen"
-          aria-controls="composer-mention-listbox"
-          :aria-activedescendant="mentionMenuOpen ? `composer-mention-option-${filteredMentionCandidates[mentionActiveIndex]?.key}` : undefined"
-          @input="syncMentionContext"
-          @click="syncMentionContext"
-          @select="syncMentionContext"
-          @keydown="handleKeyDown"
-          @keyup="handleKeyUp"
-          rows="1"
-        />
+        <div class="composer-typing-input">
+          <textarea
+            ref="textareaEl"
+            class="message-textarea"
+            :placeholder="inlineThread ? 'Reply in thread…' : 'Write a message…'"
+            :aria-label="inlineThread ? 'Reply in thread' : 'Write a message'"
+            v-model="text"
+            role="combobox"
+            aria-autocomplete="list"
+            :aria-expanded="suggestionsOpen"
+            :aria-controls="`${composerId}-mention-listbox`"
+            :aria-activedescendant="suggestionsOpen ? `${composerId}-mention-option-${suggestions[suggestionIndex]?.key}` : undefined"
+            @input="handleTypingInput"
+            @click="syncMentionContext"
+            @select="syncMentionContext"
+            @keydown="handleKeyDown"
+            @keyup="handleKeyUp"
+            rows="1"
+          />
+        </div>
         <AttachmentTray
           v-if="attachmentDrafts.length || attachmentError || attachmentStatusSummary"
           :attachments="attachmentDrafts"
@@ -65,55 +52,7 @@
         />
       </div>
       <div class="composer-toolbar">
-        <div class="composer-toolbar-left">
-          <div class="composer-toolbar-pills">
-            <!-- Prompt injection pill -->
-            <div class="prompt-menu" ref="menuEl">
-              <button
-                class="prompt-trigger"
-                type="button"
-                :data-mode="promptMode"
-                @click="menuOpen = !menuOpen"
-              >
-                <span>{{ promptLabel }}</span>
-                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
-              </button>
-              <div v-if="menuOpen" class="prompt-panel">
-                <div class="prompt-panel-header">
-                  <strong>Agent prompts</strong>
-                </div>
-                <button
-                  class="prompt-option"
-                  type="button"
-                  :data-active="autoKeepPolling"
-                  @click="toggleAutoKeepPolling"
-                >
-                  <span class="prompt-option-copy">
-                    <span class="prompt-option-title">Auto read + poll</span>
-                    <span class="prompt-option-meta">Send quiet metadata-only reminders every 20s to keep agents polling this room.</span>
-                  </span>
-                  <span class="prompt-option-check">
-                    <template v-if="autoKeepPolling">✓</template>
-                  </span>
-                </button>
-                <button
-                  class="prompt-option"
-                  type="button"
-                  :data-active="injectPrompt"
-                  @click="toggleInjectPrompt"
-                >
-                  <span class="prompt-option-copy">
-                    <span class="prompt-option-title">Attach room prompt</span>
-                    <span class="prompt-option-meta">Send the visible message normally and attach the stay-in-room agent prompt as hidden metadata.</span>
-                  </span>
-                  <span class="prompt-option-check">
-                    <template v-if="injectPrompt">✓</template>
-                  </span>
-                </button>
-                <p class="prompt-help">Prompts stay out of the transcript. Injected visible messages get a small badge; auto-poll reminders stay hidden.</p>
-              </div>
-            </div>
-          </div>
+        <div ref="menuEl" class="composer-add-wrap">
           <input
             ref="fileInputEl"
             class="attachment-input"
@@ -122,36 +61,105 @@
             @change="handleFileSelection"
           >
           <button
-            class="attachment-btn"
+            ref="addTriggerEl"
+            class="composer-add-btn"
             type="button"
-            :disabled="disabled || isSending || !attachmentsAvailable || attachmentDrafts.length >= MAX_ATTACHMENTS"
-            @click="openFilePicker"
+            :disabled="addMenuDisabled"
+            :aria-label="autoKeepPolling ? 'Add to message, auto read and poll enabled' : 'Add to message'"
+            :title="autoKeepPolling ? 'Add to message · auto read and poll enabled' : 'Add to message'"
+            aria-haspopup="menu"
+            :aria-expanded="menuOpen"
+            :aria-controls="menuOpen ? `${composerId}-add-menu` : undefined"
+            :data-prompts-active="autoKeepPolling"
+            @click="toggleAddMenu"
+            @keydown="handleAddTriggerKey"
           >
-            Attach
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
           </button>
-          <span v-if="!attachmentsAvailable" class="attachment-count">
-            Unavailable
-          </span>
-          <span v-if="attachmentDrafts.length" class="attachment-count">
-            {{ attachmentDrafts.length }} / {{ MAX_ATTACHMENTS }}
-          </span>
+          <div
+            v-if="menuOpen"
+            :id="`${composerId}-add-menu`"
+            ref="addMenuEl"
+            class="composer-add-menu"
+            :data-animate="animateAddMenu || undefined"
+            role="menu"
+            aria-label="Add to message"
+            @keydown="handleAddMenuKey"
+          >
+            <button
+              class="composer-menu-item"
+              type="button"
+              role="menuitem"
+              tabindex="-1"
+              :disabled="!canAttach"
+              @click="chooseAttachment"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m21.4 11.6-9.2 9.2a6 6 0 0 1-8.5-8.5L13.6 2.4a4 4 0 0 1 5.7 5.7l-9.9 9.9a2 2 0 0 1-2.8-2.8l9.2-9.2"/></svg>
+              <span class="composer-menu-copy">
+                <span>Attach files…</span>
+                <span v-if="!attachmentsAvailable" class="composer-menu-meta">Attachments are unavailable</span>
+                <span v-else-if="attachmentDrafts.length >= MAX_ATTACHMENTS" class="composer-menu-meta">Up to {{ MAX_ATTACHMENTS }} attachments per message</span>
+              </span>
+            </button>
+            <template v-if="!inlineThread">
+              <div class="composer-menu-separator" role="separator"></div>
+              <div class="composer-menu-heading">Agent prompts</div>
+              <button
+                class="composer-menu-item"
+                type="button"
+                role="menuitemcheckbox"
+                tabindex="-1"
+                :aria-checked="autoKeepPolling"
+                @click="toggleAutoKeepPolling"
+              >
+                <span class="composer-menu-copy">
+                  <span>Auto read + poll</span>
+                  <span class="composer-menu-meta">Keep agents polling this room with quiet reminders every 20 seconds.</span>
+                </span>
+                <span class="composer-menu-check" aria-hidden="true">{{ autoKeepPolling ? '✓' : '' }}</span>
+              </button>
+            </template>
+          </div>
         </div>
-        <button class="send-btn" type="submit" :disabled="!canSend" aria-label="Send message">
-          <svg viewBox="0 0 24 24"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
+        <div class="composer-toolbar-context">
+          <div v-if="!inlineThread" class="composer-identity">
+            <span class="composer-sender-label" :title="`Sending as ${senderName}`" :aria-label="`Sending as ${senderName}`">{{ senderName }}</span>
+            <button v-if="!isSignedIn" class="composer-signin-btn" type="button" @click="emit('signIn')">Sign in</button>
+          </div>
+          <span v-if="attachmentDrafts.length" class="attachment-count" :aria-label="`${attachmentDrafts.length} of ${MAX_ATTACHMENTS} attachments`">{{ attachmentDrafts.length }} / {{ MAX_ATTACHMENTS }}</span>
+        </div>
+        <button
+          class="send-btn"
+          type="submit"
+          :disabled="!canSend"
+          :aria-busy="isSending || slash.busy.value"
+          :aria-label="isSending || slash.busy.value ? 'Sending…' : inlineThread ? 'Send reply' : 'Send message'"
+          title="Send · Enter (Shift+Enter for a new line)"
+          @pointerdown="preserveSendFocus"
+        >
+          <svg v-if="isSending || slash.busy.value" class="composer-send-spinner" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 1-9 9"/></svg>
+          <svg v-else viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 7-7 7 7M12 5v14"/></svg>
         </button>
       </div>
     </div>
     <MentionPanel
-      v-if="mentionMenuOpen"
-      :candidates="filteredMentionCandidates"
-      :active-index="mentionActiveIndex"
-      @select="selectMention"
+      v-if="suggestionsOpen"
+      :id-prefix="composerId"
+      :candidates="suggestions"
+      :active-index="suggestionIndex"
+      :aria-label="slash.open.value ? 'Command suggestions' : 'Mention suggestions'"
+      :hint="slash.hint.value"
+      @select="selectSuggestion"
     />
   </form>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { injectRoomMessageMotion } from "../../../../../shared/ui/useRoomMessageMotion";
+import { useComposerSlashCommands } from '../../../../../shared/ui/useComposerSlashCommands'
+import { useToast } from '@/composables/useToast'
+import { useRoomTyping } from '@/composables/roomTyping'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import {
   type OutgoingMessageAttachment,
   type RoomAgentPresence,
@@ -161,6 +169,7 @@ import {
   getReplyPreviewText,
 } from '@/composables/useRoom'
 import { buildMentionCandidates } from './reachability'
+import { attentionResponseAgentNames, messageDisplayText } from './chat-message/formatting'
 import AttachmentTray from './composer/AttachmentTray.vue'
 import MentionPanel from './composer/MentionPanel.vue'
 import ReplyDraft from './composer/ReplyDraft.vue'
@@ -168,19 +177,26 @@ import { MAX_ATTACHMENTS } from './composer/types'
 import { useComposerAttachments } from './composer/useComposerAttachments'
 import { useComposerMentions } from './composer/useComposerMentions'
 import { useComposerPrompts } from './composer/useComposerPrompts'
+import PresenceChips from './composer/PresenceChips.vue'
+import { usePresenceChips } from './composer/usePresenceChips'
 
 const props = withDefaults(defineProps<{
+  inlineThread?: boolean
+  threadRootId?: string
   senderName?: string
   disabled?: boolean
   isSignedIn?: boolean
   attachmentsEnabled?: boolean
   roomIdentifier?: string
+  createTask?: (title: string) => Promise<boolean>
+  openSearch?: (query: string) => boolean
   submitMessage?: (text: string, agentPromptKind: string | null, replyTo: string | null, attachments?: OutgoingMessageAttachment[]) => Promise<boolean>
   stageAttachmentDraft?: (roomIdentifier: string, attachment: OutgoingMessageAttachment, signal?: AbortSignal) => Promise<{ upload_id: string }>
   discardAttachmentDraft?: (roomIdentifier: string, uploadId: string) => Promise<void>
   replyTo?: RoomMessage | null
   messages?: readonly RoomMessage[]
   presence?: readonly RoomAgentPresence[]
+  presenceReady?: boolean
   participants?: readonly RoomParticipant[]
   refreshReachability?: () => Promise<unknown> | unknown
 }>(), {
@@ -192,6 +208,7 @@ const props = withDefaults(defineProps<{
   replyTo: null,
   messages: () => [],
   presence: () => [],
+  presenceReady: false,
   participants: () => [],
 })
 
@@ -201,11 +218,23 @@ const emit = defineEmits<{
   signIn: []
 }>()
 
+const composerId = computed(() => props.inlineThread ? `thread-${props.threadRootId}` : 'composer')
 const text = ref('')
 const textareaEl = ref<HTMLTextAreaElement | null>(null)
 const isSending = ref(false)
 
 const roomIdentifierRef = computed(() => props.roomIdentifier)
+const typing = useRoomTyping(roomIdentifierRef)
+watch(text, value => {
+  if (!value) {
+    typing.stop()
+    resetMentionContext()
+  }
+})
+function handleTypingInput() {
+  typing.input(Boolean(text.value.trim()) && !slash.open.value)
+  syncMentionContext()
+}
 const disabledRef = computed(() => props.disabled)
 const attachmentsAvailable = computed(() => props.attachmentsEnabled !== false)
 
@@ -226,12 +255,9 @@ const {
   menuEl,
   menuOpen,
   autoKeepPolling,
-  injectPrompt,
-  promptMode,
-  promptLabel,
   toggleAutoKeepPolling,
-  toggleInjectPrompt,
 } = useComposerPrompts({
+  enabled: computed(() => !props.inlineThread),
   roomIdentifier: roomIdentifierRef,
   submitComposerMessage,
 })
@@ -266,13 +292,101 @@ const {
   discardAttachmentDraft: computed(() => props.discardAttachmentDraft),
 })
 
+const addTriggerEl = ref<HTMLButtonElement | null>(null)
+const addMenuEl = ref<HTMLDivElement | null>(null)
+const animateAddMenu = ref(false)
+const canAttach = computed(() => !props.disabled && !isSending.value && attachmentsAvailable.value && attachmentDrafts.value.length < MAX_ATTACHMENTS)
+const addMenuDisabled = computed(() => props.disabled || isSending.value || (props.inlineThread && !canAttach.value))
+
+function enabledAddItems() {
+  return Array.from(addMenuEl.value?.querySelectorAll<HTMLButtonElement>('button:not(:disabled)') ?? [])
+}
+
+function focusAddItem(item: HTMLButtonElement | undefined) {
+  if (!item) return
+  item.focus({ preventScroll: true })
+  const menu = addMenuEl.value
+  if (!menu) return
+  // Items are direct children of the positioned menu. Reveal the focused row
+  // inside its own scroll area without moving the transcript or page.
+  const top = item.offsetTop
+  const bottom = top + item.offsetHeight
+  if (top < menu.scrollTop || item.offsetHeight > menu.clientHeight) menu.scrollTop = top
+  else if (bottom > menu.scrollTop + menu.clientHeight) menu.scrollTop = bottom - menu.clientHeight
+}
+
+function openAddMenu(byPointer = false, focusLast = false) {
+  if (addMenuDisabled.value) return
+  animateAddMenu.value = byPointer && !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+  menuOpen.value = true
+  void nextTick(() => {
+    const items = enabledAddItems()
+    focusAddItem(items[focusLast ? items.length - 1 : 0])
+  })
+}
+
+function closeAddMenu(restoreFocus = false) {
+  menuOpen.value = false
+  if (restoreFocus) addTriggerEl.value?.focus({ preventScroll: true })
+}
+
+function toggleAddMenu(event: MouseEvent) {
+  if (menuOpen.value) closeAddMenu()
+  else openAddMenu(event.detail !== 0)
+}
+
+function handleAddTriggerKey(event: KeyboardEvent) {
+  if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+  event.preventDefault()
+  openAddMenu(false, event.key === 'ArrowUp')
+}
+
+function handleAddMenuKey(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    event.stopPropagation()
+    closeAddMenu(true)
+    return
+  }
+  if (event.key === 'Tab') {
+    // Resume the composer's natural tab order from the trigger after removal.
+    closeAddMenu(true)
+    return
+  }
+  if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  const items = enabledAddItems()
+  const current = items.indexOf(document.activeElement as HTMLButtonElement)
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? items.length - 1
+    : (current + (event.key === 'ArrowDown' ? 1 : -1) + items.length) % items.length
+  focusAddItem(items[next])
+}
+
+function chooseAttachment() {
+  if (!canAttach.value) return
+  closeAddMenu(true)
+  openFilePicker()
+}
+
+watch(() => props.roomIdentifier, () => closeAddMenu())
+watch(addMenuDisabled, disabled => { if (disabled) closeAddMenu() })
+
 const replyDisplayName = computed(() => {
   const reply = props.replyTo
   if (!reply?.sender) return 'unknown'
   return parseAgentIdentity(reply.sender).displayName || reply.sender
 })
 
-const replyPreviewText = computed(() => getReplyPreviewText(props.replyTo))
+const replyPreviewText = computed(() => getReplyPreviewText(props.replyTo && {
+  ...props.replyTo,
+  display_text: messageDisplayText(props.replyTo, attentionResponseAgentNames([...props.participants, ...props.presence])),
+}))
+
+const { chips: presenceChips } = usePresenceChips({
+  presence: () => props.presence,
+  scope: () => props.roomIdentifier,
+  ready: () => props.presenceReady,
+})
 
 const mentionCandidates = computed(() => {
   return buildMentionCandidates({
@@ -297,16 +411,62 @@ const {
   refreshReachability: computed(() => props.refreshReachability),
 })
 
+const toast = useToast()
+const slash = useComposerSlashCommands({
+  text,
+  platform: 'web',
+  scope: () => props.roomIdentifier,
+  hasAttachments: () => attachmentDrafts.value.length > 0,
+  isReply: () => Boolean(props.replyTo || props.inlineThread),
+  focus: () => { void nextTick(() => textareaEl.value?.focus({ preventScroll: props.inlineThread })) },
+  onError: () => toast.error('Command could not be completed. Your draft is still here.'),
+  run: async (command, argument) => {
+    if (command.name === 'task') {
+      if (!props.createTask || !await props.createTask(argument)) throw new Error('Task creation failed')
+      toast.success('Task created')
+    } else if (command.name === 'search') {
+      if (!props.openSearch?.(argument)) throw new Error('Search is unavailable')
+    }
+    return true
+  },
+})
+const suggestionsOpen = computed(() => !menuOpen.value && (slash.open.value || mentionMenuOpen.value))
+const suggestions = computed(() => slash.open.value ? slash.candidates.value : filteredMentionCandidates.value)
+const suggestionIndex = computed(() => slash.open.value ? slash.activeIndex.value : mentionActiveIndex.value)
+function selectSuggestion(candidate: { key: string }) {
+  if (slash.open.value) slash.complete(slash.candidates.value.findIndex(item => item.key === candidate.key))
+  else {
+    const mention = filteredMentionCandidates.value.find(item => item.key === candidate.key)
+    if (mention) selectMention(mention)
+  }
+}
+
 const canSend = computed(() =>
   !props.disabled
   && !isSending.value
+  && !slash.busy.value
   && !hasUploadingAttachments.value
   && !hasFailedAttachments.value
   && (text.value.trim().length > 0 || attachmentDrafts.value.length > 0)
 )
 
 async function handleSend() {
-  const trimmed = text.value.trim()
+  if (!canSend.value) return
+  await slash.submit(sendRoomMessage)
+}
+
+function preserveSendFocus(event: PointerEvent) {
+  // Keep Safari's keyboard viewport stable until the click submits the form.
+  // Keyboard activation still follows the button's native submit behavior.
+  if (event.button === 0) event.preventDefault()
+}
+
+const messageMotion = injectRoomMessageMotion()
+
+async function sendRoomMessage() {
+  const submittedText = text.value
+  const submittedRoom = props.roomIdentifier
+  const trimmed = submittedText.trim()
   if (!canSend.value) return
   if (!attachmentsAvailable.value && attachmentDrafts.value.length > 0) {
     attachmentError.value = 'Attachments are unavailable right now.'
@@ -314,13 +474,14 @@ async function handleSend() {
     return
   }
 
-  const kind = injectPrompt.value ? 'inline' : null
+  const finishMotion = props.inlineThread ? undefined : messageMotion?.capture(trimmed, textareaEl.value)
   isSending.value = true
   try {
-    const sent = await submitComposerMessage(trimmed, kind, props.replyTo?.id || null, buildOutgoingAttachments())
-    if (!sent) return
+    const sent = await submitComposerMessage(trimmed, null, props.replyTo?.id || null, buildOutgoingAttachments())
+    if (!sent || props.roomIdentifier !== submittedRoom) return
 
-    text.value = ''
+    typing.stop()
+    if (text.value === submittedText) text.value = ''
     clearAttachments()
     attachmentError.value = ''
     resetMentionContext()
@@ -328,12 +489,19 @@ async function handleSend() {
       textareaEl.value.style.height = 'auto'
     }
   } finally {
+    await nextTick()
+    finishMotion?.()
     isSending.value = false
   }
 }
 
 function handleKeyDown(e: KeyboardEvent) {
-  if (mentionMenuOpen.value) {
+  if (e.isComposing) return
+  if (slash.handleKey(e)) {
+    resetMentionContext()
+    return
+  }
+  if (!slash.open.value && mentionMenuOpen.value) {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
       moveMentionSelection(1)
@@ -376,7 +544,11 @@ function handleKeyUp(e: KeyboardEvent) {
 }
 
 onMounted(() => {
-  textareaEl.value?.focus()
+  // Opening a room on a phone should leave the transcript visible until the
+  // user chooses to write. Explicit reply actions still focus the composer.
+  if (!props.inlineThread && window.matchMedia?.('(hover: hover) and (pointer: fine)').matches) {
+    textareaEl.value?.focus({ preventScroll: true })
+  }
 })
 
 onUnmounted(() => {
@@ -392,7 +564,7 @@ watch(() => props.roomIdentifier, (newId, oldId) => {
 
 watch(() => props.replyTo, (newVal) => {
   if (newVal) {
-    textareaEl.value?.focus()
+    textareaEl.value?.focus({ preventScroll: props.inlineThread })
   }
 })
 </script>

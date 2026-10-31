@@ -11,6 +11,11 @@ export interface DesktopAppInfo {
   /** OS user home used as the deterministic cwd for rooms without project context. */
   homePath?: string;
   apiUrl: string | null;
+  /**
+   * Whether this app may run supervised agents on this computer: false on Windows
+   * for now. Absent from an older main process: the renderer then assumes not win32.
+   */
+  supervisedAgentsSupported?: boolean;
 }
 
 export interface DesktopGitHubPullRequestStats {

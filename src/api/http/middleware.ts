@@ -5,16 +5,34 @@ import type {
   ResolvedRequestAuth,
 } from "./helpers.js";
 import { LETAGENTS_ORIGIN_ROOM_ID_HEADER } from "../../shared/request-headers.js";
-import { requiredAgentSessionRouteCapability } from "../request/agent-session-route-capabilities.js";
+import { isAllowedWhileWaitingForAsker, isGrantRouteAllowedWhileWaitingForAsker, requiredAgentSessionRouteCapability } from "../request/agent-session-route-capabilities.js";
 import { isSupervisorGrantRouteAllowed } from "../request/supervisor-grant-route-registry.js";
 import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import { parseBearerAuthorization } from "../request/bearer-authorization.js";
+import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
+import { isRemoteMcpRequestPath, mcpBearerChallenge } from "../mcp-oauth/config.js";
+
+export const INVALID_BEARER_MESSAGE = "The bearer credential is invalid or expired. Reconnect with a current credential.";
+
+/**
+ * The invalid-bearer reply. On /mcp it also carries the OAuth challenge, so an
+ * MCP client refreshes its access token or signs in again (MCP authorization).
+ */
+export function replyInvalidBearer(req: { path?: string }, res: express.Response): void {
+  if (isRemoteMcpRequestPath(req.path)) res.setHeader("WWW-Authenticate", mcpBearerChallenge("invalid_token"));
+  res.status(401).json({ error: INVALID_BEARER_MESSAGE });
+}
 
 export interface HttpMiddlewareDeps {
   resolveRequestAuth(req: AuthenticatedRequest): Promise<ResolvedRequestAuth>;
+  isGrantWaitingForAsker?(grantId: string): Promise<boolean>;
 }
 
-function buildAllowedOrigins(): Set<string> {
+// Loaded on use: the ask store pulls in room messaging, which this module must not load eagerly.
+const defaultIsGrantWaitingForAsker = (grantId: string) =>
+  import("../agent-asks/store.js").then((asks) => asks.isGrantWaitingForAsker(grantId));
+
+export function buildAllowedOrigins(): Set<string> {
   return new Set([
     "https://letagents.chat",
     "http://localhost:3001",
@@ -39,7 +57,8 @@ export function registerHttpMiddleware(
       limit: "1mb",
       verify(req, _res, buf) {
         const request = req as AuthenticatedRequest & { originalUrl?: string };
-        if (request.originalUrl?.startsWith("/webhooks/github")) {
+        // Signed webhooks (GitHub, ticket trackers) verify the exact bytes.
+        if (request.originalUrl?.startsWith("/webhooks/")) {
           request.rawBody = Buffer.from(buf);
         }
       },
@@ -49,16 +68,30 @@ export function registerHttpMiddleware(
   app.use(async (req: AuthenticatedRequest, _res, next) => {
     try {
       const auth = await deps.resolveRequestAuth(req);
+      // A remote MCP session's in-process call resolves to its bound owner
+      // token (see resolveRequestAuth). Once that token is revoked it must not
+      // fall back to anonymous access.
+      if (inProcessPrincipal(req) && auth.authKind !== "owner_token") {
+        _res.status(401).json({ error: INVALID_BEARER_MESSAGE });
+        return;
+      }
       req.sessionAccount = auth.account;
       req.authKind = auth.authKind;
       req.agentSession = auth.agentSession ?? null;
       req.supervisorGrant = auth.supervisorGrant ?? null;
+      req.mcpOAuth = auth.mcpOAuth ?? null;
+      // MCP OAuth tokens are bound to the /mcp resource (resolveRequestAuth
+      // already refuses them elsewhere; this keeps that true for any resolver).
+      if (req.authKind === "mcp_oauth" && !isRemoteMcpRequestPath(req.path)) {
+        replyInvalidBearer(req, _res);
+        return;
+      }
       // A rejected credential must not inherit anonymous room permissions.
       // The sign-in probe reports authenticated:false so clients can clear
       // expired saved credentials; it exposes no room access or mutations.
       const isAuthStatusProbe = req.method === "GET" && req.path === "/auth/session";
       if (!req.authKind && !isAuthStatusProbe && parseBearerAuthorization(req.headers.authorization).kind !== "none") {
-        _res.status(401).json({ error: "The bearer credential is invalid or expired. Reconnect with a current credential." });
+        replyInvalidBearer(req, _res);
         return;
       }
       if (req.authKind === "supervisor_grant") {
@@ -66,11 +99,21 @@ export function registerHttpMiddleware(
           _res.status(403).json({ error: "This supervisor grant is not authorized for the requested route." });
           return;
         }
+        const grant = req.supervisorGrant;
+        if (grant?.scope_key?.startsWith("ask:") && !isGrantRouteAllowedWhileWaitingForAsker(req.method, req.path)
+          && await (deps.isGrantWaitingForAsker ?? defaultIsGrantWaitingForAsker)(grant.grant_id)) {
+          _res.status(403).json({ code: "waiting_for_asker", error: "This agent is waiting for the person who asked for it to accept it." });
+          return;
+        }
       }
       if (req.authKind === "agent_session" && req.agentSession) {
         const capability = requiredAgentSessionRouteCapability(req.method, req.path);
         if (!capability || !req.agentSession.capabilities.includes(capability)) {
           _res.status(403).json({ error: "This worker bearer is not authorized for the requested route." });
+          return;
+        }
+        if (req.agentSession.waiting_for_asker && !isAllowedWhileWaitingForAsker(req.method, req.path)) {
+          _res.status(403).json({ code: "waiting_for_asker", error: "This agent is waiting for the person who asked for it to accept it." });
           return;
         }
       }

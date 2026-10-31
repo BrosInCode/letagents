@@ -6,7 +6,7 @@ import {
   appendIncludePromptOnly,
   boundAgentMessageOutput,
   buildAgentDeliveryHeaders,
-  currentRoom,
+  getCurrentRoom,
   ensureAgentIdentity,
   getFallbackProjectId,
   getLatestLocalChatMessages,
@@ -125,8 +125,8 @@ export function registerReadMessagesTool(server: McpServer): void {
         : MAX_MESSAGES_PER_PAGE;
       const targetRoomId = getTargetRoomId(room_id);
       const targetProjectId = getFallbackProjectId();
-      const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
-      const sessionRoomId = targetRoomId ?? currentRoom?.room_id ?? null;
+      const localRoomId = targetRoomId ?? getCurrentRoom()?.room_id ?? targetProjectId;
+      const sessionRoomId = targetRoomId ?? getCurrentRoom()?.room_id ?? null;
       const workerRuntime = requireValidWorkerBearerRuntime();
       const boundWorker = currentWorkerCall();
       const agentSessionSnapshot = boundWorker ? { complete: true, session: boundWorker } : workerRuntime.mode === "owner"
@@ -180,7 +180,7 @@ export function registerReadMessagesTool(server: McpServer): void {
         deliveryHeaders,
       });
       if (!boundWorker) {
-        await heartbeatRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, await ensureAgentIdentity());
+        await heartbeatRoomPresence(targetRoomId ?? getCurrentRoom()?.room_id ?? null, await ensureAgentIdentity());
       }
 
       const bounded = boundAgentMessageOutput(

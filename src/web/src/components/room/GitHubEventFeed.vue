@@ -1,105 +1,70 @@
 <template>
-  <section class="event-feed-shell">
-    <GitHubEventFeedHeader
-      :event-count="events.length"
-      :pull-request-count="pullRequestCount"
-      :check-run-count="checkRunCount"
-    />
-
-    <GitHubEventFeedFilters
-      v-if="filterOptions.length > 1"
-      v-model:selected-filter="selectedFilter"
-      :options="filterOptions"
-    />
-
-    <div v-if="hasMore && filteredEvents.length > 0" class="event-feed-note">
-      Showing the latest 100 events. Older room activity is available through pagination.
-    </div>
-
-    <GitHubEventFeedEmptyState v-if="isLoading && events.length === 0" title="Loading GitHub events…">
-      Fetching the normalized room event history.
-    </GitHubEventFeedEmptyState>
-
-    <GitHubEventFeedEmptyState
-      v-else-if="errorMessage"
-      title="Could not load GitHub events"
-      variant="error"
-    >
-      {{ errorMessage }}
-    </GitHubEventFeedEmptyState>
-
-    <GitHubEventFeedEmptyState
-      v-else-if="!isAvailable"
-      title="Waiting for the room event read API"
-      variant="waiting"
-    >
-      The UI shell is ready, but this room still needs the backend event feed endpoint before
-      structured GitHub events can populate here.
-    </GitHubEventFeedEmptyState>
-
-    <GitHubEventFeedEmptyState v-else-if="filteredEvents.length === 0" title="No GitHub events yet">
-      This room has not recorded any matching normalized GitHub events{{ selectedFilter !== 'all' ? ' for the current filter' : '' }}.
-    </GitHubEventFeedEmptyState>
-
-    <GitHubEventTimeline
-      v-else
-      :groups="groupedEvents"
-      :repository="repository"
-    />
-  </section>
+  <div class="web-room-activity">
+    <ActivityFeed :events="events" :room-identifier="roomIdentifier" :available="isAvailable" :has-more="hasMore" :error="errorMessage" :loading="isLoading" :loading-older="isLoading" @refresh="emit('refresh')" @load-older="emit('loadOlder')" @open-task="emit('openTask', $event)" />
+  </div>
 </template>
-
 <script setup lang="ts">
-import GitHubEventFeedEmptyState from './github-event-feed/GitHubEventFeedEmptyState.vue'
-import GitHubEventFeedFilters from './github-event-feed/GitHubEventFeedFilters.vue'
-import GitHubEventFeedHeader from './github-event-feed/GitHubEventFeedHeader.vue'
-import GitHubEventTimeline from './github-event-feed/GitHubEventTimeline.vue'
-import { useGitHubEventFeed } from './github-event-feed/useGitHubEventFeed'
+import ActivityFeed from '../../../../../shared/ui/activity/ActivityFeed.vue'
 import type { RoomGitHubEvent } from '@/composables/useRoom'
-
-const props = defineProps<{
-  events: readonly RoomGitHubEvent[]
-  repository?: string | null
-  isAvailable: boolean
-  hasMore?: boolean
-  errorMessage?: string | null
-  isLoading?: boolean
-}>()
-
-const {
-  checkRunCount,
-  filteredEvents,
-  filterOptions,
-  groupedEvents,
-  pullRequestCount,
-  selectedFilter,
-} = useGitHubEventFeed(() => props.events)
+defineProps<{ events: readonly RoomGitHubEvent[]; roomIdentifier: string; repository?: string | null; isAvailable: boolean; hasMore?: boolean; errorMessage?: string | null; isLoading?: boolean }>()
+const emit = defineEmits<{ refresh: []; loadOlder: []; openTask: [id: string] }>()
 </script>
-
 <style scoped>
-.event-feed-shell {
-  height: 100%;
-  overflow-y: auto;
-  padding: 18px 20px 22px;
-  background:
-    radial-gradient(circle at top right, rgba(56, 189, 248, 0.06), transparent 28%),
-    var(--bg, #0a0a0a);
-}
+.web-room-activity { height: 100%; min-height: 0; min-width: 0; overflow-y: auto; overscroll-behavior: contain; background: var(--bg, #0a0a0a); }
 
-.event-feed-note {
-  margin-top: 12px;
-  padding: 10px 12px;
-  border-radius: 12px;
-  border: 1px solid var(--blue-dim, rgba(59, 130, 246, 0.1));
-  background: var(--accent-dim, rgba(255, 255, 255, 0.04));
-  color: var(--blue, #3b82f6);
-  font-size: 0.78rem;
-  line-height: 1.5;
+/* The shared feed uses a desktop dark palette; the web follows the selected theme. */
+.web-room-activity :deep(.room-activity) {
+  --activity-muted: var(--text-secondary);
+  --activity-line: var(--border-strong);
+  color: var(--text);
 }
-
-@media (max-width: 640px) {
-  .event-feed-shell {
-    padding: 14px 12px 18px;
-  }
+.web-room-activity :deep(:is(
+  .activity-copy > strong, .activity-detail h3, .activity-review-copy strong,
+  .activity-jobs a, .activity-jobs strong, .activity-empty h3
+)) { color: var(--text); }
+.web-room-activity :deep(:is(
+  .activity-filters button, .activity-search svg, .activity-feed-heading,
+  .activity-mark, .activity-meta, .activity-summary, .activity-row > time,
+  .activity-caret, .activity-detail h3 small, .activity-reviews li > svg,
+  .activity-review-copy > span, .activity-review-copy > small,
+  .activity-review-state time, .activity-review-state small, .activity-ci select,
+  .activity-run, .activity-run code, .activity-job-mark, .activity-jobs small,
+  .activity-jobs li > span, .activity-jobs li > time, .activity-history li,
+  .activity-history small, .activity-history time, .activity-detail-links,
+  .activity-detail-note, .activity-footer, .activity-footer button, .activity-empty,
+  [data-tone="muted"]
+)) { color: var(--text-secondary); }
+.web-room-activity :deep(.activity-quiet) { color: var(--text-secondary) !important; }
+.web-room-activity :deep(.activity-search input::placeholder) { color: var(--text-secondary); }
+.web-room-activity :deep(.activity-filters button[aria-pressed="true"]) {
+  background: var(--accent-active);
+  color: var(--text);
+}
+.web-room-activity :deep(.activity-search:focus-within input) {
+  border-color: var(--border-strong);
+  background: var(--bg-subtle);
+}
+.web-room-activity :deep(.activity-feed-heading button) {
+  background: var(--blue-dim);
+  color: var(--blue-text);
+}
+.web-room-activity :deep(.activity-ci option) {
+  background: var(--bg-elevated);
+  color: var(--text);
+}
+.web-room-activity :deep(:is(
+  .activity-detail h3, .activity-reviews li, .activity-jobs li, .activity-history li
+)) { border-color: var(--border-strong); }
+.web-room-activity :deep(.activity-detail-scroll) { scrollbar-color: var(--scrollbar-thumb) transparent; }
+.web-room-activity :deep(.room-activity [data-tone="purple"]) { color: var(--task-assigned); }
+.web-room-activity :deep(:is([data-tone="red"], .activity-notice, .activity-jobs [data-state="Failed"] .activity-job-mark)) { color: var(--red-text); }
+.web-room-activity :deep(:is([data-tone="blue"], .activity-jobs [data-state="Running"] .activity-job-mark)) { color: var(--blue-text); }
+.web-room-activity :deep(:is([data-tone="green"], .activity-jobs [data-state="Passed"] .activity-job-mark)) { color: var(--green-text); }
+.web-room-activity :deep(:is(button, a, input, select, .activity-detail-scroll):focus-visible) { outline-color: var(--blue-text); }
+@media (hover: hover) and (pointer: fine) {
+  .web-room-activity :deep(.activity-row:hover) { background: var(--bg-card); }
+  .web-room-activity :deep(:is(.activity-filters button:hover, .activity-quiet:hover)) { background: var(--accent-hover); }
+  .web-room-activity :deep(:is(.activity-detail-links a:hover, .activity-jobs a:hover, .activity-run a:hover)) { color: var(--text); }
+  .web-room-activity :deep(.activity-feed-heading button:hover) { background: color-mix(in srgb, var(--blue-text) 18%, transparent); }
 }
 </style>

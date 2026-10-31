@@ -42,11 +42,14 @@ export interface ActivityParticipant {
   kind: ParticipantKind
   label: string
   actorLabel: string
+  /** The agent's stable identity; wake rules and other agent state key on it. */
+  agentKey: string | null
   ownerLabel: string | null
   ideLabel: string | null
   repoBranch: string | null
   activityState: ParticipantActivityState | null
   hasCanonicalPresence: boolean
+  freshness?: RoomAgentPresence['freshness'] | null
   status: RoomAgentPresence['status'] | null
   statusText: string | null
   livenessObservation: RoomAgentPresence['liveness_observation']

@@ -36,12 +36,18 @@ export interface DesktopBoardIntentSummary {
   payload: Record<string, unknown>;
   createdAt: string;
   expiresAt: string | null;
+  /**
+   * When the request was sent to people to decide: the Board Manager's own
+   * request, or one no manager answered. Null or absent while it waits on a manager.
+   */
+  escalatedAt?: string | null;
 }
 
 export type DesktopBoardGovernanceAuditKind =
   | "coordination_event"
   | "manager_assignment"
-  | "board_intent_decision";
+  | "board_intent_decision"
+  | "tracker_rule_run";
 
 export interface DesktopBoardGovernanceAuditEntry {
   id: string;

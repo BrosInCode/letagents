@@ -1,3 +1,4 @@
+import { RoomLatencyTrace } from "./room-latency-trace.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
 import { deliveryDrainBlocksRuntime } from "./delivery-drain.js";
 import type { ManifestStore } from "./manifest-store.js";
@@ -259,6 +260,11 @@ export class ProviderCheckpointCoordinator {
         providerContinuationId,
         providerConnection,
       );
+    // A periodic bearer rotation keeps the same worker session, so it must not
+    // fence a wrapper this lane already admitted. Refusing that wrapper's init
+    // or idle checkpoint makes the adapter reap a released native turn.
+    const credentialAuthorizes = (credential: string | null): boolean => credential === agent.bearer
+      || (completingAdmittedCursorState && Boolean(credential));
     await this.serializeEntry(agent.agentId, () => this.serializeManifest(async () => {
       if (this.authority.isHandoffScheduled() && !completingAdmittedCursorState) {
         throw new DaemonFenceLostError("Cursor provider state changed during daemon handoff.");
@@ -302,7 +308,7 @@ export class ProviderCheckpointCoordinator {
         || binding.work_attempt_id !== agent.workAttemptId
         || binding.execution_generation_id !== agent.executionGenerationId
         || binding.agent_session_id !== agent.agentSessionId
-        || currentCredential !== agent.bearer
+        || !credentialAuthorizes(currentCredential)
         || live.workAttemptId !== agent.workAttemptId
         || live.providerContinuationId !== providerContinuationId
         || !sameProviderActionConnectionSnapshot(live.providerConnection, providerConnection)
@@ -398,7 +404,7 @@ export class ProviderCheckpointCoordinator {
           && recoveredBinding.work_attempt_id === agent.workAttemptId
           && recoveredBinding.execution_generation_id === agent.executionGenerationId
           && recoveredBinding.agent_session_id === agent.agentSessionId
-          && recoveredCredential === agent.bearer
+          && credentialAuthorizes(recoveredCredential)
           && recoveredLive === agent.handle
           && recoveredLive.workAttemptId === agent.workAttemptId
           && recoveredLive.providerContinuationId === providerContinuationId
@@ -428,53 +434,65 @@ export class ProviderCheckpointCoordinator {
     authority: SupervisedDeliveryAuthority,
     scope: SupervisedAuthorityScope = "settled_provider_state",
   ): Promise<boolean> {
-    if (this.authority.isHandoffScheduled()) return false;
-    if (deliveryDrainBlocksRuntime(await this.store.unresolvedDeliveryDrain(authority.agentId))) return false;
+    const timing = new RoomLatencyTrace("authority");
     try {
-      await this.authority.assertCurrent();
-    } catch {
-      return false;
-    }
-    if (authority.daemonGeneration !== this.authority.currentDaemonGeneration()) return false;
-    const entry = await this.store.getEntry(authority.agentId);
-    const handle = this.liveHandles.get(authority.agentId);
-    if (!entry
-      || entry.id !== authority.agentId
-      || entry.room_id !== authority.roomId
-      || entry.desired_state !== "running"
-      || entry.delivery_mode !== "daemon_inbox"
-      || entry.provider !== authority.provider
-      || entry.work_attempt_id !== authority.workAttemptId
-      || entry.provider_ref?.work_attempt_id !== authority.workAttemptId
-      || entry.provider_ref?.execution_generation_id !== authority.executionGenerationId) return false;
-    const binding = await this.bindings.get(authority.agentId);
-    if (!binding
-      || binding.entry_id !== authority.agentId
-      || binding.room_id !== authority.roomId
-      || binding.api_url !== authority.apiUrl
-      || binding.work_attempt_id !== authority.workAttemptId
-      || binding.execution_generation_id !== authority.executionGenerationId
-      || binding.agent_session_id !== authority.agentSessionId) return false;
-    if ((await this.bindings.credentialFor(binding)) !== authority.bearer) return false;
-    // Ingress authority deliberately survives loss of provider execution. A
-    // bounded turn requires the exact live handle in addition to this route.
-    if (!authority.handle) return true;
-    if (!handle
-      || handle !== authority.handle
-      || handle.workAttemptId !== authority.workAttemptId) return false;
-    if (scope === "lane_lease") return true;
-    if (["failed", "stopping", "stopped"].includes(entry.observed_state)
-      || ["failed", "stopping", "stopped"].includes(handle.observedState)) return false;
-    if (handle.pid !== (authority.providerConnection?.pid ?? null)) return false;
-    return entry.provider_ref?.provider_continuation_id === authority.providerContinuationId
-      && sameProviderActionConnectionSnapshot(
-        entry.provider_ref?.provider_connection ?? null,
-        authority.providerConnection,
-      )
-      && handle.providerContinuationId === authority.providerContinuationId
-      && sameProviderActionConnectionSnapshot(
-        handle.providerConnection ?? null,
-        authority.providerConnection,
-      );
+      if (this.authority.isHandoffScheduled()) return false;
+      const drain = await this.store.unresolvedDeliveryDrain(authority.agentId);
+      timing.mark("drain");
+      if (deliveryDrainBlocksRuntime(drain)) return false;
+      try {
+        await this.authority.assertCurrent();
+      } catch {
+        return false;
+      } finally {
+        timing.mark("generation");
+      }
+      if (authority.daemonGeneration !== this.authority.currentDaemonGeneration()) return false;
+      // Authority uses runtime/configuration fields, never retained output payloads.
+      const entry = await this.store.getEntry(authority.agentId, "summary");
+      timing.mark("manifest");
+      const handle = this.liveHandles.get(authority.agentId);
+      if (!entry
+        || entry.id !== authority.agentId
+        || entry.room_id !== authority.roomId
+        || entry.desired_state !== "running"
+        || entry.delivery_mode !== "daemon_inbox"
+        || entry.provider !== authority.provider
+        || entry.work_attempt_id !== authority.workAttemptId
+        || entry.provider_ref?.work_attempt_id !== authority.workAttemptId
+        || entry.provider_ref?.execution_generation_id !== authority.executionGenerationId) return false;
+      const binding = await this.bindings.get(authority.agentId);
+      timing.mark("binding");
+      if (!binding
+        || binding.entry_id !== authority.agentId
+        || binding.room_id !== authority.roomId
+        || binding.api_url !== authority.apiUrl
+        || binding.work_attempt_id !== authority.workAttemptId
+        || binding.execution_generation_id !== authority.executionGenerationId
+        || binding.agent_session_id !== authority.agentSessionId) return false;
+      const credential = await this.bindings.credentialFor(binding);
+      timing.mark("credential_lookup");
+      if (credential !== authority.bearer) return false;
+      // Ingress authority deliberately survives loss of provider execution. A
+      // bounded turn requires the exact live handle in addition to this route.
+      if (!authority.handle) return true;
+      if (!handle
+        || handle !== authority.handle
+        || handle.workAttemptId !== authority.workAttemptId) return false;
+      if (scope === "lane_lease") return true;
+      if (["failed", "stopping", "stopped"].includes(entry.observed_state)
+        || ["failed", "stopping", "stopped"].includes(handle.observedState)) return false;
+      if (handle.pid !== (authority.providerConnection?.pid ?? null)) return false;
+      return entry.provider_ref?.provider_continuation_id === authority.providerContinuationId
+        && sameProviderActionConnectionSnapshot(
+          entry.provider_ref?.provider_connection ?? null,
+          authority.providerConnection,
+        )
+        && handle.providerContinuationId === authority.providerContinuationId
+        && sameProviderActionConnectionSnapshot(
+          handle.providerConnection ?? null,
+          authority.providerConnection,
+        );
+    } finally { timing.finish(); }
   }
 }

@@ -1,5 +1,51 @@
-export function messageDisplayText(message: { text: string; display_text?: string | null }): string {
-  return message.display_text || message.text
+import {
+  attentionResponseDisplayText,
+  attentionResponseHandle,
+} from '../../../../../../shared/room-knowledge.mjs'
+import { webHighlighter } from './code-highlighter'
+
+/**
+ * The text people see for a room message. A person's Needs-you answer carries
+ * the asking agent's handle and the request id for that agent's routing; the
+ * room reads it as a reply to the agent by name instead.
+ */
+export function messageDisplayText(
+  message: { text: string; display_text?: string | null; source?: string | null },
+  agentNames?: ReadonlyMap<string, string>,
+): string {
+  if (message.display_text) return message.display_text
+  if (message.source === 'browser') {
+    const answer = attentionResponseDisplayText(message.text, handle => agentNames?.get(handle))
+    if (answer !== null) return answer
+  }
+  return message.text
+}
+
+/**
+ * Room search. What people read and what was sent both match, so "@Amber"
+ * finds a Needs-you answer as well as its raw handle does.
+ */
+export function messageMatchesSearch(
+  message: { text: string; display_text?: string | null; source?: string | null; sender?: string | null },
+  normalizedQuery: string,
+  agentNames?: ReadonlyMap<string, string>,
+): boolean {
+  // Stored messages can lack text (attachment-only or partial payloads).
+  return [message.display_text || message.text || '', String(messageDisplayText(message, agentNames) ?? ''), message.sender || '']
+    .some(value => value.toLowerCase().includes(normalizedQuery))
+}
+
+/** Room agents' names keyed by the handle a Needs-you answer uses to wake them. */
+export function attentionResponseAgentNames(
+  people: Iterable<{ agent_key: string | null; display_name: string | null }>,
+): ReadonlyMap<string, string> {
+  const names = new Map<string, string>()
+  for (const person of people) {
+    const handle = attentionResponseHandle(person.agent_key)
+    const name = person.display_name?.split('|')[0]?.trim()
+    if (handle && name && !names.has(handle)) names.set(handle, name)
+  }
+  return names
 }
 
 export function formatMessageTime(timestamp: string, now = new Date()): string {
@@ -29,8 +75,8 @@ export function stripStatusPrefix(text: string): string {
 
 const MAX_BLOCKQUOTE_DEPTH = 8
 
-export function renderMessageContent(text: string, taskReferenceIds?: ReadonlySet<string>): string {
-  return linkTaskReferences(renderMessageBlocks(text), taskReferenceIds)
+export function renderMessageContent(text: string, taskReferenceIds?: ReadonlySet<string>, onLink?: (url: string) => void): string {
+  return linkTaskReferences(renderMessageBlocks(text, 0, onLink), taskReferenceIds)
 }
 
 function linkTaskReferences(html: string, taskReferenceIds?: ReadonlySet<string>): string {
@@ -70,7 +116,7 @@ function updateReferenceSkipStack(skipStack: string[], tag: string): void {
   if (!/\/\s*>$/.test(tag)) skipStack.push(tagName)
 }
 
-function renderMessageBlocks(value: string, quoteDepth = 0): string {
+function renderMessageBlocks(value: string, quoteDepth = 0, onLink?: (url: string) => void): string {
   const lines = value.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')
   const blocks: string[] = []
   let index = 0
@@ -92,15 +138,14 @@ function renderMessageBlocks(value: string, quoteDepth = 0): string {
         index += 1
       }
       if (index < lines.length) index += 1
-      const language = fence[1] ? ` class="language-${escapeAttribute(fence[1])}"` : ''
-      blocks.push(`<pre><code${language}>${escapeHtml(code.join('\n'))}</code></pre>`)
+      blocks.push(webHighlighter.renderCodeBlock(code.join('\n'), fence[1]))
       continue
     }
 
     const heading = /^(#{1,6})\s+(.+)$/.exec(trimmed)
     if (heading) {
       const level = heading[1]!.length
-      blocks.push(`<h${level}>${renderMessageInline(heading[2]!)}</h${level}>`)
+      blocks.push(`<h${level}>${renderMessageInline(heading[2]!, onLink)}</h${level}>`)
       index += 1
       continue
     }
@@ -118,8 +163,8 @@ function renderMessageBlocks(value: string, quoteDepth = 0): string {
         index += 1
       }
       const quoteBody = quoteDepth >= MAX_BLOCKQUOTE_DEPTH
-        ? `<p>${renderMessageInline(quote.map(value => value.replace(/^>+\s?/, '')).join('\n')).replace(/\n/g, '<br>')}</p>`
-        : renderMessageBlocks(quote.join('\n'), quoteDepth + 1)
+        ? `<p>${renderMessageInline(quote.map(value => value.replace(/^>+\s?/, '')).join('\n'), onLink).replace(/\n/g, '<br>')}</p>`
+        : renderMessageBlocks(quote.join('\n'), quoteDepth + 1, onLink)
       blocks.push(`<blockquote>${quoteBody}</blockquote>`)
       continue
     }
@@ -131,7 +176,7 @@ function renderMessageBlocks(value: string, quoteDepth = 0): string {
       while (index < lines.length) {
         const item = listItem(lines[index]!)
         if (!item || item.ordered !== ordered) break
-        items.push(renderListItem(item.text))
+        items.push(renderListItem(item.text, onLink))
         index += 1
       }
       const tag = ordered ? 'ol' : 'ul'
@@ -148,26 +193,37 @@ function renderMessageBlocks(value: string, quoteDepth = 0): string {
       paragraph.push(line)
       index += 1
     }
-    blocks.push(`<p>${renderMessageInline(paragraph.join('\n')).replace(/\n/g, '<br>')}</p>`)
+    blocks.push(`<p>${renderMessageInline(paragraph.join('\n'), onLink).replace(/\n/g, '<br>')}</p>`)
   }
 
   return blocks.join('')
 }
 
-function renderMessageInline(value: string): string {
+function renderMessageInline(value: string, onLink?: (url: string) => void): string {
   const tokens: string[] = []
-  const tokenized = value.replace(/`([^`\n]+)`/g, (_match, code: string) =>
-    markdownToken(tokens, `<code>${escapeHtml(code)}</code>`)
-  )
+  const links = new Map<number, string>()
+  const linkToken = (url: string, html: string) => {
+    const token = markdownToken(tokens, html)
+    links.set(tokens.length - 1, url)
+    return token
+  }
+  const tokenized = value.replace(/`([^`\n]+)`/g, (_match, code: string) => {
+    // A URL on its own is still a link when an agent wraps it in backticks.
+    // Commands containing URLs and fenced code retain their literal rendering.
+    if (/^https?:\/\/[^\s<>"']+$/i.test(code)) {
+      return linkToken(code, `<code><a href="${escapeAttribute(code)}" target="_blank" rel="noopener noreferrer">${escapeHtml(code)}</a></code>`)
+    }
+    return markdownToken(tokens, `<code>${escapeHtml(code)}</code>`)
+  })
   let rendered = escapeHtml(tokenized)
 
   rendered = rendered.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (_match, label: string, url: string) => {
     const normalizedUrl = url.replace(/&amp;/g, '&')
-    return markdownToken(tokens, `<a href="${escapeAttribute(normalizedUrl)}" target="_blank" rel="noopener noreferrer">${label}</a>`)
+    return linkToken(normalizedUrl, `<a href="${escapeAttribute(normalizedUrl)}" target="_blank" rel="noopener noreferrer">${label}</a>`)
   })
   rendered = rendered.replace(/(https?:\/\/[^\s<"']+)/g, (_match, url: string) => {
     const normalizedUrl = url.replace(/&amp;/g, '&')
-    return markdownToken(tokens, `<a href="${escapeAttribute(normalizedUrl)}" target="_blank" rel="noopener noreferrer">${url}</a>`)
+    return linkToken(normalizedUrl, `<a href="${escapeAttribute(normalizedUrl)}" target="_blank" rel="noopener noreferrer">${url}</a>`)
   })
   rendered = rendered
     .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
@@ -177,14 +233,17 @@ function renderMessageInline(value: string): string {
     .replace(/(^|[^\w])_([^_\n]+)_(?!\w)/g, '$1<em>$2</em>')
     .replace(/(^|[\s(])@([A-Za-z0-9._:-]+(?:\/[A-Za-z0-9._-]+)*)/g, '$1<span class="mention-token">@$2</span>')
 
-  return restoreMarkdownTokens(rendered, tokens)
+  return restoreMarkdownTokens(rendered, tokens, (index) => {
+    const url = links.get(index)
+    if (url) onLink?.(url)
+  })
 }
 
-function renderListItem(value: string): string {
+function renderListItem(value: string, onLink?: (url: string) => void): string {
   const task = /^\[([ xX])\]\s+(.+)$/.exec(value)
-  if (!task) return renderMessageInline(value)
+  if (!task) return renderMessageInline(value, onLink)
   const checked = task[1]!.toLowerCase() === 'x' ? ' checked' : ''
-  return `<input class="markdown-task-checkbox" type="checkbox" disabled${checked}>${renderMessageInline(task[2]!)}`
+  return `<input class="markdown-task-checkbox" type="checkbox" disabled${checked}>${renderMessageInline(task[2]!, onLink)}`
 }
 
 function listItem(line: string): { ordered: boolean; text: string } | null {
@@ -208,8 +267,8 @@ function markdownToken(tokens: string[], html: string): string {
   return `\u0000MD${index}\u0000`
 }
 
-function restoreMarkdownTokens(value: string, tokens: string[]): string {
-  return value.replace(/\u0000MD(\d+)\u0000/g, (_match, index: string) => tokens[Number(index)] || '')
+function restoreMarkdownTokens(value: string, tokens: string[], onToken: (index: number) => void): string {
+  return value.replace(/\u0000MD(\d+)\u0000/g, (_match, index: string) => { onToken(Number(index)); return tokens[Number(index)] || '' })
 }
 
 function escapeHtml(value: string): string {

@@ -12,40 +12,46 @@
     <header class="agent-inspector-header">
       <div class="agent-inspector-identity">
         <ProviderBadge :label="projection.provider" :agent-key="projection.entry.agentKey" />
-        <div>
+        <div class="agent-inspector-identity-copy">
           <div class="agent-inspector-name-line">
             <h2 id="agent-inspector-title">{{ projection.displayName }}</h2>
-            <span class="agent-inspector-state-label" :data-state="projection.overallState" :data-tab="selectedTab">
-              <span aria-hidden="true"></span>{{ projection.overallLabel }}
-            </span>
+            <span v-if="projection.entry.homeHarness" class="agent-inspector-own-setup" :title="homeHarnessBadge(projection.provider, projection.entry.homeHarness).title" data-testid="agent-inspector-own-setup">{{ homeHarnessBadge(projection.provider, projection.entry.homeHarness).label }}</span>
+            <span v-if="projection.entry.permissionPending" class="agent-inspector-own-setup" :title="permissionPendingBadge(projection.entry.deliveryMode).title" data-testid="agent-inspector-settings-pending">{{ permissionPendingBadge().label }}</span>
           </div>
           <p>
-            <span v-if="projection.ownerAttribution">{{ projection.ownerAttribution }} · </span>
             {{ providerModelLabel }}
           </p>
         </div>
       </div>
+      <div class="agent-inspector-header-tools">
+        <AgentInspectorLifecycleActions
+          :entry-id="projection.entryId" :room-id="projection.roomId"
+          :actions="headerActions" :busy="lifecycleActionBusy" :busy-kind="lifecycleBusyKind"
+          :compact="compact" menu-only @action="handleLifecycleAction"
+        />
       <button ref="closeButton" type="button" class="agent-inspector-close" aria-label="Close agent inspector" @click="emit('close')">
         <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 4 8 8M12 4l-8 8" /></svg>
       </button>
+      </div>
     </header>
 
-    <p v-if="projection.overallDetail && selectedTab !== 'diagnostics'" class="agent-inspector-status-copy">{{ projection.overallDetail }}</p>
-
-    <p v-if="projection.resourceFreshness === 'stale'" class="agent-inspector-stale-banner" role="status">
-      Showing the last known status. Agent controls will be available when LetAgents reconnects.
-    </p>
-
-    <AgentInspectorLifecycleActions
+    <AgentInspectorSignal
       v-if="selectedTab !== 'diagnostics'"
-      :entry-id="projection.entryId"
-      :room-id="projection.roomId"
-      :actions="projection.actions"
-      :busy="lifecycleActionBusy"
-      :busy-kind="lifecycleBusyKind"
-      :compact="compact"
-      @action="handleLifecycleAction"
-    />
+      :label="signal.label" :detail="signal.detail" :state="signal.state" :tone="signal.tone" :moving="signal.moving"
+    >
+      <template #actions>
+        <button v-if="projection.turnControl?.canStop" type="button" :disabled="lifecycleActionBusy" @click="emitTurnControl('stop_turn')">
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><rect x="4" y="4" width="8" height="8" rx="1" /></svg>Stop turn
+        </button>
+        <button type="button" class="agent-inspector-signal-link" @click="selectTab('live')">View Live <span aria-hidden="true">→</span></button>
+      </template>
+      <template v-if="recoveryActions.length" #footer>
+        <AgentInspectorLifecycleActions
+          :entry-id="projection.entryId" :room-id="projection.roomId" :actions="recoveryActions"
+          :busy="lifecycleActionBusy" :busy-kind="lifecycleBusyKind" :compact="compact" @action="handleLifecycleAction"
+        />
+      </template>
+    </AgentInspectorSignal>
 
     <p
       v-if="visibleActionMessage && selectedTab !== 'diagnostics'"
@@ -69,9 +75,11 @@
         <AgentInspectorOverview
           :room-name="roomDisplayName"
           :projection="projection"
+          :usage="workResource.detail?.usage" :usage-stale="workResource.status === 'error'"
           :busy="actionState?.status === 'running'"
           :runtime-control="workResource.detail?.runtime_control ?? null"
           :runtime-control-pending="workResource.status === 'loading' || workResource.status === 'refreshing'"
+          :correction-request="correctionRequest"
           @stop-turn="emitTurnControl('stop_turn')"
           @correct-turn="emitTurnControl('steer_turn', $event)"
           @retry-turn-control="emitTurnControl('retry_turn_control')"
@@ -79,32 +87,6 @@
           @restore-conversation="emitRecoveryControl('restore_conversation', $event)"
           @skip-message="emitRecoveryControl('skip_message', $event)"
         />
-        <section v-if="retireAction" class="agent-inspector-overview-retire" aria-labelledby="agent-inspector-retire-title">
-          <div class="agent-inspector-overview-retire-copy">
-            <p id="agent-inspector-retire-title">Retire agent</p>
-            <span>Retire this agent while keeping its history and worktree.</span>
-          </div>
-          <button
-            v-if="!confirmRetire"
-            ref="retireButton"
-            type="button"
-            class="danger"
-            :disabled="lifecycleActionBusy"
-            data-action="retire_agent"
-            @click="openRetireConfirmation"
-          >
-            Retire agent
-          </button>
-          <div v-else class="agent-inspector-overview-retire-confirmation" role="alert">
-            <p>{{ AGENT_INSPECTOR_RETIRE_CONFIRMATION }}</p>
-            <div>
-              <button ref="keepAgentButton" type="button" :disabled="lifecycleActionBusy" @click="cancelRetireConfirmation">Keep agent</button>
-              <button type="button" class="danger" :disabled="lifecycleActionBusy" data-action="retire_agent" @click="handleRetire">
-                Confirm retire agent
-              </button>
-            </div>
-          </div>
-        </section>
       </div>
       <AgentInspectorLive
         v-else-if="selectedTab === 'live'" id="agent-inspector-live-panel" role="tabpanel" aria-labelledby="agent-inspector-live-tab"
@@ -124,6 +106,7 @@
       <AgentInspectorSettings
         v-else-if="selectedTab === 'settings'" id="agent-inspector-settings-panel" role="tabpanel" aria-labelledby="agent-inspector-settings-tab"
         :entry-id="projection.entryId" :display-name="projection.displayName" :workspace-path="projection.entry.workspacePath" :retired="projection.overallState === 'retired'"
+        :delivery-mode="projection.entry.deliveryMode" :permission-pending="projection.entry.permissionPending === true"
         :resource="settingsResource" :move="roomMoveResource" :move-available="roomMoveAvailable" :providers="providers" :destinations="destinations"
         :busy="actionState?.status === 'running'" :apply-pending="actionState?.kind === 'apply_settings' && actionState.status === 'success' && configurationHasRuntimeLag(settingsResource.configuration)" :conflict="settingsConflict"
         @patch="emit('settings-patch', $event)" @save="emit('settings-save', $event)" @apply="emit('settings-apply')" @reload="emit('settings-reload')"
@@ -142,17 +125,25 @@
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from "vue";
 import type {
   AgentInspectorActionIntent,
   AgentInspectorActionState,
+  AgentInspectorCorrectionRequest,
   AgentInspectorProjection,
 } from "../../../../domain/agent-inspector";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
+import { savedModelLabel } from "../../../../domain/claude-model-labels";
 import type { DesktopAgentProvider, DesktopAgentStreamEvent, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
-import { AGENT_INSPECTOR_RETIRE_CONFIRMATION, configurationHasRuntimeLag } from "../../../../domain/agent-inspector-settings";
+import { configurationHasRuntimeLag, permissionPendingBadge } from "../../../../domain/agent-inspector-settings";
+import { homeHarnessBadge } from "../../../../domain/agent-home-harness";
+import { initialTabEffects } from "../../../../domain/agent-inspector-identity";
+import { agentInspectorSignal, agentInspectorProviderLabel } from "../../../../domain/agent-inspector-presentation";
+import { agentScheduledRetry } from "../../../../domain/scheduled-retry";
+import { useSecondClock } from "../../../../composables/useSecondClock";
+import AgentInspectorSignal from "./AgentInspectorSignal.vue";
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import AgentInspectorLifecycleActions from "./AgentInspectorLifecycleActions.vue";
 import AgentInspectorOverview from "./AgentInspectorOverview.vue";
@@ -171,7 +162,7 @@ const props = defineProps<{
   roomDisplayName?: string;
   daemonStatus?: import("../../../../../../electron/ipc-types").DesktopSupervisorDaemonStatus | null;
   refreshDiagnostics?: () => Promise<boolean>;
-  initialTab?: "overview" | "work" | "workspace";
+  initialTab?: "overview" | "live" | "work" | "workspace" | "diagnostics";
   roomAgentWork?: import("../../../../../../electron/ipc-types").DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;
@@ -188,6 +179,7 @@ const props = defineProps<{
   destinations: readonly DesktopFocusRoomInfo[];
   settingsConflict: boolean;
   liveFeed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number };
+  correctionRequest?: AgentInspectorCorrectionRequest | null;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -213,10 +205,20 @@ const surfaceElement = ref<HTMLElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
 const overviewTab = ref<HTMLButtonElement | null>(null);
 const workTab = ref<HTMLButtonElement | null>(null);
-const retireButton = ref<HTMLButtonElement | null>(null);
-const keepAgentButton = ref<HTMLButtonElement | null>(null);
 const selectedTab = ref<InspectorTab>(props.initialTab ?? "overview");
-const providerModelLabel = computed(() => [props.projection.provider, props.projection.model].filter(Boolean).join(" · "));
+const providerModelLabel = computed(() => [
+  agentInspectorProviderLabel(props.projection.provider),
+  props.projection.model ? savedModelLabel(props.projection.provider, props.projection.model) : null,
+  props.settingsResource.configuration?.entryId === props.projection.entryId
+    && !configurationHasRuntimeLag(props.settingsResource.configuration)
+    ? props.settingsResource.configuration.reasoningEffort : null,
+].filter(Boolean).join(" · "));
+// While the agent waits to try again, its time is read against a clock that moves, not against the last state push.
+const retryClock = useSecondClock(() => Boolean(agentScheduledRetry(props.projection.entry.deliveryReceipts)));
+const signal = computed(() => agentInspectorSignal(props.projection, retryClock.value));
+const recoveryKinds = new Set(["resume", "recover", "reconnect", "retry_delivery", "recovery_options"]);
+const recoveryActions = computed(() => props.projection.actions.filter(action => action.available && recoveryKinds.has(action.kind)));
+const headerActions = computed(() => props.projection.actions.filter(action => !recoveryKinds.has(action.kind)));
 const liveSupportsReasoning = computed(() => {
   const provider = props.providers.find((candidate) => candidate.id === props.projection.provider);
   return provider ? provider.capabilities.includes("reasoning_stream") : null;
@@ -232,9 +234,6 @@ const visibleActionMessage = computed(() => {
   if (props.actionState.kind === "retry_delivery" && props.actionState.status !== "error") return null;
   return props.actionState.message;
 });
-const retireAction = computed(() =>
-  props.projection.actions.find((action) => action.available && action.kind === "retire_agent") ?? null);
-const confirmRetire = ref(false);
 const recoveryOptionsRequested = ref(false);
 
 function handleLifecycleAction(intent: AgentInspectorActionIntent): void {
@@ -246,30 +245,28 @@ function handleLifecycleAction(intent: AgentInspectorActionIntent): void {
   selectTab("diagnostics");
 }
 
-function openRetireConfirmation(): void {
-  confirmRetire.value = true;
-  void nextTick(() => keepAgentButton.value?.focus({ preventScroll: true }));
-}
-
-function cancelRetireConfirmation(): void {
-  confirmRetire.value = false;
-  void nextTick(() => retireButton.value?.focus({ preventScroll: true }));
-}
-
-function handleRetire(): void {
-  const action = retireAction.value;
-  if (!action) return;
-  confirmRetire.value = false;
-  emit("action", {
-    entryId: props.projection.entryId,
-    roomId: props.projection.roomId,
-    kind: action.kind,
-    ...(action.sourceMessageId ? { sourceMessageId: action.sourceMessageId } : {}),
-  });
-}
-
 function focusInitial(): void {
+  if (focusCorrection()) return;
+  if (selectedTab.value === "live") {
+    const liveTab = surfaceElement.value?.querySelector<HTMLButtonElement>("#agent-inspector-live-tab");
+    if (liveTab) {
+      liveTab.focus({ preventScroll: true });
+      return;
+    }
+  }
   closeButton.value?.focus({ preventScroll: true });
+}
+
+/** Opened to correct the current turn: land in the box, not on Close. */
+function focusCorrection(): boolean {
+  if (props.correctionRequest?.entryId !== props.projection.entryId || selectedTab.value !== "overview") return false;
+  const field = surfaceElement.value?.querySelector<HTMLTextAreaElement>(
+    `#agent-inspector-turn-correction-${CSS.escape(props.projection.entryId)}`,
+  );
+  if (!field || field.disabled) return false;
+  field.focus();
+  field.setSelectionRange(field.value.length, field.value.length);
+  return true;
 }
 
 function containsFocus(): boolean {
@@ -278,16 +275,31 @@ function containsFocus(): boolean {
 
 defineExpose({ focusInitial, containsFocus });
 
-watch([() => props.projection.entryId, () => props.requestVersion, () => props.initialTab], () => {
+function applyInitialTab(): void {
   selectedTab.value = props.initialTab ?? "overview";
-  confirmRetire.value = false;
+  const effects = initialTabEffects(selectedTab.value);
+  if (effects.emitLiveSelected) {
+    emit("live-selected");
+  }
+}
+
+onMounted(() => {
+  applyInitialTab();
+});
+
+watch([() => props.projection.entryId, () => props.requestVersion, () => props.initialTab], () => {
+  applyInitialTab();
   recoveryOptionsRequested.value = false;
 });
+
+// An already-open Inspector gets no new focusInitial from its host.
+watch(() => props.correctionRequest?.id, (id) => {
+  if (id !== undefined) focusCorrection();
+}, { flush: "post" });
 
 function selectTab(tab: InspectorTab): void {
   if (selectedTab.value === tab) return;
   if (selectedTab.value === "live" && tab !== "live") emit("live-dismissed");
-  if (tab !== "overview") confirmRetire.value = false;
   selectedTab.value = tab;
   if (tab !== "diagnostics") recoveryOptionsRequested.value = false;
   if (tab === "live") emit("live-selected");

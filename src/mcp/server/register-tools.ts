@@ -1,6 +1,7 @@
 import { localSupervisedRoomToolAvailable } from "../../../shared/local-supervised-tools.mjs";
 import { isLocalRoomApi } from "../../../shared/room-api-origin.mjs";
 import { registerRoomKnowledgeTools } from "./tools/knowledge.js";
+import { registerWakeRuleTools } from "./tools/wake-rules.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerAgentSessionTools } from "./tools/agent-sessions.js";
 import { registerMessageTools, registerStatusTools } from "./tools/messages.js";
@@ -20,13 +21,17 @@ import { toolSurfaceForExecutionProfile } from "./runtime/tool-surface-policy.js
 import { profileAwareToolServer } from "./supervised-tool-facade.js";
 import { workerAwareToolServer } from "./worker-tool-facade.js";
 import { registerWorkspaceTools } from "./tools/workspace.js";
+import { isGivenAgent, registerAskWorkspaceTools } from "./tools/ask-workspace.js";
+import { remoteToolServer } from "./remote-tool-surface.js";
 
 export function registerTools(
   server: McpServer,
   profile: LetAgentsExecutionProfile = "autonomous_mcp_worker",
   supervisedProvider = process.env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || null,
-  options: { executionOwner?: "provider" | "daemon"; apiUrl?: string } = {},
+  options: { executionOwner?: "provider" | "daemon"; apiUrl?: string; remote?: boolean } = {},
 ): void {
+  // The remote HTTP endpoint shares this registry; it only drops local-machine tools.
+  if (options.remote) server = remoteToolServer(server);
   const localRoom = profile === "supervised_room_turn" && isLocalRoomApi(options.apiUrl ?? process.env.LETAGENTS_API_URL);
   const routedServer = localRoom ? new Proxy(server, {
     get(target, property, receiver) {
@@ -51,15 +56,23 @@ export function registerTools(
   if (surface.agentSessionLifecycle) registerAgentSessionTools(tools);
   registerRoomInspectionTools(tools);
   registerRoomKnowledgeTools(tools);
+  registerWakeRuleTools(tools);
   registerStatusTools(tools);
   if (profile === "autonomous_mcp_worker" || profile === "interactive_desktop") registerWorkspaceTools(tools);
   registerTaskTools(tools);
   registerRepoInitializationTool(tools);
-  registerMessageTools(tools, { includeDeliveryLoop: surface.deliveryLoop });
+  // The remote endpoint runs on the LetAgents server, which has none of the caller's files.
+  registerMessageTools(tools, {
+    includeDeliveryLoop: surface.deliveryLoop,
+    fileAttachments: surface.messageFileAttachments && !options.remote,
+  });
   if (profile === "supervised_room_turn") registerReplyThreadTool(tools);
   if (profile === "supervised_room_turn" && supervisedProvider === "cursor") registerSupervisedRoomTurnTools(tools);
   if (surface.onboarding) registerOnboardingTools(tools);
   if (surface.roomResume) registerRoomResumeTool(tools);
   if (surface.rental) registerRentalTools(tools);
+  // A given agent's own server advertises the ask tools (by its entry id); the daemon, which runs every
+  // supervised tool call, always has their handlers. The server checks each call against the agent's grant.
+  if (profile === "supervised_room_turn" && (isGivenAgent() || options.executionOwner === "daemon")) registerAskWorkspaceTools(tools);
   registerRepoVisibilityTool(tools);
 }

@@ -1,11 +1,13 @@
 import type { DesktopGitRoomInfo } from "../../../electron/ipc-types";
 import type { RoomEntry } from "../components/desktop/types";
 import { buildRoomPinMutation } from "./sidebar-rooms";
+import type { RoomNotificationMenuItem } from "./room-notification-menu";
 
 export type SidebarRoomMenuActionId =
   | "open-room"
   | "select-room"
   | "mark-room-read"
+  | "mark-room-unread"
   | "pin-room"
   | "rename-room"
   | "copy-room-url"
@@ -17,9 +19,10 @@ export type SidebarRoomMenuActionId =
   | "archive-room";
 
 export type SidebarRoomMenuItem = {
-  id: SidebarRoomMenuActionId;
+  id: SidebarRoomMenuActionId | "notifications";
   label: string;
   danger?: boolean;
+  children?: RoomNotificationMenuItem[];
 };
 
 export type SidebarBackgroundMenuActionId =
@@ -38,6 +41,7 @@ export function buildSidebarRoomContextMenuItems(input: {
   hasProjectChildren: boolean;
   projectCollapsed: boolean;
   canManageRooms?: boolean;
+  notificationItems?: RoomNotificationMenuItem[];
 }): SidebarRoomMenuItem[][] {
   const { entry } = input;
   const canManageRooms = input.canManageRooms !== false;
@@ -53,6 +57,9 @@ export function buildSidebarRoomContextMenuItems(input: {
   }
   if (entry.hasUnread && selectable) {
     navigation.push({ id: "mark-room-read", label: "Mark as read" });
+  }
+  if (!entry.hasUnread && selectable && entry.latestMessageId && canManageRooms) {
+    navigation.push({ id: "mark-room-unread", label: "Mark as unread" });
   }
   if (navigation.length) groups.push(navigation);
 
@@ -73,6 +80,7 @@ export function buildSidebarRoomContextMenuItems(input: {
     management.push({ id: "conclude-focus-room", label: "Conclude focus room..." });
   }
   if (management.length) groups.push(management);
+  if (selectable && input.notificationItems) groups.push([{ id: "notifications", label: "Notifications", children: input.notificationItems }]);
 
   const clipboard: SidebarRoomMenuItem[] = [];
   if (selectable) {

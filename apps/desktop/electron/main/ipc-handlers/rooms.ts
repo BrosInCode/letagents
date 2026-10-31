@@ -1,5 +1,21 @@
+import type { RoomGif, RoomExpressionsSetting } from "../../../../../shared/room-expressions.mjs";
+import { createDesktopMessageReminder, getDesktopMessageReminders, deleteDesktopMessageReminder } from "../rooms/reminders.js";
 import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
-import { getDesktopNeedsYou, getDesktopKnowledge, createDesktopKnowledge, reviseDesktopKnowledge, getDesktopMemoryHistory } from "../rooms/knowledge.js";
+import { getDesktopExpressions, setDesktopExpressions, desktopGiphy } from "../rooms/expressions.js";
+import { getDesktopHistorySummarySetting, setDesktopHistorySummarySetting } from "../rooms/history-summary.js";
+import { getDesktopReplyOrder, setDesktopReplyOrder } from "../rooms/reply-order.js";
+import { getDesktopMessageLinkPreviews } from "../rooms/link-previews.js";
+import { getDesktopMessagePins, setDesktopMessagePin } from "../rooms/pins.js";
+import { reportDesktopRoomTyping } from "../rooms/typing.js";
+import { getDesktopPullRequestDiff } from "../rooms/pull-request-diff.js";
+import { getDesktopMessageReactions, setDesktopMessageReaction } from "../rooms/reactions.js";
+import { searchDesktopRoomMessages } from "../rooms/search.js";
+import { getAccountActivityState, restartAccountActivityStream, stopAccountActivityStream } from "../account-activity-stream.js";
+import { getDesktopGitHubEventFilter, getDesktopRoomAgentGuidelines, setDesktopGitHubEventFilter, setDesktopRoomAgentGuidelines } from "../rooms/room-settings.js";
+import { getDesktopRoomNotificationPreference, listDesktopRoomNotificationPreferences, setDesktopRoomNotificationPreference } from "../rooms/notification-preferences.js";
+import type { RoomNotificationPreferenceChange } from "../../../../../shared/room-notification-preferences.mjs";
+import { cancelDesktopRoomWakeRule, getDesktopRoomWakeRules, restoreDesktopRoomWakeRule } from "../rooms/wake-rules.js";
+import { getDesktopNeedsYou, getDesktopNeedsYouRoom, getDesktopKnowledge, createDesktopKnowledge, reviseDesktopKnowledge, getDesktopMemoryHistory } from "../rooms/knowledge.js";
 import type { IpcMain } from "electron";
 
 import type {
@@ -35,9 +51,11 @@ import type {
   DesktopRoomThreadPage,
   DesktopRoomThreadReadResult,
   DesktopSendRoomMessageResult,
+  DesktopChosenAttachment,
   DesktopStagedAttachment,
   DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
+  DesktopTaskMention,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
   DesktopTaskReviewWorkerActionInput,
@@ -51,12 +69,14 @@ import type {
 } from "../../ipc-types/board-governance.js";
 import {
   discardDesktopAttachment,
-  pickAndStageDesktopAttachments,
+  chooseDesktopAttachmentFiles,
+  stageChosenDesktopAttachments,
   stageDroppedDesktopAttachmentContents,
 } from "../attachments.js";
+import { openHtmlDemo } from "../attachments/html-demo-window.js";
+import { getMainWindow } from "../window.js";
 import {
-  deliverDesktopRoomMessageToManagedAgents,
-  repairDesktopRoomStreamManagedDelivery,
+  acknowledgeDesktopRoomStreamGapRepair,
   startDesktopRoomStream,
   stopDesktopRoomStream,
 } from "../room-stream.js";
@@ -84,6 +104,7 @@ import {
   getDesktopRoomMessage,
   getDesktopRoomMessageInfo,
   getDesktopRoomMessagesBefore,
+  getDesktopRoomMessagesAfter,
   getDesktopRoomStorage,
   getDesktopRoomThread,
   getDesktopRoomThreads,
@@ -105,13 +126,21 @@ import {
   updateDesktopAccountRoom,
   updateDesktopFocusRoomSettings,
   updateDesktopRoomTask,
+  getDesktopRoomTaskMentions,
   updateDesktopRoomTaskLease,
   updateDesktopRoomTaskReviewLease,
 } from "../rooms.js";
 import { desktopSmokeBoardGovernance, isDesktopSmokeCheck } from "../smoke.js";
+import { liveSupervisorStateEntries } from "../supervisor-daemon.js";
 
 export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
-  targetIpcMain.handle("desktop:room:needs-you", (_event, includeUpdates) => getDesktopNeedsYou(includeUpdates === true));
+  targetIpcMain.handle("desktop:room:needs-you", async (_event, includeUpdates) => {
+    const needsYou = await getDesktopNeedsYou(includeUpdates === true);
+    const agents = liveSupervisorStateEntries();
+    return agents ? { ...needsYou, agents } : needsYou;
+  });
+  targetIpcMain.handle("desktop:room:needs-you-room", (_event, room, includeBoardIntents) =>
+    getDesktopNeedsYouRoom(room, includeBoardIntents === true));
   targetIpcMain.handle("desktop:room:knowledge", (_event, room, type) => getDesktopKnowledge(room, type));
   targetIpcMain.handle("desktop:room:knowledge-create", (_event, room, type, input) => createDesktopKnowledge(room, type, input));
   targetIpcMain.handle("desktop:room:knowledge-revise", (_event, room, type, id, input) => reviseDesktopKnowledge(room, type, id, input));
@@ -170,6 +199,11 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       afterCursor?: string | null,
     ): Promise<DesktopRoomAgentWorkPollResult> =>
       pollDesktopRoomAgentWork(roomIdentifier, afterCursor),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-messages-after",
+    async (_event, roomIdentifier: string, afterMessageId: string | null) =>
+      getDesktopRoomMessagesAfter(roomIdentifier, afterMessageId),
   );
   targetIpcMain.handle(
     "desktop:room:get-latest-messages",
@@ -249,12 +283,18 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       getDesktopReasoningSession(roomIdentifier, sessionId),
   );
   targetIpcMain.handle(
-    "desktop:room:pick-attachments",
+    "desktop:room:choose-attachments",
+    async (_event, limit: unknown): Promise<DesktopChosenAttachment[]> =>
+      chooseDesktopAttachmentFiles(typeof limit === "number" ? limit : undefined),
+  );
+  targetIpcMain.handle(
+    "desktop:room:stage-chosen-attachments",
     async (
       _event,
       roomIdentifier: string,
+      tokens: string[],
     ): Promise<DesktopStagedAttachment[]> =>
-      pickAndStageDesktopAttachments(roomIdentifier),
+      stageChosenDesktopAttachments(roomIdentifier, Array.isArray(tokens) ? tokens.filter((token) => typeof token === "string") : []),
   );
   targetIpcMain.handle(
     "desktop:room:stage-dropped-attachment-contents",
@@ -264,6 +304,13 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       files: DesktopDroppedAttachmentContent[],
     ): Promise<DesktopStagedAttachment[]> =>
       stageDroppedDesktopAttachmentContents(roomIdentifier, files),
+  );
+  targetIpcMain.handle(
+    "desktop:room:open-html-demo",
+    async (event, href: unknown, fileName: unknown, senderLabel: unknown): Promise<void> => {
+      if (event.sender !== getMainWindow()?.webContents) throw new Error("Demos open only from the main window.");
+      await openHtmlDemo({ href, fileName, senderLabel });
+    },
   );
   targetIpcMain.handle(
     "desktop:room:discard-attachment",
@@ -284,7 +331,7 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       _event,
       roomIdentifier: string,
       repair: DesktopRoomDeliveryRepair,
-    ): Promise<void> => repairDesktopRoomStreamManagedDelivery(roomIdentifier, repair),
+    ): Promise<void> => acknowledgeDesktopRoomStreamGapRepair(roomIdentifier, repair),
   );
   targetIpcMain.handle(
     "desktop:room:stop-stream",
@@ -302,17 +349,9 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       threadRootId?: string | null,
       clientMessageId?: string | null,
       messageNamespace?: string | null,
-    ): Promise<DesktopSendRoomMessageResult> => {
-      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId, clientMessageId, messageNamespace);
-      // Local dispatch is secondary to the saved message acknowledgement.
-      // Keep its routing/retry path running without making the user resend.
-      void Promise.resolve().then(() =>
-        deliverDesktopRoomMessageToManagedAgents(roomIdentifier, result.message),
-      ).catch((error) => {
-        console.error(`[room messages] failed managed delivery for ${roomIdentifier}/${result.message.id}`, error);
-      });
-      return result;
-    },
+      gif?: RoomGif | null,
+    ): Promise<DesktopSendRoomMessageResult> =>
+      sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId, clientMessageId, messageNamespace, gif),
   );
   targetIpcMain.handle(
     "desktop:room:add-task",
@@ -336,9 +375,15 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
         status?: string;
         assignee?: string | null;
         pr_url?: string | null;
+        external_ref?: string | null;
       },
     ): Promise<DesktopTaskMutationResult> =>
       updateDesktopRoomTask(roomIdentifier, taskId, updates),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-task-mentions",
+    async (_event, roomIdentifier: string, taskId: string): Promise<DesktopTaskMention[]> =>
+      getDesktopRoomTaskMentions(roomIdentifier, taskId),
   );
   targetIpcMain.handle(
     "desktop:room:update-task-lease",
@@ -430,6 +475,40 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   );
   targetIpcMain.handle("desktop:room:get-conversation-routing", (_event, roomIdentifier: string) => getDesktopConversationRouting(roomIdentifier));
   targetIpcMain.handle("desktop:room:set-conversation-routing", (_event, roomIdentifier: string, enabled: boolean) => setDesktopConversationRouting(roomIdentifier, enabled));
+  targetIpcMain.handle("desktop:room:get-expressions", (_event, room: string) => getDesktopExpressions(room));
+  targetIpcMain.handle("desktop:room:set-expressions", (_event, room: string, enabled: boolean) => setDesktopExpressions(room, enabled));
+  targetIpcMain.handle("desktop:room:get-history-summary-setting", (_event, room: string) => getDesktopHistorySummarySetting(room));
+  targetIpcMain.handle("desktop:room:set-history-summary-setting", (_event, room: string, enabled: boolean) => setDesktopHistorySummarySetting(room, enabled));
+  targetIpcMain.handle("desktop:room:search-gifs", (_event, room: string, query: string, offset?: number) => desktopGiphy(room, { query, offset }));
+  targetIpcMain.handle("desktop:room:resolve-gif", (_event, room: string, id: string) => desktopGiphy(room, { id }));
+  targetIpcMain.handle("desktop:room:get-reply-order", (_event, roomIdentifier: string) => getDesktopReplyOrder(roomIdentifier));
+  targetIpcMain.handle("desktop:room:set-reply-order", (_event, roomIdentifier: string, enabled: boolean) => setDesktopReplyOrder(roomIdentifier, enabled));
+  targetIpcMain.handle("desktop:room:get-message-link-previews", (_event, roomIdentifier: string, references) => getDesktopMessageLinkPreviews(roomIdentifier, references));
+  targetIpcMain.handle("desktop:room:get-message-pins", (_event, roomIdentifier: string) => getDesktopMessagePins(roomIdentifier));
+  targetIpcMain.handle("desktop:room:create-message-reminder", (_event, room: string, message: string, dueAt: string) => createDesktopMessageReminder(room, message, dueAt));
+  targetIpcMain.handle("desktop:room:get-message-reminders", (_event, offset?: number) => getDesktopMessageReminders(offset));
+  targetIpcMain.handle("desktop:room:delete-message-reminder", (_event, id: string) => deleteDesktopMessageReminder(id));
+  targetIpcMain.handle("desktop:room:set-message-pin", (_event, roomIdentifier: string, messageId: string, pinned: boolean) => setDesktopMessagePin(roomIdentifier, messageId, pinned));
+  targetIpcMain.handle("desktop:room:report-typing", (_event, room: string, input: unknown) => reportDesktopRoomTyping(room, input));
+  targetIpcMain.handle("desktop:room:get-message-reactions", (_event, roomIdentifier: string, firstMessageId: string, lastMessageId: string) =>
+    getDesktopMessageReactions(roomIdentifier, firstMessageId, lastMessageId));
+  targetIpcMain.handle("desktop:room:set-message-reaction", (_event, roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) =>
+    setDesktopMessageReaction(roomIdentifier, messageId, emoji, reacted));
+  targetIpcMain.handle("desktop:room:search-messages", (_event, roomIdentifier: string, query: string, beforeMessageId?: string | null) =>
+    searchDesktopRoomMessages(roomIdentifier, query, beforeMessageId));
+  targetIpcMain.handle("desktop:room:get-account-activity", () => getAccountActivityState());
+  targetIpcMain.handle("desktop:room:restart-account-activity", () => restartAccountActivityStream());
+  targetIpcMain.handle("desktop:room:stop-account-activity", () => stopAccountActivityStream());
+  targetIpcMain.handle("desktop:room:get-github-event-filter", (_event, roomIdentifier: string) => getDesktopGitHubEventFilter(roomIdentifier));
+  targetIpcMain.handle("desktop:room:set-github-event-filter", (_event, roomIdentifier: string, enabledKinds: unknown) => setDesktopGitHubEventFilter(roomIdentifier, enabledKinds));
+  targetIpcMain.handle("desktop:room:get-agent-guidelines", (_event, roomIdentifier: string) => getDesktopRoomAgentGuidelines(roomIdentifier));
+  targetIpcMain.handle("desktop:room:list-notification-preferences", () => listDesktopRoomNotificationPreferences());
+  targetIpcMain.handle("desktop:room:get-notification-preference", (_event, identifier: string) => getDesktopRoomNotificationPreference(identifier));
+  targetIpcMain.handle("desktop:room:set-notification-preference", (_event, identifier: string, change: RoomNotificationPreferenceChange) => setDesktopRoomNotificationPreference(identifier, change));
+  targetIpcMain.handle("desktop:room:set-agent-guidelines", (_event, roomIdentifier: string, guidelines: unknown) => setDesktopRoomAgentGuidelines(roomIdentifier, guidelines));
+  targetIpcMain.handle("desktop:room:get-wake-rules", (_event, roomIdentifier: string) => getDesktopRoomWakeRules(roomIdentifier));
+  targetIpcMain.handle("desktop:room:cancel-wake-rule", (_event, roomIdentifier: string, ruleId: string) => cancelDesktopRoomWakeRule(roomIdentifier, ruleId));
+  targetIpcMain.handle("desktop:room:restore-wake-rule", (_event, roomIdentifier: string, ruleId: string) => restoreDesktopRoomWakeRule(roomIdentifier, ruleId));
   targetIpcMain.handle(
     "desktop:room:update-focus-room-settings",
     async (
@@ -473,6 +552,10 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle(
     "desktop:room:create-invite-room",
     async (): Promise<DesktopInviteRoomCreation> => createDesktopInviteRoom(),
+  );
+  targetIpcMain.handle(
+    "desktop:room:get-pull-request-diff",
+    (_event, roomIdentifier: string, number: number) => getDesktopPullRequestDiff(roomIdentifier, number),
   );
   targetIpcMain.handle(
     "desktop:room:get-github-events",

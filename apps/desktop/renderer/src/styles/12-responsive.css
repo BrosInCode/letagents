@@ -229,6 +229,10 @@
     width: calc(100% - 20px);
   }
 
+  .room-activity-line {
+    --room-activity-line-inset: 10px;
+  }
+
   .desktop-composer-footer {
     align-items: flex-start;
   }

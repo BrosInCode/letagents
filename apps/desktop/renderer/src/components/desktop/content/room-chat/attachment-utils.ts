@@ -5,14 +5,20 @@ export function hasDraggedFiles(event: DragEvent): boolean {
   return Array.from(event.dataTransfer?.types || []).includes("Files");
 }
 
+/** A chip for a pasted or dropped file. An image previews from the local file at once, before any upload. */
 export function toPendingAttachmentDraft(file: File): PendingAttachmentDraft {
+  const mimeType = file.type || "application/octet-stream";
   return {
     localId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     fileName: file.name || "attachment",
-    mimeType: file.type || "application/octet-stream",
+    mimeType,
     sizeBytes: file.size,
-    previewDataUrl: null,
+    previewDataUrl: mimeType.startsWith("image/") && typeof URL.createObjectURL === "function" ? URL.createObjectURL(file) : null,
   };
+}
+
+export function releasePendingPreview(draft: PendingAttachmentDraft): void {
+  if (draft.previewDataUrl?.startsWith("blob:")) URL.revokeObjectURL(draft.previewDataUrl);
 }
 
 export async function readDroppedAttachmentContent(file: File): Promise<DesktopDroppedAttachmentContent> {

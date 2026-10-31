@@ -22,7 +22,6 @@ import { readySourceStates } from "./rooms/snapshot/snapshots.js";
 
 const smokeRoomIdentifier = "smoke-room";
 const smokeCodexWorkerSessionId = "worker_smoke_codex";
-const smokeCodexLiveSessionId = "local_smoke_codex";
 const smokeCodexReasoningSessionId = "reasoning_smoke_codex";
 const smokePendingBoardIntentCount = 1;
 let smokeUserDataPath: string | null = null;
@@ -47,10 +46,28 @@ export function configureDesktopSmokeEnvironment(): void {
   electronApp().setPath("userData", smokeUserDataPath);
   process.env.LETAGENTS_STATE_PATH ||= join(smokeUserDataPath, "letagents-state.json");
   process.once("exit", () => {
-    if (smokeUserDataPath) {
-      rmSync(smokeUserDataPath, { recursive: true, force: true });
-    }
+    if (smokeUserDataPath) removeDesktopSmokeUserData(smokeUserDataPath);
   });
+}
+
+/**
+ * Best effort. On Windows, Chromium's helper processes may still hold files
+ * in the smoke userData folder while the app exits, and rmSync fails with
+ * EPERM or EBUSY. rmSync retries those a bounded number of times; a failure
+ * after that is logged and left, because an exception thrown here would keep
+ * the process open behind Electron's main-process error dialog instead of
+ * exiting with the smoke result.
+ */
+export function removeDesktopSmokeUserData(
+  path: string,
+  remove: typeof rmSync = rmSync,
+  log: (message: string) => void = (message) => console.warn(message),
+): void {
+  try {
+    remove(path, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  } catch (error) {
+    log(`LETAGENTS_DESKTOP_SMOKE cleanup left ${path}: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }
 
 export function seedDesktopSmokeState(): void {
@@ -123,38 +140,6 @@ function seedDesktopSmokeAgentState(now: string): void {
       },
       current_agent_session_ids: {
         [smokeRoomIdentifier]: smokeCodexWorkerSessionId,
-      },
-      current_codex_live_session_ids: {
-        [smokeRoomIdentifier]: smokeCodexLiveSessionId,
-      },
-      codex_live_sessions: {
-        [smokeCodexLiveSessionId]: {
-          session_id: smokeCodexLiveSessionId,
-          room_id: smokeRoomIdentifier,
-          room_identifier: smokeRoomIdentifier,
-          room_display_name: "Smoke Room",
-          display_name: "MapleRidge",
-          joined_via: "join_room",
-          cwd: process.cwd(),
-          stop_phrase: "/stop-codex-room",
-          max_minutes: 0,
-          delivery_mode: "desktop_events",
-          desktop_managed: true,
-          deadline_utc: null,
-          token: "LOCAL_CODEX_ROOM_smoke",
-          thread_id: "thread_smoke_codex",
-          turn_id: "turn_smoke_codex",
-          server_url: "smoke://codex",
-          server_pid: null,
-          launched_server: false,
-          codex_bin: "codex",
-          agent_session_id: smokeCodexWorkerSessionId,
-          reasoning_session_id: smokeCodexReasoningSessionId,
-          status: "running",
-          last_error: null,
-          started_at: now,
-          updated_at: now,
-        },
       },
     }, null, 2)}\n`,
     "utf8",
@@ -266,6 +251,7 @@ export function desktopSmokeRoomSnapshot(): DesktopRoomSnapshot {
         },
       },
     ],
+    liveActivitySessions: [],
     reasoningSessions: [
       {
         id: smokeCodexReasoningSessionId,

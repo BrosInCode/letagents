@@ -31,7 +31,11 @@ export async function createOwnerToken(input: {
 }
 
 export async function getOwnerTokenAccountByToken(token: string): Promise<OwnerTokenAccount | null> {
-  const tokenHash = hashToken(token);
+  return getOwnerTokenAccountByTokenHash(hashToken(token));
+}
+
+/** The owner token account for a SHA-256 hex token hash (remote MCP sessions keep only the hash). */
+export async function getOwnerTokenAccountByTokenHash(tokenHash: string): Promise<OwnerTokenAccount | null> {
 
   const [ownerToken] = await db
     .select({

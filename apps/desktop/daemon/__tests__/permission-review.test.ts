@@ -2,13 +2,17 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { agentBranchSegment, isAgentBranch, leasedBranchRef } from "../../../../shared/agent-branch.mjs";
 import {
   PERMISSION_REVIEW_MAX_COMMANDS,
   PERMISSION_REVIEW_MAX_COMMAND_CHARS,
   buildPermissionReviewRequest,
   commandNeedsPerson,
+  commandOnlyReads,
   decidePermissionReview,
   parsePermissionReviewAnswers,
+  partsAreInCommand,
+  routineCommandReview,
 } from "../../../../shared/permission-review.mjs";
 
 const project = "/Users/dev/shop-api";
@@ -103,6 +107,87 @@ test("a command that names anything outside the project needs a person", () => {
   }
 });
 
+test("a path written for Windows is read against the project, whichever separator or root it uses", () => {
+  const windows = "C:\\work\\repo";
+  const share = "\\\\nas\\share\\repo";
+  const cases: Array<[project: string, command: string, needsPerson: boolean]> = [
+    // Inside a project on a drive, written either way, with either case of drive letter.
+    [windows, "cat 'C:\\work\\repo\\src\\a.ts'", false], [windows, "cat C:/work/repo/src/a.ts", false], [windows, "cat 'c:\\work\\repo\\src\\a.ts'", false],
+    [windows, "ls 'C:\\work\\repo'", false], [windows, "ls 'C:\\work\\repo\\'", false], [windows, "cat src/a.ts", false], [windows, "cat 'src\\a.ts'", false],
+    [windows, "cat x=C:/work/repo/x", false], [windows, "git -C C:/work/repo log", false], [windows, "git -C 'C:\\work\\repo\\' log", false],
+    [`${windows}\\`, "cat 'C:\\work\\repo\\src\\a.ts'", false], ["C:/work/repo", "cat 'C:\\work\\repo\\src\\a.ts'", false],
+    // Outside it: another folder, another drive, the rest of the folder's name, or another case of it.
+    [windows, "cat 'C:\\work\\other\\x'", true], [windows, "cat 'C:\\work\\repo-other\\x'", true], [windows, "cat 'C:\\work\\Repo\\x'", true],
+    [windows, "cat 'D:\\work\\repo\\x'", true], [windows, "cat D:/work/repo/x", true], [windows, "cat x=C:/work/other/x", true], [windows, "git -C 'C:\\work\\other' log", true],
+    // A drive alone, a drive's current folder, and a path on whichever drive is current.
+    [windows, "cat 'C:\\'", true], [windows, "cat C:x", true], [windows, "cat C:", true], [windows, "cat 'C:\\work\\repo\\'x", true],
+    [windows, "cat '\\work\\repo\\x'", true], [windows, "cat /work/repo/x", true],
+    // Climbing, with either separator, also from inside the project.
+    [windows, "cat '..\\..\\secret'", true], [windows, "cat 'src\\..\\..\\x'", true], [windows, "cat 'C:/work/repo/..\\..\\x'", true], [windows, "cat 'C:\\work\\repo\\..\\x'", true],
+    // A network share.
+    [windows, "cat '\\\\nas\\share\\x'", true], [windows, "cat //nas/share/x", true], [windows, "cat '\\\\nas\\share\\C:\\work\\repo'", true],
+    // Doubled or `.` parts, history, and credentials.
+    [windows, "cat 'C:\\work\\repo\\\\x'", true], [windows, "cat 'C:\\work\\repo\\.\\x'", true], [windows, "cat 'C:\\work\\repo\\.git\\config'", true],
+    [windows, "cat 'C:\\work\\repo\\.GIT\\config'", true], [windows, "cat 'C:\\work\\repo\\.env'", true], [windows, "cat 'C:\\work\\repo\\.ssh\\id_rsa'", true],
+    [windows, "cat 'src\\.env'", true], [windows, "cat 'src\\.git\\config'", true],
+    // Windows drops the dots and spaces at the end of a name, so such a name may climb, or hold history or credentials. Three dots are a plain name.
+    [windows, "ls 'C:\\work\\repo\\.. '", true], [windows, "ls 'C:\\work\\repo\\. '", true], [windows, "cat 'C:\\work\\repo\\...\\x'", false], [windows, "cat '.. \\x'", true],
+    [windows, "cat 'C:\\work\\repo\\.git.\\config'", true], [windows, "cat '.git \\config'", true], [windows, "cat 'C:\\work\\repo\\x. '", true], [windows, "cat 'x. \\y'", true],
+    [windows, "cat 'C:\\work\\repo\\.env '", true], [windows, "cat 'C:\\work\\repo\\.env .'", true], [windows, "cat 'src\\.env '", true], [windows, "ls 'C:\\work\\repo\\.ssh '", true],
+    [windows, "cat 'key.pem '", true], [windows, "cat 'C:\\work\\repo\\.'", false], [windows, "cat 'x.y'", false],
+    // `=`, `:` and `,` may be part of a folder's name: `C:/work/repo,other` is a sibling of the project.
+    [windows, "cat C:/work/repo,other/x", true], [windows, "cat C:/work/repo=other/x", true], [windows, "cat C:/work/repo/x,y", false],
+    // cmd.exe puts a variable's value in place of `%NAME%`, in any word of any program.
+    [windows, "cat %USERPROFILE%/x", true], [windows, "ls %APPDATA%", true], [windows, "git log --format=%h", false], [windows, "git log --format=%h%s", true],
+    [windows, "echo %AWS_SECRET_ACCESS_KEY%", true], [windows, "date +%X%", true], [windows, "echo '%X%'", true], [windows, "echo \"%X%\"", true], [windows, "echo 100%", false],
+    [windows, "echo %AWS_SECRET_ACCESS_KEY:x= y%", true], [windows, "echo %X; echo Y%", true],
+    // cmd.exe quotes nothing with single quotes, and writes `/dev/null` as a file on the current drive.
+    [windows, "echo 'ok & del victim.txt'", true], [windows, "echo 'a | b'", true], [windows, "echo '!X!'", true], [windows, "echo 'x^y'", true], [windows, "echo 'a\"b'", true],
+    [windows, "echo 'ok > x'", true], [windows, "echo ok > /dev/null", true], [windows, "npm test >/dev/null 2>&1", true], [windows, "git status 2>&1", false],
+    [windows, "git log --format='ok & del victim.txt'", true], [windows, "echo x='ok > victim.txt'", true], [windows, "git log --format='!X!'", true], [windows, "git log --format='%h %s'", true],
+    [windows, "grep -rn 'parse Date' src", false], [windows, "echo \"a b\"", false], [windows, "git log -1 --format='%h'", false],
+    // A stream of a file (`file::$DATA` is the file itself) is not another file.
+    [windows, "cat 'C:/work/repo/.npmrc::$DATA'", true], [windows, "cat '.env:x'", true], [windows, "cat '.ssh=x'", true], [windows, "cat 'C:\\work\\repo\\.git::$INDEX_ALLOCATION'", true],
+    [windows, "cat 'C:\\work\\repo\\x\\..:y'", true],
+    // A project on a share.
+    [share, "cat '\\\\nas\\share\\repo\\x'", false], [share, "cat //nas/share/repo/x", false], [share, "ls '\\\\nas\\share\\repo'", false],
+    [share, "cat '\\\\nas\\share\\other\\x'", true], [share, "cat '\\\\nas\\other\\repo\\x'", true], [share, "cat '\\\\nas\\share'", true], [share, "cat 'C:\\work\\repo\\x'", true],
+    [share, "cat //nas/share/repo,other/x", true],
+    // A POSIX project reads no Windows path at all.
+    [project, "cat '\\Users\\dev\\shop-api\\x'", true], [project, "cat 'C:\\Users\\dev\\shop-api\\x'", true], [project, "cat C:/Users/dev/shop-api/x", true],
+    [project, "cat '..\\..\\x'", true], [project, "cat '\\\\nas\\share\\x'", true], [project, "cat 'src\\a.ts'", true], [project, "cat a:/etc/passwd", true],
+    // On a POSIX project a one-letter name before `:` is not a drive, as `grep 'key: value'` and Git formats write it.
+    [project, "grep -rn 'y: string' src", false], [project, "git log -1 --format=x:%s", false], [project, "git log --author=a:b", false], [project, "cat C:x", false],
+    [project, "git log --format=%h%s", false], [project, "cat /Users/dev/shop-api/a:/Users/dev/shop-api/b", false], [project, "cat /Users/dev/shop-api/x,y", false],
+    // A sibling folder whose name holds `:`, `=` or `,` is not the project and a relative name.
+    [project, "cat /Users/dev/shop-api:other/x", true], [project, "cat x=/Users/dev/shop-api,other/x", true],
+    // On POSIX a name that ends in a dot or a space is that name.
+    [project, "cat '/Users/dev/shop-api/.. '", false], [project, "cat './. '", false], [project, "cat 'x.env '", false], [project, "echo %X%", false],
+    [project, "echo 'ok & del x'", false], [project, "echo ok > /dev/null", false], [project, "git log --format='ok & x'", false],
+    // `\` is part of a name on POSIX, so `/Users/dev\shop-api` is another folder.
+    [project, "git -C '/Users/dev\\shop-api' log", true], [project, "git -C '/Users/dev/shop-api\\' log", true], [project, "cat '/Users/dev\\shop-api/x'", true],
+    // A Git pathspec that starts with `:` carries an instruction: `:(top)` reads from the repository's top, which may be above the project.
+    [project, "git grep -l -e x ':(top)README.md'", true], [project, "git grep -e x -- ':(top)x'", true], [project, "git log -- ':/x'", true], [project, "git grep -e x ':!x'", true],
+    [project, "git grep -e x -- ':(glob)src/*.ts'", true], [project, "git show 'HEAD:(top)x'", false], [project, "git show :README.md", true],
+    // A pathspec with `*`, `?` or `[` is matched by Git itself, so `.[e]nv` names `.env`. A pattern given to `-e` is not a pathspec.
+    [project, "git grep -e . -- '.[e]nv'", true], [project, "git grep -l -e . '.[e]nv'", true], [project, "git log -- '*'", true], [project, "git ls-files '?.env'", true],
+    [project, "git grep -e 'a.*b' src", false], [project, "git grep -e '.[e]nv' src", false], [project, "git log --grep='x*'", false],
+    // A pattern, a delimiter, or a format that starts with `:` is not a pathspec.
+    [project, "grep -rn ':' src", false], [project, "rg -e ':foo' src", false], [project, "sort -t : x", false], [project, "git grep -e ':' src", false],
+    [project, "git log --grep=':x'", false], [project, "git log --format=':%h'", false], [project, "git log -L :func:file", false], [project, "find . -name ':x'", false],
+  ];
+  for (const [root, command, needs] of cases) {
+    assert.equal(commandNeedsPerson(command, root), needs, `${JSON.stringify(root)} ${JSON.stringify(command)}`);
+    assert.equal(commandOnlyReads(command, root), !needs, `${JSON.stringify(root)} ${JSON.stringify(command)}`);
+  }
+  // A drive, a share, or a folder on whichever drive is current is not a project.
+  for (const root of ["C:\\", "C:", "C:/", "C:work", "\\\\nas\\share", "\\\\nas\\share\\", "//nas", "//nas/share", "\\work\\repo", "C:\\work\\..\\repo", "C:\\work\\\\repo",
+    "C:\\work\\repo.", "C:\\work\\repo\\.. ", "/tmp/repo\\", "/tmp/repo\\/", "//tmp/repo/sub\\", "\\\\nas\\share/repo", "//nas/share/repo\\x"]) {
+    assert.equal(commandNeedsPerson("ls", root), true, root);
+  }
+  assert.deepEqual(buildPermissionReviewRequest({ commands: ["ls"], project: "C:\\work\\repo\\" })?.state, { commands: ["ls"], project: "C:\\work\\repo" });
+});
+
 test("credentials and the repository's own history store need a person", () => {
   needsPerson([
     "cat .env", "cat .env.local", "cat config/.env", "cat src/.ENV", "cat .envrc", "cat .env_production", "ls .ssh", "cat .aws/credentials", "cat .npmrc", "cat .netrc", "cat .pgpass",
@@ -186,6 +271,124 @@ test("a listed program is held to the arguments that only read or check", () => 
     "go run x", "go install x", "go get x", "go generate", "go test -exec x", "cargo run", "cargo install x", "cargo publish", "cargo test --config x", "cargo fix",
     "make", "make -f x.mk", "make -C src", "make -p", "make SHELL=x", "make X=1 test", "make deploy", "make clean-db", "make test -j4",
   ], "argument that runs, writes, or reaches out");
+});
+
+test("an option's quoted value, a range of lines, a separator, and a syntax check are read", () => {
+  readable([
+    "git log -1 --format='%an <%ae>'", "git log --format=\"%h %s\" -3", "grep -rn x --include=\"*.ts\" src", "sed -n '255,300p' src/app.mjs",
+    "sed -n '1,$p' a.txt", "sed -n 40p a.txt", "sed -n '5p' a.txt b.txt", "echo '---'", "echo \"---branch---\"", "git status; echo ---; git diff",
+    "node --check src/app.mjs", "node -c src/app.mjs", "node --check src/app.mjs && node --test 2>&1 | tail -9",
+    "git -C /Users/dev/shop-api log --oneline -5", "ls -la /Users/dev/shop-api && git -C /Users/dev/shop-api/ status -sb",
+  ]);
+  needsPerson([
+    "sed -n '1,5w out.txt' a.txt", "sed -n '1e rm -rf x' a.txt", "sed '1,5p' a.txt", "sed -n 1,5p ../x", "sed -n '1,5p;w x' a.txt", "sed -n -e 1p a.txt",
+    "sed -n 1,5p /etc/passwd", "sed -n 1,5p .env", "echo -x---", "echo --x", "node --check", "node --check -e 1", "node --check src/a.ts --x",
+    "git -C /Users/dev/shop-api/src log", "git -C /Users/dev log", "git -C /tmp log", "git -C . log", "git -C /Users/dev/shop-api -C /tmp log",
+    "git -C /Users/dev/shop-api push", "git -C /Users/dev/shop-api", "git -C", "git -C /Users/dev/shop-api/.. log",
+    "git log --format='%G?'", "ls --color='~/x'", "cat x='../y'", "ls a=\"$HOME\"", "ls a='b'c", "ls a='b\nc'", "ls a='b", "X='1' ls", "='ls'",
+  ], "unreadable option value or script");
+});
+
+const OWN_KEY = "Owner/desktop-open-model-0123";
+const routine = (command: unknown, defaultBranch: string | null = "main") =>
+  routineCommandReview(command, project, { ownBranch: (name) => isAgentBranch(name, OWN_KEY), defaultBranch });
+
+test("a leased branch belongs to the agent whose key names it, for any task", () => {
+  assert.equal(agentBranchSegment("Owner/desktop-open-model-0123"), "owner-desktop-open-model-0123");
+  assert.equal(agentBranchSegment("  "), "agent");
+  for (const task of ["task_1", "task_42", "focus-3"]) assert.equal(isAgentBranch(leasedBranchRef(task, OWN_KEY), OWN_KEY), true, task);
+  for (const branch of ["main", "letagents/task_1/owner-desktop-open-model-01234", "letagents/task_1/owner-desktop-open-model-0123/x",
+    "letagents//owner-desktop-open-model-0123", "letagents/.x/owner-desktop-open-model-0123", "x/task_1/owner-desktop-open-model-0123",
+    leasedBranchRef("task_1", "Owner/other"), 7, null]) {
+    assert.equal(isAgentBranch(branch, OWN_KEY), false, String(branch));
+  }
+  assert.equal(isAgentBranch(leasedBranchRef("task_1", OWN_KEY), ""), false);
+  assert.equal(isAgentBranch(leasedBranchRef("task_1", OWN_KEY), null), false);
+});
+
+test("routine work on the agent's own branches is decided by the rules, and only its other parts are left for review", () => {
+  const own = (task: string) => leasedBranchRef(task, OWN_KEY);
+  assert.deepEqual(routine(`git add src/a.ts && git commit -m 'x' && git push origin HEAD:${own("task_1")}`), []);
+  assert.deepEqual(routine(`git push -u origin HEAD:refs/heads/${own("task_1")}`), []);
+  assert.deepEqual(routine(`git push origin ${own("task_1")}:${own("task_1")}`), []);
+  assert.deepEqual(routine("gh pr view 6 --json state --jq .state && git fetch origin main"), []);
+  assert.deepEqual(routine("git add src/a.ts && npm test 2>&1 | tail -5"), ["npm test 2>&1", "tail -5"]);
+  assert.deepEqual(routine("git fetch origin\n  git log --oneline -3 origin/main  \n"), ["git log --oneline -3 origin/main"]);
+  // A command the rules decide no part of is reviewed whole, as before.
+  assert.deepEqual(routine("git status && npm test"), ["git status && npm test"]);
+  assert.deepEqual(routine("\nls\n\n"), ["\nls\n\n"]);
+  // A merge or a new branch starts from the default branch, the agent's own, or where the agent is.
+  for (const command of ["git merge origin/main --no-edit", `git merge origin/${own("task_2")}`, `git merge ${own("task_2")}`,
+    `git checkout -b ${own("task_2")} origin/main`, `git switch -c ${own("task_2")} HEAD`, `git checkout -b ${own("task_2")}`, `git switch ${own("task_2")}`]) {
+    assert.deepEqual(routine(command), [], command);
+  }
+  assert.deepEqual(routine("git merge origin/trunk", "trunk"), []);
+  for (const command of ["git merge origin/feature", "git merge origin/trunk", `git merge origin/${leasedBranchRef("task_1", "Owner/other")}`,
+    `git checkout -b ${own("task_2")} origin/feature`, `git switch -c ${own("task_2")} origin/feature`, "git merge FETCH_HEAD",
+    // The local default branch holds whatever was committed or merged on it here, not what `origin` has.
+    "git merge main", `git checkout -b ${own("task_2")} main`, `git switch -c ${own("task_2")} main`, "git merge trunk"]) {
+    assert.equal(routine(command), null, command);
+  }
+  assert.equal(routine("git merge origin/main", null), null, "an unknown default branch is no base");
+  assert.equal(routine("git merge origin/main", "main..x"), null);
+  // A push names where it goes, so no branch checked out, upstream, or push setting can send it elsewhere.
+  for (const command of ["git push origin HEAD", `git push origin ${own("task_1")}`, `git push -u origin ${own("task_1")}`, "git push",
+    `git push origin HEAD:${own("task_1")}:x`, "git push origin HEAD:refs/heads/main", `git push origin HEAD:refs/tags/${own("task_1")}`,
+    `git push origin HEAD:refs/heads/refs/heads/${own("task_1")}`, `git push origin :${own("task_1")}`, `git push origin HEAD:${leasedBranchRef("task_1", "Owner/other")}`]) {
+    assert.equal(routine(command), null, command);
+  }
+  // `git checkout <name>` restores a folder of that name when no branch has it, and the branch stays where it was.
+  assert.equal(routine(`git checkout ${own("task_1")}`), null);
+  assert.equal(routine(`git checkout -q ${own("task_1")}`), null);
+  // What a person must see.
+  for (const command of ["git push -f origin HEAD:x", "git checkout main", "git switch main", "git add .", "git commit",
+    "git -c user.name=A -c user.email=1+a@users.noreply.github.com commit -m x", "gh pr merge 1", "git status && rm -rf x",
+    `git checkout -b ${own("task_2")} && cd /tmp`, "echo x | npm test && git add a.ts", 7, "",
+    `git add a.ts && ${Array.from({ length: PERMISSION_REVIEW_MAX_COMMANDS + 1 }, () => "ls").join(" && ")}`]) {
+    assert.equal(routine(command), null, String(command));
+  }
+  assert.equal(routineCommandReview(`git push origin HEAD:${own("task_1")}`, "shop-api", { ownBranch: () => true, defaultBranch: "main" }), null);
+  assert.equal(routineCommandReview(`git push origin HEAD:${own("task_1")}`, project, { ownBranch: () => { throw new Error("hostile"); }, defaultBranch: "main" }), null);
+  assert.equal(routineCommandReview(`git push origin HEAD:${own("task_1")}`, project, { ownBranch: () => "yes" as never, defaultBranch: "main" }), null);
+});
+
+test("a search, which can close the repository scope gh puts around it, is not a read", () => {
+  for (const command of [
+    "gh pr list --search 'repo:victim/private) OR (repo:victim/private' --state all --json number,title,body",
+    "gh issue list -S 'is:private) OR (is:private' --json title,body,url", "gh pr list --search x", "gh issue list -S x",
+    "gh pr list --label 'a\") OR (repo:x/y'", "gh pr list --author 'x repo:y'", "gh pr list --assignee 'x)'",
+  ]) {
+    assert.equal(routine(command), null, command);
+    assert.equal(commandOnlyReads(command, project), false, command);
+  }
+  for (const command of ["gh pr list --label bug --label 'type: docs' --author octo-cat", "gh issue list -l area/ui -a octocat --state open"]) {
+    assert.deepEqual(routine(command), [], command);
+    assert.equal(commandOnlyReads(command, project), true, command);
+  }
+});
+
+test("the parts another parser found must each be a part these rules found, word for word", () => {
+  const command = "git add a.ts && git -c user.name=\"A B\" commit -m 'x y' && npm test 2>&1 | tail -5";
+  assert.equal(partsAreInCommand(command, ["git add a.ts", "git -c user.name=\"A B\" commit -m 'x y'", "npm test 2>&1", "tail -5"]), true);
+  assert.equal(partsAreInCommand(command, ["npm test", "tail   -5"]), true);
+  assert.equal(partsAreInCommand(command, []), true);
+  for (const parts of [["git push origin HEAD"], ["git add a.ts", "rm -rf x"], ["tail -6"], ["git add a.ts b.ts"], ["git commit -m 'x y'"],
+    ["npm test && rm x"], ["'npm' test"], ["$(rm x)"], [""], [7], "git add a.ts"] as unknown[]) {
+    assert.equal(partsAreInCommand(command, parts), false, JSON.stringify(parts));
+  }
+  for (const whole of ["", "ls $(rm x)", 7]) assert.equal(partsAreInCommand(whole, ["ls"]), false, String(whole));
+});
+
+test("a command only reads when each part reads files, history, or this repository's pull requests", () => {
+  for (const command of ["ls -la && git log --oneline -5 && git status", "git status --short; echo ---; git branch -a", "sed -n '1,5p' a.ts | head -2",
+    "gh pr view 8 --json number,state", "gh pr checks 8 && gh issue list --state open", "cat /Users/dev/shop-api/src/a.ts", "git log -1 --format='%an <%ae>'"]) {
+    assert.equal(commandOnlyReads(command, project), true, command);
+  }
+  for (const command of ["npm test", "node --check a.ts", "make lint", "ls && npm test", "git add a.ts", "git push origin HEAD", "gh pr comment 8 --body x",
+    "gh pr view 8 && gh pr comment 8 --body x", "cd src && git log", "git -C src log", "ls &", "ls > x", "cat ../x", "cat .env", "", 7]) {
+    assert.equal(commandOnlyReads(command, project), false, String(command));
+  }
+  assert.equal(commandOnlyReads("ls", "shop-api"), false);
 });
 
 test("only text of a readable size is judged, and hostile input cannot throw", () => {

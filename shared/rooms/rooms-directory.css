@@ -755,3 +755,24 @@
 .rooms-error > .rooms-button {
   margin-top: 10px;
 }
+
+/* Keep controls comfortable and full room names readable on touch screens. */
+@media (max-width: 640px), (pointer: coarse) {
+  .rooms-button, .rooms-icon-button, .rooms-mode button, .rooms-filters button { min-height: 44px; }
+  .rooms-icon-button { min-width: 44px; }
+  .rooms-search, .rooms-input-action input { min-height: 44px; }
+  .rooms-settings > summary, .rooms-explainer > summary { min-height: 44px; padding-block: 12px; }
+}
+@media (max-width: 640px) {
+  .rooms-directory input { font-size: 16px; }
+  .rooms-heading { flex-wrap: wrap; }
+  .rooms-heading > div, .rooms-composer-heading > div { min-width: 0; }
+  .rooms-heading-actions { margin-top: 0; }
+  .rooms-heading-actions > .rooms-icon-button { display: inline-flex; }
+  .rooms-detail-meta, .rooms-composer-heading p, .rooms-entry-description { overflow-wrap: anywhere; }
+  .rooms-mode { display: flex; }
+  .rooms-mode button { flex: 1; padding-inline: 8px; }
+  .rooms-entry-main { padding-left: 0; }
+  .rooms-list-caption { align-items: flex-start; }
+  .rooms-list-caption > span:last-child { flex-shrink: 0; }
+}

@@ -9,6 +9,7 @@ import { LOCAL_ROOM_API_ORIGIN } from "../../../shared/room-api-origin.mjs";
 import { registerTools } from "../server/register-tools.js";
 import { LETAGENTS_RUNTIME_READINESS_URI, letAgentsRuntimeContract, registerRuntimeReadinessResource } from "../server/runtime-contract.js";
 import type { LetAgentsExecutionProfile } from "../server/runtime/execution-profile.js";
+import { supervisedToolIsMutation } from "../server/supervised-tool-facade.js";
 
 function discovered(profile: LetAgentsExecutionProfile, provider: string | null = null): Set<string> {
   const names = new Set<string>();
@@ -29,9 +30,6 @@ test("supervised room turns retain product tools but do not discover execution m
     "wait_for_messages",
     "register_agent_session",
     "disconnect_agent_session",
-    "start_local_codex_session",
-    "status_local_codex_session",
-    "stop_local_codex_session",
     "start_device_auth",
     "poll_device_auth",
     "clear_saved_auth",
@@ -114,6 +112,36 @@ test('workspace capture tools are available to independent callers without dupli
   }
 });
 
+test("only the npm-package profiles offer file attachments on send_message and send_thread_message", () => {
+  const schemas = (profile: LetAgentsExecutionProfile, provider: string | null, options: Parameters<typeof registerTools>[3] = {}) => {
+    const found = new Map<string, Record<string, unknown>>();
+    const server = {
+      tool(name: string, ...registration: unknown[]) { found.set(name, (registration.at(-2) ?? {}) as Record<string, unknown>); return {}; },
+    } as unknown as McpServer;
+    registerTools(server, profile, provider, options);
+    return found;
+  };
+  const cases: Array<[LetAgentsExecutionProfile, string | null, Parameters<typeof registerTools>[3], boolean]> = [
+    ["autonomous_mcp_worker", null, {}, true],
+    ["interactive_desktop", null, {}, true],
+    // The remote endpoint runs on the LetAgents server, which has none of the caller's files.
+    ["autonomous_mcp_worker", null, { remote: true }, false],
+    // Supervised agents send through the daemon's effect journal and attach with set_reply_attachments.
+    ["supervised_room_turn", "codex", {}, false],
+    ["supervised_room_turn", "claude-code", {}, false],
+    ["supervised_room_turn", "cursor", {}, false],
+    ["supervised_room_turn", "codex", { executionOwner: "daemon" }, false],
+    ["supervised_mcp_polling", "codex", {}, false],
+  ];
+  for (const [profile, provider, options, offered] of cases) {
+    const found = schemas(profile, provider, options);
+    for (const name of ["send_message", "send_thread_message"]) {
+      assert.ok(found.has(name), `${profile} registers ${name}`);
+      assert.equal(Object.hasOwn(found.get(name)!, "attachments"), offered, `${profile} ${JSON.stringify(options)} ${name}`);
+    }
+  }
+});
+
 test("interactive desktop sessions retain rental tools", () => {
   const names = discovered("interactive_desktop");
   assert.equal(names.has("rental_list_requests"), true);
@@ -122,18 +150,44 @@ test("interactive desktop sessions retain rental tools", () => {
 
 test("custodial polling advertises the restricted real tool surface with delivery enabled", () => {
   const names = discovered("supervised_mcp_polling", "codex");
-  assert.deepEqual([...names].sort(), [...discovered("supervised_room_turn", "codex")].filter(name => name !== "set_reply_thread").concat("wait_for_messages").sort());
+  assert.deepEqual([...names].sort(), [...discovered("supervised_room_turn", "codex")].filter(name => !["set_reply_thread", "set_reply_gif", "set_reply_attachments"].includes(name)).concat("wait_for_messages").sort());
   assert.deepEqual(letAgentsRuntimeContract().profiles.supervised_mcp_polling, {
     contract: "custodial_polling_v1", tools: [...names].sort(),
   });
 });
 
 
+test("every cloud profile can read room guidelines, and reading them is never a mutation", () => {
+  for (const [profile, provider] of [
+    ["autonomous_mcp_worker", null], ["interactive_desktop", null],
+    ["supervised_room_turn", "cursor"], ["supervised_room_turn", "codex"], ["supervised_room_turn", "claude-code"],
+    ["supervised_mcp_polling", "codex"],
+  ] as const) {
+    assert.equal(discovered(profile, provider).has("get_room_guidelines"), true, `${profile}/${provider} reads guidelines`);
+  }
+  assert.equal(supervisedToolIsMutation("get_room_guidelines"), false);
+});
+
+test("every cloud profile can wait with a wake rule; listing is a read and changing is journaled", () => {
+  for (const [profile, provider] of [
+    ["autonomous_mcp_worker", null], ["interactive_desktop", null],
+    ["supervised_room_turn", "cursor"], ["supervised_room_turn", "codex"], ["supervised_room_turn", "claude-code"],
+    ["supervised_mcp_polling", "codex"],
+  ] as const) {
+    for (const name of ["add_wake_rule", "list_wake_rules", "cancel_wake_rule"]) {
+      assert.equal(discovered(profile, provider).has(name), true, `${profile}/${provider} has ${name}`);
+    }
+  }
+  assert.equal(supervisedToolIsMutation("list_wake_rules"), false);
+  assert.equal(supervisedToolIsMutation("add_wake_rule"), true);
+  assert.equal(supervisedToolIsMutation("cancel_wake_rule"), true);
+});
+
 test("local native discovery and runtime contract agree and expose an executable closeout path", async () => {
-  for (const provider of ["cursor", "codex", "claude-code"]) {
+  for (const executionOwner of ["provider", "daemon"] as const) for (const provider of ["cursor", "codex", "claude-code"]) {
     const server = new McpServer({ name: "local-tool-contract", version: "1" });
     const client = new Client({ name: "local-tool-reader", version: "1" });
-    registerTools(server, "supervised_room_turn", provider, { apiUrl: LOCAL_ROOM_API_ORIGIN });
+    registerTools(server, "supervised_room_turn", provider, { apiUrl: LOCAL_ROOM_API_ORIGIN, executionOwner });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     try {
       await server.connect(serverTransport); await client.connect(clientTransport);
@@ -143,12 +197,14 @@ test("local native discovery and runtime contract agree and expose an executable
       for (const name of ["get_board", "read_messages", "claim_task", "complete_task", "update_task", "send_thread_message", "set_reply_thread", "publish_room_artifact"]) {
         assert.ok(tools.some(tool => tool.name === name), `${provider} keeps ${name}`);
       }
-      for (const name of ["join_room", "join_project", "register_task_close_intent", "register_task_claim_intent", "get_board_settings", "get_room_memory", "submit_review_verdict"]) {
+      for (const name of ["set_reply_gif", "set_reply_attachments", "search_gifs", "react_to_message", "join_room", "join_project", "register_task_close_intent", "register_task_claim_intent", "get_board_settings", "get_room_memory", "get_room_guidelines", "submit_review_verdict", "add_wake_rule", "list_wake_rules", "cancel_wake_rule"]) {
         assert.ok(!tools.some(tool => tool.name === name), `${provider} cannot discover unsupported ${name}`);
       }
       assert.match(tools.find(tool => tool.name === "update_task")!.description!, /merged work with status 'done'; no close intent or replacement work lease/);
-      assert.equal(tools.find(tool => tool.name === "get_board")?.annotations?.readOnlyHint, true);
-      assert.equal(tools.find(tool => tool.name === "update_task")?.annotations?.readOnlyHint, false);
+      if (executionOwner === "provider") {
+        assert.equal(tools.find(tool => tool.name === "get_board")?.annotations?.readOnlyHint, true);
+        assert.equal(tools.find(tool => tool.name === "update_task")?.annotations?.readOnlyHint, false);
+      }
     } finally { await client.close(); await server.close(); }
   }
   const hosted = letAgentsRuntimeContract("https://letagents.chat");
@@ -183,6 +239,8 @@ test("thread routing is a strict bounded-only control, truthfully classified as 
   try {
     await server.connect(serverTransport); await client.connect(clientTransport);
     const tool = (await client.listTools()).tools.find(tool => tool.name === "set_reply_thread")!;
+    assert.match(tool.description || "", /ordinary top-level questions in the main room by default/);
+    assert.match(tool.description || "", /existing thread replies stay threaded automatically/);
     assert.equal(tool.annotations?.readOnlyHint, false);
     assert.deepEqual(tool.inputSchema.properties, {});
     assert.equal(tool.inputSchema.additionalProperties, false);
@@ -192,4 +250,69 @@ test("thread routing is a strict bounded-only control, truthfully classified as 
       assert.match(JSON.stringify(result.content), /[Uu]nrecognized|[Uu]nexpected/);
     }
   } finally { await client.close(); await server.close(); }
+});
+
+test("reply attachments are a strict bounded-only control for supervised room turns, classified as a mutation", async () => {
+  for (const profile of ["autonomous_mcp_worker", "interactive_desktop", "supervised_mcp_polling"] as const) {
+    assert.equal(discovered(profile).has("set_reply_attachments"), false, profile);
+  }
+  assert.equal(supervisedToolIsMutation("set_reply_attachments"), true);
+  const server = new McpServer({ name: "attachment-control", version: "1" });
+  const client = new Client({ name: "attachment-control-test", version: "1" });
+  registerTools(server, "supervised_room_turn", "claude-code");
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  try {
+    await server.connect(serverTransport); await client.connect(clientTransport);
+    const tool = (await client.listTools()).tools.find(tool => tool.name === "set_reply_attachments")!;
+    assert.match(tool.description || "", /records an intent only, sends nothing/);
+    assert.match(tool.description || "", /credentials/);
+    assert.equal(tool.annotations?.readOnlyHint, false);
+    assert.equal(tool.inputSchema.additionalProperties, false);
+    for (const args of [{ files: [] }, { files: ["a", "b", "c", "d", "e"] }, { files: ["a.png"], room_id: "other" }, { paths: ["a.png"] }]) {
+      const result = await client.callTool({ name: "set_reply_attachments", arguments: args });
+      assert.equal(result.isError, true, JSON.stringify(args));
+    }
+  } finally { await client.close(); await server.close(); }
+});
+
+test("only an agent given to someone else's room gets the ask code tools, and its reads are read-only", () => {
+  const askTools = ["ask_list_files", "ask_read_file", "ask_search", "ask_propose_change"];
+  const previous = process.env.LETAGENTS_SUPERVISOR_ENTRY_ID;
+  try {
+    process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = "supervised_owner_entry";
+    for (const name of askTools) assert.equal(discovered("supervised_room_turn", "cursor").has(name), false, name);
+    process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = "supervised_rental_ask_0123456789abcdef0123456789abcdef";
+    const given = discovered("supervised_room_turn", "cursor");
+    for (const name of askTools) assert.equal(given.has(name), true, name);
+    for (const name of askTools) assert.equal(discovered("autonomous_mcp_worker").has(name), false, name);
+    assert.deepEqual(askTools.map(supervisedToolIsMutation), [false, false, false, true]);
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_SUPERVISOR_ENTRY_ID;
+    else process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = previous;
+  }
+});
+
+test("the daemon, which runs every supervised tool call, has the ask tool handlers whatever its environment", () => {
+  const previous = process.env.LETAGENTS_SUPERVISOR_ENTRY_ID;
+  try {
+    delete process.env.LETAGENTS_SUPERVISOR_ENTRY_ID;
+    const names = new Set<string>();
+    registerTools({ tool(name: string) { names.add(name); return {}; } } as unknown as McpServer, "supervised_room_turn", "claude-code", { executionOwner: "daemon" });
+    for (const name of ["ask_list_files", "ask_read_file", "ask_search", "ask_propose_change"]) assert.equal(names.has(name), true, name);
+  } finally {
+    if (previous !== undefined) process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = previous;
+  }
+});
+
+test("no profile offers the local Codex session tools that letagents 0.12.46 removed", () => {
+  const profiles: Array<[LetAgentsExecutionProfile, string | null]> = [
+    ["autonomous_mcp_worker", null], ["interactive_desktop", null], ["supervised_mcp_polling", "codex"],
+    ["supervised_room_turn", "codex"], ["supervised_room_turn", "cursor"], ["supervised_room_turn", "claude-code"],
+  ];
+  for (const [profile, provider] of profiles) {
+    const names = discovered(profile, provider);
+    for (const removed of ["start_local_codex_session", "status_local_codex_session", "stop_local_codex_session"]) {
+      assert.equal(names.has(removed), false, `${profile}/${provider} does not offer ${removed}`);
+    }
+  }
 });

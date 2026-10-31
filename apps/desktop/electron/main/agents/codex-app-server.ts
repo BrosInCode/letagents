@@ -1,9 +1,15 @@
-import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
+import { codexOwnerIsolationOverrides } from "../../../../../shared/codex-owner-isolation.mjs";
+import { signalTree, spawnTree } from "../../../../../shared/process-tree.mjs";
+import { CODEX_TOKEN_SERVICE_OVERRIDES, codexHomeForSandboxedLaunch } from "./codex-agent-home.js";
+import { codexHomeHarnessOverrides, runCodexMcpListForLaunch } from "./codex-home-harness.js";
+import { managedAgentCommitEnvironment } from "./managed-agent-commit-identity.js";
 import { isRentalCredentialIsolationRequested, rentalIsolatedChildEnvironment } from "./rental-child-environment.js";
+import { withoutRoomAuthority } from "./room-authority-environment.js";
+import { providerTreeExit } from "./provider-evidence.js";
 
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -26,12 +32,61 @@ export interface CodexAppServerOutput {
 export interface CodexAppServerLaunch {
   pid: number | null;
   exited: Promise<CodexAppServerExit>;
+  /** The Codex home this launch was given in place of the owner's. */
+  codexHome?: string;
+  /** What the owner is to be told about this launch. */
+  notices?: readonly string[];
+  /**
+   * For a launch whose sandbox lets a command write the project: why a folder
+   * the Codex config lets it write too, as named at this launch, may not be
+   * written now. Null while there is none. Asked again before each turn.
+   */
+  writableFoldersCheck?: () => string | null;
 }
 
 interface CodexAppServerLaunchOptions {
+  /**
+   * Where the app-server starts, and the project whose Git config decides
+   * the commit identity. The name is historical: the launch passes Codex no
+   * project trust.
+   */
   trustedProjectPath?: string | null;
   configOverrides?: string[];
   env?: Record<string, string>;
+  /** GIT_AUTHOR_* and GIT_COMMITTER_* resolved for this project before launch. */
+  commitEnvironment?: Record<string, string>;
+  /**
+   * The owner lets this agent use their own Codex setup, so a managed launch
+   * leaves their extensions on. Only an exact `true` does, and never for a
+   * rental. The caller must give the room's server its own environment in
+   * `configOverrides`: the process environment then carries none of it.
+   */
+  homeHarness?: boolean;
+  /**
+   * The agent's access level has a sandbox. A managed launch then gives Codex
+   * a home without the owner's saved command rules, which let a matching
+   * command out of the sandbox, or does not start.
+   */
+  sandboxed?: boolean;
+  /** That sandbox lets a command write the project, so the folders the Codex config adds to it are checked. */
+  writableSandbox?: boolean;
+  /**
+   * The agent's access level is Read-only, and this is the name of the
+   * permission profile its conversations are started with. A managed launch
+   * then defines that profile, with a `deny` for the owner's sign-in file, or
+   * does not start.
+   */
+  hideSignInProfile?: string;
+  /**
+   * The agent's policy is the Read-only level's own: Codex's read-only
+   * sandbox, and nobody to ask. That sandbox alone keeps no file from a
+   * command, so a managed launch with this policy starts only together with
+   * the level's permission profile (`hideSignInProfile`). A caller that has
+   * the policy and did not name the level has none, and is refused.
+   */
+  readOnlySandbox?: boolean;
+  /** The Codex home for this launch, in place of the owner's. A managed launch sets it. */
+  codexHome?: string;
 }
 
 function readyUrlFromServerUrl(serverUrl: string): string {
@@ -387,12 +442,7 @@ function childExitPromise(
     };
     const settleExit = (output = outputCapture?.snapshot()) => {
       if (!exit) return;
-      settle({
-        type: "exit",
-        code: exit.code,
-        signal: exit.signal,
-        output,
-      });
+      settle({ ...providerTreeExit("Codex", exit.code, exit.signal), output });
     };
 
     child.once("error", (error) => {
@@ -424,13 +474,6 @@ export function codexAppServerLaunchArgs(
   options: CodexAppServerLaunchOptions = {},
 ): string[] {
   const args = ["app-server"];
-  const trustedProjectPath = options.trustedProjectPath?.trim();
-  if (trustedProjectPath) {
-    args.push(
-      "-c",
-      `projects.${JSON.stringify(trustedProjectPath)}.trust_level="trusted"`,
-    );
-  }
   for (const override of options.configOverrides ?? []) {
     args.push("-c", override);
   }
@@ -438,22 +481,25 @@ export function codexAppServerLaunchArgs(
   return args;
 }
 
-export function launchCodexAppServer(
-  serverUrl: string,
-  codexBin: string,
-  options: CodexAppServerLaunchOptions = {},
-): CodexAppServerLaunch {
+/**
+ * The exact environment a launch gives the Codex app-server, and the commit
+ * identity it carries. Rental children keep only their isolated variables and
+ * never carry the owner's identity.
+ */
+export function codexAppServerEnvironment(
+  options: Pick<CodexAppServerLaunchOptions, "env" | "commitEnvironment" | "homeHarness" | "codexHome"> = {},
+): { env: NodeJS.ProcessEnv; commitEnvironment: Record<string, string>; rental: boolean } {
   const runtimeEnv = desktopRuntimeEnvironment();
   const configuredEnv = options.env && Object.keys(options.env).length
     ? { ...runtimeEnv, ...options.env }
     : runtimeEnv;
   const custodialPolling = configuredEnv.LETAGENTS_EXECUTION_PROFILE === "supervised_mcp_polling";
-  const env = isRentalCredentialIsolationRequested(configuredEnv)
+  const rental = isRentalCredentialIsolationRequested(configuredEnv);
+  const commitEnvironment = rental ? {} : options.commitEnvironment ?? {};
+  const env = rental
     ? rentalIsolatedChildEnvironment(configuredEnv)
-    : configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1" || custodialPolling
-      ? { ...configuredEnv }
-      : configuredEnv;
-  if (env !== configuredEnv) {
+    : { ...configuredEnv, ...commitEnvironment };
+  if (rental || configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1" || custodialPolling) {
     // A custodial supervised worker borrows exact-generation authority from the
     // daemon. Ambient desktop owner or fixed worker credentials would bypass
     // that fence and would also leak into provider-started shell commands.
@@ -464,10 +510,41 @@ export function launchCodexAppServer(
       delete env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID;
     }
   }
+  // Codex hands its own environment to every hook, the notifier and every
+  // command. With the owner's setup on those are the owner's programs, so the
+  // room agent's coordinates stay out of it; the room's server has its own copy.
+  const launchEnv = { ...(options.homeHarness === true && !rental ? withoutRoomAuthority(env) : env) };
+  // Codex sends its sign-in tokens where these say. No launch inherits one, whatever this process was started with.
+  for (const key of CODEX_TOKEN_SERVICE_OVERRIDES) delete launchEnv[key];
+  // Set last, so a rental's isolated environment carries it too.
+  if (options.codexHome) launchEnv.CODEX_HOME = options.codexHome;
+  return { env: launchEnv, commitEnvironment, rental };
+}
+
+/**
+ * Codex builds each command's environment from its shell policy, which an
+ * owner may set to drop inherited variables. Setting the identity there as
+ * well keeps it on every command the agent runs.
+ */
+export function codexCommitIdentityOverrides(commitEnvironment: Record<string, string>): string[] {
+  return Object.entries(commitEnvironment)
+    .map(([key, value]) => `shell_environment_policy.set.${key}=${JSON.stringify(value)}`);
+}
+
+export function launchCodexAppServer(
+  serverUrl: string,
+  codexBin: string,
+  options: CodexAppServerLaunchOptions = {},
+): CodexAppServerLaunch {
+  const { env, commitEnvironment } = codexAppServerEnvironment(options);
+  options = {
+    ...options,
+    configOverrides: [...codexCommitIdentityOverrides(commitEnvironment), ...(options.configOverrides ?? [])],
+  };
   const outputCapture = createCodexAppServerOutputCapture(
     sensitiveCodexAppServerLaunchValues(env, options),
   );
-  const child = spawn(codexBin, codexAppServerLaunchArgs(serverUrl, options), {
+  const child = spawnTree(codexBin, codexAppServerLaunchArgs(serverUrl, options), {
     cwd: options.trustedProjectPath?.trim() || undefined,
     detached: true,
     stdio: ["ignore", "pipe", "pipe"],
@@ -482,22 +559,82 @@ export function launchCodexAppServer(
   return {
     pid: child.pid ?? null,
     exited,
+    ...(options.codexHome ? { codexHome: options.codexHome } : {}),
   };
 }
 
-export function terminateSpawnedProcess(pid: number): void {
-  try {
-    if (process.platform !== "win32") {
-      process.kill(-pid, "SIGTERM");
-      return;
-    }
-  } catch {
-    // Fall through to direct process termination.
-  }
+/**
+ * Why a launch that has the Read-only policy and does not name the Read-only access level is not started. No launch
+ * of the product is put together that way, so this is an error in LetAgents, and the owner is told what still helps.
+ */
+export const READ_ONLY_POLICY_WITHOUT_LEVEL = "This Codex agent was to be started with the Read-only policy and without the name of the Read-only access level, "
+  + "so nothing would keep your Codex sign-in file from its commands. LetAgents starts no agent that way. "
+  + "Choose the agent's access level again in its settings and start it. If this comes back, it is an error in LetAgents: please report it.";
+/** Why a Read-only launch is not started when the launch was given no permission profile for it. */
+export const READ_ONLY_PROFILE_NOT_GIVEN = "LetAgents did not get the permission profile that keeps your Codex sign-in file from a Read-only agent's commands, "
+  + "so it will not start Codex at this access level. Start the agent again. If it happens again, choose another access level.";
 
-  try {
-    process.kill(pid, "SIGTERM");
-  } catch {
-    // Already gone.
-  }
+/**
+ * Launch a managed agent's app-server without the owner's Codex extensions:
+ * no plugins, app connectors, computer or browser use, hooks, memories,
+ * notifier or personal skills, and no MCP server but the room's own, like
+ * Claude's --strict-mcp-config. Codex itself names the servers, from the
+ * owner's config and the config of any project that config trusts; a launch
+ * that cannot get that list, or whose project changes the LetAgents server,
+ * fails. The launch passes no project trust of its own. A project
+ * that would commit as the host's global Git identity commits as the owner's
+ * GitHub noreply identity instead. When the owner has turned their own setup
+ * on for this agent, only the extensions are left alone; the rest holds.
+ * At a sandboxed access level, with or without that setup, Codex gets a home
+ * without the owner's saved command rules. A Read-only launch also defines
+ * the permission profile that keeps the owner's sign-in file from the agent's
+ * commands.
+ */
+export async function launchManagedCodexAppServer(
+  serverUrl: string,
+  codexBin: string,
+  options: CodexAppServerLaunchOptions = {},
+  /** How the home of a sandboxed launch is decided. Only a test gives another. */
+  dependencies: { homeForSandboxedLaunch?: typeof codexHomeForSandboxedLaunch } = {},
+): Promise<CodexAppServerLaunch> {
+  const { env: ownerHomeEnv, rental } = codexAppServerEnvironment({ ...options, codexHome: undefined });
+  const trustedProjectPath = options.trustedProjectPath?.trim() || undefined;
+  const hideSignInProfile = options.hideSignInProfile?.trim() || undefined;
+  // The profile belongs to a sandbox. A launch that names one without a sandbox was put together wrongly, and is not started.
+  if (hideSignInProfile && options.sandboxed !== true) throw new Error("A Codex launch that names a Read-only permission profile must be a sandboxed one.");
+  // The Read-only policy without the level's name has no profile, and Codex's read-only sandbox alone keeps no file
+  // from a command. Refused before anything is asked of Codex: nothing is started this way.
+  if (options.readOnlySandbox === true && !hideSignInProfile) throw new Error(READ_ONLY_POLICY_WITHOUT_LEVEL);
+  // Decided before anything else is asked of Codex, so every listing below reads the home the launch will.
+  const home = options.sandboxed === true
+    ? await (dependencies.homeForSandboxedLaunch ?? codexHomeForSandboxedLaunch)(codexBin, {
+        cwd: trustedProjectPath, env: ownerHomeEnv, writableSandbox: options.writableSandbox === true, ...(hideSignInProfile ? { hideSignInProfile } : {}),
+      })
+    : null;
+  // A Read-only launch is never started without its profile, whatever answered above.
+  if (hideSignInProfile && !home?.configOverrides?.length) throw new Error(READ_ONLY_PROFILE_NOT_GIVEN);
+  const codexHome = home?.codexHome ?? undefined;
+  const env = codexHome ? { ...ownerHomeEnv, CODEX_HOME: codexHome } : ownerHomeEnv;
+  // The launch's own directory and overrides, so the server list matches.
+  const view = { cwd: trustedProjectPath, env, configOverrides: options.configOverrides ?? [] };
+  const [isolation, commitEnvironment] = await Promise.all([
+    // Either way, a listing that fails says why and never its command line.
+    options.homeHarness === true && !rental
+      ? codexHomeHarnessOverrides(codexBin, view)
+      : codexOwnerIsolationOverrides(codexBin, view, runCodexMcpListForLaunch),
+    rental ? {} : managedAgentCommitEnvironment(trustedProjectPath),
+  ]);
+  const launch = launchCodexAppServer(serverUrl, codexBin, {
+    ...options,
+    commitEnvironment,
+    // The profile's overrides last: nothing a caller passes can name the same profile after them.
+    configOverrides: [...isolation, ...(options.configOverrides ?? []), ...(home?.configOverrides ?? [])],
+    codexHome,
+  });
+  return { ...launch, ...(home?.notices.length ? { notices: home.notices } : {}), ...(home?.writableFoldersCheck ? { writableFoldersCheck: home.writableFoldersCheck } : {}) };
+}
+
+export function terminateSpawnedProcess(pid: number): void {
+  // The process group, else the pid; on Windows the tree's job.
+  signalTree(pid, "SIGTERM");
 }

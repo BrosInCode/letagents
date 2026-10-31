@@ -4,6 +4,8 @@ import test from 'node:test'
 import { createRoomRefreshController } from './room/refresh.js'
 import {
   activityLoading,
+  githubEvents,
+  githubEventsHasMore,
   resetRoomState,
   messages,
   room,
@@ -387,4 +389,27 @@ test('full-state gap repair can exclude the overlapping latest-message read', as
     false,
     'the stream generation owns the one bounded after-cursor message repair',
   )
+})
+
+
+test('Activity snapshot repair preserves incoming stream events and fences room changes', async (t) => {
+  resetRoomState({activityHistoryLoading:false, githubEventsLoading:false, connectionState:'idle'})
+  const controller = createRoomRefreshController({refreshParticipants:async()=>{},refreshPresence:async()=>{}})
+  const originalFetch = globalThis.fetch
+  let release!: () => void
+  let gate = new Promise<void>(resolve => {release=resolve})
+  globalThis.fetch = (async () => {await gate; return new Response(JSON.stringify({events:[{id:'snapshot',created_at:'2026-10-11T10:00:00Z'}],has_more:true}),{status:200,headers:{'Content-Type':'application/json'}})}) as typeof fetch
+  t.after(()=>{globalThis.fetch=originalFetch;resetRoomState({activityHistoryLoading:false,githubEventsLoading:false,connectionState:'idle'})})
+  room.value={identifier:'github.com/owner/repo',name:'github.com/owner/repo',projectId:'repo',kind:'main'} as never
+  const pending=controller.refreshRoomGitHubEvents()
+  githubEvents.value=[{id:'live',created_at:'2026-10-11T10:01:00Z'}] as never
+  release(); await pending
+  assert.deepEqual(githubEvents.value.map(event=>event.id),['snapshot','live'])
+  assert.equal(githubEventsHasMore.value,true)
+  gate=new Promise<void>(resolve=>{release=resolve})
+  const retired=controller.refreshRoomGitHubEvents()
+  room.value={identifier:'github.com/other/room',projectId:'other',kind:'main'} as never
+  githubEvents.value=[{id:'other-room'}] as never
+  release(); await retired
+  assert.deepEqual(githubEvents.value.map(event=>event.id),['other-room'])
 })

@@ -72,9 +72,9 @@
         </SettingsRow>
 
         <SettingsRow
-          v-if="activePane !== 'storage:database' && !selectedRoomIsLocalGitRoom"
+          v-if="activePane !== 'storage:database'"
           title="Publish this local room"
-          description="Upload this room's local messages and tasks to LetAgents cloud. Nothing uploads until you click Publish."
+          :description="selectedRoomIsLocalGitRoom ? 'Add this project’s GitHub origin remote, then publish its messages and tasks to the repository room. Nothing uploads until you click Publish.' : 'Upload this room’s local messages and tasks to LetAgents cloud. Nothing uploads until you click Publish.'"
           badge="manual"
           badge-state="away"
         >
@@ -91,14 +91,6 @@
             </button>
           </template>
         </SettingsRow>
-
-        <SettingsRow
-          v-if="activePane !== 'storage:database' && selectedRoomIsLocalGitRoom"
-          title="Local Git Room"
-          description="This room stays on your Mac until you connect a repository hosted online."
-          badge="local"
-          badge-state="away"
-        />
 
         <SettingsRow
           v-if="activePane === 'storage:sync'"
@@ -167,6 +159,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatDate } from "../../../../domain/formatters";
 import { CloudUpload, Copy, Database, HardDrive } from "@lucide/vue";
 import { computed } from "vue";
 import type {
@@ -232,11 +225,6 @@ const chatStorageSavedLabel = computed(() => {
   if (!props.chatStorageSettings?.savedAt) return "Never";
   const timestamp = new Date(props.chatStorageSettings.savedAt);
   if (Number.isNaN(timestamp.getTime())) return "Unknown";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(timestamp);
+  return formatDate("monthDayTime", timestamp);
 });
 </script>

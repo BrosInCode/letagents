@@ -25,6 +25,14 @@ import {
 } from "./room-event-projection/task-projection.js";
 import { resolveLinkedTaskForRepoRoomEvent } from "./room-event-projection/task-resolver.js";
 import { artifactEvents, githubRoomEvents } from "../server/events.js";
+import type { JevLinkPullRequestInput } from "../connectors/jev-link.js";
+import type { Task } from "../db/types.js";
+import type { RepoRoomEvent } from "../repo-workflow/types.js";
+import {
+  getDefaultTrackerRuleEngine,
+  type TrackerRuleRepoEventInput,
+  type TrackerRuleRepoEventResult,
+} from "../connectors/rules/engine.js";
 
 export { persistMaterializedGitHubRoomEvent } from "./room-event-projection/persistence.js";
 
@@ -41,9 +49,14 @@ export interface GitHubRoomEventProjectionDeps {
   emitGitHubRoomEventUpdate: typeof emitGitHubRoomEventUpdate;
   emitRepoRoomEventProjectionMessage: typeof emitRepoRoomEventProjectionMessage;
   applyGitHubRefRoomLifecycle: typeof applyGitHubRefRoomLifecycle;
+  runTrackerRulesForRepoEvent: (input: TrackerRuleRepoEventInput) => Promise<TrackerRuleRepoEventResult>;
+  /** PR6: ask Jev to link a pull request that reached no card. Runs after the webhook answers; never throws. */
+  linkPullRequestWithJev: (input: JevLinkPullRequestInput) => void;
+  /** PR6: ask Jev about a linked pull request closed without a merge. Runs after the webhook answers; never throws. */
+  proposeForClosedPullRequestWithJev: (input: { task: Task; event: RepoRoomEvent; linkConfirmed: boolean }) => void;
 }
 
-function githubProjectionMessageIdBase(event: Pick<GitHubRoomEvent, "semantic_id" | "idempotency_key">): string {
+export function githubProjectionMessageIdBase(event: Pick<GitHubRoomEvent, "semantic_id" | "idempotency_key">): string {
   const digest = crypto
     .createHash("sha256")
     .update(event.semantic_id ?? event.idempotency_key)
@@ -88,6 +101,19 @@ const defaultGitHubRoomEventProjectionDeps: GitHubRoomEventProjectionDeps = {
   emitGitHubRoomEventUpdate,
   emitRepoRoomEventProjectionMessage,
   applyGitHubRefRoomLifecycle,
+  runTrackerRulesForRepoEvent: async (input) => (await getDefaultTrackerRuleEngine()).runForRepoEvent(input),
+  // Jev can take up to 10 s, so the webhook does not wait for it. A lost
+  // question (a crash) changes nothing: Jev never writes on its own.
+  linkPullRequestWithJev: (input) => {
+    void import("../connectors/jev/runtime.js")
+      .then(({ getDefaultJevLinkService }) => getDefaultJevLinkService().linkPullRequest(input))
+      .catch((error) => console.warn("[jev tracker] link failed:", error instanceof Error ? error.name : "unknown"));
+  },
+  proposeForClosedPullRequestWithJev: (input) => {
+    void import("../connectors/jev/runtime.js")
+      .then(({ proposeForClosedPullRequestDefault }) => proposeForClosedPullRequestDefault(input))
+      .catch((error) => console.warn("[jev tracker] exception failed:", error instanceof Error ? error.name : "unknown"));
+  },
 };
 
 export async function handleMaterializedGitHubRoomEvent(
@@ -112,8 +138,9 @@ export async function handleMaterializedGitHubRoomEvent(
     ...input.deps,
   };
   const roomEvent = event.roomEvent;
-  let taskResolution = roomEvent
-    ? await deps.resolveLinkedTaskForRepoRoomEvent(project, roomEvent)
+  const routingEvent = event.routingEvent ?? roomEvent;
+  let taskResolution = routingEvent
+    ? await deps.resolveLinkedTaskForRepoRoomEvent(project, routingEvent)
     : emptyRepoRoomEventTaskResolution();
   let linkedTask = taskResolution.task;
   const githubRoutingContext = toGitHubRoutingContext(taskResolution);
@@ -141,6 +168,7 @@ export async function handleMaterializedGitHubRoomEvent(
   }
 
   if (!roomEvent) {
+    deps.emitGitHubRoomEventUpdate(eventProject.id, persisted.event);
     return {
       status: "processed",
       installationId: input.installationId,
@@ -170,11 +198,50 @@ export async function handleMaterializedGitHubRoomEvent(
     installationId: input.installationId,
     githubRoutingContext,
     messageIdBase,
+    matchedByTicketKey: taskResolution.matchedByTicketKey === true,
+    ...(taskResolution.jevLink ? { jevLink: taskResolution.jevLink } : {}),
   });
   if (!taskProjection.authoritative && linkedTask) {
     await deps.updateGitHubRoomEventLinkedTaskId(persisted.event.idempotency_key, null);
   }
   linkedTask = taskProjection.task;
+
+  // Ticket connectors PR5: a card with a ticket runs its connection's rules
+  // when the event reached it through a confirmed link (the ticket key; the
+  // engine checks). A card the projection did not accept (a lock, or a lease
+  // on another branch) runs none.
+  if (taskProjection.authoritative && linkedTask?.external_ref) {
+    await deps.runTrackerRulesForRepoEvent({
+      deliveryId: input.deliveryId,
+      storedEvent: persisted.event,
+      eventRoomId: eventProject.id,
+      roomEvent,
+      task: linkedTask,
+      matchedByTicketKey: taskResolution.matchedByTicketKey === true,
+      linkConfirmedByPerson: taskResolution.jevLink === "jev_confirmed",
+    });
+    // PR6: a pull request on the card by its key or an accepted Jev link
+    // closed without a merge: Jev proposes what happened, in the room.
+    if (roomEvent.kind === "pull_request" && roomEvent.action === "closed" && roomEvent.pullRequest.merged !== true) {
+      deps.proposeForClosedPullRequestWithJev({
+        task: linkedTask,
+        event: roomEvent,
+        linkConfirmed: taskResolution.matchedByTicketKey === true || taskResolution.jevLink === "jev_confirmed",
+      });
+    }
+  }
+
+  // PR6: a pull request that names no ticket and reached no card. The service
+  // checks the room's Jev switch before anything else; a room without it
+  // makes no Jev call.
+  if (!taskResolution.task && roomEvent.kind === "pull_request") {
+    deps.linkPullRequestWithJev({
+      roomId: project.id,
+      event: roomEvent,
+      storedEvent: persisted.event,
+      installationId: input.installationId,
+    });
+  }
 
   const syncedArtifacts = await deps.syncRoomSharedArtifactsForGitHubRoomEvent({
     room_id: eventProject.id,

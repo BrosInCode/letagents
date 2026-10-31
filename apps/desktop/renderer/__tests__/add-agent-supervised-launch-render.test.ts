@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -10,11 +11,13 @@ import {
   nextTick,
   ref,
   Fragment,
+  ssrContextKey,
   type Component,
-  type InjectionKey,
 } from "vue";
+import * as Vue from "vue";
+import { compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
 import { renderToString } from "@vue/server-renderer";
-import { createServer, type ViteDevServer } from "vite";
+import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
 
 let vite: ViteDevServer;
 let AddAgentSupervisedLaunch: Component;
@@ -22,7 +25,6 @@ let AddAgentActionBar: Component;
 let AddAgentSetupStatus: Component;
 let AddAgentRuntimeSettings: Component;
 let AddAgentSupervisedLaunchActions: Component;
-let managedAgentSessionsKey: InjectionKey<unknown>;
 let actionStyleNames: Record<string, string>;
 let compiledActionCss: string;
 
@@ -64,11 +66,6 @@ before(async () => {
       "/renderer/src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions.module.css?inline",
     )
   ).default;
-  managedAgentSessionsKey = (
-    await vite.ssrLoadModule(
-      "/renderer/src/components/desktop/content/add-agent/managed-agent-sessions-context.ts",
-    )
-  ).managedAgentSessionsKey;
 });
 
 after(async () => {
@@ -188,21 +185,18 @@ async function renderReadyLaunch(controller: ReturnType<typeof readyController>[
     render: () => h(Fragment, [
       h(AddAgentSupervisedLaunch, { controller }),
       h(AddAgentActionBar, {
-        roomIdentifier: "room-1",
         providerId: "codex",
         provider: {
           id: "codex",
           name: "Codex",
           description: "",
-          capabilities: ["desktop_managed_runtime", "supervised_runtime"],
+          capabilities: ["supervised_runtime"],
           runtimeCommand: null,
           mcpTargetId: "codex",
           permissionProfiles: [],
           defaultPermissionProfileId: null,
         },
         preflight: { nextAction: null, status: "ready" },
-        permissionProfile: null,
-        launchMode: "supervised",
         setupBusy: false,
         setupActionLabel: "",
         copyingAuthCommand: false,
@@ -219,11 +213,6 @@ async function renderReadyLaunch(controller: ReturnType<typeof readyController>[
         charterMissing: false,
       }),
     ]),
-  });
-  app.provide(managedAgentSessionsKey, {
-    sessions: ref([]),
-    refresh: async () => undefined,
-    upsert: () => undefined,
   });
   return renderToString(app);
 }
@@ -389,7 +378,7 @@ const setupPresentationProps = {
 test("successful setup keeps diagnostics collapsed and the launch form prominent", async () => {
   const html = await renderToString(createSSRApp({
     render: () => h(AddAgentSetupStatus, setupPresentationProps, {
-      default: () => h("textarea", { "aria-label": "First task" }),
+      default: () => h("textarea", { "aria-label": "First message" }),
       actions: () => h("button", "Start agent"),
     }),
   }));
@@ -399,7 +388,7 @@ test("successful setup keeps diagnostics collapsed and the launch form prominent
   assert.doesNotMatch(html, /desktop-add-agent-status-header|status-pill|Choose how it works here/);
   assert.match(html, /<summary tabindex="0"[^>]*>Setup details<\/summary>/);
   assert.match(html, /codex-cli 0.153.4/);
-  assert.ok(html.indexOf("First task") < html.indexOf("Start agent"));
+  assert.ok(html.indexOf("First message") < html.indexOf("Start agent"));
 });
 
 test("setup problems expand diagnostics and retain their actionable instructions", async () => {
@@ -447,5 +436,80 @@ test("collapsed access options still disclose the selected high-risk permissions
   assert.ok(details);
   assert.doesNotMatch(details, /\bopen\b/);
   assert.match(html, /<summary tabindex="0"[^>]*>[\s\S]*?Full access[\s\S]*?High risk[\s\S]*?<\/summary>/);
-  assert.match(html, /<small[^>]*>First task<\/small>/);
+  assert.match(html, /<small[^>]*>First message<\/small>/);
+});
+
+/** Give an SSR-loaded SFC a client render so the host renderer can mount it. */
+async function attachClientRender(component: object, modulePath: string): Promise<void> {
+  const source = await readFile(fileURLToPath(new URL(`../src/${modulePath}`, import.meta.url)), "utf8");
+  const descriptor = parse(source, { filename: modulePath }).descriptor;
+  assert.ok(descriptor.template);
+  const script = compileScript(descriptor, { id: modulePath });
+  const compiled = compileTemplate({
+    source: descriptor.template.content,
+    filename: modulePath,
+    id: modulePath,
+    compilerOptions: { bindingMetadata: script.bindings },
+  });
+  assert.deepEqual(compiled.errors, []);
+  const clientCode = compiled.code
+    .replace(/^import \{([\s\S]*?)\} from "vue"\n/, (_match, bindings: string) => `const {${bindings.replace(/\s+as\s+/g, ": ")}} = vue\n`)
+    .replace("export function render", "function render");
+  const transformed = await transformWithEsbuild(clientCode, `${modulePath}.ts`, { loader: "ts", target: "esnext" });
+  (component as { render?: unknown }).render = Function("vue", `${transformed.code}\nreturn render;`)(Vue);
+}
+
+test("a first task set with only a change event survives choosing another access level", async () => {
+  // Accessibility automation can set a textarea's value without an input
+  // event. The access choice re-renders the form; it must not write the old
+  // task back over the text.
+  const sandboxed = { id: "sandboxed_write", label: "Workspace writes", risk: "medium", status: "available", description: "Edits a copy." };
+  const fullAccess = { id: "full_access", label: "Full access", risk: "high", status: "available", description: "Host files and network." };
+  const charter = ref("You are part of this room's team. Work on the tasks assigned to you, answer when you are addressed, and coordinate with the team in the room.");
+  const selected = ref(sandboxed);
+  await attachClientRender(AddAgentRuntimeSettings, "components/desktop/content/add-agent/AddAgentRuntimeSettings.vue");
+  const root = hostNode("root");
+  const app = testRenderer.createApp(defineComponent({
+    setup: () => () => h(AddAgentRuntimeSettings, {
+      provider: { id: "cursor", capabilities: ["supervised_runtime"] },
+      executionDescription: "Runs on this Mac.",
+      charter: charter.value,
+      permissionProfiles: [sandboxed, fullAccess],
+      selectedPermissionProfile: selected.value,
+      "onUpdate:charter": (value: string) => { charter.value = value; },
+      onSelectPermission: (profile: typeof sandboxed) => { selected.value = profile; },
+    }),
+  }));
+  app.provide(ssrContextKey, { modules: new Set<string>() });
+  app.mount(root);
+  const field = findByTestId(root, "desktop-add-agent-supervised-charter");
+  assert.ok(field);
+  assert.equal(typeof field.props.onChange, "function", "the first task must listen for change events");
+  (field.props.onChange as (event: { target: { value: string } }) => void)({ target: { value: "Review PR 4 at its latest head" } });
+  selected.value = fullAccess;
+  await nextTick();
+  assert.equal(charter.value, "Review PR 4 at its latest head");
+  assert.equal(findByTestId(root, "desktop-add-agent-supervised-charter")?.props.value, "Review PR 4 at its latest head");
+  app.unmount();
+});
+
+test("Cursor access cards distinguish restricted profiles from Full access", async () => {
+  const profiles = [
+    { id: "read_only", label: "Read-only", risk: "low", status: "available", description: "Inspect only." },
+    { id: "sandboxed_write", label: "Workspace writes", risk: "medium", status: "available", description: "Edits a copy." },
+    { id: "full_access", label: "Full access", risk: "high", status: "available", description: "Host files and network." },
+  ];
+  const html = await renderToString(createSSRApp({
+    render: () => h(AddAgentRuntimeSettings, {
+      provider: { id: "cursor", capabilities: ["supervised_runtime"] },
+      executionDescription: "Runs on this Mac.",
+      charter: "Inspect this project.",
+      permissionProfiles: profiles,
+      selectedPermissionProfile: profiles[2],
+    }),
+  }));
+  const limits = [...html.matchAll(/data-testid="desktop-add-agent-permission-limits"[^>]*>([^<]*)</g)].map((match) => match[1]);
+  assert.equal(limits.length, 3);
+  for (const line of limits.slice(0, 2)) assert.match(line, /No network access: can(?:&#39;|')t push or open PRs\./);
+  assert.match(limits[2], /can reach the network and files outside the project/);
 });

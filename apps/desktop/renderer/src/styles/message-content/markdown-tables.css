@@ -1,0 +1,27 @@
+/* Tables from renderDesktopMarkdown, on every surface that shows its output:
+   room messages and the reader, agent live prose, task descriptions and
+   contribution summaries. Wide tables scroll inside their own box. */
+:is(.desktop-long-message-html, .agent-live-prose, .task-markdown-preview, .contribution-prose) .markdown-table-scroll {
+  max-width: 100%;
+  margin: 0.72em 0;
+  overflow-x: auto;
+}
+
+:is(.desktop-long-message-html, .agent-live-prose, .task-markdown-preview, .contribution-prose) table {
+  border-collapse: collapse;
+  overflow-wrap: normal;
+}
+
+:is(.desktop-long-message-html, .agent-live-prose, .task-markdown-preview, .contribution-prose) :is(th, td) {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+:is(.desktop-long-message-html, .agent-live-prose, .task-markdown-preview, .contribution-prose) th {
+  font-weight: 600;
+}
+
+:is(.desktop-long-message-html, .agent-live-prose, .task-markdown-preview, .contribution-prose) :is(th, td).markdown-align-center { text-align: center; }
+:is(.desktop-long-message-html, .agent-live-prose, .task-markdown-preview, .contribution-prose) :is(th, td).markdown-align-right { text-align: right; }

@@ -708,6 +708,202 @@
       "when": 1790030400000,
       "tag": "0100_verified_worker_claim_intents",
       "breakpoints": true
+    },
+    {
+      "idx": 101,
+      "version": "7",
+      "when": 1790702049423,
+      "tag": "0101_room_agent_session_process_connection",
+      "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "7",
+      "when": 1790725431220,
+      "tag": "0102_room_settings",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "7",
+      "when": 1790760000000,
+      "tag": "0103_agent_wake_rules",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "7",
+      "when": 1790780000000,
+      "tag": "0104_board_intent_superseded_status",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "7",
+      "when": 1790808976596,
+      "tag": "0105_room_agent_presence_notify",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "7",
+      "when": 1790830000000,
+      "tag": "0106_wake_rule_retirement",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "7",
+      "when": 1790850000000,
+      "tag": "0107_room_agent_session_end_reason",
+      "breakpoints": true
+    },
+    {
+      "idx": 108,
+      "version": "7",
+      "when": 1790900000000,
+      "tag": "0108_message_reactions",
+      "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "7",
+      "when": 1790900100000,
+      "tag": "0109_message_pins",
+      "breakpoints": true
+    },
+    {
+      "idx": 110,
+      "version": "7",
+      "when": 1790900200000,
+      "tag": "0110_account_room_notification_preferences",
+      "breakpoints": true
+    },
+    {
+      "idx": 111,
+      "version": "7",
+      "when": 1790900300000,
+      "tag": "0111_message_reminders",
+      "breakpoints": true
+    },
+    {
+      "idx": 112,
+      "version": "7",
+      "when": 1790900400000,
+      "tag": "0112_sequential_reply_turns",
+      "breakpoints": true
+    },
+    {
+      "idx": 113,
+      "version": "7",
+      "when": 1791830000000,
+      "tag": "0113_room_expressions",
+      "breakpoints": true
+    },
+    {
+      "idx": 114,
+      "version": "7",
+      "when": 1792240000000,
+      "tag": "0114_message_attachment_upload_owner",
+      "breakpoints": true
+    },
+    {
+      "idx": 115,
+      "version": "7",
+      "when": 1792330000000,
+      "tag": "0115_live_activity_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 116,
+      "version": "7",
+      "when": 1792420000000,
+      "tag": "0116_room_history_summary",
+      "breakpoints": true
+    },
+    {
+      "idx": 117,
+      "version": "7",
+      "when": 1792510000000,
+      "tag": "0117_task_external_refs",
+      "breakpoints": true
+    },
+    {
+      "idx": 118,
+      "version": "7",
+      "when": 1792600000000,
+      "tag": "0118_tracker_connections",
+      "breakpoints": true
+    },
+    {
+      "idx": 119,
+      "version": "7",
+      "when": 1792700000000,
+      "tag": "0119_remote_mcp_sessions",
+      "breakpoints": true
+    },
+    {
+      "idx": 120,
+      "version": "7",
+      "when": 1792800000000,
+      "tag": "0120_room_tracker_filters",
+      "breakpoints": true
+    },
+    {
+      "idx": 121,
+      "version": "7",
+      "when": 1792900000000,
+      "tag": "0121_agent_asks",
+      "breakpoints": true
+    },
+    {
+      "idx": 122,
+      "version": "7",
+      "when": 1793000000000,
+      "tag": "0122_agent_ask_workspaces",
+      "breakpoints": true
+    },
+    {
+      "idx": 123,
+      "version": "7",
+      "when": 1793100000000,
+      "tag": "0123_tracker_rules",
+        "breakpoints": true
+      },
+      {
+      "idx": 124,
+      "version": "7",
+      "when": 1793200000000,
+      "tag": "0124_my_work_task_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 125,
+      "version": "7",
+      "when": 1793300000000,
+      "tag": "0125_tracker_jev_questions",
+      "breakpoints": true
+    },
+    {
+      "idx": 126,
+      "version": "7",
+      "when": 1793400000000,
+      "tag": "0126_mcp_oauth",
+      "breakpoints": true
+    },
+    {
+      "idx": 127,
+      "version": "7",
+      "when": 1793500000000,
+      "tag": "0127_github_issues_connector",
+      "breakpoints": true
+    },
+    {
+      "idx": 128,
+      "version": "7",
+      "when": 1793600000000,
+      "tag": "0128_jira_status_category_map",
+      "breakpoints": true
     }
   ]
 }

@@ -1,5 +1,6 @@
 import { ProviderLiveDisplay } from "./provider-live-display.js";
 import { publishWorkerNativeActivity } from "./cloud-http.js";
+import { liveActivitySummaryForEvent, type LiveActivitySummaryStatus } from "./live-activity-summary-relay.js";
 import { sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
 import type {
@@ -10,6 +11,7 @@ import type {
   ProviderActionTerminal,
 } from "./provider-action-port.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
+import { DaemonFenceLostError } from "./singleton.js";
 import {
   isCorrelatedNonemptyWaitResult,
   isHumanRoomActivityEvent,
@@ -40,6 +42,8 @@ import {
   type LifecycleProjectionProvider,
 } from "./lifecycle-projection-ledger.js";
 import type { LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
+import { launchProgress } from "./launch-progress.js";
+import { turnStartLatency } from "./turn-start-latency.js";
 
 /** Immutable identity for one exact durable provider installation. */
 export type ProviderInstallationToken = Readonly<{
@@ -76,6 +80,10 @@ type PendingTypedOperationalActivation = {
 
 const TYPED_OPERATIONAL_RETRY_BASE_MS = 250;
 const TYPED_OPERATIONAL_RETRY_MAX_MS = 30_000;
+/** An ended handle is handed to convergence at doubling gaps, then every 20 heartbeats (five minutes at 15 s). */
+const ENDED_HANDLE_HAND_OFF_MAX_GAP_TICKS = 20;
+/** How long the read model holds a Cursor lane's readiness through one turn boundary. */
+export const CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS = 60_000;
 
 export type ProviderRecoveryDiagnostics = {
   daemon_inbox_wait_evidence_dependency: number;
@@ -137,6 +145,17 @@ export function lifecycleLocalConformanceEligibility(
 
 export type ProviderStreamManifest = {
   getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+  /**
+   * The same entry as getEntry, read for every stream event. It may share its
+   * activity events between reads, so they are read only, never changed.
+   */
+  getRecentEntry?(entryId: string): Promise<DaemonManifestEntry | undefined>;
+  /**
+   * The same entry as getEntry for a caller that reads only its scalar fields:
+   * the activity holds the short summary window, never payloads. The batcher's
+   * overlay still applies, so state it changed is seen. Falls back to getEntry.
+   */
+  getScalarEntry?(entryId: string): Promise<DaemonManifestEntry | undefined>;
   load(): Promise<{ entries: DaemonManifestEntry[] }>;
   updateEntry(
     entryId: string,
@@ -182,6 +201,16 @@ export type ProviderStreamTransition = (
   actor: string,
 ) => Promise<void>;
 
+/**
+ * How long a stopping daemon waits for stream callbacks that are still
+ * running before it closes its socket and stores anyway. A callback writes
+ * one observation to local stores and takes milliseconds; ten seconds is
+ * far beyond that, and short enough that a stop whose callback never returns
+ * still releases what its successor needs. A callback still running then
+ * fails against the closed stores, which is how a fenced callback ends too.
+ */
+export const STOP_CALLBACKS_DEADLINE_MS = 10_000;
+
 export type ProviderStreamCoordinatorOptions = {
   /** Optional compatibility map shared with the temporarily-thin daemon facade. */
   liveHandles?: Map<string, ProviderActionHandle>;
@@ -196,6 +225,8 @@ export type ProviderStreamCoordinatorOptions = {
   lifecycleProjectionDiagnostics?(): LifecycleProjectionDiagnostics;
   captureAdmission?(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus;
   typedLifecycleAdmission?(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus;
+  /** A lasting reason this installation's execution record cannot be continued, or null. */
+  recordBlock?(installation: ProviderInstallationToken): string | null;
   /** Operational approvals have their own lifetime, independent of optional capture. */
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   manifest: ProviderStreamManifest;
@@ -209,6 +240,7 @@ export type ProviderStreamCoordinatorOptions = {
     entryId: string,
     event: DaemonActivityEvent,
     activityOnly: boolean,
+    position?: "exact" | "after_latest",
   ): Promise<void>;
   publishNativeActivity(
     entryId: string,
@@ -216,6 +248,8 @@ export type ProviderStreamCoordinatorOptions = {
     status: "working" | "idle",
     observedAt?: string,
   ): Promise<unknown>;
+  /** The line the owner sees in the live strip, for every room member; null when the turn ends. */
+  observeActivitySummary?(entryId: string, summary: string | null, status: LiveActivitySummaryStatus): void;
   handleTerminal(
     installation: ProviderInstallationToken,
     bindingIdentity: LiveBindingIdentity | undefined,
@@ -246,6 +280,7 @@ export type ProviderStreamCoordinatorOptions = {
   clearInterval?: typeof clearInterval;
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
+  nowMs?: () => number;
 };
 
 /**
@@ -266,6 +301,11 @@ export class ProviderStreamCoordinator {
   private readonly pendingTypedOperationalActivations = new Map<string, PendingTypedOperationalActivation>();
   private readonly typedDaemonInboxInstallations = new WeakSet<ProviderInstallationToken>();
   private readonly typedOperationalInstallations = new WeakSet<ProviderInstallationToken>();
+  /** Display-only: a Cursor lane's readiness before its current turn boundary, and when that boundary began. */
+  private readonly cursorBoundaryAdmissions = new WeakMap<ProviderListenerLease, {
+    admission: "ready" | null;
+    boundarySinceMs: number;
+  }>();
   private daemonInboxWaitEvidenceDependencies = 0;
   private readonly publishWorkerActivity: typeof publishWorkerNativeActivity;
   private readonly setHeartbeat: typeof setInterval;
@@ -308,6 +348,9 @@ export class ProviderStreamCoordinator {
     }
     if (installation.authorityMode !== "typed") return;
     if (!capture || !effects) throw new Error("Typed Cursor lifecycle settlement is unavailable.");
+    // The child is about to leave the handle before its idle checkpoint lands.
+    const lease = this.listenerLeases.get(agent.agentId);
+    if (lease?.handle === agent.handle) this.beginCursorTurnBoundary(lease, installation);
     capture.flush(installation);
     await effects.settle(agent.agentId);
   }
@@ -529,8 +572,65 @@ export class ProviderStreamCoordinator {
       || this.typedOperationalInstallations.has(installation);
   }
 
+  /**
+   * Why the entry's running agent cannot be admitted for delivery: its
+   * execution record cannot be continued. Null for a runtime that is
+   * admitted, is still being admitted, or does not wait on its record.
+   */
+  recordBlock(entry: DaemonManifestEntry): string | null {
+    const installation = this.latestInstallations.get(entry.id);
+    if (!installation || !this.typedDaemonInboxInstallations.has(installation)
+      || this.typedOperationalInstallations.has(installation)
+      || !this.isCurrentInstallation(installation) || !this.entryMatchesInstallation(entry, installation)) return null;
+    try { return this.options.recordBlock?.(installation) ?? null; } catch { return null; }
+  }
+
   /** Read-model witness from the same exact-birth latch that owns delivery. */
   deliveryAdmission(entry: DaemonManifestEntry): LifecycleCaptureAdmissionStatus | null {
+    return this.holdCursorTurnBoundary(entry, this.exactDeliveryAdmission(entry));
+  }
+
+  /**
+   * Cursor re-arms readiness for every per-turn child: a new birth waits for
+   * typed promotion, and a finished child leaves the handle just before its
+   * idle checkpoint lands. Delivery still gates on the exact latch above. The
+   * read model only holds the same lane's last settled readiness through that
+   * boundary, for a bounded time, instead of flashing it as unavailable.
+   */
+  private holdCursorTurnBoundary(
+    entry: DaemonManifestEntry,
+    admission: LifecycleCaptureAdmissionStatus | null,
+  ): LifecycleCaptureAdmissionStatus | null {
+    const lease = this.listenerLeases.get(entry.id);
+    if (!lease || entry.provider !== "cursor" || entry.desired_state !== "running"
+      || !["working", "idle"].includes(entry.observed_state)
+      || !this.isCurrentListenerLease(lease)
+      || lease.executionGenerationId !== entry.provider_ref?.execution_generation_id
+      || lease.handle.workAttemptId !== entry.work_attempt_id) return admission;
+    if (admission === "ready" || admission === null) return admission;
+    const boundary = this.cursorBoundaryAdmissions.get(lease);
+    return boundary && this.nowMs() - boundary.boundarySinceMs < CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS
+      ? boundary.admission
+      : admission;
+  }
+
+  /** A turn boundary starts from the readiness of the birth it replaces; an unsettled one is not held. */
+  private beginCursorTurnBoundary(lease: ProviderListenerLease, previous: ProviderInstallationToken | undefined): void {
+    if (this.cursorBoundaryAdmissions.has(lease)) return;
+    const admission = !previous ? undefined
+      : !this.typedDaemonInboxInstallations.has(previous) ? null
+      : this.typedOperationalInstallations.has(previous) ? "ready" as const
+      : undefined;
+    if (admission !== undefined) {
+      this.cursorBoundaryAdmissions.set(lease, { admission, boundarySinceMs: this.nowMs() });
+    }
+  }
+
+  private nowMs(): number {
+    return this.options.nowMs?.() ?? Date.now();
+  }
+
+  private exactDeliveryAdmission(entry: DaemonManifestEntry): LifecycleCaptureAdmissionStatus | null {
     const installation = this.latestInstallations.get(entry.id);
     if (!installation || !this.typedDaemonInboxInstallations.has(installation)) return null;
     if (!this.isCurrentInstallation(installation)
@@ -575,6 +675,7 @@ export class ProviderStreamCoordinator {
           || this.pendingTypedOperationalActivations.get(installation.entryId) !== pending
           || !await this.typedInstallationCanActivate(installation)) return false;
         this.typedOperationalInstallations.add(installation);
+        this.cursorBoundaryAdmissions.delete(lease);
         return true;
       });
       if (!admitted) {
@@ -677,12 +778,17 @@ export class ProviderStreamCoordinator {
         })
       : () => {};
     if (!this.adoptLeaseDisposer(lease, disposeStream)) return;
+    // Consecutive ticks on which this lease's handle had ended while its room
+    // binding was intact, and the tick on which convergence is asked again.
+    let endedHandleTicks = 0;
+    let nextEndedHandleHandOff = 1;
     const heartbeat = this.setHeartbeat(() => {
       const heartbeatInstallation = this.currentInstallationForLease(lease);
       if (!heartbeatInstallation) return;
       const current = heartbeatInstallation.handle;
       this.track((async () => {
-        const manifestEntry = await this.options.manifest.getEntry(entryId);
+        // The heartbeat reads only scalar fields; it never needs the events.
+        const manifestEntry = await this.readScalarEntry(entryId);
         if (!manifestEntry || !this.entryMatchesInstallation(manifestEntry, heartbeatInstallation)
           || !this.isCurrentInstallation(heartbeatInstallation)) return;
         if (this.options.runtimeCustody.liveBinding(entryId)?.executionGenerationId
@@ -691,10 +797,23 @@ export class ProviderStreamCoordinator {
           && manifestEntry.observed_state === "recovering"
           && manifestEntry.condition === "coordination_blocked"
           && manifestEntry.last_error === "Provider is running; waiting for desktop credential handoff.";
-        if (!["working", "idle"].includes(manifestEntry.observed_state)
-          && !retriesCredentialHandoff) return;
-        if (!["working", "idle"].includes(current.observedState)) return;
-        if (manifestEntry.delivery_mode === "daemon_inbox"
+        const publishesLiveness = ["working", "idle"].includes(manifestEntry.observed_state)
+          || retriesCredentialHandoff;
+        // A recovering agent still holds its bound bearer. Keep renewing and
+        // rotating it, so a recovery that waits longer than the bearer lives
+        // cannot leave the agent with an expired credential and nothing to
+        // replace it. Liveness is published only once the agent is ready.
+        const custodyOnly = !publishesLiveness && manifestEntry.desired_state === "running"
+          && manifestEntry.observed_state === "recovering";
+        if (!publishesLiveness && !custodyOnly) return;
+        // A handle can report that it ended while its entry still says the
+        // agent is running: no process exits, and the fact that should mark
+        // the entry failed can be lost. Such an agent gets no liveness, but
+        // leaving here used to skip its credential checks too, so its bearer
+        // expired and nothing ever replaced the runtime.
+        const handleEnded = ["failed", "stopped"].includes(current.observedState);
+        if (!handleEnded && !["working", "idle"].includes(current.observedState)) return;
+        if (!handleEnded && manifestEntry.delivery_mode === "daemon_inbox"
           && ["working", "idle"].includes(manifestEntry.observed_state)
           && provider.probeControl) {
           try { await provider.probeControl(current); }
@@ -710,14 +829,27 @@ export class ProviderStreamCoordinator {
           this.options.heartbeat.requestConvergence(entryId);
           return;
         }
-        if (hostGrant) {
-          const binding = await this.options.bindings.get(entryId);
-          if (binding
-            && await this.options.heartbeat.hostWorkerBearerNeedsRotation(manifestEntry, binding)) {
-            this.options.heartbeat.requestConvergence(entryId);
-            return;
-          }
+        const binding = hostGrant || handleEnded ? await this.options.bindings.get(entryId) : null;
+        if (hostGrant && binding
+          && await this.options.heartbeat.hostWorkerBearerNeedsRotation(manifestEntry, binding)) {
+          this.options.heartbeat.requestConvergence(entryId);
+          return;
         }
+        if (handleEnded) {
+          // Convergence decides what replaces it; this tick only asks, and only
+          // for an agent that still has its room binding. Without one,
+          // convergence would mint a session on every tick for a runtime it
+          // never reaches, also after room access was ended on purpose.
+          if (!binding) { endedHandleTicks = 0; nextEndedHandleHandOff = 1; return; }
+          endedHandleTicks += 1;
+          if (endedHandleTicks < nextEndedHandleHandOff) return;
+          nextEndedHandleHandOff = endedHandleTicks + Math.min(endedHandleTicks, ENDED_HANDLE_HAND_OFF_MAX_GAP_TICKS);
+          this.options.heartbeat.requestConvergence(entryId);
+          return;
+        }
+        endedHandleTicks = 0;
+        nextEndedHandleHandOff = 1;
+        if (custodyOnly) return;
         const status = current.observedState === "idle" ? "idle" : "working";
         await this.options.publishNativeActivity(
           entryId,
@@ -798,6 +930,7 @@ export class ProviderStreamCoordinator {
       this.clearPendingTypedOperationalActivation(entry.id, priorPending);
     }
     if (frozenAuthorityMode === "typed" && entry.delivery_mode === "daemon_inbox") {
+      this.beginCursorTurnBoundary(lease, prior);
       this.typedDaemonInboxInstallations.add(installation);
       this.pendingTypedOperationalActivations.set(entry.id, {
         installation,
@@ -813,6 +946,9 @@ export class ProviderStreamCoordinator {
         retryTimer: null,
       });
       this.typedLifecycleAdmissionChanged(entry.id);
+    } else {
+      // The processless lane is settled again; its turn boundary is over.
+      this.cursorBoundaryAdmissions.delete(lease);
     }
     return installation;
   }
@@ -880,6 +1016,11 @@ export class ProviderStreamCoordinator {
       && entry.provider_ref.execution_generation_id === executionGenerationId
       && sameProviderActionConnectionSnapshot(entry.provider_ref.provider_connection, connection)
       && handle.appliedConfigurationRevision !== undefined;
+  }
+
+  /** The entry for a reader of scalar fields only; its activity is not the full window. */
+  private readScalarEntry(entryId: string): Promise<DaemonManifestEntry | undefined> {
+    return this.options.manifest.getScalarEntry?.(entryId) ?? this.options.manifest.getEntry(entryId);
   }
 
   private entryMatchesInstallation(
@@ -1145,6 +1286,34 @@ export class ProviderStreamCoordinator {
     return this.handleInstalled(installation, event);
   }
 
+  /**
+   * The status an early activity-line publication may report, or null when
+   * the heartbeat would not announce liveness now. Same conditions as the
+   * heartbeat: the exact current runtime and binding generation, an entry that
+   * is working or idle (never recovering), and no pending host-grant renewal
+   * or bearer rotation. A refused line stays pending for the next heartbeat.
+   */
+  private async activitySummaryPublicationStatus(
+    installation: ProviderInstallationToken,
+  ): Promise<"working" | "idle" | null> {
+    const { entryId, handle } = installation;
+    const entry = await this.readScalarEntry(entryId);
+    if (!entry || !this.entryMatchesInstallation(entry, installation)
+      || !this.isCurrentInstallation(installation)) return null;
+    if (this.options.runtimeCustody.liveBinding(entryId)?.executionGenerationId
+      !== entry.provider_ref?.execution_generation_id) return null;
+    if (entry.observed_state !== "working" && entry.observed_state !== "idle") return null;
+    const state = handle.observedState;
+    if (state !== "working" && state !== "idle") return null;
+    if (await this.options.heartbeat.requiresHostGrant(entry)) {
+      const hostGrant = this.options.heartbeat.currentHostGrant(entry);
+      if (hostGrant && this.options.heartbeat.hostGrantNeedsRenewal(hostGrant)) return null;
+      const binding = hostGrant ? await this.options.bindings.get(entryId) : null;
+      if (hostGrant && binding && await this.options.heartbeat.hostWorkerBearerNeedsRotation(entry, binding)) return null;
+    }
+    return this.isCurrentInstallation(installation) ? state : null;
+  }
+
   private async handleInstalled(
     sourceInstallation: ProviderInstallationToken,
     event: ProviderActionStreamEvent,
@@ -1155,7 +1324,7 @@ export class ProviderStreamCoordinator {
       return;
     }
     const { entryId, handle, executionGenerationId } = installation;
-    const entry = await this.options.manifest.getEntry(entryId);
+    const entry = await (this.options.manifest.getRecentEntry?.(entryId) ?? this.options.manifest.getEntry(entryId));
     const observedLifecycle = providerStreamLifecycle(event, entry?.delivery_mode === "daemon_inbox");
     if (!entry || !this.entryMatchesInstallation(entry, installation)
       || !this.isCurrentInstallation(installation)) {
@@ -1226,13 +1395,24 @@ export class ProviderStreamCoordinator {
       }
       for (const projected of display.project(sanitizedEvent, event.nativeLifecyclePhase)) {
         this.options.streams.push(entryId, projected);
+        turnStartLatency.observeOutput(entryId, projected.method, event.observedAt);
+        launchProgress.observeOutput(entryId, projected.method);
       }
       await this.options.serializeEntry(entryId, async () => {
         if (!this.isCurrentInstallation(installation)) return;
+        // Its position was read before this write was serialized; a notice may have taken it since.
         await this.options.appendNativeActivity(entryId, sanitizedEvent,
-          daemonInbox && this.typedDaemonInboxInstallations.has(installation));
+          daemonInbox && this.typedDaemonInboxInstallations.has(installation), "after_latest");
       });
       if (!this.isCurrentInstallation(installation)) return;
+    }
+    // The same line the owner's live strip shows, for the other room members.
+    // A turn that ends or waits for room messages has no line.
+    const activityLine = observedLifecycle === "terminal" || lifecycle === "failed" || quietlyPolling
+      ? null
+      : isHumanRoomActivityEvent(event) ? liveActivitySummaryForEvent(sanitizedEvent) : undefined;
+    if (activityLine !== undefined) {
+      this.options.observeActivitySummary?.(entryId, activityLine, () => this.activitySummaryPublicationStatus(installation));
     }
     const waitEvidence = (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
       && !custodialPolling
@@ -1500,10 +1680,25 @@ export class ProviderStreamCoordinator {
     await Promise.all([...this.callbacks]);
   }
 
-  async disposeAll(): Promise<void> {
+  async disposeAll(deadlineMs = STOP_CALLBACKS_DEADLINE_MS): Promise<void> {
     this.latestInstallations.clear();
     const failures = this.disposeEveryListener();
-    try { await this.drainCallbacks(); } catch (error) { failures.push(error); }
+    // Every callback is waited for, not only up to the first that fails: the
+    // stores close after this. A callback the stopping daemon's own fence
+    // refused has ended the way a fenced callback should; counting it as a
+    // failure made a stop give up with its socket and stores still open.
+    // The wait ends at the deadline, and what is still running is reported.
+    const running = [...this.callbacks];
+    const settled = Promise.all(running.map((callback) => callback.catch((reason: unknown) => {
+      if (!(reason instanceof DaemonFenceLostError)) failures.push(reason);
+    }))).then(() => true);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    const drained = await Promise.race([settled, new Promise<false>((resolve) => { deadline = setTimeout(() => resolve(false), deadlineMs); })]);
+    clearTimeout(deadline);
+    if (!drained) {
+      console.warn("[provider_stream_stop]", JSON.stringify({ deadline_ms: deadlineMs,
+        callbacks_still_running: running.filter((callback) => this.callbacks.has(callback)).length }));
+    }
     this.throwCleanupFailures(failures, "Provider stream disposal failed.");
   }
 

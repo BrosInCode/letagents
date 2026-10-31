@@ -5,6 +5,15 @@ import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ARCHITECTURES = ["arm64", "x64"];
+// Windows ships x64 only. The website lists it under `windows` beside the
+// macOS `assets`, so a reader that knows only `assets` keeps working.
+const WINDOWS_ARCHITECTURES = ["x64"];
+
+function installerFileName(version, platform, architecture) {
+  return platform === "win32"
+    ? `LetAgents-${version}-win32-${architecture}-setup.exe`
+    : `LetAgents-${version}-darwin-${architecture}.dmg`;
+}
 
 function assertVersion(version) {
   if (!/^\d+\.\d+\.\d+$/.test(version)) {
@@ -21,8 +30,8 @@ function normalizeBaseUrl(raw) {
   return parsed.toString().replace(/\/$/, "");
 }
 
-function assertAsset({ version, architecture, asset }) {
-  const expectedFileName = `LetAgents-${version}-darwin-${architecture}.dmg`;
+function assertAsset({ version, platform, architecture, asset }) {
+  const expectedFileName = installerFileName(version, platform, architecture);
   if (asset.fileName !== expectedFileName) {
     throw new Error(`Expected ${expectedFileName}; received ${asset.fileName}.`);
   }
@@ -34,35 +43,36 @@ function assertAsset({ version, architecture, asset }) {
   }
 }
 
-export function createPublicDesktopReleaseManifest({ version, baseUrl, assets }) {
+export function createPublicDesktopReleaseManifest({ version, baseUrl, assets, windows }) {
   const safeVersion = assertVersion(version);
   const safeBaseUrl = normalizeBaseUrl(baseUrl);
   const releaseBaseUrl = `${safeBaseUrl}/desktop/v${safeVersion}`;
-  const normalizedAssets = {};
-
-  for (const architecture of ARCHITECTURES) {
-    const asset = assets[architecture];
-    if (!asset) throw new Error(`Missing ${architecture} desktop installer.`);
-    assertAsset({ version: safeVersion, architecture, asset });
-    normalizedAssets[architecture] = {
+  const normalize = (platform, architectures, source) => Object.fromEntries(architectures.map((architecture) => {
+    const asset = source?.[architecture];
+    if (!asset) {
+      throw new Error(`Missing ${platform === "win32" ? "Windows " : ""}${architecture} desktop installer.`);
+    }
+    assertAsset({ version: safeVersion, platform, architecture, asset });
+    return [architecture, {
       fileName: asset.fileName,
       publicUrl: `${releaseBaseUrl}/${asset.fileName}`,
       bytes: asset.bytes,
       sha256: asset.sha256,
-    };
-  }
+    }];
+  }));
 
   return {
     schemaVersion: 1,
     channel: "beta",
     version: safeVersion,
     checksumsUrl: `${releaseBaseUrl}/checksums.txt`,
-    assets: normalizedAssets,
+    assets: normalize("darwin", ARCHITECTURES, assets),
+    windows: normalize("win32", WINDOWS_ARCHITECTURES, windows),
   };
 }
 
-async function installerAsset(artifactsDirectory, version, architecture) {
-  const fileName = `LetAgents-${version}-darwin-${architecture}.dmg`;
+async function installerAsset(artifactsDirectory, version, platform, architecture) {
+  const fileName = installerFileName(version, platform, architecture);
   const path = join(artifactsDirectory, fileName);
   const [metadata, sha256] = await Promise.all([
     stat(path),
@@ -86,14 +96,17 @@ export async function writePublicDesktopReleaseManifest({
   outputPath,
   checksumsPath,
 }) {
-  const assets = Object.fromEntries(await Promise.all(ARCHITECTURES.map(async (architecture) => [
+  const assetsFor = async (platform, architectures) => Object.fromEntries(await Promise.all(architectures.map(async (architecture) => [
     architecture,
-    await installerAsset(artifactsDirectory, version, architecture),
+    await installerAsset(artifactsDirectory, version, platform, architecture),
   ])));
-  const manifest = createPublicDesktopReleaseManifest({ version, baseUrl, assets });
+  const assets = await assetsFor("darwin", ARCHITECTURES);
+  const windows = await assetsFor("win32", WINDOWS_ARCHITECTURES);
+  const manifest = createPublicDesktopReleaseManifest({ version, baseUrl, assets, windows });
   const checksums = [
     `${assets.arm64.sha256}  ${assets.arm64.fileName}`,
     `${assets.x64.sha256}  ${assets.x64.fileName}`,
+    `${windows.x64.sha256}  ${windows.x64.fileName}`,
     "",
   ].join("\n");
   await Promise.all([

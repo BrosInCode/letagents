@@ -1,5 +1,14 @@
 import { registerConversationRoutingRoutes } from "../routes/rooms/conversation-routing.js";
+import { registerRoomTrackerFilterRoutes } from "../routes/rooms/tracker-filters.js";
+import { updateTaskLinkingTicket } from "../connectors/card-merge.js";
+import { getDefaultTrackerSync } from "../connectors/sync.js";
+import { registerTrackerWebhookRoutes } from "../routes/connectors/tracker-webhooks.js";
+import { registerRoomSettingsRoutes } from "../routes/rooms/settings.js";
+import { registerRoomHistorySummaryRoutes } from "../routes/rooms/history-summary.js";
+import { registerRoomNotificationPreferenceRoutes } from "../routes/rooms/notification-preferences.js";
+import { registerAgentAskRoutes } from "../routes/agent-asks.js";
 import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
+import { registerWakeRuleRoutes } from "../routes/rooms/wake-rules.js";
 import type { Express } from "express";
 
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
@@ -59,6 +68,15 @@ import {
 import { requireWorkerRequestAgentIdentity } from "../request/agent-identity.js";
 import { resolveRequestAuth } from "../request/auth.js";
 import { registerAccountRoomRoutes } from "../routes/account/rooms.js";
+import { registerAccountActivityStreamRoute } from "../routes/account/activity-stream.js";
+import { registerMyWorkRoute } from "../routes/account/my-work.js";
+import { registerConnectorRoutes } from "../routes/account/connectors/index.js";
+import { registerTrackerRuleRoutes } from "../routes/account/connectors/rules.js";
+import { registerJevMetricsRoute } from "../routes/account/connectors/jev-metrics.js";
+import { AccountActivityHub } from "../account-activity/hub.js";
+import { databaseAccountActivityLoaders } from "../account-activity/loaders.js";
+import { getAccountRoomsForAccount } from "../account-room-membership/list.js";
+import { presenceChangeEvents } from "./presence-change-events.js";
 import { registerAppLoginRoutes } from "../routes/auth/app-login.js";
 import { registerConversationRoutes } from "../routes/conversations.js";
 import {
@@ -152,6 +170,10 @@ import { registerExecutionApprovalPublicationRoutes } from "../routes/execution-
 import { registerCommandReviewRoutes } from "../routes/command-reviews.js";
 import { registerRoomAgentWorkRoutes } from "../routes/rooms/agent-work.js";
 import { registerWebRoutes } from "../routes/web/index.js";
+import { registerRemoteMcpRoutes } from "../routes/mcp/remote.js";
+import { registerMcpOAuthRoutes } from "../routes/mcp/oauth.js";
+import { RemoteMcpSessions } from "../remote-mcp/sessions.js";
+import { InProcessDispatcher } from "../remote-mcp/in-process-dispatch.js";
 import {
   createListing,
   updateListing,
@@ -173,6 +195,7 @@ import { provisionRentalRoomForProvider } from "../rental/room-projection.js";
 import { publicRentalProviders } from "../rental/provider-hosts.js";
 import { rentalActivityEvents } from "../rental/activity-emitter.js";
 import { handleGitHubWebhookEvent } from "../github/webhook-handler.js";
+import { replayStoredPullRequestMergeForTask } from "../github/room-event-projection/stored-merge-replay.js";
 import { ensureTaskGitRoomForActiveWorkLease } from "../github/task-git-room.js";
 import {
   artifactEvents,
@@ -181,8 +204,11 @@ import {
   executionDelegationEvents,
   githubRoomEvents,
   messageEvents,
+  messageReactionEvents,
+  messagePinEvents,
   reasoningEvents,
   taskEvents,
+  wakeRuleEvents,
   emitProjectMessage,
 } from "./events.js";
 import {
@@ -202,7 +228,6 @@ import {
   enforceTaskAdmissionPreconditions,
   enforceTaskCoordinationMutation,
   isTrustedAgentCreator,
-  maybeEmitStaleWorkPrompt,
   rememberAgentRoomParticipant,
   rememberHumanRoomParticipant,
   rememberRoomParticipantFromMessage,
@@ -211,6 +236,15 @@ import {
 
 let sharedRoomEventBroker: RoomEventBroker | null = null;
 let sharedRoomMessageOverlayBatcher: RoomMessageOverlayBatcher | null = null;
+let sharedAccountActivityHub: AccountActivityHub | null = null;
+
+function getAccountActivityHub(): AccountActivityHub {
+  if (!sharedAccountActivityHub) {
+    sharedAccountActivityHub = new AccountActivityHub(databaseAccountActivityLoaders);
+    sharedAccountActivityHub.attach({ presence: presenceChangeEvents, messages: messageEvents, tasks: taskEvents, github: githubRoomEvents });
+  }
+  return sharedAccountActivityHub;
+}
 
 function getRoomEventBroker(): RoomEventBroker {
   sharedRoomEventBroker ??= createRoomEventBroker({
@@ -222,19 +256,34 @@ function getRoomEventBroker(): RoomEventBroker {
     agentApprovalEvents,
     agentWorkEvents,
     executionDelegationEvents,
+    wakeRuleEvents,
+    messageReactionEvents,
+    messagePinEvents,
     rentalActivityEvents,
     messageInfoEvents,
     bridgeLossEvents: roomEventBridgeLossEvents,
   });
-  setRoomEventBridgeInterestPredicate((roomId) => sharedRoomEventBroker?.hasInterest(roomId) ?? false);
+  // The sidebar's activity stream needs a room's events too, even when no room stream is open on it here.
+  setRoomEventBridgeInterestPredicate((roomId) =>
+    (sharedRoomEventBroker?.hasInterest(roomId) ?? false) || (sharedAccountActivityHub?.watches(roomId) ?? false));
   return sharedRoomEventBroker;
 }
 
+let sharedRemoteMcpSessions: RemoteMcpSessions | null = null;
+
+export function remoteMcpSessionsForTest(): RemoteMcpSessions | null {
+  return sharedRemoteMcpSessions;
+}
+
 export function closeApiRouteEventBroker(): void {
+  sharedRemoteMcpSessions?.close();
+  sharedRemoteMcpSessions = null;
   sharedRoomEventBroker?.close();
   sharedRoomEventBroker = null;
   sharedRoomMessageOverlayBatcher?.close();
   sharedRoomMessageOverlayBatcher = null;
+  sharedAccountActivityHub?.close();
+  sharedAccountActivityHub = null;
   setRoomEventBridgeInterestPredicate(null);
 }
 
@@ -335,7 +384,6 @@ export function registerApiRoutes(app: Express): void {
     requireAdmin,
     requireParticipant,
     rememberAgentRoomParticipant,
-    maybeEmitStaleWorkPrompt,
     emitProjectMessage,
   } satisfies RoomPresenceRouteDeps;
 
@@ -374,6 +422,10 @@ export function registerApiRoutes(app: Express): void {
     getTaskById,
     getTaskOwnershipState,
     updateTask,
+    updateTaskLinkingTicket,
+    refreshLinkedTicket: async (roomId: string, externalRef: string) => {
+      await getDefaultTrackerSync()?.refreshLinkedCard(roomId, externalRef);
+    },
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireAdmin,
@@ -394,6 +446,7 @@ export function registerApiRoutes(app: Express): void {
     getGitRoomBindingForRoom,
     ensureTaskGitRoomForActiveWorkLease,
     emitProjectMessage,
+    replayStoredPullRequestMerge: replayStoredPullRequestMergeForTask,
   } satisfies RoomTaskRouteDeps;
 
   const roomEventRouteDeps = {
@@ -480,15 +533,26 @@ export function registerApiRoutes(app: Express): void {
   registerGitHubIntegrationSetupRoute(app, githubIntegrationRouteDeps);
 
   registerHealthRoutes(app);
+  // Remote MCP tool calls run this same app in process (no network, no token).
+  sharedRemoteMcpSessions?.close();
+  sharedRemoteMcpSessions = new RemoteMcpSessions({ dispatcher: new InProcessDispatcher(app) });
+  registerRemoteMcpRoutes(app, { sessions: sharedRemoteMcpSessions });
+  registerMcpOAuthRoutes(app);
 
   registerGitHubAppCallbackRoute(app);
 
   registerGitHubWebhookRoutes(app, githubWebhookRouteDeps);
+  registerTrackerWebhookRoutes(app);
 
   registerAuthRoutes(app);
   registerAppLoginRoutes(app);
   registerConversationRoutes(app);
   registerAccountRoomRoutes(app);
+  registerAccountActivityStreamRoute(app, { hub: getAccountActivityHub(), getAccountRoomsForAccount });
+  registerMyWorkRoute(app);
+  registerConnectorRoutes(app);
+  registerTrackerRuleRoutes(app);
+  registerJevMetricsRoute(app);
   registerDesktopPushRoutes(app);
 
   registerGitHubIntegrationRoutes(app, githubIntegrationRouteDeps);
@@ -502,6 +566,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomJoinRoutes(app, roomJoinRouteDeps);
   registerRoomMessageRoutes(app, roomMessageRouteDeps);
   registerRoomKnowledgeRoutes(app, roomMessageRouteDeps);
+  registerWakeRuleRoutes(app, roomMessageRouteDeps);
   registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
   registerSupervisorHostGrantRoutes(app, roomPresenceRouteDeps);
   registerExecutionDelegationRoutes(app, roomPresenceRouteDeps);
@@ -520,6 +585,11 @@ export function registerApiRoutes(app: Express): void {
   registerRoomArtifactRoutes(app, roomArtifactRouteDeps);
   registerRoomPullRequestDiffRoutes(app, roomPullRequestDiffRouteDeps);
   registerConversationRoutingRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
+  registerRoomTrackerFilterRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
+  registerRoomSettingsRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
+  registerRoomHistorySummaryRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
+  registerRoomNotificationPreferenceRoutes(app, roomMessageRouteDeps);
+  registerAgentAskRoutes(app, roomMessageRouteDeps);
   registerRoomMetadataRoutes(app, roomMetadataRouteDeps);
   registerRentalProviderRoutes(app, {
     createListing,

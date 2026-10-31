@@ -58,6 +58,11 @@ export function readableIntentAction(actionType: string): string {
   return actionType.replace(/^task_/, "").replaceAll("_", " ");
 }
 
+/**
+ * Presence arrives in last-activity order, which changes on every room
+ * refresh. The picker orders by name so rows never move under the cursor,
+ * even when the manager changes; the Current badge marks the manager.
+ */
 export function liveManagerCandidates(
   governance: DesktopBoardGovernanceSnapshot,
   liveAgents: DesktopAgentPresence[]
@@ -80,7 +85,11 @@ export function liveManagerCandidates(
           || governance.activeManager?.agentSessionId === agentSessionId
           || false,
       };
-    });
+    })
+    .sort((left, right) =>
+      managerCandidateName(left).localeCompare(managerCandidateName(right))
+      || left.agentSessionId.localeCompare(right.agentSessionId)
+    );
 }
 
 export function managerCandidateName(candidate: LiveManagerCandidate): string {
@@ -139,7 +148,13 @@ function payloadText(intent: DesktopBoardIntentSummary, key: string): string | n
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+/** An actor label reads "Name | owner | runtime"; requests name the agent only. */
+function payloadActorName(intent: DesktopBoardIntentSummary, key: string): string | null {
+  return payloadText(intent, key)?.split("|")[0]?.trim() || null;
+}
+
 export function readableIntentTitle(intent: DesktopBoardIntentSummary): string {
+  if (intent.actionType === "tracker_jev_link") return "Ticket change after a Jev link";
   return intent.actionType === "task_create"
     ? "Create task"
     : readableIntentAction(intent.actionType);
@@ -153,7 +168,7 @@ export function readableIntentBody(intent: DesktopBoardIntentSummary): string {
   }
   const taskId = payloadText(intent, "task_id") || intent.taskId || "task";
   const status = payloadText(intent, "status");
-  const assignee = payloadText(intent, "assignee");
+  const assignee = payloadActorName(intent, "assignee");
   const prUrl = payloadText(intent, "pr_url");
   if (intent.actionType === "task_claim") {
     return assignee ? `Assign ${taskId} to ${assignee}` : `Claim ${taskId}`;
@@ -165,11 +180,26 @@ export function readableIntentBody(intent: DesktopBoardIntentSummary): string {
   if (intent.actionType === "task_update") {
     return status ? `Update ${taskId} to ${status}` : `Update ${taskId}`;
   }
+  if (intent.actionType === "tracker_jev_link") {
+    // Ticket connectors PR6: the server wrote the summary ("Move HT-1234 to In Review?").
+    const summary = payloadText(intent, "summary");
+    const number = typeof intent.payload.pr_number === "number" ? `#${intent.payload.pr_number}` : "a pull request";
+    const ref = payloadText(intent, "external_ref") ?? taskId;
+    // The approver sees every comment the change will post, word for word.
+    const comments = (Array.isArray(intent.payload.planned_actions) ? intent.payload.planned_actions : [])
+      .flatMap((action) => {
+        const entry = action as { kind?: unknown; body?: unknown };
+        return entry.kind === "tracker_comment" && typeof entry.body === "string" ? [entry.body] : [];
+      });
+    const commentText = comments.length ? ` Comment: ${comments.map((body) => JSON.stringify(body)).join("; ")}.` : "";
+    return `${summary ?? `Change ${ref}?`} Jev linked pull request ${number} to ${ref}.${commentText} Approving confirms the link and runs the change; denying removes a link nobody accepted.`;
+  }
   if (intent.actionType === "task_override") {
     const action = payloadText(intent, "action");
-    const target = payloadText(intent, "target_actor_key");
+    const target = payloadActorName(intent, "target_actor_key");
     if (action === "handoff") return target ? `Hand off ${taskId} to ${target}` : `Hand off ${taskId}`;
     if (action === "release") return `Release work on ${taskId}`;
+    if (status === "accepted") return `Move ${taskId} to accepted`;
     return `Change work assignment for ${taskId}`;
   }
   return "Review the requested board change.";
@@ -179,14 +209,45 @@ export function approveIntentLabel(intent: DesktopBoardIntentSummary): string {
   return intent.actionType === "task_create" ? "Create task" : "Approve";
 }
 
+/** A denial reason is optional; blank input sends none rather than "". */
+export function denyIntentReason(value: string): string | null {
+  return value.trim() || null;
+}
+
+const TRACKER_RULE_OUTCOMES: Record<string, string> = {
+  pending: "writing to the tracker",
+  succeeded: "done",
+  failed: "failed",
+  quarantined: "held for a person",
+  error: "not written",
+  skipped: "skipped",
+};
+
+function auditMetadataText(entry: DesktopBoardGovernanceAuditEntry, key: string): string | null {
+  const value = entry.metadata?.[key];
+  return typeof value === "string" && value ? value : null;
+}
+
 export function readableAuditEvent(entry: DesktopBoardGovernanceAuditEntry): string {
+  if (entry.kind === "tracker_rule_run") {
+    return `Rule "${auditMetadataText(entry, "rule_name") ?? "rule"}" ran`;
+  }
   return entry.eventType === "board_intent_task_created"
     ? "Task created"
     : entry.eventType.replaceAll("_", " ");
 }
 
+/** A tracker rule run: the repo event, the card and its ticket, and the outcome. */
 export function auditResultText(entry: DesktopBoardGovernanceAuditEntry): string | null {
   const taskId = entry.metadata?.task_id;
+  if (entry.kind === "tracker_rule_run") {
+    const event = [auditMetadataText(entry, "event_type")?.replaceAll("_", " "), auditMetadataText(entry, "event_action")]
+      .filter(Boolean).join(" ");
+    const card = [typeof taskId === "string" ? taskId : null, auditMetadataText(entry, "external_ref")]
+      .filter(Boolean).join(" · ");
+    const outcome = auditMetadataText(entry, "outcome");
+    return `On ${event || "a repo event"} for ${card || "a card"}: ${TRACKER_RULE_OUTCOMES[outcome ?? ""] ?? outcome ?? "unknown"}.`;
+  }
   return entry.eventType === "board_intent_task_created" && typeof taskId === "string"
     ? `Created ${taskId}`
     : null;

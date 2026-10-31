@@ -6,7 +6,7 @@
     @signIn="handleSignIn"
   />
 
-  <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :style="roomViewportStyle">
+  <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :data-keyboard-open="keyboardOpen" :data-compact-composer="compactComposer" :style="roomViewportStyle" @focusin="syncRoomViewport">
     <!-- Drawer -->
     <RoomDrawer
       :open="drawerOpen"
@@ -20,6 +20,7 @@
     />
 
     <RoomHeader
+      ref="roomHeader"
       :title="roomTitle"
       :subtitle="roomSubtitle"
       :activeTab="activeTab"
@@ -58,7 +59,9 @@
       :tabTransitionName="tabTransitionName"
       :messages="messages"
       :messagesHasOlder="messagesHasOlder"
+      :messagesLoaded="messagesLoaded"
       :isLoadingOlderMessages="isLoadingOlderMessages"
+        :olderMessagesError="olderMessagesError"
       :tasks="tasks"
       :focusRooms="focusRooms"
       :presence="presence"
@@ -96,7 +99,10 @@
       :loadActivityHistory="loadActivityHistory"
       :clearDisconnectedParticipants="clearDisconnectedParticipants"
       @loadOlder="loadOlderMessages"
+      @refreshGitHubEvents="refreshRoomGitHubEvents()"
+      @loadOlderGitHubEvents="loadOlderGitHubEvents"
       @reply="selectedReply = $event"
+      @thread-messages="threadImageMessages = $event"
       @openImageViewer="openImageViewer"
       @toggleStalePromptMute="handleToggleStalePromptMute"
       @addTask="handleAddTask"
@@ -113,19 +119,34 @@
       @retryCreatedRoom="retryCreatedRoom"
       @shareResults="handleShareFocusResults"
       @updateFocusSettings="handleUpdateFocusSettings"
-    />
+      @openChat="handleActiveTabChange('chat')"
+    >
+      <template #thread-composer="{ parent, quote, clearQuote, sent }">
+        <Composer v-if="isConnected" :inline-thread="true" :thread-root-id="parent.id" :sender-name="senderName"
+          :room-identifier="room?.identifier || ''" :attachments-enabled="room?.attachmentsEnabled !== false"
+          :submit-message="(text, kind, reply, files) => handleThreadSend(parent.id, text, kind, reply, files, sent)"
+          :stage-attachment-draft="stageAttachmentUpload" :discard-attachment-draft="discardAttachmentUpload"
+          :reply-to="quote" :messages="messages" :presence="presence" :participants="participants"
+          :refresh-reachability="refreshRoomReachability" :is-signed-in="auth.isSignedIn.value"
+          @clear-reply="clearQuote" @sign-in="handleSignIn" />
+      </template>
+    </RoomTabPanels>
 
     <Composer
       v-if="activeTab === 'chat' && isConnected"
+      v-show="!hideMainComposer"
       :senderName="senderName"
       :roomIdentifier="room?.identifier || ''"
       :attachmentsEnabled="room?.attachmentsEnabled !== false"
       :submitMessage="handleSend"
+      :createTask="addTask"
+      :openSearch="openComposerSearch"
       :stageAttachmentDraft="stageAttachmentUpload"
       :discardAttachmentDraft="discardAttachmentUpload"
       :replyTo="selectedReply"
       :messages="messages"
       :presence="presence"
+      :presenceReady="presenceLoaded"
       :participants="participants"
       :refreshReachability="refreshRoomReachability"
       :isSignedIn="auth.isSignedIn.value"
@@ -144,6 +165,7 @@
 
     <RoomMobileNav
       v-if="isConnected"
+      v-show="!keyboardOpen"
       :activeTab="activeTab"
       :showEventsTab="githubEventsSupported"
       @update:activeTab="handleActiveTabChange"
@@ -152,10 +174,15 @@
 </template>
 
 <script setup lang="ts">
+import { provideRoomMessageMotion } from "../../../../shared/ui/useRoomMessageMotion";
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
+import { getGitHubSupportIdentifier } from '@/composables/room/data'
+import { provideRoomMessageLinkPreviews, useRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
+import { provideRoomMessagePins, useRoomMessagePins } from '@/composables/roomMessagePins'
+import { provideRoomMessageReactions, useRoomMessageReactions } from '@/composables/roomMessageReactions'
 import RoomHeader from '@/components/room/RoomHeader.vue'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
@@ -171,8 +198,12 @@ import { useFocusRoomNavigation } from './room/useFocusRoomNavigation'
 import { useRoomImages } from './room/useRoomImages'
 import { useRoomPresentation } from './room/useRoomPresentation'
 import { useRoomTabs } from './room/useRoomTabs'
+import { useRoomViewport } from './room/useRoomViewport'
 import { useRoomTaskHandlers } from './room/useRoomTaskHandlers'
 import { useToast } from '@/composables/useToast'
+import { isValidMessageId } from '@/domain/roomRoutes'
+import { apiFetch, roomPath } from '@/composables/room/api'
+import { isVisibleRoomMessage } from '@/composables/room/identity'
 import type {
   OutgoingMessageAttachment,
   RoomMessage,
@@ -183,10 +214,13 @@ const router = useRouter()
 const {
   messages,
   messagesHasOlder,
+  messagesLoaded,
   isLoadingOlderMessages,
+  olderMessagesError,
   tasks,
   focusRooms,
   presence,
+  presenceLoaded,
   boardHandoffPresence,
   participants,
   reasoningSessions,
@@ -233,9 +267,15 @@ const {
   refreshRoomBoard,
   refreshRoomFocusRooms,
   refreshRoomGitHubEvents,
+  loadOlderGitHubEvents,
 } = useRoom()
 const auth = useAuth()
 const toast = useToast()
+provideRoomMessagePins(useRoomMessagePins(computed(() => room.value?.identifier || ''), (message) => toast.error(message)))
+provideRoomMessageReactions(useRoomMessageReactions(
+  computed(() => room.value?.identifier || ''),
+  (message) => toast.error(message),
+))
 const roomSessionValidated = ref(false)
 const roomAuthLifecycleReady = ref(false)
 
@@ -248,33 +288,19 @@ const roomAccessState = computed(() => resolveRoomAccessState({
 const drawerOpen = ref(false)
 const rulesBoardOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
-const roomViewportStyle = ref<Record<string, string>>({})
-const compactViewport = ref(false)
-
-function syncRoomViewport() {
-  const viewport = window.visualViewport
-  // The software keyboard can resize only the visual viewport. Keep the
-  // composer above it without reflowing the room during pinch-to-zoom.
-  if (!viewport || viewport.scale !== 1) return
-  compactViewport.value = viewport.height < 360
-  roomViewportStyle.value = {
-    '--room-viewport-height': `${viewport.height}px`,
-    '--room-viewport-top': `${viewport.offsetTop}px`,
-  }
-}
-
-onMounted(() => {
-  syncRoomViewport()
-  window.visualViewport?.addEventListener('resize', syncRoomViewport)
-  window.visualViewport?.addEventListener('scroll', syncRoomViewport)
-})
+const { roomViewportStyle, compactViewport, keyboardOpen, compactComposer, hideMainComposer, syncRoomViewport, resetComposerFocus } = useRoomViewport()
 
 onUnmounted(() => {
-  window.visualViewport?.removeEventListener('resize', syncRoomViewport)
-  window.visualViewport?.removeEventListener('scroll', syncRoomViewport)
+  messagePermalinkRequestId += 1
 })
 
 const searchQuery = ref('')
+const roomHeader = ref<InstanceType<typeof RoomHeader> | null>(null)
+function openComposerSearch(query: string): boolean {
+  if (!roomHeader.value?.openSearch()) return false
+  searchQuery.value = query
+  return true
+}
 const roomTabPanelsRef = ref<InstanceType<typeof RoomTabPanels> | null>(null)
 const selectedReply = ref<RoomMessage | null>(null)
 const selectedBoardTaskId = computed(() => {
@@ -294,6 +320,10 @@ const {
   githubEventsSupported,
   isConnected,
 })
+watch([activeTab, () => room.value?.identifier], resetComposerFocus)
+const threadImageMessages = ref<RoomMessage[]>([])
+watch(() => room.value?.identifier, () => { threadImageMessages.value = [] })
+const imageMessages = computed(() => [...new Map([...threadImageMessages.value, ...messages.value].map(message => [message.id, message])).values()])
 const {
   activeImageId,
   roomImages,
@@ -301,7 +331,7 @@ const {
   closeImageViewer,
   showNextImage,
   showPreviousImage,
-} = useRoomImages(messages)
+} = useRoomImages(imageMessages)
 
 const matchCount = computed(() => roomTabPanelsRef.value?.matchCount ?? 0)
 
@@ -338,6 +368,7 @@ const {
   connectionState,
   authUser: auth.user,
 })
+provideRoomMessageLinkPreviews(useRoomMessageLinkPreviews(computed(() => room.value?.identifier || ''), computed(() => getGitHubSupportIdentifier(room.value))))
 const {
   focusDraftTaskId,
   creatingFocusRoomTaskId,
@@ -387,6 +418,8 @@ function openRulesFromDrawer() {
   rulesBoardOpen.value = true
 }
 
+const messageMotion = provideRoomMessageMotion(() => room.value?.identifier)
+
 async function handleSend(
   text: string,
   agentPromptKind: string | null,
@@ -397,13 +430,23 @@ async function handleSend(
   // thread; replying to a top-level message stays a quote-reply by design.
   const replyTarget = replyTo && selectedReply.value?.id === replyTo ? selectedReply.value : null
   const threadRootId = replyTarget ? messageThreadParentId(replyTarget) : null
-  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo, attachments, threadRootId)
+  const sent = await sendMessage(text, senderName.value, agentPromptKind, replyTo, attachments, threadRootId, messageMotion.confirmation(text))
   if (sent) {
     selectedReply.value = null
     return true
   }
   toast.error(lastSendError.value || 'Message could not be sent.')
   return false
+}
+
+async function handleThreadSend(rootId: string, text: string, kind: string | null,
+  replyTo: string | null, attachments: OutgoingMessageAttachment[] = [], complete: (quoteId: string | null) => void): Promise<boolean> {
+  const sendingRoom = room.value
+  const sent = await sendMessage(text, senderName.value, kind, replyTo || rootId, attachments, rootId)
+  if (room.value !== sendingRoom) return sent
+  if (sent) complete(replyTo)
+  else toast.error(lastSendError.value || 'Reply could not be sent.')
+  return sent
 }
 
 async function handleRename() {
@@ -509,6 +552,54 @@ watch(activeTab, async (tab) => {
   }
 })
 
+let messagePermalinkRequestId = 0
+
+async function handleMessagePermalink(messageId: string) {
+  if (!isValidMessageId(messageId)) return
+  const currentRoomId = room.value?.identifier
+  const routeRoomId = route.params.roomId
+  if (!currentRoomId || (room.value?.requestedIdentifier ?? currentRoomId) !== routeRoomId
+    || route.query.message !== messageId) return
+  const requestId = ++messagePermalinkRequestId
+
+  let preflightNotFound = false
+  try {
+    const response = await apiFetch(`${roomPath(currentRoomId)}/messages/${encodeURIComponent(messageId)}`)
+    const targetMessage = (response?.message ?? response) as RoomMessage | null
+    if (!targetMessage || !isVisibleRoomMessage(targetMessage)) {
+      preflightNotFound = true
+    }
+  } catch (error: any) {
+    if (error?.status === 404) {
+      preflightNotFound = true
+    }
+  }
+
+  if (requestId !== messagePermalinkRequestId
+    || room.value?.identifier !== currentRoomId
+    || route.params.roomId !== routeRoomId
+    || route.query.message !== messageId) return
+
+  if (preflightNotFound) {
+    toast.info('That message is not available.')
+    void router.replace({ query: { ...route.query, message: undefined } })
+    return
+  }
+
+  setActiveTab('chat')
+  roomTabPanelsRef.value?.openMessageInChat(messageId)
+  void router.replace({ query: { ...route.query, message: undefined } })
+}
+
+watch(
+  [() => route.query.message, isConnected, messagesLoaded, () => route.params.roomId],
+  ([messageQuery, connected, loaded]) => {
+    messagePermalinkRequestId += 1
+    if (!connected || !loaded || typeof messageQuery !== 'string' || !isValidMessageId(messageQuery)) return
+    void handleMessagePermalink(messageQuery)
+  },
+  { immediate: true, flush: 'sync' },
+)
 </script>
 
 <style scoped>
@@ -525,8 +616,33 @@ watch(activeTab, async (tab) => {
   color: var(--text, #fafafa);
 }
 
-.room-shell[data-compact-viewport="true"] :deep(.chat-header) { height: 44px; }
+.room-shell[data-compact-viewport="true"] :deep(.chat-header) { min-height: 44px; padding-block: 0; }
 .room-shell[data-compact-viewport="true"] :deep(.chat-title p) { display: none; }
 .room-shell[data-compact-viewport="true"] :deep(.mobile-bottom-nav) { height: calc(48px + env(safe-area-inset-bottom, 0px)); }
+
+/* A landscape software keyboard can leave only 98px for the draft and send row. */
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] { grid-template-rows: 0 minmax(0, 1fr) auto; }
+/* Keep search focusable: /search or Find restores the header through focusin. */
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.chat-header) { height: 0; min-height: 0; padding: 0; border: 0; overflow: hidden; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.room-live-strip),
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.room-history-search),
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.message-pin-rail),
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.presence-chips) { display: none; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.composer) { max-height: var(--room-viewport-height); }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] > :deep(.composer) { padding-block: 2px; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] > :deep(.composer .composer-card) { padding-block: 2px; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.inline-thread-footer) { padding-top: 0; border-top: 0; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.inline-thread-composer) { padding: 0; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.message-textarea) { max-height: min(80px, max(44px, calc(var(--room-viewport-height) - 54px))); }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.composer-toolbar) { margin-top: 0; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.messages) { padding-block: 4px; mask-image: none; animation: none; }
+
+@media (max-width: 980px), (pointer: coarse) {
+  .room-shell[data-theme] > :deep(.composer:not(.inline-thread-composer)),
+  .room-shell[data-theme] :deep(.messages) {
+    padding-left: max(12px, env(safe-area-inset-left, 0px));
+    padding-right: max(12px, env(safe-area-inset-right, 0px));
+  }
+}
 
 </style>

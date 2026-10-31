@@ -1,3 +1,4 @@
+import { ROOM_TYPING, parseTypingSignal } from "../../../../shared/room-typing.mjs";
 import { createBoundedExecutor } from "../../bounded-async.js";
 import { getBridgedEmitter } from "../bridged-emitter.js";
 import {
@@ -41,6 +42,14 @@ export async function dispatchBridgeNotification(
   isCurrent: () => boolean = () => true,
 ): Promise<void> {
   if (!isCurrent()) return;
+  if (envelope.lane === ROOM_TYPING) {
+    const signal = parseTypingSignal(envelope.data);
+    if (envelope.v === 1 && envelope.origin !== instanceId && envelope.mode === "inline"
+      && envelope.event === ROOM_TYPING && signal && signal.expires_at > Date.now()) {
+      getBridgedEmitter(ROOM_TYPING)?.emitLocal(ROOM_TYPING, signal);
+    }
+    return;
+  }
   if (envelope.origin === instanceId) {
     return;
   }

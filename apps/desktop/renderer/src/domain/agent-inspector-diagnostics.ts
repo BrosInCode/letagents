@@ -6,6 +6,9 @@ export const AGENT_INSPECTOR_DIAGNOSTICS_EVENT_LIMIT = 24;
 export const AGENT_INSPECTOR_DIAGNOSTICS_REPORT_LIMIT = 32_000;
 
 const STRING_LIMIT = 240;
+// Startup failures carry a bounded observation tail that the Now card leaves
+// out. Diagnostics is where that text stays readable in full.
+const RETAINED_ERROR_LIMIT = 1_000;
 const PAYLOAD_PREVIEW_LIMIT = 800;
 const DEPTH_LIMIT = 4;
 const NODE_LIMIT = 48;
@@ -119,7 +122,7 @@ function sanitizeEncodedJson(text: string, context: SanitizeContext): string {
   }
 }
 
-function safeText(value: unknown, context: SanitizeContext): string {
+function safeText(value: unknown, context: SanitizeContext, limit = STRING_LIMIT): string {
   let text = typeof value === "string" ? value : String(value ?? "");
   text = sanitizeEncodedJson(text, context);
   text = redactMatches(text, PRIVATE_KEY_BLOCK, context);
@@ -129,7 +132,7 @@ function safeText(value: unknown, context: SanitizeContext): string {
   text = redactMatches(text, URL_USERINFO, context, (_match, protocol) => `${protocol}[REDACTED]@`);
   text = redactMatches(text, PROVIDER_TOKEN, context);
   text = redactMatches(text, JWT, context);
-  if (text.length > STRING_LIMIT) { context.truncated = true; return `${text.slice(0, STRING_LIMIT)}…`; }
+  if (text.length > limit) { context.truncated = true; return `${text.slice(0, limit)}…`; }
   return text;
 }
 
@@ -185,7 +188,7 @@ function stableProjection(entry: DesktopSupervisorManifestEntry): Omit<AgentInsp
   return {
     identity: { entryId: safeText(entry.id, context), roomId: safeText(entry.roomId, context), agentKey: entry.agentKey ? safeText(entry.agentKey, context) : null, provider: safeText(entry.provider, context), model: entry.model ? safeText(entry.model, context) : null, createdAt: safeText(entry.createdAt, context) },
     runtime: { desiredState: entry.desiredState, observedState: entry.observedState, bindingState: entry.agentSessionBindingState, providerPid: entry.providerPid, executionGenerationId: entry.executionGenerationId ? safeText(entry.executionGenerationId, context) : null, restartCount: entry.restartCount, workplaceLiveness: entry.workplaceLiveness.state, nativeLiveness: entry.nativeLiveness.state },
-    recovery: { condition: entry.condition, lastError: entry.lastError ? safeText(entry.lastError, context) : null, connection: room?.connection.state ?? null, ingress: room?.ingress.state ?? null, inbox: room?.inbox.state ?? null, turn: room?.turn.state ?? null, turnControl: entry.turnControl?.status ?? null },
+    recovery: { condition: entry.condition, lastError: entry.lastError ? safeText(entry.lastError, context, RETAINED_ERROR_LIMIT) : null, connection: room?.connection.state ?? null, ingress: room?.ingress.state ?? null, inbox: room?.inbox.state ?? null, turn: room?.turn.state ?? null, turnControl: entry.turnControl?.status ?? null },
   };
 }
 

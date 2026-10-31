@@ -8,6 +8,7 @@ import { parseScopedId } from "../../../db/utils.js";
 import { resolveParticipantRoom, routeParam } from "./helpers.js";
 import { requireWorkerRequestAgentIdentity } from "../../../request/agent-identity.js";
 import { queueMessageInfoInvalidation } from "../../../server/message-info-events.js";
+import { finishReplyTurnsTx, queueReplyTurnWakes, type ReleasedReplyTurn } from "../../../db/messages/reply-turns.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import type { RoomMessageRouteDeps } from "./types.js";
 
@@ -44,8 +45,13 @@ export function registerAgentReceiptsRoute(
       return;
     }
 
-    const { receipt_state } = req.body || {};
-    if (!receipt_state) {
+    const { receipt_state, yield_reply_turn } = req.body || {};
+    const yieldTurn = yield_reply_turn === true;
+    if (yield_reply_turn !== undefined && (!yieldTurn || receipt_state !== undefined)) {
+      res.status(400).json({ error: "yield_reply_turn must be true and cannot change receipt_state" });
+      return;
+    }
+    if (!yieldTurn && !receipt_state) {
       res.status(400).json({ error: "Missing required receipt_state parameter" });
       return;
     }
@@ -63,7 +69,7 @@ export function registerAgentReceiptsRoute(
       "cancelled",
     ];
 
-    if (!validStates.includes(receipt_state)) {
+    if (!yieldTurn && !validStates.includes(receipt_state)) {
       res.status(400).json({ error: "Invalid receipt_state" });
       return;
     }
@@ -90,6 +96,23 @@ export function registerAgentReceiptsRoute(
       return;
     }
 
+    if (yieldTurn) {
+      if (existingReceipt.turn_position === null) {
+        res.status(409).json({ error: "This receipt has no reserved reply turn" });
+        return;
+      }
+      // Relinquish only the scheduling position, never the work or its state.
+      // A delayed request may arrive after manual Retry starts a model: this
+      // monotonic yield must not overwrite responding/replied with blocked.
+      const released = await db.transaction(tx => finishReplyTurnsTx(tx, project.id, [{
+        message_number: messageNumber, agent_key: existingReceipt.agent_key,
+      }]));
+      queueReplyTurnWakes(released);
+      queueMessageInfoInvalidation(project.id, null);
+      res.json({ success: true, receipt_id: existingReceipt.id, reply_turn_yielded: true });
+      return;
+    }
+
     const fromState = existingReceipt.receipt_state;
     if (fromState === requestedState) {
       // Idempotent replay: no state change, no duplicate history event.
@@ -112,6 +135,7 @@ export function registerAgentReceiptsRoute(
     // Compare-and-set against the observed state, with the history event in
     // the same transaction: a racing writer loses cleanly instead of silently
     // regressing the receipt or splitting state from its event.
+    const releasedReplyTurns: ReleasedReplyTurn[] = [];
     const applied = await db.transaction(async (tx) => {
       const updated = await tx
         .update(message_agent_receipts)
@@ -137,8 +161,17 @@ export function registerAgentReceiptsRoute(
         actor_session_id: agentSessionId,
         timestamp,
       });
+      // An agent that reports no reply (or cancels) has ended its reply turn;
+      // the next position need not wait out its deadline.
+      if (existingReceipt.turn_position !== null && (requestedState === "no_reply" || requestedState === "cancelled")) {
+        releasedReplyTurns.push(...await finishReplyTurnsTx(tx, project.id, [{
+          message_number: messageNumber,
+          agent_key: existingReceipt.agent_key,
+        }]));
+      }
       return true;
     });
+    queueReplyTurnWakes(releasedReplyTurns);
 
     if (!applied) {
       res.status(409).json({ error: "Receipt state changed concurrently; re-read and retry." });
@@ -168,7 +201,9 @@ const RECEIPT_STATE_TRANSITIONS: Record<string, readonly string[]> = {
   retrying: ["responding", "blocked", "no_reply", "replied", "cancelled"],
   blocked: ["responding", "retrying", "no_reply", "replied", "cancelled"],
   no_reply: ["replied"],
-  unavailable: ["responding", "replied"],
+  // A successor may recover a completed silent turn as well as a reply.
+  // Requiring a fabricated responding step would misreport saved completion.
+  unavailable: ["responding", "replied", "no_reply"],
   replied: [],
   cancelled: [],
 };

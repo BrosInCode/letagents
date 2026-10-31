@@ -4,6 +4,7 @@ import type { Project } from "../../db.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 import { PullRequestDiffCache } from "./pull-request-diff-cache.js";
+import type { PullRequestUnifiedDiff } from "../../github/pull-request-diff.js";
 
 export interface RoomPullRequestDiffRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
@@ -41,14 +42,15 @@ export interface RoomPullRequestDiffRouteDeps {
     repo: string;
     number: number;
     installationId: string;
-  }): Promise<{ diff: string; headSha: string }>;
+    includeFiles?: boolean;
+  }): Promise<PullRequestUnifiedDiff>;
 }
 
 // Keyed by repo identity + installation + PR + head SHA (written only after auth).
 const diffCache = new PullRequestDiffCache();
 // Coalesce concurrent misses per repo+PR+expected-SHA so we mint a token / fetch once,
 // and a post-force-push request (different SHA) never joins an older in-flight fetch.
-const inFlight = new Map<string, Promise<{ diff: string; headSha: string }>>();
+const inFlight = new Map<string, Promise<PullRequestUnifiedDiff>>();
 
 function repoPrIdentity(
   repository: { host?: string | null; owner_login: string; repo_name: string; installation_id: string },
@@ -78,7 +80,8 @@ export function registerRoomPullRequestDiffRoutes(
     const params = req.params as Record<string, string>;
     const rawId = decodeURIComponent(params[0] ?? "");
     const number = Number.parseInt(params[1] ?? "", 10);
-    if (!Number.isInteger(number) || number <= 0) {
+    const includeFiles = req.query?.include_files === "1";
+    if (!Number.isSafeInteger(number) || number <= 0) {
       res.status(400).json({ error: "Invalid pull request number." });
       return;
     }
@@ -97,21 +100,21 @@ export function registerRoomPullRequestDiffRoutes(
     const repoRoomId = project.parent_room_id ?? project.id;
     const repository = await deps.getGitHubAppRepositoryByRoomId(repoRoomId);
     if (!repository) {
-      res.status(404).json({ error: "This room is not connected to a GitHub App repository." });
+      res.status(404).json({ error: "This room is not connected to a GitHub App repository.", ...(includeFiles ? { code: "not_connected" } : {}) });
       return;
     }
 
     // (4) Reject a removed repository before minting a token, even if the
     //     installation itself is still active.
     if (repository.removed_at) {
-      res.status(409).json({ error: "This repository connection has been removed." });
+      res.status(409).json({ error: "This repository connection has been removed.", ...(includeFiles ? { code: "installation_inactive" } : {}) });
       return;
     }
 
     // (c) Require an active (non-suspended, non-uninstalled) App installation.
     const installation = await deps.getGitHubAppInstallationById(repository.installation_id);
     if (!installation || installation.suspended_at || installation.uninstalled_at) {
-      res.status(409).json({ error: "The GitHub App installation for this repository is not active." });
+      res.status(409).json({ error: "The GitHub App installation for this repository is not active.", ...(includeFiles ? { code: "installation_inactive" } : {}) });
       return;
     }
 
@@ -125,23 +128,27 @@ export function registerRoomPullRequestDiffRoutes(
     });
     const eventHeadSha = events[0]?.head_sha ?? null;
     if (!eventHeadSha) {
-      res.status(404).json({ error: "No pull request with that number is associated with this room." });
+      res.status(404).json({ error: "No pull request with that number is associated with this room.", ...(includeFiles ? { code: "not_associated" } : {}) });
       return;
     }
 
     // (e) Cache read happens only after authorization, keyed by identity + the
     //     room event's head SHA. A force-push advances that SHA, so the old key misses.
     const cacheKey = `${repoPrIdentity(repository, number)}@${eventHeadSha}`;
+    const githubUrl = `https://github.com/${encodeURIComponent(repository.owner_login)}/${encodeURIComponent(repository.repo_name)}/pull/${number}/files`;
     const cached = diffCache.get(cacheKey);
-    if (cached !== null) {
-      res.json({ number, head_sha: eventHeadSha, diff: cached, cached: true });
+    const cachedFiles = includeFiles ? diffCache.getFileList(cacheKey) : undefined;
+    if (cached !== null && (!includeFiles || cachedFiles !== undefined)) {
+      res.json({ number, head_sha: eventHeadSha, diff: cached, cached: true,
+        ...(includeFiles ? { file_list: cachedFiles, github_url: githubUrl } : {}) });
       return;
     }
 
     // (5) Single-flight keyed by identity + expected event SHA so concurrent misses
     //     coalesce onto one fetch, while a post-force-push request (new SHA → new key)
     //     never joins an older in-flight fetch. (3) Only this producer writes the cache.
-    let pending = inFlight.get(cacheKey);
+    const flightKey = `${cacheKey}${includeFiles ? "#files" : ""}`;
+    let pending = inFlight.get(flightKey);
     if (!pending) {
       pending = (async () => {
         const result = await deps.fetchPullRequestUnifiedDiff({
@@ -149,6 +156,7 @@ export function registerRoomPullRequestDiffRoutes(
           repo: repository.repo_name,
           number,
           installationId: repository.installation_id,
+          ...(includeFiles ? { includeFiles: true } : {}),
         });
         // (2) The fetched head SHA must match the room event's; otherwise the room's
         //     view is stale (force-push) — fail closed without caching.
@@ -157,15 +165,15 @@ export function registerRoomPullRequestDiffRoutes(
             code: "sha_mismatch",
           });
         }
-        diffCache.set(cacheKey, result.diff);
+        diffCache.set(cacheKey, result.diff, includeFiles ? result.fileList ?? null : undefined);
         return result;
       })().finally(() => {
-        inFlight.delete(cacheKey);
+        inFlight.delete(flightKey);
       });
-      inFlight.set(cacheKey, pending);
+      inFlight.set(flightKey, pending);
     }
 
-    let result: { diff: string; headSha: string };
+    let result: PullRequestUnifiedDiff;
     try {
       result = await pending;
     } catch (error) {
@@ -176,7 +184,8 @@ export function registerRoomPullRequestDiffRoutes(
       return;
     }
 
-    res.json({ number, head_sha: result.headSha, diff: result.diff, cached: false });
+    res.json({ number, head_sha: result.headSha, diff: result.diff, cached: false,
+      ...(includeFiles ? { file_list: result.fileList ?? null, github_url: githubUrl } : {}) });
   });
 }
 

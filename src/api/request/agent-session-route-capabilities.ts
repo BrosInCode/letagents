@@ -8,27 +8,58 @@ import type { AgentSessionBearerCapability } from "../../shared/agent-session-be
 // old single-segment `[^/]+` every worker call in a Git room failed 403.
 const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSessionBearerCapability }> = [
   { method: "GET", path: /^\/rooms\/.+\/(?:memory|attention|memory\/[^/]+\/history)$/, capability: "coordination.read" },
+  { method: "GET", path: /^\/rooms\/.+\/(?:expressions|gif-client-config)$/, capability: "coordination.read" },
+  // The room history summary is a view of messages: an agent that may read messages may read it.
+  { method: "GET", path: /^\/rooms\/.+\/history-summary(?:\/setting|\/nodes\/\d{1,2}:\d{1,9})?$/, capability: "messages.read" },
+  { method: "PUT", path: /^\/rooms\/.+\/messages\/msg_\d+\/reactions\/[^/]+$/, capability: "messages.write" },
+  { method: "DELETE", path: /^\/rooms\/.+\/messages\/msg_\d+\/reactions\/[^/]+$/, capability: "messages.write" },
+  { method: "GET", path: /^\/rooms\/.+\/agent-guidelines$/, capability: "coordination.read" },
+  { method: "GET", path: /^\/rooms\/.+\/wake-rules$/, capability: "coordination.read" },
+  { method: "POST", path: /^\/rooms\/.+\/wake-rules(?:\/[^/]+\/(?:cancel|restore))?$/, capability: "coordination.self_write" },
   { method: "POST", path: /^\/rooms\/.+\/(?:memory|attention)$/, capability: "coordination.propose" },
   { method: "GET", path: /^\/rooms\/.+\/messages$/, capability: "messages.read" },
   { method: "GET", path: /^\/rooms\/.+\/messages\/(?:poll|stream|threads|msg_\d+|msg_\d+\/thread|msg_\d+\/info)$/, capability: "messages.read" },
+  // The daemon downloads images on the message that wakes its agent; the route redirects to object storage.
+  { method: "GET", path: /^\/rooms\/.+\/messages\/msg_\d+\/attachments\/att_\d+$/, capability: "messages.read" },
   { method: "PUT", path: /^\/rooms\/.+\/messages\/read$/, capability: "messages.read" },
   { method: "POST", path: /^\/rooms\/.+\/messages$/, capability: "messages.write" },
+  // A supervised agent's reply can carry files: the daemon stages each one first.
+  { method: "POST", path: /^\/rooms\/.+\/attachments\/uploads$/, capability: "messages.write" },
+  { method: "DELETE", path: /^\/rooms\/.+\/attachments\/uploads\/[^/]+$/, capability: "messages.write" },
   { method: "GET", path: /^\/rooms\/.+\/artifacts$/, capability: "artifacts.read" },
   { method: "GET", path: /^\/rooms\/.+\/(?:presence|participants|activity-history|reasoning|reasoning-sessions|reasoning-sessions\/[^/]+|tasks|tasks\/github-status|tasks\/[^/]+|board-governance|board-settings|board-intents|artifacts)$/, capability: "coordination.read" },
   { method: "POST", path: /^\/rooms\/.+\/(?:presence|reasoning-sessions|reasoning-sessions\/[^/]+\/updates|agent-sessions\/[^/]+\/(?:disconnect|failures|desktop-heartbeat|native-activity|desktop-pause)|tasks\/[^/]+\/(?:lease-action|review-lease-action|review-verdict))$/, capability: "coordination.self_write" },
   { method: "PUT", path: /^\/rooms\/.+\/(?:agents\/self\/observation|messages\/msg_\d+\/agent-receipts\/self)$/, capability: "coordination.self_write" },
   { method: "PATCH", path: /^\/rooms\/.+\/(?:reasoning-sessions\/[^/]+|tasks\/[^/]+)$/, capability: "coordination.self_write" },
+  { method: "DELETE", path: /^\/rooms\/.+\/live-activity$/, capability: "coordination.self_write" },
   { method: "POST", path: /^\/rooms\/.+\/(?:tasks|board-intents)$/, capability: "coordination.propose" },
   { method: "POST", path: /^\/rooms\/.+\/board-intents\/[^/]+\/(?:approve|deny)$/, capability: "coordination.self_write" },
   { method: "POST", path: /^\/rooms\/.+\/artifacts$/, capability: "artifacts.self_write" },
+  // A given agent reads the asker's code and proposes changes through LetAgents (Ask for an agent).
+  { method: "POST", path: /^\/rooms\/.+\/agent-ask-workspace\/(?:files|read|search)$/, capability: "coordination.read" },
+  { method: "POST", path: /^\/rooms\/.+\/agent-ask-workspace\/proposals$/, capability: "coordination.propose" },
 ];
+
+// What a given agent may do while it waits for the asker to accept it: stay connected, nothing else.
+const WHILE_WAITING_FOR_ASKER: ReadonlyArray<{ method: string; path: RegExp }> = [
+  { method: "POST", path: /^\/rooms\/.+\/(?:presence|agent-sessions\/[^/]+\/(?:disconnect|failures|desktop-heartbeat|native-activity|desktop-pause))$/ },
+  { method: "PUT", path: /^\/rooms\/.+\/agents\/self\/observation$/ },
+  { method: "DELETE", path: /^\/rooms\/.+\/live-activity$/ },
+];
+
+// The host may keep a waiting agent's grant and worker session alive, but not publish for it.
+const GRANT_WHILE_WAITING_FOR_ASKER = /^\/supervisor-host-grants\/[^/]+\/(?:renew|handoff|worker-sessions|worker-sessions\/[^/]+\/(?:rotate|end))$/;
+
+export function isGrantRouteAllowedWhileWaitingForAsker(method: string, path: string): boolean {
+  return method.toUpperCase() === "POST" && GRANT_WHILE_WAITING_FOR_ASKER.test(path);
+}
+
+export function isAllowedWhileWaitingForAsker(method: string, path: string): boolean {
+  const normalized = path.replace(/^\/api(?=\/rooms\/)/, "");
+  return WHILE_WAITING_FOR_ASKER.some((route) => route.method === method.toUpperCase() && route.path.test(normalized));
+}
 
 export function requiredAgentSessionRouteCapability(method: string, path: string): AgentSessionBearerCapability | null {
   const normalized = path.replace(/^\/api(?=\/rooms\/)/, "");
   return ROUTES.find((route) => route.method === method.toUpperCase() && route.path.test(normalized))?.capability ?? null;
-}
-
-export function hasRequiredAgentSessionRouteCapability(input: { method: string; path: string; capabilities: readonly AgentSessionBearerCapability[] }): boolean {
-  const required = requiredAgentSessionRouteCapability(input.method, input.path);
-  return Boolean(required && input.capabilities.includes(required));
 }

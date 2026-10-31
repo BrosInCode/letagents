@@ -40,7 +40,7 @@ export function buildCheckRunPayload(input: {
 }
 
 export function buildPullRequestPayload(input: {
-  action?: "opened" | "closed";
+  action?: "opened" | "closed" | "ready_for_review" | "reopened";
   number: number;
   title: string;
   body: string;
@@ -50,6 +50,9 @@ export function buildPullRequestPayload(input: {
   actor?: string;
   merged?: boolean;
   mergedBy?: string;
+  draft?: boolean;
+  /** Full name of the repository the head branch lives in, as a branch room needs. */
+  headRepository?: string;
 }) {
   return {
     action: input.action ?? "opened",
@@ -63,11 +66,48 @@ export function buildPullRequestPayload(input: {
       head: {
         ref: input.branchRef,
         sha: input.sha,
+        ...(input.headRepository ? { repo: { full_name: input.headRepository } } : {}),
       },
       merged: input.merged ?? false,
       merged_by: input.mergedBy ? { login: input.mergedBy } : undefined,
+      ...(input.draft ? { draft: true } : {}),
       user: { login: "octocat" },
     },
+  };
+}
+
+export function buildPullRequestParticipantPayload(input: {
+  action: "review_requested" | "review_request_removed" | "assigned" | "unassigned";
+  number: number;
+  title: string;
+  body: string;
+  url: string;
+  branchRef: string;
+  sha: string;
+  actor?: string;
+  requestedReviewer?: { login: string; id?: number };
+  requestedTeam?: { slug: string; name?: string };
+  assignee?: { login: string; id?: number };
+  /** Full name of the head repository. A different name makes a fork pull request. */
+  headRepository?: string;
+}) {
+  const base = buildPullRequestPayload({
+    number: input.number,
+    title: input.title,
+    body: input.body,
+    url: input.url,
+    branchRef: input.branchRef,
+    sha: input.sha,
+    actor: input.actor,
+    headRepository: input.headRepository,
+  });
+  return {
+    ...base,
+    action: input.action,
+    sender: { login: input.actor ?? "octocat" },
+    ...(input.requestedReviewer ? { requested_reviewer: input.requestedReviewer } : {}),
+    ...(input.requestedTeam ? { requested_team: input.requestedTeam } : {}),
+    ...(input.assignee ? { assignee: input.assignee } : {}),
   };
 }
 
@@ -80,6 +120,7 @@ export function buildPullRequestReviewPayload(input: {
   sha: string;
   reviewId: number;
   reviewState: string;
+  reviewBody?: string;
   actor?: string;
 }) {
   return {
@@ -100,6 +141,8 @@ export function buildPullRequestReviewPayload(input: {
       id: input.reviewId,
       state: input.reviewState,
       html_url: `${input.url}#pullrequestreview-${input.reviewId}`,
+      body: input.reviewBody ?? null,
+      user: { login: input.actor ?? "reviewer" },
     },
   };
 }

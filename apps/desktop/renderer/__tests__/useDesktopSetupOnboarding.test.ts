@@ -34,6 +34,7 @@ interface SetupStateInput {
   authStatus?: DesktopAuthStatus | null;
   mcpInstallState?: DesktopMcpInstallState | null;
   pickResult?: DesktopRepoRoomSelection;
+  pickError?: Error;
   pinnedRoomIdentifier?: string;
   repoStatus?: RepoStatus | null;
   openRoomSnapshot?: OpenRoomSnapshot;
@@ -105,6 +106,30 @@ test("pickRepoRoom reports success and opens the selected repo room", async () =
     meta: "codex/desktop-codex-room-agents",
   });
   assert.equal(state.authFeedback.value, null);
+});
+
+test("pickRepoRoom shows a missing Git as a step to take, not Electron's raw spawn error", async () => {
+  const state = makeSetupState({
+    pickError: new Error("Error invoking remote method 'desktop:repos:pick-room': Error: spawn git ENOENT"),
+  });
+
+  const didOpen = await withDesktopBridge(state.windowBridge, () => state.onboarding.pickRepoRoom());
+
+  assert.equal(didOpen, false);
+  assert.match(state.authFeedback.value ?? "", /^Git is not installed or not found\. Install Git/);
+  assert.doesNotMatch(state.authFeedback.value ?? "", /Error invoking remote method|ENOENT/);
+  assert.equal(state.loading.value, false);
+});
+
+test("pickRepoRoom shows the main process's own message without Electron's prefix", async () => {
+  const message = "Git is not installed or not found. Install Git for Windows from https://git-scm.com/download/win, then try again.";
+  const state = makeSetupState({
+    pickError: new Error(`Error invoking remote method 'desktop:repos:pick-room': Error: ${message}`),
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.pickRepoRoom());
+
+  assert.equal(state.authFeedback.value, message);
 });
 
 test("pickRepoRoom reports false when the picker is canceled", async () => {
@@ -1003,7 +1028,10 @@ function makeSetupState(input: SetupStateInput = {}) {
           getStatus: async () => authStatus.value ?? authStatusFixture(),
         },
         repos: {
-          pickRoom: async () => input.pickResult ?? canceledPickResult(),
+          pickRoom: async () => {
+            if (input.pickError) throw input.pickError;
+            return input.pickResult ?? canceledPickResult();
+          },
         },
         room: input.roomBridge ?? {},
         setup: input.setupBridge ?? {},

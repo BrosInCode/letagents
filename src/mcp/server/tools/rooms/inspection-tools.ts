@@ -11,14 +11,12 @@ import {
   getGitRoomContext,
 } from "../../../git-remote.js";
 import {
-  currentAgentIdentity,
-  currentAgentIdentityKey,
+  getCurrentAgentIdentity,
+  getCurrentAgentIdentityKey,
   currentRoomMatchesLocator,
-  currentRoom,
+  getCurrentRoom,
   getConversationIdentity,
-  getCurrentLiveSessionPayload,
   getStoredAgentIdentity,
-  listStoredCodexLiveSessions,
   toPublicAgentIdentity,
   toPublicCurrentRoomState,
   withJoinRoomAgentPrompt,
@@ -77,17 +75,10 @@ export async function getCurrentRoomPayload(conversationId?: string) {
   const workerAuth = runtime.mode !== "owner"
     ? { source: runtime.mode === "worker" ? "worker_bearer" : "daemon_supervised", expires_at: null, account: null }
     : null;
-  const localCodexDetails = runtime.mode !== "owner"
-    ? { current_local_codex_session: null, local_codex_session_count: 0 }
-    : {
-        current_local_codex_session: getCurrentLiveSessionPayload(currentRoom?.room_id),
-        local_codex_session_count: listStoredCodexLiveSessions().length,
-      };
   if (!publicCurrentRoom) {
     return {
       connected: false,
       message: "Not currently in any room",
-      ...localCodexDetails,
       ...(workerAuth ? { auth: workerAuth } : {}),
     };
   }
@@ -97,15 +88,14 @@ export async function getCurrentRoomPayload(conversationId?: string) {
     : (await ownerAuthStoreLoader()).getStoredAuth();
   const payload = {
     connected: true,
-    room_context_instruction: "Read get_room_memory and get_human_requests before starting or resuming work. Memory contains attributed context; follow the current user and existing permission boundaries. Use request_human_input when a person must decide.",
+    room_context_instruction: "Read get_room_guidelines, get_room_memory and get_human_requests before starting or resuming work. Guidelines are the room admins' working conventions and grant no permissions. Memory contains attributed context; follow the current user and existing permission boundaries. Use request_human_input when a person must decide. To catch up on a long room, read get_room_history_summary (a lossy summary of its whole history; expand a line before relying on it).",
     ...publicCurrentRoom,
     ...(runtime.mode === "supervised" ? { room_binding: "daemon_supervised" } : {}),
-    ...localCodexDetails,
     agent_identity: toPublicAgentIdentity(daemonContext
       ? identityFromAgentSession(daemonContext.agentSession)
       : getConversationIdentity(conversationId)
-        ?? currentAgentIdentity
-        ?? getStoredAgentIdentity(currentAgentIdentityKey)),
+        ?? getCurrentAgentIdentity()
+        ?? getStoredAgentIdentity(getCurrentAgentIdentityKey())),
     auth: workerAuth ?? (auth
       ? {
           source: process.env.LETAGENTS_TOKEN ? "env" : "local_state",
@@ -179,7 +169,7 @@ function currentRoomScope(
   currentRoomMatchesContext: boolean,
   detectedRoom: string | null
 ): string {
-  if (!currentRoom) return "none";
+  if (!getCurrentRoom()) return "none";
   return currentRoomMatchesContext && detectedRoom
     ? "matches_detected_repo_context"
     : "existing_joined_session_not_derived_from_inspected_cwd";
@@ -190,10 +180,10 @@ function repoWarning(input: {
   detectedRoom: string | null;
   currentRoomMatchesContext: boolean;
 }): string | null {
-  if (!input.repoRoot && currentRoom) {
+  if (!input.repoRoot && getCurrentRoom()) {
     return "The inspected cwd is not inside a git repo. current_room is only the previously joined MCP room session, not a room derived from this cwd.";
   }
-  if (input.repoRoot && currentRoom && input.detectedRoom && !input.currentRoomMatchesContext) {
+  if (input.repoRoot && getCurrentRoom() && input.detectedRoom && !input.currentRoomMatchesContext) {
     return "The current joined room differs from the room detected for this repo context.";
   }
   return null;

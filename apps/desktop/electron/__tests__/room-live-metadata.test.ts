@@ -1,3 +1,4 @@
+import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 
@@ -298,4 +299,10 @@ test("emptyRoomLiveMetadata returns all-ready empty poll-only sections", () => {
     Object.values(metadata.sourceStates).map((state) => state.status),
     ["ready", "ready", "ready", "ready", "ready"],
   );
+});
+
+test('history retains durable agent identity after its live presence is gone', async () => {
+  const { mapRecentActivity } = await import('../main/rooms/snapshot/mappers.js');
+  const mapped = mapRecentActivity({ entries: [{ id: 'past', participant: { kind: 'agent', display_name: 'Past Owl', actor_label: 'Old display label', agent_key: 'emmy/durable-owl', activity_state: 'offline' }, last_room_activity_at: '2026-10-10T12:00:00Z', current_tasks: [], completed_tasks: [] }] });
+  assert.equal(mapped[0].participantAgentKey, 'emmy/durable-owl');
 });

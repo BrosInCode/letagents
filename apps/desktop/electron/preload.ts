@@ -1,3 +1,4 @@
+import type { RoomGif, RoomExpressionsSetting } from "../../../shared/room-expressions.mjs";
 import { contextBridge, ipcRenderer } from "electron";
 import type { DesktopApi } from "./ipc-types.js";
 
@@ -30,6 +31,12 @@ const api: DesktopApi = {
   },
   notifications: {
     getStatus: () => ipcRenderer.invoke("desktop:notifications:get-status"),
+    setBadgeCount: (count) => ipcRenderer.invoke("desktop:notifications:set-badge-count", count),
+    onReceived: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, target: Parameters<typeof callback>[0]) => callback(target);
+      ipcRenderer.on("desktop:notifications:received", listener);
+      return () => ipcRenderer.off("desktop:notifications:received", listener);
+    },
     setEnabled: (enabled) => ipcRenderer.invoke("desktop:notifications:set-enabled", enabled),
     takePendingActivation: () => ipcRenderer.invoke("desktop:notifications:take-pending-activation"),
     onActivated: (callback) => {
@@ -82,8 +89,14 @@ const api: DesktopApi = {
     saveSettings: (input) =>
       ipcRenderer.invoke("desktop:open-model:save-settings", input),
   },
+  agentCommitIdentity: {
+    getSettings: () => ipcRenderer.invoke("desktop:agent-commit-identity:get-settings"),
+    setUseHostGitIdentity: (useHostGitIdentity: boolean) =>
+      ipcRenderer.invoke("desktop:agent-commit-identity:set-use-host-git-identity", useHostGitIdentity),
+  },
   room: {
     getNeedsYou: (includeUpdates = false) => ipcRenderer.invoke("desktop:room:needs-you", includeUpdates),
+    getNeedsYouRoom: (room, includeBoardIntents) => ipcRenderer.invoke("desktop:room:needs-you-room", room, includeBoardIntents),
     getKnowledge: (room, type) => ipcRenderer.invoke("desktop:room:knowledge", room, type),
     createKnowledge: (room, type, input) => ipcRenderer.invoke("desktop:room:knowledge-create", room, type, input),
     reviseKnowledge: (room, type, id, input) => ipcRenderer.invoke("desktop:room:knowledge-revise", room, type, id, input),
@@ -106,6 +119,7 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:get-message", roomIdentifier, messageId),
     getMessageInfo: (roomIdentifier: string, messageId: string) =>
       ipcRenderer.invoke("desktop:room:get-message-info", roomIdentifier, messageId),
+    getMessagesAfter: (roomIdentifier, afterMessageId) => ipcRenderer.invoke("desktop:room:get-messages-after", roomIdentifier, afterMessageId),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),
     getThreads: (roomIdentifier: string, filter = "all", beforeMessageId?: string | null, limit?: number) =>
@@ -116,9 +130,13 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:mark-thread-read", roomIdentifier, threadRootId, messageId ?? null),
     getReasoningSession: (roomIdentifier: string, sessionId: string) =>
       ipcRenderer.invoke("desktop:room:get-reasoning-session", roomIdentifier, sessionId),
-    pickAttachments: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:pick-attachments", roomIdentifier),
+    chooseAttachments: (limit: number) => ipcRenderer.invoke("desktop:room:choose-attachments", limit),
+    stageChosenAttachments: (roomIdentifier: string, tokens: string[]) =>
+      ipcRenderer.invoke("desktop:room:stage-chosen-attachments", roomIdentifier, tokens),
     stageDroppedAttachmentContents: (roomIdentifier, files) =>
       ipcRenderer.invoke("desktop:room:stage-dropped-attachment-contents", roomIdentifier, files),
+    openHtmlDemo: (href: string, fileName: string, senderLabel?: string | null) =>
+      ipcRenderer.invoke("desktop:room:open-html-demo", href, fileName, senderLabel ?? null),
     discardAttachment: (roomIdentifier: string, uploadId: string) =>
       ipcRenderer.invoke("desktop:room:discard-attachment", roomIdentifier, uploadId),
     startStream: (roomIdentifier: string, afterMessageId?: string | null) =>
@@ -141,12 +159,31 @@ const api: DesktopApi = {
       threadRootId?: string | null,
       clientMessageId?: string | null,
       messageNamespace?: string | null,
+      gif?: RoomGif | null,
     ) =>
-      ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? [], threadRootId ?? null, clientMessageId ?? null, messageNamespace ?? null),
+      ipcRenderer.invoke("desktop:room:send-message", roomIdentifier, text, replyTo ?? null, attachments ?? [], threadRootId ?? null, clientMessageId ?? null, messageNamespace ?? null, gif ?? null),
     addTask: (roomIdentifier: string, input) =>
       ipcRenderer.invoke("desktop:room:add-task", roomIdentifier, input),
     updateTask: (roomIdentifier: string, taskId: string, updates) =>
       ipcRenderer.invoke("desktop:room:update-task", roomIdentifier, taskId, updates),
+    getTaskMentions: (roomIdentifier: string, taskId: string) =>
+      ipcRenderer.invoke("desktop:room:get-task-mentions", roomIdentifier, taskId),
+    getTaskTicket: (roomIdentifier: string, taskId: string) =>
+      ipcRenderer.invoke("desktop:room:get-task-ticket", roomIdentifier, taskId),
+    getMyWork: (query) => ipcRenderer.invoke("desktop:room:my-work", query ?? {}),
+    askMyWorkNeedsMe: (roomId, taskId) => ipcRenderer.invoke("desktop:room:my-work-needs-me", roomId, taskId),
+    decideTaskJevLink: (roomIdentifier, taskId, prUrl, decision) =>
+      ipcRenderer.invoke("desktop:room:decide-task-jev-link", roomIdentifier, taskId, prUrl, decision),
+    listTrackerFilters: (roomIdentifier: string) =>
+      ipcRenderer.invoke("desktop:room:list-tracker-filters", roomIdentifier),
+    saveTrackerFilter: (roomIdentifier: string, input) =>
+      ipcRenderer.invoke("desktop:room:save-tracker-filter", roomIdentifier, input),
+    setTrackerFilterEnabled: (roomIdentifier: string, id: string, enabled: boolean) =>
+      ipcRenderer.invoke("desktop:room:set-tracker-filter-enabled", roomIdentifier, id, enabled),
+    removeTrackerFilter: (roomIdentifier: string, id: string) =>
+      ipcRenderer.invoke("desktop:room:remove-tracker-filter", roomIdentifier, id),
+    testTrackerFilter: (roomIdentifier: string, input) =>
+      ipcRenderer.invoke("desktop:room:test-tracker-filter", roomIdentifier, input),
     updateTaskLease: (roomIdentifier: string, taskId: string, input) =>
       ipcRenderer.invoke("desktop:room:update-task-lease", roomIdentifier, taskId, input),
     updateTaskReviewLease: (roomIdentifier: string, taskId: string, input) =>
@@ -170,7 +207,48 @@ const api: DesktopApi = {
     createAdHocFocusRoom: (roomIdentifier: string, title: string) =>
       ipcRenderer.invoke("desktop:room:create-ad-hoc-focus-room", roomIdentifier, title),
     getConversationRouting: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-conversation-routing", roomIdentifier),
+    getAccountActivity: () => ipcRenderer.invoke("desktop:room:get-account-activity"),
+    restartAccountActivity: () => ipcRenderer.invoke("desktop:room:restart-account-activity"),
+    stopAccountActivity: () => ipcRenderer.invoke("desktop:room:stop-account-activity"),
+    onAccountActivity: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:account-activity:changed", listener);
+      return () => {
+        ipcRenderer.off("desktop:account-activity:changed", listener);
+      };
+    },
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-conversation-routing", roomIdentifier, enabled),
+    getExpressions: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-expressions", roomIdentifier),
+    setExpressions: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-expressions", roomIdentifier, enabled),
+    getHistorySummarySetting: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-history-summary-setting", roomIdentifier),
+    setHistorySummarySetting: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-history-summary-setting", roomIdentifier, enabled),
+    searchGifs: (roomIdentifier: string, query: string, offset?: number) => ipcRenderer.invoke("desktop:room:search-gifs", roomIdentifier, query, offset),
+    resolveGif: (roomIdentifier: string, id: string) => ipcRenderer.invoke("desktop:room:resolve-gif", roomIdentifier, id),
+    getReplyOrder: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-reply-order", roomIdentifier),
+    setReplyOrder: (roomIdentifier: string, enabled: boolean) => ipcRenderer.invoke("desktop:room:set-reply-order", roomIdentifier, enabled),
+    getMessageLinkPreviews: (roomIdentifier, references) => ipcRenderer.invoke("desktop:room:get-message-link-previews", roomIdentifier, references),
+    getMessagePins: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-message-pins", roomIdentifier),
+    createMessageReminder: (room: string, message: string, dueAt: string) => ipcRenderer.invoke("desktop:room:create-message-reminder", room, message, dueAt),
+    getMessageReminders: (offset?: number) => ipcRenderer.invoke("desktop:room:get-message-reminders", offset),
+    deleteMessageReminder: (id: string) => ipcRenderer.invoke("desktop:room:delete-message-reminder", id),
+    setMessagePin: (roomIdentifier: string, messageId: string, pinned: boolean) => ipcRenderer.invoke("desktop:room:set-message-pin", roomIdentifier, messageId, pinned),
+    reportTyping: (roomIdentifier, input) => ipcRenderer.invoke("desktop:room:report-typing", roomIdentifier, input),
+    getMessageReactions: (roomIdentifier: string, firstMessageId: string, lastMessageId: string) =>
+      ipcRenderer.invoke("desktop:room:get-message-reactions", roomIdentifier, firstMessageId, lastMessageId),
+    setMessageReaction: (roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) =>
+      ipcRenderer.invoke("desktop:room:set-message-reaction", roomIdentifier, messageId, emoji, reacted),
+    searchMessages: (roomIdentifier: string, query: string, beforeMessageId?: string | null) =>
+      ipcRenderer.invoke("desktop:room:search-messages", roomIdentifier, query, beforeMessageId),
+    getGitHubEventFilter: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-github-event-filter", roomIdentifier),
+    setGitHubEventFilter: (roomIdentifier: string, enabledKinds: string[]) => ipcRenderer.invoke("desktop:room:set-github-event-filter", roomIdentifier, enabledKinds),
+    getAgentGuidelines: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-agent-guidelines", roomIdentifier),
+    listNotificationPreferences: () => ipcRenderer.invoke("desktop:room:list-notification-preferences"),
+    getNotificationPreference: (identifier: string) => ipcRenderer.invoke("desktop:room:get-notification-preference", identifier),
+    setNotificationPreference: (identifier: string, change: import("../../../shared/room-notification-preferences.mjs").RoomNotificationPreferenceChange) => ipcRenderer.invoke("desktop:room:set-notification-preference", identifier, change),
+    setAgentGuidelines: (roomIdentifier: string, guidelines: string) => ipcRenderer.invoke("desktop:room:set-agent-guidelines", roomIdentifier, guidelines),
+    getWakeRules: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-wake-rules", roomIdentifier),
+    cancelWakeRule: (roomIdentifier: string, ruleId: string) => ipcRenderer.invoke("desktop:room:cancel-wake-rule", roomIdentifier, ruleId),
+    restoreWakeRule: (roomIdentifier: string, ruleId: string) => ipcRenderer.invoke("desktop:room:restore-wake-rule", roomIdentifier, ruleId),
     updateFocusRoomSettings: (roomIdentifier: string, focusKey: string, settings) =>
       ipcRenderer.invoke("desktop:room:update-focus-room-settings", roomIdentifier, focusKey, settings),
     concludeFocusRoom: (roomIdentifier: string, focusKey: string, summary: string, details, quickClose) =>
@@ -187,6 +265,8 @@ const api: DesktopApi = {
     rename: (roomIdentifier: string, displayName: string) =>
       ipcRenderer.invoke("desktop:room:rename", roomIdentifier, displayName),
     createInviteRoom: () => ipcRenderer.invoke("desktop:room:create-invite-room"),
+    getPullRequestDiff: (roomIdentifier: string, number: number) =>
+      ipcRenderer.invoke("desktop:room:get-pull-request-diff", roomIdentifier, number),
     getGitHubEvents: (roomIdentifier: string, query = {}) =>
       ipcRenderer.invoke("desktop:room:get-github-events", roomIdentifier, query),
     getArtifacts: (roomIdentifier: string) =>
@@ -211,6 +291,25 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:chat-storage:publish-local-room", roomIdentifier),
     syncLocalRoom: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:chat-storage:sync-local-room", roomIdentifier),
+  },
+  asks: {
+    listModels: () => ipcRenderer.invoke("desktop:asks:list-models"),
+    create: (input) => ipcRenderer.invoke("desktop:asks:create", input),
+    listRoom: (roomId) => ipcRenderer.invoke("desktop:asks:list-room", roomId),
+    listMine: () => ipcRenderer.invoke("desktop:asks:list-mine"),
+    act: (askId, action) => ipcRenderer.invoke("desktop:asks:act", askId, action),
+    preview: (token) => ipcRenderer.invoke("desktop:asks:preview", token),
+    workspace: (askId) => ipcRenderer.invoke("desktop:asks:workspace", askId),
+    decide: (askId, proposalId, approve) => ipcRenderer.invoke("desktop:asks:decide", askId, proposalId, approve),
+    canGive: (providerId) => ipcRenderer.invoke("desktop:asks:can-give", providerId),
+    give: (input) => ipcRenderer.invoke("desktop:asks:give", input),
+    cantHelp: (token) => ipcRenderer.invoke("desktop:asks:cant-help", token),
+    takePendingLink: () => ipcRenderer.invoke("desktop:asks:take-pending-link"),
+    onOpenLink: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, token: string) => callback(token);
+      ipcRenderer.on("desktop:asks:open-link", listener);
+      return () => ipcRenderer.off("desktop:asks:open-link", listener);
+    },
   },
   rental: {
     getMarketplace: () => ipcRenderer.invoke("desktop:rental:get-marketplace"),
@@ -260,6 +359,32 @@ const api: DesktopApi = {
     openVerification: (url: string) => ipcRenderer.invoke("desktop:auth:open-verification", url),
     signOut: () => ipcRenderer.invoke("desktop:auth:sign-out"),
   },
+  connectors: {
+    list: () => ipcRenderer.invoke("desktop:connectors:list"),
+    connectOAuth: (provider) => ipcRenderer.invoke("desktop:connectors:connect-oauth", provider),
+    cancelOAuth: () => ipcRenderer.invoke("desktop:connectors:cancel-oauth"),
+    saveApiToken: (input) => ipcRenderer.invoke("desktop:connectors:save-api-token", input),
+    connectGitHub: (repository) => ipcRenderer.invoke("desktop:connectors:connect-github", repository),
+    test: (id) => ipcRenderer.invoke("desktop:connectors:test", id),
+    update: (id, patch) => ipcRenderer.invoke("desktop:connectors:update", id, patch),
+    remove: (id) => ipcRenderer.invoke("desktop:connectors:remove", id),
+    webhook: (id) => ipcRenderer.invoke("desktop:connectors:webhook", id),
+    rules: {
+      list: (id) => ipcRenderer.invoke("desktop:connectors:rules:list", id),
+      create: (id, input) => ipcRenderer.invoke("desktop:connectors:rules:create", id, input),
+      update: (id, ruleId, input) => ipcRenderer.invoke("desktop:connectors:rules:update", id, ruleId, input),
+      setEnabled: (id, ruleId, enabled) => ipcRenderer.invoke("desktop:connectors:rules:set-enabled", id, ruleId, enabled),
+      versions: (id, ruleId) => ipcRenderer.invoke("desktop:connectors:rules:versions", id, ruleId),
+      rollback: (id, ruleId, version) => ipcRenderer.invoke("desktop:connectors:rules:rollback", id, ruleId, version),
+      remove: (id, ruleId) => ipcRenderer.invoke("desktop:connectors:rules:remove", id, ruleId),
+      draft: (id, sentence) => ipcRenderer.invoke("desktop:connectors:rules:draft", id, sentence),
+    },
+    jevMetrics: () => ipcRenderer.invoke("desktop:connectors:jev-metrics"),
+  },
+  mcpConnections: {
+    list: () => ipcRenderer.invoke("desktop:mcp-connections:list"),
+    disconnect: (id) => ipcRenderer.invoke("desktop:mcp-connections:disconnect", id),
+  },
   supervisorGrant: {
     get: () => ipcRenderer.invoke("desktop:supervisor-grant:get"),
     getStorageStatus: () => ipcRenderer.invoke("desktop:supervisor-grant:get-storage-status"),
@@ -285,8 +410,10 @@ const api: DesktopApi = {
         ipcRenderer.off("desktop:repos:status-changed", listener);
       };
     },
-    openRoom: (rootPath) => ipcRenderer.invoke("desktop:repos:open-room", rootPath),
+    openRoom: (rootPath, options) => ipcRenderer.invoke("desktop:repos:open-room", rootPath, options ?? null),
     pickRoom: () => ipcRenderer.invoke("desktop:repos:pick-room"),
+    pickProjectParent: () => ipcRenderer.invoke("desktop:repos:pick-project-parent"),
+    createProject: (parentPath, name) => ipcRenderer.invoke("desktop:repos:create-project", parentPath, name),
     listProjectBindings: () => ipcRenderer.invoke("desktop:repos:list-project-bindings"),
     migrateProjectBindings: (candidates) =>
       ipcRenderer.invoke("desktop:repos:migrate-project-bindings", candidates),
@@ -297,27 +424,6 @@ const api: DesktopApi = {
   },
   workers: {
     list: () => ipcRenderer.invoke("desktop:workers:list"),
-    listManagedAgentSessions: (roomIdentifier) =>
-      ipcRenderer.invoke("desktop:workers:list-managed-agent-sessions", roomIdentifier || null),
-    onManagedAgentSessionUpdate: (callback) => {
-      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
-      ipcRenderer.on("desktop:workers:managed-agent-session", listener);
-      return () => {
-        ipcRenderer.off("desktop:workers:managed-agent-session", listener);
-      };
-    },
-    startManagedAgent: (input) =>
-      ipcRenderer.invoke("desktop:workers:start-managed-agent", input),
-    stopManagedAgent: (input = {}) =>
-      ipcRenderer.invoke("desktop:workers:stop-managed-agent", input),
-    retryManagedAgent: (input) =>
-      ipcRenderer.invoke("desktop:workers:retry-managed-agent", input),
-    inspectManagedAgent: (sessionId = null, roomIdentifier = null) =>
-      ipcRenderer.invoke("desktop:workers:inspect-managed-agent", sessionId, roomIdentifier),
-    getManagedAgentChangeSummary: (sessionId = null, roomIdentifier = null) =>
-      ipcRenderer.invoke("desktop:workers:get-managed-agent-change-summary", sessionId, roomIdentifier),
-    resolveManagedAgentPermission: (input) =>
-      ipcRenderer.invoke("desktop:workers:resolve-managed-agent-permission", input),
     listAgentProviders: () => ipcRenderer.invoke("desktop:workers:list-agent-providers"),
     listAgentProviderModels: (providerId, input = {}) =>
       ipcRenderer.invoke("desktop:workers:list-agent-provider-models", providerId, input),
@@ -326,7 +432,7 @@ const api: DesktopApi = {
     runAgentProviderSetup: (providerId, input) =>
       ipcRenderer.invoke("desktop:workers:run-agent-provider-setup", providerId, input),
   },
-  maintenance: process.platform === "darwin" ? {
+  maintenance: process.platform === "darwin" || process.platform === "win32" ? {
     getStatus: () => ipcRenderer.invoke("desktop:maintenance:status"),
     restart: resume => ipcRenderer.invoke("desktop:maintenance:restart", resume),
   } : undefined,
@@ -336,9 +442,9 @@ const api: DesktopApi = {
     listHostApprovals: roomIdentifier => ipcRenderer.invoke("desktop:supervisor:list-host-approvals", roomIdentifier),
     decideHostApproval: input => ipcRenderer.invoke("desktop:supervisor:decide-host-approval", input),
     getStatus: () => ipcRenderer.invoke("desktop:supervisor:get-status"),
+    getServiceSnapshot: () => ipcRenderer.invoke("desktop:supervisor:get-service-snapshot"),
     listAgents: (roomIdentifier) => ipcRenderer.invoke("desktop:supervisor:list-agents", roomIdentifier ?? null),
     createAgent: (input) => ipcRenderer.invoke("desktop:supervisor:create-agent", input),
-    resumeOwnershipTransfer: (id) => ipcRenderer.invoke("desktop:supervisor:resume-ownership-transfer", id),
     setDesiredState: (id, desiredState) => ipcRenderer.invoke("desktop:supervisor:set-desired-state", id, desiredState),
     reconnectAgent: (input) => ipcRenderer.invoke("desktop:supervisor:reconnect-agent", input),
     recoverAgentRuntime: (input) => ipcRenderer.invoke("desktop:supervisor:recover-agent-runtime", input),
@@ -351,6 +457,8 @@ const api: DesktopApi = {
     getAgentInspectorDetail: (input) => ipcRenderer.invoke("desktop:supervisor:get-agent-inspector-detail", input),
     getAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:get-agent-configuration", input),
     updateAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:update-agent-configuration", input),
+    setAgentHomeHarness: (input) => ipcRenderer.invoke("desktop:supervisor:set-agent-home-harness", input),
+    setAgentLiveSharing: (input) => ipcRenderer.invoke("desktop:supervisor:set-agent-live-sharing", input),
     applyAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:apply-agent-configuration", input),
     prepareRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:prepare-room-move", input),
     commitRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:commit-room-move", input),
@@ -380,6 +488,14 @@ const api: DesktopApi = {
         active = false;
         ipcRenderer.off("desktop:supervisor:state", listener);
       };
+    },
+    onLiveAgents: (callback) => {
+      // Project before contextBridge copies the argument, as Needs you reads
+      // agents: no retired agents and no activity history.
+      const listener = (_event: Electron.IpcRendererEvent, payload: { entries: Parameters<typeof callback>[0] }) =>
+        callback(payload.entries.filter((entry) => entry.desiredState !== "stopped").map((entry) => ({ ...entry, activity: [] })));
+      ipcRenderer.on("desktop:supervisor:state", listener);
+      return () => ipcRenderer.off("desktop:supervisor:state", listener);
     },
     onRetirement: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);

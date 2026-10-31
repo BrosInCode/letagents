@@ -10,21 +10,71 @@ const SENSITIVE_KEY = /(?:^|[_-])(?:authorization|proxy[_-]?authorization|cookie
 const AUTHORIZATION_ASSIGNMENT = /((?:\\?["']?)\b(?:authorization|proxy[_-]?authorization)(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!(?:bearer|basic)\b)([^\\\s"',}\]]{4,})/gi;
 const EMBEDDED_ASSIGNMENT = /((?:\\?["']?)\b(?:[a-z0-9_.-]*(?:cookie|setCookie|set[_-]?cookie|credential|credentials|password|passwd|secret|clientSecret|dbPassword|apiKey|api[_-]?key|privateKey|private[_-]?key|token|accessToken|refreshToken|authToken|bearerToken|sessionToken|letagentsToken|(?:access|refresh|auth|bearer|session|letagents)[_-]?token))(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!\[REDACTED\]|<redacted>|\*{3,})([^\\\s"',}\]]{4,})/gi;
 const AUTHORIZATION_SCHEME_VALUE = /(\b(?:bearer|basic)\s+)([a-z0-9._~+\/-]{8,}={0,2})/gi;
-const KNOWN_TOKEN = /\b(?:las(?:b|hg)_[a-z0-9_-]{20,}|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b/gi;
-const URL_PASSWORD = /(https?:\/\/[^\s/:@]+:)([^\s/@]{4,})(@)/gi;
+const KNOWN_TOKEN = /\b(?:las(?:b|hg)_[a-z0-9_-]{20,}|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|ATATT[a-z0-9_=-]{20,}|lin_(?:api|oauth)_[a-z0-9]{20,})\b/gi;
+/**
+ * The password in URL userinfo of any scheme: postgres://admin:pass@host,
+ * redis://:pass@host. People write passwords with an unescaped `@` or `/`, so
+ * the password runs to the last `@` of the word: a little too much is hidden
+ * rather than part of a password shown.
+ */
+const URL_PASSWORD = /(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]*:)(?!\[REDACTED\]@)(\S+)(@)/gi;
 const PRIVATE_KEY = /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g;
 
 export type RedactionResult<T = unknown> = { value: T; redacted: boolean; truncated: boolean };
 
+/**
+ * Literal text that each pattern cannot match without, with the pattern's own
+ * flags (so the same case rules). A pattern whose hint finds nothing cannot
+ * match, so it is not run; when no hint finds anything, which is usual for
+ * long tool output, the text is scanned once instead of six times. The result
+ * is the same.
+ *
+ * Testing the original text is enough. A replacement keeps only text the
+ * pattern itself matched and inserts "[REDACTED]", so it never joins text into
+ * a new hint match: no hint contains "[" or "]", or fits inside "REDACTED".
+ */
+const PRIVATE_KEY_HINT = /PRIVATE KEY-----/;
+const AUTHORIZATION_SCHEME_HINT = /bearer|basic/i;
+const AUTHORIZATION_ASSIGNMENT_HINT = /authorization/i;
+const EMBEDDED_ASSIGNMENT_HINT = /cookie|credential|passw(?:or)?d|secret|api[_-]?key|private[_-]?key|token/i;
+const KNOWN_TOKEN_HINT = /las(?:b|hg)_|github_pat_|gh[pousr]_|sk-|akia|atatt|lin_(?:api|oauth)_/i;
+const URL_PASSWORD_HINT = /:\/\//;
+const ANY_CASELESS_HINT = new RegExp([AUTHORIZATION_SCHEME_HINT, AUTHORIZATION_ASSIGNMENT_HINT,
+  EMBEDDED_ASSIGNMENT_HINT, KNOWN_TOKEN_HINT].map((hint) => hint.source).join("|"), "i");
+
 export function redactCredentialText(value: string, maxChars = MAX_STRING_CHARS): RedactionResult<string> {
+  return redactText(value, maxChars, true);
+}
+
+/** Every pattern run whatever the hints say: the result redactCredentialText must equal. For tests. */
+export function redactCredentialTextWithoutHints(value: string, maxChars = MAX_STRING_CHARS): RedactionResult<string> {
+  return redactText(value, maxChars, false);
+}
+
+function redactText(value: string, maxChars: number, useHints: boolean): RedactionResult<string> {
+  const hinted = (hint: RegExp) => !useHints || hint.test(value);
   let redacted = false;
-  let output = value
-    .replace(PRIVATE_KEY, () => { redacted = true; return REDACTED; })
-    .replace(AUTHORIZATION_SCHEME_VALUE, (_match, prefix: string) => { redacted = true; return `${prefix}${REDACTED}`; })
-    .replace(AUTHORIZATION_ASSIGNMENT, (_match, prefix: string) => { redacted = true; return `${prefix}${REDACTED}`; })
-    .replace(EMBEDDED_ASSIGNMENT, (_match, prefix: string) => { redacted = true; return `${prefix}${REDACTED}`; })
-    .replace(KNOWN_TOKEN, () => { redacted = true; return REDACTED; })
-    .replace(URL_PASSWORD, (_match, prefix: string, _password: string, suffix: string) => { redacted = true; return `${prefix}${REDACTED}${suffix}`; });
+  let output = value;
+  if (hinted(PRIVATE_KEY_HINT)) {
+    output = output.replace(PRIVATE_KEY, () => { redacted = true; return REDACTED; });
+  }
+  if (hinted(ANY_CASELESS_HINT)) {
+    if (hinted(AUTHORIZATION_SCHEME_HINT)) {
+      output = output.replace(AUTHORIZATION_SCHEME_VALUE, (_match, prefix: string) => { redacted = true; return `${prefix}${REDACTED}`; });
+    }
+    if (hinted(AUTHORIZATION_ASSIGNMENT_HINT)) {
+      output = output.replace(AUTHORIZATION_ASSIGNMENT, (_match, prefix: string) => { redacted = true; return `${prefix}${REDACTED}`; });
+    }
+    if (hinted(EMBEDDED_ASSIGNMENT_HINT)) {
+      output = output.replace(EMBEDDED_ASSIGNMENT, (_match, prefix: string) => { redacted = true; return `${prefix}${REDACTED}`; });
+    }
+    if (hinted(KNOWN_TOKEN_HINT)) {
+      output = output.replace(KNOWN_TOKEN, () => { redacted = true; return REDACTED; });
+    }
+  }
+  if (hinted(URL_PASSWORD_HINT)) {
+    output = output.replace(URL_PASSWORD, (_match, prefix: string, _password: string, suffix: string) => { redacted = true; return `${prefix}${REDACTED}${suffix}`; });
+  }
   const truncated = output.length > maxChars;
   if (truncated) output = `${output.slice(0, maxChars)}…`;
   return { value: output, redacted, truncated };

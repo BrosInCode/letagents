@@ -1,27 +1,62 @@
 <template>
   <div
+    ref="messageElement"
     class="message"
     :class="{
+      'is-github-history': githubHistory,
       'system-message': isSystem,
       'ambient-system-message': isAmbientSystem,
       'thinking-message': Boolean(thinkingCard),
       'reply-message': Boolean(message.reply_to),
       'has-thread': hasThread,
+      'is-inline-reply': inlineReply,
+      'is-thread-open': threadOpen,
+      'wake-notice': isWakeNotice,
     }"
     :data-msg-id="message.id"
-    @contextmenu="openContextMenu"
+    :data-chat-role="senderRole"
+    @contextmenu.stop="openContextMenu"
   >
-    <div class="message-avatar" :style="{ '--sender-color': senderColor }" />
-    <div class="message-body">
-      <MessageMeta
+    <WakeGlyph v-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" />
+    <ChatAvatar v-else-if="senderRole" :name="displayName" :avatar-url="message.sender_profile?.avatar_url" :agent="senderRole.endsWith('agent')" :provider="ideLabel" :agent-key="message.agent_identity?.agent_key" />
+    <div v-else class="message-avatar" :style="{ '--sender-color': senderColor }" />
+    <div v-if="isWakeNotice" class="message-body wake-notice-body">
+      <p class="wake-notice-line">
+        <span class="wake-notice-text">{{ visibleText }}</span>
+        <span v-if="pinned" class="message-pin-marker" role="img" aria-label="Pinned message" title="Pinned message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></span>
+        <time :datetime="message.timestamp" :title="fullTimestamp">{{ formattedTime }}</time>
+      </p>
+      <ThreadMarker
+        v-if="!inlineReply && (hasThread || threadOpen)"
+        :expanded="threadOpen"
+        :controls="`web-thread-${message.id}`"
+        :label="threadLabel"
+        :action-label="threadActionLabel"
+        @toggle="emit('openThread', message.id)"
+      />
+      <slot name="thread" />
+    </div>
+    <div v-else class="message-body">
+      <MessageMeta v-if="!githubHistory"
         :display-name="displayName"
-        :owner-attribution="identity.ownerAttribution"
-        :ide-label="ideLabel"
+        :owner-attribution="senderRole?.endsWith('agent') ? identity.ownerAttribution : null"
         :provenance-badge="provenanceBadge"
         :inline-prompt-injection="inlinePromptInjection"
         :formatted-time="formattedTime"
+        :pinned="pinned"
+        :can-pin="pinnable"
+        :pin-pending="Boolean(pinContext?.state.value.pending)"
+        @pin="pinContext?.toggle(message.id)"
+        @copy="copyMessageFromMenu"
+        :can-react="reactable"
+        :picker-open="reactionPickerAnchor !== null"
+        :actions-open="contextMenuOpen"
+        @actions="openMessageActions"
         @reply="emit('reply', message)"
         @info="emit('info', message)"
+        @react="openReactionPicker"
+        :can-open-thread="!inlineReply"
+        @thread="emit('openThread', message.id)"
       />
       <div
         class="message-bubble"
@@ -32,7 +67,7 @@
         :style="{ '--sender-color': senderColor }"
       >
         <ReplyPreview
-          v-if="message.reply_to"
+          v-if="message.reply_to && (!inlineReply || message.reply_to.id !== message.thread_root_id)"
           :message-id="message.reply_to.id"
           :display-name="replyDisplayName"
           :preview-text="replyPreviewText"
@@ -46,6 +81,9 @@
         />
         <GitHubEventCard
           v-if="githubEvent"
+          :history="githubHistory"
+          :timestamp="message.timestamp"
+          room
           :event="githubEvent"
           :taskLinkEnabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
           @openTask="emit('openTask', $event)"
@@ -59,10 +97,21 @@
         <LongMessageContent
           v-else-if="message.text"
           :text="visibleText"
-          :html="renderedContent"
+          :html="renderedMessage.html"
           :messageId="message.id"
+          :sender="readerSender"
+          :room-identifier="roomIdentifier"
           @taskReferenceClick="emit('openTask', $event)"
         />
+        <GitHubEventCard
+          v-for="preview in linkPreviews"
+          :key="preview.url"
+          :event="linkPreviewPresentation(preview)"
+          compact
+        />
+        <p v-if="message.gif" class="message-gif-link">
+          <a :href="roomGifPageUrl(message.gif) ?? undefined" target="_blank" rel="noopener noreferrer">{{ message.gif.title || 'GIF' }} · View on GIPHY</a>
+        </p>
         <MessageAttachments
           v-if="attachments.length"
           :message-id="message.id"
@@ -74,16 +123,27 @@
           :muted="stalePromptMuted"
           @toggle="handleToggleStalePromptMute"
         />
-      </div>
       <ThreadMarker
-        v-if="hasThread"
-        :latest-id="threadLatestId"
+        v-if="!inlineReply && (hasThread || threadOpen)"
+        :expanded="threadOpen"
+        :controls="`web-thread-${message.id}`"
         :label="threadLabel"
-        :latest-display-name="threadLatestDisplayName"
-        :latest-preview="threadLatestPreview"
         :action-label="threadActionLabel"
-        @scroll-to-reply="emit('scrollToReply', $event)"
+        @toggle="emit('openThread', message.id)"
       />
+        <slot name="thread" />
+      </div>
+      <MessageReactionBar
+        v-if="reactions.length"
+        :reactions="reactions"
+        :viewer-login="reactionContext?.viewerLogin.value ?? null"
+        :viewer-reacted="viewerReacted"
+        :can-react="reactable"
+        :picker-open="reactionPickerAnchor !== null"
+        @toggle="toggleReaction"
+        @add="openReactionPicker"
+      />
+
     </div>
     <ReasoningTraceModal
       :open="reasoningOpen"
@@ -91,29 +151,52 @@
       :session="reasoningSession || null"
       @close="reasoningOpen = false"
     />
+    <!-- Keep the Teleport inside the row: a second root would make this a
+         fragment, and MessageList's arrival and search classes would never
+         reach the row. -->
+    <Teleport to="body">
+      <div
+        v-if="contextMenuOpen"
+        ref="contextMenuRef"
+        class="web-message-context-menu"
+        :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
+        role="menu"
+        aria-label="Message actions"
+        data-testid="web-message-context-menu"
+        @contextmenu.prevent.stop
+        @keydown="handleMenuKeydown"
+      >
+        <button type="button" role="menuitem" @click="copyMessageFromMenu">Copy message</button>
+        <button v-if="canCopyMessageLink" type="button" role="menuitem" @click="copyMessageLinkFromMenu">Copy link to message</button>
+        <button v-if="!isWakeNotice" type="button" role="menuitem" @click="replyFromMenu">Reply</button>
+        <button v-if="!inlineReply" type="button" role="menuitem" @click="threadFromMenu">Reply in thread</button>
+        <button v-if="pinnable" type="button" role="menuitem" :disabled="Boolean(pinContext?.state.value.pending)" @click="pinFromMenu">{{ pinned ? 'Unpin message' : 'Pin message' }}</button>
+        <button v-if="reactable" type="button" role="menuitem" @click="reactFromMenu">Add reaction…</button>
+        <button v-if="canMarkUnread" type="button" role="menuitem" @click="markUnreadFromMenu">Mark unread from here</button>
+        <div class="web-message-context-menu-separator" role="separator" />
+        <button type="button" role="menuitem" @click="messageInfoFromMenu">Message info</button>
+      </div>
+      <MessageReactionPicker
+        v-if="reactionPickerAnchor"
+        :anchor="reactionPickerAnchor"
+        :viewer-reacted="viewerReacted"
+        :instant="reactionPickerInstant"
+        @select="toggleReaction"
+        @close="closeReactionPicker"
+      />
+    </Teleport>
   </div>
-  <Teleport to="body">
-    <div
-      v-if="contextMenuOpen"
-      ref="contextMenuRef"
-      class="web-message-context-menu"
-      :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
-      role="menu"
-      aria-label="Message actions"
-      data-testid="web-message-context-menu"
-      @contextmenu.prevent.stop
-      @keydown="handleMenuKeydown"
-    >
-      <button type="button" role="menuitem" @click="copyMessageFromMenu">Copy message</button>
-      <button type="button" role="menuitem" @click="replyFromMenu">Reply</button>
-      <div class="web-message-context-menu-separator" role="separator" />
-      <button type="button" role="menuitem" @click="messageInfoFromMenu">Message info</button>
-    </div>
-  </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { roomGifPageUrl } from '../../../../../shared/room-expressions.mjs'
+import ChatAvatar from '../../../../../shared/ui/ChatAvatar.vue'
+import type { MessageReaderSender } from '../../../../../shared/ui/message-reader'
+import { chatSenderRole } from '../../../../../shared/chat-appearance'
+import '../../../../../shared/ui/chat-palette.css'
+import { useAuth } from '@/composables/useAuth'
+
+import { inject, computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import AgentThinkingCard from './AgentThinkingCard.vue'
 import GitHubEventCard from './GitHubEventCard.vue'
 import LongMessageContent from './LongMessageContent.vue'
@@ -124,6 +207,16 @@ import ReasoningAnchor from './chat-message/ReasoningAnchor.vue'
 import ReplyPreview from './chat-message/ReplyPreview.vue'
 import StalePromptActions from './chat-message/StalePromptActions.vue'
 import ThreadMarker from './chat-message/ThreadMarker.vue'
+import MessageReactionBar from '../../../../../shared/ui/MessageReactionBar.vue'
+import MessageReactionPicker, { type MessageReactionPickerAnchor } from '../../../../../shared/ui/MessageReactionPicker.vue'
+import WakeGlyph from '../../../../../shared/ui/WakeGlyph.vue'
+import { isPinMessageId } from '../../../../../shared/message-pins.mjs'
+import { unreadMenuKey } from '../../../../../shared/room-unread-client'
+import { injectRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
+import { excludeGitHubEventLink, linkPreviewPresentation } from '../../../../../shared/message-link-previews.mjs'
+import { injectRoomMessagePins } from '@/composables/roomMessagePins'
+import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
+import { WAKE_NOTICE_SOURCE } from '../../../../../shared/wake-rules.mjs'
 import {
   formatMessageTime,
   messageDisplayText,
@@ -146,16 +239,29 @@ import {
   hasInlinePromptInjection,
   getReplyPreviewText,
 } from '@/composables/useRoom'
+import {
+  buildLetAgentsMessageUrl,
+  isLocalRoomIdentifier,
+  isValidMessageId,
+} from '@/domain/roomRoutes'
 
 const props = defineProps<{
+  githubHistory?: boolean;
   message: RoomMessage
   roomIdentifier?: string
   thread?: MessageThreadSummary | null
+  threadOpen?: boolean
+  inlineReply?: boolean
   stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
   reasoningSession?: RoomReasoningSession | null
   taskReferenceIds?: ReadonlySet<string>
+  /** Appended live while the room was open, not loaded or scrolled back to. */
+  arriving?: boolean
+  /** Room agents by answer handle, so answers name the agent, not its handle. */
+  agentNames?: ReadonlyMap<string, string>
 }>()
 const emit = defineEmits<{
+  openThread: [messageId: string]
   reply: [message: RoomMessage]
   info: [message: RoomMessage]
   scrollToReply: [messageId: string]
@@ -172,6 +278,15 @@ const contextMenuOpen = ref(false)
 const contextMenuPosition = ref({ x: 0, y: 0 })
 const contextMenuRef = ref<HTMLElement | null>(null)
 let contextMenuRestoreFocus: HTMLElement | null = null
+let contextMenuTrigger: HTMLElement | null = null
+
+const canCopyMessageLink = computed(() => {
+  return (
+    Boolean(props.roomIdentifier) &&
+    !isLocalRoomIdentifier(props.roomIdentifier) &&
+    isValidMessageId(props.message.id)
+  )
+})
 
 // Native context menus stay useful on these targets (open link in new tab,
 // copy selection, media controls), so the message menu defers to them.
@@ -183,14 +298,49 @@ function openContextMenu(event: MouseEvent) {
   const selection = window.getSelection()
   if (selection && !selection.isCollapsed && target && selection.containsNode(target, true)) return
   event.preventDefault()
-  contextMenuRestoreFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+  showContextMenu(event.clientX, event.clientY)
+}
+
+function openMessageActions(event: MouseEvent) {
+  const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  if (!trigger) return
+  if (contextMenuOpen.value) {
+    closeContextMenu(true)
+    return
+  }
+  const bounds = trigger.getBoundingClientRect()
+  showContextMenu(bounds.right - 190, bounds.bottom + 4, trigger)
+}
+
+function showContextMenu(x: number, y: number, invoker?: HTMLElement) {
+  contextMenuTrigger = invoker ?? null
+  contextMenuRestoreFocus = invoker ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+  const menuExtraHeight =
+    (!props.inlineReply ? 32 : 0) +
+    (canCopyMessageLink.value ? 32 : 0) +
+    (reactable.value ? 32 : 0) +
+    (pinnable.value ? 32 : 0) +
+    (canMarkUnread.value ? 32 : 0)
   contextMenuPosition.value = {
-    x: Math.min(event.clientX, window.innerWidth - 190),
-    y: Math.min(event.clientY, window.innerHeight - 170),
+    x: Math.max(8, Math.min(x, window.innerWidth - 190)),
+    y: Math.max(8, Math.min(y, window.innerHeight - (170 + menuExtraHeight))),
   }
   contextMenuOpen.value = true
   void nextTick(() => {
     contextMenuRef.value?.querySelector<HTMLElement>('[role="menuitem"]')?.focus()
+    // Measure the real menu: touch rows and translated labels can be taller.
+    const menu = contextMenuRef.value?.getBoundingClientRect?.()
+    if (!menu) return
+    const viewport = window.visualViewport
+    const left = viewport?.offsetLeft ?? 0
+    const top = viewport?.offsetTop ?? 0
+    const width = viewport?.width ?? window.innerWidth
+    const height = viewport?.height ?? window.innerHeight
+    contextMenuPosition.value = {
+      x: Math.max(left + 8, Math.min(x, left + width - menu.width - 8)),
+      y: Math.max(top + 8, Math.min(y, top + height - menu.height - 8)),
+    }
+    contextMenuRef.value!.style.maxHeight = `${Math.max(44, height - 16)}px`
   })
 }
 
@@ -199,6 +349,7 @@ function closeContextMenu(restoreFocus = false) {
   contextMenuOpen.value = false
   if (restoreFocus && contextMenuRestoreFocus?.isConnected) contextMenuRestoreFocus.focus()
   contextMenuRestoreFocus = null
+  contextMenuTrigger = null
 }
 
 async function copyMessageFromMenu() {
@@ -210,9 +361,26 @@ async function copyMessageFromMenu() {
   }
 }
 
+async function copyMessageLinkFromMenu() {
+  closeContextMenu(true)
+  if (!props.roomIdentifier) return
+  try {
+    const origin = typeof window !== 'undefined' ? window.location.origin : ''
+    const url = buildLetAgentsMessageUrl(props.roomIdentifier, props.message.id, origin)
+    await navigator.clipboard.writeText(url)
+  } catch {
+    // Clipboard may be unavailable; text remains selectable.
+  }
+}
+
 function replyFromMenu() {
   closeContextMenu()
   emit('reply', props.message)
+}
+
+function threadFromMenu() {
+  closeContextMenu()
+  emit('openThread', props.message.id)
 }
 
 function messageInfoFromMenu() {
@@ -220,8 +388,82 @@ function messageInfoFromMenu() {
   emit('info', props.message)
 }
 
+// Reactions exist only inside a room that provides them (not in previews or
+// tests), and only on a message the server sent with its reactions.
+const unreadContext = inject(unreadMenuKey, null)
+const canMarkUnread = computed(() => Boolean(unreadContext?.client.account.value && unreadContext.room.value)
+  && (!props.message.thread_root_id || props.message.thread_root_id === props.message.id)
+  && !props.message.id.startsWith('pending:'))
+function markUnreadFromMenu() {
+  closeContextMenu(true)
+  if (canMarkUnread.value) unreadContext?.client.mark(unreadContext.room.value, props.message.id)
+}
+const pinContext = injectRoomMessagePins()
+const pinnable = computed(() => Boolean(pinContext?.canPin.value) && isPinMessageId(props.message.id))
+const pinned = computed(() => pinContext?.isPinned(props.message.id) ?? false)
+function pinFromMenu(): void { closeContextMenu(true); pinContext?.toggle(props.message.id) }
+const reactionContext = injectRoomMessageReactions()
+const reactions = computed(() => reactionContext?.reactionsFor(props.message.id) ?? [])
+const reactable = computed(() => Boolean(reactionContext?.canReact.value)
+  && props.message.reactions !== undefined
+  && !isWakeNotice.value
+  && /^msg_\d+$/.test(props.message.id))
+const viewerReacted = (emoji: string): boolean => reactionContext?.viewerReacted(props.message.id, emoji) ?? false
+
+let stopTrackingReactions: (() => void) | null = null
+watch(() => [props.message.id, props.message.reactions !== undefined] as const, () => {
+  stopTrackingReactions?.()
+  stopTrackingReactions = reactionContext?.track(props.message) ?? null
+}, { immediate: true })
+
+const messageElement = ref<HTMLElement | null>(null)
+const reactionPickerAnchor = ref<MessageReactionPickerAnchor | null>(null)
+const reactionPickerInstant = ref(false)
+let reactionPickerInvoker: HTMLElement | null = null
+let reactionPickerClosedByPress: { invoker: HTMLElement; at: number } | null = null
+
+function toggleReaction(emoji: string) {
+  reactionContext?.toggle(props.message.id, emoji)
+}
+
+function showReactionPicker(anchor: MessageReactionPickerAnchor, invoker: HTMLElement | null, instant: boolean) {
+  if (!reactable.value) return
+  reactionPickerInvoker = invoker
+  reactionPickerInstant.value = instant
+  reactionPickerAnchor.value = anchor
+}
+
+function openReactionPicker(event: MouseEvent) {
+  const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null
+  if (!trigger) return
+  // The press that starts this click already closed the picker this control
+  // had open: the control is a toggle, so do not open it again.
+  const closed = reactionPickerClosedByPress
+  reactionPickerClosedByPress = null
+  if (closed?.invoker === trigger && performance.now() - closed.at < 500) return
+  // A click with no pointer detail came from the keyboard.
+  showReactionPicker({ element: trigger }, trigger, event.detail === 0)
+}
+
+function closeReactionPicker(restoreFocus: boolean, pressed?: EventTarget | null) {
+  const invoker = reactionPickerInvoker
+  reactionPickerAnchor.value = null
+  reactionPickerInvoker = null
+  reactionPickerClosedByPress = invoker && pressed instanceof Node && invoker.contains(pressed)
+    ? { invoker, at: performance.now() }
+    : null
+  if (restoreFocus && invoker?.isConnected) invoker.focus({ preventScroll: true })
+}
+
+function reactFromMenu() {
+  const { x, y } = contextMenuPosition.value
+  const invoker = contextMenuRestoreFocus
+  closeContextMenu()
+  if (messageElement.value) showReactionPicker({ element: messageElement.value, point: { x, y } }, invoker, true)
+}
+
 function handleMenuKeydown(event: KeyboardEvent) {
-  const items = Array.from(contextMenuRef.value?.querySelectorAll<HTMLElement>('[role="menuitem"]') ?? [])
+  const items = Array.from(contextMenuRef.value?.querySelectorAll<HTMLElement>('[role="menuitem"]:not(:disabled)') ?? [])
   if (items.length === 0) return
   const activeIndex = items.indexOf(document.activeElement as HTMLElement)
   if (event.key === 'ArrowDown') {
@@ -246,29 +488,44 @@ function handleMenuDismiss(event: Event) {
   if (event.type === 'keydown' && (event as KeyboardEvent).key !== 'Escape') return
   // Presses inside the menu are item activations, not dismissals.
   if (event.type === 'pointerdown' && event.target instanceof Node && contextMenuRef.value?.contains(event.target)) return
+  if (event.type === 'pointerdown' && event.target instanceof Node && contextMenuTrigger?.contains(event.target)) return
   closeContextMenu(event.type === 'keydown')
 }
 
-onMounted(() => {
+// Closed rows must not add work to every composer keypress or pointer event.
+watch(contextMenuOpen, (open, _previous, onCleanup) => {
+  if (!open) return
   document.addEventListener('pointerdown', handleMenuDismiss, true)
   document.addEventListener('keydown', handleMenuDismiss, true)
   window.addEventListener('blur', handleMenuDismiss)
-})
+  onCleanup(() => {
+    document.removeEventListener('pointerdown', handleMenuDismiss, { capture: true })
+    document.removeEventListener('keydown', handleMenuDismiss, { capture: true })
+    window.removeEventListener('blur', handleMenuDismiss)
+  })
+}, { flush: 'sync' })
 
 onUnmounted(() => {
-  document.removeEventListener('pointerdown', handleMenuDismiss, true)
-  document.removeEventListener('keydown', handleMenuDismiss, true)
-  window.removeEventListener('blur', handleMenuDismiss)
+  stopTrackingReactions?.()
+  stopTrackingPreviews?.()
 })
 const identity = computed(() => resolveAgentIdentity(props.message.sender, props.message.agent_identity))
-const displayName = computed(() => identity.value.displayName || 'anonymous')
-const isSystem = computed(() => ['letagents', 'system'].includes((props.message.sender || '').toLowerCase()))
+const displayName = computed(() => props.message.source === 'browser' ? props.message.sender : identity.value.displayName || 'anonymous')
+const isSystem = computed(() => props.message.source !== 'browser' && ['letagents', 'system'].includes((props.message.sender || '').toLowerCase()))
 const isAmbientSystem = computed(() =>
-  isAmbientSystemMessage(props.message.sender, visibleText.value)
+  props.message.source !== "browser" && isAmbientSystemMessage(props.message.sender, visibleText.value)
 )
+/** An agent's wake rule fired: one quiet line, not a conversation to reply to. */
+const isWakeNotice = computed(() => props.message.source === WAKE_NOTICE_SOURCE)
+const { user: viewer } = useAuth()
+const senderRole = computed(() => chatSenderRole({
+  human: !isSystem.value && !isWakeNotice.value && !githubEvent.value && (props.message.source === "browser" || isHumanSender(props.message.sender, props.message.source)),
+  agent: props.message.source !== 'browser' && !isSystem.value && !isWakeNotice.value && !githubEvent.value && (props.message.source === 'agent' || Boolean(props.message.agent_identity || identity.value.ownerAttribution)),
+  login: props.message.sender_profile?.login, viewerLogin: viewer.value?.login, agentKey: props.message.agent_identity?.agent_key,
+}))
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source))
 const inlinePromptInjection = computed(() => hasInlinePromptInjection(props.message))
-const githubEvent = computed(() => parseGitHubEventPresentation(props.message))
+const githubEvent = computed(() => props.message.source === 'browser' ? null : parseGitHubEventPresentation(props.message))
 const thinkingCard = computed(() => buildAgentThinkingEntry(props.message))
 const attachments = computed(() => props.message.attachments || [])
 
@@ -304,26 +561,35 @@ const ideLabel = computed(() => {
   return null
 })
 
+const readerSender = computed<MessageReaderSender>(() => ({
+  name: displayName.value,
+  context: senderRole.value === 'own-agent' ? 'Your agent'
+    : senderRole.value === 'self' ? 'You'
+      : senderRole.value === 'other-agent' ? identity.value.ownerAttribution || 'Agent'
+        : senderRole.value === 'human' ? 'Human' : null,
+  timestamp: props.message.timestamp,
+  avatarUrl: props.message.sender_profile?.avatar_url,
+  agent: Boolean(senderRole.value?.endsWith('agent')),
+  provider: ideLabel.value,
+  agentKey: props.message.agent_identity?.agent_key,
+}))
+
 const replyDisplayName = computed(() => {
   const reply = props.message.reply_to
   if (!reply) return 'unknown'
   return parseAgentIdentity(reply.sender).displayName || reply.sender || 'unknown'
 })
-const replyPreviewText = computed(() => getReplyPreviewText(props.message.reply_to))
+const replyPreviewText = computed(() => getReplyPreviewText(props.message.reply_to && {
+  ...props.message.reply_to,
+  display_text: messageDisplayText(props.message.reply_to, props.agentNames),
+}))
 
 const hasThread = computed(() => Boolean(props.thread?.count && props.thread.count > 0))
 const threadLabel = computed(() => {
   const count = props.thread?.count || 0
   return count === 1 ? '1 reply' : `${count} replies`
 })
-const threadLatestId = computed(() => props.thread?.latest?.id || props.message.id)
-const threadLatestDisplayName = computed(() => {
-  const sender = props.thread?.latest?.sender
-  if (!sender) return 'Latest'
-  return parseAgentIdentity(sender).displayName || sender
-})
-const threadLatestPreview = computed(() => getReplyPreviewText(props.thread?.latest))
-const threadActionLabel = computed(() => `Open ${threadLabel.value}`)
+const threadActionLabel = computed(() => props.threadOpen ? 'Collapse replies' : `Open ${threadLabel.value}`)
 
 const reasoningTitle = computed(() =>
   props.reasoningSession?.title
@@ -350,14 +616,28 @@ const provenanceBadge = computed<ProvenanceBadge | null>(() => {
   return null
 })
 
-const visibleText = computed(() => messageDisplayText(props.message))
+const visibleText = computed(() => messageDisplayText(props.message, props.agentNames))
 const formattedTime = computed(() => formatMessageTime(props.message.timestamp))
-const renderedContent = computed(() => renderMessageContent(
-  isAmbientSystem.value
-    ? stripStatusPrefix(visibleText.value)
-    : visibleText.value,
-  props.taskReferenceIds,
-))
+const fullTimestamp = computed(() => {
+  const date = new Date(props.message.timestamp)
+  return Number.isNaN(date.getTime())
+    ? ''
+    : date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+})
+const renderedMessage = computed(() => {
+  const urls: string[] = []
+  const html = renderMessageContent(isAmbientSystem.value ? stripStatusPrefix(visibleText.value) : visibleText.value,
+    props.taskReferenceIds, (url) => urls.push(url))
+  return { html, urls }
+})
+const previewUrls = computed(() => excludeGitHubEventLink(renderedMessage.value.urls, githubEvent.value?.url))
+const previewContext = injectRoomMessageLinkPreviews()
+const linkPreviews = computed(() => previewContext?.previewsFor(props.message.id) ?? [])
+let stopTrackingPreviews: (() => void) | null = null
+watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.value], () => {
+  stopTrackingPreviews?.()
+  stopTrackingPreviews = previewContext?.track({ id: props.message.id, urls: previewUrls.value }) ?? null
+}, { immediate: true })
 </script>
 
 <style scoped>
@@ -365,7 +645,9 @@ const renderedContent = computed(() => renderMessageContent(
   display: flex;
   align-items: flex-start;
   gap: 12px;
-  padding: 13px 0;
+  width: min(100%, 720px);
+  margin: 0 auto;
+  padding: 12px 0;
 }
 
 .message-avatar {
@@ -384,24 +666,25 @@ const renderedContent = computed(() => renderMessageContent(
 }
 
 .message-body {
-  flex: 0 1 72ch;
-  width: min(100%, 72ch);
+  flex: 1;
   min-width: 0;
 }
 
 .message-bubble {
-  --message-surface: color-mix(in srgb, var(--surface, #18181b) 96%, var(--sender-color, #71717a) 4%);
   width: fit-content;
-  max-width: 100%;
+  max-width: min(64ch, 100%);
   min-width: 0;
-  padding: 11px 15px 12px;
-  border: none;
-  border-radius: 16px 16px 16px 6px;
-  background: var(--message-surface);
-  color: color-mix(in srgb, var(--text, #fafafa) 94%, transparent);
+  box-sizing: border-box;
+  padding: 9px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: 9px;
+  background: var(--bg-subtle);
+  color: var(--text);
   box-shadow:
-    inset 0 1px color-mix(in srgb, white 5%, transparent),
-    0 1px 2px color-mix(in srgb, black 22%, transparent);
+    inset 0 1px 0 light-dark(rgba(255,255,255,.8),rgba(255,255,255,.045)),
+    0 2px 3px light-dark(rgba(9,9,11,.08),rgba(0,0,0,.6)),
+    0 8px 18px -4px light-dark(rgba(9,9,11,.15),rgba(0,0,0,.55)),
+    0 20px 34px -12px light-dark(rgba(9,9,11,.2),rgba(0,0,0,.7));
 }
 
 .message-bubble.github-message-bubble {
@@ -432,8 +715,8 @@ const renderedContent = computed(() => renderMessageContent(
 }
 
 .message-bubble :deep(.md-content) {
-  font-size: 0.96rem;
-  line-height: 1.62;
+  font-size: 14px;
+  line-height: 1.65;
   overflow-wrap: anywhere;
   word-break: normal;
 }
@@ -576,8 +859,62 @@ const renderedContent = computed(() => renderMessageContent(
   line-height: 1.5;
 }
 
+/* A wake notice keeps the ambient rhythm; the crescent stands in for the dot. */
+.message.wake-notice {
+  gap: 9px;
+  padding: 5px 0;
+}
+
+.wake-notice-glyph {
+  width: 12px;
+  height: 12px;
+  margin-top: 4px;
+  color: var(--text-tertiary, #71717a);
+}
+
+.wake-notice-body {
+  flex-basis: 72ch;
+}
+
+.wake-notice-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  column-gap: 8px;
+  width: fit-content;
+  max-width: 100%;
+  margin: -2px -6px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  color: var(--muted, #a1a1aa);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  transition: background-color 200ms ease;
+}
+
+.wake-notice-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.wake-notice-line time {
+  color: var(--text-tertiary, #71717a);
+  font-size: 0.68rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.message.wake-notice.jump-target .wake-notice-line {
+  background: color-mix(in srgb, var(--text, #fafafa) 7%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wake-notice-line { transition: none; }
+}
+
 @media (max-width: 768px) {
   .message { gap: 10px; padding: 10px 0; }
+  .message.wake-notice { gap: 9px; padding: 5px 0; }
   .message-avatar::before {
     width: 8px;
     height: 8px;
@@ -596,6 +933,10 @@ const renderedContent = computed(() => renderMessageContent(
   z-index: 9998;
   display: grid;
   min-width: 172px;
+  max-width: calc(100vw - 16px);
+  max-height: calc(100dvh - 16px);
+  overscroll-behavior: contain;
+  overflow-y: auto;
   padding: 5px;
   border: 1px solid var(--border, #27272a);
   border-radius: 10px;
@@ -615,9 +956,51 @@ const renderedContent = computed(() => renderMessageContent(
 }
 .web-message-context-menu button:hover,
 .web-message-context-menu button:focus-visible { background: rgba(255, 255, 255, 0.08); outline: none; }
+@media (max-width: 768px), (pointer: coarse) {
+  .web-message-context-menu { min-width: min(224px, calc(100vw - 16px)); }
+  .web-message-context-menu button { min-height: 44px; font-size: .875rem; }
+}
 .web-message-context-menu-separator {
   height: 1px;
   margin: 4px 6px;
   background: var(--border, #27272a);
 }
+</style>
+
+<style scoped>
+.message:is(.has-thread, .is-thread-open) > .message-body > .message-bubble { display: block; width: 100%; max-width: 100%; }
+.message:is(.has-thread, .is-thread-open) > .message-body > .message-bubble > :deep(.reply-preview) {
+  gap: 2px; margin: 0 0 10px; padding: 0 0 0 10px; border-color: var(--line); border-radius: 0; background: transparent;
+}
+.message:is(.has-thread, .is-thread-open) > .message-body > .message-bubble > :deep(.reply-preview .reply-preview-label) { font-weight: 500; }
+.message:is(.has-thread, .is-thread-open) > .message-body > .message-bubble > :deep(.reply-preview .reply-preview-text) {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+</style>
+
+<style scoped>
+.message[data-chat-role] { gap: 12px; }
+.message[data-chat-role] > .message-body { flex: initial; width: fit-content; max-width: min(78%, 68ch); }
+.message[data-chat-role] > .message-body > .message-bubble { background: var(--chat-bubble); border-color: var(--chat-border); color: light-dark(#252524, #e9e9e7); box-shadow: none; padding: 12px 16px; border-radius: 4px 13px 13px 13px; }
+.message[data-chat-role="self"] { flex-direction: row-reverse; }
+.message[data-chat-role="self"] > .message-body > .message-bubble { margin-left: auto; border-radius: 13px 4px 13px 13px; }
+.message[data-chat-role="self"] :deep(.message-meta) { justify-content: flex-end; }
+.message[data-chat-role]:is(.has-thread, .is-thread-open) > .message-body { width: min(78%, 68ch); }
+.message[data-chat-role].is-inline-reply > .message-body { max-width: calc(100% - 56px); }
+@media (max-width: 760px) {
+  .message[data-chat-role] { gap: 8px; }
+  .message[data-chat-role] > .message-body { max-width: calc(100% - 40px); }
+  .message[data-chat-role] > .message-body > .message-bubble { padding: 10px 12px; }
+  .message[data-chat-role]:is(.has-thread, .is-thread-open) > .message-body { width: calc(100% - 40px); }
+  .message[data-chat-role].is-inline-reply > .message-body { max-width: calc(100% - 40px); }
+}
+</style>
+
+<style scoped>
+.message.is-github-history { display: block; width: 100%; padding: 0 4px 0 0; border-bottom: 1px solid var(--border); }
+.message.is-github-history > .message-avatar { display: none; }
+.message.is-github-history > .message-body { width: 100%; }
+.message.is-github-history :deep(.message-meta) { min-height: 20px; margin-bottom: 3px; }
+.message.is-github-history :deep(.message-sender), .message.is-github-history :deep(.message-owner), .message.is-github-history :deep(.provenance-badge) { display: none; }
+.message.is-github-history .message-bubble { margin-top: 0; }
 </style>

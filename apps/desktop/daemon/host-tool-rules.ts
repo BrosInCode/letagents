@@ -5,9 +5,17 @@ import { basename, join } from "node:path";
 import type { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import type { ApprovalReference, ExecutionApprovalRecord } from "./execution-approval-journal.js";
+import { launchPolicyForToolRules } from "./provider-configuration.js";
 import type { DaemonManifestEntry } from "./types.js";
+import { everyOwnerPrivateSync } from "../../../shared/owner-private-fs.mjs";
 import type { ProviderPermissionRequest } from "../shared/provider-permissions.js";
 import { createGitCommand, resolveSourceRepositoryIdentity, normalizeRemote, WORKSPACE_MARKER } from "./workspace-provisioner.js";
+
+/**
+ * The same answer as the async `realpath` imported above. On Windows the JavaScript `realpathSync` keeps a short
+ * 8.3 name (RUNNER~1) that `realpath` expands, so the two would disagree on one folder; the native one agrees.
+ */
+const realpathNow: (path: string) => string = process.platform === "win32" ? realpathSync.native : realpathSync;
 
 const id = z.string().min(1).max(256);
 const label = id.regex(/^[^\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+$/);
@@ -27,7 +35,10 @@ export const hostToolScopeSchema = z.union([projectToolScopeSchema, roomToolScop
 export type HostToolScope = z.infer<typeof hostToolScopeSchema>;
 export type HostToolRule = { id: string; revision: number; ownerId: string; scope: HostToolScope; createdAtMs: number };
 const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-const policy = (entry: DaemonManifestEntry) => digest([entry.permission_profile_id, entry.provider_launch_policy ?? null]);
+/** What a saved tool permission is tied to: the agent's access level and its stored launch settings. */
+export const hostToolPolicyDigest = (entry: Pick<DaemonManifestEntry, "permission_profile_id" | "provider_launch_policy">): string =>
+  digest([entry.permission_profile_id, launchPolicyForToolRules(entry.provider_launch_policy) ?? null]);
+const policy = hostToolPolicyDigest;
 
 /** Only structured native identities establish tool scope; prose never does. */
 export function nativeToolIdentity(request: ProviderPermissionRequest): { id: string; label: string } | null {
@@ -86,7 +97,7 @@ export function assertHostToolScope(db: DatabaseSync, scope: HostToolScope, entr
     return;
   }
   if (!entry || !project || project.repo !== scope.repository || project.remoteUrl !== scope.remoteUrl
-    || realpathSync(entry.source_repo_path ?? "") !== scope.canonicalSourcePath
+    || realpathNow(entry.source_repo_path ?? "") !== scope.canonicalSourcePath
     || digest([scope.canonicalSourcePath, project.repo, project.remoteUrl]) !== scope.projectId || entry.id !== scope.agentId || entry.created_by !== scope.accountId || entry.provider !== scope.provider
     || entry.source_repo_path !== scope.sourceRepoPath || policy(entry) !== scope.policySha256) {
     throw new Error("The saved tool permission no longer matches this agent's project or access settings.");
@@ -110,14 +121,13 @@ function roomWorkspaceIdentity(entry: DaemonManifestEntry, context: HostToolCont
   if (entry.source_repo_path || entry.work_attempt_id !== context.workAttemptId || entry.workspace_path !== context.workspacePath
     || context.repo !== "room-only" || context.resolvedRevision !== "0".repeat(40)
     || context.remoteUrl !== `letagents-ephemeral:${createHash("sha256").update(context.taskId).digest("hex")}`) return null;
-  const canonical = realpathSync(context.workspacePath);
+  const canonical = realpathNow(context.workspacePath);
   const directory = lstatSync(context.workspacePath);
   const markerPath = join(canonical, WORKSPACE_MARKER);
   const file = lstatSync(markerPath);
-  if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o077)
-    || !file.isFile() || file.isSymbolicLink() || (file.mode & 0o077) || file.size > 16_384
-    || (process.getuid && (directory.uid !== process.getuid() || file.uid !== process.getuid()))
-    || canonical !== context.barePath) return null;
+  if (!directory.isDirectory() || directory.isSymbolicLink() || !file.isFile() || file.isSymbolicLink()
+    || file.size > 16_384 || canonical !== context.barePath
+    || !everyOwnerPrivateSync([{ path: context.workspacePath, info: directory }, { path: markerPath, info: file }])) return null;
   const marker = JSON.parse(readFileSync(markerPath, "utf8"));
   if (!marker || marker.version !== 1 || marker.repo !== context.repo || marker.work_attempt_id !== context.workAttemptId
     || marker.task_id !== context.taskId || marker.remote_url !== context.remoteUrl
@@ -198,6 +208,12 @@ export function bindHostToolRule(db: DatabaseSync, input: {
 }
 export class HostToolRuleRevokedError extends Error {
   constructor(readonly ruleId: string, readonly ruleRevision: number) { super("This saved tool permission was revoked."); }
+}
+/** Whether a saved tool rule made or created this decision. Stores from before saved rules have none. */
+export function isToolRuleDecision(db: DatabaseSync, decisionId: string): boolean {
+  if (Number(db.prepare("PRAGMA user_version").get()!.user_version) < 44
+    && !db.prepare("SELECT 1 FROM sqlite_master WHERE name='host_tool_rule_decisions'").get()) return false;
+  return Boolean(db.prepare("SELECT 1 FROM host_tool_rule_decisions WHERE decision_id=?").get(decisionId));
 }
 export function assertDecisionToolRule(db: DatabaseSync, decisionId: string, entry: DaemonManifestEntry | undefined): void {
   if (Number(db.prepare("PRAGMA user_version").get()!.user_version) < 44

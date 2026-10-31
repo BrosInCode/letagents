@@ -2,7 +2,7 @@ import type express from "express";
 import type { Response } from "express";
 
 import { getPollTimeoutCapMs } from "../../shared/poll-timeout-cap.js";
-import { RequestValidationError } from "../validation-error.js";
+import { MessageRoutingPendingError, RequestValidationError } from "../validation-error.js";
 import type { OwnerTokenAccount, SessionAccount } from "../db.js";
 import type { AgentSessionBearerCapability } from "../../shared/agent-session-bearer.js";
 import type { SupervisorHostGrant } from "../db.js";
@@ -23,22 +23,40 @@ export interface AgentSessionRequestPrincipal {
   owner_label: string;
   ide_label: string;
   repo_branch: string | null;
+  /** A given agent the asker hasn't accepted yet: it may only stay connected. */
+  waiting_for_asker?: boolean;
   expires_at: string;
 }
 
 export interface AuthenticatedRequest extends express.Request {
   sessionAccount?: SessionAccount | OwnerTokenAccount | null;
-  authKind?: "session" | "owner_token" | "agent_session" | "supervisor_grant" | null;
+  authKind?: RequestAuthKind;
   agentSession?: AgentSessionRequestPrincipal | null;
   supervisorGrant?: SupervisorHostGrant | null;
+  /** Set only for an OAuth access token on /mcp (authKind "mcp_oauth"). */
+  mcpOAuth?: McpOAuthRequestGrant | null;
   rawBody?: Buffer;
+}
+
+/**
+ * "mcp_oauth" is an OAuth access token from the remote MCP authorization
+ * server. It is accepted only on /mcp; the auth middleware refuses it anywhere
+ * else. Inside a remote MCP session the grant acts as "owner_token".
+ */
+export type RequestAuthKind = "session" | "owner_token" | "agent_session" | "supervisor_grant" | "mcp_oauth" | null;
+
+export interface McpOAuthRequestGrant {
+  grant_id: string;
+  /** The grant secret carried by the token; remote MCP sessions bind to it. Never log it. */
+  session_secret: string;
 }
 
 export interface ResolvedRequestAuth {
   account: SessionAccount | OwnerTokenAccount | null;
-  authKind: "session" | "owner_token" | "agent_session" | "supervisor_grant" | null;
+  authKind: RequestAuthKind;
   agentSession?: AgentSessionRequestPrincipal | null;
   supervisorGrant?: SupervisorHostGrant | null;
+  mcpOAuth?: McpOAuthRequestGrant | null;
 }
 
 export function parsePollTimeout(timeoutValue: string | undefined): number {
@@ -156,6 +174,11 @@ export function respondWithValidationOrInternalError(
   error: unknown,
   fallbackMessage: string
 ): void {
+  if (error instanceof MessageRoutingPendingError) {
+    res.setHeader("Retry-After", "1");
+    res.status(503).json({ error: error.message, code: "message_routing_pending" });
+    return;
+  }
   if (error instanceof RequestValidationError) {
     res.status(400).json({ error: error.message });
     return;

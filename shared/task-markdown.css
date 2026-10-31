@@ -30,3 +30,9 @@
 .task-markdown :is(button, [tabindex]):focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
 @media (hover: hover) and (pointer: fine) { .task-markdown-toolbar button:hover:not(:disabled) { background: var(--accent-hover); color: var(--text); } }
 @media (max-width: 640px), (pointer: coarse) { .task-markdown-toolbar .task-markdown-tool { flex-basis: 40px; width: 40px; height: 40px; min-height: 40px; } .task-markdown-tabs button { min-height: 40px; } }
+
+@media (max-width: 640px) {
+  .task-markdown textarea { font-size: 16px; min-height: 180px; }
+  .task-markdown-toolbar .task-markdown-tool { flex-basis: 44px; width: 44px; height: 44px; min-height: 44px; }
+  .task-markdown-tabs button { min-height: 44px; }
+}

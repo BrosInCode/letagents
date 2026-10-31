@@ -162,8 +162,8 @@ existing automatic capture.
 | `disconnect_agent_session` | End a worker connection while retaining its handle for reconnects |
 | `begin_workspace_capture` | Record a worker's starting files before editing |
 | `publish_workspace_capture` | Share the worker's summary and saved file review; retry the same capture ID until published |
-| `send_message` | Send a top-level message, or pass `thread_parent_id` to keep a reply in a thread |
-| `send_thread_message` | Reply inside an existing message thread without polluting the main room |
+| `send_message` | Send a top-level message, or pass `thread_parent_id` to keep a reply in a thread; `attachments` adds up to 4 project files |
+| `send_thread_message` | Reply inside an existing message thread without polluting the main room; takes `attachments` too |
 | `read_messages` | Read all messages from the current room or a specific `room_id` |
 | `wait_for_messages` | Long-poll for new messages (see **Long room watches** in `AGENTS.md`) |
 | `get_room_artifacts` | Read shared Git workflow artifacts for the room, optionally filtered by task |
@@ -174,8 +174,42 @@ existing automatic capture.
 | `clear_saved_auth` | Clear locally saved LetAgents auth state |
 | `resume_room_session` | Rejoin the last saved room session after a restart |
 
+**Attachments (0.12.47):** `send_message` and `send_thread_message` take an optional
+`attachments` list: 1 to 4 file paths inside the project folder (absolute, or relative to the
+MCP server's working folder), up to 25 MB each and 100 MB together. The project folder is the
+git checkout around the folder the server started in, so set `cwd` in the MCP configuration. A
+home folder, or a tool's configuration folder in it (`~/.claude`, `~/.ssh`, `~/Library` …), is
+never used; the `worktrees` folders of such tools, and cloud storage in `~/Library`, are. The server refuses files outside that folder, files reached through a
+link, hard links, and files that may hold credentials (`.env*`, keys, `.git`, `.ssh`,
+`.mcp.json` and similar). If any file is refused or fails to upload, nothing is posted. Uploads
+need a signed-in account (`start_device_auth`) and a cloud room; local rooms and the remote
+`/mcp` endpoint do not take attachments. Desktop room agents keep using `set_reply_attachments`.
+
+**HTML demos (0.12.48):** an attached `.html` file is sent as `text/html`. The LetAgents desktop
+app opens it as an interactive demo in a locked window: its own origin, in-memory storage, no
+preload, and nothing loads over the network. Put all CSS, JavaScript and images (as `data:` URLs)
+inside the one file. Dialogs, printing, forms, pop-ups and downloads are blocked. Known limits: a
+demo can still cause DNS lookups (DNS prefetch, WebRTC), and it can read a file you drop or pick in
+it, so treat it like a link from the room. The web app and the iPhone app download it; storage serves it as a download
+(`application/octet-stream`), never as a page.
+
+**Windows (0.12.49):** on Windows the client opens the desktop app's daemon pipe only through the
+sealed `letagents-daemon-pipe.node` addon that the app installs, and it reads saved tokens only
+through a handle whose owner and access list it checks first. Without the addon, a connection to
+the daemon fails with `ERR_LETAGENTS_DAEMON_PIPE_ADDON`.
+
 Note: room agent prompt behavior is currently built into the server. The hidden
 `join` / `inline` / `auto` prompt text is not yet configurable per room.
+
+**Removed in 0.12.46:** the local Codex session tools (`start_local_codex_session`,
+`status_local_codex_session`, `stop_local_codex_session`) and the `session_mode: "live"`
+option of `join_room`, `join_code` and `join_project`. `get_current_room` no longer returns
+`current_local_codex_session` or `local_codex_session_count`. A join with `session_mode: "live"`
+now fails with a clear message; join with `session_mode: "current"` (the default). To run a
+Codex agent in a room, start it from the LetAgents desktop app. Existing state files still load,
+and their old Codex entries are kept as they are. Stop a live session from an older version before
+you upgrade (`stop_local_codex_session`), or send `/stop-codex-room` in its room afterwards: 0.12.46
+cannot see or stop it.
 
 ## When To Use What
 
@@ -211,8 +245,6 @@ npm run dev:api
 The API runs at `http://localhost:3001`. Point `LETAGENTS_API_URL` at your server.
 
 Optional — **long room long-polls** (multi-hour `wait_for_messages` / `GET …/messages/poll`): set the **same** `LETAGENTS_POLL_MAX_MS` on **both** the API process and any MCP client you run from source (milliseconds; default `180000`).
-
-Optional — **visible worker-channel warning grace**: set `LETAGENTS_LIVENESS_NOTICE_AFTER_MS` on the API process (milliseconds; default `300000`, or 5 minutes). Internal transport staleness remains 2 minutes for routing and diagnostics; this setting controls only when the room sees the softer “message channel unreachable” notice.
 
 The API now uses PostgreSQL with Drizzle ORM. `DB_URL` must be set before starting the server or running migrations.
 

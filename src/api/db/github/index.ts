@@ -21,9 +21,12 @@ export {
   recordGitHubWebhookDelivery,
 } from "./webhook-deliveries.js";
 export {
+  claimGitHubRoomEventForTask,
   getGitHubRoomEvents,
+  getLatestPullRequestRoomEvent,
   hasGitHubRoomActivationEventAfter,
   insertGitHubRoomEvent,
+  releaseGitHubRoomEventFromTask,
   updateGitHubRoomEventLinkedTaskId,
 } from "./room-events.js";
 export { getTasksGitHubArtifactStatus } from "./artifact-status.js";

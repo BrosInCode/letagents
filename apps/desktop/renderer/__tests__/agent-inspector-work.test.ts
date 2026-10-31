@@ -26,6 +26,7 @@ import {
   humanizeAgentInspectorTimeline,
   isCurrentAgentInspectorWorkResponse,
 } from "../src/domain/agent-inspector-work";
+import { roomShellSource } from "./room-shell-source";
 
 test("work detail source selection uses exact active source before bounded recency", () => {
   assert.equal(defaultAgentInspectorWorkSource({ roomAgentState: { turn: { sourceMessageId: "active" } } } as any, { items: [{ source_message_id: "newest" }] }), "active");
@@ -137,7 +138,7 @@ test("work labels present human language instead of raw causal enums", () => {
 });
 
 test("shell keeps work loading dark, fenced, stale-safe, and routed through canonical reveal", () => {
-  const shell = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
+  const shell = roomShellSource();
   const surface = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue", import.meta.url)), "utf8");
   const work = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorWork.vue", import.meta.url)), "utf8");
   assert.doesNotMatch(shell, /agentInspectorFoundationEnabled/);
@@ -150,7 +151,7 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   assert.match(shell, /refreshOpenAgentInspectorRuntimeControl\(snapshot\)/);
   assert.match(shell, /invalidateAgentInspectorRuntimeControl\(/);
   assert.match(shell, /readAgentInspectorWorkDetail\(/);
-  assert.match(shell, /snapshotGeneration: supervisorStateDaemonGeneration/);
+  assert.match(shell, /snapshotGeneration: (?:supervisorSyncState\.)?supervisorStateDaemonGeneration/);
   assert.match(shell, /entry: selectedAgentDetailProjection\.value\?\.entry/);
   assert.match(shell, /if \(!currentDetail \|\| !isCurrent\(\)\) return/);
   assert.match(shell, /activeTab\.value = "chat"[\s\S]{0,120}revealRoomMessage\(canonicalMessageId\)/);
@@ -320,4 +321,19 @@ test("detail refresh retains exact last-check evidence and drops mismatched heal
   assert.equal(resource.status, "error");
   assert.equal(resource.detail.runtime_control, null);
   assert.equal(resource.detail.source_message.id, "source", "exact retained history survives the health failure");
+});
+
+test("usage readings remain bound to their exact conversation and daemon generation", async () => {
+  const entry = { id: "entry", roomId: "room", executionGenerationId: "execution", providerContinuationId: "thread", runtimeGenerationId: "birth" } as any;
+  const usage = { providerContinuationId: "thread", executionGenerationId: "execution", daemonGeneration: 4,
+    account: { state: "available", windows: [] }, context: { usedTokens: 31000, capacityTokens: 200000, observedAt: "2026-10-10T20:00:00.000Z" }, compaction: null };
+  const detail = { entry_id: "entry", room_id: "room", requested_source_message_id: null, source_message: null, availability: "not_loaded", usage } as any;
+  for (const changed of [entry, { ...entry, providerContinuationId: "replacement" }, { ...entry, executionGenerationId: "next" }]) {
+    let resource: any = { status: "idle", detail: null, error: null, sourceMessageId: null };
+    await readAgentInspectorWorkDetail({ entry: changed, source: null, generation: 4, previous: resource,
+      read: async () => detail, isCurrent: () => true, write: next => { resource = next; } });
+    assert.equal(resource.detail.usage, changed === entry ? usage : null);
+  }
+  const resource = { status: "ready", detail, error: null, sourceMessageId: null } as any;
+  assert.equal(invalidateAgentInspectorRuntimeControl(resource, { entries: [entry], daemonGeneration: 5 } as any, "entry", "room").detail?.usage, null);
 });

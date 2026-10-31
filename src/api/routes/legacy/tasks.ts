@@ -2,6 +2,7 @@ import type { Express, Response } from "express";
 
 import {
   BoardIntentApprovalConsumptionError,
+  ReservedTaskCreatorError,
   createCoordinationEvent,
   createTask,
   getOpenTasks,
@@ -242,6 +243,10 @@ export function registerLegacyProjectTaskRoutes(
           actorInstanceId: effectiveActorInstanceId,
         });
         res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
+      if (error instanceof ReservedTaskCreatorError) {
+        res.status(400).json({ error: error.message, code: error.code });
         return;
       }
       throw error;

@@ -173,3 +173,28 @@ test("readable system copy preserves canonical agent instructions in desktop mes
   assert.equal(mapped.replyTo?.displayText, display_text);
   assert.equal(mapped.thread?.latestReply?.displayText, display_text);
 });
+
+test("room message mapping carries reactions only when the server sent them", () => {
+  const base = { id: "msg_7", sender: "Human", text: "Ship it?", timestamp: "2026-10-02T10:00:00.000Z" };
+  assert.equal("reactions" in mapRoomMessagePayload(base), false,
+    "a local room or an older server sends none, which is how the renderer knows the message cannot be reacted to");
+  assert.deepEqual(mapRoomMessagePayload({ ...base, reactions: [] }).reactions, []);
+  assert.deepEqual(mapRoomMessagePayload({
+    ...base,
+    reactions: [
+      { emoji: "👍", count: 2, reactors: [{ login: "ada", name: "Ada", avatar_url: null }, { login: "grace" }] },
+      { emoji: "<img src=x>", count: 1, reactors: [{ login: "mallory" }] },
+      "junk",
+    ],
+  }).reactions, [
+    { emoji: "👍", count: 2, reactors: [{ login: "ada", name: "Ada", avatar_url: null }, { login: "grace", name: "grace", avatar_url: null }] },
+  ], "anything that is not a well-formed emoji reaction is dropped before it reaches the renderer");
+});
+
+test("authenticated human profile survives cloud mapping without guessing from sender", () => {
+  const base = { id: 'msg_50', sender: 'Same display name', text: 'Hello', source: 'browser', timestamp: '2026-10-12T10:00:00Z' };
+  assert.deepEqual(mapCloudRoomMessagePayload({ ...base, sender_profile: { login: 'actual-owner', avatar_url: 'https://avatars.githubusercontent.com/u/1' } }).senderProfile,
+    { login: 'actual-owner', avatarUrl: 'https://avatars.githubusercontent.com/u/1' });
+  assert.equal(mapCloudRoomMessagePayload({ ...base, sender_profile: null }).senderProfile, null);
+  assert.equal(mapCloudRoomMessagePayload(base).senderProfile, undefined);
+});

@@ -1,13 +1,19 @@
 import assert from "node:assert/strict";
 import { chmod, mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, win32 } from "node:path";
 import test from "node:test";
 
 import {
   installedCodexExecutablePath,
   resolveCodexExecutable,
 } from "../main/agents/codex-executable.js";
+
+// The host's own platform: the resolver reads real files, and on Windows it looks for codex.exe and uses a ";" PATH.
+const platform = process.platform;
+const windows = platform === "win32";
+const codexName = windows ? "codex.exe" : "codex";
+const emptyPath = windows ? "C:\\letagents-no-such-folder" : "/usr/bin:/bin";
 
 async function executable(path: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -17,27 +23,29 @@ async function executable(path: string): Promise<void> {
 
 test("Codex resolution falls back to the official standalone install outside PATH", async () => {
   const homeDirectory = await mkdtemp(join(tmpdir(), "letagents-codex-home-"));
-  const installed = join(homeDirectory, ".local", "bin", "codex");
+  const installed = windows
+    ? join(homeDirectory, "AppData", "Local", "Programs", "OpenAI", "Codex", "bin", codexName)
+    : join(homeDirectory, ".local", "bin", "codex");
   await executable(installed);
 
   assert.equal(resolveCodexExecutable({
-    env: { PATH: "/usr/bin:/bin" },
+    env: { PATH: emptyPath },
     homeDirectory,
-    platform: "darwin",
+    platform,
   }), installed);
 });
 
 test("Codex resolution preserves an existing PATH installation", async () => {
   const homeDirectory = await mkdtemp(join(tmpdir(), "letagents-codex-home-"));
   const pathDirectory = await mkdtemp(join(tmpdir(), "letagents-codex-path-"));
-  const pathCodex = join(pathDirectory, "codex");
+  const pathCodex = join(pathDirectory, codexName);
   await executable(pathCodex);
-  await executable(join(homeDirectory, ".local", "bin", "codex"));
+  await executable(join(homeDirectory, ".local", "bin", codexName));
 
   assert.equal(resolveCodexExecutable({
     env: { PATH: pathDirectory },
     homeDirectory,
-    platform: "darwin",
+    platform,
   }), pathCodex);
 });
 
@@ -49,13 +57,13 @@ test("Codex resolution honors explicit executable and install directory override
   assert.equal(resolveCodexExecutable({
     env: { LETAGENTS_CODEX_BIN: configured, PATH: "" },
     homeDirectory: root,
-    platform: "darwin",
+    platform,
   }), configured);
   assert.equal(installedCodexExecutablePath({
     env: { CODEX_INSTALL_DIR: installDirectory },
     homeDirectory: root,
-    platform: "darwin",
-  }), join(installDirectory, "codex"));
+    platform,
+  }), join(installDirectory, codexName));
 });
 
 test("Codex standalone path matches the official Windows installer default", () => {
@@ -63,5 +71,5 @@ test("Codex standalone path matches the official Windows installer default", () 
     env: { LOCALAPPDATA: "C:\\Users\\Ada\\AppData\\Local" },
     homeDirectory: "C:\\Users\\Ada",
     platform: "win32",
-  }), join("C:\\Users\\Ada\\AppData\\Local", "Programs", "OpenAI", "Codex", "bin", "codex.exe"));
+  }), win32.join("C:\\Users\\Ada\\AppData\\Local", "Programs", "OpenAI", "Codex", "bin", "codex.exe"));
 });

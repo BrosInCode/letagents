@@ -1,5 +1,26 @@
+<script lang="ts">
+import type { ChatScrollPosition } from '../../../../../shared/chat-scroll-position'
+const roomScrollPositions = new Map<string, ChatScrollPosition>()
+</script>
 <template>
   <div class="room-view-viewport">
+    <div v-if="activeTab === 'chat' && historySearch.state.value.status !== 'idle'" class="room-history-search">
+      <MessageSearchResults
+        :status="historySearch.state.value.status"
+        :hits="historySearch.hits.value"
+        :terms="historySearch.state.value.terms"
+        :has-more="historySearch.state.value.hasMore"
+        :loading-more="historySearch.state.value.loadingMore"
+        :error="historySearch.state.value.error"
+        :loaded-match-count="matchCount"
+        :format-time="formatMessageTime"
+        @show="openMessageInChat"
+        @more="historySearch.loadMore()"
+      />
+    </div>
+    <PinnedMessages v-if="activeTab === 'chat' && messagePins" :key="room?.identifier" :pins="messagePins.state.value.pins"
+      :loading="messagePins.state.value.loading" :error="messagePins.state.value.error"
+      @refresh="messagePins.refresh" @reveal="openMessageInChat" />
     <Transition :name="tabTransitionName">
       <MessageList
         v-if="activeTab === 'chat'"
@@ -7,25 +28,42 @@
         ref="messageListRef"
         class="room-tab-panel"
         :messages="messages"
+        :initial-scroll-position="roomScrollPositions.get(scrollKey(room?.identifier || ''))"
+        @scroll-position="(id, position) => roomScrollPositions.set(scrollKey(id), position)"
         :roomIdentifier="room?.identifier || ''"
+        :unreadRoomId="room?.projectId || ''"
         :reasoningSessions="reasoningSessions"
+        :presence="presence"
         :hasOlderMessages="messagesHasOlder"
+        :messagesLoaded="messagesLoaded"
         :isLoadingOlderMessages="isLoadingOlderMessages"
+        :olderMessagesError="olderMessagesError"
         :searchQuery="searchQuery"
         :stalePromptTaskStates="stalePromptTaskStates"
         :taskReferenceIds="taskReferenceIds"
+        :revealMessageId="revealMessageId"
+        :agentNames="agentNames"
         @loadOlder="emit('loadOlder')"
         @reply="emit('reply', $event)"
+        @thread-messages="emit('threadMessages', $event)"
         @openImageViewer="emit('openImageViewer', $event)"
         @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
         @openTask="emit('openTask', $event)"
-      />
+        @revealed="handleMessageRevealed"
+        @revealUnavailable="handleMessageRevealUnavailable"
+      >
+        <template #thread-composer="context"><slot name="thread-composer" v-bind="context" /></template>
+      </MessageList>
 
       <GitHubEventFeed
         v-else-if="githubEventsSupported && activeTab === 'events'"
         key="events"
         class="room-tab-panel"
         :events="githubEvents"
+        :roomIdentifier="room?.identifier || ''"
+        @refresh="emit('refreshGitHubEvents')"
+        @loadOlder="emit('loadOlderGitHubEvents')"
+        @openTask="emit('openTask', $event)"
         :repository="githubEventsRepository"
         :isAvailable="githubEventsAvailable"
         :hasMore="githubEventsHasMore"
@@ -73,6 +111,7 @@
         :clearDisconnectedParticipants="clearDisconnectedParticipants"
         :taskGithubStatus="taskGithubStatus"
         :isLoading="activityLoading"
+        @openMessage="openMessageInChat"
       />
 
       <FocusRoomsView
@@ -112,13 +151,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { useAuth } from '@/composables/useAuth'
+import { onScopeDispose } from "vue";
+import { useRoomUnread } from "@/composables/roomUnread";
+import PinnedMessages from '../../../../../shared/ui/PinnedMessages.vue'
+import { injectRoomMessagePins } from '@/composables/roomMessagePins'
+import { computed, nextTick, ref, watch } from 'vue'
 
-import ActivityView from '@/components/room/ActivityView.vue'
-import FocusRoomsView from '@/components/room/FocusRoomsView.vue'
-import GitHubEventFeed from '@/components/room/GitHubEventFeed.vue'
+import { asyncRoomPanel } from './asyncRoomPanel'
 import MessageList from '@/components/room/MessageList.vue'
-import TaskBoard from '@/components/room/TaskBoard.vue'
+import { attentionResponseAgentNames, formatMessageTime } from '@/components/room/chat-message/formatting'
+import MessageSearchResults from '../../../../../shared/ui/MessageSearchResults.vue'
+import { useRoomHistorySearch } from '@/composables/roomHistorySearch'
+import { useToast } from '@/composables/useToast'
 import type {
   FocusRoomConclusionDetails,
   FocusRoomInfo,
@@ -143,12 +188,22 @@ import type {
   TaskUpdatePayload,
 } from './types'
 
+const ActivityView = asyncRoomPanel(() => import('@/components/room/ActivityView.vue'))
+const FocusRoomsView = asyncRoomPanel(() => import('@/components/room/FocusRoomsView.vue'))
+const GitHubEventFeed = asyncRoomPanel(() => import('@/components/room/GitHubEventFeed.vue'))
+const TaskBoard = asyncRoomPanel(() => import('@/components/room/TaskBoard.vue'))
+
+const scrollAuth = useAuth()
+const scrollKey = (room: string) => JSON.stringify([scrollAuth.user.value?.id || null, room])
+
 const props = defineProps<{
   activeTab: RoomTab
   tabTransitionName: string
   messages: readonly RoomMessage[]
   messagesHasOlder: boolean
+  messagesLoaded?: boolean
   isLoadingOlderMessages: boolean
+  olderMessagesError?: string
   tasks: readonly RoomTask[]
   focusRooms: readonly FocusRoomInfo[]
   presence: readonly RoomAgentPresence[]
@@ -194,8 +249,11 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  refreshGitHubEvents: []
+  loadOlderGitHubEvents: []
   loadOlder: []
   reply: [message: RoomMessage]
+  threadMessages: [messages: RoomMessage[]]
   openImageViewer: [imageId: string]
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
   addTask: [title: string]
@@ -212,13 +270,66 @@ const emit = defineEmits<{
   shareResults: [summary: string, details: FocusRoomConclusionDetails | null]
   updateFocusSettings: [focusKey: string, settings: FocusRoomSettings]
   openTask: [taskId: string]
+  openChat: []
 }>()
+
+const messagePins = injectRoomMessagePins()
+const roomUnread = useRoomUnread();
+watch(() => props.room?.projectId, roomUnread.enter, { immediate: true, flush: "sync" });
+onScopeDispose(() => roomUnread.enter(null));
 
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
 const taskReferenceIds = computed<ReadonlySet<string>>(() =>
   new Set(props.tasks.map(task => task.id))
 )
+// Messages name agents by room display name, never by their routing handle.
+const agentNames = computed(() => attentionResponseAgentNames([...props.participants, ...props.presence]))
+
+// A message another tab asked to show; the chat reveals it once it is open.
+const revealMessageId = ref<string | null>(null)
+
+function openMessageInChat(messageId: string) {
+  if (revealMessageId.value === messageId) {
+    revealMessageId.value = null
+    void nextTick(() => {
+      revealMessageId.value = messageId
+      emit('openChat')
+    })
+    return
+  }
+  revealMessageId.value = messageId
+  emit('openChat')
+}
+
+function handleMessageRevealed(messageId: string) {
+  if (revealMessageId.value === messageId) revealMessageId.value = null
+}
+
+// Every match in the room's history, while the header search has a query.
+const historySearch = useRoomHistorySearch(
+  computed(() => props.room?.identifier || ''),
+  computed(() => props.searchQuery),
+)
+const toast = useToast()
+function handleMessageRevealUnavailable(_messageId: string, reason?: 'too_far_back' | 'unavailable') {
+  if (props.searchQuery) {
+    toast.info('That message is too far back to open here. Expand the search result to read it.', 5000)
+    return
+  }
+  if (reason === 'unavailable' || !props.messagesHasOlder) {
+    toast.info('That earlier message is not available in the loaded room history.')
+  } else {
+    toast.info('That message is too far back to open here yet.')
+  }
+}
+
+watch(() => props.activeTab, (tab) => {
+  if (tab !== 'chat') revealMessageId.value = null
+})
+watch(() => props.room?.identifier, () => {
+  revealMessageId.value = null
+})
 
 function emitShareResults(summary: string, details: FocusRoomConclusionDetails | null) {
   emit('shareResults', summary, details)
@@ -228,11 +339,13 @@ function emitUpdateFocusSettings(focusKey: string, settings: FocusRoomSettings) 
   emit('updateFocusSettings', focusKey, settings)
 }
 
-defineExpose({ matchCount })
+defineExpose({ matchCount, openMessageInChat })
 </script>
 
 <style scoped>
 .room-view-viewport {
+  display: flex;
+  flex-direction: column;
   position: relative;
   height: 100%;
   min-width: 0;
@@ -240,10 +353,53 @@ defineExpose({ matchCount })
   overflow: hidden;
 }
 
+/* Drops down from the header search, over the top of the message list. */
+.room-history-search {
+  position: absolute;
+  top: 8px;
+  left: 12px;
+  right: 12px;
+  z-index: 5;
+  display: flex;
+  max-width: 720px;
+  max-height: min(46%, 380px);
+  margin: 0 auto;
+  padding: 10px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+}
+
+.room-history-search > .history-search {
+  flex: 1;
+}
+
 .room-tab-panel {
-  height: 100%;
+  flex: 1;
   min-width: 0;
   min-height: 0;
+}
+
+.room-view-viewport :deep(.room-panel-placeholder) {
+  display: grid;
+  place-content: center;
+  flex: 1;
+  padding: 24px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.room-view-viewport :deep(.room-panel-placeholder button) {
+  justify-self: center;
+  min-height: 44px;
+  padding: 8px 16px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
 }
 
 .tab-slide-forward-enter-active,
@@ -270,5 +426,9 @@ defineExpose({ matchCount })
 .tab-slide-back-enter-from {
   opacity: 0;
   transform: translateX(-28px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-tab-panel { transition: none; transform: none; }
 }
 </style>

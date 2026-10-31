@@ -18,6 +18,8 @@ export type DesktopTaskSummaryPayload = {
     url?: string | null;
     ref?: string | null;
     state?: string | null;
+    /** Server-set link mark (PR1, PR6). */
+    linked_by?: string | null;
   }> | null;
   workflow_refs?: Array<{
     provider?: string;
@@ -30,6 +32,8 @@ export type DesktopTaskSummaryPayload = {
     kind?: string;
     holder_label?: string | null;
     agent_label?: string | null;
+    /** The server's lease label, e.g. "ScarletHarbor | Emmy's agent | Codex". */
+    actor_label?: string | null;
     agent_key?: string | null;
     agent_session_id?: string | null;
     status?: string;
@@ -50,6 +54,8 @@ export type DesktopTaskSummaryPayload = {
     muted_by?: string | null;
     muted_at?: string | null;
   } | null;
+  external_ref?: string | null;
+  ticket_state?: string | null;
   created_at?: string | null;
   updated_at?: string;
   updatedAt?: string;
@@ -77,6 +83,9 @@ export function mapDesktopTaskSummaryPayload(
       ref: artifact.ref || null,
       state: artifact.state || null,
     })),
+    jevSuggestedPullRequests: (task.workflow_artifacts || [])
+      .filter((artifact) => artifact.linked_by === "jev_suggested" && artifact.kind === "pull_request" && artifact.url)
+      .map((artifact) => ({ url: artifact.url!, number: artifact.number ?? null, title: artifact.title || null })),
     workflowRefs: (task.workflow_refs || [])
       .map((ref) => ({
         provider: ref.provider || "unknown",
@@ -89,7 +98,7 @@ export function mapDesktopTaskSummaryPayload(
       .map((lease) => ({
         id: lease.id || "",
         kind: lease.kind || "work",
-        holderLabel: lease.holder_label || lease.agent_label || null,
+        holderLabel: lease.holder_label || lease.agent_label || lease.actor_label || null,
         agentKey: lease.agent_key || null,
         agentSessionId: lease.agent_session_id || null,
         status: lease.status || "active",
@@ -115,6 +124,10 @@ export function mapDesktopTaskSummaryPayload(
           mutedAt: task.stale_prompt_state.muted_at || null,
         }
       : null,
+    // Only cards that name a ticket carry these, so other cards map as before.
+    ...(task.external_ref
+      ? { externalRef: task.external_ref, ticketState: task.ticket_state || null }
+      : {}),
     createdAt: task.created_at || null,
     updatedAt: task.updated_at || task.updatedAt || new Date().toISOString(),
   };

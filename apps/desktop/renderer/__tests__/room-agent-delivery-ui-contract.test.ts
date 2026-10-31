@@ -17,6 +17,8 @@ import type {
   DesktopRoomAgentTurnState,
   DesktopSupervisorManifestEntry,
 } from "../../electron/ipc-types";
+import { appSource } from "./app-source";
+import { roomShellSource } from "./room-shell-source";
 
 const rendererRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -26,7 +28,7 @@ async function source(relativePath: string): Promise<string> {
 
 describe("durable room delivery UI contracts", () => {
   it("opens synthetic startup blockers in exact retained work and keeps real-message reveal", async () => {
-    const shell = await source("src/components/desktop/content/DesktopRoomShell.vue");
+    const shell = await roomShellSource();
     const handler = shell.slice(shell.indexOf("async function revealRoomMessage("), shell.indexOf("async function revealRecordedWorkMessage("))
       .replace("(messageId: string): Promise<void>", "(messageId)");
     const opened: Array<{ supervisorEntryId: string }> = [];
@@ -42,7 +44,7 @@ describe("durable room delivery UI contracts", () => {
         { id: "agent-b", roomId: "room-b", displayName: "CedarRidge" }] },
       { room: { identifier: "room-a" } }, (_event: string, id: string) => unavailable.push(id),
       (request: { supervisorEntryId: string }) => opened.push(request), initialTab,
-      (id: string) => selected.push(id), async (id: string) => { revealed.push(id); return true; },
+      (id: string) => selected.push(id), async (id: string) => { revealed.push(id); return "revealed"; },
       revealedMessageId, async () => undefined, initialMessageInspectorRequest,
     ) as (id: string) => Promise<void>;
     await reveal("desktop-initial-message:agent-a");
@@ -166,7 +168,7 @@ describe("durable room delivery UI contracts", () => {
 
     const [activity, shell, inspectorDomain] = await Promise.all([
       source("src/components/desktop/content/RoomActivityTabView.vue"),
-      source("src/components/desktop/content/DesktopRoomShell.vue"),
+      roomShellSource(),
       source("src/domain/agent-inspector.ts"),
     ]);
     assert.doesNotMatch(activity, /desktop-room-agent-(?:reconnect|recover)|reconnect-room-agent|recover-room-agent/);
@@ -248,17 +250,12 @@ describe("durable room delivery UI contracts", () => {
     const activity = await source("src/components/desktop/content/RoomActivityTabView.vue");
     assert.match(activity, /const inspectorTruthfulAgents = computed\(\(\) =>/);
     assert.match(activity, /supervisedActivityIdentity\(\s*props\.agentProjections\.map/);
-    assert.match(activity, /!hasLiveActivity/);
     assert.match(activity, /legacyReachableAgents/);
     assert.match(activity, /legacyWorkingAgents/);
-    for (const group of ["online", "responding", "recovering", "reconnecting", "needs_attention", "starting", "paused", "disconnected", "status_unavailable"]) {
-      assert.match(activity, new RegExp(`key: "${group}"`));
-    }
-    assert.match(activity, /agentInspectorActivityGroupState\(agent\)/);
-    assert.match(activity, /group\.key === "status_unavailable" \? "Status unavailable" : agent\.overallLabel/);
-    assert.match(activity, /agent\.resourceFreshness === 'stale'/);
-    assert.match(activity, /selectInspectorAgent\(agent\)/);
-    assert.match(activity, /selectParticipantAgent\(agent\)/);
+    assert.match(activity, /agentInspectorSignal\(agent\)/);
+    assert.match(activity, /agent\.overallState !== "retired"/);
+    assert.match(activity, /if \(native\) selectInspectorAgent\(native\)/);
+    assert.match(activity, /if \(legacy\) selectParticipantAgent\(legacy\)/);
   });
 
   it("presents Online activity with the same connected visual treatment", async () => {
@@ -274,13 +271,13 @@ describe("durable room delivery UI contracts", () => {
   it("presents retained structural work only as room History and reveals its source message", async () => {
     const [activity, shell] = await Promise.all([
       source("src/components/desktop/content/RoomActivityTabView.vue"),
-      source("src/components/desktop/content/DesktopRoomShell.vue"),
+      roomShellSource(),
     ]);
-    assert.match(activity, /Results saved from earlier work\./);
-    assert.match(activity, /data-testid="desktop-recorded-room-work"/);
-    assert.match(activity, /recordedWorkEvidenceIncomplete\(work\)/);
+    assert.match(activity, /<AgentHistory v-if="activeView === 'history'"/);
+    assert.match(activity, /#work-detail="\{ record \}"/);
+    assert.match(activity, /recordedWorkEvidenceIncomplete\(recordedWorkById\.get\(record\.id\)!\)/);
     assert.match(activity, /The owner cleared this shared work history\./);
-    assert.match(activity, /emit\('reveal-message', work\.sourceMessageId\)/);
+    assert.match(activity, /emit\('reveal-message', recordedWorkById\.get\(record\.id\)!\.sourceMessageId\)/);
     for (const [field, label] of [
       ["unresolved", "unresolved"],
       ["succeeded", "succeeded"],
@@ -293,7 +290,8 @@ describe("durable room delivery UI contracts", () => {
       assert.match(activity, new RegExp(`counts\\.${field}`));
       assert.match(activity, new RegExp(label));
     }
-    const liveActivityProjection = activity.match(/const hasLiveActivity = computed\(\(\) => Boolean\(([\s\S]*?)\n\)\);/)?.[1] || "";
+    const liveActivityProjection = activity.slice(activity.indexOf("const rosterRows"), activity.indexOf("function rosterAgentKey"));
+    assert.ok(liveActivityProjection.length > 0);
     assert.doesNotMatch(liveActivityProjection, /roomAgentWork/);
     assert.match(shell, /async function revealRecordedWorkMessage[\s\S]*?activeTab\.value = "chat";[\s\S]*?revealRoomMessage\(messageId\)/);
   });
@@ -313,7 +311,7 @@ describe("durable room delivery UI contracts", () => {
   it("hands a known cross-thread target to the mounted panel without a refresh RPC, and toasts absent failures", async () => {
     const [chat, shell, panel, messages] = await Promise.all([
       source("src/components/desktop/content/RoomChatView.vue"),
-      source("src/components/desktop/content/DesktopRoomShell.vue"),
+      roomShellSource(),
       source("src/components/desktop/content/room-chat/RoomThreadPanel.vue"),
       source("src/components/desktop/content/room-shell/useDesktopRoomMessages.ts"),
     ]);
@@ -328,15 +326,18 @@ describe("durable room delivery UI contracts", () => {
   });
 
   it("carries grouped receipts, disabled retry capability, and reveal events across chat surfaces", async () => {
-    const [app, shell, chat, viewport, thread, message] = await Promise.all([
-      source("src/App.vue"),
-      source("src/components/desktop/content/DesktopRoomShell.vue"),
+    const [app, shell, chat, viewport, thread, message, receipts] = await Promise.all([
+      Promise.resolve(appSource()),
+      roomShellSource(),
       source("src/components/desktop/content/RoomChatView.vue"),
       source("src/components/desktop/content/room-chat/RoomMessageViewport.vue"),
       source("src/components/desktop/content/room-chat/RoomThreadPanel.vue"),
       source("src/components/desktop/content/DesktopChatMessage.vue"),
+      source("src/domain/room-message-receipts.ts"),
     ]);
-    assert.match(shell, /\(grouped\[receipt\.sourceMessageId\] \?\?= \[\]\)\.push/);
+    // The shell groups receipts by room message with the domain function, which is where the grouping lives.
+    assert.match(shell, /roomMessageDeliveryReceipts\(supervisorEntries\.value\)/);
+    assert.match(receipts, /\(grouped\[receipt\.sourceMessageId\] \?\?= \[\]\)\.push/);
     assert.match(shell, /supervisedAgentWorkIndicators/);
     for (const content of [shell, chat, viewport, thread]) {
       assert.match(content, /delivery-receipts/);

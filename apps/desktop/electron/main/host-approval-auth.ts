@@ -1,8 +1,9 @@
 import { createHash, createPrivateKey, createPublicKey, generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { constants } from "node:fs";
-import { link, lstat, mkdir, open, unlink } from "node:fs/promises";
+import { link, lstat, open, unlink } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
+import { createPrivateDir, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated } from "../../../../shared/owner-private-fs.mjs";
 import type { HostApprovalChallenge, HostApprovalOperation, SignedHostApprovalRequest } from "../../shared/host-approval-auth.js";
 
 type SecretStorage = {
@@ -34,19 +35,19 @@ export async function loadHostApprovalSigner(path?: string, storage?: SecretStor
       const configured = defaults(); path ??= configured.path; storage ??= configured.storage;
     }
     if (!storage.isEncryptionAvailable() || storage.getSelectedStorageBackend?.() === "basic_text") throw unavailable();
-    try { await mkdir(dirname(path), { mode: 0o700 }); }
+    try { await createPrivateDir(dirname(path)); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     const parent = await lstat(dirname(path));
-    if (!parent.isDirectory() || parent.isSymbolicLink() || (parent.mode & 0o077)
-      || (process.getuid && parent.uid !== process.getuid())) throw unavailable();
+    if (!parent.isDirectory() || parent.isSymbolicLink() || !await isOwnerPrivate(dirname(path), parent)) throw unavailable();
     const readSealed = async (): Promise<string | null> => {
       let file;
-      try { file = await open(path!, constants.O_RDONLY | constants.O_NOFOLLOW); }
+      try { file = await openNoFollow(path!, constants.O_RDONLY); }
       catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return null; throw error; }
       try {
         const stat = await file.stat();
-        if (!stat.isFile() || (stat.mode & 0o777) !== 0o600 || stat.size > 16_384 || stat.size < 1
-          || (process.getuid && stat.uid !== process.getuid())) throw unavailable();
+        if (!stat.isFile() || stat.size > 16_384 || stat.size < 1
+          // A high-value secret: on Windows its own DACL is read every time (checkObject).
+          || !await isOwnerPrivate(path!, stat, { exactMode: 0o600, checkObject: true })) throw unavailable();
         const stored = JSON.parse(await file.readFile("utf8")) as { version?: unknown; sealedKey?: unknown };
         if (stored.version !== 1 || typeof stored.sealedKey !== "string" || !stored.sealedKey
           || Object.keys(stored).length !== 2 || Buffer.from(stored.sealedKey, "base64").toString("base64") !== stored.sealedKey) throw unavailable();
@@ -65,8 +66,10 @@ export async function loadHostApprovalSigner(path?: string, storage?: SecretStor
         bytes = Buffer.from(JSON.stringify({ version: 1, sealedKey: ciphertext.toString("base64") }));
       } finally { encoded.fill(0); }
       const temporary = `${path}.${randomUUID()}.tmp`;
-      const file = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+      const file = await openNoFollow(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600);
       try {
+        // Windows has no mode bits: the empty file gets its private DACL first. The hard link shares it.
+        await privateEntryCreated(temporary, "file");
         await file.writeFile(bytes); await file.sync(); await file.close();
         // link is exclusive: a racing creator cannot overwrite the stable key.
         try { await link(temporary, path); }
@@ -80,7 +83,8 @@ export async function loadHostApprovalSigner(path?: string, storage?: SecretStor
     if (!sealed) throw unavailable();
     // Also sync for readers: another creator may have linked the complete key
     // but not yet synced its directory. No reader may enroll it prematurely.
-    for (const directoryPath of [dirname(path), dirname(dirname(path))]) {
+    // Windows cannot fsync a folder handle; NTFS journals the link itself.
+    for (const directoryPath of ownerPrivatePlatform() === "win32" ? [] : [dirname(path), dirname(dirname(path))]) {
       const directory = await open(directoryPath, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
       try { await directory.sync(); } finally { await directory.close(); }
     }
@@ -99,7 +103,7 @@ export async function loadHostApprovalSigner(path?: string, storage?: SecretStor
       try {
         if (!challenge || !Number.isSafeInteger(challenge.daemonGeneration) || challenge.daemonGeneration < 1
           || !/^[A-Za-z0-9_-]{43}$/.test(challenge.bootNonce) || challenge.keyFingerprint !== keyFingerprint
-          || !["list", "decide", "list_tool_rules", "revoke_tool_rule"].includes(operation) || !Number.isSafeInteger(nowMs) || nowMs < 0
+          || !["list", "decide", "list_tool_rules", "revoke_tool_rule", "set_home_harness", "set_live_sharing"].includes(operation) || !Number.isSafeInteger(nowMs) || nowMs < 0
           || !Number.isSafeInteger(nowMs + 30_000)) throw unavailable();
         const payload = JSON.stringify({ domain: "letagents.host-approval", version: 1,
           daemonGeneration: challenge.daemonGeneration, bootNonce: challenge.bootNonce, keyFingerprint,

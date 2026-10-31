@@ -29,6 +29,8 @@ import {
 import { parseAgentActorLabel } from "../../../shared/agent-identity.js";
 import {
   normalizeMessageAttachmentReferences,
+  resolveMessageAttachmentUploader,
+  type MessageAttachmentUploader,
   type NormalizedMessageAttachmentReference,
 } from "../../messages/attachments.js";
 import {
@@ -42,7 +44,7 @@ import { getCanonicalRoomMessageCatchUp } from "../../server/room-message-catchu
 import {
   resolveRequestProjectRepoAccessRoomName,
 } from "../../rooms/access.js";
-import { resolveMessageActivationIdentity } from "../rooms/messages/activation-identity.js";
+import { replyTurnHoldAgentKey, resolveMessageActivationIdentity } from "../rooms/messages/activation-identity.js";
 import { attachReceiptAuthorityActivations } from "../rooms/messages/receipt-activation.js";
 import {
   openLiveRoomDeliveryController,
@@ -110,6 +112,7 @@ export interface LegacyProjectMessageRouteDeps {
       agent_prompt_kind?: AgentPromptKind | null;
       reply_to?: string | null;
       attachments?: NormalizedMessageAttachmentReference[];
+      attachment_uploader?: MessageAttachmentUploader | null;
       publisher_agent_key?: string | null;
       publisher_agent_session_id?: string | null;
       account_id?: string | null;
@@ -210,6 +213,7 @@ export function registerLegacyProjectMessageRoutes(
         agent_prompt_kind: promptKind,
         reply_to: replyToMessageId,
         attachments,
+        attachment_uploader: resolveMessageAttachmentUploader(req),
         ...(workerIdentity?.ok ? {
           publisher_agent_key: workerIdentity.identity.agent_key,
           publisher_agent_session_id: workerIdentity.identity.agent_session_id,
@@ -294,15 +298,19 @@ export function registerLegacyProjectMessageRoutes(
     const before = typeof req.query.before === "string" ? req.query.before : undefined;
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
     const activationIdentity = await resolveMessageActivationIdentity(req, projectId);
+    const workerFrontier = {
+      wait_for_routing: activationIdentity?.session_kind === "worker",
+      hold_agent_key: replyTurnHoldAgentKey(activationIdentity),
+    };
     const result = before === "latest"
-      ? await getLatestMessages(projectId, { limit, include_prompt_only: includePromptOnly, wait_for_routing: activationIdentity?.session_kind === "worker" })
+      ? await getLatestMessages(projectId, { limit, include_prompt_only: includePromptOnly, ...workerFrontier })
       : before
-        ? await getMessagesBefore(projectId, before, { limit, include_prompt_only: includePromptOnly, wait_for_routing: activationIdentity?.session_kind === "worker" })
+        ? await getMessagesBefore(projectId, before, { limit, include_prompt_only: includePromptOnly, ...workerFrontier })
         : await getMessages(projectId, {
           limit,
           after,
           include_prompt_only: includePromptOnly,
-          wait_for_routing: activationIdentity?.session_kind === "worker",
+          ...workerFrontier,
         });
 
     res.json({
@@ -423,6 +431,7 @@ export function registerLegacyProjectMessageRoutes(
           if (liveController.activationIdentity?.session_kind === "worker" && !await waitForMessageRouting({
             roomId: projectId, messageId: event.message.id,
             includePromptOnly: deps.shouldIncludePromptOnlyMessages(req),
+            holdAgentKey: replyTurnHoldAgentKey(liveController.activationIdentity),
             closed: () => streamClosed, load: deps.getMessageStreamCheckpoint,
           })) return;
           const attached = await hydrateLiveMessageForSubscriber({
@@ -658,6 +667,7 @@ export function registerLegacyProjectMessageRoutes(
         includePromptOnly,
         load: loadMessagesAfter,
         waitForRouting: liveController.activationIdentity?.session_kind === "worker",
+        holdAgentKey: replyTurnHoldAgentKey(liveController.activationIdentity),
       });
       if (!(await liveController.check())) {
         await denyRequestAsync();

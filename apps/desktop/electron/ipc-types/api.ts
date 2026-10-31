@@ -1,7 +1,29 @@
+import type { RoomGif, RoomExpressionsSetting } from "../../../../shared/room-expressions.mjs";
 export interface DesktopConversationRoutingSettings { enabled: boolean; available: boolean; can_manage: boolean; }
+/** "Answer in turns": enabled is the room's sequential reply order; off (parallel) by default. */
+export interface DesktopReplyOrderSettings { enabled: boolean; can_manage: boolean; }
+/** Reactions of the messages in a requested range, in the shape the shared reaction store reads. */
+export interface DesktopMessageReactionsRange {
+  /** Only reacted messages appear. */
+  reactions: Record<string, MessageReaction[]>;
+  /** The emoji the signed-in person reacted with, per message. */
+  viewer_reactions?: Record<string, string[]>;
+  /** Null when the whole range was read; otherwise the message to continue from. */
+  next_first_message_id: string | null;
+}
+/** The message's reactions after the viewer added or removed one. */
+export interface DesktopMessageReactionChange { changed: boolean; reactions: MessageReaction[]; }
+/** One page of a room history search, newest first; the shape the shared search controller reads. */
+export interface DesktopRoomMessageSearchPage { terms: string[]; messages: DesktopRoomMessage[]; has_more: boolean; next_before: string | null; }
 import type { ConversationApi } from "../../../../shared/conversation-contracts.mjs";
+import type { DesktopAccountActivityState } from "./account-activity.js";
+import type { DesktopAgentAsk, DesktopAgentAskLink, DesktopAgentAskModel, DesktopAgentAskProposal, DesktopAgentAskWorkspace, DesktopAskResult, DesktopCreateAgentAskInput, DesktopGiveAgentInput } from "./asks.js";
+import type { GitHubRoomChatEventFilter, GitHubRoomChatEventKind, RoomAgentGuidelines } from "../../../../shared/room-settings.mjs";
+import type { RoomNotificationPreferenceChange, RoomNotificationPreferenceEntry, RoomNotificationPreferenceList } from "../../../../shared/room-notification-preferences.mjs";
+import type { WakeRule, WakeRulePage } from "../../../../shared/wake-rules.mjs";
+import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 import type { KnowledgeInput, KnowledgePage, KnowledgeRecord, KnowledgeRevisionInput, KnowledgeType } from "../../../../shared/room-knowledge.mjs";
-import type { DesktopNeedsYou } from "./knowledge.js";
+import type { DesktopAttentionRoom, DesktopNeedsYou } from "./knowledge.js";
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
 import type { DesktopNotificationStatus, DesktopNotificationTarget } from "./notifications.js";
 import type {
@@ -32,15 +54,6 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopAgentProviderSetupInput,
   DesktopAgentProviderSetupResult,
-  DesktopManagedAgentChangeSummary,
-  DesktopManagedAgentInspectResult,
-  DesktopManagedAgentPermissionDecisionInput,
-  DesktopManagedAgentPermissionDecisionResult,
-  DesktopManagedAgentRetryInput,
-  DesktopManagedAgentSession,
-  DesktopManagedAgentStartInput,
-  DesktopManagedAgentStartResult,
-  DesktopManagedAgentStopInput,
   DesktopSupervisorAttemptDetail,
   DesktopSupervisorAgentConfiguration,
   DesktopSupervisorAgentConfigurationApplyInput,
@@ -60,6 +73,7 @@ import type {
   DesktopSupervisorTurnControlResult,
   DesktopOpenModelSaveSettingsInput,
   DesktopOpenModelSettingsStatus,
+  DesktopAgentCommitIdentitySettings,
 } from "./agents.js";
 import type { DesktopRentalApi } from "./rental.js";
 import type {
@@ -103,6 +117,7 @@ import type {
   DesktopRoomStreamEvent,
   DesktopSendRoomMessageResult,
   DesktopStagedAttachment,
+  DesktopChosenAttachment,
 } from "./room.js";
 import type { DesktopMcpInstallManyResult, DesktopMcpInstallResult, DesktopMcpInstallState, DesktopMcpInstallTargetId } from "./setup.js";
 import type {
@@ -112,6 +127,10 @@ import type { DesktopUpdateStatus } from "./updates.js";
 import type {
   DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
+  DesktopTaskMention,
+  DesktopTaskTicket,
+  DesktopMyWorkQuery,
+  DesktopTrackerFilterInput,
   DesktopTaskMutationResult,
   DesktopTaskReviewLeaseActionInput,
   DesktopTaskReviewWorkerActionInput,
@@ -134,6 +153,8 @@ export interface DesktopApi {
   };
   notifications: {
     getStatus: () => Promise<DesktopNotificationStatus>;
+    setBadgeCount?: (count: number) => Promise<void>;
+    onReceived?: (callback: (target: DesktopNotificationTarget) => void) => () => void;
     setEnabled: (enabled: boolean) => Promise<DesktopNotificationStatus>;
     takePendingActivation: () => Promise<DesktopNotificationTarget | null>;
     onActivated: (callback: (target: DesktopNotificationTarget) => void) => () => void;
@@ -171,8 +192,14 @@ export interface DesktopApi {
     getSettingsStatus: () => Promise<DesktopOpenModelSettingsStatus>;
     saveSettings: (input: DesktopOpenModelSaveSettingsInput) => Promise<DesktopOpenModelSettingsStatus>;
   };
+  agentCommitIdentity?: {
+    getSettings: () => Promise<DesktopAgentCommitIdentitySettings>;
+    setUseHostGitIdentity: (useHostGitIdentity: boolean) => Promise<DesktopAgentCommitIdentitySettings>;
+  };
   room: {
     getNeedsYou?: (includeUpdates?: boolean) => Promise<DesktopNeedsYou>;
+    /** One room's requests and, when asked, its pending board intents. */
+    getNeedsYouRoom?: (room: string, includeBoardIntents: boolean) => Promise<Pick<DesktopAttentionRoom, "records" | "truncated" | "tasks" | "boardIntents">>;
     getKnowledge?: (room: string, type: KnowledgeType) => Promise<KnowledgePage>;
     createKnowledge?: (room: string, type: KnowledgeType, input: KnowledgeInput & { client_id: string }) => Promise<KnowledgeRecord>;
     reviseKnowledge?: (room: string, type: KnowledgeType, id: string, input: KnowledgeRevisionInput) => Promise<KnowledgeRecord>;
@@ -198,16 +225,21 @@ export interface DesktopApi {
     getLatestMessages: (roomIdentifiers: string[]) => Promise<DesktopRoomLatestMessage[]>;
     getMessage: (roomIdentifier: string, messageId: string) => Promise<DesktopRoomMessage | null>;
     getMessageInfo: (roomIdentifier: string, messageId: string) => Promise<DesktopMessageInfo | null>;
+    getMessagesAfter?: (roomIdentifier: string, afterMessageId: string | null) => Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     getThreads: (roomIdentifier: string, filter?: DesktopRoomThreadInboxFilter, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadInboxPage>;
     getThread: (roomIdentifier: string, threadRootId: string, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadPage>;
     markThreadRead: (roomIdentifier: string, threadRootId: string, messageId?: string | null) => Promise<DesktopRoomThreadReadResult>;
     getReasoningSession: (roomIdentifier: string, sessionId: string) => Promise<DesktopReasoningSessionDetail>;
-    pickAttachments: (roomIdentifier: string) => Promise<DesktopStagedAttachment[]>;
+    /** Open the file picker. Returns up to `limit` chosen files without uploading them. */
+    chooseAttachments: (limit: number) => Promise<DesktopChosenAttachment[]>;
+    stageChosenAttachments: (roomIdentifier: string, tokens: string[]) => Promise<DesktopStagedAttachment[]>;
     stageDroppedAttachmentContents?: (
       roomIdentifier: string,
       files: DesktopDroppedAttachmentContent[]
     ) => Promise<DesktopStagedAttachment[]>;
+    /** Open an HTML attachment in the locked, offline demo window. */
+    openHtmlDemo?: (href: string, fileName: string, senderLabel?: string | null) => Promise<void>;
     discardAttachment: (roomIdentifier: string, uploadId: string) => Promise<void>;
     startStream: (roomIdentifier: string, afterMessageId?: string | null) => Promise<void>;
     repairStreamDelivery?: (
@@ -223,14 +255,29 @@ export interface DesktopApi {
       attachments?: Array<{ upload_id: string }>,
       threadRootId?: string | null,
       clientMessageId?: string | null,
-      messageNamespace?: string | null
+      messageNamespace?: string | null,
+      gif?: RoomGif | null
     ) => Promise<DesktopSendRoomMessageResult>;
     addTask: (roomIdentifier: string, input: DesktopTaskCreateInput) => Promise<DesktopTaskMutationResult>;
     updateTask: (
       roomIdentifier: string,
       taskId: string,
-      updates: { title?: string; description?: string; expected_content?: { title?: string; description?: string }; status?: string; assignee?: string | null; pr_url?: string | null }
+      updates: { title?: string; description?: string; expected_content?: { title?: string; description?: string }; status?: string; assignee?: string | null; pr_url?: string | null; external_ref?: string | null }
     ) => Promise<DesktopTaskMutationResult>;
+    getTaskMentions: (roomIdentifier: string, taskId: string) => Promise<DesktopTaskMention[]>;
+    getTaskTicket: (roomIdentifier: string, taskId: string) => Promise<DesktopTaskTicket | null>;
+    /** Cards that are the account's work across its rooms. Optional so a newer renderer degrades on an older main process. */
+    getMyWork?: (query?: DesktopMyWorkQuery) => Promise<import("../../../../shared/ticket-connectors.mjs").MyWorkPage>;
+    /** PR6: Jev reads who a My work card waits on. Optional so a newer renderer degrades on an older main process. */
+    askMyWorkNeedsMe?: (roomId: string, taskId: string) => Promise<import("../../../../shared/ticket-connectors.mjs").MyWorkJevNeedsMe>;
+    /** PR6: accept or reject a Jev suggestion on a card (a room admin). */
+    decideTaskJevLink?: (roomIdentifier: string, taskId: string, prUrl: string, decision: "accept" | "reject") => Promise<void>;
+    /** Room ticket filters (ticket connectors). Local rooms have none. */
+    listTrackerFilters: (roomIdentifier: string) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
+    saveTrackerFilter: (roomIdentifier: string, input: DesktopTrackerFilterInput) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
+    setTrackerFilterEnabled: (roomIdentifier: string, id: string, enabled: boolean) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
+    removeTrackerFilter: (roomIdentifier: string, id: string) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterList>;
+    testTrackerFilter: (roomIdentifier: string, input: DesktopTrackerFilterInput) => Promise<import("../../../../shared/ticket-connectors.mjs").RoomTrackerFilterTestResult>;
     updateTaskLease: (
       roomIdentifier: string,
       taskId: string,
@@ -278,7 +325,43 @@ export interface DesktopApi {
       title: string
     ) => Promise<DesktopFocusRoomMutationResult>;
     getConversationRouting: (roomIdentifier: string) => Promise<DesktopConversationRoutingSettings>;
+    /** Who is working in each of the account's rooms, and each room's latest message. */
+    getAccountActivity?: () => Promise<DesktopAccountActivityState>;
+    /** Opens the account's activity stream, or reopens it to watch a changed set of rooms. */
+    restartAccountActivity?: () => Promise<void>;
+    stopAccountActivity?: () => Promise<void>;
+    onAccountActivity?: (callback: (state: DesktopAccountActivityState) => void) => () => void;
     setConversationRouting: (roomIdentifier: string, enabled: boolean) => Promise<DesktopConversationRoutingSettings>;
+    getExpressions: (roomIdentifier: string) => Promise<RoomExpressionsSetting>;
+    setExpressions: (roomIdentifier: string, enabled: boolean) => Promise<RoomExpressionsSetting>;
+    getHistorySummarySetting: (roomIdentifier: string) => Promise<import("../../../../shared/room-history-summary.mjs").RoomHistorySummarySetting>;
+    setHistorySummarySetting: (roomIdentifier: string, enabled: boolean) => Promise<import("../../../../shared/room-history-summary.mjs").RoomHistorySummarySetting>;
+    searchGifs: (roomIdentifier: string, query: string, offset?: number) => Promise<import("../../../../shared/giphy-client.mjs").GiphyResult>;
+    resolveGif: (roomIdentifier: string, id: string) => Promise<import("../../../../shared/giphy-client.mjs").GiphyResult>;
+    getReplyOrder: (roomIdentifier: string) => Promise<DesktopReplyOrderSettings>;
+    setReplyOrder: (roomIdentifier: string, enabled: boolean) => Promise<DesktopReplyOrderSettings>;
+    /** Cloud rooms only. Optional so a renderer newer than its main process degrades to no reactions. */
+    getMessageLinkPreviews?: (roomIdentifier: string, references: import("../../../../shared/message-link-previews.mjs").LinkPreviewReference[]) => Promise<import("../../../../shared/message-link-previews.mjs").MessageLinkPreviewsResponse>;
+    getMessagePins?: (roomIdentifier: string) => Promise<import("../../../../shared/message-pins.mjs").MessagePinsResponse>;
+    createMessageReminder?: (room: string, message: string, dueAt: string) => Promise<{ reminder: import("./reminders.js").DesktopMessageReminder }>;
+    getMessageReminders?: (offset?: number) => Promise<import("./reminders.js").DesktopMessageRemindersPage>;
+    deleteMessageReminder?: (id: string) => Promise<{ ok: boolean }>;
+    setMessagePin?: (roomIdentifier: string, messageId: string, pinned: boolean) => Promise<import("../../../../shared/message-pins.mjs").MessagePinMutationResponse>;
+    reportTyping?: (roomIdentifier: string, input: import("../../../../shared/room-typing.mjs").TypingReport) => Promise<void>;
+    getMessageReactions?: (roomIdentifier: string, firstMessageId: string, lastMessageId: string) => Promise<DesktopMessageReactionsRange>;
+    setMessageReaction?: (roomIdentifier: string, messageId: string, emoji: string, reacted: boolean) => Promise<DesktopMessageReactionChange>;
+    /** Cloud rooms only. Optional so a renderer newer than its main process keeps its in-place find. */
+    searchMessages?: (roomIdentifier: string, query: string, beforeMessageId?: string | null) => Promise<DesktopRoomMessageSearchPage>;
+    getGitHubEventFilter: (roomIdentifier: string) => Promise<GitHubRoomChatEventFilter>;
+    setGitHubEventFilter: (roomIdentifier: string, enabledKinds: GitHubRoomChatEventKind[]) => Promise<GitHubRoomChatEventFilter>;
+    getAgentGuidelines: (roomIdentifier: string) => Promise<RoomAgentGuidelines>;
+    listNotificationPreferences: () => Promise<RoomNotificationPreferenceList>;
+    getNotificationPreference: (identifier: string) => Promise<RoomNotificationPreferenceEntry>;
+    setNotificationPreference: (identifier: string, change: RoomNotificationPreferenceChange) => Promise<RoomNotificationPreferenceEntry>;
+    setAgentGuidelines: (roomIdentifier: string, guidelines: string) => Promise<RoomAgentGuidelines>;
+    getWakeRules: (roomIdentifier: string) => Promise<WakeRulePage>;
+    cancelWakeRule: (roomIdentifier: string, ruleId: string) => Promise<WakeRule>;
+    restoreWakeRule: (roomIdentifier: string, ruleId: string) => Promise<WakeRule>;
     updateFocusRoomSettings: (
       roomIdentifier: string,
       focusKey: string,
@@ -297,6 +380,7 @@ export interface DesktopApi {
     ) => Promise<DesktopFocusRoomMutationResult>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
     createInviteRoom: () => Promise<DesktopInviteRoomCreation>;
+    getPullRequestDiff?: (roomIdentifier: string, number: number) => Promise<import("./room.js").DesktopPullRequestDiffResult>;
     getGitHubEvents: (
       roomIdentifier: string,
       query?: DesktopGitHubEventsQuery,
@@ -319,6 +403,21 @@ export interface DesktopApi {
     syncLocalRoom: (roomIdentifier: string) => Promise<DesktopLocalChatSyncResult>;
   };
   rental?: DesktopRentalApi;
+  asks?: {
+    listModels: () => Promise<DesktopAskResult<DesktopAgentAskModel[]>>;
+    create: (input: DesktopCreateAgentAskInput) => Promise<DesktopAskResult<{ ask: DesktopAgentAsk; link: string }>>;
+    listRoom: (roomId: string) => Promise<DesktopAskResult<DesktopAgentAsk[]>>;
+    listMine: () => Promise<DesktopAskResult<DesktopAgentAsk[]>>;
+    act: (askId: string, action: "cancel" | "accept" | "decline" | "remove") => Promise<DesktopAskResult<DesktopAgentAsk>>;
+    preview: (token: string) => Promise<DesktopAskResult<DesktopAgentAskLink>>;
+    workspace: (askId: string) => Promise<DesktopAskResult<DesktopAgentAskWorkspace>>;
+    decide: (askId: string, proposalId: string, approve: boolean) => Promise<DesktopAskResult<DesktopAgentAskProposal>>;
+    canGive: (providerId: string) => Promise<boolean>;
+    give: (input: DesktopGiveAgentInput) => Promise<DesktopAskResult<DesktopAgentAsk>>;
+    cantHelp: (token: string) => Promise<DesktopAskResult<void>>;
+    takePendingLink: () => Promise<string | null>;
+    onOpenLink: (callback: (token: string) => void) => () => void;
+  };
   auth: {
     getStatus: () => Promise<DesktopAuthStatus>;
     startDeviceFlow: (roomIdentifier?: string | null) => Promise<DesktopAuthStartResult>;
@@ -326,6 +425,44 @@ export interface DesktopApi {
     cancelDeviceFlow: () => Promise<DesktopAuthStatus>;
     openVerification: (url: string) => Promise<void>;
     signOut: () => Promise<DesktopAuthStatus>;
+  };
+  /** Connectors: this account's tracker connections (Jira, Linear, GitHub Issues). */
+  connectors: {
+    /** `not_configured` when the server has no connector key; the app then shows that instead of an error. */
+    list: () => Promise<import("../main/connectors.js").DesktopTrackerConnectionList>;
+    /** Opens the tracker's consent page in the browser and resolves once the app finished connecting. */
+    connectOAuth: (provider: import("../../../../shared/ticket-connectors.mjs").TrackerProvider) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionView>;
+    cancelOAuth: () => Promise<void>;
+    saveApiToken: (input: import("../../../../shared/ticket-connectors.mjs").TrackerApiTokenInput) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionView>;
+    /** GitHub Issues: the LetAgents GitHub App installation that holds `owner/repo`. */
+    connectGitHub: (repository: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionView>;
+    test: (id: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionTestResult>;
+    update: (id: string, patch: import("../../../../shared/ticket-connectors.mjs").TrackerConnectionPatch) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerConnectionView>;
+    remove: (id: string) => Promise<void>;
+    /** The webhook URL and signing secret to paste into the tracker. */
+    webhook: (id: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerWebhookSetup>;
+    /** Rules: a repo event that matches moves or comments on the ticket. */
+    rules: {
+      list: (id: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleList>;
+      create: (id: string, input: import("../../../../shared/ticket-connectors.mjs").TrackerRuleInput) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleView>;
+      /** Saves a new version. */
+      update: (id: string, ruleId: string, input: import("../../../../shared/ticket-connectors.mjs").TrackerRuleInput) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleView>;
+      setEnabled: (id: string, ruleId: string, enabled: boolean) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleView>;
+      versions: (id: string, ruleId: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleVersionView[]>;
+      /** Saves an earlier version's content as the newest version. */
+      rollback: (id: string, ruleId: string, version: number) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleView>;
+      remove: (id: string, ruleId: string) => Promise<void>;
+      /** PR6: Jev turns a sentence into a rule for the editor; nothing is saved. */
+      draft?: (id: string, sentence: string) => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerRuleDraftResult>;
+    };
+    /** PR6: count, outcome and latency of Jev questions for the account's connections. */
+    jevMetrics?: () => Promise<import("../../../../shared/ticket-connectors.mjs").TrackerJevMetrics>;
+  };
+  /** Apps signed in to the remote MCP endpoint (https://letagents.chat/mcp) with OAuth. */
+  mcpConnections: {
+    list: () => Promise<{ connections: import("../main/mcp-connections.js").RemoteMcpConnectionView[] }>;
+    /** Revokes the app's tokens and ends its remote MCP sessions. */
+    disconnect: (id: string) => Promise<void>;
   };
   supervisorGrant: {
     get: () => Promise<DesktopSupervisorGrantMetadata | null>;
@@ -344,8 +481,11 @@ export interface DesktopApi {
     startStatusWatch: (rootPath: string) => Promise<RepoStatus>;
     stopStatusWatch: () => Promise<void>;
     onStatusChanged: (callback: (status: RepoStatus) => void) => () => void;
-    openRoom: (rootPath: string) => Promise<DesktopRepoRoomSelection>;
+    /** `newProjectRoom` is the creation flow: it refuses the home folder and the disk root. */
+    openRoom: (rootPath: string, options?: { newProjectRoom?: boolean }) => Promise<DesktopRepoRoomSelection>;
     pickRoom: () => Promise<DesktopRepoRoomSelection>;
+    pickProjectParent: () => Promise<string | null>;
+    createProject: (parentPath: string, name: string) => Promise<DesktopRepoRoomSelection>;
     listProjectBindings: () => Promise<DesktopProjectBinding[]>;
     migrateProjectBindings: (
       candidates: DesktopLegacyProjectBindingCandidate[],
@@ -357,22 +497,6 @@ export interface DesktopApi {
   };
   workers: {
     list: () => Promise<WorkerSnapshot[]>;
-    listManagedAgentSessions: (roomIdentifier?: string | null) => Promise<DesktopManagedAgentSession[]>;
-    onManagedAgentSessionUpdate: (callback: (session: DesktopManagedAgentSession) => void) => () => void;
-    startManagedAgent: (input: DesktopManagedAgentStartInput) => Promise<DesktopManagedAgentStartResult>;
-    stopManagedAgent: (input?: DesktopManagedAgentStopInput) => Promise<DesktopManagedAgentSession | null>;
-    retryManagedAgent: (input: DesktopManagedAgentRetryInput) => Promise<DesktopManagedAgentSession | null>;
-    inspectManagedAgent: (
-      sessionId?: string | null,
-      roomIdentifier?: string | null
-    ) => Promise<DesktopManagedAgentInspectResult | null>;
-    getManagedAgentChangeSummary: (
-      sessionId?: string | null,
-      roomIdentifier?: string | null
-    ) => Promise<DesktopManagedAgentChangeSummary | null>;
-    resolveManagedAgentPermission: (
-      input: DesktopManagedAgentPermissionDecisionInput
-    ) => Promise<DesktopManagedAgentPermissionDecisionResult>;
     listAgentProviders: () => Promise<DesktopAgentProvider[]>;
     listAgentProviderModels: (
       providerId: DesktopAgentProviderId,
@@ -393,9 +517,9 @@ export interface DesktopApi {
     listHostApprovals?: (roomIdentifier: string) => Promise<import("../../shared/host-approvals.js").DesktopHostApprovalSnapshot>;
     decideHostApproval?: (input: { id: string; decision: import("../../shared/host-approvals.js").HostApprovalSelection }) => Promise<import("../../shared/host-approvals.js").HostApprovalStatus>;
     getStatus: () => Promise<DesktopSupervisorDaemonStatus>;
+    getServiceSnapshot?: () => Promise<import("./agents.js").DesktopSupervisorServiceSnapshot>;
     listAgents: (roomIdentifier?: string | null) => Promise<DesktopSupervisorManifestEntry[]>;
     createAgent: (input: DesktopSupervisorCreateInput) => Promise<DesktopSupervisorManifestEntry>;
-    resumeOwnershipTransfer: (id: string) => Promise<DesktopSupervisorManifestEntry>;
     setDesiredState: (id: string, desiredState: DesktopSupervisorDesiredState) => Promise<DesktopSupervisorManifestEntry>;
     reconnectAgent: (input: import("./agents.js").DesktopSupervisorReconnectInput) => Promise<DesktopSupervisorManifestEntry>;
     recoverAgentRuntime: (input: import("./agents.js").DesktopSupervisorRuntimeRecoveryInput) => Promise<DesktopSupervisorManifestEntry>;
@@ -408,6 +532,8 @@ export interface DesktopApi {
     getAgentInspectorDetail: (input: import("./agents.js").DesktopSupervisorAgentInspectorDetailInput) => Promise<import("./agents.js").DesktopSupervisorAgentInspectorDetail>;
     getAgentConfiguration: (input: { entryId: string; daemonGeneration: number }) => Promise<DesktopSupervisorAgentConfiguration>;
     updateAgentConfiguration: (input: DesktopSupervisorAgentConfigurationUpdateInput) => Promise<DesktopSupervisorAgentConfigurationUpdateResult>;
+    setAgentHomeHarness?: (input: import("./agents.js").DesktopSupervisorAgentHomeHarnessInput) => Promise<import("./agents.js").DesktopSupervisorAgentHomeHarnessResult>;
+    setAgentLiveSharing?: (input: import("./agents.js").DesktopSupervisorAgentLiveSharingInput) => Promise<import("./agents.js").DesktopSupervisorAgentConfigurationUpdateResult>;
     applyAgentConfiguration: (input: DesktopSupervisorAgentConfigurationApplyInput) => Promise<DesktopSupervisorAgentConfigurationApplyResult>;
     prepareRoomMove: (input: DesktopSupervisorRoomMovePrepareInput) => Promise<DesktopSupervisorRoomMove>;
     commitRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;
@@ -419,6 +545,8 @@ export interface DesktopApi {
     onActivity: (callback: (event: { entryId: string; event: import("./agents.js").DesktopSupervisorActivityEvent }) => void) => () => void;
     /** Optional exact-room projection is applied before crossing contextBridge. */
     onState: (callback: (snapshot: import("./agents.js").DesktopSupervisorStateSnapshot) => void, roomIdentifier?: string) => () => void;
+    /** Each supervisor state push as Needs you reads agents: not retired, without activity history. */
+    onLiveAgents?: (callback: (entries: import("./agents.js").DesktopSupervisorManifestEntry[]) => void) => () => void;
     onRetirement?: (callback: (event: import("./agents.js").DesktopSupervisorRetirementEvent) => void) => () => void;
     /** Subscribe to ordered launch facts (task_84). Fold idempotently by `sequence`. */
     onLaunchEvent: (callback: (event: import("./launch-events.js").DesktopLaunchEvent) => void) => () => void;

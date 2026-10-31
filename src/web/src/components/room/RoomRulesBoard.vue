@@ -214,6 +214,8 @@ function formatTaskShortId(taskId: string): string {
 .rules-board {
   width: min(680px, 100%);
   height: 100%;
+  max-height: 100dvh;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--bg-0, #09090b);
@@ -277,6 +279,8 @@ function formatTaskShortId(taskId: string): string {
   flex-direction: column;
   gap: 16px;
   padding: 18px 22px 24px;
+  min-height: 0;
+  overscroll-behavior: contain;
   overflow-y: auto;
 }
 
@@ -353,7 +357,9 @@ function formatTaskShortId(taskId: string): string {
 }
 
 .authority-id {
-  flex-shrink: 0;
+  min-width: 0;
+  max-width: 40%;
+  overflow-wrap: anywhere;
   padding: 1px 6px;
   border-radius: 4px;
   border: 1px solid rgba(147, 197, 253, 0.42);
@@ -421,8 +427,18 @@ function formatTaskShortId(taskId: string): string {
     padding-right: 16px;
   }
 
+  .rules-close { flex: 0 0 44px; width: 44px; height: 44px; }
+  .rules-board-body { padding-bottom: max(24px, env(safe-area-inset-bottom)); }
+  .warning-row summary { min-height: 44px; padding-block: 12px; }
+
   .authority-row dl {
     grid-template-columns: 1fr;
   }
+}
+.rules-close:focus-visible, .warning-row summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
+@media (prefers-reduced-motion: reduce) {
+  .rules-panel-enter-active, .rules-panel-leave-active,
+  .rules-panel-enter-active .rules-board, .rules-panel-leave-active .rules-board { transition: none; }
+  .rules-panel-enter-from .rules-board, .rules-panel-leave-to .rules-board { transform: none; }
 }
 </style>

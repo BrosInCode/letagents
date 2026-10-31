@@ -1,3 +1,4 @@
+import { compareText } from "./formatters";
 import type { DesktopParticipantSummary } from "../../../electron/ipc-types";
 
 const AGENT_RUNTIME_PREFIXES = [
@@ -119,7 +120,7 @@ export function sortMentionableRoomParticipants<T extends Pick<
 >>(participants: readonly T[]): T[] {
   return [...participants].sort((left, right) =>
     mentionPriority(left) - mentionPriority(right) ||
-    left.displayName.localeCompare(right.displayName)
+    compareText(left.displayName, right.displayName)
   );
 }
 
@@ -139,6 +140,7 @@ export function roomMentionCandidates(
     .filter((participant) => participant.displayName.toLowerCase() !== "everyone"));
   const mentionableParticipants = allMentionableParticipants.filter((participant) => [
       participant.displayName,
+      ...(participant.kind === "human" ? [participant.githubLogin] : []),
       participant.ownerLabel,
       ownerLabelFromActor(participant.actorLabel),
     ].some((value) => normalizeDisplayName(value).toLowerCase().includes(normalizedQuery)));
@@ -154,7 +156,7 @@ export function roomMentionCandidates(
       (agentDisplayNameCounts.get(participant.displayName.toLowerCase()) || 0) > 1;
     const insertText = participant.kind === "agent"
       ? agentMentionInsertText(participant, duplicateDisplayName)
-      : participant.displayName;
+      : participant.githubLogin || participant.displayName;
     if (!insertText) return [];
     return [{
       participantKey: participant.participantKey,

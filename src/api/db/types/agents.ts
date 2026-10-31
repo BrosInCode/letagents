@@ -259,8 +259,17 @@ export interface RoomAgentSessionRow {
   created_at: string;
   updated_at: string;
   last_seen_at: string;
+  process_seen_at?: string | null;
+  process_connection_id?: string | null;
+  process_disconnected_at?: string | null;
+  process_host_id?: string | null;
+  agent_heard_at?: string | null;
   ended_at: string | null;
+  end_reason?: RoomAgentSessionEndReason | null;
 }
+
+/** Recorded only when the reason changes what happens to the session's work. */
+export type RoomAgentSessionEndReason = "room_admin";
 
 export interface RoomLiveAgentSuppressionRow {
   room_id: string;

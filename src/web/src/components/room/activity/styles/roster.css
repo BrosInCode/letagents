@@ -67,6 +67,12 @@
   white-space: nowrap;
 }
 
+/* What a waiting agent waits for: one line, truncated, in the row's own tone. */
+.activity-roster-waiting {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
 .activity-reasoning-pill {
   flex-shrink: 0;
   padding: 2px 8px;

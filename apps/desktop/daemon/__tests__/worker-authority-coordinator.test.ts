@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 
-import { SupervisorGrantRequestError } from "../cloud-http.js";
+import { NativeActivityRejectedError, SupervisorGrantRequestError } from "../cloud-http.js";
+import { ConvergencePacerClosedError } from "../convergence-pacer.js";
 import { cursorLaneRetirementSchema } from "../runtime-recovery-journal.js";
 import { WorkerCredentialMintError } from "../daemon-error-policy.js";
+import { BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS } from "../../electron/main/supervisor-daemon.js";
 import {
+  BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS,
+  boundAnnouncementStatus,
   WorkerAuthorityCoordinator,
   type BindWorkerSessionInput,
   type BootstrapOperation,
@@ -172,8 +176,13 @@ type HarnessOptions = {
   random?: () => number;
   recordExactMint?: () => Promise<void>;
   boundedContextError?: Error;
-  publishNative?: () => Promise<void>;
+  publishNative?: (entryId: string, method: string, status: "working" | "idle") => Promise<void>;
   delegationCommitMutation?: "generation" | "control" | "grant" | "clock" | "native" | "request_expiry";
+  pacing?: WorkerAuthorityCoordinatorOptions["pacing"];
+  holdIngressForBearerRotation?: NonNullable<WorkerAuthorityCoordinatorOptions["delivery"]["holdIngressForBearerRotation"]>;
+  bearerSuccessorBinding?: NonNullable<WorkerAuthorityCoordinatorOptions["delivery"]["bearerSuccessorBinding"]>;
+  bearerSuccessorAbandoned?: NonNullable<WorkerAuthorityCoordinatorOptions["delivery"]["bearerSuccessorAbandoned"]>;
+  bindError?: Error;
 };
 
 function fixture(options: HarnessOptions = {}) {
@@ -224,6 +233,7 @@ function fixture(options: HarnessOptions = {}) {
     recordExecutionBinding: options.recordExecutionBinding ?? (async () => { events.push("binding:record-execution"); }),
     bind: async (input, bindOptions) => {
       events.push("binding:bind");
+      if (options.bindError) throw options.bindError;
       credential = input.agent_session_token;
       binding = workerBinding({
         entry_id: input.entry_id,
@@ -455,6 +465,9 @@ function fixture(options: HarnessOptions = {}) {
     delivery: {
       stop: async () => { deliveryStops += 1; events.push("delivery:stop"); },
       start: async () => { deliveryStarts += 1; events.push("delivery:start"); },
+      ...(options.holdIngressForBearerRotation ? { holdIngressForBearerRotation: options.holdIngressForBearerRotation } : {}),
+      ...(options.bearerSuccessorBinding ? { bearerSuccessorBinding: options.bearerSuccessorBinding } : {}),
+      ...(options.bearerSuccessorAbandoned ? { bearerSuccessorAbandoned: options.bearerSuccessorAbandoned } : {}),
     },
     convergence: {
       request: (_entryId, kind) => { convergenceRequests += 1; convergenceKinds.push(kind); events.push("convergence:request"); },
@@ -466,7 +479,7 @@ function fixture(options: HarnessOptions = {}) {
       resetMintAttempts: () => { events.push("recovery:reset-mint"); },
     },
     activity: {
-      publishNative: async () => { events.push("activity:publish"); await options.publishNative?.(); return true; },
+      publishNative: async (entryId, method, status) => { events.push("activity:publish"); await options.publishNative?.(entryId, method, status); return true; },
       transition: async (_entryId, _state, _condition, detail) => { events.push(`transition:${detail}`); },
     },
     boundedContext: async () => {
@@ -491,6 +504,7 @@ function fixture(options: HarnessOptions = {}) {
     }) as typeof clearTimeout,
     random: options.random ?? (() => 0),
     audit: options.audit,
+    pacing: options.pacing,
   });
 
   return {
@@ -520,6 +534,8 @@ function fixture(options: HarnessOptions = {}) {
     setCursor(value: string | null) { cursor = value; },
     setEntry(value: DaemonManifestEntry) { entry = value; },
     setHandle(value: ProviderActionHandle | undefined) { handle = value; },
+    advanceClock(ms: number) { currentTime += ms; },
+    get nowMs() { return currentTime; },
     bindings,
   };
 }
@@ -739,6 +755,45 @@ test("worker mint durably marks uncertainty before HTTP and exact public identit
   assert.equal(harness.clearedTimers, 1, "the paired supplied clear function receives the mint timer");
 });
 
+test("a worker mint holds the lane from before the server call, and ends the hold itself only when the mint was refused", async () => {
+  const steps: string[] = [];
+  let refuse: false | 403 | 503 = false;
+  const harness = fixture({
+    holdIngressForBearerRotation: (entryId) => {
+      steps.push(`hold:${entryId}`);
+      return () => { steps.push("hold:abandoned"); };
+    },
+    createWorkerSession: async () => {
+      steps.push("http:mint");
+      if (refuse) throw new SupervisorGrantRequestError(refuse, "mint");
+      return { sessionId: "session-minted", bearer: "minted-secret", bearerId: "bearer-id-minted", expiresAt: new Date(now + 30 * 60_000).toISOString() };
+    },
+  });
+  harness.custody.installHostGrant(hostGrant());
+
+  const minted = await harness.subject.mintHostWorkerAuthorization(harness.entry, undefined, true);
+  assert.equal(minted?.bearer, "minted-secret");
+  assert.deepEqual(steps, ["hold:agent-1", "http:mint"],
+    "the server revokes the old bearer at this call, so the hold starts first; the lane ends it when it adopts the new bearer");
+
+  steps.length = 0;
+  refuse = 403;
+  await assert.rejects(harness.subject.mintHostWorkerAuthorization(harness.entry, undefined, true), /HTTP 403/);
+  assert.deepEqual(steps, ["hold:agent-1", "http:mint", "hold:abandoned"],
+    "a refused mint leaves the old bearer valid, so a refusal of it is the room's again at once");
+
+  steps.length = 0;
+  refuse = 503;
+  await assert.rejects(harness.subject.mintHostWorkerAuthorization(harness.entry, undefined, true), /failed after 3 attempts/);
+  assert.deepEqual(steps, ["hold:agent-1", "http:mint", "http:mint", "http:mint"],
+    "a server failure may have minted and revoked the old bearer, so its hold stands until its deadline");
+  refuse = false;
+
+  steps.length = 0;
+  await harness.subject.mintHostWorkerAuthorization(harness.entry);
+  assert.deepEqual(steps, [], "a cached, still-fresh credential reaches no server and holds nothing");
+});
+
 test("the name the room assigned replaces the name this machine requested", async () => {
   const session = (displayName: string) => ({
     session_id: "session-minted", session_token: "", room_id: "room-1", session_kind: "worker" as const,
@@ -862,6 +917,143 @@ test("non-retryable mint rejection fails once while timeout failures remain boun
   assert.equal(timedOut.timerDelays.filter((delay) => delay === 10_000).length, 3);
 });
 
+test("server requests wait for a daemon-wide slot and start their own timeouts only once admitted", async () => {
+  const acquired: string[] = [];
+  const admissions: Array<() => void> = [];
+  let released = 0;
+  let mints = 0;
+  const pacing: NonNullable<WorkerAuthorityCoordinatorOptions["pacing"]> = {
+    acquire: async (lane, entryId) => {
+      acquired.push(`${lane}:${entryId}`);
+      await new Promise<void>((resolve) => admissions.push(resolve));
+      return () => { released += 1; };
+    },
+    run: async () => { throw new Error("worker authority paces through acquire"); },
+  };
+  const settle = async () => { for (let turn = 0; turn < 10; turn += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  const harness = fixture({
+    pacing,
+    createWorkerSession: async () => {
+      mints += 1;
+      return { sessionId: "session-minted", bearer: "minted-secret", bearerId: "bearer-id-minted",
+        expiresAt: new Date(now + 30 * 60_000).toISOString() };
+    },
+  });
+  harness.custody.installHostGrant(hostGrant());
+
+  const minting = harness.subject.mintHostWorkerAuthorization(harness.entry);
+  await settle();
+  assert.deepEqual(acquired, ["authority:agent-1"]);
+  assert.equal(mints, 0, "nothing reaches the server while queued");
+  assert.equal(harness.timerDelays.includes(10_000), false, "the attempt timeout has not started while queued");
+  harness.advanceClock(45_000);
+  admissions.shift()!();
+  await settle();
+  assert.equal(mints, 1);
+  assert.deepEqual(harness.timerDelays.filter((delay) => delay === 10_000), [10_000],
+    "the admitted attempt gets its full timeout however long it queued");
+  assert.deepEqual(acquired, ["authority:agent-1", "authority:agent-1"], "lease continuity is paced as its own request");
+  admissions.shift()!();
+  assert.equal((await minting)?.agentSessionId, "session-minted");
+
+  const binding = harness.subject.bindWorkerSession({
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+    agent_session_id: "session-minted", agent_session_token: "minted-secret", api_url: "https://letagents.test",
+  });
+  await settle();
+  assert.equal(acquired.length, 3, "the bound announcement queues too");
+  assert.equal(harness.events.includes("activity:publish"), false);
+  admissions.shift()!();
+  await binding;
+  assert.ok(harness.events.includes("activity:publish"));
+  assert.equal(released, acquired.length, "every admitted request returns its slot");
+});
+
+test("a queued new-room bootstrap starts its budget only once admitted and leaves the queue when cancelled", async () => {
+  const settle = async () => { for (let turn = 0; turn < 10; turn += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  const admissions: Array<() => void> = [];
+  const pacing: NonNullable<WorkerAuthorityCoordinatorOptions["pacing"]> = {
+    acquire: async (_lane, _entryId, signal) => {
+      await new Promise<void>((resolve, reject) => {
+        admissions.push(resolve);
+        signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+      return () => {};
+    },
+    run: async () => { throw new Error("worker authority paces through acquire"); },
+  };
+  const budgets: number[] = [];
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, delay?: number, ...args: unknown[]) => {
+    if (delay === 40_000 || delay === BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS) budgets.push(delay);
+    return originalSetTimeout(callback, delay, ...args);
+  }) as typeof setTimeout;
+  try {
+    let mints = 0;
+    const harness = fixture({ pacing, cursor: null, createWorkerSession: async () => {
+      mints += 1;
+      return { sessionId: "session-minted", bearer: "minted-secret", bearerId: "bearer-id-minted",
+        expiresAt: new Date(now + 30 * 60_000).toISOString() };
+    } });
+    harness.custody.installHostGrant(hostGrant());
+    const operation: BootstrapOperation = { controller: new AbortController(), phase: "observing", operation: Promise.resolve() };
+    const bootstrapping = harness.subject.bootstrapRoomIngress({ entry_id: "agent-1", daemon_generation: 7 }, operation);
+    await settle();
+    assert.deepEqual(budgets, [BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS],
+      "queued: only the desktop's request limit runs, not the 40 s bootstrap budget");
+    harness.advanceClock(2_000);
+    admissions.shift()!();
+    await settle();
+    assert.deepEqual(budgets, [BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS, 40_000],
+      "the 40 s budget starts at admission when it ends before the request limit");
+    assert.deepEqual(harness.timerDelays.filter((delay) => delay <= 10_000), [10_000],
+      "the mint keeps its full attempt timeout");
+    admissions.shift()!();
+    assert.equal((await bootstrapping).status, "bootstrapped");
+    assert.equal(mints, 1);
+
+    const cancelled = fixture({ pacing, cursor: null, createWorkerSession: async () => { throw new Error("never admitted"); } });
+    cancelled.custody.installHostGrant(hostGrant());
+    const cancelledOperation: BootstrapOperation = { controller: new AbortController(), phase: "observing", operation: Promise.resolve() };
+    const abandoned = cancelled.subject.bootstrapRoomIngress({ entry_id: "agent-1", daemon_generation: 7 }, cancelledOperation);
+    await settle();
+    cancelledOperation.controller.abort();
+    await assert.rejects(abandoned, /mint was cancelled/);
+    assert.deepEqual(budgets, [BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS, 40_000, BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS],
+      "a bootstrap cancelled while queued never started its own budget");
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("a bootstrap that queues and then meets a slow server still ends before the desktop gives up", async () => {
+  const settle = async () => { for (let turn = 0; turn < 10; turn += 1) await new Promise((resolve) => setImmediate(resolve)); };
+  let admit!: () => void;
+  const firstAdmission = new Promise<void>((resolve) => { admit = resolve; });
+  const pacing: NonNullable<WorkerAuthorityCoordinatorOptions["pacing"]> = {
+    acquire: async () => { await firstAdmission; return () => {}; },
+    run: async () => { throw new Error("worker authority paces through acquire"); },
+  };
+  const harness = fixture({
+    pacing, cursor: null, fireMintTimeout: true, advanceClockOnTimers: true,
+    createWorkerSession: async () => new Promise<never>(() => undefined),
+  });
+  harness.custody.installHostGrant(hostGrant());
+  const receivedAt = harness.nowMs;
+  const operation: BootstrapOperation = { controller: new AbortController(), phase: "observing", operation: Promise.resolve() };
+  const bootstrapping = harness.subject.bootstrapRoomIngress({ entry_id: "agent-1", daemon_generation: 7 }, operation);
+  await settle();
+  harness.advanceClock(10_000);
+  admit();
+  await assert.rejects(bootstrapping, /failed after 3 attempts/);
+  // Mint attempts and backoff end with the room-tail reserve still left
+  // before the request limit, which itself ends before the desktop's timeout.
+  assert.ok(harness.nowMs - receivedAt <= BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS - 8_000,
+    `the mint ran until ${harness.nowMs - receivedAt} ms after receipt`);
+  assert.ok(BOOTSTRAP_ROOM_INGRESS_REQUEST_LIMIT_MS < BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS);
+  assert.deepEqual(harness.timerDelays.filter((delay) => delay <= 10_000), [10_000, 1_000, 10_000, 3_000, 1_000]);
+});
+
 test("authority changing after the remote mint records public identity but never caches its bearer", async () => {
   let harness!: ReturnType<typeof fixture>;
   harness = fixture({
@@ -935,7 +1127,7 @@ test("a caller deadline shortens the last mint attempt and skips retries that ca
   // 10s attempt, 1s backoff, then only 5s remain: the second attempt is cut
   // to fit and the third is skipped instead of overrunning the caller.
   await assert.rejects(
-    harness.subject.mintHostWorkerAuthorization(harness.entry, undefined, false, now + 16_000),
+    harness.subject.mintHostWorkerAuthorization(harness.entry, undefined, false, { budgetMs: 16_000 }),
     (error: unknown) => error instanceof WorkerCredentialMintError
       && error.retryable
       && /failed after 2 attempts.*timed out after 5000ms/.test(error.message),
@@ -1099,6 +1291,40 @@ test("binding publishes before clearing recovery and commits exact public metada
   assert.equal(harness.deliveryStarts, 1);
 });
 
+test("binding a new credential for the same worker session tells the lane, before the bind, that its successor is coming", async () => {
+  const harness = fixture({ bearerSuccessorBinding: (entryId) => { harness.events.push(`successor:${entryId}`); } });
+  const input: BindWorkerSessionInput = {
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+    agent_session_id: "session-1", agent_session_token: "worker-secret", api_url: "https://letagents.test",
+  };
+  const successors = () => harness.events.filter((event) => event.startsWith("successor:"));
+  await harness.subject.bindWorkerSession(input);
+  assert.deepEqual(successors(), [], "binding the credential the lane already holds is no rotation");
+
+  await harness.subject.bindWorkerSession({ ...input, agent_session_token: "rotated-secret", credential_ref: "rotated-ref" });
+  assert.deepEqual(successors(), ["successor:agent-1"], "a new credential for the same session is the lane's successor");
+  assert.ok(harness.events.lastIndexOf("successor:agent-1") < harness.events.lastIndexOf("binding:bind"),
+    "the lane hears of it before its own authority check can fail");
+
+  await harness.subject.bindWorkerSession({ ...input, agent_session_id: "session-other", agent_session_token: "other-secret" });
+  assert.deepEqual(successors(), ["successor:agent-1"], "another session is not this lane's successor");
+});
+
+test("a failed bind of the announced successor tells the lane that no successor is coming", async () => {
+  const harness = fixture({
+    bindError: new Error("bind failed"),
+    bearerSuccessorBinding: (entryId) => { harness.events.push(`successor:${entryId}`); },
+    bearerSuccessorAbandoned: (entryId) => { harness.events.push(`abandoned:${entryId}`); },
+  });
+  await assert.rejects(harness.subject.bindWorkerSession({
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+    agent_session_id: "session-1", agent_session_token: "rotated-secret", credential_ref: "rotated-ref",
+    api_url: "https://letagents.test",
+  }), /bind failed/);
+  const marks = harness.events.filter((event) => event.startsWith("successor:") || event.startsWith("abandoned:"));
+  assert.deepEqual(marks, ["successor:agent-1", "abandoned:agent-1"]);
+});
+
 test("binding adopts a provided credential reference even when the worker bearer is unchanged", async () => {
   const harness = fixture();
   const input: BindWorkerSessionInput = {
@@ -1216,6 +1442,172 @@ test("worker readiness fails closed when authority changes during the binding pu
     assert.equal(harness.entry.condition, "coordination_blocked", mismatch);
     assert.equal(harness.deliveryStarts, 0, mismatch);
     assert.equal(harness.manifestUpdates.length, 0, mismatch);
+  }
+});
+
+test("the bound announcement reports what the provider is doing, never work it is not doing", async () => {
+  for (const [observedState, expected] of [["idle", "idle"], ["working", "working"], ["starting", "idle"]] as const) {
+    const published: Array<{ method: string; status: string }> = [];
+    const harness = fixture({
+      handle: providerHandle({ observedState }),
+      publishNative: async (_entryId, method, status) => { published.push({ method, status }); },
+    });
+    await harness.subject.bindWorkerSession({
+      entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+      agent_session_id: "session-1", agent_session_token: "worker-secret", api_url: "https://letagents.test",
+    });
+    assert.deepEqual(published, [{ method: "native_harness.bound", status: expected }], observedState);
+  }
+  assert.equal(boundAnnouncementStatus(undefined), "idle", "no provider, no work");
+});
+
+test("a bound announcement that times out after the binding is saved finishes the bind instead of latching recovery", async () => {
+  const failures: Array<[string, () => Error]> = [
+    ["timeout", () => new DOMException("The operation was aborted due to timeout", "TimeoutError")],
+    ["network", () => new TypeError("fetch failed")],
+    ["unavailable", () => new NativeActivityRejectedError("Native activity endpoint rejected the daemon bridge with HTTP 502.", 502)],
+    ["reset mid-response", () => new TypeError("terminated", { cause: Object.assign(new Error("other side closed"), { code: "UND_ERR_SOCKET" }) })],
+    ["connection reset", () => Object.assign(new Error("read ECONNRESET"), { code: "ECONNRESET" })],
+    ["headers stalled", () => new TypeError("fetch failed", { cause: Object.assign(new Error("Headers Timeout Error"), { code: "UND_ERR_HEADERS_TIMEOUT" }) })],
+  ];
+  for (const [name, failure] of failures) {
+    const harness = fixture({
+      binding: null, credential: null, handle: providerHandle({ observedState: "idle" }),
+      publishNative: async () => { throw failure(); },
+    });
+    await harness.subject.bindWorkerSession({
+      entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+      agent_session_id: "session-2", agent_session_token: "fresh-secret", credential_ref: "bearer-id-2",
+      api_url: "https://letagents.test",
+    });
+    assert.deepEqual(harness.events.filter((event) => ["binding:bind", "activity:publish", "manifest:update"].includes(event)),
+      ["binding:bind", "activity:publish", "manifest:update"], name);
+    assert.equal(harness.entry.observed_state, "idle", name);
+    assert.equal(harness.entry.condition, "none", name);
+    assert.equal(harness.entry.last_error, null, name);
+    assert.equal(harness.entry.workplace_liveness?.state, "reachable", name);
+    assert.equal(harness.entry.last_worker_binding?.agent_session_id, "session-2", name);
+    assert.equal(harness.deliveryStarts, 1, name);
+    assert.equal(harness.subject.awaitsBindingConfirmation("agent-1", "execution-1"), false, name);
+  }
+});
+
+test("a refused or locally failed bound announcement still fails the bind", async () => {
+  for (const refusal of [
+    new NativeActivityRejectedError("Native activity endpoint rejected the daemon bridge with HTTP 401.", 401),
+    new NativeActivityRejectedError("Native activity endpoint rejected a stale daemon observation.", null),
+    // Only timeouts, unreachable servers and 5xx/408/425/429 are deferred;
+    // local failures are not the slow server this tolerance is for.
+    new ConvergencePacerClosedError(),
+    Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" }),
+    new Error("Worker credential is unavailable until desktop credential delivery."),
+    new SyntaxError("Unexpected token < in JSON at position 0"),
+    new TypeError("Cannot read properties of undefined (reading 'accepted')"),
+    new TypeError("terminated", { cause: Object.assign(new Error("disk I/O error"), { code: "SQLITE_IOERR" }) }),
+  ]) {
+    const harness = fixture({ binding: null, credential: null, publishNative: async () => { throw refusal; } });
+    await assert.rejects(harness.subject.bindWorkerSession({
+      entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+      agent_session_id: "session-2", agent_session_token: "fresh-secret", api_url: "https://letagents.test",
+    }), (error) => error === refusal);
+    assert.equal(harness.entry.condition, "coordination_blocked", refusal.message);
+    assert.equal(harness.manifestUpdates.length, 0, refusal.message);
+    assert.equal(harness.deliveryStarts, 0, refusal.message);
+  }
+});
+
+test("a recovery retry that finds the failed bind's binding exact completes the bind and clears the latch", async () => {
+  let refuse = true;
+  const harness = fixture({
+    handle: providerHandle({ observedState: "idle" }),
+    entry: manifestEntry({
+      workplace_liveness: { state: "reachable", observed_at: "2026-08-26T00:00:00.000Z", detail: "previous daemon" },
+    }),
+    publishNative: async () => {
+      if (refuse) throw new NativeActivityRejectedError("Native activity endpoint rejected the daemon bridge with HTTP 403.", 403);
+    },
+  });
+  await assert.rejects(harness.subject.confirmExactBinding("agent-1", () => true), /HTTP 403/);
+  await harness.subject.recordWorkerBindingRecoveryFailure("agent-1", "execution-1",
+    new NativeActivityRejectedError("Native activity endpoint rejected the daemon bridge with HTTP 403.", 403));
+  assert.equal(harness.subject.awaitsBindingConfirmation("agent-1", "execution-1"), true);
+  assert.equal(harness.subject.awaitsBindingConfirmation("agent-1", "execution-other"), false);
+
+  refuse = false;
+  const publishesBefore = harness.events.filter((event) => event === "activity:publish").length;
+  await harness.subject.confirmExactBinding("agent-1", () => true);
+
+  assert.equal(harness.events.filter((event) => event === "activity:publish").length, publishesBefore + 1,
+    "confirmation repeats the announcement even though the workplace looked reachable");
+  assert.equal(harness.events.includes("binding:bind"), false, "an exact binding is confirmed, not rewritten");
+  assert.equal(harness.entry.observed_state, "idle");
+  assert.equal(harness.entry.condition, "none");
+  assert.equal(harness.entry.last_error, null);
+  assert.equal(harness.entry.last_worker_binding?.agent_session_id, "session-1");
+  assert.equal(harness.subject.awaitsBindingConfirmation("agent-1", "execution-1"), false);
+  assert.equal(harness.deliveryStarts, 1);
+});
+
+test("after the room refused the bearer, only an accepted announcement confirms the binding", async () => {
+  const refusal = new NativeActivityRejectedError("Native activity endpoint rejected the daemon bridge with HTTP 403.", 403);
+  for (const attempt of ["timed out", "not allowed to publish", "accepted"] as const) {
+    const harness = fixture({
+      handle: providerHandle({ observedState: "idle" }),
+      publishNative: async () => {
+        if (attempt === "timed out") throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      },
+    });
+    await harness.subject.recordWorkerBindingRecoveryFailure("agent-1", "execution-1", refusal);
+    const confirming = harness.subject.confirmExactBinding("agent-1", () => attempt !== "not allowed to publish");
+    if (attempt === "accepted") {
+      await confirming;
+      assert.equal(harness.entry.condition, "none", attempt);
+    } else {
+      await assert.rejects(confirming, attempt === "timed out" ? /timeout/ : /without its bound announcement/, attempt);
+      assert.equal(harness.entry.condition, "coordination_blocked", `${attempt}: not marked ready`);
+      assert.equal(harness.manifestUpdates.length, 0, attempt);
+      assert.equal(harness.subject.awaitsBindingConfirmation("agent-1", "execution-1"), true, attempt);
+    }
+  }
+});
+
+test("a refusal stays latched through later timeouts until an announcement is accepted", async () => {
+  let outcome: "timeout" | "accept" = "timeout";
+  const harness = fixture({
+    handle: providerHandle({ observedState: "idle" }),
+    publishNative: async () => {
+      if (outcome === "timeout") throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+    },
+  });
+  await harness.subject.recordWorkerBindingRecoveryFailure("agent-1", "execution-1",
+    new NativeActivityRejectedError("Native activity endpoint rejected the daemon bridge with HTTP 403.", 403));
+  for (const retry of [1, 2]) {
+    const timedOut = await harness.subject.confirmExactBinding("agent-1", () => true).then(() => null, (error: unknown) => error);
+    assert.ok(timedOut instanceof Error && /timeout/.test(timedOut.message), `retry ${retry} is not confirmed by a timeout`);
+    assert.equal(harness.entry.condition, "coordination_blocked", `retry ${retry}`);
+    // Convergence records the failed confirmation; that timeout must not
+    // clear the refusal for the next retry (the third failure would exhaust
+    // the budget and unbind, as before).
+    if (retry === 1) await harness.subject.recordWorkerBindingRecoveryFailure("agent-1", "execution-1", timedOut);
+  }
+  outcome = "accept";
+  await harness.subject.confirmExactBinding("agent-1", () => true);
+  assert.equal(harness.entry.condition, "none");
+  assert.equal(harness.subject.awaitsBindingConfirmation("agent-1", "execution-1"), false);
+});
+
+test("a confirmation after a failure that was not a refusal tolerates a slow announcement and honours its guard", async () => {
+  for (const mayPublish of [true, false]) {
+    const harness = fixture({
+      handle: providerHandle({ observedState: "idle" }),
+      publishNative: async () => { throw new DOMException("The operation was aborted due to timeout", "TimeoutError"); },
+    });
+    await harness.subject.recordWorkerBindingRecoveryFailure("agent-1", "execution-1",
+      new Error("Worker binding changed before readiness could be confirmed."));
+    await harness.subject.confirmExactBinding("agent-1", () => mayPublish);
+    assert.equal(harness.entry.condition, "none", String(mayPublish));
+    assert.equal(harness.events.includes("activity:publish"), mayPublish, `${mayPublish}: a stopped retry publishes nothing`);
+    assert.equal(harness.deliveryStarts, mayPublish ? 1 : 0, String(mayPublish));
   }
 });
 
@@ -2135,6 +2527,22 @@ for (const mismatch of ["kind", "extra", "entry_id", "room_id", "work_attempt_id
     assert.ok(f.harness.custody.workerAuthorization("agent-1"), "room access is restored without the unproven lease");
   });
 }
+
+test("a runtime the daemon archived on its own counts as recovered, and still moves a lease only once its process's death was witnessed", async () => {
+  // The row the daemon writes when it archives an ended runtime marks that
+  // generation's recovery complete, as an operator's checked recovery does.
+  // A process found gone is enough to archive its runtime; a lease needs the
+  // death on the generation's terminal as well.
+  for (const witnessed of [true, false]) {
+    const terminal = { ...terminalExecution(), terminal_cause: "crashed" as const,
+      ...(witnessed ? { native_runtime_death: { kind: "claude_cli" as const, pid: 42, processIdentity: "exact-old-birth" } } : {}) };
+    const f = retiredLeaseFixture({ executions: [execution(terminal)],
+      predecessors: [{ execution_generation_id: "execution-1", agent_session_id: "session-old", authority: null, legacy_recovery_complete: true }] });
+    assert.ok(await f.harness.subject.mintHostWorkerAuthorization(f.harness.entry), "the agent gets its room access back either way");
+    assert.deepEqual([f.current.epoch, f.mutations.length], witnessed ? [5, 2] : [4, 0],
+      witnessed ? "a witnessed death moves the lease" : "without a witnessed death the lease is not moved");
+  }
+});
 
 test("completed legacy recovery may restore its exact published predecessor", async () => {
   const f = retiredLeaseFixture({ predecessors: [{ execution_generation_id: "execution-1", agent_session_id: "session-old", authority: null, legacy_recovery_complete: true }] });

@@ -49,3 +49,13 @@ function getOptionalHeaderString(req: AuthenticatedRequest, headerName: string):
   const normalized = String(req.get?.(headerName) ?? "").trim();
   return normalized || null;
 }
+
+/**
+ * The durable agent key whose held reply turns a read must hide. Only worker
+ * reads are held; people, the web app and Message info see every message.
+ */
+export function replyTurnHoldAgentKey(
+  identity: Pick<ResolvedRequestAgentIdentity, "session_kind" | "agent_key"> | null | undefined,
+): string | null {
+  return identity?.session_kind === "worker" ? identity.agent_key?.trim() || null : null;
+}

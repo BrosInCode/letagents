@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -13,6 +13,7 @@ import {
   listProjectBindings,
   migrateLegacyProjectBindings,
   parseMacosVolumeUuid,
+  resetProjectBindingsStoreCachesForTest,
 } from "../main/project-bindings-store.js";
 import {
   canonicalProjectRoomIdentifier,
@@ -21,8 +22,23 @@ import {
   projectBindingAliases,
 } from "../project-bindings.js";
 import { resolveRoomIdentifierFromPath } from "../repo-status.js";
+import { assertOwnerPrivateFile } from "./harness.js";
 
 const execFileAsync = promisify(execFile);
+
+// The store keeps its SQLite connection open between calls. Windows cannot
+// delete an open file, so each test closes the connections before it removes
+// its temp folder.
+function removeTemporary(temporary: string): void {
+  resetProjectBindingsStoreCachesForTest();
+  // Windows can hold a folder for a moment after the child process that used
+  // it exited (EBUSY); rmSync retries only such errors.
+  rmSync(temporary, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+}
+
+// The store canonicalizes folders with the native realpath. On Windows only
+// the native one expands 8.3 short names such as RUNNER~1 in the temp path.
+const canonicalPath = (path: string): string => realpathSync.native(path);
 
 test("macOS filesystem identity prefers the volume UUID over the earlier disk UUID", () => {
   const plist = `
@@ -90,14 +106,14 @@ test("hosted root, branch, and focus rooms resolve one project binding", async (
         roomIdentifier: "github.com/brosincode/letagents/focus/git:branch:ZmVhdHVyZQ",
         gitRoom: githubGitRoom(),
       })?.rootPath,
-      realpathSync(rootPath),
+      canonicalPath(rootPath),
     );
     assert.equal(
       findProjectBinding([binding], {
         roomIdentifier: "sky-lake",
         gitRoom: githubGitRoom(),
       })?.rootPath,
-      realpathSync(rootPath),
+      canonicalPath(rootPath),
     );
     assert.equal((await listProjectBindings(storeOptions)).length, 1);
     assert.ok(binding.verificationKeys.some((key) => key.startsWith("fs-root:v2:")));
@@ -106,9 +122,9 @@ test("hosted root, branch, and focus rooms resolve one project binding", async (
     const gitNamespace = binding.verificationKeys.find((key) => key.startsWith("fs-git:v2:"))?.split(":")[2];
     assert.notEqual(rootNamespace, gitNamespace);
     assert.equal(readFileSync(storePath).subarray(0, 16).toString(), "SQLite format 3\0");
-    assert.equal(statSync(storePath).mode & 0o777, 0o600);
+    assertOwnerPrivateFile(storePath, temporary);
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });
 
@@ -148,7 +164,7 @@ test("legacy project bindings survive filesystem device renumbering", async () =
     const restored = await listProjectBindings({ storePath, resolveFilesystemNamespace: volumeA });
     assert.equal(restored.length, 1);
     assert.equal(restored[0]?.id, binding.id);
-    assert.equal(restored[0]?.rootPath, realpathSync(rootPath));
+    assert.equal(restored[0]?.rootPath, canonicalPath(rootPath));
     assert.ok(restored[0]?.verificationKeys.some((key) => /^fs-root:v2:[a-f\d]{64}:/.test(key)));
     assert.ok(restored[0]?.verificationKeys.every((key) => !/^fs-(?:root|git):999999:/.test(key)));
 
@@ -178,7 +194,7 @@ test("legacy project bindings survive filesystem device renumbering", async () =
       resolveFilesystemNamespace: volumeA,
     }), []);
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });
 
@@ -221,7 +237,7 @@ test("bindings fail closed when a stable filesystem namespace is unavailable", a
       resolveFilesystemNamespace: async () => null,
     }), []);
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });
 
@@ -238,12 +254,12 @@ test("a reconnect wins over an in-flight legacy proof upgrade", async () => {
   const rootAReleased = new Promise<void>((resolve) => { releaseRootA = resolve; });
   const rootAObserved = new Promise<void>((resolve) => { observedRootA = resolve; });
   const resolveFilesystemNamespace = async (path: string): Promise<string> => {
-    if (path === realpathSync(rootA) && pauseRootA) {
+    if (path === canonicalPath(rootA) && pauseRootA) {
       pauseRootA = false;
       observedRootA();
       await rootAReleased;
     }
-    return path === realpathSync(rootA) ? "volume-a" : "volume-b";
+    return path === canonicalPath(rootA) ? "volume-a" : "volume-b";
   };
   try {
     const resolvedA = await resolveRoomIdentifierFromPath(rootA);
@@ -276,14 +292,14 @@ test("a reconnect wins over an in-flight legacy proof upgrade", async () => {
     }, { storePath, resolveFilesystemNamespace });
     releaseRootA();
 
-    assert.deepEqual((await staleRead).map((row) => row.rootPath), [realpathSync(rootB)]);
+    assert.deepEqual((await staleRead).map((row) => row.rootPath), [canonicalPath(rootB)]);
     assert.deepEqual(
       (await listProjectBindings({ storePath, resolveFilesystemNamespace })).map((row) => row.rootPath),
-      [realpathSync(rootB)],
+      [canonicalPath(rootB)],
     );
   } finally {
     releaseRootA();
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });
 
@@ -315,7 +331,7 @@ test("local Git repositories without remotes keep one identity across branches",
       binding.id,
     );
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });
 
@@ -334,10 +350,10 @@ test("plain folders are durable projects without requiring Git", async () => {
     }, { storePath });
     assert.equal(
       findProjectBinding([binding], { roomIdentifier: resolved.roomIdentifier })?.rootPath,
-      realpathSync(rootPath),
+      canonicalPath(rootPath),
     );
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });
 
@@ -364,9 +380,9 @@ test("migration records a repository's source checkout, never a linked execution
       context: { roomIdentifier: resolved.roomIdentifier, gitRoom: resolved.gitRoom },
       rootPath: linkedRoot,
     }], { storePath });
-    assert.equal(migration.bindings[0]?.rootPath, realpathSync(mainRoot));
+    assert.equal(migration.bindings[0]?.rootPath, canonicalPath(mainRoot));
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });
 
@@ -408,9 +424,9 @@ test("legacy migration accepts identity matches and rejects unrelated folders", 
       },
     ], { storePath });
     assert.equal(migration.bindings.length, 1);
-    assert.equal(migration.bindings[0]?.rootPath, realpathSync(matching));
+    assert.equal(migration.bindings[0]?.rootPath, canonicalPath(matching));
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });
 
@@ -475,10 +491,10 @@ test("concurrent project writes cannot lose another room and unavailable roots s
     rmSync(first, { recursive: true, force: true });
     assert.deepEqual(
       (await listProjectBindings({ storePath })).map((entry) => entry.rootPath),
-      [realpathSync(second)],
+      [canonicalPath(second)],
     );
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });
 
@@ -512,7 +528,60 @@ test("mutable hosted names never merge distinct stable repository identities", a
     assert.equal(bindings.length, 2);
     assert.equal(findProjectBinding(bindings, { gitRoom: firstRoom })?.id, firstBinding.id);
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
+  }
+});
+
+test("a local project stays connected when Git and its first remote are added", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-project-published-"));
+  const rootPath = join(temporary, "Scene Finder");
+  const options = { storePath: join(temporary, "bindings.sqlite"), resolveFilesystemNamespace: async () => "test-volume" };
+  mkdirSync(rootPath);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: rootPath, stdio: "ignore" });
+  try {
+    const plain = await resolveRoomIdentifierFromPath(rootPath);
+    const plainBinding = await bindProjectRoot({
+      context: { roomIdentifier: plain.roomIdentifier }, rootPath, source: "local_folder",
+    }, options);
+    git("init", "-b", "main");
+    const local = await resolveRoomIdentifierFromPath(rootPath);
+    const localContext = { roomIdentifier: local.roomIdentifier, gitRoom: local.gitRoom };
+    const localBinding = await bindProjectRoot({ context: localContext, rootPath, source: "local_git" }, options);
+    assert.ok(findProjectBinding(await listProjectBindings(options), { roomIdentifier: plain.roomIdentifier }),
+      "initializing Git must not detach the original folder room");
+    git("remote", "add", "origin", "https://github.com/example/scene-finder.git");
+    const published = await listProjectBindings(options);
+    assert.equal(findProjectBinding(published, { roomIdentifier: plain.roomIdentifier })?.id, plainBinding.id);
+    assert.equal(findProjectBinding(published, localContext)?.id, localBinding.id);
+    assert.equal(published.length, 2, "both existing rooms retain their own identity and history");
+    for (const binding of published) {
+      assert.ok(binding.verificationKeys.includes("project-room:github.com/example/scene-finder"));
+    }
+    assert.deepEqual(await listProjectBindings(options), published, "the verified transition is persisted");
+    git("remote", "set-url", "origin", "https://github.com/other/unrelated.git");
+    assert.deepEqual(await listProjectBindings(options), [], "a later remote replacement still fails closed");
+  } finally {
+    removeTemporary(temporary);
+  }
+});
+
+test("publishing cannot recover a local binding whose Git directory was replaced", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-project-replaced-git-"));
+  const rootPath = join(temporary, "project");
+  const options = { storePath: join(temporary, "bindings.sqlite"), resolveFilesystemNamespace: async () => "test-volume" };
+  mkdirSync(rootPath);
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: rootPath, stdio: "ignore" });
+  try {
+    git("init", "-b", "main");
+    const local = await resolveRoomIdentifierFromPath(rootPath);
+    await bindProjectRoot({ context: { roomIdentifier: local.roomIdentifier, gitRoom: local.gitRoom },
+      rootPath, source: "local_git" }, options);
+    rmSync(join(rootPath, ".git"), { recursive: true, force: true });
+    git("init", "-b", "main");
+    git("remote", "add", "origin", "https://github.com/example/scene-finder.git");
+    assert.deepEqual(await listProjectBindings(options), []);
+  } finally {
+    removeTemporary(temporary);
   }
 });
 
@@ -532,7 +601,7 @@ test("a folder replaced at the same path loses its old binding", async () => {
     mkdirSync(rootPath);
     assert.deepEqual(await listProjectBindings({ storePath }), []);
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });
 
@@ -551,7 +620,7 @@ test("configured room files cannot impersonate hosted Git identity", async () =>
       selected.source,
     ), false);
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });
 
@@ -565,7 +634,7 @@ test("failed legacy migration keys are retained for a later launch", async () =>
     }], { storePath: join(temporary, "bindings.json") });
     assert.deepEqual(result.retryLegacyKeys, ["github.com/brosincode/letagents"]);
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });
 
@@ -599,7 +668,67 @@ test("a migrated hosted name cannot satisfy a different stable repository id", a
       gitRoom: reusedName,
     }), null);
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
+  }
+});
+
+test("processes that open a new store at the same moment all open it without a lock error", async () => {
+  // SQLite does not apply busy_timeout to the switch to WAL: a second opener of
+  // a new file fails at once with "database is locked". Each child waits at a
+  // barrier, so the opens collide on any machine, however slow it starts them.
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-open-"));
+  const moduleUrl = new URL("../main/project-bindings-store.ts", import.meta.url).href;
+  const script = `
+    const { writeFileSync, existsSync } = await import("node:fs");
+    const { listProjectBindings } = await import(process.env.BINDINGS_MODULE_URL);
+    writeFileSync(process.env.READY_PATH, "");
+    const giveUpAt = Date.now() + 150_000;
+    while (!existsSync(process.env.GO_PATH) && Date.now() < giveUpAt) {}
+    await listProjectBindings({ storePath: process.env.STORE_PATH });
+  `;
+  const children = 12;
+  try {
+    for (let round = 0; round < 4; round += 1) {
+      const roundRoot = join(temporary, `round-${round}`);
+      const storePath = join(roundRoot, "bindings.sqlite");
+      const goPath = join(roundRoot, "go");
+      mkdirSync(roundRoot);
+      let released = false;
+      let endedEarly: string | null = null;
+      const exits = Array.from({ length: children }, (_value, index) => new Promise<string | null>((resolve) => {
+        execFile(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", script], {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            BINDINGS_MODULE_URL: moduleUrl,
+            GO_PATH: goPath,
+            READY_PATH: join(roundRoot, `ready-${index}`),
+            STORE_PATH: storePath,
+          },
+          timeout: 180_000,
+        }, (error, _stdout, stderr) => {
+          const failure = error ? String(stderr || error.message) : null;
+          if (!released) endedEarly ??= failure ?? "a child process ended before the barrier opened";
+          resolve(failure);
+        });
+      }));
+      const readyCount = () => readdirSync(roundRoot).filter((name) => name.startsWith("ready-")).length;
+      const startedAt = Date.now();
+      while (readyCount() < children && endedEarly === null && Date.now() - startedAt < 120_000) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      // Always opened: a child that waits here keeps this test file alive after a failure.
+      const allReady = readyCount() === children;
+      released = true;
+      writeFileSync(goPath, "");
+      const failures = (await Promise.all(exits)).filter((failure): failure is string => failure !== null);
+      assert.equal(endedEarly, null);
+      assert.ok(allReady, "every child process reaches the barrier");
+      assert.deepEqual(failures, []);
+      assert.ok(existsSync(storePath));
+    }
+  } finally {
+    removeTemporary(temporary);
   }
 });
 
@@ -641,6 +770,6 @@ test("separate desktop processes serialize whole-store updates", async () => {
       assert.equal((await listProjectBindings({ storePath })).length, roots.length);
     }
   } finally {
-    rmSync(temporary, { recursive: true, force: true });
+    removeTemporary(temporary);
   }
 });

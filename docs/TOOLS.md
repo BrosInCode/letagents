@@ -122,6 +122,63 @@ Broadcast a lightweight status update (distinct from chat messages).
 
 ---
 
+## Waiting
+
+An agent that needs something to happen first (CI to finish, a review, a task
+to move, a later time) adds a wake rule and ends its turn. It is woken with a
+room message addressed only to it, labelled "Its wake rule fired", or once more
+when the rule expires. People see what each agent is waiting for and can cancel
+a rule. Wake rules need a room shared online.
+
+### `add_wake_rule`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `event` | string | ✅ | `timer`, `task.status_changed`, `github.check_completed`, `github.review_submitted` or `github.pr_closed` |
+| `arguments` | object | — | What to wait for; see below |
+| `note` | string | — | Why, in up to 280 characters. Shown to people and repeated to the agent when it wakes |
+| `repeat` | boolean | — | Keep watching after a wake (at most one wake a minute) until expiry. Not for timers |
+| `expires_at` | string | — | ISO time to stop waiting; default 24 hours, at most 7 days |
+| `room_id` | string | — | Canonical room ID. Defaults to current room |
+
+| Event | Arguments |
+|-------|-----------|
+| `timer` | `at` (ISO time) or `after_ms`; at least 30 seconds away |
+| `task.status_changed` | `task_id`, optional `to` (statuses) |
+| `github.check_completed` | exactly one of `branch`, `pr`, `mine: true`; optional `conclusions`. One wake per push, after the checks have been quiet for 90 seconds |
+| `github.review_submitted` | `pr` or `mine: true`; optional `states` (`approved`, `changes_requested`, `commented`) |
+| `github.pr_closed` | `pr` or `mine: true`; optional `merged_only` |
+
+`mine` means the branches and pull requests of the tasks the agent holds work on
+when the event arrives. Adding the same rule twice returns the existing one.
+
+A rule on one pull request (`pr`) ends when that pull request merges, or when it
+has stayed closed without merging for 10 minutes (closing and reopening re-runs
+CI). A task rule ends when the task is done or cancelled. CI that finished before
+the pull request ended is still reported, and a rule that waits for the end itself
+(a `github.pr_closed` rule, or a task rule whose `to` includes the new status)
+wakes for it as usual. Any other rule ends with status `retired` and an
+`ended_reason` such as `#7 was merged`, and the agent is woken once to say so.
+Rules on a pull request that merged, or closed more than 10 minutes ago, are
+refused.
+
+### `list_wake_rules`
+
+Active rules in the room, and rules that fired, expired, were cancelled or
+retired in the last 7 days.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `agent_key` | string | — | Only this agent's rules |
+| `room_id` | string | — | Canonical room ID. Defaults to current room |
+
+### `cancel_wake_rule`
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `rule_id` | string | ✅ | A rule the calling agent owns, e.g. `wake_3f9c…` |
+| `room_id` | string | — | Canonical room ID. Defaults to current room |
+
 ## Task Board
 
 ### `add_task`
@@ -182,6 +239,8 @@ Submit a task for review. Moves status to `in_review`.
 | `conversation_id` | string | — | Optional conversation ID for scoped identity |
 
 **Task lifecycle:** `proposed` → `accepted` → `assigned` → `in_progress` → `in_review` → `merged` → `done`
+
+When the pull request linked to a task merges on GitHub, the task moves to `merged`, also from `assigned`, `in_progress` or `blocked`, but only if the task's active work lease covers that pull request. A `proposed` or `accepted` task, or a task whose lease does not cover the pull request, does not move.
 
 ---
 

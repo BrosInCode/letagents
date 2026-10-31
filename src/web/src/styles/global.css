@@ -1,5 +1,8 @@
+@import "../../../../shared/code-block.css";
+
 /* ─── Design Tokens ─── */
 :root {
+  color-scheme: dark;
   /* Colors — Dark palette */
   --bg:              #0a0a0a;
   --bg-subtle:       #111111;
@@ -46,6 +49,18 @@
   --task-merged:      #34d399;
   --task-done:        #22c55e;
   --task-cancelled:   #64748b;
+
+  /* Code blocks & syntax highlighting */
+  --code-bg:          #141414;
+  --code-header-bg:   #1a1a1a;
+  --code-text:        var(--text);
+  --code-comment:     var(--text-secondary);
+  --code-keyword:     var(--task-assigned);
+  --code-string:      var(--green-text);
+  --code-number:      var(--amber-text);
+  --code-function:    var(--blue-text);
+  --code-variable:    var(--task-in-review);
+  --code-type:        var(--red-text);
 
   /* Typography */
   --font-sans:       'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -131,6 +146,9 @@
   --task-done:        #15803d;
   --task-cancelled:   #64748b;
 
+  --code-bg:          #f4f4f5;
+  --code-header-bg:   #ebecee;
+
   --shadow-sm:  0 1px 2px rgba(0, 0, 0, 0.06);
   --shadow-md:  0 4px 12px rgba(0, 0, 0, 0.08);
   --shadow-lg:  0 8px 32px rgba(0, 0, 0, 0.12);
@@ -160,6 +178,7 @@
 
 html {
   scroll-behavior: smooth;
+  -webkit-text-size-adjust: 100%;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -183,6 +202,15 @@ button {
   cursor: pointer;
   border: none;
   background: none;
+}
+
+:where(button, a, input, textarea, select, summary):focus-visible {
+  outline: 2px solid var(--blue-text);
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
 }
 
 img {

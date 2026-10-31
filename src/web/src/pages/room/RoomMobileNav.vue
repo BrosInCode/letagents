@@ -1,8 +1,7 @@
 <template>
-  <nav class="mobile-bottom-nav" role="tablist" aria-label="Room navigation">
+  <nav class="mobile-bottom-nav" aria-label="Room navigation">
     <button
-      role="tab"
-      :aria-selected="activeTab === 'chat'"
+      :aria-current="activeTab === 'chat' ? 'page' : undefined"
       :class="{ active: activeTab === 'chat' }"
       type="button"
       @click="selectTab('chat')"
@@ -12,18 +11,16 @@
     </button>
     <button
       v-if="showEventsTab"
-      role="tab"
-      :aria-selected="activeTab === 'events'"
+      :aria-current="activeTab === 'events' ? 'page' : undefined"
       :class="{ active: activeTab === 'events' }"
       type="button"
       @click="selectTab('events')"
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-      <span>Events</span>
+      <span>Activity</span>
     </button>
     <button
-      role="tab"
-      :aria-selected="activeTab === 'board'"
+      :aria-current="activeTab === 'board' ? 'page' : undefined"
       :class="{ active: activeTab === 'board' }"
       type="button"
       @click="selectTab('board')"
@@ -32,18 +29,16 @@
       <span>Board</span>
     </button>
     <button
-      role="tab"
-      :aria-selected="activeTab === 'activity'"
+      :aria-current="activeTab === 'activity' ? 'page' : undefined"
       :class="{ active: activeTab === 'activity' }"
       type="button"
       @click="selectTab('activity')"
     >
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-      <span>Activity</span>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M20 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/><circle cx="9" cy="7" r="4"/></svg>
+      <span>Agents</span>
     </button>
     <button
-      role="tab"
-      :aria-selected="activeTab === 'rooms'"
+      :aria-current="activeTab === 'rooms' ? 'page' : undefined"
       :class="{ active: activeTab === 'rooms' }"
       type="button"
       @click="selectTab('rooms')"
@@ -82,7 +77,7 @@ function selectTab(tab: RoomTab) {
     align-items: center;
     justify-content: space-around;
     height: calc(56px + env(safe-area-inset-bottom, 0px));
-    padding: 0 4px env(safe-area-inset-bottom, 0px);
+    padding: 0 max(4px, env(safe-area-inset-right, 0px)) env(safe-area-inset-bottom, 0px) max(4px, env(safe-area-inset-left, 0px));
     background: var(--bg-0, #09090b);
     border-top: 1px solid var(--line, #27272a);
     position: sticky;
@@ -114,18 +109,19 @@ function selectTab(tab: RoomTab) {
   }
 
   .mobile-bottom-nav button span {
-    font-size: 0.62rem;
+    font-size: 0.7rem;
     font-weight: 600;
-    letter-spacing: 0.02em;
   }
 
   .mobile-bottom-nav button.active,
-  .mobile-bottom-nav button[aria-selected="true"] {
-    color: var(--accent, #6366f1);
+  .mobile-bottom-nav button[aria-current="page"] {
+    color: var(--text, #fafafa);
+    background: var(--accent-hover);
+    border-radius: 8px;
   }
 
-  .mobile-bottom-nav button:hover:not(.active) {
-    color: var(--text, #fafafa);
+  .mobile-bottom-nav button:focus-visible {
+    outline-offset: -3px;
   }
 }
 </style>

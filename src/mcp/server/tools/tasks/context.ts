@@ -1,7 +1,7 @@
 import {
-  AGENT_INSTANCE_UUID,
+  agentInstanceUuid,
   agentSessionCredentials,
-  currentRoom,
+  getCurrentRoom,
   getFallbackProjectId,
   getTargetRoomId,
   resolveWorkerToolIdentity,
@@ -23,7 +23,7 @@ export function resolveTaskToolTarget(roomId?: string): TaskToolTarget | null {
   return {
     roomId: targetRoomId ?? null,
     projectId: targetProjectId ?? null,
-    effectiveRoomId: targetRoomId ?? currentRoom?.room_id ?? null,
+    effectiveRoomId: targetRoomId ?? getCurrentRoom()?.room_id ?? null,
   };
 }
 
@@ -52,7 +52,7 @@ export function taskActorPayload(
   return {
     actor_label: identity.actor_label,
     actor_key: identity.canonical_key,
-    actor_instance_id: agentSession.agent_instance_id || AGENT_INSTANCE_UUID,
+    actor_instance_id: agentSession.agent_instance_id || agentInstanceUuid(),
     ...agentSessionCredentials(agentSession),
   };
 }

@@ -63,7 +63,31 @@ export interface RecordCoordinationDecisionInput {
   lockId?: string | null;
 }
 
-export interface TaskCoordinationEnforcementDeps {
+export interface WorkerBoardIntentAuthorityDeps {
+  getActiveBoardManager(roomId: string): Promise<{ agent_session_id: string } | null>;
+}
+
+/**
+ * Why a worker may not carry out a board change through an approved intent:
+ * it is the active Board Manager acting on someone else's work (only a person
+ * may approve the manager's own requests). Null when it may. Approvals granted
+ * before a mode change, or by a manager no longer assigned, never verify.
+ */
+export async function refuseWorkerBoardIntentExecution(
+  deps: WorkerBoardIntentAuthorityDeps,
+  input: { roomId: string; agentSessionId: string; actsOnOwnWork?: boolean }
+): Promise<{ code: string; error: string } | null> {
+  const manager = await deps.getActiveBoardManager(input.roomId);
+  if (!input.actsOnOwnWork && manager?.agent_session_id === input.agentSessionId) {
+    return {
+      code: "board_intent_manager_self_action",
+      error: "The Board Manager cannot make this change through its own request; a person must make it.",
+    };
+  }
+  return null;
+}
+
+export interface TaskCoordinationEnforcementDeps extends WorkerBoardIntentAuthorityDeps {
   getAgentIdentityByCanonicalKey(
     canonicalKey: string
   ): Promise<Pick<AgentIdentity, "canonical_key" | "owner_account_id"> | null>;
@@ -100,6 +124,7 @@ export interface TaskCoordinationEnforcementDeps {
     intent_id?: string | null;
     approval_token?: string | null;
     trusted_worker?: { agent_session_id: string; agent_key: string };
+    task_state?: { status: string; assignee_agent_key: string | null };
   }): Promise<
     | { kind: "allow"; intent?: { id: string } }
     | { kind: "deny"; code: string; error: string }
@@ -119,6 +144,11 @@ export interface TaskCoordinationMutationInput {
   actorSessionId: string | null;
   boardIntentId?: string | null;
   boardApprovalToken?: string | null;
+  /**
+   * The caller has no admin or manager authority for this transition, so the
+   * board intent approved for its own worker session is the only authority.
+   */
+  authorizeWithApprovedBoardIntent?: boolean;
 }
 
 type TaskCoordinationDenyDecision = Extract<TaskCoordinationGuardDecision, { kind: "deny" }>;
@@ -487,9 +517,93 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
     };
   }
 
+  function boardIntentPayloadForUpdate(input: TaskCoordinationMutationInput): BoardIntentPayload {
+    return boardIntentPayloadForTaskMutation({
+      taskId: input.task.id,
+      status: input.updates.status ?? null,
+      assignee: "assignee" in input.updates ? input.updates.assignee as string | null | undefined : undefined,
+      assigneeAgentKey: "assignee_agent_key" in input.updates ? input.updates.assignee_agent_key as string | null | undefined : undefined,
+      prUrl: input.updates.pr_url,
+    });
+  }
+
+  // An approved intent authorizes exactly its own transition, and only for the
+  // worker session that proposed it. It is consumed in the task write.
+  async function enforceApprovedBoardIntentTransition(
+    input: TaskCoordinationMutationInput
+  ): Promise<TaskCoordinationGuardDecision> {
+    const actorLabel = normalizeTaskActorLabel(input.actorLabel);
+    const actorKey = normalizeTaskActorKey(input.actorKey);
+    const actionType = boardIntentActionForMutation(input.updates);
+    const agentSession = input.req.authKind === "agent_session" ? input.req.agentSession : null;
+    const trustedWorker = agentSession && agentSession.room_id === input.projectId
+      && agentSession.agent_session_id === input.actorSessionId && agentSession.agent_key === actorKey
+      ? { agent_session_id: agentSession.agent_session_id, agent_key: agentSession.agent_key }
+      : null;
+    const refusal = trustedWorker
+      ? await refuseWorkerBoardIntentExecution(deps, { roomId: input.projectId, agentSessionId: trustedWorker.agent_session_id })
+      : null;
+    if (refusal) {
+      return recordIntentDenial({
+        roomId: input.projectId,
+        taskId: input.task.id,
+        mutation: "task_update",
+        actorLabel,
+        actorKey,
+        actorInstanceId: input.actorInstanceId,
+        decision: { kind: "deny", ...refusal },
+      });
+    }
+    const payload = boardIntentPayloadForUpdate(input);
+    const approval = actionType && trustedWorker
+      ? await deps.verifyBoardIntentApproval({
+          room_id: input.projectId,
+          action_type: actionType,
+          payload,
+          intent_id: input.boardIntentId,
+          trusted_worker: trustedWorker,
+          task_state: { status: input.task.status, assignee_agent_key: input.taskOwnership.assignee_agent_key },
+        })
+      : null;
+    if (!actionType || !trustedWorker || approval?.kind !== "allow" || !approval.intent?.id) {
+      return recordIntentDenial({
+        roomId: input.projectId,
+        taskId: input.task.id,
+        mutation: "task_update",
+        actorLabel,
+        actorKey,
+        actorInstanceId: input.actorInstanceId,
+        decision: approval?.kind === "deny" ? approval : { kind: "deny", code: "board_intent_required",
+          error: "Board Manager approval for this worker session is required for this board action." },
+      });
+    }
+    await recordCoordinationDecision({
+      roomId: input.projectId,
+      taskId: input.task.id,
+      mutation: "task_update",
+      decision: "allow",
+      actorLabel,
+      actorKey,
+      actorInstanceId: input.actorInstanceId,
+      reason: `Allowed ${actionType} to ${input.updates.status ?? "the approved state"} with approved board intent ${approval.intent.id}.`,
+    });
+    return allowDecision({
+      boardIntentApproval: {
+        room_id: input.projectId,
+        action_type: actionType,
+        payload,
+        intent_id: approval.intent.id,
+        trusted_worker: trustedWorker,
+      },
+    });
+  }
+
   async function enforceTaskCoordinationMutation(
     input: TaskCoordinationMutationInput
   ): Promise<TaskCoordinationGuardDecision> {
+    if (input.authorizeWithApprovedBoardIntent) {
+      return enforceApprovedBoardIntentTransition(input);
+    }
     const classified = input.forcedMutation
       ? { ...input.forcedMutation, claim: false }
       : classifyTaskCoordinationMutation(input.updates);
@@ -621,13 +735,7 @@ export function createTaskCoordinationEnforcement(deps: TaskCoordinationEnforcem
       ? await enforceBoardIntentForAgentAction({
           roomId: input.projectId,
           actionType: intentActionType,
-          payload: boardIntentPayloadForTaskMutation({
-            taskId: input.task.id,
-            status: input.updates.status ?? null,
-            assignee: "assignee" in input.updates ? input.updates.assignee as string | null | undefined : undefined,
-            assigneeAgentKey: "assignee_agent_key" in input.updates ? input.updates.assignee_agent_key as string | null | undefined : undefined,
-            prUrl: input.updates.pr_url,
-          }),
+          payload: boardIntentPayloadForUpdate(input),
           actorLabel,
           actorKey,
           actorInstanceId: input.actorInstanceId,

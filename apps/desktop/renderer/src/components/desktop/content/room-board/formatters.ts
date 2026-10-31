@@ -46,10 +46,10 @@ export function formatStaleDuration(value: number | null): string {
   return `${Math.floor(hours / 24)}d`;
 }
 
-export function relativeTime(value: string | null | undefined): string {
+export function relativeTime(value: string | null | undefined, now: number = Date.now()): string {
   const timestamp = Date.parse(value || "");
   if (!Number.isFinite(timestamp)) return "recently";
-  const deltaSeconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+  const deltaSeconds = Math.max(0, Math.floor((now - timestamp) / 1000));
   if (deltaSeconds < 45) return "just now";
   if (deltaSeconds < 3600) return `${Math.floor(deltaSeconds / 60)}m ago`;
   if (deltaSeconds < 86_400) return `${Math.floor(deltaSeconds / 3600)}h ago`;

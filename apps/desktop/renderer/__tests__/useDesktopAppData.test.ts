@@ -24,28 +24,8 @@ import type {
   WorkerSnapshot,
 } from "../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../src/components/desktop/types";
-import {
-  buildRoomStreamDeliveryRepair,
-  useDesktopAppData,
-} from "../src/composables/useDesktopAppData";
+import { useDesktopAppData } from "../src/composables/useDesktopAppData";
 import type { RecentRootRoom } from "../src/domain/sidebar-rooms";
-
-it("builds managed-agent repairs only from authoritative snapshot deltas", () => {
-  const existingTask = { ...taskSummary("task_1"), updatedAt: "2026-08-11T10:00:00.000Z" };
-  const updatedTask = { ...existingTask, updatedAt: "2026-08-11T10:01:00.000Z" };
-  const repair = buildRoomStreamDeliveryRepair(
-    roomSnapshot("focus_a", {
-      messages: [roomMessage("msg_1", "existing")],
-      tasks: [existingTask],
-    }),
-    roomSnapshot("focus_a", {
-      messages: [roomMessage("msg_1", "existing"), roomMessage("msg_2", "missed target")],
-      tasks: [updatedTask, { ...taskSummary("task_2"), updatedAt: "2026-08-11T10:02:00.000Z" }],
-    }),
-  );
-  assert.deepEqual(repair.messages.map((message) => message.id), ["msg_2"]);
-  assert.deepEqual(repair.tasks.map((task) => task.id), ["task_1", "task_2"]);
-});
 
 describe("useDesktopAppData selected focus room snapshots", () => {
   it("shows an optimistic snapshot only for uncached focus room loads", async () => {
@@ -293,7 +273,7 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
     assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
   });
 
-  it("hands authoritative gap deltas back to managed-agent delivery once", async () => {
+  it("acknowledges the authoritative gap snapshot to the room stream once", async () => {
     const harness = createHarness();
     const priorTask = { ...taskSummary("task_1"), updatedAt: "2026-08-11T10:00:00.000Z" };
     harness.selectedSnapshot.value = roomSnapshot("focus_a", {
@@ -334,12 +314,10 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
 
     assert.equal(harness.deliveryRepairs.length, 1);
     assert.equal(harness.deliveryRepairs[0]?.roomIdentifier, "focus_a");
-    assert.equal(harness.deliveryRepairs[0]?.repair.token, 41);
-    assert.deepEqual(harness.deliveryRepairs[0]?.repair.messages.map((message) => message.id), ["msg_2"]);
-    assert.deepEqual(harness.deliveryRepairs[0]?.repair.tasks.map((task) => task.id), ["task_1", "task_2"]);
+    assert.deepEqual(harness.deliveryRepairs[0]?.repair, { token: 41 });
   });
 
-  it("retries a rejected managed-agent handoff with the same baseline and token", async () => {
+  it("retries a rejected gap acknowledgement with the same token", async () => {
     const harness = createHarness({ deliveryRepairRetryMs: 1 });
     harness.selectedSnapshot.value = focusSnapshot([roomMessage("msg_1", "Existing")]);
     harness.nextSelectedSnapshot = Promise.resolve(focusSnapshot([
@@ -361,14 +339,8 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
     });
 
     assert.deepEqual(
-      harness.deliveryRepairs.map(({ repair }) => ({
-        token: repair.token,
-        messages: repair.messages.map((message) => message.id),
-      })),
-      [
-        { token: 42, messages: ["msg_2"] },
-        { token: 42, messages: ["msg_2"] },
-      ],
+      harness.deliveryRepairs.map(({ repair }) => repair),
+      [{ token: 42 }, { token: 42 }],
     );
   });
 
@@ -396,11 +368,7 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
       await waitForDesktop(() => harness.deliveryRepairs.length === 1);
     });
 
-    assert.equal(harness.deliveryRepairs[0]?.repair.token, 43);
-    assert.deepEqual(
-      harness.deliveryRepairs[0]?.repair.messages.map((message) => message.id),
-      ["msg_2"],
-    );
+    assert.deepEqual(harness.deliveryRepairs[0]?.repair, { token: 43 });
     assert.equal(harness.getSnapshotRequests.length, 2);
   });
 
@@ -1316,6 +1284,7 @@ function createHarness(options: {
   deliveryRepairRetryMs?: number;
   snapshotTimeoutMs?: number;
   openedRoom?: DesktopRepoRoomSelection;
+  selectedRootRoomIdentifier?: string;
 } = {}): {
   accountRooms: Ref<DesktopAccountRoomEntry[]>;
   authStatus: Ref<DesktopAuthStatus | null>;
@@ -1394,7 +1363,7 @@ function createHarness(options: {
     },
     sessionGeneration,
     selectedMcpTargetIds: ref<DesktopMcpInstallTargetId[]>([]),
-    selectedRootRoomIdentifier: ref("room_parent"),
+    selectedRootRoomIdentifier: ref(options.selectedRootRoomIdentifier || "room_parent"),
     selectedSnapshot,
     settingsAccountRooms,
     deliveryRepairRetryMs: options.deliveryRepairRetryMs,
@@ -1566,6 +1535,95 @@ it("keeps watcher statistics when room refresh finishes later and when reopening
     await harness.state.refresh();
     assert.deepEqual(harness.repoStatus.value, watchedStatus);
     assert.equal(harness.rootRoomSnapshot.value?.roomIdentifier, "room_parent");
+  });
+});
+
+describe("useDesktopAppData root room refresh", () => {
+  it("restores an alias-only selection after the API renames its project, without a folder or workspace fallback", async () => {
+    const canonical = "github.com/brosincode/letagents";
+    const harness = createHarness({ selectedRootRoomIdentifier: "sky-lake" });
+    harness.rootRoomSnapshot.value = null;
+    harness.activeEntry.value = { ...parentEntry(), roomIdentifier: canonical };
+    harness.nextAccountRooms = [accountRoomEntry(canonical, { displayName: "letagents", name: "sky-lake" })];
+    const canonicalSnapshot = roomSnapshot(canonical);
+    canonicalSnapshot.room!.displayName = "letagents";
+    const bridge = harness.windowBridge as { letagentsDesktop: { room: {
+      getSnapshot: (identifier: string | null) => Promise<DesktopRoomSnapshot>;
+    } } };
+    bridge.letagentsDesktop.room.getSnapshot = async (identifier) => {
+      harness.getSnapshotRequests.push(identifier);
+      if (identifier === "sky-lake") {
+        const missing = nonReadySnapshot(identifier, "unavailable");
+        missing.access.httpStatus = 404;
+        return missing;
+      }
+      assert.equal(identifier, canonical, "must not fall back to another workspace room");
+      return canonicalSnapshot;
+    };
+    await withDesktopBridge(harness.windowBridge, () => harness.state.refresh());
+    assert.deepEqual(harness.getSnapshotRequests, ["sky-lake", canonical]);
+    assert.equal(harness.rootRoomSnapshot.value?.roomIdentifier, canonical);
+    assert.equal(harness.selectedSnapshot.value?.roomIdentifier, canonical);
+    assert.equal(harness.rootRoomSnapshot.value?.room?.displayName, "letagents");
+  });
+
+  it("keeps live tasks, reasoning and artifacts when a board action refreshes the root room", async () => {
+    const harness = createHarness();
+    harness.activeEntry.value = parentEntry();
+    harness.rootRoomSnapshot.value = roomSnapshot("room_parent", {
+      tasks: [
+        { ...taskSummary("task_1"), status: "merged" },
+        { ...taskSummary("task_2"), status: "in_progress" },
+      ],
+    });
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      harness.getSnapshotRequests.length = 0;
+      harness.metadataRefreshCalls.length = 0;
+      harness.nextArtifacts = [sharedArtifact("artifact:pr:1")];
+      harness.state.handleRoomStreamEvent({
+        type: "task_update",
+        roomIdentifier: "room_parent",
+        task: { ...taskSummary("task_2"), status: "merged" },
+      });
+      harness.state.handleRoomStreamEvent({
+        type: "reasoning_update",
+        roomIdentifier: "room_parent",
+        session: reasoningSession("reason_live"),
+      });
+      harness.state.handleRoomStreamEvent({
+        type: "artifact_update",
+        roomIdentifier: "room_parent",
+        artifact: sharedArtifact("artifact:pr:1"),
+      });
+      await flushAsync();
+      // Board "Mark Done" hands back the saved task, then asks for a refresh.
+      harness.state.upsertSelectedTask({ ...taskSummary("task_1"), status: "done" });
+      harness.state.handleRefreshRoom();
+      await flushAsync();
+    });
+
+    const selected = harness.selectedSnapshot.value;
+    assert.deepEqual(selected?.tasks.map((task) => `${task.id}:${task.status}`), ["task_1:done", "task_2:merged"]);
+    assert.deepEqual(selected?.reasoningSessions.map((session) => session.id), ["reason_live"]);
+    assert.deepEqual(selected?.roomArtifacts.map((artifact) => artifact.identityKey), ["artifact:pr:1"]);
+    // The full server read owns the refresh; the root copy is left as it was.
+    assert.deepEqual(harness.metadataRefreshCalls, [0]);
+    assert.deepEqual(harness.rootRoomSnapshot.value?.tasks.map((task) => task.status), ["merged", "in_progress"]);
+  });
+
+  it("still reloads a focus room's own snapshot when it is refreshed", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot([]);
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.state.handleRefreshRoom();
+      await flushAsync();
+    });
+
+    assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
+    assert.deepEqual(harness.metadataRefreshCalls, [0]);
   });
 });
 

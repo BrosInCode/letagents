@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
+import { writeFakeProvider } from "./platform.js";
 
 const { tempDir } = createElectronTestEnv({
   prefix: "letagents-managed-agent-models-",
   paths: [],
   extraCleanupEnvKeys: [
+    "LETAGENTS_CLAUDE_CODE_BIN",
     "LETAGENTS_CODEX_BIN",
     "LETAGENTS_CURSOR_AGENT_BIN",
     "LETAGENTS_CURSOR_MANAGED_HOME",
@@ -20,7 +22,6 @@ const { tempDir } = createElectronTestEnv({
 const {
   listDesktopAgentProviderModels,
   normalizeManagedAgentEffort,
-  normalizeManagedAgentEffortForProvider,
   normalizeManagedAgentModel,
   parseCodexModelsOutput,
   parseCursorModelsOutput,
@@ -33,13 +34,9 @@ test("managed agent model normalization trims blanks to null", () => {
   assert.equal(normalizeManagedAgentModel(null), null);
 });
 
-test("managed agent effort normalization is provider aware", () => {
+test("managed agent effort normalization trims and rejects unknown values", () => {
   assert.equal(normalizeManagedAgentEffort("  high  "), "high");
   assert.equal(normalizeManagedAgentEffort("unsupported"), null);
-  assert.equal(normalizeManagedAgentEffortForProvider("codex", "xhigh"), "xhigh");
-  assert.equal(normalizeManagedAgentEffortForProvider("codex", "max"), null);
-  assert.equal(normalizeManagedAgentEffortForProvider("claude-code", "max"), "max");
-  assert.equal(normalizeManagedAgentEffortForProvider("cursor", "high"), null);
 });
 
 test("Cursor model parser handles labels, defaults, duplicates, and empty lines", () => {
@@ -116,20 +113,58 @@ test("Codex model parser handles refreshed catalog JSON", () => {
   ]);
 });
 
-test("known and custom model validation use the selected source intentionally", async () => {
-  const claudeModels = await listDesktopAgentProviderModels("claude-code");
-  assert.deepEqual(claudeModels.models.slice(0, 4).map((model) => model.label), [
-    "Fable 5",
-    "Opus (latest)",
-    "Sonnet (latest)",
-    "Haiku (latest)",
+function fakeClaude(version: string): void {
+  let claudeBin = join(tempDir, `claude-${version}`);
+  claudeBin = writeFakeProvider(claudeBin, [
+    "if (process.argv[2] !== '--version') process.exit(2);",
+    `console.log('${version} (Claude Code)');`,
+    "",
+  ].join("\n"));
+  process.env.LETAGENTS_CLAUDE_CODE_BIN = claudeBin;
+}
+
+test("Claude models are full ids with real names, and newer ones only from the CLI that knows them", async () => {
+  fakeClaude("2.1.278");
+  const older = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
+  assert.equal(older.status, "ready");
+  assert.deepEqual(older.models.map((model) => [model.id, model.label]), [
+    ["best", "Best available"],
+    ["claude-fable-5-1", "Fable 5.1"],
+    ["claude-fable-5", "Fable 5"],
+    ["claude-opus-5", "Opus 5"],
+    ["claude-sonnet-5", "Sonnet 5"],
+    ["claude-haiku-4-5", "Haiku 4.5"],
+    ["claude-opus-5[1m]", "Opus 5 1M"],
+    ["claude-sonnet-5[1m]", "Sonnet 5 1M"],
   ]);
+  assert.ok(older.models.every((model) => !("minimumCliVersion" in model)));
+
+  fakeClaude("2.1.280");
+  const cached = await listDesktopAgentProviderModels("claude-code");
+  assert.equal(cached.models.some((model) => model.id === "claude-opus-5-5"), true, "a different CLI path is its own cache entry");
+  const newer = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
+  assert.deepEqual(newer.models.filter((model) => model.id.endsWith("-5-5")).map((model) => model.label), ["Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]);
+
+  process.env.LETAGENTS_CLAUDE_CODE_BIN = join(tempDir, "no-such-claude");
+  const missing = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
+  assert.equal(missing.status, "ready", "an unreadable version still lists the models every CLI takes");
+  assert.equal(missing.models.some((model) => model.id === "claude-sonnet-5-5"), false);
+  delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
+});
+
+test("known and custom model validation use the selected source intentionally", async () => {
+  fakeClaude("2.1.278");
+  assert.deepEqual(await validateDesktopManagedAgentModel({
+    providerId: "claude-code",
+    model: "claude-sonnet-5",
+    modelSource: "known",
+  }), { model: "claude-sonnet-5", error: null });
 
   assert.deepEqual(await validateDesktopManagedAgentModel({
     providerId: "claude-code",
-    model: "sonnet",
+    model: "claude-opus-5[1m]",
     modelSource: "known",
-  }), { model: "sonnet", error: null });
+  }), { model: "claude-opus-5[1m]", error: null });
 
   const invalidKnown = await validateDesktopManagedAgentModel({
     providerId: "claude-code",
@@ -139,31 +174,24 @@ test("known and custom model validation use the selected source intentionally", 
   assert.equal(invalidKnown.model, "unknown-claude-model");
   assert.match(invalidKnown.error ?? "", /not in the known model list/);
 
-  assert.deepEqual(await validateDesktopManagedAgentModel({
+  // An alias is no longer listed; a new agent may still name one as a custom id.
+  assert.match((await validateDesktopManagedAgentModel({
     providerId: "claude-code",
     model: "opusplan",
     modelSource: "known",
-  }), { model: "opusplan", error: null });
-
-  assert.deepEqual(await validateDesktopManagedAgentModel({
-    providerId: "claude-code",
-    model: "sonnet[1m]",
-    modelSource: "known",
-  }), { model: "sonnet[1m]", error: null });
+  })).error ?? "", /not in the known model list/);
 
   assert.deepEqual(await validateDesktopManagedAgentModel({
     providerId: "claude-code",
     model: "unknown-claude-model",
     modelSource: "custom",
   }), { model: "unknown-claude-model", error: null });
+  delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
 });
 
 test("Codex model discovery reads debug model catalog output", async () => {
-  const codexBin = join(tempDir, "codex-debug-models");
-  writeFileSync(
-    codexBin,
-    [
-      "#!/usr/bin/env node",
+  let codexBin = join(tempDir, "codex-debug-models");
+  codexBin = writeFakeProvider(codexBin, [
       "if (process.argv[2] !== 'debug' || process.argv[3] !== 'models') process.exit(2);",
       "console.log(JSON.stringify({ models: [",
       "  { slug: 'gpt-5.5', display_name: 'GPT-5.5', visibility: 'list', is_default: true },",
@@ -171,9 +199,7 @@ test("Codex model discovery reads debug model catalog output", async () => {
       "  { slug: 'gpt-5.4-mini', display_name: 'GPT-5.4 Mini', visibility: 'list' }",
       "] }));",
       "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  ].join("\n"));
   process.env.LETAGENTS_CODEX_BIN = codexBin;
 
   const result = await listDesktopAgentProviderModels("codex", { refreshModels: true });
@@ -192,13 +218,10 @@ test("Codex stale ready model cache is extended after failed rediscovery", async
   let now = 1_000_000;
   t.mock.method(Date, "now", () => now);
 
-  const codexBin = join(tempDir, "codex-debug-models-stale-cache");
+  let codexBin = join(tempDir, "codex-debug-models-stale-cache");
   const counterPath = join(tempDir, "codex-debug-models-stale-cache-count");
   const failPath = join(tempDir, "codex-debug-models-stale-cache-fail");
-  writeFileSync(
-    codexBin,
-    [
-      "#!/usr/bin/env node",
+  codexBin = writeFakeProvider(codexBin, [
       "const fs = require('node:fs');",
       `const counterPath = ${JSON.stringify(counterPath)};`,
       `const failPath = ${JSON.stringify(failPath)};`,
@@ -213,9 +236,7 @@ test("Codex stale ready model cache is extended after failed rediscovery", async
       "  { slug: 'gpt-cache', display_name: 'GPT Cache', visibility: 'list' }",
       "] }));",
       "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  ].join("\n"));
   process.env.LETAGENTS_CODEX_BIN = codexBin;
 
   const first = await listDesktopAgentProviderModels("codex", { refreshModels: true });
@@ -234,18 +255,13 @@ test("Codex stale ready model cache is extended after failed rediscovery", async
 });
 
 test("Cursor discovered model validation blocks stale provider ids", async () => {
-  const cursorBin = join(tempDir, "cursor-agent-models");
-  writeFileSync(
-    cursorBin,
-    [
-      "#!/usr/bin/env node",
+  let cursorBin = join(tempDir, "cursor-agent-models");
+  cursorBin = writeFakeProvider(cursorBin, [
       "if (process.argv[2] !== 'models') process.exit(2);",
       "console.log('auto - Auto');",
       "console.log('gpt-5.2 - GPT-5.2 (default)');",
       "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  ].join("\n"));
   process.env.LETAGENTS_CURSOR_AGENT_BIN = cursorBin;
 
   const result = await listDesktopAgentProviderModels("cursor");
@@ -269,21 +285,16 @@ test("Cursor discovered model validation blocks stale provider ids", async () =>
 });
 
 test("Cursor model discovery uses the managed profile environment", async () => {
-  const cursorBin = join(tempDir, "cursor-agent-models-managed-env");
+  let cursorBin = join(tempDir, "cursor-agent-models-managed-env");
   const managedHome = join(tempDir, "managed-cursor-home");
-  writeFileSync(
-    cursorBin,
-    [
-      "#!/usr/bin/env node",
+  cursorBin = writeFakeProvider(cursorBin, [
       `if (process.env.HOME !== ${JSON.stringify(managedHome)}) {`,
       "  console.error(`wrong HOME ${process.env.HOME || ''}`);",
       "  process.exit(1);",
       "}",
       "console.log('managed - Managed Profile Model (default)');",
       "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  ].join("\n"));
   process.env.LETAGENTS_CURSOR_AGENT_BIN = cursorBin;
   process.env.LETAGENTS_CURSOR_MANAGED_HOME = managedHome;
   process.env.LETAGENTS_CURSOR_SOURCE_HOME = join(tempDir, "cursor-source-home");
@@ -291,7 +302,6 @@ test("Cursor model discovery uses the managed profile environment", async () => 
 
   const result = await listDesktopAgentProviderModels("cursor", {
     repoRootPath: tempDir,
-    cursorMcpPolicy: "filter_letagents",
   });
 
   assert.equal(result.status, "ready");
@@ -300,12 +310,9 @@ test("Cursor model discovery uses the managed profile environment", async () => 
 });
 
 test("Cursor model discovery caches failures briefly and refreshModels bypasses the cache", async () => {
-  const cursorBin = join(tempDir, "cursor-agent-models-cache-failure");
+  let cursorBin = join(tempDir, "cursor-agent-models-cache-failure");
   const counterPath = join(tempDir, "cursor-agent-models-cache-count");
-  writeFileSync(
-    cursorBin,
-    [
-      "#!/usr/bin/env node",
+  cursorBin = writeFakeProvider(cursorBin, [
       "const fs = require('node:fs');",
       `const counterPath = ${JSON.stringify(counterPath)};`,
       "const count = fs.existsSync(counterPath) ? Number(fs.readFileSync(counterPath, 'utf8')) : 0;",
@@ -313,9 +320,7 @@ test("Cursor model discovery caches failures briefly and refreshModels bypasses 
       "console.error('models unavailable');",
       "process.exit(1);",
       "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
+  ].join("\n"));
   process.env.LETAGENTS_CURSOR_AGENT_BIN = cursorBin;
   delete process.env.LETAGENTS_CURSOR_MANAGED_HOME;
   delete process.env.LETAGENTS_CURSOR_SOURCE_HOME;
@@ -333,4 +338,63 @@ test("Cursor model discovery caches failures briefly and refreshModels bypasses 
   assert.equal(refreshed.status, "error");
   assert.equal(existsSync(counterPath), true);
   assert.equal(readFileSync(counterPath, "utf8"), "2");
+});
+
+test("a fresh Cursor model list is returned before the managed profile is prepared", async () => {
+  let cursorBin = join(tempDir, "cursor-agent-models-profile-skip");
+  const managedHome = join(tempDir, "profile-skip", "home");
+  cursorBin = writeFakeProvider(cursorBin, "console.log('fast - Fast Model (default)');\n");
+  process.env.LETAGENTS_CURSOR_AGENT_BIN = cursorBin;
+  process.env.LETAGENTS_CURSOR_MANAGED_HOME = managedHome;
+  process.env.LETAGENTS_CURSOR_SOURCE_HOME = join(tempDir, "cursor-source-home");
+  process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+  const repoRootPath = join(tempDir, "profile-skip-repo");
+  mkdirSync(repoRootPath, { recursive: true });
+
+  assert.equal((await listDesktopAgentProviderModels("cursor", { repoRootPath })).status, "ready");
+  assert.equal(existsSync(managedHome), true, "a miss prepares the managed profile");
+  rmSync(join(tempDir, "profile-skip"), { recursive: true, force: true });
+  // Before: every call prepared the profile (about 30 sync fs calls) first.
+  assert.equal((await listDesktopAgentProviderModels("cursor", { repoRootPath })).status, "ready");
+  assert.equal(existsSync(managedHome), false, "a hit never touches the profile");
+  process.env.LETAGENTS_CURSOR_MANAGED_HOME = join(tempDir, "profile-skip", "other-home");
+  await listDesktopAgentProviderModels("cursor", { repoRootPath });
+  assert.equal(existsSync(join(tempDir, "profile-skip", "other-home")), true, "a different profile location is a different key");
+  process.env.LETAGENTS_CURSOR_MANAGED_HOME = managedHome;
+  // The home folder is HOME on POSIX and USERPROFILE on Windows.
+  const previousHome = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  try {
+    const otherUser = join(tempDir, "profile-skip-other-user");
+    mkdirSync(otherUser, { recursive: true });
+    process.env.HOME = otherUser;
+    process.env.USERPROFILE = otherUser;
+    rmSync(managedHome, { recursive: true, force: true });
+    await listDesktopAgentProviderModels("cursor", { repoRootPath });
+    assert.equal(existsSync(managedHome), true, "a different HOME is a different key");
+  } finally {
+    for (const [key, value] of Object.entries(previousHome)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+  await listDesktopAgentProviderModels("cursor", { repoRootPath, refreshModels: true });
+  assert.equal(existsSync(managedHome), true, "refreshModels prepares the profile again");
+});
+
+test("the model list cache drops long-expired entries and stays bounded", async (t) => {
+  let cursorBin = join(tempDir, "cursor-agent-models-prune");
+  cursorBin = writeFakeProvider(cursorBin, "console.log('one - One (default)');\n");
+  process.env.LETAGENTS_CURSOR_AGENT_BIN = cursorBin;
+  delete process.env.LETAGENTS_CURSOR_MANAGED_HOME;
+  process.env.LETAGENTS_CURSOR_SOURCE_HOME = join(tempDir, "cursor-source-home");
+  process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
+  const { modelListCacheSizeForTest } = await import("../main/agents/managed-agent-models.js");
+  let now = Date.now() + 60 * 60_000;
+  t.mock.method(Date, "now", () => now);
+  const roots = Array.from({ length: 70 }, (_, index) => join(tempDir, `prune-${index}`));
+  for (const root of roots) mkdirSync(root, { recursive: true });
+  for (const root of roots) await listDesktopAgentProviderModels("cursor", { repoRootPath: root });
+  assert.equal(modelListCacheSizeForTest(), 64, "the cache never holds more than 64 lists");
+  now += 12 * 60_000;
+  await listDesktopAgentProviderModels("cursor", { repoRootPath: roots[0] });
+  assert.equal(modelListCacheSizeForTest(), 1, "a write drops lists expired past the stale-retention window");
 });

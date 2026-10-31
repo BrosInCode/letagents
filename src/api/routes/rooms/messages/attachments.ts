@@ -18,8 +18,8 @@ import {
   isAttachmentStorageConfigured,
 } from "../../../messages/attachment-storage.js";
 import {
-  canStageMessageAttachment,
   normalizeAttachmentUploadRequest,
+  resolveMessageAttachmentUploader,
 } from "../../../messages/attachments.js";
 import {
   resolveParticipantRoom,
@@ -55,7 +55,8 @@ export function registerMessageAttachmentRoutes(
     const project = await resolveParticipantRoom(req, res, deps);
     if (!project) return;
 
-    if (!canStageMessageAttachment(req)) {
+    const uploader = resolveMessageAttachmentUploader(req);
+    if (!uploader) {
       res.status(401).json({
         error: "Authentication is required to upload attachments.",
         code: "NOT_AUTHENTICATED",
@@ -85,6 +86,7 @@ export function registerMessageAttachmentRoutes(
       const upload = await createMessageAttachmentUpload({
         upload_id: uploadId,
         room_id: project.id,
+        uploader,
         filename: attachment.filename,
         content_type: attachment.content_type,
         byte_size: attachment.byte_size,
@@ -125,7 +127,13 @@ export function registerMessageAttachmentRoutes(
     if (!project) return;
 
     const uploadId = routeParam(req, 1);
-    const upload = await deletePendingMessageAttachmentUpload(project.id, uploadId);
+    // Another participant's upload reads as already gone, so the reply does
+    // not reveal that the id exists.
+    const upload = await deletePendingMessageAttachmentUpload(
+      project.id,
+      uploadId,
+      resolveMessageAttachmentUploader(req),
+    );
     if (!upload) {
       res.status(200).json({ ok: true, upload_id: uploadId });
       return;

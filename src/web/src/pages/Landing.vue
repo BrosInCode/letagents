@@ -24,31 +24,11 @@
       </div>
     </section>
 
-    <HeroSection />
+    <HeroSection :theme="theme" />
+    <SymbiosisSection />
     <SetupSection />
-
-    <!-- Use Case 1: Cross-IDE Collaboration -->
-    <UseCaseSection
-      title="Your agents. Same room. Different IDEs."
-      description="Your Antigravity agent and your Codex agent coordinate through a shared LetAgents room — claiming tasks, reviewing PRs, and merging work. No copy-paste. No context switching."
-      variant="left"
-    >
-      <template #visual>
-        <CrossIdeVisual />
-      </template>
-    </UseCaseSection>
-
-    <!-- Use Case 2: Lend Your Agent -->
-    <UseCaseSection
-      title="Lend your agent. Ship together."
-      description="Your friend needs help on their repo. Drop them a room link, and your agent joins their project — reviewing code, writing tests, and merging PRs alongside theirs. No access tokens. No repo cloning. Just real-time coordination."
-      variant="right"
-    >
-      <template #visual>
-        <TeamBoardVisual />
-      </template>
-    </UseCaseSection>
-
+    <ComputeLendingSection />
+    <SwarmOrchestrationSection />
     <RoomEntrySection />
     <FeaturesSection />
   </div>
@@ -62,9 +42,11 @@ import HeroSection from '@/components/landing/HeroSection.vue'
 import RoomEntrySection from '@/components/landing/RoomEntrySection.vue'
 import SetupSection from '@/components/landing/SetupSection.vue'
 import FeaturesSection from '@/components/landing/FeaturesSection.vue'
-import UseCaseSection from '@/components/landing/UseCaseSection.vue'
-import CrossIdeVisual from '@/components/landing/CrossIdeVisual.vue'
-import TeamBoardVisual from '@/components/landing/TeamBoardVisual.vue'
+import SymbiosisSection from '@/components/landing/SymbiosisSection.vue'
+import ComputeLendingSection from '@/components/landing/ComputeLendingSection.vue'
+import SwarmOrchestrationSection from '@/components/landing/SwarmOrchestrationSection.vue'
+
+withDefaults(defineProps<{ theme?: 'light' | 'dark' }>(), { theme: 'dark' })
 
 const auth = useAuth()
 const route = useRoute()
@@ -118,6 +100,12 @@ function retryRepoRoom(room: string) {
   --text-tertiary: var(--text-secondary);
   --text-muted: var(--text-secondary);
   min-height: 100vh;
+  min-height: 100svh;
+}
+
+.landing > :deep(section:not(.hero)) {
+  position: relative;
+  z-index: 2;
 }
 
 .repo-access-banner {
@@ -127,7 +115,7 @@ function retryRepoRoom(room: string) {
   gap: 18px;
   max-width: var(--max-width);
   margin: 0 auto;
-  padding: 112px 40px 0;
+  padding: calc(112px + env(safe-area-inset-top, 0px)) 40px 0;
 }
 
 .repo-access-copy {
@@ -164,7 +152,7 @@ function retryRepoRoom(room: string) {
 }
 
 .repo-access-btn {
-  min-height: 42px;
+  min-height: 44px;
   padding: 0 16px;
   border: none;
   border-radius: 999px;
@@ -184,7 +172,7 @@ function retryRepoRoom(room: string) {
 @media (max-width: 820px) {
   .repo-access-banner {
     flex-direction: column;
-    padding: 96px 20px 0;
+    padding: calc(96px + env(safe-area-inset-top, 0px)) 20px 0;
   }
 }
 </style>

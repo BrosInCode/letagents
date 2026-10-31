@@ -43,8 +43,10 @@ describe("Rent theme contract", () => {
     assert.doesNotMatch(settingsStyles, /rgba\(255,\s*255,\s*255|#(?:fff|ffffff)\b|#7dd3fc|#dff5ff|#d8f3ff/i);
     assert.match(settingsStyles, /@media \(prefers-contrast: more\)/);
 
-    assert.match(rentSidebar, /color-mix\(in srgb, var\(--text\)/);
-    assert.doesNotMatch(rentSidebar, /#7dd3fc|rgba\(125,\s*211,\s*252/);
+    // The open Rent link uses the same theme highlight as every other sidebar row.
+    assert.match(rentSidebar, /background: var\(--sidebar-selected\)/);
+    assert.match(rentSidebar, /color: var\(--text\)/);
+    assert.doesNotMatch(rentSidebar, /#[0-9a-f]{3,6}\b|rgba?\(/i);
 
     assert.match(segmentedControl, /background: var\(--accent-dim\)/);
     assert.match(segmentedControl, /background: var\(--accent-active\)/);

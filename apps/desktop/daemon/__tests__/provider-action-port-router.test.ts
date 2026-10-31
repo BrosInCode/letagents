@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
-import { createConnection } from "node:net";
+import { mkdir, mkdtemp, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -20,6 +19,8 @@ import type {
 } from "../provider-action-port.js";
 import { SupervisorDaemon } from "../main.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { testNamedDaemonEndpoint } from "../../electron/__tests__/platform.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt-native-resolution",
@@ -32,10 +33,12 @@ import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
 import type { ProviderPermissionObservation } from "../../shared/provider-permissions.js";
+import { testDaemonEndpoint, WAIT_SCALE } from "./helpers/daemon-fixture.js";
+import { connectDaemon } from "../../../../shared/daemon-endpoint.mjs";
 
 const execFileAsync = promisify(execFile);
 
-async function eventually(predicate: () => Promise<boolean>, label: string, timeoutMs = 4_000): Promise<void> {
+async function eventually(predicate: () => Promise<boolean>, label: string, timeoutMs = 4_000 * WAIT_SCALE): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await predicate()) return;
@@ -46,7 +49,7 @@ async function eventually(predicate: () => Promise<boolean>, label: string, time
 
 async function daemonRequest(socketPath: string, method: string, params?: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }> {
   return new Promise((resolve, reject) => {
-    const socket = createConnection(socketPath);
+    const socket = connectDaemon(socketPath);
     let body = "";
     socket.setEncoding("utf8");
     socket.once("error", reject);
@@ -75,21 +78,32 @@ test("restoration preserves permission ownership while replacement retires it", 
   await router.observePermissions(handle, event => events.push(event), new AbortController().signal);
   const snapshot = { type: "snapshot" as const, connectionId: "socket-1", requests: [native] };
   listeners[0]!(snapshot);
+  const toldRecorded: string[] = [];
   adapter.repairContinuation = async nativeHandle => {
     listeners[0]!(snapshot); // Pending requests can arrive while restoration awaits the provider.
     return { handle: nativeHandle, outcome: "rematerialized", previousProviderContinuationId: request.expectedProviderContinuationId,
-      replacementProviderContinuationId: request.expectedProviderContinuationId };
+      replacementProviderContinuationId: request.expectedProviderContinuationId, notices: ["said while restoring"],
+      noticesRecorded: () => { toldRecorded.push("restoring"); } };
   };
   const restored = await router.repairContinuation(handle, request, { checkpointReplacement: async () => {} });
   listeners[0]!(snapshot);
   assert.equal(restored.handle, handle);
+  // The provider's owner-visible lines of a repair reach the daemon in its result.
+  assert.deepEqual(restored.notices, ["said while restoring"]);
+  // So does the way to tell the provider that they are recorded. The router does not call it.
+  assert.deepEqual(toldRecorded, []);
+  restored.noticesRecorded!();
   assert.deepEqual(events.map(event => event.type), ["snapshot", "snapshot", "snapshot"]);
   adapter.repairContinuation = async nativeHandle => {
     nativeHandle.providerContinuationId = "replacement";
     return { handle: nativeHandle, outcome: "replaced", previousProviderContinuationId: request.expectedProviderContinuationId,
-      replacementProviderContinuationId: "replacement" };
+      replacementProviderContinuationId: "replacement", notices: ["said while replacing"],
+      noticesRecorded: () => { toldRecorded.push("replacing"); } };
   };
   const replaced = await router.repairContinuation(handle, request, { checkpointReplacement: async () => {} });
+  assert.deepEqual(replaced.notices, ["said while replacing"]);
+  replaced.noticesRecorded!();
+  assert.deepEqual(toldRecorded, ["restoring", "replacing"]);
   listeners[0]!(snapshot);
   assert.equal(events.at(-1)!.type, "unavailable");
   assert.deepEqual(await router.correlatePermissionTurn(replaced.handle, { provider: "codex", native }), { outcome: "correlation_unproven" });
@@ -705,18 +719,29 @@ test("Cursor router ownership remains stable while its per-turn PID changes", as
     provider: "cursor", workAttemptId: "cursor-dynamic", roomId: "room", cwd: "/tmp/cursor",
     launchPolicy: { mode: "ask", force: false }, agentDisplayName: "DynamicCursor",
   });
+  const usage = { providerContinuationId: "cursor-session", compaction: null,
+    account: { state: "available" as const, windows: [{ id: "monthly", label: "Monthly", usedPercent: 20,
+      resetsAt: null, observedAt: "2026-10-11T00:00:00.000Z" }] },
+    context: { usedTokens: 74_514, capacityTokens: 256_000, observedAt: "2026-10-11T00:00:00.000Z" } };
+  adapter.readUsage = async exact => { assert.equal(exact, native); return usage; };
   assert.equal(handle.pid, null);
+  assert.deepEqual(await router.readUsage(handle), usage, "idle Cursor still reports account and context readings");
+  assert.equal(await router.readUsage({ ...handle, providerConnection: null }), null);
+  assert.equal(await router.readUsage({ ...handle, providerConnection: { kind: "cursor_cli", pid: null, processIdentity: "stale-birth" } }), null);
   const turn = router.runRoomTurn(handle, {
     inboxItemId: "inbox", sourceMessage: {}, activation: {}, actionId: "action",
   });
   await started;
   assert.equal(handle.pid, 8181, "public handle proxies the native per-turn PID");
+  assert.deepEqual(await router.readUsage(handle), usage, "running Cursor still reads through the same lane");
+  assert.equal(await router.readUsage({ ...handle, providerConnection: { ...handle.providerConnection!, processIdentity: "wrong-birth" } }), null);
   await router.controlTurn(handle);
   await router.stop(handle);
   assert.deepEqual(calls, ["control", "stop:8181"]);
   resolveTurn();
   await turn;
   assert.equal(handle.pid, null);
+  assert.deepEqual(await router.readUsage(handle), usage, "readings remain available after the turn finishes");
 });
 
 test("provider router accepts a missing connection only for the exact remembered Codex birth authority", async () => {
@@ -779,6 +804,30 @@ test("provider router accepts a missing connection only for the exact remembered
     "codex:attach:alpha-attempt",
     "codex:attach:alpha-attempt",
   ], "connection mismatches are rejected by the router instead of delegated to an adapter");
+});
+
+test("provider router answers with the adapter's proof when the adapter stops a remembered Codex as its policy is bound", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const alpha = await router.spawn({ provider: "codex", workAttemptId: "alpha-attempt", roomId: "room", cwd: "/tmp/alpha", launchPolicy: {} });
+  const ref: ProviderActionRef = { workAttemptId: alpha.workAttemptId, provider: "codex",
+    providerContinuationId: alpha.providerContinuationId!, providerConnection: alpha.providerConnection };
+  const policy = { approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+  const stopped = { state: "terminal" as const, notices: ["Codex reported another policy, so LetAgents stopped the agent."], terminal: {
+    endedAt: "2026-08-31T08:00:05.000Z", exitCode: null, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: alpha.providerContinuationId,
+    nativeRuntimeDeath: { kind: "codex_app_server" as const, pid: alpha.pid!, processIdentity: alpha.providerConnection!.processIdentity! },
+  } };
+  const nativeAttach = adapter.attach.bind(adapter);
+  // Without a policy the adapter is not asked again, and the remembered runtime is the answer.
+  assert.deepEqual(await router.attach(ref), alpha);
+  // With the policy the adapter binds it, and here it stops the runtime: its proof and its line are the answer, whole.
+  adapter.attach = async () => stopped;
+  assert.deepEqual(await router.attach({ ...ref, launchPolicy: policy }), stopped);
+  // An adapter that answers with another runtime, or with none, still attaches nothing.
+  adapter.attach = async () => null;
+  assert.equal(await router.attach({ ...ref, launchPolicy: policy }), null);
+  adapter.attach = async (input) => ({ ...(await nativeAttach(input))! });
+  assert.equal(await router.attach({ ...ref, launchPolicy: policy }), null);
 });
 
 test("provider router selects Open Model from an exact OpenCode connection", async () => {
@@ -912,7 +961,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY = "/absolute/dist/mcp/server.js";
     capturedSpawns.length = 0;
     const paths1 = {
-      lockPath: join(root, "d1.lock"), socketPath: join(root, "d1.sock"), manifestPath: join(root, "manifest1.json"), auditPath: join(root, "audit1.jsonl"),
+      lockPath: join(root, "d1.lock"), ...testNamedDaemonEndpoint(root, "d1"), manifestPath: join(root, "manifest1.json"), auditPath: join(root, "audit1.jsonl"),
       attemptsPath: join(root, "attempts1.json"), attemptsRoot: join(root, "attempts1"), workspaceRoot: root,
     };
     const codexEntry: DaemonManifestEntry = {
@@ -931,7 +980,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
 
     capturedSpawns.length = 0;
     const cursorPaths = {
-      lockPath: join(root, "dc.lock"), socketPath: join(root, "dc.sock"), manifestPath: join(root, "manifestc.json"), auditPath: join(root, "auditc.jsonl"),
+      lockPath: join(root, "dc.lock"), ...testNamedDaemonEndpoint(root, "dc"), manifestPath: join(root, "manifestc.json"), auditPath: join(root, "auditc.jsonl"),
       attemptsPath: join(root, "attemptsc.json"), attemptsRoot: join(root, "attemptsc"), workspaceRoot: root,
     };
     const cursorEntry: DaemonManifestEntry = {
@@ -960,7 +1009,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     // Case 2: a stale generic Claude policy is narrowed to the selected supervised approval profile.
     capturedSpawns.length = 0;
     const paths2 = {
-      lockPath: join(root, "d2.lock"), socketPath: join(root, "d2.sock"), manifestPath: join(root, "manifest2.json"), auditPath: join(root, "audit2.jsonl"),
+      lockPath: join(root, "d2.lock"), ...testNamedDaemonEndpoint(root, "d2"), manifestPath: join(root, "manifest2.json"), auditPath: join(root, "audit2.jsonl"),
       attemptsPath: join(root, "attempts2.json"), attemptsRoot: join(root, "attempts2"), workspaceRoot: root,
     };
     const claudeEntry: DaemonManifestEntry = {
@@ -983,7 +1032,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     // not the interactive-worker generic ask-before-write default.
     capturedSpawns.length = 0;
     const paths3 = {
-      lockPath: join(root, "d3.lock"), socketPath: join(root, "d3.sock"), manifestPath: join(root, "manifest3.json"), auditPath: join(root, "audit3.jsonl"),
+      lockPath: join(root, "d3.lock"), ...testNamedDaemonEndpoint(root, "d3"), manifestPath: join(root, "manifest3.json"), auditPath: join(root, "audit3.jsonl"),
       attemptsPath: join(root, "attempts3.json"), attemptsRoot: join(root, "attempts3"), workspaceRoot: root,
     };
     const daemon3 = new SupervisorDaemon(paths3, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter("claude-code") }), true);
@@ -1013,7 +1062,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
     capturedSpawns.length = 0;
     const paths4 = {
-      lockPath: join(root, "d4.lock"), socketPath: join(root, "d4.sock"), manifestPath: join(root, "manifest4.json"), auditPath: join(root, "audit4.jsonl"),
+      lockPath: join(root, "d4.lock"), ...testNamedDaemonEndpoint(root, "d4"), manifestPath: join(root, "manifest4.json"), auditPath: join(root, "audit4.jsonl"),
       attemptsPath: join(root, "attempts4.json"), attemptsRoot: join(root, "attempts4"), workspaceRoot: root,
     };
     const daemon4 = new SupervisorDaemon(paths4, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter("codex") }), true);
@@ -1030,7 +1079,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     else process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = savedUrl;
     if (savedEntry === undefined) delete process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY;
     else process.env.LETAGENTS_DEV_MCP_SERVER_ENTRY = savedEntry;
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -1178,7 +1227,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
   }
   const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
     workerBindingsPath: join(root, "worker-bindings.json"),
   };
@@ -1257,7 +1306,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
     assert.ok(calls.some((call) => call.startsWith("resume:")));
   } finally {
     await daemon.stop();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -1324,7 +1373,7 @@ test("an mcp-polling provider cannot receive Inspector control without an exact 
   };
   const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
     workerBindingsPath: join(root, "worker-bindings.json"),
   };
@@ -1366,7 +1415,7 @@ test("an mcp-polling provider cannot receive Inspector control without an exact 
         "a native-correction provider must not enqueue a daemon-inbox correction row",
       );
     } finally { await inbox.close(); }
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -1376,7 +1425,7 @@ test("daemon restart quarantines pre-target turn controls for explicit resolutio
   const adapter = fakeAdapter("claude-code", calls);
   const router = new ProviderActionPortRouter({ "claude-code": async () => adapter });
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
     workerBindingsPath: join(root, "worker-bindings.json"),
   };
@@ -1543,14 +1592,14 @@ test("daemon restart quarantines pre-target turn controls for explicit resolutio
     assert.match(appliedDuplicate.error ?? "", /room_id is required|causal target/i);
   } finally {
     await daemon.stop();
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
 test("operator-applied legacy native correction settles its interrupted FIFO row instead of retrying it", async () => {
   const root = await mkdtemp(join(tmpdir(), "la-ncr-"));
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
     attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
     workerBindingsPath: join(root, "worker-bindings.json"),
   };
@@ -1615,14 +1664,14 @@ test("operator-applied legacy native correction settles its interrupted FIFO row
     await daemon?.stop().catch(() => undefined);
     await store.close().catch(() => undefined);
     await inbox.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
 test("operator resolution remains available after the controlled runtime is detached or replaced", async () => {
   const root = await mkdtemp(join(tmpdir(), "la-historical-control-"));
   const paths = {
-    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    lockPath: join(root, "daemon.lock"), ...testDaemonEndpoint(root),
     manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
   };
   const workAttemptId = "11111111-1111-4111-8111-111111111111";
@@ -1698,7 +1747,7 @@ test("operator resolution remains available after the controlled runtime is deta
   } finally {
     await daemon?.stop().catch(() => undefined);
     await store.close().catch(() => undefined);
-    await rm(root, { recursive: true, force: true });
+    await removeTestDirectory(root);
   }
 });
 
@@ -1729,4 +1778,160 @@ test("Claude permissions route exact native turn evidence and one-shot dispatch"
     await router.spawn({ provider: "claude-code", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
   } }), /binding changed/);
   assert.equal(calls.filter(value => value === "send").length, 1);
+});
+
+test("a provider's launch notices reach the daemon with its handle", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const spawn = adapter.spawn.bind(adapter);
+  adapter.spawn = async (request) => Object.assign(await spawn(request), { launchNotices: ["Plugin boundary not in effect: no git."] });
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "notice", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  assert.deepEqual(handle.launchNotices, ["Plugin boundary not in effect: no git."]);
+  const quiet = await new ProviderActionPortRouter({ codex: async () => fakeAdapter("codex", []) })
+    .spawn({ provider: "codex", workAttemptId: "quiet", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  assert.equal(quiet.launchNotices, undefined);
+});
+
+test("a handle says its process was started with the owner's setup exactly when the provider's own handle does, and the record on a reference reaches the provider", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const spawn = adapter.spawn.bind(adapter);
+  adapter.spawn = async (request) => Object.assign(await spawn(request), { ownerSetup: request.homeHarness === true });
+  const attached: Array<boolean | undefined> = [];
+  const attach = adapter.attach.bind(adapter);
+  adapter.attach = async (ref) => { attached.push(ref.ownerSetup); return attach(ref); };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const withSetup = await router.spawn({ provider: "codex", workAttemptId: "owner", roomId: "room", cwd: "/repo", launchPolicy: {}, homeHarness: true });
+  assert.equal(withSetup.ownerSetup, true);
+  // Every later view of the same process says the same, a re-attach included.
+  assert.equal((await router.attachAction("none", "owner")).state, "absent");
+  const again = await router.attach({ workAttemptId: "owner", providerContinuationId: "continuation:owner", provider: "codex", ownerSetup: true });
+  assert.ok(again && !("state" in again));
+  assert.equal(again.ownerSetup, true);
+
+  const without = await router.spawn({ provider: "codex", workAttemptId: "plain", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  assert.equal(Object.hasOwn(without, "ownerSetup"), false, "an agent without the setup carries no such key at all");
+
+  // A process the router does not hold yet: the daemon's record goes to the provider with the reference, as it is.
+  const fresh = new ProviderActionPortRouter({ codex: async () => adapter });
+  await fresh.attach({ workAttemptId: "owner", providerContinuationId: "continuation:owner", provider: "codex", ownerSetup: true });
+  await fresh.attach({ workAttemptId: "plain", providerContinuationId: "continuation:plain", provider: "codex" });
+  assert.deepEqual(attached, [true, undefined]);
+});
+
+test("the router asks the adapter how the current handle takes images, and answers none for any other handle", async () => {
+  const adapter = fakeAdapter("open-model", []);
+  const asked: Array<{ workAttemptId: string; pid: number | null }> = [];
+  adapter.roomTurnImageDelivery = (nativeHandle) => {
+    asked.push({ workAttemptId: nativeHandle.workAttemptId, pid: nativeHandle.pid });
+    return "file";
+  };
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const spawn = { provider: "open-model", workAttemptId: "images", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(spawn);
+
+  assert.equal(await router.roomTurnImageDelivery(handle), "file", "the adapter's answer is passed through");
+  assert.deepEqual(asked, [{ workAttemptId: "images", pid: handle.pid }], "the adapter is asked once, about the native handle");
+  adapter.roomTurnImageDelivery = () => "memory";
+  assert.equal(await router.roomTurnImageDelivery(handle), "memory", "every turn is asked afresh");
+  adapter.roomTurnImageDelivery = () => null;
+  assert.equal(await router.roomTurnImageDelivery(handle), null, "an adapter can say it takes none");
+
+  adapter.roomTurnImageDelivery = (nativeHandle) => { asked.push({ workAttemptId: nativeHandle.workAttemptId, pid: nativeHandle.pid }); return "file"; };
+  asked.length = 0;
+  const neverSpawned = { ...handle, workAttemptId: "never-spawned" };
+  assert.equal(await router.roomTurnImageDelivery(neverSpawned), null, "a handle the router never held");
+  assert.equal(await router.roomTurnImageDelivery({ ...handle, providerContinuationId: "forged" }), null, "a handle with another continuation");
+  assert.equal(await router.roomTurnImageDelivery({ ...handle, pid: (handle.pid ?? 0) + 1 }), null, "a handle with another process");
+  assert.deepEqual(asked, [], "the adapter is never asked about a handle the router does not own");
+
+  const replacement = await router.spawn(spawn);
+  assert.notEqual(replacement.pid, handle.pid, "the same attempt now has a new process");
+  assert.equal(await router.roomTurnImageDelivery(handle), null, "the replaced handle");
+  assert.equal(await router.roomTurnImageDelivery(replacement), "file", "the current handle");
+  assert.deepEqual(asked, [{ workAttemptId: "images", pid: replacement.pid }]);
+});
+
+test("the router asks the adapter which files the current handle opens, and answers none for any other handle", async () => {
+  const adapter = fakeAdapter("open-model", []);
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const spawn = { provider: "open-model", workAttemptId: "files", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(spawn);
+  assert.equal(await router.roomTurnFileAccess(handle), null, "an adapter without the question opens none");
+  adapter.roomTurnFileAccess = () => ({ text: true, pdf: false });
+  assert.deepEqual(await router.roomTurnFileAccess(handle), { text: true, pdf: false });
+  assert.equal(await router.roomTurnFileAccess({ ...handle, workAttemptId: "never-spawned" }), null, "a handle the router never held");
+  assert.equal(await router.roomTurnFileAccess({ ...handle, pid: (handle.pid ?? 0) + 1 }), null, "a handle with another process");
+  const replacement = await router.spawn(spawn);
+  assert.equal(await router.roomTurnFileAccess(handle), null, "the replaced handle");
+  assert.deepEqual(await router.roomTurnFileAccess(replacement), { text: true, pdf: false });
+});
+
+test("the router answers no image delivery when the adapter has no such question", async () => {
+  const adapter = fakeAdapter("codex", []);
+  assert.equal(Object.hasOwn(adapter, "roomTurnImageDelivery"), false);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "plain", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  assert.equal(await router.roomTurnImageDelivery(handle), null);
+});
+
+test("usage reads use the acquired native connection and discard replacement responses", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const request = { provider: "codex", workAttemptId: "usage", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(request);
+  const usage = { providerContinuationId: handle.providerContinuationId!, account: { state: "available" as const, windows: [] }, context: null, compaction: null };
+  adapter.readUsage = async () => usage;
+  assert.deepEqual(await router.readUsage(handle), usage);
+  assert.equal(await router.readUsage({ ...handle, providerConnection: { ...handle.providerConnection!, processIdentity: "different-birth" } }), null);
+  let resolve!: (value: typeof usage) => void;
+  adapter.readUsage = () => new Promise(done => { resolve = done; });
+  const reading = router.readUsage(handle);
+  await router.spawn(request);
+  resolve(usage);
+  assert.equal(await reading, null);
+});
+
+for (const race of ["turn_started", "turn_finished", "continuation", "owned_handle", "exit"] as const) {
+  test(`Cursor usage discards a reading after ${race} changes during inspection`, async () => {
+    let pid: number | null = race === "turn_finished" ? 123 : null;
+    const makeNative = () => ({ workAttemptId: "cursor-usage-race", providerContinuationId: "cursor-session",
+      get pid() { return pid; },
+      get providerConnection() { return { kind: "cursor_cli" as const, pid, processIdentity: pid === null ? null : `cursor:${pid}` }; },
+      observedState: () => pid === null ? "idle" as const : "working" as const });
+    let native = makeNative();
+    let release!: () => void;
+    let exit!: (terminal: ProviderActionTerminal) => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let reads = 0;
+    const adapter: NativeProviderAdapter = { ...fakeAdapter("claude-code", []), spawn: async () => native,
+      onExit: (_handle, listener) => { exit = listener; return () => {}; },
+      readUsage: async () => { reads++; await gate; return { providerContinuationId: "cursor-session",
+        account: { state: "unavailable", windows: [] }, context: null, compaction: null }; } };
+    const router = new ProviderActionPortRouter({ cursor: async () => adapter });
+    const request = { provider: "cursor", workAttemptId: native.workAttemptId, roomId: "room", cwd: "/repo", launchPolicy: {} };
+    const handle = await router.spawn(request);
+    const pending = router.readUsage(handle);
+    assert.equal(reads, 1, "the exact idle or working lane reaches the reader");
+    if (race === "turn_started") pid = 456;
+    else if (race === "turn_finished") pid = null;
+    else if (race === "continuation") native.providerContinuationId = "new-session";
+    else if (race === "owned_handle") { native = makeNative(); await router.spawn(request); }
+    else exit({ endedAt: "2026-10-11T00:00:00.000Z", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "cursor-session" });
+    release();
+    assert.equal(await pending, null);
+  });
+}
+
+test("usage does not accept a missing process identity outside the exact idle Cursor lane", async () => {
+  for (const provider of ["codex", "claude-code", "open-model"] as const) {
+    const base = nativeHandle(provider, "usage-no-process", "session");
+    const native = { ...base, pid: null, providerConnection: { ...base.providerConnection, pid: null, processIdentity: null } };
+    let reads = 0;
+    const adapter: NativeProviderAdapter = { ...fakeAdapter(provider, []), spawn: async () => native,
+      readUsage: async () => { reads++; return null; } };
+    const router = new ProviderActionPortRouter({ [provider]: async () => adapter });
+    const handle = await router.spawn({ provider, workAttemptId: native.workAttemptId, roomId: "room", cwd: "/repo", launchPolicy: {} });
+    assert.equal(await router.readUsage(handle), null);
+    assert.equal(reads, 0);
+  }
 });

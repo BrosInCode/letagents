@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { renderToString } from "@vue/server-renderer";
 import { createSSRApp } from "vue";
 import { createServer, type ViteDevServer } from "vite";
+import { conversationSettingsSummary } from "../src/domain/room-settings-summary";
 
 let vite: ViteDevServer;
 let DesktopRoomActionPanel: object;
@@ -74,6 +75,35 @@ const localStorage = {
   localFilesPath: "/tmp/local-files",
 };
 
+/** The opening tag of the storage choice, so a test reads its state and not its attribute order. */
+function storageChoice(html: string, mode: "inherit" | "cloud" | "local"): string {
+  const tag = new RegExp(`<button[^>]*data-testid="desktop-room-storage-${mode}"[^>]*>`).exec(html)?.[0];
+  assert.ok(tag, `the ${mode} storage choice is rendered`);
+  return tag;
+}
+
+const githubRoom = {
+  ...localGitRoom,
+  identifier: "github.com/BrosInCode/letagents",
+  gitRoom: {
+    ...localGitRoom.gitRoom,
+    provider: "github",
+    host: "github.com",
+    visibility: "public",
+    accessMode: "public",
+    source: "git_remote",
+  },
+};
+
+const cloudStorage = {
+  ...localStorage,
+  roomIdentifier: githubRoom.identifier,
+  overrideMode: "inherit",
+  effectiveMode: "cloud",
+  isLocalRoom: false,
+  localRoom: null,
+};
+
 async function renderPanel(overrides: Record<string, unknown> = {}): Promise<string> {
   return renderToString(createSSRApp(DesktopRoomActionPanel, {
     room: localGitRoom,
@@ -96,48 +126,95 @@ async function renderPanel(overrides: Record<string, unknown> = {}): Promise<str
   }));
 }
 
-test("local Git Rooms disable Cloud and explain how to unlock it", async () => {
+test("local Git Rooms offer explicit publishing and explain its effect before enabling Cloud", async () => {
   const html = await renderPanel();
 
-  assert.match(html, /No Git provider is attached to this room/);
-  assert.match(html, /Add an origin remote, then reopen the repository to use Cloud/);
-  assert.match(html, /Connect this project to a repository hosted online before sharing its room/);
-  assert.match(
-    html,
-    /<button type="button" data-testid="desktop-room-storage-cloud" data-active="false" disabled>/,
-  );
-  assert.doesNotMatch(html, /Publish to cloud/);
+  assert.match(html, /Add a GitHub origin remote, then use Publish to cloud/);
+  assert.match(html, /Publishing uploads this room&#39;s messages and tasks/);
+  assert.match(html, /Adding a remote or connecting a folder does not upload anything/);
+  // Unavailable, yet reachable: the reason is read out to someone who lands on it.
+  assert.match(storageChoice(html, "cloud"), /aria-disabled="true"/);
+  assert.match(storageChoice(html, "cloud"), /aria-describedby="room-settings-storage-cloud-reason"/);
+  assert.doesNotMatch(storageChoice(html, "cloud"), / disabled/);
+  assert.match(html, /<span id="room-settings-storage-cloud-reason" class="sr-only">Add a GitHub origin remote/);
+  assert.match(storageChoice(html, "cloud"), /aria-checked="false"/);
+  assert.match(storageChoice(html, "local"), /aria-checked="true"/);
+  assert.match(html, /class="room-settings-button room-settings-publish"[^>]*>Publish to cloud/);
+});
+
+test("room publishing surfaces failures and skipped-history feedback", async () => {
+  assert.match(await renderPanel({ storageFeedback: { error: true, message: "Connect the project first." } }), /role="alert">Connect the project first\./);
+  assert.match(await renderPanel({ storageFeedback: { error: false, message: "2 items remain local." } }), /role="status">2 items remain local\./);
 });
 
 test("provider-backed rooms keep the Cloud control enabled", async () => {
-  const html = await renderPanel({
-    room: {
-      ...localGitRoom,
-      identifier: "github.com/BrosInCode/letagents",
-      gitRoom: {
-        ...localGitRoom.gitRoom,
-        provider: "github",
-        host: "github.com",
-        visibility: "public",
-        accessMode: "public",
-        source: "git_remote",
-      },
-    },
-    storage: {
-      ...localStorage,
-      roomIdentifier: "github.com/BrosInCode/letagents",
-      overrideMode: "inherit",
-      effectiveMode: "cloud",
-      isLocalRoom: false,
-      localRoom: null,
-    },
-  });
+  const html = await renderPanel({ room: githubRoom, storage: cloudStorage });
 
-  assert.match(
-    html,
-    /<button type="button" data-testid="desktop-room-storage-cloud" data-active="false">/,
-  );
+  assert.match(storageChoice(html, "cloud"), /aria-disabled="false"/);
   assert.doesNotMatch(html, /No Git provider is attached to this room/);
+});
+
+test("exactly one storage choice is selected, and following the app default wins", async () => {
+  const selected = (html: string) => (["inherit", "cloud", "local"] as const)
+    .filter((mode) => /aria-checked="true"/.test(storageChoice(html, mode)));
+
+  assert.deepEqual(selected(await renderPanel({ room: githubRoom, storage: cloudStorage })), ["inherit"]);
+  assert.deepEqual(selected(await renderPanel({ room: githubRoom, storage: { ...cloudStorage, overrideMode: "cloud" } })), ["cloud"]);
+  assert.deepEqual(selected(await renderPanel({ room: githubRoom, storage: { ...cloudStorage, effectiveMode: "local" } })), ["inherit"]);
+  assert.deepEqual(selected(await renderPanel()), ["local"]);
+});
+
+test("a storage change in flight keeps the row's text and size still", async () => {
+  const idle = await renderPanel({ room: githubRoom, storage: { ...cloudStorage, overrideMode: "cloud" } });
+  const busy = await renderPanel({ room: githubRoom, storage: { ...cloudStorage, overrideMode: "cloud" }, storageBusy: true });
+
+  // The description describes the room, so it does not change until the room does.
+  for (const html of [idle, busy]) assert.match(html, /<p class="room-settings-row-description">This room always uses cloud storage\.<\/p>/);
+  assert.doesNotMatch(idle, /Changing room storage/);
+  // People using a screen reader are still told that a change is under way.
+  assert.match(busy, /<p class="sr-only" role="status">Changing room storage…<\/p>/);
+  // The progress bar exists only while the change is under way, so its sweep starts from the edge.
+  assert.doesNotMatch(idle, /room-settings-progress/);
+  assert.match(busy, /class="room-settings-progress"/);
+  // The choices stop answering without being disabled, so focus is not dropped mid-change.
+  for (const mode of ["inherit", "cloud", "local"] as const) {
+    assert.match(storageChoice(busy, mode), /aria-disabled="true"/);
+    assert.doesNotMatch(storageChoice(busy, mode), / disabled/);
+  }
+  // A local room's publish button is not relabelled by a change that is not a publish.
+  const localBusy = await renderPanel({ room: githubRoom, storage: { ...cloudStorage, overrideMode: "local", effectiveMode: "local" }, storageBusy: true });
+  assert.match(localBusy, /Publish to cloud/);
+  assert.doesNotMatch(localBusy, /Publishing…/);
+});
+
+test("room-wide settings are offered only where the server can hold them", async () => {
+  const cloud = await renderPanel({ room: githubRoom, storage: cloudStorage });
+  for (const testId of ["room-conversation-routing", "room-reply-order", "room-agent-guidelines", "room-github-event-filter"]) {
+    assert.ok(cloud.includes(`data-testid="${testId}"`), `a cloud room offers ${testId}`);
+  }
+  assert.ok(cloud.includes('data-testid="desktop-room-settings-nav-conversation"'));
+  // Tickets joins the rail only after ticket filters load and show (never in a zero-connector room).
+  assert.ok(!cloud.includes('data-testid="desktop-room-settings-nav-tickets"'));
+  // Nav titles truncate instead of running under the summary beside them.
+  assert.match(cloud, /<span class="room-settings-nav-title">Conversation<\/span>/);
+  // "Answer in turns" sits directly after conversation routing, in the same section.
+  assert.ok(cloud.indexOf('data-testid="room-reply-order"') > cloud.indexOf('data-testid="room-conversation-routing"'));
+  assert.ok(cloud.indexOf('data-testid="room-reply-order"') < cloud.indexOf('data-section="guidelines"'));
+  assert.match(cloud, /Answer in turns/);
+
+  const local = await renderPanel();
+  for (const testId of ["room-conversation-routing", "room-reply-order", "room-agent-guidelines", "room-github-event-filter"]) {
+    assert.ok(!local.includes(`data-testid="${testId}"`), `a local room does not offer ${testId}`);
+  }
+  assert.ok(!local.includes('data-testid="desktop-room-settings-nav-conversation"'));
+  // The built-in contract is the same everywhere, so it is always offered.
+  assert.ok(local.includes('data-testid="desktop-room-rules-card"'));
+});
+
+test("the personal chat switch says that it only changes your own view", async () => {
+  const html = await renderPanel({ room: githubRoom, storage: cloudStorage, githubEventsAvailable: true, githubEventsVisible: true });
+  assert.match(html, /Show GitHub events in my chat/);
+  assert.match(html, /This only changes your view/);
 });
 
 test("GitHub connection displays review permission evidence separately without promising publication", async () => {
@@ -156,4 +233,13 @@ test("GitHub connection displays review permission evidence separately without p
     if (permission === "write") assert.match(html, /GitHub confirms authorization when a review is published/);
     else assert.match(html, /Ask the repository owner/);
   }
+});
+
+test("the Conversation nav summary stays short: one active setting by name, more as a count", () => {
+  assert.equal(conversationSettingsSummary(null, null), null);
+  assert.equal(conversationSettingsSummary("Standard", null), null);
+  assert.equal(conversationSettingsSummary("Smart", null), "Smart");
+  assert.equal(conversationSettingsSummary("Standard", "In turns"), "In turns");
+  assert.equal(conversationSettingsSummary(null, "In turns"), "In turns");
+  assert.equal(conversationSettingsSummary("Smart", "In turns"), "2 on");
 });

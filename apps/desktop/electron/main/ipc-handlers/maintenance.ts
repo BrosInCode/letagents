@@ -2,11 +2,14 @@ import electron, { type IpcMain } from "electron";
 import { supervisorDaemonClient } from "../supervisor-daemon.js";
 import { performConfirmedMaintenance } from "../force-daemon-restart.js";
 import { assertHostApprovalSender } from "../window.js";
+import { gateSupervisedAgentIpc } from "./supervised-agent-gate.js";
 
 const { app, dialog, BrowserWindow } = electron as typeof import("electron");
 let operation: Promise<void> | null = null;
 
-export function registerDaemonMaintenanceIpcHandlers(targetIpcMain: IpcMain): void {
+export function registerDaemonMaintenanceIpcHandlers(ipcMain: IpcMain): void {
+  // Maintenance acts on the supervisor daemon, which runs only where agents do.
+  const targetIpcMain = gateSupervisedAgentIpc(ipcMain);
   targetIpcMain.handle("desktop:maintenance:status", async event => {
     assertHostApprovalSender(event);
     return supervisorDaemonClient.getMaintenanceStatus();
@@ -14,7 +17,7 @@ export function registerDaemonMaintenanceIpcHandlers(targetIpcMain: IpcMain): vo
   targetIpcMain.handle("desktop:maintenance:restart", (event, resume: unknown) => {
     assertHostApprovalSender(event);
     if (typeof resume !== "boolean") throw new Error("Invalid maintenance action.");
-    if (process.platform !== "darwin") throw new Error("Service restart currently requires macOS.");
+    if (process.platform !== "darwin" && process.platform !== "win32") throw new Error("Service restart currently requires macOS or Windows.");
     if (operation) return operation;
     operation = performConfirmedMaintenance({
       assertTrusted: () => assertHostApprovalSender(event),

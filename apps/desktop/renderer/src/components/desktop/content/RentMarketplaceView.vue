@@ -3,7 +3,7 @@
     <header class="rent-marketplace-header">
       <div class="rent-marketplace-heading">
         <h1>{{ role === 'renter' ? 'Rent an agent' : 'Rent out your agents' }}</h1>
-        <p>{{ role === 'renter' ? 'Bring temporary capacity into one of your rooms.' : 'Review requests and control what this Mac makes available.' }}</p>
+        <p>{{ role === 'renter' ? 'Bring temporary capacity into one of your rooms.' : `Review requests and control what ${thisComputer} makes available.` }}</p>
       </div>
       <DesktopSegmentedControl
         v-model="role"
@@ -15,7 +15,10 @@
       />
     </header>
 
-    <RentProviderDashboard v-if="role === 'provider'" />
+    <template v-if="role === 'provider'">
+      <RentProviderDashboard v-if="supervisedAgentsSupported" />
+      <SupervisedAgentsUnavailableNotice v-else />
+    </template>
 
     <template v-else>
       <div v-if="state === 'error'" class="rent-marketplace-notice" role="alert">
@@ -156,9 +159,12 @@ import { desktopIpc } from "../../../ipc/index.js";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import DesktopSelectField from "../controls/DesktopSelectField.vue";
 import RentProviderDashboard from "./RentProviderDashboard.vue";
+import SupervisedAgentsUnavailableNotice from "./SupervisedAgentsUnavailableNotice.vue";
+import { supervisedAgentsSupported, thisComputerLabel } from "../../../domain/supervised-agents-support";
 
 const props = defineProps<{ rooms: DesktopAccountRoomEntry[]; initialRole?: "renter" | "provider" }>();
 type ViewState = "loading" | "ready" | "error";
+const thisComputer = thisComputerLabel();
 type Role = "renter" | "provider";
 const role = ref<Role>(props.initialRole || "renter");
 const state = ref<ViewState>("loading");

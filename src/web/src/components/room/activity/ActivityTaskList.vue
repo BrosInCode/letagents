@@ -92,6 +92,8 @@ defineProps<{
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  min-width: 0;
+  flex-wrap: wrap;
   padding: 10px 12px;
   border-radius: 8px;
   border: 1px solid var(--activity-border);
@@ -105,6 +107,7 @@ defineProps<{
 }
 
 .activity-task-copy strong {
+  overflow-wrap: anywhere;
   font-size: 0.82rem;
   color: var(--text, #fafafa);
 }
@@ -115,7 +118,10 @@ defineProps<{
 }
 
 .activity-task-link {
-  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   font-size: 0.72rem;
   font-weight: 600;
   color: var(--activity-blue);
@@ -127,6 +133,7 @@ defineProps<{
 }
 
 @media (max-width: 760px) {
+  .activity-task-link { min-height: 44px; }
   .activity-detail-section-header {
     flex-direction: column;
     align-items: flex-start;

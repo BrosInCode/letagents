@@ -1,3 +1,5 @@
+import { ref } from "vue";
+
 export function readSoundEnabled(): boolean {
   try {
     return window.localStorage.getItem("letagents-desktop:sound") !== "off";
@@ -13,6 +15,9 @@ export function readNotificationsEnabled(): boolean {
     return false;
   }
 }
+
+// Unread counts must be recomputed when chat visibility changes.
+export const githubEventsVisibilityRevision = ref(0);
 
 const githubEventsVisibilityStorageKey = "letagents-desktop:github-events-inline-visible";
 const environmentPanelOpenStorageKey = "letagents-desktop:environment-panel-open";
@@ -36,6 +41,7 @@ export function rememberGitHubEventsVisible(roomIdentifier: string | null | unde
     const preferences = readBooleanPreferenceMap(githubEventsVisibilityStorageKey);
     preferences[key] = visible;
     window.localStorage.setItem(githubEventsVisibilityStorageKey, JSON.stringify(preferences));
+    githubEventsVisibilityRevision.value += 1;
   } catch {
     // Local preference persistence is best-effort.
   }

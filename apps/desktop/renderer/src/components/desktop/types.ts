@@ -1,4 +1,5 @@
 import type { DesktopGitRoomInfo } from "../../../../electron/ipc-types";
+import type { SidebarRoomActivity } from "../../domain/sidebar-room-display";
 
 export type RoomEntry = {
   id: string;
@@ -22,6 +23,9 @@ export type RoomEntry = {
   latestMessageId: string | null;
   latestMessageAt: string | null;
   hasUnread: boolean;
+  /** Agents working in this room right now, as the activity stream reports. */
+  activity?: SidebarRoomActivity | null;
+  unreadCount?: number;
   pinned: boolean;
   source: "current" | "account" | "recent";
 };
@@ -50,7 +54,8 @@ export type MarketplaceEntry = {
 
 export type NeedsYouEntry = { id: "inbox:needs-you"; type: "inbox"; title: "Inbox"; description: string; sectionLabel: "LetAgents" };
 export type MessagesEntry = { id: "messages"; type: "messages"; title: "Messages"; description: string; sectionLabel: "LetAgents" };
-export type SidebarEntry = RoomEntry | SystemEntry | MarketplaceEntry | NeedsYouEntry | MessagesEntry;
+export type MyWorkEntry = { id: "my-work"; type: "my-work"; title: "My work"; description: string; sectionLabel: "LetAgents" };
+export type SidebarEntry = RoomEntry | SystemEntry | MarketplaceEntry | NeedsYouEntry | MessagesEntry | MyWorkEntry;
 
 export type ProjectGroup = {
   id: string;

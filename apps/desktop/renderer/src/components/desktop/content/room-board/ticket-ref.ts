@@ -1,0 +1,99 @@
+/** A card's `external_ref`, e.g. `jira:HT-1234`, split for display. */
+export interface TicketRefParts {
+  provider: string;
+  providerLabel: string;
+  key: string;
+}
+
+const PROVIDER_LABELS: Record<string, string> = { jira: "Jira", linear: "Linear", github: "GitHub Issues" };
+const GITHUB_REF = /^github:\s*([A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}#[1-9]\d{0,8})$/i;
+
+export function ticketRefParts(externalRef: string | null | undefined): TicketRefParts | null {
+  if (!externalRef) return null;
+  const separator = externalRef.indexOf(":");
+  if (separator <= 0 || separator === externalRef.length - 1) return null;
+  const provider = externalRef.slice(0, separator);
+  return {
+    provider,
+    providerLabel: PROVIDER_LABELS[provider] ?? provider,
+    key: externalRef.slice(separator + 1),
+  };
+}
+
+/** What the task editor saves: content edits and, on a cloud room, the ticket. */
+export interface TaskEditPatch {
+  title?: string;
+  description?: string;
+  /** Present only when the title or description changed. */
+  expected_content?: { title?: string; description?: string };
+  external_ref?: string | null;
+}
+
+/**
+ * Reads a typed ticket key: `HT-1234` (Jira), `jira:HT-1234`,
+ * `linear:ENG-12` or `github:owner/repo#12`. Null for an empty value,
+ * undefined for one that is not a key. The server checks the key again; this
+ * only catches typos early.
+ */
+export function normalizedExternalRef(value: string): string | null | undefined {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const github = GITHUB_REF.exec(trimmed);
+  if (github) return `github:${github[1]!.toLowerCase()}`;
+  const match = /^(?:(jira|linear):)?\s*([A-Za-z][A-Za-z0-9]*-\d+)$/i.exec(trimmed);
+  if (!match) return undefined;
+  const provider = (match[1] || "jira").toLowerCase();
+  // Jira project keys have two or more characters; Linear team keys may have one.
+  if (provider === "jira" && !/^[A-Za-z][A-Za-z0-9]+-/.test(match[2]!)) return undefined;
+  return `${provider}:${match[2]!.toUpperCase()}`;
+}
+
+/**
+ * The card a room search names by its ticket key: `HT-1234`, `jira:HT-1234`
+ * or `linear:ENG-12`, in any case. A bare key matches a card of any tracker
+ * with that key; null when the text is not a key or no card holds it.
+ */
+export function taskForTicketQuery<T extends { externalRef?: string | null }>(tasks: readonly T[], query: string): T | null {
+  const ref = normalizedExternalRef(query);
+  if (!ref) return null;
+  const exact = tasks.find((task) => task.externalRef === ref);
+  if (exact || /^\s*(?:jira|linear|github):/i.test(query)) return exact ?? null;
+  const key = ref.slice(ref.indexOf(":") + 1);
+  return tasks.find((task) => ticketRefParts(task.externalRef)?.key === key) ?? null;
+}
+
+/** Cards that sync imported carry `created_by` `tracker:jira`, `tracker:linear` or `tracker:github`. */
+export function isImportedTask(task: { createdBy?: string | null }): boolean {
+  return task.createdBy === "tracker:jira" || task.createdBy === "tracker:linear" || task.createdBy === "tracker:github";
+}
+
+const TICKET_STATE_LABELS: Record<string, string> = {
+  todo: "To do",
+  in_progress: "In progress",
+  in_review: "In review",
+  done: "Done",
+};
+
+/** The tracker's state, as a short label; null when the card has none. */
+export function ticketStateLabel(state: string | null | undefined): string | null {
+  if (!state) return null;
+  return TICKET_STATE_LABELS[state] ?? state.replace(/_/g, " ");
+}
+
+/** Board source filter: every card, cards that name a ticket, or cards that do not. */
+export type BoardSourceFilter = "all" | "tracker" | "native";
+
+export const BOARD_SOURCE_OPTIONS: ReadonlyArray<{ id: BoardSourceFilter; label: string }> = [
+  { id: "all", label: "All cards" },
+  { id: "tracker", label: "Tracker cards" },
+  { id: "native", label: "Native cards" },
+];
+
+export function isBoardSourceFilter(value: string): value is BoardSourceFilter {
+  return value === "all" || value === "tracker" || value === "native";
+}
+
+export function taskMatchesSource(task: { externalRef?: string | null }, source: string | undefined): boolean {
+  if (!source || source === "all") return true;
+  return source === "tracker" ? Boolean(task.externalRef) : !task.externalRef;
+}

@@ -1,3 +1,4 @@
+import { ROOM_TYPING } from "../../../../shared/room-typing.mjs";
 import type { PoolClient } from "pg";
 
 import { pool } from "../../db/client.js";
@@ -16,6 +17,8 @@ import {
   type OrderedBridgeNotificationReceiver,
 } from "./ordered-notification-receiver.js";
 import { reportBridgeLoss, roomEventBridgeLifecycleEvents } from "./loss-signals.js";
+import { PRESENCE_CHANGE_CHANNEL } from "../../../shared/presence-change-channel.js";
+import { PRESENCE_CHANGED, PRESENCE_RESYNC, presenceChangeEvents } from "../presence-change-events.js";
 import { queryBridgeClient, scheduleBridgeLossRetry } from "./publisher.js";
 
 let listenerClient: PoolClient | null = null;
@@ -92,6 +95,19 @@ async function connectListener(generation: number): Promise<void> {
     });
     const connectedReceiver = notificationReceiver;
     const onNotification = (notification: { channel: string; payload?: string }) => {
+      if (notification.channel === ROOM_TYPING) {
+        try {
+          const envelope = JSON.parse(notification.payload ?? "");
+          if (envelope?.lane === ROOM_TYPING) void dispatchBridgeNotification(envelope);
+        } catch { /* Ephemeral hints do not cause durable gap repairs. */ }
+        return;
+      }
+      if (notification.channel === PRESENCE_CHANGE_CHANNEL) {
+        // The payload is a room id written by our own trigger; bound it anyway.
+        const roomId = notification.payload;
+        if (roomId && roomId.length <= 512) presenceChangeEvents.emit(PRESENCE_CHANGED, roomId);
+        return;
+      }
       if (notification.channel !== ROOM_EVENT_CHANNEL) {
         return;
       }
@@ -118,6 +134,13 @@ async function connectListener(generation: number): Promise<void> {
       [],
       BRIDGE_CLIENT_ACQUIRE_TIMEOUT_MS,
     );
+    await queryBridgeClient(connectedClient, `LISTEN ${ROOM_TYPING}`, [], BRIDGE_CLIENT_ACQUIRE_TIMEOUT_MS);
+    await queryBridgeClient(
+      connectedClient,
+      `LISTEN ${PRESENCE_CHANGE_CHANNEL}`,
+      [],
+      BRIDGE_CLIENT_ACQUIRE_TIMEOUT_MS,
+    );
     if (stopped || generation !== bridgeGeneration) {
       connectedReceiver.close();
       detachClientEvents();
@@ -135,6 +158,8 @@ async function connectListener(generation: number): Promise<void> {
     // committed between their snapshot and listener readiness; idle rooms do
     // not allocate state.
     reportBridgeLoss("listener_connected_boundary");
+    // Presence changes committed while this listener was down were not heard.
+    presenceChangeEvents.emit(PRESENCE_RESYNC);
     roomEventBridgeLifecycleEvents.emit("connected");
     scheduleBridgeLossRetry(0);
   } catch (error) {

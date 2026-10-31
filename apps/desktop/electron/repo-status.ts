@@ -12,6 +12,7 @@ import type {
   RepoWorktreeEntry,
 } from "./ipc-types.js";
 import { runGitStdout } from "./main/git-exec.js";
+import { normalizeGitPath, sameLocalPath } from "./main/local-paths.js";
 
 export type RepoStatusBuildOptions = {
   signal?: AbortSignal;
@@ -19,6 +20,12 @@ export type RepoStatusBuildOptions = {
   includeBranchDeltas?: boolean;
   /** Project ownership checks must derive identity from Git, never repository config. */
   ignoreConfiguredRoom?: boolean;
+  /**
+   * Receives exactly what `git remote get-url origin` returned while the room
+   * was derived (stdout, or the failure), so a caller can prove which origin
+   * a decision was based on.
+   */
+  onOriginRemoteRead?: (read: { stdout: string } | { error: unknown }) => void;
 };
 
 function throwIfAborted(options: RepoStatusBuildOptions): void {
@@ -53,10 +60,14 @@ async function getRepoRoot(
 ): Promise<string | null> {
   try {
     const stdout = await runGitInPath(workspaceRoot, ["rev-parse", "--show-toplevel"], options);
-    return stdout.trim() || null;
-  } catch {
+    return normalizeGitPath(stdout.trim()) || null;
+  } catch (error) {
     throwIfAborted(options);
-    return null;
+    const failure = error as { code?: number; stderr?: string };
+    if (failure.code === 128 && /^fatal: not a git repository \(or any (?:of the parent directories|parent up to mount point\b)/.test(failure.stderr || "")) {
+      return null;
+    }
+    throw error;
   }
 }
 
@@ -162,7 +173,11 @@ async function getRemoteDefaultBranch(
   }
 }
 
-export function parseGitWorktreePorcelain(stdout: string, workspaceRoot: string): RepoWorktreeEntry[] {
+export function parseGitWorktreePorcelain(
+  stdout: string,
+  workspaceRoot: string,
+  platform: NodeJS.Platform = process.platform,
+): RepoWorktreeEntry[] {
   const lines = stdout.split(/\r?\n/);
   const entries: RepoWorktreeEntry[] = [];
   let current: Partial<RepoWorktreeEntry> | null = null;
@@ -173,7 +188,7 @@ export function parseGitWorktreePorcelain(stdout: string, workspaceRoot: string)
         path: current.path,
         branch: current.branch ?? null,
         head: current.head,
-        isCurrent: current.path === workspaceRoot,
+        isCurrent: sameLocalPath(current.path, workspaceRoot, platform),
         isMain: entries.length === 0,
       });
     }
@@ -190,7 +205,7 @@ export function parseGitWorktreePorcelain(stdout: string, workspaceRoot: string)
     const value = rest.join(" ").trim();
     if (key === "worktree") {
       pushCurrent();
-      current = { path: value };
+      current = { path: normalizeGitPath(value, platform) };
     } else if (current && key === "HEAD") {
       current.head = value;
     } else if (current && key === "branch") {
@@ -644,10 +659,6 @@ export function normalizeGitRemoteToRoomIdentifier(remote: string): string | nul
   }
 }
 
-export function readConfiguredRoomIdentifier(workspaceRoot: string): string | null {
-  return readConfiguredRoomIdentifierAt(workspaceRoot);
-}
-
 function readConfiguredRoomIdentifierAt(repoRoot: string): string | null {
   try {
     const configPath = join(repoRoot, ".letagents.json");
@@ -820,21 +831,7 @@ export async function resolveRoomIdentifierFromPath(
   routingDefaultBranch: string | null;
 }> {
   throwIfAborted(options);
-  let repoRoot: string | null = null;
-  try {
-    const stdout = await runGitInPath(folderPath, ["rev-parse", "--show-toplevel"], options);
-    repoRoot = stdout.trim() || null;
-  } catch {
-    throwIfAborted(options);
-    return {
-      repoRoot: null,
-      roomIdentifier: createLocalRoomIdentifier(folderPath),
-      source: "local_folder",
-      gitRoom: null,
-      warning: "This folder is not a Git repository. LetAgents opened a plain local folder room.",
-      routingDefaultBranch: null,
-    };
-  }
+  const repoRoot = await getRepoRoot(folderPath, options);
 
   if (!repoRoot) {
     return {
@@ -874,7 +871,14 @@ export async function resolveRoomIdentifierFromPath(
   }
 
   try {
-    const stdout = await runGitInPath(repoRoot, ["remote", "get-url", "origin"], options);
+    let stdout: string;
+    try {
+      stdout = await runGitInPath(repoRoot, ["remote", "get-url", "origin"], options);
+    } catch (error) {
+      options.onOriginRemoteRead?.({ error });
+      throw error;
+    }
+    options.onOriginRemoteRead?.({ stdout });
     const repoRoom = normalizeGitRemoteToRoomIdentifier(stdout);
     if (repoRoom) {
       return {
@@ -890,9 +894,13 @@ export async function resolveRoomIdentifierFromPath(
         routingDefaultBranch,
       };
     }
-  } catch {
+  } catch (error) {
     throwIfAborted(options);
-    // Fall through to the local Git room below.
+    const failure = error as { code?: number; stderr?: string };
+    if (failure.code !== 2 || failure.stderr?.trim() !== "error: No such remote 'origin'") {
+      throw error;
+    }
+    // A repository without an origin still opens as a local Git room.
   }
 
   // Local-only repos are keyed by a hash of the repository root. Normalize to the

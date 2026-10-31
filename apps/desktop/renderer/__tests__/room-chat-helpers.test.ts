@@ -31,7 +31,9 @@ import {
   attachmentHref,
   attachmentKey,
   attachmentMeta,
+  htmlDemoErrorText,
   imageAttachmentId,
+  isHtmlDemoAttachment,
   isImageAttachment,
 } from "../src/components/desktop/content/desktop-chat-message/attachments";
 import {
@@ -92,14 +94,10 @@ describe("room chat helpers", () => {
   it("builds image attachment ids and data URLs consistently", () => {
     const attachment: DesktopRoomMessageAttachment = {
       id: null,
-      name: "screen",
       fileName: "screen.png",
       mimeType: "image/png",
       sizeBytes: 1536,
-      url: null,
-      downloadUrl: null,
-      dataUrl: null,
-      contentBase64: "abc123",
+      href: "data:image/png;base64,abc123",
     };
 
     assert.equal(formatBytes(1536), "1.5 KB");
@@ -110,18 +108,43 @@ describe("room chat helpers", () => {
     assert.equal(isImageAttachment(attachment), true);
   });
 
+  it("opens HTML attachments as demos only through the app's attachment links", () => {
+    const html = (overrides: Partial<DesktopRoomMessageAttachment>): DesktopRoomMessageAttachment => ({
+      id: "att_1",
+      fileName: "checkout.html",
+      mimeType: "text/html",
+      sizeBytes: 2048,
+      href: "letagents-attachment://download/L3Jvb21z",
+      ...overrides,
+    });
+
+    assert.equal(isHtmlDemoAttachment(html({})), true);
+    assert.equal(isHtmlDemoAttachment(html({ mimeType: "application/xhtml+xml", fileName: "page.xhtml" })), true);
+    assert.equal(isHtmlDemoAttachment(html({ mimeType: "application/octet-stream" })), true);
+    assert.equal(isHtmlDemoAttachment(html({ mimeType: "application/octet-stream", fileName: "page.HTM" })), true);
+    assert.equal(isHtmlDemoAttachment(html({ href: "letagents-attachment://local/ZGVtbw" })), true);
+    assert.equal(isHtmlDemoAttachment(html({ mimeType: "application/octet-stream", fileName: "notes.zip" })), false);
+    assert.equal(isHtmlDemoAttachment(html({ mimeType: "image/svg+xml", fileName: "diagram.svg" })), false);
+    assert.equal(isHtmlDemoAttachment(html({ href: "https://example.com/checkout.html" })), false);
+    assert.equal(isHtmlDemoAttachment(html({ href: "" })), false);
+  });
+
+  it("shows why a demo did not open without Electron's IPC wrapper", () => {
+    assert.equal(
+      htmlDemoErrorText(new Error("Error invoking remote method 'desktop:room:open-html-demo': Error: Only room attachments open as demos.")),
+      "Only room attachments open as demos.",
+    );
+    assert.equal(htmlDemoErrorText(null), "The demo could not open.");
+  });
+
   it("decodes managed agent change summary attachments", () => {
     const { sessionId: _sessionId, repoRootPath: _repoRootPath, ...summary } = managedAgentChangeSummary();
     const attachment: DesktopRoomMessageAttachment = {
       id: "managed-agent-change-summary",
-      name: "Agent changes",
       fileName: "agent-changes.json",
       mimeType: MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME,
       sizeBytes: 120,
-      url: null,
-      downloadUrl: null,
-      dataUrl: null,
-      contentBase64: Buffer.from(JSON.stringify({
+      href: "data:application/json;base64," + Buffer.from(JSON.stringify({
         kind: "managed_agent_change_summary",
         version: 1,
         summary: {
@@ -203,14 +226,10 @@ describe("room chat helpers", () => {
     const second = roomMessage("msg_2", null, "2026-05-28T00:01:00.000Z");
     second.attachments = [{
       id: null,
-      name: "screen",
       fileName: "screen.png",
       mimeType: "image/png",
       sizeBytes: 1,
-      url: null,
-      downloadUrl: null,
-      dataUrl: null,
-      contentBase64: null,
+      href: null,
     }];
     const github = {
       ...roomMessage("msg_3", null, "2026-05-28T00:02:00.000Z"),
@@ -266,6 +285,41 @@ describe("room chat helpers", () => {
       "Ada Lovelace",
       "Grace Hopper",
     ]);
+  });
+
+  it("previews a Needs-you answer in threads without its routing handle or request id", () => {
+    const answerText = "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted.";
+    const answer = { ...roomMessage("msg_3", "msg_1", "2026-05-28T00:03:00.000Z"), text: answerText, source: "browser" };
+    assert.equal(threadQuotePreview(answer), "@agent Noted.");
+    const names = new Map([["emmymay/desktop-cursor-5849cfa6", "SummitMisty"]]);
+    assert.equal(threadQuotePreview(answer, names), "@SummitMisty Noted.");
+    const parent = roomMessage("msg_1", null);
+    assert.equal(buildThreadIndicatorSummary(parent, { count: 1, latest: answer, replies: [answer] }).latestPreview, "@agent Noted.");
+    assert.equal(
+      buildThreadIndicatorSummary(parent, { count: 1, latest: answer, replies: [answer] }, names).latestPreview,
+      "@SummitMisty Noted.",
+    );
+    // A quote is sent text: it keeps what the message said, so routing is unchanged.
+    assert.equal(
+      applyThreadQuoteToDraft("Thanks", answer),
+      `> Emmy: ${answerText.replace(/\s+/g, " ")}\n\nThanks`,
+    );
+    // An agent's own message in the same shape is shown as written.
+    assert.equal(threadQuotePreview({ ...answer, source: "agent" }), answerText.replace(/\s+/g, " "));
+  });
+
+  it("finds a Needs-you answer by the agent name people see, and by its raw handle", () => {
+    const answer = {
+      ...roomMessage("msg_3", null, "2026-05-28T00:03:00.000Z"),
+      text: "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted.",
+      source: "browser",
+    };
+    const names = new Map([["emmymay/desktop-cursor-5849cfa6", "SummitMisty"]]);
+    const search = useDesktopRoomSearch(ref([answer]), () => names);
+    for (const query of ["@SummitMisty", "desktop-cursor", "noted"]) {
+      search.searchQuery.value = query;
+      assert.deepEqual(search.searchResults.value.map((message) => message.id), ["msg_3"], query);
+    }
   });
 
   it("lets newer live thread replies refresh stale timeline indicators", () => {
@@ -426,19 +480,23 @@ describe("room chat helpers", () => {
   });
 
   it("finds and scrolls the requested thread message through its shared DOM contract", () => {
-    const calls: ScrollIntoViewOptions[] = [];
+    const calls: ScrollToOptions[] = [];
     const elements = ["msg_root", "msg_reply"].map((messageId) => ({
       dataset: { threadMessageId: messageId },
-      scrollIntoView: (options: ScrollIntoViewOptions) => calls.push(options),
+      getBoundingClientRect: () => ({ top: 180 }),
+      scrollIntoView: () => { throw new Error("must not scroll the outer room"); },
     })) as unknown as HTMLElement[];
     const root = {
       querySelectorAll: () => elements,
-    } as unknown as Pick<ParentNode, "querySelectorAll">;
+      scrollTop: 100,
+      getBoundingClientRect: () => ({ top: 80 }),
+      scrollTo: (options: ScrollToOptions) => calls.push(options),
+    } as unknown as HTMLElement;
 
     const target = scrollThreadMessageIntoView(root, "msg_reply", "smooth");
 
     assert.equal(target, elements[1]);
-    assert.deepEqual(calls, [{ behavior: "smooth", block: "center" }]);
+    assert.deepEqual(calls, [{ behavior: "smooth", top: 188 }]);
     assert.equal(scrollThreadMessageIntoView(root, "msg_missing"), null);
   });
 
@@ -847,7 +905,10 @@ describe("room chat helpers", () => {
       assert.equal(renderMessageText("`" + command + "`", ""), `<p><code>${command}</code></p>`);
     }
     assert.equal(renderMessageText('Run `cat /Users/emmy/project/App.tsx`. Route /api/health.', ""), '<p>Run <code>cat /Users/emmy/project/App.tsx</code>. Route /api/health.</p>');
-    assert.equal(renderMessageText('```sh\ncat /Users/emmy/project/App.tsx\n```', ""), '<pre><code class="language-sh">cat /Users/emmy/project/App.tsx</code></pre>');
+    assert.equal(
+      renderMessageText('```sh\ncat /Users/emmy/project/App.tsx\n```', ""),
+      '<div class="fenced-code-block"><div class="fenced-code-block-header"><span class="fenced-code-block-lang" data-lang="sh"></span><button type="button" class="fenced-code-block-copy" data-code-copy aria-label="Copy code"></button></div><pre><code class="fenced-code-block-content language-sh"><span class="hljs-built_in">cat</span> /Users/emmy/project/App.tsx</code></pre></div>',
+    );
     assert.equal(renderMessageText('[PR](https://github.com/owner/repo/pull/1)', ""), '<p><a href="https://github.com/owner/repo/pull/1" target="_blank" rel="noopener noreferrer">PR</a></p>');
   });
 
@@ -961,7 +1022,7 @@ describe("room chat helpers", () => {
         'const safe = "<ok>"',
         "```",
       ].join("\n"), ""),
-      '<h2>Review</h2><ul><li><strong>Approved</strong></li><li><input class="markdown-task-checkbox" type="checkbox" disabled checked>Tests pass</li></ul><blockquote><p>Use <code>npm test</code></p></blockquote><ol><li>Ship</li><li>Monitor</li></ol><pre><code class="language-ts">const safe = &quot;&lt;ok&gt;&quot;</code></pre>',
+      '<h2>Review</h2><ul><li><strong>Approved</strong></li><li><input class="markdown-task-checkbox" type="checkbox" disabled checked>Tests pass</li></ul><blockquote><p>Use <code>npm test</code></p></blockquote><ol><li>Ship</li><li>Monitor</li></ol><div class="fenced-code-block"><div class="fenced-code-block-header"><span class="fenced-code-block-lang" data-lang="ts"></span><button type="button" class="fenced-code-block-copy" data-code-copy aria-label="Copy code"></button></div><pre><code class="fenced-code-block-content language-ts"><span class="hljs-keyword">const</span> safe = <span class="hljs-string">&quot;&lt;ok&gt;&quot;</span></code></pre></div>',
     );
   });
 

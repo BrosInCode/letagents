@@ -12,11 +12,10 @@ import { apiCall, isMissingRouteError } from "./api.js";
 import { agentSessionCredentials, identityFromAgentSession } from "./agent-sessions.js";
 import { getSessionLivenessRegistration } from "./identity.js";
 import { hasSupervisedWorkerAuthority } from "./worker-bearer.js";
+import { scopedMap } from "./session-scope.js";
 
-const roomPresenceByIdentity = new Map<
-  string,
-  { status: AgentPresenceStatus; status_text: string | null }
->();
+const roomPresenceByIdentity = scopedMap<string, { status: AgentPresenceStatus; status_text: string | null }>(
+  "room-presence-by-identity");
 
 export function getRememberedRoomPresence(
   roomId: string | null | undefined,
@@ -27,7 +26,7 @@ export function getRememberedRoomPresence(
   }
 
   return (
-    roomPresenceByIdentity.get(
+    roomPresenceByIdentity().get(
       getRoomIdentityPresenceCacheKey(roomId, identity.actor_label)
     ) ?? { status: "idle", status_text: null }
   );
@@ -44,7 +43,7 @@ export async function syncRoomPresence(
     return;
   }
 
-  roomPresenceByIdentity.set(
+  roomPresenceByIdentity().set(
     getRoomIdentityPresenceCacheKey(roomId, resolvedIdentity.actor_label),
     presence
   );

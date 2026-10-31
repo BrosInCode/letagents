@@ -53,3 +53,46 @@ test("evicts oldest when exceeding the max entry count", () => {
   assert.equal(cache.get("a"), null);
   assert.equal(cache.size, 2);
 });
+
+test("file metadata counts toward the byte budget and expires with its diff", () => {
+  const c = clock();
+  const fileList = { files: [], total_files: 0 };
+  const cache = new PullRequestDiffCache({ now: c.now, ttlMs: 10 });
+  cache.set("k", "diff", fileList);
+  assert.equal(cache.byteSize, 4 + Buffer.byteLength(JSON.stringify(fileList)));
+  assert.deepEqual(cache.getFileList("k"), fileList);
+  c.advance(11);
+  assert.equal(cache.getFileList("k"), undefined);
+  assert.equal(cache.byteSize, 0);
+  const small = new PullRequestDiffCache({ maxEntryBytes: 4 });
+  small.set("k", "diff", fileList);
+  assert.equal(small.size, 0);
+});
+
+test("retains unavailable file lists until the diff expires", () => {
+  const c = clock();
+  const cache = new PullRequestDiffCache({ now: c.now, ttlMs: 10 });
+  cache.set("k", "diff");
+  assert.equal(cache.getFileList("k"), undefined, "metadata has not been requested");
+  cache.set("k", "diff", null);
+  assert.equal(cache.getFileList("k"), null, "metadata was requested but unavailable");
+  assert.equal(cache.byteSize, 4);
+  c.advance(11);
+  assert.equal(cache.getFileList("k"), undefined);
+  assert.equal(cache.get("k"), null);
+});
+
+test("a plain write preserves unexpired metadata and its byte accounting", () => {
+  for (const fileList of [{ files: [], total_files: 0 }, null]) {
+    const c = clock();
+    const cache = new PullRequestDiffCache({ now: c.now, ttlMs: 10 });
+    cache.set("k", "diff", fileList);
+    cache.set("k", "patch");
+    assert.deepEqual(cache.getFileList("k"), fileList);
+    assert.equal(cache.byteSize, 5 + (fileList ? Buffer.byteLength(JSON.stringify(fileList)) : 0));
+    c.advance(11);
+    cache.set("k", "new");
+    assert.equal(cache.getFileList("k"), undefined, "expired metadata is not revived");
+    assert.equal(cache.byteSize, 3);
+  }
+});

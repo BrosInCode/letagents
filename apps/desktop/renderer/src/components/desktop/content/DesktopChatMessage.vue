@@ -1,36 +1,40 @@
 <template>
   <article
+    ref="messageElement"
     class="room-chat-message"
     tabindex="-1"
     :class="{
+      'is-github-history': githubHistory,
       'is-system-message': isSystem,
       'is-github-message': Boolean(githubEvent),
       'has-reply': Boolean(message.replyTo),
       'is-search-active': searchActive,
       'is-active-thread-root': activeThreadRoot,
+      'has-thread': context === 'timeline' && (threadIndicatorVisible || activeThreadRoot),
       'is-compact-continuation': compactWithPrevious,
-      'is-ambient-system-message': isAmbientSystem,
+      'is-ambient-system-message': isAmbientSystem || isWakeNotice,
+      'is-wake-notice': isWakeNotice,
       'is-arriving': animateArrival,
+      'is-reacting': reactionPickerAnchor !== null,
       'is-thread-context': context !== 'timeline',
       'is-thread-root-context': context === 'thread-root',
       'is-thread-reply-context': context === 'thread-reply',
     }"
     :style="{ '--message-accent': senderColor }"
     :data-owner-kind="ownerKind"
+    :data-chat-role="senderRole"
     :data-message-id="message.id"
     :data-thread-message-id="threadMessageId || undefined"
     :data-testid="testId || `room-message-${message.id}`"
-    @contextmenu="openContextMenu"
-    @pointerup="handleSelectionPointerUp"
+    @contextmenu.stop="openContextMenu"
+    @pointerup.stop="handleSelectionPointerUp"
   >
-    <div
-      class="room-chat-avatar"
-      :style="{ '--avatar-color': senderColor }"
-      aria-hidden="true"
-    />
+    <WakeGlyph v-if="isWakeNotice" class="room-chat-wake-glyph" state="woke" :still="!animateArrival" />
+    <ChatAvatar v-else-if="senderRole" :name="displayName" :avatar-url="avatarUrl" :agent="ownerKind === 'agent'" :provider="ideLabel" :agent-key="message.agentIdentity?.agentKey" />
+    <div v-else class="room-chat-avatar" :style="{ '--avatar-color': senderColor }" aria-hidden="true" />
 
     <div class="room-chat-message-content">
-      <div class="room-message-meta">
+      <div v-if="!githubHistory" class="room-message-meta">
         <div class="room-message-author-block">
           <button
             v-if="ownerKind === 'agent'"
@@ -41,15 +45,33 @@
           >
             {{ displayName }}
           </button>
+          <button
+            v-else-if="personTarget"
+            class="room-message-author-button is-person-author"
+            type="button"
+            :title="`Options for ${displayName}`"
+            @click="openPersonMenu"
+          >
+            {{ displayName }}
+          </button>
           <strong v-else>{{ displayName }}</strong>
-          <span v-if="ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
-          <ProviderBadge
-            v-if="ideLabel"
-            :label="ideLabel"
-            :agent-key="message.agentIdentity?.agentKey"
-          />
+          <span v-if="ownerKind === 'agent' && ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
+
         </div>
         <div class="room-message-meta-tail">
+          <div class="room-message-actions">
+          <button
+            v-if="reactable"
+            class="room-message-reply-action room-message-react-action"
+            type="button"
+            title="Add reaction"
+            aria-label="Add reaction"
+            aria-haspopup="dialog"
+            :aria-expanded="reactionPickerAnchor !== null"
+            @click="openReactionPicker"
+          >
+            <SmilePlus :size="14" aria-hidden="true" />
+          </button>
           <button
             class="room-message-reply-action room-message-copy-action"
             type="button"
@@ -81,21 +103,37 @@
             <LocateFixed v-if="context !== 'timeline'" :size="14" aria-hidden="true" />
             <MessageSquare v-else :size="14" aria-hidden="true" />
           </button>
+          <button
+            v-if="pinnable"
+            class="room-message-reply-action room-message-pin-action"
+            type="button"
+            :title="pinned ? 'Unpin message' : 'Pin message'"
+            :aria-label="pinned ? 'Unpin message' : 'Pin message'"
+            :aria-pressed="pinned"
+            :disabled="Boolean(pinContext?.state.value.pending)"
+            @click="pinContext?.toggle(message.id)"
+          ><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></button>
+          </div>
           <span v-if="provenanceLabel" class="room-message-provenance" :data-kind="ownerKind">
             {{ provenanceLabel }}
           </span>
+          <span v-if="pinned" class="message-pin-marker" role="img" aria-label="Pinned message" title="Pinned message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></span>
           <time :datetime="message.timestamp">{{ formattedTime }}</time>
         </div>
       </div>
 
       <div v-if="message.outgoing" class="room-message-outgoing" role="status" aria-live="polite">
         <span v-if="message.outgoing.attachmentCount">{{ message.outgoing.attachmentCount }} attachment{{ message.outgoing.attachmentCount === 1 ? "" : "s" }} · </span>
-        <span>{{ message.outgoing.status === "pending" ? "Sending…" : "Delivery not confirmed" }}</span>
+        <span>{{ message.outgoing.status === "pending" ? "Sending…" : message.outgoing.error?.includes('expressions_disabled:') ? "GIF sending is off in this room" : "Delivery not confirmed" }}</span>
         <button v-if="message.outgoing.status === 'uncertain'" type="button" :title="message.outgoing.error || undefined" @click="retryDesktopOutgoingMessage(message.clientMessageId || '')">Retry safely</button>
+        <template v-if="message.gif && message.outgoing.error?.includes('expressions_disabled:')">
+          <button v-if="message.text.trim() || message.outgoing.attachmentCount" type="button" @click="sendDesktopOutgoingWithoutGif(message.clientMessageId || '')">Send without GIF</button>
+          <button v-else type="button" @click="discardRefusedDesktopGif(message.clientMessageId || '')">Remove unsent GIF</button>
+        </template>
       </div>
       <div class="room-message-bubble">
         <button
-          v-if="message.replyTo"
+          v-if="message.replyTo && (context !== 'thread-reply' || message.replyTo.id !== message.threadRootId)"
           class="room-message-reply"
           type="button"
           :aria-label="`Reply preview from ${replyDisplayName}`"
@@ -107,6 +145,9 @@
 
         <DesktopGitHubEventCard
           v-if="githubEvent"
+          :history="githubHistory"
+          :timestamp="message.timestamp"
+          room
           :event="githubEvent"
           :task-link-enabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
           @open-event="$emit('open-github-event', $event)"
@@ -114,21 +155,80 @@
         />
 
         <DesktopLongMessageContent
-          v-else
+          v-else-if="(!message.gif || visibleText) && !(message.gif?.text_fallback_only && gifState !== 'unavailable')"
           :text="visibleText || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
+          :room-identifier="roomIdentifier"
+          :sender="readerSender"
           @message-reference-click="$emit('scroll-to-message', $event)"
           @task-reference-click="$emit('open-task', $event)"
+          @mention-click="openMention"
         />
 
+        <DesktopGitHubEventCard
+          v-for="preview in linkPreviews"
+          :key="preview.url"
+          :event="linkPreviewPresentation(preview)"
+          compact
+        />
+        <RoomGif v-if="message.gif" :gif="message.gif" :room-identifier="roomIdentifier" @state="gifState = $event" />
         <DesktopMessageAttachments
           v-if="message.attachments.length"
           :message-id="message.id"
           :attachments="message.attachments"
+          :sender-label="displayName"
           @open-image="$emit('open-image', $event)"
         />
+      <button
+        v-if="context === 'timeline' && (threadIndicatorVisible || activeThreadRoot)"
+        class="room-thread-marker"
+        :class="{ 'is-active': activeThreadRoot }"
+        type="button"
+        :aria-label="threadMarkerAriaLabel"
+        :aria-expanded="activeThreadRoot"
+        :aria-controls="`room-inline-thread-${message.id}`"
+        @click="$emit('open-thread', message.id)"
+      >
+        <span class="room-thread-marker-main">
+          <MessageSquare :size="13" aria-hidden="true" />
+          <strong>{{ threadMarkerCountLabel }}</strong>
+          <span v-if="threadSummary.unreadCount > 0" class="room-thread-unread-count">
+            {{ threadSummary.unreadCount }}
+          </span>
+          <span v-if="threadSummary.loadingEarlier" class="room-thread-loading-dot" aria-label="Loading thread"></span>
+        </span>
+        <span v-if="threadSummary.participants.length" class="room-thread-participants" aria-hidden="true">
+          <span
+            v-for="participant in threadSummary.participants"
+            :key="participant.key"
+            class="room-thread-participant-avatar"
+            :style="{ '--thread-participant-color': participant.color || getSenderColor(participant.displayName, null) }"
+            :title="participant.displayName"
+          >
+            {{ participantInitials(participant.displayName) }}
+          </span>
+        </span>
+        <span v-if="threadMarkerPreview" class="room-thread-marker-preview">
+          {{ threadMarkerPreview }}
+        </span>
+        <ChevronDown class="room-thread-marker-chevron" :size="14" aria-hidden="true" />
+      </button>
+        <ThreadTransition>
+          <div v-if="activeThreadRoot" :id="`room-inline-thread-${message.id}`" class="room-inline-thread"><slot name="thread"><component :is="inlineThread" v-if="inlineThread" /></slot></div>
+        </ThreadTransition>
       </div>
+
+      <MessageReactionBar
+        v-if="reactions.length"
+        :reactions="reactions"
+        :viewer-login="reactionContext?.viewerLogin.value ?? null"
+        :viewer-reacted="viewerReacted"
+        :can-react="reactable"
+        :picker-open="reactionPickerAnchor !== null"
+        @toggle="toggleReaction"
+        @add="openReactionPicker"
+      />
 
       <ul
         v-if="visibleDeliveryReceipts.length"
@@ -140,6 +240,7 @@
           v-for="receipt in visibleDeliveryReceipts"
           :key="receipt.agentId"
           :data-state="receipt.state"
+          :data-follow-up="receipt.scheduledRetry ? 'scheduled' : receipt.followUpNote?.state"
           :aria-label="receiptLabel(receipt)"
         >
           <span class="room-message-delivery-indicator" aria-hidden="true">
@@ -151,8 +252,37 @@
           </span>
           <strong>{{ receipt.agentName }}</strong>
           <small v-if="receiptStateLabel(receipt)">{{ receiptStateLabel(receipt) }}</small>
+          <template v-if="receipt.scheduledRetry">
+            <small class="room-message-delivery-countdown" aria-hidden="true"><span>{{ scheduledRetryParts(receipt)[0] }}</span> <span>{{ scheduledRetryParts(receipt)[1] }}</span></small>
+            <button
+              type="button"
+              :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId)"
+              :aria-label="`Try again now for ${receipt.agentName}`"
+              title="Asks the agent to start this attempt now instead of waiting."
+              @click="tryRetryNow(receipt)"
+            >{{ retryingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId) ? "Asking…" : "Try now" }}</button>
+            <button
+              type="button"
+              :disabled="!roomDeliverySkipAvailable || skippingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId)"
+              :aria-label="`Stop the automatic attempts for ${receipt.agentName}`"
+              title="No more automatic attempts. Later messages go ahead. The task stays assigned to the agent: send it a message to continue."
+              @click="stopRetrying(receipt)"
+            >{{ skippingReceipt(receipt.agentId, receipt.scheduledRetry.sourceMessageId) ? "Stopping…" : "Stop trying" }}</button>
+            <small class="room-message-delivery-outcome">{{ scheduledRetryOutcome(receipt.scheduledRetry) }}</small>
+          </template>
+          <template v-else-if="receipt.followUpNote">
+            <small>{{ followUpNoteLabel(receipt.followUpNote) }}</small>
+            <button
+              v-if="receipt.followUpNote.canRetry"
+              type="button"
+              :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId, receipt.followUpNote.sourceMessageId)"
+              :aria-label="deliveryRecoveryAvailable ? `Retry delivery for ${receipt.agentName}` : `Retry delivery for ${receipt.agentName} is unavailable`"
+              title="Retry delivery"
+              @click="retryFollowUp(receipt)"
+            >{{ retryingReceipt(receipt.agentId, receipt.followUpNote.sourceMessageId) ? "Retrying…" : deliveryRecoveryAvailable ? "Retry" : "Retry unavailable" }}</button>
+          </template>
           <button
-            v-if="receipt.state === 'queued_behind_blocked' && receipt.blockedByMessageId"
+            v-if="(receipt.state === 'queued_behind_blocked' || receipt.state === 'queued_behind_retry') && receipt.blockedByMessageId"
             type="button"
             class="room-message-delivery-link"
             @click="$emit('scroll-to-message', receipt.blockedByMessageId)"
@@ -183,45 +313,18 @@
               type="button"
               :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId)"
               :aria-label="deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId) ? `Retry delivery for ${receipt.agentName}` : `Retry delivery for ${receipt.agentName} is unavailable`"
-              :title="deliveryRecoveryAvailable ? 'Retry delivery' : 'Retry will be available when delivery recovery is connected'"
+              :title="!deliveryRecoveryAvailable ? 'Retry will be available when delivery recovery is connected'
+                : receipt.retry === 'reread_saved_turn' ? 'Reads the finished turn’s answer again. The turn is not rerun.'
+                : receipt.retry === 'publish_saved_reply' ? 'Posts the saved reply. The provider is not asked again.' : 'Retry delivery'"
               @click="deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId) && $emit('retry-delivery', receipt.agentId, message.id)"
-            >{{ retryingReceipt(receipt.agentId) ? "Retrying…" : deliveryRecoveryAvailable ? "Retry" : "Retry unavailable" }}</button>
+            >{{ retryingReceipt(receipt.agentId) ? "Retrying…" : !deliveryRecoveryAvailable ? "Retry unavailable"
+              : receipt.retry === "reread_saved_turn" ? "Read again" : receipt.retry === "publish_saved_reply" ? "Post reply" : "Retry" }}</button>
             <small v-if="!deliveryRecoveryAvailable">Retry will be available when delivery recovery is connected.</small>
           </template>
         </li>
       </ul>
 
-      <button
-        v-if="context === 'timeline' && threadIndicatorVisible"
-        class="room-thread-marker"
-        :class="{ 'is-active': activeThreadRoot }"
-        type="button"
-        :aria-label="threadMarkerAriaLabel"
-        @click="$emit('open-thread', message.id)"
-      >
-        <span class="room-thread-marker-main">
-          <MessageSquare :size="13" aria-hidden="true" />
-          <strong>{{ threadMarkerCountLabel }}</strong>
-          <span v-if="threadSummary.unreadCount > 0" class="room-thread-unread-count">
-            {{ threadSummary.unreadCount }}
-          </span>
-          <span v-if="threadSummary.loadingEarlier" class="room-thread-loading-dot" aria-label="Loading thread"></span>
-        </span>
-        <span v-if="threadSummary.participants.length" class="room-thread-participants" aria-hidden="true">
-          <span
-            v-for="participant in threadSummary.participants"
-            :key="participant.key"
-            class="room-thread-participant-avatar"
-            :style="{ '--thread-participant-color': participant.color || getSenderColor(participant.displayName, null) }"
-            :title="participant.displayName"
-          >
-            {{ participantInitials(participant.displayName) }}
-          </span>
-        </span>
-        <span v-if="threadMarkerPreview" class="room-thread-marker-preview">
-          {{ threadMarkerPreview }}
-        </span>
-      </button>
+
     </div>
 
     <Teleport to="body">
@@ -252,11 +355,24 @@
           <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
             <span>Copy message</span>
           </button>
+          <button v-if="canCopyMessageLink" type="button" role="menuitem" @click="copyMessageLinkFromContext">
+            <span>Copy link to message</span>
+          </button>
           <button type="button" role="menuitem" @click="quoteReplyFromContext">
             <span>Quote reply</span>
           </button>
           <button type="button" role="menuitem" @click="tertiaryActionFromContext">
             <span>{{ tertiaryActionLabel }}</span>
+          </button>
+          <MessageReminderMenu v-if="remindable" :room="roomIdentifier ?? ''" :message="message.id" @scheduled="reminderScheduled" />
+          <button v-if="pinnable" type="button" role="menuitem" :disabled="Boolean(pinContext?.state.value.pending)" @click="pinFromContext">
+            <span>{{ pinned ? "Unpin message" : "Pin message" }}</span>
+          </button>
+          <button v-if="reactable" type="button" role="menuitem" @click="reactFromContext">
+            <span>Add reaction…</span>
+          </button>
+          <button v-if="canMarkUnread" type="button" role="menuitem" @click="markUnreadFromContext">
+            <span>Mark unread from here</span>
           </button>
           <div class="room-message-context-menu-separator" role="separator" />
           <button type="button" role="menuitem" @click="messageInfoFromContext">
@@ -264,6 +380,15 @@
           </button>
         </template>
       </div>
+
+      <MessageReactionPicker
+        v-if="reactionPickerAnchor"
+        :anchor="reactionPickerAnchor"
+        :viewer-reacted="viewerReacted"
+        :instant="reactionPickerInstant"
+        @select="toggleReaction"
+        @close="closeReactionPicker"
+      />
 
       <div
         v-if="selectionPopoverOpen"
@@ -281,17 +406,37 @@
 </template>
 
 <script setup lang="ts">
-import { retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
-import { computed, nextTick, onBeforeUnmount, ref } from "vue";
-import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare } from "@lucide/vue";
-import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
+import { inlineThreadKey } from "./desktop-chat-message/inline-thread";
+import RoomGif from "./room-chat/RoomGif.vue";
+import { unreadMenuKey } from "../../../../../../../shared/room-unread-client";
+import MessageReminderMenu from "./MessageReminderMenu.vue";
+import { reminderAccount } from "../../../composables/useMessageReminders";
+import { discardRefusedDesktopGif, sendDesktopOutgoingWithoutGif, retryDesktopOutgoingMessage } from "../../../domain/message-outbox";
+import { computed, inject, nextTick, onBeforeUnmount, ref, watch } from "vue";
+import { attentionResponseAgentNamesKey, roomMessageVisibleText } from "../../../domain/attention-response";
+import { Check, ChevronDown, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare, SmilePlus } from "@lucide/vue";
+import type { DesktopRoomAgentDeliveryAttention, DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
+import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import { useSecondClock } from "../../../composables/useSecondClock";
+import { scheduledRetryClockLabel, scheduledRetryLabelParts, scheduledRetryOutcome, type AgentScheduledRetry } from "../../../domain/scheduled-retry";
+import type { RoomMessageFollowUpNote } from "../../../domain/room-message-receipts";
+
+/** What this message needs of an automatic attempt: its time, its attempt, what it follows, and the id its two controls name. */
+type AgentScheduledRetryView = Pick<AgentScheduledRetry, "atMs" | "attempt" | "attempts" | "kind" | "sourceMessageId">;
 import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
 import { resolveExternalWebHref } from "./desktop-chat-message/message-links";
+import {
+  buildLetAgentsMessageUrl,
+  isLocalRoomIdentifier,
+  isValidMessageId,
+} from "../../../domain/room-urls";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
-import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
+import ChatAvatar from "../../../../../../../shared/ui/ChatAvatar.vue";
+import { chatSenderRole } from "../../../../../../../shared/chat-appearance";
+import "../../../../../../../shared/ui/chat-palette.css";
 import {
   getSenderColor,
   parseSenderIdentity,
@@ -307,16 +452,31 @@ import {
   formatTimestamp,
   highlightRenderedMessage,
   linkRenderedMessageReferences,
+  mayContainMessageReference,
   renderMessageText,
   isAmbientSystemMessage,
   stripStatusPrefix,
   truncate,
 } from "./desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
+import type { PersonTarget } from "../../../domain/person-target";
+import { personMenuPosition, type PersonMenuPosition } from "../../../domain/person-context-menu";
 import type { ThreadIndicatorSummary } from "./room-chat/thread-utils";
 import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
+import MessageReactionBar from "../../../../../../../shared/ui/MessageReactionBar.vue";
+import MessageReactionPicker, { type MessageReactionPickerAnchor } from "../../../../../../../shared/ui/MessageReactionPicker.vue";
+import ThreadTransition from "../../../../../../../shared/ui/ThreadTransition.vue";
+import WakeGlyph from "../../../../../../../shared/ui/WakeGlyph.vue";
+import { isPinMessageId } from "../../../../../../../shared/message-pins.mjs";
+import { linkRenderedMentions, mayContainMention, roomMentionDirectoryKey } from "../../../domain/room-mention-links";
+import { injectRoomMessageLinkPreviews } from "../../../composables/useRoomMessageLinkPreviews";
+import { excludeGitHubEventLink, linkPreviewPresentation } from "../../../../../../../shared/message-link-previews.mjs";
+import { injectRoomMessagePins } from "../../../composables/useRoomMessagePins";
+import { useMessageViewer, injectRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
+import { WAKE_NOTICE_SOURCE } from "../../../../../../../shared/wake-rules.mjs";
 
 const props = withDefaults(defineProps<{
+  githubHistory?: boolean;
   message: DesktopRoomMessage;
   compactWithPrevious?: boolean;
   threadSummary: ThreadIndicatorSummary;
@@ -329,7 +489,11 @@ const props = withDefaults(defineProps<{
   context?: "timeline" | "thread-root" | "thread-reply";
   threadMessageId?: string;
   testId?: string;
-  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }>;
+  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null; retry?: DesktopRoomAgentDeliveryAttention["retry"] | null;
+    /** The agent's automatic attempt for the work this message began, while it waits for its time. */
+    scheduledRetry?: AgentScheduledRetryView | null;
+    /** The follow-up of the work this message began, when it waits for its owner or ended with nothing started. */
+    followUpNote?: RoomMessageFollowUpNote | null }>;
   deliveryRecoveryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
   roomDeliverySkipAvailable?: boolean;
@@ -337,6 +501,7 @@ const props = withDefaults(defineProps<{
   continuationRepairKeys?: ReadonlySet<string>;
   roomDeliverySkipKeys?: ReadonlySet<string>;
   providerLabel?: string | null;
+  roomIdentifier?: string | null;
 }>(), {
   context: "timeline",
   deliveryReceipts: () => [],
@@ -345,16 +510,17 @@ const props = withDefaults(defineProps<{
   roomDeliverySkipAvailable: false,
 });
 
-function retryingReceipt(agentId: string): boolean {
-  return props.deliveryRetryKeys?.has(`${agentId}:${props.message.id}`) === true;
+/** A request for this agent that is on its way. A follow-up has an id of its own, which is not this message's. */
+function retryingReceipt(agentId: string, sourceMessageId = props.message.id): boolean {
+  return props.deliveryRetryKeys?.has(`${agentId}:${sourceMessageId}`) === true;
 }
 
 function restoringReceipt(agentId: string): boolean {
   return props.continuationRepairKeys?.has(`${agentId}:${props.message.id}`) === true;
 }
 
-function skippingReceipt(agentId: string): boolean {
-  return props.roomDeliverySkipKeys?.has(`${agentId}:${props.message.id}`) === true;
+function skippingReceipt(agentId: string, sourceMessageId = props.message.id): boolean {
+  return props.roomDeliverySkipKeys?.has(`${agentId}:${sourceMessageId}`) === true;
 }
 
 const emit = defineEmits<{
@@ -363,6 +529,7 @@ const emit = defineEmits<{
   "scroll-to-message": [messageId: string | null];
   "open-image": [imageId: string];
   "open-agent": [target: AgentModalTarget];
+  "open-person": [target: PersonTarget, position: PersonMenuPosition];
   "open-github-event": [url: string];
   "open-task": [taskId: string];
   "quote-selection": [messageId: string, text: string];
@@ -372,6 +539,37 @@ const emit = defineEmits<{
   "skip-delivery": [agentId: string, sourceMessageId: string];
   "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
 }>();
+
+/** Try now: ask the agent to start its automatic attempt at once. The request names the attempt, which is not this message. */
+function tryRetryNow(receipt: { agentId: string; scheduledRetry?: AgentScheduledRetryView | null }): void {
+  const retryId = receipt.scheduledRetry?.sourceMessageId;
+  if (retryId && props.deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId, retryId)) emit("retry-delivery", receipt.agentId, retryId);
+}
+
+/** Stop trying: end the agent's automatic attempt before it starts. */
+function stopRetrying(receipt: { agentId: string; scheduledRetry?: AgentScheduledRetryView | null }): void {
+  const retryId = receipt.scheduledRetry?.sourceMessageId;
+  if (retryId && props.roomDeliverySkipAvailable && !skippingReceipt(receipt.agentId, retryId)) emit("skip-delivery", receipt.agentId, retryId);
+}
+
+/** Retry for a follow-up that waits for its owner: the request names the follow-up, which is not this message. */
+function retryFollowUp(receipt: { agentId: string; followUpNote?: RoomMessageFollowUpNote | null }): void {
+  const note = receipt.followUpNote;
+  if (note?.canRetry && props.deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId, note.sourceMessageId)) emit("retry-delivery", receipt.agentId, note.sourceMessageId);
+}
+
+/**
+ * The countdown as this message shows it: the saved time minus the clock, so it is right however long the app slept.
+ * It has two parts, which the receipt may wrap between: the wait, and the attempt.
+ */
+function scheduledRetryParts(receipt: { scheduledRetry?: AgentScheduledRetryView | null }): [string, string] {
+  return receipt.scheduledRetry ? scheduledRetryLabelParts(receipt.scheduledRetry, retryClock.value) : ["", ""];
+}
+
+/** Why the follow-up of this message's work waits for its owner, or why it ended with nothing started. */
+function followUpNoteLabel(note: Pick<RoomMessageFollowUpNote, "state" | "text">): string {
+  return receiptErrorLabel(note.text) || (note.state === "ended" ? "The agent did not try again." : "The agent stopped and now waits for you.");
+}
 
 const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((receipt) => [
   "retryable",
@@ -383,10 +581,13 @@ const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((re
   "cancelled_by_user",
   "restoring_conversation",
   "queued_behind_blocked",
+  "queued_behind_retry",
 ].includes(receipt.state)));
+// Counts down to the saved time of an automatic attempt, once a second while one shows on this message.
+const retryClock = useSecondClock(() => Boolean(props.deliveryReceipts?.some((receipt) => receipt.scheduledRetry)));
 
 function receiptIsAnimated(state: string): boolean {
-  return ["pending", "dispatching", "awaiting_result", "publishing", "retryable", "result_recovery", "restoring_conversation"].includes(state);
+  return ["pending", "dispatching", "awaiting_result", "publishing", "retryable", "result_recovery", "restoring_conversation", "queued_behind_retry"].includes(state);
 }
 
 function receiptNeedsAttention(state: string): boolean {
@@ -407,6 +608,7 @@ function receiptStateLabel(receipt: { state: string; terminalReason: string | nu
   if (state === "restoring_conversation") return "Restoring conversation";
   if (state === "blocked") return receiptErrorLabel(receipt.error) || "Needs attention";
   if (state === "queued_behind_blocked") return "Queued behind an issue";
+  if (state === "queued_behind_retry") return "Queued until the agent has tried again";
   if (state === "acknowledged_no_reply") return "Read · no reply";
   if (state === "acknowledged_failed") return receiptErrorLabel(receipt.error) || "Work did not finish";
   if (state === "cancelled_by_room_move") return "Moved rooms";
@@ -414,8 +616,17 @@ function receiptStateLabel(receipt: { state: string; terminalReason: string | nu
   return "";
 }
 
-function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null; error: string | null }): string {
+function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null; error: string | null;
+  scheduledRetry?: AgentScheduledRetryView | null; followUpNote?: RoomMessageFollowUpNote | null }): string {
   if (receipt.terminalReason === "upgrade_authority_unavailable") return `A safety upgrade retired this legacy turn for ${receipt.agentName}; its exact authority could not be reconstructed`;
+  if (receipt.scheduledRetry || receipt.followUpNote) {
+    // Read aloud with a clock time: the list is a live region, and a count that changes each second would be read each second.
+    const failed = (receiptErrorLabel(receipt.error) || "Work did not finish").replace(/[.\s]+$/, "");
+    return `${receipt.agentName}: ${failed}. ${receipt.scheduledRetry
+      ? `${scheduledRetryClockLabel(receipt.scheduledRetry, retryClock.value)}. ${scheduledRetryOutcome(receipt.scheduledRetry)}`
+      : followUpNoteLabel(receipt.followUpNote!)}`;
+  }
+  if (receipt.state === "queued_behind_retry") return `Waiting — ${receipt.agentName} will try earlier work again first`;
   if (receipt.state === "dispatching" || receipt.state === "awaiting_result") return `${receipt.agentName} is responding`;
   if (receipt.state === "publishing") return `${receipt.agentName} is sending a reply`;
   if (receipt.state === "pending") return `${receipt.agentName} is queued to respond`;
@@ -432,6 +643,13 @@ function receiptLabel(receipt: { agentName: string; state: string; blockedByMess
   return `Waiting for ${receipt.agentName}`;
 }
 
+const gifState = ref<'loading' | 'ready' | 'unavailable'>('loading');
+const remindable = computed(() => Boolean(reminderAccount.value && props.roomIdentifier && !isLocalRoomIdentifier(props.roomIdentifier) && isValidMessageId(props.message.id) && !props.message.outgoing));
+const { pushActionToast } = useDesktopActionToasts();
+function reminderScheduled(dueAt: string) {
+  pushActionToast(`Reminder set for ${new Date(dueAt).toLocaleString()}`, "success");
+  closeContextMenu("complete");
+}
 const contextMenuOpen = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
 const firstContextMenuButton = ref<HTMLButtonElement | null>(null);
@@ -445,7 +663,7 @@ const selectionPopoverPosition = ref({ x: 0, y: 0 });
 const selectedQuoteText = ref("");
 let selectionOutsideListenerActive = false;
 const identity = computed(() => parseSenderIdentity(props.message));
-const displayName = computed(() => props.message.agentIdentity?.displayName || identity.value.displayName);
+const displayName = computed(() => props.message.source === "browser" ? props.message.sender : props.message.agentIdentity?.displayName || identity.value.displayName);
 const ownerAttribution = computed(() => resolveOwnerAttribution({
   ownerAttribution: props.message.agentIdentity?.ownerAttribution,
   ownerLabel: props.message.agentIdentity?.ownerLabel,
@@ -453,38 +671,94 @@ const ownerAttribution = computed(() => resolveOwnerAttribution({
   sender: props.message.sender,
 }));
 const ideLabel = computed(() => props.providerLabel || props.message.agentIdentity?.ideLabel || identity.value.ideLabel);
-const isSystem = computed(() => ["system", "letagents"].includes(props.message.sender.toLowerCase()));
+const isSystem = computed(() => props.message.source !== "browser" && ["system", "letagents"].includes(props.message.sender.toLowerCase()));
+/** An agent's wake rule fired: a quiet line, not a conversation. */
+const isWakeNotice = computed(() => props.message.source === WAKE_NOTICE_SOURCE);
 const isAmbientSystem = computed(() =>
-  isAmbientSystemMessage(props.message.sender, props.message.text || "")
+  props.message.source !== "browser" && isAmbientSystemMessage(props.message.sender, props.message.text || "")
 );
-const githubEvent = computed(() => parseGitHubEvent(props.message));
+const githubEvent = computed(() => props.message.source === "browser" ? null : parseGitHubEvent(props.message));
+const viewer = useMessageViewer();
+const senderRole = computed(() => chatSenderRole({ human: ownerKind.value === 'human', agent: ownerKind.value === 'agent',
+  viewerLogin: viewer.value?.login, login: props.message.senderProfile?.login, agentKey: props.message.agentIdentity?.agentKey, outgoing: Boolean(props.message.outgoing) }));
+const avatarUrl = computed(() => props.message.senderProfile?.avatarUrl || (props.message.outgoing ? viewer.value?.avatar_url : null));
+const readerSender = computed(() => ({
+  name: displayName.value,
+  context: senderRole.value === 'own-agent' ? 'Your agent' : senderRole.value === 'self' ? 'You'
+    : ownerKind.value === 'agent' ? ownerAttribution.value || 'Agent' : ownerKind.value === 'human' ? 'Human' : 'Room',
+  timestamp: props.message.timestamp,
+  avatarUrl: avatarUrl.value,
+  agent: ownerKind.value === 'agent',
+  provider: ideLabel.value,
+  agentKey: props.message.agentIdentity?.agentKey,
+}));
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source));
 const ownerKind = computed(() => {
   if (isSystem.value) return "system";
   if (props.message.source === "github") return "github";
-  if (props.message.source === "agent" || ownerAttribution.value || ideLabel.value) return "agent";
   if (props.message.source === "browser") return "human";
+  if (props.message.source === "agent" || ownerAttribution.value || ideLabel.value) return "agent";
   return "room";
 });
+/** A human who sent this message, with a GitHub login, can be clicked. System and GitHub senders cannot. */
+const personTarget = computed<PersonTarget | null>(() => {
+  const login = props.message.senderProfile?.login?.trim();
+  if (ownerKind.value !== "human" || !login) return null;
+  return { login, displayName: displayName.value, avatarUrl: props.message.senderProfile?.avatarUrl ?? null };
+});
+function openPersonMenu(event: MouseEvent): void {
+  const target = personTarget.value;
+  if (target) emit("open-person", target, personMenuPosition(event));
+}
 const provenanceLabel = computed(() =>
   ownerKind.value === "agent" && ownerAttribution.value ? null : ownerKind.value
 );
 const replyDisplayName = computed(() =>
   props.message.replyTo ? parseSenderIdentity(props.message.replyTo).displayName : "unknown"
 );
-const replyPreviewText = computed(() => truncate((props.message.replyTo?.displayText || props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
-const visibleText = computed(() => props.message.displayText || props.message.text);
+const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
+const inlineThread = inject(inlineThreadKey, null);
+const replyPreviewText = computed(() => truncate((props.message.replyTo
+  ? roomMessageVisibleText(props.message.replyTo, attentionResponseAgentNames?.value)
+  : "").replace(/\s+/g, " ").trim(), 160));
+const visibleText = computed(() => roomMessageVisibleText(props.message, attentionResponseAgentNames?.value));
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
-const renderedMarkdown = computed(() => {
+const renderedMessage = computed(() => {
   const text = visibleText.value || "No message body.";
-  return renderMessageText(isAmbientSystem.value ? stripStatusPrefix(text) : text, "");
+  const urls: string[] = [];
+  const html = renderMessageText(isAmbientSystem.value ? stripStatusPrefix(text) : text, "", undefined, undefined, (url) => urls.push(url));
+  return { html, urls };
 });
-const linkedText = computed(() => linkRenderedMessageReferences(
-  renderedMarkdown.value,
-  props.messageReferenceIds,
-  props.taskReferenceIds,
-));
-const renderedText = computed(() => highlightRenderedMessage(linkedText.value, props.highlightQuery));
+const previewUrls = computed(() => excludeGitHubEventLink(renderedMessage.value.urls, githubEvent.value?.url));
+const previewContext = injectRoomMessageLinkPreviews();
+const linkPreviews = computed(() => previewContext?.previewsFor(props.message.id) ?? []);
+let stopTrackingPreviews: (() => void) | null = null;
+watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.value], () => {
+  stopTrackingPreviews?.();
+  stopTrackingPreviews = previewContext?.track({ id: props.message.id, urls: previewUrls.value }) ?? null;
+}, { immediate: true });
+// A message with no msg_/task_ text must not read the reference sets, so a new
+// message elsewhere in the room does not re-run this pass for it.
+const linkedText = computed(() => {
+  const html = renderedMessage.value.html;
+  if (!mayContainMessageReference(html)) return html;
+  return linkRenderedMessageReferences(html, props.messageReferenceIds, props.taskReferenceIds);
+});
+// Same rule for mentions: only a message with an @mention reads the room's participants.
+const mentionDirectory = inject(roomMentionDirectoryKey, null);
+const mentionLinkedText = computed(() => {
+  const html = linkedText.value;
+  if (!mentionDirectory || !mayContainMention(html)) return html;
+  return linkRenderedMentions(html, mentionDirectory.value);
+});
+/** A clicked @mention opens that participant: an agent's inspector, or a person's menu. */
+function openMention(mentionKey: string, position: PersonMenuPosition): void {
+  const target = mentionDirectory?.value.byKey(mentionKey);
+  if (!target) return;
+  if (target.kind === "agent") emit("open-agent", target.agent);
+  else emit("open-person", target.person, position);
+}
+const renderedText = computed(() => highlightRenderedMessage(mentionLinkedText.value, props.highlightQuery));
 const copyButtonTitle = computed(() => copied.value ? "Copied" : "Copy message");
 const tertiaryActionLabel = computed(() => props.context === "timeline" ? "Reply in thread" : "Jump to root");
 const selectionActionLabel = computed(() => props.context === "timeline" ? "Add to chat" : "Add to thread");
@@ -507,7 +781,7 @@ const threadMarkerPreview = computed(() => {
 });
 const threadMarkerAriaLabel = computed(() => {
   const unread = props.threadSummary.unreadCount > 0 ? `, ${props.threadSummary.unreadCount} unread` : "";
-  return `${threadMarkerCountLabel.value}${unread}. Open thread.`;
+  return `${threadMarkerCountLabel.value}${unread}. ${props.activeThreadRoot ? "Collapse replies" : "Open thread"}.`;
 });
 const agentModalTarget = computed<AgentModalTarget>(() => ({
   messageId: props.message.id,
@@ -531,6 +805,12 @@ function participantInitials(value: string): string {
   return initials.toUpperCase();
 }
 
+const canCopyMessageLink = computed(() =>
+  !isLocalRoomIdentifier(props.roomIdentifier) &&
+  !props.message.outgoing &&
+  isValidMessageId(props.message.id)
+);
+
 function openContextMenu(event: MouseEvent): void {
   if (props.message.outgoing) return;
   const target = event.target instanceof HTMLElement ? event.target : null;
@@ -550,13 +830,16 @@ function openContextMenu(event: MouseEvent): void {
   contextMenuInvoker.value = target?.closest<HTMLElement>("button, a, [tabindex]") || article;
   closeSelectionPopover();
   const menuWidth = 180;
-  // Link variant: 3 rows + separator; message variant: 4 rows + separator.
-  // The estimate must cover the tallest variant or the last row ("Message
-  // info") clips below the viewport near the bottom edge.
-  const menuHeight = linkHref ? 140 : 176;
+  // Link variant: 3 rows + separator; message variant: 4 rows + separator,
+  // plus a row for each available pin/reaction action. The estimate must
+  // cover the tallest variant or the last row ("Message info") clips below
+  // the viewport near the bottom edge.
+  const menuHeight = linkHref ? 140 : 176 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0);
+  const clampedMenuHeight = menuHeight + (!linkHref && remindable.value ? 32 : 0) + (!linkHref && canCopyMessageLink.value ? 32 : 0)
+    + (!linkHref && canMarkUnread.value ? 32 : 0);
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
-    y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
+    y: Math.max(8, Math.min(event.clientY, window.innerHeight - clampedMenuHeight - 8)),
   };
   contextMenuOpen.value = true;
   void nextTick(() => firstContextMenuButton.value?.focus());
@@ -592,7 +875,7 @@ function handleContextMenuKeydown(event: KeyboardEvent): void {
 }
 
 function focusContextMenuItem(direction: 1 | -1): void {
-  const items = Array.from(document.querySelectorAll<HTMLButtonElement>(".room-message-context-menu [role='menuitem']"));
+  const items = Array.from(firstContextMenuButton.value?.parentElement?.querySelectorAll<HTMLButtonElement>(":scope > [role='menuitem']:not(:disabled)") ?? []);
   if (!items.length) return;
   const currentIndex = Math.max(0, items.findIndex((item) => item === document.activeElement));
   const nextIndex = (currentIndex + direction + items.length) % items.length;
@@ -602,6 +885,87 @@ function focusContextMenuItem(direction: 1 | -1): void {
 function quoteReplyFromContext(): void {
   closeContextMenu("action");
   emit("quote-reply", props.message.id);
+}
+
+const unreadContext = inject(unreadMenuKey, null);
+const canMarkUnread = computed(() => Boolean(unreadContext?.client.account.value)
+  && props.context === "timeline" && !props.message.threadReplyToId
+  && (!props.message.threadRootId || props.message.threadRootId === props.message.id)
+  && !props.message.id.startsWith("pending:"));
+function markUnreadFromContext(): void {
+  closeContextMenu("complete");
+  if (canMarkUnread.value) unreadContext?.client.mark(unreadContext.room.value, props.message.id);
+}
+const pinContext = injectRoomMessagePins();
+const pinnable = computed(() => Boolean(pinContext?.canPin.value) && isPinMessageId(props.message.id));
+const pinned = computed(() => pinContext?.isPinned(props.message.id) ?? false);
+function pinFromContext(): void { closeContextMenu("complete"); pinContext?.toggle(props.message.id); }
+
+// Reactions exist only inside a room that provides them (not in previews or
+// tests), and only on a message the server sent with its reactions: a room
+// kept on this computer, or an older server, has none.
+const reactionContext = injectRoomMessageReactions();
+const reactions = computed(() => reactionContext?.reactionsFor(props.message.id) ?? []);
+const reactable = computed(() => Boolean(reactionContext?.canReact.value)
+  && props.message.reactions !== undefined
+  && !props.message.outgoing
+  && !isWakeNotice.value
+  && /^msg_\d+$/.test(props.message.id));
+const viewerReacted = (emoji: string): boolean => reactionContext?.viewerReacted(props.message.id, emoji) ?? false;
+
+// A row keeps its component when a sent message is confirmed and takes its
+// server id, so the registration follows the id.
+let stopTrackingReactions: (() => void) | null = null;
+watch(() => [props.message.id, props.message.reactions !== undefined] as const, () => {
+  stopTrackingReactions?.();
+  stopTrackingReactions = reactionContext?.track(props.message) ?? null;
+}, { immediate: true });
+
+const messageElement = ref<HTMLElement | null>(null);
+const reactionPickerAnchor = ref<MessageReactionPickerAnchor | null>(null);
+const reactionPickerInstant = ref(false);
+let reactionPickerInvoker: HTMLElement | null = null;
+let reactionPickerClosedByPress: { invoker: HTMLElement; at: number } | null = null;
+
+function toggleReaction(emoji: string): void {
+  reactionContext?.toggle(props.message.id, emoji);
+}
+
+function showReactionPicker(anchor: MessageReactionPickerAnchor, invoker: HTMLElement | null, instant: boolean): void {
+  if (!reactable.value) return;
+  closeSelectionPopover();
+  reactionPickerInvoker = invoker;
+  reactionPickerInstant.value = instant;
+  reactionPickerAnchor.value = anchor;
+}
+
+function openReactionPicker(event: MouseEvent): void {
+  const trigger = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  if (!trigger) return;
+  // The press that starts this click already closed the picker this control
+  // had open: the control is a toggle, so do not open it again.
+  const closed = reactionPickerClosedByPress;
+  reactionPickerClosedByPress = null;
+  if (closed?.invoker === trigger && performance.now() - closed.at < 500) return;
+  // A click with no pointer detail came from the keyboard.
+  showReactionPicker({ element: trigger }, trigger, event.detail === 0);
+}
+
+function closeReactionPicker(restoreFocus: boolean, pressed?: EventTarget | null): void {
+  const invoker = reactionPickerInvoker;
+  reactionPickerAnchor.value = null;
+  reactionPickerInvoker = null;
+  reactionPickerClosedByPress = invoker && pressed instanceof Node && invoker.contains(pressed)
+    ? { invoker, at: performance.now() }
+    : null;
+  if (restoreFocus && invoker?.isConnected) invoker.focus({ preventScroll: true });
+}
+
+function reactFromContext(): void {
+  const { x, y } = contextMenuPosition.value;
+  const invoker = contextMenuInvoker.value;
+  closeContextMenu("action");
+  if (messageElement.value) showReactionPicker({ element: messageElement.value, point: { x, y } }, invoker, true);
 }
 
 function tertiaryActionFromContext(): void {
@@ -625,6 +989,15 @@ function messageInfoFromContext(): void {
 async function copyFromContext(): Promise<void> {
   closeContextMenu("copy");
   await copyMessage();
+}
+
+async function copyMessageLinkFromContext(): Promise<void> {
+  const invoker = contextMenuInvoker.value;
+  closeContextMenu("copy");
+  if (!props.roomIdentifier || !props.message.id) return;
+  const url = buildLetAgentsMessageUrl(props.roomIdentifier, props.message.id);
+  await copyToClipboard(url);
+  restoreContextMenuFocus(invoker);
 }
 
 async function openLinkFromContext(): Promise<void> {
@@ -655,11 +1028,11 @@ function messageCopyText(): string {
   const text = visibleText.value.trim();
   if (text) return text;
   if (props.message.attachments.length === 1) {
-    return props.message.attachments[0]?.fileName || props.message.attachments[0]?.name || "1 attachment";
+    return props.message.attachments[0]?.fileName || "1 attachment";
   }
   if (props.message.attachments.length > 1) {
     return props.message.attachments
-      .map((attachment) => attachment.fileName || attachment.name || "attachment")
+      .map((attachment) => attachment.fileName)
       .join("\n");
   }
   return "";
@@ -751,6 +1124,8 @@ function normalizedSelectedText(selection: Selection | null): string {
 }
 
 onBeforeUnmount(() => {
+  stopTrackingReactions?.();
+  stopTrackingPreviews?.();
   window.removeEventListener("keydown", handleContextMenuKeydown);
   window.removeEventListener("pointerdown", closeContextMenuFromOutside);
   removeSelectionOutsidePointerListener();

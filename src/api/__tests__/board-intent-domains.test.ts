@@ -36,6 +36,11 @@ const domainDeclarations = {
     "approveBoardIntent:export",
     "markBoardIntentTaskResult:export",
     "denyBoardIntent:export",
+    "TASK_PROGRESS_RANK:private",
+    "CLOSED_STATUS_NEXT_STEPS:private",
+    "SupersedeTaskState:private",
+    "boardIntentSupersedeReason:private",
+    "supersedeBoardIntentsForTask:export",
     "expireBoardIntents:export",
   ],
   approval: [
@@ -47,6 +52,9 @@ const domainDeclarations = {
     "BoardIntentApprovalConsumptionError:export",
     "stableJson:private",
     "hashBoardIntentPayload:export",
+    "approvingAssignmentLive:private",
+    "approvingManagerModeOn:private",
+    "approvedTaskStateMatches:private",
     "verifyBoardIntentApproval:export",
     "consumeBoardIntentApproval:export",
     "assertConsumeBoardIntentApproval:export",
@@ -162,6 +170,7 @@ const facadeExports = [
   "getBoardIntent:value",
   "listBoardIntents:value",
   "markBoardIntentTaskResult:value",
+  "supersedeBoardIntentsForTask:value",
   "BoardIntentApprovalConsumptionError:value",
   "assertConsumeBoardIntentApproval:value",
   "consumeBoardIntentApproval:value",
@@ -242,7 +251,7 @@ test("every board-intent declaration keeps one exact domain owner and visibility
       declarations.add(name);
     }
   }
-  assert.equal(declarations.size, 44);
+  assert.equal(declarations.size, 52);
 });
 
 test("board-intent domains are acyclic and never import the facade", () => {

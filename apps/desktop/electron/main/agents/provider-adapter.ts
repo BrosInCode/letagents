@@ -42,7 +42,7 @@ export interface ProviderAdapterCapabilities {
    * Room-ingress modes this adapter can safely run. Daemon inbox support
    * requires bounded run/recover semantics, not merely a long-lived process.
    */
-  deliveryModes?: ReadonlyArray<"mcp_polling" | "desktop_events" | "daemon_inbox">;
+  deliveryModes?: ReadonlyArray<"mcp_polling" | "daemon_inbox">;
   /** Continue the SAME provider session across a restart (vs. starting fresh). */
   resume: boolean;
   /** Inject a message into a running session at its next tool boundary (poke). */
@@ -151,6 +151,13 @@ export interface ProviderContinuationRef {
   lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
   /** Durable native process endpoint used to reconnect without creating a second writer. */
   providerConnection?: ProviderConnectionRef | null;
+  /**
+   * The daemon's own records say this process was started with its owner's
+   * own provider setup, or ("unknown") cannot say how it was started. It is
+   * never read off the process, and it is absent for every agent that has
+   * never had that setup.
+   */
+  ownerSetup?: true | "unknown";
 }
 
 export type ProviderConnectionRef =
@@ -220,10 +227,16 @@ export function sameProviderConnectionIdentity(
 export interface ProviderSpawnRequest {
   /** Host-only wake hint for a changed read-only progress projection. */
   onProgress?: () => void;
+  /**
+   * Host-only hint that the native process is up and talking. Whatever
+   * startup remains is a remote model round trip, so the daemon hands its
+   * provider-launch slot to the next agent here instead of at return.
+   */
+  onNativeStarted?: () => void;
   workAttemptId: string;
   roomId: string;
   /** Durable ingress owner selected by the daemon, never inferred from policy. */
-  deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
+  deliveryMode?: "mcp_polling" | "daemon_inbox";
   /** Requested lifecycle authority, frozen when the returned native birth is checkpointed. */
   lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
   /** Dormant, attested borrowed-worker profile. Launch returns idle; it never starts polling. */
@@ -240,6 +253,15 @@ export interface ProviderSpawnRequest {
    * hands it to the native harness verbatim; LetAgents never reinterprets it.
    */
   launchPolicy: unknown;
+  /**
+   * The owner turned on their own provider setup for this agent: their MCP
+   * servers, plugins, skills, hooks and the rest of what the provider's CLI
+   * loads for them. Off unless exactly `true`. The daemon never sets it for a
+   * rental, and every adapter refuses it for one.
+   */
+  homeHarness?: boolean;
+  /** The owner says this agent's model reads images. Only Open Model reads it; off unless exactly `true`. */
+  imageInput?: boolean;
   /** Exact configuration snapshot selected before this native runtime starts. */
   model?: string | null;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
@@ -276,6 +298,7 @@ export interface ProviderSpawnRequest {
     apiKey: string | null;
     baseUrl: string;
     model: string;
+    contextWindow?: number | null;
   };
 }
 
@@ -304,6 +327,10 @@ export interface ProviderHandle {
   readonly providerContinuationId: string | null;
   /** Persist this with the continuation so a fresh adapter can verify/reattach. */
   readonly providerConnection?: ProviderConnectionRef | null;
+  /** Owner-visible warnings from this launch; the daemon records each in the agent's activity. */
+  readonly launchNotices?: readonly string[];
+  /** The process was started with its owner's own provider setup. */
+  readonly ownerSetup?: boolean;
   observedState(): ProviderObservedState;
 }
 
@@ -317,6 +344,8 @@ export interface ProviderHandle {
 export type ProviderAttachTerminal = {
   state: "terminal";
   terminal: ProviderTerminalPayload;
+  /** Lines for the owner, when the adapter itself stopped the runtime it found; the daemon records each in the agent's activity. */
+  notices?: readonly string[];
 };
 
 export interface ProviderStopOptions {
@@ -383,26 +412,133 @@ export interface ProviderStreamEvent {
   durablePayloadRef: string | null;
 }
 
+/** How a running provider takes images: bytes in memory, a daemon-owned file its own process reads, or not at all. */
+export type RoomTurnImageDelivery = "memory" | "file" | null;
+/** An image type every image-capable provider accepts. */
+export type RoomTurnImageMimeType = "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+/**
+ * Which staged room files a running provider's agent can open with its own
+ * tools, by kind. Null: none (it cannot read this machine's files).
+ */
+export type RoomTurnFileAccess = { text: boolean; pdf: boolean } | null;
+/** Where a file from the recent room context came from, so the prompt can name it. */
+export type RoomTurnAttachmentOrigin = {
+  messageId: string;
+  /** The sender's display name, printable and short. */
+  sender: string;
+  /** The message belongs to the activating message's thread. */
+  inThread: boolean;
+  /** The start of the message's text, when the turn's room context does not show that message. */
+  preview?: string;
+};
+/**
+ * One file on the activating room message or on a recent message before it,
+ * as the daemon prepared it for this turn. The daemon alone downloads; an
+ * adapter never sees a bearer or a storage address, only bytes in memory or
+ * a daemon-owned file path.
+ */
+export type ProviderRoomTurnAttachment = {
+  /** 1-based position on its message. */
+  index: number;
+  /** The recent message that carried the file; absent for the activating message. */
+  origin?: RoomTurnAttachmentOrigin;
+  fileName: string;
+  /** The sender's declared type; for an included image, the type its bytes show. */
+  mimeType: string;
+  sizeBytes: number | null;
+  status: "image" | "not_image" | "too_large" | "turn_limit" | "unavailable" | "provider_unsupported"
+    /** A text file or PDF saved where this turn's agent may read it. */
+    | "file"
+    /** Not an image, text file or PDF by its name and declared type. */
+    | "unsupported_type"
+    /** Its bytes are neither text nor a PDF. */
+    | "binary"
+    | "empty"
+    /** This agent cannot open files on this machine. */
+    | "cannot_read"
+    /** This agent opens text files but cannot read PDFs. */
+    | "cannot_read_pdf"
+    /** Recent messages only: the turn already carries its most images from earlier messages. */
+    | "context_limit"
+    /** Recent messages only: an earlier turn of this agent already received it, so it is not sent again. */
+    | "earlier_turn";
+  /** Only for status "image": the bytes in memory, or a daemon-owned file the provider's own process reads. */
+  image?: { mimeType: RoomTurnImageMimeType; data?: Uint8Array; path?: string };
+  /** A file that is not an image: its notes say "file", not "image". */
+  category?: "file";
+  /** Only for status "file": the daemon-owned copy this turn's agent reads with its own tools. Never its bytes. */
+  file?: {
+    path: string;
+    kind: "text" | "pdf";
+    /** Text only: "utf-16" was converted to UTF-8; "unknown" is not valid UTF-8. */
+    encoding?: "utf-8" | "utf-16" | "unknown";
+    lines?: number;
+    longestLine?: number;
+    /** An earlier turn of this conversation was given it too. */
+    repeated?: boolean;
+  };
+};
 /** A single daemon-owned inbox item executed on an existing provider thread. */
 export interface ProviderRoomTurnRequest {
+  /** Authoritative inbox scope; message IDs alone are only unique within a Room. */
+  roomId?: string;
   inboxItemId: string;
   sourceMessage: unknown;
   activation: Record<string, unknown>;
   actionId: string;
   observedContext?: unknown[];
+  /** The room's history summary, on the first turn of a continuation that has not had it. */
+  historySummary?: import("../../../../../shared/room-history-summary.mjs").RoomHistoryTurnSummary;
+  /** The activating message's files, then images from recent messages, prepared by the daemon for this one turn. Never persisted. */
+  attachments?: ProviderRoomTurnAttachment[];
 }
 
 export type ProviderRoomTurnResult =
   | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   /** Exact native terminal proof; never synthesized from an exception or stream classifier. */
-  | { turnId: string; providerContinuationId: string; outcome: "failed" | "interrupted"; text: null; evidence: "transcript" | "stream"; error?: string; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
+  | { turnId: string; providerContinuationId: string; outcome: "failed" | "interrupted"; text: null; evidence: "transcript" | "stream"; error?: string;
+    /** The provider declined this turn's content on policy grounds; `error` carries its reason. */
+    refusal?: true;
+    /**
+     * The turn ended on a result of a shape the adapter does not know. `error` may hold the model's own
+     * words, which are for the owner to read: nothing may read them as a provider error and act on them.
+     */
+    unrecognizedResult?: true;
+    /**
+     * Claude Code's own structured account of a failed request to the model: the provider's HTTP status, the
+     * result's terminal reason and Claude Code's name for the error. Task continuity decides on these and not on `error`.
+     */
+    claudeApiFailure?: { status: number | null; terminalReason: string | null; category: string | null; usageLimit?: true; promptTooLong?: true };
+    /** The turn finished, but the wrapper could not prove its remote authority ended. Its journaled reply is never published. */
+    authorityUnproven?: true; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" };
 export type ProviderRoomTurnCheckpointDisposition = {
   acceptedResult: ProviderRoomTurnResult;
   cleanupRecoveryEvidence: boolean;
 };
-export interface ProviderRoomTurnRecoveryRequest { inboxItemId: string; providerTurnId: string; }
+/** Why a turn that was cut off by the exit of the process that ran it is reported as interrupted. */
+export const PROCESS_ENDED_DURING_TURN = "The agent's process ended during this turn, and the turn's result could not be recovered. The message was not run again.";
+export interface ProviderRoomTurnRecoveryRequest {
+  inboxItemId: string;
+  providerTurnId: string;
+  /** The execution record holds this turn without an ending; the ending that is read back is to be recorded too. */
+  recordEnding?: boolean;
+  /**
+   * The process that ran this turn has ended; the daemon holds its recorded
+   * terminal. A turn the conversation's own record shows as started and
+   * never ended was cut off by that exit, and is reported as interrupted.
+   */
+  originProcessEnded?: boolean;
+  /** The turn's own conversation, when it is not the one this runtime continues. */
+  providerContinuationId?: string;
+  /**
+   * The daemon has this turn saved as completed with an answer that could not
+   * be read, and this read is the second look at it. An adapter that finds no
+   * answer again may end the turn instead of reporting it unreadable again.
+   */
+  savedAsUnreadable?: boolean;
+}
 export interface ProviderContinuationRepairRequest {
   workAttemptId: string;
   expectedProviderContinuationId: string;
@@ -418,12 +554,21 @@ export interface ProviderContinuationRepairRequest {
   launchPolicy: unknown;
   model?: string | null;
   reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
+  /** The agent, as its launch names it: a line this repair says is not said again by the agent's next launch. */
+  supervisorEntryId?: string;
 }
 export interface ProviderContinuationRepairResult {
   handle: ProviderHandle;
   outcome: "rematerialized" | "replaced";
   previousProviderContinuationId: string;
   replacementProviderContinuationId: string;
+  /** Owner-visible lines of this repair; the daemon records each in the agent's activity. */
+  notices?: readonly string[];
+  /**
+   * The daemon calls this when the repair is committed and its lines, if it has any, are in the agent's
+   * activity. A provider that says a line once counts it as said only then.
+   */
+  noticesRecorded?: () => void;
 }
 
 export class ProviderContinuationMissingError extends Error {
@@ -466,6 +611,7 @@ export interface ProviderRoomTurnOptions {
 }
 
 export interface ProviderAdapter {
+  readUsage?(handle: ProviderHandle): Promise<import("../../../shared/provider-usage.js").ProviderUsage | null>;
   compactionProgress?(workAttemptId: string): { state: "compacting"; startedAt: string } | null;
   readonly id: ProviderAdapterId;
 
@@ -519,6 +665,10 @@ export interface ProviderAdapter {
 
   /** Run one bounded room turn without launching or replacing the provider. */
   runRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRequest, options?: ProviderRoomTurnOptions): Promise<ProviderRoomTurnResult>;
+  /** How this running handle takes the activating message's images; absent or null means it cannot. */
+  roomTurnImageDelivery?(handle: ProviderHandle): RoomTurnImageDelivery;
+  /** Which staged room files this running handle's agent can open with its own tools; absent or null means none. */
+  roomTurnFileAccess?(handle: ProviderHandle): RoomTurnFileAccess;
   /** Recover only a persisted exact native turn; it must not start another turn. */
   recoverRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest, options?: {
     detachSignal?: AbortSignal;

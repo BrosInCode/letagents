@@ -24,7 +24,7 @@
         System
       </button>
       <button
-        v-if="activeEntry.type !== 'inbox'"
+        v-if="activeEntry.type !== 'inbox' && activeEntry.type !== 'my-work'"
         class="primary-button"
         type="button"
         :disabled="loading"

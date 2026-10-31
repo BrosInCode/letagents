@@ -1,3 +1,4 @@
+import type { RoomGif } from "../../../../../../shared/room-expressions.mjs"
 export interface MessageReplyReference {
   id: string
   sender: string
@@ -51,6 +52,8 @@ export interface AttachmentUploadTarget {
 }
 
 export interface RoomMessage {
+  gif?: RoomGif | null
+  sender_profile?: { login: string; avatar_url: string | null } | null
   id: string
   sender: string
   text: string
@@ -62,7 +65,14 @@ export interface RoomMessage {
   thread_root_id?: string | null
   thread_reply_to_id?: string | null
   reply_to?: MessageReplyReference | null
+  /**
+   * Emoji reactions as of this read, exactly as the server sent them. The
+   * reaction store validates them; nothing else should read this field.
+   */
+  reactions?: unknown
   agent_identity?: {
+    agent_key?: string | null
+    agent_session_id?: string | null
     name: string
     display_name: string
     owner_label: string

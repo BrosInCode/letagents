@@ -1,16 +1,19 @@
 import { isDeepStrictEqual } from "node:util";
 import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 
+import { TRACKER_IMPORT_CREATOR_PREFIX } from "../../../shared/ticket-connectors.mjs";
 import { db } from "./client.js";
 import { syncRoomSharedArtifactsForTask } from "./room-shared-artifacts.js";
 import { room_agent_sessions, task_leases, tasks } from "./schema.js";
 import { clampLimit, formatTaskId, nextRoomScopedNumber, parseScopedId, type RoomSequenceExecutor } from "./utils.js";
 import { toTask } from "./mappers.js";
+import { findTaskIdByExternalRef, invalidateRoomExternalRefScope, isTaskExternalRefUniqueViolation, TaskExternalRefConflictError } from "./task-external-refs.js";
 import {
   approveBoardIntent,
   assertConsumeBoardIntentApproval,
   getBoardIntent,
   markBoardIntentTaskResult,
+  supersedeBoardIntentsForTask,
 } from "./coordination/board-intents.js";
 import { createTaskLeaseRow } from "./coordination/lease-rows.js";
 import { updateTaskLeaseWorkflowRefs } from "./coordination/task-leases.js";
@@ -31,8 +34,26 @@ export const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   cancelled: ["accepted"],
 };
 
-export function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
-  return VALID_TRANSITIONS[from]?.includes(to) ?? false;
+/**
+ * Status changes only a GitHub event may make: a linked pull request merged
+ * before the task reached review, and the card follows the merge. A person, a
+ * worker or a board intent cannot make them: only a write that passes
+ * `githubEvent` to `updateTask` can, and that is the webhook projection and
+ * the stored merge replay.
+ */
+export const GITHUB_EVENT_TRANSITIONS: Partial<Record<TaskStatus, TaskStatus[]>> = {
+  assigned: ["merged"],
+  in_progress: ["merged"],
+  blocked: ["merged"],
+};
+
+export function isValidTransition(
+  from: TaskStatus,
+  to: TaskStatus,
+  options?: { githubEvent?: boolean }
+): boolean {
+  return (VALID_TRANSITIONS[from]?.includes(to) ?? false)
+    || (options?.githubEvent === true && (GITHUB_EVENT_TRANSITIONS[from]?.includes(to) ?? false));
 }
 
 function optionalPayloadString(payload: BoardIntentPayload, key: string): string | null {
@@ -77,7 +98,7 @@ async function insertTaskRow(
   description?: string,
   sourceMessageId?: string,
   executor: RoomSequenceExecutor = db,
-  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null }
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null; externalRef?: string | null }
 ): Promise<Task> {
   const now = new Date().toISOString();
   const task: TaskRow = {
@@ -93,6 +114,7 @@ async function insertTaskRow(
     client_task_id: options?.clientTaskId ?? (options?.boardIntentApproval?.intent_id ? `board-intent:${options.boardIntentApproval.intent_id}` : null),
     pr_url: null,
     workflow_artifacts: [],
+    external_ref: options?.externalRef ?? null,
     created_at: now,
     updated_at: now,
   };
@@ -102,7 +124,7 @@ async function insertTaskRow(
   }
 
   task.number = await nextRoomScopedNumber("tasks", roomId, executor);
-  await executor.insert(tasks).values(task);
+  await withExternalRefConflict(roomId, task.external_ref, () => executor.insert(tasks).values(task));
 
   if (
     options?.boardIntentApproval?.action_type === "task_create"
@@ -146,21 +168,32 @@ export async function acceptProposedTaskTx(
   return rows.length > 0;
 }
 
+export class ReservedTaskCreatorError extends Error {
+  readonly code = "task_creator_reserved";
+  constructor() {
+    super(`created_by may not start with "${TRACKER_IMPORT_CREATOR_PREFIX}".`);
+    this.name = "ReservedTaskCreatorError";
+  }
+}
+
 export async function createTask(
   roomId: string,
   title: string,
   createdBy: string,
   description?: string,
   sourceMessageId?: string,
-  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null }
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null; clientTaskId?: string | null; externalRef?: string | null }
 ): Promise<Task> {
-  if (options?.boardIntentApproval) {
-    return db.transaction((tx) =>
+  // Reserved for cards tracker sync imports: only those may be merged away.
+  if (createdBy.startsWith(TRACKER_IMPORT_CREATOR_PREFIX)) throw new ReservedTaskCreatorError();
+  const task = options?.boardIntentApproval
+    ? await db.transaction((tx) =>
       insertTaskRow(roomId, title, createdBy, description, sourceMessageId, tx, options)
-    );
-  }
-
-  return insertTaskRow(roomId, title, createdBy, description, sourceMessageId, db, options);
+    )
+    : await insertTaskRow(roomId, title, createdBy, description, sourceMessageId, db, options);
+  // After commit, so no concurrent read caches the room as having no ticket cards.
+  if (task.external_ref) invalidateRoomExternalRefScope(roomId);
+  return task;
 }
 
 export async function approveTaskCreateBoardIntent(input: {
@@ -416,6 +449,41 @@ export async function findTaskByWorkflowArtifactMatches(
   return undefined;
 }
 
+/**
+ * A client that writes back the artifact list it read cannot send
+ * `linked_by` (validation drops it). Keep the stored mark for every artifact
+ * whose URL is already on the card and that carries no mark, so a key-linked
+ * pull request stays quiet. A server write that sets a mark (a person
+ * confirming a Jev link) replaces the stored one.
+ */
+function keepServerArtifactMarks(
+  current: readonly TaskWorkflowArtifact[],
+  next: TaskWorkflowArtifact[],
+): TaskWorkflowArtifact[] {
+  const marked = new Map(current.flatMap((artifact) =>
+    artifact.url && artifact.linked_by ? [[artifact.url, artifact] as const] : []));
+  if (marked.size === 0) return next;
+  return next.map((artifact) => {
+    const stored = artifact.url ? marked.get(artifact.url) : undefined;
+    // The mark belongs to the pull request it was set for: a client that
+    // changes the artifact's kind or number loses it.
+    return stored && !artifact.linked_by && stored.kind === artifact.kind && (stored.number ?? null) === (artifact.number ?? null)
+      ? { ...artifact, linked_by: stored.linked_by } : artifact;
+  });
+}
+
+/** Turns a unique-index violation on `(room_id, external_ref)` into a named conflict. */
+async function withExternalRefConflict<T>(roomId: string, externalRef: string | null | undefined, write: () => Promise<T>): Promise<T> {
+  try {
+    return await write();
+  } catch (error) {
+    if (externalRef && isTaskExternalRefUniqueViolation(error)) {
+      throw new TaskExternalRefConflictError(externalRef, await findTaskIdByExternalRef(roomId, externalRef).catch(() => null));
+    }
+    throw error;
+  }
+}
+
 export class TaskContentConflictError extends Error {
   readonly code = "task_content_conflict";
 
@@ -437,6 +505,7 @@ export async function updateTask(
     assignee_agent_key?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
+    external_ref?: string | null;
   },
   options?: {
     boardIntentApproval?: BoardIntentConsumptionInput | null;
@@ -449,6 +518,9 @@ export async function updateTask(
     // LeaseFenceStaleError instead of a stale predecessor overwriting the
     // successor's task state. Absent for owner/admin or lease-creation writes.
     leaseFence?: LeaseFence | null;
+    // The write projects a GitHub event onto the task, so it may also make the
+    // status changes in GITHUB_EVENT_TRANSITIONS.
+    githubEvent?: boolean;
   },
   executor?: Parameters<Parameters<(typeof db)["transaction"]>[0]>[0]
 ): Promise<Task | null> {
@@ -466,7 +538,8 @@ export async function updateTask(
     && (updates.assignee_agent_key === undefined || updates.assignee_agent_key === current.assignee_agent_key)
     && (updates.pr_url === undefined || updates.pr_url === current.pr_url)
     && (updates.workflow_artifacts === undefined
-      || isDeepStrictEqual(normalizeTaskWorkflowArtifacts({ artifacts: updates.workflow_artifacts,
+      || isDeepStrictEqual(normalizeTaskWorkflowArtifacts({
+        artifacts: keepServerArtifactMarks(current.workflow_artifacts, updates.workflow_artifacts),
         prUrl: updates.pr_url ?? current.pr_url }), current.workflow_artifacts));
   const retryingProgress = isExactProgressRetry(task);
   const retryingOwnClaim = task.status === "assigned" && updates.status === "assigned"
@@ -482,7 +555,8 @@ export async function updateTask(
     && task.status !== "accepted" && !retryingOwnClaim) {
     throw new LeaseFenceStaleError();
   }
-  if (updates.status && !isValidTransition(task.status, updates.status) && !retryingOwnClaim && !retryingProgress) {
+  if (updates.status && !isValidTransition(task.status, updates.status, { githubEvent: options?.githubEvent })
+    && !retryingOwnClaim && !retryingProgress) {
     throw new Error(
       `Invalid transition: ${task.status} → ${updates.status}. ` +
         `Allowed: ${VALID_TRANSITIONS[task.status].join(", ") || "none"}`
@@ -498,7 +572,7 @@ export async function updateTask(
   const newPrUrl = updates.pr_url ?? task.pr_url;
   const newWorkflowArtifacts = updates.workflow_artifacts
     ? normalizeTaskWorkflowArtifacts({
-        artifacts: updates.workflow_artifacts,
+        artifacts: keepServerArtifactMarks(task.workflow_artifacts, updates.workflow_artifacts),
         prUrl: newPrUrl,
       })
     : synchronizeTaskWorkflowArtifactsWithPrUrl({
@@ -506,14 +580,14 @@ export async function updateTask(
         previousPrUrl: task.pr_url,
         nextPrUrl: newPrUrl,
       });
-  const now = new Date().toISOString();
+  let now = new Date().toISOString();
   const expectedContent = updates.expected_content;
   const writesWorkflow = updates.pr_url !== undefined || updates.workflow_artifacts !== undefined;
   let writtenTask: TaskRow | undefined;
 
   const writeTaskUpdate = async (executor: Pick<typeof db, "update">) => {
     // Omitted fields must not replay the earlier read over a concurrent write.
-    [writtenTask] = await executor
+    [writtenTask] = await withExternalRefConflict(roomId, updates.external_ref ?? null, () => executor
       .update(tasks)
       .set({
         title: updates.title,
@@ -524,6 +598,10 @@ export async function updateTask(
           ? assignment.assignee_agent_key : updates.assignee_agent_key,
         pr_url: updates.pr_url,
         workflow_artifacts: writesWorkflow ? newWorkflowArtifacts : undefined,
+        external_ref: updates.external_ref,
+        // A new ticket's state comes from its tracker, never from the old one.
+        ticket_state: updates.external_ref !== undefined && updates.external_ref !== task.external_ref ? null : undefined,
+        external_item_id: updates.external_ref !== undefined && updates.external_ref !== task.external_ref ? null : undefined,
         updated_at: now,
       })
       .where(and(
@@ -532,8 +610,18 @@ export async function updateTask(
         expectedContent?.description === undefined ? undefined
           : sql`coalesce(${tasks.description}, '') = ${expectedContent.description}`,
       ))
-      .returning();
+      .returning());
     if (!writtenTask && expectedContent) throw new TaskContentConflictError();
+  };
+
+  // Open intents this write carried out, passed or ruled out: pending requests
+  // would wait for a decision that no longer applies, and approvals granted
+  // for the task as it was must not be replayed against the changed task.
+  const supersedeMootBoardIntents = async (executor: Pick<typeof db, "select" | "update">) => {
+    if (!writtenTask || (writtenTask.status === task.status
+      && writtenTask.assignee_agent_key === task.assignee_agent_key)) return;
+    await supersedeBoardIntentsForTask({ room_id: roomId, task_changed: true, task: { id: taskId,
+      status: writtenTask.status, assignee_agent_key: writtenTask.assignee_agent_key } }, executor);
   };
 
   const writeWorkLeaseCreation = async (executor: Pick<typeof db, "insert">) => {
@@ -585,7 +673,24 @@ export async function updateTask(
       if (options.leaseFence) {
         const held = await acquireLeaseFenceTx(tx, options.leaseFence);
         if (!held) throw new LeaseFenceStaleError();
-        if (progressRetryEligible && updates.status && ["in_progress", "in_review"].includes(updates.status)) {
+        const mayRetryProgress = progressRetryEligible && updates.status !== undefined
+          && ["in_progress", "in_review"].includes(updates.status);
+        if (mayRetryProgress) {
+          // An exact retry checks the worker's session once the task is locked.
+          // Share-lock the session first, as registration and claims do
+          // (session, then lease, then task), so a registration relabelling
+          // this worker never holds the session while waiting on this write.
+          await tx.select({ session_id: room_agent_sessions.session_id }).from(room_agent_sessions)
+            .where(eq(room_agent_sessions.session_id, options.leaseFence.agent_session_id)).for("share");
+        }
+        if (updates.pr_url !== undefined) {
+          // The pr_url is written to the lease too. Lock the lease row before
+          // the task row, the order lease actions and lease adoption take, so
+          // this never holds the task while waiting for the lease.
+          await tx.select({ id: task_leases.id }).from(task_leases)
+            .where(eq(task_leases.id, options.leaseFence.lease_id)).for("no key update");
+        }
+        if (mayRetryProgress) {
           // Re-read under the rebind lock and task lock: concurrent identical
           // requests must return the winning commit without changing its timestamp.
           const [current] = await tx.select().from(tasks)
@@ -635,10 +740,21 @@ export async function updateTask(
         }
       }
       if (options.boardIntentApproval) {
-        await assertConsumeBoardIntentApproval(options.boardIntentApproval, tx);
+        // Compare the approval with the task under its row lock, so a change
+        // committed after the approval cannot slip past it.
+        const [locked] = await tx.select({ status: tasks.status, assignee_agent_key: tasks.assignee_agent_key })
+          .from(tasks).where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber))).for("update");
+        await assertConsumeBoardIntentApproval({
+          ...options.boardIntentApproval,
+          ...(locked ? { task_state: locked } : {}),
+        }, tx);
       }
+      // Read the clock after the lock waits above, the lease lock first among
+      // them, so updated_at never goes back past a write this one waited for.
+      now = new Date().toISOString();
       await writeTaskUpdate(tx);
       await writeWorkLeaseCreation(tx);
+      await supersedeMootBoardIntents(tx);
       // Fenced path: refs + artifact sync inside the same fenced tx.
       if (options.leaseFence) {
         await writeArtifactSideEffects(tx);
@@ -651,10 +767,16 @@ export async function updateTask(
       await writeArtifactSideEffects(executor ?? db);
     }
   } else {
-    await writeTaskUpdate(executor ?? db);
+    // The task change and the intents it supersedes commit together.
+    const writeTaskAndSupersede = async (tx: NonNullable<typeof executor>) => {
+      await writeTaskUpdate(tx);
+      await supersedeMootBoardIntents(tx);
+    };
+    await (executor ? writeTaskAndSupersede(executor) : db.transaction(writeTaskAndSupersede));
     await writeArtifactSideEffects(executor ?? db);
   }
 
+  if (updates.external_ref !== undefined) invalidateRoomExternalRefScope(roomId);
   if (progressRetryResult) return progressRetryResult;
   return writtenTask ? toTask(writtenTask) : null;
 }

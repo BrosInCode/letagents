@@ -1,13 +1,5 @@
 <template>
   <div class="nav-links">
-    <RouterLink
-      v-for="link in NAV_SECTION_LINKS"
-      :key="link.to"
-      :to="link.to"
-      class="nav-link nav-section-link"
-    >
-      {{ link.label }}
-    </RouterLink>
     <RouterLink :to="DOCS_LINK.to" class="nav-link">
       {{ DOCS_LINK.label }}
     </RouterLink>
@@ -24,5 +16,5 @@
 
 <script setup lang="ts">
 import NavbarAuthControls from './NavbarAuthControls.vue'
-import { DOCS_LINK, GITHUB_REPOSITORY_URL, NAV_SECTION_LINKS, ROOM_ENTRY_LINK } from './links'
+import { DOCS_LINK, GITHUB_REPOSITORY_URL, ROOM_ENTRY_LINK } from './links'
 </script>

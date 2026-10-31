@@ -1,3 +1,4 @@
+import { ownerSetupRef } from "./provider-configuration.js";
 import type { SupervisorGrantHttp } from "./cloud-http.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
 import type { ManifestStore } from "./manifest-store.js";
@@ -52,7 +53,7 @@ export type RuntimeRecoveryCoordinatorOptions = {
   supervisorGrantHttp: SupervisorGrantHttp;
   provider?: ProviderActionPort;
   streams: Pick<ProviderStreamCoordinator, "currentInstallation" | "install" | "remove">;
-  terminals?: Pick<ProviderTerminalCoordinator, "handleTerminal">;
+  terminals?: Pick<ProviderTerminalCoordinator, "handleTerminal" | "supersede">;
   restartDelivery?: (entryId: string) => Promise<void>;
   releaseRecoveredObservation?: (entryId: string, runtimeId: string, stoppedCursorGeneration?: string) => void;
   processIdentity?: ProcessIdentity;
@@ -77,6 +78,8 @@ export type RuntimeRecoveryCoordinatorOptions = {
  * provider runtimes that are durably proven terminal.
  */
 export class RuntimeRecoveryCoordinator {
+  /** Entries whose exit recording an owner's recovery has taken over, until that recovery ends. */
+  private readonly exitHolds = new Map<string, () => void>();
   private readonly store: ManifestStore;
   private readonly durability: WorkDurabilityStore;
   private readonly inbox: SupervisedAgentInboxStore;
@@ -252,7 +255,6 @@ export class RuntimeRecoveryCoordinator {
       const next = await this.store.write(
         this.authority.currentManifestGeneration(),
         entries,
-        manifest.legacy_lane_owners,
         (commit) => this.authority.fenceCommit(commit),
       );
       this.authority.acceptManifestGeneration(next.generation);
@@ -332,6 +334,8 @@ export class RuntimeRecoveryCoordinator {
       return await this.recoverAgentRuntimeExclusive(entryId, daemonGeneration);
     } finally {
       release();
+      this.exitHolds.get(entryId)?.();
+      this.exitHolds.delete(entryId);
       if (recovery) {
         this.requestConvergence(entryId);
         void this.options.restartDelivery?.(entryId).catch(() => undefined);
@@ -398,6 +402,13 @@ export class RuntimeRecoveryCoordinator {
         throw new Error("This provider does not yet support stopping an unreachable runtime safely. Stop it in its provider app, then retry recovery.");
       }
     }
+    // The owner's recovery proves the process gone and saves its terminal
+    // itself. An exit of that process the daemon is still recording gives way
+    // to it now, before this waits for the entry's queue: a step of that
+    // recording which never returns must not hold the owner's last resort.
+    // The entry stays held as the recording held it until this recovery ends.
+    const hold = this.options.terminals?.supersede(entryId);
+    if (hold) this.exitHolds.set(entryId, hold);
     const record = await this.serializeEntry(entryId, () => this.authority.serializeManifest(async () => {
       await assertAuthority();
       const prepared = await this.store.prepareRuntimeRecovery(this.authority.currentManifestGeneration(), request,
@@ -464,8 +475,7 @@ export class RuntimeRecoveryCoordinator {
       if (sessionId) {
         const grant = this.workerAuthority.currentHostGrant(current);
         if (!grant || !this.supervisorGrantHttp.endWorkerSession) throw new Error("Desktop credentials are needed to finish recovery. Reconnect the desktop and retry.");
-        await this.supervisorGrantHttp.endWorkerSession({ apiUrl: grant.apiUrl, grantId: grant.grantId,
-          supervisorGrant: grant.supervisorGrant, grantGeneration: grant.grantGeneration, sessionId });
+        await this.endWorkerSessionForRestart(grant, sessionId);
       }
       await assertAuthority();
       if (binding) await this.bindings.unbind(entryId, binding.agent_session_id, binding.execution_generation_id);
@@ -485,6 +495,21 @@ export class RuntimeRecoveryCoordinator {
       return updated;
     });
     return { outcome: "recovering", entry: await this.entryWithDerivedLiveness(entry) };
+  }
+
+  /** Recovery starts the agent again in the same room, so the room keeps the turn it shared. */
+  private async endWorkerSessionForRestart(
+    grant: NonNullable<ReturnType<WorkerAuthorityCoordinator["currentHostGrant"]>>,
+    sessionId: string,
+  ): Promise<void> {
+    await this.supervisorGrantHttp.endWorkerSession!({
+      apiUrl: grant.apiUrl,
+      grantId: grant.grantId,
+      supervisorGrant: grant.supervisorGrant,
+      grantGeneration: grant.grantGeneration,
+      sessionId,
+      restarting: true,
+    });
   }
 
   private async recoverAgentRuntimeExclusive(entryId: string, daemonGeneration: number) {
@@ -583,7 +608,8 @@ export class RuntimeRecoveryCoordinator {
         }
         if (!execution.terminal && !recoverIdleCursor) {
           if (!this.provider) throw new Error("Provider recovery is unavailable.");
-          const attachment = await this.provider.attach(providerRef(entry));
+          const startedAt = (await this.store.getAgentConfiguration(entryId))?.runtime_configuration_revision;
+          const attachment = await this.provider.attach(providerRef(entry, startedAt));
           if (!attachment) {
             throw new Error("LetAgents cannot prove that the previous provider process stopped. Recovery was not started.");
           }
@@ -620,13 +646,7 @@ export class RuntimeRecoveryCoordinator {
         if (!grant || !this.supervisorGrantHttp.endWorkerSession) {
           throw new Error("Desktop credentials are required before this provider can be safely recovered.");
         }
-        await this.supervisorGrantHttp.endWorkerSession({
-          apiUrl: grant.apiUrl,
-          grantId: grant.grantId,
-          supervisorGrant: grant.supervisorGrant,
-          grantGeneration: grant.grantGeneration,
-          sessionId: retainedSessionId,
-        });
+        await this.endWorkerSessionForRestart(grant, retainedSessionId);
         if (stoppedCursorLane && interruptedDelivery && ref && binding
           && binding.entry_id === entryId && binding.room_id === entry.room_id
           && binding.work_attempt_id === ref.work_attempt_id
@@ -706,7 +726,12 @@ async function boundedRecoveryWait(pending: Promise<void>): Promise<void> {
   } finally { if (timer) clearTimeout(timer); }
 }
 
-function providerRef(entry: DaemonManifestEntry): ProviderActionRef {
+/**
+ * The reference recovery attaches with. Exported so its record of how the
+ * process was started can be checked. `appliedRevision` is the revision the
+ * store says the process started with: the entry carries none.
+ */
+export function providerRef(entry: DaemonManifestEntry, appliedRevision: number | undefined): ProviderActionRef {
   if (!entry.work_attempt_id || !entry.provider_ref) {
     throw new Error("Provider reference is unavailable.");
   }
@@ -715,6 +740,7 @@ function providerRef(entry: DaemonManifestEntry): ProviderActionRef {
     providerContinuationId: entry.provider_ref.provider_continuation_id,
     provider: entry.provider,
     providerConnection: entry.provider_ref.provider_connection,
+    ...ownerSetupRef(entry, appliedRevision),
   };
 }
 

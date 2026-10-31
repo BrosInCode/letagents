@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { resolve } from 'node:path';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
-import { createKnowledgeRecord, reviseKnowledgeRecord } from '../../../shared/room-knowledge.mjs';
+import { createKnowledgeRecord, formatAttentionRequest, reviseKnowledgeRecord } from '../../../shared/room-knowledge.mjs';
 
 const url = process.env.TEST_DB_URL;
 if (url) process.env.DB_URL = url;
@@ -10,6 +10,7 @@ const client = url ? await import('../db/client.js') : null;
 const store = url ? await import('../db/room-knowledge.js') : null;
 const messages = url ? await import('../db.js') : null;
 const events = url ? await import('../server/events.js') : null;
+const answers = url ? await import('../rooms/attention-answers.js') : null;
 const agent = { id: 'owner/worker-b', label: 'Worker B', kind: 'agent' as const };
 const human = { id: 'human-1', label: 'Emmy', kind: 'human' as const };
 const input = { client_id: 'record-0001', category: 'decision' as const, title: 'Keep the API', body: 'Preserve v2.' };
@@ -67,4 +68,28 @@ test('a response and its chat message commit atomically and roll back together',
   await assert.rejects(store!.assertKnowledgeSource(room.id, 'msg_99999'), /does not exist/);
   const hidden = await messages!.addMessage(room.id, 'system', '', { agent_prompt_kind: 'auto' });
   await assert.rejects(store!.assertKnowledgeSource(room.id, hidden.id), /does not exist/);
+});
+test('an agent request and its room notice commit together, and a retry posts nothing more', options, async () => {
+  const room = await messages!.createProjectWithName(`attention-request-${Date.now()}`);
+  const record = createKnowledgeRecord(room.id, 'attention', { ...input, client_id: 'request-notice-0001' }, agent);
+  const publisher = { agent_key: agent.id, agent_session_id: null, owner_account_id: null };
+  await assert.rejects(answers!.commitAttentionRequest(room.id, record, publisher, {
+    emitMessage: (roomId, sender, text, opts) => events!.emitProjectMessage(roomId, sender, text, { ...opts,
+      with_created_message_in_transaction: async (tx, message) => { await opts!.with_created_message_in_transaction!(tx, message); throw new Error('Simulated failure'); } }),
+  }), /Simulated failure/);
+  assert.equal(await store!.getRoomKnowledge(room.id, record.id), null);
+  assert.equal((await messages!.getMessages(room.id)).messages.length, 0);
+  const saved = await answers!.commitAttentionRequest(room.id, record, publisher);
+  const [notice] = (await messages!.getMessages(room.id)).messages;
+  assert.equal(notice.text, formatAttentionRequest(record)); assert.equal(notice.sender, agent.label); assert.equal(notice.source, 'agent');
+  assert.equal(saved.source_message_id, notice.id);
+  assert.deepEqual(await store!.getRoomKnowledge(room.id, record.id), saved);
+  assert.deepEqual(await answers!.commitAttentionRequest(room.id, record, publisher), saved, 'a retry returns the saved request');
+  await assert.rejects(answers!.commitAttentionRequest(room.id, { ...record, body: 'Different' }, publisher), /already used/);
+  assert.equal((await messages!.getMessages(room.id)).messages.length, 1);
+  const closed = reviseKnowledgeRecord(saved, { expected_version: 1, close: true }, human);
+  await answers!.commitAttentionAnswer(room.id, saved, closed, human);
+  const reply = (await messages!.getMessages(room.id)).messages.at(-1)!;
+  assert.equal(reply.reply_to?.id, notice.id, 'the answer replies to the notice');
+  assert.equal((await store!.getRoomKnowledge(room.id, record.id))!.response!.closed, true);
 });

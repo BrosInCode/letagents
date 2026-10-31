@@ -3,13 +3,14 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { appSource as readAppSource } from "./app-source";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const dialogSource = readFileSync(
   join(testDirectory, "../src/components/desktop/content/DesktopDeviceAuthDialog.vue"),
   "utf8",
 );
-const appSource = readFileSync(join(testDirectory, "../src/App.vue"), "utf8");
+const appSource = readAppSource();
 const authFlowSource = readFileSync(
   join(testDirectory, "../src/composables/useDesktopAuthFlow.ts"),
   "utf8",
@@ -29,6 +30,6 @@ test("sidebar and settings share a resumable account auth dialog", () => {
   assert.match(appSource, /<DesktopDeviceAuthDialog/);
   assert.match(appSource, /@connect-account="openAccountAuthFlow"/);
   assert.match(appSource, /@start-auth="openAccountAuthFlow"/);
-  assert.match(appSource, /if \(authStatus\.value\?\.pendingDeviceAuth\) \{\s+scheduleAuthPoll\(\);\s+return;/);
+  assert.match(appSource, /if \(authStatus\.value\?\.pendingDeviceAuth\) \{\s+(?:app\.)?scheduleAuthPoll\(\);\s+return;/);
   assert.doesNotMatch(authFlowSource, /openVerification\(result\.pendingDeviceAuth\.verificationUri\)/);
 });

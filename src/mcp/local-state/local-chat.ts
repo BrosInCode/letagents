@@ -5,8 +5,8 @@ import { captureLocalSupervisedRouting, ensureLocalSupervisedRoutingSchema, runL
 import { createRequire } from "node:module";
 import { ensureLocalTaskRevisionSchema, observeLocalTaskCommits } from "../../../shared/local-task-revisions.mjs";
 import { mkdir, readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
+import { letagentsHomePath } from "../../../shared/letagents-home.mjs";
 import { withWorkerStateFence, currentWorkerCall, assertWorkerConnection } from "../worker-call-context.js";
 import { ensureLocalWorkLeaseSchema } from "../../../shared/local-work-leases.mjs";
 
@@ -86,6 +86,7 @@ export type LocalChatMessagePage = {
 
 export type { LocalTask } from "../../../shared/local-task-store.mjs";
 import type { LocalTask } from "../../../shared/local-task-store.mjs";
+import { currentSessionScope, refuseLocalMachineInSession, requireScopeWhenHosted } from "../server/runtime/session-scope.js";
 
 type SqliteStatement = {
   all: (...params: unknown[]) => Record<string, unknown>[];
@@ -144,10 +145,10 @@ type LocalChatInput = {
 const require = createRequire(import.meta.url);
 const chatStorageSettingsPath =
   process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH?.trim() ||
-  join(homedir(), ".letagents", "chat-storage.json");
+  letagentsHomePath("chat-storage.json");
 const localChatDatabasePath =
   process.env.LETAGENTS_LOCAL_CHAT_DB?.trim() ||
-  join(homedir(), ".letagents", "local-chat.sqlite");
+  letagentsHomePath("local-chat.sqlite");
 let db: SqliteDatabase | null = null;
 let dbInitialization: Promise<SqliteDatabase> | null = null;
 let databaseInitializationObserverForTest: (() => void) | null = null;
@@ -465,6 +466,9 @@ async function initializeDb(): Promise<SqliteDatabase> {
 }
 
 async function getDb(): Promise<SqliteDatabase> {
+  // A remote session has no local chat database on the API server.
+  refuseLocalMachineInSession("Local chat storage");
+  requireScopeWhenHosted("Local chat storage");
   if (db) return db;
   dbInitialization ??= initializeDb();
   try {
@@ -560,6 +564,7 @@ function allocateLocalMessageNumber(database: SqliteDatabase, roomId: string): n
 }
 
 export async function isLocalChatStorageEnabled(): Promise<boolean> {
+  if (currentSessionScope()) return false;
   const envMode = process.env.LETAGENTS_CHAT_STORAGE?.trim().toLowerCase();
   if (envMode === "local") return true;
   if (envMode === "cloud") return false;
@@ -576,6 +581,8 @@ export async function isLocalChatStorageEnabled(): Promise<boolean> {
 export async function isLocalRoomStorageEnabled(
   roomId?: string | null,
 ): Promise<boolean> {
+  // Every room of a remote session is a hosted room.
+  if (currentSessionScope()) return false;
   const envMode = process.env.LETAGENTS_CHAT_STORAGE?.trim().toLowerCase();
   if (envMode === "local") return true;
   if (envMode === "cloud") return false;
@@ -641,6 +648,7 @@ export async function resolveLocalRoomStorageIdentifiers(
 ): Promise<{ localRoomId: string | null; cloudRoomId: string | null }> {
   const normalizedRoomId = roomId?.trim() || "";
   if (!normalizedRoomId) return { localRoomId: null, cloudRoomId: null };
+  if (currentSessionScope()) return { localRoomId: normalizedRoomId, cloudRoomId: normalizedRoomId };
   try {
     const database = await getDb();
     const row = database
@@ -879,6 +887,7 @@ export const listLocalActiveTaskOwnerLeases = localTasks.listLocalActiveTaskOwne
 export const getLocalTask = localTasks.getLocalTask;
 
 async function mutateLocalTask<T>(operation: string, args: unknown[]): Promise<T> {
+  refuseLocalMachineInSession("The local task board");
   assertWorkerConnection();
   const result = await requestLocalBoard<T>("mutate", { domain: "mcp", operation, args,
     databasePath: localChatDatabasePath, statePath: getLocalStatePath(), worker: currentWorkerCall() ?? null });

@@ -1,6 +1,11 @@
 import type { Request } from "express";
 import { parseBearerAuthorization } from "./bearer-authorization.js";
 
+import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
+import { getOwnerTokenAccountByTokenHash } from "../db/auth/owner-tokens.js";
+import { getMcpOAuthAccessGrant, getMcpOAuthGrantBySecretHash } from "../db/mcp-oauth.js";
+import { isRemoteMcpRequestPath, mcpOAuthUrls } from "../mcp-oauth/config.js";
+import { grantSecretOf, looksLikeMcpAccessToken, safeEqual, sha256Hex } from "../mcp-oauth/tokens.js";
 import {
   getOwnerTokenAccountByToken,
   getRoomAgentSessionBearerByToken,
@@ -14,6 +19,19 @@ import {
 import { isAgentSessionBearerCapability, isAgentSessionBearerFeatureEnabled } from "../../shared/agent-session-bearer.js";
 
 export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestAuth> {
+  // A remote MCP session's in-process call: re-resolve the bound owner token
+  // (or OAuth grant) from its hash, so a fresh check (live rechecks,
+  // revocation) sees the session's current account, or nothing once the
+  // token or grant is revoked. A grant acts with an owner token's powers here.
+  const internal = inProcessPrincipal(req);
+  if (internal) {
+    const account = await getOwnerTokenAccountByTokenHash(internal.tokenHash)
+      ?? (await getMcpOAuthGrantBySecretHash(internal.tokenHash))?.account
+      ?? null;
+    return account && account.account_id === internal.account.account_id
+      ? { account, authKind: "owner_token" }
+      : { account: null, authKind: null };
+  }
   const cookies = parseCookies(req.headers?.cookie);
   const sessionToken = cookies.letagents_session;
   let cookieSessionAccount = null;
@@ -31,6 +49,8 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
 
   if (authorization.kind === "invalid") return { account: null, authKind: null };
   const providerToken = authorization.token;
+
+  if (looksLikeMcpAccessToken(providerToken)) return resolveMcpOAuthAccessToken(req, providerToken);
 
   const ownerTokenAccount = await getOwnerTokenAccountByToken(providerToken);
   if (ownerTokenAccount) {
@@ -60,6 +80,10 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
     const workerBearer = await getRoomAgentSessionBearerByToken(providerToken);
     if (workerBearer) {
       const { bearer, session } = workerBearer;
+      // Loaded here, not at the top: the ask store pulls in room messaging, which imports this module.
+      const waitingForAsker = session.supervisor_grant_id
+        ? await import("../agent-asks/store.js").then(asks => asks.isGrantWaitingForAsker(session.supervisor_grant_id!))
+        : false;
       return {
         account: null,
         authKind: "agent_session",
@@ -80,6 +104,7 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
           ide_label: session.ide_label,
           repo_branch: session.repo_branch ?? null,
           expires_at: bearer.expires_at,
+          waiting_for_asker: waitingForAsker,
         },
       };
     }
@@ -88,5 +113,25 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
   return {
     account: null,
     authKind: null,
+  };
+}
+
+/**
+ * An OAuth access token from the remote MCP authorization server. Its
+ * audience is the /mcp resource, so it is accepted on /mcp only; any other
+ * path gets the invalid-bearer answer.
+ */
+async function resolveMcpOAuthAccessToken(req: Request, token: string): Promise<ResolvedRequestAuth> {
+  const refused: ResolvedRequestAuth = { account: null, authKind: null };
+  if (!isRemoteMcpRequestPath(req.path)) return refused;
+  const grantSecret = grantSecretOf("access", token);
+  if (!grantSecret) return refused;
+  const grant = await getMcpOAuthAccessGrant(sha256Hex(token));
+  if (!grant || !safeEqual(sha256Hex(grantSecret), grant.secret_hash)) return refused;
+  if (grant.resource !== mcpOAuthUrls().resource) return refused;
+  return {
+    account: grant.account,
+    authKind: "mcp_oauth",
+    mcpOAuth: { grant_id: grant.grant_id, session_secret: grantSecret },
   };
 }

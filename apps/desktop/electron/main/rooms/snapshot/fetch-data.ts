@@ -52,6 +52,7 @@ export async function fetchRoomSnapshotData(
     boardSettings,
     messages,
     githubEvents,
+    liveActivity,
   ] = await Promise.all([
     loadFocusRooms(apiRoomIdentifier),
     loadSource(
@@ -95,6 +96,13 @@ export async function fetchRoomSnapshotData(
       ),
       null,
     ),
+    // A local room has no server, so no member's agent shares a live view there.
+    loadSource(
+      storage.effectiveMode === "local"
+        ? Promise.resolve({ sessions: [] } as ReasoningResponse)
+        : apiFetch<ReasoningResponse>(`/rooms/${encodeURIComponent(apiRoomIdentifier)}/reasoning-sessions?kind=live`),
+      { sessions: [] } as ReasoningResponse,
+    ),
   ]);
 
   return {
@@ -103,6 +111,7 @@ export async function fetchRoomSnapshotData(
     participantsData: participants.data,
     presenceData: presence.data,
     reasoningData: reasoning.data,
+    liveActivityData: liveActivity.data,
     activityHistoryData: activityHistory.data,
     roomArtifactsData: roomArtifacts.data,
     boardSettingsData: boardSettings.data,

@@ -3,6 +3,7 @@ import type {
   DesktopRoomMessageReply,
   DesktopRoomMessageThreadParticipant,
 } from "../../../../../../electron/ipc-types";
+import { roomMessageVisibleText } from "../../../../domain/attention-response";
 
 export interface ThreadSummary {
   count: number;
@@ -42,12 +43,15 @@ export function findThreadMessageElement(
 }
 
 export function scrollThreadMessageIntoView(
-  root: Pick<ParentNode, "querySelectorAll"> | null,
+  root: HTMLElement | null,
   messageId: string,
-  behavior?: ScrollBehavior,
+  behavior: ScrollBehavior = "instant",
 ): HTMLElement | null {
   const target = findThreadMessageElement(root, messageId);
-  target?.scrollIntoView({ behavior, block: "center" });
+  if (root && target) {
+    // scrollIntoView would also move the room containing this nested scroller.
+    root.scrollTo({ top: root.scrollTop + target.getBoundingClientRect().top - root.getBoundingClientRect().top - 12, behavior });
+  }
   return target;
 }
 
@@ -108,9 +112,60 @@ export function resolveThreadParent(
   };
 }
 
+function sameThreadLatest(left: DesktopRoomMessage | null, right: DesktopRoomMessage | null): boolean {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return left.id === right.id && left.sender === right.sender && left.source === right.source
+    && left.text === right.text && left.displayText === right.displayText
+    && left.timestamp === right.timestamp && left.actorLabel === right.actorLabel
+    && left.agentIdentity === right.agentIdentity;
+}
+
+export function sameThreadIndicatorSummary(left: ThreadIndicatorSummary, right: ThreadIndicatorSummary): boolean {
+  return left.count === right.count
+    && left.unreadCount === right.unreadCount
+    && left.latestPreview === right.latestPreview
+    && left.latestTimestamp === right.latestTimestamp
+    && left.hasPartialHistory === right.hasPartialHistory
+    && left.loadingEarlier === right.loadingEarlier
+    && sameThreadLatest(left.latest, right.latest)
+    && left.participants.length === right.participants.length
+    && left.participants.every((participant, index) => {
+      const other = right.participants[index]!;
+      return participant.key === other.key && participant.displayName === other.displayName && participant.color === other.color;
+    });
+}
+
+/**
+ * Keeps the same summary object for a message while its content is equal.
+ * A new object each render makes Vue re-render the message row, because a
+ * changed prop identity counts as a change.
+ *
+ * Invalidation rule: an entry is replaced when the new summary differs by
+ * value. Size bound: `retain` drops entries for messages that left the list.
+ */
+export function createThreadIndicatorMemo() {
+  const entries = new Map<string, ThreadIndicatorSummary>();
+  return {
+    stable(messageId: string, next: ThreadIndicatorSummary): ThreadIndicatorSummary {
+      const previous = entries.get(messageId);
+      if (previous && sameThreadIndicatorSummary(previous, next)) return previous;
+      entries.set(messageId, next);
+      return next;
+    },
+    retain(messages: readonly { id: string }[]): void {
+      if (entries.size <= messages.length) return;
+      const live = new Set(messages.map(message => message.id));
+      for (const id of entries.keys()) if (!live.has(id)) entries.delete(id);
+    },
+    get size(): number { return entries.size; },
+  };
+}
+
 export function buildThreadIndicatorSummary(
   parent: DesktopRoomMessage,
   fallback: ThreadSummary | null,
+  agentNames: ReadonlyMap<string, string> | null = null,
 ): ThreadIndicatorSummary {
   const thread = parent.thread;
   const metadataLatest = thread?.latestReply ? threadReplyToMessage(thread.latestReply) : null;
@@ -129,8 +184,8 @@ export function buildThreadIndicatorSummary(
     ),
     latest,
     latestPreview: fallbackIsLatest
-      ? fallbackLatest?.displayText || fallbackLatest?.text || null
-      : metadataLatest?.displayText || metadataLatest?.text || latest?.displayText || latest?.text || null,
+      ? threadPreviewText(agentNames, fallbackLatest)
+      : threadPreviewText(agentNames, metadataLatest, latest),
     latestTimestamp: latest?.timestamp || null,
     participants: parseThreadParticipants(thread?.participants ?? []),
     hasPartialHistory: false,
@@ -174,8 +229,26 @@ export function threadReadState(
   };
 }
 
-export function threadQuotePreview(message: DesktopRoomMessage): string {
-  const text = (message.displayText || message.text).replace(/\s+/g, " ").trim();
+function threadPreviewText(
+  agentNames: ReadonlyMap<string, string> | null,
+  ...messages: Array<DesktopRoomMessage | null>
+): string | null {
+  for (const message of messages) {
+    const text = message ? roomMessageVisibleText(message, agentNames) : "";
+    if (text) return text;
+  }
+  return null;
+}
+
+export function threadQuotePreview(
+  message: DesktopRoomMessage,
+  agentNames: ReadonlyMap<string, string> | null = null,
+): string {
+  return threadQuoteText(message, roomMessageVisibleText(message, agentNames));
+}
+
+function threadQuoteText(message: DesktopRoomMessage, visibleText: string): string {
+  const text = visibleText.replace(/\s+/g, " ").trim();
   if (text) return truncateThreadText(text, 140);
   if (message.attachments.length === 1) return "1 attachment";
   if (message.attachments.length > 1) return `${message.attachments.length} attachments`;
@@ -186,7 +259,8 @@ export function applyThreadQuoteToDraft(draft: string, quote: DesktopRoomMessage
   const text = draft.trim();
   if (!quote) return text;
   const sender = quote.agentIdentity?.displayName || quote.sender;
-  return `> ${sender}: ${threadQuotePreview(quote)}\n\n${text}`;
+  // Sent text, not a preview: quoting keeps what the message said, unchanged.
+  return `> ${sender}: ${threadQuoteText(quote, quote.displayText || quote.text)}\n\n${text}`;
 }
 
 export function threadParentId(message: DesktopRoomMessage): string | null {

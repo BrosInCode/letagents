@@ -22,6 +22,8 @@ export interface AgentModalTarget {
   sender: string;
   agentKey: string | null;
   agentSessionId: string | null;
+  /** Desired initial section to activate when opening the inspector. */
+  initialTab?: "overview" | "live" | "work" | "workspace";
 }
 
 export type AgentInspectorRequest =

@@ -525,10 +525,13 @@ function handleReviewLeaseAction(payload: TaskReviewLeaseActionPayload) {
   .board-filters button:hover { color: var(--text); }
 }
 @media (max-width: 768px) {
-  .board-search, .board-filters button { min-height: 44px; }
+  .board-search, .board-filters button, .board-clear, .board-filter-empty button { min-height: 44px; }
+  .board-refine { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .board-refine .board-search, .board-refine :deep(.app-select:last-of-type) { grid-column: 1 / -1; }
+  .board-refine :deep(.app-select) { width: 100%; --app-select-height: 44px; }
+  .board-search { font-size: 16px; }
   .board-refine .board-search { width: 100%; }
-  .board-refine :deep(.app-select) { flex: 1 1 160px; --app-select-height: 44px; }
-  .board-kanban { grid-auto-columns: minmax(260px, calc(100vw - 52px)); }
+  .board-kanban { grid-auto-columns: minmax(260px, 340px); }
   .board-panel {
     padding: 16px 12px 14px;
   }
@@ -542,6 +545,18 @@ function handleReviewLeaseAction(payload: TaskReviewLeaseActionPayload) {
   .board-heading p {
     max-width: 32rem;
   }
+}
+
+/* A single scroll surface keeps every task reachable on phones and short screens. */
+@media (max-width: 640px) {
+  .board-panel { display: block; overflow: auto; overscroll-behavior: contain; }
+  .board-header { margin-bottom: 16px; }
+  .board-kanban-scroll { overflow: visible; padding-top: 20px; }
+  .board-kanban { width: 100%; grid-auto-flow: row; grid-template-columns: minmax(0, 1fr); grid-auto-columns: auto; gap: 24px; }
+  .board-filters { gap: 14px; }
+}
+@media (max-height: 600px) and (min-width: 641px) {
+  .board-panel { display: block; overflow: auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {

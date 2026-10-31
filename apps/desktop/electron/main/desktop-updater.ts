@@ -1,9 +1,21 @@
 import type { DesktopUpdateProgress, DesktopUpdateStatus } from "../ipc-types.js";
 
 const supportedDesktopUpdateArchitectures = new Set(["arm64", "x64"]);
+const supportedWindowsUpdateArchitectures = new Set(["x64"]);
 const DEFAULT_DOWNLOAD_ATTEMPT_LIMIT = 3;
 
-export function desktopUpdateFeedBaseUrl(arch: string): string | null {
+/**
+ * macOS feeds are named by architecture (`feeds/arm64`, `feeds/x64`); the
+ * Windows feed names the platform too (`feeds/win32-x64`), so the two x64
+ * feeds never share a folder. Matches createDesktopUpdaterConfig in
+ * electron/scripts/release-metadata.mjs.
+ */
+export function desktopUpdateFeedBaseUrl(arch: string, platform: string = "darwin"): string | null {
+  if (platform === "win32") {
+    if (!supportedWindowsUpdateArchitectures.has(arch)) return null;
+    return `https://downloads.letagents.chat/desktop/feeds/win32-${arch}`;
+  }
+  if (platform !== "darwin") return null;
   if (!supportedDesktopUpdateArchitectures.has(arch)) return null;
   return `https://downloads.letagents.chat/desktop/feeds/${arch}`;
 }

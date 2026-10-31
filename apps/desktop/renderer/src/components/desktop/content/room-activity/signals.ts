@@ -16,16 +16,16 @@ export function hasDeliverySignal(participant: ActivityParticipant): boolean {
   return participant.sources.includes("delivery") || participant.sources.includes("desktop delivery");
 }
 
-export function hasRecentLivenessObservation(participant: ActivityParticipant): boolean {
-  return isRecentTimestamp(participant.livenessObservation?.lastObservedAt);
+export function hasRecentLivenessObservation(participant: ActivityParticipant, now: number = Date.now()): boolean {
+  return isRecentTimestamp(participant.livenessObservation?.lastObservedAt, now);
 }
 
-export function hasAgentSignal(participant: ActivityParticipant): boolean {
+export function hasAgentSignal(participant: ActivityParticipant, now: number = Date.now()): boolean {
   if (participant.kind !== "agent") return false;
-  if (participant.livenessObservation && hasRecentLivenessObservation(participant)) return true;
-  if ((participant.workState || participant.statusText) && isRecentTimestamp(participant.lastSeenAt)) return true;
-  if (participant.activeReasoning.some((session) => isRecentTimestamp(session.updatedAt || session.createdAt))) return true;
-  return participant.currentTasks.some((task) => isRecentTimestamp(task.updatedAt));
+  if (participant.livenessObservation && hasRecentLivenessObservation(participant, now)) return true;
+  if ((participant.workState || participant.statusText) && isRecentTimestamp(participant.lastSeenAt, now)) return true;
+  if (participant.activeReasoning.some((session) => isRecentTimestamp(session.updatedAt || session.createdAt, now))) return true;
+  return participant.currentTasks.some((task) => isRecentTimestamp(task.updatedAt, now));
 }
 
 export function signalLabel(participant: ActivityParticipant): string {
@@ -63,19 +63,19 @@ export function resolveActivityState(
   return participant?.activityState || "offline";
 }
 
-export function connectionLabel(participant: ActivityParticipant): string {
+export function connectionLabel(participant: ActivityParticipant, now: number = Date.now()): string {
   if (participant.kind === "human") return "human";
   if (participant.activityState === "active") return "connected";
   if (participant.activityState === "away") return "idle";
-  if (hasAgentSignal(participant)) return "work update";
+  if (hasAgentSignal(participant, now)) return "work update";
   return "offline";
 }
 
-export function connectionTone(participant: ActivityParticipant): string {
+export function connectionTone(participant: ActivityParticipant, now: number = Date.now()): string {
   if (participant.kind === "human") return "human";
   if (participant.activityState === "active") return "active";
   if (participant.activityState === "away") return "away";
-  if (hasAgentSignal(participant)) return "signal";
+  if (hasAgentSignal(participant, now)) return "signal";
   return "offline";
 }
 
@@ -91,7 +91,7 @@ export function sourceBadges(participant: ActivityParticipant): Array<{ label: s
   ];
 }
 
-function isRecentTimestamp(value: string | null | undefined): boolean {
+function isRecentTimestamp(value: string | null | undefined, now: number = Date.now()): boolean {
   const signalTime = timestampValue(value);
-  return signalTime >= 0 && Date.now() - signalTime <= RECENT_SIGNAL_WINDOW_MS;
+  return signalTime >= 0 && now - signalTime <= RECENT_SIGNAL_WINDOW_MS;
 }

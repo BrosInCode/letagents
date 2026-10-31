@@ -1,8 +1,8 @@
 import crypto from "node:crypto";
 
 import {
-  formatAttachmentContentDisposition,
   MESSAGE_ATTACHMENT_UPLOAD_TTL_SECONDS,
+  resolveAttachmentDownloadHeaders,
 } from "./attachments.js";
 
 interface AttachmentStorageConfig {
@@ -258,23 +258,35 @@ export function createPresignedAttachmentDownload(input: {
   content_type: string;
 }): string {
   const config = getAttachmentStorageConfig();
+  const headers = resolveAttachmentDownloadHeaders(input);
   return presignS3Url({
     method: "GET",
     objectKey: input.object_key,
     expiresSeconds: config.downloadExpiresSeconds,
-    responseContentDisposition: formatAttachmentContentDisposition(input.filename),
-    responseContentType: input.content_type,
+    responseContentDisposition: headers.content_disposition,
+    responseContentType: headers.content_type,
   });
 }
 
-export async function deleteAttachmentObject(input: { object_key: string }): Promise<void> {
+/** A stalled storage call must not hold a request or the cleanup sweep open. */
+const ATTACHMENT_OBJECT_DELETE_TIMEOUT_MS = 15_000;
+
+export async function deleteAttachmentObject(
+  input: { object_key: string },
+  options: { signal?: AbortSignal } = {},
+): Promise<void> {
   const config = getAttachmentStorageConfig();
   const deleteUrl = presignS3Url({
     method: "DELETE",
     objectKey: input.object_key,
     expiresSeconds: Math.min(config.uploadExpiresSeconds, 60),
   });
-  const response = await fetch(deleteUrl, { method: "DELETE" });
+  const response = await fetch(deleteUrl, {
+    method: "DELETE",
+    signal: options.signal
+      ? AbortSignal.any([options.signal, AbortSignal.timeout(ATTACHMENT_OBJECT_DELETE_TIMEOUT_MS)])
+      : AbortSignal.timeout(ATTACHMENT_OBJECT_DELETE_TIMEOUT_MS),
+  });
   if (!response.ok) {
     throw new Error(`attachment object delete failed with HTTP ${response.status}`);
   }

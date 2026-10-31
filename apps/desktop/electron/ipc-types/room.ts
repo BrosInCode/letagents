@@ -1,3 +1,4 @@
+import type { RoomGif, RoomExpressionsSetting } from "../../../../shared/room-expressions.mjs";
 import type { DesktopActivityEntry, DesktopAgentPresence, DesktopParticipantSummary, DesktopReasoningSession } from "./activity.js";
 import type { RepoStatus } from "./core.js";
 import type { DesktopRentalActivityEvent, DesktopRentalOwnQuotaStatus, DesktopRentalRenterTriggerSignal } from "./rental.js";
@@ -6,6 +7,7 @@ import type {
   ClearedRoomAgentWorkSummary,
   RoomAgentWorkSummary,
 } from "../../../../shared/room-agent-work.mjs";
+import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 
 export interface DesktopRoomAgentWork {
   attemptId: string;
@@ -273,16 +275,14 @@ export interface DesktopRoomMessageThreadSummary {
   lastReadMessageId: string | null;
 }
 
+/** One shape for every attachment the screen shows, whatever room storage it came from. */
 export interface DesktopRoomMessageAttachment {
   id: string | null;
-  name: string | null;
-  fileName: string | null;
-  mimeType: string | null;
+  fileName: string;
+  mimeType: string;
   sizeBytes: number | null;
-  url: string | null;
-  downloadUrl: string | null;
-  dataUrl: string | null;
-  contentBase64: string | null;
+  /** The one link the screen loads, or null when the file is gone. */
+  href: string | null;
 }
 
 /** Public Message-info projection (cloud rooms). Mirrors GET /rooms/:room/messages/:id/info. */
@@ -310,11 +310,15 @@ export interface DesktopMessageInfo {
 }
 
 export interface DesktopRoomMessage {
+  gif?: RoomGif | null;
+  senderProfile?: { login: string; avatarUrl: string | null } | null;
   id: string;
   /** Exact idempotency identity supplied by the message publisher. */
   clientMessageId?: string | null;
   /** Renderer-only submission state; never a server message identity. */
   outgoing?: { status: "pending" | "uncertain"; attachmentCount: number; error: string | null };
+  /** Renderer-only arrival sequence from a live event/send, never history backfill. */
+  liveArrival?: number;
   sender: string;
   text: string;
   displayText?: string | null;
@@ -337,6 +341,8 @@ export interface DesktopRoomMessage {
   threadReplyToId: string | null;
   thread: DesktopRoomMessageThreadSummary | null;
   replyTo: DesktopRoomMessageReply | null;
+  /** Emoji reactions as of this read, in the shape the shared reaction helpers use. */
+  reactions?: MessageReaction[];
   /** Trusted provenance retained only for local/forked dispatch decisions. */
   localControlAuthorized?: boolean;
   /** Account-scoped, non-rendered managed-agent dispatch metadata. */
@@ -393,6 +399,13 @@ export interface DesktopGitHubIntegrationActionResult {
 export type DesktopGitHubRoomEventType =
   | "pull_request"
   | "pull_request_review"
+  | "workflow_run"
+  | "workflow_job"
+  | "pull_request_review_comment"
+  | "pull_request_review_thread"
+  | "push"
+  | "create"
+  | "delete"
   | "issue"
   | "issue_comment"
   | "check_run"
@@ -411,8 +424,27 @@ export interface DesktopGitHubRoomEvent {
   actorLogin: string | null;
   metadata: Record<string, unknown>;
   linkedTaskId: string | null;
+  providerEventAt?: string | null;
+  providerObjectUpdatedAt?: string | null;
+  eventOrderAt?: string | null;
+  headSha?: string | null;
   createdAt: string;
 }
+
+export interface DesktopPullRequestDiff {
+  number: number;
+  head_sha: string;
+  diff: string;
+  github_url: string;
+  file_list: {
+    files: Array<{ path: string; previous_path: string | null; status: string; additions: number; deletions: number }>;
+    total_files: number;
+  } | null;
+}
+
+export type DesktopPullRequestDiffResult =
+  | { ok: true; value: DesktopPullRequestDiff }
+  | { ok: false; code: string };
 
 export interface DesktopGitHubEventsQuery {
   limit?: number;
@@ -481,6 +513,8 @@ export interface DesktopRoomSnapshot {
   participantHiddenCount: number;
   presence: DesktopAgentPresence[];
   reasoningSessions: DesktopReasoningSession[];
+  /** Agents' turns their owners share with the room, one per agent at most. */
+  liveActivitySessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
   roomArtifacts: DesktopRoomSharedArtifact[];
   messages: DesktopRoomMessage[];
@@ -494,11 +528,12 @@ export interface DesktopRoomSnapshot {
   sourceStates: DesktopSnapshotSourceStates;
 }
 
-/** Durable snapshot deltas replayed only to managed agents after a live gap. */
+/**
+ * The renderer's acknowledgement that its authoritative snapshot landed after
+ * a live gap. The stream's event cursor may advance once it arrives.
+ */
 export interface DesktopRoomDeliveryRepair {
   token: number;
-  messages: DesktopRoomMessage[];
-  tasks: DesktopTaskSummary[];
 }
 
 /**
@@ -571,6 +606,7 @@ export interface DesktopRoomThreadReadResult {
 
 export interface DesktopRoomLatestMessage {
   roomIdentifier: string;
+  storageMode?: "cloud" | "local";
   latestMessageId: string | null;
   latestMessageAt: string | null;
 }
@@ -624,6 +660,7 @@ export interface DesktopLocalRoomMutationResult {
 }
 
 export type DesktopRoomStreamEvent =
+  | { type: "typing"; roomIdentifier: string; signal: import("../../../../shared/room-typing.mjs").TypingSignal }
   | {
       type: "open";
       roomIdentifier: string;
@@ -640,6 +677,8 @@ export type DesktopRoomStreamEvent =
       type: "message";
       roomIdentifier: string;
       message: DesktopRoomMessage;
+      /** Genuine live delivery, not a fetched history/catch-up event. */
+      live?: true;
     }
   | {
       /** Bounded authoritative tail used after a very large durable catch-up. */
@@ -685,9 +724,19 @@ export type DesktopRoomStreamEvent =
       sessionId: string;
     }
   | {
+      type: "live_activity_update";
+      roomIdentifier: string;
+      session: DesktopReasoningSession;
+    }
+  | {
+      type: "live_activity_remove";
+      roomIdentifier: string;
+      sessionId: string;
+    }
+  | {
       type: "resource_invalidation";
       roomIdentifier: string;
-      resource: "agent_work";
+      resource: "agent_work" | "wake_rules" | "message_reactions" | "message_pins";
     }
   | {
       type: "rental_activity";
@@ -720,6 +769,15 @@ export type DesktopRoomStreamEvent =
 
 export interface DesktopStagedAttachment {
   uploadId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  previewDataUrl: string | null;
+}
+
+/** A file chosen in the picker, shown in the composer while it uploads. */
+export interface DesktopChosenAttachment {
+  token: string;
   fileName: string;
   mimeType: string;
   sizeBytes: number;

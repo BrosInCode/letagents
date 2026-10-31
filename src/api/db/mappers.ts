@@ -3,8 +3,10 @@ import { normalizeAgentPromptKind } from "../../shared/room-agent-prompts.js";
 import { buildRoomActivitySourceFlags, deriveRoomAgentActivityState } from "../../shared/room-agent-activity.js";
 import { buildTaskWorkflowRefs, normalizeTaskWorkflowArtifacts } from "../repo-workflow.js";
 import { isInviteCode } from "../rooms/routing.js";
+import { resolveRoomDisplayName } from "../rooms/display-name.js";
 import { board_intents, board_manager_assignments, github_app_installations, github_app_repositories, github_repositories, github_webhook_deliveries, room_aliases, room_board_settings, rooms, room_git_bindings, room_shared_artifact_tasks, room_shared_artifacts } from "./schema.js";
 import { formatAttachmentId, formatMessageId, formatTaskId } from "./utils.js";
+import type { MessageReaction } from "../../../shared/message-reactions.mjs";
 import type { BoardIntent, BoardIntentRow, BoardManagerAssignment, BoardManagerAssignmentRow, CoordinationEvent, CoordinationEventRow, FocusRoomStatus, GitRoomBinding, GitHubAppInstallation, GitHubAppRepository, GitHubRepositoryLink, GitHubWebhookDelivery, GitHubWebhookDeliveryStatus, Message, MessageAttachment, MessageAttachmentData, MessageAttachmentRow, MessageAttachmentUpload, MessageAttachmentUploadRow, MessageReplyReference, MessageRow, MessageThreadSummary, Project, ReasoningSession, ReasoningSessionRow, ReasoningSessionUpdate, ReasoningSessionUpdateRow, RoomAgentDeliverySession, RoomAgentDeliverySessionRow, RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow, RoomAgentSession, RoomAgentSessionRow, RoomAlias, RoomBoardSettings, RoomBoardSettingsRow, RoomKind, RoomParticipant, RoomParticipantRow, RoomSharedArtifact, RoomSharedArtifactTaskLink, StaleTaskPromptMute, StaleTaskPromptMuteRow, Task, TaskLease, TaskLeaseRow, TaskLock, TaskLockRow, TaskRow } from "./types.js";
 
 export function toProject(row: typeof rooms.$inferSelect): Project {
@@ -12,7 +14,7 @@ export function toProject(row: typeof rooms.$inferSelect): Project {
   return {
     id: row.id,
     code: inviteRoom ? row.id : null,
-    display_name: row.display_name,
+    display_name: resolveRoomDisplayName(row.id, row.display_name, row.kind),
     name: inviteRoom ? undefined : row.id,
     kind: row.kind as RoomKind,
     parent_room_id: row.parent_room_id,
@@ -209,6 +211,8 @@ export function toMessageAttachmentUpload(row: MessageAttachmentUploadRow): Mess
     attached_message_number: row.attached_message_number,
     created_at: row.created_at,
     attached_at: row.attached_at,
+    uploader_account_id: row.uploader_account_id,
+    uploader_agent_session_id: row.uploader_agent_session_id,
   };
 }
 
@@ -226,6 +230,7 @@ export function toMessage(row: MessageRow): Message {
       : null,
     sender: row.sender,
     text: row.text,
+    ...(row.gif ? { gif: row.gif } : {}),
     ...(row.display_text ? { display_text: row.display_text } : {}),
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
     source: row.source ?? null,
@@ -235,6 +240,7 @@ export function toMessage(row: MessageRow): Message {
     thread: null,
     reply_to: null,
     attachments: [],
+    reactions: [],
   };
 }
 
@@ -271,8 +277,9 @@ export function toMessageWithReply(
   replyReference: MessageReplyReference | null,
   attachments: MessageAttachment[] = [],
   thread: MessageThreadSummary | null = null,
+  reactions: MessageReaction[] = [],
 ): Message {
-  return { ...toMessage(row), thread, reply_to: replyReference, attachments };
+  return { ...toMessage(row), thread, reply_to: replyReference, attachments, reactions };
 }
 
 export function toTask(row: TaskRow): Task {
@@ -295,7 +302,10 @@ export function toTask(row: TaskRow): Task {
     workflow_refs: buildTaskWorkflowRefs({
       artifacts: workflowArtifacts,
       prUrl: row.pr_url,
+      status: row.status,
     }),
+    external_ref: row.external_ref ?? null,
+    ticket_state: row.ticket_state ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -422,6 +432,9 @@ export function toBoardIntent(row: typeof board_intents.$inferSelect | BoardInte
     expires_at: row.expires_at,
     escalated_at: row.escalated_at,
     auto_approved: row.auto_approved,
+    approved_task_status: row.approved_task_status ?? null,
+    approved_task_assignee_agent_key: row.approved_task_assignee_agent_key ?? null,
+    approved_manager_assignment_id: row.approved_manager_assignment_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -562,6 +575,7 @@ export function toReasoningSession(row: ReasoningSessionRow): ReasoningSession {
     anchor_message_id: row.anchor_message_id,
     actor_label: row.actor_label,
     agent_key: row.agent_key,
+    kind: row.kind ?? "reasoning",
     status: row.status,
     summary: row.summary,
     latest_payload: row.latest_payload,

@@ -26,7 +26,6 @@ export interface RoomPresenceRouteDeps {
     lastSeenAt?: string | null;
     preserveLastSeenAtOnConflict?: boolean;
   }): Promise<void>;
-  maybeEmitStaleWorkPrompt(projectId: string): Promise<unknown>;
   emitProjectMessage(
     projectId: string,
     sender: string,

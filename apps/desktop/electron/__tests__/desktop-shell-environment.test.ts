@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -9,7 +11,9 @@ import {
   mergeDesktopPath,
   refreshDesktopShellEnvironment,
   resetDesktopShellEnvironmentForTests,
+  startDesktopShellEnvironmentHydration,
 } from "../main/desktop-shell-environment.js";
+import { runGit, runGitStdout } from "../main/git-exec.js";
 
 const desktopMainSource = readFileSync(
   fileURLToPath(new URL("../main.ts", import.meta.url)),
@@ -34,7 +38,15 @@ test("desktop startup creates the window without awaiting login-shell discovery"
   );
 });
 
-test("desktop PATH hydration imports login-shell CLI locations without rewriting process inputs", async () => {
+// The login-shell branch builds home folders with the host's path module, so
+// a simulated macOS or Linux home (/Users/ada) only gives a POSIX PATH on a
+// POSIX host. Each host tests the branch it runs: the Windows branch is
+// tested below on Windows. (The app never asks for another platform's PATH.)
+const posixHostOnly = process.platform === "win32"
+  ? "simulates a macOS/Linux login shell; the host path module is Windows"
+  : false;
+
+test("desktop PATH hydration imports login-shell CLI locations without rewriting process inputs", { skip: posixHostOnly }, async () => {
   resetDesktopShellEnvironmentForTests();
   const env: NodeJS.ProcessEnv = {
     PATH: "/usr/bin:/bin",
@@ -62,7 +74,7 @@ test("desktop PATH hydration imports login-shell CLI locations without rewriting
   assert.equal(desktopRuntimeEnvironment(env).PATH, result.environment.PATH);
 });
 
-test("desktop PATH hydration preserves the active NVM runtime ahead of stale global CLIs", async () => {
+test("desktop PATH hydration preserves the active NVM runtime ahead of stale global CLIs", { skip: posixHostOnly }, async () => {
   resetDesktopShellEnvironmentForTests();
   const env: NodeJS.ProcessEnv = {
     PATH: "/usr/local/bin:/Users/ada/.nvm/versions/node/v22/bin:/usr/bin",
@@ -85,7 +97,7 @@ test("desktop PATH hydration preserves the active NVM runtime ahead of stale glo
   );
 });
 
-test("desktop PATH hydration is non-fatal when shell discovery fails", async () => {
+test("desktop PATH hydration is non-fatal when shell discovery fails", { skip: posixHostOnly }, async () => {
   resetDesktopShellEnvironmentForTests();
   const env: NodeJS.ProcessEnv = { PATH: "/usr/bin:/bin" };
 
@@ -103,6 +115,47 @@ test("desktop PATH hydration is non-fatal when shell discovery fails", async () 
     "/home/ada/.local/bin:/home/ada/.volta/bin:/home/ada/.bun/bin:/usr/local/bin:/usr/bin:/bin",
   );
   assert.equal(env.PATH, "/usr/bin:/bin");
+});
+
+test("Windows PATH hydration reads Machine and User PATH from PowerShell and adds per-user CLI folders", {
+  skip: process.platform === "win32" ? false : "the Windows branch builds folders with the host path module",
+}, async () => {
+  resetDesktopShellEnvironmentForTests();
+  const env: NodeJS.ProcessEnv = {
+    PATH: "C:\\Windows\\System32",
+    APPDATA: "C:\\Users\\Ada\\AppData\\Roaming",
+    LOCALAPPDATA: "C:\\Users\\Ada\\AppData\\Local",
+  };
+  const calls: string[] = [];
+
+  const result = await hydrateDesktopShellEnvironment({
+    env,
+    platform: "win32",
+    homeDirectory: "C:\\Users\\Ada",
+    runCommand: async (command, args) => {
+      calls.push(command);
+      assert.ok(args.includes("-NoProfile"));
+      // PowerShell 7 is not installed: Windows PowerShell answers instead.
+      if (command === "pwsh.exe") throw new Error("spawn pwsh.exe ENOENT");
+      return "__LETAGENTS_PATH_START__\r\nC:\\Program Files\\Git\\cmd;c:\\windows\\system32\r\n__LETAGENTS_PATH_END__\r\n";
+    },
+  });
+
+  assert.deepEqual(calls, ["pwsh.exe", "powershell.exe"]);
+  assert.equal(
+    result.environment.PATH,
+    [
+      "C:\\Program Files\\Git\\cmd",
+      "c:\\windows\\system32",
+      "C:\\Users\\Ada\\AppData\\Roaming\\npm",
+      "C:\\Users\\Ada\\AppData\\Local\\Programs\\nodejs",
+      "C:\\Users\\Ada\\AppData\\Local\\Volta\\bin",
+      "C:\\Users\\Ada\\.local\\bin",
+      "C:\\Users\\Ada\\.bun\\bin",
+      "C:\\Users\\Ada\\scoop\\shims",
+    ].join(";"),
+  );
+  assert.equal(env.PATH, "C:\\Windows\\System32");
 });
 
 test("Windows PATH merging is case-insensitive and uses semicolons", () => {
@@ -159,4 +212,54 @@ test("desktop environment refresh reports only a real PATH transition", async ()
   const refreshed = await refreshDesktopShellEnvironment(options);
   assert.equal(refreshed.changed, true);
   assert.match(refreshed.environment.PATH || "", /^\/Users\/ada\/second:/);
+});
+
+test("desktop Git waits for shell discovery and uses its working Git instead of the GUI shim", { skip: process.platform === "win32" }, async () => {
+  resetDesktopShellEnvironmentForTests();
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-git-path-"));
+  const guiBin = join(temporary, "gui");
+  const shellBin = join(temporary, "shell");
+  mkdirSync(guiBin);
+  mkdirSync(shellBin);
+  writeFileSync(join(guiBin, "git"), "#!/bin/sh\necho 'You have not agreed to the Xcode license agreements.' >&2\nexit 69\n", { mode: 0o755 });
+  writeFileSync(join(shellBin, "git"), '#!/bin/sh\nprintf "working-git:%s:%s\\n" "$LC_ALL" "$LETAGENTS_GIT_TEST_VALUE"\n', { mode: 0o755 });
+  const previousPath = process.env.PATH;
+  const previousValue = process.env.LETAGENTS_GIT_TEST_VALUE;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let discoveryCalls = 0;
+  try {
+    process.env.PATH = guiBin;
+    process.env.LETAGENTS_GIT_TEST_VALUE = "retained";
+    const hydration = startDesktopShellEnvironmentHydration({
+      env: { PATH: guiBin }, platform: "darwin", homeDirectory: temporary,
+      runCommand: async () => {
+        discoveryCalls += 1;
+        await blocked;
+        return `__LETAGENTS_PATH_START__\n${shellBin}\n__LETAGENTS_PATH_END__\n`;
+      },
+    });
+    const first = runGitStdout(temporary, ["--version"]);
+    const second = runGitStdout(temporary, ["--version"]);
+    const controller = new AbortController();
+    const canceled = runGit(temporary, ["--version"], { signal: controller.signal });
+    controller.abort(new Error("Git request canceled"));
+    release();
+    await hydration;
+    assert.deepEqual(await Promise.all([first, second]), ["working-git:C:retained\n", "working-git:C:retained\n"]);
+    assert.equal(discoveryCalls, 1);
+    assert.equal(process.env.PATH, guiBin, "Git must not rewrite the app's inherited environment");
+    assert.match((await canceled).stderr, /Git request canceled/);
+    const missingCwd = await runGit(join(temporary, "missing"), ["--version"]);
+    assert.notEqual(missingCwd.code, 0);
+    assert.match(missingCwd.stderr, /ENOENT/, "spawn errors with empty stderr retain their diagnostic");
+  } finally {
+    release();
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousValue === undefined) delete process.env.LETAGENTS_GIT_TEST_VALUE;
+    else process.env.LETAGENTS_GIT_TEST_VALUE = previousValue;
+    resetDesktopShellEnvironmentForTests();
+    rmSync(temporary, { recursive: true, force: true });
+  }
 });

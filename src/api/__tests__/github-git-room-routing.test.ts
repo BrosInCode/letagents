@@ -28,6 +28,8 @@ const {
   getExistingGitHubEventRefRoom,
   parseGitHubRefRoomLocator,
   selectGitHubEventRefRoomTarget,
+  shouldCreateGitHubRefRoomForEvent,
+  shouldResolveArchivedGitRefRoomForEvent,
 } = await import("../github/git-room-routing.js");
 const { materializeGitHubWebhookEvent } = await import("../github-room-events.js");
 
@@ -224,4 +226,111 @@ test("webhook ref routing keeps fork pull requests in the repository room", asyn
   assert.equal(result, null);
   assert.deepEqual(childLookups, []);
   assert.deepEqual(upserts, []);
+});
+
+function participantEventPayload(input: {
+  headRepository?: Parameters<typeof pullRequestPayload>[0]["headRepository"];
+  closed?: boolean;
+  merged?: boolean;
+} = {}): GitHubWebhookPayload {
+  const base = pullRequestPayload({
+    repository: { private: true },
+    headRepository: input.headRepository,
+  });
+  const pullRequest = base.pull_request!;
+  return {
+    ...base,
+    action: "review_requested",
+    requested_reviewer: { login: "katrin", id: 555 },
+    pull_request: input.closed || input.merged
+      ? {
+        ...pullRequest,
+        state: "closed",
+        merged: input.merged === true,
+      }
+      : pullRequest,
+  };
+}
+
+test("webhook ref routing keeps participant events on fork pull requests in the repository room", async () => {
+  const payload = participantEventPayload({
+    headRepository: {
+      id: 2,
+      full_name: "Contributor/letagents",
+      owner: { login: "Contributor" },
+    },
+  });
+  const childLookups: unknown[] = [];
+  const upserts: unknown[] = [];
+
+  const result = await getExistingGitHubEventRefRoom({
+    event: event("pull_request", payload, "delivery-participant-fork-branch-room"),
+    payload,
+    repository: githubRepository({ private: true }),
+    githubRepoId: String(REPO_ID),
+    deps: {
+      getGitChildRoom: async (input) => {
+        childLookups.push(input);
+        return gitFocusRoom();
+      },
+      upsertGitRoomBinding: async (input) => {
+        upserts.push(input);
+        return repoBinding(input);
+      },
+    },
+  });
+
+  assert.equal(result, null);
+  assert.deepEqual(childLookups, []);
+  assert.deepEqual(upserts, []);
+});
+
+test("webhook ref routing does not create or resolve archived rooms for closed participant events", async () => {
+  const payload = participantEventPayload({ closed: true });
+  const materialized = event("pull_request", payload, "delivery-participant-closed-branch-room");
+  const archivedRoom = gitFocusRoom({ focus_archived_at: "2026-10-09T10:00:00.000Z" });
+  const upserts: unknown[] = [];
+
+  assert.equal(materialized.roomEvent?.kind, "pull_request_participant");
+  assert.equal(shouldCreateGitHubRefRoomForEvent(materialized), false);
+  assert.equal(shouldResolveArchivedGitRefRoomForEvent(materialized), false);
+
+  const result = await getExistingGitHubEventRefRoom({
+    event: materialized,
+    payload,
+    repository: payload.repository,
+    githubRepoId: String(REPO_ID),
+    deps: {
+      getGitChildRoom: async () => archivedRoom,
+      upsertGitRoomBinding: async (input) => {
+        upserts.push(input);
+        return repoBinding(input);
+      },
+    },
+  });
+
+  assert.equal(result, null);
+  assert.deepEqual(upserts, []);
+});
+
+test("webhook ref routing resolves an archived room for a merged participant event", async () => {
+  const payload = participantEventPayload({ merged: true });
+  const materialized = event("pull_request", payload, "delivery-participant-merged-branch-room");
+  const archivedRoom = gitFocusRoom({ focus_archived_at: "2026-10-09T10:00:00.000Z" });
+
+  assert.equal(shouldCreateGitHubRefRoomForEvent(materialized), false);
+  assert.equal(shouldResolveArchivedGitRefRoomForEvent(materialized), true);
+
+  const result = await getExistingGitHubEventRefRoom({
+    event: materialized,
+    payload,
+    repository: payload.repository,
+    githubRepoId: String(REPO_ID),
+    deps: {
+      getGitChildRoom: async () => archivedRoom,
+      upsertGitRoomBinding: async (input) => repoBinding(input),
+    },
+  });
+
+  assert.equal(result, archivedRoom);
 });

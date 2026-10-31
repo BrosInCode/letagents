@@ -48,7 +48,7 @@
       </template>
       <p v-if="failure.detail" class="agent-live-failure-detail">{{ failure.detail }}</p>
     </div>
-    <div v-if="single?.tool.replyText" class="agent-live-prose agent-live-reply" v-html="renderDesktopMarkdown(single.tool.replyText, { block: true, mentions: false })"></div>
+    <MarkdownBlock v-if="single?.tool.replyText" class="agent-live-prose agent-live-reply" :text="single.tool.replyText" :mentions="false" />
   </div>
 </template>
 
@@ -56,7 +56,7 @@
 import { computed } from "vue";
 import { Check, ChevronRight, CircleAlert, FilePenLine, FileText, Hourglass, Search, SquareTerminal, Wrench } from "@lucide/vue";
 import { formatLiveValue, liveActionFailure, liveActionStatus, type LiveTraceEntry } from "../../../../domain/agent-inspector-live-trace";
-import { renderDesktopMarkdown } from "../formatting/markdown";
+import MarkdownBlock from "../formatting/MarkdownBlock.vue";
 
 const props = defineProps<{ entry: Extract<LiveTraceEntry, { kind: "actions" }>; current: boolean }>();
 const single = computed(() => props.entry.actions.length === 1 ? props.entry.actions[0]! : null);

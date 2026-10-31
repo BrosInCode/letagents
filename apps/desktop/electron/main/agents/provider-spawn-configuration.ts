@@ -2,25 +2,40 @@ import { isDeepStrictEqual } from "node:util";
 
 import type { ProviderSpawnRequest } from "./provider-adapter.js";
 import { assertManagedAgentPermissionProfileAvailable } from "./managed-agent-permission-profiles.js";
+import { isOpenModelReasoningEffort } from "./open-model-efforts.js";
 import { supervisedOpenCodePermissionPolicy, supervisedOpenCodePermissionProfileId } from "./opencode-launch-contract.js";
 
 /**
  * Shared final attestation used by every native adapter. The daemon has
  * already normalized the snapshot; adapters independently require that the
  * real provider policy still carries the selected authority.
+ *
+ * A stored policy is otherwise the agent's own native options, passed on as
+ * they are. Not with the owner's own setup: such a launch gets the access
+ * level's own options and nothing else the policy holds. A stored option
+ * could otherwise name the project's settings, add a folder, a plugin or a
+ * server, or move the model elsewhere, and what the switch promises would
+ * depend on what some earlier writer left in the policy.
  */
 export function attestProviderSpawnPolicy(
   provider: "codex" | "claude-code" | "cursor" | "open-model",
   request: ProviderSpawnRequest,
 ): Record<string, unknown> {
-  if (!request.permissionProfileId) return plainPolicy(request.launchPolicy, provider);
+  const homeHarness = spawnUsesHomeHarness(provider, request);
+  if (!request.permissionProfileId) {
+    if (homeHarness) throw new Error(`${provider} launch refused: an agent with its owner's own setup starts only under a named access level.`);
+    return plainPolicy(request.launchPolicy, provider);
+  }
   const profile = assertManagedAgentPermissionProfileAvailable(
     provider,
     request.permissionProfileId as never,
-    "supervised",
   ).id;
   const policy = plainPolicy(request.launchPolicy, provider);
+  let ownerSetupPolicy: Record<string, unknown> | null = null;
   if (provider === "codex") {
+    if (request.supervisorEntryId?.startsWith("supervised_rental_") && profile !== "read_only") {
+      throw new Error("codex launch refused: a guest agent runs Read-only with no local tools.");
+    }
     const authority = profile === "auto_review"
       ? {
         approvalPolicy: "on-request",
@@ -30,6 +45,11 @@ export function attestProviderSpawnPolicy(
       : profile === "ask_before_write"
       ? {
         approvalPolicy: "on-request",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      }
+      : profile === "read_only"
+      ? {
+        approvalPolicy: "never",
         sandboxPolicy: { type: "readOnly", networkAccess: false },
       }
       : {
@@ -43,24 +63,30 @@ export function attestProviderSpawnPolicy(
     for (const [key, value] of Object.entries(authority)) {
       requireMatch(policy, key, value, provider);
     }
+    if (homeHarness) ownerSetupPolicy = authority;
   } else if (provider === "open-model") {
     requireMatch(policy, "permission", supervisedOpenCodePermissionPolicy(supervisedOpenCodePermissionProfileId(profile)), provider);
   } else if (provider === "claude-code") {
+    // A guest works for someone else: no tool that touches this Mac, only LetAgents'.
+    const guest = request.supervisorEntryId?.startsWith("supervised_rental_") === true;
+    if (guest && profile !== "read_only") throw new Error("claude-code launch refused: a guest agent runs Read-only with no local tools.");
     const authority = profile === "read_only"
       ? {
         permissionMode: "dontAsk",
         dangerouslySkipPermissions: false,
-        tools: ["Read", "Glob", "Grep"],
+        tools: guest ? [] : ["Read", "Glob", "Grep"],
         allowedTools: ["mcp__letagents__*"],
-        settingSources: "",
+        // The owner's own user settings, and still nothing a project supplies.
+        settingSources: homeHarness ? "user" : "",
       }
       : profile === "full_access"
         ? { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }
         : {
           permissionMode: profile === "auto_review" ? "auto" : "default", dangerouslySkipPermissions: false,
           allowDangerouslySkipPermissions: false,
-          tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"],
-          allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}",
+          // The owner's skills run through Claude's Skill tool.
+          tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch", ...(homeHarness ? ["Skill"] : [])],
+          allowedTools: ["mcp__letagents__*"], settingSources: homeHarness ? "user" : "", settings: "{}",
         };
     if (profile === "ask_before_write" || profile === "auto_review") {
       const authorityFlags = new Set(Object.keys(authority).map(key => key.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)));
@@ -71,6 +97,7 @@ export function attestProviderSpawnPolicy(
     for (const [key, value] of Object.entries(authority)) {
       requireMatch(policy, key, value, provider);
     }
+    if (homeHarness) ownerSetupPolicy = authority;
   } else if (profile === "read_only") {
     requireMatch(policy, "mode", "ask", provider);
     requireMatch(policy, "force", false, provider);
@@ -82,13 +109,90 @@ export function attestProviderSpawnPolicy(
     requireMatch(policy, "sandbox", profile === "sandboxed_write" ? "enabled" : "disabled", provider);
     if (Object.hasOwn(policy, "mode") && policy.mode !== null) throw new Error(`Cursor ${profile} launch retained a read-only mode.`);
   }
-  if (provider !== "codex" && request.reasoningEffort !== null && request.reasoningEffort !== undefined) {
+  if (request.reasoningEffort !== null && request.reasoningEffort !== undefined && provider !== "codex" && provider !== "claude-code"
+    && !(provider === "open-model" && isOpenModelReasoningEffort(request.reasoningEffort))) {
     throw new Error(`${provider} does not support the selected reasoning effort.`);
   }
   if (!Number.isSafeInteger(request.configurationRevision) || Number(request.configurationRevision) < 1) {
     throw new Error(`${provider} launch omitted its exact configuration revision.`);
   }
-  return policy;
+  return ownerSetupPolicy ?? policy;
+}
+
+/**
+ * The stored options a launch with the owner's setup did not pass on: every
+ * one that is not the access level's own. They are named to the owner, short
+ * and printable, so that leaving them out is never a silent change.
+ */
+export function ownerSetupUnusedOptionsNotice(provider: "Codex" | "Claude Code", stored: unknown, attested: Record<string, unknown>): string | null {
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) return null;
+  const unused = Object.keys(stored).filter((key) => !Object.hasOwn(attested, key))
+    .map((key) => JSON.stringify(key.replace(/[^\x20-\x7e]/g, "?").slice(0, 48)));
+  if (!unused.length) return null;
+  return `With your own setup on, this agent starts with its access level's own ${provider} options only. `
+    + `These saved options were not used: ${unused.slice(0, 8).join(", ")}${unused.length > 8 ? ` and ${unused.length - 8} more` : ""}.`;
+}
+
+/**
+ * A launch notice that is said when what it says changes, not at every start.
+ * This process remembers what each agent was last told and passes the line on
+ * only when it differs. Nothing is stored, so the line is said once more after
+ * the app restarts. A start that failed after it was given the line forgets
+ * it, so the next one says it. An agent with no id is always told.
+ * Each kind of notice has a memory of its own, so one kind does not hide another.
+ *
+ * A conversation repair can be the first to find a line. It asks `isLastTold`
+ * before it says the line, and calls `told` when the line has reached the
+ * owner, so the agent's next start does not say it again.
+ */
+export function launchNoticeSaidOnce() {
+  const lastSaid = new Map<string, string>();
+  const isLastTold = (agentId: string | undefined, notice: string | null): boolean =>
+    agentId !== undefined && lastSaid.get(agentId) === (notice ?? "");
+  const told = (agentId: string | undefined, notice: string | null): void => {
+    if (agentId !== undefined) lastSaid.set(agentId, notice ?? "");
+  };
+  return {
+    isLastTold,
+    told,
+    whenChanged(agentId: string | undefined, notice: string | null): string | null {
+      if (agentId === undefined) return notice;
+      if (isLastTold(agentId, notice)) return null;
+      told(agentId, notice);
+      return notice;
+    },
+    forget(agentId: string | undefined, given: readonly string[]): void {
+      if (agentId !== undefined && given.includes(lastSaid.get(agentId) ?? "")) lastSaid.delete(agentId);
+    },
+  };
+}
+
+/** The line about saved options that were not used: said when what was left out changes. */
+export const ownerSetupUnusedOptionsSaidOnce = launchNoticeSaidOnce();
+
+/**
+ * Whether this launch loads the owner's own provider setup. Only an exact
+ * `true` turns it on. A rental works for someone else and never gets it, and
+ * Cursor and Open Model have no owner setup to load, so a request that asks
+ * for it there is refused instead of quietly starting with less.
+ */
+export function spawnUsesHomeHarness(
+  provider: "codex" | "claude-code" | "cursor" | "open-model",
+  request: Pick<ProviderSpawnRequest, "homeHarness" | "supervisorEntryId" | "deliveryMode">,
+): boolean {
+  if (request.homeHarness !== true) return false;
+  if (request.supervisorEntryId?.startsWith("supervised_rental_")) {
+    throw new Error(`${provider} launch refused: a rented agent never uses its owner's own setup.`);
+  }
+  if (provider !== "codex" && provider !== "claude-code") {
+    throw new Error(`${provider} launch refused: this agent app has no owner setup to use.`);
+  }
+  // Only an agent the daemon delivers room messages to can be held back from
+  // its next turn once the owner turns the setup off.
+  if (request.deliveryMode !== "daemon_inbox") {
+    throw new Error(`${provider} launch refused: an agent that collects its own room messages never uses its owner's own setup.`);
+  }
+  return true;
 }
 
 function plainPolicy(value: unknown, provider: string): Record<string, unknown> {

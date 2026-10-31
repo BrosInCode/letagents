@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createSSRApp, effectScope, h, nextTick, reactive } from "vue";
+import { createSSRApp, effectScope, h, nextTick, reactive, ref } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
 
 import type {
   DesktopAgentPresence,
+  DesktopBoardGovernanceSnapshot,
   DesktopBoardIntentSummary,
+  DesktopBoardSettingsSummary,
   DesktopTaskSummary,
   WorkerSnapshot,
 } from "../../electron/ipc-types";
@@ -18,29 +21,42 @@ import {
   boardOwnerOptions,
   boardOwnerValue,
   boardStatusOptions,
+  canManageRoomBoard,
   deriveTaskTitle,
+  taskMatchesBoardSearch,
   visibleBoardGroups,
 } from "../src/components/desktop/content/room-board/board-presentation";
 import { findLocalRoomWorker } from "../src/components/desktop/content/room-board/board-workers";
 import { useRoomBoardPresentation } from "../src/components/desktop/content/room-board/useRoomBoardPresentation";
 import {
   activeBoardManagerAgents,
+  denyIntentReason,
+  liveManagerCandidates,
   managerCandidateName,
   managerCandidateRuntime,
   readableIntentBody,
 } from "../src/components/desktop/content/room-board/governance-presentation";
 import { reviewAssignmentCandidates } from "../src/components/desktop/content/room-board/review-candidates";
+import { useBoardGovernance } from "../src/components/desktop/content/room-board/useBoardGovernance";
+import { useRoomBoardController } from "../src/components/desktop/content/room-board/useRoomBoardController";
+import {
+  useGovernanceDenyForm,
+  type DenyFormFocusTarget,
+} from "../src/components/desktop/content/room-board/useGovernanceDenyForm";
 import {
   executionAuthorityState,
   reviewPanelState,
   workflowRefs,
 } from "../src/components/desktop/content/room-board/task-state";
 import { TASK_STATUS_ORDER, sortTasks } from "../src/domain/tasks";
+import { normalizedExternalRef, ticketRefParts } from "../src/components/desktop/content/room-board/ticket-ref";
 
 let vite: ViteDevServer;
 let TaskCard: object;
 let Kanban: object;
 let Toolbar: object;
+let GovernanceManagerSection: object;
+let GovernanceIntentSection: object;
 before(async () => {
   vite = await createServer({
     root: fileURLToPath(new URL("../..", import.meta.url)),
@@ -51,6 +67,8 @@ before(async () => {
   TaskCard = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardTaskCard.vue")).default;
   Kanban = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardKanban.vue")).default;
   Toolbar = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardToolbar.vue")).default;
+  GovernanceManagerSection = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardGovernanceManagerSection.vue")).default;
+  GovernanceIntentSection = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardGovernanceIntentSection.vue")).default;
 });
 after(async () => { await vite?.close(); });
 
@@ -93,6 +111,70 @@ describe("board card hierarchy", () => {
     assert.match(await render([cancel]), /aria-label="Open Test task"/);
   });
 
+  it("labels a card with its ticket key and shows the provider chip only when the card names a ticket", async () => {
+    const render = (overrides: Partial<DesktopTaskSummary>) => renderToString(createSSRApp({
+      render: () => h(TaskCard, { task: task(overrides), actions: [], busyAction: null, draggableTask: false, selected: false }),
+    }));
+    const ticketHtml = await render({ externalRef: "jira:HT-1234" });
+    assert.match(ticketHtml, /class="desktop-task-provider-chip"[^>]*data-provider="jira"[^>]*>Jira</);
+    assert.match(ticketHtml, /class="desktop-task-id"[^>]*>HT-1234</);
+    const nativeHtml = await render({});
+    assert.doesNotMatch(nativeHtml, /desktop-task-provider-chip/);
+    assert.doesNotMatch(nativeHtml, /HT-1234/);
+  });
+
+  it("shows the ticket state pill next to the work state only on cards with a tracker state", async () => {
+    const render = (overrides: Partial<DesktopTaskSummary>) => renderToString(createSSRApp({
+      render: () => h(TaskCard, { task: task(overrides), actions: [], busyAction: null, draggableTask: false, selected: false }),
+    }));
+    const synced = await render({ externalRef: "jira:HT-7", ticketState: "in_review", createdBy: "tracker:jira" });
+    assert.match(synced, /class="desktop-task-ticket-state"[^>]*data-ticket-state="in_review"[^>]*>In review</);
+    assert.doesNotMatch(await render({ externalRef: "jira:HT-7" }), /desktop-task-ticket-state/);
+    const native = await render({});
+    assert.doesNotMatch(native, /desktop-task-ticket-state|desktop-task-provider-chip/);
+  });
+
+  it("offers the tracker / native filter only when the room has imported cards", async () => {
+    const scope = effectScope();
+    const props = reactive({ roomIdentifier: "room", tasks: [task({ id: "task_1" }), task({ id: "task_2", externalRef: "jira:HT-1" })], workers: [] as WorkerSnapshot[] });
+    const presentation = scope.run(() => useRoomBoardPresentation(props, () => undefined))!;
+    assert.equal(presentation.showSourceFilter.value, false, "a linked native card alone adds no filter");
+    presentation.setSourceFilter("tracker");
+    assert.equal(presentation.visibleTaskCount.value, 2, "a hidden filter filters nothing");
+    props.tasks = [...props.tasks, task({ id: "task_3", externalRef: "jira:HT-2", createdBy: "tracker:jira", ticketState: "todo" })];
+    await nextTick();
+    assert.equal(presentation.showSourceFilter.value, true);
+    assert.deepEqual(presentation.visibleGroups.value.flatMap((group) => group.tasks.map((entry) => entry.id)).sort(), ["task_2", "task_3"]);
+    presentation.setSourceFilter("native");
+    assert.deepEqual(presentation.visibleGroups.value.flatMap((group) => group.tasks.map((entry) => entry.id)), ["task_1"]);
+    presentation.clearFilters();
+    assert.equal(presentation.sourceFilter.value, "all");
+    scope.stop();
+
+    const toolbar = (showSourceFilter: boolean) => renderToString(createSSRApp({
+      render: () => h(Toolbar, {
+        searchQuery: "", activeFilter: "open", filterOptions: [], busy: false,
+        managerMode: "off", managerTitle: "Off", pendingIntentCount: 0, governanceOpen: false,
+        ownerFilter: "all", ownerOptions: boardOwnerOptions([]), statusFilter: "all", statusOptions: boardStatusOptions(),
+        sort: "recent", showSourceFilter, sourceFilter: "all",
+      }),
+    }));
+    assert.doesNotMatch(await toolbar(false), /Filter by source/);
+    assert.match(await toolbar(true), /aria-label="Filter by source"/);
+  });
+
+  it("reads typed ticket keys and splits stored ones for display", () => {
+    assert.equal(normalizedExternalRef(""), null);
+    assert.equal(normalizedExternalRef("ht-12"), "jira:HT-12");
+    assert.equal(normalizedExternalRef("Linear:eng-4"), "linear:ENG-4");
+    assert.equal(normalizedExternalRef("not a key"), undefined);
+    assert.equal(normalizedExternalRef("E-1"), undefined);
+    assert.equal(normalizedExternalRef("linear:E-1"), "linear:E-1");
+    assert.deepEqual(ticketRefParts("linear:ENG-4"), { provider: "linear", providerLabel: "Linear", key: "ENG-4" });
+    assert.equal(ticketRefParts(null), null);
+    assert.equal(ticketRefParts("broken"), null);
+  });
+
   it("preserves reviewers, lock detail, and access to overflow links", async () => {
     const html = await renderToString(createSSRApp({
       render: () => h(TaskCard, {
@@ -126,7 +208,281 @@ describe("board card hierarchy", () => {
   });
 });
 
+describe("board manager panel", () => {
+  const casey = presence({ agentSessionId: "session_casey", actorLabel: "Casey | Cursor", displayName: "Casey" });
+  const blake = presence();
+  const avery = presence({ agentSessionId: "session_avery", actorLabel: "Avery | Claude", displayName: "Avery" });
+
+  it("keeps live candidates in a stable order across presence refreshes", () => {
+    const names = (liveAgents: DesktopAgentPresence[], snapshot = governance()) =>
+      liveManagerCandidates(snapshot, liveAgents).map(managerCandidateName);
+    assert.deepEqual(names([casey, blake, avery]), ["Avery", "Blake", "Casey"]);
+    assert.deepEqual(names([blake, avery, casey]), ["Avery", "Blake", "Casey"]);
+    // Assigning a manager marks the row as Current without moving it.
+    const managed = governance({ activeManager: activeManager("session_casey") });
+    assert.deepEqual(names([avery, casey, blake], managed), ["Avery", "Blake", "Casey"]);
+    assert.deepEqual(
+      liveManagerCandidates(managed, [blake, avery, casey]).map((candidate) => candidate.isActiveManager),
+      [false, false, true],
+    );
+  });
+
+  it("keeps the primary action in place when a manager is assigned", async () => {
+    const render = (snapshot: DesktopBoardGovernanceSnapshot, selectedCandidateId: string | null) => renderToString(createSSRApp({
+      render: () => h(GovernanceManagerSection, {
+        governance: snapshot, busy: false, selectedCandidateId, liveAgents: [blake, casey],
+      }),
+    }));
+    const actions = (html: string) => [...html.matchAll(/data-testid="board-governance-(promote|release)"/g)].map((match) => match[1]);
+    const before = await render(governance(), "session_blake");
+    assert.deepEqual(actions(before), ["promote"]);
+    assert.match(before, />\s*Make manager\s*</);
+    const after = await render(governance({ activeManager: activeManager("session_blake") }), "session_blake");
+    // The primary stays last (rightmost), so a second click lands on the
+    // disabled "Current manager" button instead of the new Release button.
+    assert.deepEqual(actions(after), ["release", "promote"]);
+    assert.match(after, /<button[^>]*disabled[^>]*data-testid="board-governance-promote"[^>]*>\s*Current manager\s*</);
+  });
+
+  it("offers an optional reason when a request is denied", async () => {
+    assert.equal(denyIntentReason("  Duplicate of task_2.  "), "Duplicate of task_2.");
+    assert.equal(denyIntentReason("   "), null);
+    const html = await renderToString(createSSRApp({
+      render: () => h(GovernanceIntentSection, {
+        governance: governance({ pendingIntents: [intent({ id: "intent_close", actionType: "task_close", taskId: "task_2" })] }),
+        busy: false,
+      }),
+    }));
+    assert.match(html, /data-testid="board-governance-deny"[^>]*>\s*Deny\s*</);
+    assert.doesNotMatch(html, /board-governance-deny-reason/, "the reason field opens only when asked");
+  });
+
+  it("runs the deny form: open, keep each reason, submit once, close and move focus when the request leaves", () => {
+    const intents = ref([
+      intent({ id: "intent_a", actionType: "task_close", taskId: "task_1" }),
+      intent({ id: "intent_b", actionType: "task_claim", taskId: "task_2" }),
+      intent({ id: "intent_c", actionType: "task_claim", taskId: "task_3" }),
+    ]);
+    const busy = ref(false);
+    const denied: Array<[string, string | null]> = [];
+    const focused: DenyFormFocusTarget[] = [];
+    const form = useGovernanceDenyForm({
+      intents: () => intents.value,
+      busy: () => busy.value,
+      deny: (intentId, reason) => denied.push([intentId, reason]),
+      focus: (target) => focused.push(target),
+    });
+
+    form.start("intent_a");
+    assert.equal(form.denyingIntentId.value, "intent_a");
+    assert.deepEqual(focused.at(-1), { kind: "reason", intentId: "intent_a" });
+    form.reason.value = "Already merged.";
+    // Opening another request's form keeps the first reason for later.
+    form.start("intent_b");
+    assert.equal(form.reason.value, "");
+    form.start("intent_a");
+    assert.equal(form.reason.value, "Already merged.");
+
+    form.submit();
+    busy.value = true;
+    form.submit();
+    form.cancel();
+    assert.deepEqual(denied, [["intent_a", "Already merged."]], "one request while busy; Cancel waits");
+    assert.equal(form.denyingIntentId.value, "intent_a", "the form stays open while the denial is in flight");
+
+    // A failed denial keeps the typed reason for a retry.
+    busy.value = false;
+    intents.value = [...intents.value];
+    assert.equal(form.reason.value, "Already merged.");
+
+    form.submit();
+    intents.value = intents.value.filter((candidate) => candidate.id !== "intent_a");
+    assert.equal(form.denyingIntentId.value, null);
+    assert.deepEqual(focused.at(-1), { kind: "request", intentId: "intent_b" }, "focus moves to the next request");
+
+    form.start("intent_c");
+    form.submit();
+    intents.value = intents.value.filter((candidate) => candidate.id !== "intent_c");
+    assert.deepEqual(focused.at(-1), { kind: "request", intentId: "intent_b" }, "the last request falls back to the one before it");
+
+    form.start("intent_b");
+    form.reason.value = "Not needed.";
+    form.cancel();
+    assert.deepEqual(focused.at(-1), { kind: "deny", intentId: "intent_b" });
+    form.start("intent_b");
+    assert.equal(form.reason.value, "", "Cancel discards the reason");
+    form.submit();
+    intents.value = [];
+    assert.deepEqual(focused.at(-1), { kind: "list" });
+    assert.deepEqual(denied.at(-1), ["intent_b", null]);
+  });
+
+  it("sends the deny reason to the board", async () => {
+    const decisions: unknown[] = [];
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        letagentsDesktop: {
+          room: {
+            decideBoardIntent: async (_room: string, intentId: string, input: unknown) => {
+              decisions.push({ intentId, input });
+              return { governance: governance() };
+            },
+          },
+        },
+      },
+    });
+    try {
+      const board = useBoardGovernance("room_1");
+      assert.equal(await board.decideIntent("intent_a", "deny", "Already merged."), true);
+    } finally {
+      if (previous) Object.defineProperty(globalThis, "window", previous);
+      else delete (globalThis as { window?: unknown }).window;
+    }
+    assert.deepEqual(decisions, [{ intentId: "intent_a", input: { decision: "deny", reason: "Already merged." } }]);
+  });
+});
+
+describe("board toolbar count", () => {
+  const renderToolbar = (pendingIntentCount: number) => renderToString(createSSRApp({
+    render: () => h(Toolbar, {
+      searchQuery: "", activeFilter: "open", filterOptions: [], busy: false,
+      managerMode: "manager_optional", managerTitle: "Manager optional", pendingIntentCount, governanceOpen: false,
+      ownerFilter: "all", ownerOptions: boardOwnerOptions([]), statusFilter: "all", statusOptions: boardStatusOptions(), sort: "recent",
+    }),
+  }));
+
+  for (const decision of ["approve", "deny"] as const) {
+    it(`drops the Manager badge when the owner ${decision === "approve" ? "approves" : "denies"} the only request`, async () => {
+      // Stands in for the room snapshot, which the parent refreshes later.
+      const roomSettings = ref<DesktopBoardSettingsSummary | null>({
+        managerMode: "manager_optional", activeManager: null, pendingIntentCount: 1,
+      });
+      const pending = intent({ id: "intent_a", actionType: "task_claim", taskId: "task_1" });
+      const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+      Object.defineProperty(globalThis, "window", {
+        configurable: true,
+        value: {
+          letagentsDesktop: {
+            room: {
+              getBoardGovernance: async () => governance({ pendingIntents: [pending], pendingIntentCount: 1 }),
+              decideBoardIntent: async () => ({ governance: governance({ pendingIntentCount: 0 }) }),
+            },
+          },
+        },
+      });
+      try {
+        const board = useBoardGovernance("room_1", () => roomSettings.value);
+        await board.openGovernance();
+        assert.equal(board.pendingIntentCount.value, 1);
+        assert.match(await renderToolbar(board.pendingIntentCount.value), /desktop-board-manager-pending-count/);
+
+        assert.equal(await board.decideIntent("intent_a", decision), true);
+        assert.equal(roomSettings.value?.pendingIntentCount, 1, "the room snapshot has not refreshed yet");
+        assert.equal(board.pendingIntentCount.value, 0, "the toolbar uses the count from the decision");
+        assert.doesNotMatch(await renderToolbar(board.pendingIntentCount.value), /desktop-board-manager-pending-count/);
+
+        roomSettings.value = { managerMode: "manager_optional", activeManager: null, pendingIntentCount: 2 };
+        assert.equal(board.pendingIntentCount.value, 2, "a newer room snapshot is the source again");
+      } finally {
+        if (previous) Object.defineProperty(globalThis, "window", previous);
+        else delete (globalThis as { window?: unknown }).window;
+      }
+    });
+  }
+
+  it("feeds the toolbar from the board manager count in the board view", () => {
+    const view = readFileSync(fileURLToPath(new URL(
+      "../src/components/desktop/content/RoomBoardView.vue",
+      import.meta.url,
+    )), "utf8");
+    assert.match(view, /useBoardGovernance\(props\.roomIdentifier, \(\) => props\.boardSettings\)/);
+    assert.match(view, /:pending-intent-count="pendingIntentCount"/);
+  });
+});
+
+describe("board task actions", () => {
+  it("lets the owner release each reviewer's lease by name, including one a recovered agent left behind", async () => {
+    const reviewed = task({
+      status: "in_review",
+      activeLeases: [
+        lease({ id: "lease_work", kind: "work", agentKey: "owner/lunar-amber", agentSessionId: "session_lunar", holderLabel: "LunarAmber | Owner's agent | Open Model" }),
+        lease({ id: "lease_review_retired", kind: "review", agentKey: "owner/field-trail", agentSessionId: "session_retired", holderLabel: "FieldTrail | Owner's agent | Cursor" }),
+        lease({ id: "lease_review_harbor", kind: "review", agentKey: "owner/harbor-marsh", agentSessionId: "session_harbor", holderLabel: "HarborMarsh | Owner's agent | Codex" }),
+      ],
+    });
+    const board = useRoomBoardController({ roomIdentifier: "room_1", tasks: [reviewed], presence: [], workers: [], canEditTasks: true }, () => undefined);
+    const releases = board.actionsFor(reviewed).filter((action) => action.id.startsWith("release-review"));
+    assert.deepEqual(releases.map((action) => action.label), ["Release FieldTrail's review", "Release HarborMarsh's review"]);
+    assert.ok(board.actionsFor(reviewed).some((action) => action.id === "release-work"));
+
+    const released: unknown[] = [];
+    const previous = Object.getOwnPropertyDescriptor(globalThis, "window");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        letagentsDesktop: {
+          room: {
+            updateTaskReviewLease: async (room: string, taskId: string, input: { action: string; lease_id: string }) => {
+              released.push({ room, taskId, action: input.action, leaseId: input.lease_id });
+              return { task: reviewed };
+            },
+          },
+        },
+      },
+    });
+    try {
+      await board.runTaskAction(reviewed, releases[0]!);
+    } finally {
+      if (previous) Object.defineProperty(globalThis, "window", previous);
+      else delete (globalThis as { window?: unknown }).window;
+    }
+    assert.equal(board.errorMessage.value, null);
+    assert.deepEqual(released, [{ room: "room_1", taskId: "task_1", action: "release", leaseId: "lease_review_retired" }]);
+  });
+
+  it("offers someone who is not a room admin only the release of their own worker's review", () => {
+    const reviewed = task({
+      status: "in_review",
+      activeLeases: [
+        lease({ id: "lease_work", kind: "work", agentKey: "owner/lunar-amber", agentSessionId: "session_lunar", holderLabel: "LunarAmber" }),
+        lease({ id: "lease_review_blake", kind: "review", agentKey: "codex/blake", agentSessionId: "session_blake", holderLabel: "Blake | Codex" }),
+        lease({ id: "lease_review_harbor", kind: "review", agentKey: "owner/harbor-marsh", agentSessionId: "session_harbor", holderLabel: "HarborMarsh" }),
+      ],
+    });
+    const releases = (workers: WorkerSnapshot[]) => useRoomBoardController(
+      { roomIdentifier: "room_1", tasks: [reviewed], presence: [], workers, canEditTasks: false }, () => undefined,
+    ).actionsFor(reviewed).filter((action) => action.id.startsWith("release-")).map((action) => action.id);
+    assert.deepEqual(releases([]), []);
+    assert.deepEqual(releases([worker()]), ["release-review:lease_review_blake"]);
+  });
+
+  it("lets the owner of a local room manage its board, as a room admin does", () => {
+    assert.equal(canManageRoomBoard("admin"), true);
+    assert.equal(canManageRoomBoard("local"), true);
+    for (const role of ["participant", "anonymous", null, undefined]) assert.equal(canManageRoomBoard(role), false);
+    const held = task({ status: "in_review", activeLeases: [
+      lease({ id: "lease_work", kind: "work", agentKey: "local/agent", holderLabel: "Local agent" }),
+      lease({ id: "lease_review", kind: "review", agentKey: "local/reviewer", holderLabel: "Reviewer" }),
+    ] });
+    const board = useRoomBoardController({ roomIdentifier: "local_room", tasks: [held], presence: [], workers: [],
+      canEditTasks: canManageRoomBoard("local") }, () => undefined);
+    assert.deepEqual(board.actionsFor(held).filter((action) => action.id.startsWith("release-")).map((action) => action.id),
+      ["release-work", "release-review:lease_review"]);
+  });
+});
+
 describe("room board helpers", () => {
+  it("finds an imported card by its ticket key, ref, tracker, or ticket state", () => {
+    const imported = task({ title: "Fix login", externalRef: "jira:SCRUM-1", ticketState: "in_review" });
+    for (const query of ["SCRUM-1", "scrum-1", "jira:SCRUM-1", "Jira", "In review"]) {
+      assert.equal(taskMatchesBoardSearch(imported, query), true, query);
+    }
+    assert.equal(taskMatchesBoardSearch(imported, "SCRUM-2"), false);
+    assert.equal(taskMatchesBoardSearch(task({ title: "Fix login" }), "SCRUM-1"), false);
+  });
+
   it("uses stable owner identities and keeps known owners distinct from unassigned", () => {
     const tasks = [
       task(),
@@ -378,6 +734,42 @@ describe("room board helpers", () => {
     ]);
   });
 
+  it("shows only the stages that hold cards in focused views, so review cards stay on screen", () => {
+    const tasks = [
+      task({ id: "task_review", status: "in_review" }),
+      task({ id: "task_blocked", status: "blocked" }),
+      task({ id: "task_unclaimed" }),
+    ];
+    const statuses = (filter: "open" | "needs-review" | "unclaimed" | "closeout") => visibleBoardGroups({
+      tasks, filter, searchQuery: "", localWorker: null,
+    }).map((group) => group.status);
+
+    // Blocked work needs a follow-up review too; the four empty stages before it are gone.
+    assert.deepEqual(statuses("needs-review"), ["blocked", "in_review"]);
+    assert.deepEqual(statuses("unclaimed"), ["accepted"]);
+    // The full lifecycle views keep every stage as a drop target.
+    assert.deepEqual(statuses("open"), TASK_STATUS_ORDER.slice(0, 6));
+    assert.deepEqual(statuses("closeout"), TASK_STATUS_ORDER.slice(6));
+  });
+
+  it("keeps an empty stage in a focused view when one of its cards can be dragged there", () => {
+    const accepted = task({ id: "task_accepted" });
+    const assigned = task({ id: "task_assigned", status: "assigned", assigneeAgentKey: "codex/blake" });
+    const statuses = (filter: "unclaimed" | "mine", tasks: DesktopTaskSummary[]) => visibleBoardGroups({
+      tasks, filter, searchQuery: "", localWorker: worker(),
+      dropTargets: (candidate) => candidate.status === "accepted" ? ["assigned"]
+        : candidate.status === "assigned" ? ["in_progress", "blocked"] : [],
+    }).map((group) => group.status);
+    // Claiming drags an Unclaimed card onto Assigned, which Unclaimed never holds.
+    assert.deepEqual(statuses("unclaimed", [accepted]), ["accepted", "assigned"]);
+    assert.deepEqual(statuses("mine", [assigned]).sort(), ["assigned", "blocked", "in_progress"]);
+  });
+
+  it("the board view gives focused views the drop targets of each card's actions", () => {
+    const view = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/RoomBoardView.vue", import.meta.url)), "utf8");
+    assert.match(view, /useRoomBoardPresentation\(props, emit, \{\s*dropTargets: \(task\) => actionsFor\(task\)\.flatMap\(\(action\) => action\.targetStatus/);
+  });
+
   it("keeps board empty-state copy and actions deterministic", () => {
     assert.deepEqual(boardEmptyState({
       taskCount: 0,
@@ -438,6 +830,12 @@ describe("room board helpers", () => {
       taskId: "task_9",
       payload: { action: "handoff", target_actor_key: "codex/casey" },
     })), "Hand off task_9 to codex/casey");
+    // Approving this lets the worker reopen or accept the task itself.
+    assert.equal(readableIntentBody(intent({
+      actionType: "task_override",
+      taskId: "task_9",
+      payload: { task_id: "task_9", status: "accepted" },
+    })), "Move task_9 to accepted");
   });
 });
 
@@ -512,6 +910,41 @@ function worker(overrides: Partial<WorkerSnapshot> = {}): WorkerSnapshot {
     agentSessionId: "session_blake",
     detail: "Blake",
     ...overrides,
+  };
+}
+
+function governance(
+  overrides: Partial<DesktopBoardGovernanceSnapshot> = {}
+): DesktopBoardGovernanceSnapshot {
+  return {
+    roomId: "room_1",
+    managerMode: "manager_optional",
+    activeManager: null,
+    candidates: [],
+    pendingIntents: [],
+    pendingIntentCount: 0,
+    audit: [],
+    warnings: [],
+    capabilities: {
+      canViewGovernance: true,
+      canAssignManager: true,
+      canReleaseManager: true,
+      canSetManagerMode: true,
+      canDecideIntents: true,
+    },
+    ...overrides,
+  };
+}
+
+function activeManager(agentSessionId: string): NonNullable<DesktopBoardGovernanceSnapshot["activeManager"]> {
+  return {
+    assignmentId: `assignment_${agentSessionId}`,
+    agentSessionId,
+    agentKey: `agent/${agentSessionId}`,
+    actorLabel: agentSessionId,
+    runtimeSource: "desktop_managed",
+    assignedBy: "EmmyMay",
+    lastHeartbeatAt: null,
   };
 }
 

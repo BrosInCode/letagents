@@ -1,3 +1,5 @@
+import { isWindowsSystemEnvironmentKey } from "./windows-child-environment.js";
+
 const RENTAL_MARKER = "LETAGENTS_RENTAL_CREDENTIAL_ISOLATION";
 
 const SAFE_KEYS = new Set([
@@ -6,17 +8,20 @@ const SAFE_KEYS = new Set([
   "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS",
   "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME",
 ]);
+const SAFE_KEYS_WITHOUT_CASE = new Set([...SAFE_KEYS].map((key) => key.toLowerCase()));
 
 /**
  * Defense in depth for rental-capable provider children: strip ambient token
  * values. Filesystem isolation is enforced separately by the verified rental
  * permission profile; this helper does not claim that HOME is a sandbox.
  */
-export function rentalIsolatedChildEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+export function rentalIsolatedChildEnvironment(source: NodeJS.ProcessEnv, platform: NodeJS.Platform = process.platform): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {};
   for (const [key, value] of Object.entries(source)) {
     if (value === undefined || key === RENTAL_MARKER) continue;
+    // Windows spells names in any case (`Path`), and its programs need its system variables.
     if (SAFE_KEYS.has(key)
+      || (platform === "win32" && (SAFE_KEYS_WITHOUT_CASE.has(key.toLowerCase()) || isWindowsSystemEnvironmentKey(key, platform)))
       || key.startsWith("LETAGENTS_SUPERVISOR_")
       || key === "LETAGENTS_SUPERVISED_BOUNDED_TURNS"
       || key === "LETAGENTS_EXECUTION_PROFILE"

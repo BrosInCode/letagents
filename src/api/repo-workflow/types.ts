@@ -24,7 +24,12 @@ export interface RepoPullRequestRef {
   headRef?: string | null;
   headSha?: string | null;
   merged?: boolean;
+  draft?: boolean;
   authorLogin?: string | null;
+  /** The author's immutable GitHub user id, when the webhook carried it. */
+  authorId?: string | null;
+  /** GitHub's `author_association` for the pull request's author. */
+  authorAssociation?: string | null;
   mergedByLogin?: string | null;
 }
 
@@ -45,6 +50,8 @@ export interface RepoReviewRef {
   state: string;
   url: string;
   body?: string | null;
+  /** GitHub's `author_association` for the reviewer. */
+  authorAssociation?: string | null;
 }
 
 export interface RepoCheckRunRef {
@@ -82,6 +89,23 @@ export interface RepoRoomEventBase {
 export interface RepoPullRequestEvent extends RepoRoomEventBase {
   kind: "pull_request";
   pullRequest: RepoPullRequestRef;
+}
+
+/** A reviewer or assignee that GitHub added to or removed from a pull request. */
+export interface RepoPullRequestParticipant {
+  role: "reviewer" | "assignee";
+  change: "added" | "removed";
+  /** The GitHub login of a person. Null for a team. */
+  login: string | null;
+  github_user_id: string | null;
+  team_slug: string | null;
+  team_name: string | null;
+}
+
+export interface RepoPullRequestParticipantEvent extends RepoRoomEventBase {
+  kind: "pull_request_participant";
+  pullRequest: RepoPullRequestRef;
+  participant: RepoPullRequestParticipant;
 }
 
 export interface RepoIssueEvent extends RepoRoomEventBase {
@@ -123,6 +147,7 @@ export interface RepoBranchLifecycleEvent extends RepoRoomEventBase {
 
 export type RepoRoomEvent =
   | RepoPullRequestEvent
+  | RepoPullRequestParticipantEvent
   | RepoIssueEvent
   | RepoIssueCommentEvent
   | RepoPullRequestReviewEvent
@@ -145,6 +170,8 @@ export type TaskWorkflowArtifactKind =
   | "merge";
 export type TaskWorkflowRefKind = TaskWorkflowArtifactKind;
 
+export type TaskWorkflowArtifactLinkMark = "ticket_key" | "jev_suggested" | "jev_confirmed";
+
 export interface TaskWorkflowArtifact {
   provider: TaskWorkflowRefProvider;
   kind: TaskWorkflowArtifactKind;
@@ -155,6 +182,13 @@ export interface TaskWorkflowArtifact {
   ref?: string | null;
   state?: string | null;
   detail?: RoomSharedArtifactDetail | null;
+  /**
+   * Set by the server when a ticket key, not a lease or an explicit link,
+   * attached this pull request to the card (`ticket_key`), or when Jev
+   * suggested the link (`jev_suggested`) and a person confirmed it
+   * (`jev_confirmed`). Never accepted from a client.
+   */
+  linked_by?: TaskWorkflowArtifactLinkMark | null;
 }
 
 export interface TaskWorkflowArtifactMatch {

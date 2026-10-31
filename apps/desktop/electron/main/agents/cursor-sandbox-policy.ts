@@ -1,6 +1,7 @@
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync } from "node:fs";
-import { homedir } from "node:os";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readlinkSync, realpathSync, rmSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isOwnerPrivateSync, ownerPrivatePlatform, protectOwnerPrivateSync } from "../../../../../shared/owner-private-fs.mjs";
 
 export function isExactCursorLoopbackTestOrigin(value: string): boolean {
   const match = /^http:\/\/127[.]0[.]0[.]1:([1-9][0-9]{0,4})$/.exec(value);
@@ -9,10 +10,31 @@ export function isExactCursorLoopbackTestOrigin(value: string): boolean {
   return Number.isSafeInteger(port) && port <= 65_535;
 }
 
+/**
+ * How the operating system confines Cursor's native process tree. This is
+ * the one decision point; every caller asks it instead of testing the
+ * platform itself.
+ * - "macos-sandbox-exec": the wrapper runs Cursor under sandbox-exec with
+ *   the turn's file, process and network rules.
+ * - "windows-unsandboxed": owner decision for Windows. Cursor runs without an
+ *   operating-system sandbox; LetAgents still limits it to the room's folder
+ *   and permission profile (workspace generation, private profile, the
+ *   wrapper's proxies and its one MCP connection).
+ * - "unconfined": other platforms, development only
+ *   (LETAGENTS_ALLOW_NON_DARWIN_DAEMON); never a product path.
+ */
+export type CursorOsSandbox = "macos-sandbox-exec" | "windows-unsandboxed" | "unconfined";
+
+export function cursorOsSandbox(platform: NodeJS.Platform = process.platform): CursorOsSandbox {
+  if (platform === "darwin") return "macos-sandbox-exec";
+  if (platform === "win32") return "windows-unsandboxed";
+  return "unconfined";
+}
+
 let cachedCursorSandboxDelegatingExecutablePaths: string[] | null = null;
 
 export function cursorSandboxDeveloperRoots(): string[] {
-  if (process.platform !== "darwin") return [];
+  if (cursorOsSandbox() !== "macos-sandbox-exec") return [];
   const roots: string[] = [];
   try {
     const selected = readlinkSync("/var/db/xcode_select_link");
@@ -63,7 +85,7 @@ export function cursorSandboxDelegatingExecutablePaths(): string[] {
     "/usr/bin/screencapture", "/usr/bin/security", "/usr/bin/shortcuts", "/usr/bin/xcrun",
     "/usr/sbin/diskutil", "/usr/sbin/networksetup", "/usr/sbin/scutil",
   ]);
-  if (process.platform === "darwin") {
+  if (cursorOsSandbox() === "macos-sandbox-exec") {
     // Resolve selected Developer tool paths without spawning a process on
     // Electron's main thread, then deny effect-delegating binaries directly
     // as well as xcrun above. Repo builds can invoke compilers directly.
@@ -283,6 +305,16 @@ export function cursorSandboxPathVariants(path: string): string[] {
 
 const CURSOR_TURN_RUNTIME_DATA_PATTERN = /^\/(?:private\/)?tmp\/letagents-cursor-data-[A-Za-z0-9]{6}$/;
 
+/** Cursor's native code uses /tmp on macOS; Windows has no /tmp, so its per-user temporary folder stands in. */
+export function cursorTemporaryRoot(): string {
+  return realpathSync(ownerPrivatePlatform() === "win32" ? tmpdir() : "/tmp");
+}
+
+function isCursorTurnRuntimeDataRoot(root: string): boolean {
+  if (ownerPrivatePlatform() !== "win32") return CURSOR_TURN_RUNTIME_DATA_PATTERN.test(root);
+  return dirname(root) === cursorTemporaryRoot() && /^letagents-cursor-data-[A-Za-z0-9]{6}$/.test(basename(root));
+}
+
 /** Cursor's UUID resume preflight ignores TMPDIR and always takes a short-lived
  * ownership lock here, even for headless sessions that have never used tmux.
  * Prepare the structural parents outside the sandbox; native code only needs
@@ -290,10 +322,14 @@ const CURSOR_TURN_RUNTIME_DATA_PATTERN = /^\/(?:private\/)?tmp\/letagents-cursor
  * root, bindings, other conversations or persistent-session sockets. */
 export function prepareCursorResumeOwnershipLock(
   sessionId: string,
-  temporaryRoot = realpathSync("/tmp"),
+  temporaryRoot = ownerPrivatePlatform() === "win32" ? "" : realpathSync("/tmp"),
 ): string {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
     throw new Error("Cursor resume ownership requires an exact native conversation UUID.");
+  }
+  // The lock root is named by uid and exists for the macOS sandbox; Cursor runs unsandboxed on Windows.
+  if (ownerPrivatePlatform() === "win32") {
+    throw new Error("Cursor resume ownership is prepared only for the macOS sandbox.");
   }
   if (typeof process.getuid !== "function") {
     throw new Error("Cursor resume ownership requires a verified local account.");
@@ -304,7 +340,7 @@ export function prepareCursorResumeOwnershipLock(
     try { mkdirSync(directory, { mode: 0o700 }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
     const stat = lstatSync(directory);
-    if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== uid || (stat.mode & 0o777) !== 0o700) {
+    if (!stat.isDirectory() || stat.isSymbolicLink() || !isOwnerPrivateSync(directory, stat, { exactMode: 0o700 })) {
       throw new Error("Cursor resume ownership directory is not private to this account.");
     }
   }
@@ -323,16 +359,16 @@ export function prepareCursorResumeOwnershipLock(
 }
 
 export function prepareCursorTurnRuntimeDataDir(): string {
-  const root = mkdtempSync(join(realpathSync("/tmp"), "letagents-cursor-data-"));
-  chmodSync(root, 0o700);
-  if (!CURSOR_TURN_RUNTIME_DATA_PATTERN.test(root)) {
+  const root = mkdtempSync(join(cursorTemporaryRoot(), "letagents-cursor-data-"));
+  protectOwnerPrivateSync(root, "directory");
+  if (!isCursorTurnRuntimeDataRoot(root)) {
     throw new Error("Cursor's private turn data root has an unexpected identity.");
   }
   return root;
 }
 
 export function removeCursorTurnRuntimeDataDir(root: string): void {
-  if (!CURSOR_TURN_RUNTIME_DATA_PATTERN.test(root)) {
+  if (!isCursorTurnRuntimeDataRoot(root)) {
     throw new Error("Refusing to remove an unexpected Cursor turn data root.");
   }
   try {

@@ -111,8 +111,6 @@ export function registerPresenceUpdateRoutes(
         preserveLastSeenAtOnConflict: true,
       });
 
-      await deps.maybeEmitStaleWorkPrompt(project.id);
-
       res.status(200).json({
         ...toPublicRoomAgentPresence(presence),
       });

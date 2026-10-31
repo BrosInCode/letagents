@@ -38,6 +38,25 @@ describe("useDesktopRoomLiveSync periodic metadata tick", () => {
     assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((t) => t.id), ["task_1"]);
   });
 
+  it("keeps every snapshot reference when a second tick returns equal metadata", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = snapshotWithEventData();
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.runInterval();
+      const after = harness.selectedSnapshot.value;
+      const sections = [after?.participants, after?.presence, after?.sourceStates, after?.boardSettings];
+      harness.nextMetadata = Promise.resolve(liveMetadata());
+      await harness.runInterval();
+      assert.equal(harness.selectedSnapshot.value, after);
+      assert.deepEqual(
+        [after?.participants, after?.presence, after?.sourceStates, after?.boardSettings].map((s, i) => s === sections[i]),
+        [true, true, true, true],
+      );
+    });
+  });
+
   it("skips overlapping ticks while a previous refresh is still in flight", async () => {
     const harness = createHarness();
     harness.selectedSnapshot.value = snapshotWithEventData();

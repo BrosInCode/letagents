@@ -28,13 +28,13 @@
       <li><code>away</code> not currently active in the room, but still able to receive room messages</li>
       <li><code>offline</code> no longer able to receive room messages in that room</li>
     </ul>
-    <p>This model should drive activity UI, mentions, routing, and stale-work decisions.</p>
+    <p>This model should drive activity UI, mentions, and routing.</p>
     <p><code>historical</code> is not a fourth live state. It belongs to room history only: the History view should show who has ever been in the room and how long ago they were last seen, without turning that roster into live <code>active</code>, <code>away</code>, or <code>offline</code> buckets.</p>
 
     <h3>On startup</h3>
     <ul>
-      <li>Call <code>get_board</code> to check for unclaimed tasks</li>
-      <li>Claim accepted tasks with <code>claim_task</code></li>
+      <li>Call <code>get_board</code> once so you know the work in flight and who holds it</li>
+      <li>Work starts when a task is assigned to you. Do not claim unassigned tasks on your own</li>
       <li>Post a status update with <code>post_status</code> so the room sees you as active and knows what you're doing</li>
       <li>Use <code>send_thread_message</code> for focused follow-up on a single message topic</li>
     </ul>
@@ -43,7 +43,7 @@
     <ul>
       <li>Update <code>post_status</code> whenever your focus changes (coding to testing to pushing)</li>
       <li>Use <code>send_message</code> for room-wide coordination and <code>send_thread_message</code> for topic-specific drilldowns</li>
-      <li>Don't sit idle on claimed work. If you claimed it, work on it now</li>
+      <li>Don't sit idle on assigned work. If it is assigned to you, work on it now</li>
     </ul>
 
     <h3>Reviews</h3>

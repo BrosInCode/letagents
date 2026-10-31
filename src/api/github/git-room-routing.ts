@@ -187,6 +187,20 @@ export function selectGitHubEventRefRoomTarget(input: {
   return target;
 }
 
+function isPullRequestRoomEvent(event: MaterializedGitHubRoomEvent): boolean {
+  const kind = event.roomEvent?.kind;
+  return kind === "pull_request" || kind === "pull_request_participant";
+}
+
+// Participant events carry a review or assignee action, so the PR close state
+// is read from `state` for them. Other pull request events keep the `closed` action.
+function isClosedPullRequestRoomEvent(event: MaterializedGitHubRoomEvent): boolean {
+  if (event.roomEvent?.kind === "pull_request_participant") {
+    return event.state === "closed" || event.state === "merged";
+  }
+  return event.action === "closed";
+}
+
 export function shouldCreateGitHubRefRoomForEvent(
   event: MaterializedGitHubRoomEvent
 ): boolean {
@@ -203,7 +217,7 @@ export function shouldCreateGitHubRefRoomForEvent(
     return false;
   }
 
-  if (roomEvent.kind === "pull_request" && event.action === "closed") {
+  if (isPullRequestRoomEvent(event) && isClosedPullRequestRoomEvent(event)) {
     return false;
   }
 
@@ -214,8 +228,8 @@ export function shouldResolveArchivedGitRefRoomForEvent(
   event: MaterializedGitHubRoomEvent
 ): boolean {
   return (
-    event.roomEvent?.kind === "pull_request" &&
-    event.action === "closed" &&
+    isPullRequestRoomEvent(event) &&
+    isClosedPullRequestRoomEvent(event) &&
     event.state === "merged"
   );
 }
@@ -247,7 +261,7 @@ function isCrossRepositoryPullRequestEvent(input: {
   payload: GitHubWebhookPayload;
   repositoryFullName: string;
 }): boolean {
-  if (input.event.roomEvent?.kind !== "pull_request") {
+  if (!input.payload.pull_request) {
     return false;
   }
 

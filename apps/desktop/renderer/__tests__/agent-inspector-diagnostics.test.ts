@@ -290,6 +290,44 @@ test("provider health is fenced by daemon, execution, runtime, entry, and room i
   assert.equal(fixture.assess().checks[1]!.state, "unknown");
 });
 
+test("a stopped Cursor lane names Recover agent in plain words when that button is offered", () => {
+  const fixture = diagnosticFixture();
+  fixture.entry.provider = "cursor";
+  fixture.entry.providerPid = null;
+  fixture.entry.observedState = "idle";
+  fixture.entry.condition = "coordination_blocked";
+  fixture.entry.roomAgentState.inbox = { state: "blocked", pendingCount: 1, blockedByMessageId: "msg_1", detail: null };
+  const check = fixture.assess().checks[1]!;
+  assert.equal(check.action?.kind, "recover");
+  assert.equal(check.summary, "The agent needs a restart");
+  assert.equal(check.detail, "LetAgents could not continue this agent by itself. Press Recover agent to restart it. It keeps its identity and its workspace.");
+  assert.doesNotMatch(check.detail, /stopped|history/);
+});
+
+test("an exact runtime that needs a choice points to Recovery options, not Recover agent", () => {
+  const fixture = diagnosticFixture();
+  fixture.daemon.capabilities.agentRuntimeRecoveryV2 = true;
+  fixture.entry.condition = "coordination_blocked";
+  fixture.entry.observedState = "recovering";
+  const check = fixture.assess().checks[1]!;
+  assert.equal(check.action?.kind, "recovery_options");
+  assert.equal(check.summary, "Choose how to restart the agent");
+  assert.equal(check.detail, "LetAgents could not continue this agent by itself. Open Recovery options and choose how to restart it.");
+  assert.doesNotMatch(check.detail, /Recover agent|history/);
+});
+
+test("a coordination block with no restart action names no button", () => {
+  const fixture = diagnosticFixture();
+  fixture.daemon.capabilities.agentRuntimeRecoveryV2 = false;
+  fixture.entry.condition = "coordination_blocked";
+  fixture.entry.observedState = "recovering";
+  const check = fixture.assess().checks[1]!;
+  assert.equal(check.action, null);
+  assert.equal(check.summary, "LetAgents is still checking this agent");
+  assert.match(check.detail, /You can refresh checks/);
+  assert.doesNotMatch(check.detail, /Recover agent|Recovery options/);
+});
+
 test("room credential recovery explains the running provider separately", () => {
   const fixture = diagnosticFixture();
   fixture.entry.observedState = "recovering";
@@ -332,6 +370,50 @@ test("conversation repair targets only the exact eligible blocked message", () =
   assert.match(check.actionImpact!, /private context cannot be recovered/);
   fixture.entry.deliveryReceipts[0].attemptCount = 1;
   assert.equal(fixture.assess().checks[3]!.action, null);
+});
+
+test("a blocked message the agent already worked on offers an honest re-read and a skip that says what it drops", () => {
+  const fixture = diagnosticFixture();
+  const detail = "The provider completed, but its final answer is still unreadable. The same turn was re-read and was not rerun.";
+  fixture.entry.roomAgentState.inbox = { state: "blocked", pendingCount: 3, blockedByMessageId: "msg_1", detail };
+  fixture.entry.deliveryReceipts = [{ state: "blocked", failureCode: null, sourceMessageId: "msg_1", attemptCount: 1, providerTurnId: "turn_1", fifoSequence: 1, timeline: [] }];
+  fixture.entry.deliveryAttention = { reason: "message_blocked", sourceMessageId: "msg_1", blockedSince: "2026-09-14T10:00:00Z", detail,
+    waitingCount: 2, providerWorkStarted: true, retry: "reread_saved_turn", canSkip: true, skipUnavailableReason: null };
+  const check = fixture.assess().checks[3]!;
+  assert.equal(check.state, "attention");
+  assert.deepEqual([check.action?.kind, check.action?.label], ["retry_delivery", "Read the reply again"]);
+  assert.match(check.actionImpact!, /not rerun/);
+  assert.match(check.nextStep, /the turn is not rerun\. You can also skip the message/);
+  assert.deepEqual([check.secondaryAction?.kind, check.secondaryAction?.sourceMessageId], ["skip_message", "msg_1"]);
+  assert.match(check.secondaryActionImpact!, /turn is not rerun, and any answer it produced is dropped/);
+
+  fixture.entry.deliveryAttention.canSkip = false;
+  fixture.entry.deliveryAttention.skipUnavailableReason = "Provider work may still be running.";
+  const refused = fixture.assess().checks[3]!;
+  assert.equal(refused.secondaryAction, null, "Skip follows the supervisor's decision");
+  assert.doesNotMatch(refused.nextStep, /You can also skip/);
+  assert.match(refused.nextStep, /Skip isn’t available: Provider work may still be running\./);
+
+  // A saved reply that failed to post is posted by Retry, not re-read.
+  fixture.entry.deliveryAttention.retry = "publish_saved_reply";
+  fixture.entry.deliveryAttention.skipUnavailableReason = "This message has a saved reply that wasn't posted.";
+  const unposted = fixture.assess().checks[3]!;
+  assert.deepEqual([unposted.action?.kind, unposted.action?.label], ["retry_delivery", "Post the saved reply"]);
+  assert.match(unposted.actionImpact!, /provider is not asked again/);
+  assert.match(unposted.nextStep, /saved but wasn’t posted/);
+  assert.doesNotMatch(unposted.nextStep, /Read the reply again/);
+  fixture.entry.deliveryAttention.retry = "reread_saved_turn";
+  fixture.entry.deliveryAttention.canSkip = true;
+  assert.equal(fixture.assess("stale").checks[3]!.secondaryAction, null, "a stale snapshot offers no remedy");
+
+  // Skipping asks first, in plain words: the turn is not rerun and its answer is dropped.
+  const component = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorDiagnostics.vue", import.meta.url)), "utf8");
+  assert.match(component, /@click="reviewSkip"/);
+  assert.match(component, /Skip this message\?/);
+  assert.match(component, /turn for this message won’t be rerun, and any answer it produced will be dropped/);
+  // The confirmation is bound to the message it named and closes if the head changes.
+  assert.match(component, /runRecovery\(\{ \.\.\.selectedCheck\.secondaryAction, sourceMessageId: skipTarget \}\)/);
+  assert.match(component, /sourceMessageId !== skipTarget\.value\) skipTarget\.value = null/);
 });
 
 test("uncertain side effects suppress retry and send the user to evidence", () => {

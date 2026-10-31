@@ -1,3 +1,4 @@
+import type { RoomGif } from "../../../../../shared/room-expressions.mjs";
 import type { Request, Response } from "express";
 
 import type {
@@ -5,7 +6,10 @@ import type {
   Project,
 } from "../../../db.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
-import type { NormalizedMessageAttachmentReference } from "../../../messages/attachments.js";
+import type {
+  MessageAttachmentUploader,
+  NormalizedMessageAttachmentReference,
+} from "../../../messages/attachments.js";
 import type { AgentPromptKind } from "../../../../shared/room-agent-prompts.js";
 import type { RoomEventBroker } from "../../../server/room-event-broker.js";
 import type { RoomMessageOverlayBatcher } from "../../../server/room-message-overlays.js";
@@ -23,7 +27,12 @@ export interface RoomMessageRouteDeps {
   ): Promise<boolean>;
   getMessageStreamCheckpoint?(
     roomId: string,
-    options: { requestedCursor?: string | null; includePromptOnly?: boolean; waitForRouting?: boolean },
+    options: {
+      requestedCursor?: string | null;
+      includePromptOnly?: boolean;
+      waitForRouting?: boolean;
+      holdAgentKey?: string | null;
+    },
   ): Promise<{ checkpoint: string | null; cursorExists: boolean }>;
   beginRoomAgentDelivery?: typeof import("../../../rooms/agent-delivery.js").beginRoomAgentDelivery;
   attachReceiptAuthorityActivations?: typeof import("./receipt-activation.js").attachReceiptAuthorityActivations;
@@ -31,6 +40,12 @@ export interface RoomMessageRouteDeps {
   getMessageThreads?: typeof import("../../../db.js").getMessageThreads;
   getMessageThread?: typeof import("../../../db.js").getMessageThread;
   resolveMessageActivationIdentity?: typeof import("./activation-identity.js").resolveMessageActivationIdentity;
+  messagePinStore?: import("./pins.js").MessagePinStore;
+  getMessageLinkPreviews?: typeof import("../../../db/messages/link-previews.js").getMessageLinkPreviews;
+  queueMessagePinInvalidation?(roomId: string): void;
+  messageReactionStore?: import("./reactions.js").MessageReactionStore;
+  queueMessageReactionInvalidation?(roomId: string): void;
+  searchRoomMessages?: typeof import("../../../db/messages/search.js").searchRoomMessages;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireParticipant(
@@ -51,7 +66,9 @@ export interface RoomMessageRouteDeps {
       agent_prompt_kind?: AgentPromptKind | null;
       reply_to?: string | null;
       thread_root_id?: string | null;
-      attachments?: NormalizedMessageAttachmentReference[];
+      gif?: RoomGif | null;
+    attachments?: NormalizedMessageAttachmentReference[];
+      attachment_uploader?: MessageAttachmentUploader | null;
       client_message_id?: string | null;
       publisher_agent_key?: string | null;
       publisher_agent_session_id?: string | null;

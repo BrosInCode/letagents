@@ -9,3 +9,11 @@ export class RequestValidationError extends Error {
     this.name = "RequestValidationError";
   }
 }
+
+/** No message was committed: retry the same outgoing identity once its root is routed. */
+export class MessageRoutingPendingError extends Error {
+  constructor() {
+    super("The original message is still being routed. Please try again shortly.");
+    this.name = "MessageRoutingPendingError";
+  }
+}

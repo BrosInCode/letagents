@@ -5,11 +5,11 @@ import { buildAgentActorLabel, formatOwnerAttribution } from "../../../../shared
 import { normalizeAgentBaseName } from "../../../../shared/codenames.js";
 import {
   apiCall,
-  currentAgentIdentity,
-  currentAgentIdentityKey,
+  getCurrentAgentIdentity,
+  getCurrentAgentIdentityKey,
   detectAgentIdeLabel,
   getConversationIdentity,
-  getLetagentsToken,
+  hasLetagentsCredential,
   resolveOwnerContext,
   setConversationIdentity,
   storeCurrentAgentIdentity,
@@ -47,7 +47,7 @@ export function registerSetAgentNameTool(server: McpServer): void {
         });
       }
 
-      const authAvailable = Boolean(await getLetagentsToken());
+      const authAvailable = await hasLetagentsCredential();
       if (!authAvailable) {
         return jsonTextResponse({
           success: false,
@@ -90,7 +90,7 @@ export function registerSetAgentNameTool(server: McpServer): void {
           ide_label: ideLabel,
           actor_label: actorLabel,
           canonical_key: canonicalKey,
-          runtime_key: currentAgentIdentityKey,
+          runtime_key: getCurrentAgentIdentityKey(),
           source: conversation_id ? "local" : "api",
           resolved_at: new Date().toISOString(),
         };
@@ -98,7 +98,7 @@ export function registerSetAgentNameTool(server: McpServer): void {
         if (conversation_id) {
           setConversationIdentity(conversation_id, updatedIdentity);
         } else {
-          storeCurrentAgentIdentity(updatedIdentity, currentAgentIdentityKey);
+          storeCurrentAgentIdentity(updatedIdentity, getCurrentAgentIdentityKey());
         }
 
         return jsonTextResponse({
@@ -107,7 +107,7 @@ export function registerSetAgentNameTool(server: McpServer): void {
           agent_identity: toPublicAgentIdentity(
             conversation_id
               ? getConversationIdentity(conversation_id)
-              : currentAgentIdentity,
+              : getCurrentAgentIdentity(),
           ),
         });
       } catch (error) {

@@ -7,16 +7,22 @@ import type {
   ProviderActionStreamEvent,
 } from "../provider-action-port.js";
 import {
+  CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS,
   lifecycleLocalConformanceEligibility,
   ProviderStreamCoordinator,
+  STOP_CALLBACKS_DEADLINE_MS,
   type ProviderInstallationToken,
+  type ProviderStreamCoordinatorOptions,
 } from "../provider-stream-coordinator.js";
 import { ProviderLiveDisplay } from "../provider-live-display.js";
 import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { providerStreamLifecycle } from "../provider-stream-policy.js";
 import type { DaemonActivityEvent, DaemonManifestEntry } from "../types.js";
-import { WorkerRuntimeCustody } from "../worker-runtime-custody.js";
+import { WorkerRuntimeCustody, type InstalledHostGrant } from "../worker-runtime-custody.js";
+import { LiveActivitySummaryRelay } from "../live-activity-summary-relay.js";
+import type { WorkerSessionBinding } from "../worker-binding-store.js";
 import type { LifecycleProjectionObservation } from "../lifecycle-projection-ledger.js";
+import { setTurnStartLatencyReporter, turnStartLatency, type StartLatencyRecord } from "../turn-start-latency.js";
 
 const cleanLifecycleProjection = () => ({
   available: true,
@@ -134,6 +140,10 @@ const streamEvent = (sequence: number, method: string): ProviderActionStreamEven
 
 function coordinatorHarness(input: {
   appendActivity?: (method: string) => Promise<void>;
+  appendedActivity?: (event: DaemonActivityEvent) => void;
+  getRecentEntry?: (manifest: DaemonManifestEntry) => Promise<DaemonManifestEntry | undefined>;
+  getScalarEntry?: (manifest: DaemonManifestEntry) => Promise<DaemonManifestEntry | undefined>;
+  onGetEntry?: () => void;
   appendActivityOnly?: (method: string) => Promise<void>;
   stop?: () => Promise<void>;
   durabilityAttempt?: { execution_generations: Array<Record<string, unknown>>; checkpoints?: unknown[] };
@@ -155,12 +165,15 @@ function coordinatorHarness(input: {
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   startDelivery?: (entryId: string) => Promise<void>;
   startCutover?: (entryId: string) => Promise<void>;
-  bindingGet?: (entryId: string) => Promise<null>;
-  publishNativeActivity?: () => Promise<void>;
+  bindingGet?: (entryId: string) => Promise<WorkerSessionBinding | null>;
+  heartbeat?: Partial<ProviderStreamCoordinatorOptions["heartbeat"]>;
+  publishNativeActivity?: (entryId?: string, method?: string, status?: "working" | "idle") => Promise<void>;
+  observeActivitySummary?: ProviderStreamCoordinatorOptions["observeActivitySummary"];
   requestConvergence?: (entryId: string) => void;
   serializeManifest?: <T>(operation: () => Promise<T>) => Promise<T>;
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
+  nowMs?: () => number;
 } = {}) {
   let manifest = entry();
   let manifestAvailable = true;
@@ -200,7 +213,9 @@ function coordinatorHarness(input: {
       probeControl: input.probeControl,
     },
     manifest: {
-      getEntry: async () => manifestAvailable ? manifest : undefined,
+      getEntry: async () => { input.onGetEntry?.(); return manifestAvailable ? manifest : undefined; },
+      ...(input.getScalarEntry ? { getScalarEntry: async () => manifestAvailable ? input.getScalarEntry!(manifest) : undefined } : {}),
+      ...(input.getRecentEntry ? { getRecentEntry: async () => manifestAvailable ? input.getRecentEntry!(manifest) : undefined } : {}),
       load: async () => ({ entries: [manifest] }),
       updateEntry: async (_entryId, update) => {
         manifest = update(manifest);
@@ -243,9 +258,12 @@ function coordinatorHarness(input: {
     transition: async (_entryId, observed_state, condition) => {
       manifest = { ...manifest, observed_state, condition };
     },
-    appendNativeActivity: async (_entryId, event, activityOnly) => activityOnly
-      ? input.appendActivityOnly?.(event.method) : input.appendActivity?.(event.method),
-    publishNativeActivity: async () => input.publishNativeActivity?.(),
+    appendNativeActivity: async (_entryId, event, activityOnly) => {
+      input.appendedActivity?.(event);
+      return activityOnly ? input.appendActivityOnly?.(event.method) : input.appendActivity?.(event.method);
+    },
+    publishNativeActivity: async (entryId, method, status) => input.publishNativeActivity?.(entryId, method, status),
+    observeActivitySummary: input.observeActivitySummary,
     handleTerminal: async () => {},
     streams: { reset: () => {}, push: (_entryId, event) => input.pushStream?.(event), end: (entryId) => input.endStream?.(entryId) },
     delivery: { start: input.startDelivery ?? (async () => {}), startCutover: input.startCutover ?? (async () => {}) },
@@ -256,12 +274,14 @@ function coordinatorHarness(input: {
       hostGrantNeedsRenewal: () => false,
       hostWorkerBearerNeedsRotation: async () => false,
       requestConvergence: input.requestConvergence ?? (() => {}),
+      ...input.heartbeat,
     },
     setInterval: input.setInterval
       ?? ((() => ({ unref() {} })) as unknown as typeof setInterval),
     clearInterval: input.clearInterval ?? ((() => {}) as typeof clearInterval),
     setTimeout: input.setTimeout,
     clearTimeout: input.clearTimeout,
+    nowMs: input.nowMs,
   });
   return {
     coordinator,
@@ -760,6 +780,81 @@ test("Cursor typed child births share one listener but never share operational a
   await harness.coordinator.disposeAll();
 });
 
+test("Cursor readiness holds through a turn boundary instead of flashing unavailable", async () => {
+  let now = 1_000_000;
+  const admissions = new Map<ProviderInstallationToken, "pending" | "ready" | "unavailable">();
+  const idle = { kind: "cursor_cli" as const, pid: null, processIdentity: null };
+  const cursorHandle: ProviderActionHandle = {
+    workAttemptId: "attempt-1", pid: null, providerContinuationId: "continuation-1",
+    observedState: "idle", appliedConfigurationRevision: 1, providerConnection: idle,
+  };
+  const cursorEntry = (connection: Extract<NonNullable<ProviderActionHandle["providerConnection"]>, { kind: "cursor_cli" }>): DaemonManifestEntry => ({
+    ...entry(), provider: "cursor", observed_state: connection.pid === null ? "idle" : "working",
+    provider_ref: { ...entry().provider_ref!, provider_connection: connection },
+  });
+  const harness = coordinatorHarness({
+    typedLifecycleAdmission: installation => admissions.get(installation) ?? "unavailable",
+    onStream: async () => () => {},
+    nowMs: () => now,
+  });
+  harness.setManifest(cursorEntry(idle));
+  await harness.coordinator.install("agent-1", cursorHandle, "generation-2");
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), null);
+  let births = 0;
+  const startTurn = () => {
+    births += 1;
+    const birth = { kind: "cursor_cli" as const, pid: 200 + births, processIdentity: `cursor-boundary-birth-${births}` };
+    cursorHandle.pid = birth.pid; cursorHandle.providerConnection = birth; cursorHandle.observedState = "working";
+    harness.setManifest(cursorEntry(birth));
+    return harness.coordinator.activateCommittedCursorRuntime({
+      entry: harness.getManifest(), handle: cursorHandle, executionGenerationId: "generation-2", authorityMode: "typed",
+    });
+  };
+  const finishTurn = async () => {
+    // The child is settled and leaves the handle before its idle checkpoint.
+    await harness.coordinator.settleCursorLifecycleBeforeIdle(
+      { agentId: "agent-1", handle: cursorHandle, executionGenerationId: "generation-2" },
+      { flush: () => {} }, { settle: async () => {} },
+    );
+    cursorHandle.pid = null; cursorHandle.providerConnection = idle; cursorHandle.observedState = "idle";
+  };
+  const checkpointIdle = () => {
+    harness.setManifest(cursorEntry(idle));
+    harness.coordinator.activateCommittedCursorRuntime({
+      entry: harness.getManifest(), handle: cursorHandle, executionGenerationId: "generation-2", authorityMode: null,
+    });
+  };
+
+  // Turn start: the committed child birth waits for its typed evidence.
+  const token = startTurn();
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false, "delivery still waits for the exact birth");
+  now += 5_000;
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), null,
+    "the view keeps the lane's settled readiness while the new turn's evidence catches up");
+  admissions.set(token, "ready");
+  harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "ready");
+
+  // Turn end: the finished turn keeps its readiness until the idle checkpoint.
+  await finishTurn();
+  now += 5_000;
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "ready");
+  // The hold is measured from the boundary itself, not from the first read.
+  now += CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS;
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "unavailable");
+  checkpointIdle();
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), null);
+
+  // A first read that arrives after the hold already expired shows the truth.
+  startTurn();
+  now += CURSOR_TURN_BOUNDARY_ADMISSION_HOLD_MS + 1;
+  assert.equal(harness.coordinator.deliveryAdmission(harness.getManifest()), "unavailable");
+  // A failed lane is never masked.
+  assert.equal(harness.coordinator.deliveryAdmission({ ...harness.getManifest(), observed_state: "failed" }), "unavailable");
+  await harness.coordinator.disposeAll();
+});
+
 test("Cursor keeps one listener lease while immutable child-birth tokens advance", async () => {
   const rawListeners: Array<(event: ProviderActionStreamEvent) => void> = [];
   const appended: string[] = [];
@@ -935,6 +1030,53 @@ test("daemon-inbox heartbeats probe exact live runtimes without granting recover
   assert.equal(harness.getManifest().observed_state, "working");
   assert.equal(harness.getManifest().condition, "none");
   await harness.coordinator.disposeAll();
+});
+
+test("a recovering agent's heartbeat still renews and rotates its bound credentials without announcing liveness", async () => {
+  const grant: InstalledHostGrant = {
+    entryId: "agent-1", roomId: "room-1", agentKey: "owner/agent-1", grantId: "grant-1",
+    supervisorGrant: "supervisor-secret", grantGeneration: 1, apiUrl: "https://letagents.test",
+    daemonGeneration: 7, hostId: "host-1", installationId: "installation-1",
+    ownerAccountId: null, scopeKey: null, expiresAt: "2099-01-01T00:00:00.000Z",
+  };
+  const binding: WorkerSessionBinding = {
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1",
+    execution_generation_id: "generation-2", agent_session_id: "session-1", credential_ref: "bearer-1",
+    api_url: grant.apiUrl, room_cursor: null, last_sequence: 0, last_observed_at_ms: 0,
+    updated_at: "2026-08-26T00:00:00.000Z",
+  };
+  for (const due of ["rotation", "renewal", "none"] as const) {
+    let heartbeat: (() => void) | null = null;
+    let activityCalls = 0;
+    let convergenceCalls = 0;
+    const harness = coordinatorHarness({
+      bindingGet: async () => binding,
+      publishNativeActivity: async () => { activityCalls += 1; },
+      requestConvergence: () => { convergenceCalls += 1; },
+      heartbeat: {
+        requiresHostGrant: () => true,
+        currentHostGrant: () => grant,
+        hostGrantNeedsRenewal: () => due === "renewal",
+        hostWorkerBearerNeedsRotation: async () => due === "rotation",
+      },
+      setInterval: ((callback: () => void) => {
+        heartbeat = callback;
+        return { unref() {} };
+      }) as unknown as typeof setInterval,
+    });
+    await harness.coordinator.install("agent-1", { ...handle, observedState: "idle" }, "generation-2");
+    harness.runtimeCustody.installLiveBinding("agent-1", {
+      agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
+    });
+    // The latch a failed bind leaves behind: bound, but still recovering.
+    harness.setManifest({ ...harness.getManifest(), observed_state: "recovering", condition: "coordination_blocked",
+      last_error: "Restoring room access (attempt 1 of 3) failed: The operation was aborted due to timeout. Retrying automatically." });
+    heartbeat!();
+    await harness.coordinator.drainCallbacks();
+    assert.equal(convergenceCalls, due === "none" ? 0 : 1, due);
+    assert.equal(activityCalls, 0, `${due}: a recovering agent is not announced as live`);
+    await harness.coordinator.disposeAll();
+  }
 });
 
 test("control probes exclude non-daemon, non-live, generation-mismatched, and replaced runtimes", async () => {
@@ -1187,6 +1329,157 @@ test("provider stream events are FIFO per entry and stale handles are ignored", 
     streamEvent(3, "item/stale"),
   );
   assert.deepEqual(calls, ["item/first", "item/second"]);
+  await harness.coordinator.disposeAll();
+});
+
+test("the native heartbeat reads its entry without activity events when the manifest offers a scalar read", async () => {
+  let heartbeat: (() => void) | null = null;
+  let activityCalls = 0;
+  let fullReads = 0;
+  const scalarReads: string[] = [];
+  const harness = coordinatorHarness({
+    onGetEntry: () => { fullReads += 1; },
+    getScalarEntry: async (current) => { scalarReads.push(current.id); return { ...current, activity: [] }; },
+    publishNativeActivity: async () => { activityCalls += 1; },
+    setInterval: ((callback: () => void) => {
+      heartbeat = callback;
+      return { unref() {} };
+    }) as unknown as typeof setInterval,
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  harness.runtimeCustody.installLiveBinding("agent-1", {
+    agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
+  });
+  const readsAfterInstall = fullReads;
+  heartbeat!();
+  await harness.coordinator.drainCallbacks();
+  heartbeat!();
+  await harness.coordinator.drainCallbacks();
+  assert.equal(activityCalls, 2, "the heartbeat still announces liveness from the scalar read");
+  assert.deepEqual(scalarReads, ["agent-1", "agent-1"]);
+  assert.equal(fullReads, readsAfterInstall, "no heartbeat reads the full entry");
+  await harness.coordinator.disposeAll();
+});
+
+test("each stream event reads its entry through getRecentEntry when the manifest offers it", async () => {
+  const recentReads: string[] = [];
+  const appended: DaemonActivityEvent[] = [];
+  const harness = coordinatorHarness({
+    appendedActivity: (event) => appended.push(event),
+    getRecentEntry: async (current) => {
+      recentReads.push(current.id);
+      return { ...current, activity: [{
+        observed_at: "2026-08-26T00:00:00.000Z", sequence: 41, provider: "codex", kind: "tool", method: "item/earlier",
+        summary: "earlier", status: "working", payload: {}, payload_truncated: false, payload_redacted: false,
+        durable_payload_ref: null,
+      }] };
+    },
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.enqueue("agent-1", handle, streamEvent(1, "item/first"));
+  assert.deepEqual(recentReads, ["agent-1"]);
+  // The next sequence follows the recent read's activity, not the event's own.
+  assert.equal(appended.at(-1)?.sequence, 42);
+  await harness.coordinator.disposeAll();
+});
+
+test("the first projected live-display event ends the agent's turn start-up timing", async () => {
+  const records: StartLatencyRecord[] = [];
+  const displayed: DaemonActivityEvent[] = [];
+  setTurnStartLatencyReporter(record => { records.push(record); });
+  const harness = coordinatorHarness({ pushStream: event => displayed.push(event) });
+  try {
+    await harness.coordinator.install("agent-1", handle, "generation-2");
+    turnStartLatency.received({ agentId: "agent-1", item: { inbox_item_id: "inbox-1", source_message_id: "msg_1", source_message: { source: "browser" } }, busy: false, liveHandle: true });
+    turnStartLatency.begin("agent-1", "inbox-1", "codex")!.providerCalled();
+    const now = new Date().toISOString();
+    const delta = (sequence: number, method: string, payload: Record<string, unknown>): ProviderActionStreamEvent => ({
+      ...streamEvent(sequence, method), observedAt: now,
+      payload: { threadId: "continuation-1", turnId: "turn-1", ...payload },
+    });
+    await harness.coordinator.enqueue("agent-1", handle, { ...delta(1, "thread/read", {}), kind: "item_lifecycle" });
+    assert.deepEqual(records, [], "a protocol event is not output");
+    await harness.coordinator.enqueue("agent-1", handle, delta(2, "item/agentMessage/delta", { itemId: "item-1", delta: "Hello" }));
+    assert.deepEqual(displayed.map(event => event.method), ["item/agentMessage/delta"]);
+    assert.deepEqual(records.map(record => [record.event, record.event === "turn_start_latency" ? record.sample.first_output : null]),
+      [["turn_start_latency", "text"]]);
+  } finally {
+    setTurnStartLatencyReporter(null);
+    await harness.coordinator.disposeAll();
+  }
+});
+
+test("each human-visible working event gives the room the owner's live line, from the bound runtime only", async () => {
+  const lines: Array<[string, string | null, Promise<string | null> | string | null]> = [];
+  const harness = coordinatorHarness({
+    observeActivitySummary: (entryId, summary, status) => { lines.push([entryId, summary, status()]); },
+  });
+  const settled = async () => Promise.all(lines.map(async ([entryId, summary, status]) => [entryId, summary, await status]));
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.enqueue("agent-1", handle, streamEvent(1, "item/agentMessage/delta"));
+  assert.deepEqual(await settled(), [["agent-1", "Writing a response", null]], "no binding yet: the line waits for one");
+  harness.runtimeCustody.installLiveBinding("agent-1", {
+    agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
+  });
+  await harness.coordinator.enqueue("agent-1", handle, { ...streamEvent(2, "thread/read"), kind: "item_lifecycle" });
+  assert.equal(lines.length, 1, "a protocol read says nothing about the line");
+  await harness.coordinator.enqueue("agent-1", handle, { ...streamEvent(3, "item/commandExecution/outputDelta"), kind: "command_output" });
+  assert.deepEqual((await settled()).at(-1), ["agent-1", "Working in the project", "working"]);
+  await harness.coordinator.enqueue("agent-1", handle, { ...streamEvent(4, "item/completed"), kind: "item_lifecycle", payload: { item: { status: "completed" } } });
+  assert.equal(lines.length, 2, "an item that ends inside the turn keeps the line, as on the owner's desktop");
+  await harness.coordinator.enqueue("agent-1", handle, { ...streamEvent(5, "turn/completed"), kind: "turn_lifecycle" });
+  assert.deepEqual(lines.at(-1)?.slice(0, 2), ["agent-1", null], "the end of the turn clears the line");
+  await harness.coordinator.disposeAll();
+});
+
+test("a recovering agent publishes no activity line; the next heartbeat after it works again carries the kept line", async () => {
+  let heartbeat: (() => void) | null = null;
+  const published: Array<[string | undefined, string | undefined, string | null]> = [];
+  let timers: Array<() => void> = [];
+  const relay: LiveActivitySummaryRelay = new LiveActivitySummaryRelay({
+    publish: async (entryId, status) => { published.push(["native_harness.activity_summary", status, status === "working" ? relay.take(entryId) : null]); },
+    setTimeout: ((callback: () => void) => { timers.push(callback); return 0; }) as never,
+    clearTimeout: () => {},
+  });
+  const rawListeners: Array<(event: ProviderActionStreamEvent) => void> = [];
+  // A typed daemon-inbox agent: no per-event publication, so only the relay and the heartbeat publish.
+  const harness = coordinatorHarness({
+    authorityMode: "typed",
+    typedLifecycleAdmission: () => "ready",
+    onStream: async (_handle, listener) => { rawListeners.push(listener); return () => {}; },
+    observeActivitySummary: (entryId, summary, status) => relay.observe(entryId, summary, status),
+    publishNativeActivity: async (entryId, method, status) => {
+      published.push([method, status, status === "working" ? relay.take(entryId!) : null]);
+    },
+    setInterval: ((callback: () => void) => { heartbeat = callback; return { unref() {} }; }) as unknown as typeof setInterval,
+  });
+  const runTimers = async () => {
+    const due = timers; timers = [];
+    for (const run of due) run();
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  harness.runtimeCustody.installLiveBinding("agent-1", {
+    agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
+  });
+  harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(rawListeners.length, 1);
+  harness.setManifest({ ...harness.getManifest(), observed_state: "recovering" });
+  rawListeners[0]!({ ...streamEvent(1, "item/commandExecution/outputDelta"), kind: "command_output" });
+  await harness.coordinator.drainCallbacks();
+  await runTimers();
+  heartbeat!();
+  await harness.coordinator.drainCallbacks();
+  assert.deepEqual(published, [], "a recovering agent announces neither its line nor its liveness");
+
+  harness.setManifest({ ...harness.getManifest(), observed_state: "working" });
+  heartbeat!();
+  await harness.coordinator.drainCallbacks();
+  assert.deepEqual(published, [["native_harness.heartbeat", "working", "Working in the project"]], "the kept line rides the next heartbeat");
+  await runTimers();
+  assert.equal(published.length, 1, "and is not published twice");
   await harness.coordinator.disposeAll();
 });
 
@@ -1771,4 +2064,62 @@ test("coordinator normalizes only the redacted display copy of a failed native c
   assert.doesNotMatch(JSON.stringify(displayed), /secret_canary_not_real_1234567890/);
   assert.notEqual(harness.getManifest().observed_state, "failed");
   await harness.coordinator.disposeAll();
+});
+
+test("stopping waits for every stream callback, and one that the stop's own fence refused is not a failure of the stop", async () => {
+  const { DaemonFenceLostError } = await import("../singleton.js");
+  const harness = coordinatorHarness({});
+  let finish!: () => void;
+  let finished = false;
+  // One callback is refused by the fence the stopping daemon has raised; another is still writing.
+  harness.coordinator.track(Promise.reject(new DaemonFenceLostError("Supervisor handoff fenced a stale daemon-owned commit.")));
+  harness.coordinator.track(new Promise<void>((resolve) => { finish = () => { finished = true; resolve(); }; }));
+  let disposed = false;
+  const disposal = harness.coordinator.disposeAll().then(() => { disposed = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(disposed, false, "the stores are not closed under a callback that is still running");
+  finish();
+  await disposal;
+  assert.equal(finished, true);
+
+  // Any other failure of a callback is still the stop's to report.
+  harness.coordinator.track(Promise.reject(new Error("activity storage fault")));
+  await assert.rejects(harness.coordinator.disposeAll(), /activity storage fault/);
+});
+
+test("stopping waits for stream callbacks no longer than its deadline, then goes on and reports what still runs", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const warnings: string[] = [];
+  t.mock.method(console, "warn", (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); });
+  const flush = async () => { for (let turn = 0; turn < 4; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve)); };
+  const harness = coordinatorHarness({});
+  assert.equal(STOP_CALLBACKS_DEADLINE_MS, 10_000);
+  // One callback never returns; another ends at once.
+  harness.coordinator.track(new Promise<void>(() => {}));
+  harness.coordinator.track(Promise.resolve());
+  let disposed = false;
+  const disposal = harness.coordinator.disposeAll().then(() => { disposed = true; });
+  await flush();
+  t.mock.timers.tick(STOP_CALLBACKS_DEADLINE_MS - 1);
+  await flush();
+  assert.equal(disposed, false, "the stop waits for the deadline");
+  assert.deepEqual(warnings, []);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(disposed, true);
+  await disposal;
+  assert.deepEqual(warnings, ['[provider_stream_stop] {"deadline_ms":10000,"callbacks_still_running":1}'],
+    "and then goes on, reporting the callback that still runs");
+
+  // A callback that failed before the deadline is still the stop's to report, after the wait.
+  const failing = coordinatorHarness({});
+  failing.coordinator.track(new Promise<void>(() => {}));
+  failing.coordinator.track(Promise.reject(new Error("activity storage fault")));
+  let failure: unknown = null;
+  const failed = failing.coordinator.disposeAll().catch((error: unknown) => { failure = error; });
+  await flush();
+  t.mock.timers.tick(STOP_CALLBACKS_DEADLINE_MS);
+  await flush();
+  assert.match(String(failure), /activity storage fault/);
+  await failed;
 });

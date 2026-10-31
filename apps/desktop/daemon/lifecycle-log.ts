@@ -1,20 +1,47 @@
 import {
-  chmodSync,
   closeSync,
+  constants,
   mkdirSync,
   openSync,
   renameSync,
   statSync,
   writeSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 
 import { redactCredentialText } from "./credential-redaction.js";
+import { setRoomLatencyReporter } from "./room-latency-trace.js";
+import { setTurnStartLatencyReporter } from "./turn-start-latency.js";
+import { openNoFollowSync, ownerPrivatePlatform, privateEntryCreatedSync, protectOwnerPrivateSync } from "../../../shared/owner-private-fs.mjs";
 
 const MAX_LIFECYCLE_LOG_BYTES = 256 * 1024;
 
+/**
+ * Open the log for appending. POSIX: open(path, "a") as before. Windows: an
+ * exclusive create first, so "made" is the open's own answer (a dangling link
+ * at the path counts as existing); an existing log is opened without following
+ * a link.
+ */
+function openLog(path: string): { descriptor: number; made: boolean } {
+  if (ownerPrivatePlatform() !== "win32") return { descriptor: openSync(path, "a", 0o600), made: false };
+  try { return { descriptor: openSync(path, "ax", 0o600), made: true }; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error; }
+  return { descriptor: openNoFollowSync(path, constants.O_WRONLY | constants.O_APPEND, 0o600), made: false };
+}
+
+/**
+ * Make the log private. POSIX: chmod 0600 as before. Windows: a log the open
+ * just made inherits its verified private folder (no tool runs at daemon
+ * start); an existing one is protected.
+ */
+function protectLog(path: string, made: boolean): void {
+  if (made) privateEntryCreatedSync(path, "file");
+  else protectOwnerPrivateSync(path, "file");
+}
+
 export type DaemonLifecycleEvent = {
-  event: "daemon_starting" | "daemon_ready" | "handoff_complete" | "entrypoint_failure" | "fatal_exception" | "process_exit";
+  event: "daemon_starting" | "daemon_ready" | "handoff_complete" | "entrypoint_failure" | "fatal_exception" | "process_exit" | "room_latency"
+    | "turn_start_latency" | "provider_launch_latency";
   detail?: string | null;
   exitCode?: number | null;
 };
@@ -30,14 +57,15 @@ export class DaemonLifecycleLog {
   constructor(readonly path: string, private readonly maxBytes = MAX_LIFECYCLE_LOG_BYTES) {
     try {
       mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-      chmodSync(dirname(path), 0o700);
+      protectOwnerPrivateSync(dirname(path), "directory");
       try {
         if (statSync(path).size >= maxBytes) renameSync(path, `${path}.previous`);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       }
-      this.descriptor = openSync(path, "a", 0o600);
-      chmodSync(path, 0o600);
+      const opened = openLog(path);
+      this.descriptor = opened.descriptor;
+      protectLog(path, opened.made);
     } catch {
       this.descriptor = null;
     }
@@ -46,6 +74,16 @@ export class DaemonLifecycleLog {
   append(event: DaemonLifecycleEvent): void {
     if (this.descriptor === null) return;
     try {
+      // Slow-operation samples can recur throughout a long-lived process.
+      // Keep the same two-file retention used at startup.
+      if (statSync(this.path).size >= this.maxBytes) {
+        closeSync(this.descriptor);
+        this.descriptor = null;
+        renameSync(this.path, `${this.path}.previous`);
+        const opened = openLog(this.path);
+        this.descriptor = opened.descriptor;
+        protectLog(this.path, opened.made);
+      }
       const detail = event.detail == null
         ? null
         : redactCredentialText(event.detail, 4_096).value;
@@ -71,6 +109,32 @@ export class DaemonLifecycleLog {
     }
     this.descriptor = null;
   }
+}
+
+/** Install process-level diagnostics only from the executable entrypoint. */
+export function startDaemonLifecycleDiagnostics(path: string): DaemonLifecycleLog {
+  const lifecycle = new DaemonLifecycleLog(path);
+  setRoomLatencyReporter(sample => lifecycle.append({ event: "room_latency", detail: JSON.stringify(sample) }));
+  // One start-up sample per turn would soon push process failures out of the
+  // lifecycle file, so they get a sibling file, created at the first sample.
+  const turnLatencyPath = join(dirname(path), "daemon-turn-latency.jsonl");
+  let turnLatency: DaemonLifecycleLog | null = null;
+  setTurnStartLatencyReporter(record => {
+    turnLatency ??= new DaemonLifecycleLog(turnLatencyPath);
+    turnLatency.append({ event: record.event, detail: JSON.stringify(record.sample) });
+  });
+  lifecycle.append({ event: "daemon_starting" });
+  process.on("uncaughtExceptionMonitor", error => {
+    lifecycle.append({ event: "fatal_exception", detail: daemonLifecycleErrorDetail(error) });
+  });
+  process.on("exit", exitCode => {
+    setRoomLatencyReporter(null);
+    setTurnStartLatencyReporter(null);
+    turnLatency?.close();
+    lifecycle.append({ event: "process_exit", exitCode });
+    lifecycle.close();
+  });
+  return lifecycle;
 }
 
 export function daemonLifecycleErrorDetail(error: unknown): string {

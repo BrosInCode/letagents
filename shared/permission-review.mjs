@@ -20,6 +20,12 @@
  * answer, a timeout) means "ask a person". Nothing here ever denies a command
  * or decides that a command is dangerous: it only declines to decide.
  *
+ * The rules read a command as a POSIX shell does: its quoting, its
+ * operators, and its `/dev/null`. On a Windows project they also refuse
+ * what cmd.exe would read differently (`%NAME%`, operators inside single
+ * quotes, `/dev/null`), but they do not read cmd.exe's own grammar. An
+ * agent that runs its commands through cmd.exe must not be decided here.
+ *
  * Pure: no I/O, no clock, no environment.
  */
 
@@ -43,7 +49,7 @@ const DOUBLE_QUOTED = /^[\x20\x23\x25-\x5b\x5d-\x5f\x61-\x7e]*$/;
 /** Joining or discarding an output stream names no file a command could overwrite. */
 const STREAM = /^(?:2>&1|[12]?>>? ?\/dev\/null)(?=[ \t\n;|&]|$)/;
 
-const CREDENTIAL = /(?:^|[/=:,])\.(?:env|envrc|ssh|aws|gnupg|kube|docker|dockercfg|npmrc|pypirc|netrc|pgpass|git-credentials|azure|boto|s3cfg|my\.cnf)(?:$|[/._-])|\.(?:env|pem|key|crt|cer|p12|pfx|jks|keystore|kdbx|tfstate|tfvars)(?:$|[.,:])|credential|secret|passw|token|api[_-]?key|private[_-]?key|service[_-]?account|kubeconfig|wallet|_history|id_(?:rsa|dsa|ecdsa|ed25519)|authorized_keys|known_hosts|keychain/i;
+const CREDENTIAL = /(?:^|[/\\=:,])\.(?:env|envrc|ssh|aws|gnupg|kube|docker|dockercfg|npmrc|pypirc|netrc|pgpass|git-credentials|azure|boto|s3cfg|my\.cnf)(?:$|[/\\._=:,-])|\.(?:env|pem|key|crt|cer|p12|pfx|jks|keystore|kdbx|tfstate|tfvars)(?:$|[.,:])|credential|secret|passw|token|api[_-]?key|private[_-]?key|service[_-]?account|kubeconfig|wallet|_history|id_(?:rsa|dsa|ecdsa|ed25519)|authorized_keys|known_hosts|keychain/i;
 
 /** A script, target, or file named for an action that ships, removes, or reaches production. */
 const CONSEQUENTIAL_NAME = /deploy|release|publish|rollback|destroy|teardown|wipe|purge|drop|nuke|erase|delete|remove|reset|clean|clear|uninstall|install|migrat|seed|prod|backup|restore|upload|email|notify|charge|refund|invoice|payment|(?:^|[^a-z])(?:env|db|sync|ship|push|rm)(?:$|[^a-z])/i;
@@ -52,34 +58,118 @@ function isText(value, max) {
   return typeof value === "string" && value.length > 0 && value.length <= max;
 }
 
+/**
+ * Both `/` and `\` split a path. Windows reads either, and a POSIX shell
+ * never passes a `\` through unquoted, so reading both everywhere costs
+ * nothing and lets no part hide behind the other separator.
+ */
+export const PATH_SEPARATOR = /[\\/]/;
+
+/**
+ * Where an absolute path starts, and its parts, or null when the text is
+ * relative. The root is `/` for a POSIX path or one that starts with a
+ * separator alone, the drive in lower case followed by `/` for `C:\x` or
+ * `C:/x`, and `//server/share` for a network share written either way. A
+ * drive with no separator after it (`C:x`) names a folder the shell remembers
+ * for that drive, so it is absolute but has no root this file can read.
+ * Parts keep their case: how a file system folds it is not known here.
+ */
+function absolutePath(text) {
+  const drive = /^([A-Za-z]):/.exec(text);
+  if (drive) {
+    const rest = text.slice(2);
+    if (!PATH_SEPARATOR.test(rest.charAt(0))) return { root: null, parts: [] };
+    return { root: `${drive[1].toLowerCase()}:/`, parts: rest.slice(1).split(PATH_SEPARATOR) };
+  }
+  if (!PATH_SEPARATOR.test(text.charAt(0))) return null;
+  if (!PATH_SEPARATOR.test(text.charAt(1))) return { root: "/", parts: text.slice(1).split(PATH_SEPARATOR) };
+  const [server, share, ...parts] = text.slice(2).split(PATH_SEPARATOR);
+  // `//x` alone is read as a share without a name. Nothing is inside it.
+  return server && share ? { root: `//${server}/${share}`, parts } : { root: null, parts: [] };
+}
+
+/**
+ * True when Windows opens a name as another name: it drops the dots and
+ * spaces at the end, so `.. ` climbs and `.env ` holds credentials. Such a
+ * name is not compared with anything. `.` stands, and three dots or more
+ * alone are a plain name (`go test ./...`).
+ */
+function openedAsAnotherName(part) {
+  return /[. ]$/.test(part) && part !== "." && !/^\.{3,}$/.test(part);
+}
+
+/**
+ * Where an absolute path is against the project: the project itself, inside
+ * it, or null when it is elsewhere or not read. A path with another root (a
+ * different drive, a different share, a POSIX root against a drive) is
+ * elsewhere, whatever its parts say. An empty part or `.` inside the path is
+ * not read; one separator at the end is.
+ */
+function placeInProject(text, project) {
+  const path = absolutePath(text);
+  const root = absolutePath(project);
+  if (!path || !root || path.root === null || path.root !== root.root) return null;
+  // On a POSIX project `\` is part of a name, so `/a\b` is not `/a/b`.
+  if (root.root === "/" && text.includes("\\")) return null;
+  const parts = path.parts.length > 1 && path.parts.at(-1) === "" ? path.parts.slice(0, -1) : path.parts;
+  if (parts.some((part) => part === "") || parts.slice(0, -1).some((part) => part === ".")) return null;
+  if (parts.length < root.parts.length || root.parts.some((part, index) => parts[index] !== part)) return null;
+  return parts.length === root.parts.length ? "self" : "inside";
+}
+
+/** True when the project is on a Windows drive or share, where `\` separates and `C:x` names a folder. */
+function onWindows(project) {
+  return absolutePath(project)?.root !== "/";
+}
+
 function normalizedProject(project) {
   if (!isText(project, PERMISSION_REVIEW_MAX_PROJECT_CHARS) || !/^[\x21-\x7e]+$/.test(project)) return null;
-  const trimmed = project.replace(/\/+$/, "");
-  return trimmed.startsWith("/") && trimmed.length > 1
-    && trimmed.split("/").slice(1).every((part) => part && part !== "." && part !== "..") ? trimmed : null;
+  // `\x` names a folder on whichever drive is current, and a POSIX folder's name may hold a `\`: neither is read.
+  if (!absolutePath(project) || (!onWindows(project) && project.includes("\\"))) return null;
+  // A share is written with one separator throughout: `//x/y/z\` could also be a POSIX folder whose name ends in `\`.
+  if (onWindows(project) && !/^[A-Za-z]:/.test(project) && project.includes("/") && project.includes("\\")) return null;
+  const trimmed = project.replace(/[\\/]+$/, "");
+  const path = absolutePath(trimmed);
+  // A root alone (`/`, `C:\`, `\\server\share`) is not a project: everything would be inside it.
+  return path && path.root !== null && path.parts.length > 0
+    && path.parts.every((part) => part && part !== "." && part !== ".." && !(onWindows(project) && openedAsAnotherName(part))) ? trimmed : null;
+}
+
+/** The text inside a quote that starts at `index`, and where the quote ends, or null. */
+function quotedText(command, index) {
+  const quote = command[index];
+  const end = command.indexOf(quote, index + 1);
+  if (end < 0) return null;
+  const value = command.slice(index + 1, end);
+  return (quote === "'" ? SINGLE_QUOTED : DOUBLE_QUOTED).test(value) && !value.includes("\n") ? { value, end: end + 1 } : null;
 }
 
 /**
  * Split a command into simple commands of words, or return null when any part
  * of it is written in a way these rules do not read: expansion, substitution,
  * escaping, grouping, a redirect to a file, a background job, a comment, or a
- * quote joined to other text.
+ * quote joined to other text other than an option's value.
+ *
+ * Each simple command also says how it is joined to the one before it, and
+ * where it is in the text, so a part of the command can be judged as written.
  */
 function readCommands(command) {
   // Printable ASCII, tab, and new line only. Anything else can look like a space and not be one.
   if (!/^[\x20-\x7e\t\n]+$/.test(command)) return null;
-  const commands = [{ words: [], fed: false }];
+  const commands = [{ words: [], fed: false, joiner: null, start: -1, end: -1 }];
   const current = () => commands[commands.length - 1];
   const boundary = (index) => index >= command.length || " \t\n;|&".includes(command[index]);
+  const covers = (from, to) => { if (current().start < 0) current().start = from; current().end = to; };
   let index = 0;
   while (index < command.length) {
     const char = command[index];
     if (char === " " || char === "\t") { index += 1; continue; }
     const rest = command.slice(index);
     const stream = STREAM.exec(rest);
-    if (stream) { index += stream[0].length; continue; }
+    if (stream) { covers(index, index + stream[0].length); index += stream[0].length; continue; }
     if (char === "\n") {
-      if (current().words.length > 0) commands.push({ words: [], fed: false });
+      if (current().words.length > 0) commands.push({ words: [], fed: false, joiner: "\n", start: -1, end: -1 });
+      else current().start = -1;
       index += 1;
       continue;
     }
@@ -88,26 +178,34 @@ function readCommands(command) {
       // An operator joins two commands. One with nothing before it, or `|&`, `;;`, `&`, is not read.
       if (current().words.length === 0 || /^[|;&]/.test(rest.slice(operator.length))) return null;
       // What comes through a pipe is the next program's input, and some programs run their input.
-      commands.push({ words: [], fed: operator === "|" });
+      commands.push({ words: [], fed: operator === "|", joiner: operator, start: -1, end: -1 });
       index += operator.length;
       continue;
     }
     if (char === "'" || char === '"') {
-      const end = command.indexOf(char, index + 1);
-      if (end < 0 || !boundary(end + 1)) return null;
-      const value = command.slice(index + 1, end);
-      if (!(char === "'" ? SINGLE_QUOTED : DOUBLE_QUOTED).test(value) || value.includes("\n")) return null;
-      current().words.push({ value, quoted: true });
-      index = end + 1;
+      const quoted = quotedText(command, index);
+      if (!quoted || !boundary(quoted.end)) return null;
+      current().words.push({ value: quoted.value, quoted: true });
+      covers(index, quoted.end);
+      index = quoted.end;
       continue;
     }
     let end = index;
     while (end < command.length && PLAIN.test(command[end])) end += 1;
-    if (end === index || !boundary(end)) return null;
-    const value = command.slice(index, end);
+    if (end === index) return null;
+    let value = command.slice(index, end);
     // A shell expands `~` at the start of a word and after `=` or `:`, and zsh expands a leading `=`.
     if (/(?:^|[=:])~|^=/.test(value)) return null;
+    // `--format='%an <%ae>'` is one word to a shell: an option, `=`, and a value quoted whole.
+    if (value.endsWith("=") && (command[end] === "'" || command[end] === '"')) {
+      const quoted = quotedText(command, end);
+      if (!quoted) return null;
+      value += quoted.value;
+      end = quoted.end;
+    }
+    if (!boundary(end)) return null;
     current().words.push({ value, quoted: false });
+    covers(index, end);
     index = end;
   }
   // Only `;` or a new line may end a command. `&&`, `||`, and `|` leave the shell waiting for more.
@@ -118,19 +216,45 @@ function readCommands(command) {
   return commands.length > 0 ? commands : null;
 }
 
+/**
+ * The pieces of a word that may each name a path, with where each starts:
+ * `a=b`, `a:b` and `a,b` are read as two. The colon after a drive letter is
+ * part of the path, not a break, when a separator follows it (`C:\x`, `C:/x`)
+ * and, on a Windows project, always (`C:x` names a folder on that drive). On
+ * a POSIX project `x:y` stays two pieces, as `grep 'key: value'` writes it.
+ */
+function pathPieces(value, windows) {
+  const pieces = [];
+  let start = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    const char = value[index];
+    if (char === ":" && index === start + 1 && /[A-Za-z]/.test(value[start])
+      && (windows || PATH_SEPARATOR.test(value.charAt(index + 1)))) continue;
+    if (char === "=" || char === ":" || char === ",") {
+      pieces.push({ piece: value.slice(start, index), start });
+      start = index + 1;
+    }
+  }
+  pieces.push({ piece: value.slice(start), start });
+  return pieces;
+}
+
 /** True when the text names nothing outside the project and nothing that holds credentials or history. */
 function staysInProject(value, project) {
   // `@file` makes several programs read their arguments from the file.
   if (value.includes("://") || /(?:^|[=:,])@/.test(value) || CREDENTIAL.test(value)) return false;
-  for (const piece of value.split(/[=:,]/)) {
+  const windows = onWindows(project);
+  // A project written with `/` alone is on a system where `\` separates nothing, and a path written with one is not read there.
+  if (!windows && value.includes("\\")) return false;
+  for (const { piece, start } of pathPieces(value, windows)) {
     if (piece.startsWith("~")) return false;
-    const parts = piece.split("/");
-    if (parts.some((part) => part === ".." || part.toLowerCase() === ".git")) return false;
-    if (piece.startsWith("/")) {
-      const path = piece.replace(/\/+$/, "") || "/";
-      if (parts.slice(1, -1).some((part) => part === "" || part === ".")) return false;
-      if (path !== project && !path.startsWith(`${project}/`)) return false;
-    }
+    const parts = piece.split(PATH_SEPARATOR);
+    if (parts.some((part) => part === ".." || part.toLowerCase() === ".git" || (windows && openedAsAnotherName(part)))) return false;
+    // Absolute in any form: `/x`, `\x`, `C:\x`, `C:/x`, `C:x`, `\\server\share\x`, `//server/share/x`. The piece must be
+    // inside the project, and so must the rest of the word from it on: `=`, `:` and `,` may be part of a folder's name,
+    // and `/project:other/x` is a sibling folder, not the project and a relative name.
+    if (/^(?:[\\/]|[A-Za-z]:)/.test(piece)
+      && (placeInProject(piece, project) === null || placeInProject(value.slice(start), project) === null)) return false;
   }
   return true;
 }
@@ -271,7 +395,8 @@ function nodeAllowed(args, project) {
   for (; index < args.length && args[index].startsWith("-"); index += 1) {
     if (args[index] === "--import" && /^tsx(?:\/esm)?$/.test(args[index + 1] ?? "")) index += 1;
     else if (args[index] === "--test") testing = true;
-    else if (!/^(?:--import=tsx(?:\/esm)?|--test-concurrency=\d{1,3}|--test-timeout=\d{1,7}|--test-only|--experimental-test-module-mocks|--experimental-strip-types|--no-warnings|--enable-source-maps)$/.test(args[index])) return false;
+    // `--check` only parses the script. It never runs it.
+    else if (!/^(?:--import=tsx(?:\/esm)?|--test-concurrency=\d{1,3}|--test-timeout=\d{1,7}|--test-only|--experimental-test-module-mocks|--experimental-strip-types|--no-warnings|--enable-source-maps|--check|-c)$/.test(args[index])) return false;
   }
   const rest = args.slice(index);
   // Without a script, node reads its program from the input, unless it was told to find the tests.
@@ -300,9 +425,13 @@ const PROGRAMS = {
   dirname: reads({}),
   cut: reads({ valued: { "-d": any, "-f": any, "-c": any } }),
   date: (args) => args.every((arg) => /^\+[A-Za-z0-9%:_./ -]*$/.test(arg)),
-  echo: (args) => args.every((arg) => !arg.startsWith("-") || /^-[neE]+$/.test(arg)),
+  // No echo reads `---` as an option, so a separator such as `---files---` is printed as written.
+  echo: (args) => args.every((arg) => !arg.startsWith("-") || /^-[neE]+$/.test(arg) || arg.startsWith("---")),
   which: reads({}),
   diff: reads({ flags: letters("urqwbBN"), valued: { "-U": number } }),
+  // Printing a range of lines only. Any other script can write a file or run a command.
+  sed: ([quiet, script, ...files], project) => quiet === "-n" && /^(?:\d{1,7}|\$)(?:,(?:\d{1,7}|\$))?p$/.test(script ?? "")
+    && readArguments(files, {}, project) !== null,
   // A second file name is where `uniq` writes.
   uniq: (args, project) => (readArguments(args, { flags: letters("cdui") }, project) ?? [0, 0]).length <= 1,
   sort: reads({ flags: letters("bdfgnruV"), valued: { "-k": any, "-t": any } }),
@@ -328,14 +457,21 @@ const PROGRAMS = {
     return true;
   },
   git: ([verb, ...args], project) => {
+    // `-C` naming the project itself runs Git where it runs anyway. Any other folder may be another repository, with hooks of its own.
+    if (verb === "-C") return typeof args[0] === "string" && placeInProject(args[0], project) === "self" && PROGRAMS.git(args.slice(1), project);
     if (verb === "branch") return args.every((arg) => /^(?:--show-current|--list|--all|--remotes|-a|-r|-l|-v|-vv)$/.test(arg));
     if (verb === "tag") return args.every((arg) => /^(?:--list|-l)$/.test(arg));
     // One `--` may separate revisions from paths. What follows it is a path.
     const separator = args.indexOf("--");
     const before = separator < 0 ? args : args.slice(0, separator);
     const paths = separator < 0 ? [] : args.slice(separator + 1);
-    return GIT_VERBS.has(verb) && readArguments(before, verb === "grep" ? GIT_GREP : GIT_LOOK, project) !== null
-      && paths.every((path) => !path.startsWith("-") && staysInProject(path, project));
+    const words = GIT_VERBS.has(verb) ? readArguments(before, verb === "grep" ? GIT_GREP : GIT_LOOK, project) : null;
+    // A pathspec that starts with `:` carries an instruction (`:(top)x`, `:/x`, `:!x`), and `:(top)` reads from
+    // the repository's top folder, which may be above the project. One with `*`, `?` or `[` is matched by Git
+    // itself, so `.[e]nv` names `.env`. An option's value (`-e ':x'`, `-e 'a.*'`) is neither.
+    const pathspec = (word) => !word.startsWith(":") && !/[*?[]/.test(word);
+    return words !== null && words.every(pathspec)
+      && paths.every((path) => !path.startsWith("-") && pathspec(path) && staysInProject(path, project));
   },
   npm: ([verb, ...rest], project) => {
     if (verb === "ls" || verb === "list") return rest.every((arg) => /^(?:--depth=\d+|--all|-a|--json|--long|-l)$/.test(arg));
@@ -384,6 +520,22 @@ function simpleCommandAllowed({ words, fed }, project) {
 }
 
 /**
+ * The simple commands of a command run in the project, or null when they are
+ * not read. On Windows, cmd.exe reads the whole line before any word: it puts
+ * a variable's value in place of `%NAME%` wherever the two signs are, even
+ * across words and quotes; single quotes quote nothing, so `&`, `|`, `<`,
+ * `>`, `^`, `!` and `"` inside them act; and `/dev/null` is a file on the
+ * current drive. None of these is read on a Windows project.
+ */
+function readProjectCommands(command, project) {
+  const commands = readCommands(command);
+  if (!commands || !onWindows(project)) return commands;
+  if (/%[^%]*%/.test(command) || command.includes("/dev/null")) return null;
+  // Every word: a quoted value joined to its option (`--format='a & b'`) is read as one plain word.
+  return commands.some((simple) => simple.words.some((word) => /[&|<>^!"]/.test(word.value))) ? null : commands;
+}
+
+/**
  * True when a person must decide. It means only that these rules cannot read
  * the command, not that the command is harmful.
  */
@@ -392,10 +544,204 @@ export function commandNeedsPerson(command, project) {
     if (!isText(command, PERMISSION_REVIEW_MAX_COMMAND_CHARS)) return true;
     const root = normalizedProject(project);
     if (!root) return true;
-    const commands = readCommands(command);
+    const commands = readProjectCommands(command, root);
     return !commands || !commands.every((simple) => simpleCommandAllowed(simple, root));
   } catch {
     return true;
+  }
+}
+
+/**
+ * A branch or commit named in plain words. `FETCH_HEAD` is whatever was
+ * fetched last, which may be anyone's pull request.
+ */
+function isRef(value) {
+  return /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(value) && !/\.\.|\/\/|\/\.|\.lock(?:\/|$)|[/.]$/.test(value)
+    && value !== "FETCH_HEAD";
+}
+
+/** A jq filter that cannot read the environment, a file, or another input. */
+const jqFilter = (value) => !/\$|\b(?:env|input|inputs|input_filename|import|include|debug|stderr|halt|halt_error|get_search_list)\b/.test(value);
+const GH_OUTPUT = { "--json": (value) => /^[A-Za-z]+(?:,[A-Za-z]+)*$/.test(value), "--jq": jqFilter, "-q": jqFilter };
+const ghState = (value) => /^(?:open|closed|merged|all)$/.test(value);
+const ghLogin = (value) => /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(value);
+// `gh` quotes a label. It puts search text inside parentheses that the text can close, so a search may reach any repository.
+const ghLabel = (value) => /^[A-Za-z0-9][A-Za-z0-9 ._:/-]{0,49}$/.test(value);
+const GH_LIST = { ...GH_OUTPUT, "--state": ghState, "-s": ghState, "--limit": number, "-L": number, "--label": ghLabel, "-l": ghLabel,
+  "--author": ghLogin, "-A": ghLogin, "--assignee": ghLogin, "-a": ghLogin };
+const pullRequest = (value) => NUMBER.test(value) || isRef(value);
+
+/**
+ * `gh` commands that only read this repository's pull requests and issues.
+ * There is no `--repo`, so `gh` reads the repository the project's remote
+ * names, and no `--web`, which opens a browser.
+ */
+const GH_READS = {
+  pr: {
+    view: { spec: { flags: ["--comments", "-c"], valued: GH_OUTPUT, anywhere: true }, most: 1, target: pullRequest },
+    diff: { spec: { flags: ["--name-only", "--patch"], anywhere: true }, most: 1, target: pullRequest },
+    checks: { spec: { flags: ["--required"], valued: GH_OUTPUT, anywhere: true }, most: 1, target: pullRequest },
+    status: { spec: { valued: GH_OUTPUT, anywhere: true }, most: 0 },
+    list: { spec: { valued: { ...GH_LIST, "--head": isRef, "-H": isRef, "--base": isRef, "-B": isRef }, anywhere: true }, most: 0 },
+  },
+  issue: {
+    view: { spec: { flags: ["--comments", "-c"], valued: GH_OUTPUT, anywhere: true }, least: 1, most: 1, target: number },
+    list: { spec: { valued: GH_LIST, anywhere: true }, most: 0 },
+  },
+};
+
+function githubRead([noun, verb, ...args], project) {
+  const read = Object.hasOwn(GH_READS, noun ?? "") && Object.hasOwn(GH_READS[noun], verb ?? "") ? GH_READS[noun][verb] : null;
+  const words = read ? readArguments(args, read.spec, project) : null;
+  return words !== null && words.length >= (read.least ?? 0) && words.length <= read.most && words.every((word) => read.target(word));
+}
+
+/** A message given on the command line. Git opens an editor for one that is not. */
+const message = (value) => typeof value === "string" && value.length > 0 && !value.startsWith("-");
+
+/**
+ * Git commands that stage named files, commit, merge, fetch branches from
+ * `origin`, switch branches, or push to `origin`. Returns what the caller must
+ * still check: the branch the command creates or switches to and the branch
+ * it pushes to, which must be the agent's own, and the commit it merges or
+ * starts a branch from, which brings that commit's files into the project.
+ * Null when the command is not one of these.
+ */
+function gitWork([verb, ...rest], project) {
+  if (verb === "add") {
+    const files = readArguments(rest, { flags: ["-u", "--update", "-v", "--verbose"], anywhere: true }, project);
+    // Files by name. A folder, a pattern, or a name that starts with a dot may hold more than the agent wrote.
+    return files?.every((file) => /^[A-Za-z0-9_][A-Za-z0-9_./-]*\.[A-Za-z0-9]+$/.test(file)
+      && file.split("/").every((part) => part !== "" && !part.startsWith("."))) ? {} : null;
+  }
+  if (verb === "commit") {
+    let given = false;
+    const options = [];
+    for (let at = 0; at < rest.length; at += 1) {
+      if (rest[at] !== "-m" && rest[at] !== "--message") options.push(rest[at]);
+      else if (message(rest[at + 1])) { given = true; at += 1; } else return null;
+    }
+    if (!options.every((option) => /^(?:-q|--quiet|-a|--all|--amend|--no-edit|--reset-author|-s|--signoff)$/.test(option))) return null;
+    return given || (options.includes("--amend") && options.includes("--no-edit")) ? {} : null;
+  }
+  if (verb === "checkout" || verb === "switch") {
+    const words = rest.filter((word) => word !== "-q" && word !== "--quiet");
+    // A new branch, from a named commit or from where the agent is now.
+    if (words[0] === (verb === "checkout" ? "-b" : "-c") && words.length >= 2 && words.length <= 3 && words.slice(1).every(isRef)) {
+      return { branch: words[1], ...(words[2] === undefined ? {} : { from: words[2] }) };
+    }
+    // An existing branch. `git checkout <name>` restores a file or folder of that name when no branch has it, so only `git switch`.
+    return verb === "switch" && words.length === 1 && isRef(words[0]) ? { branch: words[0] } : null;
+  }
+  if (verb === "merge") {
+    const words = [];
+    for (let at = 0; at < rest.length; at += 1) {
+      if (rest[at] === "-m") { if (!message(rest[at + 1])) return null; at += 1; }
+      else if (!/^(?:-q|--quiet|--no-edit|--ff|--ff-only|--no-ff|--no-stat)$/.test(rest[at])) words.push(rest[at]);
+    }
+    return words.length === 1 && isRef(words[0]) ? { from: words[0] } : null;
+  }
+  if (verb === "fetch") {
+    const words = readArguments(rest, { flags: ["-q", "--quiet", "--prune", "-p"], anywhere: true }, project);
+    // Branches of `origin` only. A pull request's ref may hold anyone's code.
+    return words?.[0] === "origin" && words.slice(1).every((ref) => isRef(ref) && !/^(?:pull|refs)\//.test(ref)) ? {} : null;
+  }
+  if (verb === "push") {
+    // No force, no deletion, and no tags. The branch it goes to is named after `:`, so neither the branch checked
+    // out, nor its upstream, nor any push setting decides where it goes.
+    const words = readArguments(rest, { flags: ["-u", "--set-upstream", "-q", "--quiet"], anywhere: true }, project);
+    if (words?.length !== 2 || words[0] !== "origin") return null;
+    const [source, destination, extra] = words[1].split(":");
+    return extra === undefined && destination !== undefined && isRef(source) && isRef(destination)
+      ? { push: destination.startsWith("refs/heads/") ? destination.slice("refs/heads/".length) : destination } : null;
+  }
+  return null;
+}
+
+/**
+ * True when each simple command in each part is, word for word, one in the
+ * whole command. A part another parser found that these rules did not is a
+ * reading of the command they have not judged.
+ */
+export function partsAreInCommand(command, parts) {
+  try {
+    if (!isText(command, PERMISSION_REVIEW_MAX_COMMAND_CHARS) || !Array.isArray(parts)) return false;
+    const key = (simple) => JSON.stringify(simple.words.map((word) => [word.value, word.quoted && simple.words[0] === word]));
+    const whole = new Set((readCommands(command) ?? []).map(key));
+    return whole.size > 0 && parts.every((part) => {
+      const simples = isText(part, PERMISSION_REVIEW_MAX_COMMAND_CHARS) ? readCommands(part) : null;
+      return simples !== null && simples.every((simple) => whole.has(key(simple)));
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when every part of the command only reads: files inside the project,
+ * the repository's history, or its pull requests and issues. Nothing that
+ * runs the project's own code, which may write anything.
+ */
+export function commandOnlyReads(command, project) {
+  try {
+    if (!isText(command, PERMISSION_REVIEW_MAX_COMMAND_CHARS)) return false;
+    const root = normalizedProject(project);
+    const commands = root ? readProjectCommands(command, root) : null;
+    return commands !== null && commands.every((simple) => (simpleCommandAllowed(simple, root) && !RUNS_CODE.has(simple.words[0].value))
+      || (!simple.words[0].quoted && simple.words[0].value === "gh" && githubRead(simple.words.slice(1).map((word) => word.value), root)));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Review a command from an agent that works on its own branches, as far as
+ * these rules can. Returns null when a person must decide. Otherwise returns
+ * the parts Jev must still review, each as written: none when the rules alone
+ * allow the whole command.
+ *
+ * The rules allow on their own what Jev would call a change or a network call
+ * but is routine for such an agent: reading this repository's pull requests
+ * and issues, and staging, committing, fetching from `origin`, merging
+ * `origin`'s default branch or its own, and creating, switching to, and
+ * pushing to its own branches. Reading and the project's checks still go to Jev, as written.
+ *
+ * `ownBranch` says whether a branch is the agent's own. `defaultBranch` is the
+ * branch `origin` names as its default, or null when it is not known. A merge
+ * or a new branch may start only from `origin`'s copy of that branch, the
+ * agent's own, or where it is: any other branch, the local default branch
+ * included, may bring in settings and hooks that no one reviewed.
+ */
+export function routineCommandReview(command, project, context) {
+  try {
+    if (!isText(command, PERMISSION_REVIEW_MAX_COMMAND_CHARS)) return null;
+    const root = normalizedProject(project);
+    const commands = root ? readProjectCommands(command, root) : null;
+    if (!commands) return null;
+    const own = (branch) => typeof branch === "string" && context.ownBranch(branch) === true;
+    const base = typeof context.defaultBranch === "string" && isRef(context.defaultBranch) ? context.defaultBranch : null;
+    const trusted = (ref) => ref === "HEAD" || own(ref) || (ref.startsWith("origin/") && own(ref.slice("origin/".length)))
+      || (base !== null && ref === `origin/${base}`);
+    const review = [];
+    let decided = false;
+    for (const simple of commands) {
+      if (simpleCommandAllowed(simple, root)) {
+        review.push(command.slice(simple.start, simple.end));
+        continue;
+      }
+      decided = true;
+      const [program, ...words] = simple.words;
+      const args = words.map((word) => word.value);
+      if (!program.quoted && program.value === "gh" && githubRead(args, root)) continue;
+      const work = !program.quoted && program.value === "git" ? gitWork(args, root) : null;
+      if (!work || (work.branch !== undefined && !own(work.branch)) || (work.push !== undefined && !own(work.push))
+        || (work.from !== undefined && !trusted(work.from))) return null;
+    }
+    // A command the rules decided no part of is reviewed whole, as it always was.
+    if (!decided) return [command];
+    return review.length <= PERMISSION_REVIEW_MAX_COMMANDS ? review : null;
+  } catch {
+    return null;
   }
 }
 

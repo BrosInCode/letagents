@@ -20,6 +20,9 @@
 .agent-inspector-live-trigger summary { min-height: 40px; display: flex; align-items: center; gap: 8px; cursor: pointer; font-size: 11px; color: var(--live-muted); }
 .agent-inspector-live-trigger summary::after { content: '+'; margin-left: auto; font-size: 15px; }
 .agent-inspector-live-trigger[open] summary::after { content: '−'; }
+/* Another member sees only a reference to the request; the message itself is in the room. */
+.agent-inspector-shared-live-request { width: 100%; min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 4px 0; border: 0; border-bottom: 1px solid var(--border); background: transparent; color: var(--live-muted); font: 11px var(--font-sans); text-align: left; cursor: pointer; }
+.agent-inspector-shared-live-request .agent-live-request-sender { margin-left: auto; }
 .agent-live-request-sender { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .agent-inspector-live-trigger p { margin: 0 0 12px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
 .agent-live-timeline-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 18px 0 12px; }
@@ -49,7 +52,8 @@
 .agent-live-prose a { color: var(--live-blue); text-decoration: underline; text-underline-offset: 3px; }
 .agent-live-prose blockquote { margin: 9px 0; padding-left: 12px; border-left: 2px solid var(--live-border); color: var(--live-muted); }
 .agent-live-entry[data-kind="reasoning"] .agent-live-prose { color: var(--live-muted); }
-.agent-live-disclosure > summary { display: flex; align-items: flex-start; gap: 11px; min-height: 44px; padding: 3px 3px 5px 0; cursor: pointer; border-radius: 8px; }
+.agent-live-disclosure > summary, .agent-live-row { display: flex; align-items: flex-start; gap: 11px; min-height: 44px; padding: 3px 3px 5px 0; border-radius: 8px; }
+.agent-live-disclosure > summary { cursor: pointer; }
 .agent-inspector-live summary { list-style: none; }
 .agent-inspector-live summary::-webkit-details-marker { display: none; }
 .agent-live-action-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 3px; padding-top: 2px; }
@@ -58,7 +62,7 @@
 .agent-live-action-status { flex-shrink: 0; padding-top: 4px; font-size: 10px; color: var(--live-muted); max-width: 76px; text-align: right; line-height: 1.5; }
 .agent-live-chevron { flex-shrink: 0; margin-top: 5px; color: var(--live-muted); }
 .agent-live-disclosure[open] > summary > .agent-live-chevron { transform: rotate(90deg); }
-.agent-live-action[data-current="true"] > .agent-live-disclosure { border-radius: 10px; background: var(--blue-dim); outline: 1px solid color-mix(in srgb, var(--live-blue) 25%, transparent); }
+.agent-live-action[data-current="true"] > :is(.agent-live-disclosure, .agent-live-row) { border-radius: 10px; background: var(--blue-dim); outline: 1px solid color-mix(in srgb, var(--live-blue) 25%, transparent); }
 .agent-live-action[data-current="true"] :is(.agent-live-icon,.agent-live-action-status) { color: var(--live-blue); }
 .agent-live-action[data-status="error"] :is(.agent-live-icon,.agent-live-action-status),
 .agent-live-action[data-status="failed"] :is(.agent-live-icon,.agent-live-action-status) { color: var(--red-text); }
@@ -89,11 +93,11 @@
 .agent-inspector-live :is(summary,button,a):focus-visible { outline: 2px solid var(--live-blue); outline-offset: 3px; border-radius: 5px; }
 @media (hover: hover) and (pointer: fine) {
   .agent-live-disclosure > summary:hover, .agent-live-group-items summary:hover { background: var(--accent-dim); }
-  .agent-inspector-live-trigger summary:hover { color: var(--text); }
+  .agent-inspector-live-trigger summary:hover, .agent-inspector-shared-live-request:hover { color: var(--text); }
   .agent-live-follow-bar button:hover { background: var(--accent-hover); color: var(--text); }
 }
 @media (max-width: 380px) {
-  .agent-live-disclosure > summary { gap: 7px; }
+  .agent-live-disclosure > summary, .agent-live-row { gap: 7px; }
   .agent-live-action-status { max-width: 60px; }
   .agent-live-note { padding-left: 29px; }
 }
@@ -102,7 +106,7 @@
 .agent-live-entry { animation: agent-live-arrive 180ms var(--inspector-ease-out, ease-out); }
 .agent-live-chevron, .agent-live-group-items summary svg { transition: transform 160ms var(--inspector-ease-out, ease-out); }
 .agent-live-action :is(.agent-live-icon,.agent-live-action-status) { transition: color 160ms ease; }
-.agent-live-action > .agent-live-disclosure { transition: background-color 180ms ease, outline-color 180ms ease; }
+.agent-live-action > :is(.agent-live-disclosure, .agent-live-row) { transition: background-color 180ms ease, outline-color 180ms ease; }
 .agent-live-now[data-running="true"] .agent-live-state > span { animation: agent-live-breathe 1800ms ease-in-out infinite; }
 .agent-live-follow-bar button { transition: background-color 140ms ease, transform 120ms var(--inspector-ease-out, ease-out); }
 .agent-live-follow-bar button:active { transform: translateY(1px); }

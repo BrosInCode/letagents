@@ -30,7 +30,7 @@ const textarea = ref<HTMLTextAreaElement | null>(null)
 const preview = ref(false)
 const generatedId = useId()
 const inputId = computed(() => props.id || 'task-markdown-' + generatedId)
-const rendered = computed(() => renderDesktopMarkdown(props.modelValue, { block: true, mentions: false, preservePaths: true }))
+const rendered = computed(() => renderDesktopMarkdown(props.modelValue, { block: true, mentions: false, preservePaths: true, noCache: true }))
 async function format(tool: MarkdownTool) {
   const input = textarea.value
   if (!input || props.disabled || preview.value) return

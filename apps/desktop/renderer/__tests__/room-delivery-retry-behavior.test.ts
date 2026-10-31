@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
-import { after, before, test } from "node:test";
+import { after, before, beforeEach, test, type TestContext } from "node:test";
 import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import { parse, compileScript, compileTemplate } from "@vue/compiler-sfc";
 import * as Vue from "vue";
 import { createRenderer, nextTick, ssrContextKey, type App } from "vue";
-import { createServer, type ViteDevServer } from "vite";
+import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
 import { createRoomDeliveryRetryCoordinator } from "../src/domain/room-delivery-retry";
 import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalChoice } from "../../shared/host-approvals";
-import { hostApprovalFields, hostApprovalTitle } from "../src/components/desktop/content/room-chat/host-approval-presentation";
+import { HOST_APPROVAL_ARM_MS, hostApprovalFields, hostApprovalTitle } from "../src/components/desktop/content/room-chat/host-approval-presentation";
+import { readHostApprovalDismissals, rememberHostApprovalDismissal } from "../src/components/desktop/content/room-chat/host-approval-dismissals";
 
 interface HostNode {
   kind: "element" | "text" | "comment";
@@ -21,11 +22,13 @@ interface HostNode {
   scrollTop: number;
   scrollHeight: number;
   clientHeight: number;
+  getBoundingClientRect: () => Pick<DOMRect, "top" | "bottom" | "left" | "right" | "width" | "height">;
   style: Record<string, string>;
   classList: { add: (...names: string[]) => void; remove: (...names: string[]) => void };
   focus: (_options?: FocusOptions) => void;
   scrollTo: (_options?: ScrollToOptions) => void;
   querySelector: (_selector: string) => null;
+  querySelectorAll: (_selector: string) => HostNode[];
   addEventListener: (_name: string, _listener: EventListener) => void;
   removeEventListener: (_name: string, _listener: EventListener) => void;
 }
@@ -34,8 +37,10 @@ function hostNode(kind: HostNode["kind"], type?: string, text = ""): HostNode {
   return {
     getRootNode: () => ({ activeElement: null }),
     kind, type, text, children: [], parent: null, props: {}, scrollTop: 0, scrollHeight: 0, clientHeight: 0, style: {},
+    getBoundingClientRect() { return { top: 0, bottom: this.clientHeight, left: 0, right: 800, width: 800, height: this.clientHeight }; },
     classList: { add: () => undefined, remove: () => undefined }, focus: () => undefined, scrollTo: () => undefined,
     querySelector: () => null,
+    querySelectorAll: () => [],
     addEventListener: () => undefined, removeEventListener: () => undefined,
   };
 }
@@ -52,9 +57,12 @@ Object.assign(globalThis, {
     requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0),
     cancelAnimationFrame: clearTimeout, innerWidth: 1200, innerHeight: 800,
     location: { href: "http://localhost/" }, getSelection: () => null,
+    matchMedia: (media: string) => ({
+      matches: false, media, addEventListener: () => undefined, removeEventListener: () => undefined,
+    }),
     document: { documentElement: { style: { scrollBehavior: "" } } },
   },
-  document: { documentElement: { style: { scrollBehavior: "" } } },
+  document: { documentElement: { style: { scrollBehavior: "" } }, addEventListener() {}, removeEventListener() {}, visibilityState: "visible", hasFocus: () => true },
 });
 
 const renderer = createRenderer<HostNode, HostNode>({
@@ -134,8 +142,11 @@ let RoomThreadPanel: object;
 let DesktopLongMessageContent: object;
 let DesktopAttachmentDrafts: object;
 let RoomComposer: object;
-let RoomComposerEventChips: object;
+let RoomActivityLine: object;
+let ActivityOrb: object;
 let messageDrafts: typeof import("../src/domain/desktop-message-drafts");
+let attentionResponse: typeof import("../src/domain/attention-response");
+let hostApprovals: typeof import("../src/components/desktop/content/room-chat/host-approvals");
 
 async function attachClientRender(component: object, modulePath: string): Promise<void> {
   const source = await readFile(fileURLToPath(new URL(`../src/${modulePath}`, import.meta.url)), "utf8");
@@ -152,7 +163,8 @@ async function attachClientRender(component: object, modulePath: string): Promis
   const clientCode = compiled.code
     .replace(/^import \{([\s\S]*?)\} from "vue"\n/, (_match, bindings: string) => `const {${bindings.replace(/\s+as\s+/g, ": ")}} = vue\n`)
     .replace("export function render", "function render");
-  (component as { render?: unknown }).render = Function("vue", `${clientCode}\nreturn render;`)(Vue);
+  const transformed = await transformWithEsbuild(clientCode, `${modulePath}.ts`, { loader: "ts", target: "esnext" });
+  (component as { render?: unknown }).render = Function("vue", `${transformed.code}\nreturn render;`)(Vue);
 }
 
 before(async () => {
@@ -161,15 +173,23 @@ before(async () => {
     server: { middlewareMode: true },
   });
   messageDrafts = await vite.ssrLoadModule("/renderer/src/domain/desktop-message-drafts.ts");
-  [DesktopChatMessage, RoomMessageViewport, RoomThreadPanel, DesktopLongMessageContent, DesktopAttachmentDrafts, RoomComposer, RoomComposerEventChips] = await Promise.all([
+  // The same module instance DesktopChatMessage injects from.
+  attentionResponse = await vite.ssrLoadModule("/renderer/src/domain/attention-response.ts") as typeof attentionResponse;
+  hostApprovals = await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/host-approvals.ts");
+  [DesktopChatMessage, RoomMessageViewport, RoomThreadPanel, DesktopLongMessageContent, DesktopAttachmentDrafts, RoomComposer, RoomActivityLine, ActivityOrb] = await Promise.all([
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomThreadPanel.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopLongMessageContent.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopAttachmentDrafts.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposer.vue").then((module) => module.default),
-    vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposerEventChips.vue").then((module) => module.default),
+    vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomActivityLine.vue").then((module) => module.default),
+    vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/ActivityOrb.vue", import.meta.url))).then((module) => module.default),
   ]);
+  // This test mounts client templates onto SSR-loaded components. Compile the
+  // timeline's transparent grouping wrapper too so ordinary message slots run.
+  const groupedUpdates = await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/RoomGitHubUpdates.vue", import.meta.url)));
+  await attachClientRender(groupedUpdates.default, "../../../../shared/ui/RoomGitHubUpdates.vue");
   await Promise.all([
     attachClientRender(DesktopChatMessage, "components/desktop/content/DesktopChatMessage.vue"),
     attachClientRender(RoomMessageViewport, "components/desktop/content/room-chat/RoomMessageViewport.vue"),
@@ -177,22 +197,24 @@ before(async () => {
     attachClientRender(DesktopLongMessageContent, "components/desktop/content/DesktopLongMessageContent.vue"),
     attachClientRender(DesktopAttachmentDrafts, "components/desktop/content/DesktopAttachmentDrafts.vue"),
     attachClientRender(RoomComposer, "components/desktop/content/room-chat/RoomComposer.vue"),
-    attachClientRender(RoomComposerEventChips, "components/desktop/content/room-chat/RoomComposerEventChips.vue"),
+    attachClientRender(RoomActivityLine, "components/desktop/content/room-chat/RoomActivityLine.vue"),
+    attachClientRender(ActivityOrb, "../../../../shared/ui/ActivityOrb.vue"),
   ]);
 });
 
 after(async () => { await vite?.close(); });
+// Approvals are shared app-wide; each test starts from a desktop that has listed none.
+beforeEach(() => { hostApprovals?.resetHostApprovals(); });
 
 function composerProps() {
-  return { attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], participants: [],
-    pendingAttachmentDrafts: [], permissionApprovals: [], permissionError: null, replyTo: null, resolvingPermissionIds: {},
-    roomIdentifier: "room-a", roomLoading: false, sendError: null, sending: false };
+  return { attaching: false, attachmentDrafts: [], participants: [],
+    pendingAttachmentDrafts: [], replyTo: null, roomIdentifier: "room-a", roomLoading: false, sendError: null, sending: false };
 }
 
 function hostApproval(): DesktopHostApproval {
   return { id: "presentation-1", presentation: { agentId: "agent-a", displayName: "GardenPoint", provider: "open-model",
     title: "Run a command", details: '<script>notExecutable()</script>\n{"command":"npm test"}', denyScope: "session_pending" },
-    status: "pending", detail: null, retryDecision: null };
+    status: "pending", detail: null, retryDecision: null, dismissKey: null };
 }
 
 async function flushHostApprovals(): Promise<void> {
@@ -200,7 +222,40 @@ async function flushHostApprovals(): Promise<void> {
   await nextTick();
 }
 
-test("composer presents literal host-only native requests and sends only the selected presentation handle", async () => {
+/** A request's actions arm HOST_APPROVAL_ARM_MS after it becomes the visible card; tests that act on it wait that out. */
+async function settleTray(context: TestContext): Promise<void> {
+  context.mock.timers.tick(HOST_APPROVAL_ARM_MS);
+  await nextTick();
+}
+
+const approvalTray = (root: HostNode) => descendants(root).find(node => node.props["data-testid"] === "desktop-host-approval");
+const trayText = (root: HostNode) => descendants(approvalTray(root)!).map(node => node.text).join("\n");
+const trayButton = (root: HostNode, label: string) => descendants(root).find(node => node.props["aria-label"] === label);
+
+/** Step the composer's one approval tray through its queue until it shows the request from `name`. */
+async function showTrayRequest(root: HostNode, name: string): Promise<HostNode> {
+  for (let step = trayButton(root, "Previous approval"); step && !step.props.disabled; step = trayButton(root, "Previous approval")) {
+    (step.props.onClick as () => void)(); await nextTick();
+  }
+  for (;;) {
+    const tray = approvalTray(root);
+    assert.ok(tray, `expected the tray to hold a request from ${name}`);
+    if (descendants(tray).some(node => node.text.includes(name))) return tray;
+    const next = trayButton(root, "Next approval");
+    assert.ok(next && !next.props.disabled, `expected the tray to hold a request from ${name}`);
+    (next.props.onClick as () => void)(); await nextTick();
+  }
+}
+
+/** The tray's queue length: "N of M" once it holds more than one request. */
+function trayQueueLength(root: HostNode): number {
+  if (!approvalTray(root)) return 0;
+  const position = descendants(root).find(node => node.props["data-testid"] === "desktop-host-approval-position");
+  return position ? Number(/of (\d+)/.exec(descendants(position).map(node => node.text).join(""))![1]) : 1;
+}
+
+test("composer presents literal host-only native requests and sends only the selected presentation handle", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
   const requests: unknown[] = [];
   const api = { supervisor: {
     listHostApprovals: async (room: string) => { assert.equal(room, "room-a"); return { available: true, approvals: [hostApproval()], error: null }; },
@@ -210,20 +265,85 @@ test("composer presents literal host-only native requests and sends only the sel
   const { root, app } = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
+    await settleTray(context);
     assert.ok(descendants(root).some(node => node.text.includes('<script>notExecutable()</script>')));
     assert.equal(descendants(root).some(node => node.type === "script" || node.props.innerHTML), false);
-    assert.ok(descendants(root).some(node => node.text.includes("Deny applies to all pending permissions for this agent.")));
+    assert.equal(descendants(root).some(node => node.text.includes("Deny applies")), false, "no note: the Deny button says what it covers");
+    assert.equal(buttonByText(root, "Deny").props.title, "Denies this and every other request from GardenPoint");
     assert.equal(buttonByText(root, "Allow once").props.type, "button");
     await (buttonByText(root, "Allow once").props.onClick as () => Promise<void>)();
     await nextTick();
     assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_once" }]);
     assert.equal(buttons(root).some(node => descendants(node).some(child => child.text === "Allow once")), false);
-    assert.ok(buttonByText(root, "Show 1 approval needing attention"),
-      "an uncertain decision remains accessible without offering another approval");
+    assert.match(trayText(root), /Allowed · not confirmed yet/, "an uncertain decision stays in view without offering another approval");
+    assert.ok(buttonByText(root, "Check again"));
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
-test("composer labels a generic Codex grant as turn-scoped", async () => {
+test("a deny that covers the agent's other requests says Deny all N, then the activity line counts them", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const three = ["p-1", "p-2", "p-3"].map(id => ({ ...hostApproval(), id, requestKey: id }));
+  const other = { ...hostApproval(), id: "p-other", requestKey: "p-other", presentation: { ...hostApproval().presentation, agentId: "agent-b", displayName: "SparrowReef" } };
+  const requests: unknown[] = [];
+  const notices: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [...three, other], error: null }),
+    decideHostApproval: async (input: unknown) => { requests.push(input); return "decision_sent"; },
+  } } });
+  const { root, app } = mount(RoomComposer, { ...composerProps(), onApprovalNotice: (notice: unknown) => { notices.push(notice); } });
+  try {
+    await flushHostApprovals();
+    const deny = () => descendants(root).find(node => node.props["data-testid"] === "desktop-host-approval-deny")!;
+    assert.equal(descendants(deny()).map(node => node.text).join(""), "Deny all 3", "another agent's request is not counted");
+    assert.equal(deny().props.title, "Denies this and every other request from GardenPoint");
+    assert.equal(deny().props.disabled, true, "Deny all waits out the hold like Deny");
+    await settleTray(context);
+    await (deny().props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.deepEqual(requests, [{ id: "p-1", decision: "deny" }], "one decision; the agent's deny scope covers the rest");
+    assert.deepEqual(notices, [{ icon: "check", lead: "Denied 3 requests from ", name: "GardenPoint" }]);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("an unconfirmed Deny all adds no activity line; its card says not confirmed yet", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const two = ["p-1", "p-2"].map(id => ({ ...hostApproval(), id, requestKey: id }));
+  let approvals: DesktopHostApproval[] = two;
+  const notices: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+    decideHostApproval: async () => "uncertain",
+  } } });
+  const { root, app } = mount(RoomComposer, { ...composerProps(), onApprovalNotice: (notice: unknown) => { notices.push(notice); } });
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    await (buttonByText(root, "Deny all 2").props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.deepEqual(notices, [], "nothing claims the requests were denied");
+    assert.match(trayText(root), /Denied · not confirmed yet/);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a single deny or an allow adds no activity line", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const notices: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [hostApproval()], error: null }),
+    decideHostApproval: async () => "decision_sent",
+  } } });
+  const { root, app } = mount(RoomComposer, { ...composerProps(), onApprovalNotice: (notice: unknown) => { notices.push(notice); } });
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    await (buttonByText(root, "Deny").props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.deepEqual(notices, []);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer labels a generic Codex grant as turn-scoped", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
   const approval = hostApproval();
   approval.presentation = { ...approval.presentation, provider: "codex", title: "Grant for this turn", denyScope: "request" };
   const requests: unknown[] = [];
@@ -234,12 +354,14 @@ test("composer labels a generic Codex grant as turn-scoped", async () => {
   const { root, app } = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
+    await settleTray(context);
     await (buttonByText(root, "Grant for this turn").props.onClick as () => Promise<void>)();
     assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_once" }]);
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
-test("composer retries only the recorded choice and disables stale cards during a connection failure", async () => {
+test("composer retries only the recorded choice and disables stale cards during a connection failure", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
   const approval = hostApproval(); approval.status = "decision_recorded"; approval.retryDecision = "deny";
   let snapshot: DesktopHostApprovalSnapshot = { available: true, approvals: [approval], error: null };
   const decisions: unknown[] = [];
@@ -250,15 +372,27 @@ test("composer retries only the recorded choice and disables stale cards during 
   const { root, app } = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
-    await (buttonByText(root, "Retry recorded denial").props.onClick as () => Promise<void>)();
+    await settleTray(context);
+    assert.match(trayText(root), /Denied · not confirmed yet/);
+    await (buttonByText(root, "Check again").props.onClick as () => Promise<void>)();
     await nextTick();
+    assert.deepEqual(decisions, [{ id: "presentation-1", decision: "deny" }], "Check again sends only the recorded choice");
+    await settleTray(context);
+    // The send failed: Check again now only lists again, and never sends the decision a second time.
+    await (buttonByText(root, "Check again").props.onClick as () => Promise<void>)();
+    await flushHostApprovals();
     assert.deepEqual(decisions, [{ id: "presentation-1", decision: "deny" }]);
-    assert.equal(buttonByText(root, "Retry recorded denial").props.disabled, true);
+    // The listing succeeded and main still offers the recorded retry: Check again would send that same choice again.
     snapshot = { available: false, approvals: [], error: "Host approvals are unavailable. Restart the background service." };
-    await (buttonByText(root, "Refresh approvals").props.onClick as () => Promise<void>)();
-    await nextTick();
-    assert.equal(buttonByText(root, "Retry recorded denial").props.disabled, true);
-    assert.ok(descendants(root).some(node => node.text.includes("Restart the background service")));
+    await hostApprovals.refreshHostApprovals("room-a");
+    await flushHostApprovals();
+    await settleTray(context);
+    assert.match(trayText(root), /Denied · not confirmed yet/, "with the service down the card keeps its calm line");
+    await (buttonByText(root, "Check again").props.onClick as () => Promise<void>)();
+    await flushHostApprovals();
+    assert.deepEqual(decisions, [{ id: "presentation-1", decision: "deny" }], "and Check again only lists again");
+    assert.equal(descendants(root).some(node => /Restart the background service|Host approvals/.test(node.text)), false,
+      "the service's own error text never shows");
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
@@ -269,7 +403,7 @@ test("composer shows unavailable approval authority and discards late results af
   await flushHostApprovals();
   resolve({ available: false, approvals: [], error: "Host approval key is unavailable." });
   await flushHostApprovals();
-  assert.equal(descendants(root).some(node => node.text.includes("Host approval key")), true);
+  assert.equal(descendants(root).some(node => node.text.includes("Host approval key")), false, "no request waits: nothing shows");
   assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
   app.unmount();
   const late = mount(RoomComposer, composerProps());
@@ -282,7 +416,7 @@ test("composer shows unavailable approval authority and discards late results af
 });
 
 test("composer rejects stale refreshes and removes retry controls after an uncertain recorded decision", async (context) => {
-  context.mock.timers.enable({ apis: ["setInterval"] });
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   let resolveRefresh!: (snapshot: DesktopHostApprovalSnapshot) => void;
   let reads = 0;
   const approval = hostApproval(); approval.status = "decision_recorded"; approval.retryDecision = "allow_once";
@@ -296,16 +430,17 @@ test("composer rejects stale refreshes and removes retry controls after an uncer
     await flushHostApprovals();
     context.mock.timers.tick(3_000);
     await flushHostApprovals();
-    await (buttonByText(root, "Retry recorded approval").props.onClick as () => Promise<void>)();
+    await (buttonByText(root, "Check again").props.onClick as () => Promise<void>)();
     await nextTick();
     resolveRefresh({ available: true, approvals: [hostApproval()], error: null });
     await flushHostApprovals();
-    assert.equal(buttons(root).some(node => descendants(node).some(child => /^(Allow once|Retry recorded approval)$/.test(child.text))), false);
-    assert.ok(buttonByText(root, "Show 1 approval needing attention"));
+    assert.equal(buttons(root).some(node => descendants(node).some(child => /^(Allow once|Deny)$/.test(child.text))), false);
+    assert.match(trayText(root), /Allowed · not confirmed yet/, "the stale pending listing never brings Allow back");
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
-test("composer keeps unresolved approval failures visible and dismisses cards locally", async () => {
+test("composer keeps unresolved approval failures visible and dismisses cards locally", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
   const pending = hostApproval();
   const unavailable = { ...hostApproval(), id: "presentation-2", status: "unavailable" as const,
     detail: "No decision was recorded for this request.",
@@ -321,24 +456,550 @@ test("composer keeps unresolved approval failures visible and dismisses cards lo
   const { root, app } = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
-    assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 1);
-    await (buttonByText(root, "Show 2 approvals needing attention").props.onClick as () => void)();
+    await settleTray(context);
+    assert.equal(trayQueueLength(root), 2, "the live request and the unconfirmed one; an unavailable record stays out");
+    assert.equal(descendants(root).some(node => /unavailable or unconfirmed|UnavailableAgent/.test(node.text)), false);
+    assert.equal(buttons(root).filter(node => descendants(node).some(child => child.text === "Allow once")).length, 1,
+      "the live request still leads the tray");
+    (trayButton(root, "Next approval")!.props.onClick as () => void)();
     await nextTick();
-    assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 3);
-    const unavailableCard = descendants(root).find(node => node.props["data-testid"] === "desktop-host-approval"
-      && descendants(node).some(child => child.text.includes("UnavailableAgent")))!;
-    const unavailableText = descendants(unavailableCard).map(node => node.text).join("\n");
-    assert.match(unavailableText, /UnavailableAgent · Approval unavailable/);
-    assert.match(unavailableText, /No decision was recorded for this request\./);
-    assert.doesNotMatch(unavailableText, /unconfirmed|Your decision will not be sent again/);
-    assert.equal(buttons(root).filter(node => descendants(node).some(child => child.text === "Allow once")).length, 1);
+    assert.match(trayText(root), /Answered · not confirmed yet/);
+    assert.doesNotMatch(trayText(root), /Your decision will not be sent again|Confirmation unavailable/);
+    assert.equal(buttons(root).filter(node => descendants(node).some(child => child.text === "Allow once")).length, 0);
+    await showTrayRequest(root, "GardenPoint");
+    await settleTray(context);
     const dismiss = descendants(root).find(node => node.props["aria-label"] === "Dismiss approval from GardenPoint");
     assert.ok(dismiss?.props.onClick);
     (dismiss.props.onClick as () => void)();
     await nextTick();
-    assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 2);
+    assert.equal(trayQueueLength(root), 1);
     assert.deepEqual(decisions, [], "dismissal is local presentation state and never changes the recorded approval");
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer keeps an Open Model request its agent waits on in view and offers to stop the turn after the grace", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now: Date.parse("2026-10-01T06:19:05.000Z") });
+  // Shaped like the card the daemon lists for a live OpenCode request it cannot match to a room turn.
+  const live = { ...hostApproval(), id: "presentation-live", status: "unavailable" as const,
+    detail: "This request cannot currently be matched to an active room turn. Decisions are disabled until it can be verified.",
+    presentation: { ...hostApproval().presentation, displayName: "LunarAmber", title: "Approval unavailable" as const,
+      details: JSON.stringify({ id: "per_1", sessionID: "ses_1", permission: "edit", patterns: ["src/app.mjs"], metadata: {}, always: [] }) } };
+  const record = { ...live, id: "presentation-record", dismissKey: "record-key",
+    presentation: { ...live.presentation, displayName: "StaleAgent", details: "The native request is no longer available to inspect on this connection." } };
+  const stopped: string[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [live, record], error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, { ...composerProps(),
+    onStopAgentTurn: (agentId: string, approvalId: string) => { stopped.push(`${agentId}:${approvalId}`); } });
+  const cardsShown = () => descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval");
+  try {
+    await flushHostApprovals();
+    assert.equal(cardsShown().length, 0, "a failed match is often a race that the next listing resolves");
+    context.mock.timers.tick(27_000);
+    await flushHostApprovals();
+    assert.equal(cardsShown().length, 0);
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    const cards = cardsShown();
+    assert.equal(cards.length, 1, "the request its agent waits on stays in view; a durable record stays out of the composer");
+    assert.equal(trayHeading(root), "LunarAmber is waiting on a request you can't answer here");
+    assert.match(descendants(descendants(root).find(node => node.props["data-testid"] === "desktop-host-approval-blocked-detail")!)
+      .map(node => node.text).join(""), /Stopping the turn cancels the request\./, "the explanation sits in Details");
+    assert.equal(buttons(root).some(node => descendants(node).some(child => /^(Allow once|Deny)$/.test(child.text))), false);
+    const stop = () => buttonByText(root, "Stop turn");
+    assert.equal(stop().props.disabled, true, "Stop turn shares the hold of a request that just took the tray");
+    (stop().props.onClick as () => void)();
+    assert.deepEqual(stopped, [], "a click aimed at the previous request stops nothing");
+    await settleTray(context);
+    assert.equal(stop().props.disabled, false);
+    assert.ok(stop().parent?.props.class?.toString().includes("desktop-host-approval-stop"), "it sits in Deny's place, clear of Allow once");
+    (stop().props.onClick as () => void)();
+    assert.deepEqual(stopped, ["agent-a:presentation-live"], "the card names its own request, which is checked again before stopping");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("the grace before Stop turn counts from when the request was first listed, across new presentations", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now: Date.parse("2026-10-01T06:19:05.000Z") });
+  const waiting = (id: string) => ({ ...hostApproval(), id, requestKey: "request-a", status: "unavailable" as const,
+    detail: "This approval has expired. No new decision can be sent from this card.",
+    presentation: { ...hostApproval().presentation, displayName: "LunarAmber",
+      details: JSON.stringify({ id: "per_1", sessionID: "ses_1", permission: "edit", patterns: ["src/app.mjs"], metadata: {}, always: [] }) } });
+  let approvals = [waiting("presentation-1")];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    context.mock.timers.tick(27_000);
+    await flushHostApprovals();
+    // Main presents the same request again under a new handle.
+    approvals = [waiting("presentation-2")];
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    assert.ok(buttonByText(root, "Stop turn"), "30 s after the request was first listed, not after this presentation");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer remembers dismissed undecidable records across restarts and brings back live requests", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const stored = new Map<string, string>();
+  Object.assign(window, { localStorage: { getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => { stored.set(key, value); } } });
+  // Main mints new presentation IDs on every launch; only the record's dismissKey is stable.
+  const launch = (generation: number, recordStatus: "uncertain" | "unavailable" = "uncertain") => [
+    { ...hostApproval(), id: `pending-${generation}` },
+    { ...hostApproval(), id: `record-${generation}`, status: recordStatus, dismissKey: `record-key-${recordStatus}`,
+      presentation: { ...hostApproval().presentation, displayName: "StaleAgent", title: "Approval unavailable" as const } },
+  ];
+  let approvals = launch(1);
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+  } } });
+  const cards = (root: HostNode) => descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval");
+  const first = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    for (const name of ["StaleAgent", "GardenPoint"]) {
+      await showTrayRequest(first.root, name);
+      await settleTray(context);
+      const dismiss = descendants(first.root).find(node => node.props["aria-label"] === `Dismiss approval from ${name}`)!;
+      (dismiss.props.onClick as () => void)();
+      await nextTick();
+    }
+    assert.equal(cards(first.root).length, 0);
+  } finally { first.app.unmount(); }
+  approvals = launch(2);
+  const relaunched = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.deepEqual(cards(relaunched.root).map(node => descendants(node).some(child => child.text.includes("GardenPoint"))), [true],
+      "a live request is never hidden across restarts, and a dismissed record stays dismissed");
+  } finally { relaunched.app.unmount(); }
+  approvals = [...launch(3), { ...launch(3)[1]!, id: "record-3b", status: "uncertain" as const, dismissKey: "record-key-changed" }];
+  const changed = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.equal(trayQueueLength(changed.root), 2, "a status change (a new dismissKey) resurfaces the record");
+  } finally {
+    changed.app.unmount();
+    delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+    delete (window as unknown as Record<string, unknown>).localStorage;
+  }
+});
+
+test("a record dismissed this session returns when its status changes; a live request stays dismissed", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const stored = new Map<string, string>();
+  Object.assign(window, { localStorage: { getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => { stored.set(key, value); } } });
+  const record = (status: "uncertain" | "unavailable") => ({ ...hostApproval(), id: "record", status, dismissKey: `record-key-${status}`,
+    presentation: { ...hostApproval().presentation, displayName: "StaleAgent", title: "Approval unavailable" as const } });
+  let approvals: DesktopHostApproval[] = [hostApproval(), record("uncertain")];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    for (const name of ["StaleAgent", "GardenPoint"]) {
+      await showTrayRequest(root, name);
+      await settleTray(context);
+      (descendants(root).find(node => node.props["aria-label"] === `Dismiss approval from ${name}`)!.props.onClick as () => void)();
+      await nextTick();
+    }
+    assert.deepEqual(JSON.parse(stored.get("letagents-desktop:host-approval-dismissals")!), ["record-key-uncertain"],
+      "only the undecidable record is remembered");
+    // The same session presentation changes status: main issues a new key for it.
+    approvals = [hostApproval(), { ...record("uncertain"), dismissKey: "record-key-uncertain-again" }];
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    const shown = descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval");
+    assert.deepEqual(shown.map(node => descendants(node).some(child => child.text.includes("StaleAgent"))), [true],
+      "the changed record returns while the dismissed live request stays hidden for the session");
+  } finally {
+    app.unmount();
+    delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+    delete (window as unknown as Record<string, unknown>).localStorage;
+  }
+});
+
+const namedApproval = (id: string, displayName: string, requestKey: string | null = null): DesktopHostApproval =>
+  ({ ...hostApproval(), id, requestKey, presentation: { ...hostApproval().presentation, displayName } });
+const trayHeading = (root: HostNode) => descendants(descendants(approvalTray(root)!).find(node => node.type === "strong")!)
+  .map(node => node.text).join("");
+const trayPosition = (root: HostNode) => descendants(descendants(root).find(node => node.props["data-testid"] === "desktop-host-approval-position")!)
+  .map(node => node.text).join("");
+
+test("the composer shows one approval at a time and a new request joins its queue", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval"] });
+  let approvals = [namedApproval("p-a", "GardenPoint")];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.equal(trayHeading(root), "GardenPoint · Run a command");
+    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval-position"), false);
+    // The daemon may list a new request before older ones.
+    approvals = [namedApproval("p-b", "SparrowReef"), namedApproval("p-a", "GardenPoint")];
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 1, "one tray, never a stack");
+    assert.equal(trayHeading(root), "GardenPoint · Run a command", "the request on screen stays on screen");
+    assert.equal(trayPosition(root), "1 of 2");
+    (trayButton(root, "Next approval")!.props.onClick as () => void)();
+    await nextTick();
+    assert.equal(trayHeading(root), "SparrowReef · Run a command");
+    assert.equal(trayPosition(root), "2 of 2");
+    assert.equal(trayButton(root, "Next approval")!.props.disabled, true);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a decision shows the next request in its place and holds its buttons until it settles", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  let approvals = [namedApproval("p-a", "GardenPoint"), namedApproval("p-b", "SparrowReef")];
+  const decisions: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+    decideHostApproval: async (input: unknown) => { decisions.push(input); return "decision_sent"; },
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true, "a request that just appeared waits to settle");
+    await settleTray(context);
+    await (buttonByText(root, "Allow once").props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.equal(trayHeading(root), "SparrowReef · Run a command", "the next request takes the decided one's place");
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true, "its decisions wait for it to settle");
+    await (buttonByText(root, "Allow once").props.onClick as () => Promise<void>)();
+    assert.deepEqual(decisions, [{ id: "p-a", decision: "allow_once" }], "a second click never answers the new request unread");
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS);
+    await nextTick();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+    await (buttonByText(root, "Deny").props.onClick as () => Promise<void>)();
+    assert.deepEqual(decisions, [{ id: "p-a", decision: "allow_once" }, { id: "p-b", decision: "deny" }]);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a request withdrawn from under the pointer gives way to one whose actions wait to settle", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  let approvals = [namedApproval("p-a", "GardenPoint"), namedApproval("p-b", "SparrowReef")];
+  const decisions: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+    decideHostApproval: async (input: unknown) => { decisions.push(input); return "decision_sent"; },
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    assert.equal(trayHeading(root), "GardenPoint · Run a command");
+    // The turn ends, or the request is decided in the Inbox: it leaves the listing.
+    approvals = [namedApproval("p-b", "SparrowReef")];
+    context.mock.timers.tick(3_000 - HOST_APPROVAL_ARM_MS);
+    await flushHostApprovals();
+    assert.equal(trayHeading(root), "SparrowReef · Run a command");
+    for (const label of ["Allow once", "Deny"]) assert.equal(buttonByText(root, label).props.disabled, true, `${label} waits to settle`);
+    assert.equal(trayButton(root, "Dismiss approval from SparrowReef")!.props.disabled, true, "so does dismissing it");
+    await (buttonByText(root, "Allow once").props.onClick as () => Promise<void>)();
+    (trayButton(root, "Dismiss approval from SparrowReef")!.props.onClick as () => void)();
+    await nextTick();
+    assert.deepEqual(decisions, [], "a click meant for the withdrawn request answers nothing");
+    assert.equal(trayHeading(root), "SparrowReef · Run a command", "and hides nothing");
+    await settleTray(context);
+    await (buttonByText(root, "Allow once").props.onClick as () => Promise<void>)();
+    assert.deepEqual(decisions, [{ id: "p-b", decision: "allow_once" }]);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a request presented again under a new handle keeps its place, and the decision uses the new handle", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  let approvals = [namedApproval("p-a", "GardenPoint", "request-a"), namedApproval("p-b", "SparrowReef", "request-b")];
+  const decisions: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+    decideHostApproval: async (input: unknown) => { decisions.push(input); return "decision_sent"; },
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    // Main re-presents request-a: a new presentation ID for the same native request.
+    approvals = [namedApproval("p-a-again", "GardenPoint", "request-a"), namedApproval("p-b", "SparrowReef", "request-b")];
+    context.mock.timers.tick(3_000 - HOST_APPROVAL_ARM_MS);
+    await flushHostApprovals();
+    assert.equal(trayHeading(root), "GardenPoint · Run a command");
+    assert.equal(trayPosition(root), "1 of 2", "still one entry per request");
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false, "the same request is not new, so nothing waits");
+    await (buttonByText(root, "Allow once").props.onClick as () => Promise<void>)();
+    assert.deepEqual(decisions, [{ id: "p-a-again", decision: "allow_once" }]);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a request that appears holds all its decisions until the hold ends, then arms by itself", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [namedApproval("p-a", "GardenPoint")], error: null }),
+    decideHostApproval: async () => "decision_sent",
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  const held = () => [buttonByText(root, "Deny"), buttonByText(root, "Allow once"), trayButton(root, "Dismiss approval from GardenPoint")!]
+    .map(node => node.props.disabled);
+  try {
+    await flushHostApprovals();
+    assert.deepEqual(held(), [true, true, true], "a request that just appeared holds its decisions");
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS - 1);
+    await nextTick();
+    assert.deepEqual(held(), [true, true, true], "still held one millisecond before the hold ends");
+    context.mock.timers.tick(1);
+    await nextTick();
+    assert.deepEqual(held(), [false, false, false], "armed by the clock alone, with no other event");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("Next shows a different request, and that request holds its decisions until it arms", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [namedApproval("p-a", "GardenPoint"), namedApproval("p-b", "SparrowReef")], error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+    (trayButton(root, "Next approval")!.props.onClick as () => void)();
+    await nextTick();
+    assert.equal(trayHeading(root), "SparrowReef · Run a command");
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true, "the request it moved to holds its decisions");
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS);
+    await nextTick();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a request that can still be answered leads the stack, even when an unconfirmed one was listed first", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
+  const uncertain = { ...namedApproval("p-u", "StaleAgent"), status: "uncertain" as const };
+  let approvals: DesktopHostApproval[] = [uncertain];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.equal(trayHeading(root), "StaleAgent · Run a command");
+    // The request it can answer arrives after the unconfirmed one was listed.
+    approvals = [uncertain, namedApproval("p-a", "GardenPoint")];
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    assert.equal(trayHeading(root), "StaleAgent · Run a command", "the request on screen stays on screen");
+    (trayButton(root, "Previous approval")!.props.onClick as () => void)();
+    await nextTick();
+    assert.equal(trayHeading(root), "GardenPoint · Run a command", "the request it can answer leads the stack");
+    assert.equal(trayPosition(root), "1 of 2");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+/** A request a turn waits on: the stack shows it without the history toggle once the grace has passed. */
+const waitingOnTurn = (id: string, displayName: string): DesktopHostApproval => ({ ...hostApproval(), id, status: "unavailable",
+  detail: "This request cannot currently be matched to an active room turn. Decisions are disabled until it can be verified.",
+  presentation: { ...hostApproval().presentation, displayName, title: "Approval unavailable",
+    details: JSON.stringify({ id: `per_${id}`, sessionID: "ses_1", permission: "edit", patterns: ["src/app.mjs"], metadata: {}, always: [] }) } });
+const stopTurnButton = (root: HostNode) => buttons(root).find(node => descendants(node).some(child => child.text === "Stop turn"));
+
+test("the composer has no history line: an unavailable record no turn waits on stays out of the stack", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now: Date.parse("2026-10-01T06:19:05.000Z") });
+  let approvals: DesktopHostApproval[] = [waitingOnTurn("waiting-1", "LunarAmber"), waitingOnTurn("waiting-2", "CopperRidge"), namedApproval("p-a", "GardenPoint")];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals, error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    context.mock.timers.tick(30_000);
+    await flushHostApprovals();
+    assert.equal(trayPosition(root), "1 of 3", "the stack holds the pending request and both waiting requests");
+    approvals = [...approvals, { ...hostApproval(), id: "stale", status: "unavailable" as const,
+      presentation: { ...hostApproval().presentation, displayName: "StaleAgent", title: "Approval unavailable" as const } }];
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    assert.equal(trayPosition(root), "1 of 3", "the record is not added to the stack");
+    assert.equal(descendants(root).some(node => /unavailable or unconfirmed|StaleAgent/.test(node.text)), false, "and no line offers it");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("Stop turn still works while the approvals service is down", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now: Date.parse("2026-10-01T06:19:05.000Z") });
+  let available = true;
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => available ? { available: true, approvals: [waitingOnTurn("waiting-1", "LunarAmber")], error: null }
+      : { available: false, approvals: [], error: "Host approvals are unavailable." },
+  } } });
+  const stopped: string[] = [];
+  const { root, app } = mount(RoomComposer, { ...composerProps(),
+    onStopAgentTurn: (agentId: string, approvalId: string) => { stopped.push(`${agentId}:${approvalId}`); } });
+  try {
+    await flushHostApprovals();
+    context.mock.timers.tick(30_000);
+    await flushHostApprovals();
+    available = false;
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    assert.equal(trayHeading(root), "LunarAmber is waiting on a request you can't answer here");
+    assert.equal(descendants(root).some(node => /Host approvals|Can't answer right now/.test(node.text)), false);
+    await settleTray(context);
+    assert.equal(stopTurnButton(root)!.props.disabled, false, "the room lists the request again before it stops anything");
+    (stopTurnButton(root)!.props.onClick as () => void)();
+    assert.deepEqual(stopped, ["agent-a:waiting-1"]);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a card that gains Stop turn on the same request holds that button for the hold", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout", "Date"], now: Date.parse("2026-10-01T06:19:05.000Z") });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [waitingOnTurn("waiting-1", "LunarAmber")], error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.ok(!approvalTray(root), "no turn waits on it yet, so there is nothing to offer here");
+    context.mock.timers.tick(30_000);
+    await flushHostApprovals();
+    const stop = stopTurnButton(root);
+    assert.ok(stop, "Stop turn appears once the turn waits on the request");
+    assert.equal(stop.props.disabled, true, "its own hold starts when it appears");
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS - 1);
+    await nextTick();
+    assert.equal(stopTurnButton(root)!.props.disabled, true, "still held one millisecond before the end");
+    context.mock.timers.tick(1);
+    await nextTick();
+    assert.equal(stopTurnButton(root)!.props.disabled, false, "armed by the clock alone");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("a card that appeared while the chat tab was hidden holds again when the tab is shown", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [namedApproval("p-a", "GardenPoint")], error: null }),
+  } } });
+  const chatTabActive = Vue.ref(true);
+  const { root, app } = mount({ setup: () => () => Vue.h(RoomComposer, { ...composerProps(), active: chatTabActive.value }) }, {});
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+    chatTabActive.value = false;
+    await nextTick();
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS * 2);
+    chatTabActive.value = true;
+    await nextTick();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true, "shown again, the card holds again");
+    await settleTray(context);
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("the composer holds its card again when the window comes back to the front, and drops its listener on unmount", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [namedApproval("p-a", "GardenPoint")], error: null }),
+  } } });
+  const listeners = new Set<() => void>();
+  const doc = document as unknown as { addEventListener: (type: string, listener: () => void) => void;
+    removeEventListener: (type: string, listener: () => void) => void; visibilityState: string };
+  const original = { add: doc.addEventListener, remove: doc.removeEventListener, state: doc.visibilityState };
+  doc.addEventListener = (type, listener) => { if (type === "visibilitychange") listeners.add(listener); };
+  doc.removeEventListener = (type, listener) => { if (type === "visibilitychange") listeners.delete(listener); };
+  const { root, app } = mount(RoomComposer, composerProps());
+  let listenersAfterUnmount = -1;
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    assert.equal(listeners.size, 1, "listening while mounted");
+    doc.visibilityState = "hidden";
+    context.mock.timers.tick(HOST_APPROVAL_ARM_MS * 2);
+    doc.visibilityState = "visible";
+    for (const listener of [...listeners]) listener();
+    await nextTick();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true, "back in front: the card holds again");
+    await settleTray(context);
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+    app.unmount();
+    listenersAfterUnmount = listeners.size;
+  } finally {
+    if (listenersAfterUnmount < 0) app.unmount();
+    doc.addEventListener = original.add;
+    doc.removeEventListener = original.remove;
+    doc.visibilityState = original.state;
+    delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+  }
+  assert.equal(listenersAfterUnmount, 0, "unmounting removes the listener");
+});
+
+test("Deny and Allow keep fixed widths so their hit areas never move between requests", async () => {
+  const css = await readFile(fileURLToPath(new URL("../src/styles/composer-agent-reasoning/composer-permissions.css", import.meta.url)), "utf8");
+  const rule = (selector: string) => {
+    const match = new RegExp(`${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(css);
+    assert.ok(match, `${selector} has a rule`);
+    return match[1];
+  };
+  for (const selector of [".desktop-host-approval-decisions .desktop-host-approval-deny", ".desktop-host-approval-decisions .desktop-host-approval-allow"]) {
+    const body = rule(selector);
+    assert.match(body, /flex:\s*none/, `${selector} never grows or shrinks`);
+    assert.match(body, /(?:^|[;\s])width:\s*\d+px/, `${selector} has a fixed width`);
+  }
+  // The row runs right to left and wraps upward, so the state's actions hold
+  // the bottom-right corner and Always allow can only move above them.
+  const decisions = rule(".desktop-host-approval-decisions");
+  assert.match(decisions, /flex-direction:\s*row-reverse/);
+  assert.match(decisions, /flex-wrap:\s*wrap-reverse/);
+});
+
+test("Always allow, which saves a permanent rule, always carries its full label", async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
+  const approval = namedApproval("p-a", "GardenPoint");
+  approval.presentation.alwaysAllow = { agentId: "agent-a", accountId: "owner", projectId: "a".repeat(64), projectName: "a-project-with-a-long-name",
+    sourceRepoPath: "/projects/app", canonicalSourcePath: "/projects/app", repository: "app", remoteUrl: "/projects/app",
+    provider: "open-model", toolId: "opencode:bash", toolLabel: "Bash", policySha256: "b".repeat(64) };
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [approval], error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await settleTray(context);
+    const label = "Always allow Bash in a-project-with-a-long-name";
+    const always = buttonByText(root, label);
+    assert.equal(always.props["aria-label"], label, "readable by name even when the tray truncates it");
+    assert.match(String(always.props.title), new RegExp(`^${label}\\. Saved for this agent`), "its tooltip names the rule, not only how to revoke it");
+    const decisions = descendants(root).find(node => node.props.class === "desktop-host-approval-decisions")!;
+    assert.equal(decisions.children.filter(node => node.kind === "element").at(-1), always,
+      "it comes after the state's actions, so it wraps above them instead of pushing them");
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("remembered approval dismissals keep the newest 500 and work without storage", () => {
+  let dismissals = readHostApprovalDismissals();
+  assert.equal(dismissals.size, 0, "missing storage reads as no dismissals");
+  dismissals = rememberHostApprovalDismissal(dismissals, "key-without-storage");
+  assert.ok(dismissals.has("key-without-storage"), "a dismissal still holds for the session");
+  const stored = new Map<string, string>([["letagents-desktop:host-approval-dismissals", '["kept",7,null]']]);
+  Object.assign(window, { localStorage: { getItem: (key: string) => stored.get(key) ?? null,
+    setItem: (key: string, value: string) => { stored.set(key, value); } } });
+  try {
+    dismissals = readHostApprovalDismissals();
+    assert.deepEqual([...dismissals], ["kept"], "non-string entries are ignored");
+    for (let index = 0; index < 500; index += 1) dismissals = rememberHostApprovalDismissal(dismissals, `key-${index}`);
+    const saved = JSON.parse(stored.get("letagents-desktop:host-approval-dismissals")!) as string[];
+    assert.equal(saved.length, 500);
+    assert.equal(saved[0], "key-0", "the oldest key ages out first");
+    assert.equal(saved.at(-1), "key-499");
+    assert.deepEqual([...readHostApprovalDismissals()], saved);
+  } finally { delete (window as unknown as Record<string, unknown>).localStorage; }
 });
 
 test("approval details show tool inputs and exact edits without transport JSON", async () => {
@@ -439,21 +1100,22 @@ test("native MCP approval shows the action and complete inputs without protocol 
   assert.equal(hostApprovalTitle({ ...edit, title: "Approval unavailable" }), "Approval unavailable");
 });
 
-test("composer shows approval-service failure when no request cards have arrived", async () => {
+test("composer shows nothing about the approval service when no request is waiting", async () => {
   Object.assign(window, { letagentsDesktop: { supervisor: {
     listHostApprovals: async () => ({ available: false, approvals: [], error: "Approval connection unavailable" }),
   } } });
   const { root, app } = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
-    assert.ok(descendants(root).some(node => node.text.includes("Approval connection unavailable")));
-    assert.ok(buttonByText(root, "Refresh approvals"));
+    assert.equal(descendants(root).some(node => /Approval connection unavailable|Refresh approvals|Can't answer/.test(node.text)), false,
+      "no request waits, so nothing about the approvals service shows");
+    assert.equal(buttons(root).some(node => descendants(node).some(child => /Refresh approvals|Retry/.test(child.text))), false);
     assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
-test("composer disables existing approvals when the bridge becomes unavailable without an error", async (context) => {
-  context.mock.timers.enable({ apis: ["setInterval"] });
+test("a waiting request says Can't answer right now with Retry when the bridge becomes unavailable", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval", "setTimeout"] });
   let available = true;
   Object.assign(window, { letagentsDesktop: { supervisor: {
     listHostApprovals: async () => ({ available, approvals: available ? [hostApproval()] : [], error: null }),
@@ -461,12 +1123,25 @@ test("composer disables existing approvals when the bridge becomes unavailable w
   const { root, app } = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
+    await settleTray(context);
     assert.equal(buttonByText(root, "Allow once").props.disabled, false);
     available = false;
     context.mock.timers.tick(3_000);
     await flushHostApprovals();
-    assert.equal(buttonByText(root, "Allow once").props.disabled, true);
-    assert.ok(descendants(root).some(node => node.text.includes("Host approvals are unavailable")));
+    assert.equal(buttons(root).some(node => descendants(node).some(child => /^(Allow once|Deny)$/.test(child.text))), false,
+      "Allow and Deny give way to Retry");
+    assert.match(trayText(root), /Can't answer right now/);
+    assert.equal(descendants(root).some(node => node.text.includes("Host approvals are unavailable")), false);
+    const retry = () => descendants(root).find(node => node.props["data-testid"] === "desktop-host-approval-retry")!;
+    assert.ok(retry().parent?.props.class?.toString().includes("desktop-host-approval-in-deny-slot"), "Retry sits in Deny's place");
+    assert.equal(retry().props.disabled, true, "Retry holds like any action that appears");
+    await settleTray(context);
+    available = true;
+    await (retry().props.onClick as () => Promise<void>)();
+    await flushHostApprovals();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true, "Allow once that returns in place of Retry holds first");
+    await settleTray(context);
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
@@ -509,6 +1184,21 @@ test("mounted shared message retry button is a native, exact, capability-aware c
   (retryButton.props.onClick as () => void)();
   assert.deepEqual(calls, [["oak", "message_1"]], "one activation carries exactly the receipt identity");
   available.app.unmount();
+
+  // A saved provider turn is only read again, and the button says so.
+  const reread = mount(DesktopChatMessage, { ...base, deliveryRecoveryAvailable: true,
+    deliveryReceipts: [{ agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null, providerTurnId: "turn_1", retry: "reread_saved_turn" }] });
+  const rereadButton = buttonByText(reread.root, "Read again");
+  assert.equal(rereadButton.props.title, "Reads the finished turn’s answer again. The turn is not rerun.");
+  (rereadButton.props.onClick as () => void)();
+  assert.deepEqual(calls.at(-1), ["oak", "message_1"], "it is the same exact Retry delivery request");
+  reread.app.unmount();
+
+  // A saved reply that failed to post has a provider turn too, but Retry posts it.
+  const unposted = mount(DesktopChatMessage, { ...base, deliveryRecoveryAvailable: true,
+    deliveryReceipts: [{ agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null, providerTurnId: "turn_1", retry: "publish_saved_reply" }] });
+  assert.equal(buttonByText(unposted.root, "Post reply").props.title, "Posts the saved reply. The provider is not asked again.");
+  unposted.app.unmount();
 
   const busy = mount(DesktopChatMessage, {
     ...base,
@@ -570,6 +1260,136 @@ test("missing-conversation controls render only before provider work starts", ()
   ambiguous.app.unmount();
 });
 
+test("a mounted message counts down in view to the saved time, and its buttons ask for the agent's follow-up", async (context) => {
+  // The time of day is the test's, and a second passes only when the test says so. The two are apart: after a
+  // sleep the time is far ahead and one tick comes.
+  const start = Date.parse("2026-10-09T14:30:00.000Z");
+  let now = start;
+  context.mock.method(Date, "now", () => now);
+  context.mock.timers.enable({ apis: ["setInterval"] });
+  const second = async (passedMs = 1_000) => { now += passedMs; context.mock.timers.tick(1_000); await nextTick(); };
+  const retries: Array<[string, string]> = [];
+  const skips: Array<[string, string]> = [];
+  const failed = { agentId: "oak", agentName: "Oak", state: "acknowledged_failed", blockedByMessageId: null, failureCode: null, terminalReason: null,
+    attemptCount: 1, providerTurnId: "turn_1", error: "API Error: Repeated 529 Overloaded errors." };
+  const props = Vue.reactive({
+    message: message(), threadSummary: emptyThreadSummary, activeThreadRoot: false, highlightQuery: "", searchActive: false,
+    deliveryRecoveryAvailable: true, roomDeliverySkipAvailable: true,
+    deliveryReceipts: [{ ...failed, scheduledRetry: { atMs: start + 100_000, attempt: 2, attempts: 3, kind: "provider_fault", sourceMessageId: "task-continuation:inbox_1" } }] as unknown[],
+    onRetryDelivery: (agentId: string, sourceMessageId: string) => retries.push([agentId, sourceMessageId]),
+    onSkipDelivery: (agentId: string, sourceMessageId: string) => skips.push([agentId, sourceMessageId]),
+  });
+  const mounted = mount({ setup: () => () => Vue.h(DesktopChatMessage, { ...props }) }, {});
+  const textOf = (node: HostNode) => descendants(node).map((child) => child.text).join("").trim();
+  const receipt = () => descendants(mounted.root).find((node) => node.type === "li" && node.props["data-state"] === "acknowledged_failed")!;
+  const notes = () => descendants(receipt()).filter((node) => node.type === "small").map(textOf);
+  const countdown = () => textOf(descendants(receipt()).find((node) => node.type === "small" && node.props["aria-hidden"] === "true")!);
+  try {
+    await nextTick();
+    // What is in view: the count, which moves; what is read aloud: a clock time, which does not.
+    assert.equal(countdown(), "Trying again in 1 min 40 s (attempt 2 of 3)");
+    const spoken = String(receipt().props["aria-label"]);
+    assert.match(spoken, /^Oak: API Error: Repeated 529 Overloaded errors\. Trying again at \S.* \(attempt 2 of 3\)\. If all 3 attempts fail, the agent stops and waits for you\.$/);
+    await second();
+    assert.equal(countdown(), "Trying again in 1 min 39 s (attempt 2 of 3)");
+    await second(); await second();
+    assert.equal(countdown(), "Trying again in 1 min 37 s (attempt 2 of 3)");
+    assert.equal(receipt().props["aria-label"], spoken, "the spoken label did not change with the count");
+    // The machine sleeps for a minute and one tick comes: the count is the saved time minus the time now.
+    await second(60_000);
+    assert.equal(countdown(), "Trying again in 37 s (attempt 2 of 3)");
+    await second(36_000);
+    assert.equal(countdown(), "Trying again in 1 s (attempt 2 of 3)");
+    // At the time, and after it while the turn has not started: nothing says that the agent tries now.
+    await second();
+    assert.equal(countdown(), "About to try again (attempt 2 of 3)");
+    assert.match(String(receipt().props["aria-label"]), /^Oak: API Error: Repeated 529 Overloaded errors\. About to try again \(attempt 2 of 3\)\. /);
+    await second(300_000);
+    assert.equal(countdown(), "About to try again (attempt 2 of 3)");
+
+    // The two controls ask for the follow-up by its own id, not for this message.
+    const tryNow = buttonByText(receipt(), "Try now");
+    const stop = buttonByText(receipt(), "Stop trying");
+    assert.deepEqual([tryNow.props.type, tryNow.props.disabled, tryNow.props["aria-label"]], ["button", false, "Try again now for Oak"]);
+    assert.deepEqual([stop.props.type, stop.props.disabled, stop.props["aria-label"]], ["button", false, "Stop the automatic attempts for Oak"]);
+    (tryNow.props.onClick as () => void)();
+    (stop.props.onClick as () => void)();
+    assert.deepEqual([retries, skips], [[["oak", "task-continuation:inbox_1"]], [["oak", "task-continuation:inbox_1"]]]);
+
+    // The turn starts: the follow-up no longer waits, so the message shows what failed and nothing else.
+    props.deliveryReceipts = [failed];
+    await nextTick();
+    assert.deepEqual(notes(), ["API Error: Repeated 529 Overloaded errors."]);
+    assert.equal(buttons(receipt()).length, 0);
+
+    // All attempts failed: the message says that the agent waits for its owner, and Retry asks for that follow-up.
+    const waits = "All three automatic attempts failed. The agent now waits for you: check the provider, then use Retry delivery to try again. Existing work is preserved.";
+    props.deliveryReceipts = [{ ...failed, followUpNote: { state: "waiting_for_owner", sourceMessageId: "task-continuation:inbox_4", text: waits, canRetry: true } }];
+    await nextTick();
+    assert.deepEqual(notes(), ["API Error: Repeated 529 Overloaded errors.", waits]);
+    assert.equal(buttons(receipt()).length, 1);
+    (buttonByText(receipt(), "Retry").props.onClick as () => void)();
+    assert.deepEqual(retries.at(-1), ["oak", "task-continuation:inbox_4"]);
+
+    // Its owner stopped the attempts: the message says so, with no control, for as long as the receipt is kept.
+    const stopped = "You stopped the automatic attempts. The task is still assigned to this agent. Send it a message to continue.";
+    props.deliveryReceipts = [{ ...failed, followUpNote: { state: "ended", sourceMessageId: "task-continuation:inbox_1", text: stopped, canRetry: false } }];
+    await nextTick();
+    assert.deepEqual(notes(), ["API Error: Repeated 529 Overloaded errors.", stopped]);
+    assert.equal(buttons(receipt()).length, 0);
+    assert.equal(receipt().props["aria-label"], `Oak: API Error: Repeated 529 Overloaded errors. ${stopped}`);
+    await second(3_600_000);
+    assert.deepEqual(notes(), ["API Error: Repeated 529 Overloaded errors.", stopped]);
+  } finally {
+    mounted.app.unmount();
+  }
+});
+
+test("the room's activity line shows an agent that waits to try again as a row at rest, which no room message retires", async () => {
+  const waiting = { id: "agent-a:waiting", displayName: "Agent A", summary: "Waiting to try again, due at 14:32 (attempt 2 of 3)",
+    startedAt: "2026-10-09T14:32:00.000Z", agentSessionId: "session-a", agentKey: null, sourceMessageId: null, waiting: true as const };
+  const props = Vue.reactive({
+    active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: false,
+    loadingOlderMessages: false, messages: [message("msg_1")], threadMessages: [] as ReturnType<typeof message>[],
+    messageNamespace: "waiting-row", localAgentWork: [waiting] as unknown[],
+    deliveryReceiptsByMessage: {}, hasFilteredRoomActivity: false,
+    roomIdentifier: "room", githubActivityAvailable: false, roomLoading: false, searchQuery: "", taskReferenceIds: new Set(),
+  });
+  const opened: unknown[] = [];
+  const viewport = mount({ setup: () => () => Vue.h(RoomMessageViewport, { ...props, onOpenAgent: (target: unknown) => opened.push(target) }) }, {});
+  const byTestId = (id: string) => descendants(viewport.root).filter((node) => node.props["data-testid"] === id);
+  const text = (node: HostNode) => descendants(node).map((child) => child.text ?? "").join("");
+  const pill = () => byTestId("room-activity-live")[0]!;
+  try {
+    await nextTick();
+    assert.ok(pill(), "one agent: one live pill");
+    assert.equal(pill().props["data-waiting"], true, "the pill is marked as one that waits, which is what puts it at rest");
+    assert.equal(text(byTestId("room-activity-live-echo")[0]!), "Waiting to try again, due at 14:32 (attempt 2 of 3)");
+    assert.equal(byTestId("room-local-agent-work").length, 0, "the list opens only on a click");
+    (pill().props.onClick as () => void)();
+    await nextTick();
+    const [row] = byTestId("room-local-agent-work");
+    assert.equal(row!.props["data-waiting"], true);
+    assert.equal(row!.props["aria-label"], "Agent A: Waiting to try again, due at 14:32 (attempt 2 of 3)");
+    (byTestId("room-local-agent-work-open")[0]!.props.onClick as () => void)();
+    assert.equal((opened[0] as { agentSessionId: string }).agentSessionId, "session-a", "Open opens that agent");
+
+    // The agent wrote to the room earlier, and other messages arrive: the pill stays, because the agent still waits.
+    props.messages = [message("msg_1"), { ...message("msg_2"), agentIdentity: { agentSessionId: "session-a" } } as never, message("msg_3")];
+    await nextTick();
+    assert.equal(pill().props["data-waiting"], true);
+
+    // The attempt starts. The agent's working pill takes its place at once, with its own text, and is not at rest.
+    props.localAgentWork = [{ id: "agent-a", displayName: "Agent A", summary: "Working", startedAt: "2026-10-09T14:32:05.000Z",
+      agentSessionId: "session-a", agentKey: null, sourceMessageId: null }];
+    await nextTick();
+    assert.equal(pill().props["data-waiting"], undefined);
+    assert.equal(text(byTestId("room-activity-live-echo")[0]!), "Working");
+  } finally {
+    viewport.app.unmount();
+  }
+});
+
 test("history failure offers explicit retry without viewport or scroll retries", async () => {
   let calls = 0;
   const viewport = mount(RoomMessageViewport, {
@@ -600,6 +1420,68 @@ test("history failure offers explicit retry without viewport or scroll retries",
   } finally { viewport.app.unmount(); }
 });
 
+test("viewport resizing for the composer or pin row keeps bottom readers attached and older readers in place", async () => {
+  let resized: (() => void) | null = null;
+  const observed: unknown[] = [];
+  Object.assign(globalThis, { ResizeObserver: class {
+    constructor(callback: () => void) { resized = callback; }
+    observe(target: unknown) { observed.push(target); }
+    disconnect() { resized = null; }
+  } });
+  const viewport = mount(RoomMessageViewport, {
+    active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: false,
+    loadingOlderMessages: false, messages: [message()], threadMessages: [], messageNamespace: "composer-growth", localAgentWork: [],
+    deliveryReceiptsByMessage: {}, deliveryRecoveryAvailable: false, deliveryRetryKeys: new Set(),
+    hasFilteredRoomActivity: false, roomIdentifier: "room", githubActivityAvailable: false,
+    roomLoading: false, searchQuery: "", taskReferenceIds: new Set(),
+  });
+  try {
+    const list = descendants(viewport.root).find(node => node.props["data-testid"] === "room-chat-list")!;
+    // A plain host node held in a template ref is a reactive proxy of it.
+    assert.equal(observed.length, 1); assert.equal(Vue.toRaw(observed[0]), list, "the message list's own size is watched");
+    Object.assign(list, { isConnected: true, getClientRects: () => [{}], getBoundingClientRect: () => ({ top: 0 }), querySelectorAll: () => [] });
+    list.scrollHeight = 2_000; list.clientHeight = 600; list.scrollTop = 1_400;
+    (list.props.onScroll as () => void)();
+    // An approval docks above the input: the list loses 90px of height.
+    list.clientHeight = 510;
+    resized!();
+    assert.equal(list.scrollTop, 2_000, "the newest message stays visible");
+    // The tray arrives as the list settles: a scroll event can measure the
+    // shorter list before the resize is reported, and must not lose the reader.
+    list.scrollTop = 1_490;
+    (list.props.onScroll as () => void)();
+    list.clientHeight = 400;
+    (list.props.onScroll as () => void)();
+    resized!();
+    assert.equal(list.scrollTop, 2_000, "still at the newest message");
+    // Someone reading older messages is left where they are.
+    list.scrollTop = 300;
+    (list.props.onScroll as () => void)();
+    list.clientHeight = 330;
+    resized!();
+    assert.equal(list.scrollTop, 300);
+    // The last pin disappears: the viewport gains the row's height. Older
+    // readers keep their offset; no independent pin watcher is necessary.
+    list.clientHeight = 360;
+    resized!();
+    assert.equal(list.scrollTop, 300);
+    // Exercise the complete 0→1→0 pin row transition while following latest.
+    list.scrollTop = 1_640;
+    (list.props.onScroll as () => void)();
+    list.clientHeight = 330;
+    resized!();
+    assert.equal(list.scrollTop, 2_000);
+    list.scrollTop = 1_670;
+    (list.props.onScroll as () => void)();
+    list.clientHeight = 360;
+    resized!();
+    assert.equal(list.scrollTop, 2_000);
+  } finally {
+    viewport.app.unmount();
+    delete (globalThis as Record<string, unknown>).ResizeObserver;
+  }
+});
+
 test("an idle viewport skips work history tracking and resumes causal reply suppression when work starts", async () => {
   const props = Vue.reactive({
     active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: false,
@@ -614,13 +1496,17 @@ test("an idle viewport skips work history tracking and resumes causal reply supp
   const viewport = mount({ setup: () => () => Vue.h(RoomMessageViewport, { ...props }) }, {});
   const instance = viewport.app._instance!.subTree.component!;
   const setup = (instance as unknown as {
-    devtoolsRawSetupState: { currentLocalAgentWork: Vue.ComputedRef & { onTrack?: (event: Vue.DebuggerEvent) => void } };
+    devtoolsRawSetupState: {
+      currentLocalAgentWork: Vue.ComputedRef & { onTrack?: (event: Vue.DebuggerEvent) => void };
+      sortedVisibleMessages: Vue.ComputedRef;
+    };
   }).devtoolsRawSetupState;
   let historyReads = 0;
+  // The history is read directly or through the viewport's one sorted copy of it.
   setup.currentLocalAgentWork.onTrack = (event) => {
-    if (event.key === "messages" || event.key === "threadMessages") historyReads += 1;
+    if (event.key === "messages" || event.key === "threadMessages" || event.target === setup.sortedVisibleMessages) historyReads += 1;
   };
-  const echoes = () => descendants(viewport.root).filter(node => node.props["data-testid"] === "room-local-agent-work-echo");
+  const echoes = () => descendants(viewport.root).filter(node => node.props["data-testid"] === "room-activity-live-echo");
   try {
     props.localAgentWork = [];
     await nextTick();
@@ -641,8 +1527,20 @@ test("an idle viewport skips work history tracking and resumes causal reply supp
     await nextTick();
     assert.equal(echoes().length, 0, "a later exact-agent reply clears work even when input history is unordered");
 
+    props.messages = [...props.messages, message("msg_4")];
+    props.localAgentWork = [{ ...props.localAgentWork[0]!, sourceMessageId: "msg_4" }];
+    await nextTick();
+    assert.equal(echoes().length, 1, "a new source begins another work turn");
     props.localAgentWork = [];
     await nextTick();
+    assert.equal(echoes().length, 1, "a cleared turn retains its indicator briefly for an incoming reply");
+    props.threadMessages = [
+      { ...message("msg_5"), agentIdentity: { agentSessionId: "session-a" } },
+      message("msg_4"), reply, message("msg_2"), message("msg_1"),
+    ] as typeof props.threadMessages;
+    await nextTick();
+    assert.equal(echoes().length, 0, "an unordered thread reply consumes the pending handoff immediately");
+
     historyReads = 0;
     props.threadMessages = [message("msg_4")];
     await nextTick();
@@ -666,8 +1564,8 @@ test("mounted main viewport and thread panel forward the same retry event contra
 
   const threadCalls: Array<[string, string]> = [];
   const thread = mount(RoomThreadPanel, {
-    parent: message(), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "room",
-    sending: false, sendError: null, attaching: false, attachmentDrafts: [], attachmentError: null,
+    parent: message("root_1"), initialThreadSummary: null, replies: [message()], participants: [], roomIdentifier: "room",
+    sending: false, sendError: null, attaching: false, attachmentDrafts: [],
     pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false, revealMessageId: null,
     searchQuery: "", activeSearchMessageId: null, taskReferenceIds: new Set(),
     deliveryReceiptsByMessage: { message_1: [{ agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null }] },
@@ -817,14 +1715,14 @@ test("main and thread composers preserve failed drafts and only clear acknowledg
     let complete: (sent: boolean) => void = () => assert.fail("send not emitted");
     const props = thread ? {
       parent: message(), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "room",
-      sending: false, sendError: null, attaching: false, attachmentDrafts: [], attachmentError: null,
+      sending: false, sendError: null, attaching: false, attachmentDrafts: [],
       pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false, revealMessageId: null,
       searchQuery: "", activeSearchMessageId: null, taskReferenceIds: new Set(),
       deliveryReceiptsByMessage: {}, deliveryRecoveryAvailable: true, deliveryRetryKeys: new Set(),
     } : composerProps();
     const mounted = mount(thread ? RoomThreadPanel : RoomComposer, {
       ...props,
-      [thread ? "onSendThreadMessage" : "onSendMessage"]: (...args: unknown[]) => { complete = args.at(-1) as typeof complete; },
+      [thread ? "onSendThreadMessage" : "onSendMessage"]: (...args: unknown[]) => { complete = args[thread ? 4 : 3] as typeof complete; },
     });
     try {
       const input = descendants(mounted.root).find(node => node.type === "textarea")!;
@@ -864,6 +1762,129 @@ test("main and thread composers preserve failed drafts and only clear acknowledg
   delete (window as unknown as Record<string, unknown>).letagentsDesktop;
 });
 
+test("the composer tells the activity line when a message is being written, so a GitHub update steps aside", async () => {
+  Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
+  const render = (props: Record<string, unknown> = {}) =>
+    mount(RoomComposer, { ...composerProps(), roomIdentifier: "room-github-update", ...props });
+  const drafting = (mounted: ReturnType<typeof render>) =>
+    (mounted.app._instance!.exposed as { drafting: { value: boolean } }).drafting.value;
+  const mounted = render();
+  try {
+    assert.equal(drafting(mounted), false, "an empty composer lets the update show");
+    assert.equal(descendants(mounted.root).some(node => String(node.props["data-testid"] ?? "").startsWith("desktop-composer-event")), false,
+      "updates are no longer drawn inside the composer");
+    const input = descendants(mounted.root).find(node => node.type === "textarea")!;
+    const setDraft = input.props["onUpdate:modelValue"] as (text: string) => void;
+    setDraft("A new top-level message"); await nextTick();
+    assert.equal(drafting(mounted), true, "a message being written never looks like it carries the update");
+    setDraft("   "); await nextTick();
+    assert.equal(drafting(mounted), false);
+  } finally { mounted.app.unmount(); }
+  for (const props of [
+    { replyTo: { id: "msg_1", sender: "Emmy", text: "Earlier" } },
+    { attachmentDrafts: [{ uploadId: "upl_1", name: "notes.txt", sizeBytes: 3, mimeType: "text/plain" }] },
+  ]) {
+    const composing = render(props);
+    try { assert.equal(drafting(composing), true, JSON.stringify(props)); } finally { composing.app.unmount(); }
+  }
+  delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+});
+
+const needsYouAnswerText = "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted. Post each verdict as a PR comment.";
+
+/** Mounts a component the way RoomChatView does: with the room's agent names provided. */
+function mountWithAgentNames(
+  component: object,
+  props: Record<string, unknown>,
+  named = true,
+  displayName = "SummitMisty",
+) {
+  const root = hostNode("element", "root");
+  const app = renderer.createApp({
+    setup() {
+      if (named) {
+        Vue.provide(attentionResponse.attentionResponseAgentNamesKey, Vue.ref(attentionResponse.attentionResponseAgentNames([
+          { agentKey: "EmmyMay/desktop-cursor-5849cfa6", displayName },
+        ])));
+      }
+      return () => Vue.h(component, props);
+    },
+  });
+  app.provide(ssrContextKey, { modules: new Set<string>() });
+  app.mount(root);
+  return { root, app };
+}
+
+function renderedMessage(
+  messageOverrides: Record<string, unknown>,
+  named = true,
+  displayName?: string,
+): { html: string; text: string } {
+  const { root, app } = mountWithAgentNames(DesktopChatMessage, {
+    message: { ...message("msg_161"), sender: "EmmyMay", text: needsYouAnswerText, ...messageOverrides },
+    threadSummary: emptyThreadSummary, activeThreadRoot: false, highlightQuery: "", searchActive: false,
+  }, named, displayName);
+  const nodes = descendants(root);
+  const result = {
+    html: nodes.map(node => String(node.props.innerHTML ?? "")).join(""),
+    text: nodes.map(node => node.text).join(" "),
+  };
+  app.unmount();
+  return result;
+}
+
+test("a person's Needs-you answer reads as a reply to the agent by name", () => {
+  const named = renderedMessage({}).html;
+  assert.match(named, /<span class="mention-token">@SummitMisty<\/span> Noted\. Post each verdict as a PR comment\./);
+  assert.doesNotMatch(named, /@agent:|desktop-cursor|Human response|summitmisty-gh-app/);
+  // Outside a room roster the mention stays visible, as a neutral @agent.
+  const unnamed = renderedMessage({}, false).html;
+  assert.match(unnamed, /@agent<\/span> Noted\. Post each verdict/);
+  assert.doesNotMatch(unnamed, /@agent:|Human response/);
+  // A roster name that is not a plain mention cannot style a person's message.
+  for (const spoofed of ["[Approved by EmmyMay](https://evil.example)", "**EmmyMay approved**", "__x__"]) {
+    const html = renderedMessage({}, true, spoofed).html;
+    assert.match(html, /@agent<\/span> Noted\./, spoofed);
+    assert.doesNotMatch(html, /<a |<strong>|evil\.example/, spoofed);
+  }
+  // Only a person's answer is rewritten; an agent posting the same shape is shown as written.
+  assert.match(renderedMessage({ source: "agent", sender: "SummitMisty | EmmyMay's agent | Cursor" }).html, /Human response/);
+});
+
+test("a Needs-you answer that opens with a block keeps the block apart from the mention", () => {
+  const html = renderedMessage({
+    text: "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\n```sh\nnpm test\n```",
+  }).html;
+  assert.match(html, /<p><span class="mention-token">@SummitMisty<\/span><\/p>/);
+  assert.match(html, /<pre[^>]*>[\s\S]*<code[^>]*>npm <span class="hljs-built_in">test<\/span><\/code>/);
+});
+
+test("replies to a Needs-you answer preview it by agent name, in the message and in the composer", async () => {
+  const reply = renderedMessage({
+    id: "msg_162", sender: "SummitMisty | EmmyMay's agent | Cursor", source: "agent", text: "Understood.",
+    replyTo: { id: "msg_161", sender: "EmmyMay", text: needsYouAnswerText, source: "browser", timestamp: "2026-09-30T16:42:00.000Z" },
+  });
+  assert.match(reply.text, /@SummitMisty Noted\. Post each verdict/);
+  assert.doesNotMatch(reply.text, /@agent:|Human response/);
+
+  Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
+  const composer = mountWithAgentNames(RoomComposer, {
+    ...composerProps(),
+    roomIdentifier: "room-answer-reply",
+    replyTo: { id: "msg_161", sender: "EmmyMay", text: needsYouAnswerText, source: "browser" },
+  });
+  try {
+    await nextTick();
+    const chip = descendants(composer.root).find(node => node.props["data-testid"] === "desktop-composer-reply")!;
+    const chipText = descendants(chip).map(node => node.text).join(" ");
+    assert.match(chipText, /@SummitMisty Noted\. Post each verdict/);
+    assert.doesNotMatch(chipText, /@agent:|Human response/);
+  } finally {
+    composer.app.unmount();
+    delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+  }
+});
+
 test("outgoing row exposes sending, uncertain retry, and confirmed state without server actions", async () => {
   const outbox = await vite.ssrLoadModule("/renderer/src/domain/message-outbox.ts");
   outbox.clearDesktopMessageOutbox();
@@ -901,7 +1922,7 @@ test("room drafts survive switching and remount, stay account isolated, and neve
   Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: async () => ({ available: true, approvals: [], error: null }) } } });
   let sends = 0;
   let complete: (sent: boolean) => void = () => assert.fail("send not emitted");
-  const open = (room: string) => mount(RoomComposer, { ...composerProps(), roomIdentifier: room, messageNamespace: `${room}:cloud:cloud`, onSendMessage: (...args: unknown[]) => { sends += 1; complete = args.at(-1) as typeof complete; } });
+  const open = (room: string) => mount(RoomComposer, { ...composerProps(), roomIdentifier: room, messageNamespace: `${room}:cloud:cloud`, onSendMessage: (...args: unknown[]) => { sends += 1; complete = args[3] as typeof complete; } });
   const input = (view: ReturnType<typeof mount>) => descendants(view.root).find(node => node.type === "textarea")!;
   const value = (view: ReturnType<typeof mount>) => (input(view) as unknown as { value: string }).value;
   let view = open("Messaging-QA");
@@ -949,10 +1970,10 @@ test("thread reopen restores text and selection quote and accepted send clears o
   const open = (id = "message_1") => mount(RoomThreadPanel, {
     parent: message(id), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "room",
     messageNamespace: "room:cloud:cloud", sending: false, sendError: null, attaching: false,
-    attachmentDrafts: [], attachmentError: null, pendingAttachmentDrafts: [], hasOlderReplies: false,
+    attachmentDrafts: [], pendingAttachmentDrafts: [], hasOlderReplies: false,
     loadingOlderReplies: false, revealMessageId: null, searchQuery: "", activeSearchMessageId: null,
     taskReferenceIds: new Set(), deliveryReceiptsByMessage: {}, deliveryRetryKeys: new Set(),
-    onSendThreadMessage: (...args: unknown[]) => { sends.push(args); complete = args.at(-1) as typeof complete; },
+    onSendThreadMessage: (...args: unknown[]) => { sends.push(args); complete = args[4] as typeof complete; },
   });
   const input = (view: ReturnType<typeof mount>) => descendants(view.root).find(node => node.type === "textarea")!;
   const value = (view: ReturnType<typeof mount>) => (input(view) as unknown as { value: string }).value;
@@ -998,10 +2019,10 @@ test("acceptance after switching threads clears only the original submitted text
   let complete: (sent: boolean) => void = () => assert.fail("send not emitted");
   const component = { setup: () => () => Vue.h(RoomThreadPanel, {
     parent: message(threadId.value), initialThreadSummary: null, replies: [], participants: [], roomIdentifier: "room",
-    sending: false, sendError: null, attaching: false, attachmentDrafts: [], attachmentError: null,
+    sending: false, sendError: null, attaching: false, attachmentDrafts: [],
     pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false, searchQuery: "",
     activeSearchMessageId: null, taskReferenceIds: new Set(), deliveryReceiptsByMessage: {}, deliveryRetryKeys: new Set(),
-    onSendThreadMessage: (...args: unknown[]) => { complete = args.at(-1) as typeof complete; },
+    onSendThreadMessage: (...args: unknown[]) => { complete = args[4] as typeof complete; },
   }) };
   const view = mount(component, {});
   try {
@@ -1026,7 +2047,7 @@ test("attachment-only thread acceptance restores composer focus without requirin
     attachmentDrafts: [{ uploadId: "upload-focus", fileName: "note.txt", mimeType: "text/plain", sizeBytes: 3, previewDataUrl: null }],
     attachmentError: null, pendingAttachmentDrafts: [], hasOlderReplies: false, loadingOlderReplies: false,
     searchQuery: "", activeSearchMessageId: null, taskReferenceIds: new Set(), deliveryReceiptsByMessage: {}, deliveryRetryKeys: new Set(),
-    onSendThreadMessage: (...args: unknown[]) => (args.at(-1) as (accepted: boolean) => void)(true),
+    onSendThreadMessage: (...args: unknown[]) => (args[4] as (accepted: boolean) => void)(true),
   });
   try {
     await nextTick();
@@ -1040,7 +2061,8 @@ test("attachment-only thread acceptance restores composer focus without requirin
   } finally { app.unmount(); messageDrafts.clearDesktopMessageDrafts(); }
 });
 
-for (const roomWorkspace of [false, true]) test(`composer names the saved permission scope before sending Always allow (room: ${roomWorkspace})`, async () => {
+for (const roomWorkspace of [false, true]) test(`composer names the saved permission scope before sending Always allow (room: ${roomWorkspace})`, async (context) => {
+  context.mock.timers.enable({ apis: ["setTimeout"] });
   const approval = hostApproval();
   approval.presentation.alwaysAllow = roomWorkspace ? { kind: "room_workspace", version: 1, agentId: "agent-a", accountId: "owner",
     roomId: "room", workAttemptId: "5bff98b0-2ab1-41d7-88c4-e0eb62dff36a", workspacePath: "/private/workspace", canonicalWorkspacePath: "/private/workspace",
@@ -1055,6 +2077,7 @@ for (const roomWorkspace of [false, true]) test(`composer names the saved permis
   const { root, app } = mount(RoomComposer, composerProps());
   try {
     await flushHostApprovals();
+    await settleTray(context);
     await (buttonByText(root, roomWorkspace ? "Always allow Bash in this room workspace" : "Always allow Bash in Do App").props.onClick as () => Promise<void>)();
     assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_always" }]);
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }

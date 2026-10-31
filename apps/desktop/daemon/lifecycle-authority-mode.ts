@@ -9,7 +9,7 @@ export type LifecycleAuthorityProvider = z.output<typeof lifecycleAuthorityProvi
 /** Closed release policy. Authority varies only by provider and durable delivery shape. */
 export function lifecycleAuthorityModeForProvider(
   provider: LifecycleAuthorityProvider,
-  deliveryMode: "mcp_polling" | "desktop_events" | "daemon_inbox",
+  deliveryMode: "mcp_polling" | "daemon_inbox",
 ): LifecycleAuthorityMode {
   switch (provider) {
     case "codex":

@@ -1,6 +1,6 @@
 import {
   combineSideEffects, ExecutionProtocolError, parseExecutionFact, sameNativeTurn,
-  type ContinuationState, type ControlState, type ExecutionOperationFact, type ExecutionOutcome,
+  type ContinuationState, type ExecutionFact, type ControlState, type ExecutionOperationFact, type ExecutionOutcome,
   type NativeTurnIdentity, type RuntimeState, type SideEffectState, type TurnOutcome, type TurnState,
 } from "./execution-protocol.js";
 
@@ -70,7 +70,14 @@ function reduceOperation(previous: OperationProjection | undefined, fact: Execut
 
 /** Pure shadow projection. This module has no provider, inbox, or publication handles. */
 export function reduceExecutionFact(previous: ExecutionProjection, value: unknown): ExecutionProjection {
-  const fact = parseExecutionFact(value);
+  return reduceParsedExecutionFact(previous, parseExecutionFact(value));
+}
+
+/**
+ * The same reduction for a fact this process already produced with
+ * parseExecutionFact. Never pass a value that did not come from that parser.
+ */
+export function reduceParsedExecutionFact(previous: ExecutionProjection, fact: ExecutionFact): ExecutionProjection {
   if (fact.observerEpoch < previous.observerEpoch) throw new ExecutionProtocolError("stale_observer");
   if (fact.observerEpoch > previous.observerEpoch) previous = { ...previous, observerEpoch: fact.observerEpoch };
   switch (fact.domain) {

@@ -12,6 +12,7 @@ import {
   AGENT_NAME,
 } from "./config.js";
 import { getAuthenticatedAgentDirectory } from "./directory.js";
+import { currentSessionScope } from "../session-scope.js";
 
 function shouldReuseStoredIdentity(
   identity: StoredAgentIdentityState | null,
@@ -27,6 +28,8 @@ function shouldReuseStoredIdentity(
 }
 
 function resolveExplicitAgentIdentity(): { name: string; display_name: string } | null {
+  // The API process's env never names a remote session's agent.
+  if (currentSessionScope()) return null;
   if (AGENT_NAME) {
     const name = normalizeAgentBaseName(AGENT_NAME);
     return {

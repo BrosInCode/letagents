@@ -65,7 +65,11 @@ export function registerWebRoutes(app: Express): void {
   app.get("/docs", (_req, res) => {
     sendVueApp(res);
   });
-  app.get("/messages", (_req, res) => {
+  app.get(["/messages", "/my-work", "/connectors"], (_req, res) => {
+    sendVueApp(res);
+  });
+  // "Ask for an agent" links open the desktop app from this page.
+  app.get(/^\/ask\/[A-Za-z0-9_-]{20,64}$/, (_req, res) => {
     sendVueApp(res);
   });
 

@@ -1,0 +1,8 @@
+{
+  "self": "https://acme.atlassian.net/rest/api/3/issue/10101/comment/20055",
+  "id": "20055",
+  "author": { "accountId": "5b10ac8d82e05b22cc7d4ef5", "displayName": "Emmy May" },
+  "body": { "type": "doc", "version": 1, "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "PR #88 opened" }] }] },
+  "created": "2026-10-21T10:00:00.000+0000",
+  "updated": "2026-10-21T10:00:00.000+0000"
+}

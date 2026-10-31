@@ -18,7 +18,7 @@
   height: 26px;
   border-radius: 50%;
   background: linear-gradient(135deg, rgba(148, 163, 184, 0.2), rgba(226, 232, 240, 0.1));
-  border: 1.5px solid rgba(255, 255, 255, 0.1);
+  border: 1.5px solid var(--border-strong);
   display: grid;
   place-items: center;
   font-weight: 800;
@@ -29,7 +29,7 @@
 .nav-username {
   font-size: 0.8rem;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.8);
+  color: var(--text-secondary);
   max-width: 120px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -41,16 +41,16 @@
   border-radius: var(--radius-sm);
   font-size: 0.72rem;
   font-weight: 600;
-  color: rgba(255, 255, 255, 0.35);
+  color: var(--text-secondary);
   background: transparent;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
   cursor: pointer;
-  transition: all var(--duration-fast);
+  transition: color var(--duration-fast), background-color var(--duration-fast), border-color var(--duration-fast);
   letter-spacing: 0;
 }
 
 .nav-signout:hover {
-  color: rgba(255, 255, 255, 0.8);
-  border-color: rgba(255, 255, 255, 0.15);
-  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  border-color: var(--border-accent);
+  background: var(--accent-dim);
 }

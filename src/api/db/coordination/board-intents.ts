@@ -25,6 +25,7 @@ export {
   getBoardIntent,
   listBoardIntents,
   markBoardIntentTaskResult,
+  supersedeBoardIntentsForTask,
 } from "./board-intent-lifecycle.js";
 export {
   BoardIntentApprovalConsumptionError,

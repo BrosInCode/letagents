@@ -1,3 +1,4 @@
+import { getDefaultTrackerRuleEngine } from "../connectors/rules/engine.js";
 import {
   acceptProposedTaskTx,
   approveTaskCreateBoardIntent,
@@ -6,20 +7,13 @@ import {
   claimBoardIntentEscalationTx,
   countBoardIntents,
   countRecentAutoApprovedIntents,
-  getRoomAgentPresence,
-  listStalledRoomCandidates,
-  markRoomStallNudgedTx,
   getActiveBoardManager,
   getLivenessAnnouncementCandidate,
   getReachableWorkerDeliverySessionForAgentSession,
   getRoomBoardSettings,
-  getRoomLiveAgentSuppressionActorLabels,
   listActiveBoardManagerAssignments,
   listActiveBoardManagerCandidates,
   listEscalationCandidateBoardIntents,
-  listLivenessAnnouncementCandidates,
-  markAgentOfflineAnnounced,
-  markAgentRecoveryAnnounced,
   pruneExpiredExecutionApprovalPublications,
   pruneStaleRoomAgentDeliveryInstances,
   markBoardIntentAutoApprovedTx,
@@ -32,15 +26,12 @@ import {
 } from "../db.js";
 import {
   getDueRoomOperationalContext,
-  getLivenessRoomContexts,
 } from "../db/coordination/due-room-context.js";
 import {
   lockBoardManagerFailoverDeliveryKeysTx,
   rescheduleActiveBoardManagerAssignment,
 } from "../db/coordination/board-manager-failover.js";
 import { rescheduleEscalationCandidateBoardIntent } from "../db/coordination/board-intents.js";
-import { rescheduleStalledRoomCandidate } from "../db/coordination/room-stall.js";
-import { rescheduleLivenessAnnouncementCandidate } from "../db/presence/offline-announcements.js";
 import {
   createBoardManagerFailoverSweeper,
   type BoardManagerFailoverResult,
@@ -50,71 +41,9 @@ import {
   INTENT_AUTO_APPROVE_MAX_PER_WINDOW,
   INTENT_AUTO_APPROVE_WINDOW_MS,
 } from "../rooms/board-intent-escalation-sweep.js";
-import {
-  createRoomStallSweeper,
-  selectRoomStallNudgeWorkerLabels,
-} from "../rooms/room-stall-sweep.js";
-import {
-  createLivenessSweeper,
-  LIVENESS_SWEEP_INTERVAL_MS,
-  resolveOfflineAnnounceAfterMs,
-  type LivenessAnnouncementInput,
-} from "../rooms/liveness-sweep.js";
 import { emitProjectMessage } from "./events.js";
 import { workflowEffectBroker } from "../workflow-effects/runtime.js";
-
-async function announceOffline(input: LivenessAnnouncementInput): Promise<void> {
-  await emitProjectMessage(input.room_id, "letagents", input.text, {
-    source: "agent_liveness",
-    agent_prompt_kind: "auto",
-    client_message_id: input.client_message_id,
-    with_created_message_in_transaction: async (tx) => {
-      await markAgentOfflineAnnounced(
-        {
-          room_id: input.room_id,
-          delivery_key: input.delivery_key,
-          announced_at: input.announced_at,
-        },
-        tx
-      );
-    },
-  });
-}
-
-async function announceRecovery(input: LivenessAnnouncementInput): Promise<void> {
-  await emitProjectMessage(input.room_id, "letagents", input.text, {
-    source: "agent_liveness",
-    client_message_id: input.client_message_id,
-    with_created_message_in_transaction: async (tx) => {
-      await markAgentRecoveryAnnounced(
-        {
-          room_id: input.room_id,
-          delivery_key: input.delivery_key,
-          announced_at: input.announced_at,
-        },
-        tx
-      );
-    },
-  });
-}
-
-const livenessSweeper = createLivenessSweeper({
-  listCandidates: (options) => listLivenessAnnouncementCandidates(options),
-  getCandidate: getLivenessAnnouncementCandidate,
-  rescheduleCandidate: rescheduleLivenessAnnouncementCandidate,
-  getSuppressedActorLabels: getRoomLiveAgentSuppressionActorLabels,
-  getActiveBoardManagerSessionId: async (roomId) =>
-    (await getActiveBoardManager(roomId))?.agent_session_id ?? null,
-  getRoomContexts: getLivenessRoomContexts,
-  announceOffline,
-  announceRecovery,
-  offlineAnnounceAfterMs: resolveOfflineAnnounceAfterMs(
-    process.env.LETAGENTS_LIVENESS_NOTICE_AFTER_MS
-  ),
-  onError: (roomId, error) => {
-    console.error(`Liveness sweep failed for room ${roomId}:`, error);
-  },
-});
+import { sweepAgentAsks } from "../agent-asks/store.js";
 
 /** Fence lost inside the failover transaction: roll the announcement back quietly. */
 class BoardManagerFailoverLostRace extends Error {
@@ -377,57 +306,8 @@ const intentEscalationSweeper = createIntentEscalationSweeper({
   },
 });
 
-/** Fence lost inside the stall-nudge transaction: roll the announcement back quietly. */
-class RoomStallNudgeLostRace extends Error {
-  constructor() {
-    super("room stall nudge lost the fence");
-    this.name = "RoomStallNudgeLostRace";
-  }
-}
-
-const roomStallSweeper = createRoomStallSweeper({
-  listStalledRooms: (options) => listStalledRoomCandidates(options),
-  rescheduleRoom: rescheduleStalledRoomCandidate,
-  hasReachableManager,
-  getRoomContexts: getDueRoomOperationalContext,
-  listLiveWorkerLabels: async (roomId) => {
-    const presence = await getRoomAgentPresence(roomId, {
-      limit: 20,
-      excludeSupervisorManaged: true,
-    });
-    return selectRoomStallNudgeWorkerLabels({
-      presence,
-    });
-  },
-  announceStall: async (input) => {
-    let nudged = false;
-    try {
-      await emitProjectMessage(input.room_id, "letagents", input.text, {
-        source: "agent_liveness",
-        agent_prompt_kind: "auto",
-        client_message_id: input.client_message_id,
-        with_created_message_in_transaction: async (tx) => {
-          nudged = await markRoomStallNudgedTx(tx, {
-            room_id: input.room_id,
-            epoch: input.epoch,
-          });
-          if (!nudged) {
-            throw new RoomStallNudgeLostRace();
-          }
-        },
-      });
-    } catch (error) {
-      if (error instanceof RoomStallNudgeLostRace) {
-        return false;
-      }
-      throw error;
-    }
-    return nudged;
-  },
-  onError: (roomId, error) => {
-    console.error(`Room stall sweep failed for room ${roomId}:`, error);
-  },
-});
+/** Cadence of the shared background sweeps below. */
+const LIVENESS_SWEEP_INTERVAL_MS = 60 * 1000;
 
 let sweepTimer: NodeJS.Timeout | null = null;
 let sweepPromise: Promise<void> | null = null;
@@ -453,11 +333,6 @@ export function startLivenessSweep(): void {
       console.error("Execution approval publication cleanup failed:", error);
       }
       try {
-      await livenessSweeper.sweepOnce();
-      } catch (error) {
-      console.error("Liveness sweep failed:", error);
-      }
-      try {
       await boardManagerFailoverSweeper.sweepOnce();
       } catch (error) {
       console.error("Board Manager failover sweep failed:", error);
@@ -468,14 +343,26 @@ export function startLivenessSweep(): void {
       console.error("Intent escalation sweep failed:", error);
       }
       try {
-      await roomStallSweeper.sweepOnce();
-      } catch (error) {
-      console.error("Room stall sweep failed:", error);
-      }
-      try {
       await workflowEffectBroker.sweepOnce();
       } catch (error) {
       console.error("Workflow effect reconciliation sweep failed:", error);
+      }
+      try {
+      // Tracker rule runs continue once the sweep settled their last write.
+      await (await getDefaultTrackerRuleEngine()).advancePendingRuns();
+      } catch (error) {
+      console.error("Tracker rule run sweep failed:", error);
+      }
+      try {
+      // Ticket connectors PR6: Jev question rows older than 90 days (hourly).
+      await (await import("../connectors/jev/runtime.js")).pruneJevQuestions();
+      } catch (error) {
+      console.error("Jev question sweep failed:", error);
+      }
+      try {
+      await sweepAgentAsks();
+      } catch (error) {
+      console.error("Agent ask sweep failed:", error);
       }
     })();
     const pending = run.finally(() => {

@@ -1,6 +1,6 @@
 export { addMessage, addMessageWithCreateStatus } from "./messages/create.js";
 export { getMessageStreamCheckpoint } from "./messages/checkpoint.js";
-export type { MessageCreateTransaction } from "./messages/create.js";
+export type { AddMessageOptions, MessageCreateTransaction } from "./messages/create.js";
 export {
   getLatestMessages,
   getMessageById,
@@ -28,7 +28,9 @@ export {
 export { getMessageAccountAgentRoutingById } from "./messages/account-agent-routing.js";
 export {
   createMessageAttachmentUpload,
+  deleteExpiredPendingMessageAttachmentUpload,
   deletePendingMessageAttachmentUpload,
   getMessageAttachment,
   getMessageAttachmentUpload,
+  listExpiredPendingMessageAttachmentUploads,
 } from "./messages/attachments.js";

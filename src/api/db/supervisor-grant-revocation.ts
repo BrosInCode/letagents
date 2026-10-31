@@ -30,6 +30,7 @@ import {
   endRoomAgentSession,
   getSupervisorRoomAgentSession,
 } from "./auth/room-agent-sessions.js";
+import { announceRemovedLiveActivity, deleteLiveActivityOfDepartedAgents } from "./reasoning.js";
 import type { SupervisorHostGrant } from "./types.js";
 
 export interface SupervisorGrantOwnerAccount {
@@ -149,6 +150,13 @@ export async function revokeSupervisorGrantAuthority(input: {
       endedSessionIds.push(observed.session_id);
     }
   }
+  // Ending each worker removed the turn it shared. A worker that had ended
+  // earlier, to restart in the same room, and never came back left its turn:
+  // the revocation (a retire or purge with no live session) removes it too.
+  await announceRemovedLiveActivity(await deleteLiveActivityOfDepartedAgents({
+    room_ids: current.allowed_room_ids,
+    agent_keys: current.allowed_agent_keys,
+  }));
 
   return {
     grant: revoked ?? current,

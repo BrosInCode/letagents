@@ -29,7 +29,7 @@ export function toAvailableGitHubEventsResult<TEvent>(payload: {
   }
 }
 
-export function toUnavailableGitHubEventsResult<TEvent>(): RoomGitHubEventsFetchResult<TEvent> {
+function toUnavailableGitHubEventsResult<TEvent>(): RoomGitHubEventsFetchResult<TEvent> {
   return {
     events: [],
     available: false,

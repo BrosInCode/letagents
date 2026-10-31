@@ -1,11 +1,19 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 const routes = [
+  { path: "/connectors", name: "connectors", component: () => import("./pages/Connectors.vue") },
+  { path: "/my-work", name: "my-work", component: () => import("./pages/MyWork.vue") },
   { path: "/messages", name: "messages", component: () => import("./pages/Messages.vue") },
   {
     path: '/',
     name: 'landing',
     component: () => import('./pages/Landing.vue'),
+  },
+  {
+    path: '/ask/:token',
+    name: 'ask',
+    component: () => import('./pages/AskLink.vue'),
+    props: true,
   },
   {
     path: '/docs',
@@ -25,7 +33,9 @@ export const router = createRouter({
   routes,
   scrollBehavior(to, _from, savedPosition) {
     if (to.hash) {
-      return { el: to.hash, top: 92, behavior: 'smooth' }
+      const navbarBottom = document.querySelector('.navbar')?.getBoundingClientRect().bottom ?? 72
+      const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+      return { el: to.hash, top: Math.max(92, navbarBottom + 20), behavior: reducedMotion ? 'instant' : 'smooth' }
     }
     if (savedPosition) {
       return savedPosition

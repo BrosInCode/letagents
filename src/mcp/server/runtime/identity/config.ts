@@ -1,4 +1,5 @@
 import { execSync } from "child_process";
+import { currentSessionScope, requireScopeWhenHosted } from "../session-scope.js";
 
 import {
   inferAgentIdeLabel,
@@ -25,6 +26,9 @@ export const AGENT_OWNER_LABEL = (
 export const EXPLICIT_AGENT_IDENTITY_KEY = getExplicitAgentIdentityStorageKey();
 
 export function readCommandOutput(command: string, cwd = process.cwd()): string | null {
+  // A remote session never runs programs on the API server.
+  if (currentSessionScope()) return null;
+  requireScopeWhenHosted("A local program");
   try {
     const output = execSync(command, {
       cwd,
@@ -58,9 +62,45 @@ function getExplicitAgentIdentityStorageKey(): string | null {
   return runtimeSignals[0] ?? null;
 }
 
+/**
+ * Reads the `clientInfo.name` the MCP host sent in `initialize`. Hosts that
+ * do not set LETAGENTS_AGENT_IDE are still identifiable this way; without it
+ * every Claude Code or OpenCode agent showed up as a generic "Agent". Read
+ * lazily: the name exists as soon as the initialize request is handled.
+ */
+let readMcpClientName: () => string | null | undefined = () => null;
+
+export function setMcpClientNameSource(source: () => string | null | undefined): void {
+  readMcpClientName = source;
+}
+
+const MCP_CLIENT_IDE_LABELS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/^claude[-_ ]?code\b/i, "Claude Code"],
+  [/^opencode\b/i, "OpenCode"],
+  [/^codex\b/i, "Codex"],
+  [/^cursor\b/i, "Cursor"],
+  [/^antigravity\b/i, "Antigravity"],
+];
+
+export function ideLabelFromMcpClientName(name: string | null | undefined): string | null {
+  const value = String(name ?? "").trim();
+  if (!value) return null;
+  return MCP_CLIENT_IDE_LABELS.find(([pattern]) => pattern.test(value))?.[1] ?? null;
+}
+
 export function detectAgentIdeLabel(): string {
+  // A remote session is described by its own client, never the API's env.
+  const scope = currentSessionScope();
+  if (scope) return ideLabelFromMcpClientName(scope.clientName) ?? "Agent";
   if (AGENT_IDE_LABEL) {
     return toTitleCaseCodename(AGENT_IDE_LABEL);
+  }
+
+  // The host's own name outranks inherited environment: Claude Code started
+  // from a Codex shell still carries CODEX_* variables.
+  const fromClient = ideLabelFromMcpClientName(readMcpClientName());
+  if (fromClient) {
+    return fromClient;
   }
 
   if (isCodexRuntime()) {
@@ -73,9 +113,9 @@ export function detectAgentIdeLabel(): string {
 }
 
 export function detectAgentRuntimeLabel(): string {
-  if (isCodexRuntime()) {
+  if (!currentSessionScope() && isCodexRuntime()) {
     return "codex";
   }
 
-  return detectAgentIdeLabel().trim().toLowerCase() || "unknown";
+  return detectAgentIdeLabel().trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "unknown";
 }

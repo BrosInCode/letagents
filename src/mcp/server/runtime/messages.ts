@@ -164,6 +164,23 @@ function withThreadMetadata(
   };
 }
 
+/**
+ * Who reacted is worth an agent's attention; an empty list on every message,
+ * or an avatar address per reactor, is not.
+ */
+function withAgentReadableReactions(record: AgentReadableMessageRecord): AgentReadableMessageRecord {
+  const { reactions, ...rest } = record;
+  if (!Array.isArray(reactions)) return record;
+  const readable = reactions.filter(isRecord).map((reaction) => ({
+    emoji: reaction.emoji,
+    count: reaction.count,
+    by: (Array.isArray(reaction.reactors) ? reaction.reactors : [])
+      .filter(isRecord)
+      .map((reactor) => reactor.name ?? reactor.login),
+  }));
+  return readable.length ? { ...rest, reactions: readable } : rest;
+}
+
 function toAgentReadableMessage(
   message: unknown,
   recordsById: Map<string, AgentReadableMessageRecord>,
@@ -173,7 +190,7 @@ function toAgentReadableMessage(
     return message;
   }
 
-  const record = withThreadMetadata(message as AgentReadableMessageRecord, recordsById, summaries);
+  const record = withThreadMetadata(withAgentReadableReactions(message as AgentReadableMessageRecord), recordsById, summaries);
   const kind = normalizeAgentPromptKind(record.agent_prompt_kind);
   const text = typeof record.text === "string" ? record.text : null;
 

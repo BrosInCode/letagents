@@ -1,3 +1,5 @@
+import { taskMatchesSource, ticketRefParts, ticketStateLabel } from "./ticket-ref";
+import { compareText } from "../../../../domain/formatters";
 import type { DesktopTaskSummary, WorkerSnapshot } from "../../../../../../electron/ipc-types";
 import { TASK_STATUS_ORDER } from "../../../../domain/tasks";
 import { timestampValue } from "../../../../domain/time";
@@ -33,6 +35,9 @@ export const BOARD_HANDOFF_STAGE_LABELS: ReadonlyArray<string> = [
     .map((status) => status === "in_review" ? "Review" : readableStatus(status)),
   "Closeout",
 ];
+
+/** Views that show every lifecycle stage; the rest show only stages with cards. */
+const BOARD_FULL_LIFECYCLE_FILTERS: ReadonlySet<BoardFilter> = new Set(["open", "closeout"]);
 
 export const BOARD_FILTERS: ReadonlyArray<{ id: BoardFilter; label: string }> = [
   { id: "open", label: "Open" },
@@ -85,6 +90,10 @@ export function taskMatchesBoardSearch(
     task.assigneeAgentKey || "",
     task.createdBy || "",
     ...task.workflowRefs.map((ref) => `${ref.provider} ${ref.kind} ${ref.label}`),
+    // An imported card: its ticket ref (`jira:SCRUM-1`), its key, and its ticket state.
+    task.externalRef || "",
+    ticketRefParts(task.externalRef)?.providerLabel || "",
+    ticketStateLabel(task.ticketState) || "",
   ].join(" ").toLowerCase();
   return haystack.includes(query);
 }
@@ -112,7 +121,7 @@ export function boardOwnerOptions(tasks: DesktopTaskSummary[]): Array<{ id: stri
     { id: "all", label: "All owners" },
     { id: "unassigned", label: "Unassigned" },
     ...[...owners].map(([id, label]) => ({ id, label }))
-      .sort((left, right) => left.label.localeCompare(right.label) || left.id.localeCompare(right.id)),
+      .sort((left, right) => compareText(left.label, right.label) || compareText(left.id, right.id)),
   ];
 }
 
@@ -130,7 +139,11 @@ export function visibleBoardGroups(input: {
   localWorker: WorkerSnapshot | null;
   ownerFilter?: string;
   statusFilter?: string;
+  /** all, tracker or native; offered only when the room has imported cards. */
+  sourceFilter?: string;
   sort?: BoardSort;
+  /** Statuses a card can be dragged to; focused views keep those stages visible. */
+  dropTargets?: (task: DesktopTaskSummary) => readonly string[];
 }): TaskGroup[] {
   const statuses = input.filter === "closeout"
     ? CLOSEOUT_BOARD_STATUSES
@@ -140,19 +153,27 @@ export function visibleBoardGroups(input: {
     && taskMatchesBoardSearch(task, input.searchQuery)
     && (!input.ownerFilter || input.ownerFilter === "all" || boardOwnerValue(task) === input.ownerFilter)
     && (!input.statusFilter || input.statusFilter === "all" || task.status === input.statusFilter)
+    && taskMatchesSource(task, input.sourceFilter)
   ).sort((left, right) => {
     const delta = input.sort === "title"
-      ? left.title.localeCompare(right.title)
+      ? compareText(left.title, right.title)
       : input.sort === "oldest"
         ? timestampValue(left.createdAt) - timestampValue(right.createdAt)
         : timestampValue(right.updatedAt || right.createdAt) - timestampValue(left.updatedAt || left.createdAt);
-    return delta || left.id.localeCompare(right.id);
+    return delta || compareText(left.id, right.id);
   });
-  return statuses.filter((status) => !input.statusFilter || input.statusFilter === "all" || status === input.statusFilter).map((status) => ({
+  const groups = statuses.filter((status) => !input.statusFilter || input.statusFilter === "all" || status === input.statusFilter).map((status) => ({
     status,
     label: readableStatus(status),
     tasks: tasks.filter((task) => task.status === status),
   }));
+  // Open and Closeout are the full lifecycle, so every stage stays a drop
+  // target. A focused view is a short list spread over six 280px columns:
+  // its empty stages pushed the cards it exists to show off-screen. It keeps
+  // a stage that holds cards, or that one of its cards can be dragged to.
+  if (BOARD_FULL_LIFECYCLE_FILTERS.has(input.filter)) return groups;
+  const dropTargets = new Set(tasks.flatMap((task) => input.dropTargets?.(task) ?? []));
+  return groups.filter((group) => group.tasks.length > 0 || dropTargets.has(group.status));
 }
 
 export function boardEmptyState(input: {
@@ -253,4 +274,13 @@ export function deriveTaskTitle(title: string, description: string): string {
   return firstLine.length > 96
     ? `${firstLine.slice(0, 93).trimEnd()}...`
     : firstLine;
+}
+
+/**
+ * Whether the viewer manages this room's board: edits tasks and clears any
+ * agent's lease. A room admin does; so does whoever owns a local room, which
+ * has no roles of its own.
+ */
+export function canManageRoomBoard(role: string | null | undefined): boolean {
+  return role === "admin" || role === "local";
 }

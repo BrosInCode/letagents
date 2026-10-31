@@ -26,15 +26,17 @@ function desktopAutoUpdater() {
 }
 
 function updatesSupported(): boolean {
-  return process.platform === "darwin"
+  return (process.platform === "darwin" || process.platform === "win32")
     && app?.isPackaged === true
-    && Boolean(desktopUpdateFeedBaseUrl(process.arch));
+    && Boolean(desktopUpdateFeedBaseUrl(process.arch, process.platform));
 }
 
 function unsupportedReason(): string | null {
-  if (process.platform !== "darwin") return "Automatic updates currently require macOS.";
+  if (process.platform !== "darwin" && process.platform !== "win32") {
+    return "Automatic updates currently require macOS or Windows.";
+  }
   if (app?.isPackaged !== true) return "Automatic updates run only in signed production builds.";
-  if (!desktopUpdateFeedBaseUrl(process.arch)) {
+  if (!desktopUpdateFeedBaseUrl(process.arch, process.platform)) {
     return `Automatic updates do not have a release feed for the ${process.arch} architecture.`;
   }
   return null;
@@ -59,7 +61,7 @@ function publishStatus(status: DesktopUpdateStatus): void {
 
 function updateBaseUrl(): string {
   const configuredBaseUrl = process.env.LETAGENTS_DESKTOP_UPDATE_BASE_URL?.trim();
-  const baseUrl = configuredBaseUrl || desktopUpdateFeedBaseUrl(process.arch);
+  const baseUrl = configuredBaseUrl || desktopUpdateFeedBaseUrl(process.arch, process.platform);
   if (!baseUrl) throw new Error(`No desktop update feed is configured for the ${process.arch} architecture.`);
   let parsed: URL;
   try {
@@ -123,6 +125,9 @@ export function initializeDesktopUpdates(): void {
   electronUpdater.autoRunAppAfterInstall = true;
   electronUpdater.allowDowngrade = false;
   electronUpdater.allowPrerelease = false;
+  // Windows releases are one full NSIS installer (with a sidecar blockmap),
+  // never a web installer and its separate package.
+  if (process.platform === "win32") electronUpdater.disableWebInstaller = true;
   electronUpdater.logger = {
     debug: (...values: unknown[]) => console.debug("[desktop-updater]", ...values),
     info: (...values: unknown[]) => console.info("[desktop-updater]", ...values),

@@ -37,6 +37,15 @@ export const CRASH_LOOP_EXIT_LIMIT = 5;
 export const CRASH_LOOP_WINDOW_MS = 10 * 60 * 1000;
 export const MAX_BACKOFF_MS = 5 * 60 * 1000;
 
+/**
+ * Whether the convergence loop will still restart a lane after one more failed
+ * lane ends. It mirrors the crash-loop check made before every provider
+ * restart, counting the failure that has not been recorded yet.
+ */
+export function restartsAfterNextFailure(exitTimestampsMs: readonly number[], nowMs: number): boolean {
+  return exitTimestampsMs.filter((at) => at >= nowMs - CRASH_LOOP_WINDOW_MS).length + 1 < CRASH_LOOP_EXIT_LIMIT;
+}
+
 /** Exponential 1s → 5m retry backoff, indexed from the first failure. */
 export function restartBackoffMs(consecutiveFailures: number): number {
   return Math.min(MAX_BACKOFF_MS, 1_000 * 2 ** Math.max(0, consecutiveFailures - 1));

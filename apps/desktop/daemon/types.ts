@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.201";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.275";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -165,10 +165,23 @@ export type DaemonAgentConfiguration = {
   delivery_cutover?: DaemonDeliveryCutover | null;
   /** Provider-native policy selected in Add Agent; passed through unchanged. */
   provider_launch_policy?: unknown;
+  /**
+   * The owner says this agent's model reads images. Only an Open Model agent
+   * uses it; it applies the next time the agent starts. Inspector-owned, like
+   * the revisions, so never taken from the flat manifest.
+   */
+  image_input?: boolean;
+  /**
+   * Whether the owner shares this agent's live activity with the room; while
+   * "withdrawing", the room may still show earlier turns that the daemon must
+   * remove. Off unless the owner turns it on in the desktop app;
+   * database-owned, like the revisions, so never taken from the flat manifest.
+   */
+  live_sharing?: "off" | "on" | "withdrawing";
 };
 
 /** Durable owner of room ingress for one supervised provider execution. */
-export type DaemonAgentDeliveryMode = "mcp_polling" | "desktop_events" | "daemon_inbox";
+export type DaemonAgentDeliveryMode = "mcp_polling" | "daemon_inbox";
 
 /** Durable one-way handoff from legacy polling to daemon-owned ingress. */
 export type DaemonDeliveryCutover = {
@@ -309,6 +322,11 @@ export type DaemonManifestEntry = {
   model: string | null;
   reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
   charter: string;
+  /**
+   * Neither revision is ever on an entry read back from the store, so no
+   * reader may use them from a flat entry: read them from the store
+   * (`getAgentConfiguration`), where they are the record.
+   */
   config_revision?: number;
   runtime_configuration_revision?: number;
   desired_state: DesiredState;
@@ -343,6 +361,8 @@ export type DaemonManifestEntry = {
 export type DaemonManifestEntryView = DaemonManifestEntry & {
   /** Current child-owned progress only; never durable lifecycle or readiness. */
   provider_progress?: { state: "compacting"; startedAt: string } | null;
+  /** Live start-up progress of the latest launch in this daemon; memory only. */
+  launch_progress?: import("./launch-progress.js").LaunchProgressView | null;
   runtime_recovery?: {
     operationId: string; roomId: string; executionGenerationId: string; runtimeGenerationId: string;
     mode: "resume" | "fresh"; phase: "prepared" | "stopped";
@@ -351,6 +371,17 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
   runtime_generation_id?: string | null;
   /** Read-only credential contract from configuration, never caller-owned manifest input. */
   polling_contract?: "custodial_polling_v1" | null;
+  /**
+   * Read-only: this agent uses its owner's own provider setup ("on"), will
+   * once it restarts, or still does until it restarts. Absent means off.
+   */
+  home_harness?: import("./provider-configuration.js").HomeHarnessState;
+  /**
+   * Read-only: the owner saved another access level (permission mode) after
+   * this agent's process started, and the process has not been replaced yet.
+   * Absent means the process runs with the saved level.
+   */
+  permission_pending?: true;
   worker_binding?: DaemonWorkerBindingProjection | null;
   /** Ephemeral causal delivery projection; never persisted in the manifest. */
   room_agent_state?: {
@@ -360,6 +391,26 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
     turn: { state: "idle" | "dispatching" | "responding" | "publishing" | "retrying" | "failed"; inbox_item_id: string | null; source_message_id: string | null; provider_turn_id: string | null; detail: string | null };
     task: { state: "none" | "assigned" | "working" | "blocked"; task_id: string | null; title: string | null };
   } | null;
+  /**
+   * Ephemeral, never persisted. Set while the agent's oldest unsettled room
+   * message is blocked: later messages wait behind it until a person retries
+   * or skips it. `condition` keeps describing only the runtime.
+   */
+  delivery_attention?: {
+    reason: "message_blocked";
+    source_message_id: string;
+    blocked_since: string;
+    detail: string | null;
+    /** Messages waiting behind the blocked one. */
+    waiting_count: number;
+    /** The message reached the provider, or may have. */
+    provider_work_started: boolean;
+    /** What Retry delivery does: re-read the saved turn (never rerun it), post the saved reply, start the turn, or restore the conversation first. */
+    retry: "reread_saved_turn" | "publish_saved_reply" | "start_turn" | "restore_conversation";
+    /** Skip is accepted now; skipping never reruns the turn and drops any answer it had. */
+    can_skip: boolean;
+    skip_unavailable_reason: string | null;
+  } | null;
   delivery_receipts?: Array<{
     inbox_item_id: string; source_message_id: string; fifo_sequence: number;
     /** Deterministic publication identity used even before a canonical id was checkpointed. */
@@ -368,29 +419,34 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
     canonical_message_id: string | null;
     state: "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "acknowledged" | "acknowledged_no_reply" | "acknowledged_failed" | "retryable" | "blocked" | "restoring_conversation" | "cancelled_by_room_move" | "cancelled_by_user" | "queued_behind_blocked";
     attempt_count: number; provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code: "provider_continuation_missing" | null; terminal_reason: "upgrade_authority_unavailable" | null; updated_at: string;
+    /**
+     * Set on a follow-up, which has no room message of its own: the room message the failed work began with (null
+     * when that receipt is no longer kept), and where the follow-up stands. `scheduled`: the daemon starts it by
+     * itself at `at_ms`, as automatic attempt `attempt` of `attempts`, after a provider fault or a turn without a
+     * reply. `waiting_for_owner`: it is blocked. `ended`: it ended with nothing started, and its `error` says why.
+     */
+    follow_up?: {
+      for_message_id: string | null;
+      state: "scheduled" | "waiting_for_owner" | "ended";
+      /**
+       * Why it waits for its owner or ended, from a closed set (`FOLLOW_UP_REASONS` in task-continuity.ts). Absent while
+       * it waits for its time. Anything that reads this must tolerate a reason that it does not know.
+       */
+      reason?: "stopped_by_owner" | "skipped" | "agent_changed" | "task_not_held" | "uncertain_action" | "uncertain_resolved" | "attempts_failed" | "ownership_unverified" | "other";
+      /**
+       * Only for an ended follow-up whose note asks its owner to send a message (`stopped_by_owner`, `agent_changed`): whether a turn has
+       * started for a message of a person that came after it. Absent from a daemon that does not say, and then the note stays.
+       */
+      later_person_turn?: boolean;
+      scheduled: { at_ms: number; attempt: number; attempts: number; kind: "provider_fault" | "no_reply" } | null;
+    };
     timeline: Array<{ event_sequence: number; phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled"; observed_at: string; detail: string | null }>;
   }>;
-};
-
-/** Durable mixed-engine fence for a legacy Electron-owned provider lane. */
-export type LegacyLaneOwner = {
-  reservation_id: string;
-  room_id: string;
-  provider: string;
-  /** Electron process that owns an in-flight reservation. */
-  owner_pid: number;
-  /** Birth identity prevents a recycled PID from preserving an orphan fence. */
-  owner_process_identity: string;
-  state: "reserved" | "active";
-  session_id: string | null;
-  created_at: string;
-  updated_at: string;
 };
 
 export type DaemonManifest = {
   generation: number;
   entries: DaemonManifestEntry[];
-  legacy_lane_owners?: LegacyLaneOwner[];
 };
 
 export type Transition = {

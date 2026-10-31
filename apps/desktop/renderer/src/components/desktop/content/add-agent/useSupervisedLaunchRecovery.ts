@@ -22,16 +22,12 @@ export function canStartNewSupervisedLaunch(input: {
   providerId: DesktopAgentProviderId | null;
   scanStatus: SupervisedRecoveryScanStatus;
   hasActiveLaunch: boolean;
-  hasRecoveryCandidate: boolean;
   recoveringCandidate: boolean;
-  supportsConcurrentAgents: boolean;
 }): boolean {
+  // Every durable agent owns its own runtime, so a recoverable entry never
+  // blocks another launch; only an explicit recovery in flight does.
   return recoveryScanAllowsNewLaunch(input.scanStatus)
     && !input.hasActiveLaunch
-    // A recoverable entry is optional only when this provider gives every
-    // durable agent an independently addressable runtime. Providers that
-    // still own one shared lane must resolve that entry before another launch.
-    && (!input.hasRecoveryCandidate || input.supportsConcurrentAgents)
     && !input.recoveringCandidate;
 }
 
@@ -39,7 +35,7 @@ export function canStartNewSupervisedLaunch(input: {
  * agent reached ready, later liveness degradation is lifecycle state for that
  * stable agent—not an abandoned Add Agent transaction. */
 function isIncompleteRecoverableLaunch(entry: DesktopSupervisorManifestEntry): boolean {
-  return (entry.desiredState === "running" || entry.desiredState === "paused")
+  return entry.desiredState === "running"
     && entry.readyReachedAt == null
     && !supervisedLaunchProgress(entry).ready;
 }
@@ -161,7 +157,7 @@ export function useSupervisedLaunchRecovery(options: {
     const remembered = recoverable.find((entry) => options.hasRememberedLaunch(roomIdentifier, entry.id));
     const launching = remembered ?? recoverable[0];
     if (!launching) return;
-    if (remembered && launching.desiredState !== "paused") {
+    if (remembered) {
       options.activate(launching);
       return;
     }
@@ -203,35 +199,13 @@ export function useSupervisedLaunchRecovery(options: {
         )} Try Recover again; no new agent was started.`, "error");
         return;
       }
-      if (!refreshed.entry || (refreshed.entry.desiredState !== "running" && refreshed.entry.desiredState !== "paused")) {
+      if (!refreshed.entry || refreshed.entry.desiredState !== "running") {
         options.forgetLaunch(roomIdentifier, selected.id);
         candidate.value = null;
         options.setLookupFeedback("That previous supervised launch is no longer available. It was not restarted.", "warning");
         return;
       }
-      let entry = refreshed.entry;
-      if (entry.desiredState === "paused") {
-        try {
-          entry = await desktopIpc.supervisor.resumeOwnershipTransfer(entry.id);
-        } catch (error) {
-          if (generation === lookupGeneration && options.isCurrentRequest(requestVersion)) {
-            options.setLookupFeedback(`${contextualAddAgentError(
-              `Couldn't resume the saved ${entry.displayName} launch`,
-              error,
-              "The ownership transfer is still paused.",
-            )} Cancel it before starting a replacement, or try Recover again.`, "error");
-          }
-          return;
-        }
-      }
-      if (
-        generation !== lookupGeneration
-        || !options.open()
-        || !options.isCurrentRequest(requestVersion)
-        || options.roomIdentifier() !== roomIdentifier
-        || options.providerId() !== selected.provider
-        || candidate.value?.id !== selected.id
-      ) return;
+      const entry = refreshed.entry;
       options.rememberLaunch(roomIdentifier, entry.id);
       options.activate(entry);
     } finally {

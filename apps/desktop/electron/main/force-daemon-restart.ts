@@ -15,7 +15,8 @@ export interface ForceDaemonRestartPort {
   killTimeoutMs: number;
 }
 
-async function waitForForcedExit(port: ForceDaemonRestartPort, identity: DaemonProcessIdentity,
+export async function waitForConfirmedDaemonExit(
+  port: Pick<ForceDaemonRestartPort, "observe" | "now" | "delay" | "pollIntervalMs">, identity: DaemonProcessIdentity,
   observation: Observation, timeoutMs: number): Promise<Observation> {
   const deadline = port.now() + timeoutMs;
   let identityLoss: Observation | undefined;
@@ -43,7 +44,7 @@ export async function forceStopDaemon(port: ForceDaemonRestartPort): Promise<voi
   let observation = port.observe(identity);
   for (const signal of ["SIGTERM", "SIGKILL"] as const) {
     if (observation.kind === "same") observation = port.signal(identity, signal);
-    observation = await waitForForcedExit(port, identity, observation,
+    observation = await waitForConfirmedDaemonExit(port, identity, observation,
       signal === "SIGTERM" ? port.terminateTimeoutMs : port.killTimeoutMs);
     if (observation.kind !== "same") break;
   }

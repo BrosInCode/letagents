@@ -1,13 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { Message, RoomAgentPresence, StaleTaskPromptMute, Task } from "../db.js";
+import type { StaleTaskPromptMute, Task } from "../db.js";
 import {
-  createStaleWorkPromptEmitter,
   getTaskStalePromptState,
   STALE_TASK_THRESHOLD_MS,
-  STALE_WORK_PROMPT_COOLDOWN_MS,
-  selectStaleTaskAutoPrompt,
 } from "../tasks/stale-work.js";
 
 const NOW = Date.parse("2026-04-07T21:00:00.000Z");
@@ -34,39 +31,6 @@ function buildTask(overrides: Partial<Task> = {}): Task {
   };
 }
 
-function buildPresence(overrides: Partial<RoomAgentPresence> = {}): RoomAgentPresence {
-  return {
-    room_id: overrides.room_id ?? "github.com/brosincode/letagents",
-    actor_label: overrides.actor_label ?? "MapleRidge | EmmyMay's agent | Agent",
-    agent_key: overrides.agent_key ?? "EmmyMay/mapleridge",
-    agent_instance_id: overrides.agent_instance_id ?? "instance-mapleridge",
-    agent_session_id: overrides.agent_session_id ?? "session-mapleridge",
-    display_name: overrides.display_name ?? "MapleRidge",
-    owner_label: overrides.owner_label ?? "EmmyMay",
-    ide_label: overrides.ide_label ?? "Agent",
-    status: overrides.status ?? "idle",
-    status_text: overrides.status_text ?? "idle and monitoring room",
-    last_heartbeat_at: overrides.last_heartbeat_at ?? isoMinutesAgo(1),
-    created_at: overrides.created_at ?? isoMinutesAgo(180),
-    updated_at: overrides.updated_at ?? isoMinutesAgo(1),
-    freshness: overrides.freshness ?? "active",
-    activity_state: overrides.activity_state ?? "away",
-    source_flags: overrides.source_flags ?? ["presence"],
-  };
-}
-
-function buildMessage(text: string, index: number): Message {
-  return {
-    id: `msg_${index}`,
-    sender: "letagents",
-    text,
-    agent_prompt_kind: "auto",
-    source: undefined,
-    timestamp: new Date(NOW).toISOString(),
-    reply_to: null,
-  };
-}
-
 function buildMute(overrides: Partial<StaleTaskPromptMute> = {}): StaleTaskPromptMute {
   return {
     room_id: overrides.room_id ?? "github.com/brosincode/letagents",
@@ -78,108 +42,16 @@ function buildMute(overrides: Partial<StaleTaskPromptMute> = {}): StaleTaskPromp
   };
 }
 
-test("selectStaleTaskAutoPrompt picks an accepted unclaimed stale task for an away agent", () => {
-  const prompt = selectStaleTaskAutoPrompt({
-    tasks: [
-      buildTask({
-        id: "task_59",
-        status: "accepted",
-        updated_at: isoMinutesAgo(
-          Math.ceil(STALE_TASK_THRESHOLD_MS.accepted_unclaimed / 60_000) + 5
-        ),
-      }),
-    ],
-    presence: [buildPresence()],
-    now: NOW,
+test("accepted work with no assignee stays a board state, not a room prompt", () => {
+  const task = buildTask({
+    status: "accepted",
+    assignee: null,
+    updated_at: isoMinutesAgo(Math.ceil(STALE_TASK_THRESHOLD_MS.accepted_unclaimed / 60_000) + 5),
   });
-
-  assert.equal(prompt?.task.id, "task_59");
-  assert.equal(prompt?.reason, "accepted_unclaimed");
-  assert.match(prompt?.prompt_text ?? "", /accepted and unclaimed/);
-  assert.match(prompt?.prompt_text ?? "", /MapleRidge, please pick it up/);
-});
-
-test("selectStaleTaskAutoPrompt prefers accepted stale work over older review backlog", () => {
-  const prompt = selectStaleTaskAutoPrompt({
-    tasks: [
-      buildTask({
-        id: "task_60",
-        status: "in_review",
-        updated_at: isoMinutesAgo(
-          Math.ceil(STALE_TASK_THRESHOLD_MS.in_review_no_follow_up / 60_000) + 30
-        ),
-      }),
-      buildTask({
-        id: "task_61",
-        status: "accepted",
-        updated_at: isoMinutesAgo(
-          Math.ceil(STALE_TASK_THRESHOLD_MS.accepted_unclaimed / 60_000) + 1
-        ),
-      }),
-    ],
-    presence: [buildPresence()],
-    now: NOW,
-  });
-
-  assert.equal(prompt?.task.id, "task_61");
-  assert.equal(prompt?.reason, "accepted_unclaimed");
-});
-
-test("selectStaleTaskAutoPrompt ignores stale tasks when no away agent is available", () => {
-  const prompt = selectStaleTaskAutoPrompt({
-    tasks: [
-      buildTask({
-        status: "blocked",
-        updated_at: isoMinutesAgo(
-          Math.ceil(STALE_TASK_THRESHOLD_MS.blocked_no_follow_up / 60_000) + 20
-        ),
-      }),
-    ],
-    presence: [buildPresence({ status: "working" })],
-    now: NOW,
-  });
-
-  assert.equal(prompt, null);
-});
-
-test("selectStaleTaskAutoPrompt skips fresh tasks that have not crossed the stale threshold", () => {
-  const prompt = selectStaleTaskAutoPrompt({
-    tasks: [
-      buildTask({
-        status: "accepted",
-        updated_at: isoMinutesAgo(
-          Math.floor(STALE_TASK_THRESHOLD_MS.accepted_unclaimed / 60_000) - 1
-        ),
-      }),
-    ],
-    presence: [buildPresence()],
-    now: NOW,
-  });
-
-  assert.equal(prompt, null);
-});
-
-test("selectStaleTaskAutoPrompt skips stale tasks muted for the current task version", () => {
-  const mutedTask = buildTask({
-    id: "task_63",
-    status: "in_review",
-    updated_at: isoMinutesAgo(
-      Math.ceil(STALE_TASK_THRESHOLD_MS.in_review_no_follow_up / 60_000) + 10
-    ),
-  });
-  const prompt = selectStaleTaskAutoPrompt({
-    tasks: [mutedTask],
-    presence: [buildPresence()],
-    stalePromptMutes: [
-      buildMute({
-        task_id: mutedTask.id,
-        task_updated_at: mutedTask.updated_at,
-      }),
-    ],
-    now: NOW,
-  });
-
-  assert.equal(prompt, null);
+  const state = getTaskStalePromptState({ task, now: NOW });
+  assert.equal(state.is_stale, true);
+  assert.equal(state.reason, "accepted_unclaimed");
+  assert.equal(state.muted, false);
 });
 
 test("getTaskStalePromptState keeps a mute active only until the task changes", () => {
@@ -213,112 +85,4 @@ test("getTaskStalePromptState keeps a mute active only until the task changes", 
   assert.equal(activeMuteState.muted, true);
   assert.equal(activeMuteState.muted_by, "EmmyMay");
   assert.equal(staleMuteState.muted, false);
-});
-
-test("createStaleWorkPromptEmitter emits stale prompt and respects cooldown", async () => {
-  let now = NOW;
-  const staleTask = buildTask({
-    id: "task_62",
-    updated_at: isoMinutesAgo(
-      Math.ceil(STALE_TASK_THRESHOLD_MS.accepted_unclaimed / 60_000) + 5
-    ),
-  });
-  const taskCalls: Array<{ projectId: string; limit: number }> = [];
-  const presenceCalls: Array<{
-    projectId: string;
-    limit: number;
-    excludeSupervisorManaged?: boolean;
-  }> = [];
-  const emitted: Array<{
-    projectId: string;
-    sender: string;
-    text: string;
-    task: { id: string; title: string };
-    options: {
-      agent_prompt_kind: "auto";
-      parent_activity: string;
-      parent_event_kind: "all_activity";
-    };
-  }> = [];
-  const emitter = createStaleWorkPromptEmitter({
-    getOpenTasks: async (projectId, options) => {
-      taskCalls.push({ projectId, limit: options.limit });
-      return { tasks: [staleTask] };
-    },
-    getRoomAgentPresence: async (projectId, options) => {
-      presenceCalls.push({ projectId, ...options });
-      return [buildPresence()];
-    },
-    getStaleTaskPromptMutes: async () => [],
-    emitTaskAnchoredMessage: async (projectId, sender, text, task, options) => {
-      emitted.push({ projectId, sender, text, task, options });
-      return buildMessage(text, emitted.length);
-    },
-    now: () => now,
-  });
-
-  const firstMessage = await emitter.maybeEmitStaleWorkPrompt(
-    "github.com/brosincode/letagents"
-  );
-  const secondMessage = await emitter.maybeEmitStaleWorkPrompt(
-    "github.com/brosincode/letagents"
-  );
-  now += STALE_WORK_PROMPT_COOLDOWN_MS + 1;
-  const thirdMessage = await emitter.maybeEmitStaleWorkPrompt(
-    "github.com/brosincode/letagents"
-  );
-
-  assert.equal(firstMessage?.id, "msg_1");
-  assert.equal(secondMessage, null);
-  assert.equal(thirdMessage?.id, "msg_2");
-  assert.deepEqual(taskCalls.map((call) => call.limit), [200, 200, 200]);
-  assert.deepEqual(presenceCalls.map((call) => call.limit), [50, 50, 50]);
-  assert.ok(presenceCalls.every((call) => call.excludeSupervisorManaged));
-  assert.equal(emitted.length, 2);
-  assert.equal(emitted[0]?.projectId, "github.com/brosincode/letagents");
-  assert.equal(emitted[0]?.sender, "letagents");
-  assert.equal(emitted[0]?.task.id, "task_62");
-  assert.deepEqual(emitted[0]?.options, {
-    agent_prompt_kind: "auto",
-    parent_activity: "Stale-work prompt",
-    parent_event_kind: "all_activity",
-  });
-});
-
-test("createStaleWorkPromptEmitter defers mute lookup until a prompt is possible", async () => {
-  const staleTask = buildTask();
-  let taskCalls = 0;
-  let presenceCalls = 0;
-  let muteLookupCalls = 0;
-  let emitted = 0;
-  const emitter = createStaleWorkPromptEmitter({
-    getOpenTasks: async () => ({
-      tasks: taskCalls++ === 0 ? [] : [staleTask],
-    }),
-    getRoomAgentPresence: async (_projectId, options) => {
-      assert.equal(options.excludeSupervisorManaged, true);
-      return [buildPresence({
-        activity_state: presenceCalls++ === 1 ? "active" : "away",
-      })];
-    },
-    getStaleTaskPromptMutes: async () => {
-      muteLookupCalls += 1;
-      return [];
-    },
-    emitTaskAnchoredMessage: async (_projectId, _sender, text) => {
-      emitted += 1;
-      return buildMessage(text, emitted);
-    },
-    now: () => NOW,
-  });
-
-  assert.equal(await emitter.maybeEmitStaleWorkPrompt("room-no-tasks"), null);
-  assert.equal(await emitter.maybeEmitStaleWorkPrompt("room-no-away-agent"), null);
-  assert.equal(muteLookupCalls, 0);
-
-  assert.equal(
-    (await emitter.maybeEmitStaleWorkPrompt("room-promptable"))?.id,
-    "msg_1"
-  );
-  assert.equal(muteLookupCalls, 1);
 });

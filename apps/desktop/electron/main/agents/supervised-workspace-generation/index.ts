@@ -1,0 +1,4 @@
+/** The public surface of supervised workspace generations. */
+export { SUPERVISED_WORKSPACE_GENERATION_LIMITATION, SupervisedWorkspaceGenerationError, SupervisedWorkspaceConflictError } from "./types.js";
+export type { SupervisedWorkspaceGenerationPhase, SupervisedWorkspaceGenerationFailpoint, SupervisedWorkspaceGenerationLimits, SupervisedWorkspaceGenerationSupport, SupervisedWorkspaceReadOnlyRoot, SupervisedWorkspaceGenerationFailpointHandler, CreateSupervisedWorkspaceGenerationOptions, RecoverSupervisedWorkspaceGenerationOptions, SupervisedWorkspaceGenerationResult, SupervisedWorkspaceGenerationHandle } from "./types.js";
+export { assertSupervisedWorkspaceGenerationSupported, supervisedWorkspaceGenerationManifestPath, createSupervisedWorkspaceGeneration, removeSupervisedWorkspaceGenerationReceipt, recoverSupervisedWorkspaceGeneration, openSupervisedWorkspaceGeneration } from "./generation.js";

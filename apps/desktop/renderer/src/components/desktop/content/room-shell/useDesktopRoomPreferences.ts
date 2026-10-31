@@ -1,4 +1,4 @@
-import { onBeforeUnmount, ref, watch, type Ref } from "vue";
+import { onScopeDispose, onBeforeUnmount, ref, watch, type Ref } from "vue";
 import type { DesktopNotificationStatus, DesktopRoomMessage } from "../../../../../../electron/ipc-types";
 import {
   readNotificationPermission,
@@ -6,8 +6,11 @@ import {
   readSoundEnabled,
 } from "./preferences";
 import { playRoomInteractionSound } from "./roomSounds";
+import { roomMessageVisibleText } from "../../../../domain/attention-response";
+import { roomNotificationPreferences } from "../../../../composables/useRoomNotificationPreferences";
 
-export function useDesktopRoomPreferences() {
+export function useDesktopRoomPreferences(roomIdentifier: () => string) {
+  watch(roomIdentifier, (id) => { void roomNotificationPreferences.refresh(id); }, { immediate: true });
   const soundEnabled = ref(readSoundEnabled());
   const notificationsEnabled = ref(readNotificationsEnabled());
   const nativeNotificationsActive = ref(false);
@@ -69,12 +72,16 @@ export function useDesktopRoomPreferences() {
     }
   }
 
-  function showRoomNotification(message: DesktopRoomMessage, roomDisplayName: string): void {
+  function showRoomNotification(
+    message: DesktopRoomMessage,
+    roomDisplayName: string,
+    agentNames: ReadonlyMap<string, string> | null = null,
+  ): void {
     if (nativeNotificationsActive.value) return;
     if (!notificationsEnabled.value || typeof Notification === "undefined" || Notification.permission !== "granted") return;
     if (document.visibilityState === "visible" && document.hasFocus()) return;
     const sender = message.sender.split("|")[0]?.trim() || "LetAgents";
-    const body = (message.displayText || message.text).trim() || `${message.attachments.length} attachment${message.attachments.length === 1 ? "" : "s"}`;
+    const body = roomMessageVisibleText(message, agentNames).trim() || `${message.attachments.length} attachment${message.attachments.length === 1 ? "" : "s"}`;
     new Notification(`${sender} in ${roomDisplayName}`, {
       body,
       silent: true,
@@ -89,6 +96,13 @@ export function useDesktopRoomPreferences() {
     toggleNotifications,
     playRoomSound,
     showRoomNotification,
+    watchRoomNotifications: (options: Parameters<typeof watchRoomNotifications>[0]) => watchRoomNotifications({
+      ...options,
+      shouldNotify: async (message) => {
+        const id = roomIdentifier();
+        return await roomNotificationPreferences.allowsAfterRead(id, message.text) && id === roomIdentifier();
+      },
+    }),
   };
 }
 
@@ -97,11 +111,14 @@ export function watchRoomNotifications(options: {
   ownMessageIds: Set<string>;
   playRoomSound(kind: "send" | "notification"): void;
   showRoomNotification(message: DesktopRoomMessage): void;
+  shouldNotify?(message: DesktopRoomMessage): boolean | Promise<boolean>;
 }) {
   let observedLatestMessageId: string | null = null;
+  let active = true;
+  onScopeDispose(() => { active = false; });
   watch(
     () => options.visibleMessages.value.at(-1)?.id || null,
-    (messageId) => {
+    async (messageId) => {
       if (!messageId) return;
       if (!observedLatestMessageId) {
         observedLatestMessageId = messageId;
@@ -111,6 +128,8 @@ export function watchRoomNotifications(options: {
       observedLatestMessageId = messageId;
       const message = options.visibleMessages.value.find((entry) => entry.id === messageId);
       if (!message || options.ownMessageIds.has(message.id)) return;
+      if (options.shouldNotify && !await options.shouldNotify(message)) return;
+      if (!active || observedLatestMessageId !== messageId) return;
       options.playRoomSound("notification");
       options.showRoomNotification(message);
     }

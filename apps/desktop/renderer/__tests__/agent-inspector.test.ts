@@ -17,7 +17,12 @@ import {
   projectAgentInspectorTurnControl,
 } from "../src/domain/agent-inspector";
 import type { AgentInspectorActionState } from "../src/domain/agent-inspector";
+import { useAgentPauseRequests } from "../src/domain/agent-pause-requests";
+import { ref } from "vue";
+import type { AgentInspectorWorkResource } from "../src/domain/agent-inspector-work";
+import { agentInspectorActionErrorMessage, agentInspectorSignal } from "../src/domain/agent-inspector-presentation";
 import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-inspector-identity";
+import { projectAgentInspectorDiagnostics } from "../src/domain/agent-inspector-diagnostics";
 import {
   foldSupervisorActivityPush,
   mergeSupervisorEntriesPoll,
@@ -33,6 +38,7 @@ import {
   supervisedActivityIdentity,
 } from "../src/domain/room-agent-delivery";
 import { roomMentionCandidates } from "../src/domain/participants";
+import { STATE_WATCH_RECEIPT_TIMELINE_PHASES } from "../../daemon/state-watch-projection";
 import type {
   DesktopParticipantSummary,
   DesktopRoomAgentDeliveryReceipt,
@@ -146,6 +152,64 @@ function task(id: string, status: string, overrides: Partial<DesktopTaskSummary>
   };
 }
 
+test("stopped runtime evidence gives Overview the same confirmed recovery path as Diagnostics", () => {
+  const stopped = entry({ observedState: "idle", runtimeGenerationId: "runtime_1" });
+  stopped.roomAgentState!.inbox.state = "waiting_for_desktop_credentials";
+  const workResource: AgentInspectorWorkResource = {
+    status: "ready", error: null, sourceMessageId: null,
+    detail: {
+      availability: "not_loaded", entry_id: stopped.id, room_id: stopped.roomId,
+      requested_source_message_id: null, inbox_item_id: null, source_message: null,
+      receipt: null, terminal: null, publication: null, continuation_repair: null,
+      timeline: [], items: [], uncertain_effects: [], history_boundary: null,
+      runtime_control: { runtime_generation_id: "runtime_1", execution_generation_id: stopped.executionGenerationId!,
+        daemon_generation_id: "7", runtime_state: "exited", control_state: "responsive", observed_at: "2026-10-14T22:45:00Z" },
+    },
+  };
+  const options = { roomId: stopped.roomId, workResource, daemonGeneration: 7 };
+  const actions = (overrides: Partial<typeof options> = {}, candidate = stopped) =>
+    projectAgentInspector(candidate, { ...options, ...overrides })!.actions.filter(action => action.available).map(action => action.kind);
+  assert.ok(actions().includes("recovery_options"));
+  assert.ok(!actions().includes("reconnect"));
+  assert.ok(!actions().includes("reconnect_runtime"));
+  assert.equal(projectAgentInspector(stopped, options)!.now?.label, "Agent stopped");
+  const retainedCompaction = projectAgentInspector({ ...stopped,
+    provider: "claude-code",
+    providerProgress: { state: "compacting", startedAt: "2026-10-14T22:44:00Z" },
+  }, options)!;
+  assert.doesNotMatch(retainedCompaction.overallDetail, /compacting/i);
+  assert.equal(agentInspectorSignal(retainedCompaction).state, "needs_attention");
+  assert.equal(agentInspectorSignal(retainedCompaction).moving, false);
+  assert.ok(!actions({}, { ...stopped, desiredState: "stopped" }).includes("recovery_options"));
+  assert.ok(!actions({}, { ...stopped, deliveryMode: "mcp_polling" }).includes("recovery_options"));
+  const control = workResource.detail!.runtime_control!;
+  for (const change of [
+    { runtime_state: "ready" as const, control_state: "responsive" as const },
+    { runtime_state: "ready" as const, control_state: "lost" as const },
+    { runtime_state: "ready" as const, control_state: "degraded" as const },
+    { execution_generation_id: "old_execution" }, { runtime_generation_id: "old_runtime" },
+    { daemon_generation_id: "6" },
+  ]) {
+    const resource = { ...workResource, detail: { ...workResource.detail!, runtime_control: { ...control, ...change } } };
+    assert.ok(actions({ workResource: resource }).includes("reconnect"), "only exact exited evidence suppresses credential reconnect");
+    assert.ok(!actions({ workResource: resource }).includes("recovery_options"));
+  }
+  for (const resource of [
+    { ...workResource, status: "error" as const }, { ...workResource, status: "refreshing" as const },
+    { ...workResource, detail: { ...workResource.detail!, entry_id: "another_agent" } },
+    { ...workResource, detail: { ...workResource.detail!, room_id: "another_room" } },
+  ]) assert.ok(actions({ workResource: resource }).includes("reconnect"));
+  assert.ok(!projectAgentInspector(stopped, { ...options, resourceFreshness: "stale" })!.actions.some(action =>
+    action.available && ["reconnect", "recovery_options"].includes(action.kind)));
+  const terminal = { ...stopped, nativeLiveness: { ...stopped.nativeLiveness, state: "terminal" as const } };
+  assert.ok(projectAgentInspector(terminal, { roomId: stopped.roomId })!.actions.some(action => action.kind === "recovery_options" && action.available));
+  for (const kind of ["reconnect", "reconnect_runtime"] as const) {
+    const message = agentInspectorActionErrorMessage(kind, new Error("Error invoking remote method: Error: The previous provider runtime is unavailable."));
+    assert.match(message, /Diagnostics → Agent runtime/);
+    assert.doesNotMatch(message, /remote method/);
+  }
+});
+
 test("truthful online state requires the exact delivery connection and preserves reconnecting", () => {
   assert.equal(agentInspectorOverallState(entry()), "online");
   assert.equal(agentInspectorOverallState(entry({
@@ -191,15 +255,191 @@ test("truthful online state requires the exact delivery connection and preserves
   })), "reconnecting");
 });
 
-test("a Claude usage-limit bootstrap failure explains the automatic retry instead of a raw diagnostic", () => {
-  const limited = entry({
+test("an agent its room refuses needs attention and says so, ahead of its queued messages", () => {
+  const detail = "The room refused this agent's access, so it is not receiving room messages.";
+  const refused = (inbox: NonNullable<DesktopSupervisorManifestEntry["roomAgentState"]>["inbox"]) => entry({
+    observedState: "idle",
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      ingress: { state: "blocked", observedAt: "2026-07-23T10:00:00.000Z", detail },
+      inbox,
+    },
+  });
+  for (const inbox of [
+    { state: "empty" as const, pendingCount: 0, blockedByMessageId: null, detail: null },
+    { state: "queued" as const, pendingCount: 2, blockedByMessageId: null, detail: "Room delivery is queued." },
+  ]) {
+    const agent = refused(inbox);
+    assert.equal(agentInspectorOverallState(agent), "needs_attention", "never shown as reconnecting or online");
+    const now = projectAgentInspector(agent, { roomId: "focus_1", deliveryRetryAvailable: false })?.now;
+    assert.deepEqual([now?.kind, now?.label, now?.summary], ["attention", "Needs attention", detail], inbox.state);
+  }
+  // Without a refusal, a queue is still described as a queue.
+  const reconnecting = entry({ observedState: "idle", roomAgentState: {
+    ...entry().roomAgentState!,
+    ingress: { state: "backoff", observedAt: null, detail: "Supervised room poll failed with HTTP 503." },
+    inbox: { state: "queued", pendingCount: 2, blockedByMessageId: null, detail: "Room delivery is queued." },
+  } });
+  const now = projectAgentInspector(reconnecting, { roomId: "focus_1", deliveryRetryAvailable: false })?.now;
+  assert.deepEqual([now?.label, now?.summary], ["Reconnecting", "Room delivery is queued."]);
+});
+
+test("a Claude usage-limit bootstrap failure reads as one plain reason, not the raw start-up diagnostic", () => {
+  const raw = "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (failed_response). "
+    + "Startup observations: assistant_error=rate_limit; usage_limit_resets_at=2026-10-07T15:00:00.000Z; result=success; init_ms=512; bootstrap_ms=1492; budget_ms=30000.";
+  const limited = (overrides: Partial<DesktopSupervisorManifestEntry> = {}) => entry({
+    provider: "claude",
     observedState: "recovering",
     condition: "coordination_blocked",
-    lastError: "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (failed_response). "
-      + "Startup observations: assistant_error=rate_limit; result=success; init_ms=512; bootstrap_ms=1492; budget_ms=30000.",
+    lastError: raw,
+    ...overrides,
   });
-  const projection = projectAgentInspector(limited, { roomId: "focus_1", deliveryRetryAvailable: false });
-  assert.match(projection?.now?.summary ?? "", /usage limit was reached.*retries automatically/);
+  const summary = (agent: DesktopSupervisorManifestEntry) => projectAgentInspector(agent, { roomId: "focus_1", deliveryRetryAvailable: false })?.now;
+
+  const now = summary(limited());
+  assert.equal(agentInspectorOverallState(limited()), "needs_attention");
+  assert.equal(now?.kind, "attention");
+  assert.match(now?.summary ?? "", /^Claude's usage limit is reached\. LetAgents checks again by itself and starts the agent after the limit resets\./);
+  assert.doesNotMatch(now?.summary ?? "", /failed_response|assistant_error|Startup observations|convergence scheduler/,
+    "the observation string stays in Diagnostics");
+  // The owner can also ask for a check now through the control the header offers.
+  assert.match(summary(limited({ executionGenerationId: null, providerContinuationId: null }))?.summary ?? "", /To try again now, recover the agent\.$/);
+  assert.match(summary(limited({ runtimeGenerationId: "runtime_1" }))?.summary ?? "", /To try again now, open Recovery options\.$/);
+  assert.equal(projectAgentInspectorDiagnostics(projectAgentInspector(limited(), { roomId: "focus_1", deliveryRetryAvailable: false })!)
+    .recovery.lastError, raw, "the raw observation is kept in technical details");
+});
+
+test("a Claude startup deadline reads as one sentence naming the recovery control on offer", () => {
+  const lastError = "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (deadline). "
+    + "Startup observations: last_line_type=system.init; last_line_ms=1198; init_ms=1198; bootstrap_ms=28803; budget_ms=30000; "
+    + "stdout_lines=3; matched_session_lines=3; stderr_bytes=0; api_retry_count=0; assistant_count=0; result_count=0; "
+    + "line_types=command_lifecycle.unlisted:1,command_lifecycle.started:1,system.init:1.";
+  const stalled = (overrides: Partial<DesktopSupervisorManifestEntry> = {}) => entry({
+    provider: "claude",
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    runtimeGenerationId: "runtime_1",
+    providerPid: null,
+    lastError,
+    ...overrides,
+  });
+  const projection = projectAgentInspector(stalled(), { roomId: "focus_1" });
+  const available = (kind: string) => projection?.actions.find((action) => action.kind === kind)?.available;
+  assert.equal(projection?.now?.kind, "attention");
+  assert.equal(projection?.now?.summary, "Claude didn’t finish starting within 30 seconds. Open Recovery options to restart it.");
+  assert.equal(available("recovery_options"), true, "the copy names a control the header offers");
+  assert.equal(available("restart_runtime"), true);
+  assert.equal(available("fresh_runtime"), true);
+  assert.equal(projectAgentInspectorDiagnostics(projection!).recovery.lastError, lastError, "Diagnostics keeps the raw text");
+
+  const legacy = projectAgentInspector(stalled({ observedState: "failed", runtimeGenerationId: null }), { roomId: "focus_1" });
+  assert.equal(legacy?.now?.summary, "Claude didn’t finish starting within 30 seconds. Recover the agent to try again.");
+
+  // With the owner's own setup on, the visible sentence says what of the owner's held the start up, not only Diagnostics.
+  const ownerSetup = (suffix: string) => projectAgentInspector(stalled({ lastError: lastError.replace("budget_ms=30000", "budget_ms=60000") + suffix }), { roomId: "focus_1" })?.now?.summary;
+  assert.equal(ownerSetup(" This agent starts with your own Claude Code setup, so one of your MCP servers or hooks may be holding the start up."),
+    "Claude didn’t finish starting within 60 seconds. One of your own MCP servers or hooks may be holding the start up. Open Recovery options to restart it.");
+  assert.equal(ownerSetup(' Your MCP server "owner_slow" did not start, so this agent is running without it.'),
+    "Claude didn’t finish starting within 60 seconds. Your MCP server \"owner_slow\" did not start, so this agent is running without it. Open Recovery options to restart it.");
+  assert.equal(legacy?.actions.find((action) => action.kind === "recover")?.available, true);
+
+  const summary = (detail: string) => projectAgentInspector(stalled({ lastError: detail }), { roomId: "focus_1" })?.now?.summary;
+  assert.equal(
+    summary("convergence scheduler failure: Claude CLI did not report its stream-json init message (deadline). "
+      + "Startup observations: init_ms=1499; bootstrap_ms=not_started; budget_ms=1499."),
+    "Claude didn’t finish starting within 1 second. Open Recovery options to restart it.",
+  );
+  assert.match(
+    summary("convergence scheduler failure: Claude CLI did not report its stream-json init message (deadline). "
+      + "Startup observations: init_ms=400; bootstrap_ms=not_started; budget_ms=400.") ?? "",
+    /^Claude didn’t finish starting within 1 second\./,
+    "a sub-second budget still names a duration",
+  );
+  assert.equal(
+    summary("convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (compaction_deadline). "
+      + "Startup observations: compaction_ms=120000; compaction_budget_ms=120000; init_ms=900; bootstrap_ms=150000; budget_ms=30000."),
+    "Claude didn’t finish starting in time. Open Recovery options to restart it.",
+    "compaction extends the startup budget, so no single duration is claimed",
+  );
+});
+
+test("a start refused over the owner's own setup leads with the reason and the ways out, not with the scheduler", () => {
+  const reason = "This project's Codex config changes your MCP server \"owner_browser\", so LetAgents will not start Codex here with your own setup. "
+    + "Remove [mcp_servers.owner_browser] from the project's .codex/config.toml, stop trusting the project in Codex, or turn off \"Use your own Codex setup\" for this agent.";
+  const projection = projectAgentInspector(entry({
+    provider: "codex", observedState: "recovering", condition: "coordination_blocked",
+    lastError: `convergence scheduler failure: ${reason}`,
+  }), { roomId: "focus_1" });
+  assert.equal(projection?.now?.summary, reason);
+  assert.doesNotMatch(projection?.now?.summary ?? "", /convergence scheduler failure/);
+});
+
+test("a refused Codex sandbox startup offers confirmed recovery despite retained PID and idle evidence", () => {
+  const lastError = "convergence scheduler failure: Codex did not answer when LetAgents asked for its settings "
+    + "(Codex did not answer in time), so LetAgents will not start it at a sandboxed access level. Start the agent again.";
+  const refused = entry({
+    observedState: "recovering", condition: "coordination_blocked", lastError,
+    runtimeGenerationId: "runtime_1",
+    nativeLiveness: { state: "idle", observedAt: "2026-07-23T09:00:00.000Z", detail: "Retained old observation." },
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: { state: "disconnected", observedAt: "2026-07-23T10:00:00.000Z", detail: lastError },
+      ingress: { state: "stopped", observedAt: "2026-07-23T10:00:00.000Z", detail: null },
+      inbox: { state: "waiting_for_desktop_credentials", pendingCount: 0, blockedByMessageId: null, detail: null },
+    },
+  });
+  const projection = projectAgentInspector(refused, { roomId: "focus_1" });
+  const action = (kind: string) => projection?.actions.find(candidate => candidate.kind === kind);
+  assert.equal(projection?.overallState, "needs_attention");
+  assert.equal(projection?.now?.summary,
+    "Agent startup needs attention. Review the startup error. Use Recovery options to restart and resume.");
+  assert.equal(projection?.runtimeExited, false, "a refused startup is not proof that a retained process exited");
+  assert.equal(action("reconnect")?.available, false);
+  assert.equal(action("reconnect_runtime")?.available, false);
+  assert.equal(action("recovery_options")?.available, true);
+  assert.equal(action("restart_runtime")?.available, true);
+  assert.equal(action("restart_runtime")?.danger, true, "restart still uses the confirmed recovery flow");
+  assert.equal(projectAgentInspectorDiagnostics(projection!).recovery.lastError, lastError);
+
+  const stale = projectAgentInspector(refused, { roomId: "focus_1", resourceFreshness: "stale" });
+  for (const kind of ["reconnect", "reconnect_runtime", "recovery_options", "restart_runtime"]) {
+    assert.equal(stale?.actions.find(candidate => candidate.kind === kind)?.available, false);
+  }
+  const credentialsOnly = projectAgentInspector({ ...refused,
+    lastError: "The provider is running, but room access could not be restored after 3 attempts.",
+    nativeLiveness: { state: "healthy", observedAt: "2026-07-23T10:00:00.000Z", detail: null },
+  }, { roomId: "focus_1" });
+  assert.equal(credentialsOnly?.actions.find(candidate => candidate.kind === "reconnect")?.available, true);
+  assert.equal(credentialsOnly?.actions.find(candidate => candidate.kind === "reconnect_runtime")?.available, true);
+
+  for (const change of [
+    { desiredState: "paused" }, { desiredState: "stopped" }, { observedState: "idle", condition: "none", providerPid: 456 },
+    { runtimeRecovery: { operationId: "recovery_1", roomId: refused.roomId,
+      executionGenerationId: refused.executionGenerationId!, runtimeGenerationId: "runtime_1", mode: "resume", phase: "prepared" } },
+  ] satisfies Partial<DesktopSupervisorManifestEntry>[]) {
+    const changed = projectAgentInspector({ ...refused, ...change }, { roomId: "focus_1" });
+    assert.doesNotMatch(changed?.now?.summary ?? "", /Agent startup needs attention/,
+      "old startup errors do not override a paused, recovered or actively restarting agent");
+  }
+});
+
+test("only a trailing startup observation list is left out of the Now summary", () => {
+  const summary = (lastError: string) => projectAgentInspector(entry({
+    provider: "claude",
+    observedState: "recovering",
+    condition: "coordination_blocked",
+    lastError,
+  }), { roomId: "focus_1" })?.now?.summary;
+  const exited = "convergence scheduler failure: Claude CLI did not complete its daemon-safe bootstrap turn (native_exit; exit code 1; signal none).";
+  assert.equal(
+    summary(`${exited} Startup observations: last_api_retry=overloaded (HTTP 529); init_ms=812; bootstrap_ms=40; `
+      + "budget_ms=30000; line_types=system.init:1,command_lifecycle.exited:1."),
+    exited,
+  );
+  const advice = "OpenCode could not start. Startup observations: none. Reinstall the CLI and try again.";
+  assert.equal(summary(advice), advice, "prose after the label is not a diagnostic list");
+  const trailingAdvice = `${exited} Startup observations: init_ms=812; budget_ms=30000. Reinstall the CLI and try again.`;
+  assert.equal(summary(trailingAdvice), trailingAdvice, "advice after the list keeps the whole message");
 });
 
 test("a stopped provider with retained historical coordinates offers recovery instead of false reconnect or delivery retry", () => {
@@ -307,6 +547,78 @@ test("a reconnecting room keeps provider connectivity separate from delivery aut
   });
   assert.notEqual(projection?.overallLabel, "Online");
   assert.equal(projection?.actions.find((action) => action.kind === "retry_delivery")?.available, false);
+});
+
+test("a pause reads as Pausing… while it drains and Paused once saved, never Stopped or Disconnected", () => {
+  // Mid-turn, the daemon drains room delivery before it saves desired=paused.
+  const draining = entry({
+    observedState: "working",
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: { state: "disconnected", observedAt: "2026-07-23T10:00:05.000Z", detail: null },
+      ingress: { state: "stopped", observedAt: "2026-07-23T10:00:05.000Z", detail: "Ingress stopped by the supervisor." },
+      inbox: { state: "queued", pendingCount: 1, blockedByMessageId: null, detail: "Room delivery is queued." },
+    },
+  });
+  assert.equal(projectAgentInspector(draining, { roomId: "focus_1" })?.overallLabel, "Disconnected");
+  const pausing = projectAgentInspector(draining, {
+    roomId: "focus_1",
+    pauseRequestedEntryIds: new Set(["supervised_1"]),
+  });
+  assert.equal(pausing?.overallState, "paused");
+  assert.equal(pausing?.overallLabel, "Pausing…");
+  assert.equal(pausing?.now, null, "a drained queue is not a request for attention");
+  assert.equal(agentInspectorActivityGroupState(pausing!), "paused");
+  assert.equal(
+    projectAgentInspector(entry(), { roomId: "focus_1", pauseRequestedEntryIds: new Set(["supervised_2"]) })?.overallLabel,
+    "Online",
+    "another agent's pause request changes nothing here",
+  );
+
+  // Saved: the provider process then stops before the pause settles.
+  for (const observedState of ["stopping", "stopped", "paused"] as const) {
+    const saved = projectAgentInspector(entry({ desiredState: "paused", observedState }), {
+      roomId: "focus_1",
+      pauseRequestedEntryIds: new Set(["supervised_1"]),
+    });
+    assert.equal(saved?.overallState, "paused", observedState);
+    assert.equal(saved?.overallLabel, "Paused", observedState);
+    assert.equal(agentInspectorActivityGroupState(saved!), "paused", observedState);
+  }
+  assert.equal(agentInspectorOverallState(entry({ desiredState: "stopped", observedState: "stopping" })), "retired");
+  assert.equal(agentInspectorOverallState(entry({ observedState: "stopped" })), "retired");
+});
+
+test("a pause stays Pausing… for the room until its saved state arrives, whoever closes the Inspector", async () => {
+  const entries = ref<DesktopSupervisorManifestEntry[]>([entry(), entry({ id: "supervised_2" })]);
+  const pauses = useAgentPauseRequests(entries);
+  const label = () => projectAgentInspector(entries.value[0]!, {
+    roomId: "focus_1",
+    pauseRequestedEntryIds: pauses.entryIds.value,
+  })?.overallLabel;
+
+  let answer!: (value: string) => void;
+  const request = pauses.run("supervised_1", () => new Promise<string>((resolve) => { answer = resolve; }));
+  assert.equal(label(), "Pausing…");
+  // A push that still says running (delivery draining) keeps the request open.
+  entries.value = [entry({ observedState: "working" }), entry({ id: "supervised_2" })];
+  assert.equal(label(), "Pausing…");
+  answer("saved");
+  assert.equal(await request, "saved");
+  assert.equal(label(), "Pausing…", "the reply alone does not end it; the saved state does");
+  // The saved pause arrives by push, not by the Inspector's own reply.
+  entries.value = [entry({ desiredState: "paused", observedState: "stopping" }), entry({ id: "supervised_2" })];
+  assert.deepEqual([...pauses.entryIds.value], []);
+  assert.equal(label(), "Paused");
+  // A later Resume is not mistaken for the old pause.
+  entries.value = [entry(), entry({ id: "supervised_2" })];
+  assert.equal(label(), "Online");
+
+  await assert.rejects(pauses.run("supervised_2", async () => { throw new Error("daemon unavailable"); }));
+  assert.deepEqual([...pauses.entryIds.value], [], "a failed request hands the state back to the agent");
+  void pauses.run("supervised_2", () => new Promise(() => undefined));
+  pauses.clear("supervised_2");
+  assert.deepEqual([...pauses.entryIds.value], [], "resuming elsewhere ends a pause that was never observed");
 });
 
 test("overall state follows the complete product precedence table", () => {
@@ -684,6 +996,8 @@ test("turn control is available only for the exact responding provider turn", ()
   });
   assert.equal(openModelControl?.capability, "native_interrupt");
   assert.equal(openModelControl?.canStop, true);
+  assert.equal(projectAgentInspectorTurnControl({ ...responding, provider: "open-model",
+    roomAgentState: { ...responding.roomAgentState!, turn: { ...responding.roomAgentState!.turn, state: "retrying" } } }), null);
   assert.equal(openModelControl?.canCorrect, true);
 
   const uncheckpointed = projectAgentInspectorTurnControl(entry({
@@ -1465,13 +1779,68 @@ test("duplicate supervised names resolve to exact canonical agent mentions", () 
 
 
 test("inspector shows current compaction during startup and work, hiding it after failure or stale reads", () => {
-  const compacting = entry({ provider: "claude-code", providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
-  for (const observedState of ["starting", "working"] as const) {
-    const result = projectAgentInspector({ ...compacting, observedState }, { roomId: "focus_1" });
-    assert.equal(result?.now?.summary, "Compacting conversation");
-    assert.equal(result?.overallDetail, "Compacting conversation", "agent list shows the same current progress");
+  for (const provider of ["claude-code", "open-model"] as const) {
+    const compacting = entry({ provider, providerProgress: { state: "compacting", startedAt: "2026-09-24T00:00:00Z" } });
+    for (const observedState of ["starting", "working"] as const) {
+      const result = projectAgentInspector({ ...compacting, observedState }, { roomId: "focus_1" });
+      assert.equal(result?.now?.summary, "Compacting conversation");
+      assert.equal(result?.overallDetail, "Compacting conversation", "agent list shows the same current progress");
+    }
+    assert.notEqual(projectAgentInspector(compacting, { roomId: "focus_1", resourceFreshness: "stale" })?.now?.summary, "Compacting conversation");
+    assert.notEqual(projectAgentInspector({ ...compacting, condition: "coordination_blocked" }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
+    assert.notEqual(projectAgentInspector({ ...compacting, providerProgress: null }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
   }
-  assert.notEqual(projectAgentInspector(compacting, { roomId: "focus_1", resourceFreshness: "stale" })?.now?.summary, "Compacting conversation");
-  assert.notEqual(projectAgentInspector({ ...compacting, condition: "coordination_blocked" }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
-  assert.notEqual(projectAgentInspector({ ...compacting, providerProgress: null }, { roomId: "focus_1" })?.now?.summary, "Compacting conversation");
+});
+
+test('Overview signal distinguishes responding, compaction and stale observations', async () => {
+  const { agentInspectorSignal } = await import('../src/domain/agent-inspector-presentation');
+  const projection = projectAgentInspector(entry(), { roomId: 'focus_1' })!;
+  assert.ok(projection);
+  assert.equal(agentInspectorSignal({ ...projection, overallState: 'responding' }).label, 'Responding');
+  assert.equal(agentInspectorSignal({ ...projection, overallState: 'online' }).tone, 'green');
+  const compacting = { ...projection, entry: { ...projection.entry, provider: 'claude-code', desiredState: 'running' as const, observedState: 'working' as const, condition: 'none' as const, providerProgress: { state: 'compacting' as const, startedAt: new Date().toISOString() } } };
+  assert.equal(agentInspectorSignal(compacting).state, 'compacting');
+  assert.equal(agentInspectorSignal(compacting).tone, 'violet');
+  assert.equal(agentInspectorSignal({ ...compacting, resourceFreshness: 'stale' }).state, 'stale');
+  assert.equal(agentInspectorSignal({ ...compacting, resourceFreshness: 'stale' }).moving, false);
+});
+
+/** The receipts as manifest.watch_state carries them: each timeline keeps only the phases room-level readers use. */
+function stateWatchTrimmed(value: DesktopSupervisorManifestEntry): DesktopSupervisorManifestEntry {
+  return { ...value, deliveryReceipts: value.deliveryReceipts?.map((delivery) => ({
+    ...delivery, timeline: delivery.timeline.filter((event) => STATE_WATCH_RECEIPT_TIMELINE_PHASES.has(event.phase)),
+  })) };
+}
+
+const FULL_DELIVERY_TIMELINE: DesktopRoomAgentDeliveryReceipt["timeline"] = [
+  { sequence: 1, phase: "received", observedAt: "2026-07-23T10:00:00.000Z", detail: null },
+  { sequence: 2, phase: "queued", observedAt: "2026-07-23T10:00:00.500Z", detail: null },
+  { sequence: 3, phase: "turn_started", observedAt: "2026-07-23T10:00:01.000Z", detail: null },
+  { sequence: 4, phase: "retry_scheduled", observedAt: "2026-07-23T10:00:01.500Z", detail: "provider fault" },
+  { sequence: 5, phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null },
+  { sequence: 6, phase: "conversation_restoring", observedAt: "2026-07-23T10:00:02.500Z", detail: null },
+  { sequence: 7, phase: "conversation_restored", observedAt: "2026-07-23T10:00:03.000Z", detail: "The saved conversation is available again." },
+  { sequence: 8, phase: "turn_finished", observedAt: "2026-07-23T10:00:04.000Z", detail: null },
+];
+
+test("a state-watch receipt timeline gives the same turn start and continuation recovery as the full one", () => {
+  const delivery = receipt("message_1", "awaiting_result", { timeline: FULL_DELIVERY_TIMELINE });
+  const responding = entry({
+    activity: [activity(1, { summary: "Old work" }), activity(4, { summary: "Checking the workspace" })],
+    deliveryReceipts: [delivery],
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      turn: { state: "responding", inboxItemId: delivery.inboxItemId, sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+    },
+  });
+  const trimmed = stateWatchTrimmed(responding);
+  assert.deepEqual(trimmed.deliveryReceipts![0]!.timeline.map((event) => event.sequence), [3, 5, 7]);
+  const full = projectAgentInspector(responding, { roomId: "focus_1" });
+  const fromWatch = projectAgentInspector(trimmed, { roomId: "focus_1" });
+  assert.equal(full?.liveWork.startedAt, "2026-07-23T10:00:02.000Z", "the latest turn_started of the current turn");
+  assert.deepEqual(fromWatch?.liveWork, full?.liveWork);
+  assert.deepEqual(fromWatch?.now, full?.now);
+  assert.equal(full?.continuationRecovery?.state, "restored");
+  assert.equal(full?.continuationRecovery?.noticeId, `supervised_1:${delivery.inboxItemId}:7`);
+  assert.deepEqual(fromWatch?.continuationRecovery, full?.continuationRecovery);
 });

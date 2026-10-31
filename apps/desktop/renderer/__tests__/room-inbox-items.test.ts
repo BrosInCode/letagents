@@ -70,6 +70,44 @@ describe("deriveInboxDegradation", () => {
 });
 
 describe("desktop room inbox items", () => {
+  it("shows a Needs-you answer without its routing handle or request id", () => {
+    const answer = "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted.";
+    const summary = threadSummary("msg_7", 1, "2026-06-01T10:05:00.000Z");
+    summary.latestReply = { ...summary.latestReply, text: answer, source: "browser" };
+    const [item] = buildDesktopInboxItems({
+      filter: "all",
+      threadPage: {
+        threads: [{ root: roomMessage("msg_7", answer, "2026-06-01T10:00:00.000Z"), summary }],
+        hasMore: false,
+        unreadThreadCount: 1,
+      },
+      tasks: [],
+      githubEvents: [],
+      reasoningSessions: [],
+    });
+    assert.equal(item?.title, "@agent Noted.", "without a roster the mention stays neutral");
+    assert.equal(item?.preview, "@agent Noted.");
+    assert.doesNotMatch(JSON.stringify(item?.activity), /@agent:|Human response/);
+    const [named] = buildDesktopInboxItems({
+      filter: "all",
+      threadPage: {
+        threads: [{ root: roomMessage("msg_7", answer, "2026-06-01T10:00:00.000Z"), summary }],
+        hasMore: false,
+        unreadThreadCount: 1,
+      },
+      tasks: [],
+      githubEvents: [],
+      reasoningSessions: [],
+      presence: [{
+        ...presence("SummitMisty | EmmyMay's agent | Cursor", "worker", "active"),
+        agentKey: "EmmyMay/desktop-cursor-5849cfa6",
+      }],
+    });
+    assert.equal(named?.title, "@SummitMisty Noted.");
+    assert.equal(named?.preview, "@SummitMisty Noted.");
+    assert.match(JSON.stringify(named?.activity), /@SummitMisty Noted\./);
+  });
+
   it("derives actionable inbox rows from threads, tasks, GitHub failures, and blocked agents", () => {
     const threadPage: DesktopRoomThreadInboxPage = {
       threads: [

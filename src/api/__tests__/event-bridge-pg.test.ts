@@ -228,3 +228,38 @@ test("a timed-out bridge publish is rolled back and never appears later", {
     await pool.end();
   }
 });
+
+test('typing crosses two API processes without durable writes, self echo, broker delivery or loss markers', {
+  skip: testDatabaseUrl ? false : 'set TEST_DB_URL for PostgreSQL typing bridge', timeout: 30000,
+}, async () => {
+  const { Pool } = await import('pg');
+  const pool = new Pool({ connectionString: testDatabaseUrl });
+  const snapshot = async () => {
+    const result: Record<string, unknown> = {};
+    for (const table of ['messages', 'message_agent_receipts', 'message_agent_receipt_events', 'desktop_push_notifications', 'room_agent_presence']) {
+      const { rows } = await pool.query(`SELECT md5(coalesce(string_agg(row_to_json(t)::text, ',' ORDER BY row_to_json(t)::text), '')) AS digest FROM ${table} t`);
+      result[table] = rows[0].digest;
+    }
+    return result;
+  };
+  const before = await snapshot();
+  const roomId = `typing-bridge-${randomUUID()}`;
+  const subscriber = startWorker('subscriber', roomId, 'typing');
+  let publisher: ChildProcess | null = null;
+  try {
+    await waitForMessage(subscriber, 'subscriber_ready');
+    publisher = startWorker('publisher', roomId, 'typing');
+    const [result] = await Promise.all([waitForMessage(subscriber, 'typing_result'), waitForMessage(publisher, 'publisher_done')]);
+    assert.equal((result.signal as any).name, 'Ada');
+    assert.equal((result.signal as any).room_id, roomId);
+    assert.equal(result.selfEcho, 0);
+    assert.equal(result.agentWoke, false);
+    assert.deepEqual(result.losses, []);
+    await Promise.all([waitForExit(subscriber), waitForExit(publisher)]);
+    assert.deepEqual(await snapshot(), before, 'message bodies, receipts, notification queue and presence are byte-for-byte unchanged');
+  } finally {
+    if (subscriber.exitCode === null && subscriber.signalCode === null) subscriber.kill();
+    if (publisher && publisher.exitCode === null && publisher.signalCode === null) publisher.kill();
+    await pool.end();
+  }
+});

@@ -1,13 +1,17 @@
 import type { StoredAccount } from "../../local-state.js";
+import { scopedValue } from "./session-scope.js";
 
-let currentAuthenticatedAccount: StoredAccount | null | undefined = undefined;
-let currentAuthenticatedAccountSource: "env" | "stored" | null = null;
-let currentAuthenticatedEnvToken: string | null = null;
+type AuthenticatedAccountCache = {
+  account: StoredAccount | null | undefined;
+  source: "env" | "stored" | null;
+  envToken: string | null;
+};
+
+const cache = scopedValue<AuthenticatedAccountCache>("auth-cache",
+  () => ({ account: undefined, source: null, envToken: null }));
 
 export function clearAuthenticatedAccountCache(): void {
-  currentAuthenticatedAccount = undefined;
-  currentAuthenticatedAccountSource = null;
-  currentAuthenticatedEnvToken = null;
+  cache.set({ account: undefined, source: null, envToken: null });
 }
 
 export function setAuthenticatedAccountCache(
@@ -15,19 +19,9 @@ export function setAuthenticatedAccountCache(
   source: "env" | "stored" | null,
   envToken: string | null
 ): void {
-  currentAuthenticatedAccount = account;
-  currentAuthenticatedAccountSource = source;
-  currentAuthenticatedEnvToken = envToken;
+  cache.set({ account, source, envToken });
 }
 
-export function getAuthenticatedAccountCache(): {
-  account: StoredAccount | null | undefined;
-  source: "env" | "stored" | null;
-  envToken: string | null;
-} {
-  return {
-    account: currentAuthenticatedAccount,
-    source: currentAuthenticatedAccountSource,
-    envToken: currentAuthenticatedEnvToken,
-  };
+export function getAuthenticatedAccountCache(): AuthenticatedAccountCache {
+  return { ...cache.get() };
 }

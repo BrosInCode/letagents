@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { sep } from "node:path";
 import test, { mock } from "node:test";
 import { createElectronTestEnv } from "./harness.js";
 
@@ -10,8 +11,12 @@ process.env.LETAGENTS_DESKTOP_USER_DATA_DIR = env.tempDir;
 mock.module("electron", { defaultExport: { app: { getPath: () => env.tempDir } } });
 const { stageDroppedDesktopAttachmentContents, readLocalStagedAttachments } = await import("../main/attachments.js");
 const { sendDesktopRoomMessage } = await import("../main/rooms/messages.js");
-const { setChatStorageMode } = await import("../main/chat-storage/settings.js");
+const { localFilesPath, setChatStorageMode } = await import("../main/chat-storage/settings.js");
 const { getLocalChatMessages } = await import("../main/rooms/messages/local-store.js");
+
+test("staged attachment files live in the test's own folder, never in the real home", () => {
+  assert.ok(localFilesPath.startsWith(`${env.tempDir}${sep}`), localFilesPath);
+});
 
 test("local attachment survives rejected send and identical retry returns one persisted message", async () => {
   await setChatStorageMode("local");

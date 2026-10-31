@@ -8,7 +8,9 @@ import {
 import {
   MAC_DESKTOP_PUBLIC_BASE_URL,
   parseMacDesktopPublicReleaseManifest,
+  type DesktopPublicReleaseAsset,
   type MacDesktopPublicReleaseManifest,
+  type WindowsDesktopArchitecture,
 } from "../../shared/desktop-release-manifest.js";
 import {
   advanceDesktopReleaseHighWater,
@@ -34,6 +36,21 @@ export interface DesktopDownloadRouteDeps {
 
 function parseArchitecture(raw: string): MacDesktopArchitecture | undefined {
   return raw === "arm64" || raw === "x64" ? raw : undefined;
+}
+
+function parseWindowsArchitecture(raw: string): WindowsDesktopArchitecture | undefined {
+  return raw === "x64" ? raw : undefined;
+}
+
+/** Every installer a release lists: both macOS DMGs and, from the first Windows release on, the Windows installer. */
+function releaseInstallers(release: MacDesktopPublicReleaseManifest): Array<{ label: string; asset: DesktopPublicReleaseAsset }> {
+  return [
+    ...(Object.keys(release.assets) as MacDesktopArchitecture[]).map((architecture) => ({
+      label: architecture,
+      asset: release.assets[architecture],
+    })),
+    ...(release.windows ? [{ label: "Windows x64", asset: release.windows.x64 }] : []),
+  ];
 }
 
 async function readBoundedBody(response: Response, maxBytes: number, label: string): Promise<string> {
@@ -63,8 +80,7 @@ export async function verifyMacDesktopReleaseArtifacts(
   release: MacDesktopPublicReleaseManifest,
   fetcher: typeof fetch = fetch,
 ): Promise<void> {
-  await Promise.all((Object.keys(release.assets) as MacDesktopArchitecture[]).map(async (architecture) => {
-    const asset = release.assets[architecture];
+  await Promise.all(releaseInstallers(release).map(async ({ label: architecture, asset }) => {
     const assetResponse = await fetcher(asset.publicUrl, {
       method: "HEAD",
       redirect: "error",
@@ -239,5 +255,30 @@ export function registerDesktopDownloadRoutes(
     res
       .set("Cache-Control", "public, max-age=60, must-revalidate")
       .redirect(302, publicUrl);
+  });
+
+  // Windows has no bundled fallback: the first release with a Windows build
+  // is newer than the bundled macOS release, so only the current manifest
+  // can name it.
+  app.get("/downloads/windows/:architecture", async (req, res) => {
+    const architecture = parseWindowsArchitecture(req.params.architecture);
+    if (!architecture) {
+      res.status(404).send("Windows beta build not found.");
+      return;
+    }
+    let release: MacDesktopPublicReleaseManifest;
+    try {
+      release = await loadCurrentRelease();
+    } catch {
+      res.status(503).set("Cache-Control", "no-store").send("Current Windows beta release is temporarily unavailable.");
+      return;
+    }
+    if (!release.windows) {
+      res.status(404).set("Cache-Control", "public, max-age=60, must-revalidate").send("Windows beta build not found.");
+      return;
+    }
+    res
+      .set("Cache-Control", "public, max-age=60, must-revalidate")
+      .redirect(302, release.windows[architecture].publicUrl);
   });
 }

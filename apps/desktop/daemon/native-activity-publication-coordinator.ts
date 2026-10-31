@@ -1,5 +1,6 @@
-import { publishWorkerNativeActivity } from "./cloud-http.js";
+import { NativeActivityRejectedError, publishWorkerNativeActivity } from "./cloud-http.js";
 import { redactCredentialText } from "./credential-redaction.js";
+import { LiveActivitySummaryRelay, type LiveActivitySummaryRelayOptions, type LiveActivitySummaryStatus } from "./live-activity-summary-relay.js";
 import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import type { DaemonManifestEntry } from "./types.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
@@ -9,6 +10,7 @@ export type NativeActivityPublicationPorts = {
   updateEntry(
     entryId: string,
     update: (entry: DaemonManifestEntry) => DaemonManifestEntry,
+    options?: { readsNoActivity?: boolean },
   ): Promise<DaemonManifestEntry>;
   startDelivery(entryId: string): Promise<void>;
 };
@@ -19,7 +21,26 @@ export type NativeActivityPublicationPorts = {
  * committed only after the exact binding publication succeeds.
  */
 export class NativeActivityPublicationCoordinator {
-  constructor(private readonly ports: NativeActivityPublicationPorts) {}
+  private readonly summaries: LiveActivitySummaryRelay;
+
+  constructor(
+    private readonly ports: NativeActivityPublicationPorts,
+    summaryClock: Omit<LiveActivitySummaryRelayOptions, "publish"> = {},
+  ) {
+    this.summaries = new LiveActivitySummaryRelay({
+      ...summaryClock,
+      publish: (entryId, status) => this.publish(entryId, "native_harness.activity_summary", status),
+    });
+  }
+
+  /**
+   * Record what the agent does now, in the words its owner sees. The room
+   * receives a change within the summary interval, and every later working
+   * publication carries it. Null clears it when the turn ends.
+   */
+  observeActivitySummary(entryId: string, summary: string | null, status: LiveActivitySummaryStatus): void {
+    this.summaries.observe(entryId, summary, status);
+  }
 
   async publish(
     entryId: string,
@@ -31,6 +52,9 @@ export class NativeActivityPublicationCoordinator {
     const observedMs = Date.parse(observedAt);
     const currentBinding = await this.ports.bindings.get(entryId);
     if (!currentBinding || !await this.ports.bindings.credentialFor(currentBinding)) return false;
+    // An idle agent does nothing to describe; its line is gone with the turn.
+    if (status === "idle") this.summaries.reset(entryId);
+    const activitySummary = status === "working" ? this.summaries.take(entryId) : null;
     const publication = await this.ports.bindings.publish(
       entryId,
       observedMs,
@@ -50,13 +74,14 @@ export class NativeActivityPublicationCoordinator {
             method: safeMethod,
             status,
             operation: "the daemon bridge",
+            activitySummary,
           }),
         };
       },
     );
     if (!publication) return false;
     if (!publication.accepted) {
-      throw new Error("Native activity endpoint rejected a stale daemon observation.");
+      throw new NativeActivityRejectedError("Native activity endpoint rejected a stale daemon observation.", null);
     }
     const verifiedBinding = await this.ports.bindings.get(entryId);
     if (verifiedBinding
@@ -66,6 +91,8 @@ export class NativeActivityPublicationCoordinator {
       && verifiedBinding.agent_session_id === currentBinding.agent_session_id) {
       let recoveredCredentialHandoff = false;
       await this.ports.updateEntry(entryId, (current) => {
+        // The callback may run twice; only the last run counts.
+        recoveredCredentialHandoff = false;
         const recoversCredentialHandoff = current.desired_state === "running"
           && current.condition === "coordination_blocked"
           && current.last_error === "Provider is running; waiting for desktop credential handoff."
@@ -87,7 +114,8 @@ export class NativeActivityPublicationCoordinator {
             detail: "scoped worker bearer verified",
           },
         };
-      });
+        // Reads only scalar fields, so the lock-held read can skip the events.
+      }, { readsNoActivity: true });
       if (recoveredCredentialHandoff) {
         void this.ports.startDelivery(entryId).catch(() => undefined);
       }

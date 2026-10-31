@@ -1,3 +1,4 @@
+import { codexAgentIsReadOnly } from "./bounded-effect-coordinator.js";
 import { lastRoomMessageId } from "./cloud-http.js";
 import {
   authoritativeRoomJoinRejection,
@@ -497,6 +498,14 @@ export class RoomMoveCoordinator {
       }
       if (!await runtimeIsExact([move.source_room_id])) {
         return failFence("failed", "Runtime authority changed before destination membership was joined.");
+      }
+      // A move the agent asked for is a room tool call that is applied later, here. Its owner may have
+      // saved Read-only since the call was prepared, and that level does not let the agent move rooms,
+      // so the move is not made. A move its owner makes in the Inspector has no effect of the agent's
+      // and is not held to the agent's level.
+      const savedNow = move.effect_id ? await this.ports.store.getEntry(move.agent_id) : null;
+      if (savedNow && codexAgentIsReadOnly(savedNow)) {
+        return failFence("failed", "The agent's access level is now Read-only, which does not let it move to another room.");
       }
       await advance("waiting_for_current_turn", "joining_destination");
     }

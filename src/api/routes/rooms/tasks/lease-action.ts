@@ -5,6 +5,7 @@ import {
   applyTaskWorkLeaseAction,
   BoardIntentApprovalConsumptionError,
   createCoordinationEvent,
+  getActiveBoardManager,
   getActiveRoomAgentSessionsForWorkerIdentity,
   getActiveTaskLeases,
   getActiveTaskLocks,
@@ -21,6 +22,7 @@ import {
   respondWithBadRequest,
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
+import { answerRequestsNamingLease } from "../../../rooms/attention-answers.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import {
   normalizeTaskActorInstanceId,
@@ -32,6 +34,7 @@ import {
   leaseMatchesActor,
 } from "../../../coordination-policy.js";
 import { buildAgentActorLabel } from "../../../../shared/agent-identity.js";
+import { refuseWorkerBoardIntentExecution } from "../../../tasks/coordination-enforcement.js";
 import { resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
 import { attachTaskDetails } from "./task-details.js";
 import { getActiveWorkLease, LEASE_RECOVERY_ACTIVE_STATUSES } from "./lease-helpers.js";
@@ -158,7 +161,24 @@ export function registerTaskLeaseActionRoute(
       agentInstanceId: actorInstanceId,
       agentSessionId: actorSessionId,
     });
-    if (!requesterIsLeaseHolder && !workerHandoff) {
+    // Likewise a worker may release someone else's lease only with the exact
+    // release the manager approved for it; that is verified and consumed below.
+    const workerIntentRelease = req.authKind === "agent_session" && action === "release"
+      && !requesterIsLeaseHolder && Boolean(deps.normalizeOptionalString(requestBody.board_intent_id));
+    const workerIntentAction = workerHandoff || workerIntentRelease;
+    if (workerIntentAction && req.agentSession) {
+      // A holder handing on its own lease acts on its own work; anything else
+      // done to another worker's lease is subject to the manager check too.
+      const refusal = await refuseWorkerBoardIntentExecution(
+        { getActiveBoardManager },
+        { roomId: project.id, agentSessionId: req.agentSession.agent_session_id, actsOnOwnWork: requesterIsLeaseHolder },
+      );
+      if (refusal) {
+        res.status(403).json({ error: refusal.error, code: refusal.code });
+        return;
+      }
+    }
+    if (!requesterIsLeaseHolder && !workerIntentAction) {
       if (!(await deps.requireAdmin(req, res, project))) return;
     }
 
@@ -272,7 +292,7 @@ export function registerTaskLeaseActionRoute(
         }
       }
 
-      if (workerHandoff || ((actorKey || actorSessionId) && await shouldRequireBoardIntent({ room_id: project.id }))) {
+      if (workerIntentAction || ((actorKey || actorSessionId) && await shouldRequireBoardIntent({ room_id: project.id }))) {
         const payload = boardIntentPayloadForLeaseAction({
           taskId: task.id,
           action,
@@ -284,8 +304,8 @@ export function registerTaskLeaseActionRoute(
           ? { agent_session_id: req.agentSession.agent_session_id, agent_key: req.agentSession.agent_key }
           : undefined;
         // A copied approval token must not substitute for the authenticated
-        // proposing worker when authorizing a handoff of someone else's work.
-        const approvalToken = workerHandoff ? null : deps.normalizeOptionalString(requestBody.board_approval_token);
+        // proposing worker when authorizing a change to someone else's work.
+        const approvalToken = workerIntentAction ? null : deps.normalizeOptionalString(requestBody.board_approval_token);
         const approval = await verifyBoardIntentApproval({
           room_id: project.id,
           action_type: "task_override",
@@ -293,6 +313,7 @@ export function registerTaskLeaseActionRoute(
           intent_id: deps.normalizeOptionalString(requestBody.board_intent_id),
           approval_token: approvalToken,
           ...(trustedWorker ? { trusted_worker: trustedWorker } : {}),
+          task_state: { status: task.status, assignee_agent_key: task.assignee_agent_key },
         });
         if (approval.kind === "deny") {
           await createCoordinationEvent({
@@ -305,7 +326,8 @@ export function registerTaskLeaseActionRoute(
             actor_instance_id: actorInstanceId,
             reason: approval.error,
           });
-          res.status(409).json({ error: approval.error, code: approval.code });
+          // Without its approval a worker has no authority over someone else's lease.
+          res.status(workerIntentRelease ? 403 : 409).json({ error: approval.error, code: approval.code });
           return;
         }
         if (approval.intent?.id) {
@@ -320,8 +342,11 @@ export function registerTaskLeaseActionRoute(
         }
       }
 
-      if (workerHandoff && !boardIntentApproval) {
-        res.status(409).json({ error: "An exact approved handoff is required.", code: "board_intent_required" });
+      if (workerIntentAction && !boardIntentApproval) {
+        res.status(workerIntentRelease ? 403 : 409).json({
+          error: `An exact approved ${action} is required.`,
+          code: "board_intent_required",
+        });
         return;
       }
 
@@ -433,6 +458,15 @@ export function registerTaskLeaseActionRoute(
           next_task_status: nextTask.status,
         },
       });
+      // A person clearing a lease answers the requests that asked for it.
+      if (action === "release" && desktopHumanWrite && req.sessionAccount) {
+        await answerRequestsNamingLease({
+          room_id: project.id,
+          lease_id: releasedLease.id,
+          response: `Released the work lease ${releasedLease.id} on ${task.id}.`,
+          person: { id: req.sessionAccount.account_id, label: req.sessionAccount.login, kind: "human" },
+        });
+      }
 
       const taskWithDetails = await attachTaskDetails(project.id, nextTask);
       deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });

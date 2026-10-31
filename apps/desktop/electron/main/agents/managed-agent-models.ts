@@ -1,4 +1,5 @@
-import { execFile } from "node:child_process";
+import { execProviderFile } from "../../../../../shared/provider-executable.mjs";
+import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import type {
@@ -9,9 +10,11 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopManagedAgentEffort,
 } from "../../ipc-types.js";
+import { claudeCodeVersionAtLeast, resolveClaudeCodeExecutable } from "./claude-code-version.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
-import { normalizeCursorMcpPolicy, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
+import { DEFAULT_CURSOR_MCP_POLICY, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
+import { resolveOpenModelEffortCatalog } from "./open-model-efforts.js";
 import { readOpenModelSettings } from "./open-model-settings.js";
 import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "../desktop-shell-environment.js";
 
@@ -38,19 +41,46 @@ const MODEL_LIST_TIMEOUT_MS = 10_000;
 const MODEL_LIST_MAX_BUFFER = 8 * 1024 * 1024;
 const modelListCache = new Map<string, ModelListCacheEntry>();
 
-const CLAUDE_CODE_KNOWN_MODELS: DesktopAgentProviderModelOption[] = [
-  // Full model id on purpose: shipped Claude Code CLIs reject the bare
-  // "fable" alias ("issue with the selected model"), while full ids pass
-  // through to the API on every CLI version.
-  { id: "claude-fable-5", label: "Fable 5", source: "known" },
-  { id: "opus", label: "Opus (latest)", source: "known" },
-  { id: "sonnet", label: "Sonnet (latest)", source: "known" },
-  { id: "haiku", label: "Haiku (latest)", source: "known" },
+// Full model ids with their real names. The CLI has no command that lists
+// models, and an alias ("opus", "sonnet") runs a different model on each CLI
+// version, so its name cannot be shown. A CLI refuses a full id its own model
+// catalog does not describe, so a newer model is listed only from the CLI
+// version that names it. Each id was run on Claude Code 2.1.278; that CLI
+// asks for 2.1.280 for the 5.5 models.
+const CLAUDE_CODE_KNOWN_MODELS: Array<DesktopAgentProviderModelOption & { minimumCliVersion?: string }> = [
+  // "best" is the one alias kept: it means the best model the CLI has.
   { id: "best", label: "Best available", source: "known" },
-  { id: "opusplan", label: "Opus Plan", source: "known" },
-  { id: "sonnet[1m]", label: "Sonnet 1M", source: "known" },
-  { id: "opus[1m]", label: "Opus 1M", source: "known" },
+  { id: "claude-fable-5-1", label: "Fable 5.1", source: "known" },
+  { id: "claude-fable-5", label: "Fable 5", source: "known" },
+  { id: "claude-opus-5-5", label: "Opus 5.5", source: "known", minimumCliVersion: "2.1.280" },
+  { id: "claude-sonnet-5-5", label: "Sonnet 5.5", source: "known", minimumCliVersion: "2.1.280" },
+  { id: "claude-haiku-5-5", label: "Haiku 5.5", source: "known", minimumCliVersion: "2.1.280" },
+  { id: "claude-opus-5", label: "Opus 5", source: "known" },
+  { id: "claude-sonnet-5", label: "Sonnet 5", source: "known" },
+  { id: "claude-haiku-4-5", label: "Haiku 4.5", source: "known" },
+  { id: "claude-opus-5[1m]", label: "Opus 5 1M", source: "known" },
+  { id: "claude-sonnet-5[1m]", label: "Sonnet 5 1M", source: "known" },
 ];
+
+async function listClaudeCodeModels(
+  input: DesktopAgentProviderPreflightInput,
+): Promise<DesktopAgentProviderModelsResult> {
+  const runtimeEnv = desktopRuntimeEnvironment();
+  const command = resolveClaudeCodeExecutable(runtimeEnv);
+  const cacheKey = `claude-code:${command}`;
+  const cached = modelListCache.get(cacheKey);
+  if (!input.refreshModels && cached && cached.expiresAt > Date.now()) {
+    return cloneModelResult(cached.result);
+  }
+  const version = await execFileWithTimeout(command, ["--version"], { env: runtimeEnv });
+  const versionLine = version.ok ? firstNonEmptyLine(version.stdout) ?? firstNonEmptyLine(version.stderr) ?? "" : "";
+  const models = CLAUDE_CODE_KNOWN_MODELS
+    .filter((model) => !model.minimumCliVersion || claudeCodeVersionAtLeast(versionLine, model.minimumCliVersion))
+    .map(({ minimumCliVersion: _minimum, ...model }) => model);
+  const next = modelResult("claude-code", "ready", models, null, null);
+  modelListCache.set(cacheKey, { expiresAt: Date.now() + MODEL_LIST_CACHE_MS, result: next });
+  return cloneModelResult(next);
+}
 
 export function normalizeManagedAgentModel(value: string | null | undefined): string | null {
   const normalized = String(value ?? "").trim();
@@ -78,17 +108,6 @@ export function normalizeManagedAgentEffort(
     : null;
 }
 
-export function normalizeManagedAgentEffortForProvider(
-  providerId: DesktopAgentProviderId,
-  value: DesktopManagedAgentEffort | string | null | undefined,
-): DesktopManagedAgentEffort | null {
-  const effort = normalizeManagedAgentEffort(value);
-  if (!effort) return null;
-  if (providerId === "claude-code") return effort;
-  if (providerId === "codex") return effort === "max" ? null : effort;
-  return null;
-}
-
 export async function listDesktopAgentProviderModels(
   providerId: DesktopAgentProviderId,
   input: DesktopAgentProviderPreflightInput = {},
@@ -98,7 +117,7 @@ export async function listDesktopAgentProviderModels(
     return listCursorModels(input);
   }
   if (providerId === "claude-code") {
-    return modelResult(providerId, "ready", CLAUDE_CODE_KNOWN_MODELS, null, null);
+    return listClaudeCodeModels(input);
   }
   if (providerId === "codex") {
     return listCodexModels(input);
@@ -157,7 +176,6 @@ export async function validateDesktopManagedAgentModel(input: {
   model?: string | null;
   modelSource?: DesktopAgentProviderModelSource | null;
   repoRootPath?: string | null;
-  cursorMcpPolicy?: DesktopAgentProviderPreflightInput["cursorMcpPolicy"];
 }): Promise<{ model: string | null; error: string | null }> {
   const model = normalizeManagedAgentModel(input.model);
   if (!model) {
@@ -210,7 +228,10 @@ function modelResult(
   return {
     providerId,
     status,
-    models: models.map((model) => ({ ...model })),
+    models: models.map((model) => ({
+      ...model,
+      ...(model.supportedEfforts ? { supportedEfforts: [...model.supportedEfforts] } : {}),
+    })),
     defaultModel,
     error,
   };
@@ -220,15 +241,18 @@ async function listCursorModels(
   input: DesktopAgentProviderPreflightInput,
 ): Promise<DesktopAgentProviderModelsResult> {
   const command = process.env.LETAGENTS_CURSOR_AGENT_BIN || "cursor-agent";
-  const context = cursorModelExecutionContext(input);
-  if (context.error) {
-    return modelResult("cursor", "error", [], null, context.error);
-  }
-  const cacheKey = `cursor:${command}:${context.cacheKey}`;
+  // The key holds every input of the managed profile's location, so a fresh
+  // answer is returned before the profile (about 30 sync fs calls) is prepared.
+  // A hit runs no Cursor process, so it needs no workspace MCP check either.
+  const cacheKey = `cursor:${JSON.stringify(cursorModelCacheKeyParts(command, input))}`;
   const forceRefresh = Boolean(input.refreshModels);
   const cached = modelListCache.get(cacheKey);
   if (!forceRefresh && cached && cached.expiresAt > Date.now()) {
     return cloneModelResult(cached.result);
+  }
+  const context = cursorModelExecutionContext(input);
+  if (context.error) {
+    return modelResult("cursor", "error", [], null, context.error);
   }
 
   const result = await execFileWithTimeout(command, ["models"], {
@@ -254,10 +278,44 @@ async function listCursorModels(
   return cloneModelResult(next);
 }
 
+/** Expired entries stay this long so a failed rediscovery can serve the last ready list. */
+const MODEL_LIST_STALE_RETENTION_MS = 10 * 60_000;
+const MODEL_LIST_CACHE_LIMIT = 64;
+
+function pruneModelListCache(now: number): void {
+  for (const [key, entry] of modelListCache) {
+    if (entry.expiresAt + MODEL_LIST_STALE_RETENTION_MS <= now) modelListCache.delete(key);
+  }
+  for (const key of modelListCache.keys()) {
+    if (modelListCache.size < MODEL_LIST_CACHE_LIMIT) break;
+    modelListCache.delete(key);
+  }
+}
+
+/** Test-only: the number of remembered model lists. */
+export function modelListCacheSizeForTest(): number {
+  return modelListCache.size;
+}
+
+function cursorModelCacheKeyParts(command: string, input: DesktopAgentProviderPreflightInput): string[] {
+  const workspaceRoot = normalizeOptionalPath(input.repoRootPath);
+  return [
+    command,
+    DEFAULT_CURSOR_MCP_POLICY,
+    workspaceRoot ? resolve(workspaceRoot) : "",
+    process.env.LETAGENTS_CURSOR_SOURCE_HOME ?? "",
+    process.env.LETAGENTS_CURSOR_MANAGED_HOME ?? "",
+    process.env.LETAGENTS_STATE_PATH ?? "",
+    homedir(),
+  ];
+}
+
 function cacheModelListResult(
   cacheKey: string,
   result: DesktopAgentProviderModelsResult,
 ): void {
+  pruneModelListCache(Date.now());
+  modelListCache.delete(cacheKey);
   modelListCache.set(cacheKey, {
     expiresAt: Date.now() + (result.status === "ready" ? MODEL_LIST_CACHE_MS : MODEL_LIST_ERROR_CACHE_MS),
     result,
@@ -268,6 +326,7 @@ function refreshStaleReadyModelCache(
   cacheKey: string,
   cached: ModelListCacheEntry,
 ): DesktopAgentProviderModelsResult {
+  modelListCache.delete(cacheKey);
   modelListCache.set(cacheKey, {
     expiresAt: Date.now() + MODEL_LIST_ERROR_CACHE_MS,
     result: cached.result,
@@ -278,12 +337,11 @@ function refreshStaleReadyModelCache(
 function cursorModelExecutionContext(input: DesktopAgentProviderPreflightInput): {
   cwd?: string;
   env: NodeJS.ProcessEnv;
-  cacheKey: string;
   error: string | null;
 } {
   const workspaceRoot = normalizeOptionalPath(input.repoRootPath);
   const resolvedWorkspaceRoot = workspaceRoot ? resolve(workspaceRoot) : null;
-  const mcpPolicy = normalizeCursorMcpPolicy(input.cursorMcpPolicy);
+  const mcpPolicy = DEFAULT_CURSOR_MCP_POLICY;
   try {
     const profile = prepareCursorManagedProfile({
       workspaceRoot: resolvedWorkspaceRoot,
@@ -293,19 +351,11 @@ function cursorModelExecutionContext(input: DesktopAgentProviderPreflightInput):
     return {
       cwd: resolvedWorkspaceRoot ?? undefined,
       env,
-      cacheKey: [
-        mcpPolicy,
-        resolvedWorkspaceRoot ?? "",
-        profile.homeDir,
-        profile.configDir,
-        profile.dataDir,
-      ].join(":"),
       error: null,
     };
   } catch (error) {
     return {
       env: buildCursorChildEnv(),
-      cacheKey: `${mcpPolicy}:${resolvedWorkspaceRoot ?? ""}`,
       error: error instanceof Error ? error.message : String(error),
     };
   }
@@ -330,7 +380,27 @@ async function listOpenModelModels(
   input: DesktopAgentProviderPreflightInput,
 ): Promise<DesktopAgentProviderModelsResult> {
   const settings = await readOpenModelSettings();
+  const efforts = settings.baseUrl
+    ? await resolveOpenModelEffortCatalog({
+      baseUrl: settings.baseUrl,
+      apiKey: settings.apiKey,
+      refresh: Boolean(input.refreshModels),
+    })
+    : null;
+  return openModelModelsResult(settings, input, efforts ?? new Map());
+}
+
+/** The saved model and the agent's own choice, each with the efforts the endpoint lists for it. */
+export function openModelModelsResult(
+  settings: { model: string },
+  input: DesktopAgentProviderPreflightInput,
+  efforts: ReadonlyMap<string, readonly DesktopManagedAgentEffort[]>,
+): DesktopAgentProviderModelsResult {
   const selectedModel = normalizeManagedAgentModel(input.model);
+  const supportedEfforts = (id: string) => {
+    const listed = efforts.get(id);
+    return listed?.length ? { supportedEfforts: [...listed] } : {};
+  };
   const models: DesktopAgentProviderModelOption[] = [];
   if (settings.model) {
     models.push({
@@ -338,6 +408,7 @@ async function listOpenModelModels(
       label: `${settings.model} (saved)`,
       isDefault: true,
       source: "known",
+      ...supportedEfforts(settings.model),
     });
   }
   if (selectedModel && selectedModel !== settings.model) {
@@ -345,6 +416,7 @@ async function listOpenModelModels(
       id: selectedModel,
       label: selectedModel,
       source: normalizeManagedAgentModelSource(input.modelSource),
+      ...supportedEfforts(selectedModel),
     });
   }
   return modelResult("open-model", "ready", models, settings.model || null, null);
@@ -448,7 +520,7 @@ function execFileWithTimeout(
   options: ExecOptions = {},
 ): Promise<ExecResult> {
   return new Promise((resolve) => {
-    const child = execFile(
+    const child = execProviderFile(
       command,
       args,
       {

@@ -37,12 +37,13 @@ import type { DesktopRentalLaunchConfiguration, DesktopRentalProviderDashboard, 
 import { desktopIpc } from "../../../ipc/index.js";
 import { loadRentalProviderDashboard, useRentalProviderEvents } from "../../../composables/useRentalProviderEvents";
 import RentRequestReviewSheet from "./RentRequestReviewSheet.vue";
+import { thisComputerLabel } from "../../../domain/supervised-agents-support";
 
 const dashboard = ref<DesktopRentalProviderDashboard>(emptyDashboard()); const settings = ref<DesktopRentalProviderSettings | null>(null); const loading = ref(true); const error = ref<string | null>(null); const reviewingRequest = ref<DesktopRentalRequest | null>(null); const reviewSession = ref<DesktopRentalSession | null>(null); const reviewError = ref<string | null>(null); const launching = ref(false);
 let reviewRequestToken = 0;
 const workingSessions = computed(() => dashboard.value.capacitySessions.filter((session) => session.status === 'active' && session.launchState === 'active'));
 const availableSlots = computed(() => Math.max(0, (settings.value?.maxConcurrentSessions || 0) - dashboard.value.capacitySessions.length));
-const statusCopy = computed(() => settings.value?.blockers.length ? settings.value.blockers[0] : settings.value?.enabled ? `${availableSlots.value} slot${availableSlots.value === 1 ? '' : 's'} available from this Mac.` : 'Turn on availability in Settings → Renting when you are ready.');
+const statusCopy = computed(() => settings.value?.blockers.length ? settings.value.blockers[0] : settings.value?.enabled ? `${availableSlots.value} slot${availableSlots.value === 1 ? '' : 's'} available from ${thisComputerLabel()}.` : 'Turn on availability in Settings → Renting when you are ready.');
 onMounted(() => { void refresh(); });
 useRentalProviderEvents(() => { void refresh(false); });
 async function refresh(showLoading = true): Promise<void> { if (showLoading) loading.value = true; error.value = null; try { const bridge = desktopIpc.rental; if (!bridge) throw new Error('Restart LetAgents Desktop to use renting.'); const [nextDashboard, nextSettings] = await Promise.all([loadRentalProviderDashboard(), bridge.getProviderSettings()]); dashboard.value = nextDashboard; settings.value = nextSettings; } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Could not load provider availability.'; } finally { if (showLoading) loading.value = false; } }

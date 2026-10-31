@@ -10,6 +10,13 @@ function getWebSocketCtor(): typeof WebSocket {
 
 const DEFAULT_RPC_REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * The socket constructor the client connects through. Production uses the
+ * runtime's own WebSocket. A replay test passes one that plays a recording of
+ * a real app-server, and the recorder passes one that taps every frame.
+ */
+export type CodexRpcWebSocketCtor = typeof WebSocket;
+
 export type RpcRequestId = string | number;
 export interface RpcServerRequest {
   readonly id: RpcRequestId;
@@ -93,6 +100,7 @@ export class CodexRpcClient {
   private intentionalClose = false;
   private disconnectNotified = false;
   private readonly disconnectListeners = new Set<() => void>();
+  private codexHome: string | null = null;
   private nextId = 1;
   private readonly pending = new Map<
     number,
@@ -107,10 +115,15 @@ export class CodexRpcClient {
     private readonly serverUrl: string,
     private readonly onNotification?: (notification: RpcNotification) => void,
     private readonly requestTimeoutMs = DEFAULT_RPC_REQUEST_TIMEOUT_MS,
+    private readonly webSocketCtor?: CodexRpcWebSocketCtor,
   ) {}
 
+  private socketCtor(): CodexRpcWebSocketCtor {
+    return this.webSocketCtor ?? getWebSocketCtor();
+  }
+
   async connect(): Promise<void> {
-    const WS = getWebSocketCtor();
+    const WS = this.socketCtor();
     const previous = this.ws;
     this.ws = null;
     this.invalidateRequests();
@@ -160,7 +173,7 @@ export class CodexRpcClient {
 
     try {
       if (this.ws !== connectedSocket!) throw new Error("WebSocket connection replaced");
-      await this.request("initialize", {
+      const initialized = await this.request<{ codexHome?: unknown } | null>("initialize", {
         clientInfo: {
           name: "letagents-desktop-codex-supervisor",
           title: "LetAgents Desktop Codex Supervisor",
@@ -168,6 +181,7 @@ export class CodexRpcClient {
         },
         capabilities: { experimentalApi: true },
       });
+      this.codexHome = typeof initialized?.codexHome === "string" ? initialized.codexHome : null;
       if (this.ws !== connectedSocket!) throw new Error("WebSocket connection replaced");
       this.notify("initialized");
     } catch (error) {
@@ -214,6 +228,11 @@ export class CodexRpcClient {
     });
   }
 
+  /** The Codex home the app-server said it runs with when this client connected. Null when it did not say. */
+  reportedCodexHome(): string | null {
+    return this.codexHome;
+  }
+
   close(): void {
     this.intentionalClose = true;
     const ws = this.ws;
@@ -236,7 +255,7 @@ export class CodexRpcClient {
 
   currentConnectionId(): string | null {
     const ws = this.ws;
-    return ws && ws.readyState === getWebSocketCtor().OPEN ? this.connectionId : null;
+    return ws && ws.readyState === this.socketCtor().OPEN ? this.connectionId : null;
   }
 
   onPendingRequestsChanged(listener: () => void): () => void {
@@ -382,7 +401,7 @@ export class CodexRpcClient {
 
   private send(payload: Record<string, unknown>): void {
     const ws = this.ws;
-    if (!ws || ws.readyState !== getWebSocketCtor().OPEN) {
+    if (!ws || ws.readyState !== this.socketCtor().OPEN) {
       throw new Error("Codex app-server WebSocket is not open.");
     }
     ws.send(JSON.stringify(payload));

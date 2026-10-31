@@ -1,3 +1,4 @@
+import { mergeActivityEvents } from '../../../../../shared/ui/activity/model'
 import { isRepoBackedRoomId } from '../roomGitHubEvents'
 import { apiFetch, roomPath } from './api'
 import { HANDOFF_PRESENCE_PAGE_SIZE } from './constants'
@@ -257,7 +258,7 @@ export function createRoomRefreshController(
     try {
       const next = await fetchGitHubEvents(roomIdentifier)
       if (!isCurrent()) return false
-      githubEvents.value = next.events
+      githubEvents.value = mergeActivityEvents(next.events, githubEvents.value)
       githubEventsAvailable.value = next.available
       githubEventsHasMore.value = next.hasMore
       githubEventsError.value = next.error
@@ -280,6 +281,24 @@ export function createRoomRefreshController(
     return repaired === true
   }
 
+  async function loadOlderGitHubEvents(): Promise<void> {
+    if (!room.value || githubEventsLoading.value || !githubEventsHasMore.value) return
+    const roomIdentifier = room.value.identifier
+    const target = getGitHubEventsIdentifier(room.value)
+    const oldest = [...githubEvents.value].sort((a, b) => Date.parse(a.event_order_at || a.created_at) - Date.parse(b.event_order_at || b.created_at) || a.id.localeCompare(b.id))[0]
+    if (!oldest) return
+    githubEventsLoading.value = true
+    try {
+      const next = await fetchGitHubEvents(target, oldest.id)
+      if (room.value?.identifier !== roomIdentifier) return
+      githubEvents.value = mergeActivityEvents(next.events, githubEvents.value)
+      githubEventsHasMore.value = next.hasMore
+      githubEventsError.value = next.error
+    } finally {
+      if (room.value?.identifier === roomIdentifier) githubEventsLoading.value = false
+    }
+  }
+
   function scheduleGitHubEventsRefresh(
     roomIdentifier: string,
     supported = isRepoBackedRoomId(roomIdentifier),
@@ -287,7 +306,7 @@ export function createRoomRefreshController(
     if (githubEventsRefreshTimer) return
     githubEventsRefreshTimer = setTimeout(() => {
       githubEventsRefreshTimer = null
-      void refreshGitHubEvents(roomIdentifier, supported)
+      void refreshGitHubEvents(roomIdentifier, supported, () => Boolean(room.value && getGitHubEventsIdentifier(room.value) === roomIdentifier))
     }, 350)
   }
 
@@ -452,6 +471,7 @@ export function createRoomRefreshController(
     refreshRoomBoard,
     refreshRoomFocusRooms,
     refreshRoomGitHubEvents,
+    loadOlderGitHubEvents,
     refreshRoomMessages,
     refreshTaskGithubStatus,
     refreshTasksAndPresence,

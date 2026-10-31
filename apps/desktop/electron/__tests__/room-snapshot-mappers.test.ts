@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mapRoomArtifactPayload, mapRoomArtifacts, mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
+import { mapRecentActivity, mapRoomArtifactPayload, mapRoomArtifacts, mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
 import { mapDesktopGitRoomPayload } from "../main/rooms/git-room.js";
 import { readySourceStates } from "../main/rooms/snapshot/snapshots.js";
 import { canonicalJoinedRoomIdentifier, roomInfoCacheKey, roomInfoCacheKeys } from "../main/rooms/room-info.js";
 import type { RoomSnapshotData } from "../main/rooms/snapshot/payloads.js";
+import { mapDesktopTaskSummaryPayload } from "../main/rooms/tasks/mappers.js";
 
 const emptySnapshotData: RoomSnapshotData = {
   focusRoomsData: { focus_rooms: [] },
@@ -13,6 +14,7 @@ const emptySnapshotData: RoomSnapshotData = {
   participantsData: { participants: [], hidden_count: 0 },
   presenceData: { presence: [] },
   reasoningData: { sessions: [], reasoning_sessions: [] },
+  liveActivityData: { sessions: [] },
   activityHistoryData: { entries: [] },
   roomArtifactsData: { artifacts: [] },
   boardSettingsData: {
@@ -385,6 +387,38 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
   });
 });
 
+test("task leases carry the holder's room label, not only its agent handle", () => {
+  // The lease shape the server sends for GET /rooms/:room/tasks.
+  const task = mapDesktopTaskSummaryPayload({
+    id: "task_1",
+    status: "done",
+    active_leases: [{
+      id: "tl_review",
+      kind: "review",
+      status: "active",
+      agent_key: "EmmyMay/desktop-codex-30e2dae522e0062dd4da65ab597b685d",
+      agent_session_id: "agent_session_1330",
+      actor_label: "ScarletHarbor | EmmyMay's agent | Codex",
+    }],
+  });
+  assert.equal(task.activeLeases[0]?.holderLabel, "ScarletHarbor | EmmyMay's agent | Codex");
+  assert.equal(task.activeLeases[0]?.agentKey, "EmmyMay/desktop-codex-30e2dae522e0062dd4da65ab597b685d");
+  // Local tasks still name their holder with holder_label.
+  assert.equal(mapDesktopTaskSummaryPayload({
+    id: "task_2",
+    active_leases: [{ id: "local", kind: "work", holder_label: "Local reviewer", actor_label: "ignored" }],
+  }).activeLeases[0]?.holderLabel, "Local reviewer");
+});
+
+test("only a card that names a ticket carries the ticket fields", () => {
+  const ticketCard = mapDesktopTaskSummaryPayload({ id: "task_1", external_ref: "jira:HT-1234", ticket_state: "in_review" });
+  assert.equal(ticketCard.externalRef, "jira:HT-1234");
+  assert.equal(ticketCard.ticketState, "in_review");
+  const nativeCard = mapDesktopTaskSummaryPayload({ id: "task_2", external_ref: null, ticket_state: null });
+  assert.equal("externalRef" in nativeCard, false);
+  assert.equal("ticketState" in nativeCard, false);
+});
+
 test("mapSnapshotData carries per-source states through unchanged", () => {
   const data: RoomSnapshotData = {
     ...emptySnapshotData,
@@ -402,4 +436,24 @@ test("mapSnapshotData carries per-source states through unchanged", () => {
   assert.equal(snapshot.sourceStates.githubEvents.status, "error");
   assert.equal(snapshot.sourceStates.messages.status, "ready");
   assert.equal(snapshot.sourceStates.messages.error, null);
+});
+
+test("mapRecentActivity maps the participant GitHub login and leaves it null when absent", () => {
+  const entries = mapRecentActivity({
+    entries: [
+      {
+        id: "with_login",
+        participant: { kind: "human", display_name: "Ana", github_login: "ana-lee" },
+        first_seen_at: "2026-05-12T10:00:00.000Z",
+      },
+      {
+        id: "without_login",
+        participant: { kind: "agent", display_name: "Owl" },
+        first_seen_at: "2026-05-12T10:05:00.000Z",
+      },
+    ],
+  } as never);
+
+  assert.equal(entries[0]?.participantGithubLogin, "ana-lee");
+  assert.equal(entries[1]?.participantGithubLogin, null);
 });

@@ -11,6 +11,7 @@ import type {
 import type { DaemonManifestEntry, DaemonRoomMoveRecord } from "./types.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
+import { restartsAfterNextFailure } from "./reconciler-policy.js";
 
 type DeliveryMode = "refresh" | "ensure" | "wake";
 type ExactBoundedContextCoordinates = {
@@ -61,6 +62,14 @@ export type SupervisedDeliveryLifecyclePorts = {
  */
 export class SupervisedDeliveryLifecycleCoordinator {
   constructor(private readonly ports: SupervisedDeliveryLifecyclePorts) {}
+
+  /** Whether the lane is restarted if its runtime ends now, read fresh from the manifest. */
+  private async laneOutlook(entryId: string): Promise<"restarts" | "needs_owner" | undefined> {
+    const entry = await this.ports.manifest.getEntry(entryId);
+    if (!entry || entry.desired_state !== "running") return undefined;
+    return restartsAfterNextFailure(entry.reconciliation?.exit_timestamps_ms ?? [], Date.now())
+      ? "restarts" : "needs_owner";
+  }
 
   async exactActiveBoundedContext(
     input: ExactBoundedContextCoordinates,
@@ -210,6 +219,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
       executionGenerationId: binding.execution_generation_id,
       daemonGeneration: this.ports.currentDaemonGeneration(),
       deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      laneOutlook: () => this.laneOutlook(entryId),
     };
     if (!await this.ports.providerAuthority.isExactAuthority(agent)) return;
     // Durable identity may have loaded across a provider-birth replacement.

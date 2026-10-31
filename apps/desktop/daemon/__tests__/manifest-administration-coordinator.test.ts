@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { hostToolPolicyDigest } from "../host-tool-rules.js";
 
 import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { schedulerErrorDetail } from "../daemon-error-policy.js";
@@ -10,17 +11,13 @@ import {
   type StoredAgentConfiguration,
 } from "../manifest-administration-coordinator.js";
 import { projectDaemonCreateRequestReplayParameters } from "../manifest-entry-projection.js";
-import {
-  deriveProviderConfigurationSnapshot,
-  providerSupportsConcurrentSupervisedAgents,
-} from "../provider-configuration.js";
+import { deriveProviderConfigurationSnapshot } from "../provider-configuration.js";
 import { DaemonFenceLostError } from "../singleton.js";
 import { supervisedPermissionProfilesForProvider } from "../supervised-permission-profiles.js";
 import type {
   DaemonActivityEvent,
   DaemonManifest,
   DaemonManifestEntry,
-  LegacyLaneOwner,
 } from "../types.js";
 
 const DAEMON_GENERATION = 7;
@@ -62,21 +59,6 @@ function activity(overrides: Partial<DaemonActivityEvent> = {}): DaemonActivityE
   };
 }
 
-function legacyOwner(overrides: Partial<LegacyLaneOwner> = {}): LegacyLaneOwner {
-  return {
-    reservation_id: "legacy-1",
-    room_id: "room-1",
-    provider: "legacy-provider",
-    owner_pid: 10,
-    owner_process_identity: "birth-1",
-    state: "active",
-    session_id: "session-1",
-    created_at: CREATED_AT,
-    updated_at: CREATED_AT,
-    ...overrides,
-  };
-}
-
 function storedConfiguration(overrides: Partial<StoredAgentConfiguration> = {}): StoredAgentConfiguration {
   return {
     provider: "codex",
@@ -87,6 +69,10 @@ function storedConfiguration(overrides: Partial<StoredAgentConfiguration> = {}):
     provider_launch_policy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
     config_revision: 3,
     runtime_configuration_revision: 2,
+    // Room messages are delivered by the daemon, as for every agent the desktop app creates.
+    delivery_mode: "daemon_inbox",
+    // Off unless the owner of an Open Model agent turned it on.
+    image_input: false,
     ...overrides,
   };
 }
@@ -140,13 +126,13 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
       events.push(`store:get-purge:${operationId}`);
       return purgeComplete ? { phase: "complete" } as never : null;
     },
-    async write(expectedGeneration, entries, legacyLaneOwners, commitFence) {
+    async write(expectedGeneration, entries, commitFence) {
       events.push(`store:write:${expectedGeneration}`);
       assert.equal(expectedGeneration, durableManifestGeneration, "manifest write must use the durable generation");
       await commitFence(async () => {
         events.push("store:commit");
         durableManifestGeneration += 1;
-        manifest = { generation: durableManifestGeneration, entries, legacy_lane_owners: legacyLaneOwners };
+        manifest = { generation: durableManifestGeneration, entries };
       });
       return { generation: durableManifestGeneration };
     },
@@ -175,33 +161,11 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
           charter: input.charter,
           permission_profile_id: input.permissionProfileId,
           provider_launch_policy: input.providerLaunchPolicy,
+          image_input: input.imageInput,
           config_revision: input.expectedRevision + 1,
         };
       });
       return { generation: durableManifestGeneration, outcome: "updated", configuration };
-    },
-    async appendActivity(expectedGeneration, entryId, event, observedState, nativeLiveness, limit, commitFence) {
-      events.push(`store:append:${event.sequence}:${limit}`);
-      assert.equal(expectedGeneration, durableManifestGeneration,
-        "activity append must use the durable manifest generation");
-      let updated!: DaemonManifestEntry;
-      await commitFence(async () => {
-        events.push("store:commit-activity");
-        const current = manifest.entries.find((candidate) => candidate.id === entryId)!;
-        updated = {
-          ...current,
-          observed_state: observedState,
-          native_liveness: nativeLiveness,
-          activity: [...(current.activity ?? []), event].slice(-limit),
-        };
-        durableManifestGeneration = expectedGeneration + 1;
-        manifest = {
-          ...manifest,
-          generation: durableManifestGeneration,
-          entries: manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate),
-        };
-      });
-      return { generation: durableManifestGeneration, entry: updated };
     },
     async appendActivityOnly(expectedGeneration, entryId, event, limit, commitFence) {
       events.push(`store:append-only:${event.sequence}:${limit}`);
@@ -226,11 +190,30 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
     },
     async recordActivity(expectedGeneration, entryId, event, runtimeUpdate, limit, commitFence) {
       events.push(`store:record:${event.sequence}:${limit}`);
-      const next = runtimeUpdate
-        ? await store.appendActivity(expectedGeneration, entryId, event,
-          runtimeUpdate.observedState, runtimeUpdate.nativeLiveness, limit, commitFence)
-        : await store.appendActivityOnly(expectedGeneration, entryId, event, limit, commitFence);
-      return { generation: next.generation };
+      if (!runtimeUpdate) {
+        const next = await store.appendActivityOnly(expectedGeneration, entryId, event, limit, commitFence);
+        return { generation: next.generation };
+      }
+      assert.equal(expectedGeneration, durableManifestGeneration,
+        "activity append must use the durable manifest generation");
+      let updated!: DaemonManifestEntry;
+      await commitFence(async () => {
+        events.push("store:commit-activity");
+        const current = manifest.entries.find((candidate) => candidate.id === entryId)!;
+        updated = {
+          ...current,
+          observed_state: runtimeUpdate.observedState,
+          native_liveness: runtimeUpdate.nativeLiveness,
+          activity: [...(current.activity ?? []), event].slice(-limit),
+        };
+        durableManifestGeneration = expectedGeneration + 1;
+        manifest = {
+          ...manifest,
+          generation: durableManifestGeneration,
+          entries: manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate),
+        };
+      });
+      return { generation: durableManifestGeneration };
     },
     async updateWorkplaceLiveness(expectedGeneration, entryId, liveness, commitFence) {
       events.push(`store:liveness:${liveness.state}`);
@@ -271,17 +254,10 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
     },
     policies: {
       projectCreateReplayParameters: projectDaemonCreateRequestReplayParameters,
-      providerSupportsConcurrentAgents: providerSupportsConcurrentSupervisedAgents,
       deriveProviderConfiguration: deriveProviderConfigurationSnapshot,
       permissionProfilesForProvider: supervisedPermissionProfilesForProvider,
       sanitizeActivity: sanitizeDaemonActivityEvent,
       safeErrorDetail: schedulerErrorDetail,
-    },
-    lanes: {
-      liveOwners: (owners) => {
-        events.push("lanes:live");
-        return [...owners];
-      },
     },
     convergence: {
       request: (entryId) => { events.push(`convergence:${entryId}`); },
@@ -321,7 +297,6 @@ test("entry validation and create replay preserve exact validation and convergen
     "authority:assert",
     "store:get-purge:purge:agent-1",
     "store:load",
-    "lanes:live",
     "store:write:4",
     "authority:fence",
     "authority:assert",
@@ -341,6 +316,21 @@ test("entry validation and create replay preserve exact validation and convergen
     state.subject.putManifestEntry({ ...withHistory, room_id: "different-room" }),
     /already bound to different agent parameters/,
   );
+});
+
+test("manifest.put saves an effort only for a provider that takes it", async () => {
+  for (const [provider, reasoning_effort] of [["open-model", "max"], ["open-model", "minimal"], ["claude-code", "minimal"], ["cursor", "low"]] as const) {
+    const refused = harness();
+    await assert.rejects(
+      refused.subject.putManifestEntry(entry({ provider, reasoning_effort: reasoning_effort as DaemonManifestEntry["reasoning_effort"] })),
+      /does not take reasoning effort/,
+    );
+    assert.deepEqual(refused.events, []);
+  }
+  for (const [provider, reasoning_effort] of [["open-model", "high"], ["open-model", "xhigh"], ["codex", "max"], ["claude-code", null], ["claude-code", "max"]] as const) {
+    const saved = await harness().subject.putManifestEntry(entry({ provider, reasoning_effort }));
+    assert.equal(saved.reasoning_effort, reasoning_effort);
+  }
 });
 
 test("a new agent never shares a name with another agent saved for its room", async () => {
@@ -425,54 +415,22 @@ test("manifest.put rejects caller-supplied polling custody before any write or c
   }
 });
 
-test("put enforces purge, supervised, and live legacy lane ownership without overfencing stopped claims", async () => {
+test("put enforces purge and admits a second supervised entry for the same room and provider", async () => {
   const purged = harness();
   purged.setPurgeComplete(true);
   await assert.rejects(purged.subject.putManifestEntry(entry()), /was permanently purged/);
 
   const supervised = harness([entry({ id: "owner", desired_state: "running" })]);
-  await assert.rejects(
-    supervised.subject.putManifestEntry(entry({ id: "candidate", desired_state: "paused" })),
-    /already owned by supervised entry 'owner'/,
-  );
-
-  const legacy = harness();
-  (legacy.manifest as DaemonManifest).legacy_lane_owners = [legacyOwner()];
-  await assert.rejects(
-    legacy.subject.putManifestEntry(entry({ desired_state: "running" })),
-    /already owned by legacy reservation 'legacy-1'/,
-  );
-  assert.equal((await legacy.subject.putManifestEntry(entry({ id: "stopped", desired_state: "stopped" }))).id, "stopped");
+  const candidate = await supervised.subject.putManifestEntry(entry({ id: "candidate", desired_state: "paused" }));
+  assert.equal(candidate.id, "candidate");
+  assert.deepEqual(supervised.manifest.entries.map((current) => current.id), ["owner", "candidate"]);
 });
 
-test("restart quarantine stops every duplicate non-concurrent lane owner and preserves concurrent providers", async () => {
-  const state = harness([
-    entry({ id: "left", desired_state: "running" }),
-    entry({ id: "right", desired_state: "paused" }),
-    entry({ id: "terminal", desired_state: "stopped", observed_state: "stopped" }),
-    entry({ id: "codex-left", provider: "codex", desired_state: "running" }),
-    entry({ id: "codex-right", provider: "codex", desired_state: "running" }),
-  ]);
-
-  await state.subject.quarantineDuplicateSupervisedLaneOwners();
-
-  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "left")?.desired_state, "stopped");
-  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "right")?.desired_state, "stopped");
-  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "left")?.last_error,
-    "LetAgents found multiple supervised agents for this provider lane after restart and stopped them to prevent duplicate work.");
-  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "terminal")?.last_error, undefined);
-  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "codex-left")?.desired_state, "running");
-  assert.equal(state.manifest.entries.find((candidate) => candidate.id === "codex-right")?.desired_state, "running");
-  assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
-});
-
-test("display naming trims, avoids no-op commits, and keeps legacy-owner cleanup in the write", async () => {
+test("display naming trims and avoids no-op commits", async () => {
   const state = harness([entry()]);
-  (state.manifest as DaemonManifest).legacy_lane_owners = [legacyOwner()];
 
   const renamed = await state.subject.setDisplayName("agent-1", "  Renamed  ");
   assert.equal(renamed.display_name, "Renamed");
-  assert.equal(state.events.includes("lanes:live"), true);
   assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
 
   state.events.length = 0;
@@ -493,7 +451,7 @@ test("serialized admission asserts current ownership and the commit fence blocks
   const fenced = harness([entry()]);
   fenced.setHandoffScheduled(true);
   await assert.rejects(
-    fenced.subject.appendActivity("agent-1", activity()),
+    fenced.subject.appendNativeActivity("agent-1", activity(), false),
     /Supervisor handoff fenced a stale daemon-owned commit/,
   );
   assert.equal(fenced.events.includes("authority:fence"), true);
@@ -507,21 +465,22 @@ test("activity sanitization precedes sequence admission and persists exact bound
   const state = harness([entry({ activity: [prior], observed_state: "idle" })]);
 
   await assert.rejects(
-    state.subject.appendActivity("agent-1", activity({ sequence: 5 })),
+    state.subject.appendNativeActivity("agent-1", activity({ sequence: 5 }), false),
     /Native activity sequence 5 is not newer than 5/,
   );
 
-  const updated = await state.subject.appendActivity("agent-1", activity({
+  await state.subject.appendNativeActivity("agent-1", activity({
     sequence: 6,
     status: "blocked",
     summary: "blocked token=abcdefghijklmnopqrstuvwxyz123456",
     payload: { api_key: "secret-value" },
-  }));
+  }), false);
+  const updated = state.manifest.entries[0]!;
   assert.equal(updated.observed_state, "idle", "blocked activity preserves observed state");
   assert.equal(updated.native_liveness?.state, "active");
   assert.equal(updated.activity?.at(-1)?.payload_redacted, true);
   assert.equal(JSON.stringify(updated.activity?.at(-1)).includes("secret-value"), false);
-  assert.equal(state.events.includes("store:append:6:200"), true);
+  assert.equal(state.events.includes("store:record:6:200"), true);
   assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
 });
 
@@ -548,6 +507,21 @@ test("activity-only persistence sanitizes presentation without acquiring lifecyc
   assert.equal(state.events.includes("store:commit-activity"), false,
     "presentation-only persistence cannot enter the lifecycle-bearing store path");
   assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
+});
+
+test("a provider stream's event whose position a notice took meanwhile is written after the newest, not refused", async () => {
+  for (const activityOnly of [false, true]) {
+    const state = harness([entry({ observed_state: "idle", activity: Array.from({ length: 6 }, (_, sequence) => activity({ sequence })) })]);
+    // The event read position 5 as the next free one; a notice has taken it since.
+    await assert.rejects(state.subject.appendNativeActivity("agent-1", activity({ sequence: 5 }), activityOnly), /not newer than 5/,
+      "an exact position is still admitted exactly");
+    await state.subject.appendNativeActivity("agent-1", activity({ sequence: 5, summary: "stream event" }), activityOnly, "after_latest");
+    assert.deepEqual(state.manifest.entries[0]!.activity!.slice(-2).map(event => [event.sequence, event.summary]),
+      [[5, activity({ sequence: 5 }).summary], [6, "stream event"]]);
+    // A position that is still free is kept as it is.
+    await state.subject.appendNativeActivity("agent-1", activity({ sequence: 9, summary: "later event" }), activityOnly, "after_latest");
+    assert.equal(state.manifest.entries[0]!.activity!.at(-1)!.sequence, 9);
+  }
 });
 
 test("native activity keeps scalar admission, redaction, lifecycle ownership, and fencing without entry reads", async () => {
@@ -603,7 +577,7 @@ test("activity, liveness, and configuration stores reject a stale accepted manif
   const staleActivity = harness([entry()]);
   staleActivity.setAcceptedManifestGeneration(3);
   await assert.rejects(
-    staleActivity.subject.appendActivity("agent-1", activity()),
+    staleActivity.subject.appendNativeActivity("agent-1", activity(), false),
     /activity append must use the durable manifest generation/,
   );
   assert.equal(staleActivity.events.includes("authority:fence"), false);
@@ -716,4 +690,562 @@ test("configuration keeps daemon and revision fences, trusted-policy derivation,
     "a revision conflict must not notify state watchers");
   assert.equal(state.events.includes("authority:accept:5"), true,
     "the unchanged durable generation is still adopted exactly as production does");
+});
+
+const OWN_SETUP_KEY = "letagentsOwnerIsolation";
+/** The stored form of "on", and of the revisions at which the choice changed. */
+const OWN_SETUP_ON = { [OWN_SETUP_KEY]: false };
+const changedAt = (...revisions: number[]) => Object.fromEntries(revisions.map((revision) => [`letagentsOwnerIsolationChangedAt${revision}`, false]));
+/** The revision at which the access level (permission mode) was last changed. */
+const permissionChangedAt = (revision: number) => ({ [`letagentsPermissionChangedAt${revision}`]: false });
+
+test("the owner's own setup is turned on and off as its own revisioned change, and other edits keep it", async () => {
+  const state = harness([entry({ provider: "codex" })]);
+  const before = await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+  assert.equal(before.home_harness, false, "a row with no value is off");
+  assert.equal(before.home_harness_availability, "available");
+
+  state.events.length = 0;
+  const on = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 3, configuration: {}, homeHarness: true,
+  });
+  assert.equal(on.outcome, "updated");
+  assert.equal(on.configuration?.home_harness, true);
+  assert.equal(on.configuration?.config_revision, 4, "it applies at the next start, like a model or access change");
+  assert.equal(on.configuration?.runtime_configuration_revision, 2);
+  assert.equal(on.configuration?.home_harness_pending, true, "a process that is already running does not have it yet");
+  assert.deepEqual(state.configuration?.provider_launch_policy,
+    { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, ...OWN_SETUP_ON, ...changedAt(4) });
+  assert.equal(state.configuration?.model, "gpt-5.6", "nothing else about the agent changes");
+  assert.equal(state.configuration?.charter, "Help the room");
+  assert.ok(state.events.includes("authority:fence") && state.events.includes("state:notify"));
+
+  // Asking for what is already saved changes nothing.
+  state.events.length = 0;
+  const again = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 4, configuration: {}, homeHarness: true,
+  });
+  assert.equal(again.outcome, "updated");
+  assert.equal(again.configuration?.config_revision, 4);
+  assert.equal(state.events.some((event) => event.startsWith("store:update-config")), false);
+
+  // A model or access edit carries the choice forward.
+  const edited = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 4,
+    configuration: { model: "gpt-5.6-mini", reasoning_effort: "low", charter: "Help the room", permission_profile_id: "ask_before_write" },
+  });
+  assert.equal(edited.outcome, "updated");
+  assert.equal(edited.configuration?.home_harness, true);
+  assert.deepEqual(state.configuration?.provider_launch_policy, {
+    approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false }, ...OWN_SETUP_ON, ...changedAt(4),
+    // The access level changed in this save, which is recorded beside the choice and does not disturb it.
+    ...permissionChangedAt(5),
+  });
+  assert.equal(edited.configuration?.home_harness_pending, true);
+
+  const stale = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 4, configuration: {}, homeHarness: false,
+  });
+  assert.equal(stale.outcome, "conflict", "a stale revision changes nothing");
+  assert.equal(state.configuration?.config_revision, 5);
+
+  const off = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 5, configuration: {}, homeHarness: false,
+  });
+  assert.equal(off.outcome, "updated");
+  assert.equal(off.configuration?.home_harness, false);
+  assert.equal(Object.hasOwn(state.configuration!.provider_launch_policy as object, OWN_SETUP_KEY), false,
+    "off stores no key, exactly like an agent that never had it");
+  assert.equal(off.configuration?.home_harness_pending, false, "the running process never started with it, so nothing is left to stop");
+});
+
+test("turning the owner's own setup off is not reported as done while the process that started with it still runs", async () => {
+  const state = harness([entry({ provider: "codex" })]);
+  const toggle = async (homeHarness: boolean) => {
+    const result = await state.subject.updateAgentConfiguration({
+      entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: state.configuration!.config_revision, configuration: {}, homeHarness,
+    });
+    assert.equal(result.outcome, "updated");
+    return result.configuration!;
+  };
+  /** The agent restarts: its new process starts with the saved configuration. */
+  const restart = () => state.setConfiguration({ ...state.configuration!, runtime_configuration_revision: state.configuration!.config_revision });
+  const read = () => state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+
+  assert.deepEqual([(await toggle(true)).home_harness, (await read()).home_harness_pending], [true, true]);
+  restart();
+  assert.deepEqual([(await read()).home_harness, (await read()).home_harness_pending], [true, false], "now it runs with it");
+
+  const off = await toggle(false);
+  assert.deepEqual([off.home_harness, off.home_harness_pending], [false, true], "saved off, but the running process still has it");
+  // An ordinary save in between changes neither the choice nor what is still running.
+  const saved = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: state.configuration!.config_revision,
+    configuration: { model: "gpt-5.6", reasoning_effort: "low", charter: "Help the room", permission_profile_id: "full_access" },
+  });
+  assert.deepEqual([saved.configuration?.home_harness, saved.configuration?.home_harness_pending], [false, true]);
+  // Back on before any restart: the process has had it all along.
+  const backOn = await toggle(true);
+  assert.deepEqual([backOn.home_harness, backOn.home_harness_pending], [true, false]);
+  const offAgain = await toggle(false);
+  assert.deepEqual([offAgain.home_harness, offAgain.home_harness_pending], [false, true]);
+  restart();
+  assert.deepEqual([(await read()).home_harness, (await read()).home_harness_pending], [false, false], "only a restart ends it");
+});
+
+test("turning the owner's setup on and off again leaves every agent's own settings, and what its saved tool permissions are tied to, exactly as they were", async () => {
+  // Each access level, in the short form Add Agent stores and in the full form a Save stores.
+  const cases: Array<[string, string | null, Record<string, unknown>]> = [
+    ["codex", "full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
+    ["codex", "full_access", {}],
+    ["codex", null, {}],
+    ["codex", "ask_before_write", {}],
+    ["codex", "ask_before_write", { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } }],
+    ["codex", "auto_review", {}],
+    ["codex", "auto_review", { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" }],
+    ["claude-code", "read_only", { permissionMode: "dontAsk", dangerouslySkipPermissions: false }],
+    ["claude-code", "read_only", { permissionMode: "dontAsk", dangerouslySkipPermissions: false, tools: ["Read", "Glob", "Grep"], allowedTools: ["mcp__letagents__*"], settingSources: "" }],
+    ["claude-code", "ask_before_write", { permissionMode: "default" }],
+    ["claude-code", "ask_before_write", { permissionMode: "default", dangerouslySkipPermissions: false, allowDangerouslySkipPermissions: false,
+      tools: ["Read", "Glob", "Grep", "Bash", "Write", "Edit", "NotebookEdit", "WebFetch", "WebSearch"], allowedTools: ["mcp__letagents__*"], settingSources: "", settings: "{}" }],
+    ["claude-code", "auto_review", { permissionMode: "auto" }],
+    ["claude-code", "full_access", { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }],
+    ["claude-code", "full_access", { dangerouslySkipPermissions: true, permissionMode: "bypassPermissions", model: "kept-as-it-was" }],
+  ];
+  for (const [provider, profile, policy] of cases) {
+    const name = `${provider}/${profile}/${JSON.stringify(policy)}`;
+    const state = harness([entry({ provider })]);
+    state.setConfiguration(storedConfiguration({ provider, reasoning_effort: null, permission_profile_id: profile, provider_launch_policy: policy }));
+    const before = structuredClone(state.configuration!);
+    const digest = () => hostToolPolicyDigest({ permission_profile_id: state.configuration!.permission_profile_id ?? undefined, provider_launch_policy: state.configuration!.provider_launch_policy });
+    const digestBefore = digest();
+    const toggle = async (homeHarness: boolean) => {
+      const result = await state.subject.updateAgentConfiguration({
+        entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: state.configuration!.config_revision, configuration: {}, homeHarness,
+      });
+      assert.equal(result.outcome, "updated", name);
+    };
+    await toggle(true);
+    assert.notEqual(digest(), digestBefore, `${name}: on, the saved tool permissions are paused`);
+    // On adds LetAgents' own keys and touches nothing else.
+    const native = Object.fromEntries(Object.entries(state.configuration!.provider_launch_policy as Record<string, unknown>).filter(([key]) => !key.startsWith("letagents")));
+    assert.equal(JSON.stringify(native), JSON.stringify(policy), `${name}: the provider's own options are not rewritten`);
+    await toggle(false);
+    assert.equal(digest(), digestBefore, `${name}: off again, they apply again`);
+    const after = state.configuration!;
+    assert.deepEqual(
+      { model: after.model, reasoning_effort: after.reasoning_effort, charter: after.charter, permission_profile_id: after.permission_profile_id },
+      { model: before.model, reasoning_effort: before.reasoning_effort, charter: before.charter, permission_profile_id: before.permission_profile_id }, name);
+    // A second round trip, and one made before the agent ever restarted, change nothing either.
+    await toggle(true); await toggle(false);
+    assert.equal(digest(), digestBefore, `${name}: second round trip`);
+  }
+});
+
+test("a value planted in a rental's stored settings is removed by its next ordinary save", async () => {
+  for (const [id, provider, profile, native] of [
+    ["supervised_rental_0123", "codex", "full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
+    ["supervised_rental_0123", "cursor", "sandboxed_write", { force: true, sandbox: "enabled" }],
+    ["agent-1", "cursor", "sandboxed_write", { force: true, sandbox: "enabled" }],
+  ] as const) {
+    const state = harness([entry({ id, provider })]);
+    state.setConfiguration(storedConfiguration({
+      provider, reasoning_effort: null, model: null, permission_profile_id: profile,
+      provider_launch_policy: { ...native, ...OWN_SETUP_ON, ...changedAt(2) },
+    }));
+    const saved = await state.subject.updateAgentConfiguration({
+      entryId: id, daemonGeneration: DAEMON_GENERATION, expectedRevision: 3,
+      configuration: { model: null, reasoning_effort: null, charter: "Help the room, carefully", permission_profile_id: profile },
+    });
+    assert.equal(saved.outcome, "updated", `${id}/${provider}`);
+    assert.deepEqual(state.configuration?.provider_launch_policy, native, `${id}/${provider}: neither key survives the save`);
+    assert.equal(saved.configuration?.home_harness, false);
+    assert.equal(saved.configuration?.home_harness_pending, false);
+  }
+});
+
+test("an ordinary configuration update cannot turn the owner's own setup on", async () => {
+  const state = harness([entry({ provider: "codex" })]);
+  const fields = { model: "gpt-5.6", reasoning_effort: "high", charter: "Help the room", permission_profile_id: "full_access" };
+  for (const smuggled of [
+    { ...fields, homeHarness: true },
+    { ...fields, home_harness: true },
+    { ...fields, ...OWN_SETUP_ON },
+  ]) {
+    const result = await state.subject.updateAgentConfiguration({
+      entryId: "agent-1", daemonGeneration: DAEMON_GENERATION,
+      expectedRevision: state.configuration!.config_revision, configuration: smuggled,
+    });
+    assert.equal(result.outcome, "updated");
+    assert.equal(result.configuration?.home_harness, false, JSON.stringify(smuggled));
+    assert.equal(Object.hasOwn(state.configuration!.provider_launch_policy as object, OWN_SETUP_KEY), false);
+  }
+  const policy = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: state.configuration!.config_revision,
+    configuration: { ...fields, provider_launch_policy: OWN_SETUP_ON },
+  });
+  assert.equal(policy.outcome, "invalid");
+  assert.equal((await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).home_harness, false);
+
+  // A choice that is not exactly on or off is refused, not guessed.
+  const unclear = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: state.configuration!.config_revision,
+    configuration: {}, homeHarness: "true" as never,
+  });
+  assert.equal(unclear.outcome, "invalid");
+  assert.equal((await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).home_harness, false);
+});
+
+test("a rented agent and an agent app with no owner setup never get the owner's own setup", async () => {
+  for (const [id, provider, availability, reason] of [
+    ["supervised_rental_0123", "codex", "rental", /rented agent works for someone else/],
+    ["supervised_rental_0123", "cursor", "rental", /rented agent works for someone else/],
+    ["agent-1", "cursor", "unsupported", /no setup of yours/],
+    ["agent-1", "open-model", "unsupported", /no setup of yours/],
+  ] as const) {
+    const state = harness([entry({ id, provider })]);
+    // Even a stored value, however it got there, reads as off.
+    state.setConfiguration(storedConfiguration({
+      provider,
+      permission_profile_id: provider === "cursor" ? "sandboxed_write" : "full_access",
+      provider_launch_policy: provider === "cursor"
+        ? { force: true, sandbox: "enabled", ...OWN_SETUP_ON }
+        : provider === "open-model" ? { permission: { "*": "allow" }, ...OWN_SETUP_ON }
+          : { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, ...OWN_SETUP_ON },
+    }));
+    const current = await state.subject.getAgentConfiguration(id, DAEMON_GENERATION);
+    assert.equal(current.home_harness, false, `${id}/${provider}`);
+    assert.equal(current.home_harness_availability, availability);
+    state.events.length = 0;
+    const refused = await state.subject.updateAgentConfiguration({
+      entryId: id, daemonGeneration: DAEMON_GENERATION, expectedRevision: 3, configuration: {}, homeHarness: true,
+    });
+    assert.equal(refused.outcome, "invalid");
+    assert.match((refused as { error: string }).error, reason);
+    assert.equal(state.events.some((event) => event.startsWith("store:update-config")), false, "nothing is written");
+  }
+});
+
+test("an agent that collects its own room messages cannot be given the owner's own setup, and a stored value is taken out at its next save", async () => {
+  for (const [provider, profile, native] of [
+    ["codex", "full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
+    ["claude-code", "ask_before_write", { permissionMode: "default", dangerouslySkipPermissions: false }],
+  ] as const) {
+    for (const deliveryMode of ["mcp_polling", undefined] as const) {
+      const state = harness([entry({ provider })]);
+      const stored = storedConfiguration({
+        provider, reasoning_effort: null, model: null, permission_profile_id: profile,
+        provider_launch_policy: { ...native, ...OWN_SETUP_ON, ...changedAt(2) },
+      });
+      if (deliveryMode) stored.delivery_mode = deliveryMode; else delete stored.delivery_mode;
+      state.setConfiguration(stored);
+      // Settings shows it as off, with the reason, and never as waiting for a restart.
+      const read = await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+      assert.deepEqual([read.home_harness, read.home_harness_pending, read.home_harness_availability], [false, false, "polling"], `${provider}/${deliveryMode}`);
+      // The desktop app's own signed request is refused, and nothing is written.
+      state.events.length = 0;
+      const refused = await state.subject.updateAgentConfiguration({
+        entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 3, configuration: {}, homeHarness: true,
+      });
+      assert.equal(refused.outcome, "invalid");
+      assert.match((refused as { error: string }).error, /it fetches its own messages, so LetAgents can't reliably switch your setup off again/);
+      assert.equal(state.events.some((event) => event.startsWith("store:update-config")), false);
+      // An ordinary save removes what was stored.
+      const saved = await state.subject.updateAgentConfiguration({
+        entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 3,
+        configuration: { model: null, reasoning_effort: null, charter: "Help the room, carefully", permission_profile_id: profile },
+      });
+      assert.equal(saved.outcome, "updated");
+      assert.equal(Object.keys(state.configuration!.provider_launch_policy as object).some((key) => key.startsWith("letagents")), false);
+    }
+  }
+});
+
+test("a Codex agent that collects its own room messages cannot be saved as Read-only: the level is listed as unavailable with the reason, and the save says it", { skip: process.platform === "win32" ? "Codex has no Read-only on Windows: codexReadOnlyRefusal has its own test." : false }, async () => {
+  const NEEDS_DELIVERY = "Read-only access is for a Codex agent that LetAgents delivers room messages to. "
+    + "This agent collects its own room messages, so LetAgents cannot hold it to the room tools that Read-only allows. Choose another access level for this agent.";
+  type Listed = { id: string; status: string; detail: string | null };
+  const save = (state: ReturnType<typeof harness>, profile: string) => state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 3,
+    configuration: { model: null, reasoning_effort: null, charter: "Help the room, carefully", permission_profile_id: profile },
+  });
+  const usual = supervisedPermissionProfilesForProvider("codex") as Listed[];
+  for (const deliveryMode of ["mcp_polling", undefined] as const) {
+    const state = harness([entry({ provider: "codex" })]);
+    const stored = storedConfiguration({ model: null, reasoning_effort: null });
+    if (deliveryMode) stored.delivery_mode = deliveryMode; else delete stored.delivery_mode;
+    state.setConfiguration(stored);
+    // Where the access levels are offered: Read-only cannot be chosen, and says why. Every other level is as it was.
+    const listed = (await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).supervised_permission_profiles as Listed[];
+    assert.deepEqual(listed.map((profile) => (profile.id === "read_only" ? [profile.status, profile.detail] : profile)),
+      usual.map((profile) => (profile.id === "read_only" ? ["gated", NEEDS_DELIVERY] : profile)), String(deliveryMode));
+    // Where it is saved: refused in the same words, and nothing is written.
+    state.events.length = 0;
+    const refused = await save(state, "read_only");
+    assert.deepEqual([refused.outcome, (refused as { error?: string }).error], ["invalid", NEEDS_DELIVERY], String(deliveryMode));
+    assert.equal(state.events.some((event) => event.startsWith("store:update-config")), false, "nothing is written");
+    assert.equal(state.configuration!.permission_profile_id, "full_access");
+    // Another level is saved as before.
+    assert.equal((await save(state, "ask_before_write")).outcome, "updated");
+    assert.equal(state.configuration!.permission_profile_id, "ask_before_write");
+  }
+  // An agent the background service delivers room messages to: Read-only is offered and saved.
+  const delivered = harness([entry({ provider: "codex" })]);
+  delivered.setConfiguration(storedConfiguration({ model: null, reasoning_effort: null }));
+  assert.deepEqual((await delivered.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).supervised_permission_profiles, usual);
+  assert.equal((await save(delivered, "read_only")).outcome, "updated");
+  assert.equal(delivered.configuration!.permission_profile_id, "read_only");
+  // Read-only for another provider is another thing, and is not touched.
+  const claude = harness([entry({ provider: "claude-code" })]);
+  claude.setConfiguration(storedConfiguration({ provider: "claude-code", model: null, reasoning_effort: null, permission_profile_id: "ask_before_write",
+    provider_launch_policy: { permissionMode: "default", dangerouslySkipPermissions: false }, delivery_mode: "mcp_polling" }));
+  assert.deepEqual((await claude.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).supervised_permission_profiles, supervisedPermissionProfilesForProvider("claude-code"));
+  assert.equal((await save(claude, "read_only")).outcome, "updated");
+});
+
+test("a new agent cannot be created with the owner's own setup already on", async () => {
+  const state = harness();
+  for (const value of [false, true, "false", null]) {
+    await assert.rejects(
+      state.subject.putManifestEntry(entry({
+        id: "supervised_new", provider: "codex",
+        provider_launch_policy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, [OWN_SETUP_KEY]: value },
+      })),
+      /turned on in the desktop app and cannot be supplied to manifest\.put/,
+    );
+  }
+  // Nor with the key nested, in a history of changes, or carried on an own `__proto__` as JSON text can.
+  for (const policy of [
+    { approvalPolicy: "never", nested: OWN_SETUP_ON },
+    { approvalPolicy: "never", ...changedAt(1) },
+    // The record of a changed access level is the daemon's own too: a caller that could write one could make it restart the agent for ever.
+    { approvalPolicy: "never", ...permissionChangedAt(99_999_999) },
+    JSON.parse(`{"approvalPolicy":"never","__proto__":{"${OWN_SETUP_KEY}":false}}`),
+    JSON.parse(`{"approvalPolicy":"never","sandboxPolicy":{"__proto__":{"${OWN_SETUP_KEY}":false}}}`),
+    // Any spelling of a key LetAgents keeps for itself, and the escaped and repeated forms JSON text allows.
+    { approvalPolicy: "never", LetagentsOwnerIsolation: false },
+    { approvalPolicy: "never", "letagents-owner-isolation": false },
+    { approvalPolicy: "never", letagentsHomeHarness: true },
+    JSON.parse('{"approvalPolicy":"never","letagents\\u004fwnerIsolation":false}'),
+    JSON.parse('{"approvalPolicy":"never","letagentsOwnerIsolation":true,"letagentsOwnerIsolation":false}'),
+  ]) {
+    await assert.rejects(
+      state.subject.putManifestEntry(entry({ id: "supervised_new", provider: "codex", provider_launch_policy: policy })),
+      /turned on in the desktop app and cannot be supplied to manifest\.put/, JSON.stringify(policy),
+    );
+  }
+  assert.deepEqual(state.manifest.entries, []);
+  assert.equal(state.events.includes("store:load"), false, "the request is refused before anything is read or written");
+});
+
+test("an agent that uses its owner's Claude settings is told so beside each access level", async () => {
+  const state = harness([entry({ provider: "claude-code" })]);
+  state.setConfiguration(storedConfiguration({
+    provider: "claude-code", reasoning_effort: null, permission_profile_id: "ask_before_write",
+    provider_launch_policy: { permissionMode: "default", dangerouslySkipPermissions: false, ...OWN_SETUP_ON },
+  }));
+  const on = await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+  assert.equal(on.home_harness, true);
+  const details = (on.supervised_permission_profiles as Array<{ detail: string | null }>).map((profile) => profile.detail ?? "").join(" ");
+  assert.doesNotMatch(details, /Other Claude settings do not apply/);
+  assert.match(details, /Your own Claude Code allow rules apply too, and can let the agent act without asking you/);
+  state.setConfiguration(storedConfiguration({
+    provider: "claude-code", reasoning_effort: null, permission_profile_id: "ask_before_write",
+    provider_launch_policy: { permissionMode: "default", dangerouslySkipPermissions: false },
+  }));
+  const off = await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+  assert.match((off.supervised_permission_profiles as Array<{ detail: string | null }>).map((profile) => profile.detail ?? "").join(" "),
+    /Other Claude settings do not apply/);
+});
+
+test("a change to the access level is recorded against its revision and asks for the agent to be restarted; no other edit does", async () => {
+  // Open Model cannot use the owner's setup: its stored policy is read without any key of LetAgents' own.
+  const state = harness([entry({ provider: "open-model" })]);
+  state.setConfiguration(storedConfiguration({ provider: "open-model", model: "qwen/qwen3-coder", reasoning_effort: null,
+    permission_profile_id: "full_access", provider_launch_policy: { permission: { "*": "allow" } } }));
+  const save = (expectedRevision: number, permission: string, extra: Record<string, unknown> = {}) => state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision,
+    configuration: { model: "qwen/qwen3-coder", reasoning_effort: null, charter: "Help the room", permission_profile_id: permission, ...extra },
+  });
+  const requests = () => state.events.filter((event) => event.startsWith("convergence:"));
+
+  state.events.length = 0;
+  assert.equal((await save(3, "ask_before_write")).outcome, "updated");
+  assert.deepEqual(state.configuration?.provider_launch_policy, { permission: { "*": "allow", edit: "ask", bash: "ask" }, ...permissionChangedAt(4) });
+  assert.deepEqual(requests(), ["convergence:agent-1"], "a running agent is asked to take the new level as soon as it is idle");
+
+  // Another edit while the agent has not restarted yet keeps the record, even though this agent's policy is read without it.
+  state.events.length = 0;
+  assert.equal((await save(4, "ask_before_write", { model: "qwen/other" })).outcome, "updated");
+  assert.equal(state.configuration?.model, "qwen/other");
+  assert.deepEqual(state.configuration?.provider_launch_policy, { permission: { "*": "allow", edit: "ask", bash: "ask" }, ...permissionChangedAt(4) },
+    "the process that started before revision 4 still runs the old level, so the record stays");
+  assert.deepEqual(requests(), [], "no other edit asks for a restart");
+
+  // A later change replaces the record: it is the latest that decides.
+  state.events.length = 0;
+  assert.equal((await save(5, "auto_review")).outcome, "updated");
+  assert.deepEqual(state.configuration?.provider_launch_policy, { permission: { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" }, ...permissionChangedAt(6) });
+  assert.deepEqual(requests(), ["convergence:agent-1"]);
+
+  // Nothing is recorded, or asked for, when nothing changed or nothing was saved.
+  state.events.length = 0;
+  assert.equal((await save(6, "auto_review", { charter: "Another" })).outcome, "updated");
+  assert.equal((await save(6, "full_access")).outcome, "conflict", "a stale revision saves nothing");
+  state.setConfigurationOutcome("invalid");
+  assert.equal((await save(7, "full_access")).outcome, "invalid");
+  assert.deepEqual(requests(), []);
+  assert.deepEqual(state.configuration?.provider_launch_policy, { permission: { "*": "allow", edit: "ask", bash: "ask", external_directory: "deny" }, ...permissionChangedAt(6) });
+});
+
+test("an agent that never had its access level saved is changed from the level it would have started with", async () => {
+  // No level is saved: Codex starts with full access, so choosing full access changes nothing.
+  const state = harness([entry({ provider: "codex" })]);
+  state.setConfiguration(storedConfiguration({ permission_profile_id: null, provider_launch_policy: {} }));
+  const save = (expectedRevision: number, permission: string) => state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision,
+    configuration: { model: "gpt-5.6", reasoning_effort: "high", charter: "Help the room", permission_profile_id: permission },
+  });
+  state.events.length = 0;
+  assert.equal((await save(3, "full_access")).outcome, "updated");
+  assert.equal(Object.keys(state.configuration!.provider_launch_policy as object).some((key) => key.startsWith("letagentsPermission")), false);
+  assert.deepEqual(state.events.filter((event) => event.startsWith("convergence:")), []);
+  assert.equal((await save(4, "ask_before_write")).outcome, "updated");
+  assert.deepEqual(state.events.filter((event) => event.startsWith("convergence:")), ["convergence:agent-1"]);
+});
+
+test("the owner's own setup is saved beside a change to the access level without disturbing it", async () => {
+  const state = harness([entry({ provider: "codex" })]);
+  await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 3,
+    configuration: { model: "gpt-5.6", reasoning_effort: "high", charter: "Help the room", permission_profile_id: "ask_before_write" },
+  });
+  assert.deepEqual(state.configuration?.provider_launch_policy, {
+    approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false }, ...permissionChangedAt(4),
+  });
+  state.events.length = 0;
+  const on = await state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: 4, configuration: {}, homeHarness: true,
+  });
+  assert.equal(on.outcome, "updated");
+  assert.deepEqual(state.configuration?.provider_launch_policy, {
+    approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false }, ...OWN_SETUP_ON, ...changedAt(5), ...permissionChangedAt(4),
+  }, "the record of the access level survives the switch");
+  assert.deepEqual(state.events.filter((event) => event.startsWith("convergence:")), [], "the switch has its own restart");
+});
+
+const IMAGE_INPUT_REFUSAL = /Only an Open Model agent takes this choice/;
+const saveConfiguration = (state: ReturnType<typeof harness>, expectedRevision: number, extra: Record<string, unknown> = {}) =>
+  state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision,
+    configuration: { model: "provider/model", reasoning_effort: null, charter: "Help the room", permission_profile_id: "full_access", ...extra },
+  });
+const openModelHarness = (imageInput = false) => {
+  const state = harness([entry({ provider: "open-model" })]);
+  state.setConfiguration(storedConfiguration({
+    provider: "open-model", model: "provider/model", reasoning_effort: null, permission_profile_id: "full_access",
+    provider_launch_policy: { permission: { "*": "allow" } }, image_input: imageInput,
+  }));
+  return state;
+};
+
+test("the owner of an Open Model agent saves that its model reads images, and turns it off again", async () => {
+  const state = openModelHarness();
+  assert.equal((await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION)).image_input, false, "off until the owner says so");
+
+  state.events.length = 0;
+  const on = await saveConfiguration(state, 3, { image_input: true });
+  assert.equal(on.outcome, "updated");
+  assert.equal(on.configuration?.image_input, true);
+  assert.equal(state.configuration?.image_input, true, "the store was asked to keep it");
+  assert.equal(on.configuration?.config_revision, 4, "it is a configuration change like a model change");
+  assert.ok(state.events.includes("authority:fence") && state.events.includes("state:notify"));
+  assert.equal(state.configuration?.model, "provider/model", "nothing else about the agent changes");
+
+  const off = await saveConfiguration(state, 4, { image_input: false });
+  assert.equal(off.outcome, "updated");
+  assert.equal(off.configuration?.image_input, false);
+  assert.equal(state.configuration?.image_input, false);
+});
+
+test("a save that leaves out the image choice keeps what is saved", async () => {
+  for (const saved of [true, false]) {
+    const state = openModelHarness(saved);
+    const result = await saveConfiguration(state, 3, { charter: `Changed while saved is ${saved}` });
+    assert.equal(result.outcome, "updated", String(saved));
+    assert.equal(result.configuration?.image_input, saved, `an older desktop app does not turn it ${saved ? "off" : "on"}`);
+    assert.equal(state.configuration?.image_input, saved);
+    assert.equal(state.configuration?.charter, `Changed while saved is ${saved}`);
+  }
+});
+
+test("only an Open Model agent can be saved as reading images, and a refusal writes nothing", async () => {
+  for (const [provider, profile, policy] of [
+    ["codex", "full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }],
+    ["claude-code", "full_access", { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }],
+    ["cursor", "sandboxed_write", { force: true, sandbox: "enabled" }],
+  ] as const) {
+    const state = harness([entry({ provider })]);
+    state.setConfiguration(storedConfiguration({ provider, permission_profile_id: profile, provider_launch_policy: policy }));
+    state.events.length = 0;
+    const refused = await saveConfiguration(state, 3, { image_input: true, permission_profile_id: profile });
+    assert.equal(refused.outcome, "invalid", provider);
+    assert.match((refused as { error: string }).error, IMAGE_INPUT_REFUSAL, provider);
+    assert.equal(state.events.some((event) => event.startsWith("store:update-config")), false, `${provider}: nothing is written`);
+    assert.equal(state.configuration?.image_input, false, provider);
+    assert.equal(state.configuration?.config_revision, 3, provider);
+
+    const off = await saveConfiguration(state, 3, { image_input: false, permission_profile_id: profile });
+    assert.equal(off.outcome, "updated", `${provider}: turning it off is always allowed ${JSON.stringify(off)}`);
+    assert.equal(off.configuration?.image_input, false, provider);
+  }
+});
+
+test("a choice about images that is not true or false is refused before anything is read or written", async () => {
+  for (const bad of ["true", "false", 1, 0, null, {}, []]) {
+    const state = openModelHarness();
+    state.events.length = 0;
+    const refused = await saveConfiguration(state, 3, { image_input: bad });
+    assert.equal(refused.outcome, "invalid", String(bad));
+    assert.deepEqual(state.events, [], `${JSON.stringify(bad)}: no store read, no write`);
+    assert.equal(state.configuration?.image_input, false);
+    assert.equal(state.configuration?.config_revision, 3);
+  }
+});
+
+test("settings report that the image choice exists only for an Open Model agent", async () => {
+  for (const [provider, available] of [["open-model", true], ["codex", false], ["claude-code", false], ["cursor", false], ["legacy-provider", false]] as const) {
+    const state = harness([entry({ provider })]);
+    state.setConfiguration(storedConfiguration({ provider }));
+    const read = await state.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+    assert.equal(read.image_input_available, available, provider);
+    assert.equal(read.image_input, false, `${provider}: the saved choice is reported beside whether it is offered`);
+  }
+  const on = openModelHarness(true);
+  const read = await on.subject.getAgentConfiguration("agent-1", DAEMON_GENERATION);
+  assert.deepEqual([read.image_input, read.image_input_available], [true, true]);
+});
+
+test("switching the owner's own setup keeps a saved image choice, and an agent that cannot switch it is left as it was", async () => {
+  // Only the agent apps with an owner setup can switch it; a stored value on one of them is carried through unchanged.
+  const codex = harness([entry({ provider: "codex" })]);
+  codex.setConfiguration(storedConfiguration({ provider: "codex", image_input: true }));
+  const toggle = (state: ReturnType<typeof harness>, homeHarness: boolean) => state.subject.updateAgentConfiguration({
+    entryId: "agent-1", daemonGeneration: DAEMON_GENERATION, expectedRevision: state.configuration!.config_revision, configuration: {}, homeHarness,
+  });
+  assert.equal((await toggle(codex, true)).outcome, "updated");
+  assert.equal(codex.configuration?.image_input, true, "on");
+  assert.equal((await toggle(codex, false)).outcome, "updated");
+  assert.equal(codex.configuration?.image_input, true, "off again");
+  const plain = harness([entry({ provider: "codex" })]);
+  assert.equal((await toggle(plain, true)).outcome, "updated");
+  assert.equal(plain.configuration?.image_input, false, "an agent that never had the choice does not gain it");
+
+  // An Open Model agent has no owner setup to switch, so the request is refused and its image choice stays.
+  const openModel = openModelHarness(true);
+  openModel.events.length = 0;
+  const refused = await toggle(openModel, true);
+  assert.equal(refused.outcome, "invalid");
+  assert.equal(openModel.events.some((event) => event.startsWith("store:update-config")), false);
+  assert.equal(openModel.configuration?.image_input, true);
 });

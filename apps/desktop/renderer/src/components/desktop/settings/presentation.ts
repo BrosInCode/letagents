@@ -1,5 +1,8 @@
+import { formatDate } from "../../../domain/formatters";
+import { thisComputerLabel } from "../../../domain/supervised-agents-support";
 import type {
   DesktopAccountRoomEntry,
+  DesktopAgentCommitIdentitySettings,
   DesktopAppAgentActionMetadata,
   DesktopMcpInstallConfigPath,
 } from "../../../../../electron/ipc-types";
@@ -67,12 +70,7 @@ export function lastOpenedLabel(room: DesktopAccountRoomEntry): string {
   if (!room.lastOpenedAt) return "No recent activity";
   const timestamp = new Date(room.lastOpenedAt);
   if (Number.isNaN(timestamp.getTime())) return "Recent";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(timestamp);
+  return formatDate("monthDayTime", timestamp);
 }
 
 export function roleSourceLabel(room: DesktopAccountRoomEntry): string {
@@ -84,4 +82,17 @@ export function roleSourceLabel(room: DesktopAccountRoomEntry): string {
   if (room.source === "participant") return `${role} · Participant`;
   if (room.source === "focus") return `${role} · Focus activity`;
   return role;
+}
+
+/** What the agent-commit switch means right now, in the owner's terms. */
+export function agentCommitIdentityDescription(settings: DesktopAgentCommitIdentitySettings | null): string {
+  if (!settings) return "Checking how agents commit…";
+  if (settings.useHostGitIdentity) {
+    return `Agents commit with ${thisComputerLabel()}'s own Git name and email. Applies when an agent next starts.`;
+  }
+  if (!settings.githubIdentity) {
+    return `Connect GitHub so agents commit without your Git email. Until then they use ${thisComputerLabel()}'s Git identity.`;
+  }
+  const { name, email } = settings.githubIdentity;
+  return `In GitHub repositories that would use your global Git email, agents commit as ${name} <${email}> instead. Applies when an agent next starts.`;
 }

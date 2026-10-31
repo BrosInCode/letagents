@@ -180,3 +180,30 @@ test("a response that never drains is closed on a bounded deadline with all reso
   assert.equal(res.listenerCount("drain"), 0);
   assert.equal(res.listenerCount("error"), 0);
 });
+
+test('typing uses a synchronous best-effort write: no drain listener, queue or message reordering', async () => {
+  const req = new EventEmitter();
+  const res = Object.assign(fakeSseResponse(), {
+    socket: { setKeepAlive() {} }, setHeader() {}, flushHeaders() {},
+    end() { this.writableEnded = true; },
+  });
+  const connection = openSseConnection(req as any, res as any, 'typing-test');
+  try {
+    res.chunks.length = 0;
+    await connection.write('message-one');
+    res.writableNeedDrain = true;
+    assert.equal(connection.tryWrite('typing-dropped'), false);
+    assert.equal(res.listenerCount('drain'), 0, 'hint never waits for backpressure');
+    res.writableNeedDrain = false;
+    res.writableLength = 1;
+    assert.equal(connection.tryWrite('typing-also-dropped'), false);
+    res.writableLength = 0;
+    await connection.write('message-two');
+    assert.deepEqual(res.chunks, ['message-one', 'message-two']);
+    assert.equal(connection.tryWrite('typing'), true);
+    await connection.write('message-three');
+    assert.deepEqual(res.chunks, ['message-one', 'message-two', 'typing', 'message-three']);
+    assert.equal(res.destroyed, false);
+  } finally { connection.close(); }
+  assert.equal(connection.tryWrite('after-close'), false);
+});

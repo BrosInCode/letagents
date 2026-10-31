@@ -1,4 +1,15 @@
-export const TURN_START_TIMEOUT_MS = 30_000;
+import { tmpdir } from "node:os";
+
+/**
+ * How long a released turn has to report Cursor's init. This bound covers the
+ * wrapper's own start as well as Cursor's. On Windows that start also hosts a
+ * cold MCP runtime and seals its pipe through PowerShell, before Cursor runs:
+ * 61 to 66 s from release to init with four turns starting in a 4-CPU VM.
+ */
+export function cursorTurnStartTimeoutMs(platform: NodeJS.Platform = process.platform): number {
+  return platform === "win32" ? 120_000 : 30_000;
+}
+export const TURN_START_TIMEOUT_MS = cursorTurnStartTimeoutMs();
 
 // Native readiness and MCP capability attestation intentionally share one
 // deadline so a legitimate cold Cursor process keeps a single startup budget.
@@ -13,9 +24,13 @@ export const CURSOR_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 
 // Both checks are local-runtime contracts. Keep enough room for Cursor's
 // native handshake without turning a broken runtime into a long launch stall.
-export const CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS = 15_000;
-export const CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS = 15_000;
-export const CURSOR_MCP_CONNECTOR_PARENT = "/tmp";
+export const CURSOR_REAL_MCP_VALIDATION_TIMEOUT_MS = process.platform === "win32" ? 45_000 : 15_000;
+export const CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS = process.platform === "win32" ? 30_000 : 15_000;
+/** Cursor's sandbox profile names /tmp on macOS; Windows has no /tmp, so its per-user temporary folder stands in. */
+export function cursorMcpConnectorParent(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? tmpdir() : "/tmp";
+}
+export const CURSOR_MCP_CONNECTOR_PARENT = cursorMcpConnectorParent();
 export const CURSOR_SUPERVISED_AGENT_ENDPOINT = "https://api2.cursor.sh";
 export const CURSOR_SUPERVISED_CONTROL_PLANE_PATHS = [
   "/aiserver.v1.DashboardService/GetMe",

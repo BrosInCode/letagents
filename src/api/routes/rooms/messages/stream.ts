@@ -1,9 +1,9 @@
+import { ROOM_TYPING } from "../../../../../shared/room-typing.mjs";
+import { roomTyping } from "../../../server/room-typing.js";
 import { waitForMessageRouting } from "./wait-for-routing.js";
+import { replyTurnHoldAgentKey } from "./activation-identity.js";
 import type { Express } from "express";
 import {
-  ROOM_RESOURCE_AGENT_APPROVAL,
-  ROOM_RESOURCE_AGENT_WORK,
-  ROOM_RESOURCE_EXECUTION_DELEGATION,
   ROOM_RESOURCE_INVALIDATION_CAPABILITY,
 } from "../../../../../shared/room-resource-invalidation.mjs";
 import {
@@ -47,7 +47,28 @@ const runStreamCheckpoint = createBoundedExecutor({
 const MAX_STREAM_CAPABILITY_VALUES = 16;
 const MAX_STREAM_CAPABILITY_BYTES = 512;
 
-function streamSupportsResourceInvalidation(req: AuthenticatedRequest): boolean {
+/**
+ * The SSE frame of a reasoning change. A live session (an agent's turn, shared
+ * by its owner) has its own event names, so clients that read reasoning
+ * sessions, older ones included, never receive one.
+ */
+export function reasoningStreamFrame(
+  projectId: string,
+  event: Extract<RoomEvent, { kind: "reasoning_updated" | "reasoning_removed" }>,
+): { name: string; data: Record<string, unknown> } {
+  if (event.kind === "reasoning_removed") {
+    return {
+      name: event.sessionKind === "live" ? "live_activity_remove" : "reasoning_remove",
+      data: { room_id: projectId, session_id: event.sessionId },
+    };
+  }
+  if (event.session.kind === "live") {
+    return { name: "live_activity_update", data: { room_id: projectId, session: event.session } };
+  }
+  return { name: "reasoning_update", data: { room_id: projectId, session: event.session, update: event.update } };
+}
+
+function streamSupports(req: AuthenticatedRequest, capability: string): boolean {
   const raw = req.query?.stream_capability;
   const values = typeof raw === "string"
     ? [raw]
@@ -63,7 +84,7 @@ function streamSupportsResourceInvalidation(req: AuthenticatedRequest): boolean 
       || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value)
     ) return false;
   }
-  return values.includes(ROOM_RESOURCE_INVALIDATION_CAPABILITY);
+  return values.includes(capability);
 }
 
 export function registerMessageStreamRoute(
@@ -75,7 +96,7 @@ export function registerMessageStreamRoute(
     if (!project) return;
 
     const projectId = project.id;
-    const supportsResourceInvalidation = streamSupportsResourceInvalidation(req);
+    const supportsResourceInvalidation = streamSupports(req, ROOM_RESOURCE_INVALIDATION_CAPABILITY);
     const accessRoomName = await (
       deps.resolveRequestProjectRepoAccessRoomName ?? resolveRequestProjectRepoAccessRoomName
     )(req, project);
@@ -155,6 +176,7 @@ export function registerMessageStreamRoute(
           requestedCursor,
           includePromptOnly,
           waitForRouting: liveController.activationIdentity?.session_kind === "worker",
+          holdAgentKey: replyTurnHoldAgentKey(liveController.activationIdentity),
         }),
       );
       await writeEvent(roomSyncSseFrame({
@@ -172,6 +194,17 @@ export function registerMessageStreamRoute(
         requested_cursor: requestedCursor,
         event_cursor: subscription.checkpointCursor,
         gap: true,
+      }));
+    }
+
+    if (isAppSession(req) && !project.focus_key?.startsWith("rental:") && streamSupports(req, ROOM_TYPING)) {
+      let checking = false;
+      connection.addCleanup(roomTyping.subscribe(projectId, req.sessionAccount!.account_id, (signal) => {
+        if (checking || streamClosed || res.writableNeedDrain || res.writableLength > 0) return;
+        checking = true;
+        void liveController.check().then((allowed) => {
+          if (allowed && signal.expires_at > Date.now()) connection?.tryWrite(`event: ${ROOM_TYPING}\ndata: ${JSON.stringify(signal)}\n\n`);
+        }).catch(() => { /* A failed hint never closes message delivery. */ }).finally(() => { checking = false; });
       }));
     }
 
@@ -218,6 +251,7 @@ export function registerMessageStreamRoute(
             // reconnect replay without a second delivery acknowledgment.
             if (liveController.activationIdentity?.session_kind === "worker" && !await waitForMessageRouting({
               roomId: projectId, messageId: event.message.id, includePromptOnly,
+              holdAgentKey: replyTurnHoldAgentKey(liveController.activationIdentity),
               closed: () => streamClosed, load: deps.getMessageStreamCheckpoint,
             })) return;
             // Let every listener enter the shared per-event overlay batch.
@@ -264,6 +298,9 @@ export function registerMessageStreamRoute(
         case "task_updated":
           await writeEvent(`${eventId}event: task_update\ndata: ${JSON.stringify({ ...event.task, room_id: projectId })}\n\n`);
           return;
+        case "task_removed":
+          await writeEvent(`${eventId}event: task_remove\ndata: ${JSON.stringify({ task_id: event.taskId, room_id: projectId })}\n\n`);
+          return;
         case "github_event_updated":
           await writeEvent(`${eventId}event: github_event\ndata: ${JSON.stringify({
             ...toPublicGitHubRoomEvent(event.event),
@@ -271,18 +308,11 @@ export function registerMessageStreamRoute(
           })}\n\n`);
           return;
         case "reasoning_updated":
-          await writeEvent(`${eventId}event: reasoning_update\ndata: ${JSON.stringify({
-            room_id: projectId,
-            session: event.session,
-            update: event.update,
-          })}\n\n`);
+        case "reasoning_removed": {
+          const frame = reasoningStreamFrame(projectId, event);
+          await writeEvent(`${eventId}event: ${frame.name}\ndata: ${JSON.stringify(frame.data)}\n\n`);
           return;
-        case "reasoning_removed":
-          await writeEvent(`${eventId}event: reasoning_remove\ndata: ${JSON.stringify({
-            room_id: projectId,
-            session_id: event.sessionId,
-          })}\n\n`);
-          return;
+        }
         case "artifact_updated":
           await writeEvent(`${eventId}event: artifact_update\ndata: ${JSON.stringify({
             room_id: projectId,
@@ -295,14 +325,8 @@ export function registerMessageStreamRoute(
             message_ids: event.messageIds,
           })}\n\n`);
           return;
-        case "agent_work_invalidated":
-        case "agent_approval_invalidated":
-        case "execution_delegation_invalidated": {
-          const resource = event.kind === "agent_work_invalidated"
-            ? ROOM_RESOURCE_AGENT_WORK
-            : event.kind === "agent_approval_invalidated"
-              ? ROOM_RESOURCE_AGENT_APPROVAL
-              : ROOM_RESOURCE_EXECUTION_DELEGATION;
+        case "resource_invalidated": {
+          const resource = event.resource;
           if (supportsResourceInvalidation) {
             await writeEvent(`${eventId}event: ${ROOM_RESOURCE_INVALIDATION_CAPABILITY}\ndata: ${JSON.stringify({
               room_id: projectId,

@@ -2,7 +2,8 @@ import type { TaskStatus } from "../db.js";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
 import { RequestValidationError } from "../validation-error.js";
 
-type RequestAuthKind = "session" | "owner_token" | "agent_session" | "supervisor_grant" | null | undefined;
+// "mcp_oauth" never reaches task routes: the auth middleware accepts it on /mcp only.
+type RequestAuthKind = "session" | "owner_token" | "agent_session" | "supervisor_grant" | "mcp_oauth" | null | undefined;
 
 export const TASK_TITLE_MAX_LENGTH = 512;
 export const TASK_DESCRIPTION_MAX_LENGTH = 100_000;
@@ -54,6 +55,7 @@ export function buildTaskUpdatePatch(input: {
     assignee_agent_key?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
+    external_ref?: string | null;
   };
   actorLabel: string | null;
   actorKey: string | null;
@@ -68,6 +70,7 @@ export function buildTaskUpdatePatch(input: {
     assignee_agent_key?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
+    external_ref?: string | null;
   } = {};
 
   if (Object.prototype.hasOwnProperty.call(body, "title")) {

@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { processBirth, PROCESS_TREE_UNKILLABLE_EXIT_CODE, signalTree } from "../../../../../shared/process-tree.mjs";
 
 // Shared process-evidence primitives for provider adapters (plan v10 §4.8).
 // Extracted verbatim from the Codex adapter (#765) so the liveness invariants
@@ -13,7 +13,7 @@ const SENSITIVE_PAYLOAD_KEY = /(?:authorization|cookie|credential|password|secre
 const AUTHORIZATION_SECRET_ASSIGNMENT = /((?:\\?["']?)\bauthorization(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!(?:bearer|basic)\b)([^\\\s"',}\]]{4,})/gi;
 const EMBEDDED_SECRET_ASSIGNMENT = /((?:\\?["']?)\b(?:[a-z0-9_.-]*(?:cookie|setCookie|credential|password|secret|clientSecret|dbPassword|apiKey|api[_-]?key|privateKey|private[_-]?key|token|accessToken|refreshToken|authToken|bearerToken|sessionToken|letagentsToken|(?:access|refresh|auth|bearer|session|letagents)[_-]?token))(?:\\?["']?)\s*[:=]\s*(?:\\?["']?))(?!\[REDACTED\]|<redacted>|\*{3,})([^\\\s"',}\]]{4,})/gi;
 const AUTHORIZATION_SCHEME_SECRET = /(\b(?:bearer|basic)\s+)([a-z0-9._~+\/-]{8,}={0,2})/gi;
-const KNOWN_SECRET = /\b(?:las(?:b|hg)_[a-z0-9_-]{20,}|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{20,}|AKIA[A-Z0-9]{16})\b/gi;
+const KNOWN_SECRET = /\b(?:las(?:b|hg)_[a-z0-9_-]{20,}|github_pat_[a-z0-9_]{20,}|gh[pousr]_[a-z0-9]{20,}|sk-[a-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|ATATT[a-z0-9_=-]{20,}|lin_(?:api|oauth)_[a-z0-9]{20,})\b/gi;
 
 export function redactCredentialText(value: string): { value: string; redacted: boolean } {
   let redacted = false;
@@ -30,8 +30,15 @@ export function redactCredentialText(value: string): { value: string; redacted: 
  * exit types (e.g. CodexAppServerExit) are structural supersets of this.
  */
 export type ProviderProcessExit =
-  | { type: "error"; error: Error }
+  /** `treeMayRun`: the helper's process is gone, but the tree in its job may not be, so its absence proves no exit. */
+  | { type: "error"; error: Error; treeMayRun?: boolean }
   | { type: "exit"; code: number | null; signal: NodeJS.Signals | null };
+
+/** The exit of a provider in the helper's job. Its unkillable code is the helper's own answer: part of the tree may still run. */
+export function providerTreeExit(provider: string, code: number | null, signal: NodeJS.Signals | null): ProviderProcessExit {
+  if (code !== PROCESS_TREE_UNKILLABLE_EXIT_CODE) return { type: "exit", code, signal };
+  return { type: "error", treeMayRun: true, error: new Error(`${provider}'s processes did not end when LetAgents closed their job. They may still be running.`) };
+}
 
 /** A control channel whose loss is disconnect evidence (RPC socket, stdio). */
 export interface ProviderControlChannel {
@@ -39,7 +46,11 @@ export interface ProviderControlChannel {
 }
 
 export interface ProviderProcessEvidenceDeps {
-  signalProcess(pid: number, signal: NodeJS.Signals): void;
+  /**
+   * Signal the process tree led by pid. `identity` is its recorded birth: on
+   * Windows a pid this process does not hold is ended only with it.
+   */
+  signalProcess(pid: number, signal: NodeJS.Signals, identity?: string | null): void;
   /** null means verified absent; undefined means liveness could not be verified. */
   getProcessIdentity(pid: number): string | null | undefined;
 }
@@ -114,43 +125,14 @@ export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function defaultSignalProcess(pid: number, signal: NodeJS.Signals): void {
-  try {
-    if (process.platform !== "win32") {
-      process.kill(-pid, signal);
-      return;
-    }
-  } catch {
-    // Fall through to the direct child pid. The process group may already be
-    // gone while the child exit event is still in flight.
-  }
-  try {
-    process.kill(pid, signal);
-  } catch {
-    // Already terminal. The observed exit promise remains authoritative.
-  }
+export function defaultSignalProcess(pid: number, signal: NodeJS.Signals, identity?: string | null): void {
+  // POSIX: the process group, then the pid alone. Windows: the helper's job
+  // of a tree this process holds, or of a pid whose recorded birth matches.
+  signalTree(pid, signal, { identity });
 }
 
 export function defaultGetProcessIdentity(pid: number): string | null | undefined {
-  try {
-    // argv/command is mutable (`claude` rewrites its process title after init),
-    // so it cannot be part of a durable birth identity. PID is carried beside
-    // this value; the kernel-recorded start time distinguishes PID reuse while
-    // remaining stable for the process lifetime.
-    const identity = execFileSync(
-      "/bin/ps",
-      ["-p", String(pid), "-o", "lstart="],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    ).trim();
-    return identity || undefined;
-  } catch {
-    try {
-      process.kill(pid, 0);
-      return undefined;
-    } catch (error) {
-      return (error as NodeJS.ErrnoException).code === "ESRCH" ? null : undefined;
-    }
-  }
+  return processBirth(pid);
 }
 
 const PS_LONG_START_PREFIX = /^\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}/;
@@ -291,7 +273,7 @@ export function observeFencedExit<E extends ProviderProcessExit>(
           return;
         }
         if (identityBeforeTerm === undefined) return;
-        deps.signalProcess(pid, "SIGTERM");
+        deps.signalProcess(pid, "SIGTERM", processIdentity);
         await delay(DEFAULT_STOP_GRACE_MS);
         if (settled) return;
         // Re-check the birth identity before escalation. A recycled PID must
@@ -305,7 +287,7 @@ export function observeFencedExit<E extends ProviderProcessExit>(
           return;
         }
         if (identityBeforeKill === undefined) return;
-        deps.signalProcess(pid, "SIGKILL");
+        deps.signalProcess(pid, "SIGKILL", processIdentity);
         // Only actual process-identity disappearance can make the generation
         // terminal. A control-channel close by itself remains ambiguous and
         // restart-blocking.
@@ -343,7 +325,7 @@ export async function terminateFreshLaunch(
     ) return;
   }
 
-  deps.signalProcess(launch.pid, "SIGTERM");
+  deps.signalProcess(launch.pid, "SIGTERM", launch.processIdentity);
   const graceful = await Promise.race([
     launch.exited.then(() => true),
     delay(graceMs).then(() => false),
@@ -361,6 +343,6 @@ export async function terminateFreshLaunch(
     ) return;
   }
 
-  deps.signalProcess(launch.pid, "SIGKILL");
+  deps.signalProcess(launch.pid, "SIGKILL", launch.processIdentity);
   await launch.exited;
 }

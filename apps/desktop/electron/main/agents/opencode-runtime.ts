@@ -19,16 +19,23 @@ if (typeof configuredVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(configuredV
 /** Single runtime contract version shared by development, packaging, and tests. */
 export const OPENCODE_RUNTIME_VERSION = configuredVersion;
 
+/** The packaged OpenCode binary's file name: Windows needs the `.exe`. */
+export function bundledOpenCodeBinaryName(platform: NodeJS.Platform = process.platform): string {
+  return platform === "win32" ? "opencode.exe" : "opencode";
+}
+
 export function resolveOpenCodeBinary(
   env: NodeJS.ProcessEnv = process.env,
   resourcesPath: string = typeof process.resourcesPath === "string"
     ? process.resourcesPath
     : "",
+  platform: NodeJS.Platform = process.platform,
+  exists: (path: string) => boolean = existsSync,
 ): string {
   if (env.LETAGENTS_OPENCODE_BIN?.trim()) return env.LETAGENTS_OPENCODE_BIN.trim();
   if (resourcesPath) {
-    const bundled = join(resourcesPath, "app", "runtime", "opencode");
-    if (existsSync(bundled)) return bundled;
+    const bundled = join(resourcesPath, "app", "runtime", bundledOpenCodeBinaryName(platform));
+    if (exists(bundled)) return bundled;
   }
   return "opencode";
 }

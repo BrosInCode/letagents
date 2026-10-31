@@ -1,0 +1,798 @@
+.connectors-page {
+  --connector-bg: var(--bg, #0b0b0c);
+  --connector-surface: var(--bg-card, light-dark(#f1f0ef, #141415));
+  --connector-hover: var(--accent-hover, light-dark(#eeecee, #19191b));
+  --connector-line: var(--border, #262628);
+  --connector-text: var(--text, #eae9ec);
+  --connector-muted: var(--text-secondary, #98979f);
+  --connector-green: light-dark(#51765f, #9cb9a8);
+  --connector-red: light-dark(#a25d5d, #d29b9b);
+  color: var(--connector-text);
+  width: 100%;
+  min-width: 0;
+  max-width: 1050px;
+  margin: 0 auto;
+  font-size: 14px;
+  line-height: 1.55;
+}
+.connectors-page *,
+.connector-dialog * {
+  box-sizing: border-box;
+}
+.connectors-page button,
+.connector-dialog button,
+.connector-dialog input,
+.connector-dialog select,
+.connector-dialog textarea {
+  font: inherit;
+}
+.connectors-page button,
+.connector-dialog button {
+  cursor: pointer;
+}
+.connectors-page button:disabled,
+.connector-dialog button:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+}
+.connectors-page button:focus-visible,
+.connector-dialog button:focus-visible,
+.connector-dialog input:focus-visible,
+.connector-dialog select:focus-visible,
+.connector-dialog textarea:focus-visible {
+  outline: 2px solid #b4a4c5;
+  outline-offset: 3px;
+}
+.connectors-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 3px 0 29px;
+}
+.connectors-header h1 {
+  font-size: 29px;
+  line-height: 1.2;
+  letter-spacing: -0.035em;
+  margin: 0;
+  font-weight: 650;
+}
+.connector-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.connector-secondary,
+.connector-primary,
+.connector-danger-button {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  padding: 7px 13px;
+  border: 1px solid var(--connector-line);
+  border-radius: 7px;
+  color: var(--connector-text);
+  background: transparent;
+  text-decoration: none;
+}
+.connector-secondary:hover {
+  background: var(--connector-hover);
+}
+.connector-primary {
+  background: var(--connector-text);
+  color: var(--connector-bg);
+  border-color: transparent;
+}
+.connector-danger-button {
+  color: var(--connector-red);
+}
+.connector-icon {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--connector-muted);
+  font-size: 23px !important;
+}
+.connector-icon:hover,
+.connector-text:hover {
+  background: var(--connector-hover);
+  color: var(--connector-text);
+}
+.connector-text {
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--connector-muted);
+  padding: 7px 9px;
+}
+.connector-tabs {
+  display: flex;
+  gap: 28px;
+  overflow: auto;
+  scrollbar-width: none;
+  border-bottom: 1px solid var(--connector-line);
+  margin: 0 0 30px;
+}
+.connector-tabs > button {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 0 15px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--connector-muted);
+  font-size: 13px;
+}
+.connector-tabs > button[aria-selected="true"] {
+  color: var(--connector-text);
+  border-bottom-color: var(--connector-text);
+}
+.connector-tabs > button > span {
+  font-size: 11px;
+  color: var(--connector-muted);
+  font-variant-numeric: tabular-nums;
+}
+.connector-section {
+  margin-bottom: 34px;
+}
+.connector-section-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 18px 13px;
+  color: var(--connector-muted);
+  font-size: 11px;
+}
+.connector-section-heading h2 {
+  color: var(--connector-text);
+  font-size: 12px;
+  letter-spacing: 0.015em;
+  font-weight: 600;
+  margin: 0;
+}
+.connector-section-context {
+  margin-left: auto;
+}
+.connector-row {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 130px 14px;
+  gap: 17px;
+  align-items: center;
+  width: 100%;
+  padding: 21px 18px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--connector-text);
+  text-align: left;
+  position: relative;
+}
+.connector-row + .connector-row::before {
+  content: "";
+  position: absolute;
+  left: 71px;
+  right: 18px;
+  top: 0;
+  border-top: 1px solid var(--connector-line);
+}
+.connector-row:hover {
+  background: var(--connector-hover);
+}
+.connector-row-content {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.connector-row-content strong {
+  font-weight: 550;
+  font-size: 14px;
+}
+.connector-row-content small {
+  font-size: 12px;
+  color: var(--connector-muted);
+  overflow-wrap: anywhere;
+}
+.connector-status {
+  font-size: 12px;
+  color: var(--connector-green);
+  white-space: nowrap;
+}
+.connector-row > .connector-status {
+  text-align: right;
+}
+.connector-status[data-attention="true"] {
+  color: light-dark(#94703b, #cbb18a);
+}
+.connector-chevron {
+  font-size: 22px;
+  line-height: 1;
+  color: var(--connector-muted);
+  text-align: right;
+}
+.connector-logo {
+  display: grid;
+  place-items: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  flex-shrink: 0;
+  color: var(--connector-muted);
+}
+.connector-logo img {
+  width: 27px;
+  height: 27px;
+  object-fit: contain;
+}
+.connector-logo svg {
+  width: 24px;
+  height: 24px;
+  stroke: currentColor;
+  stroke-width: 1.65;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.connector-logo[data-provider="jira"] {
+  color: #86a9da;
+  background: rgb(80 130 210 / 8%);
+}
+.connector-logo[data-provider="linear"] {
+  color: #aba8d7;
+  background: rgb(130 120 200 / 8%);
+}
+.connector-logo[data-provider="github"] {
+  color: var(--connector-text);
+  background: var(--connector-surface);
+}
+.connector-category-intro {
+  margin: 0 18px 15px;
+  color: var(--connector-muted);
+  font-size: 13px;
+}
+.connector-discover {
+  padding-top: 14px;
+}
+.connector-discover h2 {
+  font-size: 12px;
+  font-weight: 500;
+  margin: 0 18px 8px;
+  color: var(--connector-muted);
+}
+.connector-discover-row {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 14px;
+  gap: 17px;
+  align-items: center;
+  width: 100%;
+  padding: 18px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--connector-muted);
+  text-align: left;
+}
+.connector-discover-row:hover {
+  background: var(--connector-hover);
+}
+.connector-discover-row > span:first-child {
+  text-align: center;
+  font-size: 22px;
+}
+.connector-discover-row strong,
+.connector-discover-row small {
+  display: block;
+}
+.connector-discover-row strong {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--connector-text);
+  margin-bottom: 4px;
+}
+.connector-discover-row small {
+  font-size: 12px;
+}
+.connector-empty {
+  padding: 35px 18px;
+  color: var(--connector-muted);
+}
+.connector-dialog {
+  color: var(--connector-text);
+  background: var(--connector-bg);
+  border: 1px solid var(--connector-line);
+  padding: 0;
+  box-shadow: 0 24px 90px #0005;
+  max-width: calc(100vw - 32px);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.connector-dialog::backdrop {
+  background: #0006;
+}
+.connector-catalog {
+  width: 590px;
+  max-height: calc(100dvh - 70px);
+  border-radius: 13px;
+}
+.connector-dialog-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 22px;
+  border-bottom: 1px solid var(--connector-line);
+}
+.connector-dialog-toolbar h2 {
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+.connector-catalog .connector-tabs {
+  margin: 0;
+  padding: 0 25px;
+  gap: 26px;
+}
+.connector-catalog-body {
+  padding: 10px 12px 22px;
+}
+.connector-catalog-body h3 {
+  font-size: 11px;
+  color: var(--connector-muted);
+  font-weight: 500;
+  margin: 20px 14px 7px;
+}
+.connector-catalog-option {
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 14px;
+  gap: 15px;
+  width: 100%;
+  align-items: center;
+  text-align: left;
+  padding: 15px 14px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--connector-text);
+}
+.connector-catalog-option:hover {
+  background: var(--connector-hover);
+}
+.connector-catalog-option strong,
+.connector-catalog-option small {
+  display: block;
+}
+.connector-catalog-option strong {
+  font-size: 13px;
+  font-weight: 550;
+  margin-bottom: 4px;
+}
+.connector-catalog-option small {
+  color: var(--connector-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.connector-detail {
+  position: fixed;
+  inset: 0 0 0 auto;
+  margin: 0;
+  height: 100dvh;
+  max-height: 100dvh;
+  width: 480px;
+  max-width: 100vw;
+  border-width: 0 0 0 1px;
+  border-radius: 0;
+  overflow: hidden;
+}
+.connector-detail[open] {
+  display: flex;
+  flex-direction: column;
+}
+.connector-detail-body {
+  padding: 28px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  min-height: 0;
+  scrollbar-gutter: stable;
+}
+.connector-detail-heading {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 23px;
+}
+.connector-detail-heading .connector-logo {
+  height: 44px;
+  width: 44px;
+}
+.connector-detail-heading h2 {
+  font-size: 22px;
+  line-height: 1.25;
+  letter-spacing: -0.025em;
+  margin: 0;
+}
+.connector-detail-heading p {
+  font-size: 12px;
+  color: var(--connector-muted);
+  margin: 5px 0 0;
+}
+.connector-detail-state {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 23px;
+  gap: 12px;
+}
+.connector-detail-summary {
+  font-size: 14px;
+  color: var(--connector-muted);
+  margin-bottom: 25px;
+}
+.connector-detail-section {
+  padding: 20px 0;
+  border-bottom: 1px solid var(--connector-line);
+}
+.connector-detail-section h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 550;
+}
+.connector-detail-section p,
+.connector-form p,
+.connector-disclosure p,
+.connector-steps p {
+  color: var(--connector-muted);
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.connector-detail-section p:last-child {
+  margin-bottom: 0;
+}
+.connector-facts {
+  margin: 0;
+  padding: 0 0 18px;
+  border-bottom: 1px solid var(--connector-line);
+}
+.connector-facts > div {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 12px;
+  padding: 8px 0;
+}
+.connector-facts dt {
+  color: var(--connector-muted);
+  font-size: 12px;
+}
+.connector-facts dd {
+  margin: 0;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.connector-disclosure {
+  border-bottom: 1px solid var(--connector-line);
+  --disclosure-padding: 18px 12px;
+  --disclosure-hover: var(--connector-hover);
+  margin: 0 -12px;
+}
+.connector-disclosure .disclosure-trigger {
+  font-size: 13px;
+  font-weight: 550;
+}
+.connector-disclosure svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: var(--connector-muted);
+  stroke-width: 1.5;
+  margin-left: auto;
+}
+.connector-disclosure svg[data-open="true"] {
+  transform: rotate(90deg);
+}
+.connector-disclosure-body {
+  padding: 0 12px 20px;
+}
+.connector-map-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 145px 28px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 12px;
+}
+.connector-map-row > span {
+  overflow-wrap: anywhere;
+}
+.connector-map-add {
+  display: flex;
+  gap: 8px;
+  margin: 14px 0;
+}
+.connector-map-add input {
+  min-width: 0;
+  flex: 1;
+}
+.connector-form {
+  display: grid;
+  gap: 17px;
+}
+.connector-field {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  min-width: 0;
+}
+.connector-dialog input,
+.connector-dialog textarea,
+.connector-dialog select {
+  border: 1px solid var(--connector-line);
+  border-radius: 7px;
+  background: var(--connector-surface);
+  color: var(--connector-text);
+  min-height: 38px;
+  padding: 9px 11px;
+  width: 100%;
+  min-width: 0;
+}
+.connector-code {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--connector-line);
+  border-radius: 8px;
+  padding: 10px;
+  margin: 10px 0;
+}
+.connector-code code,
+.connector-config-path code,
+.connector-disclosure-body > code {
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  user-select: text;
+}
+.connector-code code {
+  flex: 1;
+  min-width: 0;
+}
+.connector-config-path {
+  display: grid;
+  gap: 5px;
+  margin: 12px 0;
+}
+.connector-config-path strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+.connector-switch-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 18px;
+}
+.connector-switch-row h3 {
+  margin: 0 0 8px;
+}
+.connector-danger {
+  padding: 25px 0 5px;
+}
+.connector-danger p {
+  color: var(--connector-muted);
+  font-size: 12px;
+}
+.connector-feedback,
+.connector-notice {
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 12px 14px;
+  border: 1px solid var(--connector-line);
+  border-radius: 7px;
+  overflow-wrap: anywhere;
+  margin: 12px 0;
+  color: var(--connector-muted);
+}
+.connector-notice p {
+  margin: 6px 0 12px;
+}
+.connector-steps {
+  padding-left: 20px;
+  display: grid;
+  gap: 22px;
+}
+.connector-steps > li {
+  padding-left: 6px;
+}
+.connector-steps strong {
+  font-size: 13px;
+  font-weight: 550;
+}
+.connector-ticket-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.connector-ticket-list li {
+  display: grid;
+  gap: 3px;
+  font-size: 12px;
+}
+.connector-ticket-list small {
+  color: var(--connector-muted);
+}
+/* Retain the existing rules editor, using the same quiet detail-panel controls. */
+.connector-detail .settings-connector-rules {
+  border-bottom: 1px solid var(--connector-line);
+  padding: 18px 0;
+}
+.connector-detail .settings-connector-rules summary {
+  font-size: 13px;
+  color: var(--connector-text);
+  padding: 9px 12px;
+  margin: -9px -12px;
+  border-radius: 7px;
+}
+.connector-detail .settings-connector-rules summary:hover {
+  background: var(--connector-hover);
+}
+.connector-detail .settings-connector-rules[open] summary {
+  margin-bottom: 10px;
+}
+.connector-detail .settings-control-title {
+  font-size: 13px;
+  font-weight: 550;
+  margin: 0 0 5px;
+}
+.connector-detail .settings-control-description,
+.connector-detail .settings-muted-note {
+  color: var(--connector-muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.connector-detail .settings-control-row {
+  padding: 12px 0;
+  border: 0;
+  background: none;
+  display: block;
+}
+.connector-detail .settings-control-action {
+  margin-top: 10px;
+}
+.connector-detail .settings-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+}
+.connector-detail .settings-connector-rule {
+  border-top: 1px solid var(--connector-line);
+  padding: 10px 0;
+}
+.connector-detail .settings-connector-rule-form :is(input, select, textarea) {
+  background: var(--connector-surface);
+  color: var(--connector-text);
+}
+.connector-detail .ghost-button,
+.connector-detail .primary-button {
+  min-height: 34px;
+  padding: 6px 11px;
+  border: 1px solid var(--connector-line);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--connector-text);
+  font-size: 12px;
+}
+.connector-detail .primary-button {
+  background: var(--connector-text);
+  color: var(--connector-bg);
+}
+.connector-detail .settings-feedback {
+  font-size: 12px;
+  color: var(--connector-muted);
+  overflow-wrap: anywhere;
+}
+.connector-detail .work-filter-trigger {
+  width: 100%;
+  background: var(--connector-surface);
+  color: var(--connector-text);
+  border-color: var(--connector-line);
+  font-size: 12px;
+  min-height: 36px;
+}
+.connector-dialog .desktop-switch {
+  --text: var(--connector-text);
+  --accent-dim: var(--connector-surface);
+  --border-accent: var(--connector-line);
+}
+[data-theme="light"] .connectors-page,
+.light .connectors-page {
+  --connector-green: #51765f;
+  --connector-red: #a25d5d;
+}
+@media (max-width: 640px) {
+  .connectors-header {
+    padding-bottom: 20px;
+    gap: 10px;
+  }
+  .connectors-header h1 {
+    font-size: 25px;
+  }
+  .connector-tabs {
+    gap: 22px;
+  }
+  .connector-row {
+    grid-template-columns: 32px minmax(0, 1fr) 14px;
+    gap: 12px;
+    padding: 18px 10px;
+  }
+  .connector-row > .connector-status {
+    grid-column: 2;
+    grid-row: 2;
+    text-align: left;
+    margin-top: -8px;
+  }
+  .connector-row > .connector-chevron {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+  }
+  .connector-row + .connector-row::before {
+    left: 54px;
+    right: 10px;
+  }
+  .connector-section-heading {
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+  .connector-section-context {
+    display: none;
+  }
+  .connector-discover-row {
+    padding: 16px 10px;
+    gap: 12px;
+  }
+  .connector-detail {
+    width: 100%;
+  }
+  .connector-detail-body {
+    padding: 22px;
+  }
+  .connector-catalog {
+    max-height: calc(100dvh - 32px);
+  }
+  .connector-catalog .connector-tabs {
+    gap: 20px;
+    padding: 0 18px;
+  }
+  .connector-map-row {
+    grid-template-columns: minmax(0, 1fr) 125px 24px;
+  }
+  .connector-facts > div {
+    grid-template-columns: 100px minmax(0, 1fr);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .connectors-page * {
+    scroll-behavior: auto !important;
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+.connector-token-toggle summary {
+  color: var(--connector-muted);
+  padding: 12px;
+  margin: 0 -12px;
+  cursor: pointer;
+  border-radius: 7px;
+}
+.connector-token-toggle summary:hover {
+  background: var(--connector-hover);
+}

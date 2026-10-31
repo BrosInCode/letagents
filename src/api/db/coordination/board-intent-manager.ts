@@ -1,7 +1,7 @@
 import { and, asc, eq, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
-import { board_manager_assignments, room_agent_sessions, room_board_settings } from "../schema.js";
+import { board_intents, board_manager_assignments, room_agent_sessions, room_board_settings } from "../schema.js";
 import { toBoardManagerAssignment, toRoomBoardSettings } from "../mappers.js";
 import { coordinationId } from "../utils.js";
 import { DEFAULT_BOARD_MANAGER_FAILOVER } from "../../../shared/board-manager-failover.js";
@@ -69,26 +69,49 @@ export async function setRoomBoardManagerMode(input: {
 }): Promise<RoomBoardSettings> {
   const now = new Date().toISOString();
   const failoverUpdate = input.manager_failover ? { manager_failover: input.manager_failover } : {};
-  const [row] = (await db
-    .insert(room_board_settings)
-    .values({
-      room_id: input.room_id,
-      manager_mode: input.manager_mode,
-      manager_failover: input.manager_failover ?? DEFAULT_BOARD_MANAGER_FAILOVER,
-      updated_by: input.updated_by,
-      created_at: now,
-      updated_at: now,
-    })
-    .onConflictDoUpdate({
-      target: room_board_settings.room_id,
-      set: {
+  const row = await db.transaction(async (tx) => {
+    const [previous] = await tx
+      .select({ manager_mode: room_board_settings.manager_mode })
+      .from(room_board_settings)
+      .where(eq(room_board_settings.room_id, input.room_id))
+      .for("update");
+    const [saved] = (await tx
+      .insert(room_board_settings)
+      .values({
+        room_id: input.room_id,
         manager_mode: input.manager_mode,
-        ...failoverUpdate,
+        manager_failover: input.manager_failover ?? DEFAULT_BOARD_MANAGER_FAILOVER,
         updated_by: input.updated_by,
+        created_at: now,
         updated_at: now,
-      },
-    })
-    .returning()) as RoomBoardSettingsRow[];
+      })
+      .onConflictDoUpdate({
+        target: room_board_settings.room_id,
+        set: {
+          manager_mode: input.manager_mode,
+          ...failoverUpdate,
+          updated_by: input.updated_by,
+          updated_at: now,
+        },
+      })
+      .returning()) as RoomBoardSettingsRow[];
+    // Approvals were granted under the previous mode. Retire the unused ones
+    // with the change, so switching off and on again cannot revive them.
+    if (normalizeBoardManagerMode(previous?.manager_mode) !== normalizeBoardManagerMode(saved.manager_mode)) {
+      await tx
+        .update(board_intents)
+        .set({
+          status: "superseded",
+          decision_by: "LetAgents",
+          decision_reason: sql`'Superseded: Board Manager mode changed to ' || ${saved.manager_mode}
+            || ' after ' || coalesce(${board_intents.decision_by}, 'the manager') || ' approved it.'`,
+          decided_at: now,
+          updated_at: now,
+        })
+        .where(and(eq(board_intents.room_id, input.room_id), eq(board_intents.status, "approved")));
+    }
+    return saved;
+  });
 
   const settings = toRoomBoardSettings(row);
   const { recordBoardManagerModeChangedEvent } = await import("./board-governance.js");

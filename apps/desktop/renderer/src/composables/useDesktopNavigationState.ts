@@ -1,4 +1,4 @@
-import { computed, ref, type Ref } from "vue";
+import { computed, ref, watch, type Ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppInfo,
@@ -8,13 +8,17 @@ import type {
   RepoStatus,
 } from "../../../electron/ipc-types";
 import type { ProjectGroup, RoomEntry, SidebarEntry, SidebarMode } from "../components/desktop/types";
-import { rentMarketplaceEntry, systemEntries } from "../domain/desktop-navigation";
+import { localPathBasename } from "../domain/local-path";
+import { myWorkEntry, rentMarketplaceEntry, systemEntries } from "../domain/desktop-navigation";
 import { readStoredString } from "../domain/desktop-storage";
+import { projectRoomName } from "../domain/project-room-name";
+import { repositoryRoomName } from "../../../../../shared/project-room-name.mjs";
 import {
   buildSidebarProjectGroups,
   normalizeRoomIdentifier,
   rememberRecentRootRooms,
   resolveAccountRoomAliasIdentifier,
+  roomSnapshotAliases,
   rootPathLabel,
   rootRoomEntryId,
   type RecentRootRoom,
@@ -72,12 +76,20 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
   });
 
   const repoName = computed(() => {
-    return currentRecentRootRoom.value?.displayName
-      || options.rootRoomSnapshot.value?.room?.displayName
+    const identifier = currentRootRoomIdentifier.value;
+    const gitRoom = options.rootRoomSnapshot.value?.room?.gitRoom || currentAccountRoom.value?.gitRoom;
+    const freshName = options.rootRoomSnapshot.value?.room?.displayName
       || currentAccountRoom.value?.displayName
+      || null;
+    if (gitRoom || repositoryRoomName(identifier) || currentRecentRootRoom.value?.kind === "project") {
+      return projectRoomName({ roomIdentifier: identifier, gitRoom,
+        rootPath: currentRecentRootRoom.value?.rootPath, fallback: freshName });
+    }
+    return freshName
+      || currentRecentRootRoom.value?.displayName
       || options.rootRoomSnapshot.value?.roomIdentifier
-      || options.repoStatus.value?.rootPath?.split("/").filter(Boolean).pop()
-      || options.appInfo.value?.workspaceRoot?.split("/").filter(Boolean).pop()
+      || localPathBasename(options.repoStatus.value?.rootPath)
+      || localPathBasename(options.appInfo.value?.workspaceRoot)
       || "Room";
   });
 
@@ -110,7 +122,13 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
         gitRoom: null,
       };
     }
-    return options.selectedSnapshot.value.room;
+    const room = options.selectedSnapshot.value.room;
+    if (room.kind === "focus") return room;
+    const recent = options.recentRootRooms.value.find((entry) =>
+      normalizeRoomIdentifier(entry.identifier) === normalizeRoomIdentifier(room.identifier));
+    if (!room.gitRoom && !repositoryRoomName(room.identifier) && recent?.kind !== "project") return room;
+    return { ...room, displayName: projectRoomName({ roomIdentifier: room.identifier, gitRoom: room.gitRoom,
+      rootPath: recent?.rootPath, fallback: room.displayName }) };
   });
 
   const selectedFocusRooms = computed(() => {
@@ -264,12 +282,19 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
   }));
 
   const activeEntry = ref<SidebarEntry>(pinnedRoom.value);
+  let settingsReturnEntry: SidebarEntry | null = null;
+  watch(activeEntry, (entry, previous) => {
+    if (entry.type === "system" && previous.type !== "system") {
+      settingsReturnEntry = previous;
+    }
+  }, { flush: "sync" });
   const sidebarMode = ref<SidebarMode>("expanded");
   const pinnedCollapsed = ref(false);
   const roomsCollapsed = ref(false);
   const collapsedProjects = ref<Record<string, boolean>>({});
 
   function findSidebarEntryById(entryId: string): SidebarEntry | null {
+    if (entryId === myWorkEntry.id) return myWorkEntry;
     if (entryId === "messages") return { id: "messages", type: "messages", title: "Messages", description: "Private conversations", sectionLabel: "LetAgents" };
     if (entryId === pinnedRoom.value.id) return pinnedRoom.value;
     if (entryId === currentParentRoom.value.id) return currentParentRoom.value;
@@ -295,6 +320,15 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
   function selectSidebarEntry(entry: SidebarEntry): void {
     activeEntry.value = entry;
+  }
+
+  function returnFromSettings(): void {
+    const previous = settingsReturnEntry;
+    settingsReturnEntry = null;
+    // Resolve rooms again: one may have been removed while Settings was open.
+    activeEntry.value = previous?.type === "room"
+      ? findSidebarEntryById(previous.id) || currentParentRoom.value
+      : previous || currentParentRoom.value;
   }
 
   function cycleSidebar() {
@@ -378,6 +412,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     repoName,
     resolveSelectedRoomIdentifier,
     roomsCollapsed,
+    returnFromSettings,
     selectSidebarEntry,
     selectedAccess,
     selectedFocusRooms,
@@ -393,17 +428,4 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
 function projectChildRooms(project: ProjectGroup): RoomEntry[] {
   return [...project.branchRooms, ...project.focusRooms];
-}
-
-function roomSnapshotAliases(snapshot: DesktopRoomSnapshot): Set<string> {
-  return new Set([
-    snapshot.roomIdentifier,
-    snapshot.access.roomIdentifier,
-    snapshot.access.code,
-    snapshot.room?.identifier,
-    snapshot.room?.name,
-    snapshot.room?.code,
-  ]
-    .map(normalizeRoomIdentifier)
-    .filter((value): value is string => Boolean(value)));
 }

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-const mainSource = read("../main.ts");
+// The entry point and the daemon class modules it re-exports from ./main/.
+const mainFiles = ["../main.ts", ...readdirSync(new URL("../main/", import.meta.url)).filter((name) => name.endsWith(".ts")).sort().map((name) => `../main/${name}`)];
+const mainSource = mainFiles.map(read).join("\n");
 const routerSource = read("../control-request-router.ts");
 const cloudSource = read("../cloud-http.ts");
 const daemonReadModelSource = read("../daemon-read-model.ts");
@@ -23,12 +25,8 @@ const expectedControlMethods = [
   "daemon.negotiate",
   "daemon.prepare_handoff",
   "daemon.status",
-  "lane.activate_legacy",
-  "lane.release_legacy",
-  "lane.reserve_legacy",
   "local_board.mutate",
   "local_board.watch",
-  "manifest.append_activity",
   "manifest.compare_and_set_desired_state",
   "manifest.control_turn",
   "manifest.list",
@@ -112,7 +110,6 @@ test("daemon policy and projection domains remain extracted", () => {
     "desired-state-coordinator",
     "entry-concurrency-gate",
     "execution-delegation-coordinator",
-    "legacy-lane-coordinator",
     "lifecycle-administration-coordinator",
     "manifest-administration-coordinator",
     "manifest-transition-coordinator",
@@ -134,7 +131,7 @@ test("daemon policy and projection domains remain extracted", () => {
     "worker-authority-coordinator",
     "worker-runtime-custody",
   ]) {
-    assert.match(mainSource, new RegExp(`from "\\./${moduleName}\\.js"`));
+    assert.match(mainSource, new RegExp(`from "\\.\\.?/${moduleName}\\.js"`));
   }
   assert.match(roomAgentProjectionSource, /from "\.\/manifest-view-projection\.js"/);
   assert.match(daemonReadModelSource, /from "\.\/room-agent-state-projection\.js"/);
@@ -189,7 +186,19 @@ test("daemon policy and projection domains remain extracted", () => {
   // composition; retries, storage ownership and handoff policy remain extracted.
   // 1657 -> 1660: automatic permission review composition; the rules, the
   // edit and command decisions, and the server call stay in their own modules.
-  assert.ok(mainSource.split("\n").length < 1_660, "main.ts must remain a thin composition root");
+  // 1660 -> 1662: exact-binding confirmation ports; the bind latch and its
+  // retry policy stay in worker-authority-coordinator.ts.
+  // 1662 -> 1677: daemon-wide convergence pacer composition and user-action
+  // priority marks; limits, queueing and priority stay in convergence-pacer.ts.
+  // 1677 -> 1678: the live activity summary port; the line, its path stripping
+  // and its throttle stay in live-activity-summary-relay.ts.
+  // 1678 -> 1900: main.ts split into ./main/ modules (one class chain, no behavior
+  // change); the budget now counts every file of the composition root, and the
+  // split added only file headers, imports, layer declarations and abstract parts.
+  // 1900 -> 1903: the live launch progress port and its notify; the tracking
+  // stays in launch-progress.ts.
+  assert.ok(mainSource.split("\n").length < 1_903, "main.ts must remain a thin composition root");
+  for (const file of mainFiles) assert.ok(read(file).split("\n").length < 600, `${file} must stay under 600 lines`);
 });
 
 function read(relativePath: string): string {

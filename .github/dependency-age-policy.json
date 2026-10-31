@@ -7,16 +7,6 @@
       "reason": "Intentional early adoption after tarball review and Codex Security scan 13f36e57-0cac-4a6c-8def-50cd6fc036a1. Re-scan before changing this version."
     },
     {
-      "name": "@hono/node-server",
-      "version": "2.0.10",
-      "reason": "Exact patched release required to remediate GHSA-9mqv-5hh9-4cgg before the normal cooldown expires; registry signatures and the full test suite are verified in CI."
-    },
-    {
-      "name": "electron",
-      "version": "42.8.1",
-      "reason": "Exact patched release required to remediate GHSA-r4w5-6pfg-jxp5 before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI. Remove after 2026-08-11 when the cooldown is naturally satisfied."
-    },
-    {
       "name": "qs",
       "version": "6.16.0",
       "reason": "Exact patched release required to remediate GHSA-x5fp-wj9c-mxmx and GHSA-4mjr-xmp4-gh2g before the normal cooldown expires; registry signatures, dependency audits, and full test suites are verified in CI. Remove after 2026-09-06 when the cooldown is naturally satisfied."
@@ -70,6 +60,41 @@
       "name": "@typescript-eslint/visitor-keys",
       "version": "8.63.0",
       "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "body-parser",
+      "version": "2.4.0",
+      "reason": "Exact patched release required to remediate GHSA-27r3-jxmh-p828 (high: denial of service via trailing bytes after a compressed request body; the public API runs Express) before the normal cooldown expires. Owner-approved 2026-10-26. Published by npm trusted publishing from expressjs/body-parser tag v2.4.0 with SLSA provenance and a registry signature; no install scripts; the diff against 2.3.0 was reviewed. Remove after 2026-10-29 when the cooldown is naturally satisfied."
+    },
+    {
+      "name": "electron",
+      "version": "42.11.16",
+      "reason": "Exact patched release required to remediate GHSA-jr5w-w6x2-84p9 (high: compromised eMudhra intermediate certificates) before the normal cooldown expires. Owner-approved 2026-10-26; registry signatures, dependency audits, and full test suites are verified in CI. Remove after 2026-10-27 when the cooldown is naturally satisfied."
+    },
+    {
+      "name": "fast-uri",
+      "version": "3.1.9",
+      "reason": "Exact patched release required to remediate GHSA-w74x-v6f9-j3xg, GHSA-xhq7-xmqj-769h, GHSA-wjr9-j795-jxcr and GHSA-333x-w4r6-6crp before the normal cooldown expires. Owner-approved 2026-10-26; registry signatures, dependency audits, and full test suites are verified in CI. Remove after 2026-10-26 when the cooldown is naturally satisfied."
+    },
+    {
+      "name": "follow-redirects",
+      "version": "1.16.2",
+      "reason": "Exact patched release required to remediate GHSA-mrwp-f3q8-3g9p (high: cross-realm sensitiveHeaders arrays are discarded) before the normal cooldown expires; development dependency of wait-on only. Remove when it passes the normal cooldown."
+    },
+    {
+      "name": "joi",
+      "version": "18.3.1",
+      "reason": "Exact patched release required to remediate GHSA-4528-x5fx-h6hg (high: quadratic-time split in string().email({ multiple: true })) before the normal cooldown expires; development dependency of wait-on only. Remove when it passes the normal cooldown."
+    },
+    {
+      "name": "minimatch",
+      "version": "11.0.3",
+      "reason": "Exact patched release required to remediate GHSA-g3hv-75wg-m249 (moderate: denial of service via globparts amplification, published 2026-10-30) before the normal cooldown expires; development dependency of eslint, typescript-estree and vue-tsc only. Remove when it passes the normal cooldown."
+    },
+    {
+      "name": "@isaacs/nonrecursive-glob-match",
+      "version": "1.0.3",
+      "reason": "Dependency of the patched minimatch 11.0.3 (GHSA-g3hv-75wg-m249), same author, no install scripts; development dependency only. Remove when it passes the normal cooldown."
     }
   ]
 }

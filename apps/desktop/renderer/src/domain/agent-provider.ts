@@ -30,10 +30,11 @@ function providerLabel(value: string | null | undefined): string | null {
   const key = normalized(raw);
   if (!key || genericProviderLabels.has(key)) return null;
   if (key === "codex" || key.startsWith("codex:")) return "Codex";
-  if (key === "claude" || key === "claude code" || key.startsWith("claude:")) return "Claude Code";
+  if (key === "claude" || key === "claude code" || key === "claude-code" || key.startsWith("claude:")) return "Claude Code";
   if (key === "cursor" || key.startsWith("cursor:")) return "Cursor";
   if (key === "antigravity" || key.startsWith("antigravity:")) return "Antigravity";
   if (key === "open model" || key === "open-model" || key === "open_model") return "Open Model";
+  if (key === "opencode" || key === "open code") return "OpenCode";
   return raw;
 }
 

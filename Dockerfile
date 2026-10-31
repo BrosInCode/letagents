@@ -16,6 +16,13 @@ COPY drizzle.config.ts ./
 # Build server (TypeScript → dist/)
 RUN npm run build
 
+# The shared web UI (shared/ui) imports desktop renderer sources: chat
+# avatars use the provider images, and the Connectors page uses desktop
+# settings components, the error helper and IPC types. Build stage only;
+# the production image copies the built bundle, not these sources.
+COPY apps/desktop/renderer/src/ apps/desktop/renderer/src/
+COPY apps/desktop/electron/ipc-types/ apps/desktop/electron/ipc-types/
+
 # Build Vue SPA (src/web/ → src/web/dist/)
 RUN cd src/web && npm ci && npx vite build
 

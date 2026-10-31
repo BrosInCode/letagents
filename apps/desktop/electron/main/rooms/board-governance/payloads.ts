@@ -50,13 +50,15 @@ export interface BoardGovernanceApiResponse {
     approval_token_hash: string | null;
     decided_at: string | null;
     expires_at: string | null;
+    /** Set once the request is sent to people to decide; absent from older servers. */
+    escalated_at?: string | null;
     created_at: string;
     updated_at: string;
   }>;
   pending_intent_count: number;
   audit: Array<{
     id: string;
-    kind: "coordination_event" | "manager_assignment" | "board_intent_decision";
+    kind: "coordination_event" | "manager_assignment" | "board_intent_decision" | "tracker_rule_run";
     event_type: string;
     actor_label: string | null;
     reason: string | null;

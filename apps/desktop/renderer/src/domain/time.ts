@@ -9,10 +9,10 @@ export function latestTimestamp(...values: Array<string | null | undefined>): st
     .sort((left, right) => timestampValue(right) - timestampValue(left))[0] || null;
 }
 
-export function formatRelativeTime(value: string | null | undefined): string {
+export function formatRelativeTime(value: string | null | undefined, now: number = Date.now()): string {
   const timestamp = timestampValue(value);
   if (!timestamp) return "unknown";
-  const delta = Date.now() - timestamp;
+  const delta = now - timestamp;
   if (delta < 60_000) return "just now";
   if (delta < 3_600_000) return `${Math.max(1, Math.round(delta / 60_000))}m ago`;
   if (delta < 86_400_000) return `${Math.max(1, Math.round(delta / 3_600_000))}h ago`;

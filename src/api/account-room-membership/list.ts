@@ -315,7 +315,8 @@ export async function getAccountRoomsForAccount(
     });
 }
 
-async function latestMessagesForRooms(roomIds: string[]): Promise<Map<string, LatestRoomMessage>> {
+/** Each room's newest message that its members can see, as the room list reports it. */
+export async function latestMessagesForRooms(roomIds: string[]): Promise<Map<string, LatestRoomMessage>> {
   const uniqueRoomIds = [...new Set(roomIds.filter(Boolean))];
   if (!uniqueRoomIds.length) return new Map();
 

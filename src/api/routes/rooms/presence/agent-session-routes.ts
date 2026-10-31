@@ -1,6 +1,16 @@
 import type { Express } from "express";
-import { getDurableRoomWorkerSessions, getRoomWorkerNameHolders } from "../../../db/auth/room-agent-sessions.js";
+import {
+  closeRoomAgentProcessConnection,
+  getDurableRoomWorkerSessions,
+  getRoomWorkerNameHolders,
+  isEndedRoomAgentSessionCredential,
+  openRoomAgentProcessConnection,
+  recordRoomAgentProcessExit,
+  refreshRoomAgentProcessConnection,
+} from "../../../db/auth/room-agent-sessions.js";
 import { claimRoomParticipantOwner, getParticipantOwnersProvenByMessages } from "../../../db/participants.js";
+import { db } from "../../../db/client.js";
+import { getSessionConnections } from "../../../db/messages/session-connections.js";
 import { isMcpWorkerId, isMcpConnectionToken } from "../../../../shared/mcp-worker.js";
 
 import {
@@ -19,11 +29,13 @@ import {
   upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat,
   upsertRoomAgentPresence,
 } from "../../../db.js";
+import { parseNativeActivitySummary } from "../../../db/presence/liveness.js";
 import {
   respondWithInternalError,
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import { disconnectRoomAgentDeliverySession } from "../../../rooms/agent-delivery.js";
+import { closeRequestsOfRetiredAgent } from "../../../rooms/attention-answers.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import {
   requireWorkerRequestAgentIdentity,
@@ -33,20 +45,38 @@ import { buildAgentActorLabel, parseAgentActorLabel } from "../../../../shared/a
 import { pickLocalCodename } from "../../../../shared/codenames.js";
 import { isMessageSenderWithinBounds } from "../../../../../shared/message-contracts.mjs";
 import {
+  AGENT_PROCESS_CONNECTION_REFRESH_MS,
   normalizeAgentPresenceStatus,
   normalizeRoomAgentSessionKind,
 } from "../../../../shared/agent-presence.js";
 import {
+  LETAGENTS_AGENT_SESSION_ID_HEADER,
+  LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
+} from "../../../../shared/request-headers.js";
+import { openSseConnection } from "../../../http/sse.js";
+import {
+  announceAgentSessionEnded,
+  holdAgentProcessConnection,
+} from "../../../rooms/agent-process-connections.js";
+import {
   isActiveWorkerActorLabelConflict,
+  isLockTimeout,
   normalizeOptionalText,
   normalizeRegistrationLiveness,
   normalizeRuntime,
 } from "./helpers.js";
 import type { RoomPresenceRouteDeps } from "./types.js";
 import {
+  agentDisplayNameKey,
   allocateAgentDisplayName,
   isNameHeldByAnotherAgent,
+  nameComesFreeAtMs,
+  selectReleasableNameHolders,
 } from "../../../rooms/agent-display-name-allocation.js";
+
+// Past the moment a name comes free, so that the clocks that stamped the
+// evidence and the one that reads it need not agree to the millisecond.
+const NAME_WAIT_MARGIN_MS = 500;
 
 export function desktopManagedPausePresence(input: {
   availability?: "failure" | "room_closed";
@@ -151,6 +181,7 @@ export function registerAgentSessionRoutes(
       runtime,
       repo_branch,
       registration_liveness,
+      process_host_id,
       replace_agent_session_id,
       replace_agent_session_token,
     } = req.body as {
@@ -165,6 +196,7 @@ export function registerAgentSessionRoutes(
       runtime?: string;
       repo_branch?: string | null;
       registration_liveness?: unknown;
+      process_host_id?: unknown;
       replace_agent_session_id?: string | null;
       replace_agent_session_token?: string | null;
     };
@@ -205,6 +237,9 @@ export function registerAgentSessionRoutes(
         return;
       }
       const normalizedRegistrationLiveness = normalizeRegistrationLiveness(registration_liveness);
+      const processHostId = typeof process_host_id === "string" && /^[A-Za-z0-9_.:-]{1,128}$/.test(process_host_id)
+        ? process_host_id
+        : null;
       const replacementSessionId = typeof replace_agent_session_id === "string"
         ? replace_agent_session_id.trim()
         : "";
@@ -222,17 +257,64 @@ export function registerAgentSessionRoutes(
         });
         return;
       }
-      const [activeParticipants, activeSessionsForIdentity, durableWorkers, workerNameHolders] = await Promise.all([
-        getRoomParticipants(project.id, { limit: 200 }),
-        requestedSessionKind === "worker"
-          ? getActiveRoomAgentSessionsForWorkerIdentity({
-              room_id: project.id,
-              agent_key: agent.canonical_key,
-            })
-          : Promise.resolve([]),
-        getDurableRoomWorkerSessions(project.id),
-        getRoomWorkerNameHolders(project.id),
-      ]);
+      // Reduce a replayed, already-decorated label to its base ONLY from the
+      // client's explicit trusted base signal (`requested_base_display_name`),
+      // never from numeric shape or name history. Absent a valid signal the
+      // label is preserved verbatim (fail closed), so a deliberate
+      // numeric-ending name is never demoted and legacy accumulation is not
+      // "guessed" away.
+      const trustedRequestedBase = typeof requested_base_display_name === "string"
+        ? requested_base_display_name.trim()
+        : "";
+      const canonicalDisplayName = resolveReplayCanonicalBase(requestedDisplayName, trustedRequestedBase);
+      const normalizedRequestedDisplayName = normalizeReplayedAgentDisplayName(
+        requestedDisplayName,
+        canonicalDisplayName
+      );
+
+      const readRoom = async () => {
+        const [participants, sessionsForIdentity, durable, holders] = await Promise.all([
+          getRoomParticipants(project.id, { limit: 200 }),
+          requestedSessionKind === "worker"
+            ? getActiveRoomAgentSessionsForWorkerIdentity({
+                room_id: project.id,
+                agent_key: agent.canonical_key,
+              })
+            : Promise.resolve([]),
+          getDurableRoomWorkerSessions(project.id),
+          getRoomWorkerNameHolders(project.id),
+        ]);
+        const { connected } = await getSessionConnections(
+          db, project.id, holders.filter((holder) => !holder.ended_at).map((holder) => holder.session_id));
+        return {
+          participants, sessionsForIdentity, durable,
+          holders: holders.map((holder) => ({ ...holder, delivery_connected: connected.has(holder.session_id) })),
+        };
+      };
+      let room = await readRoom();
+      // A process that restarts registers within seconds of the one it
+      // replaces. If the name it asks for is held only by sessions whose
+      // process is about to be taken for gone, wait for that moment, once,
+      // instead of handing it another name that it would then keep.
+      if (requestedSessionKind === "worker" && normalizedAgentInstanceId) {
+        const comesFreeAt = nameComesFreeAtMs({
+          display_name: normalizedRequestedDisplayName || canonicalDisplayName,
+          owner_account_id: req.sessionAccount.account_id,
+          agent_key: agent.canonical_key,
+          agent_instance_id: normalizedAgentInstanceId,
+          process_host_id: processHostId,
+          holders: room.holders,
+          now_ms: Date.now(),
+        });
+        if (comesFreeAt !== null) {
+          await new Promise((resolve) => setTimeout(resolve, Math.max(0, comesFreeAt - Date.now()) + NAME_WAIT_MARGIN_MS));
+          room = await readRoom();
+        }
+      }
+      const activeParticipants = room.participants;
+      const activeSessionsForIdentity = room.sessionsForIdentity;
+      const durableWorkers = room.durable;
+      const workerNameHolders = room.holders;
       const replaceableSessionIds = new Set(
         activeSessionsForIdentity
           .filter((session) => normalizedAgentInstanceId
@@ -260,24 +342,51 @@ export function registerAgentSessionRoutes(
         (session) => !replaceableSessionIds.has(session.session_id),
       );
 
-      // Reduce a replayed, already-decorated label to its base ONLY from the
-      // client's explicit trusted base signal (`requested_base_display_name`),
-      // never from numeric shape or name history. Absent a valid signal the
-      // label is preserved verbatim (fail closed), so a deliberate
-      // numeric-ending name is never demoted and legacy accumulation is not
-      // "guessed" away.
-      const trustedRequestedBase = typeof requested_base_display_name === "string"
-        ? requested_base_display_name.trim()
-        : "";
-      const canonicalDisplayName = resolveReplayCanonicalBase(requestedDisplayName, trustedRequestedBase);
-      const normalizedRequestedDisplayName = normalizeReplayedAgentDisplayName(
-        requestedDisplayName,
-        canonicalDisplayName
-      );
-
       let baseDisplayName = isGenericName
         ? pickLocalCodename(agent.canonical_key).display_name
         : (normalizedRequestedDisplayName || canonicalDisplayName);
+      // A name held by a session whose process is gone passes to a
+      // registration by the same owner. A process that restarts leaves its
+      // session behind, and an agent that registers afresh leaves its
+      // registration behind; nothing else ends either, so without this each
+      // would refuse the agent its own name for ever.
+      //
+      // That holds for a session that registers again as much as for a new
+      // one. An agent given another name, because its own was held when it
+      // asked, takes its own the next time it registers after the holder has
+      // gone.
+      const ownCurrentSession = normalizedAgentInstanceId
+        ? activeSessionsForIdentity.find((session) => session.agent_instance_id === normalizedAgentInstanceId) ?? null
+        : null;
+      // A durable worker reaches for the name it first asked for, whatever
+      // name it sends now.
+      const firstAsked = (durableWorker
+        ? durableWorkers.find((session) => session.agent_instance_id === normalizedAgentInstanceId
+          && session.agent_key === agent.canonical_key)?.assigned_base_display_name?.trim()
+        : null) || null;
+      const ownerAccountId = req.sessionAccount.account_id;
+      const releasableHolders = requestedSessionKind === "worker" && normalizedAgentInstanceId
+        ? [...new Map([baseDisplayName, firstAsked ?? baseDisplayName].flatMap((displayName) =>
+            selectReleasableNameHolders({
+              display_name: displayName,
+              owner_account_id: ownerAccountId,
+              agent_key: agent.canonical_key,
+              agent_instance_id: normalizedAgentInstanceId,
+              process_host_id: processHostId,
+              holders: workerNameHolders,
+              now_ms: Date.now(),
+            })).map((holder) => [holder.session_id, holder] as const)).values()]
+        : [];
+      const releasedSessionIds = new Set(releasableHolders.map((holder) => holder.session_id));
+      const releasedAgentKeys = new Set(releasableHolders
+        .filter((holder) => holder.agent_key !== agent.canonical_key)
+        .map((holder) => holder.agent_key));
+      const heldAllocationSessions = allocationSessions.filter(
+        (session) => !releasedSessionIds.has(session.session_id));
+      const heldDurableWorkers = durableWorkers.filter(
+        (session) => !releasedSessionIds.has(session.session_id));
+      const heldWorkerNameHolders = workerNameHolders.filter(
+        (holder) => !releasedSessionIds.has(holder.session_id));
       // An agent's own history never holds a name against it. Holding an
       // agent's past names against it is what renamed it on every reconnect:
       // each name it was given became one more name it could not have.
@@ -301,7 +410,9 @@ export function registerAgentSessionRoutes(
           for (const participant of unownedNamesakes) {
             const owner = provenOwners.get(participant.actor_label!);
             if (!owner) continue;
-            if (owner === agent.canonical_key) provenOwnParticipantKeys.add(participant.participant_key);
+            if (owner === agent.canonical_key || releasedAgentKeys.has(owner)) {
+              provenOwnParticipantKeys.add(participant.participant_key);
+            }
             // Bookkeeping only: the registration does not depend on it.
             await claimRoomParticipantOwner({
               room_id: project.id, participant_key: participant.participant_key, agent_key: owner,
@@ -313,13 +424,15 @@ export function registerAgentSessionRoutes(
       }
       const isOwnParticipant = (participant: (typeof activeParticipants)[number]): boolean =>
         participant.kind === "agent" && (participant.agent_key === agent.canonical_key
+          // History of an agent that released the name holds it no longer.
+          || (participant.agent_key !== null && releasedAgentKeys.has(participant.agent_key))
           || provenOwnParticipantKeys.has(participant.participant_key));
       const holdsOwnHistory = requestedSessionKind !== "worker";
       const usedDisplayNames = new Set([
         ...activeParticipants.filter((participant) => holdsOwnHistory || !isOwnParticipant(participant))
           .map((participant) => participant.display_name),
-        ...allocationSessions.map((session) => session.display_name),
-        ...durableWorkers.filter((session) => session.agent_instance_id !== normalizedAgentInstanceId)
+        ...heldAllocationSessions.map((session) => session.display_name),
+        ...heldDurableWorkers.filter((session) => session.agent_instance_id !== normalizedAgentInstanceId)
           .map((session) => session.display_name),
       ]);
 
@@ -329,9 +442,9 @@ export function registerAgentSessionRoutes(
       // it. Never reclaim a label that belongs to a human or another agent:
       // genuinely concurrent/same-name peers still need disambiguation.
       if (requestedSessionKind === "worker") {
-        const baseHeldByThisIdentity = allocationSessions.some(
+        const baseHeldByThisIdentity = heldAllocationSessions.some(
           (session) => session.display_name === baseDisplayName
-        ) || durableWorkers.some((session) => session.display_name === baseDisplayName
+        ) || heldDurableWorkers.some((session) => session.display_name === baseDisplayName
           && session.agent_instance_id !== normalizedAgentInstanceId);
         const baseBelongsToAnotherParticipant = activeParticipants.some(
           (participant) => participant.display_name === baseDisplayName && !isOwnParticipant(participant)
@@ -361,14 +474,14 @@ export function registerAgentSessionRoutes(
         if (
           resumableName
           && (isGenericName || resumableName === baseDisplayName)
-          && !allocationSessions.some((session) => session.display_name === resumableName)
+          && !heldAllocationSessions.some((session) => session.display_name === resumableName)
         ) {
           usedDisplayNames.delete(resumableName);
           baseDisplayName = resumableName;
         }
       }
       const durablePredecessor = durableWorker
-        ? durableWorkers.find((session) => session.agent_instance_id === normalizedAgentInstanceId
+        ? heldDurableWorkers.find((session) => session.agent_instance_id === normalizedAgentInstanceId
           && session.agent_key === agent.canonical_key)
         : null;
       if (durablePredecessor) {
@@ -379,15 +492,50 @@ export function registerAgentSessionRoutes(
       // participant was once called and cannot make a mention ambiguous. An
       // agent of another identity that answers to a name now is matched the
       // way mention routing matches it, so no spelling of that name is free.
-      const ownSessions = workerNameHolders.filter((holder) =>
+      const ownSessions = heldWorkerNameHolders.filter((holder) =>
         holder.agent_key === agent.canonical_key && !holder.ended_at);
       const isHeld = (displayName: string): boolean => usedDisplayNames.has(displayName)
         || isNameHeldByAnotherAgent({
           display_name: displayName,
           agent_key: agent.canonical_key,
           own_sessions: ownSessions,
-          holders: workerNameHolders,
+          holders: heldWorkerNameHolders,
         });
+      // A session that registers again keeps the name it is living under
+      // when the name it asks for is held, rather than being moved again.
+      // Room history never contests the name a session is living under; only
+      // another agent that answers to it now can.
+      if (ownCurrentSession && !durableWorker) {
+        const heldByAnotherAgent = (displayName: string): boolean => isNameHeldByAnotherAgent({
+          display_name: displayName,
+          agent_key: agent.canonical_key,
+          own_sessions: ownSessions,
+          holders: heldWorkerNameHolders,
+        });
+        if (agentDisplayNameKey(ownCurrentSession.display_name) === agentDisplayNameKey(baseDisplayName)) {
+          if (!heldByAnotherAgent(baseDisplayName)) usedDisplayNames.delete(baseDisplayName);
+        } else if (isHeld(baseDisplayName) && !heldByAnotherAgent(ownCurrentSession.display_name)) {
+          usedDisplayNames.delete(ownCurrentSession.display_name);
+          baseDisplayName = ownCurrentSession.display_name;
+        }
+      }
+
+      // A durable worker keeps the name it was given when it reconnects,
+      // whatever name it sends: it cannot rename itself. But if it was given
+      // that name only because the one it first asked for was held, it takes
+      // the one it asked for once that is free.
+      let takesRequestedName = false;
+      if (durablePredecessor && firstAsked
+        && agentDisplayNameKey(firstAsked) !== agentDisplayNameKey(durablePredecessor.display_name)
+        && !isHeld(firstAsked)) {
+        baseDisplayName = firstAsked;
+        takesRequestedName = true;
+      }
+      // The name a session already lives under, which it falls back to if
+      // the name it reached for turns out to be held after all.
+      const ownName = durablePredecessor?.display_name
+        ?? (durableWorker ? null : ownCurrentSession?.display_name ?? null);
+      let fellBackToOwnName = false;
 
       let offset = 0;
       const normalizedRepoBranch = normalizeOptionalText(repo_branch);
@@ -408,6 +556,12 @@ export function registerAgentSessionRoutes(
           owner_label: agent.owner_label,
           ide_label: resolvedIdeLabel,
         });
+        // Only holders of the name actually being taken are ended, and only
+        // those still live: an offline durable holder has nothing to end.
+        const takenKey = agentDisplayNameKey(sessionDisplayName);
+        const takeoverSessionIds = releasableHolders
+          .filter((holder) => !holder.ended_at && agentDisplayNameKey(holder.display_name) === takenKey)
+          .map((holder) => holder.session_id);
         if (
           !isMessageSenderWithinBounds(actorLabel)
           || !isMessageSenderWithinBounds(sessionDisplayName)
@@ -426,6 +580,8 @@ export function registerAgentSessionRoutes(
             session_kind: requestedSessionKind,
             runtime: normalizeRuntime(runtime || resolvedIdeLabel),
             registration_liveness: normalizedRegistrationLiveness,
+            process_host_id: processHostId,
+            takes_requested_name: takesRequestedName,
             repo_branch: normalizedRepoBranch,
             actor_label: actorLabel,
             agent_key: agent.canonical_key,
@@ -441,18 +597,30 @@ export function registerAgentSessionRoutes(
           }, replacementSessionId && replacementSessionToken ? {
             session_id: replacementSessionId,
             session_token: replacementSessionToken,
-          } : null);
+          } : null, takeoverSessionIds);
           // The database fence invalidates credentials first. Only after that
           // commit succeeds, wake any already-authenticated long-poll/SSE
           // request for the stable session id before returning the successor
           // credential. The successor cannot connect until this response.
-          for (const replacedSessionId of durableWorker ? [] : created.replaced_session_ids) {
+          for (const replacedSessionId of [
+            ...(durableWorker ? [] : created.replaced_session_ids),
+            ...created.taken_over_session_ids,
+          ]) {
+            // A session registered again in place has not ended.
+            if (replacedSessionId !== created.session.session_id) announceAgentSessionEnded(replacedSessionId);
             await disconnectRoomAgentDeliverySession({
               room_id: project.id,
               agent_session_id: replacedSessionId,
             });
           }
-          res.status(201).json(created.session);
+          // Said only when there is something to say: a client that
+          // predates it keeps what it is sent.
+          res.status(201).json(created.adopted_task_leases.length === 0 ? created.session : {
+            ...created.session,
+            adopted_task_leases: created.adopted_task_leases.map((lease) => ({
+              lease_id: lease.lease_id, task_id: lease.task_id, kind: lease.kind,
+            })),
+          });
           return;
         } catch (error) {
           if (isActiveAgentInstanceConflictError(error)) {
@@ -465,8 +633,25 @@ export function registerAgentSessionRoutes(
           }
           if (requestedSessionKind === "worker" && isActiveWorkerActorLabelConflict(error)) {
             usedDisplayNames.add(sessionDisplayName);
+            if (ownName && !fellBackToOwnName
+              && agentDisplayNameKey(ownName) !== agentDisplayNameKey(sessionDisplayName)) {
+              // It reached for another name and did not get it. It stays as
+              // it is rather than being moved to a third.
+              fellBackToOwnName = true;
+              takesRequestedName = false;
+              baseDisplayName = ownName;
+              usedDisplayNames.delete(ownName);
+              offset = 0;
+              continue;
+            }
             offset++;
             continue;
+          }
+          if (isLockTimeout(error)) {
+            // Another registration in this room is still committing.
+            res.setHeader("Retry-After", "1");
+            res.status(503).json({ error: "Agent session registration is busy. Retry shortly." });
+            return;
           }
           throw error;
         }
@@ -483,6 +668,158 @@ export function registerAgentSessionRoutes(
         error,
         "Agent session could not be registered."
       );
+    }
+  });
+
+  // The agent's process holds this connection open for as long as it runs.
+  // It carries nothing: that it is open is the message. It is the server's
+  // only evidence of whether the process still exists, because activity on
+  // the session cannot tell a process that is gone from one that is busy or
+  // waiting between room calls.
+  app.get(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/process$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+    if (!(await deps.requireParticipant(req, res, project))) return;
+
+    const header = (name: string): string | undefined => {
+      const value = req.headers?.[name.toLowerCase()];
+      return typeof value === "string" ? value : undefined;
+    };
+    const identity = await requireWorkerRequestAgentIdentity({
+      req,
+      body: {
+        agent_session_id: header(LETAGENTS_AGENT_SESSION_ID_HEADER),
+        agent_session_token: header(LETAGENTS_AGENT_SESSION_TOKEN_HEADER),
+      },
+      room_id: project.id,
+    });
+    if (!identity.ok) {
+      // A process whose session has ended is told so. It proved the session
+      // was its own, and this is how it learns its name has passed on: it
+      // had no connection open to be told over when that happened.
+      const sessionId = header(LETAGENTS_AGENT_SESSION_ID_HEADER)?.trim();
+      const sessionToken = header(LETAGENTS_AGENT_SESSION_TOKEN_HEADER)?.trim();
+      const accountId = req.sessionAccount?.account_id;
+      if (sessionId === targetSessionId && sessionToken && accountId) {
+        try {
+          if (await isEndedRoomAgentSessionCredential({
+            session_id: sessionId, session_token: sessionToken, room_id: project.id, owner_account_id: accountId,
+          })) {
+            res.status(410).json({ error: "Agent session has ended.", code: "agent_session_ended" });
+            return;
+          }
+        } catch (error) {
+          respondWithInternalError(res, "GET /rooms/:room_id/agent-sessions/:id/process", error, "Process connection could not be opened.");
+          return;
+        }
+      }
+      res.status(identity.status).json({ error: identity.error });
+      return;
+    }
+    if (identity.identity.agent_session_id !== targetSessionId) {
+      res.status(403).json({ error: "A process connection belongs to its own session." });
+      return;
+    }
+
+    let connectionId: string | null;
+    try {
+      connectionId = await openRoomAgentProcessConnection({ session_id: targetSessionId, room_id: project.id });
+    } catch (error) {
+      respondWithInternalError(res, "GET /rooms/:room_id/agent-sessions/:id/process", error, "Process connection could not be opened.");
+      return;
+    }
+    if (!connectionId) {
+      // The session has ended. The client stops rather than reconnects.
+      res.status(410).json({ error: "Agent session has ended.", code: "agent_session_ended" });
+      return;
+    }
+
+    const openedConnectionId = connectionId;
+    const connection = openSseConnection(req, res, `agent process ${targetSessionId}`);
+    // The process names this connection when it says it is exiting.
+    void connection.write(`event: open\ndata: ${JSON.stringify({ connection_id: openedConnectionId })}\n\n`);
+    // Set when this server closes the connection for a reason of its own.
+    // Such a close says nothing about the process at the other end.
+    let closedByServer = false;
+    const sessionEnded = async () => {
+      closedByServer = true;
+      await connection.write("event: ended\ndata: {}\n\n");
+      connection.close();
+    };
+    const release = holdAgentProcessConnection(targetSessionId, {
+      sessionEnded: () => { void sessionEnded(); },
+      serverLeaving: () => {
+        closedByServer = true;
+        connection.close();
+      },
+    });
+    // A session that ends on this server is told at once, above. The
+    // interval is what keeps the evidence current: it marks the process
+    // seen, so that a server that dies without closing its connections
+    // leaves evidence that goes stale instead of evidence that never does.
+    // It also reaches a session ended by another server.
+    let refreshing = false;
+    const refresh = setInterval(() => {
+      if (refreshing || connection.closed) return;
+      refreshing = true;
+      void refreshRoomAgentProcessConnection({ session_id: targetSessionId, connection_id: openedConnectionId })
+        .then(async (state) => {
+          if (state === "current") return;
+          // Only an ended session is reported as ended. A replaced
+          // connection is closed without comment: the session lives on.
+          if (state === "ended") await sessionEnded();
+          else connection.close();
+        })
+        .catch((error: unknown) => {
+          console.error(`[agent process] failed to refresh ${targetSessionId}`, error);
+        })
+        .finally(() => { refreshing = false; });
+    }, AGENT_PROCESS_CONNECTION_REFRESH_MS);
+    refresh.unref?.();
+    connection.addCleanup(async () => {
+      clearInterval(refresh);
+      release();
+      if (closedByServer) return;
+      await closeRoomAgentProcessConnection({ session_id: targetSessionId, connection_id: openedConnectionId });
+    });
+  });
+
+  // A process on its way out says so. Unlike a closed connection, which may
+  // reopen, this needs no waiting before its name can pass on. The session is
+  // not ended: a durable worker returns to it when its process starts again.
+  app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/process\/exit$/, async (req: AuthenticatedRequest, res) => {
+    const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");
+    const targetSessionId = decodeURIComponent((req.params as Record<string, string>)[1] ?? "").trim();
+    const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(rawId));
+    const project = await deps.resolveRoomOrReply(roomId, res);
+    if (!project) return;
+    if (!(await deps.requireParticipant(req, res, project))) return;
+    const identity = await requireWorkerRequestAgentIdentity({
+      req,
+      body: (req.body ?? {}) as Record<string, unknown>,
+      room_id: project.id,
+    });
+    if (!identity.ok) {
+      res.status(identity.status).json({ error: identity.error });
+      return;
+    }
+    if (identity.identity.agent_session_id !== targetSessionId) {
+      res.status(403).json({ error: "A process speaks only for its own session." });
+      return;
+    }
+    const connectionId = (req.body as Record<string, unknown> | undefined)?.process_connection_id;
+    try {
+      const recorded = await recordRoomAgentProcessExit({
+        session_id: targetSessionId,
+        room_id: project.id,
+        connection_id: typeof connectionId === "string" && connectionId.trim() ? connectionId.trim() : null,
+      });
+      res.json({ recorded });
+    } catch (error) {
+      respondWithInternalError(res, "POST /rooms/:room_id/agent-sessions/:id/process/exit", error, "Process exit could not be recorded.");
     }
   });
 
@@ -536,18 +873,32 @@ export function registerAgentSessionRoutes(
         room_id: project.id,
         owner_account_id: ownerAccountScope,
         credential_fence: credentialFence,
+        // A room admin disconnecting an agent takes its work away: its leases
+        // stay with this session to be released, not passed to its next one.
+        end_reason: hasSelfCredentials ? null : "room_admin",
       });
       if (!endedSession) {
         res.status(404).json({ error: "Agent session not found" });
         return;
       }
 
+      announceAgentSessionEnded(targetSessionId);
       // Ending already retires delivery and emits credential-scoped invalidations.
       // A later session-id-only disconnect could hit a reconnecting successor.
       const deliverySession = isMcpWorkerId(endedSession.agent_instance_id) ? null : await disconnectRoomAgentDeliverySession({
         room_id: project.id,
         agent_session_id: targetSessionId,
       });
+      // The agent will not read answers to its open requests, so the admin
+      // closes them. An agent leaving by itself keeps them for its return.
+      if (!hasSelfCredentials && req.sessionAccount) {
+        await closeRequestsOfRetiredAgent({
+          room_id: project.id,
+          agent_key: endedSession.agent_key,
+          session_id: endedSession.session_id,
+          person: { id: req.sessionAccount.account_id, label: req.sessionAccount.login, kind: "human" },
+        });
+      }
 
       res.json({
         room_id: project.id,
@@ -692,6 +1043,7 @@ export function registerAgentSessionRoutes(
       sequence?: unknown;
       method?: unknown;
       status?: unknown;
+      activity_summary?: unknown;
     };
     let identity: ResolvedRequestAgentIdentity | null = null;
     if (req.authKind === "agent_session") {
@@ -758,6 +1110,11 @@ export function registerAgentSessionRoutes(
       res.status(400).json({ error: "observed_at, positive integer sequence, native method, and a valid native status are required." });
       return;
     }
+    const activitySummary = parseNativeActivitySummary(body.activity_summary);
+    if (!activitySummary.ok) {
+      res.status(400).json({ error: activitySummary.error });
+      return;
+    }
     try {
       const result = await recordNativeHarnessActivity({
         room_id: project.id,
@@ -774,6 +1131,7 @@ export function registerAgentSessionRoutes(
         sequence,
         method,
         status,
+        activity_summary: activitySummary.summary,
       });
       res.json({ room_id: project.id, axis: "execution_activity", ...result });
     } catch (error) {

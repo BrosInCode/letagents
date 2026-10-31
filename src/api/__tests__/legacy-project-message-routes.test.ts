@@ -258,6 +258,7 @@ test("legacy agent-session bearer writes cannot impersonate an ordinary sender",
     publisher_agent_key?: string | null;
     publisher_agent_session_id?: string | null;
     account_id?: string | null;
+    attachment_uploader?: { account_id: string | null; agent_session_id: string | null } | null;
   } | null = null;
   const app = {
     get() {},
@@ -279,6 +280,7 @@ test("legacy agent-session bearer writes cannot impersonate an ordinary sender",
         publisher_agent_key?: string | null;
         publisher_agent_session_id?: string | null;
         account_id?: string | null;
+        attachment_uploader?: { account_id: string | null; agent_session_id: string | null } | null;
       },
     ) => {
       emitted = {
@@ -287,6 +289,7 @@ test("legacy agent-session bearer writes cannot impersonate an ordinary sender",
         publisher_agent_key: options.publisher_agent_key,
         publisher_agent_session_id: options.publisher_agent_session_id,
         account_id: options.account_id,
+        attachment_uploader: options.attachment_uploader,
       };
       return {
         id: "msg_1",
@@ -347,6 +350,8 @@ test("legacy agent-session bearer writes cannot impersonate an ordinary sender",
     publisher_agent_key: "owner/maple",
     publisher_agent_session_id: "agent_session_worker",
     account_id: "acct_owner",
+    // Attachments belong to the worker session, not to its owner's account.
+    attachment_uploader: { account_id: null, agent_session_id: "agent_session_worker" },
   });
 });
 

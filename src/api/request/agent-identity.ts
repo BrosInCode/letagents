@@ -1,7 +1,9 @@
 import { buildAgentActorLabel, parseAgentActorLabel } from "../../shared/agent-identity.js";
+import { AGENT_SESSION_ENDED_ADVICE } from "../../shared/request-headers.js";
 import {
   getAgentIdentityByCanonicalKey,
   getRoomAgentSessionByCredentials,
+  isEndedRoomAgentSessionCredential,
   touchRoomAgentSession,
 } from "../db.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
@@ -152,6 +154,33 @@ export type WorkerRequestAgentIdentityResult =
   | { ok: true; identity: ResolvedRequestAgentIdentity }
   | { ok: false; status: number; error: string };
 
+/**
+ * What to say to a request whose session credentials were refused. A session
+ * that ended, asked after by its own agent, is said to have ended, with what
+ * to do about it. Anyone else is refused without being told which it was.
+ */
+export async function describeRefusedAgentSession(input: {
+  req: AuthenticatedRequest;
+  agent_session_id: string | null | undefined;
+  agent_session_token: string | null | undefined;
+  room_id: string | null | undefined;
+}): Promise<string> {
+  const refused = "Invalid agent session credentials.";
+  const accountId = input.req.authKind === "owner_token" ? input.req.sessionAccount?.account_id : null;
+  if (!accountId || !input.agent_session_id || !input.agent_session_token || !input.room_id) return refused;
+  try {
+    return await isEndedRoomAgentSessionCredential({
+      session_id: input.agent_session_id,
+      session_token: input.agent_session_token,
+      room_id: input.room_id,
+      owner_account_id: accountId,
+    }) ? AGENT_SESSION_ENDED_ADVICE : refused;
+  } catch {
+    // The refusal stands whether or not the reason could be looked up.
+    return refused;
+  }
+}
+
 export async function requireWorkerRequestAgentIdentity(input: {
   req: AuthenticatedRequest;
   body: Record<string, unknown>;
@@ -198,7 +227,9 @@ export async function requireWorkerRequestAgentIdentity(input: {
     return {
       ok: false,
       status: 401,
-      error: "Invalid agent session credentials.",
+      error: await describeRefusedAgentSession({
+        req: input.req, agent_session_id: sessionId, agent_session_token: sessionToken, room_id: input.room_id,
+      }),
     };
   }
   if (identity.session_kind !== "worker") {

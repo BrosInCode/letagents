@@ -8,7 +8,7 @@ import {
   clearAuthenticatedAccountCache,
   clearPendingDeviceAuth,
   clearStoredAuth,
-  currentRoom,
+  getCurrentRoom,
   ensureAgentIdentity,
   getPendingDeviceAuth,
   getStoredAuth,
@@ -73,7 +73,7 @@ function registerStartDeviceAuthTool(server: McpServer): void {
         interval_seconds: response.interval,
         expires_at: new Date(Date.now() + response.expires_in * 1000).toISOString(),
         started_at: new Date().toISOString(),
-        suggested_room_id: room_id ?? currentRoom?.room_id ?? getRoomFromConfig() ?? undefined,
+        suggested_room_id: room_id ?? getCurrentRoom()?.room_id ?? getRoomFromConfig() ?? undefined,
       });
 
       return jsonTextResponse({
@@ -175,7 +175,7 @@ function registerPollDeviceAuthTool(server: McpServer): void {
       const roomToJoin =
         room_id ||
         pendingAuth?.suggested_room_id ||
-        currentRoom?.room_id ||
+        getCurrentRoom()?.room_id ||
         getRoomFromConfig() ||
         undefined;
 

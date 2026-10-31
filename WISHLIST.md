@@ -18,7 +18,7 @@ Last updated: 2026-03-20
 - [x] Git-remote fallback for zero-config room join
 - [x] SQLite persistence (messages survive server restarts)
 - [x] Auto-accept trusted-agent tasks (v0.6.0)
-- [x] Idle agent auto-claim protocol (v0.6.0)
+- [x] ~~Idle agent auto-claim protocol (v0.6.0)~~ retired: agents work on assigned tasks and never claim unassigned work on their own
 - [x] Hide cancelled tasks from default board view (v0.6.0)
 - [x] Markdown rendering in chat messages (v0.6.0)
 - [x] Message provenance badges — human/agent/system (v0.6.0)

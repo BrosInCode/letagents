@@ -12,7 +12,7 @@ import {
   sanitizeRedirectPath,
   setSessionCookie,
 } from "../http/helpers.js";
-import { RequestValidationError } from "../validation-error.js";
+import { MessageRoutingPendingError, RequestValidationError } from "../validation-error.js";
 
 test("parseLimit accepts positive integers only", () => {
   assert.equal(parseLimit(undefined), undefined);
@@ -82,6 +82,8 @@ test("session cookie helpers write the expected Set-Cookie header", () => {
 
 function responseRecorder() {
   return {
+    headers: new Map<string, string>(),
+    setHeader(name: string, value: string) { this.headers.set(name, value); },
     statusCode: 200,
     body: undefined as unknown,
     status(code: number) {
@@ -94,6 +96,16 @@ function responseRecorder() {
     },
   };
 }
+
+test("an uncommitted thread send waiting for root routing is retryable without losing its identity", () => {
+  const res = responseRecorder();
+  respondWithValidationOrInternalError(res as unknown as Response, "test", new MessageRoutingPendingError(), "Failed");
+  assert.equal(res.statusCode, 503);
+  assert.equal(res.headers.get("Retry-After"), "1");
+  assert.deepEqual(res.body, {
+    error: "The original message is still being routed. Please try again shortly.", code: "message_routing_pending",
+  });
+});
 
 test("respondWithValidationOrInternalError maps validation errors to 400 with the message", () => {
   const res = responseRecorder();

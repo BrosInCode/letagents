@@ -1,4 +1,5 @@
 import { redactCredentialText } from "./credential-redaction.js";
+import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import { advanceReconciliationState } from "./reconciler-state.js";
 import type {
   DaemonManifestEntry,
@@ -12,7 +13,7 @@ type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 
 export type ManifestTransitionPorts = {
   store: {
-    getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+    getEntry(entryId: string, activityMode?: "full" | "summary"): Promise<DaemonManifestEntry | undefined>;
     replaceEntry(
       expectedGeneration: number,
       entry: DaemonManifestEntry,
@@ -46,13 +47,36 @@ export type ManifestTransitionPorts = {
 export class ManifestTransitionCoordinator {
   constructor(private readonly ports: ManifestTransitionPorts) {}
 
+  /**
+   * With `readsNoActivity`, the callback promises to read no activity event and
+   * to depend only on the entry it is given (it may run twice, so it must reset
+   * any state it sets). The first run gets the entry without its activity: the
+   * `activity` property is a non-enumerable getter that throws, so a callback
+   * that reads it fails at once (spreading the entry is safe). When the
+   * callback returns that entry unchanged, a summary read is returned, and its
+   * `activity` is only the short summary window, not the full stored list.
+   * When it returns a change, the full entry is read inside the same lock and
+   * the callback runs again on it, so the committed write always starts from
+   * the full committed row. Callers of this option must not use the returned
+   * entry's activity.
+   */
   async updateEntry(
     entryId: string,
     update: (entry: DaemonManifestEntry) => DaemonManifestEntry,
     roomMoveCancellation?: { agentId: string; detail: string },
+    options?: { readsNoActivity?: boolean },
   ): Promise<DaemonManifestEntry> {
     return this.ports.authority.serializeMutation(async () => {
       await this.ports.authority.assertCurrent();
+      if (options?.readsNoActivity) {
+        const scalars = await this.ports.store.getEntry(entryId, "summary");
+        if (!scalars) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
+        const guarded = Object.defineProperty({ ...scalars }, "activity", {
+          enumerable: false,
+          get(): never { throw new Error("An update that declares readsNoActivity read the entry's activity."); },
+        }) as DaemonManifestEntry;
+        if (update(guarded) === guarded) return scalars;
+      }
       const entry = await this.ports.store.getEntry(entryId);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
       const updated = update(entry);
@@ -129,11 +153,18 @@ export class ManifestTransitionCoordinator {
         : entry.last_error === null || entry.last_error === undefined
           ? null
           : redactCredentialText(entry.last_error).value;
+    // Cursor runs no process between turns, so no runtime fact marks it ready
+    // while it starts: its first one comes with its first turn and finds it
+    // idle. Reaching idle after a launch is its ready mark.
+    const readyReachedAt = entry.provider === "cursor"
+      ? resolveReadyReachedAt({ ...entry, observed_state: to, condition }, false, new Date().toISOString())
+      : null;
     const updated: DaemonManifestEntry = {
       ...entry,
       observed_state: to,
       condition,
       last_error: lastError,
+      ...(readyReachedAt ? { ready_reached_at: readyReachedAt } : {}),
       reconciliation: nextReconciliation,
       reconciliation_notices: notices.slice(-32),
     };

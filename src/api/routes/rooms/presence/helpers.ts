@@ -64,6 +64,20 @@ export function normalizeRegistrationLiveness(value: unknown) {
   };
 }
 
+/**
+ * A statement gave up waiting for a lock (PostgreSQL 55P03), or was chosen to
+ * give way to another transaction it was deadlocked with (40P01). Either way
+ * nothing was changed, and asking again shortly succeeds.
+ */
+export function isLockTimeout(error: unknown): boolean {
+  for (let current = error, depth = 0; current && depth < 4; depth += 1) {
+    const code = (current as { code?: unknown }).code;
+    if (code === "55P03" || code === "40P01") return true;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export function isActiveWorkerActorLabelConflict(error: unknown): boolean {
   const cause = typeof error === "object" && error !== null && "cause" in error
     ? (error as { cause?: unknown }).cause

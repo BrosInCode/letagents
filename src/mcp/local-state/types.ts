@@ -37,43 +37,6 @@ export interface RoomSessionState {
   last_message_id?: string;
 }
 
-export type CodexLiveSessionStatus =
-  | "starting"
-  | "running"
-  | "completed"
-  | "interrupted"
-  | "failed"
-  | "unknown";
-
-export interface CodexLiveSessionState {
-  session_id: string;
-  room_id: string;
-  room_identifier: string;
-  room_code?: string | null;
-  room_display_name?: string | null;
-  joined_via: JoinedVia;
-  cwd: string;
-  repo_branch?: string | null;
-  stop_phrase: string;
-  max_minutes: number;
-  delivery_mode?: "mcp_polling" | "desktop_events";
-  desktop_managed?: boolean;
-  deadline_utc?: string | null;
-  token: string;
-  thread_id: string;
-  turn_id: string;
-  server_url: string;
-  server_pid?: number | null;
-  launched_server: boolean;
-  codex_bin: string;
-  agent_session_id?: string | null;
-  reasoning_session_id?: string | null;
-  status: CodexLiveSessionStatus;
-  last_error?: string | null;
-  started_at: string;
-  updated_at: string;
-}
-
 export interface StoredAgentIdentityState {
   name: string;
   display_name: string;
@@ -160,8 +123,13 @@ export interface LetagentsLocalState {
   current_agent_session_ids?: Record<string, string>;
   current_room?: RoomSessionState;
   room_sessions?: Record<string, RoomSessionState>;
-  current_codex_live_session_ids?: Record<string, string>;
-  codex_live_sessions?: Record<string, CodexLiveSessionState>;
+  /**
+   * Written by letagents before 0.12.46, which could start a local Codex
+   * worker. Nothing reads them now; they stay in the file as they are, so an
+   * older letagents version and the desktop app keep their own entries.
+   */
+  current_codex_live_session_ids?: unknown;
+  codex_live_sessions?: unknown;
   local_host_id?: string;
 }
 

@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   projectStateWatchActivity,
   projectStateWatchEntries,
+  projectStateWatchReceipts,
   STATE_WATCH_ACTIVITY_SUMMARY_LIMIT,
+  STATE_WATCH_RECEIPT_TIMELINE_PHASES,
 } from "../state-watch-projection.js";
 import type { DaemonActivityEvent, DaemonManifestEntryView } from "../types.js";
 
@@ -96,11 +98,92 @@ test("state watch entries preserve every field the launch and inspector views de
   assert.equal(projected!.activity!.length, STATE_WATCH_ACTIVITY_SUMMARY_LIMIT);
 });
 
+type Receipt = NonNullable<DaemonManifestEntryView["delivery_receipts"]>[number];
+type Phase = Receipt["timeline"][number]["phase"];
+
+function deliveryReceipt(id: string, phases: Phase[]): Receipt {
+  return {
+    inbox_item_id: `inbox_${id}`, source_message_id: `message_${id}`, fifo_sequence: 1,
+    reply_client_message_id: `reply_${id}`, canonical_message_id: `canonical_${id}`, state: "acknowledged",
+    attempt_count: 2, provider_turn_id: `turn_${id}`, blocked_by_message_id: null, error: null,
+    failure_code: null, terminal_reason: null, updated_at: "2026-09-01T00:05:00.000Z",
+    follow_up: { for_message_id: "message_0", state: "ended", reason: "other", scheduled: null },
+    timeline: phases.map((phase, index) => ({
+      event_sequence: index + 1, phase, observed_at: new Date(1_700_000_000_000 + index * 1_000).toISOString(),
+      detail: phase === "conversation_restored" ? `restored ${index + 1}` : null,
+    })),
+  };
+}
+
+const EVERY_PHASE: Phase[] = ["received", "queued", "turn_started", "result_unreadable", "retry_scheduled",
+  "turn_started", "turn_finished", "blocked", "conversation_restoring", "conversation_restored", "publish_started",
+  "published", "no_reply", "room_move_cancelled", "user_cancelled", "conversation_restored"];
+
+test("state watch receipts keep only the timeline phases room-level readers use, in order", () => {
+  assert.deepEqual([...STATE_WATCH_RECEIPT_TIMELINE_PHASES].sort(), ["conversation_restored", "turn_started"]);
+  const full = deliveryReceipt("1", EVERY_PHASE);
+  const before = structuredClone(full);
+  const [projected] = projectStateWatchReceipts([full])!;
+  assert.deepEqual(projected!.timeline, full.timeline.filter((event) =>
+    event.phase === "turn_started" || event.phase === "conversation_restored"));
+  assert.deepEqual(projected!.timeline.map((event) => event.event_sequence), [3, 6, 10, 16]);
+  // Every other receipt field is carried through as it is, and the input is not changed.
+  assert.deepEqual({ ...projected, timeline: [] }, { ...full, timeline: [] });
+  assert.deepEqual(full, before);
+});
+
+test("a state watch receipt keeps a timeline array even when no event is kept", () => {
+  const both =projectStateWatchReceipts([deliveryReceipt("2", ["received", "queued"]), deliveryReceipt("3", [])])!;
+  assert.ok(both.every((receipt) => Array.isArray(receipt.timeline) && receipt.timeline.length === 0));
+  assert.equal(projectStateWatchReceipts(undefined), undefined);
+});
+
+test("a frozen timeline is trimmed once and its trim reused; a mutable one is trimmed every time", () => {
+  // Frozen, as the read model hands out the inbox inputs it keeps between wakes.
+  const frozen = Object.freeze({ ...deliveryReceipt("4", EVERY_PHASE), timeline: Object.freeze(deliveryReceipt("4", EVERY_PHASE).timeline) });
+  const first = projectStateWatchReceipts([frozen])![0]!.timeline;
+  const second = projectStateWatchReceipts([frozen])![0]!.timeline;
+  assert.equal(first.length, 4);
+  assert.equal(second, first, "the next wake reuses the trim");
+  assert.ok(Object.isFrozen(first), "a shared trim cannot be edited by one view");
+  // A timeline that can still change is never answered from the map.
+  const mutable = deliveryReceipt("5", EVERY_PHASE);
+  const once = projectStateWatchReceipts([mutable])![0]!.timeline;
+  mutable.timeline.push({ event_sequence: 17, phase: "turn_started", observed_at: "2026-09-01T00:09:00.000Z", detail: null });
+  const again = projectStateWatchReceipts([mutable])![0]!.timeline;
+  assert.notEqual(again, once);
+  assert.deepEqual(again.map((event) => event.event_sequence), [3, 6, 10, 16, 17]);
+});
+
+test("state watch entries trim receipt timelines and leave entries without receipts or activity untouched", () => {
+  const withReceipts = { ...entry("agent_3", 0), delivery_receipts: [deliveryReceipt("5", EVERY_PHASE)] };
+  delete (withReceipts as { activity?: unknown }).activity;
+  const [projected] = projectStateWatchEntries([withReceipts]);
+  assert.notEqual(projected, withReceipts);
+  assert.equal(projected!.delivery_receipts![0]!.timeline.length, 4);
+  assert.equal(Object.hasOwn(projected!, "activity"), false, "no activity field is added");
+  assert.equal(withReceipts.delivery_receipts[0]!.timeline.length, EVERY_PHASE.length, "manifest.list keeps the full timeline");
+});
+
 test("state watch entries without activity are returned untouched", () => {
   const bare = { ...entry("agent_2", 0) };
   delete (bare as { activity?: unknown }).activity;
   const [projected] = projectStateWatchEntries([bare]);
   assert.equal(projected, bare, "an entry with no activity field is not copied");
+});
+
+test("trimmed receipt timelines cut a long-history snapshot's receipt bytes", () => {
+  const delivered: Phase[] = ["received", "queued", "turn_started", "turn_finished", "publish_started", "published"];
+  const entries = Array.from({ length: 150 }, (_unused, index) => ({
+    ...entry(`agent_${index}`, 0),
+    delivery_receipts: Array.from({ length: 120 }, (_receipt, receipt) => deliveryReceipt(`${index}_${receipt}`, delivered)),
+  }));
+  const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+  const before = bytes(entries.map((row) => row.delivery_receipts));
+  const after = bytes(projectStateWatchEntries(entries).map((row) => row.delivery_receipts));
+  const mib = (value: number) => `${(value / 1_048_576).toFixed(2)} MiB`;
+  console.log(`receipts (150 entries x 120 receipts x 6 events): ${mib(before)} -> ${mib(after)} (${(before / after).toFixed(1)}x)`);
+  assert.ok(before / after > 1.5, `the timeline trim must cut receipt bytes, saw ${(before / after).toFixed(2)}x`);
 });
 
 test("a 150-entry snapshot is an order of magnitude smaller than full history", () => {

@@ -1,12 +1,10 @@
-import type {
-  DesktopManagedAgentSession,
-  DesktopSupervisorManifestEntry,
-} from "../../../electron/ipc-types";
+import type { DesktopSupervisorManifestEntry } from "../../../electron/ipc-types";
 import type {
   AgentInspectorSelection,
   AgentInspectorRequest,
   AgentModalTarget,
 } from "../components/desktop/content/desktop-chat-message/types";
+import type { ManagedAgentWorkIndicator } from "./managed-agents";
 
 export type SupervisorEntriesResource =
   | { state: "loading"; roomIdentifier: string; updatedAt: string | null; data: readonly DesktopSupervisorManifestEntry[]; error: null }
@@ -51,31 +49,6 @@ export function isCurrentAgentInspectorOperation(
     && context.modalStateVersion === expected.context.modalStateVersion
     && context.roomIdentifier === expected.context.roomIdentifier
     && context.inspectorRequestVersion === expected.context.inspectorRequestVersion;
-}
-
-/**
- * The shell request version is authoritative. Two requests may intentionally
- * have identical presentation/session fields, so those fields alone cannot
- * decide whether modal-local operations should survive.
- */
-export function agentInspectorRequestResetKey(
-  selection: AgentInspectorSelection | null,
-  inspectorRequestVersion: number,
-): string {
-  return JSON.stringify([
-    inspectorRequestVersion,
-    selection?.kind ?? null,
-    selection?.kind === "supervised" ? selection.supervisorEntryId : null,
-    selection?.kind === "unavailable" ? selection.unavailableReason : null,
-    selection?.messageId ?? null,
-    selection?.clientMessageId ?? null,
-    selection?.messageSource ?? null,
-    selection?.agentSessionId ?? null,
-    selection?.agentKey ?? null,
-    selection?.actorLabel ?? null,
-    selection?.displayName ?? null,
-    selection?.sender ?? null,
-  ]);
 }
 
 export function isCurrentAgentInspectorSupervisorUpdate(
@@ -193,68 +166,40 @@ export function resolvingAgentInspectorRequest(target: AgentModalTarget): AgentI
   return { kind: "resolving", target };
 }
 
-/**
- * Resolve control-bearing local sessions using only exact durable identity.
- * Presentation and reasoning relationships are intentionally excluded: they
- * may help render context, but they must never grant stop/retry/permission
- * controls. Duplicates and disagreeing session/key identities fail closed.
- */
-export function resolveAgentInspectorManagedSessions(
-  sessions: readonly DesktopManagedAgentSession[],
-  selection: AgentInspectorSelection | null,
-): DesktopManagedAgentSession[] {
-  const resolution = resolveAgentInspectorManagedSession(sessions, selection);
-  return resolution.state === "matched" ? [resolution.session] : [];
+export interface InitialTabEffects {
+  emitLiveSelected: boolean;
 }
 
-export type AgentInspectorManagedSessionResolution =
-  | { state: "matched"; session: DesktopManagedAgentSession }
-  | { state: "unmatched" }
-  | { state: "ambiguous" };
+export function initialTabEffects(tab: string | undefined): InitialTabEffects {
+  return {
+    emitLiveSelected: tab === "live",
+  };
+}
+
+export function inspectorInitialTab(target: AgentModalTarget): "overview" | "live" | "work" | "workspace" {
+  return target.initialTab ?? (target.workSourceMessageId ? "work" : target.workspaceSourceMessageId ? "workspace" : "overview");
+}
 
 /**
- * Resolve one control-bearing local session without collapsing ambiguity into
- * "external". Display labels and provider labels are deliberately excluded.
+ * Project a room work indicator into an agent modal target aimed directly at
+ * the Live inspector view. Supervision and session resolution are handled by
+ * resolveSupervisorEntryId in the room shell using exact runtime identity.
  */
-export function resolveAgentInspectorManagedSession(
-  sessions: readonly DesktopManagedAgentSession[],
-  selection: AgentInspectorSelection | null,
-): AgentInspectorManagedSessionResolution {
-  if (!selection) return { state: "unmatched" };
-  if (selection.kind === "supervised") {
-    const matches = sessions.filter((session) => session.supervisorEntryId === selection.supervisorEntryId);
-    if (matches.length > 1) return { state: "ambiguous" };
-    return matches.length === 1 ? { state: "matched", session: matches[0]! } : { state: "unmatched" };
-  }
-  if (selection.kind !== "external") return { state: "unmatched" };
-
-  const sessionId = exactIdentity(selection.agentSessionId);
-  const agentKey = exactIdentity(selection.agentKey);
-  const specificAgentKey = agentKey && /[/:]/.test(agentKey) ? agentKey : null;
-  if (!sessionId && !specificAgentKey) return { state: "unmatched" };
-
-  const sessionMatches = sessionId
-    ? sessions.filter((session) => exactIdentity(session.agentSessionId) === sessionId)
-    : [];
-  const keyMatches = specificAgentKey
-    ? sessions.filter((session) => exactIdentity(session.agentKey) === specificAgentKey)
-    : [];
-  if (sessionMatches.length > 1 || keyMatches.length > 1) return { state: "ambiguous" };
-  if (sessionId && specificAgentKey) {
-    if (sessionMatches.length === 0 && keyMatches.length === 0) return { state: "unmatched" };
-    if (sessionMatches.length !== 1 || keyMatches.length !== 1) return { state: "ambiguous" };
-    return sessionMatches[0]!.id === keyMatches[0]!.id
-      ? { state: "matched", session: sessionMatches[0]! }
-      : { state: "ambiguous" };
-  }
-  if (sessionId) {
-    return sessionMatches.length === 1
-      ? { state: "matched", session: sessionMatches[0]! }
-      : { state: "unmatched" };
-  }
-  return keyMatches.length === 1
-    ? { state: "matched", session: keyMatches[0]! }
-    : { state: "unmatched" };
+export function workIndicatorAgentTarget(work: ManagedAgentWorkIndicator): AgentModalTarget {
+  return {
+    workSourceMessageId: undefined,
+    messageId: null,
+    clientMessageId: null,
+    messageSource: "agent",
+    actorLabel: work.displayName,
+    displayName: work.displayName,
+    ownerAttribution: null,
+    ideLabel: null,
+    sender: work.displayName,
+    agentKey: work.agentKey ?? null,
+    agentSessionId: work.agentSessionId ?? null,
+    initialTab: "live",
+  };
 }
 
 export function resolveAgentInspectorSelection(

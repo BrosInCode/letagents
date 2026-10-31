@@ -4,21 +4,33 @@ import {
 } from "../../local-state/storage.js";
 import type { StoredMcpWorker, StoredAgentSessionState } from "../../local-state/types.js";
 import { isLocalRoomStorageEnabled, resolveLocalRoomStorageIdentifiers } from "../../local-state.js";
-import { assertWorkerConnection, pinWorkerConnection, pinnedWorkerConnection, withWorkerCall } from "../../worker-call-context.js";
+import { assertWorkerConnection, heldWorkerConnection, pinWorkerConnection, pinnedWorkerConnection, withWorkerCall } from "../../worker-call-context.js";
 import { isMcpWorkerId } from "../../../shared/mcp-worker.js";
 import { AGENT_CODENAME_SPACE, pickLocalCodename } from "../../../shared/codenames.js";
 import { buildAgentActorLabel } from "../../../shared/agent-identity.js";
 import { normalizeRoutingHandle, normalizeRoutingSender } from "../../../../shared/routing-aliases.mjs";
 import { encodeRoomIdPath } from "../../room-id.js";
 import { getGitCurrentBranch } from "../../git-remote.js";
-import { apiCall, getApiUrl, getLetagentsToken } from "./api.js";
+import { apiCall, apiCallWhenFree, getApiUrl, hasLetagentsCredential } from "./api.js";
 import { resolveOwnerContext } from "./identity/directory.js";
 import { detectAgentIdeLabel, detectAgentRuntimeLabel } from "./identity/config.js";
-import { getSessionLivenessRegistration } from "./identity/liveness.js";
+import { getProcessHostId, getSessionLivenessRegistration } from "./identity/liveness.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import { holdProcessConnection } from "./process-connection.js";
+import { scopedMap } from "./session-scope.js";
 
-type WorkerConnection = { worker: StoredMcpWorker; session: StoredAgentSessionState };
-const connecting = new Map<string, Promise<WorkerConnection>>();
+export type AdoptedTaskLease = { lease_id: string; task_id: string; kind: string };
+type WorkerConnection = {
+  worker: StoredMcpWorker;
+  session: StoredAgentSessionState;
+  /** The name that was asked for, when a worker this process holds has it. */
+  name_held_here?: string | null;
+  /** Leases an earlier session of this agent held, which this one now holds. */
+  adopted_task_leases?: AdoptedTaskLease[];
+};
+// What the room said of the registration just made, kept for its caller.
+const adoptedBySession = scopedMap<string, AdoptedTaskLease[]>("adopted-task-leases");
+const connecting = scopedMap<string, Promise<WorkerConnection>>("connecting-workers");
 
 function snapshot() {
   const result = readLocalStateSnapshot();
@@ -30,7 +42,7 @@ async function workerScope(): Promise<string> {
   if (requireValidWorkerBearerRuntime().mode !== "owner") {
     throw new Error("Worker handles are for independent MCP chats; supervised identity is supplied by its supervisor.");
   }
-  const hasAccountToken = Boolean(await getLetagentsToken());
+  const hasAccountToken = await hasLetagentsCredential();
   const owner = await resolveOwnerContext();
   if (hasAccountToken && !owner.login) {
     throw new Error("Could not verify your LetAgents account. Check your connection or sign-in, then retry with the same worker_id or registration_key. Saved worker identities have not been changed.");
@@ -46,6 +58,82 @@ function getWorker(workerId: string, scope: string): StoredMcpWorker {
   return worker;
 }
 
+export function readAdoptedTaskLeases(value: unknown): AdoptedTaskLease[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const lease = entry as { lease_id?: unknown; task_id?: unknown; kind?: unknown } | null;
+    return lease && typeof lease.lease_id === "string" && typeof lease.task_id === "string"
+      && typeof lease.kind === "string"
+      ? [{ lease_id: lease.lease_id, task_id: lease.task_id, kind: lease.kind }] : [];
+  });
+}
+
+/**
+ * The workers this process holds in a room under a name.
+ *
+ * A chat that has lost its worker_id registers as if it were new, and asks
+ * for the name it knows itself by. This process still holds the worker it
+ * registered as, so the room sees that name held by an agent that is there,
+ * and gives the chat another. It is then a second agent, under a name it
+ * does not know, with none of its tasks.
+ *
+ * A worker_id is what lets a chat act as a worker, so it is not given to
+ * every chat that asks for a worker's name: two chats served by one process
+ * may ask for the same name, and each is its own worker. A chat is told only
+ * that the name is held here, and how to say that it is the one holding it.
+ */
+function workersThisProcessHoldsUnder(
+  displayName: string | undefined,
+  scope: string,
+  roomId: string,
+): Array<{ worker_id: string; display_name: string }> {
+  const asked = displayName?.trim();
+  if (!asked) return [];
+  const nameKey = (name: string) => normalizeRoutingHandle(name) || normalizeRoutingSender(name);
+  const state = snapshot();
+  return Object.values(state.mcp_workers ?? {}).flatMap((worker) => {
+    if (worker.scope !== scope) return [];
+    const sessionId = worker.rooms[roomId]?.session_id;
+    const session = sessionId ? state.agent_sessions?.[sessionId] : undefined;
+    if (!sessionId || !session || session.ended_at) return [];
+    const held = heldWorkerConnection(getLocalStatePath(), sessionId);
+    if (!held || held.session_token !== session.session_token) return [];
+    // The name it lives under, which is the name it knows itself by. A
+    // worker that asked for this name and was given another is not it.
+    if (nameKey(session.display_name) !== nameKey(asked)) return [];
+    return [{ worker_id: worker.worker_id, display_name: session.display_name }];
+  });
+}
+
+/**
+ * A chat says that it registered under this name and has lost its handle. If
+ * this process holds one worker under the name in the room, that is the
+ * worker, and the chat has it back.
+ */
+export async function recoverMcpWorker(input: {
+  roomId: string;
+  displayName: string;
+  runtime?: string;
+  cwd?: string;
+}): Promise<WorkerConnection> {
+  const scope = await workerScope();
+  const identifiers = await resolveLocalRoomStorageIdentifiers(input.roomId);
+  const held = workersThisProcessHoldsUnder(input.displayName, scope, identifiers.cloudRoomId || input.roomId);
+  if (held.length === 0) {
+    throw new Error(
+      `This MCP server holds no worker named "${input.displayName.trim()}" in this room, so there is nothing to recover. `
+      + "Register as a new worker with a registration_key.",
+    );
+  }
+  if (held.length > 1) {
+    throw new Error(
+      `This MCP server holds more than one worker named "${input.displayName.trim()}" in this room and cannot tell `
+      + "which one this chat is. Register as a new worker with a registration_key.",
+    );
+  }
+  return registerMcpWorker({ roomId: input.roomId, workerId: held[0]!.worker_id, runtime: input.runtime, cwd: input.cwd });
+}
+
 export async function registerMcpWorker(input: {
   roomId: string;
   workerId?: string;
@@ -57,10 +145,15 @@ export async function registerMcpWorker(input: {
   const scope = await workerScope();
   if (input.workerId && input.registrationKey) throw new Error("Use worker_id to resume or registration_key to create, not both.");
   let workerId = input.workerId;
+  let nameHeldHere: string | null = null;
+  const identifiers = await resolveLocalRoomStorageIdentifiers(input.roomId);
+  const roomId = identifiers.cloudRoomId || input.roomId;
   if (!workerId) {
     if (!input.registrationKey?.trim()) throw new Error("A new chat must supply its own registration_key and retain the returned worker_id.");
     const keyHash = createHash("sha256").update(`${scope}\n${input.registrationKey}`).digest("hex");
-    snapshot();
+    const known = Object.values(snapshot().mcp_workers ?? {})
+      .some((worker) => worker.scope === scope && worker.registration_key_hash === keyHash);
+    if (!known) nameHeldHere = workersThisProcessHoldsUnder(input.displayName, scope, roomId)[0]?.display_name ?? null;
     updateLocalState((state) => {
       state.mcp_workers ??= {};
       const prior = Object.values(state.mcp_workers).find((w) => w.scope === scope && w.registration_key_hash === keyHash);
@@ -73,18 +166,23 @@ export async function registerMcpWorker(input: {
     });
   }
   const worker = getWorker(workerId!, scope);
-  const identifiers = await resolveLocalRoomStorageIdentifiers(input.roomId);
-  const roomId = identifiers.cloudRoomId || input.roomId;
   const local = await isLocalRoomStorageEnabled(input.roomId);
   const key = `${getLocalStatePath()}\n${worker.worker_id}\n${roomId}`;
-  const inFlight = connecting.get(key);
+  const inFlight = connecting().get(key);
   if (inFlight) return inFlight;
   const result = connectWorker(input, worker, scope, roomId, local);
-  connecting.set(key, result);
+  connecting().set(key, result);
   try {
-    return await result;
+    const connection = await result;
+    const adopted = adoptedBySession().get(connection.session.session_id);
+    adoptedBySession().delete(connection.session.session_id);
+    return {
+      ...connection,
+      ...(nameHeldHere ? { name_held_here: nameHeldHere } : {}),
+      ...(adopted?.length ? { adopted_task_leases: adopted } : {}),
+    };
   } finally {
-    connecting.delete(key);
+    connecting().delete(key);
   }
 }
 
@@ -94,7 +192,10 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
   const current = currentId ? snapshot().agent_sessions?.[currentId] : undefined;
   const pinned = currentId ? pinnedWorkerConnection(getLocalStatePath(), currentId) : null;
   if (pinned && current && !current.ended_at && pinned.session_token === current.session_token
-    && !worker.rooms[roomId]?.pending) return { worker, session: pinned };
+    && !worker.rooms[roomId]?.pending) {
+    if (!local) holdProcessConnection(pinned);
+    return { worker, session: pinned };
+  }
 
   const owner = await resolveOwnerContext();
   if (!local && !owner.login) throw new Error("Sign in before registering a worker in a hosted room.");
@@ -125,7 +226,9 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
         created_at: prior?.created_at ?? now, updated_at: now, last_seen_at: now, ended_at: null,
       };
     } else {
-      const created = await apiCall<StoredAgentSessionState & { assigned_base_display_name?: string; worker_bearer?: unknown }>(
+      const created = await apiCallWhenFree<StoredAgentSessionState & {
+        assigned_base_display_name?: string; worker_bearer?: unknown; adopted_task_leases?: unknown;
+      }>(
         `/rooms/${encodeRoomIdPath(roomId)}/agent-sessions`, {
           method: "POST", body: JSON.stringify({
             actor_key: agent.canonical_key, agent_instance_id: worker.worker_id,
@@ -133,6 +236,7 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
             session_kind: "worker", runtime: input.runtime || detectAgentRuntimeLabel(), ide_label: ide,
             repo_branch: getGitCurrentBranch(input.cwd),
             registration_liveness: getSessionLivenessRegistration(input.runtime || detectAgentRuntimeLabel()),
+            process_host_id: getProcessHostId(),
             connection_token: operation.connection_token,
             replace_agent_session_id: operation.predecessor_id ?? null,
             replace_agent_session_token: operation.predecessor_token ?? null,
@@ -145,8 +249,10 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
         throw new Error("The server did not confirm this worker connection. Upgrade the API before using durable worker handles.");
       }
       // Keep only the session credential; the server's optional bearer is not used here.
-      const { assigned_base_display_name, worker_bearer: _unusedBearer, ...record } = created;
+      const { assigned_base_display_name, worker_bearer: _unusedBearer, adopted_task_leases, ...record } = created;
       session = { ...record, requested_base_display_name: assigned_base_display_name ?? worker.display_name };
+      const adopted = readAdoptedTaskLeases(adopted_task_leases);
+      if (adopted.length > 0) adoptedBySession().set(session.session_id, adopted);
     }
     updateLocalState((state) => {
       const target = state.mcp_workers?.[worker.worker_id]?.rooms[roomId];
@@ -189,6 +295,7 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
   });
   const session = await finish(operation);
   pinWorkerConnection(getLocalStatePath(), session);
+  if (!local) holdProcessConnection(session);
   return { worker: getWorker(worker.worker_id, scope), session };
 }
 

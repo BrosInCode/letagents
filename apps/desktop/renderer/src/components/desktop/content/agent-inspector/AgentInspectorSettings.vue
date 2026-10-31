@@ -24,7 +24,7 @@
         <label class="agent-inspector-field"><span>Initial message</span><textarea :value="resource.draft.charter" rows="4" readonly aria-readonly="true"></textarea><small>The first message sent when this agent was created.</small></label>
         <fieldset v-if="resource.configuration.supervisedPermissionProfiles.length" class="agent-inspector-permissions" :disabled="busy || !settingsEditable" :aria-describedby="'agent-inspector-permission-detail'">
           <legend>Permissions</legend>
-          <p id="agent-inspector-permission-detail" class="agent-inspector-settings-note">Choose what the agent can access the next time it starts.</p>
+          <p id="agent-inspector-permission-detail" class="agent-inspector-settings-note" :data-tone="permissionPending ? 'warning' : undefined" data-testid="agent-inspector-permission-timing">{{ permissionTimingNote(deliveryMode, permissionPending) }}</p>
           <label v-for="profile in resource.configuration.supervisedPermissionProfiles" :key="profile.id" class="agent-inspector-permission-choice" :data-selected="resource.draft.permissionProfileId === profile.id" :data-state="profile.status">
             <input
               type="radio"
@@ -38,9 +38,41 @@
               <strong>{{ profile.label }}</strong>
               <small>{{ resource.draft.permissionProfileId === profile.id ? `Selected · ${profile.description}` : profile.description }}</small>
               <small v-if="profile.detail || profile.status !== 'available'">{{ profile.detail || (profile.status === 'gated' ? 'This access option is not available yet.' : 'This agent app does not support this access option.') }}</small>
+              <small v-if="profileLimits(profile)" class="agent-inspector-permission-limits">{{ profileLimits(profile) }}</small>
             </span>
           </label>
         </fieldset>
+        <section v-if="resource.draft.imageInput !== undefined" class="agent-inspector-permissions agent-inspector-image-input" aria-labelledby="agent-inspector-image-input-title">
+          <div class="agent-inspector-home-harness-row">
+            <strong id="agent-inspector-image-input-title">{{ IMAGE_INPUT_TITLE }}</strong>
+            <DesktopSwitch
+              labelledby="agent-inspector-image-input-title"
+              describedby="agent-inspector-image-input-description"
+              test-id="agent-inspector-image-input"
+              :checked="resource.draft.imageInput === true"
+              :disabled="busy || !settingsEditable"
+              @toggle="patch({ imageInput: resource.draft.imageInput !== true })"
+            />
+          </div>
+          <p id="agent-inspector-image-input-description" class="agent-inspector-settings-note">{{ IMAGE_INPUT_DESCRIPTION }}</p>
+        </section>
+        <AgentInspectorHomeHarness
+          v-if="resource.configuration.homeHarness && desktopIpc.supervisor?.setAgentHomeHarness"
+          :configuration="resource.configuration"
+          :state="resource.configuration.homeHarness"
+          :disabled="busy || !settingsEditable || retired"
+          :unsaved-edits="unsavedEdits"
+          :saved-rules="toolRules.length"
+          @changed="reloadSettings"
+        />
+        <AgentInspectorLiveSharing
+          v-if="resource.configuration.liveSharing && desktopIpc.supervisor?.setAgentLiveSharing"
+          :configuration="resource.configuration"
+          :state="resource.configuration.liveSharing"
+          :disabled="busy || !settingsEditable || retired"
+          :unsaved-edits="unsavedEdits"
+          @changed="reloadSettings"
+        />
         <section v-if="desktopIpc.supervisor?.listHostToolRules" class="agent-inspector-permissions" aria-label="Always allowed tools">
           <strong>Always allowed</strong>
           <p v-if="toolRulesLoading" class="agent-inspector-settings-note" role="status">Loading…</p>
@@ -60,6 +92,7 @@
         <div class="agent-inspector-section-heading"><p id="agent-inspector-move-title">Move room</p></div>
         <p v-if="!moveAvailable || move.status === 'unavailable'" class="agent-inspector-settings-note">{{ move.error || AGENT_INSPECTOR_ROOM_MOVE_UNAVAILABLE }}</p>
         <template v-else>
+          <p v-if="resource.configuration.homeHarness?.enabled" class="agent-inspector-settings-note" data-tone="warning" role="alert" data-testid="agent-inspector-move-own-setup">{{ homeHarnessMoveNote(resource.configuration.provider) }}</p>
           <p class="agent-inspector-settings-note">If a move is interrupted, reopen these settings to resume it.</p>
           <p v-if="move.status === 'loading' && !move.move" class="agent-inspector-settings-note" role="status">Checking for a saved room move…</p>
           <label class="agent-inspector-field"><span>Destination room</span><select v-model="destination" :disabled="busy || move.status === 'loading' || Boolean(move.move && !moveTerminal)"><option value="">Choose a room</option><option v-for="room in destinations" :key="room.identifier" :value="room.identifier">{{ room.displayName }}</option></select></label>
@@ -96,32 +129,52 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from "vue";
-import type { DesktopAgentProvider, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
+import type { DesktopAgentProvider, DesktopFocusRoomInfo, DesktopManagedAgentPermissionProfileId } from "../../../../../../electron/ipc-types";
 import {
   AGENT_INSPECTOR_RETIRE_CONFIRMATION,
   AGENT_INSPECTOR_ROOM_MOVE_UNAVAILABLE,
   agentInspectorProviderSupportsEffort,
+  configurationDraft,
   configurationHasRuntimeLag,
+  IMAGE_INPUT_DESCRIPTION,
+  IMAGE_INPUT_TITLE,
   inspectorEffortOptions,
+  permissionTimingNote,
   roomMovePresentation,
   type AgentInspectorConfigurationDraft,
   type AgentInspectorConfigurationResource,
   type AgentInspectorRoomMoveResource,
 } from "../../../../domain/agent-inspector-settings";
+import { homeHarnessMoveNote } from "../../../../domain/agent-home-harness";
+import { supervisedPermissionProfileLimits } from "../../../../domain/managed-agents";
 import { desktopIpc } from "../../../../ipc";
 import type { HostToolRule } from "../../../../../../shared/host-tool-rules";
-const props = defineProps<{ entryId: string; displayName: string; workspacePath: string | null; retired: boolean; resource: AgentInspectorConfigurationResource; move: AgentInspectorRoomMoveResource; moveAvailable: boolean; providers: readonly DesktopAgentProvider[]; destinations: readonly DesktopFocusRoomInfo[]; busy: boolean; applyPending: boolean; conflict: boolean }>();
+import AgentInspectorHomeHarness from "./AgentInspectorHomeHarness.vue";
+import DesktopSwitch from "../../controls/DesktopSwitch.vue";
+import AgentInspectorLiveSharing from "./AgentInspectorLiveSharing.vue";
+const props = defineProps<{ entryId: string; displayName: string; workspacePath: string | null; retired: boolean; resource: AgentInspectorConfigurationResource; move: AgentInspectorRoomMoveResource; moveAvailable: boolean; providers: readonly DesktopAgentProvider[]; destinations: readonly DesktopFocusRoomInfo[]; busy: boolean; applyPending: boolean; conflict: boolean; deliveryMode?: string; permissionPending?: boolean }>();
 const emit = defineEmits<{ patch: [patch: Partial<AgentInspectorConfigurationDraft>]; save: [overwrite: boolean]; apply: []; reload: []; "prepare-move": [destination: string]; "commit-move": []; retire: []; purge: [] }>();
 const destination = ref(""); const purgeConfirmation = ref(""); const confirmRetire = ref(false);
 const provider = computed(() => props.providers.find((item) => item.id === props.resource.configuration?.provider) ?? null);
-const canEditModel = computed(() => Boolean(provider.value?.capabilities.includes("desktop_managed_runtime")));
+const canEditModel = computed(() => Boolean(provider.value?.capabilities.includes("supervised_runtime")));
 const canEditEffort = computed(() => agentInspectorProviderSupportsEffort(provider.value?.id));
 const runtimeLag = computed(() => configurationHasRuntimeLag(props.resource.configuration));
 const settingsEditable = computed(() => props.resource.status === "ready");
 const validDraft = computed(() => Boolean(props.resource.draft));
+const unsavedEdits = computed(() => {
+  const { configuration, draft } = props.resource;
+  if (!configuration || !draft) return false;
+  const saved = configurationDraft(configuration);
+  return (Object.keys(saved) as Array<keyof AgentInspectorConfigurationDraft>).some((key) => saved[key] !== draft[key]);
+});
 const movePresentation = computed(() => props.move.move ? roomMovePresentation(props.move.move) : null);
 const moveTerminal = computed(() => Boolean(movePresentation.value?.terminal));
 function patch(value: Partial<AgentInspectorConfigurationDraft>) { emit("patch", value); }
+/** What an access level withholds, for this agent: its owner's own setup, when on, is outside those limits. */
+function profileLimits(profile: { id: DesktopManagedAgentPermissionProfileId; status: "available" | "gated" | "unsupported" }): string | null {
+  const configuration = props.resource.configuration;
+  return configuration ? supervisedPermissionProfileLimits(configuration.provider, profile, configuration.homeHarness?.enabled === true) : null;
+}
 function confirmRetireAgent(): void { confirmRetire.value = false; emit("retire"); }
 watch(() => props.entryId, () => { destination.value = ""; purgeConfirmation.value = ""; confirmRetire.value = false; });
 const toolRules = ref<HostToolRule[]>([]);

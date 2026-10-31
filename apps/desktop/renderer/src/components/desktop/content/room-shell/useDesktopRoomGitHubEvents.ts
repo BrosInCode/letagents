@@ -1,3 +1,4 @@
+import { provideRoomMessageLinkPreviews, useRoomMessageLinkPreviews } from "../../../../composables/useRoomMessageLinkPreviews";
 import {
   computed,
   onBeforeUnmount,
@@ -14,7 +15,8 @@ import type {
 import { mergeDesktopGitHubEventsPage } from "../../../../domain/desktop-room-snapshots";
 import { roomSupportsGitHubIntegration } from "../../../../domain/git-rooms";
 import { desktopIpc } from "../../../../ipc/index.js";
-import type { ComposerEventPreview } from "../room-chat/RoomComposerEventChips.vue";
+import { providePullRequestDiffContext } from "../../../../composables/usePullRequestDiffContext";
+import type { ComposerEventPreview } from "../room-chat/composer-event-preview";
 import { buildComposerEventPreview } from "../room-chat/composer-event-preview";
 import {
   isLowSignalGitHubCheckMessage,
@@ -45,7 +47,6 @@ export function useDesktopRoomGitHubEvents(options: {
   const eventsUnseenCount = ref(0);
   const eventsUnseenTone = ref<RoomTabIndicatorTone>("info");
   const composerGitHubEventTimers = new Map<string, number>();
-  let githubEventsRefreshTimer: number | null = null;
 
   const githubRepository = computed(() =>
     options.connectedRepository.value
@@ -53,6 +54,14 @@ export function useDesktopRoomGitHubEvents(options: {
     || eventsPage.value?.githubRoomIdentifier
     || null
   );
+  provideRoomMessageLinkPreviews(useRoomMessageLinkPreviews(
+    computed(() => options.localGitRoom.value ? "" : options.room.value.identifier),
+    computed(() => options.room.value.gitRoom?.repository.fullName || githubRepository.value),
+  ));
+  providePullRequestDiffContext({
+    room: computed(() => options.room.value.identifier),
+    repository: computed(() => options.githubConnected.value ? githubRepository.value : null),
+  });
   const showEventsTab = computed(() =>
     !options.localGitRoom.value && (
       roomSupportsGitHubIntegration(options.room.value)
@@ -77,6 +86,8 @@ export function useDesktopRoomGitHubEvents(options: {
     eventsTaskFilterId.value = null;
     eventsSelectedEventId.value = null;
     eventsError.value = null;
+    eventsLoading.value = false;
+    eventsLoadingOlder.value = false;
     eventsLoadedOlderWithoutMatches.value = false;
     clearComposerGitHubEventPreviews();
     resetEventsIndicator();
@@ -93,18 +104,12 @@ export function useDesktopRoomGitHubEvents(options: {
     const latestMessage = options.messages.value.at(-1);
     if (!latestMessage || !showEventsTab.value || !shouldRefreshEventsForMessage(latestMessage)) return;
     if (!shouldPreviewComposerEvent(latestMessage)) {
-      scheduleGitHubEventsRefresh(options.activeTab.value === "events" ? 250 : 900);
       return;
     }
     ingestComposerGitHubEvent(latestMessage);
-    scheduleGitHubEventsRefresh(options.activeTab.value === "events" ? 250 : 900);
   });
 
   onBeforeUnmount(() => {
-    if (githubEventsRefreshTimer !== null) {
-      window.clearTimeout(githubEventsRefreshTimer);
-      githubEventsRefreshTimer = null;
-    }
     clearComposerGitHubEventPreviews();
   });
 
@@ -117,15 +122,18 @@ export function useDesktopRoomGitHubEvents(options: {
 
   async function refreshGitHubEvents(): Promise<void> {
     if (!showEventsTab.value || !desktopIpc.room?.getGitHubEvents) return;
+    const identifier = options.room.value.identifier;
     eventsLoading.value = true;
     eventsError.value = null;
     try {
-      const nextPage = await desktopIpc.room.getGitHubEvents(options.room.value.identifier, { limit: 100 });
+      const nextPage = await desktopIpc.room.getGitHubEvents(identifier, { limit: 100 });
+      if (options.room.value.identifier !== identifier) return;
       eventsPage.value = mergeDesktopGitHubEventsPage(eventsPage.value, nextPage);
     } catch (error) {
+      if (options.room.value.identifier !== identifier) return;
       eventsError.value = error instanceof Error ? error.message : "GitHub events could not be loaded.";
     } finally {
-      eventsLoading.value = false;
+      if (options.room.value.identifier === identifier) eventsLoading.value = false;
     }
   }
 
@@ -133,20 +141,23 @@ export function useDesktopRoomGitHubEvents(options: {
     if (!showEventsTab.value || !desktopIpc.room?.getGitHubEvents || eventsLoadingOlder.value) return;
     const after = eventsPage.value?.events.at(-1)?.id || null;
     if (!after) return;
+    const identifier = options.room.value.identifier;
     eventsLoadingOlder.value = true;
     eventsError.value = null;
     eventsLoadedOlderWithoutMatches.value = false;
     const beforeCount = eventsPage.value?.events.length || 0;
     try {
-      const nextPage = await desktopIpc.room.getGitHubEvents(options.room.value.identifier, { limit: 100, after });
+      const nextPage = await desktopIpc.room.getGitHubEvents(identifier, { limit: 100, after });
+      if (options.room.value.identifier !== identifier) return;
       eventsPage.value = mergeDesktopGitHubEventsPage(eventsPage.value, nextPage);
       eventsLoadedOlderWithoutMatches.value = Boolean(
         nextPage.events.length && (eventsPage.value?.events.length || 0) === beforeCount,
       );
     } catch (error) {
+      if (options.room.value.identifier !== identifier) return;
       eventsError.value = error instanceof Error ? error.message : "Older GitHub events could not be loaded.";
     } finally {
-      eventsLoadingOlder.value = false;
+      if (options.room.value.identifier === identifier) eventsLoadingOlder.value = false;
     }
   }
 
@@ -190,15 +201,6 @@ export function useDesktopRoomGitHubEvents(options: {
       return;
     }
     await desktopIpc.auth?.openVerification?.(url);
-  }
-
-  function scheduleGitHubEventsRefresh(delayMs: number): void {
-    if (!showEventsTab.value) return;
-    if (githubEventsRefreshTimer !== null) window.clearTimeout(githubEventsRefreshTimer);
-    githubEventsRefreshTimer = window.setTimeout(() => {
-      githubEventsRefreshTimer = null;
-      void refreshGitHubEvents().catch(() => undefined);
-    }, delayMs);
   }
 
   function ingestComposerGitHubEvent(message: DesktopRoomMessage): void {

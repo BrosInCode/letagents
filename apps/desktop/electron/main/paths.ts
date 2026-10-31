@@ -1,6 +1,7 @@
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { letagentsHomePath } from "../../../../shared/letagents-home.mjs";
 
 export const electronMainDir = join(dirname(fileURLToPath(import.meta.url)), "..");
 export const desktopRoot = join(electronMainDir, "..");
@@ -15,9 +16,11 @@ export const devServerUrl =
 export const apiUrl =
   process.env.LETAGENTS_API_URL?.trim() || "https://letagents.chat";
 export const attachmentProtocolScheme = "letagents-attachment";
+/** Served only inside the HTML demo session; the app window cannot load it. */
+export const htmlDemoProtocolScheme = "letagents-demo";
 export const roomMessageHistoryPageSize = 150;
 
 export function getLetAgentsLocalStatePath(): string {
   return process.env.LETAGENTS_STATE_PATH?.trim() ||
-    join(homedir(), ".letagents", "mcp-state.json");
+    letagentsHomePath("mcp-state.json");
 }

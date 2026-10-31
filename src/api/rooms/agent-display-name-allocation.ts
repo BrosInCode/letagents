@@ -1,4 +1,5 @@
 import { normalizeRoutingHandle, normalizeRoutingSender } from "../../../shared/routing-aliases.mjs";
+import { agentProcessGoneSoonAtMs, isAgentProcessGone } from "../../shared/agent-presence.js";
 import { pickLocalCodename } from "../../shared/codenames.js";
 
 /**
@@ -70,6 +71,81 @@ export interface RoomWorkerNameHolder {
   created_at: string;
   /** Set only for an offline durable worker, which keeps its name reserved. */
   ended_at: string | null;
+  owner_account_id?: string | null;
+  last_seen_at?: string | null;
+  /** Set for a worker whose lifetime a desktop supervisor owns. */
+  supervisor_grant_id?: string | null;
+  process_host_id?: string | null;
+  agent_heard_at?: string | null;
+  delivery_connected?: boolean;
+  process_seen_at?: string | null;
+  process_connection_id?: string | null;
+  process_disconnected_at?: string | null;
+}
+
+/**
+ * Holders of `display_name` whose process is gone, so that the name can pass
+ * to a registration by the same owner.
+ *
+ * A process that restarts leaves its session behind, and an agent that
+ * registers afresh leaves its registration behind. Nothing else ends either,
+ * so each would refuse the agent its own name for ever.
+ *
+ * A holder is released on evidence that its process no longer exists. One
+ * whose client offers no evidence is released only after a long silence.
+ *
+ * Never released: another owner's agent, the caller's own instance, and a
+ * supervised worker, whose lifetime belongs to its supervisor.
+ */
+export function selectReleasableNameHolders<Holder extends RoomWorkerNameHolder>(input: {
+  display_name: string;
+  owner_account_id: string;
+  agent_key: string;
+  agent_instance_id: string | null;
+  process_host_id: string | null;
+  holders: readonly Holder[];
+  now_ms: number;
+}): Holder[] {
+  const key = agentDisplayNameKey(input.display_name);
+  if (!key) return [];
+  return input.holders.filter((holder) => {
+    if (!holder.owner_account_id || holder.owner_account_id !== input.owner_account_id) return false;
+    if (holder.supervisor_grant_id) return false;
+    if (holder.agent_key === input.agent_key && holder.agent_instance_id === input.agent_instance_id) return false;
+    if (agentDisplayNameKey(holder.display_name) !== key) return false;
+    return isAgentProcessGone(holder, { now_ms: input.now_ms, process_host_id: input.process_host_id });
+  });
+}
+
+/**
+ * When `display_name` will come free, if that is moments away: every agent
+ * that holds it against this registration is one whose process will be
+ * taken for gone at a known moment. Null when the name is free already, or
+ * held by anyone of whom that cannot be said.
+ */
+export function nameComesFreeAtMs(input: {
+  display_name: string;
+  owner_account_id: string;
+  agent_key: string;
+  agent_instance_id: string | null;
+  process_host_id: string | null;
+  holders: readonly RoomWorkerNameHolder[];
+  now_ms: number;
+}): number | null {
+  const key = agentDisplayNameKey(input.display_name);
+  if (!key) return null;
+  const observer = { now_ms: input.now_ms, process_host_id: input.process_host_id };
+  let latest: number | null = null;
+  for (const holder of input.holders) {
+    if (agentDisplayNameKey(holder.display_name) !== key) continue;
+    if (holder.agent_key === input.agent_key && holder.agent_instance_id === input.agent_instance_id) continue;
+    if (holder.owner_account_id !== input.owner_account_id || holder.supervisor_grant_id) return null;
+    if (isAgentProcessGone(holder, observer)) continue;
+    const at = agentProcessGoneSoonAtMs(holder, observer);
+    if (at === null) return null;
+    latest = Math.max(latest ?? 0, at);
+  }
+  return latest;
 }
 
 function isSenior(left: RoomWorkerNameHolder, right: RoomWorkerNameHolder): boolean {

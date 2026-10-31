@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { providerAcquisitionIdentity, providerAcquisitionEvidence } from "../../../shared/provider-acquisition-evidence.mjs";
 
 import { supervisedProviderLabel } from "./cloud-http.js";
+import { sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
 import {
@@ -21,7 +22,7 @@ import {
   type ProviderActionSpawn,
   type ProviderActionTerminal,
 } from "./provider-action-port.js";
-import { deriveProviderConfigurationSnapshot } from "./provider-configuration.js";
+import { deriveProviderConfigurationSnapshot, entryLaunchPolicy, ownerSetupRef } from "./provider-configuration.js";
 import { isCursorChildConnection } from "./provider-state-policy.js";
 import {
   lifecycleAuthorityModeForProvider,
@@ -35,6 +36,7 @@ import {
   assertSupervisedRentalPermissionProfileAvailable,
 } from "./supervised-permission-profiles.js";
 import type {
+  DaemonActivityEvent,
   DaemonManifestEntry,
   ExecutionTerminalPayload,
   TaskWorkAttempt,
@@ -53,10 +55,16 @@ import type {
   MintedWorkerAuthorization,
 } from "./worker-runtime-custody.js";
 import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
-import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
+import type { SupervisedAgentInboxStore, SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 
+import { ProviderStopError } from "./daemon-error-policy.js";
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
+import { ACTIVITY_RECORD_CONTINUED_NOTICE, ACTIVITY_RECORD_STOPPED_NOTICE } from "./runtime-recovery-journal.js";
+import { EXIT_UNSETTLED_NOTICE } from "./provider-terminal-coordinator.js";
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
+import type { ConvergencePacing } from "./convergence-pacer.js";
+import { launchProgress } from "./launch-progress.js";
+import { turnStartLatency } from "./turn-start-latency.js";
 
 // A live generation with no attachable handle resolves on its own once the
 // old process exits or answers again. Re-check with capped backoff so the
@@ -64,6 +72,24 @@ import { matchesPollingActivationRuntime, type PollingActivationRecord } from ".
 // runtime that stays unattachable costs one cheap check per half hour.
 const UNATTACHABLE_GENERATION_RECHECK_MS = 60_000;
 const UNATTACHABLE_GENERATION_RECHECK_MAX_MS = 30 * 60_000;
+const WORKSPACE_REPOSITORY_RETRY_MS = 5_000;
+const WORKSPACE_REPOSITORY_RETRY_MAX_MS = 5 * 60_000;
+/**
+ * How long an ended runtime is left for the turn of its in-flight message to
+ * be recorded. A provider reports a failed turn's result moments after the
+ * failure; past this the result is not coming and the runtime is retired
+ * without it.
+ */
+export const RETIREMENT_SETTLEMENT_WAIT_MS = 30_000;
+/**
+ * The inbox head has a turn that may still be running and no result saved for
+ * it. A started turn handed back to `pending` counts: a delivery lane that
+ * lets go of its turn leaves the row that way while the provider works on.
+ */
+function turnInFlight(head: Pick<SupervisedInboxItem, "state" | "provider_turn_id" | "outcome"> | null): boolean {
+  return head !== null && (["dispatching", "awaiting_result", "result_recovery"].includes(head.state)
+    || (head.state === "pending" && Boolean(head.provider_turn_id) && !head.outcome));
+}
 const UNATTACHABLE_GENERATION_CAUSE = "durable execution generation remains live without an attachable provider handle";
 
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
@@ -79,10 +105,14 @@ export type ProviderExecutionConfiguration = {
   provider_launch_policy: unknown;
   config_revision: number;
   runtime_configuration_revision: number;
+  /** The owner says this Open Model agent's model reads images. Absent is off. */
+  image_input?: boolean;
 };
 
 export type ProviderExecutionStore = {
   pendingRuntimeRecovery(agentId: string): Promise<unknown>;
+  /** Archive what the agent's exited runtimes left unfinished in its execution record. Resolves with the runtimes archived. */
+  archiveExitedRuntimes?(agentId: string, commitFence: CommitFence): Promise<string[]>;
   unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
   unresolvedPollingActivation(agentId: string): Promise<PollingActivationRecord | null>;
   load(): Promise<{ generation: number; entries: DaemonManifestEntry[] }>;
@@ -177,6 +207,14 @@ export type ProviderExecutionCoordinatorOptions = {
     serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
   };
   notifyProgressChanged?(): void;
+  /** Start-up progress changed; it carries no receipts, so no capture refresh is needed. */
+  notifyLaunchProgressChanged?(): void;
+  /**
+   * Called inside the commit lane right after a retiring daemon checkpointed
+   * an entry's provider birth outside the manifest lane: batched activity
+   * admitted earlier must never be written over that record.
+   */
+  retirePendingActivity?(entryId: string): void;
   updateManifestEntry(
     entryId: string,
     update: (entry: DaemonManifestEntry) => DaemonManifestEntry,
@@ -190,7 +228,10 @@ export type ProviderExecutionCoordinatorOptions = {
   ): Promise<void>;
   terminalPayload(terminal: ProviderActionTerminal, actor: string, connection?: ProviderActionHandle["providerConnection"]): ExecutionTerminalPayload;
   settleRuntimeApprovals(entryId: string): Promise<void>;
-  refreshManagedRuntime?(entryId: string): Promise<void>;
+  /** Resolves with when to converge again while a replacement is still owed, and what to tell the owner meanwhile. */
+  refreshManagedRuntime?(entryId: string): Promise<void | { retryAfterMs: number; notice?: string }>;
+  /** The entry's runtime has exited and that exit is still being recorded. Whoever records it converges the entry again. */
+  exitSettling?(entryId: string): boolean;
   observeProviderExit(
     entryId: string,
     terminal: ProviderActionTerminal,
@@ -202,6 +243,8 @@ export type ProviderExecutionCoordinatorOptions = {
   delivery: {
     stop(entryId: string): Promise<unknown>;
     start(entryId: string, mode?: "ensure" | "wake"): Promise<unknown>;
+    /** The room refuses the bearer this agent's delivery polls with. */
+    roomRefusesAccess?(entryId: string): boolean;
   };
   inbox: {
     head: SupervisedAgentInboxStore["head"];
@@ -230,6 +273,8 @@ export type ProviderExecutionCoordinatorOptions = {
       session: BoundWorkerAuthorization,
       mayPublish?: () => boolean,
     ): Promise<void>;
+    awaitsBindingConfirmation(entryId: string, executionGenerationId: string): boolean;
+    confirmExactBinding(entryId: string, mayPublish: () => boolean): Promise<void>;
     bearerNeedsRotation(entry: DaemonManifestEntry, binding: WorkerSessionBinding): Promise<boolean>;
     blockExpiredAuthority(entry: DaemonManifestEntry, detail: string): Promise<void>;
     currentOpenModelCredential(
@@ -244,7 +289,7 @@ export type ProviderExecutionCoordinatorOptions = {
     clearSuccessfulRecovery(entryId: string): void;
   };
   workspace: {
-    ephemeral: Pick<EphemeralWorkspaceProvisioner, "provision">;
+    ephemeral: Pick<EphemeralWorkspaceProvisioner, "provision" | "ensureRepository">;
     git: Pick<WorkspaceProvisioner, "provision">;
     gitCommand: GitCommand;
   };
@@ -254,6 +299,8 @@ export type ProviderExecutionCoordinatorOptions = {
   recordSchedulerFailure(entryId: string, error: unknown, actor: string): Promise<void>;
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
+  /** Daemon-wide limit on concurrent cold provider launches. */
+  pacing?: ConvergencePacing;
 };
 
 type DispatchReservation = {
@@ -271,8 +318,11 @@ export class ProviderExecutionCoordinator {
   private readonly pendingReminders = new Map<string, symbol>();
   private readonly failedLaunchAdmissions = new Map<string, string>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** When the wait for an ended runtime's last turn runs out, per runtime. */
+  private readonly retirementDeadlines = new WeakMap<ProviderActionHandle, number>();
   private readonly recoveryDueAtMs = new Map<string, number>();
   private readonly unattachableRechecks = new Map<string, number>();
+  private readonly workspaceRepositoryRetries = new Map<string, number>();
   private readonly dispatchReservations = new Map<Promise<void>, string>();
   private readonly activeDispatches = new Map<symbol, DispatchReservation>();
   private fatalDispatchError: unknown = null;
@@ -284,18 +334,27 @@ export class ProviderExecutionCoordinator {
     this.clearRecoveryTimeout = options.clearTimeout ?? clearTimeout;
   }
 
-  providerRef(
+  /**
+   * The reference to an entry's process. Whether that process has its owner's
+   * setup is read against the revision the store says it started with: the
+   * entry carries none. A caller that has just read it passes it in; with none
+   * to be had the reference is refused.
+   */
+  async providerRef(
     entry: DaemonManifestEntry,
     lifecycleAuthorityMode?: LifecycleAuthorityMode,
-  ): ProviderActionRef {
+    appliedRevision?: number,
+  ): Promise<ProviderActionRef> {
     const ref = entry.provider_ref;
     if (!ref) throw new Error("Manifest entry has no durable provider ref.");
+    const startedAt = appliedRevision ?? (await this.options.store.getAgentConfiguration(entry.id))?.runtime_configuration_revision;
     return {
       workAttemptId: ref.work_attempt_id,
       providerContinuationId: ref.provider_continuation_id,
       provider: entry.provider,
       providerConnection: ref.provider_connection,
       ...(lifecycleAuthorityMode ? { lifecycleAuthorityMode } : {}),
+      ...ownerSetupRef(entry, startedAt),
     };
   }
 
@@ -333,8 +392,14 @@ export class ProviderExecutionCoordinator {
           return this.converge(entryId, kind);
         },
       ))
-      .then(() => {
-        if (!this.options.authority.isDispatchPaused?.()) return this.options.refreshManagedRuntime?.(entryId);
+      .then(async () => {
+        if (this.options.authority.isDispatchPaused?.()) return;
+        const pending = await this.options.refreshManagedRuntime?.(entryId);
+        if (!pending) return;
+        // The agent is still to be replaced. It is tried again from here, so
+        // a turn held back for the replacement never waits on another event.
+        this.scheduleRecovery(entryId, pending.retryAfterMs);
+        if (pending.notice) await this.recordLaunchNotices(entryId, [pending.notice]);
       })
       .catch(async (error) => {
         await this.options.recordSchedulerFailure(
@@ -393,6 +458,7 @@ export class ProviderExecutionCoordinator {
     this.recoveryTimers.clear();
     this.recoveryDueAtMs.clear();
     this.unattachableRechecks.clear();
+    this.workspaceRepositoryRetries.clear();
   }
 
   async drainDispatches(entryIds?: readonly string[]): Promise<void> {
@@ -447,6 +513,84 @@ export class ProviderExecutionCoordinator {
       || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch
       || current?.desired_state !== "running") return null;
     return current;
+  }
+
+  /**
+   * Puts a provider's launch warnings in the agent's activity, which the
+   * agent inspector shows, instead of only in the daemon's discarded output.
+   */
+  /**
+   * An agent's execution record stopped under a runtime that keeps working.
+   * Nothing is wrong with the agent, and nothing asks for its owner: they are
+   * told once, in the agent's activity, and not again until a new record has
+   * been started.
+   */
+  noteRecordStopped(entryId: string): void {
+    if (!this.options.streams.currentInstallation(entryId)) return;
+    void this.recordLaunchNotices(entryId, [ACTIVITY_RECORD_STOPPED_NOTICE], true).catch(() => undefined);
+  }
+
+  /** For delivery, before a new turn: see `archiveExitedRuntimes`. */
+  archiveEndedRuntimes(entryId: string): Promise<void> {
+    return this.archiveExitedRuntimes(entryId);
+  }
+
+  /**
+   * The daemon stopped waiting for an exit of this entry to be recorded in
+   * full. One line in the agent's activity says so, once for each exit: a
+   * later exit that cannot be recorded either is told again.
+   */
+  noteExitUnsettled(entryId: string, exitId: string): void {
+    void this.recordLaunchNotices(entryId, [EXIT_UNSETTLED_NOTICE], false, exitId).catch(() => undefined);
+  }
+
+  /** The owner-visible lines of a conversation repair: recorded in the agent's activity as a launch's are. */
+  noteRepairNotices(entryId: string, notices: readonly string[]): Promise<void> {
+    return this.recordLaunchNotices(entryId, notices);
+  }
+
+  private async recordLaunchNotices(entryId: string, notices: readonly string[], unlessLatest = false, exit?: string): Promise<void> {
+    await this.options.updateManifestEntry(entryId, (current) => {
+      if (unlessLatest && current.activity?.filter((event) => event.kind === "launch_notice").at(-1)?.summary === notices.at(-1)) return current;
+      if (exit && current.activity?.some((event) => event.kind === "launch_notice" && (event.payload as { exit?: unknown } | null)?.exit === exit)) return current;
+      let sequence = current.activity?.at(-1)?.sequence ?? 0;
+      const observedAt = new Date(this.options.nowMs()).toISOString();
+      const events = notices.map((notice): DaemonActivityEvent => sanitizeDaemonActivityEvent({
+        observed_at: observedAt,
+        sequence: ++sequence,
+        provider: current.provider,
+        kind: "launch_notice",
+        method: "workspace_boundary",
+        summary: notice.slice(0, 500),
+        status: "idle",
+        payload: exit ? { notice, exit } : { notice },
+        payload_truncated: false,
+        payload_redacted: false,
+        durable_payload_ref: null,
+      }));
+      return { ...current, activity: [...(current.activity ?? []), ...events].slice(-200) };
+    });
+  }
+
+  /**
+   * Every earlier generation of this agent has ended, and nothing can still
+   * complete its execution record. A gap or an open turn left there would
+   * keep the runtime that is about to start from being recorded, and the
+   * agent from taking messages, until a person used "Restart and resume". The
+   * daemon records that same boundary itself and says so once in the agent's
+   * activity. A failure here is not a reason to keep the agent down: the
+   * launch goes ahead, and a runtime that then cannot be recorded is
+   * recovered by the pass that finds it blocked.
+   */
+  private async archiveExitedRuntimes(entryId: string): Promise<void> {
+    let archived: string[] = [];
+    try {
+      archived = await this.options.store.archiveExitedRuntimes?.(entryId, this.options.authority.fenceCommit) ?? [];
+    } catch (error) {
+      if (error instanceof DaemonFenceLostError) throw error;
+      return;
+    }
+    if (archived.length) await this.recordLaunchNotices(entryId, [ACTIVITY_RECORD_CONTINUED_NOTICE]);
   }
 
   async ensureWorkAttempt(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
@@ -796,6 +940,7 @@ export class ProviderExecutionCoordinator {
             }
             await this.options.authority.assertCurrent();
             await commit();
+            this.options.retirePendingActivity?.(entryId);
           }),
         );
         this.options.authority.acceptManifestGeneration(next.generation);
@@ -816,6 +961,8 @@ export class ProviderExecutionCoordinator {
     if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return null;
     const ref = entry.provider_ref;
     if (!ref) return null;
+    // The runtime this reference names has exited and its exit is not recorded yet.
+    if (!this.options.streams.get(entry.id) && this.options.exitSettling?.(entry.id)) return null;
     // Attachment can acquire native channels (or retire an old child). Reserve
     // before the first await so handoff drains direct control/grant callers too.
     const reservation = this.reserveDispatch(entry.id, ref.execution_generation_id);
@@ -863,7 +1010,7 @@ export class ProviderExecutionCoordinator {
           configurationRevision: appliedRevision!,
         })
       : null;
-    const attachRef = this.providerRef(entry, frozenAuthority ?? undefined);
+    const attachRef = await this.providerRef(entry, frozenAuthority ?? undefined, appliedRevision);
     // Pending Inspector edits are a future launch contract. Never apply them
     // to a surviving runtime whose original configuration is no longer stored.
     if (entry.provider === "codex" && configuration!.config_revision === appliedRevision) {
@@ -873,7 +1020,7 @@ export class ProviderExecutionCoordinator {
         reasoningEffort: configuration!.reasoning_effort ?? null,
         permissionProfileId: configuration!.permission_profile_id,
         configurationRevision: appliedRevision!,
-      }, configuration!.provider_launch_policy).launchPolicy;
+      }, entryLaunchPolicy({ id: entry.id, provider: configuration!.provider, deliveryMode: entry.delivery_mode }, configuration!.provider_launch_policy)).launchPolicy;
     }
     if (this.options.authority.isHandoffScheduled() || this.options.authority.isDispatchPaused?.()) return null;
     const attachment = await this.options.provider.attach(attachRef);
@@ -886,6 +1033,9 @@ export class ProviderExecutionCoordinator {
           "Provider attach terminal evidence belongs to a different durable continuation.",
         );
       }
+      // The adapter stopped the runtime it found, and says why. The owner reads it in the agent's activity.
+      // Telling the owner never keeps the proof of the exit from being recorded.
+      if (attachment.notices?.length) await this.recordLaunchNotices(entry.id, attachment.notices).catch(() => undefined);
       await this.options.durability.recordTerminal(
         ref.work_attempt_id,
         execution.execution_generation_id,
@@ -1038,6 +1188,7 @@ export class ProviderExecutionCoordinator {
     let entry = await this.options.store.getEntry(entryId);
     if (!entry) {
       this.failedLaunchAdmissions.delete(entryId);
+      this.workspaceRepositoryRetries.delete(entryId);
       return;
     }
     let launchControlEpoch = this.options.concurrency.currentControlEpoch(entryId);
@@ -1060,7 +1211,14 @@ export class ProviderExecutionCoordinator {
       return;
     }
     this.failedLaunchAdmissions.delete(entryId);
-    await this.convergeStopped(entry);
+    // A stopped agent starts its next attempt at the shortest wait.
+    this.workspaceRepositoryRetries.delete(entryId);
+    try {
+      await this.convergeStopped(entry);
+    } catch (error) {
+      // A pause that fails is not a failed stop.
+      throw entry.desired_state === "stopped" ? new ProviderStopError(error) : error;
+    }
   }
 
   private async convergeRunning(
@@ -1080,6 +1238,7 @@ export class ProviderExecutionCoordinator {
         assertSupervisedRentalPermissionProfileAvailable(
           rentalConfiguration.provider,
           rentalConfiguration.permission_profile_id,
+          entry.id,
         );
       } catch (error) {
         await this.options.delivery.stop(entry.id).catch(() => undefined);
@@ -1130,6 +1289,12 @@ export class ProviderExecutionCoordinator {
     if (!currentAfterAttempt) return;
     entry = currentAfterAttempt;
     let handle = this.options.streams.get(entry.id) ?? null;
+    // The daemon lets go of a runtime the moment its process exits, and
+    // records the exit after this pass. Until then the generation has no
+    // terminal: attaching would take the exited runtime back and deliver its
+    // exit a second time, and launching would report a live generation with
+    // nothing to attach. The settlement converges this entry when it is done.
+    if (!handle && this.options.exitSettling?.(entry.id)) return;
     if (!handle && entry.provider_ref) {
       try {
         handle = await this.attachLiveProvider(entry);
@@ -1158,7 +1323,14 @@ export class ProviderExecutionCoordinator {
       const admission = configuration && await this.launchAdmission(entry, launchControlEpoch, configuration);
       if (admission && admission === this.failedLaunchAdmissions.get(entry.id)) return;
     }
-    await this.launchProvider(entry, launchControlEpoch);
+    try {
+      await this.launchProvider(entry, launchControlEpoch);
+    } catch (error) {
+      launchProgress.fail(entry.id, error);
+      throw error;
+    } finally {
+      launchProgress.settle(entry.id);
+    }
   }
 
   private async launchAdmission(
@@ -1243,6 +1415,24 @@ export class ProviderExecutionCoordinator {
           );
           return;
         }
+      } else if (entry.provider_ref?.execution_generation_id
+        && this.options.host.awaitsBindingConfirmation(entry.id, entry.provider_ref.execution_generation_id)) {
+        // A bind that failed after saving its binding leaves that binding
+        // exact, so this retry has nothing to mint. Skipping the bind would
+        // also skip the bookkeeping that clears the bind's recovery latch.
+        const executionGenerationId = entry.provider_ref.execution_generation_id;
+        try {
+          await this.options.host.confirmExactBinding(entry.id, () => !this.options.authority.isHandoffScheduled()
+            && this.options.concurrency.currentControlEpoch(entry.id) === controlEpoch);
+          entry = await this.options.store.getEntry(entry.id) ?? entry;
+        } catch (error) {
+          if (this.options.authority.isHandoffScheduled()
+            || this.options.authority.currentDaemonGeneration() !== daemonGeneration
+            || this.options.concurrency.currentControlEpoch(entry.id) !== controlEpoch
+            || this.options.host.currentGrant(entry) !== grant) return;
+          await this.options.host.recordBindingRecoveryFailure(entry.id, executionGenerationId, error);
+          return;
+        }
       }
       if (this.options.authority.isHandoffScheduled()
         || this.options.authority.currentDaemonGeneration() !== daemonGeneration
@@ -1270,10 +1460,19 @@ export class ProviderExecutionCoordinator {
         "daemon-convergence",
       );
     }
-    const terminal = (typed && ["failed", "stopped"].includes(entry.observed_state))
+    // A typed lane takes its state from execution facts, not from the handle.
+    // The one exception runs toward failure only: no turn can run on a handle
+    // that itself reports failed or stopped, and the fact that should have
+    // failed the entry can be lost, which left the agent looking alive and
+    // receiving nothing. Cursor is excluded: its handle ends only with a
+    // committed terminal, which the exit path already owns.
+    const typedHandleEnded = typed && entry.provider !== "cursor"
+      && ["failed", "stopped"].includes(handle.observedState);
+    const terminal = (typed && (["failed", "stopped"].includes(entry.observed_state) || typedHandleEnded))
       || (!typed && (["failed", "stopped"].includes(handle.observedState)
         || (handle.observedState === "idle" && !requiresGrant)));
     if (terminal) {
+      if (await this.holdsRetirement(entry, handle, typedHandleEnded)) return;
       await this.options.streams.fenceTerminalOnce(
         handle,
         `manifest:${entry.id}:reattached-terminal:${entry.provider_ref?.execution_generation_id ?? "unknown"}`,
@@ -1281,8 +1480,52 @@ export class ProviderExecutionCoordinator {
       return;
     }
     if (entry.desired_state === "running" && entry.delivery_mode === "daemon_inbox") {
+      // A turn an earlier runtime left open, once its message is settled, would
+      // refuse the next turn of this one. It is archived as soon as it is seen.
+      await this.archiveExitedRuntimes(entry.id);
       await this.options.delivery.start(entry.id, "ensure");
     }
+  }
+
+  /**
+   * Retiring a runtime stops its process, and two things can make that the
+   * wrong moment.
+   *
+   * Its message is still in flight: the inbox head has a turn started and no
+   * result saved. A stop now would land before the provider finished the turn,
+   * and the next message would wait behind a turn nobody can finish. Leave the
+   * runtime until the result is saved; delivery wakes convergence when it
+   * records one. The inbox is asked rather than the delivery lane, because a
+   * lane that lost its turn (a newly minted session takes its authority to
+   * record it) holds nothing while the provider is still working. The wait is
+   * bounded: a runtime that never reports the result is retired anyway, and
+   * the turn is then recovered from the provider's own record, never run
+   * again.
+   *
+   * The room refuses this agent's bearer: a handle that ended while its entry
+   * did not is left as it is. Replacing it is not what the room's answer asks
+   * for, and the daemon cannot tell an expired bearer from a session a room
+   * admin ended. A bearer that is due is still rotated above, on its
+   * schedule, and an entry that itself ended is still replaced, as both were
+   * before.
+   */
+  private async holdsRetirement(
+    entry: DaemonManifestEntry,
+    handle: ProviderActionHandle,
+    typedHandleEnded: boolean,
+  ): Promise<boolean> {
+    const head = await this.options.inbox.head(entry.id);
+    if (turnInFlight(head)) {
+      const now = this.options.nowMs();
+      const deadline = this.retirementDeadlines.get(handle) ?? now + RETIREMENT_SETTLEMENT_WAIT_MS;
+      this.retirementDeadlines.set(handle, deadline);
+      if (now < deadline) {
+        this.scheduleRecovery(entry.id, deadline - now);
+        return true;
+      }
+    }
+    return typedHandleEnded && !["failed", "stopped"].includes(entry.observed_state)
+      && this.options.delivery.roomRefusesAccess?.(entry.id) === true;
   }
 
   /** Delivery readiness comes from durable worker authority, never provider polling output. */
@@ -1349,6 +1592,8 @@ export class ProviderExecutionCoordinator {
     if (await this.options.store.pendingRuntimeRecovery(initialEntry.id)
       || await this.options.store.unresolvedDeliveryDrain(initialEntry.id)
       || await this.options.store.unresolvedPollingActivation(initialEntry.id)) return;
+    const launchTiming = turnStartLatency.beginLaunch(initialEntry.id, initialEntry.provider);
+    launchProgress.begin(initialEntry.id, () => (this.options.notifyLaunchProgressChanged ?? this.options.notifyProgressChanged)?.());
     let entry = initialEntry;
     let launchControlEpoch = initialControlEpoch;
     const attempt = await this.options.durability.getAttempt(entry.work_attempt_id!);
@@ -1393,6 +1638,7 @@ export class ProviderExecutionCoordinator {
       return;
     }
     this.unattachableRechecks.delete(entry.id);
+    await this.archiveExitedRuntimes(entry.id);
     if (!activeExecution && entry.turn_control && entry.turn_control.status !== "completed") {
       entry = await this.options.completeTurnControlForRuntimeRecovery(entry);
     }
@@ -1411,7 +1657,7 @@ export class ProviderExecutionCoordinator {
     // Resume must name the lifecycle authority the saved runtime was born
     // under, exactly as attach does; without it a typed birth is read back as
     // typed_shadow and every daemon-inbox resume is refused.
-    const ref = entry.provider_ref ? this.providerRef(entry, await this.frozenLifecycleAuthority(entry) ?? undefined) : null;
+    const ref = entry.provider_ref ? await this.providerRef(entry, await this.frozenLifecycleAuthority(entry) ?? undefined) : null;
     const requiresGrant = await this.options.host.requiresGrant(entry);
     const mintedAuthorization = requiresGrant
       ? await this.options.host.mintAuthorization(entry)
@@ -1450,6 +1696,32 @@ export class ProviderExecutionCoordinator {
       const grant = this.options.host.currentGrant(entry);
       if (!grant || !await this.options.authority.ownsDaemonGeneration(grant.daemonGeneration)) return;
     }
+    if (isEphemeralWorkspaceMarker(attempt.workspace_identity)) {
+      // A room-only workspace made by an older version gets its own
+      // repository before any provider starts in it. This runs before the
+      // entry says "starting": a failure is reported and retried, instead of
+      // leaving the agent starting with nothing to wake it.
+      try {
+        await this.options.workspace.ephemeral.ensureRepository(attempt.workspace_path);
+        this.workspaceRepositoryRetries.delete(entry.id);
+      } catch (error) {
+        const retries = (this.workspaceRepositoryRetries.get(entry.id) ?? 0) + 1;
+        this.workspaceRepositoryRetries.set(entry.id, retries);
+        const delayMs = Math.min(
+          WORKSPACE_REPOSITORY_RETRY_MS * 2 ** Math.min(retries - 1, 10),
+          WORKSPACE_REPOSITORY_RETRY_MAX_MS,
+        );
+        await this.options.transition(
+          entry.id,
+          "failed",
+          "coordination_blocked",
+          `Could not prepare the agent's room-only workspace (${error instanceof Error ? error.message : String(error)}). Retrying in ${Math.round(delayMs / 1000)} seconds.`,
+          "daemon-convergence",
+        );
+        this.scheduleRecovery(entry.id, delayMs);
+        return;
+      }
+    }
     await this.options.transition(
       entry.id,
       entry.provider_ref ? "recovering" : "starting",
@@ -1477,18 +1749,21 @@ export class ProviderExecutionCoordinator {
       ? assertSupervisedRentalPermissionProfileAvailable(
           launchConfiguration.provider,
           launchConfiguration.permission_profile_id,
+          entry.id,
         )
       : assertSupervisedPermissionProfileAvailable(
           launchConfiguration.provider,
           launchConfiguration.permission_profile_id,
         );
     const launchSnapshot = deriveProviderConfigurationSnapshot({
+      supervisorEntryId: entry.id,
       provider: launchConfiguration.provider,
       model: launchConfiguration.model,
       reasoningEffort: launchConfiguration.reasoning_effort ?? null,
       permissionProfileId,
       configurationRevision: launchConfiguration.config_revision,
-    }, launchConfiguration.provider_launch_policy);
+      // A rental never carries its owner's own setup, whatever is stored.
+    }, entryLaunchPolicy({ id: entry.id, provider: launchConfiguration.provider, deliveryMode: entry.delivery_mode }, launchConfiguration.provider_launch_policy));
     const openModelCredential = entry.provider === "open-model"
       ? this.options.host.currentOpenModelCredential(
           entry.id,
@@ -1534,8 +1809,16 @@ export class ProviderExecutionCoordinator {
     }
     const devMcpServerEntryPath = devMcpServerEntryFromEnv() ?? undefined;
     let mintedHostSession: BoundWorkerAuthorization | null = null;
+    let releaseLaunchSlot: () => void = () => {};
     const spawn: ProviderActionSpawn = {
       onProgress: () => this.options.notifyProgressChanged?.(),
+      // A provider whose remaining startup is a remote model turn (Claude's
+      // bootstrap) returns its launch slot as soon as its process is up.
+      onNativeStarted: () => {
+        launchTiming?.mark("process");
+        launchProgress.mark(entry.id, "process");
+        releaseLaunchSlot();
+      },
       workAttemptId: attempt.work_attempt_id,
       roomId: entry.room_id,
       cwd: attempt.workspace_path,
@@ -1545,6 +1828,9 @@ export class ProviderExecutionCoordinator {
         ? "room_scratch"
         : "git_worktree",
       launchPolicy: launchSnapshot.launchPolicy,
+      ...(launchSnapshot.homeHarness ? { homeHarness: true as const } : {}),
+      // Read when the runtime starts: OpenCode learns a model takes images from its launch configuration.
+      ...(launchSnapshot.provider === "open-model" && launchConfiguration.image_input === true ? { imageInput: true as const } : {}),
       provider: launchSnapshot.provider,
       model: launchSnapshot.model,
       reasoningEffort: launchSnapshot.reasoningEffort,
@@ -1567,6 +1853,8 @@ export class ProviderExecutionCoordinator {
           apiKey: openModelCredential.apiKey,
           baseUrl: openModelCredential.baseUrl,
           model: launchSnapshot.model?.trim() || openModelCredential.model,
+          ...((!launchSnapshot.model?.trim() || launchSnapshot.model.trim() === openModelCredential.model)
+            && openModelCredential.contextWindow != null ? { contextWindow: openModelCredential.contextWindow } : {}),
         },
       } : {}),
     };
@@ -1593,6 +1881,15 @@ export class ProviderExecutionCoordinator {
           },
         });
       }
+      // Cold launches share a daemon-wide limit. The slot is taken before the
+      // final authority check below, so a launch that queued behind other
+      // agents is checked again, and its own startup budget starts only once
+      // it is admitted. It covers the local process start; see onNativeStarted.
+      launchTiming?.mark("prepare");
+      launchProgress.mark(entry.id, "prepare");
+      releaseLaunchSlot = this.options.pacing ? await this.options.pacing.acquire("launch", entry.id) : () => {};
+      launchTiming?.mark("slot_wait");
+      launchProgress.mark(entry.id, "slot_wait");
       // Capture consumed inputs before the final existing authority check. No
       // new await is inserted between that check and native dispatch.
       const admission = await this.launchAdmission(initialEntry, launchControlEpoch, launchConfiguration,
@@ -1615,16 +1912,24 @@ export class ProviderExecutionCoordinator {
       try {
         try {
           try {
+            launchTiming?.mark("admission");
+            launchProgress.mark(entry.id, "admission");
             handle = resumed
               ? await this.options.provider.resume(ref!, { ...spawn, resumeFrom: ref })
               : await this.options.provider.spawn(spawn);
+            launchTiming?.markProcessReturned();
+            launchProgress.markProcessReturned(entry.id);
           } catch (error) {
             if (admission) this.failedLaunchAdmissions.set(entry.id, admission);
             throw error;
+          } finally {
+            releaseLaunchSlot();
           }
           this.failedLaunchAdmissions.delete(entry.id);
           providerDispatched = true;
-          if (handle.appliedConfigurationRevision !== launchSnapshot.configurationRevision) {
+          if (handle.appliedConfigurationRevision !== launchSnapshot.configurationRevision
+            // A process started with its owner's setup must say so: that is what later ends it when the owner turns it off.
+            || (handle.ownerSetup === true) !== (launchSnapshot.homeHarness === true)) {
             throw new Error(
               "Provider launch did not attest the complete configuration snapshot.",
             );
@@ -1642,6 +1947,7 @@ export class ProviderExecutionCoordinator {
           // Its successor can reconcile the secondary attempt checkpoint from
           // that durable manifest without extending the handoff boundary.
           if (this.options.authority.isHandoffScheduled()) return;
+          if (handle.launchNotices?.length) await this.recordLaunchNotices(entry.id, handle.launchNotices);
           await this.options.durability.checkpoint(attempt.work_attempt_id, {
             room_cursor: launchConfiguration.polling_contract
               ? spawn.supervisorWorkerSession?.roomCursor ?? null
@@ -1730,6 +2036,9 @@ export class ProviderExecutionCoordinator {
             launchControlEpoch,
           );
           if (control === "handoff" || control === "fenced") return;
+          launchTiming?.mark("install");
+          launchTiming?.complete(resumed ? "resume" : "fresh");
+          launchProgress.mark(entry.id, "install");
         } catch (error) {
           if (providerDispatched && !providerPersisted && handle) {
             try {
@@ -1754,6 +2063,8 @@ export class ProviderExecutionCoordinator {
         dispatchReservation.release(fatalReservationError);
       }
     } catch (error) {
+      // Each path below ends this launch: the start-up row says so, whether or not the error is rethrown.
+      if (!(providerPersisted && this.options.authority.isHandoffScheduled())) launchProgress.fail(entry.id, error);
       if (reusesActiveCursorExecution && !providerPersisted) {
         await this.options.host.recordBindingRecoveryFailure(
           entry.id,
@@ -1807,6 +2118,8 @@ export class ProviderExecutionCoordinator {
         );
       }
       throw error;
+    } finally {
+      releaseLaunchSlot();
     }
     if (!handle) throw new Error("Provider launch returned no handle.");
     if (requestedAuthorityMode !== "typed" && (["failed", "stopped"].includes(handle.observedState)
@@ -1880,6 +2193,8 @@ export class ProviderExecutionCoordinator {
 
   private async convergeStopped(entry: DaemonManifestEntry): Promise<void> {
     let handle = this.options.streams.get(entry.id) ?? null;
+    // The exit being recorded is what stops or pauses this entry.
+    if (!handle && this.options.exitSettling?.(entry.id)) return;
     const activation = await this.options.store.unresolvedPollingActivation(entry.id);
     if (activation && !matchesPollingActivationRuntime(activation, entry, handle ?? undefined)) return;
     if (activation && !this.options.provider.stopRef) throw new Error("Polling activation requires exact-reference provider stop.");
@@ -1896,7 +2211,7 @@ export class ProviderExecutionCoordinator {
         `desired state changed to ${entry.desired_state}`,
         "daemon-convergence",
       );
-      const terminal = await this.options.provider.stopRef(this.providerRef(entry), {
+      const terminal = await this.options.provider.stopRef(await this.providerRef(entry), {
         actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
       });
       const attempt = await this.options.durability.getAttempt(exactStopRef.work_attempt_id);

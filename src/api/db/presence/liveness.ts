@@ -10,6 +10,7 @@ import {
 } from "../schema.js";
 import type { RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow } from "../types.js";
 import type { AgentPresenceStatus } from "../../../shared/agent-presence.js";
+import { boundLiveActivityLine, cleanLiveActivityLine } from "../../../../shared/live-activity-summary.mjs";
 
 class StaleNativePresenceOwnerError extends Error {}
 
@@ -72,10 +73,12 @@ function nativePresenceOwnerFence(input: {
  * it must not manufacture work.  Preserve the validated provider status and
  * give an idle heartbeat a human-readable listening label.
  */
-export function nativeHarnessPresenceForStatus(status: AgentPresenceStatus): {
+export function nativeHarnessPresenceForStatus(status: AgentPresenceStatus, activitySummary: string | null = null): {
   status: AgentPresenceStatus;
   status_text: string;
 } {
+  // A working agent's daemon may say what it does: the line its owner sees.
+  if (status === "working" && activitySummary) return { status, status_text: activitySummary };
   switch (status) {
     case "idle":
       return { status, status_text: "Connected — listening" };
@@ -86,6 +89,21 @@ export function nativeHarnessPresenceForStatus(status: AgentPresenceStatus): {
     case "working":
       return { status, status_text: "Working" };
   }
+}
+
+/**
+ * The optional one-line activity summary of a native-activity report. Absent
+ * and null mean none. Control and invisible characters are removed, space is
+ * collapsed, and a longer text is cut to 120 UTF-16 units with an ellipsis: a
+ * heartbeat must never be refused for its text. Only a non-string is refused.
+ */
+export function parseNativeActivitySummary(value: unknown):
+  | { ok: true; summary: string | null }
+  | { ok: false; error: string } {
+  if (value === undefined || value === null) return { ok: true, summary: null };
+  if (typeof value !== "string") return { ok: false, error: "activity_summary must be a string or null." };
+  const summary = cleanLiveActivityLine(value);
+  return { ok: true, summary: summary ? boundLiveActivityLine(summary) : null };
 }
 
 export async function upsertRoomAgentLivenessObservation(input: {
@@ -221,6 +239,8 @@ export async function recordNativeHarnessActivity(input: {
   sequence: number;
   method: string;
   status: AgentPresenceStatus;
+  /** Cleaned and bounded again here. Shown only while the agent works. */
+  activity_summary?: string | null;
 }): Promise<{
   observation: RoomAgentLivenessObservation | null;
   presence: RoomAgentPresence | null;
@@ -289,7 +309,8 @@ export async function recordNativeHarnessActivity(input: {
       };
     }
 
-    const presence = nativeHarnessPresenceForStatus(input.status);
+    const activitySummary = parseNativeActivitySummary(input.activity_summary);
+    const presence = nativeHarnessPresenceForStatus(input.status, activitySummary.ok ? activitySummary.summary : null);
     const [presenceRow] = await tx.insert(room_agent_presence).values({
       room_id: input.room_id,
       actor_label: input.actor_label,

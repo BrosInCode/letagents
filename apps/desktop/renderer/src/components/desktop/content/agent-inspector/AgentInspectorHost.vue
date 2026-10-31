@@ -4,17 +4,16 @@
     ref="wideHostElement"
     class="agent-inspector-host-wide"
   >
-    <Transition name="agent-inspector-panel" appear>
+    <Transition :css="false" appear @enter="enterPanel" @enter-cancelled="cancelOpening" @leave="leavePanel">
       <component
         ref="surfaceComponent"
         :is="surfaceComponentType"
         v-bind="surfaceProps(false)"
         @close="emit('close')"
         @action="forwardAction($event, 'wide')"
-        @status="participantAnnouncement = $event"
         @retry="retryStatus"
-        @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
+        @reveal-live-request="emit('reveal-live-request', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
@@ -31,7 +30,7 @@
         @click="emit('close')"
       ></button>
     </Transition>
-    <Transition name="agent-inspector-panel">
+    <Transition :css="false" @enter="enterPanel" @enter-cancelled="cancelOpening" @leave="leavePanel">
       <component
         ref="surfaceComponent"
         :is="surfaceComponentType"
@@ -39,10 +38,9 @@
         v-bind="surfaceProps(true)"
         @close="emit('close')"
         @action="forwardAction($event, 'compact')"
-        @status="participantAnnouncement = $event"
         @retry="retryStatus"
-        @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
+        @reveal-live-request="emit('reveal-live-request', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
         @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
@@ -56,9 +54,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue";
 import {
-  agentInspectorLiveAnnouncement,
   type AgentInspectorActionIntent,
   type AgentInspectorActionState,
+  type AgentInspectorCorrectionRequest,
   type AgentInspectorProjection,
 } from "../../../../domain/agent-inspector";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
@@ -69,25 +67,28 @@ import type {
   DesktopRoomAgentWork,
   DesktopAgentStreamEvent,
   DesktopFocusRoomInfo,
-  DesktopManagedAgentSession,
   DesktopReasoningSession,
 } from "../../../../../../electron/ipc-types";
 import {
   projectAgentInspectorParticipant,
   projectAgentInspectorStatus,
-  type AgentInspectorParticipantSessionUpdate,
 } from "../../../../domain/agent-inspector-participant";
-import { agentInspectorRequestResetKey } from "../../../../domain/agent-inspector-identity";
+import { agentInspectorSignal, sharedAgentInspectorPresentation } from "../../../../domain/agent-inspector-presentation";
 import { latestReasoningSessionForExactIdentity } from "../../../../domain/reasoning";
+import { sharedLiveViewForAgent } from "../../../../domain/agent-inspector-shared-live";
 import AgentInspectorSurface from "./AgentInspectorSurface.vue";
 import AgentInspectorStatusSurface from "./AgentInspectorStatusSurface.vue";
 import AgentInspectorParticipantSurface from "./AgentInspectorParticipantSurface.vue";
 import type { AgentInspectorSelection } from "../desktop-chat-message/types";
 import "./agent-inspector.css";
+import { animateInspectorOpening } from "./inspector-opening";
 
 const compactBreakpoint = 920;
 const props = defineProps<{
   open: boolean;
+  presence?: readonly import("../../../../../../electron/ipc-types").DesktopAgentPresence[];
+  presenceFresh?: boolean;
+  viewerLogin?: string | null;
   projection: AgentInspectorProjection | null;
   daemonStatus?: import("../../../../../../electron/ipc-types").DesktopSupervisorDaemonStatus | null;
   refreshDiagnostics?: () => Promise<boolean>;
@@ -106,12 +107,14 @@ const props = defineProps<{
   roomIdentifier: string;
   roomDisplayName?: string;
   requestVersion: number;
-  initialTab?: "overview" | "work" | "workspace";
+  initialTab?: "overview" | "live" | "work" | "workspace" | "diagnostics";
   roomAgentWork?: DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;
-  managedSessions: readonly DesktopManagedAgentSession[];
   reasoningSessions: readonly DesktopReasoningSession[];
+  /** Agents' turns their owners share with the room. */
+  liveActivitySessions?: readonly DesktopReasoningSession[];
+  correctionRequest?: AgentInspectorCorrectionRequest | null;
 }>();
 const emit = defineEmits<{
   close: [];
@@ -132,35 +135,22 @@ const emit = defineEmits<{
   "room-move-commit": [];
   retire: [];
   purge: [];
-  "session-updated": [update: AgentInspectorParticipantSessionUpdate];
   "open-reasoning": [sessionId: string];
+  "reveal-live-request": [messageId: string];
   retry: [];
 }>();
 
 const compact = ref(false);
 const wideHostElement = ref<HTMLElement | null>(null);
 const surfaceComponent = ref<{ focusInitial: () => void; containsFocus: () => boolean } | null>(null);
-const participantAnnouncement = ref<string | null>(null);
-const participantProjection = computed(() =>
-  projectAgentInspectorParticipant(props.selection, props.managedSessions, props.roomIdentifier)
-);
-const participantSelectionKey = computed(() =>
-  agentInspectorRequestResetKey(props.selection, props.requestVersion)
-);
-const participantReasoning = computed(() => {
-  const participant = participantProjection.value;
-  if (!participant) return null;
-  if (participant.kind === "local_managed" && participant.session.reasoningSessionId) {
-    const linked = props.reasoningSessions.find((session) =>
-      session.id === participant.session.reasoningSessionId
-    );
-    if (linked) return linked;
-  }
-  const identity = participant.kind === "local_managed"
-    ? participant.session
-    : props.selection;
-  return latestReasoningSessionForExactIdentity(identity, props.reasoningSessions);
-});
+const participantProjection = computed(() => projectAgentInspectorParticipant(props.selection));
+const participantReasoning = computed(() => participantProjection.value
+  ? latestReasoningSessionForExactIdentity(props.selection, props.reasoningSessions)
+  : null);
+// Another member's agent: its turn, when its owner shares live activity with the room.
+const participantLiveView = computed(() => participantProjection.value
+  ? sharedLiveViewForAgent(props.selection.agentKey, props.liveActivitySessions ?? [])
+  : null);
 const surfaceKind = computed(() => props.projection ? "projection" : participantProjection.value ? "participant" : "status");
 const surfaceComponentType = computed<Component>(() => props.projection
   ? AgentInspectorSurface
@@ -169,23 +159,15 @@ const surfaceComponentType = computed<Component>(() => props.projection
     : AgentInspectorStatusSurface);
 watch(compact, (value) => emit("presentation-change", value), { immediate: true });
 const statusPresentation = computed(() => projectAgentInspectorStatus(props.selection));
+const sharedPresentation = computed(() => sharedAgentInspectorPresentation(
+  props.selection, props.presence ?? [], props.roomIdentifier, props.viewerLogin, props.presenceFresh,
+));
 const liveAnnouncement = computed(() => {
   if (props.actionState?.message) return props.actionState.message;
-  if (participantAnnouncement.value) return participantAnnouncement.value;
-  if (props.projection) return agentInspectorLiveAnnouncement(props.projection);
-  if (participantProjection.value?.kind === "local_managed") {
-    return `${participantProjection.value.title}: ${participantProjection.value.heading}.`;
-  }
-  if (participantProjection.value?.kind === "unavailable") {
-    return `${participantProjection.value.title}: ${participantProjection.value.heading}.`;
-  }
-  if (participantProjection.value?.kind === "external") return `${participantProjection.value.title}: externally managed agent.`;
+  if (props.projection) return `${props.projection.displayName}: ${agentInspectorSignal(props.projection).label}.`;
+  if (participantProjection.value) return `${participantProjection.value.title}: ${sharedPresentation.value.signal.label}.`;
   return `${statusPresentation.value.title}: ${statusPresentation.value.heading}.`;
 });
-watch(
-  () => [props.roomIdentifier, props.requestVersion, participantSelectionKey.value],
-  () => { participantAnnouncement.value = null; },
-);
 function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
   const workspace = { roomAgentWork: props.roomAgentWork ?? [], roomAgentWorkStatus: props.roomAgentWorkStatus ?? 'idle',
     workspaceSourceMessageId: props.workspaceSourceMessageId, workspaceAgentKey: props.selection.agentKey,
@@ -210,22 +192,32 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
       roomDisplayName: props.roomDisplayName,
       settingsConflict: props.settingsConflict,
       liveFeed: props.liveFeed,
+      correctionRequest: props.correctionRequest ?? null,
     };
   }
   if (participantProjection.value) {
     return {
       ...workspace,
       projection: participantProjection.value,
+      shared: sharedPresentation.value,
+      roomDisplayName: props.roomDisplayName,
       compact: compactPresentation,
-      busy: false,
       roomIdentifier: props.roomIdentifier,
       requestVersion: props.requestVersion,
-      selectionKey: participantSelectionKey.value,
       reasoning: participantReasoning.value,
+      liveView: participantLiveView.value,
     };
   }
   return { ...statusPresentation.value, compact: compactPresentation };
 }
+let finishOpening: (() => void) | null = null;
+function cancelOpening(): void { finishOpening?.(); finishOpening = null; }
+function enterPanel(element: Element, done: () => void): void {
+  cancelOpening();
+  finishOpening = animateInspectorOpening(element as HTMLElement, restoreFocusElement?.closest<HTMLElement>('button, [role="button"]') ?? null, done);
+}
+function leavePanel(_element: Element, done: () => void): void { cancelOpening(); done(); }
+watch(() => props.requestVersion, cancelOpening);
 let resizeObserver: ResizeObserver | null = null;
 let restoreFocusElement: HTMLElement | null = null;
 let restoreFocusOnClose = true;
@@ -282,7 +274,16 @@ watch(() => [props.open, compact.value] as const, ([open, isCompact], previous) 
     const focusTarget = restoreFocusOnClose ? restoreFocusElement : null;
     restoreFocusElement = null;
     restoreFocusOnClose = true;
-    if (focusTarget) void nextTick(() => focusTarget.focus({ preventScroll: true }));
+    if (focusTarget) {
+      void nextTick(() => {
+        if (focusTarget.isConnected) {
+          focusTarget.focus({ preventScroll: true });
+        } else {
+          const composer = document.querySelector<HTMLElement>('[data-testid="desktop-composer-input"]');
+          composer?.focus({ preventScroll: true });
+        }
+      });
+    }
   }
 }, { immediate: true });
 
@@ -330,12 +331,19 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  cancelOpening();
   resizeObserver?.disconnect();
   resizeObserver = null;
   window.removeEventListener("resize", syncCompact);
   document.removeEventListener("keydown", handleHostKeydown, true);
   document.removeEventListener("pointerdown", handleDocumentPointerDown, true);
   setShellContentInert(false);
-  if (restoreFocusOnClose) restoreFocusElement?.focus({ preventScroll: true });
+  if (restoreFocusOnClose && restoreFocusElement) {
+    if (restoreFocusElement.isConnected) {
+      restoreFocusElement.focus({ preventScroll: true });
+    } else {
+      document.querySelector<HTMLElement>('[data-testid="desktop-composer-input"]')?.focus({ preventScroll: true });
+    }
+  }
 });
 </script>

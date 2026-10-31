@@ -1,0 +1,70 @@
+// The shared context of App.vue's composables. App.vue fills it in order: the
+// state, then the function composables (they only define functions, like the
+// hoisted declarations they came from), then each watcher and composable slice
+// in its original registration order.
+
+import type { useAppState } from "./useAppState";
+import type { useAppInboxActions, useAppInboxState, useAppRoomAttention } from "./useAppInbox";
+import type { useAppRentalActions, useAppRentalEvents } from "./useAppRentals";
+import type { useAppSidebarLayout } from "./useAppSidebarLayout";
+import type { useAppProjectRepo, useAppProjectRepoWatchers } from "./useAppProjectRepo";
+import type { useAppSidebarMessages, useAppAccountActivityFeed, useAppReadMarkers, useAppHistoryWatchers } from "./useAppSidebarMessages";
+import type { useAppSidebarSelection, useAppSidebarEntries } from "./useAppSidebarSelection";
+import type { useAppFocusRoomConclusion } from "./useAppFocusRoomConclusion";
+import type { useAppSessionActions, useAppAccountScope, useAppAuthFlow, useAppAccountSwitch, useAppAuthWatchers } from "./useAppSession";
+import type { useAppSettingsActions, useAppSetupOnboarding } from "./useAppSettings";
+import type { useAppArchivedRooms, useAppArchivedRoomWatcher } from "./useAppArchivedRooms";
+import type { useAppRoomShellActions, useAppChatScrollWatchers } from "./useAppRoomShell";
+import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./useAppNavigation";
+import type { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./useAppRoomData";
+import type { useAppLifecycle } from "./useAppLifecycle";
+
+/** What each composable returns, by composable name. */
+interface AppContextParts {
+  useAppState: ReturnType<typeof useAppState>;
+  useAppInboxActions: ReturnType<typeof useAppInboxActions>;
+  useAppRentalActions: ReturnType<typeof useAppRentalActions>;
+  useAppSidebarLayout: ReturnType<typeof useAppSidebarLayout>;
+  useAppProjectRepo: ReturnType<typeof useAppProjectRepo>;
+  useAppSidebarMessages: ReturnType<typeof useAppSidebarMessages>;
+  useAppSidebarSelection: ReturnType<typeof useAppSidebarSelection>;
+  useAppFocusRoomConclusion: ReturnType<typeof useAppFocusRoomConclusion>;
+  useAppSessionActions: ReturnType<typeof useAppSessionActions>;
+  useAppSettingsActions: ReturnType<typeof useAppSettingsActions>;
+  useAppArchivedRooms: ReturnType<typeof useAppArchivedRooms>;
+  useAppRoomShellActions: ReturnType<typeof useAppRoomShellActions>;
+  useAppAccountScope: ReturnType<typeof useAppAccountScope>;
+  useAppAccountActivityFeed: ReturnType<typeof useAppAccountActivityFeed>;
+  useAppInboxState: ReturnType<typeof useAppInboxState>;
+  useAppNavigation: ReturnType<typeof useAppNavigation>;
+  useAppRoomAttention: ReturnType<typeof useAppRoomAttention>;
+  useAppRoomContext: ReturnType<typeof useAppRoomContext>;
+  useAppReadMarkers: ReturnType<typeof useAppReadMarkers>;
+  useAppSidebarEntries: ReturnType<typeof useAppSidebarEntries>;
+  useAppRentalEvents: ReturnType<typeof useAppRentalEvents>;
+  useAppHistoryWatchers: ReturnType<typeof useAppHistoryWatchers>;
+  useAppRoomData: ReturnType<typeof useAppRoomData>;
+  useAppAuthFlow: ReturnType<typeof useAppAuthFlow>;
+  useAppAccountSwitch: ReturnType<typeof useAppAccountSwitch>;
+  useAppRoomManagement: ReturnType<typeof useAppRoomManagement>;
+  useAppSetupOnboarding: ReturnType<typeof useAppSetupOnboarding>;
+  useAppChatScrollWatchers: ReturnType<typeof useAppChatScrollWatchers>;
+  useAppSelectionWatchers: ReturnType<typeof useAppSelectionWatchers>;
+  useAppProjectRepoWatchers: ReturnType<typeof useAppProjectRepoWatchers>;
+  useAppArchivedRoomWatcher: ReturnType<typeof useAppArchivedRoomWatcher>;
+  useAppRoomStreamWatchers: ReturnType<typeof useAppRoomStreamWatchers>;
+  useAppAuthWatchers: ReturnType<typeof useAppAuthWatchers>;
+  useAppLifecycle: ReturnType<typeof useAppLifecycle>;
+}
+
+type UnionToIntersection<U> = (U extends unknown ? (part: U) => void : never) extends (part: infer I) => void ? I : never;
+
+/**
+ * The context as one composable sees it: only the results of the composables
+ * it reads from. A narrow view keeps TypeScript from inferring a composable's
+ * return type from itself.
+ */
+export type AppContextOf<Name extends keyof AppContextParts> = UnionToIntersection<AppContextParts[Name]>;
+
+/** The whole context that App.vue fills. */
+export type AppContext = AppContextOf<keyof AppContextParts>;

@@ -2,6 +2,7 @@ import { createLocalTaskStore } from "../../../shared/local-task-store.mjs";
 import { runWithLocalBoardOwner } from "../../../shared/local-board-owner.mjs";
 import { withRegisteredWorkerStateFence } from "../../../shared/local-worker-state-fence.mjs";
 import { DaemonControlSocket } from "../../../apps/desktop/daemon/control-socket.js";
+import { DAEMON_STATE_DIR_ENV, daemonEndpoint } from "../../../shared/daemon-endpoint.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -62,8 +63,12 @@ const {
 
 // Exercise the standalone client against a real socket with the shared owner store.
 const { getLocalKnowledgeDatabase } = await import("../local-state/local-chat.js");
-process.env.LETAGENTS_BOARD_SOCKET_PATH = join(tempDir, "board.sock");
-const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_PATH, request =>
+// A socket file on POSIX, a named pipe with its proof on Windows. Worker
+// threads find the proof through the state directory variable.
+const boardEndpoint = daemonEndpoint(tempDir);
+process.env.LETAGENTS_BOARD_SOCKET_PATH = boardEndpoint.connectPath;
+process.env[DAEMON_STATE_DIR_ENV] = tempDir;
+const boardSocket = new DaemonControlSocket(boardEndpoint.listenPath, request =>
   runWithLocalBoardOwner(() => {}, async () => {
     assert.equal(request.method, "local_board.mutate");
     const input = request.params as { domain: string; operation: string; args: unknown[]; worker: unknown; statePath: string };
@@ -78,10 +83,10 @@ const boardSocket = new DaemonControlSocket(process.env.LETAGENTS_BOARD_SOCKET_P
     });
     const operation = tasks[input.operation as keyof typeof tasks] as (...args: unknown[]) => unknown;
     return operation(...input.args);
-  }));
+  }), undefined, undefined, { peerProofPath: boardEndpoint.proofPath });
 await runWithLocalBoardOwner(() => {}, () => getLocalKnowledgeDatabase());
 await boardSocket.start();
-test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
+test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; delete process.env[DAEMON_STATE_DIR_ENV]; });
 
 type SendToolHandler = (
   input: Record<string, unknown>,
@@ -124,7 +129,13 @@ test.after(() => {
   delete process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH;
   delete process.env.LETAGENTS_LOCAL_CHAT_DB;
   delete process.env.LETAGENTS_STATE_PATH;
-  rmSync(tempDir, { recursive: true, force: true });
+  try {
+    rmSync(tempDir, { recursive: true, force: true });
+  } catch (error) {
+    // Windows keeps the open SQLite database locked until this process exits
+    // (EBUSY); the runner's temp directory is cleaned up with the job.
+    if (process.platform !== "win32" || (error as NodeJS.ErrnoException).code !== "EBUSY") throw error;
+  }
 });
 
 test("MCP local chat state follows setting and supports message wait", async () => {
@@ -1787,7 +1798,7 @@ test("local routing schema startup is history-independent and bounded backfill r
   database.close();
 });
 
-test("local routing schema upgrade is race-idempotent across processes", async () => {
+test("local routing schema upgrade is race-idempotent across processes", { timeout: 20_000 }, async (t) => {
   const { DatabaseSync } = require("node:sqlite") as {
     DatabaseSync: new (path: string) => ReturnType<typeof openSqliteDb> & { close(): void };
   };
@@ -1821,23 +1832,36 @@ test("local routing schema upgrade is race-idempotent across processes", async (
     const db = new DatabaseSync(workerData.databasePath);
     parentPort.postMessage("ready");
     Atomics.wait(new Int32Array(workerData.start), 0, 0);
-    await projection.ensureLocalThreadRoutingProjectionSchemaAsync(db);
-    db.close();
+    try {
+      // Test concurrent cutover correctness independently of CI scheduling load.
+      // The mock-clock test separately verifies the production retry deadline.
+      await projection.ensureLocalThreadRoutingProjectionSchemaAsync(db, { maxWaitMs: 10_000 });
+    } finally { db.close(); }
   `, {
     eval: true,
     type: "module",
     workerData: { databasePath, moduleUrl, start },
   }));
-  await Promise.all(workers.map((worker) => new Promise<void>((resolve, reject) => {
-    worker.once("message", () => resolve());
-    worker.once("error", reject);
-  })));
-  Atomics.store(gate, 0, 1);
-  Atomics.notify(gate, 0, workerCount);
-  await Promise.all(workers.map((worker) => new Promise<void>((resolve, reject) => {
-    worker.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`upgrade worker exited ${code}`)));
-    worker.once("error", reject);
-  })));
+  t.after(async () => { await Promise.all(workers.map((worker) => worker.terminate())); });
+  try {
+    // Register completion handlers before releasing the start gate so even a
+    // fast failure is observed, and drain every worker before fixture cleanup.
+    const completions = workers.map((worker) => new Promise<void>((resolve, reject) => {
+      worker.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`upgrade worker exited ${code}`)));
+      worker.once("error", reject);
+    }));
+    const completed = Promise.all(completions);
+    void completed.catch(() => {});
+    await Promise.all(workers.map((worker) => new Promise<void>((resolve, reject) => {
+      worker.once("message", () => resolve());
+      worker.once("error", reject);
+    })));
+    Atomics.store(gate, 0, 1);
+    Atomics.notify(gate, 0, workerCount);
+    await completed;
+  } finally {
+    await Promise.all(workers.map((worker) => worker.terminate()));
+  }
 
   const verified = new DatabaseSync(databasePath);
   const columns = new Set(verified.prepare("PRAGMA table_info(local_chat_thread_routing_aliases_v2)")

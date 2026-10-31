@@ -6,6 +6,8 @@ import { createServer } from "node:net";
 import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
+import { listenTestDaemon, testDaemonSocketPath } from "./support/platform.js";
+
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 process.env.LETAGENTS_API_URL ??= "http://127.0.0.1:39999";
 
@@ -441,7 +443,7 @@ test("worker bearer mode disables owner-auth onboarding tools without API traffi
   globalThis.fetch = originalFetch;
 });
 
-test("worker bearer mode keeps room inspection off saved owner auth and local Codex data", async () => {
+test("worker bearer mode keeps room inspection off saved owner auth", async () => {
   await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
     rememberRoom(toRoomState({ room_id: "room_inspection", joined_via: "join_room", is_local: true }));
     setRoomInspectionOwnerAuthStoreLoaderForTest(async () => assert.fail("worker room inspection must not load saved auth"));
@@ -452,22 +454,11 @@ test("worker bearer mode keeps room inspection off saved owner auth and local Co
         expires_at: null,
         account: null,
       });
-      assert.equal(result.current_local_codex_session, null);
-      assert.equal(result.local_codex_session_count, 0);
+      assert.equal("current_local_codex_session" in result, false, "letagents 0.12.46 removed local Codex sessions");
+      assert.equal("local_codex_session_count" in result, false);
     } finally {
       setRoomInspectionOwnerAuthStoreLoaderForTest(null);
     }
-  });
-});
-
-test("worker bearer mode disables local Codex session orchestration", async () => {
-  await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
-    const start = toolHandler(registerAgentSessionTools, "start_local_codex_session");
-    assert.deepEqual(JSON.parse((await start({ room: "room_1" })).content[0]!.text), {
-      success: false,
-      error: "worker_bearer_mode",
-      message: "Local Codex session orchestration is disabled while LETAGENTS_AGENT_SESSION_BEARER is configured.",
-    });
   });
 });
 
@@ -504,7 +495,7 @@ test("custodial polling borrows authority and cannot fall back to owner or envir
 
 test("custodial wait uses exact BEFORE cursor and records only bounded RELEASE without legacy checkpoints", async () => {
   const root = mkdtempSync(join(tmpdir(), "custodial-wait-"));
-  const socketPath = join(root, "daemon.sock");
+  const socketPath = testDaemonSocketPath(root);
   const phases: string[] = [];
   const requests: any[] = [];
   let rejectRelease = false;
@@ -533,7 +524,7 @@ test("custodial wait uses exact BEFORE cursor and records only bounded RELEASE w
   });
   const originalFetch = globalThis.fetch;
   try {
-    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    await new Promise<void>((resolve) => listenTestDaemon(server, socketPath, resolve));
     await withAuthEnv({ executionProfile: "supervised_mcp_polling", supervisorRoomId: "room_exact" }, async () => {
       process.env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET = socketPath;
       process.env.LETAGENTS_SUPERVISOR_PROVIDER = "codex";
@@ -702,9 +693,9 @@ test("bounded supervised tools bind the exact daemon room without joining ambien
       supervisorRoomId: "exact-supervisor-room",
     }, async () => {
       await autoJoinFromContext();
-      assert.equal(roomState.currentRoom?.room_id, "stale-or-ambient-room", "startup must not trust ambient or launch-time room state");
+      assert.equal(roomState.getCurrentRoom()?.room_id, "stale-or-ambient-room", "startup must not trust ambient or launch-time room state");
       await runWithCurrentSupervisedRoom("exact-supervisor-room", async () => {
-        assert.equal(roomState.currentRoom?.room_id, "stale-or-ambient-room", "per-call authority must not mutate process-global room state");
+        assert.equal(roomState.getCurrentRoom()?.room_id, "stale-or-ambient-room", "per-call authority must not mutate process-global room state");
 
         const currentRoom = await getCurrentRoomPayload();
         assert.equal(currentRoom.connected, true);
@@ -748,7 +739,7 @@ test("bounded supervised room joins cannot select an ambient local room", async 
       globalThis.fetch = async () => assert.fail("bounded room joins must fail before network");
       const joinRoom = toolHandler(registerRoomJoinTools, "join_room");
       await assert.rejects(() => joinRoom({ name: "ambient_local_room" }), /Room joins and creation are disabled/);
-      assert.equal(roomState.currentRoom?.room_id, "exact-supervisor-room");
+      assert.equal(roomState.getCurrentRoom()?.room_id, "exact-supervisor-room");
     });
   } finally {
     globalThis.fetch = originalFetch;

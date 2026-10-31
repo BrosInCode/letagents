@@ -27,7 +27,7 @@
           <span class="agent-live-icon" aria-hidden="true"><component :is="entry.kind === 'reasoning' ? NotebookPen : MessageSquare" :size="14" :stroke-width="1.6" /></span>
           <div class="agent-live-note">
             <span class="agent-live-caption">{{ entry.kind === 'reasoning' ? 'Work note' : 'Agent update' }}</span>
-            <div class="agent-live-prose" v-html="renderDesktopMarkdown(entry.text, { block: true, mentions: false })"></div>
+            <MarkdownBlock class="agent-live-prose" :text="entry.text" :mentions="false" />
           </div>
         </template>
       </li>
@@ -47,10 +47,12 @@
 </template>
 
 <script setup lang="ts">
+import { formatDate } from "../../../../domain/formatters";
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { useNow } from "../../../../composables/useNow";
 import { ArrowDown, MessageSquare, NotebookPen } from "@lucide/vue";
 import AgentInspectorLiveActions from "./AgentInspectorLiveActions.vue";
-import { renderDesktopMarkdown } from "../formatting/markdown";
+import MarkdownBlock from "../formatting/MarkdownBlock.vue";
 import { followAgentLiveScroll } from "../../../../domain/agent-inspector-live-scroll";
 import { formatFullTimestamp } from "../../../../domain/time";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
@@ -88,11 +90,11 @@ const canShowCurrent = computed(() => canPresentCurrentAgentStream({ ...props.wo
 const currentRequest = computed(() => currentAgentRequest(props.resource, props.activeSourceMessageId));
 const scopedEvents = computed(() => !props.work.active || canShowCurrent.value ? scopeAgentStreamEventsToWork(props.feed.events, props.work) : []);
 const transcript = computed(() => foldAgentStreamEvents(scopedEvents.value, props.feed.ended));
-const now = ref(Date.now());
-let elapsedTimer: ReturnType<typeof setInterval> | null = null;
 
 const isFollowing = computed(() => availability.value === "active" && canShowCurrent.value);
 const availability = computed(() => agentLiveAvailability(props.work, props.feed.ended));
+// One shared 1 s clock, running only while the agent is being followed.
+const now = useNow(1_000, () => isFollowing.value);
 
 const presented = computed((): { item: LiveTranscriptItem; tool: LiveToolPresentation | null }[] =>
   transcript.value.items.filter(item => item.kind !== "reasoning" || props.supportsReasoning !== false).map((item) => ({
@@ -112,7 +114,7 @@ const actionCount = computed(() => transcript.value.items.filter(item => item.ki
 const lastUpdateLabel = computed(() => {
   const value = transcript.value.lastActivityAt;
   if (!value || !Number.isFinite(Date.parse(value))) return null;
-  return new Date(value).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return formatDate("clockTime", value);
 });
 
 const workDurationLabel = computed(() => {
@@ -128,7 +130,8 @@ const workDurationLabel = computed(() => {
   const duration = formatLiveWorkDuration(
     props.work.startedAt,
     null,
-    now.value,
+    // Never older than the work start: the shared clock may be idle while not following.
+    Math.max(now.value, Date.now()),
   );
   return duration ? `Working for ${duration}` : "Work in progress";
 });
@@ -173,23 +176,6 @@ const emptyStateLabel = computed(() => {
   return "No recent actions are available.";
 });
 
-onMounted(syncElapsedTimer);
-
-watch([isFollowing, () => props.work.startedAt], syncElapsedTimer);
-
-onUnmounted(() => {
-  stopElapsedTimer();
-});
-
-function syncElapsedTimer(): void {
-  stopElapsedTimer();
-  now.value = Date.now();
-  if (!isFollowing.value) return;
-  elapsedTimer = setInterval(() => {
-    now.value = Date.now();
-  }, 1_000);
-}
-
 function turnStateFallback(state: AgentInspectorLiveWorkProjection["state"]): string {
   if (state === "dispatching") return "Preparing a response";
   if (state === "publishing") return "Sending the response";
@@ -209,12 +195,6 @@ function transitionDetail(state: AgentInspectorLiveWorkProjection["agentState"])
   if (state === "reconnecting") return "Reconnecting the room delivery path before work can continue.";
   if (state === "restoring_conversation") return "Restoring the private conversation before room work can continue.";
   return "Restoring room access before work can continue.";
-}
-
-function stopElapsedTimer(): void {
-  if (!elapsedTimer) return;
-  clearInterval(elapsedTimer);
-  elapsedTimer = null;
 }
 
 </script>

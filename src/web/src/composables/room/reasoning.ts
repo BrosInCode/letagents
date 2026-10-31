@@ -2,7 +2,7 @@ import { apiFetch, roomPath } from './api'
 import { MAX_LIVE_REASONING_UPDATES } from './constants'
 import type { RoomReasoningSession, RoomReasoningUpdate } from './types'
 
-export function reasoningSortValue(session: RoomReasoningSession): number {
+function reasoningSortValue(session: RoomReasoningSession): number {
   const detailEntries = session.entries || session.updates
   const latestEntry = detailEntries?.[detailEntries.length - 1]
   const latestTimestamp = latestEntry

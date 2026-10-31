@@ -6,12 +6,12 @@
 .docs-page .docs-layout {
   display: flex;
   min-height: 100vh;
-  padding-top: 80px;
+  padding-top: calc(80px + env(safe-area-inset-top, 0px));
 }
 
 .docs-page .sidebar {
   position: fixed;
-  top: 80px;
+  top: calc(80px + env(safe-area-inset-top, 0px));
   left: 0;
   bottom: 0;
   width: 260px;
@@ -19,6 +19,7 @@
   border-right: 1px solid var(--border, rgba(255,255,255,0.08));
   background: var(--bg-0, #0a0a0a);
   overflow-y: auto;
+  overscroll-behavior: contain;
   z-index: 50;
 }
 
@@ -60,11 +61,12 @@
   box-sizing: border-box;
   max-width: 780px;
   padding: 48px 48px 100px;
+  overflow-wrap: anywhere;
 }
 
 .docs-page .doc-section {
   margin-bottom: 64px;
-  scroll-margin-top: 100px;
+  scroll-margin-top: calc(100px + env(safe-area-inset-top, 0px));
 }
 
 .docs-page .doc-section:last-child {
@@ -267,8 +269,8 @@
 .docs-page .sidebar-toggle {
   display: none;
   position: fixed;
-  bottom: 20px;
-  right: 20px;
+  bottom: max(20px, env(safe-area-inset-bottom, 0px));
+  right: max(20px, env(safe-area-inset-right, 0px));
   z-index: 200;
   width: 48px;
   height: 48px;
@@ -283,19 +285,43 @@
   box-shadow: 0 4px 20px rgba(0,0,0,0.4);
 }
 
+.docs-page .sidebar-close {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 44px;
+  margin-bottom: 18px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  color: var(--text);
+}
+.docs-page .sidebar-close span { font-size: 24px; }
+.docs-page :is(.sidebar-link, .sidebar-close, .sidebar-toggle):focus-visible {
+  outline: 2px solid var(--blue-text);
+  outline-offset: 2px;
+}
+
 @media (max-width: 800px) {
   .docs-page .sidebar {
+    visibility: hidden;
     transform: translateX(-100%);
-    transition: transform 250ms ease;
-    width: 280px;
+    transition: transform 200ms ease-out;
+    width: min(320px, calc(100vw - 32px));
     background: var(--surface, #111);
     top: 0;
-    padding-top: 90px;
+    padding: max(20px, env(safe-area-inset-top, 0px)) 16px max(24px, env(safe-area-inset-bottom, 0px));
+    z-index: 201;
   }
 
   .docs-page .sidebar.open {
+    visibility: visible;
     transform: translateX(0);
   }
+
+  .docs-page .sidebar-overlay { z-index: 200; }
+  .docs-page .sidebar-link { display: flex; align-items: center; min-height: 44px; }
 
   .docs-page .sidebar-toggle {
     display: flex;
@@ -309,4 +335,8 @@
   .docs-page .doc-section h2 {
     font-size: 1.3rem;
   }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .docs-page .sidebar { transition: none; }
 }

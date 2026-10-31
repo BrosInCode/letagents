@@ -1,6 +1,8 @@
 <template>
   <div class="messages-wrap">
-    <div class="messages scroll-fade-y" ref="messagesEl">
+    <p v-if="openingThreadId || threadOpenError" class="thread-open-status" role="status">{{ threadOpenError || 'Loading thread…' }}</p>
+    <div class="messages-scroll">
+    <div class="messages scroll-fade-y" ref="messagesEl" @wheel.passive="restoringPosition = false" @touchstart.passive="restoringPosition = false" @pointerdown="restoringPosition = false" @keydown="restoringPosition = false" @scrollend="finishMessageReveal">
       <button
         v-if="hasOlderMessages"
         class="load-older-btn"
@@ -8,42 +10,74 @@
         :disabled="isLoadingOlderMessages"
         @click="emit('loadOlder')"
       >
-        {{ isLoadingOlderMessages ? 'Loading older messages...' : 'Load older messages' }}
+        {{ isLoadingOlderMessages ? 'Loading older messages...' : olderMessagesError ? 'Retry loading older messages' : 'Load older messages' }}
       </button>
-      <TransitionGroup name="message-arrival" @after-enter="handleAfterEnter">
+
+        <RoomGitHubUpdates v-for="entry in timelineEntries" :key="`${roomIdentifier}:${entry.id}`" :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : [entry.message]" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEventPresentation" @rows-changed="observeMessageRows" @layout-start="beginGroupLayout" @layout-settled="measureGroupLayout">
+        <template #default="{ message: msg, history }">
+        <div v-if="msg.id === unreadTimeline.dividerId.value" class="explicit-unread" role="separator">New messages</div>
         <ChatMessage
-          v-for="msg in messages"
-          :key="msg.id"
           :message="msg"
+          :github-history="history"
           :roomIdentifier="roomIdentifier"
-          :thread="threadSummaries.get(msg.id) || null"
+          :thread="loadedThreadSummaries.get(msg.id) || threadSummaries.get(msg.id) || null"
+          :thread-open="activeThreadId === msg.id"
           :stalePromptTaskStates="stalePromptTaskStates"
           :reasoningSession="reasoningByAnchorMessage.get(msg.id) || null"
           :class="messageClasses(msg)"
-          :searchQuery="searchQuery"
           :taskReferenceIds="taskReferenceIds"
+          :arriving="arrivingMessageIds.has(msg.id)"
+          :agentNames="agentNames"
           @reply="emit('reply', $event)"
+          @open-thread="toggleThread"
           @info="handleOpenMessageInfo($event)"
           @openImageViewer="emit('openImageViewer', $event)"
           @scrollToReply="scrollToMessage"
           @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
           @openTask="emit('openTask', $event)"
-        />
-      </TransitionGroup>
+        >
+          <template #thread>
+            <ThreadTransition>
+            <div v-if="openedThreads.has(msg.id)" v-show="activeThreadId === msg.id" class="web-thread-disclosure">
+            <InlineThread
+              :id="`web-thread-${msg.id}`" :parent="msg" :messages="messages" :room-identifier="roomIdentifier || ''"
+              :reasoning-by-anchor-message="reasoningByAnchorMessage" :stale-prompt-task-states="stalePromptTaskStates"
+              @toggle-stale-prompt-mute="emit('toggleStalePromptMute', $event)"
+              :active="activeThreadId === msg.id" :agent-names="agentNames" :task-reference-ids="taskReferenceIds"
+              :search-query="searchQuery" :reveal-message-id="threadRevealId"
+              @close="toggleThread(msg.id)" @info="handleOpenMessageInfo" @open-image-viewer="emit('openImageViewer', $event)"
+              @open-task="emit('openTask', $event)" @jump="scrollToMessage" @rows-changed="observeMessageRows"
+              @summary="loadedThreadSummaries.set(msg.id, $event)" @messages="rememberThreadMessages(msg.id, $event)">
+              <template #composer="context"><slot name="thread-composer" v-bind="context" /></template>
+            </InlineThread>
+            </div>
+            </ThreadTransition>
+          </template>
+        </ChatMessage>
+        </template>
+        </RoomGitHubUpdates>
+
     </div>
     <button
       v-if="unreadCount > 0 || isScrolledFarUp"
       class="new-messages-pill visible"
-      @click="() => scrollToBottom()"
+      @click="unreadTimeline.jumpToLatest()"
     >
       <span v-if="unreadCount > 0">↓ {{ unreadCount }} new messages</span>
       <span v-else>↓ Scroll to latest</span>
     </button>
-    <div v-if="messages.length === 0" class="empty-state">
+    <div v-if="messages.length === 0 && !agentWork.length" class="empty-state">
       <div class="empty-state-card">
         <h3>Open a room to begin</h3>
         <p>Create a room for your agents, copy the join code, and watch messages appear in real time.</p>
       </div>
+    </div>
+    </div>
+    <!-- Live strip: who is working or typing right now. It sits outside the
+         scrolling list so it stays in view while the reader is in older history. -->
+    <div ref="liveStripEl" class="room-live-strip">
+      <RoomWorkActivity v-if="agentWork.length" :key="roomIdentifier" :work="agentWork" />
+      <TypingIndicator v-else :key="roomIdentifier || ''" :names="typingNames" :color-for="typingColor" />
     </div>
     <MessageInfoSurface
       :open="infoSurfaceOpen"
@@ -56,13 +90,33 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
-import { type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
+import type { ChatScrollPosition } from '../../../../../shared/chat-scroll-position'
+import RoomGitHubUpdates from '../../../../../shared/ui/RoomGitHubUpdates.vue'
+import { createGitHubTimeline } from '../../../../../shared/grouped-github-updates'
+import { parseGitHubEventPresentation } from './githubEventMessage'
+
+import RoomWorkActivity from "./RoomWorkActivity.vue";
+import { useRoomWorkIndicators } from "./roomWorkIndicators";
+import TypingIndicator from "../../../../../shared/ui/TypingIndicator.vue";
+import { useRoomTypingNames } from "@/composables/roomTyping";
+import { getSenderColor } from "@/composables/room/identity";
+import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../shared/ui/useRoomMessageMotion";
+import { provide, ref, computed, watch, nextTick, onMounted, onBeforeUnmount, onUnmounted } from 'vue'
+import { type RoomAgentPresence, type RoomMessage, type RoomReasoningSession, type StalePromptTaskState } from '@/composables/useRoom'
 import ChatMessage from './ChatMessage.vue'
+import ThreadTransition from '../../../../../shared/ui/ThreadTransition.vue'
+import InlineThread from './InlineThread.vue'
+import { apiFetch, roomPath } from '@/composables/room/api'
+import { messageMatchesSearch } from './chat-message/formatting'
 import MessageInfoSurface from './MessageInfoSurface.vue'
-import { getAppendedMessageIds, mergeMessageArrivalIds } from './messageArrival'
-import { buildMessageThreadSummaries } from './messageThreading'
+import { mergeMessageArrivalIds, watchMessageListGrowth } from './messageArrival'
+import { buildMessageThreadSummaries, messageThreadParentId, type MessageThreadSummary } from './messageThreading'
 import { createReadEvidenceReporter } from './readEvidence'
+import { injectRoomMessageLinkPreviews } from '@/composables/roomMessageLinkPreviews'
+import { injectRoomMessageReactions } from '@/composables/roomMessageReactions'
+import { decideMessageRevealAction } from './messageReveal'
+import { useRoomUnread } from '@/composables/roomUnread'
+import { unreadMenuKey, useUnreadTimeline } from '../../../../../shared/room-unread-client'
 
 const activeInfoMessage = ref<RoomMessage | null>(null)
 const infoSurfaceOpen = ref(false)
@@ -73,39 +127,230 @@ function handleOpenMessageInfo(msg: RoomMessage) {
 }
 
 const props = defineProps<{
+  initialScrollPosition?: ChatScrollPosition | null
   messages: readonly RoomMessage[]
   roomIdentifier?: string
+  unreadRoomId?: string
+  presence?: readonly RoomAgentPresence[]
   reasoningSessions?: readonly RoomReasoningSession[]
   hasOlderMessages?: boolean
+  messagesLoaded?: boolean
   isLoadingOlderMessages?: boolean
+  olderMessagesError?: string
   searchQuery?: string
   stalePromptTaskStates?: Readonly<Record<string, StalePromptTaskState>>
   taskReferenceIds?: ReadonlySet<string>
+  /** A message another view asked to show, e.g. the one that woke an agent. */
+  revealMessageId?: string | null
+  agentNames?: ReadonlyMap<string, string>
 }>()
 const emit = defineEmits<{
+  scrollPosition: [room: string, position: ChatScrollPosition]
+  threadMessages: [messages: RoomMessage[]]
   loadOlder: []
   reply: [message: RoomMessage]
   openImageViewer: [imageId: string]
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
   openTask: [taskId: string]
+  revealed: [messageId: string]
+  /** The requested message is further back than the list will load to reach it. */
+  revealUnavailable: [messageId: string, reason?: 'too_far_back' | 'unavailable']
 }>()
 
+const currentAgentWork = useRoomWorkIndicators(() => props.presence || [], () => props.messages, () => props.roomIdentifier)
+
 const messagesEl = ref<HTMLElement | null>(null)
+const liveStripEl = ref<HTMLElement | null>(null)
+const typingNames = useRoomTypingNames(computed(() => props.roomIdentifier || ''))
+const typingColor = (name: string) => getSenderColor(name, 'browser')
+const unreadRoom = computed(() => props.unreadRoomId)
+const roomUnread = useRoomUnread()
+provide(unreadMenuKey, { client: roomUnread, room: unreadRoom })
+const unreadRevealId = ref<string | null>(null)
+let finishUnreadReveal: ((found: boolean) => void) | null = null
+const unreadTimeline = useUnreadTimeline({
+  client: roomUnread, room: unreadRoom,
+  active: computed(() => Boolean(props.unreadRoomId)),
+  ready: computed(() => Boolean(props.messagesLoaded)),
+  element: messagesEl,
+  reveal: id => new Promise(resolve => {
+    finishUnreadReveal?.(false)
+    finishUnreadReveal = resolve
+    unreadRevealId.value = id
+    revealOlderPagesRequested = 0
+    void nextTick(revealRequestedMessage)
+  }),
+  bottom: (reading) => scrollToBottom(reading ? 'smooth' : 'instant'),
+})
+function completeUnreadReveal(found: boolean) {
+  unreadRevealId.value = null
+  finishUnreadReveal?.(found)
+  finishUnreadReveal = null
+}
 const unreadCount = ref(0)
 const isScrolledFarUp = ref(false)
 const arrivingMessageIds = ref<ReadonlySet<string>>(new Set())
-let isScrolledToBottom = true
+let restoringPosition = true
+let restoreRequestPending = false
+let restorePagesRequested = 0
+let isScrolledToBottom = !props.initialScrollPosition || props.initialScrollPosition.latest
+function roomAnchors() {
+  return Array.from(messagesEl.value?.querySelectorAll<HTMLElement>(':scope > [data-msg-id], :scope > [data-scroll-anchor-id]') || [])
+}
+function findRoomAnchor(messageId: string) {
+  return roomAnchors().find(row => (row.dataset.msgId || row.dataset.scrollAnchorId) === messageId)
+    || findMessageElement(messageId)?.closest<HTMLElement>('.room-github-updates')
+}
+function rememberPosition(room = props.roomIdentifier || '') {
+  const el = messagesEl.value
+  if (restoringPosition || !el || !el.isConnected || el.clientHeight <= 0 || props.messagesLoaded === false) return
+  // Latest restores to the bottom, so composer growth needs no message measurements.
+  if (isScrolledToBottom) {
+    emit('scrollPosition', room, { top: el.scrollTop, latest: true, anchor: null })
+    return
+  }
+  const top = el.getBoundingClientRect().top
+  const anchor = roomAnchors().find(row => row.getBoundingClientRect().bottom > top)
+  emit('scrollPosition', room, { top: el.scrollTop, latest: isScrolledToBottom,
+    anchor: anchor ? { messageId: (anchor.dataset.msgId || anchor.dataset.scrollAnchorId)!, offsetTop: anchor.getBoundingClientRect().top - top } : null })
+}
+function restorePosition(): boolean {
+  if (!restoringPosition) return false
+  const el = messagesEl.value
+  if (!el || el.clientHeight <= 0 || props.messagesLoaded === false) return true
+  const saved = props.initialScrollPosition
+  const anchor = saved?.anchor && findRoomAnchor(saved.anchor.messageId)
+  if (saved && !saved.latest && saved.anchor && !anchor && props.hasOlderMessages && !props.olderMessagesError && restorePagesRequested < 20) {
+    if (!props.isLoadingOlderMessages && !restoreRequestPending) {
+      restoreRequestPending = true; restorePagesRequested++; emit('loadOlder')
+    }
+    return true
+  }
+  restoringPosition = false
+  if (!saved || saved.latest) scrollToBottom('instant')
+  else {
+    unreadTimeline.programmaticScroll()
+    el.scrollTo({ behavior: 'instant', top: anchor ? el.scrollTop + anchor.getBoundingClientRect().top - el.getBoundingClientRect().top - saved.anchor!.offsetTop
+      : Math.min(saved.top, Math.max(0, el.scrollHeight - el.clientHeight)) })
+    measureGroupLayout()
+    rememberPosition()
+  }
+  return true
+}
+let scrollRevision = 0
+let revealingMessage = false
+let revealFrame: number | null = null
+let revealTimer: number | null = null
+let bottomFollowQueued = false
+function followLatestAfterLayout() {
+  if (restoringPosition || !isScrolledToBottom || bottomFollowQueued) return
+  const revision = scrollRevision
+  const top = messagesEl.value?.scrollTop
+  bottomFollowQueued = true
+  void nextTick(() => {
+    bottomFollowQueued = false
+    if (revision === scrollRevision && messagesEl.value?.scrollTop === top) scrollToBottom('instant')
+  })
+}
 
 const matchedIds = computed(() => {
   const q = (props.searchQuery || '').toLowerCase().trim()
   if (!q) return new Set<string>()
   const ids = new Set<string>()
   for (const msg of props.messages) {
-    if ((msg.display_text || msg.text || '').toLowerCase().includes(q) || (msg.sender || '').toLowerCase().includes(q)) {
+    if (messageMatchesSearch(msg, q, props.agentNames)) {
       ids.add(msg.id)
     }
   }
   return ids
+})
+
+const activeThreadId = ref<string | null>(null)
+const loadedThreadRoots = ref(new Map<string, RoomMessage>())
+const openingThreadId = ref<string | null>(null)
+const threadOpenError = ref('')
+let threadRoomRevision = 0
+const allRootMessages = computed(() => [...new Map([...loadedThreadRoots.value.values(), ...props.messages].map(message => [message.id, message])).values()].sort((a, b) => a.timestamp.localeCompare(b.timestamp) || Number(a.id.slice(4)) - Number(b.id.slice(4))))
+const openedThreads = ref(new Set<string>())
+const loadedThreadMessages = ref(new Map<string, RoomMessage[]>())
+function rememberThreadMessages(id: string, messages: RoomMessage[]) {
+  loadedThreadMessages.value.set(id, messages)
+  emit('threadMessages', [...loadedThreadRoots.value.values(), ...[...loadedThreadMessages.value.values()].flat()])
+}
+const loadedThreadSummaries = ref(new Map<string, MessageThreadSummary>())
+const threadRevealId = ref<string | null>(null)
+const timelineMessages = computed(() => {
+  const loaded = new Set(allRootMessages.value.map(message => message.id))
+  return allRootMessages.value.filter(message => {
+    const parent = messageThreadParentId(message)
+    return !parent || !loaded.has(parent)
+  })
+
+})
+const buildGroupedTimeline = createGitHubTimeline<{ type: 'message'; id: string; message: RoomMessage }, RoomMessage>()
+const timelineEntries = computed(() => buildGroupedTimeline(timelineMessages.value.map(message => ({ type: 'message' as const, id: message.id, message })),
+  entry => entry.message, message => message.source === 'github' ? parseGitHubEventPresentation(message) : null, props.roomIdentifier))
+function measureGroupLayout() {
+  const el = messagesEl.value
+  if (el) isScrolledToBottom = !revealingMessage && el.scrollHeight - el.scrollTop - el.clientHeight < 60
+}
+function beginGroupLayout() {
+  scrollRevision++
+  isScrolledToBottom = false
+  messageMotion.cancel()
+}
+async function toggleThread(id: string) {
+  const source = props.messages.find(message => message.id === id)
+  const rootId = source && messageThreadParentId(source)
+  if (rootId) {
+    if (openingThreadId.value) return
+    const revision = threadRoomRevision
+    if (!allRootMessages.value.some(message => message.id === rootId)) {
+      openingThreadId.value = rootId
+      threadOpenError.value = ''
+      try {
+        const page = await apiFetch(`${roomPath(props.roomIdentifier || '')}/messages/${encodeURIComponent(rootId)}/thread`)
+        if (revision !== threadRoomRevision) return
+        loadedThreadRoots.value.set(rootId, page.root)
+        rememberThreadMessages(rootId, page.replies)
+      } catch {
+        if (revision === threadRoomRevision) threadOpenError.value = 'Thread could not be opened. Please try again.'
+        return
+      } finally { if (revision === threadRoomRevision) openingThreadId.value = null }
+    }
+    await toggleThread(rootId)
+    threadRevealId.value = id
+    await nextTick()
+    scrollToMessage(rootId)
+    return
+  }
+  threadOpenError.value = ''
+  const el = messagesEl.value
+  const top = el?.scrollTop ?? 0
+  const returnFocus = activeThreadId.value === id ? el?.querySelector<HTMLButtonElement>(`[data-msg-id="${CSS.escape(id)}"] .thread-marker`) : null
+  scrollRevision++
+  isScrolledToBottom = false
+  messageMotion.cancel()
+  activeThreadId.value = activeThreadId.value === id ? null : id
+  openedThreads.value.add(id)
+  threadRevealId.value = null
+  void nextTick(() => {
+    if (el) el.scrollTo({ top, behavior: 'instant' })
+    checkScroll()
+    observeMessageRows()
+    returnFocus?.focus({ preventScroll: true })
+  })
+}
+watch(() => props.roomIdentifier, () => {
+  threadRoomRevision++
+  openingThreadId.value = null
+  threadOpenError.value = ''
+  loadedThreadRoots.value = new Map()
+  activeThreadId.value = null
+  openedThreads.value = new Set()
+  loadedThreadSummaries.value = new Map()
+  loadedThreadMessages.value = new Map()
+  threadRevealId.value = null
 })
 
 const threadSummaries = computed(() => buildMessageThreadSummaries(props.messages))
@@ -133,20 +378,39 @@ function messageClasses(msg: RoomMessage): Record<string, boolean> {
   return classes
 }
 
-function handleAfterEnter(element: Element) {
-  const messageId = (element as HTMLElement).dataset.msgId
-  if (!messageId || !arrivingMessageIds.value.has(messageId)) return
-  const nextIds = new Set(arrivingMessageIds.value)
-  nextIds.delete(messageId)
-  arrivingMessageIds.value = nextIds
+const arrivalTimers = new Map<string, ReturnType<typeof setTimeout>>()
+function markArrivals(ids: string[]) {
+  arrivingMessageIds.value = mergeMessageArrivalIds(arrivingMessageIds.value, ids)
+  for (const id of ids) {
+    clearTimeout(arrivalTimers.get(id))
+    arrivalTimers.set(id, setTimeout(() => {
+      arrivalTimers.delete(id)
+      const remaining = new Set(arrivingMessageIds.value)
+      remaining.delete(id)
+      arrivingMessageIds.value = remaining
+    }, 320))
+  }
+}
+function clearArrivals() {
+  arrivalTimers.forEach(clearTimeout)
+  arrivalTimers.clear()
+  arrivingMessageIds.value = new Set()
+}
+
+function handleScroll() {
+  if (restoringPosition) return
+  cancelMessageRevealFrame()
+  checkScroll()
+  rememberPosition()
 }
 
 function checkScroll() {
+  scrollRevision++
   if (!messagesEl.value) return
   const el = messagesEl.value
   const distanceToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
-  isScrolledToBottom = distanceToBottom < 60
-  if (el.scrollTop < 240 && props.hasOlderMessages && !props.isLoadingOlderMessages) {
+  isScrolledToBottom = !revealingMessage && distanceToBottom < 60
+  if (el.scrollTop < 240 && props.hasOlderMessages && !props.isLoadingOlderMessages && !props.olderMessagesError) {
     emit('loadOlder')
   }
   
@@ -158,18 +422,83 @@ function checkScroll() {
   }
 }
 
+function cancelMessageRevealFrame() {
+  if (revealFrame !== null) window.cancelAnimationFrame(revealFrame)
+  revealFrame = null
+}
+
+function cancelMessageReveal() {
+  cancelMessageRevealFrame()
+  if (revealTimer !== null) window.clearTimeout(revealTimer)
+  revealFrame = revealTimer = null
+  revealingMessage = false
+}
+
+function beginMessageReveal() {
+  cancelMessageReveal()
+  const element = messagesEl.value
+  if (!element) return
+  const top = element.scrollTop
+  revealingMessage = true
+  // Smooth scrolling may start after the first frame. Any scroll event cancels this probe.
+  revealFrame = window.requestAnimationFrame(() => {
+    revealFrame = window.requestAnimationFrame(() => {
+      revealFrame = null
+      if (messagesEl.value === element && element.scrollTop === top) finishMessageReveal()
+    })
+  })
+  revealTimer = window.setTimeout(finishMessageReveal, 800)
+}
+
+function finishMessageReveal() {
+  cancelMessageReveal()
+  checkScroll()
+}
+
 function scrollToBottom(behavior: ScrollBehavior = 'smooth') {
+  restoringPosition = false
+  unreadTimeline.programmaticScroll()
   if (!messagesEl.value) return
+  cancelMessageReveal()
+  isScrolledToBottom = true
   messagesEl.value.scrollTo({ top: messagesEl.value.scrollHeight, behavior })
   unreadCount.value = 0
   isScrolledFarUp.value = false
+  if (behavior === 'instant') rememberPosition()
 }
 
-function scrollToMessage(messageId: string) {
-  if (!messagesEl.value || !messageId) return
-  const target = messagesEl.value.querySelector(`[data-msg-id="${messageId}"]`) as HTMLElement | null
+function findMessageElement(messageId: string): HTMLElement | null {
+  if (!messagesEl.value || !messageId) return null
+  return messagesEl.value.querySelector<HTMLElement>(`[data-msg-id="${CSS.escape(messageId)}"]`)
+}
+
+function scrollToMessage(messageId: string, behavior: ScrollBehavior = 'smooth', historyReady = false) {
+  restoringPosition = false
+  const reply = [...props.messages, ...[...loadedThreadMessages.value.values()].flat()].find(message => message.id === messageId)
+  const root = reply && messageThreadParentId(reply)
+  if (root && !allRootMessages.value.some(message => message.id === root)) { void toggleThread(messageId); return }
+  if (root) {
+    if (activeThreadId.value !== root) toggleThread(root)
+    threadRevealId.value = messageId
+    void nextTick(() => scrollToMessage(root, behavior))
+    return
+  }
+
+  messageMotion.cancel()
+  unreadTimeline.programmaticScroll()
+  const target = findMessageElement(messageId)
   if (!target) return
-  target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  const group = target.closest('.room-github-updates')
+  if (group && !historyReady) {
+    const room = props.roomIdentifier, revision = scrollRevision
+    group.dispatchEvent(new CustomEvent('reveal-github-message', { detail: { id: messageId, ready: () => { if (room === props.roomIdentifier && revision === scrollRevision) scrollToMessage(messageId, behavior, true) } } }))
+    return
+  }
+  scrollRevision++
+  isScrolledToBottom = false
+  if (behavior === 'instant') cancelMessageReveal()
+  else beginMessageReveal()
+  target.scrollIntoView({ behavior, block: 'center' })
   target.classList.add('jump-target')
   window.setTimeout(() => {
     target.classList.remove('jump-target')
@@ -179,14 +508,22 @@ function scrollToMessage(messageId: string) {
 // Scroll to first match when search changes
 watch(() => props.searchQuery, async () => {
   await nextTick()
-  const firstMatch = messagesEl.value?.querySelector('.search-match')
-  if (firstMatch) {
-    firstMatch.scrollIntoView({ behavior: 'smooth', block: 'center' })
-  }
+  const matchingReply = props.messages.find(message => matchedIds.value.has(message.id) && messageThreadParentId(message))
+  if (matchingReply) { scrollToMessage(matchingReply.id); return }
+  const firstMatch = timelineMessages.value.find(message => matchedIds.value.has(message.id))
+  if (firstMatch) scrollToMessage(firstMatch.id)
 })
 
-watch(() => props.roomIdentifier, (nextRoomIdentifier) => {
-  arrivingMessageIds.value = new Set()
+watch(() => props.roomIdentifier, (nextRoomIdentifier, previousRoomIdentifier) => {
+  rememberPosition(previousRoomIdentifier)
+  restoringPosition = true
+  restorePagesRequested = 0
+  restoreRequestPending = false
+  isScrolledToBottom = !props.initialScrollPosition || props.initialScrollPosition.latest
+  void nextTick(restorePosition)
+  scrollRevision++
+  cancelMessageReveal()
+  clearArrivals()
   // Retire the old room's reporter: cancel its 600ms qualification timers
   // (rows are no longer visible), flush its gathered evidence against the
   // room it was captured in, and start Room B with clean per-room state.
@@ -196,42 +533,148 @@ watch(() => props.roomIdentifier, (nextRoomIdentifier) => {
   void retiring.dispose()
 })
 
-watch(() => props.messages, async (newMessages, oldMessages) => {
-  const newLen = newMessages.length
-  const oldLen = oldMessages?.length || 0
-  if (newLen > oldLen) {
-    const oldFirstId = oldMessages?.[0]?.id
-    const oldLastId = oldMessages?.[oldLen - 1]?.id
-    const newFirstId = newMessages[0]?.id
-    const newLastId = newMessages[newLen - 1]?.id
-    const isPrepend = Boolean(oldFirstId && oldLastId && newFirstId !== oldFirstId && newLastId === oldLastId)
-    if (isPrepend) {
-      const el = messagesEl.value
-      const previousScrollHeight = el?.scrollHeight || 0
-      await nextTick()
-      if (el) {
-        el.scrollTop += el.scrollHeight - previousScrollHeight
-      }
-      return
-    }
+// Coalesce layout changes into one follow, cancelled by navigation or scrolling.
+const messageReactions = injectRoomMessageReactions()
+const messageLinkPreviews = injectRoomMessageLinkPreviews()
+watch([
+  () => messageReactions?.revision.value,
+  () => messageLinkPreviews?.revision.value,
+], followLatestAfterLayout)
 
-    const appendedIds = getAppendedMessageIds(
-      (oldMessages || []).map((message) => message.id),
-      newMessages.map((message) => message.id),
-    )
-    if (appendedIds.length > 0) {
-      arrivingMessageIds.value = mergeMessageArrivalIds(arrivingMessageIds.value, appendedIds)
-    }
 
-    if (isScrolledToBottom) {
-      await nextTick()
-      scrollToBottom()
-    } else {
-      unreadCount.value += newLen - oldLen
-    }
-    nextTick(() => setupReadObserver())
+// Typing and composer growth resize the list without changing its messages.
+let viewportResizeObserver: ResizeObserver | null = null
+let observedViewportHeight = 0
+function keepLatestInViewOnResize() {
+  const el = messagesEl.value
+  if (!el || el.clientHeight === observedViewportHeight) return
+  const wasAtLatest = isScrolledToBottom || el.scrollHeight - el.scrollTop - observedViewportHeight < 60
+  observedViewportHeight = el.clientHeight
+  if (wasAtLatest && !revealingMessage) {
+    isScrolledToBottom = true
+    followLatestAfterLayout()
   }
+}
+
+watchMessageListGrowth(() => timelineMessages.value, async ({ prepended, appendedIds, addedCount }) => {
+  if (restoringPosition) { await nextTick(); restorePosition(); observeMessageRows(); return }
+  if (prepended) {
+    const el = messagesEl.value
+    const previousScrollHeight = el?.scrollHeight || 0
+    const revision = scrollRevision
+    await nextTick()
+    if (el && revision === scrollRevision) {
+      unreadTimeline.programmaticScroll()
+      el.scrollTop += el.scrollHeight - previousScrollHeight
+    }
+    observeMessageRows()
+    return
+  }
+
+  if (appendedIds.length > 0) {
+    markArrivals(appendedIds)
+  }
+
+  if (isScrolledToBottom) {
+    followLatestAfterLayout()
+  } else {
+    unreadCount.value += addedCount
+  }
+  nextTick(() => {
+    if (readObserver) observeMessageRows()
+    else setupReadObserver()
+  })
 })
+
+const motionMessages = () => timelineMessages.value.map(message => ({
+  id: message.id, stableId: message.id, text: message.text,
+  session: message.agent_identity?.agent_session_id, key: message.agent_identity?.agent_key,
+}))
+
+const workHandoff = useRoomWorkHandoff({
+  work: () => currentAgentWork.value,
+  identity: work => work,
+  after: work => work.after,
+  messages: motionMessages,
+  scope: () => props.roomIdentifier,
+  enabled: () => Boolean(props.messagesLoaded) && isScrolledToBottom,
+})
+const agentWork = workHandoff.work
+watch(() => agentWork.value.map(work => work.id).join('|'), followLatestAfterLayout)
+
+const messageMotion = useRoomMessageMotion({
+  element: messagesEl,
+  work: liveStripEl,
+  scope: () => props.roomIdentifier,
+  ready: () => Boolean(props.messagesLoaded),
+  following: () => isScrolledToBottom,
+  scrollToLatest: () => scrollToBottom('instant'),
+  messages: motionMessages,
+  onInterrupt: () => workHandoff.clear(),
+})
+
+// A requested message may be older than the loaded page: load a few older
+// pages to find it, then give up quietly rather than paging the whole room.
+const MAX_REVEAL_OLDER_PAGES = 20
+let initialScrollSettled = false
+let revealOlderPagesRequested = 0
+
+function revealRequestedMessage() {
+  const messageId = props.revealMessageId || unreadRevealId.value
+  const isUnreadReveal = !props.revealMessageId && Boolean(unreadRevealId.value)
+  if (!messageId) return
+
+  const historyReady =
+    initialScrollSettled &&
+    (props.messagesLoaded ?? (props.messages.length > 0 || !props.hasOlderMessages))
+  const found = props.messages.some(message => message.id === messageId)
+    && (!isUnreadReveal || props.messages.some(message => message.id === messageId && (!message.thread_root_id || message.thread_root_id === message.id)))
+
+  const action = decideMessageRevealAction({
+    found,
+    historyReady,
+    hasOlder: Boolean(props.hasOlderMessages),
+    loading: Boolean(props.isLoadingOlderMessages),
+    pagesRequested: revealOlderPagesRequested,
+    maxPages: MAX_REVEAL_OLDER_PAGES,
+  })
+
+  switch (action) {
+    case 'scroll':
+      scrollToMessage(messageId, isUnreadReveal ? 'instant' : 'smooth')
+      revealOlderPagesRequested = 0
+      if (isUnreadReveal) completeUnreadReveal(true)
+      else emit('revealed', messageId)
+      break
+    case 'wait':
+      // Still waiting for initial history, or a page load is currently in flight.
+      break
+    case 'load_older':
+      revealOlderPagesRequested += 1
+      emit('loadOlder')
+      break
+    case 'too_far_back':
+      revealOlderPagesRequested = 0
+      if (isUnreadReveal) { completeUnreadReveal(false); break }
+      emit('revealUnavailable', messageId, 'too_far_back')
+      emit('revealed', messageId)
+      break
+    case 'unavailable':
+      revealOlderPagesRequested = 0
+      if (isUnreadReveal) { completeUnreadReveal(false); break }
+      emit('revealUnavailable', messageId, 'unavailable')
+      emit('revealed', messageId)
+      break
+  }
+}
+
+watch(() => props.revealMessageId, () => { revealOlderPagesRequested = 0 })
+// Registered after the messages watcher so a prepend has restored its scroll
+// position before the reveal scrolls.
+watch(
+  () => [props.revealMessageId, props.messages, props.messages.length, props.isLoadingOlderMessages, props.messagesLoaded] as const,
+  () => { void nextTick(revealRequestedMessage) },
+)
 
 // Viewport-based read evidence reporting. Each row must individually stay
 // qualified for 600 ms before it becomes evidence; qualified numbers are
@@ -243,7 +686,7 @@ const visibleMessageTimers = new Map<string, number>()
  * thread scope or the server (correctly) refuses them as timeline evidence.
  */
 function threadRootSeqForMessage(seq: number): number | null {
-  const message = props.messages.find((candidate) => candidate.id === `msg_${seq}`)
+  const message = [...props.messages, ...[...loadedThreadMessages.value.values()].flat()].find((candidate) => candidate.id === `msg_${seq}`)
   const rootSeq = message?.thread_root_id ? parseMsgNumber(message.thread_root_id) : null
   return rootSeq !== null && rootSeq !== seq ? rootSeq : null
 }
@@ -269,7 +712,13 @@ function clearVisibleMessageTimers() {
 }
 
 function handleDocumentVisibilityChange() {
-  if (!readEvidenceAllowed()) clearVisibleMessageTimers()
+  if (!readEvidenceAllowed()) {
+    clearVisibleMessageTimers()
+    return
+  }
+  // The observer only reports rows whose visibility changes, so rows that
+  // stayed on screen while the window was away need a fresh observer.
+  setupReadObserver()
 }
 
 function setupReadObserver() {
@@ -317,25 +766,52 @@ function setupReadObserver() {
     { root: messagesEl.value, threshold: [0, 0.25, 0.5] }
   )
 
-  const elements = messagesEl.value.querySelectorAll('.message[data-msg-id]')
+  observeMessageRows()
+}
+
+// Observing a row that is already observed does nothing, so rows already on
+// screen keep their pending 600 ms timers while new messages keep arriving.
+function observeMessageRows() {
+  const elements = messagesEl.value?.querySelectorAll('.message[data-msg-id]') ?? []
   elements.forEach((el) => readObserver?.observe(el))
 }
 
 onMounted(() => {
-  messagesEl.value?.addEventListener('scroll', checkScroll)
+  messagesEl.value?.addEventListener('scroll', handleScroll)
+  if (typeof ResizeObserver !== 'undefined' && messagesEl.value) {
+    observedViewportHeight = messagesEl.value.clientHeight
+    viewportResizeObserver = new ResizeObserver(keepLatestInViewOnResize)
+    viewportResizeObserver.observe(messagesEl.value)
+  }
   document.addEventListener('visibilitychange', handleDocumentVisibilityChange)
   window.addEventListener('blur', handleDocumentVisibilityChange)
+  window.addEventListener('focus', handleDocumentVisibilityChange)
   /* Use 'instant' so re-entering the chat tab doesn't visibly scroll from top */
   nextTick(() => {
-    scrollToBottom('instant')
+    restorePosition()
     setupReadObserver()
+    initialScrollSettled = true
+    revealRequestedMessage()
   })
 })
 
+watch(() => props.isLoadingOlderMessages, (loading, previous) => {
+  if (previous && !loading) restoreRequestPending = false
+}, { flush: 'sync' })
+watch(() => [props.messagesLoaded, props.messages.length, props.isLoadingOlderMessages, props.olderMessagesError],
+  () => { if (restoringPosition) void nextTick(restorePosition) }, { flush: 'post' })
+onBeforeUnmount(() => rememberPosition())
+
 onUnmounted(() => {
-  messagesEl.value?.removeEventListener('scroll', checkScroll)
+  clearArrivals()
+  scrollRevision++
+  cancelMessageReveal()
+  viewportResizeObserver?.disconnect()
+  completeUnreadReveal(false)
+  messagesEl.value?.removeEventListener('scroll', handleScroll)
   document.removeEventListener('visibilitychange', handleDocumentVisibilityChange)
   window.removeEventListener('blur', handleDocumentVisibilityChange)
+  window.removeEventListener('focus', handleDocumentVisibilityChange)
   if (readObserver) readObserver.disconnect()
   clearVisibleMessageTimers()
   void readReporter.dispose()
@@ -345,79 +821,22 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 </script>
 
 <style scoped>
-.messages-wrap { position: relative; min-width: 0; min-height: 0; overflow: hidden; flex: 1; }
+.thread-open-status { margin: 0; padding: 6px 24px; color: var(--muted); font-size: .8rem; }
+.explicit-unread { transition: none !important; animation: none !important; display: flex; align-items: center; gap: 12px; font-size: 11px; color: var(--text-secondary); margin: 12px 0; }
+.explicit-unread::before, .explicit-unread::after { content: ""; flex: 1; border-top: 1px solid var(--border-strong); }
+.messages-wrap { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; flex: 1; }
+/* The list and its floating pill. The live strip sits below it, outside the scroll. */
+.messages-scroll { position: relative; flex: 1 1 0; min-height: 0; }
+/* The strip owns the space under the last message, so its rows grow into that space without moving the list twice. */
+.room-live-strip { flex: 0 0 44px; min-height: 44px; padding: 0 24px; --room-chat-content-max: 720px; }
 
 .messages {
   height: 100%;
   overflow-y: auto;
   overscroll-behavior: contain;
-  padding: 16px 20px;
+  padding: 16px 20px 6px;
+  --room-chat-content-max: 720px;
   scroll-behavior: smooth;
-}
-
-.message-arrival-enter-active.animate-arrival {
-  will-change: transform, opacity;
-  transition:
-    opacity 190ms ease-out,
-    transform 280ms cubic-bezier(0.22, 0.8, 0.2, 1);
-}
-
-.message-arrival-enter-from.animate-arrival {
-  opacity: 0;
-  transform: translateY(12px) scale(0.985);
-}
-
-.message-arrival-enter-to.animate-arrival {
-  opacity: 1;
-  transform: translateY(0) scale(1);
-}
-
-.message-arrival-enter-active.animate-arrival :deep(.message-avatar) {
-  will-change: transform, opacity;
-  transition:
-    opacity 170ms ease-out 25ms,
-    transform 210ms cubic-bezier(0.22, 0.8, 0.2, 1) 25ms;
-}
-
-.message-arrival-enter-from.animate-arrival :deep(.message-avatar) {
-  opacity: 0;
-  transform: translateY(5px) scale(0.72);
-}
-
-.message-arrival-enter-active.animate-arrival :deep(.message-meta) {
-  will-change: transform, opacity;
-  transition:
-    opacity 170ms ease-out 35ms,
-    transform 190ms cubic-bezier(0.22, 0.8, 0.2, 1) 35ms;
-}
-
-.message-arrival-enter-from.animate-arrival :deep(.message-meta) {
-  opacity: 0;
-  transform: translateY(7px);
-}
-
-.message-arrival-enter-active.animate-arrival :deep(.message-bubble) {
-  transform-origin: 14px 100%;
-  will-change: transform, opacity;
-  transition:
-    opacity 190ms ease-out 25ms,
-    transform 250ms cubic-bezier(0.22, 0.8, 0.2, 1) 25ms;
-}
-
-.message-arrival-enter-from.animate-arrival :deep(.message-bubble) {
-  opacity: 0;
-  transform: translateY(7px) scale(0.98);
-}
-
-.message-arrival-enter-active.animate-arrival :deep(.mention-token) {
-  transform-origin: 50% 70%;
-  animation: web-message-mention-arrive 210ms 55ms cubic-bezier(0.16, 1, 0.3, 1) both;
-}
-
-@keyframes web-message-mention-arrive {
-  from { opacity: 0; transform: translateY(3px) scale(0.9); }
-  58% { opacity: 1; transform: translateY(0) scale(1.035); }
-  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .load-older-btn {
@@ -441,7 +860,7 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 
 .new-messages-pill {
   position: absolute;
-  bottom: 12px;
+  bottom: 2px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 10;
@@ -475,8 +894,9 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 .empty-state-card p { font-size: 0.82rem; color: var(--muted, #71717a); line-height: 1.5; }
 
 @media (max-width: 768px) {
-  .messages { padding: 12px 12px; }
-  .new-messages-pill { bottom: 8px; font-size: 0.7rem; padding: 5px 12px; }
+  .messages { padding: 8px 12px 6px; }
+  .room-live-strip { padding: 0 12px; }
+  .new-messages-pill { bottom: 2px; font-size: 0.7rem; padding: 5px 12px; }
   .empty-state { padding: 24px 16px; }
   .load-older-btn, .new-messages-pill { min-height: 44px; }
 }
@@ -484,36 +904,6 @@ defineExpose({ matchCount: computed(() => matchedIds.value.size) })
 @media (prefers-reduced-motion: reduce) {
   .messages { scroll-behavior: auto; }
 
-  .message-arrival-enter-active.animate-arrival {
-    transition: opacity 160ms ease-out;
-  }
-
-  .message-arrival-enter-from.animate-arrival {
-    transform: none;
-  }
-
-  .message-arrival-enter-active.animate-arrival :deep(.message-avatar),
-  .message-arrival-enter-active.animate-arrival :deep(.message-meta),
-  .message-arrival-enter-active.animate-arrival :deep(.message-bubble) {
-    transition: none;
-  }
-
-  .message-arrival-enter-active.animate-arrival :deep(.mention-token) {
-    transform: none;
-    animation: web-message-mention-arrive-reduced 120ms ease-out both;
-  }
-
-  .message-arrival-enter-from.animate-arrival :deep(.message-avatar),
-  .message-arrival-enter-from.animate-arrival :deep(.message-meta),
-  .message-arrival-enter-from.animate-arrival :deep(.message-bubble) {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes web-message-mention-arrive-reduced {
-  from { opacity: 0; }
-  to { opacity: 1; }
 }
 </style>
 

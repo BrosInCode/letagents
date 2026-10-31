@@ -1,5 +1,7 @@
+import { normalizeRoomGif, type RoomGif } from "../../../../../../shared/room-expressions.mjs";
 import type { DesktopRoomMessage } from "../../../ipc-types.js";
 import { parseAccountAgentRoutingEnvelope } from "../../../../../../shared/message-contracts.mjs";
+import { normalizeMessageReactions } from "../../../../../../shared/message-reactions.mjs";
 import {
   mapRoomMessageAttachmentPayload,
   type RoomMessageAttachmentPayload,
@@ -20,6 +22,8 @@ export type RoomMessageReplyPayload = {
 };
 
 export type RoomMessagePayload = {
+  gif?: RoomGif | null;
+  sender_profile?: { login: string; avatar_url: string | null } | null;
   id: string;
   client_message_id?: string | null;
   sender: string;
@@ -33,6 +37,7 @@ export type RoomMessagePayload = {
   thread_reply_to_id?: string | null;
   thread?: RoomMessageThreadSummaryPayload | null;
   reply_to?: RoomMessageReplyPayload | null;
+  reactions?: unknown;
   agent_identity?: {
     name?: string | null;
     display_name?: string | null;
@@ -79,7 +84,10 @@ export function mapRoomMessagePayload(
     id: message.id,
     clientMessageId: message.client_message_id?.trim() || null,
     sender: message.sender,
+    ...(message.sender_profile === undefined ? {} : { senderProfile: message.sender_profile
+      ? { login: message.sender_profile.login, avatarUrl: message.sender_profile.avatar_url } : null }),
     text: message.text,
+    ...(message.gif ? { gif: normalizeRoomGif(message.gif) } : {}),
     ...(message.display_text ? { displayText: message.display_text } : {}),
     attachments: (message.attachments || []).map(
       mapRoomMessageAttachmentPayload,
@@ -106,6 +114,8 @@ export function mapRoomMessagePayload(
           agentIdentity: mapRoomMessageAgentIdentity(message.reply_to.agent_identity || null),
         }
       : null,
+    // Absent on local rooms and older servers; an empty list still means "none".
+    ...(message.reactions === undefined ? {} : { reactions: normalizeMessageReactions(message.reactions) }),
     ...(accountAgentRouting === undefined ? {} : { accountAgentRouting }),
     ...(typeof message.local_control_authorized === "boolean"
       ? { localControlAuthorized: message.local_control_authorized }

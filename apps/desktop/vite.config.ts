@@ -8,7 +8,12 @@ export default defineConfig({
   plugins: [vue(), {
     name: "workspace-reader-notices",
     generateBundle() {
-      const files = ["monaco-editor/LICENSE", "monaco-editor/ThirdPartyNotices.txt", "dompurify/LICENSE"];
+      const files = [
+        "monaco-editor/LICENSE",
+        "monaco-editor/ThirdPartyNotices.txt",
+        "dompurify/LICENSE",
+        "highlight.js/LICENSE",
+      ];
       this.emitFile({ type: "asset", fileName: "workspace-reader-notices.txt", source: files.map(file =>
         `${file}\n\n${readFileSync(new URL(`./node_modules/${file}`, import.meta.url), "utf8")}`,
       ).join("\n\n") });

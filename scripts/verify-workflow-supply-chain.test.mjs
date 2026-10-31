@@ -51,6 +51,7 @@ function workflowJobsFromText(workflow) {
         condition: null,
         continueOnError: null,
         name: jobMatch[1],
+        needs: [],
         steps: [],
       };
       jobs.push(currentJob);
@@ -64,6 +65,11 @@ function workflowJobsFromText(workflow) {
     const jobCondition = line.match(/^ {4}if\s*:\s*(.+)$/);
     if (jobCondition) {
       currentJob.condition = jobCondition[1].trim();
+      continue;
+    }
+    const jobNeeds = line.match(/^ {4}needs\s*:\s*(.+)$/);
+    if (jobNeeds) {
+      currentJob.needs = jobNeeds[1].replace(/^\[|\]$/g, "").split(",").map((need) => need.trim()).filter(Boolean);
       continue;
     }
     const jobContinueOnError = line.match(/^ {4}continue-on-error\s*:\s*(.+)$/);
@@ -184,7 +190,12 @@ function assertAuditStepsAreMandatory(jobs, workflowPath) {
     const publishJob = job.name === "npm-publish";
     assert.equal(
       job.condition,
-      publishJob ? "github.ref == 'refs/heads/staging'" : null,
+      workflowPath === ".github/workflows/ci.yml"
+        ? publishJob ? "github.ref == 'refs/heads/staging' && inputs.purpose != 'room-ack-evaluation'"
+          : job.name === "room-ack-evaluation"
+            ? "github.event_name == 'workflow_dispatch' && inputs.purpose == 'room-ack-evaluation'"
+            : "inputs.purpose != 'room-ack-evaluation'"
+        : publishJob ? "github.ref == 'refs/heads/staging'" : null,
       `${workflowPath}:${job.name} must not skip dependency gates`,
     );
     assert.ok(
@@ -363,7 +374,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
         'npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2\necho "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"',
     ).length,
     2,
-    "build and integration jobs must install isolated pinned audit clients",
+    "only the dependency-audit and evaluator jobs may install isolated pinned audit clients",
   );
   assert.equal(
     releaseScripts.filter(
@@ -394,43 +405,197 @@ test("dependency advisory checks use the pinned supported audit client", () => {
   );
 
   assert.deepEqual(ciScripts.filter(containsDirectNpmAudit), [
-    "npm audit signatures",
-    "cd src/web && npm audit signatures",
-    "npm audit signatures --prefix apps/desktop",
-    "npm audit signatures",
-    "npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures",
+    "cd src/web && node ../../scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures",
   ]);
   assert.deepEqual(releaseScripts.filter(containsDirectNpmAudit), [
-    "npm audit signatures\nnpm audit signatures --prefix apps/desktop",
+    "node scripts/retry-command.mjs npm audit signatures\nnode scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    // build-windows: one tree per step, each right after its install.
+    "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
   ]);
 
   assert.deepEqual(
     ciScripts.filter(containsDirectNpmCi),
     [
-      "npm ci --ignore-scripts --no-audit",
-      "cd src/web && npm ci --ignore-scripts --no-audit",
-      "npm ci --ignore-scripts --no-audit --prefix apps/desktop",
-      "npm ci --ignore-scripts --no-audit",
-      "npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "cd src/web && node ../../scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit\nnode scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
     ],
     "CI installs must disable npm's implicit unbounded audit",
   );
   assert.deepEqual(
     releaseScripts.filter(containsDirectNpmCi),
     [
-      "npm ci --ignore-scripts --no-audit\n" +
-        "npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit\n" +
+        "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
     ],
     "release installs must disable npm's implicit unbounded audit",
   );
 });
 
+test("the Windows release build verifies each tree it installs before anything runs it", () => {
+  const jobs = workflowJobs(".github/workflows/desktop-release.yml");
+  const windows = jobs.find((candidate) => candidate.name === "build-windows");
+  assert.ok(windows, "desktop-release.yml must build Windows");
+  // The macOS builds run the lockfile gates (cooldown, advisories) first;
+  // the sealed native pieces are built on the toolchain their seals name.
+  assert.deepEqual(windows.needs, ["build-macos", "build-native-windows"]);
+  const steps = windows.steps;
+  const lifecycle = steps.findIndex((step) => step.name === "Run verified dependency lifecycle scripts");
+  assert.ok(lifecycle > 0, "build-windows must run lifecycle scripts only after verification");
+  const checks = steps.filter((step) => containsDirectNpmAudit(step.run ?? ""));
+  assert.equal(checks.length, 2);
+  for (const step of checks) {
+    const index = steps.indexOf(step);
+    const suffix = step.run.endsWith(" --prefix apps/desktop") ? " --prefix apps/desktop" : "";
+    assert.equal(step.run, `node scripts/retry-command.mjs npm audit signatures${suffix}`);
+    assert.equal(steps[index - 1]?.run, `node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit${suffix}`, `${step.name} must verify the tree it just installed`);
+    assert.ok(index < lifecycle, `${step.name} must run before lifecycle scripts`);
+    // A pwsh step checks only its last command's exit code, so each check is
+    // its own one-command step on the default shell.
+    assert.equal(step.shell, null, `${step.name} must use the default shell`);
+    assert.equal(step.condition, null, `${step.name} must not be skipped`);
+    assert.equal(step.continueOnError, null, `${step.name} must fail the job`);
+  }
+  for (const step of steps) {
+    const run = step.run ?? "";
+    assert.doesNotMatch(run, /verify-dependency-advisories\.mjs|verify:dependency-age|dependency-audit-npm/, `${step.name} must not repeat the lockfile gates`);
+    assert.ok(step.condition === null || /provenance/i.test(step.name ?? ""), `${step.name} must not be skipped`);
+  }
+});
+
+test("the dependency gates run once, in dependency-audit, before every check job", () => {
+  const jobs = workflowJobs(".github/workflows/ci.yml");
+  const job = (name) => {
+    const found = jobs.find((candidate) => candidate.name === name);
+    assert.ok(found, `ci.yml must define the ${name} job`);
+    return found;
+  };
+  const audit = job("dependency-audit");
+  assert.deepEqual(audit.needs, [], "dependency-audit must start at once");
+  assert.equal(audit.condition, "inputs.purpose != 'room-ack-evaluation'");
+  assert.equal(audit.continueOnError, null);
+
+  // Every gate runs here, unconditionally, and fails the job.
+  const gates = [
+    "npm run verify:dependency-age",
+    "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/verify-dependency-advisories.mjs .",
+    "cd src/web && node ../../scripts/retry-command.mjs npm audit signatures",
+    "node scripts/verify-dependency-advisories.mjs src/web",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+    "node scripts/verify-dependency-advisories.mjs apps/desktop apps/desktop/electron/runtime/letagents",
+  ];
+  for (const gate of gates) {
+    const steps = audit.steps.filter((step) => step.run === gate);
+    assert.equal(steps.length, 1, `dependency-audit must run "${gate}" once`);
+    assert.equal(steps[0].condition, null, `dependency-audit must not skip "${gate}"`);
+    assert.equal(steps[0].continueOnError, null, `"${gate}" must fail dependency-audit`);
+  }
+  // It only checks: nothing it installed may run a lifecycle script.
+  for (const command of audit.steps.flatMap((step) => (step.run ?? "").split("\n"))) {
+    assert.doesNotMatch(command, /\bnpx\b|\bnpm\s+(?:rebuild|exec|x|run(?!\s+verify:dependency-age$)|run-script)\b/, command);
+    if (/\bnpm\s+(?:install|i|add|ci)\b/.test(command)) {
+      assert.match(command, /\s--ignore-scripts\b/, `dependency-audit must install without lifecycle scripts: ${command}`);
+    }
+  }
+
+  // The check jobs install the same lockfiles and run their lifecycle
+  // scripts, so each waits for the gates and none repeats them.
+  const notGated = new Set(["dependency-audit", "build", "integration-tests", "npm-publish", "docker", "deploy", "room-ack-evaluation"]);
+  const checkJobs = jobs.filter((candidate) => !notGated.has(candidate.name));
+  assert.deepEqual(checkJobs.map((candidate) => candidate.name).sort(), ["build-checks", "desktop-tests", "desktop-tests-windows", "integration-db-tests", "mcp-tests-windows", "process-tree-windows"]);
+  // Each Windows job's gate: the step after which its suites run.
+  const windowsGates = {
+    "mcp-tests-windows": { name: "Build the MCP server", id: "build" },
+    "desktop-tests-windows": { name: "Run verified dependency lifecycle scripts", id: "setup" },
+  };
+  for (const checkJob of checkJobs) {
+    assert.deepEqual(checkJob.needs, ["dependency-audit"], `${checkJob.name} must wait for dependency-audit`);
+    for (const step of checkJob.steps) {
+      const run = step.run ?? "";
+      // The Windows job installs Windows-only optional packages that the ubuntu
+      // signature check never sees, so it verifies each tree's signatures itself,
+      // right after installing it and before anything runs it.
+      const windowsGate = windowsGates[checkJob.name];
+      if (windowsGate && containsDirectNpmAudit(run)) {
+        const index = checkJob.steps.indexOf(step);
+        const install = checkJob.steps[index - 1]?.run ?? "";
+        const suffix = run.endsWith(" --prefix apps/desktop") ? " --prefix apps/desktop" : "";
+        assert.equal(run, `node scripts/retry-command.mjs npm audit signatures${suffix}`, `${checkJob.name}:${step.name}`);
+        assert.equal(install, `node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit${suffix}`, `${checkJob.name}:${step.name} must verify the tree it just installed`);
+        assert.equal(step.condition, null, `${checkJob.name}:${step.name} must not be skipped`);
+        assert.equal(step.continueOnError, null, `${checkJob.name}:${step.name} must fail the job`);
+        assert.equal(step.shell, null, `${checkJob.name}:${step.name} must use the default shell`);
+        // Verification precedes execution: both checks sit before the build
+        // gate, and every suite runs only when that gate succeeded, so a
+        // failed or skipped check leaves nothing to run the unverified tree.
+        const gate = checkJob.steps.findIndex((candidate) => candidate.name === windowsGate.name);
+        assert.ok(gate > index, `${checkJob.name}:${step.name} must run before the gate "${windowsGate.name}"`);
+        // Nothing runs between the last check and the gate.
+        const lastCheck = checkJob.steps.findLastIndex((candidate) => containsDirectNpmAudit(candidate.run ?? ""));
+        assert.equal(gate, lastCheck + 1, `${checkJob.name} must reach its gate right after its last signature check`);
+        // Its tests write below a scratch home, never the runner's profile.
+        assert.match(checkJob.steps[0].run ?? "", /printf 'HOME=%s\\nUSERPROFILE=%s\\n' .* >> "\$\{GITHUB_ENV\}"/, `${checkJob.name} must point HOME and USERPROFILE at a scratch folder first`);
+        assert.ok(checkJob.steps.length > gate + 1, `${checkJob.name} must run its suites after the gate`);
+        for (const later of checkJob.steps.slice(gate + 1)) {
+          assert.equal(later.condition, `\${{ !cancelled() && steps.${windowsGate.id}.outcome == 'success' }}`, `${checkJob.name}:${later.name} must wait for the gate "${windowsGate.name}"`);
+        }
+        continue;
+      }
+      assert.ok(!containsDirectNpmAudit(run), `${checkJob.name}:${step.name} must not repeat npm audit`);
+      assert.doesNotMatch(run, /verify-dependency-advisories\.mjs/, `${checkJob.name}:${step.name} must not repeat the advisory audit`);
+      assert.doesNotMatch(run, /verify:dependency-age|verify-dependency-age\.mjs/, `${checkJob.name}:${step.name} must not repeat the cooldown`);
+      assert.doesNotMatch(run, /dependency-audit-npm/, `${checkJob.name}:${step.name} must not install the audit client`);
+    }
+  }
+  for (const gate of ["build", "integration-tests"]) {
+    assert.ok(job(gate).needs.includes("dependency-audit"), `${gate} must wait for dependency-audit`);
+  }
+});
+
+test("the retry wrapper only wraps the pinned npm ci installs and signature checks", () => {
+  // scripts/retry-command.mjs runs any command, so a step could use it to hide
+  // an install or audit the npm ci and npm audit checks above would not see.
+  const wrapperLine = /^(?:cd src\/web && node \.\.\/\.\.\/|node )scripts\/retry-command\.mjs (?:npm ci --ignore-scripts --no-audit|npm audit signatures)(?: --prefix apps\/desktop)?$/;
+  for (const path of workflowPaths) {
+    const commands = workflowRunScripts(workflowJobs(path))
+      .flatMap((script) => script.split("\n"))
+      .filter((command) => command.includes("retry-command"));
+    assert.ok(commands.length > 0, `${path} should install through the retry wrapper`);
+    for (const command of commands) {
+      assert.match(command, wrapperLine, `${path} uses the retry wrapper for something other than npm ci`);
+    }
+  }
+});
+
 test("the OpenCode runtime contract steps are exactly the reviewed ones", () => {
-  const build = workflowJobs(".github/workflows/ci.yml").find((job) => job.name === "build");
-  assert.ok(build, "ci.yml must define the build job");
+  const build = workflowJobs(".github/workflows/ci.yml").find((job) => job.name === "build-checks");
+  assert.ok(build, "ci.yml must define the build-checks job");
   const step = (name) => {
     const found = build.steps.filter((candidate) => candidate.name === name);
-    assert.equal(found.length, 1, `the build job must define "${name}" once`);
+    assert.equal(found.length, 1, `the build-checks job must define "${name}" once`);
     return found[0];
   };
   const detect = step("Detect OpenCode runtime contract changes");
@@ -475,6 +640,122 @@ test("the OpenCode runtime contract steps are exactly the reviewed ones", () => 
     assert.equal(candidate.continueOnError, null, `"${candidate.name}" must fail the job when it fails`);
     assert.equal(candidate.shell, null, `"${candidate.name}" must use the default shell`);
   }
-  assert.equal(build.condition, null);
+  assert.equal(build.condition, "inputs.purpose != 'room-ack-evaluation'");
   assert.equal(build.continueOnError, null);
+});
+
+function workflowJobText(workflow, name) {
+  const start = workflow.indexOf(`\n  ${name}:\n`);
+  assert.ok(start >= 0, `ci.yml must define the ${name} job`);
+  const next = workflow.slice(start + 1).search(/\n {2}\S/);
+  return next === -1 ? workflow.slice(start) : workflow.slice(start, start + 1 + next);
+}
+
+test("the required checks wait for every check job and fail closed", () => {
+  const jobs = workflowJobs(".github/workflows/ci.yml");
+  const job = (name) => {
+    const found = jobs.find((candidate) => candidate.name === name);
+    assert.ok(found, `ci.yml must define the ${name} job`);
+    return found;
+  };
+  const gates = ["build", "integration-tests"].map(job);
+
+  // A skipped required check counts as passing, so each gate runs after any
+  // outcome and passes only when every job it waits for succeeded.
+  for (const gate of gates) {
+    assert.equal(gate.condition, "${{ always() && inputs.purpose != 'room-ack-evaluation' }}", gate.name);
+    assert.equal(gate.continueOnError, null, gate.name);
+    assert.equal(gate.steps.length, 1, gate.name);
+    assert.equal(
+      gate.steps[0].run,
+      'echo "${NEEDS}"\njq -e \'length > 0 and all(.[]; .result == "success")\' <<< "${NEEDS}" > /dev/null',
+      gate.name,
+    );
+    assert.equal(gate.steps[0].condition, null, gate.name);
+    assert.equal(gate.steps[0].shell, null, gate.name);
+  }
+
+  const notChecks = new Set(["build", "integration-tests", "npm-publish", "docker", "deploy", "room-ack-evaluation"]);
+  assert.deepEqual(
+    [...new Set(gates.flatMap((gate) => gate.needs))].sort(),
+    jobs.map((candidate) => candidate.name).filter((name) => !notChecks.has(name)).sort(),
+    "every check job must sit behind a required check",
+  );
+  for (const name of ["npm-publish", "docker"]) {
+    assert.deepEqual(job(name).needs, ["build", "integration-tests"], `${name} must wait for both required checks`);
+  }
+  assert.deepEqual(job("deploy").needs, ["docker"], "deploy must wait for the images built after both checks");
+});
+
+test("every integration test step runs in exactly one existing group", () => {
+  const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
+  const groupList = workflowJobText(workflow, "integration-db-tests").match(/^ {8}group:\s*\[([^\]]*)\]\s*$/m);
+  assert.ok(groupList, "integration-db-tests must list its groups");
+  const groups = groupList[1].split(",").map((group) => group.trim());
+  const integration = workflowJobs(".github/workflows/ci.yml").find((job) => job.name === "integration-db-tests");
+
+  const used = new Set();
+  for (const step of integration.steps) {
+    const runsTests = /(?:^|\s)--test(?:\s|$)/.test(step.run ?? "");
+    if (!runsTests) {
+      assert.equal(step.condition, null, `setup step "${step.name}" must run in every group`);
+      continue;
+    }
+    const group = step.condition?.match(/^matrix\.group == (\S+)$/)?.[1];
+    assert.ok(groups.includes(group), `"${step.name}" must name one of the groups ${groups.join(", ")}`);
+    used.add(group);
+  }
+  assert.deepEqual([...used].sort(), [...groups].sort(), "every group must run at least one test step");
+});
+
+test("desktop-tests and desktop-tests-windows run every desktop suite, with electron shards of one total", () => {
+  const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
+  const desktopScripts = JSON.parse(readFileSync("apps/desktop/package.json", "utf8")).scripts;
+  const suiteScripts = [...desktopScripts.test.matchAll(/npm run (test:[\w:-]+)/g)].map((match) => match[1]);
+  // A suite added to `npm test` in apps/desktop must also run in CI.
+  assert.equal(desktopScripts.test, suiteScripts.map((name) => `npm run ${name}`).join(" && "));
+  // The shards must choose from the same files `npm test` runs locally.
+  const electronFiles = desktopScripts["test:electron"].match(/^npm run test:electron:files -- (\S+)$/)?.[1];
+  assert.ok(electronFiles, "test:electron must pass one file pattern to test:electron:files");
+
+  const shardTotals = [];
+  for (const [jobName, otherSuites] of [["desktop-tests", ["daemon", "renderer"]], ["desktop-tests-windows", ["build", "daemon", "renderer"]]]) {
+    const suites = [...workflowJobText(workflow, jobName).matchAll(/^ {10}- (.+)$/gm)].map((match) => match[1].trim());
+    const shards = suites.flatMap((suite) => {
+      const match = suite.match(/^electron (\d+)\/(\d+)$/);
+      return match ? [{ index: Number(match[1]), total: Number(match[2]) }] : [];
+    });
+    assert.deepEqual(suites.filter((suite) => !suite.startsWith("electron ")).sort(), otherSuites, jobName);
+
+    const desktopJob = workflowJobs(".github/workflows/ci.yml").find((job) => job.name === jobName);
+    const testStep = desktopJob.steps.find((step) => step.name === "Test desktop (${{ matrix.suite }})");
+    assert.ok(testStep, `${jobName} must define its test step`);
+    for (const name of suiteScripts) {
+      const run = `${testStep.run}\n`;
+      const ran = name === "test:electron"
+        ? run.includes("npm run test:electron:files -- ")
+        : [`npm --prefix apps/desktop run ${name}\n`, `npm --prefix apps/desktop run ${name} ||`].some((command) => run.includes(command));
+      assert.ok(ran, `${jobName} must run ${name}`);
+    }
+    assert.ok(
+      testStep.run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" --weights ../../scripts/electron-test-weights.json ${electronFiles} > `),
+      `the ${jobName} electron shards must select from ${electronFiles}, as test:electron does`,
+    );
+    assert.ok(shards.length > 0, `${jobName} must run the electron suite`);
+    assert.deepEqual(
+      shards.map(({ index, total }) => `${index}/${total}`).sort(),
+      Array.from({ length: shards[0].total }, (_, index) => `${index + 1}/${shards[0].total}`).sort(),
+      jobName,
+    );
+    shardTotals.push(shards[0].total);
+  }
+  assert.equal(new Set(shardTotals).size, 1, "desktop-tests and desktop-tests-windows must split the electron suite the same way");
+
+  // The Windows job also type checks and builds the desktop app.
+  const windowsStep = workflowJobs(".github/workflows/ci.yml")
+    .find((job) => job.name === "desktop-tests-windows").steps
+    .find((step) => step.name === "Test desktop (${{ matrix.suite }})");
+  for (const name of ["typecheck", "build"]) {
+    assert.ok(windowsStep.run.includes(`npm --prefix apps/desktop run ${name} || status=1`), `desktop-tests-windows must run ${name}`);
+  }
 });

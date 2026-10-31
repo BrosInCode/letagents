@@ -22,6 +22,7 @@ const domainDeclarations = {
   "owner-tokens": [
     "createOwnerToken:export",
     "getOwnerTokenAccountByToken:export",
+    "getOwnerTokenAccountByTokenHash:export",
     "deleteOwnerTokenById:export",
   ],
   "agent-identities": [
@@ -65,6 +66,10 @@ const domainDeclarations = {
     "rotateRoomAgentSessionTx:private",
     "createRoomAgentSession:export",
     "createFencedRoomAgentSession:export",
+    "openRoomAgentProcessConnection:export",
+    "refreshRoomAgentProcessConnection:export",
+    "recordRoomAgentProcessExit:export",
+    "closeRoomAgentProcessConnection:export",
     "RoomWorkerNameHolderRow:export",
     "WorkerDisplayNameExhaustedError:export",
     "isWorkerDisplayNameExhaustedError:export",
@@ -74,6 +79,7 @@ const domainDeclarations = {
     "getDurableRoomWorkerSessions:export",
     "getLastEndedWorkerSessionDisplayName:export",
     "getRoomAgentSessionByCredentials:export",
+    "isEndedRoomAgentSessionCredential:export",
     "getSupervisorRoomAgentSession:export",
     "ResolvedRoomAgentSessionBearer:export",
     "getRoomAgentSessionBearerByToken:export",

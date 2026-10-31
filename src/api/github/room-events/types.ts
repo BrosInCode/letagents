@@ -21,6 +21,8 @@ export interface MaterializedGitHubRoomEvent {
   head_ref: string | null;
   head_sha: string | null;
   metadata: GitHubRoomEventMetadata | null;
+  /** Used only to establish exact workflow ownership; never projected to tasks/chat. */
+  routingEvent?: RepoRoomEvent;
   roomEvent: RepoRoomEvent | null;
 }
 

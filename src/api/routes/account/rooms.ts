@@ -1,4 +1,5 @@
 import type { Express } from "express";
+import { resolveRoomDisplayName } from "../../rooms/display-name.js";
 
 import {
   archiveAccountRoomForAccount,
@@ -99,12 +100,16 @@ function toAccountRoomResponse(
   const gitRoomSummary =
     formatGitRoomSummary(gitRoomBinding ?? null) ??
     formatManualGitRoomSummaryForRoomId(room.room_id);
+  const displayName = resolveRoomDisplayName(room.room_id, room.display_name, room.kind);
 
   return {
     room_id: room.room_id,
     id: room.room_id,
-    display_name: room.display_name,
-    name: room.room_id,
+    display_name: displayName,
+    // Released desktop clients recover old selections through display_name or
+    // name. Retain the exact former generated label in that compatibility lane;
+    // identity and all actions continue to use the canonical room_id/id.
+    name: displayName !== room.display_name ? room.display_name : room.room_id,
     kind: room.kind,
     parent_room_id: null,
     focus_key: null,

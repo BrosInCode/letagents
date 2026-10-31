@@ -5,6 +5,8 @@ LetAgents desktop ships two macOS artifacts for both Apple Silicon (`arm64`) and
 - `LetAgents-<version>-darwin-<arch>.dmg` is the first-install artifact. Users open it and drag LetAgents to Applications.
 - `LetAgents-<version>-darwin-<arch>.zip` is the application update payload. The updater downloads it; users should not install this file manually.
 
+Each release also ships an unsigned Windows x64 installer; see [Windows](#windows-unsigned-beta) below.
+
 Each versioned release also includes SHA-256 checksum files, `desktop-release-<arch>.json`, `latest-mac-<arch>.yml`, a ZIP blockmap, and the legacy `RELEASES-<arch>.json`. The workflow publishes the first two discovery formats to each architecture feed: `latest-mac.yml` powers the progress-aware updater, while `RELEASES.json` remains a compatibility bridge for clients released before 0.1.4. Both point to immutable, versioned files on Cloudflare R2, so stable clients never depend on GitHub's repository-wide `releases/latest` selection or private-repository authentication.
 
 ## One-time Apple setup
@@ -39,7 +41,7 @@ The token cannot create or delete buckets. Versioned objects are uploaded with o
 
 1. Change `apps/desktop/package.json` to the next numeric `x.y.z` desktop version and merge that change to `staging` through a reviewed PR.
 2. From the exact reviewed commit, create and push the matching tag: `desktop-v<x.y.z>`.
-3. Watch the **Desktop release** workflow. Its arm64 and x64 jobs verify dependencies, build the exact embedded MCP and OpenCode runtimes, sign the applications, submit each app and DMG to Apple, validate the stapled tickets, and create GitHub build-provenance attestations. A final job uploads both architectures to immutable versioned R2 paths, publishes the matching GitHub Release as a backup/archive, then advances the two public R2 update feeds.
+3. Watch the **Desktop release** workflow. Its arm64 and x64 jobs verify dependencies, build the exact embedded MCP and OpenCode runtimes, sign the applications, submit each app and DMG to Apple, validate the stapled tickets, and create GitHub build-provenance attestations. The Windows job then builds the installer, installs it on the runner, runs the installed app's smoke check and uninstalls it. A final job uploads every platform to immutable versioned R2 paths, publishes the matching GitHub Release as a backup/archive, then advances the three public R2 update feeds.
 4. Download the DMG on a clean Mac and complete the first-install smoke test before announcing the release.
 
 The workflow refuses a tag that does not exactly match the desktop package version or a runner whose CPU does not match its matrix architecture. If either architecture fails signing, notarization, verification, attestation, or artifact generation, it does not publish the release.
@@ -49,6 +51,25 @@ Verify a downloaded DMG or updater ZIP against GitHub's signed provenance record
 ```sh
 gh attestation verify /path/to/LetAgents-<version>-darwin-<arch>.<dmg-or-zip> --repo BrosInCode/letagents
 ```
+
+## Windows (unsigned beta)
+
+The Windows build is one per-user NSIS installer, `LetAgents-<version>-win32-x64-setup.exe`, with its `.blockmap`, `latest-win32-x64.yml`, `desktop-release-win32-x64.json` and SHA-256 files beside the macOS files in the same versioned folder.
+
+- It installs to `%LOCALAPPDATA%\Programs\LetAgents\LetAgents.exe` without administrator rights, adds Start menu and desktop shortcuts, registers `letagents://` links and an **Installed apps** entry. IT teams can allow-list that path. Uninstalling keeps the user's data in `%APPDATA%\LetAgents`, as moving the Mac app to the Trash does.
+- The installer and app are **not code-signed** yet (no certificate is available to the company). SmartScreen shows "Windows protected your PC" on the first run: choose **More info → Run anyway**.
+- Updates: Windows clients read `https://downloads.letagents.chat/desktop/feeds/win32-x64/latest.yml`, a folder apart from the macOS `x64` feed. The packaged `app-update.yml` has no `publisherName`, so electron-updater does not ask for an Authenticode signature; each download is still checked against the SHA-512 in `latest.yml`, over HTTPS. **Restart & update** runs the next installer with `--updated --force-run`; it waits for the app to quit, replaces the files and starts the app again. The installer keeps a copy of itself in `%LOCALAPPDATA%\letagents-desktop-updater\installer.exe`, which the next update uses with the two blockmaps to download only changed ranges.
+- The release job runs on `windows-2022`, because that image has NSIS 3.10 preinstalled and `windows-latest` (Windows Server 2025) has none. It starts after both macOS jobs, and the publish job waits for it, so a Windows failure holds the whole release, as a failed macOS architecture does.
+- The app ships the process-tree helper `resources/app/runtime/letagents-process-tree.exe` (a Job Object helper in C, `apps/desktop/native/win-process-tree`). Its build is reproducible and sealed in `shared/letagents-process-tree.seal.json`: the job **Windows sealed native pieces** builds it on `windows-latest` (the MSVC and SDK the seal names) with `build.mjs --arch x64 --check --strict`, and the packager writes it into the app only when its sha256 is the sealed one. Any other bytes fail the release, and the app itself refuses a helper that is not the sealed build. When a runner image update changes the compiler, the job prints the values to reseal: copy them into the seal in a pull request.
+- The app also ships the daemon pipe addon `resources/app/runtime/letagents-daemon-pipe.node` (an N-API addon in C, `apps/desktop/native/win-daemon-pipe`). Every Windows client of the supervisor daemon opens the daemon pipe through it: with `SECURITY_IDENTIFICATION`, so the server cannot impersonate the user, and only after it checked that the server process runs as the same user. It is sealed in `shared/letagents-daemon-pipe.seal.json` and built, checked and staged the same way, by the same release job; the app refuses an addon that is not the sealed build, and no client falls back to libuv's pipe connect. For a local build, set `LETAGENTS_DAEMON_PIPE_ADDON_BUILD` to a sealed `letagents-daemon-pipe.node`, or let the packager build it with Visual Studio's C++ tools.
+- Local build, on Windows with NSIS 3 installed (or `LETAGENTS_MAKENSIS` set to `makensis.exe`) and `LETAGENTS_OPENCODE_BIN` set to the `opencode.exe` of `opencode-ai@<openCodeVersion>`. The packager builds the helper with Visual Studio's C++ tools and fails unless they make the sealed bytes; set `LETAGENTS_PROCESS_TREE_HELPER_BUILD` to a sealed `letagents-process-tree.exe` (for example the `letagents-process-tree-x64` artifact of the CI job `process-tree-windows`) to use that instead:
+
+```sh
+npm --prefix apps/desktop run package:win
+npm --prefix apps/desktop run smoke:windows-install
+```
+
+When a code-signing certificate is available: sign `LetAgents.exe` and the installer in `package-windows.mjs`, and add `publisherName` to the Windows updater config in `electron/scripts/release-metadata.mjs` in the same release, so that installed apps start to require the signature only once every newer installer has it.
 
 ## Service-owned local board rollout
 
@@ -88,3 +109,64 @@ The updater downloads a newer signed ZIP in the background but never restarts th
 Update metadata must continue to use HTTPS and immutable versioned asset URLs. Do not rely on a normal quit as the user-controlled installation path: Squirrel.Mac may stage a downloaded replacement for the next launch. If that path applies an update, the new app's normal implementation-version handshake still retires an older serving daemon before reconciliation. **Restart & update** remains the preferred path because the current app proves the handoff first and can report a retryable failure without quitting.
 
 Do not replace an existing GitHub release asset with different bytes after it has been announced. If a release is faulty, publish a higher patch version; clients and Squirrel.Mac are designed to move forward to a newer version, not silently downgrade. Stable and beta channels should use separate feed locations so pre-release metadata cannot reach stable clients.
+
+
+## Room team and expression trial (desktop 0.1.119)
+
+Release the API/migration and MCP 0.12.37 before desktop 0.1.119. Keep both Room
+conversation switches off by default. **Answer in turns (Beta)** controls reply
+coordination; **GIFs and agent reactions (Beta)** independently enables optional
+expression tools. Neither switch gives an agent the authority of a human admin.
+
+Configure `GIPHY_API_KEY` as a repository Actions secret for the existing staging
+deployment. The deploy step writes it into the host's existing `.env` without
+printing it; an absent secret preserves an existing host value. Local development
+can set the same environment variable on the API process. Never commit a key.
+GIPHY requires direct client requests, so the authenticated client configuration
+route returns it only to room participants, with `Cache-Control: no-store`.
+It is an application client key, not a substitute for Room authentication. Agent
+tool results contain only provider IDs and titles, never the key or media URLs.
+
+The current beta key allows 100 API calls/hour across this integration. This is a
+small opt-in trial, not a production-scale quota. Review usage and GIPHY's
+production application/pricing before broad rollout. Search is explicit rather
+than firing on every keystroke. The client bounds requests, backs off after quota
+or provider failures, preserves result order/URLs and stores only IDs in Room
+messages. Official attribution artwork comes from
+https://media.giphy.com/giphy-attribution-marks.zip (GIPHY API attribution marks).
+
+Agents choose tools based on context. The router decides attention; it does not
+choose an emoji or GIF for the agent. `search_gifs` and `react_to_message` run
+through the existing tool execution path. A supervised `set_reply_gif` records a
+turn-scoped attachment intent; the normal final publisher remains the only
+publisher. `no_reply` still sends nothing. GIFs and reactions are sparse optional
+expressions, not work completion, approval, or agreement records.
+
+A supervised `set_reply_attachments` call attaches up to 4 workspace files (25 MB
+each) to the same final answer. The daemon copies them into
+`~/.letagents/reply-attachments` at call time. Each file must be a regular,
+singly linked file inside the agent's workspace, opened with `O_NOFOLLOW_ANY` so
+no symlink anywhere in its path is followed, and not a credential or agent-tool
+configuration file (`.env*`, keys, `.git`, `.ssh`, `.cursor`, `.claude`, `.mcp.json`
+and similar). Just before it publishes, the daemon stages the copies with the
+worker bearer through `shared/message-attachments.mjs`, retries a failed upload
+once, and names in the reply any file it still could not upload, so an attachment
+never blocks the answer. It discards staged uploads when the post fails, and it
+removes copies after the post, or after two days. Local rooms and Read-only Codex
+agents do not offer the tool. Worker bearers need the server's `POST`/`DELETE
+/rooms/:room/attachments/uploads` routes, which ship with the tool.
+
+If GIPHY is unavailable, normal agent work and text replies continue. A lost
+reaction acknowledgment is reported as unconfirmed, never falsely as failure or
+success. Human drafts stay in the composer during search failure. After an
+explicit precommit flag refusal, an unsent GIF can be removed or its text sent;
+an uncertain network send retains its content and idempotency key for retry.
+Web clients show a GIF title and provider link; the searchable picker and inline
+play/pause display in this release are desktop features. Local-only Rooms and
+rental/internal-message agent reactions are not enabled by this trial.
+
+Rollback: turn off the relevant Room switch. Existing messages/reactions stay
+readable, human reactions continue, and ordinary text sends keep working. Do not
+drop migration 0113 or rewrite saved messages during a rollback. If rolling back
+the API binary, keep expressions off and verify reaction identity compatibility;
+the new composite reaction key distinguishes each agent from its human owner.

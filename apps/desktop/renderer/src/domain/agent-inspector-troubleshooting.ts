@@ -15,6 +15,9 @@ export interface AgentDiagnosticCheck {
   observedAt: string | null;
   action: AgentInspectorActionAvailability | null;
   actionImpact: string | null;
+  /** A second remedy offered alongside the first, such as skipping a blocked message. */
+  secondaryAction: AgentInspectorActionAvailability | null;
+  secondaryActionImpact: string | null;
   destination: "overview" | "work" | null;
 }
 export interface AgentTroubleshooting {
@@ -39,6 +42,17 @@ const actionImpacts: Partial<Record<AgentInspectorActionAvailability["kind"], st
   retry_delivery: "Retry the blocked message through its saved delivery record.",
   restore_conversation: "Create a replacement private conversation and retry the message that could not start. The missing conversation’s private context cannot be recovered.",
 };
+
+/** Plain words for a runtime the daemon will not restart alone. Name only the button that is offered. */
+function coordinationBlockedReason(offered: AgentInspectorActionAvailability["kind"] | undefined): readonly [string, string] {
+  if (offered === "recover") {
+    return ["The agent needs a restart", "LetAgents could not continue this agent by itself. Press Recover agent to restart it. It keeps its identity and its workspace."];
+  }
+  if (offered === "recovery_options") {
+    return ["Choose how to restart the agent", "LetAgents could not continue this agent by itself. Open Recovery options and choose how to restart it."];
+  }
+  return ["LetAgents is still checking this agent", "LetAgents could not continue this agent by itself. It is still checking this agent. You can refresh checks to read its latest state."];
+}
 
 /** Read-only explanations over existing authority. Never infer failure from silence. */
 export function projectAgentTroubleshooting(
@@ -66,7 +80,7 @@ export function projectAgentTroubleshooting(
     nextStep: string, observedAt: string | null = null, recovery: AgentInspectorActionAvailability | null = null,
     destination: AgentDiagnosticCheck["destination"] = null): AgentDiagnosticCheck => ({
     id, label, state, summary, detail: safeDiagnosticText(explanation), nextStep, observedAt, action: recovery,
-    actionImpact: recovery ? actionImpacts[recovery.kind] ?? null : null, destination,
+    actionImpact: recovery ? actionImpacts[recovery.kind] ?? null : null, secondaryAction: null, secondaryActionImpact: null, destination,
   });
 
   const service = check("service", "Background service", daemon?.healthy && fresh ? "passed" : "unknown",
@@ -88,15 +102,16 @@ export function projectAgentTroubleshooting(
     paused ? "This agent is intentionally paused. Room work is held until it resumes." : "This saved agent has been stopped. Its retained work is still available.",
     paused ? "Resume the agent when you want it to receive work again." : "Open Work to inspect its saved history.", null, paused ? action("resume") : null, "work");
   else if (["quarantined", "security_blocked", "budget_blocked", "coordination_blocked"].includes(entry.condition)) {
+    const recovery = action("recovery_options", "recover");
     const reasons = {
       quarantined: ["Repeated runtime failures", "Automatic recovery was stopped after repeated provider exits. Resolve the reported cause before recovering the agent."],
       security_blocked: ["Permission needs attention", "A security or permission requirement is blocking this agent. Review the reported cause before trying again."],
       budget_blocked: ["Usage limit needs attention", "A budget or usage requirement is blocking this agent. Review the reported limit before trying again."],
-      coordination_blocked: ["Recovery is waiting for ownership", "LetAgents cannot yet establish the authority needed to continue this agent safely."],
+      coordination_blocked: coordinationBlockedReason(recovery?.kind),
     } as const;
     const [summary, explanation] = reasons[entry.condition as keyof typeof reasons];
     provider = check("provider", "Agent runtime", "attention", summary, explanation,
-      "Review the latest error in Technical details. Resolve that cause, then use the available recovery action or refresh checks.", null, action("recovery_options", "recover"));
+      "Review the latest error in Technical details. Resolve that cause, then use the available recovery action or refresh checks.", null, recovery);
   } else if (control) {
     const state = control.state === "responsive" ? "passed" : ["lost", "exited"].includes(control.state) ? "attention"
       : ["connecting", "stopping"].includes(control.state) ? "pending" : "unknown";
@@ -156,6 +171,13 @@ export function projectAgentTroubleshooting(
     const uncertain = projection.turnControl?.status === "uncertain" || Boolean(detail?.uncertain_effects.length);
     const active = ["dispatching", "responding", "publishing", "retrying"].includes(room.turn.state);
     const queued = room.inbox.pendingCount > 0;
+    // The supervisor's account of the blocked message, when it has one.
+    const attention = entry.deliveryAttention ?? null;
+    const rereads = blocked && attention?.retry === "reread_saved_turn";
+    const posts = blocked && attention?.retry === "publish_saved_reply";
+    const skipNote = !attention ? ""
+      : attention.canSkip ? " You can also skip the message so the messages behind it can continue."
+      : attention.skipUnavailableReason ? ` Skip isn’t available: ${safeDiagnosticText(attention.skipUnavailableReason)}` : "";
     delivery = check("delivery", "Message delivery", held ? "paused" : uncertain || blocked ? "attention" : repairing || active || queued ? "pending" : "passed",
       held ? "Waiting for the agent to resume" : uncertain ? "An outcome needs verification" : repairing ? "Restoring the conversation"
       : blocked ? missing ? "Saved conversation is missing" : "A message needs attention"
@@ -169,15 +191,29 @@ export function projectAgentTroubleshooting(
         : queued ? "Messages are waiting in this agent’s inbox." : "The current inbox has no pending messages. This does not mean every earlier request succeeded."),
       uncertain ? "Open the recorded work and verify the affected operation before retrying."
       : blocked ? missing ? "Restore the conversation when available, then verify that the blocked message progresses."
-        : "Inspect the blocked message in Work. Retry delivery when the exact message is eligible."
+        : rereads ? `The agent already worked on this message. Read the reply again to re-check its saved answer; the turn is not rerun.${skipNote}`
+        : posts ? `The agent’s reply is saved but wasn’t posted. Post the saved reply; the provider is not asked again.${skipNote}`
+        : `Inspect the blocked message in Work. Retry delivery when the exact message is eligible.${skipNote}`
       : repairing || active || queued ? "Open Work for the message timeline, or refresh checks for the latest delivery state."
       : "If a reply is missing, open Work to see whether the message was received, completed, or published.",
       null, held || uncertain || repairing ? null : blocked ? action(missing ? "restore_conversation" : "retry_delivery") : null,
       projection.turnControl?.status === "uncertain" ? "overview" : "work");
+    if (delivery.action?.kind === "retry_delivery" && (rereads || posts)) {
+      delivery.actionImpact = rereads
+        ? "Read the finished turn’s saved answer again. The turn is not rerun."
+        : "Post the saved reply to the room. The provider is not asked again.";
+    }
+    const skip = blocked && !held && !uncertain && !repairing ? action("skip_message") : null;
+    if (skip && skip.sourceMessageId === (attention?.sourceMessageId ?? room.inbox.blockedByMessageId)) {
+      delivery.secondaryAction = skip;
+      delivery.secondaryActionImpact = attention?.providerWorkStarted
+        ? "Skip this message so the messages behind it can continue. The agent’s turn is not rerun, and any answer it produced is dropped."
+        : "Skip this message so the messages behind it can continue. The agent won’t work on it.";
+    }
   }
   // A disconnected observer must never paint cached per-agent facts as healthy.
   const checks = [service, provider, connection, delivery].map(row => !fresh && row.id !== "service"
-    ? { ...row, state: "unknown" as const, summary: "Waiting for fresh state", detail: "The desktop is showing a previous observation. Reconnect to the background service before relying on this check.", action: null, actionImpact: null }
+    ? { ...row, state: "unknown" as const, summary: "Waiting for fresh state", detail: "The desktop is showing a previous observation. Reconnect to the background service before relying on this check.", action: null, actionImpact: null, secondaryAction: null, secondaryActionImpact: null }
     : row);
   const firstIssue = checks.find(row => row.state === "attention") ?? checks.find(row => row.state === "unknown")
     ?? checks.find(row => row.state === "pending") ?? checks.find(row => row.state === "paused") ?? checks[0]!;

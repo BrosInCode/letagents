@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -15,6 +15,8 @@ import { validateExecutionApprovalPublicationSchema } from "../execution-approva
 import { LifecycleProjectionLedger, validateLegacyLifecycleProjectionLedgerSchema,
   validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { assertKilledBySelf, CHILD_PROCESS_TIMEOUT_MS } from "../../electron/__tests__/platform.js";
 
 type Row = Record<string, unknown>;
 const now = "2026-08-30T00:00:00.000Z";
@@ -26,7 +28,7 @@ async function fixture() {
   const database = new DatabaseSync(path);
   database.exec("PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL");
   new DaemonStateSchema().createSchema(database);
-  return { path, database, cleanup: async () => { database.close(); await rm(directory, { recursive: true, force: true }); } };
+  return { path, database, cleanup: async () => { database.close(); await removeTestDirectory(directory); } };
 }
 
 /** Restore the physical v44 closure constraints before changing version markers. */
@@ -255,10 +257,27 @@ function seedLifecycleProjectionV1Evidence(database: DatabaseSync): void {
   }
 }
 
+/**
+ * Physically restore the pre-v49 delivery-mode constraint, which still allowed the
+ * retired desktop engine's mode, so a fixture row can hold the value an old database held.
+ */
+function restoreDesktopEventsDeliveryConstraint(database: DatabaseSync): void {
+  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  database.exec("PRAGMA writable_schema=ON");
+  database.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, ?) WHERE name='agent_configurations'").run(
+    "delivery_mode IN ('mcp_polling','daemon_inbox')",
+    "delivery_mode IN ('mcp_polling','desktop_events','daemon_inbox')",
+  );
+  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+  assert.match(String(database.prepare("SELECT sql FROM sqlite_master WHERE name='agent_configurations'").get()!.sql),
+    /delivery_mode IN \('mcp_polling','desktop_events','daemon_inbox'\)/);
+}
+
 function seedPreB1RuntimeBirth(database: DatabaseSync, input: {
   agentId: string;
   provider: "codex" | "claude-code" | "cursor" | "open-model";
   connectionKind: "codex_app_server" | "claude_cli" | "cursor_cli" | "opencode_server";
+  /** "desktop_events" is the retired mode: only a database older than v49 can hold it. */
   deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
   processIdentity?: string | null;
   pid?: number | null;
@@ -273,6 +292,7 @@ function seedPreB1RuntimeBirth(database: DatabaseSync, input: {
   const processIdentity = input.processIdentity === undefined ? `birth-${input.agentId}` : input.processIdentity;
   const pid = input.pid === undefined ? 100 + Number(database.prepare("SELECT COUNT(*) AS n FROM agent_identities").get()!.n) : input.pid;
   const sortOrder = Number(database.prepare("SELECT COUNT(*) AS n FROM agent_identities").get()!.n);
+  if (input.deliveryMode === "desktop_events") restoreDesktopEventsDeliveryConstraint(database);
   database.prepare("INSERT INTO agent_identities VALUES(?,?,?,?)").run(input.agentId, "migration-test", now, sortOrder);
   database.prepare(`INSERT INTO agent_configurations
     (agent_id,provider,charter,delivery_mode,provider_launch_policy_present,provider_launch_policy_undefined,
@@ -472,6 +492,9 @@ function versionPair(database: DatabaseSync): unknown[] {
   return [database.prepare("PRAGMA user_version").get(), database.prepare("SELECT generation,schema_version FROM manifest_metadata WHERE singleton=1").get()];
 }
 
+/** A file name made of the characters a SQLite URI treats as syntax. Windows names cannot hold "?", so it is left out there. */
+const DATABASE_NAME = process.platform === "win32" ? "state space#%.sqlite" : "state space?#%.sqlite";
+
 test("v18 preserves blocked FIFO, all child authority and uncertain cutover bytes", async () => {
   const env = await fixture();
   try {
@@ -535,8 +558,8 @@ for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27, 30, 33, 34]) test(`a 
       database.exec('PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL');
       new DaemonStateSchema(() => process.kill(process.pid, 'SIGKILL')).createSchema(database);
     `;
-    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, env.path], { encoding: "utf8", timeout: 10_000 });
-    assert.equal(child.signal, "SIGKILL", child.stderr);
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, env.path], { encoding: "utf8", timeout: CHILD_PROCESS_TIMEOUT_MS });
+    assertKilledBySelf(child);
     assert.deepEqual(legacyRows(env.database), before);
     if (cutovers) assert.deepEqual(env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all(), cutovers);
     assert.equal((env.database.prepare("PRAGMA user_version").get() as Row).user_version, version);
@@ -685,7 +708,7 @@ test("future schema refusal precedes WAL conversion and initializer writes", asy
     const inspection = new DatabaseSync(path, { readOnly: true });
     try { assert.equal((inspection.prepare("PRAGMA journal_mode").get() as Row).journal_mode, "delete"); }
     finally { inspection.close(); }
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
 test("prepared operational opener requires an already-current schema without migrating it", async () => {
@@ -736,13 +759,13 @@ test("prepared operational opener never creates missing state and preserves reje
       assert.equal(database.prepare("PRAGMA journal_mode").get()!.journal_mode, mode);
       database.close();
     }
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
 test("prepared operational opener escapes URI metacharacters in existing paths", async () => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-prepared-uri-"));
   try {
-    const path = join(directory, "state space?#%.sqlite");
+    const path = join(directory, DATABASE_NAME);
     const owner = await openDaemonStateDatabase(path, (database) => new DaemonStateSchema().createSchema(database));
     try {
       const prepared = await openPreparedDaemonStateDatabase(path);
@@ -750,9 +773,9 @@ test("prepared operational opener escapes URI metacharacters in existing paths",
         prepared.exec("BEGIN IMMEDIATE; INSERT INTO execution_generations VALUES('prepared-uri-proof','agent',1); COMMIT");
         assert.ok(owner.prepare("SELECT 1 FROM execution_generations WHERE execution_generation_id='prepared-uri-proof'").get());
       } finally { prepared.close(); }
-      assert.ok((await readdir(directory)).every((name) => name.startsWith("state space?#%.sqlite")));
+      assert.ok((await readdir(directory)).every((name) => name.startsWith(DATABASE_NAME)));
     } finally { owner.close(); }
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
 test("migration temporary row snapshots cannot spill plaintext to disk", async () => {
@@ -763,7 +786,7 @@ test("migration temporary row snapshots cannot spill plaintext to disk", async (
       new DaemonStateSchema().createSchema(opened);
     });
     database.close();
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
 test("observation opener accepts current WAL with durable settings and no migration", async () => {
@@ -816,13 +839,13 @@ test("observation opener never creates absent databases or directories and rejec
     assert.throws(() => openDaemonStateObservationDatabase(path), /already-current schema/);
     assert.deepEqual(await readFile(path), before);
     assert.deepEqual(await readdir(directory), ["empty.sqlite"]);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
 test("observation opener escapes URI metacharacters in existing local paths", async () => {
   const directory = await mkdtemp(join(tmpdir(), "letagents-observation-uri-"));
   try {
-    const path = join(directory, "state space?#%.sqlite");
+    const path = join(directory, DATABASE_NAME);
     const operational = await openDaemonStateDatabase(path, (database) => new DaemonStateSchema().createSchema(database));
     try {
       const observer = openDaemonStateObservationDatabase(path);
@@ -830,9 +853,9 @@ test("observation opener escapes URI metacharacters in existing local paths", as
         observer.exec("BEGIN IMMEDIATE; INSERT INTO execution_generations VALUES('uri-proof','agent',1); COMMIT");
         assert.ok(operational.prepare("SELECT 1 FROM execution_generations WHERE execution_generation_id='uri-proof'").get());
       } finally { observer.close(); }
-      assert.ok((await readdir(directory)).every((name) => name.startsWith("state space?#%.sqlite")));
+      assert.ok((await readdir(directory)).every((name) => name.startsWith(DATABASE_NAME)));
     } finally { operational.close(); }
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
 for (const invalid of ["older17", "older20", "older21", "newer", "non_wal", "typed_journal_missing", "legacy_journal_missing"] as const) {
@@ -876,7 +899,7 @@ test("rejected future observation database does not checkpoint an unowned WAL", 
     assert.ok(before.wal.length > 0);
     assert.throws(() => openDaemonStateObservationDatabase(path), /Unsupported daemon state schema version/);
     assert.deepEqual({ database: await readFile(path), wal: await readFile(`${path}-wal`) }, before);
-  } finally { await rm(directory, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(directory); }
 });
 
 test("v19 adds observer and proof slots without rewriting v18 evidence or rebuilding the inbox", async () => {
@@ -1763,6 +1786,8 @@ test("v33 retires incompatible Codex births without replaying work or deleting h
     const desired = Object.fromEntries((env.database.prepare(`SELECT agent_id,desired_state
       FROM agent_launch_intents ORDER BY agent_id`).all() as Row[])
       .map((row) => [String(row.agent_id), row.desired_state]));
+    assert.equal(env.database.prepare("SELECT delivery_mode FROM agent_configurations WHERE agent_id='codex-events-shadow'").get()!.delivery_mode,
+      "mcp_polling", "the retired mode is rewritten to polling before any birth is judged");
     assert.deepEqual(desired, {
       "claude-legacy": "running",
       "codex-birthless": "running",
@@ -2365,3 +2390,144 @@ test("v46 adds empty worker execution custody without inventing legacy bindings"
       "a missing current custody table cannot be silently recreated");
   } finally { await env.cleanup(); }
 });
+
+function insertAgentConfigurationRow(database: DatabaseSync, agentId: string, sortOrder: number, deliveryMode: string): void {
+  database.prepare("INSERT INTO agent_identities VALUES(?,?,?,?)").run(agentId, "migration-test", now, sortOrder);
+  database.prepare(`INSERT INTO agent_configurations
+    (agent_id,provider,model,charter,permission_profile_id,delivery_mode,delivery_cutover_json,
+     provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json)
+    VALUES(?,'codex','model','charter','full_access',?,NULL,0,0,NULL)`).run(agentId, deliveryMode);
+}
+
+function deliveryModesByAgent(database: DatabaseSync): Row[] {
+  return database.prepare("SELECT agent_id,delivery_mode FROM agent_configurations ORDER BY agent_id").all()
+    .map((row) => ({ ...row }));
+}
+
+test("v49 rewrites the retired desktop_events delivery mode to polling when a v48 database opens", async () => {
+  assert.ok(DAEMON_STATE_SCHEMA_VERSION >= 49, "the rewrite shipped in schema v49");
+  const env = await fixture();
+  try {
+    restoreDesktopEventsDeliveryConstraint(env.database);
+    insertAgentConfigurationRow(env.database, "retired-events", 0, "desktop_events");
+    insertAgentConfigurationRow(env.database, "kept-inbox", 1, "daemon_inbox");
+    insertAgentConfigurationRow(env.database, "kept-polling", 2, "mcp_polling");
+    env.database.exec("UPDATE manifest_metadata SET schema_version=48 WHERE singleton=1; PRAGMA user_version=48");
+    assert.deepEqual(versionPair(env.database).map((row) => ({ ...(row as Row) })), [
+      { user_version: 48 },
+      { generation: 0, schema_version: 48 },
+    ]);
+    assert.deepEqual(deliveryModesByAgent(env.database), [
+      { agent_id: "kept-inbox", delivery_mode: "daemon_inbox" },
+      { agent_id: "kept-polling", delivery_mode: "mcp_polling" },
+      { agent_id: "retired-events", delivery_mode: "desktop_events" },
+    ]);
+
+    const opened = await openDaemonStateDatabase(env.path, (database) => new DaemonStateSchema().createSchema(database));
+    try {
+      assert.equal(opened.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
+      assert.equal(opened.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get()!.schema_version,
+        DAEMON_STATE_SCHEMA_VERSION);
+      assert.deepEqual(deliveryModesByAgent(opened), [
+        { agent_id: "kept-inbox", delivery_mode: "daemon_inbox" },
+        { agent_id: "kept-polling", delivery_mode: "mcp_polling" },
+        { agent_id: "retired-events", delivery_mode: "mcp_polling" },
+      ], "only the retired mode changes, and it becomes polling");
+      assert.deepEqual(opened.prepare("PRAGMA foreign_key_check").all(), []);
+
+      // Every open repairs a stray row, so a current-schema database never fails its delivery-mode validation on one.
+      opened.prepare("UPDATE agent_configurations SET delivery_mode='desktop_events' WHERE agent_id='kept-polling'").run();
+    } finally { opened.close(); }
+    const reopened = await openDaemonStateDatabase(env.path, (database) => new DaemonStateSchema().createSchema(database));
+    try {
+      assert.equal(reopened.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
+      assert.deepEqual(deliveryModesByAgent(reopened), [
+        { agent_id: "kept-inbox", delivery_mode: "daemon_inbox" },
+        { agent_id: "kept-polling", delivery_mode: "mcp_polling" },
+        { agent_id: "retired-events", delivery_mode: "mcp_polling" },
+      ]);
+    } finally { reopened.close(); }
+  } finally { await env.cleanup(); }
+});
+
+test("a new database rejects the retired desktop_events delivery mode like any unknown value", async () => {
+  const env = await fixture();
+  try {
+    insertAgentConfigurationRow(env.database, "accepted-polling", 0, "mcp_polling");
+    insertAgentConfigurationRow(env.database, "accepted-inbox", 1, "daemon_inbox");
+    for (const [index, deliveryMode] of ["desktop_events", "DAEMON_INBOX", ""].entries()) {
+      assert.throws(() => insertAgentConfigurationRow(env.database, `rejected-${index}`, 2 + index, deliveryMode), /CHECK/, deliveryMode);
+    }
+    assert.deepEqual(deliveryModesByAgent(env.database), [
+      { agent_id: "accepted-inbox", delivery_mode: "daemon_inbox" },
+      { agent_id: "accepted-polling", delivery_mode: "mcp_polling" },
+    ]);
+  } finally { await env.cleanup(); }
+});
+
+for (const previous of [44, 45, 46, 47, 48, 49] as const) {
+  test(`v${previous} database gains the image input column off for every existing agent when it opens`, async () => {
+    assert.ok(DAEMON_STATE_SCHEMA_VERSION >= 50, "the image input column shipped in schema v50");
+    const env = await fixture();
+    try {
+      insertAgentConfigurationRow(env.database, "open-model-agent", 0, "daemon_inbox");
+      insertAgentConfigurationRow(env.database, "other-agent", 1, "mcp_polling");
+      if (previous === 44) restoreV44ClosureFixture(env.database);
+      env.database.exec(`ALTER TABLE agent_configurations DROP COLUMN image_input;
+        UPDATE manifest_metadata SET schema_version=${previous} WHERE singleton=1; PRAGMA user_version=${previous}`);
+      assert.equal(env.database.prepare("SELECT 1 FROM pragma_table_info('agent_configurations') WHERE name='image_input'").get(), undefined);
+      const rowsBefore = env.database.prepare("SELECT agent_id,provider,model,charter,permission_profile_id,delivery_mode,config_revision FROM agent_configurations ORDER BY agent_id")
+        .all().map((row) => ({ ...row }));
+
+      const opened = await openDaemonStateDatabase(env.path, (database) => new DaemonStateSchema().createSchema(database));
+      try {
+        assert.deepEqual(versionPair(opened).map((row) => ({ ...(row as Row) })), [
+          { user_version: DAEMON_STATE_SCHEMA_VERSION },
+          { generation: 0, schema_version: DAEMON_STATE_SCHEMA_VERSION },
+        ]);
+        assert.deepEqual({ ...opened.prepare("SELECT type,\"notnull\" AS required,dflt_value FROM pragma_table_info('agent_configurations') WHERE name='image_input'").get() },
+          { type: "INTEGER", required: 1, dflt_value: "0" });
+        assert.deepEqual(opened.prepare("SELECT agent_id,image_input FROM agent_configurations ORDER BY agent_id").all().map((row) => ({ ...row })), [
+          { agent_id: "open-model-agent", image_input: 0 },
+          { agent_id: "other-agent", image_input: 0 },
+        ]);
+        assert.deepEqual(opened.prepare("SELECT agent_id,provider,model,charter,permission_profile_id,delivery_mode,config_revision FROM agent_configurations ORDER BY agent_id")
+          .all().map((row) => ({ ...row })), rowsBefore, "no other configuration value changes");
+        assert.throws(() => opened.prepare("UPDATE agent_configurations SET image_input=2").run(), /CHECK/);
+        opened.prepare("UPDATE agent_configurations SET image_input=1 WHERE agent_id='open-model-agent'").run();
+        assert.deepEqual(opened.prepare("PRAGMA foreign_key_check").all(), []);
+      } finally { opened.close(); }
+
+      const reopened = await openDaemonStateDatabase(env.path, (database) => new DaemonStateSchema().createSchema(database));
+      try {
+        assert.equal(reopened.prepare("SELECT image_input FROM agent_configurations WHERE agent_id='open-model-agent'").get()!.image_input, 1,
+          "a later open keeps the owner's choice");
+      } finally { reopened.close(); }
+    } finally { await env.cleanup(); }
+  });
+}
+
+for (const damage of ["missing", "nullable", "defaults_on", "out_of_range"] as const) {
+  test(`a current database with a ${damage.replaceAll("_", " ")} image input column fails closed for the schema and the observation opener`, async () => {
+    const env = await fixture();
+    try {
+      insertAgentConfigurationRow(env.database, "agent", 0, "mcp_polling");
+      if (damage !== "out_of_range") env.database.exec("ALTER TABLE agent_configurations DROP COLUMN image_input");
+      if (damage === "nullable") env.database.exec("ALTER TABLE agent_configurations ADD COLUMN image_input INTEGER DEFAULT 0");
+      if (damage === "defaults_on") env.database.exec("ALTER TABLE agent_configurations ADD COLUMN image_input INTEGER NOT NULL DEFAULT 1");
+      if (damage === "out_of_range") env.database.exec("PRAGMA ignore_check_constraints=ON; UPDATE agent_configurations SET image_input=2; PRAGMA ignore_check_constraints=OFF");
+      env.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      const before = await readFile(env.path);
+      const versions = versionPair(env.database);
+      const refusal = /invalid image input column/;
+      // SQLite's own integrity check can see a broken CHECK constraint before the column check runs.
+      assert.throws(() => new DaemonStateSchema().createSchema(env.database),
+        damage === "out_of_range" ? /invalid image input column|failed SQLite integrity validation/ : refusal, "a current schema is never silently repaired");
+      assert.throws(() => openDaemonStateObservationDatabase(env.path), refusal);
+      assert.deepEqual(await readFile(env.path), before);
+      assert.deepEqual(versionPair(env.database), versions);
+      assert.equal(!!env.database.prepare("SELECT 1 FROM pragma_table_info('agent_configurations') WHERE name='image_input'").get(), damage !== "missing");
+      if (damage === "out_of_range") assert.equal(env.database.prepare("SELECT image_input FROM agent_configurations").get()!.image_input, 2, "the bad value is left as found");
+    } finally { await env.cleanup(); }
+  });
+}

@@ -1,0 +1,6 @@
+{
+  "data": {
+    "viewer": { "id": "9a3c1d2e-4f5a-4b6c-8d7e-0f1a2b3c4d5e", "name": "Emmy May", "displayName": "emmy", "email": "emmy@example.com" },
+    "organization": { "id": "org-7f6e5d4c-3b2a-4190-8f7e-6d5c4b3a2910", "name": "Herotel", "urlKey": "herotel" }
+  }
+}

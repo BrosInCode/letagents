@@ -214,7 +214,7 @@ function countBudgetReads(t: TestContext, db: DatabaseSync): () => number {
   let count = 0;
   t.mock.method(db, "prepare", (sql: string) => {
     if (sql.includes("SELECT COUNT(*) AS facts,COALESCE(SUM(")) {
-      assert.match(sql, /FROM \(SELECT .* FROM execution_facts WHERE agent_id=\? LIMIT 10001\)/s,
+      assert.match(sql, /FROM \(SELECT .* FROM execution_facts WHERE agent_id=\? AND sequence>\? LIMIT 10001\)/s,
         "the row bound must apply before aggregation");
       count++;
     }
@@ -303,7 +303,6 @@ test("the closed release policy gives supported daemon-owned provider births typ
   for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const) {
     assert.equal(lifecycleAuthorityModeForProvider(provider, "daemon_inbox"), "typed");
     assert.equal(lifecycleAuthorityModeForProvider(provider, "mcp_polling"), "typed_shadow");
-    assert.equal(lifecycleAuthorityModeForProvider(provider, "desktop_events"), "typed_shadow");
   }
 });
 
@@ -674,6 +673,166 @@ test("warm ingestion reuses projection history and matches cold replay", (t) => 
   } finally { db.close(); }
 });
 
+test("a message in an earlier record window reads as saved after later windows fill, as does one that spans two windows and the newest one", () => {
+  const { db, store } = fixture();
+  try {
+    applyRuntimeRecoverySchema(db);
+    store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "runtime",
+      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 100 });
+    const token = observer(store);
+    /** A turn of `message` in the given runtime, its start and one command recorded through `source`. */
+    const turnOf = (message: string, runtime: "runtime" | "runtime2", source: ShadowObserver, sequence: number) => {
+      const generation = runtime === "runtime" ? "generation" : "generation2";
+      const createdAtMs = (runtime === "runtime" ? 100 : 200) + sequence;
+      const attemptId = store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: message, executionGenerationId: generation,
+        workspaceId: "workspace", createdAtMs });
+      const turn = { turnId: `${message}-${runtime}`, providerContinuationId: "conversation", providerTurnId: `native-${message}-${runtime}` };
+      store.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: generation, runtimeGenerationId: runtime,
+        attemptId, ...turn, createdAtMs });
+      const values = { executionGenerationId: generation, runtimeGenerationId: runtime, observerEpoch: source.epoch, ...turn };
+      assert.equal(store.ingest(source.sourceId, source, fact(sequence, { factId: `${turn.turnId}-start`, domain: "turn", state: "active", ...values })).status, "accepted");
+      assert.equal(store.ingest(source.sourceId, source, operationFact(sequence + 1, { factId: `${turn.turnId}-command`, ...values,
+        executionId: `command-${turn.turnId}` })).status, "accepted");
+      store.ingest(source.sourceId, source, fact(sequence + 2, { factId: `${turn.turnId}-end`, domain: "turn", state: "terminal", turnOutcome: "completed", ...values }));
+    };
+    turnOf("old", "runtime", token, 1);
+    turnOf("spanning", "runtime", token, 4);
+
+    // The runtime is archived behind a boundary, and the next one starts a new window.
+    const archived = { ...db.prepare("SELECT * FROM execution_observers").get()! };
+    db.prepare("INSERT INTO agent_runtime_recoveries VALUES('boundary','agent','room','generation','runtime','resume','complete','{}',?,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')")
+      .run(JSON.stringify(archived));
+    db.prepare("UPDATE execution_observers SET observer_epoch=observer_epoch+1").run();
+    db.prepare("UPDATE execution_runtime_generations SET runtime_state='exited',ended_at_ms=200 WHERE runtime_generation_id='runtime'").run();
+    store.registerRuntime({ agentId: "agent", executionGenerationId: "generation2", runtimeGenerationId: "runtime2",
+      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 200 });
+    const next = observer(store, { expectedEpoch: 2, subjectRuntimeGenerationId: "runtime2", observerRuntimeGenerationId: "runtime2" });
+    turnOf("spanning", "runtime2", next, 1);
+    turnOf("newest", "runtime2", next, 4);
+    // The new window fills up to its limit.
+    db.prepare(`WITH RECURSIVE positions(value) AS (SELECT 7 UNION ALL SELECT value+1 FROM positions WHERE value<10000)
+      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+        source_sequence,domain,kind,state,side_effects,observed_at_ms)
+      SELECT 'later-'||value,'agent','generation2','runtime2',?,value,'runtime','state_changed','ready','none',300+value FROM positions`).run(next.epoch);
+    db.prepare("UPDATE execution_observers SET last_source_sequence=10000,max_observed_sequence=10000").run();
+    assert.ok(Number(db.prepare("SELECT COUNT(*) AS n FROM execution_facts").get()!.n) > 10_000, "more facts than one window's worth");
+
+    const turns = (message: string) => {
+      const detail = store.retainedMessageExecution("agent", "room", message);
+      assert.equal(detail.availability, "available", `${message}: ${JSON.stringify(detail)}`);
+      return detail.availability === "available" ? detail.turns.map(turn => [turn.turnId, turn.state, turn.operations.length]) : [];
+    };
+    assert.deepEqual(turns("old"), [["old-runtime", "terminal", 1]], "a message in the earlier window reads as saved, with what was saved of it");
+    assert.deepEqual(turns("spanning"), [["spanning-runtime2", "terminal", 1], ["spanning-runtime", "terminal", 1]], "one that spans two windows shows both turns");
+    assert.deepEqual(turns("newest"), [["newest-runtime2", "terminal", 1]], "and the newest one reads as before");
+    for (const message of ["old", "spanning", "newest"]) {
+      const summary = store.roomWorkSummary("agent", "room", message);
+      assert.equal(summary.availability, "available", `${message}: ${JSON.stringify(summary)}`);
+      assert.equal(summary.availability === "available" && summary.summary.operation_counts.unresolved
+        + summary.summary.operation_counts.succeeded + summary.summary.operation_counts.failed, message === "spanning" ? 2 : 1,
+        `${message}: every command of the message is counted`);
+      assert.equal(summary.availability === "available" && summary.summary.evidence_incomplete, message !== "newest",
+        `${message}: activity behind the boundary is incomplete, the newest is not`);
+    }
+    assert.deepEqual(store.retainedMessageExecution("agent", "room", "never"), { availability: "not_captured" }, "a message with nothing saved still says so");
+  } finally { db.close(); }
+});
+
+test("a record of exactly one window's worth reads its oldest fact: a message saved only there reads as saved", () => {
+  const { db, store } = fixture();
+  try {
+    applyRuntimeRecoverySchema(db);
+    seed(store); const token = observer(store);
+    // The message's turn started, and that is all the record holds of it: its first fact.
+    assert.equal(store.ingest(token.sourceId, token, turnFact(1)).status, "accepted");
+    db.prepare(`WITH RECURSIVE positions(value) AS (SELECT 2 UNION ALL SELECT value+1 FROM positions WHERE value<10000)
+      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+        source_sequence,domain,kind,state,side_effects,observed_at_ms)
+      SELECT 'filler-'||value,'agent','generation','runtime',1,value,'runtime','state_changed','ready','none',100+value FROM positions`).run();
+    db.prepare("UPDATE execution_observers SET last_source_sequence=10000,max_observed_sequence=10000").run();
+    assert.equal(Number(db.prepare("SELECT COUNT(*) AS n FROM execution_facts").get()!.n), 10_000);
+    const detail = store.retainedMessageExecution("agent", "room", "message");
+    assert.equal(detail.availability, "available", JSON.stringify(detail));
+    assert.deepEqual(detail.availability === "available" ? detail.turns.map(turn => [turn.turnId, turn.state]) : [], [["turn", "active"]]);
+    const summary = roomSummary(store);
+    assert.deepEqual([summary.recorded_state, summary.evidence_incomplete], ["active", false]);
+  } finally { db.close(); }
+});
+
+test("a message on a runtime that has recorded more than one window's worth is summarized as incomplete, never with its earlier commands left out", () => {
+  const { db, store } = fixture();
+  try {
+    applyRuntimeRecoverySchema(db);
+    seed(store); const token = observer(store);
+    const fill = (from: number, to: number, epoch = 1) => db.prepare(`WITH RECURSIVE positions(value) AS (SELECT ? UNION ALL SELECT value+1 FROM positions WHERE value<?)
+      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+        source_sequence,domain,kind,state,side_effects,observed_at_ms)
+      SELECT 'filler-'||value,'agent','generation','runtime',?,value,'runtime','state_changed','ready','none',100+value FROM positions`).run(from, to, epoch);
+    // A long turn: one command at its start and one near its end, with a great deal recorded between them.
+    assert.equal(store.ingest(token.sourceId, token, turnFact(1)).status, "accepted");
+    assert.equal(store.ingest(token.sourceId, token, operationFact(2, { executionId: "a" })).status, "accepted");
+    assert.equal(store.ingest(token.sourceId, token, operationFact(3, { executionId: "a", kind: "completed", outcome: "succeeded" })).status, "accepted");
+    fill(4, 9_990);
+    db.prepare("UPDATE execution_observers SET last_source_sequence=9990,max_observed_sequence=9990").run();
+    assert.equal(store.ingest(token.sourceId, token, operationFact(9_991, { executionId: "b" })).status, "accepted");
+    assert.equal(store.ingest(token.sourceId, token, operationFact(9_992, { executionId: "b", kind: "completed", outcome: "succeeded" })).status, "accepted");
+    assert.equal(store.ingest(token.sourceId, token, turnFact(9_993, { state: "terminal", turnOutcome: "completed" })).status, "accepted");
+    assert.deepEqual([roomSummary(store).operation_counts.succeeded, roomSummary(store).evidence_incomplete], [2, false], "the whole runtime is read");
+
+    // An earlier runtime of the agent is archived: its boundary starts a new window under this runtime, which records on.
+    const archived = JSON.stringify(db.prepare("SELECT * FROM execution_observers").get());
+    db.prepare("INSERT INTO agent_runtime_recoveries VALUES('earlier','agent','room','generation','runtime-long-ago','resume','complete','{}',?,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')").run(archived);
+    db.prepare("UPDATE execution_observers SET observer_epoch=observer_epoch+1").run();
+    fill(9_994, 10_010, 2);
+    db.prepare("UPDATE execution_observers SET last_source_sequence=10010,max_observed_sequence=10010").run();
+    assert.ok(Number(db.prepare("SELECT COUNT(*) AS n FROM execution_facts WHERE runtime_generation_id='runtime'").get()!.n) > 10_000);
+    const summary = roomSummary(store);
+    assert.ok(summary.operation_counts.succeeded === 2 || summary.evidence_incomplete,
+      `a summary that leaves out a command says it is incomplete: ${JSON.stringify(summary)}`);
+    assert.equal(summary.evidence_incomplete, true);
+  } finally { db.close(); }
+});
+
+test("a recovery boundary starts a fresh record window: a full record no longer refuses the next runtime, and nothing is deleted", () => {
+  const { db, store } = fixture();
+  try {
+    applyRuntimeRecoverySchema(db);
+    seed(store); const token = observer(store);
+    retainFacts(db, 1, 10000);
+    assert.equal(store.ingest(token.sourceId, token, fact(10001)).status, "retention_limit");
+    const full = { ...db.prepare("SELECT * FROM execution_observers").get()! };
+    assert.deepEqual([full.last_source_sequence, full.max_observed_sequence], [10000, 10001]);
+
+    // A new runtime without a boundary: the gap refuses its observer, and the budget would refuse its facts.
+    store.registerRuntime({ agentId: "agent", executionGenerationId: "generation2", runtimeGenerationId: "runtime2",
+      provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 200 });
+    const next = { subjectRuntimeGenerationId: "runtime2", observerRuntimeGenerationId: "runtime2" };
+    assert.throws(() => observer(store, { expectedEpoch: 1, ...next }), /source_gap/);
+
+    // The boundary the daemon, or "Restart and resume", records for the full runtime.
+    db.prepare("INSERT INTO agent_runtime_recoveries VALUES('boundary','agent','room','generation','runtime','resume','complete','{}',?,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z')")
+      .run(JSON.stringify(full));
+    db.prepare("UPDATE execution_observers SET observer_epoch=observer_epoch+1").run();
+    const rebound = observer(store, { expectedEpoch: 2, ...next });
+    const later = (sequence: number, values: Record<string, unknown> = {}) => fact(sequence, {
+      factId: `later-${sequence}`, observerEpoch: rebound.epoch, runtimeGenerationId: "runtime2", executionGenerationId: "generation2", ...values });
+    assert.equal(store.ingest(rebound.sourceId, rebound, later(1)).status, "accepted", "the next runtime is recorded from the start of a new window");
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 10001, "the facts before the boundary are all still there");
+    assert.equal(store.projectRuntime("runtime2").lastJournalSequence, 10001);
+    assert.equal(store.projectRuntime("runtime").lastJournalSequence, 10000, "and can still be read");
+
+    // The new window has the same size as the first, and fills up the same way.
+    db.prepare(`WITH RECURSIVE positions(value) AS (SELECT 2 UNION ALL SELECT value+1 FROM positions WHERE value<10000)
+      INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+        source_sequence,domain,kind,state,side_effects,observed_at_ms)
+      SELECT 'later-'||value,'agent','generation2','runtime2',?,value,'runtime','state_changed','ready','none',300+value FROM positions`).run(rebound.epoch);
+    db.prepare("UPDATE execution_observers SET last_source_sequence=10000,max_observed_sequence=10000").run();
+    assert.equal(new ExecutionShadowStore(db).projectRuntime("runtime2").lastJournalSequence, 20000);
+    assert.equal(store.ingest(rebound.sourceId, rebound, later(10001)).status, "retention_limit");
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 20000);
+  } finally { db.close(); }
+});
+
 test("retention caps physical witnesses without deleting evidence, advancing accepted cursors, or affecting peers", (t) => {
   const { db, store } = fixture();
   try {
@@ -920,6 +1079,131 @@ test("cache invalidates other stores on shared and separate connections", async 
   }
 });
 
+async function walFixture() {
+  const root = await mkdtemp(join(tmpdir(), "execution-shadow-key-"));
+  const path = join(root, "state.sqlite");
+  const { db, store } = fixture(path);
+  db.exec("PRAGMA journal_mode=WAL; CREATE TABLE heartbeat(id INTEGER PRIMARY KEY, n INTEGER NOT NULL); INSERT INTO heartbeat VALUES(1,0)");
+  const other = new DatabaseSync(path);
+  other.exec("PRAGMA foreign_keys=ON");
+  return { db, store, other, close: async () => { other.close(); db.close(); await rm(root, { recursive: true, force: true }); } };
+}
+function countIncrementalReads(t: TestContext, db: DatabaseSync): () => number {
+  const prepare = db.prepare.bind(db);
+  let count = 0;
+  t.mock.method(db, "prepare", (sql: string) => {
+    if (sql.includes("WHERE f.runtime_generation_id=? AND f.sequence>? ORDER BY f.sequence")) count++;
+    return prepare(sql);
+  });
+  return () => count;
+}
+function insertRawFact(db: DatabaseSync, value: ExecutionFact, extra: Record<string, unknown> = {}): void {
+  const row: Record<string, string | number | null> = {
+    fact_id: value.factId, agent_id: value.agentId, execution_generation_id: value.executionGenerationId,
+    runtime_generation_id: value.runtimeGenerationId, observer_epoch: value.observerEpoch, source_sequence: value.sourceSequence,
+    native_event_id: value.nativeEventId ?? null, turn_id: "turnId" in value ? value.turnId : null,
+    execution_id: value.domain === "execution" ? value.executionId : null, domain: value.domain, kind: value.kind,
+    state: "state" in value ? value.state : null, operation: value.domain === "execution" ? value.operation : null,
+    outcome: "outcome" in value ? value.outcome : null, side_effects: value.sideEffects,
+    output_bytes: "outputBytes" in value ? value.outputBytes : null, observed_at_ms: value.observedAtMs,
+    turn_outcome: "turnOutcome" in value ? value.turnOutcome ?? null : null, ...extra,
+  } as Record<string, string | number | null>;
+  db.prepare(`INSERT INTO execution_facts(${Object.keys(row).join(",")}) VALUES(${Object.keys(row).map(() => "?").join(",")})`).run(...Object.values(row));
+}
+
+test("warm projections and budgets survive unrelated commits from other connections", async (t) => {
+  const f = await walFixture();
+  try {
+    seed(f.store); const token = observer(f.store);
+    f.store.ingest(token.sourceId, token, turnFact(1, { nativeEventId: "active" }));
+    const history = countHistoryReads(t, f.db);
+    const budgets = countBudgetReads(t, f.db);
+    for (let sequence = 2; sequence <= 40; sequence++) {
+      // A heartbeat publication and an activity batch on their own handles.
+      f.other.exec("UPDATE heartbeat SET n=n+1");
+      f.other.exec("BEGIN IMMEDIATE; INSERT INTO heartbeat(n) VALUES(1); INSERT INTO heartbeat(n) VALUES(2); COMMIT");
+      assert.equal(f.store.ingest(token.sourceId, token, operationFact(sequence, { kind: "output", outputBytes: 1,
+        nativeEventId: `output-${sequence}` })).status, "accepted");
+    }
+    f.other.exec("UPDATE heartbeat SET n=n+1");
+    const warm = f.store.projectRuntime("runtime");
+    assert.equal(history(), 0, "unrelated commits do not force a journal replay");
+    assert.equal(budgets(), 0, "unrelated commits do not force a budget recount");
+    assert.equal(warm.projection.turns.get("turn")?.operations.get("command")?.outputBytes, 39);
+    assert.deepEqual(warm, new ExecutionShadowStore(f.db).projectRuntime("runtime"), "the warm projection equals a full replay");
+  } finally { await f.close(); }
+});
+
+test("a fact for the same runtime from another connection is reduced on top of the warm projection", async (t) => {
+  const f = await walFixture();
+  try {
+    seed(f.store); const token = observer(f.store);
+    f.store.ingest(token.sourceId, token, turnFact(1, { nativeEventId: "active" }));
+    f.store.ingest(token.sourceId, token, operationFact(2, { kind: "output", outputBytes: 3, nativeEventId: "output-a" }));
+    f.store.projectRuntime("runtime");
+    const history = countHistoryReads(t, f.db);
+    const incremental = countIncrementalReads(t, f.db);
+    // Another writer appends: a new output, and a replay of an already seen native event.
+    insertRawFact(f.other, operationFact(3, { factId: "foreign-3", kind: "output", outputBytes: 5, nativeEventId: "output-b" }));
+    insertRawFact(f.other, operationFact(4, { factId: "foreign-4", kind: "output", outputBytes: 3, nativeEventId: "output-a" }));
+    const seen = f.store.projectRuntime("runtime");
+    assert.equal(history(), 0, "only the newer facts are read");
+    assert.equal(incremental(), 1);
+    assert.equal(seen.lastJournalSequence, 4);
+    assert.equal(seen.projection.turns.get("turn")?.operations.get("command")?.outputBytes, 8, "the native replay is not counted twice");
+    assert.deepEqual(seen, new ExecutionShadowStore(f.db).projectRuntime("runtime"), "incremental equals a full replay");
+    // The budget follows the same append: one more fact crosses no cap but is counted.
+    f.other.exec("UPDATE execution_observers SET last_source_sequence=4,max_observed_sequence=4");
+    assert.equal(f.store.ingest(token.sourceId, token, operationFact(5, { kind: "output", outputBytes: 1 })).status, "accepted");
+    assert.deepEqual(f.store.projectRuntime("runtime"), new ExecutionShadowStore(f.db).projectRuntime("runtime"));
+
+    // A conflicting re-observation from another writer fails exactly as a full replay does.
+    insertRawFact(f.other, operationFact(6, { factId: "foreign-6", kind: "output", outputBytes: 99, nativeEventId: "output-b" }));
+    assert.throws(() => f.store.projectRuntime("runtime"), /sequence_conflict/);
+    assert.throws(() => new ExecutionShadowStore(f.db).projectRuntime("runtime"), /sequence_conflict/);
+  } finally { await f.close(); }
+});
+
+test("deleted facts and a moved record window invalidate warm projections and budgets", async (t) => {
+  const f = await walFixture();
+  try {
+    applyRuntimeRecoverySchema(f.db);
+    seed(f.store); const token = observer(f.store);
+    for (let sequence = 1; sequence <= 4; sequence++) {
+      f.store.ingest(token.sourceId, token, sequence === 1 ? turnFact(1)
+        : operationFact(sequence, { kind: "output", outputBytes: sequence }));
+    }
+    f.store.projectRuntime("runtime");
+    const history = countHistoryReads(t, f.db);
+    const budgets = countBudgetReads(t, f.db);
+    // A retention-style delete of the oldest output from another connection.
+    f.other.exec("DELETE FROM execution_facts WHERE fact_id='fact-2'");
+    const afterDelete = f.store.projectRuntime("runtime");
+    assert.equal(history(), 1, "a deleted fact forces a full replay");
+    assert.equal(budgets(), 1, "a deleted fact forces a budget recount");
+    assert.equal(afterDelete.projection.turns.get("turn")?.operations.get("command")?.outputBytes, 7);
+    assert.deepEqual(afterDelete, new ExecutionShadowStore(f.db).projectRuntime("runtime"));
+    // Delete one cached fact and append two: the journal only looks like an
+    // append. The newer facts must not be reduced onto the stale projection.
+    f.other.exec("DELETE FROM execution_facts WHERE fact_id='fact-3'");
+    insertRawFact(f.other, operationFact(5, { kind: "output", outputBytes: 50 }));
+    insertRawFact(f.other, operationFact(6, { kind: "output", outputBytes: 60 }));
+    const replaced = f.store.projectRuntime("runtime");
+    assert.equal(history(), 3, "warm, then cold, then warm again after the second change");
+    assert.equal(budgets(), 3);
+    assert.equal(replaced.projection.turns.get("turn")?.operations.get("command")?.outputBytes, 114);
+    assert.deepEqual(replaced, new ExecutionShadowStore(f.db).projectRuntime("runtime"));
+
+    // A recovery boundary moves the agent's record window: the budget is
+    // recounted, while the unchanged runtime journal keeps its projection.
+    const archived = JSON.stringify(f.db.prepare("SELECT * FROM execution_observers WHERE agent_id='agent'").get());
+    f.other.prepare("INSERT INTO agent_runtime_recoveries VALUES('boundary','agent','room','generation','runtime','resume','complete','{}',?,'now','now')").run(archived);
+    assert.deepEqual(f.store.projectRuntime("runtime"), replaced);
+    assert.equal(budgets(), 5, "a new window start recounts the budget");
+    assert.equal(history(), 4, "no replay for an unchanged runtime journal");
+  } finally { await f.close(); }
+});
+
 test("caller-owned rollback and same-connection schema changes cannot poison cache", () => {
   const { db, store } = fixture();
   try {
@@ -1043,7 +1327,7 @@ test("source watermarks preserve unaccepted tails without minting facts and rema
   } finally { db.close(); }
 });
 
-test("unchanged source watermarks still validate current observer, source admission, and storage", (t) => {
+test("unchanged source watermarks still validate current observer, source admission, and storage", () => {
   const { db, store } = fixture();
   try {
     seed(store); const token = observer(store);
@@ -1056,12 +1340,10 @@ test("unchanged source watermarks still validate current observer, source admiss
     db.prepare("INSERT INTO execution_observer_sources(agent_id,source_id) VALUES(?,?)").run(token.agentId, token.sourceId);
     const resumed = observer(store, { expectedEpoch: 1, sourceId: token.sourceId });
     assert.throws(() => store.observeSourcePosition(token.sourceId, token, 1), /stale_observer/);
-    const prepare = db.prepare.bind(db);
-    t.mock.method(db, "prepare", (sql: string) => {
-      if (sql === "SELECT * FROM execution_observers WHERE agent_id=?") throw new Error("injected storage unavailable");
-      return prepare(sql);
-    });
-    assert.throws(() => store.observeSourcePosition(resumed.sourceId, resumed, 1), /injected storage unavailable/,
+    // The observer read uses a statement prepared earlier; make the durable
+    // read itself fail, not only a later prepare.
+    db.exec("ALTER TABLE execution_observers RENAME TO unavailable_observers");
+    assert.throws(() => store.observeSourcePosition(resumed.sourceId, resumed, 1), /no such table/,
       "a previous valid token cannot conceal a failed durable read");
   } finally { db.close(); }
 });

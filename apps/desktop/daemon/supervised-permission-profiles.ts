@@ -44,9 +44,11 @@ const codexProfiles: readonly SupervisedPermissionProfile[] = [
   },
   {
     id: "read_only", label: "Read-only",
-    description: "Read-only access is unavailable for Codex here.",
-    status: "gated", risk: "low",
-    detail: "Choose another available access level.", isDefault: false,
+    description: "Can read files on this computer, also outside your project, and read and post in the room.",
+    // Not "low": the Codex sandbox denies no read, so the agent can read every file this account can, and it can post in the room.
+    // The one file kept from its commands is the owner's Codex sign-in file, which its permission profile denies.
+    status: "available", risk: "medium",
+    detail: "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews.", isDefault: false,
   },
 ];
 
@@ -61,7 +63,7 @@ const claudeProfiles: readonly SupervisedPermissionProfile[] = [
     id: "ask_before_write", label: "Ask before writes",
     description: "Requires approval before Claude can change files or run write-capable commands.",
     status: "available", risk: "medium",
-    detail: "Each approval allows one action. Other Claude settings do not apply. LetAgents room tools remain available.", isDefault: false,
+    detail: "Commands that only read the project, its history, or its pull requests run without asking. Each approval allows one action. Other Claude settings do not apply. LetAgents room tools remain available.", isDefault: false,
   },
   {
     id: "auto_review", label: "Auto",
@@ -71,7 +73,7 @@ const claudeProfiles: readonly SupervisedPermissionProfile[] = [
   },
   {
     id: "full_access", label: "Full access",
-    description: "Can change files and run commands on this Mac without asking.",
+    description: "Can change files and run commands on this computer without asking.",
     status: "available", risk: "high",
     detail: "Commands can access files outside your project. Use only for work you trust.", isDefault: false,
   },
@@ -100,7 +102,7 @@ const openModelProfiles: readonly SupervisedPermissionProfile[] = [
     id: "auto_review", label: "Auto",
     description: "Lets LetAgents review each command before it runs. Routine commands and edits to project files run without asking.",
     status: "available", risk: "high",
-    detail: "Each command is sent to LetAgents and to Jev, a decision model, for review. A command that deletes, publishes, installs, or reaches the network still asks you, and so does an edit to a settings or credentials file. Reading project files and looking things up on the web are not reviewed. The agent's own tools cannot open files outside the project.", isDefault: false,
+    detail: "Reading and checking commands are sent to LetAgents and to Jev, a decision model, for review. Committing, fetching, reading pull requests, and pushing to the agent's own LetAgents branch run without asking. A command that deletes, installs, force-pushes, or pushes anywhere else still asks you, and so does an edit to a settings or credentials file. Reading project files and looking things up on the web are not reviewed. The agent's own tools cannot open files outside the project.", isDefault: false,
   },
   {
     id: "sandboxed_write", label: "Sandboxed writes",
@@ -130,10 +132,19 @@ const cursorProfiles: readonly SupervisedPermissionProfile[] = [
     status: "available", risk: "medium", detail: "Cursor restricts file and command access. LetAgents checks for conflicts before copying changes back. Files ignored by Git stay read-only, and project access settings stay protected.", isDefault: true,
   },
   {
-    id: "full_access", label: "Workspace writes (compatibility)", description: "Turns off Cursor’s own command restrictions so more project tools can run.",
-    status: "available", risk: "high", detail: "Cursor still works in a separate copy and cannot write directly to files on this Mac. LetAgents checks for conflicts before copying changes back. Files ignored by Git are not copied back.", isDefault: false,
+    id: "full_access", label: "Full access", description: "Can change files on this computer and run commands without approval prompts.",
+    status: "available", risk: "high", detail: "Changes apply directly to the agent's working directory. Commands can access files outside the project and use the network, including Git pushes and pull requests with available credentials. LetAgents manages room messages and Cursor sign-in separately.", isDefault: false,
   },
 ];
+
+/**
+ * Why Codex has no Read-only access on Windows. Read-only promises that a
+ * command cannot read the owner's Codex sign-in file, and Codex 0.166.0 on
+ * Windows does not honour a `deny`: a command printed a denied file. Its
+ * restricted-token sandbox refuses a `deny` outright. The launch still makes
+ * its own check (codex-agent-home.ts); this says so where the level is offered.
+ */
+export const CODEX_READ_ONLY_WINDOWS = "On Windows, Codex cannot keep your sign-in file from an agent's commands, and Read-only promises that. Choose another access level.";
 
 export function supervisedPermissionProfilesForProvider(providerId: string): SupervisedPermissionProfile[] {
   const provider = providerId.trim().toLowerCase();
@@ -147,6 +158,86 @@ export function supervisedPermissionProfilesForProvider(providerId: string): Sup
         ? cursorProfiles
         : [];
   return profiles.map((profile) => ({ ...profile }));
+}
+
+/**
+ * What changes in an access level's description for an agent that uses its
+ * owner's own setup. The owner's allow rules, hooks, MCP tools and plugins
+ * then apply as well, and some of them act without an approval, so a line
+ * that promises an approval for everything would no longer be true.
+ */
+const OWNER_SETUP_DESCRIPTIONS: Readonly<Record<string, Readonly<Record<string, { description?: string; detail: string }>>>> = {
+  "claude-code": {
+    read_only: {
+      description: "Can read and search files, and use LetAgents room tools and the MCP tools your own Claude Code rules allow.",
+      detail: "Its own tools cannot change files or run commands. Your MCP tools and hooks can, where your own Claude Code settings allow them. Nothing asks you.",
+    },
+    ask_before_write: {
+      description: "Asks before Claude changes files or runs write-capable commands, unless your own Claude Code rules already allow them.",
+      detail: "Commands that only read the project, its history, or its pull requests run without asking. Each approval allows one action. Your own Claude Code allow rules apply too, and can let the agent act without asking you. Your hooks run as you set them up. LetAgents room tools remain available.",
+    },
+    auto_review: {
+      detail: "Claude blocks actions it judges risky. Anything a room message asks for counts as approved, including commands that reach outside your project. Your own Claude Code allow rules apply first, and your hooks run as you set them up.",
+    },
+    full_access: {
+      detail: "Commands can access files outside your project. Use only for work you trust. While your own setup is on, the project's own Claude settings, hooks, skills, commands and MCP servers are not loaded. Its CLAUDE.md still is.",
+    },
+  },
+  codex: {
+    read_only: {
+      // Only what was seen: how Codex treats an MCP server of the owner's at this level. Hooks and plugins were not tried.
+      detail: "Cannot change files. Its commands cannot use the network, and web search is off. Its commands cannot read your Codex sign-in file. It asks for no approval: a command that needs more is refused. Your saved Codex command rules do not apply to it. It cannot change the task board, join rooms or submit reviews. These limits cover Codex's own commands and the room's tools only. Your own MCP tools can run without asking when your own Codex settings already approve them or their own server labels them read-only, which nothing checks. This level puts no limit of its own on your hooks and plugins.",
+    },
+    ask_before_write: {
+      detail: "Starts with read-only file access and no network access. Requests approval when it needs more access. Your own MCP tools, hooks and plugins are not held to these limits: they run as you, and some run without asking.",
+    },
+    auto_review: {
+      detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project. Your own MCP tools, hooks and plugins are not held to these limits: they run as you.",
+    },
+  },
+};
+
+/** The same profiles, described truthfully for an agent that uses its owner's own setup. */
+export function describeProfilesWithOwnerSetup(providerId: string, profiles: unknown): unknown {
+  const provider = providerId.trim().toLowerCase();
+  const descriptions = OWNER_SETUP_DESCRIPTIONS[provider === "claude" ? "claude-code" : provider];
+  if (!descriptions || !Array.isArray(profiles)) return profiles;
+  return profiles.map((profile) => {
+    const id = profile && typeof profile === "object" ? (profile as { id?: unknown }).id : null;
+    const described = typeof id === "string" && Object.hasOwn(descriptions, id) ? descriptions[id] : null;
+    // Only an access level the agent can actually use is redescribed.
+    return described && (profile as { status?: unknown }).status === "available" ? { ...profile, ...described } : profile;
+  });
+}
+
+/**
+ * Why a Codex agent that collects its own room messages cannot have Read-only.
+ * Read-only limits the room tools to a named list, and the background service
+ * holds that list only for an agent it delivers room messages to. Said where
+ * the level is offered and where it is saved, so the owner learns it there
+ * and not only when the agent does not start.
+ */
+export const CODEX_READ_ONLY_NEEDS_DELIVERY = "Read-only access is for a Codex agent that LetAgents delivers room messages to. "
+  + "This agent collects its own room messages, so LetAgents cannot hold it to the room tools that Read-only allows. Choose another access level for this agent.";
+
+/** Whether Read-only cannot be used by this agent: a Codex agent the background service does not deliver room messages to. */
+export function codexReadOnlyNeedsDelivery(providerId: string, deliveryMode: string | null | undefined): boolean {
+  return providerId.trim().toLowerCase() === "codex" && deliveryMode !== "daemon_inbox";
+}
+
+/** Why this agent cannot have Read-only, for a Codex agent that cannot. Null otherwise. */
+export function codexReadOnlyRefusal(providerId: string, deliveryMode: string | null | undefined, platform: string = process.platform): string | null {
+  if (providerId.trim().toLowerCase() !== "codex") return null;
+  if (platform === "win32") return CODEX_READ_ONLY_WINDOWS;
+  return codexReadOnlyNeedsDelivery(providerId, deliveryMode) ? CODEX_READ_ONLY_NEEDS_DELIVERY : null;
+}
+
+/** A provider's access levels as one agent can use them: Read-only is shown as unavailable, with the reason, to an agent that cannot have it. */
+export function describeProfilesForAgent(providerId: string, deliveryMode: string | null | undefined, profiles: unknown, platform: string = process.platform): unknown {
+  const refusal = codexReadOnlyRefusal(providerId, deliveryMode, platform);
+  if (!refusal || !Array.isArray(profiles)) return profiles;
+  return profiles.map((profile) => (profile && typeof profile === "object" && (profile as { id?: unknown }).id === "read_only"
+    ? { ...profile, status: "gated", detail: refusal } : profile));
 }
 
 export function assertSupervisedPermissionProfileAvailable(providerId: string, requestedId: string | null): string {
@@ -171,10 +262,19 @@ export function assertSupervisedPermissionProfileAvailable(providerId: string, r
 export function assertSupervisedRentalPermissionProfileAvailable(
   providerId: string,
   requestedId: string | null,
+  entryId: string | null = null,
+  platform: string = process.platform,
 ): string {
   const provider = providerId.trim().toLowerCase();
   const requested = requestedId?.trim() || null;
-  if (provider !== "cursor" || requested !== "sandboxed_write") {
+  // A given agent (Ask for an agent, entry id supervised_rental_ask_*) may also run with no local tools
+  // at all; the rental marketplace stays Cursor's verified sandbox only.
+  const given = entryId?.startsWith("supervised_rental_ask_") === true;
+  const verified = (provider === "cursor" && requested === "sandboxed_write")
+    || (given && provider === "claude-code" && requested === "read_only")
+    || (given && provider === "codex" && requested === "read_only");
+  // Windows gives Cursor no OS sandbox and Codex no Read-only (rental-permission-profiles.ts holds the same line).
+  if (!verified || (platform === "win32" && (provider === "cursor" || provider === "codex"))) {
     throw new Error(
       "Rented agents require an explicit verified workspace-rooted permission profile.",
     );

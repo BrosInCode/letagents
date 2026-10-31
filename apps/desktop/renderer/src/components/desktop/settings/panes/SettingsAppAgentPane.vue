@@ -11,20 +11,18 @@
       <SettingsRow
         title="Show App Agent"
         description="Show the floating assistant in the app. Off by default."
+        description-id="settings-app-agent-enabled-description"
       >
         <template #action>
-          <button
-            class="secondary-button settings-action-button"
-            type="button"
-            role="switch"
-            aria-label="Show App Agent"
-            :aria-checked="appAgentSettings?.enabled === true"
-            :disabled="appAgentBusy || !appAgentSettings"
-            data-testid="settings-app-agent-enabled"
-            @click="toggleAppAgent"
-          >
-            {{ appAgentSettings?.enabled === true ? "Disable" : "Enable" }}
-          </button>
+          <DesktopSwitch
+            label="Show App Agent"
+            describedby="settings-app-agent-enabled-description"
+            test-id="settings-app-agent-enabled"
+            :checked="appAgentSettings?.enabled === true"
+            :busy="appAgentBusy"
+            :disabled="!appAgentSettings"
+            @toggle="toggleAppAgent"
+          />
         </template>
       </SettingsRow>
 
@@ -143,6 +141,7 @@
 </template>
 
 <script setup lang="ts">
+import { formatDate } from "../../../../domain/formatters";
 import { Save } from "@lucide/vue";
 import { computed, ref, watch } from "vue";
 import type {
@@ -160,6 +159,7 @@ import {
   actionRiskState,
   slugify,
 } from "../presentation";
+import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import SettingsRow from "../SettingsRow.vue";
 import type { SettingsFeedback } from "../types";
 
@@ -216,12 +216,7 @@ const appAgentSavedLabel = computed(() => {
   if (!props.appAgentSettings?.savedAt) return "never";
   const timestamp = new Date(props.appAgentSettings.savedAt);
   if (Number.isNaN(timestamp.getTime())) return "recently";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(timestamp);
+  return formatDate("monthDayTime", timestamp);
 });
 
 const appAgentKeyDescription = computed(() => {

@@ -37,7 +37,14 @@ export function validateRoomWorkspaceSchema(db: DatabaseSync): void {
 export type WorkspaceCaptureIdentity = { agentId: string; roomId: string; sourceMessageId: string; workAttemptId: string; inboxItemId: string };
 const keys = (key: WorkspaceCaptureIdentity) => [key.agentId, key.roomId, key.sourceMessageId, key.workAttemptId, key.inboxItemId];
 export class RoomWorkspaceStore {
-  constructor(private readonly db: DatabaseSync) {}
+  private readonly reviewSizeSql: 'octet_length(data)' | 'length(data)';
+  constructor(private readonly db: DatabaseSync) {
+    // Reviews are gzip/base64 ASCII. In UTF-8, byte length comes from SQLite's
+    // record metadata, without reading an already-uploaded archive again.
+    // Other database encodings retain the original character-count semantics.
+    this.reviewSizeSql = db.prepare('PRAGMA encoding').get()?.encoding === 'UTF-8'
+      ? 'octet_length(data)' : 'length(data)';
+  }
   begin(key: WorkspaceCaptureIdentity): boolean {
     // A second native invocation for the same source is ambiguous. Do not reuse a
     // previous invocation's baseline, even if the provider never returned a turn id.
@@ -75,8 +82,11 @@ export class RoomWorkspaceStore {
     } catch (error) { this.db.exec('ROLLBACK TO workspace_review; RELEASE workspace_review'); throw error; }
   }
   pendingPage(agentId: string, roomId: string, sourceMessageId: string): WorkspaceReviewPage | null {
-    const row = this.db.prepare('SELECT digest,uploaded_pages,length(data) AS size,substr(data,uploaded_pages*?+1,?) AS page FROM room_workspace_reviews WHERE agent_id=? AND room_id=? AND source_message_id=?')
-      .get(REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, agentId, roomId, sourceMessageId);
+    const row = this.db.prepare(`SELECT digest,uploaded_pages,${this.reviewSizeSql} AS size,
+      CASE WHEN uploaded_pages*? < ${this.reviewSizeSql}
+        THEN substr(data,uploaded_pages*?+1,?) END AS page
+      FROM room_workspace_reviews WHERE agent_id=? AND room_id=? AND source_message_id=?`)
+      .get(REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, REVIEW_PAGE_SIZE, agentId, roomId, sourceMessageId);
     if (!row || Number(row.uploaded_pages) * REVIEW_PAGE_SIZE >= Number(row.size)) return null;
     return { digest: String(row.digest), index: Number(row.uploaded_pages), total: Math.ceil(Number(row.size) / REVIEW_PAGE_SIZE), data: String(row.page) };
   }

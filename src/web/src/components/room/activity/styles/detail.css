@@ -49,6 +49,15 @@
   gap: 10px;
 }
 
+/* The shared wake-rule cards take the activity panel's card radius. */
+.activity-detail-waiting .wake-rule {
+  border-radius: 8px;
+}
+
+.activity-detail-waiting .wake-rule-mark {
+  border-radius: 6px;
+}
+
 .activity-detail-section-header {
   display: flex;
   align-items: center;
@@ -188,3 +197,12 @@
   border-color: rgba(147, 197, 253, 0.34);
   outline: none;
 }
+
+.activity-panel .activity-detail,
+.activity-detail-section,
+.activity-detail-header > div,
+.activity-liveness-card > div > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.activity-detail-header h3 { flex-wrap: wrap; }

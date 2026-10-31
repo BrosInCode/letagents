@@ -1,26 +1,76 @@
 import { constants } from "node:fs";
-import { link, lstat, mkdir, open, unlink } from "node:fs/promises";
+import { link, lstat, open, unlink } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
-import { homedir } from "node:os";
+import { letagentsHome } from "./letagents-home.mjs";
+import {
+  createPrivateDir, hasProfileDefaultAccess, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated,
+  protectOwnerPrivate, syncDirectory as syncFolder,
+} from "./owner-private-fs.mjs";
 
-export const daemonMaintenancePath = (root = join(homedir(), ".letagents")) => join(root, "daemon-maintenance.json");
+export const daemonMaintenancePath = (root = letagentsHome()) => join(root, "daemon-maintenance.json");
 export const DAEMON_MAINTENANCE_MESSAGE = "Agent supervision is paused for service maintenance. Resume it in Settings → Updates.";
 
 async function syncDirectory(path) {
-  const directory = await open(dirname(path), "r");
-  try { await directory.sync(); } finally { await directory.close(); }
+  await syncFolder(dirname(path));
+}
+
+/**
+ * Windows reads a file's permissions by path, so a record is trusted only in
+ * a folder no other account can change (no swap during the read).
+ */
+async function privateParent(path) {
+  const folder = dirname(path);
+  const info = await lstat(folder);
+  return info.isDirectory() && !info.isSymbolicLink() && await isOwnerPrivate(folder, info);
+}
+
+/**
+ * Windows: "no record" is trusted only where no other account could have
+ * deleted one. A hold is only ever written into a private folder, so in a
+ * folder of this account's that is not private yet no hold was written; it is
+ * made private now (only from a fresh profile folder's access) and the absence
+ * stands. A missing folder holds nothing. Any other answer (another account's
+ * folder, a tool failure) fails closed. Accepted limit: an account that held
+ * WRITE_DAC on the folder earlier may keep an open handle that no DACL change
+ * revokes; a handle-based design is needed to close that.
+ */
+async function absenceIsTrusted(path) {
+  try { await lstat(dirname(path)); }
+  catch (error) { if (error.code === "ENOENT") return; throw error; }
+  await ensurePrivateParent(path);
+}
+
+/**
+ * Windows: make this account's own state folder private if it is not yet
+ * (the daemon's state database code does the same at start). Only a folder
+ * with a fresh profile folder's access (this account, SYSTEM, Administrators)
+ * is changed in place; one that grants any other account is refused.
+ */
+async function ensurePrivateParent(path) {
+  const folder = dirname(path);
+  const info = await lstat(folder);
+  const unsafe = () => new Error(`Unsafe service maintenance folder. Make ${folder} private to this account `
+    + "(only you and SYSTEM may have access), then try again.");
+  if (!info.isDirectory() || info.isSymbolicLink()) throw unsafe();
+  if (await isOwnerPrivate(folder, info)) return;
+  if (!await hasProfileDefaultAccess(folder, info)) throw unsafe();
+  await protectOwnerPrivate(folder, "directory", { force: true });
 }
 
 /** Only ENOENT means normal operation. Corruption or an unsafe path must fail closed. */
 export async function readDaemonMaintenance(path = daemonMaintenancePath()) {
   let file;
-  try { file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }
-  catch (error) { if (error.code === "ENOENT") return null; throw error; }
+  try { file = await openNoFollow(path, constants.O_RDONLY | constants.O_NONBLOCK); }
+  catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    if (ownerPrivatePlatform() === "win32") await absenceIsTrusted(path);
+    return null;
+  }
   try {
     const stat = await file.stat();
-    if (!stat.isFile() || stat.size > 4096 || (stat.mode & 0o077) !== 0
-      || (process.getuid && stat.uid !== process.getuid())) throw new Error("Unsafe service maintenance record.");
+    if (!stat.isFile() || stat.size > 4096 || !await isOwnerPrivate(path, stat)
+      || (ownerPrivatePlatform() === "win32" && !await privateParent(path))) throw new Error("Unsafe service maintenance record.");
     const value = JSON.parse(await file.readFile("utf8"));
     if (value?.version !== 1 || typeof value.id !== "string" || !/^[a-f0-9-]{36}$/.test(value.id)
       || typeof value.createdAt !== "string" || !Number.isFinite(Date.parse(value.createdAt))
@@ -33,11 +83,15 @@ export async function readDaemonMaintenance(path = daemonMaintenancePath()) {
 async function publishHold(path) {
   const existing = await readDaemonMaintenance(path);
   if (existing) { await syncDirectory(path); return existing; }
-  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await createPrivateDir(dirname(path), { recursive: true });
+  // Windows: the record is written only into a verified private folder, so it
+  // inherits the private entries at creation; the hard link shares them.
+  if (ownerPrivatePlatform() === "win32") await ensurePrivateParent(path);
   const value = { version: 1, id: randomUUID(), createdAt: new Date().toISOString() };
   const temporary = `${path}.${value.id}.tmp`;
   const file = await open(temporary, "wx", 0o600);
   try {
+    await privateEntryCreated(temporary, "file");
     await file.writeFile(`${JSON.stringify(value)}\n`, "utf8");
     await file.sync();
     try { await link(temporary, path); }
@@ -46,7 +100,11 @@ async function publishHold(path) {
     const published = await readDaemonMaintenance(path);
     if (!published) throw new Error("Service maintenance record disappeared before commit.");
     return published;
-  } finally { await file.close(); await unlink(temporary); }
+  } finally {
+    await file.close();
+    // Windows: a busy temporary file (a scanner holding it) must not undo a published hold.
+    await unlink(temporary).catch((error) => { if (ownerPrivatePlatform() !== "win32") throw error; });
+  }
 }
 
 /** Explicit resume owns removal, after the held daemon has exited. */
@@ -62,12 +120,14 @@ async function removeHold(id, path) {
 }
 
 // Keep this inode forever. Unlinking a flock file can create two owners. Darwin
-// uses the kernel lock; non-Darwin tests model ownership in-process, like the
-// daemon singleton. Product maintenance is currently macOS-only.
+// uses the kernel lock. Elsewhere ownership is modeled in-process: on Windows
+// only the desktop main process takes this lock, and the app's single-instance
+// lock holds that to one process.
 const simulatedClaims = new Set();
 export async function withDaemonMaintenanceOperation(operation, path = daemonMaintenancePath()) {
   const lockPath = `${resolve(path)}.lock`;
-  await mkdir(dirname(lockPath), { recursive: true, mode: 0o700 });
+  await createPrivateDir(dirname(lockPath), { recursive: true });
+  if (ownerPrivatePlatform() === "win32") await ensurePrivateParent(lockPath);
   const native = process.platform === "darwin";
   if (!native && simulatedClaims.has(lockPath)) throw new Error("Another service maintenance action is in progress.");
   if (!native) simulatedClaims.add(lockPath);
@@ -75,10 +135,19 @@ export async function withDaemonMaintenanceOperation(operation, path = daemonMai
   let active = true;
   const assertActive = () => { if (!active) throw new Error("Service maintenance action has ended."); };
   try {
-    lock = await open(lockPath, constants.O_CREAT | constants.O_RDWR | constants.O_NOFOLLOW
+    if (ownerPrivatePlatform() === "win32") await createWindowsLock(lockPath);
+    lock = await openNoFollow(lockPath, constants.O_CREAT | constants.O_RDWR
       | constants.O_NONBLOCK | (native ? 0x20 /* Darwin O_EXLOCK */ : 0), 0o600);
-    const stat = await lock.stat();
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0 || (process.getuid && stat.uid !== process.getuid())) {
+    let stat = await lock.stat();
+    // Windows: another of this account's processes may have made the lock and
+    // not yet set its DACL. A lock this account owns is made private here
+    // (it holds no data); one another account owns is refused.
+    if (ownerPrivatePlatform() === "win32" && stat.isFile() && !await isOwnerPrivate(lockPath, stat)
+      && await isOwnedByCurrentUser(lockPath, stat)) {
+      await protectOwnerPrivate(lockPath, "file", { force: true });
+      stat = await lock.stat();
+    }
+    if (!stat.isFile() || !await isOwnerPrivate(lockPath, stat)) {
       throw new Error("Unsafe service maintenance lock.");
     }
     return await operation({
@@ -94,6 +163,13 @@ export async function withDaemonMaintenanceOperation(operation, path = daemonMai
     await lock?.close();
     if (!native) simulatedClaims.delete(lockPath);
   }
+}
+/** Windows has no mode bits: a new lock file is made exclusively and given its private DACL before use. */
+async function createWindowsLock(lockPath) {
+  let created;
+  try { created = await open(lockPath, "wx", 0o600); }
+  catch (error) { if (error.code === "EEXIST") return; throw error; }
+  try { await privateEntryCreated(lockPath, "file"); } finally { await created.close(); }
 }
 export const createDaemonMaintenance = (path = daemonMaintenancePath()) => withDaemonMaintenanceOperation(owner => owner.create(), path);
 export const clearDaemonMaintenance = (id, path = daemonMaintenancePath()) => withDaemonMaintenanceOperation(owner => owner.clear(id), path);

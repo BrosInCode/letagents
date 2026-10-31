@@ -73,6 +73,7 @@ function createRouteApp() {
     post(path: RegExp, handler: (req: unknown, res: ReturnType<typeof createResponseRecorder>) => Promise<void>) {
       handlers.post.set(path.toString(), handler);
     },
+    delete() {},
   };
 
   return { app, handlers };
@@ -94,7 +95,7 @@ function createResponseRecorder() {
 }
 
 test("registerRoomReasoningRoutes preserves canonical route order", () => {
-  const calls: Array<{ method: "get" | "post" | "patch"; path: string }> = [];
+  const calls: Array<{ method: "get" | "post" | "patch" | "delete"; path: string }> = [];
   const app = {
     get(path: RegExp) {
       calls.push({ method: "get", path: path.toString() });
@@ -104,6 +105,9 @@ test("registerRoomReasoningRoutes preserves canonical route order", () => {
     },
     patch(path: RegExp) {
       calls.push({ method: "patch", path: path.toString() });
+    },
+    delete(path: RegExp) {
+      calls.push({ method: "delete", path: path.toString() });
     },
   };
 
@@ -116,6 +120,7 @@ test("registerRoomReasoningRoutes preserves canonical route order", () => {
     { method: "get", path: "/^\\/rooms\\/(.+)\\/reasoning-sessions\\/([^/]+)$/" },
     { method: "patch", path: "/^\\/rooms\\/(.+)\\/reasoning-sessions\\/([^/]+)$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/reasoning-sessions\\/([^/]+)\\/updates$/" },
+    { method: "delete", path: "/^\\/rooms\\/(.+)\\/live-activity$/" },
   ]);
 });
 

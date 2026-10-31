@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, realpath, rename, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -14,6 +14,7 @@ import {
   UnusableSourceRepositoryError,
   type GitCommand,
 } from "../workspace-provisioner.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 /**
  * Build a fake GitCommand keyed by the meaningful subcommand. A value throws
@@ -152,7 +153,7 @@ test("originless local projects provision isolated worktrees without changing th
     const foreignIdentity = await resolveSourceRepositoryIdentity(foreign, git);
     await assert.rejects(provision(foreignIdentity.revision, foreign), /remote identity does not match/);
     assert.equal(String(await git(["-C", source, "remote"])).trim(), "", "launch never adds an origin to the project");
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });
 
 test("originless repositories borrowing objects produce independent private clones", async () => {
@@ -178,5 +179,5 @@ test("originless repositories borrowing objects produce independent private clon
     await rename(donor, join(root, "donor-unavailable"));
     assert.equal(String(await git(["-C", result.path, "show", "HEAD:app.txt"])), "borrowed content");
     assert.equal(await readFile(join(source, ".git", "objects", "info", "alternates"), "utf8"), alternates);
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally { await removeTestDirectory(root); }
 });

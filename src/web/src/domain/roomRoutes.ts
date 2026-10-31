@@ -1,9 +1,16 @@
-export function encodeRoomPathIdentifier(identifier: string): string {
-  return String(identifier)
-    .split('/')
-    .map(segment => encodeURIComponent(segment))
-    .join('/')
-}
+export {
+  LETAGENTS_ROOM_ORIGIN,
+  MESSAGE_ID_PATTERN,
+  isValidMessageId,
+  encodeRoomPathIdentifier,
+  decodeRoomPath,
+  isLocalRoomIdentifier,
+  buildLetAgentsMessageUrl,
+  parseLetAgentsMessageUrl,
+  resolveSameRoomMessageReference,
+} from '../../../../shared/room-message-urls.mjs'
+
+import { encodeRoomPathIdentifier } from '../../../../shared/room-message-urls.mjs'
 
 export function buildDirectRoomPath(identifier: string | null | undefined): string {
   const value = identifier?.trim()

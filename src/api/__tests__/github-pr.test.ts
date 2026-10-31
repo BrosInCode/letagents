@@ -155,3 +155,34 @@ test("openRentalPatchPullRequest creates a patch commit branch before opening th
   assert.equal(calls.some((call) => call.url.endsWith("/git/refs")), true);
   assert.equal(calls.at(-1)?.url.endsWith("/pulls"), true);
 });
+
+test("stacked changes build on the work branch head and reuse the open pull request", async () => {
+  const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 }).privateKey.export({ format: "pem", type: "pkcs1" }).toString();
+  const calls: string[] = [];
+  const fetchImpl: typeof fetch = async (url, init) => {
+    const method = init?.method ?? "GET"; const target = String(url);
+    const body = init?.body ? JSON.parse(String(init.body)) : null;
+    calls.push(`${method} ${target.replace("https://api.github.com", "")}`);
+    if (target.endsWith("/access_tokens")) return jsonResponse({ token: "t" });
+    if (target.endsWith("/git/ref/heads/main")) return jsonResponse({ object: { sha: "base" } });
+    if (target.endsWith("/git/ref/heads/letagents/ask-1")) return jsonResponse({ object: { sha: "earlier" } });
+    if (target.endsWith("/git/commits/earlier")) return jsonResponse({ sha: "earlier", tree: { sha: "earliertree" } });
+    if (target.endsWith("/git/trees")) { assert.equal(body.base_tree, "earliertree"); return jsonResponse({ sha: "tree2" }); }
+    if (target.endsWith("/git/commits") && method === "POST") { assert.deepEqual(body.parents, ["earlier"]); return jsonResponse({ sha: "second" }); }
+    if (target.endsWith("/git/refs/heads/letagents/ask-1") && method === "PATCH") return jsonResponse({});
+    if (target.includes("/pulls?state=open")) return jsonResponse([{ number: 7, html_url: "https://github.com/acme/app/pull/7", title: "t", head: { ref: "letagents/ask-1" }, base: { ref: "main" } }]);
+    return jsonResponse({ message: `Unexpected ${method} ${target}` }, 500);
+  };
+  const result = await openRentalPatchPullRequest({
+    repoProvider: "github", repoOwner: "acme", repoName: "app", baseBranch: "main", workBranch: "letagents/ask-1",
+    patchFiles: [{ path: "a.ts", operation: "modify", content: "x" }], title: "Second change", stackOnWorkBranch: true,
+  }, {
+    getConfig: async () => ({ appId: "1", privateKey } as any),
+    getRepositoryByFullName: async () => ({ installation_id: "inst", removed_at: null } as any),
+    getInstallationById: async () => ({ installation_id: "inst", suspended_at: null, uninstalled_at: null } as any),
+    fetchImpl,
+  });
+  assert.equal(result.number, 7);
+  assert.equal(result.commitSha, "second");
+  assert.ok(!calls.some(call => call.startsWith("POST /repos/acme/app/pulls")), "no second PR is opened");
+});

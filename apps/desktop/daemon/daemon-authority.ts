@@ -18,6 +18,7 @@ export class DaemonAuthority {
   private manifestGeneration: number;
   private manifestMutation: Promise<void> = Promise.resolve();
   private manifestCommit: Promise<void> = Promise.resolve();
+  private pendingWriteFlush: (() => Promise<void>) | null = null;
 
   constructor(
     private readonly dependencies: DaemonAuthorityDependencies,
@@ -30,11 +31,40 @@ export class DaemonAuthority {
     return this.manifestGeneration;
   }
 
+  /**
+   * The stored generation only grows, so an accepted value lower than the
+   * current one is a stale acceptance: a writer outside the manifest lane (the
+   * handoff birth checkpoint) can accept its generation after an activity
+   * batch retried past it. Never move backwards.
+   */
   set generation(generation: number) {
-    this.manifestGeneration = generation;
+    if (generation > this.manifestGeneration) this.manifestGeneration = generation;
+  }
+
+  /**
+   * Work that must commit before any other manifest mutation runs: the
+   * batched activity events admitted earlier in this lane.
+   */
+  setPendingWriteFlush(flush: (() => Promise<void>) | null): void {
+    this.pendingWriteFlush = flush;
   }
 
   async serializeManifestMutation<T>(operation: () => Promise<T>): Promise<T> {
+    return this.runSerializedManifestMutation(async () => {
+      await this.pendingWriteFlush?.();
+      return operation();
+    });
+  }
+
+  /**
+   * The same lane without the pending-write flush. Only activity admission and
+   * the activity flush itself use it.
+   */
+  serializeManifestMutationWithoutFlush<T>(operation: () => Promise<T>): Promise<T> {
+    return this.runSerializedManifestMutation(operation);
+  }
+
+  private async runSerializedManifestMutation<T>(operation: () => Promise<T>): Promise<T> {
     const previous = this.manifestMutation;
     let release!: () => void;
     this.manifestMutation = new Promise<void>((resolve) => { release = resolve; });

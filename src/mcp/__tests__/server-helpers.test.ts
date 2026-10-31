@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { execSync } from "child_process";
 import { mkdirSync, realpathSync, rmSync, writeFileSync } from "fs";
-import { join } from "path";
+import { join, resolve, sep } from "path";
 import { tmpdir } from "os";
 import { findExistingConfig, resolveGitRoot } from "../server/repo-context.js";
 
@@ -34,14 +34,27 @@ describe("resolveGitRoot", () => {
 
   after(() => cleanup(repoDir));
 
+  // git prints the long, real path; on Windows the temp directory is handed
+  // out under its short 8.3 name, which only the native realpath expands.
+  const realRepoDir = () => realpathSync.native(repoDir);
+
   it("returns the repo root when called from repo root", () => {
-    assert.equal(resolveGitRoot(repoDir), realpathSync(repoDir));
+    assert.equal(resolveGitRoot(repoDir), realRepoDir());
   });
 
   it("returns the repo root when called from a subdirectory", () => {
     const subDir = join(repoDir, "src", "deep", "path");
     mkdirSync(subDir, { recursive: true });
-    assert.equal(resolveGitRoot(subDir), realpathSync(repoDir));
+    assert.equal(resolveGitRoot(subDir), realRepoDir());
+  });
+
+  it("returns git's forward-slash output as a native path", () => {
+    const printed = "C:/Users/owner/repo\n";
+    const root = resolveGitRoot(repoDir, () => printed);
+    assert.equal(root, resolve("C:/Users/owner/repo"));
+    if (process.platform === "win32") assert.equal(root, ["C:", "Users", "owner", "repo"].join(sep));
+    assert.equal(resolveGitRoot(repoDir, () => "\n"), null);
+    assert.equal(resolveGitRoot(repoDir, () => { throw new Error("not a git repository"); }), null);
   });
 
   it("returns null when not inside a git repo", () => {
