@@ -45,7 +45,8 @@ export const MAC_DESKTOP_BETA: MacDesktopBetaPresentation = {
 export type DesktopVisitorPlatform = 'mac' | 'windows' | 'other'
 
 export interface DesktopDownloadLink {
-  platform: 'mac' | 'windows'
+  /** One logo for each platform: Intel Mac sits beside the Apple logo with none of its own. */
+  icon: 'apple' | 'windows' | null
   label: string
   href: string
 }
@@ -66,10 +67,10 @@ export function desktopDownloadOffer(
   release: MacDesktopBetaPresentation,
   platform: DesktopVisitorPlatform,
 ): { primary: DesktopDownloadLink; others: DesktopDownloadLink[] } {
-  const appleSilicon: DesktopDownloadLink = { platform: 'mac', label: 'Mac · Apple Silicon', href: release.downloads.arm64 }
-  const intel: DesktopDownloadLink = { platform: 'mac', label: 'Intel Mac', href: release.downloads.x64 }
+  const appleSilicon: DesktopDownloadLink = { icon: 'apple', label: 'Mac · Apple Silicon', href: release.downloads.arm64 }
+  const intel: DesktopDownloadLink = { icon: null, label: 'Intel Mac', href: release.downloads.x64 }
   const windows: DesktopDownloadLink | null = release.downloads.windows
-    ? { platform: 'windows', label: 'Windows', href: release.downloads.windows }
+    ? { icon: 'windows', label: 'Windows', href: release.downloads.windows }
     : null
   if (windows && platform === 'windows') return { primary: windows, others: [appleSilicon, intel] }
   return { primary: appleSilicon, others: windows ? [intel, windows] : [intel] }

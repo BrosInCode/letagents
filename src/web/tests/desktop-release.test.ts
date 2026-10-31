@@ -90,6 +90,10 @@ test('the visitor platform leads the download links, and Windows appears only wi
   assert.deepEqual(labels(desktopDownloadOffer(withWindows, 'mac')), ['Mac · Apple Silicon', 'Intel Mac', 'Windows'])
   assert.deepEqual(labels(desktopDownloadOffer(withWindows, 'other')), ['Mac · Apple Silicon', 'Intel Mac', 'Windows'])
   assert.deepEqual(labels(desktopDownloadOffer(MAC_DESKTOP_BETA, 'windows')), ['Mac · Apple Silicon', 'Intel Mac'])
+
+  const icons = (offer: ReturnType<typeof desktopDownloadOffer>) => [offer.primary.icon, ...offer.others.map((link) => link.icon)]
+  assert.deepEqual(icons(desktopDownloadOffer(withWindows, 'windows')), ['windows', 'apple', null])
+  assert.deepEqual(icons(desktopDownloadOffer(withWindows, 'mac')), ['apple', null, 'windows'])
 })
 
 test('visitor platform detection reads the browser and treats phones as neither desktop', () => {
