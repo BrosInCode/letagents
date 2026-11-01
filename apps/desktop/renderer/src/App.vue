@@ -323,6 +323,7 @@
     <AskAgentDialog
       :open="askAgentOpen"
       :room-identifier="selectedRoomWithProjectContext?.identifier ?? null"
+      :room-label="selectedRoomInfo.displayName || activeEntry.title"
       :rooms="settingsAccountRooms"
       @close="askAgentOpen = false"
       @created="void app.refreshAccountRooms?.()"

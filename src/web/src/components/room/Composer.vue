@@ -101,6 +101,11 @@
                 <span v-else-if="attachmentDrafts.length >= MAX_ATTACHMENTS" class="composer-menu-meta">Up to {{ MAX_ATTACHMENTS }} attachments per message</span>
               </span>
             </button>
+            <button v-if="!inlineThread && isSignedIn" class="composer-menu-item" type="button" role="menuitem" tabindex="-1"
+              data-testid="composer-menu-ask-agent" @click="closeAddMenu(true); emit('askAgent')">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v3M7 6h10a3 3 0 0 1 3 3v9H4V9a3 3 0 0 1 3-3ZM8 11h.01M16 11h.01M9 15h6" /></svg>
+              <span class="composer-menu-copy">Ask someone for an agent</span>
+            </button>
             <template v-if="!inlineThread">
               <div class="composer-menu-separator" role="separator"></div>
               <div class="composer-menu-heading">Agent prompts</div>
@@ -216,6 +221,7 @@ const emit = defineEmits<{
   send: [text: string, agentPromptKind: string | null, replyTo: string | null, attachments?: OutgoingMessageAttachment[]]
   clearReply: []
   signIn: []
+  askAgent: []
 }>()
 
 const composerId = computed(() => props.inlineThread ? `thread-${props.threadRootId}` : 'composer')
