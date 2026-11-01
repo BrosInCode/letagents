@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { mergeWeights, parseArgs } from "./measure-test-weights.mjs";
+import { mergeWeights, parseArgs, spawnCommand } from "./measure-test-weights.mjs";
+import { npmInvocation } from "./npm-command.mjs";
 
 const script = path.resolve("scripts/measure-test-weights.mjs");
 
@@ -26,6 +27,33 @@ test("new measurements replace old ones, round to whole seconds, never drop belo
     "m.ts": 1,
     "z.ts": 3,
   });
+});
+
+test("an npm command runs through the npm launcher wrapper, any other command as named", () => {
+  // On Windows `spawn("npm")` finds nothing; the wrapper runs npm-cli.js under
+  // the current node (scripts/npm-command.mjs), as scripts/retry-command.mjs does.
+  assert.deepEqual(spawnCommand("npm", ["run", "test:daemon:files", "--", "a.ts"]), npmInvocation(["run", "test:daemon:files", "--", "a.ts"]));
+  assert.deepEqual(spawnCommand("node", ["a.mjs"]), { command: "node", args: ["a.mjs"], options: {} });
+});
+
+test("a command that cannot start fails the run instead of being timed", () => {
+  const directory = mkdtempSync(path.join(tmpdir(), "measure-test-weights-missing-"));
+  try {
+    writeFileSync(path.join(directory, "fast.mjs"), "");
+    const out = path.join(directory, "weights.json");
+    assert.throws(
+      () =>
+        execFileSync(
+          process.execPath,
+          [script, "--out", out, "--cwd", directory, "--run", path.join(directory, "no-such-command"), "fast.mjs"],
+          { stdio: ["ignore", "pipe", "pipe"] },
+        ),
+      /Could not run .*no-such-command fast\.mjs: .*ENOENT/,
+    );
+    assert.equal(existsSync(out), false);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test("the command times each file alone and writes the weights file", () => {

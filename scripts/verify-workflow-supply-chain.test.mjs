@@ -1,11 +1,21 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import test from "node:test";
 
-const workflowPaths = [
-  ".github/workflows/ci.yml",
-  ".github/workflows/desktop-release.yml",
-];
+// Every workflow in the folder, so a new one cannot escape the checks below.
+const workflowPaths = readdirSync(".github/workflows")
+  .filter((name) => /\.ya?ml$/.test(name))
+  .sort()
+  .map((name) => `.github/workflows/${name}`);
+const measureWorkflowPath = ".github/workflows/measure-test-weights.yml";
+
+test("the policy covers every workflow in the folder", () => {
+  assert.deepEqual(workflowPaths, [
+    ".github/workflows/ci.yml",
+    ".github/workflows/desktop-release.yml",
+    measureWorkflowPath,
+  ]);
+});
 
 function readRunScript(lines, startIndex, runIndent, inlineValue) {
   const inlineScript = inlineValue.trim();
@@ -357,10 +367,16 @@ test("dependency advisory checks use the pinned supported audit client", () => {
   const ciScripts = workflowRunScripts(ciJobs);
   const releaseScripts = workflowRunScripts(releaseJobs);
 
+  const measureWorkflow = readFileSync(measureWorkflowPath, "utf8");
+  const measureJobs = workflowJobs(measureWorkflowPath);
+  const measureScripts = workflowRunScripts(measureJobs);
+
   assertNoWorkflowRunDefaults(ciWorkflow, ".github/workflows/ci.yml");
   assertNoWorkflowRunDefaults(releaseWorkflow, ".github/workflows/desktop-release.yml");
+  assertNoWorkflowRunDefaults(measureWorkflow, measureWorkflowPath);
   assertAuditStepsAreMandatory(ciJobs, ".github/workflows/ci.yml");
   assertAuditStepsAreMandatory(releaseJobs, ".github/workflows/desktop-release.yml");
+  assertAuditStepsAreMandatory(measureJobs, measureWorkflowPath);
 
   assert.equal(
     ciScripts.filter((script) => script === "npm install -g npm@11.6.2").length,
@@ -421,6 +437,15 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "node scripts/retry-command.mjs npm audit signatures",
     "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
   ]);
+  assert.deepEqual(measureScripts.filter(containsDirectNpmAudit), [
+    "node scripts/retry-command.mjs npm audit signatures",
+    "node scripts/retry-command.mjs npm audit signatures --prefix apps/desktop",
+  ]);
+  assert.deepEqual(
+    measureScripts.filter((script) => script.startsWith("node scripts/verify-dependency-advisories.mjs")),
+    [],
+    "the measurement installs the lockfiles ci.yml audits on every push, and only on dispatch",
+  );
 
   assert.deepEqual(
     ciScripts.filter(containsDirectNpmCi),
@@ -451,6 +476,14 @@ test("dependency advisory checks use the pinned supported audit client", () => {
       "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
     ],
     "release installs must disable npm's implicit unbounded audit",
+  );
+  assert.deepEqual(
+    measureScripts.filter(containsDirectNpmCi),
+    [
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit",
+      "node scripts/retry-command.mjs npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+    ],
+    "measurement installs must disable npm's implicit unbounded audit",
   );
 });
 
@@ -646,7 +679,7 @@ test("the OpenCode runtime contract steps are exactly the reviewed ones", () => 
 
 function workflowJobText(workflow, name) {
   const start = workflow.indexOf(`\n  ${name}:\n`);
-  assert.ok(start >= 0, `ci.yml must define the ${name} job`);
+  assert.ok(start >= 0, `the workflow must define the ${name} job`);
   const next = workflow.slice(start + 1).search(/\n {2}\S/);
   return next === -1 ? workflow.slice(start) : workflow.slice(start, start + 1 + next);
 }
@@ -781,4 +814,87 @@ test("desktop-tests and desktop-tests-windows run every desktop suite, with elec
   for (const name of ["typecheck", "build"]) {
     assert.ok(windowsStep.run.includes(`npm --prefix apps/desktop run ${name} || status=1`), `desktop-tests-windows must run ${name}`);
   }
+});
+
+test("the weight measurement runs only on dispatch, prepares the runner as desktop-tests-windows does, and keeps both weights files", () => {
+  const workflow = readFileSync(measureWorkflowPath, "utf8");
+  // Dispatch is the only trigger: the measurement takes about an hour of a
+  // Windows runner and its result is committed by hand.
+  const triggers = workflow.match(/^on:\n((?: {2}.*\n|\n)*)/m);
+  assert.ok(triggers, `${measureWorkflowPath} must declare its triggers`);
+  assert.deepEqual(
+    triggers[1].split("\n").filter((line) => /^ {2}\S/.test(line)),
+    ["  workflow_dispatch:"],
+  );
+  assert.doesNotMatch(workflow, /^\s*(?:push|pull_request|pull_request_target|schedule|merge_group|workflow_run|workflow_call)\s*:/m);
+
+  const jobs = workflowJobs(measureWorkflowPath);
+  assert.equal(jobs.length, 1, "the measurement is one job");
+  const [job] = jobs;
+  const jobText = workflowJobText(workflow, job.name);
+  assert.equal(job.condition, null);
+  assert.equal(job.continueOnError, null);
+  assert.match(jobText, /^ {4}runs-on: windows-latest$/m);
+  const timeout = jobText.match(/^ {4}timeout-minutes: (\d+)$/m);
+  assert.ok(timeout, "the job must bound its run time");
+  assert.ok(Number(timeout[1]) >= 90, "the two suites take about 50 minutes of Windows time when files run one at a time");
+  assert.match(jobText, /^ {6}LETAGENTS_API_URL: http:\/\/127\.0\.0\.1:9$/m);
+
+  // Every step before the measurement is the step of the same name in the
+  // desktop-tests-windows job: the scratch home first, pinned checkout and
+  // Node, both installs through the retry wrapper with their signature
+  // checks, then the lifecycle scripts and Electron.
+  const windows = workflowJobs(".github/workflows/ci.yml").find((candidate) => candidate.name === "desktop-tests-windows");
+  const windowsSteps = windows.steps.slice(0, windows.steps.findIndex((step) => step.name === "Test desktop (${{ matrix.suite }})"));
+  const measureIndex = job.steps.findIndex((step) => step.name === "Measure the daemon and electron test files");
+  assert.ok(measureIndex > 0, "the job must define its measurement step");
+  assert.deepEqual(job.steps.slice(0, measureIndex), windowsSteps);
+  assert.equal(job.steps[0].name, "Use a scratch home and keep committed line endings");
+  assert.equal(
+    job.steps.findIndex((step) => step.run?.includes("npm exec --prefix apps/desktop -- install-electron")),
+    measureIndex - 1,
+    "Electron is installed right after the rebuilds, before the measurement",
+  );
+
+  // The measurement builds the native helpers as desktop-tests-windows does,
+  // then times each suite's files, from apps/desktop, one file per process,
+  // with bash expanding the same file patterns the shards select from.
+  const measure = job.steps[measureIndex];
+  assert.equal(measure.shell, "bash", "bash expands the file patterns; cmd would not");
+  assert.equal(measure.condition, "${{ !cancelled() && steps.setup.outcome == 'success' }}");
+  assert.equal(measure.continueOnError, null);
+  const lines = measure.run.split("\n");
+  assert.equal(lines[0], "set -euo pipefail");
+  for (const command of [
+    "node apps/desktop/native/win-daemon-pipe/build.mjs --check",
+    "node apps/desktop/native/win-process-tree/build.mjs --check",
+    'mv apps/desktop/native/win-process-tree/build/x64/letagents-process-tree.exe "${helper_dir}/"',
+    'export LETAGENTS_TEST_PROCESS_TREE_HELPER="${helper_dir}/letagents-process-tree.exe"',
+    'out_dir="${RUNNER_TEMP//\\\\//}/test-weights"',
+    "cd apps/desktop",
+  ]) {
+    assert.ok(lines.includes(command), `the measurement must run ${command}`);
+  }
+  const desktopScripts = JSON.parse(readFileSync("apps/desktop/package.json", "utf8")).scripts;
+  const measurements = lines.filter((line) => line.startsWith("node ../../scripts/measure-test-weights.mjs "));
+  assert.deepEqual(
+    measurements,
+    ["daemon", "electron"].map((kind) => {
+      const files = desktopScripts[`test:${kind}`].match(/^npm run test:\w+:files -- (\S+)$/)[1];
+      return `node ../../scripts/measure-test-weights.mjs --out "\${out_dir}/${kind}-test-weights.json" --run "npm run test:${kind}:files --" ${files}`;
+    }),
+    "each suite is measured once, from the file pattern test:<kind> runs",
+  );
+  assert.ok(
+    lines.indexOf("cd apps/desktop") < lines.indexOf(measurements[0]),
+    "the measurement runs from apps/desktop, where the file patterns resolve",
+  );
+
+  // Both files reach the artifact, which a person commits to scripts/.
+  const upload = jobText.match(/^ {6}- name: Keep the measured weights\n((?: {8}.*\n)*)/m);
+  assert.ok(upload, "the job must keep the measured weights");
+  assert.match(upload[1], /^ {8}uses: actions\/upload-artifact@[0-9a-f]{40} # v\d/m);
+  assert.match(upload[1], /^ {10}path: \$\{\{ runner\.temp \}\}\/test-weights\/\*-test-weights\.json$/m);
+  assert.match(upload[1], /^ {10}if-no-files-found: error$/m);
+  assert.doesNotMatch(upload[1], /^ {8}(?:if|continue-on-error):/m);
 });

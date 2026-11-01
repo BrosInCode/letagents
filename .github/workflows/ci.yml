@@ -609,7 +609,8 @@ jobs:
               # The daemon suite runs about five times slower on Windows than
               # on ubuntu and was the slowest job of every run, so it is split
               # by measured time (scripts/daemon-test-weights.json) like the
-              # electron suite below.
+              # electron suite below. Dispatching measure-test-weights.yml
+              # measures both weights files on a Windows runner.
               shard="${SUITE#daemon }"
               # Every daemon pipe client opens the pipe through the sealed
               # addon (shared/daemon-pipe-native.mjs finds the local build).

@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { npmInvocation } from "./npm-command.mjs";
+
 // Records how long each test file takes when it runs alone, so
 // scripts/select-test-shard.mjs can balance CI shards by time instead of by
 // byte size. A file that starts real daemon processes can take a minute while
@@ -12,9 +14,12 @@ import { pathToFileURL } from "node:url";
 //   node scripts/measure-test-weights.mjs --out scripts/electron-test-weights.json \
 //     --cwd apps/desktop --run "npm run test:electron:files --" electron/__tests__/*.test.ts
 //
-// --run is split on spaces; quoted arguments are not supported.
-// Each file runs once, in its own process, with HOME on a scratch folder so
-// the desktop suites do not write into the real ~/.letagents. The output maps
+// --run is split on spaces; quoted arguments are not supported. A command
+// named `npm` runs through scripts/npm-command.mjs, so it also works on
+// Windows, where the launcher is npm.cmd and spawn finds no `npm`.
+// Each file runs once, in its own process, with HOME and USERPROFILE on a
+// scratch folder so the desktop suites do not write into the real
+// ~/.letagents. The output maps
 // each file to whole seconds of wall time. Rerun it after a suite changes a lot;
 // the shard selector falls back to a size estimate for files it has no weight for.
 
@@ -57,18 +62,30 @@ function readWeights(file) {
   }
 }
 
+// `npm` is the launcher's name, not a program `spawn` finds on Windows.
+export function spawnCommand(command, args) {
+  return command === "npm" ? npmInvocation(args) : { command, args, options: {} };
+}
+
 function main() {
   const { out, cwd, run, files } = parseArgs(process.argv.slice(2));
   const [command, ...commandArgs] = run.split(" ").filter(Boolean);
   const measured = {};
   for (const file of files) {
     const home = mkdtempSync(path.join(tmpdir(), "test-weights-home-"));
+    const spawn = spawnCommand(command, [...commandArgs, file]);
     const started = Date.now();
-    const result = spawnSync(command, [...commandArgs, file], {
+    const result = spawnSync(spawn.command, spawn.args, {
       cwd,
       stdio: ["ignore", "ignore", "inherit"],
-      env: { ...process.env, HOME: home, LETAGENTS_API_URL: "http://127.0.0.1:9" },
+      env: { ...process.env, HOME: home, USERPROFILE: home, LETAGENTS_API_URL: "http://127.0.0.1:9" },
+      ...spawn.options,
     });
+    // A command that never started would be timed as an instant run and
+    // leave a weight of one second for every file; that is a usage error.
+    if (result.error) {
+      throw new Error(`Could not run ${[command, ...commandArgs, file].join(" ")}: ${result.error.message}`);
+    }
     const seconds = (Date.now() - started) / 1000;
     measured[file] = seconds;
     const outcome = result.status === 0 ? "ok" : `exit ${result.status ?? result.signal}`;
