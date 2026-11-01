@@ -55,7 +55,7 @@ const layout = ref<InstanceType<typeof InboxLayout> | null>(null)
 const requestHeading = ref<HTMLElement | null>(null)
 const router = useRouter()
 function focusSelection() {
-  if (requestHeading.value) requestHeading.value.focus({ preventScroll: true })
+  if (requestHeading.value?.getClientRects().length) requestHeading.value.focus({ preventScroll: true })
   else layout.value?.focusHeading()
 }
 async function respond(close = false) {
