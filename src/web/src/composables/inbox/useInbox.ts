@@ -79,14 +79,17 @@ export function useInbox(accountId: Ref<string | null>, api = createInboxApi(api
     try {
       const record = await api.answer(item, response, close)
       if (!alive || current !== session) return
+      const keepFocus = selectedKey.value === item.key
       answers.value = { ...answers.value, [item.key]: record }; delete drafts[item.key]
-      if (selectedKey.value === item.key) {
+      if (keepFocus) {
         const next = items.value.find(other => other.key !== item.key)
         if (next) selectedKey.value = next.key
         else { section.value = 'answered'; selectedKey.value = item.key }
       }
       outcome.value = close ? 'Request closed.' : 'Response sent.'
       void refresh()
+      // The page restores focus only when this request was still being read.
+      return keepFocus ? selectedKey.value : undefined
     } catch (cause) { if (alive && current === session) actionError.value = cause instanceof Error ? cause.message : 'Could not save your response.' }
     finally { if (alive && current === session) sending.value = false }
   }

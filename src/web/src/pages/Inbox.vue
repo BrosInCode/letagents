@@ -12,7 +12,7 @@
           <ul v-if="failures.length"><li v-for="failure in failures" :key="failure.label">{{ failure.label }}</li></ul>
           <p v-if="snapshot?.limited">Showing recent activity from up to 100 rooms and their focus rooms. Open a room for its full history.</p>
         </details>
-        <p v-if="lastRead.length" class="web-inbox-notice" role="status">{{ lastRead.length }} {{ lastRead.length === 1 ? 'update' : 'updates' }} marked read in this inbox. <button @click="undoRead">Undo</button></p>
+        <p v-if="lastRead.length" class="web-inbox-notice" role="status">{{ lastRead.length }} {{ lastRead.length === 1 ? 'update' : 'updates' }} marked read in this inbox. <button @click="undoUpdatesRead">Undo</button></p>
         <p v-if="actionError" class="web-inbox-notice web-inbox-error" role="alert">{{ actionError }}</p>
         <p v-if="outcome" class="web-inbox-notice" role="status">{{ outcome }}</p>
       </template>
@@ -21,25 +21,25 @@
       <template #detail>
         <article v-if="selected" :key="selected.key" class="web-inbox-detail" aria-labelledby="web-inbox-request-title">
           <div class="inbox-detail-top"><span>{{ selected.category }}</span><time :datetime="selected.timestamp" :title="date(selected.timestamp)">{{ age(selected.timestamp) }}</time></div>
-          <div class="inbox-detail-content"><h2 id="web-inbox-request-title" tabindex="-1">{{ selected.title }}</h2>
+          <div class="inbox-detail-content"><h2 id="web-inbox-request-title" ref="requestHeading" tabindex="-1">{{ selected.title }}</h2>
           <div class="inbox-detail-byline"><ChatAvatar :name="selected.actor" :agent="selected.agent" :agent-key="selected.agentKey" :provider="selected.provider" :avatar-url="selected.avatarUrl" /><span>{{ selected.actor }}</span><span aria-hidden="true">·</span><button class="inbox-text-button" @click="openRoom(selected, 'room')">{{ selected.roomName }} <span aria-hidden="true">↗</span></button></div>
           <p class="inbox-detail-body">{{ selected.body || 'Open the original work for more context.' }}</p>
           <div v-if="selected.record?.response" class="inbox-answer" role="status"><strong>{{ selected.record.response.closed ? 'Closed' : 'Answer recorded' }}</strong><p>{{ selected.record.response.body }}</p><small>{{ selected.record.response.actor.label }} · {{ date(selected.record.response.at) }}</small></div>
-          <InboxResponse v-else-if="selected.record" :id="`web-response-${selected.record.id}`" :model-value="drafts[selected.key]" :suggestion="selected.record.recommendation || undefined" :disabled="sending" :recipient="selected.actor" @update:model-value="drafts[selected!.key] = $event" @submit="answer()" @close="answer(true)" />
-          <div v-else class="inbox-actions"><a v-if="safeExternalUrl(selected.url)" :href="safeExternalUrl(selected.url)" target="_blank" rel="noopener noreferrer" class="inbox-button inbox-primary">Open on GitHub ↗</a><button v-else class="inbox-button inbox-primary" @click="openRoom(selected)">{{ selected.taskId ? 'Open task' : selected.messageId ? 'Open thread' : 'Open room' }} <span aria-hidden="true">↗</span></button><button class="inbox-button" @click="markRead([selected])">Mark read</button></div>
+          <InboxResponse v-else-if="selected.record" :id="`web-response-${selected.record.id}`" :model-value="drafts[selected.key]" :suggestion="selected.record.recommendation || undefined" :disabled="sending" :recipient="selected.actor" @update:model-value="drafts[selected!.key] = $event" @submit="respond()" @close="respond(true)" />
+          <div v-else class="inbox-actions"><a v-if="safeExternalUrl(selected.url)" :href="safeExternalUrl(selected.url)" target="_blank" rel="noopener noreferrer" class="inbox-button inbox-primary">Open on GitHub ↗</a><button v-else class="inbox-button inbox-primary" @click="openRoom(selected)">{{ selected.taskId ? 'Open task' : selected.messageId ? 'Open thread' : 'Open room' }} <span aria-hidden="true">↗</span></button><button class="inbox-button" @click="markUpdatesRead([selected])">Mark read</button></div>
           <details v-if="selected.record && (selected.record.unblocks || selected.record.source_message_id || safeExternalUrl(selected.record.source_url))" class="inbox-supporting"><summary>Supporting details</summary><p v-if="selected.record.unblocks"><strong>Your answer unblocks</strong><br />{{ selected.record.unblocks }}</p><div class="inbox-actions"><a v-if="safeExternalUrl(selected.record.source_url)" :href="safeExternalUrl(selected.record.source_url)" target="_blank" rel="noopener noreferrer">View source ↗</a><button v-if="selected.record.source_message_id" @click="openRoom(selected, 'source')">Original message ↗</button></div></details>
           <details v-if="selected.history?.length" class="inbox-supporting"><summary>History <span>{{ selected.history.length }}</span></summary><ol class="web-inbox-history"><li v-for="entry in selected.history" :key="entry.id"><strong>{{ entry.label }}</strong><p>{{ entry.body }}</p><time :datetime="entry.timestamp">{{ date(entry.timestamp) }}</time></li></ol></details>
           </div>
         </article>
       </template>
-      <template #queue-footer><button v-if="section === 'updates'" class="web-inbox-mark-all" :disabled="loading || !items.length" @click="markRead(items)">Mark all read</button></template>
+      <template #queue-footer><button v-if="section === 'updates'" class="web-inbox-mark-all" :disabled="loading || !items.length" @click="markUpdatesRead(items)">Mark all read</button></template>
       <template #footer><div v-if="section === 'updates' && moreThreads.length" class="web-inbox-pagination"><button v-for="room in moreThreads" :key="room.id" :disabled="loadingOlder" @click="loadOlder(room.id)">{{ loadingOlder ? 'Loading…' : `More replies · ${room.label}` }}</button></div></template>
     </InboxLayout>
     <div v-else class="web-inbox-signin"><h1>Inbox</h1><p>Sign in to answer requests and follow updates across your rooms.</p><button :disabled="isSigningIn" @click="signIn('/inbox')">{{ isSigningIn ? 'Opening…' : 'Sign in with GitHub' }}</button></div>
   </div>
 </template>
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import WorkspaceNav from '../components/layout/WorkspaceNav.vue'
 import InboxLayout from '../../../../shared/ui/inbox/InboxLayout.vue'
@@ -52,7 +52,25 @@ const { isSignedIn, user, isSigningIn, signIn, checkSession } = useAuth()
 const accountId = computed(() => isSignedIn.value ? user.value?.id || null : null)
 const { snapshot, loading, error, actionError, outcome, section, rooms, query, selectedKey, drafts, sending, loadingOlder, lastRead, counts, items, selected, failures, moreThreads, selectItem, refresh, markRead, undoRead, answer, loadOlder } = useInbox(accountId)
 const layout = ref<InstanceType<typeof InboxLayout> | null>(null)
+const requestHeading = ref<HTMLElement | null>(null)
 const router = useRouter()
+function focusSelection() {
+  if (requestHeading.value) requestHeading.value.focus({ preventScroll: true })
+  else layout.value?.focusHeading()
+}
+async function respond(close = false) {
+  const account = accountId.value
+  const target = await answer(close)
+  if (target === undefined) return
+  await nextTick()
+  if (accountId.value === account && selectedKey.value === target) focusSelection()
+}
+async function markUpdatesRead(list: InboxItem[]) {
+  markRead(list); await nextTick(); focusSelection()
+}
+async function undoUpdatesRead() {
+  undoRead(); await nextTick(); layout.value?.focusHeading()
+}
 const emptyTitle = computed(() => loading.value ? 'Checking your rooms' : error.value || failures.value.length ? 'Some inbox data is unavailable' : query.value || rooms.value.length ? 'No matching items' : section.value === 'answered' ? 'No answers yet' : section.value === 'updates' ? 'No unread updates' : 'You’re clear for now')
 function avatar(key: string) { return items.value.find(item => item.key === key) }
 function date(value: string) { return Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString() : '' }

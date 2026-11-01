@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { effectScope, nextTick, ref } from 'vue'
-import { createInboxApi, safeExternalUrl, type InboxItem, type InboxSnapshot } from '../src/composables/inbox/api'
+import { createInboxApi, safeExternalUrl, threadItems, type InboxItem, type InboxSnapshot } from '../src/composables/inbox/api'
 import { useInbox } from '../src/composables/inbox/useInbox'
 import { createKnowledgeRecord, reviseKnowledgeRecord } from '../../../shared/room-knowledge.mjs'
 
@@ -124,4 +124,37 @@ test('older replies use the last reply cursor and cannot replace a refreshed sna
   assert.deepEqual(cursors, ['msg_3'])
   assert.equal(inbox.snapshot.value?.threads[item.roomId].threads.length, 1)
   assert.equal(inbox.loadingOlder.value, false)
+})
+
+test('answer and close identify the next reading target for focus restoration', async t => {
+  for (const close of [false, true]) {
+    const next = { ...item, key: 'next', title: 'Another question', record: { ...record, id: 'another-question' } }
+    const { inbox } = state(t, stub({ load: async () => snapshot([item, next]), answer: async () => reviseKnowledgeRecord(record, { expected_version: record.version, ...(close ? { close: true } : { response: 'Go ahead.' }) }, { id: 'owner', label: 'Owner', kind: 'human' }) }))
+    await settle(); inbox.selectItem(item.key); inbox.drafts[item.key] = 'Go ahead.'
+    const focusTarget = await inbox.answer(close); await settle()
+    assert.equal(focusTarget, 'next')
+    assert.equal(inbox.selected.value?.key, 'next')
+  }
+})
+test('an answer does not request focus when the user moved to another item while sending', async t => {
+  const pending = deferred<typeof record>()
+  const next = { ...item, key: 'next', title: 'Another question', record: { ...record, id: 'another-question' } }
+  const { inbox } = state(t, stub({ load: async () => snapshot([item, next]), answer: () => pending.promise }))
+  await settle(); inbox.selectItem(item.key); inbox.drafts[item.key] = 'Go ahead.'
+  const answer = inbox.answer(); inbox.selectItem('next'); await settle()
+  pending.resolve(reviseKnowledgeRecord(record, { expected_version: record.version, response: 'Go ahead.' }, { id: 'owner', label: 'Owner', kind: 'human' }))
+  assert.equal(await answer, undefined)
+  await settle(); assert.equal(inbox.selected.value?.key, 'next')
+})
+
+
+test('Open thread targets the latest unread reply so room navigation opens the replies', () => {
+  const root = { id: 'msg_10', sender: 'Amber', text: 'Original request', source: 'agent', timestamp: record.created_at }
+  const latest = { ...root, id: 'msg_12', sender: 'Owner', text: 'Latest reply', source: 'browser' }
+  const room = { id: item.roomId, label: item.roomName }
+  const [thread] = threadItems(room, { threads: [{ root, summary: { latest_reply: latest, has_unread: true, unread_count: 1 } }], has_more: false })
+  assert.equal(thread.messageId, 'msg_12')
+  assert.equal(thread.title, 'Original request')
+  const [fallback] = threadItems(room, { threads: [{ root, summary: { latest_reply: null, has_unread: true, unread_count: 1 } }], has_more: false })
+  assert.equal(fallback.messageId, 'msg_10')
 })

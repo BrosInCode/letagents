@@ -32,6 +32,7 @@
 .knowledge-empty-mark { display: grid; place-items: center; width: 52px; height: 52px; border: 1px solid var(--border-strong); border-radius: 16px; color: var(--text-secondary); background: var(--bg-subtle); box-shadow: var(--shadow-sm); }
 .knowledge-empty h2, .knowledge-empty h3 { margin: 20px 0 8px; color: var(--text); font-size: 19px; font-weight: 580; line-height: 1.35; letter-spacing: -.025em; }
 .knowledge-empty p { max-width: 42ch; margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.7; text-wrap: pretty; }
+.knowledge-category { display: inline-flex; align-items: center; gap: 6px; color: var(--text-secondary); font-size: 10px; font-weight: 550; line-height: 1.4; }
 .knowledge-prose { margin: 0; color: var(--text-secondary); font-size: 13px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
 .knowledge-answer p { margin: 10px 0 0; font-size: 13px; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
 .knowledge-source-row { justify-content: flex-start; flex-wrap: wrap; margin: 20px 0; }
@@ -151,6 +152,7 @@
 .inbox-approval-result { margin: 20px 0; }
 .inbox-outcome { margin: 0 0 16px; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .inbox-outcome:not(.knowledge-success) { color: var(--text-secondary); }
+.memory-start-goal .knowledge-category { font-size: 12px; }
 @media (hover: hover) and (pointer: fine) {
   .knowledge-page :is(.knowledge-button, .knowledge-icon-button, .memory-prompt):not(:disabled):hover { background: var(--accent-hover); color: var(--text); }
   .knowledge-page .knowledge-primary:not(:disabled):hover { color: var(--bg); background: color-mix(in srgb, var(--text) 90%, var(--bg)); }

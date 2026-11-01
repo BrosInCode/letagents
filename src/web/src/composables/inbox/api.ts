@@ -34,7 +34,7 @@ export function threadItems(room: InboxRoom, page: ThreadPage): InboxItem[] {
     return { ...base(room, 'thread', root.id), section: 'updates', category: 'Unread replies', title: messageText(root) || 'Thread',
       body: messageText(latest), actor: latest.sender, timestamp: latest.timestamp, fingerprint: `${latest.id}:${summary.unread_count}`,
       agent: latest.source === 'agent', agentKey: latest.agent_identity?.agent_key, provider: latest.agent_identity?.ide_label,
-      avatarUrl: latest.sender_profile?.avatar_url, messageId: root.id,
+      avatarUrl: latest.sender_profile?.avatar_url, messageId: latest.id,
       history: [{ id: root.id, label: `Thread started by ${root.sender}`, body: messageText(root), timestamp: root.timestamp },
         ...(latest.id === root.id ? [] : [{ id: latest.id, label: `Latest reply from ${latest.sender}`, body: messageText(latest), timestamp: latest.timestamp }])] }
   })
