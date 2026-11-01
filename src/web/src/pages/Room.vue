@@ -152,7 +152,10 @@
       :isSignedIn="auth.isSignedIn.value"
       @clearReply="selectedReply = null"
       @signIn="handleSignIn"
+      @askAgent="askAgentOpen = true"
     />
+
+    <AskAgentDialog v-if="askAgentOpen && auth.isSignedIn.value && room" :room-identifier="room.identifier" :room-label="roomTitle" @close="askAgentOpen = false" />
 
     <ImageViewerModal
       v-if="activeImageId && roomImages.length"
@@ -194,6 +197,7 @@ import RoomMobileNav from './room/RoomMobileNav.vue'
 import RoomTabPanels from './room/RoomTabPanels.vue'
 import { resolveRoomAccessState } from './room/roomAuth'
 import Composer from '@/components/room/Composer.vue'
+import AskAgentDialog from '@/components/room/AskAgentDialog.vue'
 import { useFocusRoomNavigation } from './room/useFocusRoomNavigation'
 import { useRoomImages } from './room/useRoomImages'
 import { useRoomPresentation } from './room/useRoomPresentation'
@@ -270,6 +274,8 @@ const {
   loadOlderGitHubEvents,
 } = useRoom()
 const auth = useAuth()
+const askAgentOpen = ref(false)
+watch([() => auth.user.value?.id, () => room.value?.identifier], () => { askAgentOpen.value = false }, { flush: 'sync' })
 const toast = useToast()
 provideRoomMessagePins(useRoomMessagePins(computed(() => room.value?.identifier || ''), (message) => toast.error(message)))
 provideRoomMessageReactions(useRoomMessageReactions(

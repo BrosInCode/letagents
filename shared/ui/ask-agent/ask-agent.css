@@ -1,0 +1,24 @@
+.ask-intro { color: var(--give-muted); margin-top: 8px !important; font-size: 13px; }
+.ask-fields { display: flex; flex-direction: column; gap: 23px; }
+.ask-room-picker .work-filter-trigger { min-height: 46px; padding-block: 10px; }
+.ask-room-picker .work-menu-option { min-height: 40px; }
+.ask-field { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+.ask-field > span { font-size: 13px; font-weight: 550; }
+.ask-field small, .ask-optional { font-size: 11px; font-weight: 400; color: var(--give-faint); margin-left: 5px; }
+.ask-field input, .ask-field textarea, .ask-ready-link input { min-width: 0; width: 100%; border: 1px solid var(--give-line); border-radius: 8px; padding: 10px 13px; background: var(--give-inset); color: var(--give-text); font: inherit; }
+.ask-field textarea { resize: vertical; min-height: 88px; max-height: 180px; }
+.ask-field textarea:focus-visible { outline: 2px solid var(--give-accent); outline-offset: 3px; }
+.ask-field input::placeholder, .ask-field textarea::placeholder { color: var(--give-faint); opacity: 1; }
+.ask-new-room { margin-top: 13px; }
+.ask-amount-choices { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+.give-amount > .ask-any { font-size: 25px; letter-spacing: -.5px; }
+.ask-fields .give-error { margin-top: 0; }
+.ask-fields section > .give-error { margin-top: 10px; }
+.ask-loading { font-size: 12px; color: var(--give-muted); margin-top: 9px !important; }
+.ask-ready-link { display: flex; gap: 8px; margin-top: 24px; }
+.ask-ready-link input { flex: 1; font-size: 12px; }
+.ask-ready-link button { flex-shrink: 0; }
+@media (max-width: 480px) {
+  .ask-fields { gap: 20px; }
+  .ask-amount-choices button { padding-inline: 2px; }
+}

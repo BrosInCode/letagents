@@ -5,13 +5,6 @@ import { fileURLToPath } from "node:url";
 
 const source = (path: string) => readFileSync(fileURLToPath(new URL(`../src/components/desktop/content/${path}`, import.meta.url)), "utf8");
 
-test("a new room made by a failed ask is reused on retry, and forgotten when the sheet reopens", () => {
-  const dialog = source("asks/AskAgentDialog.vue");
-  assert.match(dialog, /if \(!createdRoomId\.value\) \{\s*const room = await desktopIpc\.room\.createInviteRoom\(\);/);
-  assert.match(dialog, /roomId = createdRoomId\.value;/);
-  assert.match(dialog, /createdRoomId\.value = null;/);
-});
-
 test("the composer's + menu closes on a click elsewhere or Escape, and drops its listeners on unmount", () => {
   // Behaviour: room-composer-add-menu.test.ts. This keeps the listener cleanup in place.
   const menu = source("room-chat/RoomComposerAddMenu.vue");
@@ -36,9 +29,11 @@ const { before, after } = await import('node:test');
 const { createServer } = await import('vite');
 const { createRenderer, createSSRApp, h, reactive, nextTick, ssrContextKey } = await import('vue');
 const { renderToString } = await import('@vue/server-renderer');
-let vite: any, Give: any, Panel: any, Dropdown: any;
+let vite: any, Give: any, Panel: any, Dropdown: any, Ask: any, AskPanel: any;
 before(async () => {
   vite = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
+  Ask = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/asks/AskAgentDialog.vue')).default;
+  AskPanel = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../../shared/ui/ask-agent/AskAgentPanel.vue', import.meta.url)))).default;
   Give = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/asks/GiveAgentDialog.vue')).default;
   Panel = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../../shared/ui/give-agent/GiveAgentPanel.vue', import.meta.url)))).default;
   Dropdown = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../../shared/ui/FilterDropdown.vue', import.meta.url)))).default;
@@ -126,4 +121,80 @@ test('unsafe/missing receiver images fall back to initials; unavailable agents r
   assert.match(html, /disabled[^>]*data-testid="agent-give-add"/);
   const picker = await renderToString(createSSRApp(Dropdown, { modelValue: 'no', label: 'Agent', options: [{ id: 'no', label: 'Not available', disabled: true }] }));
   assert.match(picker, /role="option"[^>]*disabled/);
+});
+
+function askController(t: any, overrides: any = {}) {
+  const saved = { window: globalThis.window, localStorage: globalThis.localStorage };
+  const inputs: any[] = [], rooms: any[] = [];
+  Object.assign(globalThis, { window: { letagentsDesktop: {
+    asks: { listModels: async () => ok(models), create: async (input: any) => { inputs.push(input); return ok({ ask: { id: 'ask-one' }, link: 'https://letagents.chat/ask/created' }); }, ...overrides.asks },
+    room: { createInviteRoom: async () => { rooms.push('created'); return { roomIdentifier: 'new-room' }; }, rename: async () => {}, ...overrides.room },
+  } }, localStorage: { getItem: () => '{}', setItem() {} } });
+  t.after(() => Object.assign(globalThis, saved));
+  const props = reactive({ open: true, roomIdentifier: 'room-one', rooms: [{ roomIdentifier: 'room-one', name: 'Room one', focusRooms: [] }] });
+  return { ...mount(t, Ask, props), props, inputs, rooms };
+}
+const askInput = { roomId: '__new__', newRoomName: 'Review', providerId: 'codex', model: null, amountPercent: null, note: 'Please help.' };
+
+test('Ask shares the Give visual controls and preserves optional Any usage and model presets', async t => {
+  const props = reactive({ models, rooms: [{ id: 'room-one', label: 'Room one' }], initialRoom: 'room-one', presetModelLabel: 'Codex', busy: false, loading: false, createdLink: null });
+  const { vm, events } = mount(t, AskPanel, props);
+  assert.equal(vm.selectedModel.value.providerId, 'codex');
+  vm.note.value = 'Review this'; vm.submit();
+  assert.deepEqual(events[0], ['create', { ...askInput, roomId: 'room-one', newRoomName: '', note: 'Review this' }]);
+  const html = await renderToString(createSSRApp(AskPanel, props));
+  assert.match(html, /give-agent-panel ask-agent-panel/);
+  assert.match(html, /aria-label="Room: Room one"/);
+  assert.match(html, /aria-label="Agent: Codex"/);
+  assert.match(html, /harness-icons\/codex\.png/);
+  assert.doesNotMatch(html, /<select/);
+  assert.match(html, /Message/);
+  await vm.openCustom(); vm.customText.value = '0'; vm.submit();
+  vm.customText.value = '101'; vm.submit(); vm.customText.value = '2.5'; vm.submit();
+  assert.equal(events.length, 1);
+  vm.customText.value = '15'; vm.submit(); assert.equal(events[1][1].amountPercent, 15);
+  props.busy = true; vm.submit(); assert.equal(events.length, 2);
+  props.busy = false; props.createdLink = 'https://letagents.chat/ask/one'; vm.submit(); assert.equal(events.length, 2);
+});
+
+test('Ask reuses a newly created room after failure, suppresses duplicate submits and resets on reopen', async t => {
+  const pending = deferred(); let calls = 0;
+  const { vm, events, props, rooms } = askController(t, { asks: { create: () => ++calls === 1 ? pending.promise : Promise.resolve(ok({ ask: { id: 'ask-one' }, link: 'https://letagents.chat/ask/one' })) } });
+  await settle();
+  const first = vm.submit(askInput); await settle(); await vm.submit(askInput); vm.close();
+  assert.equal(calls, 1); assert.equal(rooms.length, 1); assert.deepEqual(events, []);
+  pending.resolve({ ok: false, error: 'Try again' }); await first;
+  assert.equal(vm.busy.value, false); assert.equal(vm.error.value, 'Try again');
+  await vm.submit(askInput); assert.equal(rooms.length, 1); assert.equal(vm.created.value.link, 'https://letagents.chat/ask/one');
+  assert.deepEqual(events, [['created', 'new-room']]);
+  props.open = false; await settle(); props.open = true; await settle();
+  assert.equal(vm.createdRoomId.value, null); assert.equal(vm.created.value, null);
+});
+
+test('Ask can retry a model load failure and ignores results after closing', async t => {
+  let calls = 0; const pending = deferred();
+  const { vm, props } = askController(t, { asks: { listModels: () => ++calls === 1 ? Promise.reject(new Error('offline')) : pending.promise } });
+  await settle(); assert.match(vm.error.value, /Couldn't load/); assert.equal(vm.loading.value, false);
+  const retry = vm.loadModels(); props.open = false; await settle();
+  pending.resolve(ok(models)); await retry;
+  assert.deepEqual(vm.models.value, []); assert.equal(vm.error.value, null); assert.equal(vm.loading.value, false);
+});
+
+test('Ask does not create a request if its room creation finishes after the dialog closes', async t => {
+  const pending = deferred();
+  const { vm, props, inputs, events } = askController(t, { room: { createInviteRoom: () => pending.promise } });
+  await settle(); const creating = vm.submit(askInput); props.open = false; await settle();
+  pending.resolve({ roomIdentifier: 'late-room' }); await creating;
+  assert.deepEqual(inputs, []); assert.deepEqual(events, []); assert.equal(vm.created.value, null);
+});
+
+
+test('Ask keeps the current room when account rooms are still loading and when the catalog arrives', async t => {
+  const props = reactive({ models: [], rooms: [], initialRoom: 'room-one', loading: true });
+  const { vm, events } = mount(t, AskPanel, props);
+  assert.equal(vm.roomChoice.value, 'room-one');
+  Object.assign(props, { rooms: [{ id: 'other', label: 'Other' }, { id: 'room-one', label: 'Current' }], models, loading: false });
+  await settle(); vm.submit(); assert.equal(events[0][1].roomId, 'room-one');
+  const desktop = askController(t); desktop.props.rooms = []; await settle();
+  assert.deepEqual(desktop.vm.roomOptions.value, [{ id: 'room-one', label: 'room-one' }]);
 });
