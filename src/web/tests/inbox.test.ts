@@ -158,3 +158,17 @@ test('Open thread targets the latest unread reply so room navigation opens the r
   const [fallback] = threadItems(room, { threads: [{ root, summary: { latest_reply: null, has_unread: true, unread_count: 1 } }], has_more: false })
   assert.equal(fallback.messageId, 'msg_10')
 })
+
+
+test('answering a middle request advances to its displayed successor and the last falls back to its predecessor', async t => {
+  const rows = ['a', 'b', 'c'].map(key => ({ ...item, key, title: key, record: { ...record, id: `request-${key}` } }))
+  for (const close of [false, true]) {
+    for (const [chosen, expected] of [['b', 'c'], ['c', 'b']]) {
+      const { inbox } = state(t, stub({ load: async () => snapshot(rows), answer: async request => reviseKnowledgeRecord(request.record!, { expected_version: request.record!.version, ...(close ? { close: true } : { response: 'Go ahead.' }) }, { id: 'owner', label: 'Owner', kind: 'human' }) }))
+      await settle(); assert.deepEqual(inbox.items.value.map(item => item.key), ['a', 'b', 'c'])
+      inbox.selectItem(chosen); inbox.drafts[chosen] = 'Go ahead.'
+      assert.equal(await inbox.answer(close), expected)
+      await settle(); assert.equal(inbox.selected.value?.key, expected)
+    }
+  }
+})

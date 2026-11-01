@@ -74,7 +74,7 @@ export function useInbox(accountId: Ref<string | null>, api = createInboxApi(api
   async function answer(close = false) {
     const item = selected.value, response = item ? drafts[item.key] || '' : ''
     if (!accountId.value || !item?.record || sending.value || (!close && !response.trim())) return
-    const current = session
+    const current = session, displayed = items.value
     sending.value = true; actionError.value = ''
     try {
       const record = await api.answer(item, response, close)
@@ -82,7 +82,11 @@ export function useInbox(accountId: Ref<string | null>, api = createInboxApi(api
       const keepFocus = selectedKey.value === item.key
       answers.value = { ...answers.value, [item.key]: record }; delete drafts[item.key]
       if (keepFocus) {
-        const next = items.value.find(other => other.key !== item.key)
+        const remaining = new Set(items.value.map(other => other.key))
+        const index = displayed.findIndex(other => other.key === item.key)
+        const next = displayed.slice(index + 1).find(other => remaining.has(other.key) && other.key !== item.key)
+          ?? displayed.slice(0, index).reverse().find(other => remaining.has(other.key) && other.key !== item.key)
+          ?? items.value.find(other => other.key !== item.key)
         if (next) selectedKey.value = next.key
         else { section.value = 'answered'; selectedKey.value = item.key }
       }
