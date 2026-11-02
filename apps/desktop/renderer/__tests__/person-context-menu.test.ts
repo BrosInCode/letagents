@@ -7,12 +7,12 @@ import type { PersonTarget } from "../src/domain/person-target";
 const ana: PersonTarget = { login: "Ana-Lee", displayName: "Ana Lee", avatarUrl: null };
 
 describe("buildPersonContextMenuItems", () => {
-  it("returns one group with Message and Work in this room", () => {
+  it("returns one group with Message and View work", () => {
     const groups = buildPersonContextMenuItems({ target: ana, viewerLogin: "someone-else" });
     assert.equal(groups.length, 1);
     assert.deepEqual(groups[0]!.map((item) => [item.id, item.label]), [
       ["message", "Message Ana Lee"],
-      ["work", "Work in this room"],
+      ["work", "View work"],
     ]);
   });
 
