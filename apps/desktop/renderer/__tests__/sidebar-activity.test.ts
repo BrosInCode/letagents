@@ -8,9 +8,12 @@ import {
 } from "../src/domain/account-activity";
 import {
   describeSidebarRoomActivity,
+  describeSidebarUnreadTotal,
   sidebarGroupActivity,
+  sidebarGroupUnread,
   sidebarProjectDetails,
   sidebarRoomTitle,
+  sidebarUnreadTotal,
 } from "../src/domain/sidebar-room-display";
 import type { ProjectGroup, RoomEntry } from "../src/components/desktop/types";
 
@@ -74,4 +77,67 @@ test("nested focus rooms drop the prefix their parent already implies", () => {
   assert.equal(sidebarRoomTitle({ kind: "focus", title: "focus:   Agents QA" }), "Agents QA");
   assert.equal(sidebarRoomTitle({ kind: "focus", title: "Focus:" }), "Focus:", "a title that is only the prefix is kept");
   assert.equal(sidebarRoomTitle({ kind: "parent", title: "Focus: a room literally named this" }), "Focus: a room literally named this");
+});
+
+test("a collapsed room group totals the unread messages folded under it", () => {
+  const project: ProjectGroup = {
+    id: "group", roomName: "sky-lake",
+    parent: room("parent", { unreadCount: 14, hasUnread: true }),
+    focusRooms: [
+      room("focus_1", { kind: "focus", unreadCount: 7, hasUnread: true }),
+      room("focus_2", { kind: "focus", unreadCount: 0, hasUnread: true }),
+    ],
+    branchRooms: [room("branch", { kind: "branch", unreadCount: 2, hasUnread: true })],
+  };
+  assert.deepEqual(sidebarGroupUnread(project, false), { count: 14, markedUnread: true, rooms: 1, nested: false }, "expanded, the parent shows only its own room");
+  assert.deepEqual(sidebarGroupUnread(project, true), { count: 23, markedUnread: true, rooms: 3, nested: true });
+  assert.equal(describeSidebarUnreadTotal(sidebarGroupUnread(project, true)), "23 unread messages in 3 rooms");
+  assert.equal(describeSidebarUnreadTotal(sidebarGroupUnread(project, false)), "14 unread messages");
+
+  const quiet: ProjectGroup = { ...project, parent: room("parent"), focusRooms: [room("focus_1", { kind: "focus" })], branchRooms: [] };
+  assert.deepEqual(sidebarGroupUnread(quiet, true), { count: 0, markedUnread: false, rooms: 0, nested: false }, "nothing unread is no badge at all");
+});
+
+test("a collapsed group surfaces unread messages that only its children hold", () => {
+  const project: ProjectGroup = {
+    id: "group", roomName: "sky-lake",
+    parent: room("parent"),
+    focusRooms: [room("focus_1", { kind: "focus", unreadCount: 5, hasUnread: true })],
+    branchRooms: [],
+  };
+  assert.deepEqual(sidebarGroupUnread(project, false), { count: 0, markedUnread: false, rooms: 0, nested: false }, "expanded, the child row carries it");
+  assert.equal(describeSidebarUnreadTotal(sidebarGroupUnread(project, true)), "5 unread messages in a nested room", "the tooltip says the messages sit under the fold");
+
+  const marked: ProjectGroup = { ...project, focusRooms: [room("focus_1", { kind: "focus", hasUnread: true })] };
+  assert.deepEqual(sidebarGroupUnread(marked, true), { count: 0, markedUnread: true, rooms: 0, nested: false }, "a hand-marked child keeps the dot on the collapsed parent");
+  assert.equal(describeSidebarUnreadTotal(sidebarGroupUnread(marked, true)), "Marked unread");
+  assert.equal(describeSidebarUnreadTotal({ count: 1, markedUnread: true, rooms: 1, nested: false }), "1 unread message");
+});
+
+test("muted rooms stay out of a group total but a muted parent still counts its own", () => {
+  const isMuted = (id: string | null | undefined) => id === "focus_1" || id === "parent";
+  const project: ProjectGroup = {
+    id: "group", roomName: "sky-lake",
+    parent: room("parent", { unreadCount: 3, hasUnread: true }),
+    focusRooms: [
+      room("focus_1", { kind: "focus", unreadCount: 40, hasUnread: true }),
+      room("focus_2", { kind: "focus", unreadCount: 2, hasUnread: true }),
+    ],
+    branchRooms: [],
+  };
+  assert.deepEqual(sidebarGroupUnread(project, true, isMuted), { count: 5, markedUnread: true, rooms: 2, nested: true });
+  assert.deepEqual(sidebarGroupUnread(project, true), { count: 45, markedUnread: true, rooms: 3, nested: true }, "without a mute lookup every room counts");
+});
+
+test("rooms hidden behind the overflow button total onto it", () => {
+  const hidden = [
+    room("branch_9", { kind: "branch", unreadCount: 4, hasUnread: true }),
+    room("branch_10", { kind: "branch", unreadCount: 0 }),
+    room("branch_11", { kind: "branch", unreadCount: 120, hasUnread: true }),
+  ];
+  const total = sidebarUnreadTotal(hidden, { isMuted: (id) => id === "branch_11" });
+  assert.deepEqual(total, { count: 4, markedUnread: true, rooms: 1, nested: true });
+  assert.equal(describeSidebarUnreadTotal(total), "4 unread messages in a nested room");
+  assert.equal(describeSidebarUnreadTotal(sidebarUnreadTotal(hidden)), "124 unread messages in 2 rooms");
+  assert.equal(describeSidebarUnreadTotal(sidebarUnreadTotal([])), null, "an expanded list hides nothing");
 });
