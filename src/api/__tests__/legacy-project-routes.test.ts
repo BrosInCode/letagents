@@ -10,6 +10,7 @@ const {
   isRepoBackedRoomId,
   replyRepoRoomAccessDecision,
   resolveRepoRoomAccessDecision,
+  unsupportedRepoProviderMessage,
 } = await import("../rooms/access.js");
 
 function createDeps() {
@@ -185,7 +186,7 @@ test("legacy room open refuses non-GitHub repo room ids with 403 before any room
     assert.deepEqual(body, {
       error: "unsupported_repo_provider",
       code: "UNSUPPORTED_REPO_PROVIDER",
-      message: "Repo rooms are supported for github.com repositories only",
+      message: unsupportedRepoProviderMessage(roomId),
       room_id: roomId,
     });
   }

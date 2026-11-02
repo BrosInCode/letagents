@@ -88,6 +88,77 @@ test("resolveGitHubRepoRoomAccessDecision rejects authenticated non-collaborator
   assert.deepEqual(decision, { kind: "private_repo_no_access" });
 });
 
+test("resolveGitHubRepoRoomAccessDecision keys every dependency lookup on the canonical room name", async () => {
+  // Webhook invalidation clears `github.com/owner/repo`, so a lookup (and its
+  // cache entry) under an alias spelling would stay stale after a member leaves.
+  for (const roomName of [
+    "github.com/brosincode/secret-repo",
+    "GitHub.com/BrosInCode/Secret-Repo",
+    "www.github.com/brosincode/secret-repo",
+    "ssh.github.com/BrosInCode/Secret-Repo",
+    "ssh.github.com:443/brosincode/secret-repo",
+    "ssh://git@ssh.github.com:443/BrosInCode/Secret-Repo.git",
+  ]) {
+    const visibilityNames: string[] = [];
+    const collaboratorNames: string[] = [];
+    const decision = await resolveGitHubRepoRoomAccessDecision(
+      {
+        roomName,
+        sessionAccount: {
+          provider: "github",
+          provider_access_token: "secret-token",
+          login: "EmmyMay",
+        },
+        freshCollaboratorCheck: true,
+      },
+      {
+        getVisibility: async (name) => {
+          visibilityNames.push(name);
+          return "private";
+        },
+        isCollaborator: async (input) => {
+          collaboratorNames.push(input.roomName);
+          return true;
+        },
+      }
+    );
+
+    assert.deepEqual(decision, { kind: "allow" }, roomName);
+    assert.deepEqual(visibilityNames, ["github.com/brosincode/secret-repo"], roomName);
+    assert.deepEqual(collaboratorNames, ["github.com/brosincode/secret-repo"], roomName);
+  }
+});
+
+test("a webhook invalidation of the canonical room clears the entry an alias-form decision created", async () => {
+  let memberRemoved = false;
+  globalThis.fetch = (async (url: string | URL | Request) => {
+    if (/\/collaborators\/[^/]+\/permission$/.test(String(url))) {
+      return memberRemoved
+        ? new Response(JSON.stringify({ message: "Not Found" }), { status: 404 })
+        : new Response(JSON.stringify({ permission: "write" }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ private: true, owner: { login: "BrosInCode" } }), { status: 200 });
+  }) as typeof fetch;
+
+  const account = { provider: "github", provider_access_token: "secret-token", login: "alias-member" };
+  const aliasRoom = "ssh.github.com/brosincode/alias-invalidation-repo";
+  const canonicalRoom = "github.com/brosincode/alias-invalidation-repo";
+
+  assert.deepEqual(
+    await resolveGitHubRepoRoomAccessDecision({ roomName: aliasRoom, sessionAccount: account }),
+    { kind: "allow" }
+  );
+
+  // The member is removed and the webhook clears the CANONICAL room.
+  memberRemoved = true;
+  clearGitHubRepoAccessCacheForRoom(canonicalRoom);
+
+  assert.deepEqual(
+    await resolveGitHubRepoRoomAccessDecision({ roomName: aliasRoom, sessionAccount: account }),
+    { kind: "private_repo_no_access" }
+  );
+});
+
 // The real github.com room and the hosts that must land in it give one decision.
 const GITHUB_ROOM_SPELLINGS = [
   "github.com/brosincode/secret-repo",

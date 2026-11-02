@@ -91,6 +91,59 @@ test("ssh URLs for other hosts drop the scheme, user and port", () => {
   );
 });
 
+test("https URLs lose their userinfo and port, so a clone token never lands in a room id", async () => {
+  const { isRepoBackedRoomId } = await import("../rooms/room-ids.js");
+
+  for (const url of [
+    "https://x-access-token:ghp_SECRET@github.com/acme/private.git",
+    "https://x-access-token:ghp_SECRET@github.com:443/acme/private.git",
+    "https://ghp_SECRET@github.com/acme/private",
+    "http://user:pass@github.com/acme/private/",
+    "https://github.com:443/acme/private",
+    "https://x-access-token:ghp_SECRET@www.github.com/acme/private.git",
+    "https://x-access-token:ghp_SECRET@ssh.github.com:443/acme/private.git",
+    "github.com:443/acme/private",
+    "GitHub.com:443/Acme/Private.git",
+  ]) {
+    const roomId = normalizeRoomName(url);
+    assert.equal(roomId, "github.com/acme/private", url);
+    assert.equal(roomId.includes("SECRET"), false, url);
+    assert.equal(isRepoBackedRoomId(roomId), true, url);
+  }
+});
+
+test("userinfo and port are dropped for other hosts too, which keeps them repo-shaped", async () => {
+  const { isRepoBackedRoomId } = await import("../rooms/room-ids.js");
+
+  assert.equal(
+    normalizeRoomName("https://oauth2:glpat-SECRET@gitlab.com:8443/team/Project.git"),
+    "gitlab.com/team/Project"
+  );
+  assert.equal(normalizeRoomName("bitbucket.org:443/ws/repo"), "bitbucket.org/ws/repo");
+  for (const url of [
+    "https://oauth2:glpat-SECRET@gitlab.com:8443/team/Project.git",
+    "bitbucket.org:443/ws/repo",
+    "https://token@git.example.com:8443/team/app.git",
+  ]) {
+    assert.equal(isRepoBackedRoomId(normalizeRoomName(url)), true, url);
+  }
+});
+
+test("port stripping leaves ad-hoc, focus and git-room ids alone", () => {
+  assert.equal(normalizeRoomName("focus_5"), "focus_5");
+  assert.equal(normalizeRoomName("ABCX-7291"), "ABCX-7291");
+  assert.equal(normalizeRoomName("localhost:3000/notes"), "localhost:3000/notes");
+  assert.equal(normalizeRoomName("team-chat"), "team-chat");
+  assert.equal(
+    normalizeRoomName("git-room:local:0123456789abcdef:main"),
+    "git-room:local:0123456789abcdef:main"
+  );
+  assert.equal(
+    normalizeRoomName("git-room:github.com:owner/repo:branch:bWFpbg"),
+    "git-room:github.com:owner/repo:branch:bWFpbg"
+  );
+});
+
 test("isKnownProvider accepts the GitHub host aliases", () => {
   assert.equal(isKnownProvider("github.com"), true);
   assert.equal(isKnownProvider("WWW.GitHub.com"), true);

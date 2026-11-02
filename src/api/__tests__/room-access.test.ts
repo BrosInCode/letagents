@@ -17,6 +17,7 @@ const {
   resolveGitHubRoomEntryDecision,
   resolveProjectRepoRoomAccessDecision,
   resolveRepoRoomAccessDecision,
+  unsupportedRepoProviderMessage,
 } = await import("../rooms/access.js");
 
 function project(id: string, parentRoomId: string | null = null): Project {
@@ -175,7 +176,7 @@ test("requireParticipant refuses non-GitHub repo-backed rooms for anonymous and 
     assert.deepEqual(state.body, {
       error: "unsupported_repo_provider",
       code: "UNSUPPORTED_REPO_PROVIDER",
-      message: "Repo rooms are supported for github.com repositories only",
+      message: unsupportedRepoProviderMessage("bitbucket.org/poppix/pdf-service"),
       room_id: "bitbucket.org/poppix/pdf-service",
     });
   }
@@ -193,7 +194,7 @@ test("replyRepoRoomAccessDecision answers an unsupported provider with 403, not 
   assert.deepEqual(state.body, {
     error: "unsupported_repo_provider",
     code: "UNSUPPORTED_REPO_PROVIDER",
-    message: "Repo rooms are supported for github.com repositories only",
+    message: unsupportedRepoProviderMessage("gitlab.com/team/project"),
     room_id: "gitlab.com/team/project",
   });
 });
@@ -267,28 +268,29 @@ test("a GitLab subgroup room is denied as an unsupported provider, not opened as
   }
 });
 
-test("the unsupported-provider message explains a repo-shaped name that has no dot in its host", () => {
-  const dotted = jsonResponse();
-  replyRepoRoomAccessDecision(dotted.res, "gitlab.com/group/sub/project", { kind: "unsupported_repo_provider" });
-  assert.equal(dotted.state.statusCode, 403);
-  assert.deepEqual(dotted.state.body, {
-    error: "unsupported_repo_provider",
-    code: "UNSUPPORTED_REPO_PROVIDER",
-    message: "Repo rooms are supported for github.com repositories only",
-    room_id: "gitlab.com/group/sub/project",
-  });
-
-  const dotless = jsonResponse();
-  replyRepoRoomAccessDecision(dotless.res, "team/design/ideas", { kind: "unsupported_repo_provider" });
-  assert.equal(dotless.state.statusCode, 403);
-  const body = dotless.state.body as { error: string; code: string; message: string; room_id: string };
-  assert.equal(body.error, "unsupported_repo_provider");
-  assert.equal(body.code, "UNSUPPORTED_REPO_PROVIDER");
-  assert.equal(body.room_id, "team/design/ideas");
-  assert.match(body.message, /^Repo rooms are supported for github\.com repositories only\. /);
-  assert.match(body.message, /host 'team'/);
-  assert.match(body.message, /name without two slashes, for example team-design-ideas/);
-  assert.match(body.message, /\.letagents\.json file with a room field/);
+test("every unsupported-provider reply names the host, the shape and the .letagents.json workaround", () => {
+  for (const [roomName, host] of [
+    ["team/design/ideas", "team"],
+    ["github-work/acme/app", "github-work"],
+    // A dotted SSH alias, a real unsupported host and `local` get the same hint.
+    ["github.com-work/acme/app", "github.com-work"],
+    ["gitlab.com/group/sub/project", "gitlab.com"],
+    ["bitbucket.org/poppix/pdf-service", "bitbucket.org"],
+    ["local/Users/someone", "local"],
+  ] as const) {
+    const reply = jsonResponse();
+    replyRepoRoomAccessDecision(reply.res, roomName, { kind: "unsupported_repo_provider" });
+    assert.equal(reply.state.statusCode, 403, roomName);
+    const body = reply.state.body as { error: string; code: string; message: string; room_id: string };
+    assert.equal(body.error, "unsupported_repo_provider", roomName);
+    assert.equal(body.code, "UNSUPPORTED_REPO_PROVIDER", roomName);
+    assert.equal(body.room_id, roomName);
+    assert.equal(body.message, unsupportedRepoProviderMessage(roomName), roomName);
+    assert.match(body.message, /^Repo rooms are supported for github\.com repositories only\. /, roomName);
+    assert.ok(body.message.includes(`host '${host}'`), roomName);
+    assert.match(body.message, /name without two slashes, for example team-design-ideas/, roomName);
+    assert.match(body.message, /\.letagents\.json file with a room field/, roomName);
+  }
 });
 
 test("project repo access uses locator rooms without binding lookup", async () => {

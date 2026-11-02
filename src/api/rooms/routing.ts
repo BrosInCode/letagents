@@ -59,10 +59,23 @@ export function isInviteCode(value: string): boolean {
 }
 
 /**
+ * Drop `user[:password]@` and `:port` from the authority (the text before the
+ * first `/`) of a URL whose scheme is already removed. The path is untouched.
+ */
+function stripAuthorityUserinfoAndPort(value: string): string {
+  const slashIndex = value.indexOf("/");
+  const authority = slashIndex < 0 ? value : value.slice(0, slashIndex);
+  const path = slashIndex < 0 ? "" : value.slice(slashIndex);
+  const host = authority.slice(authority.lastIndexOf("@") + 1).replace(/:\d+$/, "");
+  return `${host}${path}`;
+}
+
+/**
  * Normalize a room name according to provider-specific rules.
  *
  * Strips all common prefixes and normalizes slashes:
- *   - Strip https:// or http:// prefix
+ *   - Strip https:// or http:// prefix, with any userinfo (token) and port
+ *   - A bare host:port first segment loses its port (github.com:443/o/r)
  *   - Convert SSH remote git@github.com:owner/repo → github.com/owner/repo
  *   - Strip .git suffix
  *   - Strip trailing slashes
@@ -78,11 +91,13 @@ export function isInviteCode(value: string): boolean {
 export function normalizeRoomName(name: string): string {
   let normalized = name.trim();
 
-  // Strip https:// or http:// prefix
+  // Strip https:// or http:// prefix, and with it any userinfo and port. A
+  // clone URL such as https://x-access-token:TOKEN@github.com/acme/private.git
+  // must never leave its token inside a room id.
   if (normalized.startsWith("https://")) {
-    normalized = normalized.slice("https://".length);
+    normalized = stripAuthorityUserinfoAndPort(normalized.slice("https://".length));
   } else if (normalized.startsWith("http://")) {
-    normalized = normalized.slice("http://".length);
+    normalized = stripAuthorityUserinfoAndPort(normalized.slice("http://".length));
   }
 
   // Convert SSH URL: ssh://git@host:443/owner/repo → host/owner/repo
@@ -108,6 +123,13 @@ export function normalizeRoomName(name: string): string {
   // Map GitHub host aliases (ssh.github.com, www.github.com) to github.com
   // before anything keys off the host, so the clone lands in its real room.
   const parts = normalized.split("/");
+  // A bare `host:port/owner/repo` (github.com:443/acme/private) is the same
+  // repository; a port inside the host would make the id fall outside the
+  // repo-backed shape and open as an ad-hoc room.
+  if (parts.length >= 3 && /^[A-Za-z0-9.-]+:\d+$/.test(parts[0])) {
+    parts[0] = parts[0].replace(/:\d+$/, "");
+    normalized = parts.join("/");
+  }
   if (parts.length > 1 && canonicalizeGitHostAlias(parts[0]) === "github.com") {
     parts[0] = "github.com";
     normalized = parts.join("/");

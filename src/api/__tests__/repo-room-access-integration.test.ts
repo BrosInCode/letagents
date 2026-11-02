@@ -46,16 +46,12 @@ const NON_GITHUB_REPO_ROOMS = [
 ];
 const UNSUPPORTED_PROVIDER_MESSAGE = "Repo rooms are supported for github.com repositories only";
 
-/** A host without a dot gets a longer message that names the way out. */
+/** Every refusal names the host and the way out: a plainer name or a .letagents.json room field. */
 function assertUnsupportedProviderMessage(roomName: string, message: unknown, label: string): void {
   const host = roomName.split("/")[0] ?? "";
-  if (host.includes(".") || host === "local") {
-    assert.equal(message, UNSUPPORTED_PROVIDER_MESSAGE, label);
-    return;
-  }
-
   assert.equal(typeof message, "string", label);
   assert.ok((message as string).startsWith(`${UNSUPPORTED_PROVIDER_MESSAGE}. `), label);
+  assert.ok((message as string).includes(`host '${host}'`), label);
   assert.match(message as string, /name without two slashes/, label);
   assert.match(message as string, /\.letagents\.json file with a room field/, label);
 }
