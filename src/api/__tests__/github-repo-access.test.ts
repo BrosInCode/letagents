@@ -88,6 +88,43 @@ test("resolveGitHubRepoRoomAccessDecision rejects authenticated non-collaborator
   assert.deepEqual(decision, { kind: "private_repo_no_access" });
 });
 
+for (const roomName of [
+  "gitlab.com/team/project",
+  "bitbucket.org/team/project",
+  "local/Users/someone",
+  "github.com.evil.example/owner/repo",
+]) {
+  test(`resolveGitHubRepoRoomAccessDecision denies the non-GitHub repo room ${roomName} for everyone`, async () => {
+    const deps = {
+      getVisibility: async () => {
+        throw new Error("visibility must not be looked up for a non-GitHub host");
+      },
+      isCollaborator: async () => {
+        throw new Error("collaborator check must not run for a non-GitHub host");
+      },
+    };
+
+    assert.deepEqual(
+      await resolveGitHubRepoRoomAccessDecision({ roomName, sessionAccount: null }, deps),
+      { kind: "unsupported_repo_provider" }
+    );
+    assert.deepEqual(
+      await resolveGitHubRepoRoomAccessDecision(
+        {
+          roomName,
+          sessionAccount: {
+            provider: "github",
+            provider_access_token: "secret-token",
+            login: "EmmyMay",
+          },
+        },
+        deps
+      ),
+      { kind: "unsupported_repo_provider" }
+    );
+  });
+}
+
 test("repository visibility is shared and single-flighted across authenticated callers", async () => {
   const roomName = `github.com/brosincode/public-cache-${Date.now()}`;
   let calls = 0;

@@ -17,7 +17,10 @@ export type GitHubRepoVisibility = "public" | "private" | "unknown";
 export type RepoRoomAccessDecision =
   | { kind: "allow" }
   | { kind: "auth_required" }
-  | { kind: "private_repo_no_access" };
+  | { kind: "private_repo_no_access" }
+  // The room id has the `host/owner/repo` shape of a repo room, but no
+  // visibility or collaborator check exists for its host. Nobody may enter.
+  | { kind: "unsupported_repo_provider" };
 
 interface RepoRoomAccessIdentity {
   provider?: string | null;
@@ -601,7 +604,9 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
 }): Promise<RepoRoomAccessDecision> {
   const githubRepo = parseGitHubRepoName(input.roomName);
   if (!githubRepo) {
-    return { kind: "allow" };
+    // Fail closed. Only github.com repositories have a visibility and
+    // collaborator check, so any other host must never be admitted.
+    return { kind: "unsupported_repo_provider" };
   }
 
   const accessToken = input.sessionAccount?.provider_access_token ?? undefined;

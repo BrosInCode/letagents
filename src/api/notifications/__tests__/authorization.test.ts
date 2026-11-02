@@ -102,3 +102,22 @@ test("desktop push authorization still allows a public repository without a toke
   );
   assert.equal(decision, "allow");
 });
+
+test("desktop push authorization denies a non-GitHub repo room even when the GitHub credential is absent", async () => {
+  const bitbucketRoom = { id: "bitbucket.org/poppix/pdf-service" } as Project;
+  const decision = await authorizeDesktopPushNotification(
+    { accountId: account.account_id, roomId: bitbucketRoom.id },
+    {
+      getProject: async () => bitbucketRoom,
+      getAccount: async () => ({ ...account, provider_access_token: null }),
+      resolveAccess: async () => ({
+        isRepoBacked: true,
+        roomName: bitbucketRoom.id,
+        repoRoomName: bitbucketRoom.id,
+        binding: null,
+        decision: { kind: "unsupported_repo_provider" },
+      }),
+    },
+  );
+  assert.equal(decision, "deny");
+});

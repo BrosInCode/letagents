@@ -25,7 +25,7 @@ const { isSupervisorGrantRouteAllowed } = await import("../request/supervisor-gr
 const { registerHttpMiddleware } = await import("../http/middleware.js");
 const { clearSupervisorAccessRevalidationCache, registerSupervisorHostGrantRoutes, requireSupervisorGrantRoomAccess, respondToStaleSupervisorGrantFence } = await import("../routes/supervisor-host-grants.js");
 const { SupervisorGrantFenceStaleError } = await import("../db/auth.js");
-const { requireGitRoomParticipant } = await import("../rooms/access.js");
+const { requireGitRoomParticipant, resolveRepoRoomAccessDecision } = await import("../rooms/access.js");
 const { hashToken } = await import("../db/utils.js");
 const { registerRoomAgentWorkRoutes } = await import("../routes/rooms/agent-work.js");
 const { clearRoomAgentWork, publishRoomAgentWork, publishIndependentWorkspace, readRoomAgentWork, readRoomAgentWorkReviewPage } = await import("../db/room-agent-work.js");
@@ -183,6 +183,85 @@ test("grant room revalidation uses a fresh check and revokes on definitive denia
   assert.equal(options[0]?.throwOnIndeterminate, true);
   assert.deepEqual(revoked, ["grant_access"]);
   assert.equal(response.statusCode, 403);
+});
+
+test("a non-GitHub repo room in a grant gets 403 for that room and never revokes the grant", async () => {
+  clearSupervisorAccessRevalidationCache();
+  const response = recorder();
+  const revoked: string[] = [];
+  const checked: string[] = [];
+  const grant = {
+    grant_id: "grant_mixed", owner_account_id: "owner_access", host_id: "host", installation_id: "install",
+    scope_key: "owner", rental_session_id: null, token_version: 1,
+    allowed_room_ids: ["github.com/o/r", "bitbucket.org/t/p"],
+    allowed_agent_keys: ["owner/agent"], current_generation: 1, issued_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 60_000).toISOString(), revoked_at: null,
+  };
+  const allowed = await requireSupervisorGrantRoomAccess(grant as never, response as never, {
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async (roomId: string) => ({ id: roomId }),
+    requireParticipant: async () => true,
+    getProjectById: async (roomId: string) => ({ id: roomId } as never),
+    resolveProjectRepoAccessTarget: async (project: any) => ({ roomName: project.id, repoRoomName: project.id }),
+    // The real decision function answers the bitbucket room; the GitHub room is stubbed as still allowed.
+    resolveRepoRoomAccessDecision: async (input: any) => {
+      checked.push(input.roomName);
+      return input.roomName.startsWith("github.com/")
+        ? { kind: "allow" as const }
+        : resolveRepoRoomAccessDecision(input);
+    },
+    getGitHubAppRepositoryByRoomId: async () => undefined,
+    getSupervisorGrantOwnerAccount: async () => ({
+      account_id: "owner_access", provider: "github", login: "owner", provider_access_token: "token",
+    }),
+    revokeSupervisorGrantAuthority: async (input: any) => {
+      revoked.push(input.grant_id);
+      return { grant, revoked_now: true, ended_session_ids: ["session_1"] } as never;
+    },
+  }, { kind: "all" });
+  assert.equal(allowed, false);
+  assert.deepEqual([...checked].sort(), ["bitbucket.org/t/p", "github.com/o/r"]);
+  assert.equal(response.statusCode, 403);
+  assert.equal((response.body as any).code, "UNSUPPORTED_REPO_PROVIDER");
+  assert.equal((response.body as any).room_id, "bitbucket.org/t/p");
+  assert.deepEqual(revoked, [], "the grant and its worker sessions stay in place");
+});
+
+test("a real loss of access on a GitHub room still revokes a grant that also lists a non-GitHub room", async () => {
+  clearSupervisorAccessRevalidationCache();
+  const response = recorder();
+  const revoked: string[] = [];
+  const grant = {
+    grant_id: "grant_mixed_revoked", owner_account_id: "owner_access", host_id: "host", installation_id: "install",
+    scope_key: "owner", rental_session_id: null, token_version: 1,
+    allowed_room_ids: ["bitbucket.org/t/p", "github.com/o/r"],
+    allowed_agent_keys: ["owner/agent"], current_generation: 1, issued_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 60_000).toISOString(), revoked_at: null,
+  };
+  const allowed = await requireSupervisorGrantRoomAccess(grant as never, response as never, {
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async (roomId: string) => ({ id: roomId }),
+    requireParticipant: async () => true,
+    getProjectById: async (roomId: string) => ({ id: roomId } as never),
+    resolveProjectRepoAccessTarget: async (project: any) => ({ roomName: project.id, repoRoomName: project.id }),
+    resolveRepoRoomAccessDecision: async (input: any) =>
+      input.roomName.startsWith("github.com/")
+        ? { kind: "private_repo_no_access" as const }
+        : resolveRepoRoomAccessDecision(input),
+    getGitHubAppRepositoryByRoomId: async () => undefined,
+    getSupervisorGrantOwnerAccount: async () => ({
+      account_id: "owner_access", provider: "github", login: "owner", provider_access_token: "token",
+    }),
+    revokeSupervisorGrantAuthority: async (input: any) => {
+      revoked.push(input.grant_id);
+      return { grant, revoked_now: true, ended_session_ids: [] } as never;
+    },
+  }, { kind: "all" });
+  assert.equal(allowed, false);
+  assert.equal(response.statusCode, 403);
+  assert.equal((response.body as any).code, "SUPERVISOR_GIT_ROOM_ACCESS_REVOKED");
+  assert.equal((response.body as any).room_id, "github.com/o/r");
+  assert.deepEqual(revoked, ["grant_mixed_revoked"]);
 });
 
 test("indeterminate fresh room access errors do not revoke grant authority", async () => {

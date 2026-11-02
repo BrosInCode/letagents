@@ -20,6 +20,7 @@ const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
 const createProjectWithName = dbModule?.createProjectWithName;
 const createSession = dbModule?.createSession;
+const getProjectById = dbModule?.getProjectById;
 const insertGitHubRoomEvent = dbModule?.insertGitHubRoomEvent;
 const upsertAccount = dbModule?.upsertAccount;
 
@@ -33,6 +34,12 @@ const tsxBinary = path.resolve(
 
 const PUBLIC_ROOM = "github.com/brosincode/public-repo";
 const PRIVATE_ROOM = "github.com/brosincode/private-repo";
+const NON_GITHUB_REPO_ROOMS = [
+  "bitbucket.org/poppix/pdf-service",
+  "gitlab.com/team/project",
+  "local/Users/someone",
+];
+const UNSUPPORTED_PROVIDER_MESSAGE = "Repo rooms are supported for github.com repositories only";
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -544,6 +551,94 @@ test(
     const payload = await response.json();
     assert.equal(payload.code, "PRIVATE_REPO_NO_ACCESS");
     assert.equal(payload.room_id, PRIVATE_ROOM);
+  }
+);
+
+test(
+  "non-GitHub repo room ids are refused on the real join route and never create a room",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed repo room access integration tests" : false,
+  },
+  async (t) => {
+    if (!getProjectById) {
+      throw new Error("DB-backed repo room access integration tests require TEST_DB_URL");
+    }
+
+    const githubApi = await startGitHubApiStub();
+    t.after(async () => {
+      await stopGitHubApiStub(githubApi.server);
+    });
+
+    const signedInToken = await createGitHubSessionToken({
+      login: "collab",
+      accessToken: "github-token-collab",
+    });
+
+    const { child, port } = await startApiServer(githubApi.baseUrl);
+    t.after(async () => {
+      await stopChildProcess(child);
+    });
+
+    for (const roomName of NON_GITHUB_REPO_ROOMS) {
+      for (const sessionToken of [undefined, signedInToken]) {
+        const label = `${roomName} ${sessionToken ? "signed in" : "anonymous"}`;
+        const response = await joinRoom({ port, roomName, sessionToken });
+
+        assert.equal(response.status, 403, label);
+        const payload = await response.json();
+        assert.equal(payload.code, "UNSUPPORTED_REPO_PROVIDER", label);
+        assert.equal(payload.message, UNSUPPORTED_PROVIDER_MESSAGE, label);
+        assert.equal(payload.room_id, roomName, label);
+      }
+
+      assert.equal(await getProjectById(roomName), undefined, `${roomName} must not be created`);
+    }
+  }
+);
+
+test(
+  "protected room routes refuse an existing non-GitHub repo room for anonymous and signed-in callers",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed repo room access integration tests" : false,
+  },
+  async (t) => {
+    if (!createProjectWithName) {
+      throw new Error("DB-backed repo room access integration tests require TEST_DB_URL");
+    }
+
+    const githubApi = await startGitHubApiStub();
+    t.after(async () => {
+      await stopGitHubApiStub(githubApi.server);
+    });
+
+    for (const roomName of NON_GITHUB_REPO_ROOMS) {
+      await createProjectWithName(roomName);
+    }
+
+    const signedInToken = await createGitHubSessionToken({
+      login: "collab",
+      accessToken: "github-token-collab",
+    });
+
+    const { child, port } = await startApiServer(githubApi.baseUrl);
+    t.after(async () => {
+      await stopChildProcess(child);
+    });
+
+    for (const roomName of NON_GITHUB_REPO_ROOMS) {
+      for (const sessionToken of [undefined, signedInToken]) {
+        const label = `${roomName} ${sessionToken ? "signed in" : "anonymous"}`;
+        const response = await fetchRoomMessages({ port, roomName, sessionToken });
+
+        assert.equal(response.status, 403, label);
+        const payload = await response.json();
+        assert.equal(payload.code, "UNSUPPORTED_REPO_PROVIDER", label);
+        assert.equal(payload.message, UNSUPPORTED_PROVIDER_MESSAGE, label);
+        assert.equal(payload.room_id, roomName, label);
+      }
+    }
   }
 );
 

@@ -83,6 +83,18 @@ const repoAccessBanner = computed(() => {
     }
   }
 
+  if (reason === 'repo_provider_unsupported') {
+    return {
+      kind: 'denied' as const,
+      room: '',
+      redirectTo,
+      title: 'Repo provider not supported',
+      body: room
+        ? `${room} cannot be opened. Repo rooms are supported for github.com repositories only.`
+        : 'Repo rooms are supported for github.com repositories only.',
+    }
+  }
+
   return null
 })
 

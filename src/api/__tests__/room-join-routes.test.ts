@@ -4,6 +4,11 @@ import test from "node:test";
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerRoomJoinRoutes } = await import("../routes/rooms/join.js");
 const { buildGitHubRefRoomLocator } = await import("../github/git-room-routing.js");
+const {
+  isRepoBackedRoomId,
+  replyRepoRoomAccessDecision,
+  resolveRepoRoomAccessDecision,
+} = await import("../rooms/access.js");
 
 function createDeps() {
   const unused = async () => {
@@ -423,5 +428,174 @@ test("canonical focus joins authorize after resolution and prefer the current Gi
   assert.deepEqual(response.body, {
     id: project.id,
     gitRoomBinding: branchBinding,
+  });
+});
+
+test("join route refuses non-GitHub repo room ids with 403 before any room is created", async () => {
+  const anonymous = null;
+  const signedIn = {
+    account_id: "acct_1",
+    provider: "github",
+    login: "EmmyMay",
+    provider_access_token: "secret-token",
+  };
+
+  for (const roomId of ["bitbucket.org/poppix/pdf-service", "gitlab.com/team/project", "local/Users/someone"]) {
+    for (const sessionAccount of [anonymous, signedIn]) {
+      let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
+      const app = {
+        post(_path: RegExp, registeredHandler: typeof handler) {
+          handler = registeredHandler;
+        },
+      };
+      const response = {
+        statusCode: 200,
+        body: undefined as unknown,
+        status(code: number) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload: unknown) {
+          this.body = payload;
+          return this;
+        },
+      };
+
+      registerRoomJoinRoutes(app as never, {
+        ...createDeps(),
+        resolveCanonicalRoomRequestId: async (value: string) => value,
+        isRepoBackedRoomId,
+        resolveRepoRoomAccessDecision,
+        replyRepoRoomAccessDecision,
+        resolveRoomOrReply: async () => {
+          throw new Error("a room must not be resolved or created for a non-GitHub repo room id");
+        },
+      } as never);
+
+      assert.ok(handler);
+      await handler(
+        {
+          params: { 0: roomId },
+          headers: {},
+          socket: { remoteAddress: "192.0.2.77" },
+          sessionAccount,
+        },
+        response as never
+      );
+
+      assert.equal(response.statusCode, 403, `${roomId} ${sessionAccount ? "signed in" : "anonymous"}`);
+      assert.deepEqual(response.body, {
+        error: "unsupported_repo_provider",
+        code: "UNSUPPORTED_REPO_PROVIDER",
+        message: "Repo rooms are supported for github.com repositories only",
+        room_id: roomId,
+      });
+    }
+  }
+});
+
+async function joinThroughRoute(roomId: string, overrides: Record<string, unknown>, remoteAddress: string) {
+  let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
+  const app = {
+    post(_path: RegExp, registeredHandler: typeof handler) {
+      handler = registeredHandler;
+    },
+  };
+  const response = {
+    statusCode: 200,
+    body: undefined as unknown,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: unknown) {
+      this.body = payload;
+      return this;
+    },
+  };
+  registerRoomJoinRoutes(app as never, {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async (value: string) => value,
+    isRepoBackedRoomId,
+    ...overrides,
+  } as never);
+  assert.ok(handler);
+  await handler(
+    { params: { 0: roomId }, headers: {}, socket: { remoteAddress }, sessionAccount: null },
+    response as never
+  );
+  return response;
+}
+
+test("join route does not treat a focus locator under an ad-hoc parent as a repo room", async () => {
+  const accessChecks: string[] = [];
+  const focusRoom = { id: "focus_9", parent_room_id: "focus-adhoc-parent", display_name: "Focus: Intent" };
+
+  const response = await joinThroughRoute(
+    "focus-adhoc-parent/focus/focus-intent-0123abcd",
+    {
+      resolveRepoRoomAccessDecision: async ({ roomName }: { roomName: string }) => {
+        accessChecks.push(roomName);
+        return resolveRepoRoomAccessDecision({ roomName, sessionAccount: null });
+      },
+      replyRepoRoomAccessDecision,
+      resolveRoomOrReply: async () => focusRoom,
+      getProjectAccessRoomId: () => focusRoom.parent_room_id,
+      resolveProjectRole: async () => "anonymous",
+      toRoomResponse: () => ({ room_id: focusRoom.id }),
+    },
+    "192.0.2.81"
+  );
+
+  assert.deepEqual(accessChecks, [], "an ad-hoc parent gets no repo pre-check on the raw locator");
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, { room_id: "focus_9" });
+});
+
+test("join route checks a focus locator under a GitHub repo against that repo", async () => {
+  const accessChecks: string[] = [];
+
+  const response = await joinThroughRoute(
+    "github.com/o/r/focus/focus-intent-0123abcd",
+    {
+      resolveRepoRoomAccessDecision: async ({ roomName }: { roomName: string }) => {
+        accessChecks.push(roomName);
+        return { kind: "auth_required" as const };
+      },
+      replyRepoRoomAccessDecision: (res: any, roomName: string) => {
+        res.status(401).json({ error: "auth_required", room_id: roomName });
+        return false;
+      },
+      resolveRoomOrReply: async () => {
+        throw new Error("resolveRoomOrReply should not be called after denial");
+      },
+    },
+    "192.0.2.82"
+  );
+
+  assert.deepEqual(accessChecks, ["github.com/o/r"]);
+  assert.equal(response.statusCode, 401);
+  assert.deepEqual(response.body, { error: "auth_required", room_id: "github.com/o/r" });
+});
+
+test("join route refuses a focus locator under a non-GitHub repo with 403 UNSUPPORTED_REPO_PROVIDER", async () => {
+  const response = await joinThroughRoute(
+    "bitbucket.org/t/p/focus/focus-intent-0123abcd",
+    {
+      resolveRepoRoomAccessDecision,
+      replyRepoRoomAccessDecision,
+      resolveRoomOrReply: async () => {
+        throw new Error("resolveRoomOrReply should not be called after denial");
+      },
+    },
+    "192.0.2.83"
+  );
+
+  assert.equal(response.statusCode, 403);
+  assert.deepEqual(response.body, {
+    error: "unsupported_repo_provider",
+    code: "UNSUPPORTED_REPO_PROVIDER",
+    message: "Repo rooms are supported for github.com repositories only",
+    room_id: "bitbucket.org/t/p",
   });
 });

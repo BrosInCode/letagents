@@ -3,18 +3,15 @@ import type { Express, Response } from "express";
 import type { GitRoomBinding, Project } from "../../db.js";
 import { parseGitHubRefRoomLocator } from "../../github/git-room-routing.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
-import type { ProjectRepoAccessDecision } from "../../rooms/access.js";
-import { normalizeRoomId } from "../../rooms/routing.js";
+import type {
+  ProjectRepoAccessDecision,
+  RepoRoomAccessDecision,
+  RepoRoomAccessDenial,
+} from "../../rooms/access.js";
+import { normalizeRoomId, parseFocusRoomLocator } from "../../rooms/routing.js";
 import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
-
-type RepoRoomAccessDecision =
-  | { kind: "allow" }
-  | { kind: "auth_required" }
-  | { kind: "private_repo_no_access" };
-
-type RepoRoomAccessDenial = Exclude<RepoRoomAccessDecision, { kind: "allow" }>;
 
 export interface RoomJoinRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
@@ -90,10 +87,24 @@ function checkJoinRateLimit(ip: string): boolean {
 }
 
 function getJoinAccessRoomName(roomId: string, deps: RoomJoinRouteDeps): string | null {
+  // A focus locator (`<parent>/focus/<key>`) can look like `host/owner/repo`
+  // when its parent has one segment. Its access follows the parent. A parent
+  // that is not repo-backed is checked later, on the resolved project.
+  const focusLocator = parseFocusRoomLocator(roomId);
+  if (focusLocator) {
+    return deps.isRepoBackedRoomId(focusLocator.parentRoomId)
+      ? focusLocator.parentRoomId
+      : getGitRefRoomAccessName(roomId);
+  }
+
   if (deps.isRepoBackedRoomId(roomId)) {
     return roomId;
   }
 
+  return getGitRefRoomAccessName(roomId);
+}
+
+function getGitRefRoomAccessName(roomId: string): string | null {
   const gitRefRoom = parseGitHubRefRoomLocator(roomId);
   if (gitRefRoom) {
     return `github.com/${gitRefRoom.repositoryFullName}`;
