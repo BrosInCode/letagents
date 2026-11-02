@@ -37,23 +37,15 @@ async function renderPanel(viewerLogin: string | null): Promise<string> {
   return `${html}${Object.values(context.teleports ?? {}).join("")}`;
 }
 
-test("person work panel renders the four sections and their empty lines with no events", async () => {
+test("person work panel names the repository and shows one concise empty state", async () => {
   const html = await renderPanel("owen");
-
-  assert.match(html, /Open pull requests/);
-  assert.match(html, /Waiting for review/);
-  assert.match(html, /Reviews given/);
-  assert.match(html, /Merged in the last 24 hours/);
-  assert.match(html, /No open pull requests in this room/);
-  assert.match(html, /No pull requests waiting for review in this room/);
-  assert.match(html, /No reviews given in this room/);
-  assert.match(html, /No pull requests merged in the last 24 hours/);
+  assert.match(html, /No open pull requests recorded in the last 30 days/);
+  assert.match(html, /Recorded GitHub activity · last 30 days/);
   assert.match(html, /Mira Patel/);
-  assert.match(html, /@mira in this room/);
+  assert.match(html, /@mira/);
+  assert.match(html, /acme\/app/);
   assert.match(html, /aria-label="Close work panel"/);
-  assert.doesNotMatch(html, /Your work/);
-  // The events route does not name a room per event, so the panel has no room links.
-  assert.doesNotMatch(html, /Go to room/);
+  assert.doesNotMatch(html, /Your work|in this room|Waiting for review|Reviews given/);
 });
 
 test("person work panel labels the signed-in person's own work", async () => {
@@ -70,4 +62,67 @@ test("person work panel wires the focus trap, Escape stopPropagation and deactiv
   assert.match(source, /trapFocusInDialog\(event, panelElement\.value\)/);
   assert.match(source, /event\.stopPropagation\(\)/);
   assert.match(source, /onDeactivated\(/);
+});
+
+test("ticket links survive ordinary snapshots and reject stale room/ref responses", async (t) => {
+  const { createRenderer, nextTick, reactive, ref, ssrContextKey } = await import("vue");
+  const globals = { window: globalThis.window, document: globalThis.document, HTMLElement: globalThis.HTMLElement };
+  const pending: Array<{ room: string; resolve: (value: unknown) => void }> = [];
+  const prUrl = "https://github.com/acme/app/pull/12";
+  Object.assign(globalThis, {
+    HTMLElement: class {},
+    document: { activeElement: null, addEventListener() {}, removeEventListener() {} },
+    window: { letagentsDesktop: { room: {
+      getGitHubEvents: async (room: string, query: { eventType: string }) => ({
+        roomIdentifier: room, githubRoomIdentifier: room, hasMore: false,
+        events: query.eventType === "pull_request" ? [{
+          id: "evt_12", eventType: "pull_request", action: "opened", state: "open",
+          githubObjectUrl: prUrl, title: "Fix loading", metadata: { author_login: "mira" },
+          eventOrderAt: new Date().toISOString(), createdAt: new Date().toISOString(),
+        }] : [],
+      }),
+      getTaskTicket: (room: string) => new Promise(resolve => pending.push({ room, resolve })),
+    } } },
+  });
+  // Run the production setup/lifecycle without DOM rendering; UI is covered by SSR and browser QA.
+  const renderer = createRenderer({
+    createElement: () => ({}), createText: () => ({}), createComment: () => ({}),
+    insert() {}, remove() {}, setText() {}, setElementText() {}, patchProp() {},
+    parentNode: () => null, nextSibling: () => null,
+  });
+  const props = reactive({
+    target: { login: "mira", displayName: "Mira Patel", avatarUrl: null },
+    roomId: "github.com/acme/app", viewerLogin: "owen",
+    tasks: [{ id: "task_1", title: "Fix loading", prUrl, workflowArtifacts: [], externalRef: "jira:APP-1", ticketState: "open" }],
+  });
+  const panel = ref<any>(null);
+  const Component = { ...(PersonWorkPanel as object), render: () => null };
+  const app = renderer.createApp(() => h(Component, { ...props, ref: panel }));
+  app.provide(ssrContextKey, { modules: new Set() }); app.mount({});
+  t.after(() => { app.unmount(); Object.assign(globalThis, globals); });
+  const settle = async () => { for (let i = 0; i < 8; i++) await nextTick(); };
+  const state = () => panel.value.$.setupState;
+  await settle();
+  assert.equal(pending.length, 1);
+  pending[0].resolve({ externalRef: "jira:APP-1", url: "https://acme.atlassian.net/browse/APP-1" });
+  await settle();
+  assert.equal(state().ticketLink(props.tasks[0]), "https://acme.atlassian.net/browse/APP-1");
+
+  props.tasks = props.tasks.map(task => ({ ...task, title: "Fix loading updated" }));
+  await settle();
+  assert.equal(pending.length, 1, "unchanged ticket identities do not refetch");
+  assert.equal(state().ticketLink(props.tasks[0]), "https://acme.atlassian.net/browse/APP-1");
+
+  props.tasks = props.tasks.map(task => ({ ...task, externalRef: "jira:APP-2" }));
+  await settle();
+  assert.equal(state().ticketLink(props.tasks[0]), undefined, "old ref must not remain clickable");
+  assert.equal(pending.length, 2);
+  props.roomId = "focus_20";
+  await settle();
+  const latest = pending.at(-1)!;
+  assert.equal(latest.room, "focus_20");
+  latest.resolve({ externalRef: "jira:APP-2", url: "https://acme.atlassian.net/browse/APP-2" });
+  pending[1].resolve({ externalRef: "jira:APP-2", url: "https://wrong.example/old-room" });
+  await settle();
+  assert.equal(state().ticketLink(props.tasks[0]), "https://acme.atlassian.net/browse/APP-2");
 });

@@ -13,6 +13,9 @@
     :target="personWorkTarget"
     :room-id="roomIdentifier"
     :viewer-login="viewerLogin ?? null"
+    :tasks="tasks"
+    :tasks-unavailable="tasksUnavailable"
+    @open-task="personWorkTarget = null; emit('open-task', $event)"
     @close="personWorkTarget = null"
   />
 </template>
@@ -23,17 +26,21 @@ import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/Des
 import PersonWorkPanel from "./PersonWorkPanel.vue";
 import { buildPersonContextMenuItems, type PersonMenuAction, type PersonMenuPosition } from "../../../domain/person-context-menu";
 import type { PersonTarget } from "../../../domain/person-target";
+import type { DesktopTaskSummary } from "../../../../../electron/ipc-types";
 
 /** Menu and Work panel for a clicked person. The room shell mounts this once and calls open(). */
 const props = defineProps<{
   viewerLogin?: string | null;
   roomIdentifier: string;
+  tasks?: DesktopTaskSummary[];
+  tasksUnavailable?: boolean;
 }>();
 
 const emit = defineEmits<{
   "open-messages-with": [target: PersonTarget];
   /** The Work panel opened. The room shell closes the agent inspector. */
   "work-open": [];
+  "open-task": [taskId: string];
 }>();
 
 const personMenu = ref<{ target: PersonTarget; position: PersonMenuPosition } | null>(null);
