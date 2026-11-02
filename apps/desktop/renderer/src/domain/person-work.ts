@@ -1,8 +1,12 @@
-import type { DesktopGitHubRoomEvent } from "../../../electron/ipc-types";
+import type { DesktopGitHubRoomEvent } from "../../../electron/ipc-types/room";
+import type { DesktopTaskSummary } from "../../../electron/ipc-types/tasks";
 import { timestampValue } from "./time";
 
-/** A GitHub room event plus the room it belongs to. Events without a room use the panel room. */
+/** A GitHub event plus its source room; task IDs are only meaningful within that scope. */
 export type PersonWorkEvent = DesktopGitHubRoomEvent & { roomId?: string | null };
+
+export type PersonWorkTask = Pick<DesktopTaskSummary,
+  "id" | "title" | "prUrl" | "workflowArtifacts" | "externalRef" | "ticketState">;
 
 export interface PersonWorkRow {
   prUrl: string;
@@ -32,6 +36,26 @@ const MERGED_WINDOW_MS = 24 * 60 * 60 * 1000;
 // Review events store the review URL (".../pull/12#pullrequestreview-9"),
 // so the pull request URL is the part before "/pull/<number>".
 const PULL_REQUEST_URL = /^(https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/(\d+))(?:[/?#].*)?$/;
+
+/** Resolve recorded links, never a matching title, author, or suggested Jev match. */
+export function personWorkTasks<T extends PersonWorkTask>(
+  row: PersonWorkRow,
+  events: readonly PersonWorkEvent[],
+  tasks: readonly T[],
+  roomId: string,
+): T[] {
+  const prKey = (value: string | null) => PULL_REQUEST_URL.exec(value ?? "")?.[1].toLowerCase();
+  const key = prKey(row.prUrl);
+  if (!key) return [];
+  // IDs are local to a board. A focus room may be showing its parent's events.
+  const linkedIds = new Set(events.filter((event) =>
+    event.roomId === roomId && prKey(event.githubObjectUrl) === key,
+  ).map((event) => event.linkedTaskId).filter(Boolean));
+  return tasks.filter((task) => linkedIds.has(task.id)
+    || prKey(task.prUrl) === key
+    || task.workflowArtifacts.some((artifact) => artifact.provider === "github"
+      && artifact.kind === "pull_request" && prKey(artifact.url) === key));
+}
 
 interface PullRequestGroup {
   prUrl: string;

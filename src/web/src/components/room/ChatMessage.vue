@@ -39,6 +39,8 @@
     <div v-else class="message-body">
       <MessageMeta v-if="!githubHistory"
         :display-name="displayName"
+        :can-view-work="Boolean(workTarget && personWorkContext?.available())"
+        @work="openWork"
         :owner-attribution="senderRole?.endsWith('agent') ? identity.ownerAttribution : null"
         :provenance-badge="provenanceBadge"
         :inline-prompt-injection="inlinePromptInjection"
@@ -191,6 +193,7 @@
 <script setup lang="ts">
 import { roomGifPageUrl } from '../../../../../shared/room-expressions.mjs'
 import ChatAvatar from '../../../../../shared/ui/ChatAvatar.vue'
+import { injectPersonWork, personWorkTarget } from './personWork'
 import type { MessageReaderSender } from '../../../../../shared/ui/message-reader'
 import { chatSenderRole } from '../../../../../shared/chat-appearance'
 import '../../../../../shared/ui/chat-palette.css'
@@ -509,6 +512,10 @@ onUnmounted(() => {
   stopTrackingReactions?.()
   stopTrackingPreviews?.()
 })
+const personWorkContext = injectPersonWork()
+const workTarget = computed(() => personWorkTarget(props.message))
+function openWork(event: MouseEvent) { if (workTarget.value && personWorkContext?.available()) personWorkContext.open(workTarget.value, event) }
+
 const identity = computed(() => resolveAgentIdentity(props.message.sender, props.message.agent_identity))
 const displayName = computed(() => props.message.source === 'browser' ? props.message.sender : identity.value.displayName || 'anonymous')
 const isSystem = computed(() => props.message.source !== 'browser' && ['letagents', 'system'].includes((props.message.sender || '').toLowerCase()))

@@ -19,7 +19,7 @@ export function buildPersonContextMenuItems(input: {
   const isViewer = viewer !== null && input.target.login.trim().toLowerCase() === viewer;
   return [[
     { id: "message", label: `Message ${input.target.displayName}`, disabled: isViewer },
-    { id: "work", label: "Work in this room" },
+    { id: "work", label: "View work" },
   ]];
 }
 

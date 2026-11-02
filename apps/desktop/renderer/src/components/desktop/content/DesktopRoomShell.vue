@@ -306,7 +306,7 @@
       @purge="purgeAgentInspectorAgent"
     />
 
-    <PersonActionsHost ref="personActions" :viewer-login="viewerLogin" :room-identifier="room.identifier" @open-messages-with="emit('open-messages-with', $event)" @work-open="selectedAgentDetailRequest && closeAgentDetail(); selectedReasoningSessionId && closeReasoningInspector()" />
+    <PersonActionsHost ref="personActions" :viewer-login="viewerLogin" :room-identifier="room.identifier" :tasks="tasks" :tasks-unavailable="roomLoading || sourceStates?.tasks.status === 'error'" @open-task="openBoardTask" @open-messages-with="emit('open-messages-with', $event)" @work-open="selectedAgentDetailRequest && closeAgentDetail(); selectedReasoningSessionId && closeReasoningInspector()" />
     <AddAgentModal
       v-if="supervisedAgentsSupported"
       :room-storage-mode="storage.effectiveMode"

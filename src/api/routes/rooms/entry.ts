@@ -10,6 +10,7 @@ import {
   isKnownProvider,
   normalizeRoomId,
   normalizeRoomName,
+  parseFocusRoomLocator,
   resolveRoomIdentifier,
 } from "../../rooms/routing.js";
 import { sendAppPage } from "../web/index.js";
@@ -144,7 +145,9 @@ export function registerRoomEntryRoutes(
           res.redirect(302, decision.location);
           return;
         }
-      } else if (deps.isRepoBackedRoomId(canonicalRoomId)) {
+      } else if (!parseFocusRoomLocator(canonicalRoomId) && deps.isRepoBackedRoomId(canonicalRoomId)) {
+        // A focus locator that matches no room is not a repo room id, even when
+        // its parent has one segment and the whole locator looks like one.
         const decision = await deps.resolveGitHubRoomEntryDecision({
           roomName: canonicalRoomId,
           sessionAccount: req.sessionAccount,

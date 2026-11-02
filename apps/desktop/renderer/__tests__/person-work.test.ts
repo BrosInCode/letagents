@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { DesktopGitHubRoomEvent } from "../../electron/ipc-types";
+import type { DesktopGitHubRoomEvent, DesktopTaskSummary } from "../../electron/ipc-types";
 import {
   buildPersonWork,
+  personWorkTasks,
   loadRoomEventsOfType,
   type PersonWorkEvent,
   type PersonWorkEventPage,
@@ -520,5 +521,52 @@ describe("loadRoomEventsOfType", () => {
     assert.deepEqual(result.events.map((event) => event.id), ["e1"]);
     assert.equal(result.truncated, false);
     assert.deepEqual(cursors, [null, "e1"]);
+  });
+});
+
+
+describe("personWorkTasks verified associations", () => {
+  const room = "github.com/acme/app";
+  function task(overrides: Partial<DesktopTaskSummary> = {}): DesktopTaskSummary {
+    return {
+      id: "task_1", title: "Add search", description: null, status: "in_progress",
+      assignee: "mira", assigneeAgentKey: null, createdBy: null, prUrl: null,
+      workflowArtifacts: [], workflowRefs: [], activeLeases: [], activeLocks: [],
+      stalePromptState: null, createdAt: null, updatedAt: NOW.toISOString(), ...overrides,
+    };
+  }
+  const row = buildPersonWork([pullRequestEvent({ id: "evt_1" })], "mira", NOW).openPrs[0];
+
+  it("links a recorded task ID only on the event's own board", () => {
+    const event = pullRequestEvent({ id: "evt_1", roomId: room, linkedTaskId: "task_1" });
+    assert.deepEqual(personWorkTasks(row, [event], [task()], room).map(t => t.id), ["task_1"]);
+    assert.deepEqual(personWorkTasks(row, [event], [task()], "focus_12"), []);
+    assert.deepEqual(personWorkTasks(row, [{ ...event, roomId: null }], [task()], room), []);
+  });
+
+  it("links exact PR URLs on board cards or accepted artifacts, including in focus rooms", () => {
+    const direct = task({ prUrl: "https://github.com/Acme/App/pull/12/files" });
+    const artifact = task({ id: "task_2", workflowArtifacts: [{
+      provider: "github", kind: "pull_request", url: row.prUrl + "#discussion", id: null,
+      number: 12, title: null, ref: null, state: "open",
+    }] });
+    assert.deepEqual(personWorkTasks(row, [], [direct, artifact], "focus_12").map(t => t.id), ["task_1", "task_2"]);
+  });
+
+  it("does not infer links from titles, assignees, PR numbers, descriptions or suggestions", () => {
+    const cards = [
+      task(), task({ prUrl: "https://github.com/other/repo/pull/12" }),
+      task({ description: row.prUrl }),
+      task({ jevSuggestedPullRequests: [{ url: row.prUrl, number: 12, title: row.title }] }),
+      task({ workflowArtifacts: [{ provider: "github", kind: "issue", url: row.prUrl,
+        id: null, number: 12, title: null, ref: null, state: null }] }),
+    ];
+    assert.deepEqual(personWorkTasks(row, [], cards, room), []);
+  });
+
+  it("does not borrow task links from another PR's events", () => {
+    const event = pullRequestEvent({ id: "evt_other", roomId: room, linkedTaskId: "task_1",
+      githubObjectUrl: "https://github.com/acme/app/pull/120" });
+    assert.deepEqual(personWorkTasks(row, [event], [task()], room), []);
   });
 });
