@@ -125,7 +125,7 @@ const isViewer = computed(() => {
 const sections = computed(() => [
   { key: "open", title: "Open PRs", rows: work.value.openPrs.filter(row => row.state === "open") },
   { key: "draft", title: "Draft PRs", rows: work.value.openPrs.filter(row => row.state === "draft") },
-  { key: "review", title: isViewer.value ? "Awaiting your review" : "Awaiting their review", rows: work.value.needsTheirReview },
+  { key: "review", title: isViewer.value ? "Needs your review" : "Needs their review", rows: work.value.needsTheirReview },
   { key: "reviewed", title: "Reviews given", rows: work.value.reviewed },
   { key: "merged", title: "Merged in the last 24 hours", rows: work.value.mergedRecently },
 ]);
