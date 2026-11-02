@@ -8,7 +8,7 @@ import type {
   RepoRoomAccessDecision,
   RepoRoomAccessDenial,
 } from "../../rooms/access.js";
-import { normalizeRoomId } from "../../rooms/routing.js";
+import { normalizeRoomId, parseFocusRoomLocator } from "../../rooms/routing.js";
 import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
@@ -87,10 +87,24 @@ function checkJoinRateLimit(ip: string): boolean {
 }
 
 function getJoinAccessRoomName(roomId: string, deps: RoomJoinRouteDeps): string | null {
+  // A focus locator (`<parent>/focus/<key>`) can look like `host/owner/repo`
+  // when its parent has one segment. Its access follows the parent. A parent
+  // that is not repo-backed is checked later, on the resolved project.
+  const focusLocator = parseFocusRoomLocator(roomId);
+  if (focusLocator) {
+    return deps.isRepoBackedRoomId(focusLocator.parentRoomId)
+      ? focusLocator.parentRoomId
+      : getGitRefRoomAccessName(roomId);
+  }
+
   if (deps.isRepoBackedRoomId(roomId)) {
     return roomId;
   }
 
+  return getGitRefRoomAccessName(roomId);
+}
+
+function getGitRefRoomAccessName(roomId: string): string | null {
   const gitRefRoom = parseGitHubRefRoomLocator(roomId);
   if (gitRefRoom) {
     return `github.com/${gitRefRoom.repositoryFullName}`;

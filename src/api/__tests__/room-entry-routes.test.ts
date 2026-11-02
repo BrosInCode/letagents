@@ -76,6 +76,39 @@ test("focus locator entry redirects to the canonical opaque room id", async () =
   assert.deepEqual(redirect, { status: 301, location: "/in/focus_37?tab=chat" });
 });
 
+test("entry for a missing focus locator under an ad-hoc parent is not checked as a repo room", async () => {
+  const handlers: Array<(req: any, res: any) => Promise<void> | void> = [];
+  const app = {
+    get(_path: RegExp | string, handler: (req: any, res: any) => Promise<void> | void) {
+      handlers.push(handler);
+    },
+  };
+  registerRoomEntryRoutes(app as never, {
+    ...createDeps(),
+    // The same shape test the server uses: three segments look like host/owner/repo.
+    isRepoBackedRoomId: (roomId: string) => /^[A-Za-z0-9.-]+\/[^/]+\/[^/]+$/.test(roomId),
+    resolveGitHubRoomEntryDecision: async () => {
+      throw new Error("a focus locator must not be checked as a repo room");
+    },
+  } as never);
+
+  let redirected = false;
+  let servedApp = false;
+  const sendsApp = () => { servedApp = true; return { send() {} }; };
+  await handlers[2]?.({
+    params: { 0: "focus-adhoc-parent/focus/focus-intent-0123abcd" },
+    originalUrl: "/in/focus-adhoc-parent/focus/focus-intent-0123abcd",
+    sessionAccount: null,
+  }, {
+    redirect() { redirected = true; },
+    status: sendsApp,
+    sendFile() { servedApp = true; },
+  });
+
+  assert.equal(redirected, false);
+  assert.equal(servedApp, true);
+});
+
 test("public room resolution hands a focus locator off as its canonical room id", async () => {
   const payload = await buildPublicRoomResolvePayload(
     "github.com/owner/repo/focus/git:branch:RmVhdHVyZQ",
