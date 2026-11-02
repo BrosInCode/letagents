@@ -125,7 +125,7 @@ test('the provider run conclusion wins over a failed continue-on-error job', () 
   assert.equal(groupActivity([event('pr'),failedJob,passed])[0].attention,false)
 })
 
-import { createGitHubTimeline, githubArtifactKey, githubUpdateRows } from '../../../shared/grouped-github-updates'
+import { createGitHubTimeline, githubArtifactKey, githubUpdateRows, githubChatHighlights, githubChatHighlightLimit } from '../../../shared/grouped-github-updates'
 import { parseGitHubEventPresentation } from '../src/components/room/githubEventMessage'
 import { chatSenderRole, avatarInitials } from '../../../shared/chat-appearance'
 function roomUpdate(id: number, text: string, link = url) { return { id: `msg_${id}`, source: 'github', sender: 'github', timestamp: at(id), text: `${text} ${link}` } }
@@ -204,3 +204,110 @@ test('separate check jobs on the same workflow cannot overwrite each other', () 
   assert.equal(rows[0].event.statusLabel, 'Failure');
   assert.equal(rows[1].event.statusLabel, 'Success');
 });
+
+const checkMessage = (id: number, name: string, state: string, run = '90') => roomUpdate(id,
+  `Check "${name}" (GitHub Actions) ${state} in BrosInCode/letagents`,
+  `https://github.com/BrosInCode/letagents/actions/runs/${run}/job/${id}`)
+
+test('Chat condenses checks by run, keeps individual outcomes and silences recovered and cancelled runs', () => {
+  const messages = [checkMessage(1,'build','failure'), checkMessage(2,'integration-tests','success'), checkMessage(3,'build','success')]
+  let rows = githubUpdateRows(messages.slice(0,2),parseRoomEvent)
+  let highlights = githubChatHighlights(rows)
+  assert.equal(highlights.length,1)
+  assert.deepEqual(highlights[0].checks.map(check=>[check.name,check.state]),[['build','Failed'],['integration-tests','Passed']])
+  rows = githubUpdateRows(messages,parseRoomEvent)
+  assert.equal(githubChatHighlights(rows).length,0)
+  assert.equal(rows.flatMap(row=>row.messages).length,3,'compaction never drops the original notifications')
+  assert.equal(githubChatHighlights(githubUpdateRows([checkMessage(4,'build','cancelled','91')],parseRoomEvent)).length,0)
+})
+
+test('Chat bounds highlights even when a burst contains many failed workflows', () => {
+  const messages = Array.from({length:20},(_,index)=>checkMessage(index+1,'build','failure',String(90+index)))
+  const rows = githubUpdateRows(messages,parseRoomEvent)
+  const highlights = githubChatHighlights(rows)
+  assert.equal(highlights.length,githubChatHighlightLimit)
+  assert.deepEqual(highlights.map(item=>item.title),['Workflow #107','Workflow #108','Workflow #109'])
+  assert.equal(rows.length,20)
+})
+
+test('Chat uses explicit PR context without letting duplicate legacy check events obscure it', () => {
+  const failedJob = job('job-failed',1,'completed',2)
+  failedJob.metadata = {...failedJob.metadata, conclusion:'failure',head_ref:'feature/activity'}
+  const legacy = event('legacy-check',{event_type:'check_run',action:'completed',state:'failure',title:'build',github_object_url:failedJob.github_object_url,metadata:{same_repo_pull_request_numbers:[42]},provider_event_at:at(2)})
+  const activity = [event('pr'),failedJob,legacy]
+  const groups = groupActivity(activity)
+  const original = JSON.stringify(groups)
+  const rows = githubUpdateRows([checkMessage(1,'build','failure')],parseRoomEvent)
+  const highlight = githubChatHighlights(rows,groups)[0]
+  assert.equal(highlight.label,'#42')
+  assert.equal(highlight.title,'Activity view')
+  assert.equal(highlight.branch,'feature/activity')
+  assert.equal(highlight.checks.length,1)
+  assert.equal(highlight.checks[0].state,'Failed')
+  assert.equal(JSON.stringify(groups),original,'the Activity projection remains unchanged')
+  assert.deepEqual(groups.flatMap(group=>group.events).map(event=>event.id).sort(),activity.map(event=>event.id).sort())
+})
+
+test('Chat suppresses an old failing notification after a successful retry or a changed PR head', () => {
+  const failedJob=job('failed',1,'completed',2)
+  failedJob.metadata={...failedJob.metadata,conclusion:'failure'}
+  const rows=githubUpdateRows([checkMessage(1,'build','failure')],parseRoomEvent)
+  const recovered=job('recovered',2,'completed',4)
+  assert.equal(githubChatHighlights(rows,groupActivity([event('pr'),failedJob,recovered])).length,0)
+  assert.equal(githubChatHighlights(rows,groupActivity([event('pr',{head_sha:'new-sha'}),failedJob])).length,0)
+})
+
+test('Chat keeps a merged milestone while routine PR changes stay in the digest', () => {
+  const messages=[roomPR(1),roomUpdate(2,'PR #42 received new commits in BrosInCode/letagents'),roomUpdate(3,'PR #42 merged in BrosInCode/letagents')]
+  assert.equal(githubChatHighlights(githubUpdateRows(messages.slice(0,2),parseRoomEvent)).length,0)
+  const highlights=githubChatHighlights(githubUpdateRows(messages,parseRoomEvent))
+  assert.equal(highlights.length,1)
+  assert.equal(highlights[0].merged,true)
+  assert.equal(highlights[0].title,'Quiet room updates')
+})
+
+test('Chat anchors a merge to its actual notification even with earlier blocks and later comments', () => {
+  const merged=roomUpdate(3,'PR #42 merged in BrosInCode/letagents')
+  const messages=[roomPR(1),merged,roomUpdate(4,'Willow commented on PR #42 in BrosInCode/letagents: "Looks good"')]
+  const groups=groupActivity([event('opened'),event('merged',{action:'closed',state:'closed',metadata:{merged:true},provider_event_at:at(3)})])
+  assert.equal(githubChatHighlights(githubUpdateRows(messages.slice(0,1),parseRoomEvent),groups).length,0)
+  const highlights=githubChatHighlights(githubUpdateRows(messages,parseRoomEvent),groups)
+  assert.equal(highlights.length,1)
+  assert.equal(highlights[0].sourceMessageId,merged.id)
+  assert.equal(highlights[0].time,merged.timestamp)
+})
+
+test('Chat picks the latest matching notification once and selects Activity via recorded job IDs', () => {
+  const failedJob=job('failed-job',1,'completed',2)
+  failedJob.metadata={...failedJob.metadata,conclusion:'failure'}
+  const messages=[checkMessage(1,'build','failure'),roomPR(2),checkMessage(3,'tests','failure')]
+  const rows=githubUpdateRows(messages,parseRoomEvent)
+  const highlights=githubChatHighlights(rows,groupActivity([failedJob]))
+  assert.equal(highlights.length,1)
+  assert.equal(highlights[0].sourceMessageId,messages[2].id)
+  assert.equal(highlights[0].url,url.toLowerCase())
+  assert.equal(highlights[0].activityEventId,'failed-job','PR context can come entirely from workflow metadata')
+  const legacy=event('legacy-check',{event_type:'check_run',action:'completed',state:'failure',github_object_url:failedJob.github_object_url,metadata:null})
+  const fallback=githubChatHighlights(githubUpdateRows([messages[0]],parseRoomEvent),groupActivity([legacy]))[0]
+  assert.match(fallback.url,/\/actions\/runs\/90$/)
+  assert.equal(fallback.activityEventId,'legacy-check','canonical run links still select a recorded job event')
+})
+
+test('Chat never invents a PR association from a task or an unsafe or mismatched repository URL', () => {
+  const message=roomUpdate(1,'Check "build" (GitHub Actions) failure in BrosInCode/other linked to task_42','https://github.com/BrosInCode/other/actions/runs/90/job/19')
+  const highlight=githubChatHighlights(githubUpdateRows([message],parseRoomEvent),groupActivity([event('pr'),job('failed',1,'completed',2)]))[0]
+  assert.equal(highlight.title,'Workflow #90')
+  assert.notEqual(highlight.label,'#42')
+  for (const link of ['javascript:alert(1)','https://github.com.evil.test/BrosInCode/letagents/actions/runs/90','https://github.com/Wrong/repo/actions/runs/90']) {
+    const bad=roomUpdate(2,'Check "build" (GitHub Actions) failure in BrosInCode/letagents',link)
+    assert.equal(githubChatHighlights(githubUpdateRows([bad],parseRoomEvent)).length,0)
+  }
+})
+
+test('fallback workflow summaries open the failed job instead of a passing job in the same run', () => {
+  const messages=[checkMessage(10,'lint','success'),checkMessage(20,'build','failure'),checkMessage(30,'tests','success')]
+  const activity=messages.map((message,index)=>event(`check-${index}`,{event_type:'check_run',action:'completed',state:index===1?'failure':'success',title:['lint','build','tests'][index],github_object_url:parseRoomEvent(message)!.url,metadata:null,provider_event_at:at(index+1)}))
+  const highlight=githubChatHighlights(githubUpdateRows(messages,parseRoomEvent),groupActivity(activity))[0]
+  assert.equal(highlight.activityEventId,'check-1')
+  assert.equal(highlight.sourceMessageId,messages[2].id)
+})

@@ -1,10 +1,23 @@
 <template>
   <template v-if="!grouped"><slot :message="messages[0]" :history="false" /></template>
   <section v-else ref="element" class="room-github-updates" :data-scroll-anchor-id="anchorId || messages[0]?.id" aria-label="GitHub updates">
+    <div v-for="highlight in highlights" :key="highlight.key" class="github-chat-highlight" :data-merged="highlight.merged">
+      <a v-if="highlight.merged" class="github-chat-milestone" :href="highlight.url" @click="openActivity($event, highlight.url, highlight.activityEventId)">
+        <span class="github-chat-milestone-mark" aria-hidden="true">✓</span><span><strong>{{ highlight.title }}</strong><small>{{ highlight.label }} · Merged</small></span>
+      </a>
+      <DisclosurePanel v-else :open="highlightOpen.has(highlight.key)" :panel-id="panelId(`highlight:${highlight.key}`)" trigger-class="github-chat-highlight-toggle" :instant="instant" @toggle="toggleHighlight(highlight.key, $event)" @settled="emit('layoutSettled')">
+        <template #summary><span class="github-chat-highlight-copy"><small class="github-chat-attention">{{ highlight.status }}</small><strong>{{ highlight.label }} · {{ highlight.title }}</strong><small v-if="highlight.branch" class="github-chat-branch">{{ highlight.branch }}</small><small v-if="highlight.checks.length">{{ checkSummary(highlight.checks) }} · reported checks</small></span></template>
+        <div class="github-chat-checks">
+          <div v-for="(check, index) in highlight.checks.filter(check => failedGitHubCheck(check.state))" :key="index" class="github-chat-check"><span>{{ check.name }}</span><span>{{ check.state }}</span></div>
+          <a :href="highlight.url" class="github-chat-activity-link" @click="openActivity($event, highlight.url, highlight.activityEventId)">{{ activity?.available.value ? 'View in Activity' : 'View on GitHub' }} ↗</a>
+        </div>
+      </DisclosurePanel>
+    </div>
+    <div class="github-chat-digest">
     <DisclosurePanel :open="!collapsed" :panel-id="panelId('group')" trigger-class="github-updates-heading" :instant="instant" @toggle="toggleGroup" @settled="emit('layoutSettled')">
     <template #summary><span class="github-updates-heading-copy">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M9 19c-4 1-4-2-6-2m12 5v-4c0-1-.3-2-1-2 4-.5 6-2 6-6 0-2-.5-3-2-4 .3-1 .3-3-.2-4-2 0-3 1-4 2-2-.5-4-.5-6 0-1-1-2-2-4-2-.5 1-.5 3-.2 4C2 7 2 8 2 10c0 4 2 5.5 6 6-.7.5-1 1.5-1 2v4" /></svg>
-      <strong>GitHub updates</strong><span v-if="repositories.length === 1">{{ repositories[0] }}</span>
+      <strong>Repository activity</strong><span class="github-updates-count">{{ messages.length }} {{ messages.length === 1 ? 'event' : 'events' }}</span>
     </span></template>
     <div class="github-update-rows">
       <div class="github-update-list">
@@ -20,20 +33,23 @@
             <div class="github-history-inner">
               <div class="github-history-heading"><span>History</span><a v-if="safeUrl(row.event.url)" :href="safeUrl(row.event.url)!" target="_blank" rel="noopener noreferrer">Open on GitHub ↗</a></div>
               <div :ref="(el: unknown) => setScroller(row.key, el)" class="github-history-scroll" tabindex="0" :aria-label="`${row.label} update history`" @scroll="rememberScroll(row.key)">
-                <template v-if="!lazyHistory || rendered.has(row.key)"><template v-for="message in row.messages" :key="message.id"><slot :message="message" :history="true" /></template></template>
+                <template v-if="lazyHistory === false || rendered.has(row.key)"><template v-for="message in row.messages" :key="message.id"><slot :message="message" :history="true" /></template></template>
               </div>
               <div class="github-history-bottom"><button type="button" :class="{ available: unseen.has(row.key) }" :disabled="!unseen.has(row.key)" @click="latest(row.key)">Latest updates ↓</button></div>
             </div>
       </DisclosurePanel>
       </div>
     </div>
+    <button v-if="activity?.available.value" type="button" class="github-chat-activity-link" @click="activity.open()">View full history in Activity →</button>
     </DisclosurePanel>
+    </div>
   </section>
 </template>
 <script setup lang="ts" generic="M extends { id: string; timestamp: string }">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue';
+import { computed, inject, nextTick, onBeforeUnmount, onMounted, ref, useId, watch } from 'vue';
 import DisclosurePanel from './DisclosurePanel.vue';
-import { githubUpdateRows, type GitHubUpdateEvent } from '../grouped-github-updates';
+import { failedGitHubCheck, githubChatHighlights, githubUpdateRows, type GitHubChatHighlight, type GitHubUpdateEvent } from '../grouped-github-updates';
+import { roomGitHubActivityKey } from './room-github-activity';
 const props = defineProps<{
   anchorId?: string; messages: readonly M[]; grouped: boolean; parseEvent: (message: M) => GitHubUpdateEvent | null;
   /** Mount a row's history only once it has been opened. */
@@ -45,7 +61,10 @@ defineSlots<{ default(props: { message: M; history: boolean }): unknown }>();
 const emit = defineEmits<{ rowsChanged: []; layoutStart: []; layoutSettled: [] }>();
 const element = ref<HTMLElement | null>(null);
 const instant = ref(false);
-const collapsed = ref(false);
+const collapsed = ref(true);
+const groupVisited = ref(false);
+const highlightOpen = ref(new Set<string>());
+const activity = inject(roomGitHubActivityKey, null);
 const open = ref(new Set<string>());
 const unseen = ref(new Set<string>());
 const scrollers = new Map<string, HTMLElement>();
@@ -55,21 +74,41 @@ const instanceId = useId();
 // and the same empty list each time, so the rows watch below never runs for it.
 const noRows: ReturnType<typeof githubUpdateRows<M>> = [];
 const rows = computed(() => props.grouped ? githubUpdateRows(props.messages, props.parseEvent) : noRows);
-// Bounded mode (desktop): a long run of events mounts at most rowLimit rows,
-// and no closed history. A row stays mounted once it has been opened.
-const shownCount = ref(props.rowLimit ?? Number.POSITIVE_INFINITY);
-const shownRows = computed(() => props.rowLimit ? rows.value.slice(Math.max(0, rows.value.length - shownCount.value)) : rows.value);
+const highlights = computed(() => {
+  if (!activity) return githubChatHighlights(rows.value);
+  const ids = new Set(props.messages.map(message => message.id));
+  return activity.highlights.value.filter(highlight => ids.has(highlight.sourceMessageId));
+});
+// Routine events start collapsed. Only visiting the digest mounts its rows.
+// Keep visited histories mounted so their scroll bookmarks survive closing.
+const rowPageSize = computed(() => Math.min(props.rowLimit || 10, 10));
+const shownCount = ref(rowPageSize.value);
+const shownRows = computed(() => groupVisited.value ? rows.value.slice(Math.max(0, rows.value.length - shownCount.value)) : []);
 const hiddenRowCount = computed(() => rows.value.length - shownRows.value.length);
 const rendered = ref(new Set<string>());
 async function showEarlier() {
   emit('layoutStart');
-  shownCount.value += props.rowLimit ?? rows.value.length;
+  shownCount.value += rowPageSize.value;
   await nextTick();
   emit('rowsChanged');
 }
 const repositories = computed(() => [...new Set(rows.value.map(row => row.event.repository).filter(Boolean))]);
 function panelId(key: string) { return `${instanceId}-${encodeURIComponent(key)}`; }
 function safeUrl(value: string | null) { try { const url = new URL(value || ''); return url.protocol === 'https:' && url.hostname === 'github.com' ? url.href : null; } catch { return null; } }
+function openActivity(event: MouseEvent, url: string, eventId?: string | null) {
+  if (!activity?.available.value || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  event.preventDefault(); activity.open(url, eventId);
+}
+function checkSummary(checks: GitHubChatHighlight['checks']): string {
+  const counts = new Map<string, number>();
+  for (const check of checks) { const state = failedGitHubCheck(check.state) ? 'failed' : check.state.toLowerCase(); counts.set(state, (counts.get(state) || 0) + 1); }
+  return [...counts].map(([state, count]) => `${count} ${state}`).join(' · ');
+}
+async function toggleHighlight(key: string, event: MouseEvent) {
+  emit('layoutStart'); instant.value = event.detail === 0;
+  if (highlightOpen.value.has(key)) highlightOpen.value.delete(key); else highlightOpen.value.add(key);
+  await nextTick(); emit('rowsChanged');
+}
 function setScroller(key: string, el: unknown) { if (el instanceof HTMLElement) scrollers.set(key, el); else scrollers.delete(key); }
 function rememberScroll(key: string) {
   const el = scrollers.get(key); if (!el || collapsed.value || !open.value.has(key) || el.clientHeight <= 0) return;
@@ -92,6 +131,7 @@ async function toggleGroup(event: MouseEvent) {
   emit('layoutStart');
   instant.value = event.detail === 0;
   collapsed.value = !collapsed.value;
+  if (!collapsed.value) groupVisited.value = true;
   await nextTick();
   if (!collapsed.value) for (const key of open.value) restoreHistory(key);
   emit('rowsChanged');
@@ -117,7 +157,8 @@ function reveal(event: Event) {
   event.stopPropagation();
   instant.value = true;
   collapsed.value = false;
-  if (props.rowLimit) shownCount.value = Math.max(shownCount.value, rows.value.length - index);
+  groupVisited.value = true;
+  shownCount.value = Math.max(shownCount.value, rows.value.length - index);
   open.value.add(row.key);
   rendered.value.add(row.key);
   void nextTick(() => { instant.value = false; emit('rowsChanged'); detail.ready(); });
@@ -126,12 +167,33 @@ onMounted(() => element.value?.addEventListener('reveal-github-message', reveal)
 onBeforeUnmount(() => element.value?.removeEventListener('reveal-github-message', reveal));
 </script>
 <style>
-.room-github-updates { width: min(100%, var(--room-chat-content-max, 720px)); align-self: center; flex: 0 0 auto; box-sizing: border-box; margin: 20px auto; padding: 8px; border: 1px solid var(--border, #242427); border-radius: 12px; background: light-dark(#fafafa, #0d0d0e); overflow: hidden; }
+.room-github-updates { width: min(100%, var(--room-chat-content-max, 720px)); align-self: center; flex: 0 0 auto; box-sizing: border-box; margin: 12px auto; }
+.github-chat-digest { border-block: 1px solid var(--border, #242427); }
+.github-chat-highlight { margin-bottom: 12px; border: 1px solid var(--border, #242427); border-radius: 10px; background: light-dark(#fafafa, #111113); overflow: hidden; }
+.github-chat-highlight[data-merged=true] { border: 0; background: none; }
+.github-chat-milestone { display: flex; gap: 10px; align-items: flex-start; padding: 8px 16px; color: var(--text); text-decoration: none; }
+.github-chat-milestone:hover strong { text-decoration: underline; }
+.github-chat-milestone-mark { color: light-dark(#6d4c91, #b9a2ce); }
+.github-chat-milestone strong { font-size: 13px; font-weight: 500; }
+.github-chat-milestone small { display: block; font-size: 11px; color: var(--text-tertiary); }
+.github-chat-highlight-copy { display: grid; gap: 5px; overflow-wrap: anywhere; }
+.github-chat-highlight-copy strong { font-size: 14px; font-weight: 520; color: var(--text); }
+.github-chat-highlight-copy small { font-size: 11px; color: var(--text-secondary); }
+.github-chat-highlight-copy .github-chat-attention { color: light-dark(#8a541e, #e0b77b); }
+.github-chat-branch { color: var(--text-tertiary); }
+.github-chat-checks { padding: 0 16px 8px; border-top: 1px solid var(--border, #242427); }
+.github-chat-check { display: flex; justify-content: space-between; gap: 14px; padding: 10px 0; font-size: 12px; }
+.github-chat-check > span:first-child { min-width: 0; overflow-wrap: anywhere; }
+.github-chat-check > span:last-child { color: light-dark(#ad4444, #d59393); }
+.github-chat-activity-link { display: inline-block; margin: 5px 16px 10px; padding: 6px 0; border: 0; background: none; font: inherit; font-size: 12px; color: var(--text-secondary); text-decoration: none; cursor: pointer; }
+.github-chat-checks .github-chat-activity-link { margin-inline: 0; }
+.github-chat-activity-link:hover { text-decoration: underline; }
 .room-github-updates .github-updates-heading { min-height: 44px; font-size: 12px; color: var(--text-tertiary); }
 .github-updates-heading-copy { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .github-updates-heading-copy svg { width: 17px; height: 17px; flex-shrink: 0; }
 .github-updates-heading-copy strong { font-weight: 500; color: var(--text-secondary); }
 .github-updates-heading-copy > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.github-updates-heading-copy .github-updates-count { display: inline; margin-left: auto; flex-shrink: 0; }
 .github-update-row + .github-update-row { border-top: 1px solid var(--border, #242427); }
 .github-update-earlier { display: block; width: 100%; min-height: 36px; border: 0; border-radius: 8px; background: none; color: var(--text-secondary); font: inherit; font-size: 12px; cursor: pointer; }
 .github-update-earlier:focus-visible { outline: 2px solid var(--text-secondary, #97979f); outline-offset: -3px; }

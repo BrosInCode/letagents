@@ -1,6 +1,7 @@
 import { provideRoomMessageLinkPreviews, useRoomMessageLinkPreviews } from "../../../../composables/useRoomMessageLinkPreviews";
 import {
   computed,
+  provide,
   onBeforeUnmount,
   ref,
   readonly,
@@ -24,6 +25,9 @@ import {
 } from "../desktop-chat-message/github-event";
 import type { GitHubEventPresentation } from "../desktop-chat-message/types";
 import type { RoomTab, RoomTabId } from "./types";
+import { roomGitHubActivityKey } from "../../../../../../../../shared/ui/room-github-activity";
+import { groupActivity } from "../../../../../../../../shared/ui/activity/model";
+import { githubChatHighlights, githubUpdateRows } from "../../../../../../../../shared/grouped-github-updates";
 
 type RoomTabIndicatorTone = NonNullable<NonNullable<RoomTab["indicator"]>["tone"]>;
 
@@ -70,6 +74,18 @@ export function useDesktopRoomGitHubEvents(options: {
       || options.messages.value.some(shouldRefreshEventsForMessage)
     )
   );
+
+  provide(roomGitHubActivityKey, {
+    available: showEventsTab,
+    highlights: computed(() => githubChatHighlights(githubUpdateRows(options.messages.value, parseGitHubEvent), groupActivity((eventsPage.value?.events || []).map(event => ({
+      id: event.id, event_type: event.eventType, action: event.action, github_object_id: event.githubObjectId,
+      github_object_url: event.githubObjectUrl, title: event.title, state: event.state, actor_login: event.actorLogin,
+      metadata: event.metadata, linked_task_id: event.linkedTaskId, created_at: event.createdAt,
+      provider_event_at: event.providerEventAt, provider_object_updated_at: event.providerObjectUpdatedAt,
+      event_order_at: event.eventOrderAt, head_sha: event.headSha,
+    }))))),
+    open: (url, eventId) => { if (eventId) openEventById(eventId); else if (url) void openGitHubEventFromChat(url); else openEventsTab(); },
+  });
 
   watch(options.initialPage, (nextPage) => {
     if (!nextPage) {
