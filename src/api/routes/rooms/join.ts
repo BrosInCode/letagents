@@ -3,18 +3,15 @@ import type { Express, Response } from "express";
 import type { GitRoomBinding, Project } from "../../db.js";
 import { parseGitHubRefRoomLocator } from "../../github/git-room-routing.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
-import type { ProjectRepoAccessDecision } from "../../rooms/access.js";
+import type {
+  ProjectRepoAccessDecision,
+  RepoRoomAccessDecision,
+  RepoRoomAccessDenial,
+} from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
-
-type RepoRoomAccessDecision =
-  | { kind: "allow" }
-  | { kind: "auth_required" }
-  | { kind: "private_repo_no_access" };
-
-type RepoRoomAccessDenial = Exclude<RepoRoomAccessDecision, { kind: "allow" }>;
 
 export interface RoomJoinRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;

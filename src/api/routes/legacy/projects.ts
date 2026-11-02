@@ -17,7 +17,11 @@ import {
   type AuthenticatedRequest,
   type ResolvedRequestAuth,
 } from "../../http/helpers.js";
-import type { ProjectRepoAccessDecision } from "../../rooms/access.js";
+import type {
+  ProjectRepoAccessDecision,
+  RepoRoomAccessDecision,
+  RepoRoomAccessDenial,
+} from "../../rooms/access.js";
 import {
   formatGitRoomSummary,
   formatManualGitRoomSummaryForRoomId,
@@ -33,7 +37,7 @@ export interface LegacyProjectRouteDeps {
   resolveRepoRoomAccessDecision(input: {
     roomName: string;
     sessionAccount: AuthenticatedRequest["sessionAccount"];
-  }): Promise<{ kind: "allow" } | { kind: "auth_required" } | { kind: "private_repo_no_access" }>;
+  }): Promise<RepoRoomAccessDecision>;
   resolveProjectRepoRoomAccessDecision(input: {
     project: Project;
     sessionAccount: AuthenticatedRequest["sessionAccount"];
@@ -41,7 +45,7 @@ export interface LegacyProjectRouteDeps {
   replyRepoRoomAccessDecision(
     res: Response,
     roomName: string,
-    decision: { kind: "auth_required" } | { kind: "private_repo_no_access" }
+    decision: RepoRoomAccessDenial
   ): false;
   resolveProjectRole(
     project: Project,

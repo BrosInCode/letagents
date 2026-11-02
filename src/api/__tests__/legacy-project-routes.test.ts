@@ -6,6 +6,11 @@ const {
   buildLegacyProjectRoomResponse,
   registerLegacyProjectRoutes,
 } = await import("../routes/legacy/projects.js");
+const {
+  isRepoBackedRoomId,
+  replyRepoRoomAccessDecision,
+  resolveRepoRoomAccessDecision,
+} = await import("../rooms/access.js");
 
 function createDeps() {
   const unused = async () => {
@@ -138,4 +143,50 @@ test("agent identity registration rejects labels that cannot be routed in messag
   assert.deepEqual(body, {
     error: "Agent identity fields exceed the supported message-routing bounds.",
   });
+});
+
+test("legacy room open refuses non-GitHub repo room ids with 403 before any room is created", async () => {
+  let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
+  const app = {
+    get() {},
+    patch() {},
+    post(path: string, candidate: typeof handler) {
+      if (path === "/projects/room/:name") handler = candidate;
+    },
+  };
+  registerLegacyProjectRoutes(app as never, {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    isRepoBackedRoomId,
+    resolveRepoRoomAccessDecision,
+    replyRepoRoomAccessDecision,
+    // The unreachable test database would make a room insert fail with a
+    // connection error, so a 403 here proves the denial came first.
+  } as never);
+  assert.ok(handler);
+
+  for (const roomId of ["bitbucket.org/poppix/pdf-service", "gitlab.com/team/project", "local/Users/someone"]) {
+    let statusCode = 200;
+    let body: unknown;
+    const response = {
+      status(code: number) {
+        statusCode = code;
+        return response;
+      },
+      json(value: unknown) {
+        body = value;
+        return response;
+      },
+    };
+
+    await handler({ params: { name: encodeURIComponent(roomId) }, sessionAccount: null }, response as never);
+
+    assert.equal(statusCode, 403, roomId);
+    assert.deepEqual(body, {
+      error: "unsupported_repo_provider",
+      code: "UNSUPPORTED_REPO_PROVIDER",
+      message: "Repo rooms are supported for github.com repositories only",
+      room_id: roomId,
+    });
+  }
 });

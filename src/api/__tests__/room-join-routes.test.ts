@@ -4,6 +4,11 @@ import test from "node:test";
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerRoomJoinRoutes } = await import("../routes/rooms/join.js");
 const { buildGitHubRefRoomLocator } = await import("../github/git-room-routing.js");
+const {
+  isRepoBackedRoomId,
+  replyRepoRoomAccessDecision,
+  resolveRepoRoomAccessDecision,
+} = await import("../rooms/access.js");
 
 function createDeps() {
   const unused = async () => {
@@ -424,4 +429,67 @@ test("canonical focus joins authorize after resolution and prefer the current Gi
     id: project.id,
     gitRoomBinding: branchBinding,
   });
+});
+
+test("join route refuses non-GitHub repo room ids with 403 before any room is created", async () => {
+  const anonymous = null;
+  const signedIn = {
+    account_id: "acct_1",
+    provider: "github",
+    login: "EmmyMay",
+    provider_access_token: "secret-token",
+  };
+
+  for (const roomId of ["bitbucket.org/poppix/pdf-service", "gitlab.com/team/project", "local/Users/someone"]) {
+    for (const sessionAccount of [anonymous, signedIn]) {
+      let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
+      const app = {
+        post(_path: RegExp, registeredHandler: typeof handler) {
+          handler = registeredHandler;
+        },
+      };
+      const response = {
+        statusCode: 200,
+        body: undefined as unknown,
+        status(code: number) {
+          this.statusCode = code;
+          return this;
+        },
+        json(payload: unknown) {
+          this.body = payload;
+          return this;
+        },
+      };
+
+      registerRoomJoinRoutes(app as never, {
+        ...createDeps(),
+        resolveCanonicalRoomRequestId: async (value: string) => value,
+        isRepoBackedRoomId,
+        resolveRepoRoomAccessDecision,
+        replyRepoRoomAccessDecision,
+        resolveRoomOrReply: async () => {
+          throw new Error("a room must not be resolved or created for a non-GitHub repo room id");
+        },
+      } as never);
+
+      assert.ok(handler);
+      await handler(
+        {
+          params: { 0: roomId },
+          headers: {},
+          socket: { remoteAddress: "192.0.2.77" },
+          sessionAccount,
+        },
+        response as never
+      );
+
+      assert.equal(response.statusCode, 403, `${roomId} ${sessionAccount ? "signed in" : "anonymous"}`);
+      assert.deepEqual(response.body, {
+        error: "unsupported_repo_provider",
+        code: "UNSUPPORTED_REPO_PROVIDER",
+        message: "Repo rooms are supported for github.com repositories only",
+        room_id: roomId,
+      });
+    }
+  }
 });

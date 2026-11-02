@@ -13,6 +13,7 @@ import {
   isGitHubRepoAdmin,
   parseGitHubRepoName,
   resolveGitHubRepoRoomAccessDecision,
+  type RepoRoomAccessDecision,
 } from "../github/repo-access.js";
 import {
   sanitizeRedirectPath,
@@ -22,6 +23,7 @@ import { resolveRequestAuth } from "../request/auth.js";
 import { isRepoBackedRoomId } from "./room-ids.js";
 
 export { isRepoBackedRoomId };
+export type { RepoRoomAccessDecision };
 
 export type RoomAccessAccount = Pick<
   SessionAccount | OwnerTokenAccount,
@@ -31,11 +33,6 @@ export type RoomAccessAccount = Pick<
 type RequestAccount = RoomAccessAccount | null | undefined;
 
 export type RoomRole = "admin" | "participant" | "anonymous";
-
-export type RepoRoomAccessDecision =
-  | { kind: "allow" }
-  | { kind: "auth_required" }
-  | { kind: "private_repo_no_access" };
 
 export type RepoRoomAccessDenial = Exclude<RepoRoomAccessDecision, { kind: "allow" }>;
 
@@ -141,8 +138,24 @@ function buildDeviceFlowUrl(roomName: string): string {
   return url.toString();
 }
 
+type LandingRedirectReason =
+  | "repo_signin_required"
+  | "repo_access_denied"
+  | "repo_provider_unsupported";
+
+function landingRedirectReason(decision: RepoRoomAccessDenial): LandingRedirectReason {
+  switch (decision.kind) {
+    case "auth_required":
+      return "repo_signin_required";
+    case "unsupported_repo_provider":
+      return "repo_provider_unsupported";
+    case "private_repo_no_access":
+      return "repo_access_denied";
+  }
+}
+
 function buildLandingRedirect(input: {
-  reason: "repo_signin_required" | "repo_access_denied";
+  reason: LandingRedirectReason;
   roomName: string;
   redirectTo: string;
 }): string {
@@ -170,6 +183,17 @@ export function replyRepoRoomAccessDecision(
     return false;
   }
 
+  if (decision.kind === "unsupported_repo_provider") {
+    // Not a sign-in problem: no account can open a repo room on this host.
+    res.status(403).json({
+      error: "unsupported_repo_provider",
+      code: "UNSUPPORTED_REPO_PROVIDER",
+      message: "Repo rooms are supported for github.com repositories only",
+      room_id: roomName,
+    });
+    return false;
+  }
+
   res.status(403).json({
     error: "private_repo_no_access",
     code: "PRIVATE_REPO_NO_ACCESS",
@@ -187,6 +211,12 @@ export async function resolveRepoRoomAccessDecision(input: {
 }): Promise<RepoRoomAccessDecision> {
   if (!isRepoBackedRoomId(input.roomName)) {
     return { kind: "allow" };
+  }
+
+  // Fail closed before any provider lookup: a `host/owner/repo` id on any host
+  // other than github.com has no visibility or collaborator check to run.
+  if (!parseGitHubRepoName(input.roomName)) {
+    return { kind: "unsupported_repo_provider" };
   }
 
   return resolveGitHubRepoRoomAccessDecision(input);
@@ -472,9 +502,7 @@ export async function resolveProjectRoomEntryDecision(input: {
   return {
     kind: "redirect",
     location: buildLandingRedirect({
-      reason: accessDecision.decision.kind === "auth_required"
-        ? "repo_signin_required"
-        : "repo_access_denied",
+      reason: landingRedirectReason(accessDecision.decision),
       roomName: accessDecision.roomName ?? getProjectAccessRoomId(input.project),
       redirectTo: input.redirectTo,
     }),
@@ -501,7 +529,7 @@ export async function resolveGitHubRoomEntryDecision(input: {
   return {
     kind: "redirect",
     location: buildLandingRedirect({
-      reason: decision.kind === "auth_required" ? "repo_signin_required" : "repo_access_denied",
+      reason: landingRedirectReason(decision),
       roomName: input.roomName,
       redirectTo: input.redirectTo,
     }),

@@ -94,6 +94,102 @@ test("resolveRepoRoomAccessDecision allows non-repo rooms without auth", async (
   );
 });
 
+const NON_GITHUB_REPO_ROOMS = [
+  "gitlab.com/team/project",
+  "bitbucket.org/poppix/pdf-service",
+  "local/Users/someone",
+];
+
+test("repo-shaped rooms on a host other than github.com are denied without any provider lookup", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("no provider lookup may run for a non-GitHub host");
+  }) as typeof fetch;
+  try {
+    for (const roomName of NON_GITHUB_REPO_ROOMS) {
+      assert.equal(isRepoBackedRoomId(roomName), true, roomName);
+      assert.deepEqual(
+        await resolveRepoRoomAccessDecision({ roomName, sessionAccount: null }),
+        { kind: "unsupported_repo_provider" },
+        `${roomName} anonymous`
+      );
+      assert.deepEqual(
+        await resolveRepoRoomAccessDecision({
+          roomName,
+          sessionAccount: {
+            account_id: "acct_1",
+            provider: "github",
+            login: "EmmyMay",
+            provider_access_token: "secret-token",
+          },
+        }),
+        { kind: "unsupported_repo_provider" },
+        `${roomName} signed in`
+      );
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("project repo access denies non-GitHub repo-backed rooms and focus rooms under them", async () => {
+  for (const roomName of NON_GITHUB_REPO_ROOMS) {
+    for (const candidate of [project(roomName), project("focus_9", roomName)]) {
+      const decision = await resolveProjectRepoRoomAccessDecision(
+        { project: candidate, sessionAccount: null },
+        {
+          getGitRoomBindingForRoom: async () => {
+            throw new Error("binding lookup should not run for locator rooms");
+          },
+          resolveRepoRoomAccessDecision,
+        }
+      );
+
+      assert.equal(decision.isRepoBacked, true, roomName);
+      assert.equal(decision.repoRoomName, roomName);
+      assert.deepEqual(decision.decision, { kind: "unsupported_repo_provider" });
+    }
+  }
+});
+
+test("requireParticipant refuses non-GitHub repo-backed rooms for anonymous and signed-in callers", async () => {
+  for (const sessionAccount of [
+    null,
+    { account_id: "acct_1", provider: "github", login: "EmmyMay", provider_access_token: "secret-token" },
+  ]) {
+    const { res, state } = jsonResponse();
+
+    assert.equal(
+      await requireParticipant({ sessionAccount } as never, res, project("bitbucket.org/poppix/pdf-service")),
+      false
+    );
+    assert.equal(state.statusCode, 403);
+    assert.deepEqual(state.body, {
+      error: "unsupported_repo_provider",
+      code: "UNSUPPORTED_REPO_PROVIDER",
+      message: "Repo rooms are supported for github.com repositories only",
+      room_id: "bitbucket.org/poppix/pdf-service",
+    });
+  }
+});
+
+test("replyRepoRoomAccessDecision answers an unsupported provider with 403, not a sign-in request", () => {
+  const { res, state } = jsonResponse();
+
+  assert.equal(
+    replyRepoRoomAccessDecision(res, "gitlab.com/team/project", { kind: "unsupported_repo_provider" }),
+    false
+  );
+
+  assert.equal(state.statusCode, 403);
+  assert.deepEqual(state.body, {
+    error: "unsupported_repo_provider",
+    code: "UNSUPPORTED_REPO_PROVIDER",
+    message: "Repo rooms are supported for github.com repositories only",
+    room_id: "gitlab.com/team/project",
+  });
+});
+
 test("project repo access uses locator rooms without binding lookup", async () => {
   let bindingLookups = 0;
   const decision = await resolveProjectRepoRoomAccessDecision(
@@ -220,6 +316,21 @@ test("Git-room participant access accepts only the worker bearer's exact room", 
   );
   assert.equal(denied.state.statusCode, 403);
   assert.deepEqual(denied.state.body, { error: "Worker bearer is scoped to a different room." });
+});
+
+test("resolveGitHubRoomEntryDecision redirects non-GitHub repo room entries with an unsupported-provider reason", async () => {
+  const decision = await resolveGitHubRoomEntryDecision({
+    roomName: "bitbucket.org/poppix/pdf-service",
+    sessionAccount: null,
+    redirectTo: "/in/bitbucket.org/poppix/pdf-service",
+  });
+
+  assert.equal(decision.kind, "redirect");
+  assert.ok(decision.kind === "redirect");
+  const location = new URL(decision.location, "https://letagents.test");
+  assert.equal(location.pathname, "/");
+  assert.equal(location.searchParams.get("reason"), "repo_provider_unsupported");
+  assert.equal(location.searchParams.get("room"), "bitbucket.org/poppix/pdf-service");
 });
 
 test("resolveGitHubRoomEntryDecision allows non-repo room entries", async () => {
