@@ -8,6 +8,7 @@ const {
   isRepoBackedRoomId,
   replyRepoRoomAccessDecision,
   resolveRepoRoomAccessDecision,
+  unsupportedRepoProviderMessage,
 } = await import("../rooms/access.js");
 
 function createDeps() {
@@ -440,7 +441,15 @@ test("join route refuses non-GitHub repo room ids with 403 before any room is cr
     provider_access_token: "secret-token",
   };
 
-  for (const roomId of ["bitbucket.org/poppix/pdf-service", "gitlab.com/team/project", "local/Users/someone"]) {
+  const roomIds = [
+    "bitbucket.org/poppix/pdf-service",
+    "gitlab.com/team/project",
+    "local/Users/someone",
+    "gitlab.com/group/sub/project",
+    "github-work/acme/app",
+    "team/design/ideas",
+  ];
+  for (const [roomIndex, roomId] of roomIds.entries()) {
     for (const sessionAccount of [anonymous, signedIn]) {
       let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
       const app = {
@@ -477,7 +486,8 @@ test("join route refuses non-GitHub repo room ids with 403 before any room is cr
         {
           params: { 0: roomId },
           headers: {},
-          socket: { remoteAddress: "192.0.2.77" },
+          // One address per room keeps the join rate limit out of this test.
+          socket: { remoteAddress: `192.0.2.${100 + roomIndex}` },
           sessionAccount,
         },
         response as never
@@ -487,9 +497,71 @@ test("join route refuses non-GitHub repo room ids with 403 before any room is cr
       assert.deepEqual(response.body, {
         error: "unsupported_repo_provider",
         code: "UNSUPPORTED_REPO_PROVIDER",
-        message: "Repo rooms are supported for github.com repositories only",
+        message: unsupportedRepoProviderMessage(roomId),
         room_id: roomId,
       });
     }
+  }
+});
+
+test("join route sends GitHub host aliases to the access check as the real github.com room", async () => {
+  const privateRoom = "github.com/brosincode/private-repo";
+  const aliases = [
+    "www.github.com/BrosInCode/Private-Repo",
+    "ssh.github.com:443/BrosInCode/Private-Repo",
+    "https://www.github.com/BrosInCode/Private-Repo.git",
+    "ssh://git@ssh.github.com:443/BrosInCode/Private-Repo.git",
+    "git@ssh.github.com:BrosInCode/Private-Repo.git",
+  ];
+
+  for (const [aliasIndex, alias] of aliases.entries()) {
+    let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
+    const app = {
+      post(_path: RegExp, registeredHandler: typeof handler) {
+        handler = registeredHandler;
+      },
+    };
+    const response = {
+      statusCode: 200,
+      body: undefined as unknown,
+      status(code: number) {
+        this.statusCode = code;
+        return this;
+      },
+      json(payload: unknown) {
+        this.body = payload;
+        return this;
+      },
+    };
+    const checkedRooms: string[] = [];
+
+    registerRoomJoinRoutes(app as never, {
+      ...createDeps(),
+      resolveCanonicalRoomRequestId: async (value: string) => value,
+      isRepoBackedRoomId,
+      resolveRepoRoomAccessDecision: async (input: { roomName: string }) => {
+        checkedRooms.push(input.roomName);
+        return { kind: "auth_required" } as const;
+      },
+      replyRepoRoomAccessDecision,
+      resolveRoomOrReply: async () => {
+        throw new Error("a room must not be resolved or created before the access check passes");
+      },
+    } as never);
+
+    assert.ok(handler);
+    await handler(
+      {
+        params: { 0: alias },
+        headers: {},
+        socket: { remoteAddress: `192.0.2.${150 + aliasIndex}` },
+        sessionAccount: null,
+      },
+      response as never
+    );
+
+    assert.deepEqual(checkedRooms, [privateRoom], alias);
+    assert.equal(response.statusCode, 401, alias);
+    assert.equal((response.body as { room_id: string }).room_id, privateRoom, alias);
   }
 });

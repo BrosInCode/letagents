@@ -88,11 +88,47 @@ test("resolveGitHubRepoRoomAccessDecision rejects authenticated non-collaborator
   assert.deepEqual(decision, { kind: "private_repo_no_access" });
 });
 
+// The real github.com room and the hosts that must land in it give one decision.
+const GITHUB_ROOM_SPELLINGS = [
+  "github.com/brosincode/secret-repo",
+  "www.github.com/brosincode/secret-repo",
+  "ssh.github.com/brosincode/secret-repo",
+  "ssh.github.com:443/brosincode/secret-repo",
+];
+
+for (const roomName of GITHUB_ROOM_SPELLINGS) {
+  test(`resolveGitHubRepoRoomAccessDecision treats ${roomName} as the real GitHub repo room`, async () => {
+    const collaborator = {
+      provider: "github",
+      provider_access_token: "secret-token",
+      login: "EmmyMay",
+    };
+    const decide = (
+      visibility: "public" | "private",
+      sessionAccount: typeof collaborator | null,
+      isCollaborator: boolean
+    ) =>
+      resolveGitHubRepoRoomAccessDecision(
+        { roomName, sessionAccount },
+        { getVisibility: async () => visibility, isCollaborator: async () => isCollaborator }
+      );
+
+    assert.deepEqual(await decide("public", null, false), { kind: "allow" });
+    assert.deepEqual(await decide("private", null, false), { kind: "auth_required" });
+    assert.deepEqual(await decide("private", collaborator, true), { kind: "allow" });
+    assert.deepEqual(await decide("private", collaborator, false), { kind: "private_repo_no_access" });
+  });
+}
+
 for (const roomName of [
   "gitlab.com/team/project",
+  "gitlab.com/group/sub/project",
   "bitbucket.org/team/project",
   "local/Users/someone",
   "github.com.evil.example/owner/repo",
+  "ssh.github.com.evil.example/owner/repo",
+  "github-work/acme/app",
+  "team/design/ideas",
 ]) {
   test(`resolveGitHubRepoRoomAccessDecision denies the non-GitHub repo room ${roomName} for everyone`, async () => {
     const deps = {

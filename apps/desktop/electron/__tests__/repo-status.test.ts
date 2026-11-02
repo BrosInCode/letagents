@@ -651,3 +651,41 @@ test("normalizeGitRemoteToRoomIdentifier lowercases github.com identifiers (ssh 
     "example.com/Owner/Repo",
   );
 });
+
+test("normalizeGitRemoteToRoomIdentifier maps ssh.github.com and www.github.com to github.com", () => {
+  const remotes = [
+    "ssh://git@ssh.github.com:443/BrosInCode/LetAgents.git",
+    "ssh://git@ssh.github.com/BrosInCode/LetAgents",
+    "ssh://git@SSH.GitHub.com:443/BrosInCode/LetAgents.git",
+    "git@ssh.github.com:BrosInCode/LetAgents.git",
+    "https://www.github.com/BrosInCode/LetAgents.git",
+    "https://www.github.com/BrosInCode/LetAgents/",
+    "git@www.github.com:BrosInCode/LetAgents.git",
+    // The ordinary github.com forms land in the same room.
+    "git@github.com:BrosInCode/LetAgents.git",
+    "https://github.com/BrosInCode/LetAgents",
+  ];
+  for (const remote of remotes) {
+    assert.equal(normalizeGitRemoteToRoomIdentifier(remote), "github.com/brosincode/letagents", remote);
+  }
+});
+
+test("normalizeGitRemoteToRoomIdentifier keeps SSH config aliases and look-alike hosts apart from github.com", () => {
+  // The real host of an SSH alias lives in ~/.ssh/config, so the alias stays and the server refuses it.
+  assert.equal(
+    normalizeGitRemoteToRoomIdentifier("git@github-work:acme/App.git"),
+    "github-work/acme/App",
+  );
+  assert.equal(
+    normalizeGitRemoteToRoomIdentifier("ssh://git@github-work/acme/App.git"),
+    "github-work/acme/App",
+  );
+  assert.equal(
+    normalizeGitRemoteToRoomIdentifier("https://ssh.github.com.evil.example/Owner/Repo.git"),
+    "ssh.github.com.evil.example/Owner/Repo",
+  );
+  assert.equal(
+    normalizeGitRemoteToRoomIdentifier("https://gist.github.com/Owner/Repo.git"),
+    "gist.github.com/Owner/Repo",
+  );
+});

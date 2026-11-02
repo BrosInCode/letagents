@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,11 +14,14 @@ delete process.env.LETAGENTS_TOKEN;
 
 const originalFetch = globalThis.fetch;
 const {
+  autoJoinFromContext,
   buildJoinResponse,
+  describeUnsupportedProviderAutoJoin,
   joinRoomIdentifier,
   joinRoomIdentifierWithoutImplicitGitRefCreate,
   normalizeJoinSessionMode,
 } = await import("../server/runtime/rooms.js");
+const { ApiError } = await import("../server/runtime/api.js");
 const { shutdownRuntime } = await import("../server/runtime/room-state.js");
 
 test.after(() => {
@@ -249,4 +253,117 @@ test("non-generated room joins keep normal create-capable behavior", async () =>
   assert.equal(calls[0]?.url, "http://127.0.0.1:39999/rooms/focus_27/join");
   assert.equal(calls[0]?.method, "POST");
   assert.equal(joined.room.room_id, "focus_27");
+});
+
+function unsupportedProviderError(roomId: string): InstanceType<typeof ApiError> {
+  return new ApiError(403, JSON.stringify({
+    error: "unsupported_repo_provider",
+    code: "UNSUPPORTED_REPO_PROVIDER",
+    message: "Repo rooms are supported for github.com repositories only",
+    room_id: roomId,
+  }));
+}
+
+test("the auto-join failure for an unsupported provider names the host and the .letagents.json workaround", () => {
+  const fromRemote = describeUnsupportedProviderAutoJoin(
+    unsupportedProviderError("github-work/acme/app"),
+    "git-remote"
+  );
+  assert.ok(fromRemote);
+  assert.match(fromRemote, /Auto-join failed/);
+  assert.match(fromRemote, /host 'github-work'/);
+  assert.match(fromRemote, /from the git remote/);
+  assert.match(fromRemote, /not a supported provider/);
+  assert.match(fromRemote, /\.letagents\.json file with a room field/);
+  assert.match(fromRemote, /"room": "github\.com\/owner\/repo"/);
+
+  const fromConfig = describeUnsupportedProviderAutoJoin(
+    unsupportedProviderError("gitlab.com/team/project"),
+    "config"
+  );
+  assert.ok(fromConfig);
+  assert.match(fromConfig, /host 'gitlab\.com'/);
+  assert.match(fromConfig, /room field in \.letagents\.json/);
+  assert.match(fromConfig, /not a supported provider/);
+});
+
+test("the unsupported-provider message ignores every other auto-join failure", () => {
+  assert.equal(describeUnsupportedProviderAutoJoin(new Error("boom"), "git-remote"), null);
+  assert.equal(describeUnsupportedProviderAutoJoin(new ApiError(500, "oops"), "git-remote"), null);
+  assert.equal(
+    describeUnsupportedProviderAutoJoin(
+      new ApiError(403, JSON.stringify({ code: "PRIVATE_REPO_NO_ACCESS", room_id: "github.com/o/r" })),
+      "git-remote"
+    ),
+    null
+  );
+  assert.equal(
+    describeUnsupportedProviderAutoJoin(
+      new ApiError(401, JSON.stringify({ code: "UNSUPPORTED_REPO_PROVIDER", room_id: "x/y/z" })),
+      "git-remote"
+    ),
+    null
+  );
+});
+
+async function autoJoinWithRemote(remote: string, respond: (url: string) => Response): Promise<{
+  requestedUrls: string[];
+  logged: string[];
+}> {
+  const originalCwd = process.cwd();
+  const originalConsoleError = console.error;
+  const repoDir = mkdtempSync(join(tmpdir(), "letagents-auto-join-remote-"));
+  const requestedUrls: string[] = [];
+  const logged: string[] = [];
+  try {
+    execFileSync("git", ["init", "--quiet"], { cwd: repoDir });
+    execFileSync("git", ["remote", "add", "origin", remote], { cwd: repoDir });
+    process.chdir(repoDir);
+
+    globalThis.fetch = async (url) => {
+      requestedUrls.push(String(url));
+      return respond(String(url));
+    };
+    console.error = (...args: unknown[]) => {
+      logged.push(args.map(String).join(" "));
+    };
+
+    await autoJoinFromContext();
+  } finally {
+    console.error = originalConsoleError;
+    process.chdir(originalCwd);
+    rmSync(repoDir, { recursive: true, force: true });
+  }
+  return { requestedUrls, logged };
+}
+
+test("auto-join from a git remote that uses an SSH config alias reports the unsupported provider", async () => {
+  const { requestedUrls, logged } = await autoJoinWithRemote(
+    "git@github-work:acme/app.git",
+    () => new Response(JSON.stringify({
+      error: "unsupported_repo_provider",
+      code: "UNSUPPORTED_REPO_PROVIDER",
+      message: "Repo rooms are supported for github.com repositories only",
+      room_id: "github-work/acme/app",
+    }), { status: 403, headers: { "Content-Type": "application/json" } })
+  );
+
+  assert.deepEqual(requestedUrls, ["http://127.0.0.1:39999/rooms/github-work/acme/app/join"]);
+  assert.equal(logged.length, 1, logged.join("\n"));
+  assert.match(logged[0], /host 'github-work'/);
+  assert.match(logged[0], /not a supported provider/);
+  assert.match(logged[0], /\.letagents\.json file with a room field/);
+  assert.doesNotMatch(logged[0], /API error 403/);
+});
+
+test("auto-join through ssh.github.com:443 asks for the real github.com room", async () => {
+  const { requestedUrls } = await autoJoinWithRemote(
+    "ssh://git@ssh.github.com:443/BrosInCode/LetAgents.git",
+    () => new Response(JSON.stringify({
+      room_id: "github.com/brosincode/letagents",
+      display_name: "BrosInCode/letagents",
+    }), { status: 200, headers: { "Content-Type": "application/json" } })
+  );
+
+  assert.equal(requestedUrls[0], "http://127.0.0.1:39999/rooms/github.com/brosincode/letagents/join");
 });

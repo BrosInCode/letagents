@@ -167,6 +167,29 @@ function buildLandingRedirect(input: {
   return `/?${params.toString()}`;
 }
 
+const UNSUPPORTED_REPO_PROVIDER_MESSAGE =
+  "Repo rooms are supported for github.com repositories only";
+
+/**
+ * The refusal text for a repo-shaped room id on a host other than github.com.
+ * A first segment without a dot (`team/design/ideas`, `github-work/acme/app`)
+ * is the case people do not expect, so that text also names the two ways out.
+ */
+export function unsupportedRepoProviderMessage(roomName: string): string {
+  const host = roomName.split("/")[0] ?? "";
+  if (!host || host.includes(".") || host.toLowerCase() === "local") {
+    return UNSUPPORTED_REPO_PROVIDER_MESSAGE;
+  }
+
+  return (
+    `${UNSUPPORTED_REPO_PROVIDER_MESSAGE}. A room name with two slashes, such as ${roomName}, ` +
+    `is read as the repo room host/owner/repo, here on the host '${host}'. ` +
+    "For a plain room, use a name without two slashes, for example team-design-ideas. " +
+    "If the host is an SSH config alias, put the real repository in a .letagents.json file " +
+    'with a room field, for example {"room": "github.com/owner/repo"}.'
+  );
+}
+
 export function replyRepoRoomAccessDecision(
   res: Response,
   roomName: string,
@@ -188,7 +211,7 @@ export function replyRepoRoomAccessDecision(
     res.status(403).json({
       error: "unsupported_repo_provider",
       code: "UNSUPPORTED_REPO_PROVIDER",
-      message: "Repo rooms are supported for github.com repositories only",
+      message: unsupportedRepoProviderMessage(roomName),
       room_id: roomName,
     });
     return false;

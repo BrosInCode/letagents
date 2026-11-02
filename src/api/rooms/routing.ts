@@ -10,6 +10,8 @@
  * Room ID normalization handles all of:
  *   - https:// and http:// prefix stripping
  *   - git@github.com:owner/repo.git (SSH remote) → github.com/owner/repo
+ *   - ssh://git@host[:port]/owner/repo.git (SSH URL) → host/owner/repo
+ *   - ssh.github.com and www.github.com (GitHub host aliases) → github.com
  *   - .git suffix stripping
  *   - Trailing slash stripping
  *   - Provider-specific casing (GitHub: lowercase)
@@ -22,6 +24,24 @@ const KNOWN_PROVIDERS = new Set([
   "gitlab.com",
   "bitbucket.org",
 ]);
+
+// Hostnames that serve the same GitHub repositories as github.com:
+//   - ssh.github.com is GitHub's SSH-over-HTTPS endpoint (git@ssh.github.com on
+//     port 443), used when port 22 is blocked.
+//   - www.github.com is the same site as github.com.
+// An SSH config alias such as `git@github-work:acme/app.git` is NOT listed: its
+// real host lives in ~/.ssh/config, which the server cannot read.
+const GITHUB_HOST_ALIASES = new Set(["ssh.github.com", "www.github.com"]);
+
+/**
+ * Map a GitHub host alias to `github.com`. Accepts an optional `:port`
+ * (`ssh.github.com:443`). Any other host is returned lowercased and unchanged.
+ */
+export function canonicalizeGitHostAlias(host: string): string {
+  const lowered = host.trim().toLowerCase();
+  const hostname = lowered.replace(/:\d+$/, "");
+  return GITHUB_HOST_ALIASES.has(hostname) ? "github.com" : lowered;
+}
 
 // Providers where owner and repo names are case-insensitive
 const CASE_INSENSITIVE_PROVIDERS = new Set(["github.com"]);
@@ -65,6 +85,12 @@ export function normalizeRoomName(name: string): string {
     normalized = normalized.slice("http://".length);
   }
 
+  // Convert SSH URL: ssh://git@host:443/owner/repo → host/owner/repo
+  const sshUrlMatch = normalized.match(/^ssh:\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+)$/i);
+  if (sshUrlMatch) {
+    normalized = `${sshUrlMatch[1]}/${sshUrlMatch[2]}`;
+  }
+
   // Convert SSH remote: git@github.com:owner/repo → github.com/owner/repo
   const sshMatch = normalized.match(/^git@([^:]+):(.+)$/);
   if (sshMatch) {
@@ -79,8 +105,15 @@ export function normalizeRoomName(name: string): string {
     normalized = normalized.slice(0, -4);
   }
 
-  // Apply provider-specific casing
+  // Map GitHub host aliases (ssh.github.com, www.github.com) to github.com
+  // before anything keys off the host, so the clone lands in its real room.
   const parts = normalized.split("/");
+  if (parts.length > 1 && canonicalizeGitHostAlias(parts[0]) === "github.com") {
+    parts[0] = "github.com";
+    normalized = parts.join("/");
+  }
+
+  // Apply provider-specific casing
   const provider = parts[0]?.toLowerCase();
 
   if (provider && CASE_INSENSITIVE_PROVIDERS.has(provider)) {
@@ -143,7 +176,7 @@ export function isReservedMainRoomCreationId(roomId: string): boolean {
  * Check if a provider hostname is known.
  */
 export function isKnownProvider(hostname: string): boolean {
-  return KNOWN_PROVIDERS.has(hostname.toLowerCase());
+  return KNOWN_PROVIDERS.has(canonicalizeGitHostAlias(hostname));
 }
 
 /**

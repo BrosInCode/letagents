@@ -98,6 +98,14 @@ const NON_GITHUB_REPO_ROOMS = [
   "gitlab.com/team/project",
   "bitbucket.org/poppix/pdf-service",
   "local/Users/someone",
+  // GitLab subgroups: `parseRepoRoomName` reads these as repositories too.
+  "gitlab.com/group/sub/project",
+  "gitlab.com/group/sub/deeper/project",
+  "GitLab.com/Group/Sub/Project",
+  // No dot in the host: an SSH config alias (`git@github-work:acme/app.git`) and
+  // a plain three-part name stay repo-shaped, so they are refused, not opened.
+  "github-work/acme/app",
+  "team/design/ideas",
 ];
 
 test("repo-shaped rooms on a host other than github.com are denied without any provider lookup", async () => {
@@ -188,6 +196,99 @@ test("replyRepoRoomAccessDecision answers an unsupported provider with 403, not 
     message: "Repo rooms are supported for github.com repositories only",
     room_id: "gitlab.com/team/project",
   });
+});
+
+test("isRepoBackedRoomId classifies every room id shape", () => {
+  const repoBacked = [
+    "github.com/BrosInCode/letagents",
+    "github.com/o/r",
+    "bitbucket.org/poppix/pdf-service",
+    "local/Users/someone",
+    "gitlab.com/team/project",
+    // GitLab with three or more segments, however the host is cased.
+    "gitlab.com/group/sub/project",
+    "gitlab.com/group/sub/deeper/project",
+    "GitLab.com/Group/Sub/Project",
+    // A host without a dot stays repo-shaped on purpose (see room-ids.ts).
+    "github-work/acme/app",
+    "team/design/ideas",
+  ];
+  const notRepoBacked = [
+    "focus_5",
+    "ABCX-7291",
+    "ABCX-7291-L2QP",
+    "team-chat",
+    "team/design",
+    "gitlab.com/group",
+    "gitlab.com",
+    // Branch rooms and other four-part ids on GitHub or Bitbucket are unchanged.
+    "github.com/brosincode/letagents/focus/git:branch:bWFpbg",
+    "bitbucket.org/ws/repo/extra",
+    "gitlab-example.com/group/sub/project",
+    "not-gitlab.com/group/sub/project",
+    "gitlab.com.evil.example/group/sub/project",
+    "git-room:local:0123456789abcdef:main",
+    "git-room:github.com:owner/repo:branch:bWFpbg",
+  ];
+
+  for (const roomId of repoBacked) {
+    assert.equal(isRepoBackedRoomId(roomId), true, roomId);
+  }
+  for (const roomId of notRepoBacked) {
+    assert.equal(isRepoBackedRoomId(roomId), false, roomId);
+  }
+});
+
+test("GitLab ids agree between isRepoBackedRoomId and parseRepoRoomName", async () => {
+  const { parseRepoRoomName } = await import("../repo-workflow/repo-room.js");
+
+  for (const roomId of [
+    "gitlab.com/team/project",
+    "gitlab.com/group/sub/project",
+    "gitlab.com/group/sub/deeper/project",
+    "GitLab.com/Group/Sub/Project",
+  ]) {
+    assert.equal(parseRepoRoomName(roomId)?.provider, "gitlab", roomId);
+    assert.equal(isRepoBackedRoomId(roomId), true, roomId);
+  }
+  for (const roomId of ["gitlab.com/group", "gitlab.com"]) {
+    assert.equal(parseRepoRoomName(roomId), null, roomId);
+    assert.equal(isRepoBackedRoomId(roomId), false, roomId);
+  }
+});
+
+test("a GitLab subgroup room is denied as an unsupported provider, not opened as an ad-hoc room", async () => {
+  for (const roomName of ["gitlab.com/group/sub/project", "gitlab.com/group/project"]) {
+    assert.deepEqual(
+      await resolveRepoRoomAccessDecision({ roomName, sessionAccount: null }),
+      { kind: "unsupported_repo_provider" },
+      roomName
+    );
+  }
+});
+
+test("the unsupported-provider message explains a repo-shaped name that has no dot in its host", () => {
+  const dotted = jsonResponse();
+  replyRepoRoomAccessDecision(dotted.res, "gitlab.com/group/sub/project", { kind: "unsupported_repo_provider" });
+  assert.equal(dotted.state.statusCode, 403);
+  assert.deepEqual(dotted.state.body, {
+    error: "unsupported_repo_provider",
+    code: "UNSUPPORTED_REPO_PROVIDER",
+    message: "Repo rooms are supported for github.com repositories only",
+    room_id: "gitlab.com/group/sub/project",
+  });
+
+  const dotless = jsonResponse();
+  replyRepoRoomAccessDecision(dotless.res, "team/design/ideas", { kind: "unsupported_repo_provider" });
+  assert.equal(dotless.state.statusCode, 403);
+  const body = dotless.state.body as { error: string; code: string; message: string; room_id: string };
+  assert.equal(body.error, "unsupported_repo_provider");
+  assert.equal(body.code, "UNSUPPORTED_REPO_PROVIDER");
+  assert.equal(body.room_id, "team/design/ideas");
+  assert.match(body.message, /^Repo rooms are supported for github\.com repositories only\. /);
+  assert.match(body.message, /host 'team'/);
+  assert.match(body.message, /name without two slashes, for example team-design-ideas/);
+  assert.match(body.message, /\.letagents\.json file with a room field/);
 });
 
 test("project repo access uses locator rooms without binding lookup", async () => {

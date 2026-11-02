@@ -90,8 +90,8 @@ const repoAccessBanner = computed(() => {
       redirectTo,
       title: 'Repo provider not supported',
       body: room
-        ? `${room} cannot be opened. Repo rooms are supported for github.com repositories only.`
-        : 'Repo rooms are supported for github.com repositories only.',
+        ? `${room} cannot be opened. Repo rooms are supported for github.com repositories only. A room name with two slashes is read as a repo room (host/owner/repo). For a plain room, use a name without two slashes.`
+        : 'Repo rooms are supported for github.com repositories only. A room name with two slashes is read as a repo room (host/owner/repo). For a plain room, use a name without two slashes.',
     }
   }
 

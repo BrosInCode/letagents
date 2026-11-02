@@ -620,19 +620,32 @@ export async function refreshRepoStatus(
     worktrees,
   };
 }
+
+/**
+ * Hostnames that serve the same GitHub repositories as github.com:
+ * ssh.github.com is GitHub's SSH-over-HTTPS endpoint (port 443) and
+ * www.github.com is the same site as github.com. An SSH config alias such as
+ * `git@github-work:acme/app.git` is not listed: its real host lives in
+ * ~/.ssh/config, so it keeps the alias and the server refuses that room as an
+ * unsupported provider.
+ */
+const GITHUB_HOST_ALIASES = new Set(["ssh.github.com", "www.github.com"]);
+
 /**
  * Normalize the casing of a `host/owner/repo` room identifier derived from a git
  * remote. Hostnames are always case-insensitive, so they are safe to lowercase.
  * GitHub owner/repo names are also case-insensitive, so we lowercase the path for
  * github.com to keep two differently-cased clones in the same repo-level room
  * (branch rooms are already lowercased downstream). Other hosts may be
- * case-sensitive, so their path casing is preserved.
+ * case-sensitive, so their path casing is preserved. The GitHub host aliases map
+ * to github.com first, so a clone through them lands in its real room.
  */
 function normalizeDerivedRoomIdentifierCasing(identifier: string): string {
   const trimmed = identifier.trim().replace(/\/+$/, "");
   const slashIndex = trimmed.indexOf("/");
   if (slashIndex < 0) return trimmed.toLowerCase();
-  const host = trimmed.slice(0, slashIndex).toLowerCase();
+  const lowercaseHost = trimmed.slice(0, slashIndex).toLowerCase();
+  const host = GITHUB_HOST_ALIASES.has(lowercaseHost) ? "github.com" : lowercaseHost;
   const rest = trimmed.slice(slashIndex + 1);
   return host === "github.com" ? `${host}/${rest.toLowerCase()}` : `${host}/${rest}`;
 }
