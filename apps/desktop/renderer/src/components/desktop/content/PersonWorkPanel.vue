@@ -29,10 +29,11 @@
           <ul class="person-work-list">
             <li v-for="row in section.rows" :key="row.prUrl" class="person-work-row">
               <a class="person-work-pr" :href="row.prUrl" @click.prevent="openPullRequest(row)">
-                <span>{{ row.title || 'Untitled pull request' }}</span><ArrowUpRight :size="15" aria-hidden="true" />
+                <span class="person-work-pr-title">{{ row.title || 'Untitled pull request' }}</span>
+                <span v-if="row.prNumber !== null" class="person-work-pr-number">#{{ row.prNumber }}</span>
+                <ArrowUpRight :size="15" aria-hidden="true" />
               </a>
               <p class="person-work-row-meta">
-                <span v-if="row.prNumber !== null">#{{ row.prNumber }}</span>
                 <span v-if="section.key !== 'open' && section.key !== 'draft'">{{ stateLabel(row.state) }}</span>
                 <span v-if="row.note">{{ row.note }}</span>
                 <time :datetime="row.updatedAt">{{ formatRelativeTime(row.updatedAt) }}</time>
@@ -287,7 +288,8 @@ function stateLabel(state: string): string {
 .person-work-list { margin: 0; padding: 0; list-style: none; }
 .person-work-row { min-width: 0; padding: 14px 8px; border-top: 1px solid var(--border); }
 .person-work-pr { display: flex; align-items: baseline; gap: 10px; color: var(--text); text-decoration: none; font-size: .88rem; font-weight: 550; line-height: 1.45; }
-.person-work-pr span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.person-work-pr-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.person-work-pr-number { flex: 0 0 auto; color: var(--text-secondary); font-size: .88rem; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .person-work-pr svg { flex-shrink: 0; color: var(--text-tertiary); }
 .person-work-row-meta { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0 0; color: var(--text-tertiary); font-size: .72rem; line-height: 1.5; }
 .person-work-task { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 10px; min-width: 0; }
