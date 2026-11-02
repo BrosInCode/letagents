@@ -294,7 +294,8 @@ function stateLabel(state: string): string {
 .person-work-section h3 { display: flex; align-items: baseline; gap: 8px; margin: 0; color: var(--text-secondary); font-size: .78rem; font-weight: 550; }
 .person-work-count { color: var(--text-tertiary); font-size: .72rem; font-variant-numeric: tabular-nums; }
 .person-work-list { margin: 0; padding: 0; list-style: none; }
-.person-work-row { min-width: 0; padding: 14px 8px; border-top: 1px solid var(--border); transition: background-color 140ms ease; }
+.person-work-row { position: relative; isolation: isolate; min-width: 0; padding: 14px 8px; border-top: 1px solid var(--border); }
+.person-work-row::before { content: ""; position: absolute; z-index: -1; inset: 6px 0; border-radius: 6px; background: transparent; transition: background-color 140ms ease; pointer-events: none; }
 .person-work-pr { display: flex; align-items: baseline; gap: 10px; color: var(--text); text-decoration: none; font-size: .88rem; font-weight: 550; line-height: 1.45; }
 .person-work-pr-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .person-work-pr-number { flex: 0 0 auto; color: var(--text-secondary); font-size: .88rem; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -313,7 +314,7 @@ function stateLabel(state: string): string {
 .person-work-pr svg, .person-work-pr-number { transition: color 140ms ease; }
 a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 3px; }
 @media (hover: hover) and (pointer: fine) {
-  .person-work-row:hover { background: var(--bg-subtle); }
+  .person-work-row:hover::before { background: var(--bg-subtle); }
   .person-work-pr:hover svg, .person-work-pr:hover .person-work-pr-number, .person-work-ticket:hover, .person-work-board:hover { color: var(--text); }
   .person-work-pr:hover, .person-work-ticket:hover, .person-work-board:hover { text-decoration: underline; text-underline-offset: 3px; }
   .person-work-close:hover, .person-work-footer button:hover:not(:disabled) { background: var(--bg-subtle); }
