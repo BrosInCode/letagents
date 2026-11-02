@@ -35,6 +35,10 @@ export async function authorizeDesktopPushNotification(
   });
   if (!access.isRepoBacked || access.decision.kind === "allow") return "allow";
 
+  // No account can open a repo room on a host other than github.com, so a
+  // missing GitHub credential is not the cause and a retry cannot help.
+  if (access.decision.kind === "unsupported_repo_provider") return "deny";
+
   // A missing/expired provider credential is an authentication outage, not
   // proof that the account lost repository access. Preserve the backlog and
   // retry with the normal bounded worker policy until a live session refreshes

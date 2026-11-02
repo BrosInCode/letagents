@@ -229,12 +229,20 @@ export async function requireSupervisorGrantRoomAccess(
     return respondSupervisorAccessRetry(res, "GitHub access could not be revalidated; retry after the provider recovers.");
   }
 
+  let unsupportedProviderTarget: { repoRoomName: string } | null = null;
   for (const { target, decision } of decisions) {
     if (decision.kind === "allow") {
       supervisorAccessRevalidationCache.set(
         accessRevalidationCacheKey(grant, target.repoRoomName),
         Date.now() + SUPERVISOR_ACCESS_REVALIDATION_TTL_MS,
       );
+      continue;
+    }
+    if (decision.kind === "unsupported_repo_provider") {
+      // The owner did not lose access: no account can open a repo room on this
+      // host. Refuse this call for that room below, but keep the grant and its
+      // worker sessions. A real loss of access on another room still revokes.
+      unsupportedProviderTarget ??= target;
       continue;
     }
     await revokeAuthority({
@@ -246,6 +254,14 @@ export async function requireSupervisorGrantRoomAccess(
       error: "The supervisor grant owner no longer has access to an authorized Git Room.",
       code: "SUPERVISOR_GIT_ROOM_ACCESS_REVOKED",
       room_id: target.repoRoomName,
+    });
+    return false;
+  }
+  if (unsupportedProviderTarget) {
+    res.status(403).json({
+      error: "Repo rooms are supported for github.com repositories only",
+      code: "UNSUPPORTED_REPO_PROVIDER",
+      room_id: unsupportedProviderTarget.repoRoomName,
     });
     return false;
   }
