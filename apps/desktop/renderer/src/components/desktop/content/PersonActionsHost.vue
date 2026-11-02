@@ -17,6 +17,7 @@
         :viewer-login="viewerLogin ?? null"
         :tasks="tasks"
         :tasks-unavailable="tasksUnavailable"
+        :services="workServices"
         @open-task="closeWork(); emit('open-task', $event)"
         @close="closeWork"
       />
@@ -31,6 +32,14 @@ import PersonWorkPanel from "./PersonWorkPanel.vue";
 import { buildPersonContextMenuItems, type PersonMenuAction, type PersonMenuPosition } from "../../../domain/person-context-menu";
 import type { PersonTarget } from "../../../domain/person-target";
 import type { DesktopTaskSummary } from "../../../../../electron/ipc-types";
+import type { PersonWorkServices } from "../../../domain/person-work-services";
+import { desktopIpc } from "../../../ipc/index.js";
+
+const workServices: PersonWorkServices = {
+  getEvents: (roomId, options) => desktopIpc.room.getGitHubEvents(roomId, options),
+  getTicket: (roomId, taskId) => desktopIpc.room.getTaskTicket(roomId, taskId),
+  openExternalUrl: (url) => desktopIpc.app.openExternalUrl(url),
+};
 
 /** Menu and Work panel for a clicked person. The room shell mounts this once and calls open(). */
 const props = defineProps<{

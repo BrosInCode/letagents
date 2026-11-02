@@ -31,6 +31,7 @@ async function renderPanel(viewerLogin: string | null): Promise<string> {
       target: { login: "mira", displayName: "Mira Patel", avatarUrl: null },
       roomId: "github.com/acme/app",
       viewerLogin,
+      services: { getEvents: async () => ({ events: [], hasMore: false, roomIdentifier: "github.com/acme/app" }), getTicket: async () => null, openExternalUrl: async () => {} },
     }),
   });
   const html = await renderToString(app, context);
@@ -64,11 +65,12 @@ test("person work panel wires the focus trap, Escape stopPropagation and deactiv
   assert.match(source, /onDeactivated\(/);
 });
 
-test("ticket links survive ordinary snapshots and reject stale room/ref responses", async (t) => {
+test("platform services preserve ticket links across snapshots and reject stale room/ref responses", async (t) => {
   const { createRenderer, nextTick, reactive, ref, ssrContextKey } = await import("vue");
   const globals = { window: globalThis.window, document: globalThis.document, HTMLElement: globalThis.HTMLElement };
   const pending: Array<{ room: string; resolve: (value: unknown) => void }> = [];
   const prUrl = "https://github.com/acme/app/pull/12";
+  const opened: string[] = [];
   Object.assign(globalThis, {
     HTMLElement: class {},
     document: { activeElement: null, addEventListener() {}, removeEventListener() {} },
@@ -82,7 +84,7 @@ test("ticket links survive ordinary snapshots and reject stale room/ref response
         }] : [],
       }),
       getTaskTicket: (room: string) => new Promise(resolve => pending.push({ room, resolve })),
-    } } },
+    }, app: { openExternalUrl: async (url: string) => { opened.push(url); } } } },
   });
   // Run the production setup/lifecycle without DOM rendering; UI is covered by SSR and browser QA.
   const renderer = createRenderer({
@@ -90,7 +92,15 @@ test("ticket links survive ordinary snapshots and reject stale room/ref response
     insert() {}, remove() {}, setText() {}, setElementText() {}, patchProp() {},
     parentNode: () => null, nextSibling: () => null,
   });
+  const bridge = globalThis.window.letagentsDesktop;
+  const services = {
+    getEvents: bridge.room.getGitHubEvents,
+    getTicket: bridge.room.getTaskTicket,
+    openExternalUrl: bridge.app.openExternalUrl,
+  };
+  Object.assign(globalThis, { window: {} });
   const props = reactive({
+    services,
     target: { login: "mira", displayName: "Mira Patel", avatarUrl: null },
     roomId: "github.com/acme/app", viewerLogin: "owen",
     tasks: [{ id: "task_1", title: "Fix loading", prUrl, workflowArtifacts: [], externalRef: "jira:APP-1", ticketState: "open" }],
@@ -107,6 +117,9 @@ test("ticket links survive ordinary snapshots and reject stale room/ref response
   pending[0].resolve({ externalRef: "jira:APP-1", url: "https://acme.atlassian.net/browse/APP-1" });
   await settle();
   assert.equal(state().ticketLink(props.tasks[0]), "https://acme.atlassian.net/browse/APP-1");
+  await state().openTicket(props.tasks[0]);
+  await state().openPullRequest({ prUrl });
+  assert.deepEqual(opened, ["https://acme.atlassian.net/browse/APP-1", prUrl]);
 
   props.tasks = props.tasks.map(task => ({ ...task, title: "Fix loading updated" }));
   await settle();

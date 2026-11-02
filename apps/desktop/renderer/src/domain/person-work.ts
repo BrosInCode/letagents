@@ -1,8 +1,12 @@
-import type { DesktopGitHubRoomEvent, DesktopTaskSummary } from "../../../electron/ipc-types";
+import type { DesktopGitHubRoomEvent } from "../../../electron/ipc-types/room";
+import type { DesktopTaskSummary } from "../../../electron/ipc-types/tasks";
 import { timestampValue } from "./time";
 
 /** A GitHub event plus its source room; task IDs are only meaningful within that scope. */
 export type PersonWorkEvent = DesktopGitHubRoomEvent & { roomId?: string | null };
+
+export type PersonWorkTask = Pick<DesktopTaskSummary,
+  "id" | "title" | "prUrl" | "workflowArtifacts" | "externalRef" | "ticketState">;
 
 export interface PersonWorkRow {
   prUrl: string;
@@ -34,12 +38,12 @@ const MERGED_WINDOW_MS = 24 * 60 * 60 * 1000;
 const PULL_REQUEST_URL = /^(https:\/\/github\.com\/[^/\s]+\/[^/\s]+\/pull\/(\d+))(?:[/?#].*)?$/;
 
 /** Resolve recorded links, never a matching title, author, or suggested Jev match. */
-export function personWorkTasks(
+export function personWorkTasks<T extends PersonWorkTask>(
   row: PersonWorkRow,
   events: readonly PersonWorkEvent[],
-  tasks: readonly DesktopTaskSummary[],
+  tasks: readonly T[],
   roomId: string,
-): DesktopTaskSummary[] {
+): T[] {
   const prKey = (value: string | null) => PULL_REQUEST_URL.exec(value ?? "")?.[1].toLowerCase();
   const key = prKey(row.prUrl);
   if (!key) return [];

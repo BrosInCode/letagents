@@ -12,7 +12,7 @@
           <h2 id="person-work-title">{{ target.displayName || target.login }}</h2>
           <p class="person-work-login">@{{ target.login }}<span v-if="repositoryLabel"> · {{ repositoryLabel }}</span></p>
         </div>
-        <button class="person-work-close" type="button" aria-label="Close work panel" @click="emit('close', $event.detail === 0)"><X :size="18" aria-hidden="true" /></button>
+        <button class="person-work-close" type="button" aria-label="Close work panel" @click="emit('close', $event.detail === 0)"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m18 6-12 12M6 6l12 12" /></svg></button>
       </header>
 
       <div class="person-work-body">
@@ -31,7 +31,7 @@
               <a class="person-work-pr" :href="row.prUrl" @click.prevent="openPullRequest(row)">
                 <span class="person-work-pr-title">{{ row.title || 'Untitled pull request' }}</span>
                 <span v-if="row.prNumber !== null" class="person-work-pr-number">#{{ row.prNumber }}</span>
-                <ArrowUpRight :size="15" aria-hidden="true" />
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10" /></svg>
               </a>
               <p class="person-work-row-meta">
                 <span v-if="section.key !== 'open' && section.key !== 'draft'">{{ stateLabel(row.state) }}</span>
@@ -40,10 +40,10 @@
               </p>
               <div v-for="task in tasksByPr.get(row.prUrl) || []" :key="task.id" class="person-work-task">
                 <a v-if="ticketLink(task)" :href="ticketLink(task)" class="person-work-ticket" @click.prevent="openTicket(task)">
-                  {{ ticketRefParts(task.externalRef)?.providerLabel }} {{ ticketRefParts(task.externalRef)?.key }}<ArrowUpRight :size="12" aria-hidden="true" />
+                  {{ ticketRefParts(task.externalRef)?.providerLabel }} {{ ticketRefParts(task.externalRef)?.key }}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 17 17 7M7 7h10v10" /></svg>
                 </a>
                 <button v-else type="button" class="person-work-board" @click="emit('open-task', task.id)">
-                  <span>{{ task.id.replace(/^task_/, 'T') }}</span> {{ task.title }}<ChevronRight :size="12" aria-hidden="true" />
+                  <span>{{ task.id.replace(/^task_/, 'T') }}</span> {{ task.title }}<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
                 </button>
               </div>
             </li>
@@ -68,16 +68,15 @@ import {
   PERSON_WORK_PAGE_LIMIT,
   type PersonWorkEvent,
   type PersonWorkRow,
+  type PersonWorkTask,
 } from "../../../domain/person-work";
+import type { PersonWorkServices } from "../../../domain/person-work-services";
 import { loginInitials } from "../../../domain/initials";
 import { formatRelativeTime } from "../../../domain/time";
 import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
-import { desktopIpc } from "../../../ipc/index.js";
-import { ArrowUpRight, ChevronRight, X } from "@lucide/vue";
 import DisclosurePanel from "../../../../../../../shared/ui/DisclosurePanel.vue";
 import { safeWorkUrl } from "../../../../../../../shared/ui/my-work/model";
 import { ticketRefParts } from "./room-board/ticket-ref";
-import type { DesktopTaskSummary, DesktopTaskTicket } from "../../../../../electron/ipc-types";
 
 type PersonWorkEventType = "pull_request" | "pull_request_review";
 
@@ -87,9 +86,12 @@ const props = defineProps<{
   target: PersonTarget;
   roomId: string;
   viewerLogin: string | null;
-  tasks?: DesktopTaskSummary[];
+  tasks?: PersonWorkTask[];
   tasksUnavailable?: boolean;
+  services: PersonWorkServices;
 }>();
+
+const services = props.services;
 
 const emit = defineEmits<{
   close: [instant?: boolean];
@@ -110,7 +112,7 @@ const repositoryLabel = computed(() => {
   const scope = eventRoomId.value || props.roomId;
   return repository || (scope.startsWith("github.com/") ? scope.slice(11) : "");
 });
-const tickets = ref<Record<string, DesktopTaskTicket | null>>({});
+const tickets = ref<Record<string, Awaited<ReturnType<PersonWorkServices["getTicket"]>>>>({});
 let ticketRequest = 0;
 const openSections = reactive<Record<string, boolean>>({ open: true, draft: true, review: true, reviewed: false, merged: false });
 let requestToken = 0;
@@ -144,20 +146,20 @@ watch(() => JSON.stringify([props.roomId, linkedTickets.value.map(task => [task.
   const roomId = props.roomId;
   tickets.value = {};
   const loaded = await Promise.all(tasks.map(async task => {
-    try { return [task.id, await desktopIpc.room.getTaskTicket(roomId, task.id)] as const; }
+    try { return [task.id, await services.getTicket(roomId, task.id)] as const; }
     catch { return [task.id, null] as const; }
   }));
   if (request === ticketRequest && roomId === props.roomId) tickets.value = Object.fromEntries(loaded);
 });
-function ticketLink(task: DesktopTaskSummary): string | undefined {
+function ticketLink(task: PersonWorkTask): string | undefined {
   const ticket = tickets.value[task.id];
   return ticket && ticket.externalRef === task.externalRef ? safeWorkUrl(ticket.url) : undefined;
 }
-async function openTicket(task: DesktopTaskSummary): Promise<void> {
+async function openTicket(task: PersonWorkTask): Promise<void> {
   const url = ticketLink(task);
   if (!url) return;
   actionError.value = null;
-  try { await desktopIpc.app.openExternalUrl(url); }
+  try { await services.openExternalUrl(url); }
   catch { actionError.value = "The ticket could not be opened."; }
 }
 
@@ -218,7 +220,7 @@ async function loadEventsOfType(
   let sourceRoomId: string | null = null;
   const result = await loadRoomEventsOfType(
     async ({ after }) => {
-      const page = await desktopIpc.room.getGitHubEvents(roomId, {
+      const page = await services.getEvents(roomId, {
         limit: PERSON_WORK_PAGE_LIMIT, eventType, since, after,
       });
       sourceRoomId = page.githubRoomIdentifier || page.roomIdentifier;
@@ -237,7 +239,7 @@ async function loadEventsOfType(
 async function openPullRequest(row: PersonWorkRow): Promise<void> {
   actionError.value = null;
   try {
-    await desktopIpc.app.openExternalUrl(row.prUrl);
+    await services.openExternalUrl(row.prUrl);
   } catch {
     actionError.value = "The pull request could not be opened.";
   }
@@ -294,7 +296,7 @@ function stateLabel(state: string): string {
 .person-work-section h3 { display: flex; align-items: baseline; gap: 8px; margin: 0; color: var(--text-secondary); font-size: .78rem; font-weight: 550; }
 .person-work-count { color: var(--text-tertiary); font-size: .72rem; font-variant-numeric: tabular-nums; }
 .person-work-list { margin: 0; padding: 0; list-style: none; }
-.person-work-row { position: relative; isolation: isolate; min-width: 0; padding: 14px 8px; border-top: 1px solid var(--border); }
+.person-work-row { position: relative; isolation: isolate; min-width: 0; padding: 15px 8px 14px; }
 .person-work-row::before { content: ""; position: absolute; z-index: -1; inset: 6px 0; border-radius: 6px; background: transparent; transition: background-color 140ms ease; pointer-events: none; }
 .person-work-pr { display: flex; align-items: baseline; gap: 10px; color: var(--text); text-decoration: none; font-size: .88rem; font-weight: 550; line-height: 1.45; }
 .person-work-pr-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }

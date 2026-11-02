@@ -2,7 +2,8 @@
   <div class="message-meta">
     <div class="message-sender">
       <div class="message-sender-row">
-        <strong>{{ displayName }}</strong>
+        <button v-if="canViewWork" type="button" class="message-person-action" :aria-label="`View ${displayName}’s work`" @click="emit('work', $event)">{{ displayName }}</button>
+        <strong v-else>{{ displayName }}</strong>
         <IdeBadge v-if="ideLabel" :label="ideLabel" />
       </div>
       <span v-if="ownerAttribution" class="message-sender-subtitle">
@@ -83,6 +84,7 @@ import type { ProvenanceBadge } from './types'
 
 defineProps<{
   displayName: string
+  canViewWork?: boolean
   ownerAttribution?: string | null
   ideLabel?: string | null
   provenanceBadge?: ProvenanceBadge | null
@@ -99,6 +101,7 @@ defineProps<{
 
 const emit = defineEmits<{
   actions: [event: MouseEvent]
+  work: [event: MouseEvent]
   pin: []
   copy: []
   reply: []
@@ -134,7 +137,10 @@ const emit = defineEmits<{
   flex-wrap: wrap;
   line-height: 1.3;
 }
-.message-meta strong { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
+.message-person-action { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.message-person-action:hover { text-decoration: underline; text-underline-offset: 3px; }
+.message-person-action:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 3px; }
+.message-meta strong, .message-person-action { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
 .message-sender-subtitle { font-size: 0.72rem; color: var(--muted, #71717a); }
 
 .message-meta-tail {
