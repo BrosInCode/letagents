@@ -48,14 +48,35 @@ export function sidebarProjectDetails(project: ProjectGroup): string {
   return parts.filter(Boolean).join(" · ");
 }
 
-/** The unread badge a room group's parent row shows. */
-export interface SidebarGroupUnread {
+/** The unread badge a sidebar row shows for several rooms at once. */
+export interface SidebarUnreadTotal {
   /** Unread messages the badge counts. */
   count: number;
-  /** A room was marked unread by hand with nothing to count. */
+  /** Some room in the span is unread; with nothing to count the badge is a dot. */
   markedUnread: boolean;
-  /** How many rooms the count spans; the tooltip says so when it is more than one. */
+  /** How many rooms carry a count; the tooltip says so when it is more than one. */
   rooms: number;
+  /** A counted room is folded away under the row rather than the row's own room. */
+  nested: boolean;
+}
+
+/**
+ * Sum the unread state of rooms that one row stands for. Rooms folded under
+ * the row are skipped while muted, as Slack and Discord leave muted channels
+ * out of a section total; the row's own room always counts.
+ */
+export function sidebarUnreadTotal(
+  rooms: readonly RoomEntry[],
+  options: { own?: RoomEntry | null; isMuted?: (roomIdentifier: string | null | undefined) => boolean } = {},
+): SidebarUnreadTotal {
+  const counted = rooms.filter((room) => room === options.own || !options.isMuted?.(room.roomIdentifier));
+  const unread = counted.filter((room) => (room.unreadCount || 0) > 0);
+  return {
+    count: unread.reduce((total, room) => total + (room.unreadCount || 0), 0),
+    markedUnread: counted.some((room) => room.hasUnread),
+    rooms: unread.length,
+    nested: unread.some((room) => room !== options.own),
+  };
 }
 
 /**
@@ -63,19 +84,19 @@ export interface SidebarGroupUnread {
  * the unread messages of every room folded under it, so nothing hides behind
  * the fold. Expanded, each room shows its own count and the parent shows only its.
  */
-export function sidebarGroupUnread(project: ProjectGroup, collapsed: boolean): SidebarGroupUnread {
-  const rooms = collapsed ? [project.parent, ...project.focusRooms, ...project.branchRooms] : [project.parent];
-  const counted = rooms.filter((room) => (room.unreadCount || 0) > 0);
-  return {
-    count: counted.reduce((total, room) => total + (room.unreadCount || 0), 0),
-    markedUnread: rooms.some((room) => room.hasUnread),
-    rooms: counted.length,
-  };
+export function sidebarGroupUnread(
+  project: ProjectGroup,
+  collapsed: boolean,
+  isMuted?: (roomIdentifier: string | null | undefined) => boolean,
+): SidebarUnreadTotal {
+  const folded = collapsed ? [...project.focusRooms, ...project.branchRooms] : [];
+  return sidebarUnreadTotal([project.parent, ...folded], { own: project.parent, isMuted });
 }
 
-/** What the parent row's unread badge says, read aloud and in its tooltip. */
-export function describeSidebarGroupUnread(unread: SidebarGroupUnread): string | null {
+/** What a multi-room unread badge says, read aloud and in its tooltip. */
+export function describeSidebarUnreadTotal(unread: SidebarUnreadTotal): string | null {
   if (unread.count <= 0) return unread.markedUnread ? "Marked unread" : null;
   const messages = `${unread.count} unread message${unread.count === 1 ? "" : "s"}`;
-  return unread.rooms > 1 ? `${messages} in ${unread.rooms} rooms` : messages;
+  if (unread.rooms > 1) return `${messages} in ${unread.rooms} rooms`;
+  return unread.nested ? `${messages} in a nested room` : messages;
 }

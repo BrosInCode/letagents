@@ -356,6 +356,7 @@
                 >
                   <ChevronRight aria-hidden="true" />
                   <span>{{ projectRoomOverflowLabel(project) }}</span>
+                  <RoomUnreadBadge v-bind="projectOverflowUnreadBadge(project)" />
                 </button>
               </TransitionGroup>
             </Transition>
@@ -502,6 +503,7 @@
                 >
                   <ChevronRight aria-hidden="true" />
                   <span>{{ projectRoomOverflowLabel(project) }}</span>
+                  <RoomUnreadBadge v-bind="projectOverflowUnreadBadge(project)" />
                 </button>
               </TransitionGroup>
             </Transition>
@@ -693,7 +695,7 @@ import {
 } from "../../../domain/sidebar-context-menu";
 import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/DesktopContextMenu.vue";
 import RoomMutedIcon from "./RoomMutedIcon.vue";
-import { roomNotificationPreferences, roomNotificationState } from "../../../composables/useRoomNotificationPreferences";
+import { roomNotificationPreferences, roomNotificationState, roomNotificationsMuted } from "../../../composables/useRoomNotificationPreferences";
 import { roomNotificationMenuItems, roomNotificationMenuChange } from "../../../domain/room-notification-menu";
 import { sidebarProjectForEntry } from "../../../domain/sidebar-zen-mode";
 import {
@@ -708,7 +710,7 @@ import {
 import SidebarRoomSwitcher from "./SidebarRoomSwitcher.vue";
 import SidebarChildRoom from "./SidebarChildRoom.vue";
 import SidebarRoomActivity from "./SidebarRoomActivity.vue";
-import { describeSidebarGroupUnread, sidebarGroupActivity, sidebarGroupUnread, sidebarProjectDetails, sidebarRoomTitle } from "../../../domain/sidebar-room-display";
+import { describeSidebarUnreadTotal, sidebarGroupActivity, sidebarGroupUnread, sidebarProjectDetails, sidebarRoomTitle, sidebarUnreadTotal, type SidebarUnreadTotal } from "../../../domain/sidebar-room-display";
 import SidebarAccountMenu from "./SidebarAccountMenu.vue";
 import type { ProjectGroup, SidebarEntry, SystemEntry, RoomEntry } from "../types";
 import { desktopIpc } from "../../../ipc/index.js";
@@ -820,8 +822,18 @@ function projectIsCollapsed(projectId: string): boolean {
 
 /** Collapsed, the parent row totals the group; expanded, it shows only its own room. */
 function projectUnreadBadge(project: ProjectGroup): { count: number; markedUnread: boolean; label: string | undefined } {
-  const unread = sidebarGroupUnread(project, projectIsCollapsed(project.id));
-  return { count: unread.count, markedUnread: unread.markedUnread, label: describeSidebarGroupUnread(unread) || undefined };
+  return unreadBadgeProps(sidebarGroupUnread(project, projectIsCollapsed(project.id), roomNotificationsMuted));
+}
+
+/** Rooms behind "Show N more" keep their unread messages visible on that button. */
+function projectOverflowUnreadBadge(project: ProjectGroup): { count: number; markedUnread: boolean; label: string | undefined } {
+  const visible = new Set(visibleProjectChildRooms(project).map((room) => room.id));
+  const hidden = projectChildRooms(project).filter((room) => !visible.has(room.id));
+  return unreadBadgeProps(sidebarUnreadTotal(hidden, { isMuted: roomNotificationsMuted }));
+}
+
+function unreadBadgeProps(unread: SidebarUnreadTotal): { count: number; markedUnread: boolean; label: string | undefined } {
+  return { count: unread.count, markedUnread: unread.markedUnread, label: describeSidebarUnreadTotal(unread) || undefined };
 }
 function toggleProject(projectId: string): void {
   if (zenMode.value) zenCollapsedProjects.value[projectId] = !projectIsCollapsed(projectId);
