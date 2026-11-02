@@ -38,7 +38,7 @@ function toggleLandingTheme() {
 }
 
 // Show navbar/footer on landing and docs, hide in room view
-const showNavbar = computed(() => !['room', 'messages', 'my-work', 'connectors', 'ask'].includes(String(route.name)))
+const showNavbar = computed(() => !['room', 'messages', 'my-work', 'connectors', 'ask', 'inbox'].includes(String(route.name)))
 const showFooter = showNavbar
 </script>
 

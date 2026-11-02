@@ -1,0 +1,25 @@
+/* The Inbox owns its scroll panes; Memory keeps its existing knowledge layout. */
+.needs-you-page.inbox-layout { padding: 8px 0 0; gap: 0; overflow: hidden; }
+.app-main:has(> .needs-you-page) { padding: 28px 36px 24px; gap: 0; }
+.inbox-desktop-detail { min-width: 0; }
+.inbox-desktop-detail .inbox-detail-content { max-width: 660px; margin: 0 auto; }
+.inbox-desktop-detail h2 { margin: 0; font-size: 26px; font-weight: 550; letter-spacing: -.025em; line-height: 1.4; overflow-wrap: anywhere; }
+.inbox-desktop-detail h2:focus { outline: none; }
+.inbox-desktop-detail .inbox-detail-byline .chat-avatar { width: 26px; height: 26px; flex-basis: 26px; }
+.inbox-desktop-detail .knowledge-prose { line-height: 1.85; }
+.inbox-desktop-detail .knowledge-task-action { padding: 0; margin-top: 24px; border: 0; max-height: none; overflow: visible; }
+.inbox-desktop-detail .knowledge-source-row { margin: 18px 0 0; gap: 10px; }
+.inbox-desktop-detail .knowledge-answer { margin: 24px 0 0; max-height: none; overflow: visible; background: var(--bg-subtle); border-color: var(--border); }
+.inbox-desktop-detail .inbox-approval-fields { margin: 20px 0; }
+.inbox-desktop-detail .inbox-approval-fields pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+.inbox-desktop-detail .inbox-activity { margin: 16px 0 0; }
+.needs-you-page .inbox-filter-hidden { margin: 0; }
+.needs-you-page .knowledge-text-button { white-space: normal; }
+@media (max-width: 850px) {
+  .app-main:has(> .needs-you-page) { padding: 22px 22px 18px; }
+  .inbox-desktop-detail h2 { font-size: 24px; }
+}
+@media (max-width: 700px) {
+  .app-main:has(> .needs-you-page) { padding: 18px 16px; }
+  .inbox-desktop-detail .knowledge-source-row { flex-wrap: wrap; }
+}

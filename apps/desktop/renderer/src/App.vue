@@ -136,7 +136,7 @@
     ></div>
     <section class="app-main" :data-room-entry="activeEntry.type === 'room'" :data-messages-entry="activeEntry.type === 'messages'" :data-my-work-entry="activeEntry.type === 'my-work'" data-testid="desktop-main">
       <DesktopTopbar
-        v-if="activeEntry.type !== 'room' && activeEntry.type !== 'marketplace' && activeEntry.type !== 'messages' && activeEntry.type !== 'my-work' && !isSettingsSurface"
+        v-if="activeEntry.type !== 'room' && activeEntry.type !== 'marketplace' && activeEntry.type !== 'messages' && activeEntry.type !== 'my-work' && (activeEntry.type !== 'inbox' || sidebarMode === 'hidden') && !isSettingsSurface"
         :active-entry="activeEntry"
         :sidebar-mode="sidebarMode"
         :loading="loading"

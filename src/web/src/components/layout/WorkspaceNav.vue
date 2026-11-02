@@ -6,6 +6,7 @@
     </RouterLink>
     <nav aria-label="Workspace">
       <RouterLink to="/my-work">My work</RouterLink>
+      <RouterLink to="/inbox">Inbox</RouterLink>
       <RouterLink to="/messages">Messages</RouterLink>
       <RouterLink to="/connectors">Connectors</RouterLink>
     </nav>
