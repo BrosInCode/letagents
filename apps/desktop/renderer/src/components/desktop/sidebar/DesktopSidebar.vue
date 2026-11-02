@@ -297,7 +297,7 @@
                     <span class="pinned-title">{{ project.roomName }}</span>
                     <RoomMutedIcon :room-identifier="project.parent.roomIdentifier" />
                     <SidebarRoomActivity :activity="sidebarGroupActivity(project, projectIsCollapsed(project.id))" />
-                    <RoomUnreadBadge :count="project.parent.unreadCount || 0" :marked-unread="project.parent.hasUnread" />
+                    <RoomUnreadBadge v-bind="projectUnreadBadge(project)" />
                   </span>
                 </span>
               </button>
@@ -442,7 +442,7 @@
                       <span class="project-name">{{ project.roomName }}</span>
                       <RoomMutedIcon :room-identifier="project.parent.roomIdentifier" />
                       <SidebarRoomActivity :activity="sidebarGroupActivity(project, projectIsCollapsed(project.id))" />
-                      <RoomUnreadBadge :count="project.parent.unreadCount || 0" :marked-unread="project.parent.hasUnread" />
+                      <RoomUnreadBadge v-bind="projectUnreadBadge(project)" />
                     </span>
                   </span>
                 </span>
@@ -708,7 +708,7 @@ import {
 import SidebarRoomSwitcher from "./SidebarRoomSwitcher.vue";
 import SidebarChildRoom from "./SidebarChildRoom.vue";
 import SidebarRoomActivity from "./SidebarRoomActivity.vue";
-import { sidebarGroupActivity, sidebarProjectDetails, sidebarRoomTitle } from "../../../domain/sidebar-room-display";
+import { describeSidebarGroupUnread, sidebarGroupActivity, sidebarGroupUnread, sidebarProjectDetails, sidebarRoomTitle } from "../../../domain/sidebar-room-display";
 import SidebarAccountMenu from "./SidebarAccountMenu.vue";
 import type { ProjectGroup, SidebarEntry, SystemEntry, RoomEntry } from "../types";
 import { desktopIpc } from "../../../ipc/index.js";
@@ -816,6 +816,12 @@ watch(zenProject, (project) => {
 
 function projectIsCollapsed(projectId: string): boolean {
   return Boolean(zenMode.value ? zenCollapsedProjects.value[projectId] : props.collapsedProjects[projectId]);
+}
+
+/** Collapsed, the parent row totals the group; expanded, it shows only its own room. */
+function projectUnreadBadge(project: ProjectGroup): { count: number; markedUnread: boolean; label: string | undefined } {
+  const unread = sidebarGroupUnread(project, projectIsCollapsed(project.id));
+  return { count: unread.count, markedUnread: unread.markedUnread, label: describeSidebarGroupUnread(unread) || undefined };
 }
 function toggleProject(projectId: string): void {
   if (zenMode.value) zenCollapsedProjects.value[projectId] = !projectIsCollapsed(projectId);

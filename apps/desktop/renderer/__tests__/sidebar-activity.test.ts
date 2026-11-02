@@ -7,8 +7,10 @@ import {
   streamedLatestMessage,
 } from "../src/domain/account-activity";
 import {
+  describeSidebarGroupUnread,
   describeSidebarRoomActivity,
   sidebarGroupActivity,
+  sidebarGroupUnread,
   sidebarProjectDetails,
   sidebarRoomTitle,
 } from "../src/domain/sidebar-room-display";
@@ -74,4 +76,26 @@ test("nested focus rooms drop the prefix their parent already implies", () => {
   assert.equal(sidebarRoomTitle({ kind: "focus", title: "focus:   Agents QA" }), "Agents QA");
   assert.equal(sidebarRoomTitle({ kind: "focus", title: "Focus:" }), "Focus:", "a title that is only the prefix is kept");
   assert.equal(sidebarRoomTitle({ kind: "parent", title: "Focus: a room literally named this" }), "Focus: a room literally named this");
+});
+
+test("a collapsed room group totals the unread messages folded under it", () => {
+  const project: ProjectGroup = {
+    id: "group", roomName: "sky-lake",
+    parent: room("parent", { unreadCount: 14 }),
+    focusRooms: [
+      room("focus_1", { kind: "focus", unreadCount: 7 }),
+      room("focus_2", { kind: "focus", unreadCount: 0, hasUnread: true }),
+    ],
+    branchRooms: [room("branch", { kind: "branch", unreadCount: 2 })],
+  };
+  assert.deepEqual(sidebarGroupUnread(project, false), { count: 14, markedUnread: false, rooms: 1 }, "expanded, the parent shows only its own room");
+  assert.deepEqual(sidebarGroupUnread(project, true), { count: 23, markedUnread: true, rooms: 3 });
+  assert.equal(describeSidebarGroupUnread(sidebarGroupUnread(project, true)), "23 unread messages in 3 rooms");
+  assert.equal(describeSidebarGroupUnread(sidebarGroupUnread(project, false)), "14 unread messages");
+  assert.equal(describeSidebarGroupUnread({ count: 1, markedUnread: false, rooms: 1 }), "1 unread message");
+  assert.equal(describeSidebarGroupUnread({ count: 0, markedUnread: true, rooms: 0 }), "Marked unread", "a hand-marked room keeps its dot");
+  assert.equal(describeSidebarGroupUnread({ count: 0, markedUnread: false, rooms: 0 }), null);
+
+  const quiet: ProjectGroup = { ...project, parent: room("parent"), focusRooms: [room("focus_1", { kind: "focus" })], branchRooms: [] };
+  assert.deepEqual(sidebarGroupUnread(quiet, true), { count: 0, markedUnread: false, rooms: 0 }, "nothing unread is no badge at all");
 });

@@ -47,3 +47,35 @@ export function sidebarProjectDetails(project: ProjectGroup): string {
   if (focusCount) parts.push(`${focusCount} focus ${focusCount === 1 ? "room" : "rooms"}`);
   return parts.filter(Boolean).join(" · ");
 }
+
+/** The unread badge a room group's parent row shows. */
+export interface SidebarGroupUnread {
+  /** Unread messages the badge counts. */
+  count: number;
+  /** A room was marked unread by hand with nothing to count. */
+  markedUnread: boolean;
+  /** How many rooms the count spans; the tooltip says so when it is more than one. */
+  rooms: number;
+}
+
+/**
+ * Like Slack and Discord section headers: a collapsed group's parent row totals
+ * the unread messages of every room folded under it, so nothing hides behind
+ * the fold. Expanded, each room shows its own count and the parent shows only its.
+ */
+export function sidebarGroupUnread(project: ProjectGroup, collapsed: boolean): SidebarGroupUnread {
+  const rooms = collapsed ? [project.parent, ...project.focusRooms, ...project.branchRooms] : [project.parent];
+  const counted = rooms.filter((room) => (room.unreadCount || 0) > 0);
+  return {
+    count: counted.reduce((total, room) => total + (room.unreadCount || 0), 0),
+    markedUnread: rooms.some((room) => room.hasUnread),
+    rooms: counted.length,
+  };
+}
+
+/** What the parent row's unread badge says, read aloud and in its tooltip. */
+export function describeSidebarGroupUnread(unread: SidebarGroupUnread): string | null {
+  if (unread.count <= 0) return unread.markedUnread ? "Marked unread" : null;
+  const messages = `${unread.count} unread message${unread.count === 1 ? "" : "s"}`;
+  return unread.rooms > 1 ? `${messages} in ${unread.rooms} rooms` : messages;
+}

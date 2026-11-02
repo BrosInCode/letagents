@@ -19,4 +19,6 @@ test("unread badges show bounded numbers, exact accessible counts and manual mar
   assert.match(await render(1), /aria-label="1 unread message"[^>]*>1<\/span>/);
   assert.match(await render(145), /aria-label="145 unread messages"[^>]*>99\+<\/span>/);
   assert.match(await render(0, true), /class="room-unread-dot" aria-label="Marked unread"/);
+  const grouped = await renderToString(createSSRApp(RoomUnreadBadge, { count: 23, label: "23 unread messages in 3 rooms" }));
+  assert.match(grouped, /aria-label="23 unread messages in 3 rooms" title="23 unread messages in 3 rooms">23<\/span>/, "a group total says which rooms it spans");
 });
