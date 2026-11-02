@@ -1,6 +1,6 @@
 <template>
   <div class="person-work-layer">
-    <button class="person-work-scrim" type="button" aria-label="Close work panel" @click="emit('close')"></button>
+    <button class="person-work-scrim" type="button" aria-label="Close work panel" @click="emit('close', $event.detail === 0)"></button>
     <aside ref="panelElement" class="person-work-panel" role="dialog" aria-modal="true" aria-labelledby="person-work-title" tabindex="-1">
       <header class="person-work-header">
         <span class="person-work-avatar" aria-hidden="true">
@@ -12,7 +12,7 @@
           <h2 id="person-work-title">{{ target.displayName || target.login }}</h2>
           <p class="person-work-login">@{{ target.login }}<span v-if="repositoryLabel"> · {{ repositoryLabel }}</span></p>
         </div>
-        <button class="person-work-close" type="button" aria-label="Close work panel" @click="emit('close')"><X :size="18" aria-hidden="true" /></button>
+        <button class="person-work-close" type="button" aria-label="Close work panel" @click="emit('close', $event.detail === 0)"><X :size="18" aria-hidden="true" /></button>
       </header>
 
       <div class="person-work-body">
@@ -92,7 +92,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  close: [];
+  close: [instant?: boolean];
   "open-task": [taskId: string];
 }>();
 
@@ -173,7 +173,7 @@ onMounted(() => {
 });
 
 // The panel is teleported to body. Leaving a kept-alive room view must close it.
-onDeactivated(() => emit("close"));
+onDeactivated(() => emit("close", true));
 
 onBeforeUnmount(() => {
   requestToken += 1;
@@ -252,7 +252,7 @@ function handleKeydown(event: KeyboardEvent): void {
   event.preventDefault();
   // One Escape press must not also close an inspector behind the panel.
   event.stopPropagation();
-  emit("close");
+  emit("close", true);
 }
 
 function stateLabel(state: string): string {
@@ -308,7 +308,7 @@ function stateLabel(state: string): string {
 .person-work-footer button, .person-work-error button { padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); font: inherit; cursor: pointer; }
 .person-work-footer button:disabled { opacity: .5; cursor: default; }
 .person-work-close { transition: background-color 140ms ease, transform 120ms ease; }
-.person-work-close:active { transform: scale(.95); }
+.person-work-close:active:not(:focus-visible) { transform: scale(.95); }
 .person-work-footer button, .person-work-error button, .person-work-ticket, .person-work-board { transition: background-color 140ms ease, color 140ms ease; }
 .person-work-pr svg, .person-work-pr-number { transition: color 140ms ease; }
 a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 3px; }
@@ -322,7 +322,7 @@ a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-
   .person-work-enter-active, .person-work-leave-active { transition-duration: 80ms; }
   .person-work-enter-active .person-work-panel, .person-work-leave-active .person-work-panel { transition: none; transform: none; }
   .person-work-close { transition: background-color 140ms ease; }
-  .person-work-close:active { transform: none; }
+  .person-work-close:active:not(:focus-visible) { transform: none; }
 }
 @media (max-width: 559px) { .person-work-panel { inset: 0; width: 100%; border: 0; border-radius: 0; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); } .person-work-header { padding: 20px; } .person-work-footer { padding: 12px 20px; } }
 </style>
