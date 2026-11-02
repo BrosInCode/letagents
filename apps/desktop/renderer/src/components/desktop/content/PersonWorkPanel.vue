@@ -42,7 +42,7 @@
                 <a v-if="ticketLink(task)" :href="ticketLink(task)" class="person-work-ticket" @click.prevent="openTicket(task)">
                   {{ ticketRefParts(task.externalRef)?.providerLabel }} {{ ticketRefParts(task.externalRef)?.key }}<ArrowUpRight :size="12" aria-hidden="true" />
                 </a>
-                <button type="button" class="person-work-board" @click="emit('open-task', task.id)">
+                <button v-else type="button" class="person-work-board" @click="emit('open-task', task.id)">
                   <span>{{ task.id.replace(/^task_/, 'T') }}</span> {{ task.title }}<ChevronRight :size="12" aria-hidden="true" />
                 </button>
               </div>
