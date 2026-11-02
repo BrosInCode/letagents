@@ -83,9 +83,9 @@ test('the Updates count appears only once a read has loaded updates', async () =
     const earlyUpdates = await render(needsYou([blocked], false), 'updates', true);
     assert.doesNotMatch(earlyUpdates, /class="knowledge-total"/, 'the Updates heading has no number either');
     assert.match(earlyUpdates, /Fix the build/, 'rows already known still show');
-    assert.match(earlyUpdates, /<button class="knowledge-button" disabled title="Available once updates load\.">/, 'Mark all updates read waits for updates');
+    assert.match(earlyUpdates, /<button class="knowledge-text-button" disabled title="Available once updates load\.">/, 'Mark all updates read waits for updates');
     const loadedUpdates = await render(needsYou([blocked], true), 'updates');
-    assert.match(loadedUpdates, /class="knowledge-total">1</);
+    assert.match(loadedUpdates, /Updates<span>1<\/span>/);
     assert.match(loadedUpdates, /title="Mark the 1 displayed updates read\. New activity will still appear\."/);
 
     assert.match(await render(needsYou([], false), 'updates', true), /Checking your rooms/, 'an empty list reads as loading while the read runs');

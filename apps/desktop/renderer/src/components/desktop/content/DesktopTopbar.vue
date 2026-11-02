@@ -14,17 +14,17 @@
         <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
       </svg>
     </button>
-    <div v-if="activeEntry.type !== 'room'" class="topbar-title">
+    <div v-if="activeEntry.type !== 'room' && activeEntry.type !== 'inbox'" class="topbar-title">
       <p class="sidebar-label">{{ activeEntry.sectionLabel }}</p>
       <h2>{{ activeEntry.title }}</h2>
     </div>
     <div v-else class="topbar-spacer" aria-hidden="true"></div>
-    <div class="topbar-actions">
+    <div v-if="activeEntry.type !== 'inbox'" class="topbar-actions">
       <button class="ghost-button" type="button" data-testid="topbar-system-button" @click="$emit('show-system')">
         System
       </button>
       <button
-        v-if="activeEntry.type !== 'inbox' && activeEntry.type !== 'my-work'"
+        v-if="activeEntry.type !== 'my-work'"
         class="primary-button"
         type="button"
         :disabled="loading"
