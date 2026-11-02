@@ -1,5 +1,5 @@
 <template>
-  <Teleport to="body">
+  <div class="person-work-layer">
     <button class="person-work-scrim" type="button" aria-label="Close work panel" @click="emit('close')"></button>
     <aside ref="panelElement" class="person-work-panel" role="dialog" aria-modal="true" aria-labelledby="person-work-title" tabindex="-1">
       <header class="person-work-header">
@@ -24,7 +24,7 @@
         <p v-if="!loading && !error && !work.openPrs.length" class="person-work-status">No open pull requests recorded in the last {{ PERSON_WORK_LOOKBACK_DAYS }} days.</p>
 
         <DisclosurePanel v-for="section in visibleSections" :key="section.key" class="person-work-section"
-          :open="openSections[section.key]" :instant="true" @toggle="openSections[section.key] = !openSections[section.key]">
+          :open="openSections[section.key]" @toggle="openSections[section.key] = !openSections[section.key]">
           <template #summary><h3>{{ section.title }} <span class="person-work-count">{{ section.rows.length }}</span></h3></template>
           <ul class="person-work-list">
             <li v-for="row in section.rows" :key="row.prUrl" class="person-work-row">
@@ -52,7 +52,7 @@
       </div>
       <footer class="person-work-footer"><span>Recorded GitHub activity · last {{ PERSON_WORK_LOOKBACK_DAYS }} days</span><button type="button" :disabled="loading" @click="loadWork">Refresh</button></footer>
     </aside>
-  </Teleport>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -267,6 +267,14 @@ function stateLabel(state: string): string {
 </script>
 
 <style scoped>
+.person-work-layer { position: fixed; z-index: 120; inset: 0; overflow: clip; }
+.person-work-enter-active { transition: opacity 240ms ease; }
+.person-work-leave-active { transition: opacity 160ms ease; pointer-events: none; }
+.person-work-enter-active .person-work-panel { transition: transform 240ms cubic-bezier(.22, 1, .36, 1); }
+.person-work-leave-active .person-work-panel { transition: transform 160ms cubic-bezier(.22, 1, .36, 1); }
+.person-work-enter-from, .person-work-leave-to { opacity: 0; }
+.person-work-enter-from .person-work-panel { transform: translateX(20px); }
+.person-work-leave-to .person-work-panel { transform: translateX(12px); }
 .person-work-scrim { position: fixed; z-index: 120; inset: 0; padding: 0; border: 0; background: var(--overlay-scrim); }
 .person-work-panel { position: fixed; z-index: 121; inset: 12px 12px 12px auto; width: min(540px, calc(100vw - 24px)); display: flex; flex-direction: column; box-sizing: border-box; border: 1px solid var(--border-strong); border-radius: 17px; background: var(--bg); color: var(--text); box-shadow: 0 24px 72px light-dark(#0000001f, #0000007a); overflow: hidden; }
 .person-work-panel:focus { outline: none; }
@@ -277,7 +285,7 @@ function stateLabel(state: string): string {
 .person-work-identity h2 { margin: 0 0 4px; font-size: 1rem; font-weight: 650; overflow-wrap: anywhere; }
 .person-work-eyebrow, .person-work-login { margin: 0; color: var(--text-tertiary); font-size: .76rem; overflow-wrap: anywhere; }
 .person-work-close { display: grid; place-items: center; width: 36px; height: 36px; flex: 0 0 36px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text-secondary); cursor: pointer; }
-.person-work-body { flex: 1; min-height: 0; overflow-y: auto; padding: 16px; }
+.person-work-body { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; padding: 16px; }
 .person-work-status { margin: 0; padding: 12px 8px; color: var(--text-secondary); font-size: .8rem; line-height: 1.5; }
 .person-work-error { margin: 0; padding: 12px 8px; color: var(--red); font-size: .8rem; }
 .person-work-error p { margin: 0 0 8px; }
@@ -286,7 +294,7 @@ function stateLabel(state: string): string {
 .person-work-section h3 { display: flex; align-items: baseline; gap: 8px; margin: 0; color: var(--text-secondary); font-size: .78rem; font-weight: 550; }
 .person-work-count { color: var(--text-tertiary); font-size: .72rem; font-variant-numeric: tabular-nums; }
 .person-work-list { margin: 0; padding: 0; list-style: none; }
-.person-work-row { min-width: 0; padding: 14px 8px; border-top: 1px solid var(--border); }
+.person-work-row { min-width: 0; padding: 14px 8px; border-top: 1px solid var(--border); transition: background-color 140ms ease; }
 .person-work-pr { display: flex; align-items: baseline; gap: 10px; color: var(--text); text-decoration: none; font-size: .88rem; font-weight: 550; line-height: 1.45; }
 .person-work-pr-title { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .person-work-pr-number { flex: 0 0 auto; color: var(--text-secondary); font-size: .88rem; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
@@ -299,7 +307,22 @@ function stateLabel(state: string): string {
 .person-work-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 24px; border-top: 1px solid var(--border); color: var(--text-tertiary); font-size: .7rem; }
 .person-work-footer button, .person-work-error button { padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--text-secondary); font: inherit; cursor: pointer; }
 .person-work-footer button:disabled { opacity: .5; cursor: default; }
+.person-work-close { transition: background-color 140ms ease, transform 120ms ease; }
+.person-work-close:active { transform: scale(.95); }
+.person-work-footer button, .person-work-error button, .person-work-ticket, .person-work-board { transition: background-color 140ms ease, color 140ms ease; }
+.person-work-pr svg, .person-work-pr-number { transition: color 140ms ease; }
 a:focus-visible, button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 3px; }
-@media (hover: hover) { .person-work-pr:hover, .person-work-ticket:hover, .person-work-board:hover { text-decoration: underline; text-underline-offset: 3px; } .person-work-close:hover, .person-work-footer button:hover { background: var(--bg-subtle); } }
+@media (hover: hover) and (pointer: fine) {
+  .person-work-row:hover { background: var(--bg-subtle); }
+  .person-work-pr:hover svg, .person-work-pr:hover .person-work-pr-number, .person-work-ticket:hover, .person-work-board:hover { color: var(--text); }
+  .person-work-pr:hover, .person-work-ticket:hover, .person-work-board:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .person-work-close:hover, .person-work-footer button:hover:not(:disabled) { background: var(--bg-subtle); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .person-work-enter-active, .person-work-leave-active { transition-duration: 80ms; }
+  .person-work-enter-active .person-work-panel, .person-work-leave-active .person-work-panel { transition: none; transform: none; }
+  .person-work-close { transition: background-color 140ms ease; }
+  .person-work-close:active { transform: none; }
+}
 @media (max-width: 559px) { .person-work-panel { inset: 0; width: 100%; border: 0; border-radius: 0; padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); } .person-work-header { padding: 20px; } .person-work-footer { padding: 12px 20px; } }
 </style>

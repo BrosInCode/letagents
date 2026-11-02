@@ -8,16 +8,20 @@
     @select="handlePersonMenuSelect"
     @close="personMenu = null"
   />
-  <PersonWorkPanel
-    v-if="personWorkTarget"
-    :target="personWorkTarget"
-    :room-id="roomIdentifier"
-    :viewer-login="viewerLogin ?? null"
-    :tasks="tasks"
-    :tasks-unavailable="tasksUnavailable"
-    @open-task="personWorkTarget = null; emit('open-task', $event)"
-    @close="personWorkTarget = null"
-  />
+  <Teleport to="body">
+    <Transition name="person-work" appear @before-leave="disableLeavingPanel">
+      <PersonWorkPanel
+        v-if="personWorkTarget"
+        :target="personWorkTarget"
+        :room-id="roomIdentifier"
+        :viewer-login="viewerLogin ?? null"
+        :tasks="tasks"
+        :tasks-unavailable="tasksUnavailable"
+        @open-task="personWorkTarget = null; emit('open-task', $event)"
+        @close="personWorkTarget = null"
+      />
+    </Transition>
+  </Teleport>
 </template>
 
 <script setup lang="ts">
@@ -45,6 +49,10 @@ const emit = defineEmits<{
 
 const personMenu = ref<{ target: PersonTarget; position: PersonMenuPosition } | null>(null);
 const personWorkTarget = ref<PersonTarget | null>(null);
+// Focus is restored as the dialog closes; its fading copy must not be tabbable.
+function disableLeavingPanel(element: Element): void {
+  (element as HTMLElement).inert = true;
+}
 const personMenuItemGroups = computed<DesktopContextMenuItem[][]>(() => personMenu.value
   ? buildPersonContextMenuItems({ target: personMenu.value.target, viewerLogin: props.viewerLogin ?? null })
   : []);
