@@ -155,6 +155,10 @@
       @askAgent="askAgentOpen = true"
     />
 
+    <PersonWorkHost v-if="isConnected && room && auth.isSignedIn.value" ref="personWorkHost"
+      :room-identifier="room.identifier" :viewer-login="auth.user.value?.login || null"
+      :session-id="auth.user.value?.id || null" :theme="theme" :tasks="tasks" @open-task="openBoardTask" />
+
     <AskAgentDialog v-if="askAgentOpen && auth.isSignedIn.value && room" :room-identifier="room.identifier" :room-label="roomTitle" @close="askAgentOpen = false" />
 
     <ImageViewerModal
@@ -198,6 +202,8 @@ import RoomTabPanels from './room/RoomTabPanels.vue'
 import { resolveRoomAccessState } from './room/roomAuth'
 import Composer from '@/components/room/Composer.vue'
 import AskAgentDialog from '@/components/room/AskAgentDialog.vue'
+import PersonWorkHost from '@/components/room/PersonWorkHost.vue'
+import { providePersonWork } from '@/components/room/personWork'
 import { useFocusRoomNavigation } from './room/useFocusRoomNavigation'
 import { useRoomImages } from './room/useRoomImages'
 import { useRoomPresentation } from './room/useRoomPresentation'
@@ -274,6 +280,9 @@ const {
   loadOlderGitHubEvents,
 } = useRoom()
 const auth = useAuth()
+const personWorkHost = ref<InstanceType<typeof PersonWorkHost> | null>(null)
+providePersonWork((person, event) => personWorkHost.value?.open(person, event), () => Boolean(isConnected.value && auth.isSignedIn.value && room.value))
+watch(() => route.params.roomId, () => personWorkHost.value?.close(true), { flush: 'sync' })
 const askAgentOpen = ref(false)
 watch([() => auth.user.value?.id, () => room.value?.identifier], () => { askAgentOpen.value = false }, { flush: 'sync' })
 const toast = useToast()

@@ -1,4 +1,4 @@
-import type { RoomGif, RoomExpressionsSetting } from "../../../../shared/room-expressions.mjs";
+import type { RoomGif } from "../../../../shared/room-expressions.mjs";
 import type { DesktopActivityEntry, DesktopAgentPresence, DesktopParticipantSummary, DesktopReasoningSession } from "./activity.js";
 import type { RepoStatus } from "./core.js";
 import type { DesktopRentalActivityEvent, DesktopRentalOwnQuotaStatus, DesktopRentalRenterTriggerSignal } from "./rental.js";

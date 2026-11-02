@@ -7,6 +7,8 @@ export interface RoomTask {
   assignee_agent_key: string | null
   created_by: string | null
   pr_url: string | null
+  external_ref?: string | null
+  ticket_state?: string | null
   workflow_artifacts: ReadonlyArray<{
     provider: string
     kind: string
