@@ -38,8 +38,23 @@ const NON_GITHUB_REPO_ROOMS = [
   "bitbucket.org/poppix/pdf-service",
   "gitlab.com/team/project",
   "local/Users/someone",
+  // GitLab subgroups are repositories too, so they are refused, not opened.
+  "gitlab.com/group/sub/project",
+  // A host without a dot (an SSH config alias, or a plain three-part name).
+  "github-work/acme/app",
+  "team/design/ideas",
 ];
 const UNSUPPORTED_PROVIDER_MESSAGE = "Repo rooms are supported for github.com repositories only";
+
+/** Every refusal names the host and the way out: a plainer name or a .letagents.json room field. */
+function assertUnsupportedProviderMessage(roomName: string, message: unknown, label: string): void {
+  const host = roomName.split("/")[0] ?? "";
+  assert.equal(typeof message, "string", label);
+  assert.ok((message as string).startsWith(`${UNSUPPORTED_PROVIDER_MESSAGE}. `), label);
+  assert.ok((message as string).includes(`host '${host}'`), label);
+  assert.match(message as string, /name without two slashes/, label);
+  assert.match(message as string, /\.letagents\.json file with a room field/, label);
+}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -363,14 +378,19 @@ async function joinRoom(input: {
   port: number;
   roomName: string;
   sessionToken?: string;
+  /** Lets one test make many joins without sharing the per-address join rate limit. */
+  forwardedFor?: string;
 }): Promise<Response> {
+  const headers: Record<string, string> = {};
+  if (input.sessionToken) {
+    headers.Cookie = `letagents_session=${encodeURIComponent(input.sessionToken)}`;
+  }
+  if (input.forwardedFor) {
+    headers["X-Forwarded-For"] = input.forwardedFor;
+  }
   return fetch(`http://127.0.0.1:${input.port}/rooms/${encodeURIComponent(input.roomName)}/join`, {
     method: "POST",
-    headers: input.sessionToken
-      ? {
-          Cookie: `letagents_session=${encodeURIComponent(input.sessionToken)}`,
-        }
-      : undefined,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
   });
 }
 
@@ -580,20 +600,103 @@ test(
       await stopChildProcess(child);
     });
 
-    for (const roomName of NON_GITHUB_REPO_ROOMS) {
+    for (const [roomIndex, roomName] of NON_GITHUB_REPO_ROOMS.entries()) {
       for (const sessionToken of [undefined, signedInToken]) {
         const label = `${roomName} ${sessionToken ? "signed in" : "anonymous"}`;
-        const response = await joinRoom({ port, roomName, sessionToken });
+        const response = await joinRoom({
+          port,
+          roomName,
+          sessionToken,
+          forwardedFor: `198.51.100.${roomIndex + 1}`,
+        });
 
         assert.equal(response.status, 403, label);
         const payload = await response.json();
         assert.equal(payload.code, "UNSUPPORTED_REPO_PROVIDER", label);
-        assert.equal(payload.message, UNSUPPORTED_PROVIDER_MESSAGE, label);
+        assertUnsupportedProviderMessage(roomName, payload.message, label);
         assert.equal(payload.room_id, roomName, label);
       }
 
       assert.equal(await getProjectById(roomName), undefined, `${roomName} must not be created`);
     }
+  }
+);
+
+test(
+  "GitHub host aliases join the real github.com room on the real join route and keep its access rules",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed repo room access integration tests" : false,
+  },
+  async (t) => {
+    if (!getProjectById) {
+      throw new Error("DB-backed repo room access integration tests require TEST_DB_URL");
+    }
+
+    const githubApi = await startGitHubApiStub();
+    t.after(async () => {
+      await stopGitHubApiStub(githubApi.server);
+    });
+
+    const collaboratorToken = await createGitHubSessionToken({
+      login: "collab",
+      accessToken: "github-token-collab",
+    });
+    const outsiderToken = await createGitHubSessionToken({
+      login: "outsider",
+      accessToken: "github-token-outsider",
+    });
+
+    const { child, port } = await startApiServer(githubApi.baseUrl);
+    t.after(async () => {
+      await stopChildProcess(child);
+    });
+
+    const publicAliases = [
+      "www.github.com/BrosInCode/Public-Repo",
+      "ssh.github.com:443/BrosInCode/Public-Repo",
+      "ssh://git@ssh.github.com:443/BrosInCode/Public-Repo.git",
+    ];
+    const privateAliases = [
+      "www.github.com/BrosInCode/Private-Repo",
+      "ssh.github.com:443/BrosInCode/Private-Repo",
+      "ssh://git@ssh.github.com:443/BrosInCode/Private-Repo.git",
+    ];
+    let address = 0;
+    const join = (roomName: string, sessionToken?: string) =>
+      joinRoom({ port, roomName, sessionToken, forwardedFor: `203.0.113.${(address += 1)}` });
+
+    for (const alias of publicAliases) {
+      const response = await join(alias);
+      assert.equal(response.status, 200, alias);
+      const payload = await response.json();
+      assert.equal(payload.room_id, PUBLIC_ROOM, alias);
+    }
+
+    for (const alias of privateAliases) {
+      const anonymous = await join(alias);
+      assert.equal(anonymous.status, 401, `${alias} anonymous`);
+      assert.equal((await anonymous.json()).room_id, PRIVATE_ROOM, `${alias} anonymous`);
+
+      const outsider = await join(alias, outsiderToken);
+      assert.equal(outsider.status, 403, `${alias} outsider`);
+      const outsiderPayload = await outsider.json();
+      assert.equal(outsiderPayload.code, "PRIVATE_REPO_NO_ACCESS", `${alias} outsider`);
+      assert.equal(outsiderPayload.room_id, PRIVATE_ROOM, `${alias} outsider`);
+
+      const collaborator = await join(alias, collaboratorToken);
+      assert.equal(collaborator.status, 200, `${alias} collaborator`);
+      assert.equal((await collaborator.json()).room_id, PRIVATE_ROOM, `${alias} collaborator`);
+    }
+
+    assert.ok(await getProjectById(PUBLIC_ROOM), "the real public room exists");
+    assert.ok(await getProjectById(PRIVATE_ROOM), "the real private room exists");
+    // getProjectById normalizes its argument, so ask the table directly: no
+    // room may exist under an alias spelling.
+    const aliasRows = await pool?.query(
+      "select id from rooms where id like '%www.github.com%' or id like '%ssh.github.com%'"
+    );
+    assert.deepEqual(aliasRows?.rows, [], "no room is created under a GitHub host alias");
   }
 );
 
@@ -635,7 +738,7 @@ test(
         assert.equal(response.status, 403, label);
         const payload = await response.json();
         assert.equal(payload.code, "UNSUPPORTED_REPO_PROVIDER", label);
-        assert.equal(payload.message, UNSUPPORTED_PROVIDER_MESSAGE, label);
+        assertUnsupportedProviderMessage(roomName, payload.message, label);
         assert.equal(payload.room_id, roomName, label);
       }
     }

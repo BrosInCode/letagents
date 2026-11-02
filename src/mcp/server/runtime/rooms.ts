@@ -20,6 +20,7 @@ import {
   ApiError,
   apiCall,
   isMissingRouteError,
+  parseApiErrorPayload,
 } from "./api.js";
 import {
   RepoRoomAuthRequiredError,
@@ -444,7 +445,44 @@ async function bindWorkerRoomFromContext(): Promise<{ room: RoomState; source: s
   };
 }
 
+type AutoJoinSource = "config" | "git-remote" | "saved-room";
+
+/**
+ * The message for an auto-join that the server refused because the room's host
+ * is not GitHub (HTTP 403 `UNSUPPORTED_REPO_PROVIDER`). It names the host, says
+ * it is not a supported provider, and names the workaround: a `.letagents.json`
+ * file with a `room` field. Returns null for any other failure.
+ */
+export function describeUnsupportedProviderAutoJoin(
+  error: unknown,
+  source: AutoJoinSource | null
+): string | null {
+  const payload = parseApiErrorPayload(error);
+  if (!(error instanceof ApiError) || error.status !== 403 || payload?.code !== "UNSUPPORTED_REPO_PROVIDER") {
+    return null;
+  }
+
+  const roomId = typeof payload.room_id === "string" ? payload.room_id : "";
+  const host = roomId.split("/")[0] || "unknown";
+  const origin = source === "config"
+    ? "the room field in .letagents.json"
+    : source === "git-remote"
+      ? "the git remote"
+      : "the saved room";
+  const workaround = source === "config"
+    ? "Change the room field in .letagents.json to a github.com/owner/repo room, or to a plain room name without two slashes."
+    : "To choose the room yourself, add a .letagents.json file with a room field in the repo root, " +
+      'for example {"room": "github.com/owner/repo"}. If the host is an SSH config alias such as ' +
+      "git@github-work:owner/repo.git, name the real github.com repository in that field.";
+  return (
+    `⚠️ Auto-join failed (server still running): the host '${host}' (from ${origin}, room '${roomId}') ` +
+    "is not a supported provider. LetAgents repo rooms work for github.com repositories only. " +
+    workaround
+  );
+}
+
 export async function autoJoinFromContext(): Promise<void> {
+  let source: AutoJoinSource | null = null;
   try {
     const workerRuntime = requireValidWorkerBearerRuntime();
     if (workerRuntime.mode === "supervised") {
@@ -466,6 +504,7 @@ export async function autoJoinFromContext(): Promise<void> {
 
     const configRoom = getRoomFromConfig();
     if (configRoom) {
+      source = "config";
       const gitContext = buildActiveGitRoomContext({
         repoRoom: configRoom,
         currentBranch: getGitCurrentBranch(),
@@ -491,6 +530,7 @@ export async function autoJoinFromContext(): Promise<void> {
 
     const gitContext = getGitRoomContext();
     if (gitContext.repoRoom) {
+      source = "git-remote";
       if (gitContext.activeRefRoomLocator && gitContext.currentBranch) {
         const joinedBranchRoom = await joinExistingRoomIdentifier(gitContext.activeRefRoomLocator, "git-remote");
         if (joinedBranchRoom) {
@@ -511,6 +551,7 @@ export async function autoJoinFromContext(): Promise<void> {
 
     const savedCurrentRoom = getStoredCurrentRoom();
     if (savedCurrentRoom) {
+      source = "saved-room";
       const joined = await joinRoomIdentifierWithoutImplicitGitRefCreate(
         savedCurrentRoom.room_id,
         savedCurrentRoom.joined_via,
@@ -530,6 +571,12 @@ export async function autoJoinFromContext(): Promise<void> {
       console.error(
         `🔐 Repo room auth required for '${err.roomId}'. Open ${err.pendingAuth.verification_uri} and enter code ${err.pendingAuth.user_code}, then run poll_device_auth.`
       );
+      return;
+    }
+
+    const unsupportedProvider = describeUnsupportedProviderAutoJoin(err, source);
+    if (unsupportedProvider) {
+      console.error(unsupportedProvider);
       return;
     }
 

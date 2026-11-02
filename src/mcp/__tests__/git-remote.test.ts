@@ -76,6 +76,62 @@ describe("normalizeGitRemote", () => {
       "bitbucket.org/workspace/repo"
     );
   });
+
+  it("maps ssh.github.com to github.com, with and without the :443 port", () => {
+    for (const remote of [
+      "ssh://git@ssh.github.com:443/BrosInCode/letagents.git",
+      "ssh://git@ssh.github.com/BrosInCode/letagents.git",
+      "ssh://git@SSH.GitHub.com:443/BrosInCode/letagents",
+      "git@ssh.github.com:BrosInCode/letagents.git",
+    ]) {
+      assert.equal(normalizeGitRemote(remote), "github.com/brosincode/letagents", remote);
+    }
+  });
+
+  it("maps www.github.com to github.com", () => {
+    for (const remote of [
+      "https://www.github.com/BrosInCode/letagents.git",
+      "https://www.github.com/BrosInCode/letagents/",
+      "http://WWW.GitHub.com/BrosInCode/letagents",
+    ]) {
+      assert.equal(normalizeGitRemote(remote), "github.com/brosincode/letagents", remote);
+    }
+  });
+
+  it("lands every real GitHub host form in the same room", () => {
+    const rooms = new Set(
+      [
+        "git@github.com:BrosInCode/letagents.git",
+        "https://github.com/BrosInCode/letagents",
+        "https://www.github.com/BrosInCode/letagents",
+        "ssh://git@ssh.github.com:443/BrosInCode/letagents.git",
+        "git@ssh.github.com:BrosInCode/letagents.git",
+      ].map(normalizeGitRemote)
+    );
+    assert.deepEqual([...rooms], ["github.com/brosincode/letagents"]);
+  });
+
+  it("does not map look-alike hosts to github.com", () => {
+    assert.equal(
+      normalizeGitRemote("https://ssh.github.com.evil.example/Owner/Repo.git"),
+      "ssh.github.com.evil.example/Owner/Repo"
+    );
+    assert.equal(
+      normalizeGitRemote("git@www.github.com.evil.example:Owner/Repo.git"),
+      "www.github.com.evil.example/Owner/Repo"
+    );
+    assert.equal(
+      normalizeGitRemote("https://gist.github.com/Owner/Repo.git"),
+      "gist.github.com/Owner/Repo"
+    );
+  });
+
+  it("keeps an SSH config alias as its own host, so the server can refuse it", () => {
+    assert.equal(
+      normalizeGitRemote("git@github-work:acme/App.git"),
+      "github-work/acme/App"
+    );
+  });
 });
 
 describe("buildGitRefRoomLocator", () => {

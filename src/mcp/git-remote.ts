@@ -11,6 +11,12 @@
 //   https://github.com/BrosInCode/letagents.git → github.com/brosincode/letagents
 //   https://github.com/BrosInCode/letagents → github.com/brosincode/letagents
 //   ssh://git@gitlab.com/team/project.git → gitlab.com/team/project
+//   ssh://git@ssh.github.com:443/Owner/Repo.git → github.com/owner/repo
+//   https://www.github.com/Owner/Repo → github.com/owner/repo
+//
+// An SSH config alias (git@github-work:acme/app.git) keeps its alias as the
+// host (github-work/acme/app): the real host lives in ~/.ssh/config, which is
+// not read here. The server refuses such a room as an unsupported provider.
 
 import { execFileSync } from "child_process";
 import { currentSessionScope, requireScopeWhenHosted } from "./server/runtime/session-scope.js";
@@ -27,8 +33,16 @@ export interface GitRoomContext {
 }
 
 /**
+ * Hostnames that serve the same GitHub repositories as github.com:
+ * ssh.github.com is GitHub's SSH-over-HTTPS endpoint (port 443) and
+ * www.github.com is the same site as github.com.
+ */
+const GITHUB_HOST_ALIASES = new Set(["ssh.github.com", "www.github.com"]);
+
+/**
  * Normalize a git remote URL to `host/owner/repo` format.
- * Strips protocol (SSH/HTTPS), user prefix, and `.git` suffix.
+ * Strips protocol (SSH/HTTPS), user prefix, and `.git` suffix, and maps the
+ * GitHub host aliases ssh.github.com and www.github.com to github.com.
  */
 export function normalizeGitRemote(url: string): string {
   let normalized = url.trim();
@@ -57,7 +71,8 @@ export function normalizeGitRemote(url: string): string {
   normalized = normalized.replace(/\/+$/, "");
 
   const parts = normalized.split("/");
-  const host = parts[0]?.toLowerCase();
+  const lowercaseHost = parts[0]?.toLowerCase();
+  const host = lowercaseHost && GITHUB_HOST_ALIASES.has(lowercaseHost) ? "github.com" : lowercaseHost;
   if (host) {
     parts[0] = host;
     normalized = host === "github.com" ? parts.join("/").toLowerCase() : parts.join("/");

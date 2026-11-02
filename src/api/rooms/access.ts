@@ -167,6 +167,32 @@ function buildLandingRedirect(input: {
   return `/?${params.toString()}`;
 }
 
+const UNSUPPORTED_REPO_PROVIDER_MESSAGE =
+  "Repo rooms are supported for github.com repositories only";
+
+/**
+ * The refusal text for a repo-shaped room id on a host other than github.com.
+ * Every reply names the host, explains the shape and gives the two ways out: a
+ * name without two slashes, or a .letagents.json room field. People hit this
+ * with names they did not expect to be repo-shaped (`team/design/ideas`), with
+ * SSH config aliases (`github-work/acme/app`, `github.com-work/acme/app`) and
+ * with hosts that are real but unsupported (`gitlab.com/group/sub/project`).
+ */
+export function unsupportedRepoProviderMessage(roomName: string): string {
+  const host = roomName.split("/")[0] ?? "";
+  if (!host) {
+    return UNSUPPORTED_REPO_PROVIDER_MESSAGE;
+  }
+
+  return (
+    `${UNSUPPORTED_REPO_PROVIDER_MESSAGE}. A room name shaped host/owner/repo, such as ${roomName}, ` +
+    `is read as a repo room, here on the host '${host}'. ` +
+    "For a plain room, use a name without two slashes, for example team-design-ideas. " +
+    "If the host is an SSH config alias, put the real repository in a .letagents.json file " +
+    'with a room field, for example {"room": "github.com/owner/repo"}.'
+  );
+}
+
 export function replyRepoRoomAccessDecision(
   res: Response,
   roomName: string,
@@ -188,7 +214,7 @@ export function replyRepoRoomAccessDecision(
     res.status(403).json({
       error: "unsupported_repo_provider",
       code: "UNSUPPORTED_REPO_PROVIDER",
-      message: "Repo rooms are supported for github.com repositories only",
+      message: unsupportedRepoProviderMessage(roomName),
       room_id: roomName,
     });
     return false;

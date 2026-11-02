@@ -609,8 +609,13 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
     return { kind: "unsupported_repo_provider" };
   }
 
+  // Key every lookup, and so every cache entry, on the canonical room name.
+  // Webhook invalidation clears `github.com/owner/repo`; an alias spelling
+  // (`ssh.github.com/owner/repo`) would otherwise keep a stale entry.
+  const canonicalRoomName = `github.com/${githubRepo.owner}/${githubRepo.repo}`.toLowerCase();
+
   const accessToken = input.sessionAccount?.provider_access_token ?? undefined;
-  const visibility = await deps.getVisibility(input.roomName, accessToken, {
+  const visibility = await deps.getVisibility(canonicalRoomName, accessToken, {
     bypassCache: input.freshCollaboratorCheck,
   });
   if (visibility === "public") {
@@ -630,7 +635,7 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
   }
 
   const allowed = await deps.isCollaborator({
-    roomName: input.roomName,
+    roomName: canonicalRoomName,
     login: input.sessionAccount.login,
     accessToken: input.sessionAccount.provider_access_token,
     bypassCache: input.freshCollaboratorCheck,
