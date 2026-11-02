@@ -5,6 +5,8 @@
 
       <RouterLink class="drawer-work-link" to="/my-work" @click="emit('close')">My work <span aria-hidden="true">→</span></RouterLink>
 
+      <RouterLink class="drawer-work-link" to="/inbox" @click="emit('close')">Inbox <span aria-hidden="true">→</span></RouterLink>
+
       <ThemeToggle :is-dark="isDark" @toggle="toggleTheme" />
 
       <SharePanel

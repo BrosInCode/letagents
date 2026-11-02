@@ -25,14 +25,14 @@ after(async () => {
 })
 
 test('workspace navigation keeps all account destinations and marks the current page', async () => {
-  const router = createRouter({ history: createMemoryHistory(), routes: ['/', '/my-work', '/messages', '/connectors'].map(path => ({ path, component: { render: () => null } })) })
+  const router = createRouter({ history: createMemoryHistory(), routes: ['/', '/my-work', '/messages', '/connectors', '/inbox'].map(path => ({ path, component: { render: () => null } })) })
   await router.push('/messages')
   const app = createSSRApp({ render: () => h(WorkspaceNav) })
   app.use(router)
   const html = await renderToString(app)
   assert.match(html, /aria-label="LetAgents home"/)
   assert.match(html, /aria-label="Workspace"/)
-  for (const path of ['/my-work', '/messages', '/connectors']) assert.ok(html.includes(`href="${path}"`))
+  for (const path of ['/my-work', '/messages', '/connectors', '/inbox']) assert.ok(html.includes(`href="${path}"`))
   assert.match(html, /<a[^>]*aria-current="page"[^>]*href="\/messages"|<a[^>]*href="\/messages"[^>]*aria-current="page"/)
   assert.equal((html.match(/aria-current="page"/g) || []).length, 1)
 })

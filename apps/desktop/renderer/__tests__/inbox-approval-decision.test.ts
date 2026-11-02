@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { readFile } from "node:fs/promises";
 import { compileScript, compileTemplate, parse } from "@vue/compiler-sfc";
 import * as Vue from "vue";
+import { transformSync } from "esbuild";
 import { computed, createRenderer, defineComponent, h, nextTick, ref, ssrContextKey } from "vue";
 import { createServer, type ViteDevServer } from "vite";
 import type { DesktopHostApproval } from "../../shared/host-approvals";
@@ -67,6 +68,17 @@ before(async () => {
   InboxView = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/InboxView.vue")).default;
   store = await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/host-approvals.ts");
   attention = await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-inbox/agent-attention.ts");
+  // Imported shared SFCs also need their client render functions in this host renderer.
+  for (const relative of ['InboxLayout.vue', 'InboxResponse.vue', '../ChatAvatar.vue']) {
+    const path = fileURLToPath(new URL(`../../../../shared/ui/inbox/${relative}`, import.meta.url));
+    const child = (await vite.ssrLoadModule(path)).default;
+    const descriptor = parse(await readFile(path, 'utf8'), { filename: path }).descriptor;
+    const script = compileScript(descriptor, { id: path });
+    const template = compileTemplate({ source: descriptor.template!.content, filename: path, id: path, compilerOptions: { bindingMetadata: script.bindings } });
+    assert.deepEqual(template.errors, []);
+    const code = template.code.replace(/^import \{([\s\S]*?)\} from "vue"\n/, (_match, bindings: string) => `const {${bindings.replace(/\s+as\s+/g, ": ")}} = vue\n`).replace('export function render', 'function render');
+    child.render = Function('vue', `${transformSync(code, { loader: 'ts' }).code}\nreturn render;`)(Vue);
+  }
   // Mount the real template with a renderer that records the host tree. The
   // list animation has no layout to measure here, so it renders its children.
   const modulePath = "components/desktop/content/InboxView.vue";
@@ -154,7 +166,7 @@ const boardIntent = (id: string, createdAt: string) => ({ kind: "board_intent" a
   roomIdentifier: "room-a", timestamp: createdAt, intent: { id, taskId: "task_6", actionType: "task_claim", status: "pending",
     proposerActorLabel: "LunarAmber | Someone's agent | Open Model", payload: { task_id: "task_6", assignee: "LunarAmber | Someone's agent | Open Model" },
     createdAt, expiresAt: null } });
-const queueTitles = (root: HostNode) => descendants(root).filter(node => node.type === "button" && node.props.class === "knowledge-queue-item")
+const queueTitles = (root: HostNode) => descendants(root).filter(node => node.type === "button" && node.props.class === "inbox-queue-row")
   .map(node => text(descendants(node).find(child => child.type === "strong")!));
 const detailTitle = (root: HostNode) => text(descendants(root).find(node => node.type === "h2" && node.props.id === "request-title")!);
 
@@ -215,7 +227,7 @@ test("new requests never move the selected row, whether chosen or shown first", 
     assert.deepEqual(queueTitles(root), ["CopperRidge · Run a command", "Assign task_6 to LunarAmber", "SparrowReef · Run a command"],
       "the arrival joins below the row on screen");
     assert.equal(detailTitle(root), "CopperRidge · Run a command");
-    const second = descendants(root).filter(node => node.props.class === "knowledge-queue-item")[2]!;
+    const second = descendants(root).filter(node => node.props.class === "inbox-queue-row")[2]!;
     (second.props.onClick as () => void)();
     await nextTick();
     extra.value = [...extra.value, boardIntent("bi_0", "2026-09-29T00:00:00.000Z")];
@@ -286,7 +298,7 @@ test("a request presented again keeps one row and its selection", async (context
   const listed = { approvals: [approvalNamed("p-1", "CopperRidge", "git status", "request-a"), approvalNamed("p-2", "SparrowReef", "npm test", "request-b")] };
   const { root, app } = await mountQueue(context, listed);
   try {
-    const second = descendants(root).filter(node => node.props.class === "knowledge-queue-item")[1]!;
+    const second = descendants(root).filter(node => node.props.class === "inbox-queue-row")[1]!;
     (second.props.onClick as () => void)();
     await nextTick();
     // Main mints a new presentation ID for the same native request.
@@ -324,7 +336,7 @@ test("answering one of several requests stays in Needs you and selects the next 
     await nextTick();
     assert.equal(detailTitle(root), "Pick a launch date");
     const textarea = descendants(root).find(node => node.type === "textarea")!;
-    (textarea.props["onUpdate:modelValue"] as (value: string) => void)("Next Tuesday");
+    (textarea.props.onInput as (event: unknown) => void)({ target: { value: "Next Tuesday" } });
     await nextTick();
     const form = descendants(root).find(node => node.type === "form")!;
     await (form.props.onSubmit as (event: { preventDefault: () => void }) => Promise<void>)({ preventDefault: () => undefined });
@@ -362,11 +374,14 @@ test("closing a request without answering sends no draft, moves on, and shows it
     await nextTick();
     assert.equal(detailTitle(root), "Pick a launch date");
     const textarea = descendants(root).find(node => node.type === "textarea")!;
-    (textarea.props["onUpdate:modelValue"] as (value: string) => void)("Half-written answer");
+    (textarea.props.onInput as (event: unknown) => void)({ target: { value: "Half-written answer" } });
     await nextTick();
     const close = descendants(root).find(node => node.type === "button" && text(node) === "Close without answering")!;
     assert.equal(close.props.type, "button", "closing never submits the response form");
     await (close.props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.deepEqual(revisions, [], 'opening the confirmation does not close the request');
+    await clickButton(root, 'Close request');
     await new Promise(resolve => setImmediate(resolve)); await nextTick(); await nextTick();
     assert.deepEqual(revisions, [{ id: "rec_1", expected_version: 1, close: true }], "the draft is not sent");
     assert.equal(section.value, "needs-you", "the view stays on the remaining requests");
@@ -376,6 +391,6 @@ test("closing a request without answering sends no draft, moves on, and shows it
     section.value = "answered"; await nextTick();
     assert.equal(detailTitle(root), "Pick a launch date");
     assert.ok(descendants(root).some(node => node.props.role === "status" && /Closed\s*Closed without an answer\./.test(text(node))), "the detail reads Closed, not Answer recorded");
-    assert.ok(descendants(root).some(node => node.props["data-kind"] === "closed" && text(node) === "Closed"), "its category reads Closed");
+    assert.ok(descendants(root).some(node => node.type === "span" && text(node) === "Closed"), "its category reads Closed");
   } finally { app.unmount(); }
 });
