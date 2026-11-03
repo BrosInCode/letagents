@@ -28,3 +28,25 @@ export const remote_mcp_sessions = pgTable(
     index("remote_mcp_sessions_last_seen_idx").on(table.last_seen_at),
   ],
 );
+
+/**
+ * Remote MCP credential state (migration 0129): the merged runtime state of
+ * every session one credential (owner token or OAuth grant) opened. A new
+ * session starts from it, so a client that opens a session per call keeps its
+ * worker handles, rooms and cursors. Sealed like a session's state.
+ */
+export const remote_mcp_credentials = pgTable(
+  "remote_mcp_credentials",
+  {
+    /** SHA-256 hex of the owner token or OAuth grant secret. */
+    token_hash: text("token_hash").primaryKey(),
+    account_id: text("account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    state: jsonb("state").$type<Record<string, unknown>>().notNull(),
+    version: integer("version").notNull().default(1),
+    created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+    updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [index("remote_mcp_credentials_account_idx").on(table.account_id)],
+);

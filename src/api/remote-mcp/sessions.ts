@@ -8,10 +8,14 @@ import {
   deleteIdleRemoteMcpSessions,
   deleteRemoteMcpSession,
   deleteRemoteMcpSessionForAccount,
+  deleteRevokedRemoteMcpCredentials,
   deleteRevokedRemoteMcpSessions,
+  findLatestRemoteMcpSessionForToken,
+  getRemoteMcpCredential,
   getRemoteMcpSession,
   insertRemoteMcpSession,
   listRemoteMcpSessionsForAccount,
+  saveRemoteMcpCredentialState,
   saveRemoteMcpSessionState,
   touchRemoteMcpSession,
   type RemoteMcpSessionRow,
@@ -26,10 +30,13 @@ import {
 import type { InProcessDispatcher } from "./in-process-dispatch.js";
 import { getPollTimeoutCapMs } from "../../shared/poll-timeout-cap.js";
 import { RemoteMcpBusyError, RemoteMcpStateTooLargeError } from "./errors.js";
+import { IMPLICIT_CLIENT_NAME } from "./implicit-session.js";
 import {
+  deriveRemoteMcpCredentialStateKey,
   deriveRemoteMcpStateKey,
   hashRemoteMcpToken,
   openRemoteMcpState,
+  REMOTE_MCP_CREDENTIAL_BINDING,
   sealRemoteMcpState,
 } from "./state-crypto.js";
 
@@ -41,7 +48,17 @@ import {
  * dispatcher bound to its account), and saves the state back to Postgres. No
  * session needs this process's memory to continue: any replica, or this one
  * after a restart, reloads it from `remote_mcp_sessions`.
+ *
+ * The credential that opened a session (an owner token or an OAuth grant) also
+ * has one row in `remote_mcp_credentials`: the merged state of every session
+ * it opened, written after each session save. A new session starts from that
+ * state. So a client that opens a new MCP session for every tool call, as
+ * ChatGPT's connector does, still finds its worker handles, its room and its
+ * read cursors; and a client that sends no session id at all is served in the
+ * credential's implicit session (`IMPLICIT_CLIENT_NAME`).
  */
+
+export { IMPLICIT_CLIENT_NAME };
 
 export interface RemoteMcpLimits {
   /** Sessions one account may hold; the least recently used one is replaced. */
@@ -158,6 +175,8 @@ export interface LoadedRemoteMcpSession {
   readonly tokenHash: string;
   /** Opens and seals the saved state; derived from the token, never stored. */
   readonly stateKey: Buffer;
+  /** Opens and seals the credential's merged state; derived from the token, never stored. */
+  readonly credentialKey: Buffer;
   readonly agentInstanceId: string;
   readonly clientName: string | null;
   state: McpSessionPersistentState;
@@ -213,11 +232,27 @@ export class RemoteMcpSessions {
     this.loaded.clear();
   }
 
-  /** Create a session for an authenticated initialize request. */
+  /** The credential's merged state, or null when it has none this account can open. */
+  private async loadCredentialState(tokenHash: string, credentialKey: Buffer, accountId: string): Promise<{
+    state: McpSessionPersistentState; version: number;
+  } | null> {
+    const row = await getRemoteMcpCredential(tokenHash);
+    if (!row || row.account_id !== accountId) return null;
+    const opened = openRemoteMcpState(row.state, credentialKey, { sessionId: REMOTE_MCP_CREDENTIAL_BINDING, accountId });
+    return opened === null ? null : { state: readState(opened), version: row.version };
+  }
+
+  /**
+   * Create a session for an authenticated initialize request. It starts from
+   * the credential's merged state, so a worker registered in an earlier
+   * session of the same credential is usable here.
+   */
   // Two initializes for one account racing here may both see room under the
   // cap and leave it one or two over; the account's next open trims it back.
-  // Rare, and bounded by the 10-per-minute create limit.
+  // Rare, and bounded by the per-minute create limit.
   async open(input: { accountId: string; token: string; clientName: string | null }): Promise<string> {
+    const tokenHash = hashRemoteMcpToken(input.token);
+    const seed = await this.loadCredentialState(tokenHash, deriveRemoteMcpCredentialStateKey(input.token), input.accountId);
     const existing = await listRemoteMcpSessionsForAccount(input.accountId);
     const excess = existing.length - this.limits.maxSessionsPerAccount + 1;
     for (const victim of existing.slice(0, Math.max(0, excess))) {
@@ -232,10 +267,10 @@ export class RemoteMcpSessions {
     await insertRemoteMcpSession({
       sessionId,
       accountId: input.accountId,
-      tokenHash: hashRemoteMcpToken(input.token),
+      tokenHash,
       agentInstanceId: randomUUID(),
       clientName: input.clientName?.slice(0, 200) ?? null,
-      state: sealRemoteMcpState(emptyState(), key, { sessionId, accountId: input.accountId }) as unknown as Record<string, unknown>,
+      state: sealRemoteMcpState(seed?.state ?? emptyState(), key, { sessionId, accountId: input.accountId }) as unknown as Record<string, unknown>,
     });
     this.counters.opened += 1;
     return sessionId;
@@ -256,10 +291,22 @@ export class RemoteMcpSessions {
     if (presented.length !== stored.length || !timingSafeEqual(presented, stored) || row.account_id !== accountId) {
       return null;
     }
-    return this.adopt(row, deriveRemoteMcpStateKey(token, sessionId));
+    return this.adopt(row, deriveRemoteMcpStateKey(token, sessionId), deriveRemoteMcpCredentialStateKey(token));
   }
 
-  private adopt(row: RemoteMcpSessionRow, stateKey: Buffer): LoadedRemoteMcpSession | null {
+  /**
+   * The session that serves this credential's requests sent without a session
+   * id, when one exists: its most recently used implicit session. Such a
+   * client never learns a session id, so it never shares a stateful client's
+   * session either.
+   */
+  async findImplicit(input: { accountId: string; token: string }): Promise<LoadedRemoteMcpSession | null> {
+    const row = await findLatestRemoteMcpSessionForToken(input.accountId, hashRemoteMcpToken(input.token), IMPLICIT_CLIENT_NAME);
+    if (!row) return null;
+    return this.adopt(row, deriveRemoteMcpStateKey(input.token, row.session_id), deriveRemoteMcpCredentialStateKey(input.token));
+  }
+
+  private adopt(row: RemoteMcpSessionRow, stateKey: Buffer, credentialKey: Buffer): LoadedRemoteMcpSession | null {
     const current = this.loaded.get(row.session_id);
     if (current && current.version >= row.version) {
       current.lastUsedAt = Date.now();
@@ -281,6 +328,7 @@ export class RemoteMcpSessions {
       accountId: row.account_id,
       tokenHash: row.token_hash,
       stateKey,
+      credentialKey,
       agentInstanceId: row.agent_instance_id,
       clientName: row.client_name,
       state: incoming,
@@ -398,6 +446,9 @@ export class RemoteMcpSessions {
     const removed = [...await deleteIdleRemoteMcpSessions(cutoff, busy), ...await deleteRevokedRemoteMcpSessions()];
     for (const id of removed) this.loaded.delete(id);
     this.counters.swept += removed.length;
+    // Credential state is never idle-deleted: it is what a new session starts
+    // from. It goes when its owner token or OAuth grant goes.
+    await deleteRevokedRemoteMcpCredentials();
     // This process's decrypted copies go too, once unused for the idle time.
     for (const [id, session] of this.loaded) {
       if (now - session.lastUsedAt >= this.limits.idleTimeoutMs && !this.inFlightBySession.has(id)) this.loaded.delete(id);
@@ -408,6 +459,8 @@ export class RemoteMcpSessions {
    * Saves for one session run one at a time. A save writes only when a call
    * changed the state, and only over the version it started from; when another
    * replica saved in between, the two states are merged and written again.
+   * After the session row, the credential's merged state is written the same
+   * way, so the next session of this credential starts from it.
    */
   private save(session: LoadedRemoteMcpSession): Promise<void> {
     const run = session.saving.then(async () => {
@@ -415,7 +468,15 @@ export class RemoteMcpSessions {
         await touchRemoteMcpSession(session.sessionId).catch(() => undefined);
         return;
       }
-      for (let attempt = 0; attempt < 4; attempt += 1) {
+      await this.saveSessionRow(session);
+      await this.saveCredential(session);
+    });
+    session.saving = run.catch(() => undefined);
+    return run;
+  }
+
+  private async saveSessionRow(session: LoadedRemoteMcpSession): Promise<void> {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
         const state = session.state;
         pruneState(state);
         const plain = JSON.stringify(state);
@@ -456,9 +517,33 @@ export class RemoteMcpSessions {
         Object.assign(session.state, mergeSessionStates(session.state, readState(theirs), "ours"));
         session.version = row.version;
       }
-      throw new Error("The remote MCP session state kept changing; retry the call.");
-    });
-    session.saving = run.catch(() => undefined);
-    return run;
+    throw new Error("The remote MCP session state kept changing; retry the call.");
+  }
+
+  /**
+   * Merge this session's state into its credential's row: the row's entries
+   * stay, this session's values win. Written only over the version read, and
+   * retried over a newer row, as the session row is.
+   */
+  private async saveCredential(session: LoadedRemoteMcpSession): Promise<void> {
+    const binding = { sessionId: REMOTE_MCP_CREDENTIAL_BINDING, accountId: session.accountId };
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      const row = await getRemoteMcpCredential(session.tokenHash);
+      // A row of another account under this hash cannot happen; never write over it.
+      if (row && row.account_id !== session.accountId) return;
+      const theirs = row ? openRemoteMcpState(row.state, session.credentialKey, binding) : null;
+      const merged = mergeSessionStates(theirs === null ? emptyState() : readState(theirs), session.state, "theirs");
+      pruneState(merged);
+      if (Buffer.byteLength(JSON.stringify(merged)) > this.limits.maxStateBytes) throw new RemoteMcpStateTooLargeError();
+      const version = await saveRemoteMcpCredentialState({
+        tokenHash: session.tokenHash,
+        accountId: session.accountId,
+        expectedVersion: row?.version ?? null,
+        state: sealRemoteMcpState(merged, session.credentialKey, binding) as unknown as Record<string, unknown>,
+      });
+      if (version !== null) return;
+      this.counters.conflicts += 1;
+    }
+    throw new Error("The remote MCP credential state kept changing; retry the call.");
   }
 }

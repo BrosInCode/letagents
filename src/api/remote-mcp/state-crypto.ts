@@ -18,6 +18,17 @@ export function deriveRemoteMcpStateKey(token: string, sessionId: string): Buffe
     Buffer.from("letagents remote mcp session state v1", "utf8"), 32));
 }
 
+/**
+ * The `sessionId` a credential's merged state is bound to. It stands in for a
+ * session id in the key derivation and the sealed binding, so a session's
+ * state can never be opened as credential state or the reverse.
+ */
+export const REMOTE_MCP_CREDENTIAL_BINDING = "credential";
+
+export function deriveRemoteMcpCredentialStateKey(token: string): Buffer {
+  return deriveRemoteMcpStateKey(token, REMOTE_MCP_CREDENTIAL_BINDING);
+}
+
 export interface SealedRemoteMcpState {
   v: 1;
   iv: string;

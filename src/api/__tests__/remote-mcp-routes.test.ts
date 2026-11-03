@@ -26,7 +26,8 @@ function untouchableSessions(): RemoteMcpSessions & { calls: string[] } {
     calls.push(name);
     throw new Error(`${name} must not be reached`);
   };
-  return { calls, open: fail("open"), find: fail("find"), handle: fail("handle"), delete: fail("delete") } as never;
+  return { calls, open: fail("open"), find: fail("find"), findImplicit: fail("findImplicit"), handle: fail("handle"),
+    delete: fail("delete") } as never;
 }
 
 async function startApp(sessions: RemoteMcpSessions): Promise<{ server: Server; base: string; app: express.Express }> {
@@ -55,6 +56,8 @@ const initializeBody = {
   jsonrpc: "2.0", id: 1, method: "initialize",
   params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "raw", version: "1" } },
 };
+
+const toolsListBody = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 
 function post(url: string, headers: Record<string, string>, body: unknown = initializeBody): Promise<Response> {
   return fetch(url, {
@@ -86,17 +89,66 @@ test("the remote endpoint refuses bad requests before any session work", { timeo
       { status: unknownBearer.status, auth: unknownBearer.headers.get("www-authenticate"), body: await unknownBearer.json() },
       "a valid bearer of the wrong kind looks exactly like an invalid bearer");
 
-    const notInitialize = await post(url, { Authorization: "Bearer owner-a" }, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
-    assert.equal(notInitialize.status, 400);
     const wrongAccept = await fetch(url, { method: "POST", body: JSON.stringify(initializeBody),
       headers: { Authorization: "Bearer owner-a", "Content-Type": "application/json", Accept: "application/json" } });
     assert.equal(wrongAccept.status, 406);
+    const wrongAcceptStateless = await fetch(url, { method: "POST", body: JSON.stringify(toolsListBody),
+      headers: { Authorization: "Bearer owner-a", "Content-Type": "application/json", Accept: "application/json" } });
+    assert.equal(wrongAcceptStateless.status, 406, "a session-less call needs the same Accept header before any session work");
     const oversized = await post(url, { Authorization: "Bearer owner-a" },
       { ...initializeBody, params: { ...initializeBody.params, padding: "x".repeat(300 * 1024) } });
     assert.equal(oversized.status, 413, "bodies over the MCP cap never reach SDK validation");
     assert.equal((await fetch(url, { headers: { Authorization: "Bearer owner-a" } })).status, 400);
 
     assert.deepEqual(sessions.calls, [], "no refused request reached the session store");
+  } finally {
+    server.close();
+  }
+});
+
+test("a POST without a session id that is not initialize is served in the credential's implicit session", { timeout: 30_000 }, async () => {
+  // ChatGPT's connector sends every call this way. The first such call opens
+  // the implicit session; the next one finds and reuses it.
+  const calls: string[] = [];
+  const fakeSession = { sessionId: "implicit-1", accountId: "acct_a" };
+  let opened = false;
+  const sessions = {
+    findImplicit: async (input: { accountId: string }) => {
+      calls.push(`findImplicit:${input.accountId}`);
+      return opened ? fakeSession : null;
+    },
+    open: async (input: { clientName: string | null }) => {
+      calls.push(`open:${input.clientName}`);
+      opened = true;
+      return "implicit-1";
+    },
+    find: async (sessionId: string) => {
+      calls.push(`find:${sessionId}`);
+      return fakeSession;
+    },
+    handle: async (session: { sessionId: string }, _account: unknown, _req: unknown, res: express.Response) => {
+      calls.push(`handle:${session.sessionId}`);
+      res.setHeader("Mcp-Session-Id", session.sessionId);
+      res.status(200).json({ ok: true });
+    },
+    delete: async () => { throw new Error("delete must not be reached"); },
+  } as never as RemoteMcpSessions;
+  const { server, base } = await startApp(sessions);
+  const url = `${base}/mcp`;
+  try {
+    const first = await post(url, { Authorization: "Bearer owner-a" }, toolsListBody);
+    assert.equal(first.status, 200);
+    assert.equal(first.headers.get("mcp-session-id"), "implicit-1");
+    const second = await post(url, { Authorization: "Bearer owner-a" }, toolsListBody);
+    assert.equal(second.status, 200);
+    assert.deepEqual(calls, [
+      "findImplicit:acct_a", "open:stateless", "find:implicit-1", "handle:implicit-1",
+      "findImplicit:acct_a", "handle:implicit-1",
+    ], "the first call opens the implicit session, the second reuses it");
+    assert.equal((await fetch(url, { headers: { Authorization: "Bearer owner-a" } })).status, 400,
+      "GET without a session id is still refused");
+    assert.equal((await fetch(url, { method: "DELETE", headers: { Authorization: "Bearer owner-a" } })).status, 400,
+      "DELETE without a session id is still refused");
   } finally {
     server.close();
   }

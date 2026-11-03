@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { assertWorkerConnection } from "../../../worker-call-context.js";
 import { z } from "zod";
-import { getPollTimeoutCapMs } from "../../../../shared/poll-timeout-cap.js";
+import { getPollTimeoutCapMs, REMOTE_MCP_WAIT_MAX_MS } from "../../../../shared/poll-timeout-cap.js";
 import { encodeRoomIdPath } from "../../../room-id.js";
 import {
   agentSessionCredentials,
@@ -54,7 +54,7 @@ import { normalizeRoutingSender } from "../../../../../shared/routing-aliases.mj
 import { findLocalMessageById, findRemoteMessageById } from "./message-lookup.js";
 import { fetchRecentRemoteMessages } from "./read-tool.js";
 import { jsonToolResponse } from "./response.js";
-import { scopedMap } from "../../runtime/session-scope.js";
+import { currentSessionScope, scopedMap } from "../../runtime/session-scope.js";
 
 const DEFAULT_POLL_TIMEOUT_MS = 30000;
 
@@ -583,7 +583,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         .number()
         .optional()
         .describe(
-          "Maximum wait time in milliseconds (min 1000, capped by LETAGENTS_POLL_MAX_MS / server). If set to 0, the default timeout will be used."
+          "Maximum wait time in milliseconds (min 1000, capped by LETAGENTS_POLL_MAX_MS / server; over the remote /mcp endpoint capped at 30000, so call again with after_message_id when the result is empty). If set to 0, the default timeout will be used."
         ),
       agent_session_id: z
         .string()
@@ -627,7 +627,11 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         // or the provider turn fails afterward.
         if (after_message_id) scheduleSupervisedWorkerCursorCheckpoint(agentSession, after_message_id);
       }
-      const maxPollMs = getPollTimeoutCapMs();
+      // A hosted MCP client ends a long tool call on its own, unpublished
+      // clock; a remote wait returns well inside it and the agent loops.
+      const maxPollMs = currentSessionScope()
+        ? Math.min(getPollTimeoutCapMs(), REMOTE_MCP_WAIT_MAX_MS)
+        : getPollTimeoutCapMs();
       const serverTimeout = Math.min(
         Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
         maxPollMs

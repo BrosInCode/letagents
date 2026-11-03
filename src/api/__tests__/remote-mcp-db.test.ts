@@ -34,6 +34,8 @@ const stateCrypto = await import("../remote-mcp/state-crypto.js");
 let server: Server | null = null;
 let baseUrl = "";
 const TOKEN_A = "remote_mcp_owner_token_a";
+/** A second owner token of account A: another credential, so another credential state. */
+const TOKEN_A2 = "remote_mcp_owner_token_a_second";
 const TOKEN_B = "remote_mcp_owner_token_b";
 
 async function createOwner(suffix: string, token: string) {
@@ -50,6 +52,7 @@ if (testDatabaseUrl) {
     await dbClient!.pool.query("CREATE SCHEMA public");
     await migrate(dbClient!.db, { migrationsFolder: path.resolve(process.cwd(), "drizzle") });
     await createOwner("a", TOKEN_A);
+    await createOwner("a", TOKEN_A2);
     await createOwner("b", TOKEN_B);
     server = appModule!.createApiApp().listen(0, "127.0.0.1");
     await once(server, "listening");
@@ -101,6 +104,32 @@ function rawPost(token: string, sessionId: string, body: unknown) {
       "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
     body: JSON.stringify(body),
   });
+}
+
+/** The tool result inside a streamed (SSE) MCP response, parsed like `call` parses it. */
+async function toolResultOf(response: Response): Promise<Record<string, any>> {
+  const text = await response.text();
+  const data = text.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim());
+  const message = JSON.parse(data.at(-1) ?? "{}") as { result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean }; error?: unknown };
+  if (message.error) return { rpcError: message.error };
+  const part = message.result?.content?.find((entry) => entry.type === "text")?.text ?? "";
+  try {
+    return { ...JSON.parse(part), isError: message.result?.isError };
+  } catch {
+    return { raw: part, isError: message.result?.isError };
+  }
+}
+
+function statelessPost(token: string, body: unknown) {
+  return fetch(`${baseUrl}/mcp`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify(body),
+  });
+}
+
+function toolCall(id: number, name: string, args: Record<string, unknown> = {}) {
+  return { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } };
 }
 
 async function stdioToolNames(): Promise<string[]> {
@@ -218,6 +247,84 @@ test("a session survives a restart by reloading its state from the table", { ski
   }
 });
 
+test("a new session of the same credential starts from the earlier session's room and worker handle", { skip, timeout: 60_000 }, async () => {
+  // ChatGPT's connector opens a new session for every tool call. The worker it
+  // registered in one call must answer in the next.
+  const first = await connect();
+  let joined: Record<string, any>;
+  let handle: Record<string, any>;
+  try {
+    joined = await call(first.client, "join_room", { name: "remote-mcp-credential" });
+    handle = await call(first.client, "register_agent_session",
+      { room_id: joined.room_id, display_name: "Per-call Dot", registration_key: "credential-key-1", runtime: "dot" });
+    assert.ok(handle.worker_id, JSON.stringify(handle));
+  } finally {
+    await first.client.close();
+  }
+  sessions().dropLoaded(); // another replica, or this one after a restart
+
+  const second = await connect();
+  try {
+    assert.notEqual(second.transport.sessionId, first.transport.sessionId);
+    const room = await call(second.client, "get_current_room");
+    assert.equal(room.room_id, "remote-mcp-credential", "the joined room came along from the credential state");
+    const sent = await call(second.client, "send_message",
+      { room_id: joined.room_id, worker_id: handle.worker_id, text: "sent from the next session" });
+    assert.equal(sent.isError, undefined, `the worker handle came along: ${JSON.stringify(sent)}`);
+    const recovered = await call(second.client, "register_agent_session",
+      { room_id: joined.room_id, display_name: "Per-call Dot", recover_lost_worker: true });
+    assert.equal(recovered.worker_id, handle.worker_id, `a chat that lost its worker_id gets it back: ${JSON.stringify(recovered)}`);
+  } finally {
+    await second.client.close();
+  }
+
+  // Another credential of the same account has its own state.
+  const other = await connect(TOKEN_A2);
+  try {
+    const refused = await call(other.client, "send_message",
+      { room_id: joined.room_id, worker_id: handle.worker_id, text: "not mine" });
+    assert.equal(refused.isError, true, JSON.stringify(refused));
+    assert.match(String(refused.raw ?? JSON.stringify(refused)), /Unknown worker_id/);
+  } finally {
+    await other.client.close();
+  }
+});
+
+test("requests without a session id run in the credential's implicit session, which the next one reuses", { skip, timeout: 60_000 }, async () => {
+  const first = await statelessPost(TOKEN_A, toolCall(1, "join_room", { name: "remote-mcp-stateless" }));
+  assert.equal(first.status, 200, await first.clone().text());
+  const sessionId = first.headers.get("mcp-session-id");
+  assert.ok(sessionId, "the implicit session has an id, which the client may ignore");
+  const joined = await toolResultOf(first);
+  assert.equal(joined.room_id, "remote-mcp-stateless", JSON.stringify(joined));
+  assert.equal((await remoteSessionsDb!.getRemoteMcpSession(sessionId!))?.client_name, "stateless");
+
+  const registered = await statelessPost(TOKEN_A, toolCall(2, "register_agent_session",
+    { room_id: joined.room_id, display_name: "Stateless Dot", registration_key: "stateless-key-1", runtime: "dot" }));
+  assert.equal(registered.headers.get("mcp-session-id"), sessionId, "the implicit session is reused");
+  const handle = await toolResultOf(registered);
+  assert.ok(handle.worker_id, JSON.stringify(handle));
+
+  sessions().dropLoaded();
+  const sent = await statelessPost(TOKEN_A, toolCall(3, "send_message",
+    { room_id: joined.room_id, worker_id: handle.worker_id, text: "hello without a session id" }));
+  assert.equal(sent.headers.get("mcp-session-id"), sessionId);
+  const result = await toolResultOf(sent);
+  assert.equal(result.isError, undefined, JSON.stringify(result));
+  assert.ok(result.message_id ?? result.id ?? result.success !== false, JSON.stringify(result));
+
+  // A stateful client of the same credential starts from the same state, in its own session.
+  const stateful = await connect();
+  try {
+    assert.notEqual(stateful.transport.sessionId, sessionId);
+    const viaHandle = await call(stateful.client, "send_message",
+      { room_id: joined.room_id, worker_id: handle.worker_id, text: "same worker, stateful session" });
+    assert.equal(viaHandle.isError, undefined, JSON.stringify(viaHandle));
+  } finally {
+    await stateful.client.close();
+  }
+});
+
 test("wait_for_messages in process is capped by LETAGENTS_POLL_MAX_MS", { skip, timeout: 60_000 }, async () => {
   const { client } = await connect();
   try {
@@ -252,11 +359,15 @@ test("DELETE removes the session, and the account cap replaces the oldest", { sk
 test("revoking the owner token refuses its requests and the sweep deletes its sessions", { skip, timeout: 60_000 }, async () => {
   const created = await createOwner("revoked", "remote_mcp_token_to_revoke");
   const { client, transport } = await connect("remote_mcp_token_to_revoke");
+  await call(client, "join_room", { name: "remote-mcp-revoked" });
+  const credentialHash = stateCrypto.hashRemoteMcpToken("remote_mcp_token_to_revoke");
+  assert.ok(await remoteSessionsDb!.getRemoteMcpCredential(credentialHash), "a call that changed state wrote the credential state");
   await ownerTokens!.deleteOwnerTokenById(created.token_id);
   const refused = await rawPost("remote_mcp_token_to_revoke", transport.sessionId!, { jsonrpc: "2.0", id: 9, method: "tools/list" });
   assert.equal(refused.status, 401);
   await sessions().sweep();
   assert.equal(await remoteSessionsDb!.getRemoteMcpSession(transport.sessionId!), null);
+  assert.equal(await remoteSessionsDb!.getRemoteMcpCredential(credentialHash), null, "the credential state went with the token");
   await client.close().catch(() => undefined);
 });
 

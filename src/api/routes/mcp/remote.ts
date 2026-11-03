@@ -6,6 +6,7 @@ import { parseBearerAuthorization } from "../../request/bearer-authorization.js"
 import { buildAllowedOrigins, replyInvalidBearer } from "../../http/middleware.js";
 import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
 import type { RemoteMcpSessions } from "../../remote-mcp/sessions.js";
+import { IMPLICIT_CLIENT_NAME } from "../../remote-mcp/implicit-session.js";
 import { RemoteMcpBusyError } from "../../remote-mcp/errors.js";
 import type { OwnerTokenAccount } from "../../db/types/auth.js";
 import { buildInMemoryListingsRateLimiter } from "../rental/renter/rate-limiter.js";
@@ -51,8 +52,10 @@ function clientNameOf(body: unknown): string | null {
 export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps): void {
   const { sessions } = deps;
   const allowRequest = deps.allowRequest ?? buildInMemoryListingsRateLimiter({ capacity: 600, windowMs: 60_000 });
+  // ChatGPT's connector opens one or two sessions per tool call, so the budget
+  // allows a busy agent turn; the per-account session cap bounds the rows.
   const allowSessionCreate = deps.allowSessionCreate
-    ?? buildInMemoryListingsRateLimiter({ capacity: 10, windowMs: 60_000 });
+    ?? buildInMemoryListingsRateLimiter({ capacity: 30, windowMs: 60_000 });
   const allowedOrigins = buildAllowedOrigins();
 
   const handler = async (req: AuthenticatedRequest, res: Response) => {
@@ -113,6 +116,7 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
 
     const sessionId = req.headers["mcp-session-id"];
     if (typeof sessionId === "string" && sessionId) {
+      // A stateful client: the session it opened, or 404 so it initializes again.
       const session = await sessions.find(sessionId, token, accountId);
       if (!session) {
         // Unknown, expired, or opened with another token: the client re-initializes.
@@ -134,7 +138,7 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
       return;
     }
 
-    if (req.method !== "POST" || !isInitializeRequest(req.body)) {
+    if (req.method !== "POST") {
       jsonRpcError(res, 400, "Send an initialize request first, without an Mcp-Session-Id header.");
       return;
     }
@@ -144,11 +148,22 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
       jsonRpcError(res, 406, "Accept must include application/json and text/event-stream.");
       return;
     }
+    const initialize = isInitializeRequest(req.body);
+    if (!initialize) {
+      // A stateless client (ChatGPT's connector sends every call without a
+      // session id): served in the credential's implicit session, which
+      // starts from the credential's saved state like any other session.
+      const implicit = await sessions.findImplicit({ accountId, token });
+      if (implicit) {
+        await serve(implicit);
+        return;
+      }
+    }
     if (!allowSessionCreate(accountId)) {
       jsonRpcError(res, 429, "Too many new remote MCP sessions. Slow down.");
       return;
     }
-    const opened = await sessions.open({ accountId, token, clientName: clientNameOf(req.body) });
+    const opened = await sessions.open({ accountId, token, clientName: initialize ? clientNameOf(req.body) : IMPLICIT_CLIENT_NAME });
     const session = await sessions.find(opened, token, accountId);
     if (!session) {
       jsonRpcError(res, 500, "The remote MCP session could not start.");

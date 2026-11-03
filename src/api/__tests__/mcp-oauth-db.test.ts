@@ -244,6 +244,8 @@ test("an MCP SDK client signs in, calls tools, keeps its session across refresh,
     assert.equal(after.status, 401);
     assert.match(after.headers.get("www-authenticate") ?? "", /error="invalid_token"/);
     const sessions = await dbClient!.pool.query("SELECT 1 FROM remote_mcp_sessions WHERE session_id = $1", [sessionId]);
+    const credentials = await dbClient!.pool.query("SELECT 1 FROM remote_mcp_credentials c JOIN mcp_oauth_grants g ON g.secret_hash = c.token_hash WHERE g.revoked_at IS NOT NULL");
+    assert.equal(credentials.rowCount, 0, "revoking the grant deleted its credential state too");
     assert.equal(sessions.rowCount, 0, "the grant's sessions are deleted at once");
   } finally {
     await client.close().catch(() => undefined);

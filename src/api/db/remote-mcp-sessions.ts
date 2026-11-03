@@ -1,9 +1,10 @@
-import { and, asc, eq, lt, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, lt, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
-import { mcp_oauth_grants, owner_tokens, remote_mcp_sessions } from "./schema.js";
+import { mcp_oauth_grants, owner_tokens, remote_mcp_credentials, remote_mcp_sessions } from "./schema.js";
 
 export type RemoteMcpSessionRow = typeof remote_mcp_sessions.$inferSelect;
+export type RemoteMcpCredentialRow = typeof remote_mcp_credentials.$inferSelect;
 
 export async function insertRemoteMcpSession(input: {
   sessionId: string;
@@ -26,6 +27,21 @@ export async function insertRemoteMcpSession(input: {
 export async function getRemoteMcpSession(sessionId: string): Promise<RemoteMcpSessionRow | null> {
   const [row] = await db.select().from(remote_mcp_sessions)
     .where(eq(remote_mcp_sessions.session_id, sessionId)).limit(1);
+  return row ?? null;
+}
+
+/** The most recently used session this credential opened under `clientName`, if any. */
+export async function findLatestRemoteMcpSessionForToken(
+  accountId: string, tokenHash: string, clientName: string,
+): Promise<RemoteMcpSessionRow | null> {
+  const [row] = await db.select().from(remote_mcp_sessions)
+    .where(and(
+      eq(remote_mcp_sessions.account_id, accountId),
+      eq(remote_mcp_sessions.token_hash, tokenHash),
+      eq(remote_mcp_sessions.client_name, clientName),
+    ))
+    .orderBy(desc(remote_mcp_sessions.last_seen_at))
+    .limit(1);
   return row ?? null;
 }
 
@@ -92,6 +108,52 @@ export async function deleteRevokedRemoteMcpSessions(): Promise<string[]> {
         AND ${mcp_oauth_grants.revoked_at} IS NULL AND ${mcp_oauth_grants.expires_at} > now())`)
     .returning({ session_id: remote_mcp_sessions.session_id });
   return rows.map((row) => row.session_id);
+}
+
+export async function getRemoteMcpCredential(tokenHash: string): Promise<RemoteMcpCredentialRow | null> {
+  const [row] = await db.select().from(remote_mcp_credentials)
+    .where(eq(remote_mcp_credentials.token_hash, tokenHash)).limit(1);
+  return row ?? null;
+}
+
+/**
+ * Save a credential's merged state. With `expectedVersion` null the row is
+ * created; otherwise it is written only over that version. Returns the new
+ * version, or null when another replica created or changed the row first.
+ */
+export async function saveRemoteMcpCredentialState(input: {
+  tokenHash: string;
+  accountId: string;
+  expectedVersion: number | null;
+  state: Record<string, unknown>;
+}): Promise<number | null> {
+  if (input.expectedVersion === null) {
+    const [created] = await db.insert(remote_mcp_credentials)
+      .values({ token_hash: input.tokenHash, account_id: input.accountId, state: input.state })
+      .onConflictDoNothing()
+      .returning({ version: remote_mcp_credentials.version });
+    return created?.version ?? null;
+  }
+  const [row] = await db.update(remote_mcp_credentials).set({
+    state: input.state,
+    version: sql`${remote_mcp_credentials.version} + 1`,
+    updated_at: sql`now()`,
+  }).where(and(
+    eq(remote_mcp_credentials.token_hash, input.tokenHash),
+    eq(remote_mcp_credentials.account_id, input.accountId),
+    eq(remote_mcp_credentials.version, input.expectedVersion),
+  )).returning({ version: remote_mcp_credentials.version });
+  return row?.version ?? null;
+}
+
+/** Delete credential state whose owner token or OAuth grant no longer exists or is revoked. */
+export async function deleteRevokedRemoteMcpCredentials(): Promise<string[]> {
+  const rows = await db.delete(remote_mcp_credentials)
+    .where(sql`NOT EXISTS (SELECT 1 FROM ${owner_tokens} WHERE ${owner_tokens.token_hash} = ${remote_mcp_credentials.token_hash})
+      AND NOT EXISTS (SELECT 1 FROM ${mcp_oauth_grants} WHERE ${mcp_oauth_grants.secret_hash} = ${remote_mcp_credentials.token_hash}
+        AND ${mcp_oauth_grants.revoked_at} IS NULL AND ${mcp_oauth_grants.expires_at} > now())`)
+    .returning({ token_hash: remote_mcp_credentials.token_hash });
+  return rows.map((row) => row.token_hash);
 }
 
 /** Delete one session only if it still belongs to this account (eviction). */
