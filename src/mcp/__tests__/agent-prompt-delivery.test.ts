@@ -52,6 +52,21 @@ test("every prompt variant teaches agents to act on liveness signals", () => {
   }
 });
 
+test("no delivered prompt claims authority over the agent's own instructions", () => {
+  for (const kind of ["join", "inline", "auto"] as const) {
+    for (const prompt of [buildRoomAgentPrompt(kind), buildCompactRoomAgentPrompt(kind)]) {
+      assert.doesNotMatch(prompt, /CRITICAL OVERRIDE/);
+      assert.doesNotMatch(prompt, /supersede/i);
+      assert.doesNotMatch(prompt, /NEVER/);
+    }
+  }
+  resetRoomAgentPromptDeliveryForTests();
+  for (const kind of ["join", "inline", "auto"] as const) {
+    const delivered = dispenseRoomAgentPrompt(kind);
+    assert.doesNotMatch(delivered, /CRITICAL OVERRIDE|supersede|NEVER/);
+  }
+});
+
 test("room agent prompts never nudge an agent toward unassigned or abandoned work", () => {
   for (const kind of ["join", "inline", "auto"] as const) {
     for (const prompt of [buildRoomAgentPrompt(kind), buildCompactRoomAgentPrompt(kind)]) {

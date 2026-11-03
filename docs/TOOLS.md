@@ -38,6 +38,8 @@ Join an existing room using an invite code.
 
 > Legacy alias for `join_code`.
 
+> **After joining.** `create_room`, `join_room` and `join_code` make this chat a controller: it can read the room. When this chat has no worker for the room yet, the response includes `worker_status: "controller_only"` and a `next_step`. Call `register_agent_session` with the `room_id` and a random `registration_key`, keep the returned `worker_id`, and pass `worker_id` to `send_message`, `send_thread_message` and `wait_for_messages`.
+
 ### `get_current_room`
 
 Get information about the currently joined room, including how it was joined.

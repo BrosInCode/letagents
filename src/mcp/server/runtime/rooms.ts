@@ -12,10 +12,14 @@ import {
   type JoinedVia,
 } from "../../room-id.js";
 import {
+  getLocalStatePath,
+  getStoredAgentRoutingStateSnapshot,
   isLocalRoomStorageEnabled,
   getStoredCurrentRoom,
   getStoredRoomSession,
+  resolveLocalRoomStorageIdentifiers,
 } from "../../local-state.js";
+import { heldWorkerConnection } from "../../worker-call-context.js";
 import {
   ApiError,
   apiCall,
@@ -27,6 +31,7 @@ import {
   maybeHandleRepoRoomAuthRequired,
 } from "./device-auth.js";
 import {
+  agentInstanceUuid,
   ensureAgentIdentity,
   toPublicAgentIdentity,
   withAgentIdentity,
@@ -295,6 +300,41 @@ export async function joinRoomIdentifierWithoutImplicitGitRefCreate(
   }));
 }
 
+const CONTROLLER_ONLY_NEXT_STEP =
+  "You joined as this account's controller and can read the room. "
+  + "To post as an agent, call register_agent_session with this room_id and a random registration_key "
+  + "generated once for this chat, keep the returned worker_id, and pass worker_id to send_message, "
+  + "send_thread_message and wait_for_messages.";
+
+/**
+ * After a join this chat is a controller: it can read the room, but a write
+ * tool refuses until the chat registers a worker. Say so in the join response,
+ * unless the chat needs no registration or already has a worker in the room:
+ * - A worker-bearer or supervised runtime brings its own worker identity.
+ * - A local room starts its local worker on the first write.
+ * - A chat that holds a worker for the room (an MCP worker handle this process
+ *   connected, or a legacy session this process registered) can already write.
+ * If the saved worker state cannot be read in full, nothing is claimed.
+ */
+async function controllerOnlyJoinFields(roomId: string): Promise<Record<string, unknown>> {
+  if (requireValidWorkerBearerRuntime().mode !== "owner") return {};
+  if (await isLocalRoomStorageEnabled(roomId)) return {};
+
+  const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(roomId);
+  const statePath = getLocalStatePath();
+  const instanceId = agentInstanceUuid();
+  for (const candidateRoomId of new Set([roomId, cloudRoomId ?? roomId])) {
+    const { sessions, complete } = getStoredAgentRoutingStateSnapshot(candidateRoomId);
+    if (!complete) return {};
+    const registered = sessions.some((session) =>
+      session.agent_instance_id === instanceId
+      || heldWorkerConnection(statePath, session.session_id)?.session_token === session.session_token
+    );
+    if (registered) return {};
+  }
+  return { worker_status: "controller_only", next_step: CONTROLLER_ONLY_NEXT_STEP };
+}
+
 export async function createInviteRoom(): Promise<{
   room: RoomState;
   response: Record<string, unknown>;
@@ -330,6 +370,7 @@ export async function createInviteRoom(): Promise<{
     response: {
       ...toPublicRoomResponse(project, roomId),
       agent_identity: toPublicAgentIdentity(agentIdentity),
+      ...await controllerOnlyJoinFields(room.room_id),
     },
   };
 }
@@ -346,7 +387,10 @@ export async function buildJoinResponse(input: {
     session_mode: input.session_mode,
   });
 
-  return withJoinRoomAgentPrompt(basePayload);
+  return withJoinRoomAgentPrompt({
+    ...basePayload,
+    ...await controllerOnlyJoinFields(input.joined.room.room_id),
+  });
 }
 
 export async function joinInviteCode(

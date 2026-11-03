@@ -139,19 +139,23 @@ export function identityFromAgentSession(session: StoredAgentSessionState): Stor
   };
 }
 
+/** Names the current parameter (worker_id) first; agent_session_id is the older spelling. */
+export const WORKER_IDENTITY_REQUIRED_MESSAGE =
+  "A registered worker identity is required for this write action. " +
+  "Call register_agent_session for this room first (room_id plus a random registration_key), " +
+  "then pass the returned worker_id to this tool. " +
+  "Older clients may pass agent_session_id instead.";
+
 export function requireWorkerAgentSession(
   roomId: string | null | undefined,
   sessionId?: string | null
 ): StoredAgentSessionState {
   const session = resolveAgentSession(roomId, sessionId);
   if (!session) {
-    throw new Error(
-      "Registered worker agent_session_id is required for this write action. " +
-        "Call register_agent_session for this room first, then pass the returned agent_session_id explicitly."
-    );
+    throw new Error(WORKER_IDENTITY_REQUIRED_MESSAGE);
   }
   if (session.session_kind !== "worker") {
-    throw new Error("Worker agent_session_id is required for this write action.");
+    throw new Error("A worker identity (not a controller) is required for this write action.");
   }
   return session;
 }

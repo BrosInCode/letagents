@@ -16,12 +16,14 @@ const originalFetch = globalThis.fetch;
 const {
   autoJoinFromContext,
   buildJoinResponse,
+  createInviteRoom,
   describeUnsupportedProviderAutoJoin,
   joinRoomIdentifier,
   joinRoomIdentifierWithoutImplicitGitRefCreate,
   normalizeJoinSessionMode,
 } = await import("../server/runtime/rooms.js");
 const { ApiError } = await import("../server/runtime/api.js");
+const { ensureLocalWorkerAgentSession, requireWorkerAgentSession } = await import("../server/runtime/agent-sessions.js");
 const { shutdownRuntime } = await import("../server/runtime/room-state.js");
 
 test.after(() => {
@@ -68,6 +70,130 @@ test("a current join answers with the room and starts no local agent process", a
   for (const removed of ["local_codex_session", "local_codex_session_started", "local_codex_session_reused"]) {
     assert.equal(removed in response, false, removed);
   }
+});
+
+const CONTROLLER_ONLY_NEXT_STEP =
+  "You joined as this account's controller and can read the room. To post as an agent, call register_agent_session "
+  + "with this room_id and a random registration_key generated once for this chat, keep the returned worker_id, "
+  + "and pass worker_id to send_message, send_thread_message and wait_for_messages.";
+
+function joinedRoom(roomId: string): RoomState {
+  return {
+    room_id: roomId,
+    project_id: null,
+    code: null,
+    display_name: roomId,
+    joined_via: "join_room",
+    joined_at: "2026-06-30T00:00:00.000Z",
+    last_seen_at: "2026-06-30T00:00:00.000Z",
+  };
+}
+
+function joinResponseFor(roomId: string): Promise<Record<string, unknown>> {
+  return buildJoinResponse({
+    joined: { room: joinedRoom(roomId), response: { room_id: roomId, display_name: roomId } },
+    room_identifier: roomId,
+    joined_via: "join_room",
+    session_mode: "current",
+  });
+}
+
+async function withEnv<T>(name: string, value: string, run: () => Promise<T>): Promise<T> {
+  const previous = process.env[name];
+  process.env[name] = value;
+  try {
+    return await run();
+  } finally {
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+  }
+}
+
+test("a join response says the chat is a controller until it registers a worker", async () => {
+  const response = await joinResponseFor("room_controller_only");
+
+  assert.equal(response.worker_status, "controller_only");
+  assert.equal(response.next_step, CONTROLLER_ONLY_NEXT_STEP);
+  // The fields that were there before stay as they were.
+  assert.equal(response.room_id, "room_controller_only");
+  assert.equal(response.joined_via, "join_room");
+  assert.equal(response.session_mode, "current");
+  assert.equal(response.agent_prompt_kind, "join");
+  assert.ok(response.agent_identity);
+});
+
+test("a join response adds no controller note once this chat holds a worker for the room", async () => {
+  await ensureLocalWorkerAgentSession("room_with_worker", { sessionKind: "worker" });
+
+  const response = await joinResponseFor("room_with_worker");
+
+  assert.equal("worker_status" in response, false);
+  assert.equal("next_step" in response, false);
+  assert.equal(response.room_id, "room_with_worker");
+});
+
+test("a controller session does not count as a worker in the join response", async () => {
+  await ensureLocalWorkerAgentSession("room_with_controller", { sessionKind: "controller" });
+
+  const response = await joinResponseFor("room_with_controller");
+
+  assert.equal(response.worker_status, "controller_only");
+});
+
+test("a join response adds no controller note where a worker identity is already supplied", async () => {
+  // A worker bearer is a server-side worker session for this process.
+  const workerBearer = await withEnv("LETAGENTS_AGENT_SESSION_BEARER", "worker-bearer-test", () =>
+    joinResponseFor("room_worker_bearer")
+  );
+  assert.equal("worker_status" in workerBearer, false);
+  assert.equal("next_step" in workerBearer, false);
+
+  // A local room starts its local worker on the first write.
+  const localRoom = await withEnv("LETAGENTS_CHAT_STORAGE", "local", () => joinResponseFor("room_local_storage"));
+  assert.equal("worker_status" in localRoom, false);
+  assert.equal("next_step" in localRoom, false);
+});
+
+test("a created room says the chat is a controller until it registers a worker", async () => {
+  globalThis.fetch = async () =>
+    new Response(JSON.stringify({ id: "proj_created", code: "ABCD-1234", display_name: "Created room" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+
+  const created = await createInviteRoom();
+
+  assert.equal(created.room.room_id, "ABCD-1234");
+  assert.equal(created.response.room_id, "ABCD-1234");
+  assert.equal(created.response.worker_status, "controller_only");
+  assert.equal(created.response.next_step, CONTROLLER_ONLY_NEXT_STEP);
+  assert.ok(created.response.agent_identity);
+});
+
+test("the missing-worker error names worker_id first and keeps agent_session_id as the older spelling", () => {
+  assert.throws(
+    () => requireWorkerAgentSession("room_no_worker", null),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(
+        error.message,
+        "A registered worker identity is required for this write action. "
+          + "Call register_agent_session for this room first (room_id plus a random registration_key), "
+          + "then pass the returned worker_id to this tool. Older clients may pass agent_session_id instead."
+      );
+      assert.ok(error.message.indexOf("worker_id") < error.message.indexOf("agent_session_id"));
+      return true;
+    }
+  );
+});
+
+test("a controller session is refused for a write action with a message about worker identity", async () => {
+  const controller = await ensureLocalWorkerAgentSession("room_refuse_controller", { sessionKind: "controller" });
+
+  assert.throws(
+    () => requireWorkerAgentSession("room_refuse_controller", controller.session_id),
+    /A worker identity \(not a controller\) is required for this write action\./
+  );
 });
 
 test("joinRoomIdentifier can request an existing-only room join", async () => {
