@@ -97,18 +97,26 @@ Var InstalledHere
   ${EndIf}
 !macroend
 
-; Stops each program running from $INSTDIR except this installer: an agent's
-; process-tree helper keeps running when the app and its daemon have quit
-; (stopping it ends the agent processes in its job), and a model probe's
-; opencode.exe runs on its own. Helpers of any other LetAgents copy are left
-; alone. WMI reads each process's path also from this 32-bit installer; no
-; cmdlets, which can take many seconds to load. The folder reaches PowerShell
-; through the environment, so no path is quoted on its command line.
+; Stops each program running from $INSTDIR\resources: an agent's process-tree
+; helper keeps running when the app and its daemon have quit (stopping it
+; ends the agent processes in its job), and a model probe's opencode.exe runs
+; on its own. Only the app's own resources folder, so a /D= install into a
+; shared folder stops nothing else there, and helpers of any other LetAgents
+; copy are left alone. WMI reads each process's path also from this 32-bit
+; installer; no cmdlets, which can take many seconds to load. The folder
+; reaches PowerShell through the environment, so no path is quoted on its
+; command line. Where PowerShell cannot run this (blocked, or Constrained
+; Language Mode), the helpers are stopped by name instead.
 !macro STOP_PROGRAMS_IN_INSTDIR
-  System::Call 'Kernel32::SetEnvironmentVariable(t "LETAGENTS_STOP_IN", t "$INSTDIR")'
-  System::Call 'Kernel32::SetEnvironmentVariable(t "LETAGENTS_STOP_SELF", t "$EXEPATH")'
-  nsExec::Exec `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root = $$env:LETAGENTS_STOP_IN.TrimEnd('\') + '\'; foreach ($$p in ([wmisearcher]'SELECT ProcessId, ExecutablePath FROM Win32_Process').Get()) { $$x = $$p.ExecutablePath; if ($$x -and $$x.StartsWith($$root, [StringComparison]::OrdinalIgnoreCase) -and $$x -ne $$env:LETAGENTS_STOP_SELF) { try { [Diagnostics.Process]::GetProcessById([int]$$p.ProcessId).Kill() } catch {} } }"`
+  System::Call 'Kernel32::SetEnvironmentVariable(t "LETAGENTS_STOP_IN", t "$INSTDIR\resources")'
+  nsExec::Exec `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "try { $$root = $$env:LETAGENTS_STOP_IN + '\'; foreach ($$p in ([wmisearcher]'SELECT ProcessId, ExecutablePath FROM Win32_Process').Get()) { $$x = $$p.ExecutablePath; if ($$x -and $$x.StartsWith($$root, [StringComparison]::OrdinalIgnoreCase)) { try { [Diagnostics.Process]::GetProcessById([int]$$p.ProcessId).Kill() } catch {} } }; exit 0 } catch { exit 1 }"`
   Pop $R0
+  ; The app started with --force-run inherits this installer's environment.
+  System::Call 'Kernel32::SetEnvironmentVariable(t "LETAGENTS_STOP_IN", p 0)'
+  ${If} $R0 != 0
+    nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM "${HELPER_NAME}"'
+    Pop $R0
+  ${EndIf}
 !macroend
 
 ; Wait for the app to quit (electron-updater starts this installer and then
