@@ -24,6 +24,7 @@ import type {
   RoomTurnFileAccess,
 } from "./provider-action-port.js";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
+import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
 import type { ClaudePermissionObservation, ClaudeNativePermissionRequest, CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 
@@ -86,6 +87,28 @@ export type NativeProviderAdapter = {
 
 export type ProviderAdapterLoader = () => Promise<NativeProviderAdapter>;
 
+type BundledRuntimeVerifier = () => Promise<void>;
+
+/**
+ * The adapters' own sealed-runtime check, run once in the background from the
+ * Electron build tree; see warmLetAgentsMcpRuntime. A build without that
+ * module (an older or partial dist-electron) has nothing to warm; its
+ * launches still verify the runtime themselves, as every launch does.
+ */
+const bundledRuntimeVerifierFromBuild: BundledRuntimeVerifier = async () => {
+  let module: { warmLetAgentsMcpRuntime?: (input: { devEntryPath?: string }) => Promise<void> };
+  try {
+    module = await import(new URL("../dist-electron/main/agents/letagents-mcp-runtime.js", import.meta.url).href);
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code !== "ERR_MODULE_NOT_FOUND") throw error;
+    // Only a packaged app has a bundled runtime; there a missing module means every launch pays the first hash.
+    if (typeof (process as { resourcesPath?: unknown }).resourcesPath === "string") console.warn("[runtime_verify]", "the Electron build's runtime module is missing; launches verify the runtime themselves");
+    return;
+  }
+  if (typeof module.warmLetAgentsMcpRuntime !== "function") return;
+  await module.warmLetAgentsMcpRuntime({ devEntryPath: devMcpServerEntryFromEnv() ?? undefined });
+};
+
 function publicHandle(handle: NativeHandle, appliedConfigurationRevision?: number): ProviderActionHandle {
   return {
     workAttemptId: handle.workAttemptId,
@@ -112,7 +135,14 @@ export class ProviderActionPortRouter implements ProviderActionPort {
   /** Whether each remembered native handle's process has exited. One that has stays remembered for custody, and is never attached again. */
   private readonly exits = new WeakMap<NativeHandle, { exited: boolean }>();
 
-  constructor(private readonly adapterLoaders: Readonly<Record<string, ProviderAdapterLoader>> = {}) {}
+  constructor(
+    private readonly adapterLoaders: Readonly<Record<string, ProviderAdapterLoader>> = {},
+    private readonly bundledRuntimeVerifier: BundledRuntimeVerifier = bundledRuntimeVerifierFromBuild,
+  ) {}
+
+  verifyBundledRuntime(): Promise<void> {
+    return this.bundledRuntimeVerifier();
+  }
 
   compactionProgress(workAttemptId: string, provider: string): { state: "compacting"; startedAt: string } | null {
     const current = this.handles.get(workAttemptId);

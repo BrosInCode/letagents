@@ -768,7 +768,7 @@ test("a completed launch reports its start-up phases, split at the native ready 
       assert.equal(runtime.installed.length, 1);
       assert.deepEqual(records.map(record => [record.event, record.sample.provider, "launch" in record.sample ? record.sample.launch : null,
         Object.keys(record.sample.phases_ms)]), [["provider_launch_latency", "codex", "fresh",
-        ["prepare", "slot_wait", "admission", "process", ...(nativeSignal ? ["bootstrap"] : []), "install"]]]);
+        ["prepare", "runtime_verify", "slot_wait", "admission", "process", ...(nativeSignal ? ["bootstrap"] : []), "install"]]]);
     }
 
     records.length = 0;
@@ -811,7 +811,7 @@ test("live launch progress follows the launch phases, records a failure kind, an
     assert.equal(view.state, "launched");
     assert.equal(view.current, null);
     assert.deepEqual(view.phases.map((phase) => phase.phase),
-      ["prepare", "slot_wait", "admission", "process", ...(nativeSignal ? ["bootstrap"] : []), "install"]);
+      ["prepare", "runtime_verify", "slot_wait", "admission", "process", ...(nativeSignal ? ["bootstrap"] : []), "install"]);
     assert.ok(view.phases.every((phase) => typeof phase.ms === "number"));
     assert.ok(notified >= view.phases.length, "each phase change wakes the state watch");
   }
@@ -850,6 +850,65 @@ test("live launch progress follows the launch phases, records a failure kind, an
   admit!();
   await converging;
   assert.equal(launchProgress.view("agent-1"), null, "a launch that never ran leaves the manifest to tell the rest");
+});
+
+test("a launch waits for the daemon's runtime verification before it takes a launch slot, and a failed verification ends it there", async () => {
+  let finishVerification: (() => void) | null = null;
+  let verifications = 0;
+  const acquired: string[] = [];
+  const seen: Array<string | null> = [];
+  const runtime = harness({ provider: provider({
+    verifyBundledRuntime: () => {
+      verifications += 1;
+      seen.push(launchProgress.view("agent-1")?.current ?? null);
+      return new Promise<void>((resolve) => { finishVerification = resolve; });
+    },
+    spawn: async () => returnedHandle,
+  }) });
+  const coordinator = new ProviderExecutionCoordinator({
+    ...runtime.options,
+    pacing: {
+      acquire: async (lane, entryId) => { acquired.push(`${lane}:${entryId}`); return () => {}; },
+      run: async () => { throw new Error("launches pace through acquire"); },
+    },
+  });
+  const converging = coordinator.converge("agent-1");
+  for (let turn = 0; turn < 50 && !finishVerification; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(verifications, 1);
+  assert.deepEqual(seen, ["runtime_verify"], "the wait is reported as its own phase");
+  assert.deepEqual(acquired, [], "no launch slot is held while the launch waits");
+  finishVerification!();
+  await converging;
+  assert.equal(runtime.installed.length, 1);
+  assert.deepEqual(acquired, ["launch:agent-1"]);
+  assert.deepEqual(launchProgress.view("agent-1")!.phases.map((phase) => phase.phase),
+    ["prepare", "runtime_verify", "slot_wait", "admission", "process", "install"]);
+
+  const failing = harness({ provider: provider({
+    verifyBundledRuntime: async () => {
+      throw new Error("The bundled LetAgents MCP runtime failed its complete tree integrity check (expected a, found b).");
+    },
+    spawn: async () => { throw new Error("a failed verification never reaches spawn"); },
+  }) });
+  await assert.rejects(failing.coordinator.converge("agent-1"), /complete tree integrity check/);
+  const failed = launchProgress.view("agent-1")!;
+  assert.equal(failed.state, "failed");
+  assert.deepEqual(failed.failure, { phase: "runtime_verify", action: "retry" });
+  assert.equal(failing.installed.length, 0);
+
+  const legacy = harness({ provider: provider({ spawn: async () => returnedHandle }) });
+  await legacy.coordinator.converge("agent-1");
+  assert.equal(legacy.installed.length, 1, "a port without the check launches as before");
+
+  const stalled = harness({ provider: provider({
+    verifyBundledRuntime: () => new Promise<void>(() => {}),
+    spawn: async () => returnedHandle,
+  }) });
+  await new ProviderExecutionCoordinator({ ...stalled.options, runtimeVerifyWaitMs: 50 }).converge("agent-1");
+  assert.equal(stalled.installed.length, 1, "a check that never answers holds a launch only for the bound");
+  const bounded = launchProgress.view("agent-1")!;
+  assert.equal(bounded.state, "launched");
+  assert.ok((bounded.phases.find((phase) => phase.phase === "runtime_verify")?.ms ?? 0) >= 50);
 });
 
 test("delivery handoff freezes convergence and draining never creates a successor", async () => {

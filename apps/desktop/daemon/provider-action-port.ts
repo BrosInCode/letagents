@@ -331,6 +331,15 @@ export interface ProviderActionPort {
   correlatePermissionTurn?(handle: ProviderActionHandle, request: ProviderPermissionRequest, options?: { roomTurnId?: string }): Promise<ProviderPermissionCorrelation>;
   replyPermission?(handle: ProviderActionHandle, request: ProviderPermissionRequest, reply: "once" | "reject", options: ProviderPermissionDispatchOptions): Promise<ProviderPermissionReply>;
   capabilities(workAttemptId: string, provider?: string): Promise<ProviderActionCapabilities>;
+  /**
+   * Resolves once the MCP runtime shipped with the app has passed its sealed
+   * tree integrity check in this process, so that no launch pays for that
+   * check; rejects with the integrity error when the tree does not match.
+   * The daemon starts it at its own start and a launch waits on it, for a
+   * bounded time, before it takes a launch slot. A launch through a port
+   * without it does not wait; every launch still verifies the runtime itself.
+   */
+  verifyBundledRuntime?(): Promise<void>;
   /** Verify the selected polling runtime before an existing writer is stopped. */
   preflightCustodialPolling?(input: { provider: string; devMcpServerEntryPath?: string }): Promise<void>;
   activateCustodialPolling?(handle: ProviderActionHandle, request: CustodialPollingActivationRequest, options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }>;

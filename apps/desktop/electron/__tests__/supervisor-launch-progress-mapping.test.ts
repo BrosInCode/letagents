@@ -33,6 +33,10 @@ test("daemon launch progress maps to the renderer shape", () => {
     slotAhead: null,
   });
   assert.equal(projectLaunchProgress({ ...wire, state: "running", current: "slot_wait", failure: null, slot_ahead: 3 })!.slotAhead, 3);
+  const verifying = { ...wire, state: "running", current: "runtime_verify", failure: null,
+    phases: [wire.phases[0], { phase: "runtime_verify", started_at: "2026-10-26T10:00:00.300Z", ms: null }] };
+  assert.equal(projectLaunchProgress(verifying)!.current, "runtime_verify");
+  assert.deepEqual(projectLaunchProgress(verifying)!.phases.map((phase) => phase.phase), ["prepare", "runtime_verify"]);
   assert.equal(projectLaunchProgress({ ...wire, attempt: 2 })!.attempt, 2);
 });
 

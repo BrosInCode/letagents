@@ -197,7 +197,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // split added only file headers, imports, layer declarations and abstract parts.
   // 1900 -> 1903: the live launch progress port and its notify; the tracking
   // stays in launch-progress.ts.
-  assert.ok(mainSource.split("\n").length < 1_903, "main.ts must remain a thin composition root");
+  // 1903 -> 1907: the bundled runtime check kicked off at start; the verification,
+  // its memo and its retry stay in letagents-mcp-runtime.ts behind the provider port.
+  assert.ok(mainSource.split("\n").length < 1_907, "main.ts must remain a thin composition root");
   for (const file of mainFiles) assert.ok(read(file).split("\n").length < 600, `${file} must stay under 600 lines`);
 });
 

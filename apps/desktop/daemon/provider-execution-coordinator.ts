@@ -82,6 +82,12 @@ const WORKSPACE_REPOSITORY_RETRY_MAX_MS = 5 * 60_000;
  */
 export const RETIREMENT_SETTLEMENT_WAIT_MS = 30_000;
 /**
+ * The longest a launch waits for the daemon's background check of the bundled
+ * MCP runtime. That check only spares the launch its own first hash, which runs
+ * regardless; a filesystem that never answers must not hold launches forever.
+ */
+const RUNTIME_VERIFY_WAIT_MS = 180_000;
+/**
  * The inbox head has a turn that may still be running and no result saved for
  * it. A started turn handed back to `pending` counts: a delivery lane that
  * lets go of its turn leaves the row that way while the provider works on.
@@ -186,6 +192,8 @@ export type ProviderExecutionStreams = {
 
 export type ProviderExecutionCoordinatorOptions = {
   provider: ProviderActionPort;
+  /** Test-only: the bound on the runtime_verify wait. */
+  runtimeVerifyWaitMs?: number;
   store: ProviderExecutionStore;
   durability: ProviderExecutionDurability;
   bindings: Pick<WorkerBindingStore, "get" | "credentialFor" | "supervisedWorkerSession">;
@@ -1887,6 +1895,15 @@ export class ProviderExecutionCoordinator {
       // it is admitted. It covers the local process start; see onNativeStarted.
       launchTiming?.mark("prepare");
       launchProgress.mark(entry.id, "prepare");
+      // The sealed MCP runtime's integrity check runs once per daemon, in the
+      // background from daemon start. A launch that comes before it has
+      // finished waits for it here, before it takes a launch slot, so the
+      // wait is reported as its own phase and holds no slot another agent
+      // could use. A failed check ends the launch here, as it would in spawn.
+      const runtimeVerification = this.options.provider.verifyBundledRuntime?.();
+      if (runtimeVerification) await boundedRuntimeVerification(runtimeVerification, this.options.runtimeVerifyWaitMs ?? RUNTIME_VERIFY_WAIT_MS);
+      launchTiming?.mark("runtime_verify");
+      launchProgress.mark(entry.id, "runtime_verify");
       releaseLaunchSlot = this.options.pacing ? await this.options.pacing.acquire("launch", entry.id) : () => {};
       launchTiming?.mark("slot_wait");
       launchProgress.mark(entry.id, "slot_wait");
@@ -2273,4 +2290,13 @@ export class ProviderExecutionCoordinator {
       "daemon-convergence",
     );
   }
+}
+
+/** Waits for the background runtime check, at most `waitMs`; one that outlives the bound is left to the launch's own check. */
+async function boundedRuntimeVerification(verification: Promise<void>, waitMs: number): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const expiry = new Promise<void>((resolve) => { timer = setTimeout(resolve, waitMs); });
+  // A rejection after the bound passed is the launch's own check to repeat; it is not unhandled here.
+  verification.catch(() => undefined);
+  try { await Promise.race([verification, expiry]); } finally { clearTimeout(timer); }
 }
