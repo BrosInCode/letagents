@@ -135,7 +135,7 @@ function projectRoomAgentState(value: unknown): DesktopSupervisorManifestEntry["
   };
 }
 
-const LAUNCH_PHASES = ["prepare", "slot_wait", "admission", "process", "bootstrap", "install"] as const;
+const LAUNCH_PHASES = ["prepare", "runtime_verify", "slot_wait", "admission", "process", "bootstrap", "install"] as const;
 
 function wireTime(value: unknown): string | null {
   return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;

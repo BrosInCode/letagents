@@ -46,7 +46,8 @@ const MAX_REMEMBERED_AGENTS = 128;
 
 /** The phase that starts when `ended` ends. Process hands over to the bootstrap only at a native ready signal. */
 const NEXT: Record<LaunchPhase, LaunchPhase | null> = {
-  prepare: "slot_wait",
+  prepare: "runtime_verify",
+  runtime_verify: "slot_wait",
   slot_wait: "admission",
   admission: "process",
   process: "bootstrap",

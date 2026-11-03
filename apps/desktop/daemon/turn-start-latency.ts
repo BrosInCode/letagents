@@ -37,13 +37,15 @@ export type TurnStartPhase = "inbox_wait" | "context" | "provider_entry" | "disp
   | "dispatch_intent" | "provider_start" | "turn_checkpoint" | "first_output" | "turn_end";
 /**
  * prepare: authority, credentials and configuration before the launch slot.
+ * runtime_verify: waiting for the daemon's one-time integrity check of the
+ *   bundled MCP runtime, when it has not finished yet (0 after that).
  * slot_wait: the daemon-wide cold launch limit.
  * admission: the final launch checks.
  * process: the native process up to its own ready signal.
  * bootstrap: a remote model round trip after that signal (Claude's bootstrap).
  * install: persisting the handle and installing its stream.
  */
-export type LaunchPhase = "prepare" | "slot_wait" | "admission" | "process" | "bootstrap" | "install";
+export type LaunchPhase = "prepare" | "runtime_verify" | "slot_wait" | "admission" | "process" | "bootstrap" | "install";
 export type FirstOutputKind = "text" | "reasoning" | "tool";
 
 type Phases<Phase extends string> = Partial<Record<Phase, number>>;

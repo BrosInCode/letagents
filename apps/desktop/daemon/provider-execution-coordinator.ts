@@ -1887,6 +1887,14 @@ export class ProviderExecutionCoordinator {
       // it is admitted. It covers the local process start; see onNativeStarted.
       launchTiming?.mark("prepare");
       launchProgress.mark(entry.id, "prepare");
+      // The sealed MCP runtime's integrity check runs once per daemon, in the
+      // background from daemon start. A launch that comes before it has
+      // finished waits for it here, before it takes a launch slot, so the
+      // wait is reported as its own phase and holds no slot another agent
+      // could use. A failed check ends the launch here, as it would in spawn.
+      await this.options.provider.verifyBundledRuntime?.();
+      launchTiming?.mark("runtime_verify");
+      launchProgress.mark(entry.id, "runtime_verify");
       releaseLaunchSlot = this.options.pacing ? await this.options.pacing.acquire("launch", entry.id) : () => {};
       launchTiming?.mark("slot_wait");
       launchProgress.mark(entry.id, "slot_wait");

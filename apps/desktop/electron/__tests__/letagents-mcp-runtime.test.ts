@@ -7,9 +7,11 @@ import { createElectronTestEnv } from "./harness.js";
 import {
   LETAGENTS_MCP_RUNTIME_VERSION,
   clearLetAgentsMcpRuntimeVerificationCacheForTest,
+  clearLetAgentsMcpRuntimeWarmupsForTest,
   computeLetAgentsMcpRuntimeTreeSha256,
   letAgentsMcpRuntimeTreeWalkCountsForTest,
   resolveLetAgentsMcpRuntime,
+  warmLetAgentsMcpRuntime,
 } from "../main/agents/letagents-mcp-runtime.js";
 
 const { tempDir } = createElectronTestEnv({
@@ -175,6 +177,81 @@ test("a sealed runtime tree is hashed once while every entry's metadata is uncha
   writeFileSync(dependencyFile, "module.exports = 1;\n");
   symlinkSync(dependencyFile, join(nodeModules, "dependency", "link.js"));
   assert.throws(resolveOnce, /redirected entry/, "structural rules run on every resolution");
+});
+
+test("the daemon's background verification seeds the memo, so the first resolution reads no file contents", async () => {
+  const resources = join(tempDir, "warm-resources");
+  const nodeModules = join(resources, "app", "runtime", "letagents", "node_modules");
+  writeRuntimePackage(join(nodeModules, "letagents"), LETAGENTS_MCP_RUNTIME_VERSION);
+  mkdirSync(join(nodeModules, "dependency", "nested", "deeper"), { recursive: true });
+  for (let index = 0; index < 12; index += 1) {
+    writeFileSync(join(nodeModules, "dependency", `file-${index}.js`), `module.exports = ${index};\n`.repeat(index * 40 + 1));
+  }
+  writeFileSync(join(nodeModules, "dependency", "nested", "deeper", "leaf.js"), "module.exports = 'leaf';\n");
+  writeFileSync(join(nodeModules, "dependency", "nested", "empty.js"), "");
+  const expectedBundledTreeSha256 = computeLetAgentsMcpRuntimeTreeSha256(nodeModules);
+  const counts = letAgentsMcpRuntimeTreeWalkCountsForTest;
+  clearLetAgentsMcpRuntimeVerificationCacheForTest();
+  clearLetAgentsMcpRuntimeWarmupsForTest();
+  const input = { resourcesPath: resources, env: {}, expectedBundledTreeSha256, racyRetryDelayMs: 1_100 };
+
+  // The tree was written moments ago: the first hash matches but is not remembered, so it is hashed again after the delay.
+  const before = { ...counts };
+  const first = warmLetAgentsMcpRuntime(input);
+  assert.equal(warmLetAgentsMcpRuntime(input), first, "concurrent requests share one verification");
+  await first;
+  const backgroundHashes = counts.backgroundHashes - before.backgroundHashes;
+  assert.ok(backgroundHashes >= 2 && backgroundHashes <= 3, `a racy tree is hashed again (${backgroundHashes} hashes)`);
+  assert.equal(counts.hashes - before.hashes, 0, "nothing was hashed on the calling thread");
+
+  const warmed = { ...counts };
+  resolveLetAgentsMcpRuntime({ resourcesPath: resources, env: {}, expectedBundledTreeSha256 });
+  assert.equal(counts.hashes - warmed.hashes, 0, "the first resolution reads no file contents");
+  assert.equal(counts.metadataWalks - warmed.metadataWalks, 1, "it still walks the complete tree's metadata");
+  await warmLetAgentsMcpRuntime(input);
+  assert.equal(counts.backgroundHashes, warmed.backgroundHashes, "a remembered tree is not verified again");
+
+  // Same size, deep in a dependency: the metadata walk catches it, and resolution re-hashes and fails closed.
+  writeFileSync(join(nodeModules, "dependency", "nested", "deeper", "leaf.js"), "module.exports = 'LEAF';\n");
+  assert.throws(() => resolveLetAgentsMcpRuntime({ resourcesPath: resources, env: {}, expectedBundledTreeSha256 }), /complete tree integrity check/);
+});
+
+test("a tampered tree fails the background verification closed, remembers nothing, and is verified again on the next request", async () => {
+  const resources = join(tempDir, "warm-tampered");
+  const nodeModules = join(resources, "app", "runtime", "letagents", "node_modules");
+  const entry = writeRuntimePackage(join(nodeModules, "letagents"), LETAGENTS_MCP_RUNTIME_VERSION);
+  mkdirSync(join(nodeModules, "dependency"), { recursive: true });
+  writeFileSync(join(nodeModules, "dependency", "index.js"), "module.exports = 1;\n");
+  const expectedBundledTreeSha256 = computeLetAgentsMcpRuntimeTreeSha256(nodeModules);
+  writeFileSync(join(nodeModules, "dependency", "index.js"), "module.exports = 2;\n");
+  const counts = letAgentsMcpRuntimeTreeWalkCountsForTest;
+  clearLetAgentsMcpRuntimeVerificationCacheForTest();
+  clearLetAgentsMcpRuntimeWarmupsForTest();
+  const input = { resourcesPath: resources, env: {}, expectedBundledTreeSha256, racyRetryDelayMs: 10 };
+
+  await assert.rejects(warmLetAgentsMcpRuntime(input), /complete tree integrity check/);
+  const again = { ...counts };
+  await assert.rejects(warmLetAgentsMcpRuntime(input), /complete tree integrity check/);
+  assert.equal(counts.backgroundHashes - again.backgroundHashes, 1, "a failed verification is not cached");
+  assert.throws(() => resolveLetAgentsMcpRuntime({ resourcesPath: resources, env: {}, expectedBundledTreeSha256 }),
+    /complete tree integrity check/, "resolution fails closed on its own check");
+
+  const outsideEntry = join(tempDir, "outside-entry.js");
+  writeFileSync(outsideEntry, "// outside the sealed root\n");
+  unlinkSync(entry);
+  symlinkSync(outsideEntry, entry);
+  const redirected = { ...counts };
+  await assert.rejects(warmLetAgentsMcpRuntime(input), /redirected/, "structural rules fail before any file is read");
+  assert.equal(counts.backgroundHashes, redirected.backgroundHashes);
+});
+
+test("background verification has nothing to do for a development entry or a missing bundled runtime", async () => {
+  const counts = letAgentsMcpRuntimeTreeWalkCountsForTest;
+  const before = { ...counts };
+  await warmLetAgentsMcpRuntime({ devEntryPath: join(tempDir, "dev-entry.js"), env: {} });
+  await warmLetAgentsMcpRuntime({ resourcesPath: join(tempDir, "missing"), env: {} });
+  await warmLetAgentsMcpRuntime({ resourcesPath: "", env: {} });
+  assert.deepEqual({ ...counts }, before);
 });
 
 function writeRuntimePackage(packageRoot: string, version: string): string {

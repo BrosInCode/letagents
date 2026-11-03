@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, type Hash } from "node:crypto";
 import {
   type BigIntStats,
   closeSync,
@@ -12,7 +12,9 @@ import {
   readFileSync,
   realpathSync,
 } from "node:fs";
+import { open as openAsync } from "node:fs/promises";
 import { createRequire } from "node:module";
+import { setTimeout as sleep } from "node:timers/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 type DesktopPackageMetadata = {
@@ -66,34 +68,35 @@ export function resolveLetAgentsMcpRuntime(input: {
     return inspectRuntimeEntry(devEntry, "development");
   }
 
-  const resourcesPath = input.resourcesPath
-    ?? (typeof process.resourcesPath === "string" ? process.resourcesPath : "");
-  if (resourcesPath) {
-    const runtimeRoot = join(resourcesPath, "app", "runtime", "letagents");
-    const bundledEntry = join(
-      runtimeRoot,
-      "node_modules",
-      "letagents",
-      "dist",
-      "mcp",
-      "server.js",
-    );
-    if (existsSync(bundledEntry)) {
-      const expectedTreeSha256 = input.expectedBundledTreeSha256
-        ?? LETAGENTS_MCP_RUNTIME_TREE_SHA256;
-      assertUnredirectedRuntimePath(runtimeRoot, bundledEntry);
-      const actualTreeSha256 = verifiedRuntimeTreeSha256(join(runtimeRoot, "node_modules"), expectedTreeSha256);
-      if (actualTreeSha256 !== expectedTreeSha256) {
-        throw new Error(
-          `The bundled LetAgents MCP runtime failed its complete tree integrity check (expected ${expectedTreeSha256}, found ${actualTreeSha256}).`,
-        );
-      }
-      return inspectRuntimeEntry(bundledEntry, "bundled");
+  const bundled = bundledRuntimePaths(input.resourcesPath);
+  if (bundled && existsSync(bundled.entry)) {
+    const expectedTreeSha256 = input.expectedBundledTreeSha256
+      ?? LETAGENTS_MCP_RUNTIME_TREE_SHA256;
+    assertUnredirectedRuntimePath(bundled.root, bundled.entry);
+    const actualTreeSha256 = verifiedRuntimeTreeSha256(bundled.nodeModules, expectedTreeSha256);
+    if (actualTreeSha256 !== expectedTreeSha256) {
+      throw runtimeTreeIntegrityError(expectedTreeSha256, actualTreeSha256);
     }
+    return inspectRuntimeEntry(bundled.entry, "bundled");
   }
 
   throw new Error(
     "The packaged LetAgents MCP runtime is unavailable. Reinstall LetAgents Desktop; supervised Cursor never downloads executable bridge code at turn time.",
+  );
+}
+
+function bundledRuntimePaths(resourcesPath: string | undefined): { root: string; nodeModules: string; entry: string } | null {
+  const resources = resourcesPath
+    ?? (typeof process.resourcesPath === "string" ? process.resourcesPath : "");
+  if (!resources) return null;
+  const root = join(resources, "app", "runtime", "letagents");
+  const nodeModules = join(root, "node_modules");
+  return { root, nodeModules, entry: join(nodeModules, "letagents", "dist", "mcp", "server.js") };
+}
+
+function runtimeTreeIntegrityError(expected: string, found: string): Error {
+  return new Error(
+    `The bundled LetAgents MCP runtime failed its complete tree integrity check (expected ${expected}, found ${found}).`,
   );
 }
 
@@ -128,11 +131,18 @@ export function clearLetAgentsMcpRuntimeVerificationCacheForTest(): void {
   verifiedRuntimeTrees.clear();
 }
 
-/** Test-only counters: how many complete-tree hashes and metadata walks ran. */
-export const letAgentsMcpRuntimeTreeWalkCountsForTest = { hashes: 0, metadataWalks: 0 };
+/**
+ * Test-only counters: how many complete-tree hashes and metadata walks ran on
+ * the calling thread, and how many complete-tree hashes ran in the background.
+ */
+export const letAgentsMcpRuntimeTreeWalkCountsForTest = { hashes: 0, metadataWalks: 0, backgroundHashes: 0 };
+
+function verifiedTreeKey(nodeModulesRoot: string, expectedTreeSha256: string): string {
+  return JSON.stringify([resolve(nodeModulesRoot), expectedTreeSha256]);
+}
 
 function verifiedRuntimeTreeSha256(nodeModulesRoot: string, expectedTreeSha256: string): string {
-  const key = JSON.stringify([resolve(nodeModulesRoot), expectedTreeSha256]);
+  const key = verifiedTreeKey(nodeModulesRoot, expectedTreeSha256);
   const remembered = verifiedRuntimeTrees.get(key);
   if (remembered !== undefined) {
     if (walkLetAgentsMcpRuntimeTree(nodeModulesRoot, false).fingerprint === remembered) {
@@ -140,15 +150,87 @@ function verifiedRuntimeTreeSha256(nodeModulesRoot: string, expectedTreeSha256: 
     }
     verifiedRuntimeTrees.delete(key);
   }
-  const { digest, fingerprint, newestCtimeNs, startedNs } = walkLetAgentsMcpRuntimeTree(nodeModulesRoot, true);
-  if (digest === expectedTreeSha256 && newestCtimeNs + RACY_CTIME_WINDOW_NS < startedNs) {
-    if (verifiedRuntimeTrees.size >= VERIFIED_RUNTIME_TREE_LIMIT) {
-      const oldest = verifiedRuntimeTrees.keys().next().value;
-      if (oldest !== undefined) verifiedRuntimeTrees.delete(oldest);
-    }
-    verifiedRuntimeTrees.set(key, fingerprint);
+  const walked = walkLetAgentsMcpRuntimeTree(nodeModulesRoot, true);
+  if (walked.digest === expectedTreeSha256) rememberVerifiedTree(key, walked);
+  return walked.digest ?? "";
+}
+
+/** Remember a tree whose digest matched; a racy one (see above) is not remembered. */
+function rememberVerifiedTree(key: string, walked: Pick<RuntimeTreeWalk, "fingerprint" | "newestCtimeNs" | "startedNs">): boolean {
+  if (walked.newestCtimeNs + RACY_CTIME_WINDOW_NS >= walked.startedNs) return false;
+  if (verifiedRuntimeTrees.size >= VERIFIED_RUNTIME_TREE_LIMIT) {
+    const oldest = verifiedRuntimeTrees.keys().next().value;
+    if (oldest !== undefined) verifiedRuntimeTrees.delete(oldest);
   }
-  return digest ?? "";
+  verifiedRuntimeTrees.set(key, walked.fingerprint);
+  return true;
+}
+
+/**
+ * Background verifications in flight or finished, keyed like the memo. A
+ * failed one is forgotten at once, so the next request verifies again.
+ */
+const runtimeWarmups = new Map<string, Promise<void>>();
+/** A tree still inside its racy window is hashed again after this delay, this many times at most. */
+const RACY_RETRY_DELAY_MS = 2_500;
+const RACY_RETRY_LIMIT = 3;
+/** Files read at once while hashing in the background. */
+const BACKGROUND_READ_CONCURRENCY = 4;
+
+/** Test-only: forget every background verification. */
+export function clearLetAgentsMcpRuntimeWarmupsForTest(): void {
+  runtimeWarmups.clear();
+}
+
+/**
+ * Verify the bundled runtime's complete tree once per process, in the
+ * background, so that no launch pays for it.
+ *
+ * The first resolution in a process reads and hashes every file of the sealed
+ * tree (7k files, 45 MB). Warm, that is 0.2 s; on a fresh install behind an
+ * on-access virus scanner it was measured at over 80 s, all of it on the event
+ * loop and inside the first agent launch. This runs the same walk with
+ * asynchronous reads, a few files at a time, from daemon start. When the digest
+ * matches, it seeds the memo above; every later resolution then walks only the
+ * metadata, as it does after any first resolution. The structural rules, the
+ * racy rule and the fail-closed mismatch are unchanged: resolution still runs
+ * its own complete check and never trusts this one.
+ *
+ * Resolves when the tree matched, or when there is nothing to verify here (a
+ * development entry, no bundled runtime). Rejects with the integrity error
+ * when the tree does not match; nothing is remembered, and the next call
+ * verifies again. A tree written moments ago is hashed again after a short
+ * delay until it leaves its racy window, a few times at most.
+ */
+export function warmLetAgentsMcpRuntime(input: {
+  devEntryPath?: string | null;
+  env?: NodeJS.ProcessEnv;
+  resourcesPath?: string;
+  /** Test-only digest override for a synthetic bundled runtime fixture. */
+  expectedBundledTreeSha256?: string;
+  /** Test-only: the delay before a racy tree is hashed again. */
+  racyRetryDelayMs?: number;
+} = {}): Promise<void> {
+  if (input.devEntryPath?.trim()) return Promise.resolve();
+  const bundled = bundledRuntimePaths(input.resourcesPath);
+  if (!bundled || !existsSync(bundled.entry)) return Promise.resolve();
+  const expectedTreeSha256 = input.expectedBundledTreeSha256 ?? LETAGENTS_MCP_RUNTIME_TREE_SHA256;
+  const key = verifiedTreeKey(bundled.nodeModules, expectedTreeSha256);
+  if (verifiedRuntimeTrees.has(key)) return Promise.resolve();
+  const pending = runtimeWarmups.get(key);
+  if (pending) return pending;
+  const warmup = (async () => {
+    assertUnredirectedRuntimePath(bundled.root, bundled.entry);
+    for (let attempt = 1; ; attempt += 1) {
+      const walked = await hashRuntimeTreeInBackground(bundled.nodeModules);
+      if (walked.digest !== expectedTreeSha256) throw runtimeTreeIntegrityError(expectedTreeSha256, walked.digest);
+      if (rememberVerifiedTree(key, walked) || attempt >= RACY_RETRY_LIMIT) return;
+      await sleep(input.racyRetryDelayMs ?? RACY_RETRY_DELAY_MS);
+    }
+  })();
+  runtimeWarmups.set(key, warmup);
+  warmup.catch(() => { if (runtimeWarmups.get(key) === warmup) runtimeWarmups.delete(key); });
+  return warmup;
 }
 
 /** Compute the deterministic digest used to seal the complete runtime tree. */
@@ -156,20 +238,77 @@ export function computeLetAgentsMcpRuntimeTreeSha256(nodeModulesRoot: string): s
   return walkLetAgentsMcpRuntimeTree(nodeModulesRoot, true).digest ?? "";
 }
 
-function walkLetAgentsMcpRuntimeTree(
-  nodeModulesRoot: string,
-  readContents: boolean,
-): { digest: string | null; fingerprint: string; newestCtimeNs: bigint; startedNs: bigint } {
-  const startedNs = BigInt(Date.now()) * 1_000_000n;
-  let newestCtimeNs = 0n;
+type RuntimeTreeWalk = { digest: string | null; fingerprint: string; newestCtimeNs: bigint; startedNs: bigint };
+type RuntimeTreeFile = { path: string; relativePath: string; size: number };
+
+function walkLetAgentsMcpRuntimeTree(nodeModulesRoot: string, readContents: boolean): RuntimeTreeWalk {
   if (readContents) letAgentsMcpRuntimeTreeWalkCountsForTest.hashes += 1;
   else letAgentsMcpRuntimeTreeWalkCountsForTest.metadataWalks += 1;
+  const files = runtimeTreeFiles(nodeModulesRoot);
+  const hash = readContents ? createHash("sha256") : null;
+  let step = files.next();
+  while (!step.done) {
+    // Each file is read right after its own metadata, before the next entry.
+    if (hash) appendRuntimeFile(hash, step.value.relativePath, readRuntimeFileNoFollow(step.value.path, step.value.size));
+    step = files.next();
+  }
+  return { digest: hash ? hash.digest("hex") : null, ...step.value };
+}
+
+/**
+ * The complete-tree hash with asynchronous reads, a few files in flight at
+ * once, so the event loop keeps turning. The metadata walk runs a few entries
+ * ahead of the reads; every file's metadata is still taken before its read.
+ */
+async function hashRuntimeTreeInBackground(nodeModulesRoot: string): Promise<RuntimeTreeWalk & { digest: string }> {
+  letAgentsMcpRuntimeTreeWalkCountsForTest.backgroundHashes += 1;
+  const files = runtimeTreeFiles(nodeModulesRoot);
+  const hash = createHash("sha256");
+  const reads: Array<{ file: RuntimeTreeFile; data: Promise<Buffer> }> = [];
+  let step = files.next();
+  try {
+    for (;;) {
+      while (!step.done && reads.length < BACKGROUND_READ_CONCURRENCY) {
+        const file = step.value;
+        reads.push({ file, data: readRuntimeFileNoFollowAsync(file.path, file.size) });
+        step = files.next();
+      }
+      const next = reads.shift();
+      if (!next) break;
+      appendRuntimeFile(hash, next.file.relativePath, await next.data);
+    }
+  } catch (error) {
+    for (const read of reads) read.data.catch(() => undefined);
+    throw error;
+  }
+  if (!step.done) throw new Error("The LetAgents MCP runtime walk ended early.");
+  return { ...step.value, digest: hash.digest("hex") };
+}
+
+function appendRuntimeFile(hash: Hash, relativePath: string, data: Buffer): void {
+  const pathBytes = Buffer.from(relativePath, "utf8");
+  const header = Buffer.allocUnsafe(16);
+  header.writeBigUInt64BE(BigInt(pathBytes.length), 0);
+  header.writeBigUInt64BE(BigInt(data.length), 8);
+  hash.update(header);
+  hash.update(pathBytes);
+  hash.update(data);
+}
+
+/**
+ * Walk the complete tree in one deterministic order, applying every structural
+ * rule (no symlinks, regular files only, entry and byte bounds) and recording
+ * every entry's metadata. Yields each file for the caller to read and hash;
+ * returns the metadata fingerprint once the walk is complete.
+ */
+function* runtimeTreeFiles(nodeModulesRoot: string): Generator<RuntimeTreeFile, Omit<RuntimeTreeWalk, "digest">, undefined> {
+  const startedNs = BigInt(Date.now()) * 1_000_000n;
+  let newestCtimeNs = 0n;
   const logicalRoot = resolve(nodeModulesRoot);
   const rootStat = lstatSync(logicalRoot, { bigint: true });
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) {
     throw new Error("The LetAgents MCP runtime dependency root must be a real directory.");
   }
-  const hash = readContents ? createHash("sha256") : null;
   const metadata = createHash("sha256");
   const recordMetadata = (relativePath: string, stat: BigIntStats): void => {
     if (stat.ctimeNs > newestCtimeNs) newestCtimeNs = stat.ctimeNs;
@@ -187,7 +326,7 @@ function walkLetAgentsMcpRuntimeTree(
   let entries = 0;
   let bytes = 0;
 
-  const walk = (directory: string, relativeDirectory: string): void => {
+  const walk = function* (directory: string, relativeDirectory: string): Generator<RuntimeTreeFile, void, undefined> {
     const opened = opendirSync(directory);
     const names: string[] = [];
     try {
@@ -215,7 +354,7 @@ function walkLetAgentsMcpRuntimeTree(
       }
       recordMetadata(relativePath, stat);
       if (stat.isDirectory()) {
-        walk(path, relativePath);
+        yield* walk(path, relativePath);
         continue;
       }
       if (!stat.isFile()) {
@@ -226,24 +365,11 @@ function walkLetAgentsMcpRuntimeTree(
       if (bytes > MAX_RUNTIME_TREE_BYTES) {
         throw new Error("The LetAgents MCP runtime exceeds its complete tree size bound.");
       }
-      if (!hash) continue;
-      const data = readRuntimeFileNoFollow(path, size);
-      const pathBytes = Buffer.from(relativePath, "utf8");
-      const header = Buffer.allocUnsafe(16);
-      header.writeBigUInt64BE(BigInt(pathBytes.length), 0);
-      header.writeBigUInt64BE(BigInt(data.length), 8);
-      hash.update(header);
-      hash.update(pathBytes);
-      hash.update(data);
+      yield { path, relativePath, size };
     }
   };
-  walk(logicalRoot, "");
-  return {
-    digest: hash ? hash.digest("hex") : null,
-    fingerprint: metadata.digest("hex"),
-    newestCtimeNs,
-    startedNs,
-  };
+  yield* walk(logicalRoot, "");
+  return { fingerprint: metadata.digest("hex"), newestCtimeNs, startedNs };
 }
 
 function assertUnredirectedRuntimePath(runtimeRoot: string, entryPath: string): void {
@@ -297,6 +423,33 @@ function readRuntimeFileNoFollow(path: string, expectedSize: number): Buffer {
     return data;
   } finally {
     if (fd !== null) closeSync(fd);
+  }
+}
+
+/** The asynchronous twin of readRuntimeFileNoFollow, with the same checks. */
+async function readRuntimeFileNoFollowAsync(path: string, expectedSize: number): Promise<Buffer> {
+  const handle = await openAsync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const before = await handle.stat();
+    if (!before.isFile() || before.size !== expectedSize) {
+      throw new Error("runtime file changed before it could be verified");
+    }
+    const data = Buffer.alloc(expectedSize);
+    let offset = 0;
+    while (offset < data.length) {
+      const { bytesRead } = await handle.read(data, offset, data.length - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    const after = await handle.stat();
+    if (offset !== data.length || after.size !== before.size
+      || after.dev !== before.dev || after.ino !== before.ino
+      || after.mtimeMs !== before.mtimeMs) {
+      throw new Error("runtime file changed while it was being verified");
+    }
+    return data;
+  } finally {
+    await handle.close();
   }
 }
 

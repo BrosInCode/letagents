@@ -622,7 +622,7 @@ export interface DesktopRoomAgentDeliveryAttention {
 }
 
 /** A daemon provider launch phase; see daemon/turn-start-latency.ts LaunchPhase. */
-export type DesktopSupervisorLaunchPhase = "prepare" | "slot_wait" | "admission" | "process" | "bootstrap" | "install";
+export type DesktopSupervisorLaunchPhase = "prepare" | "runtime_verify" | "slot_wait" | "admission" | "process" | "bootstrap" | "install";
 
 /**
  * Live start-up progress of an agent's latest provider launch in the running

@@ -1935,3 +1935,14 @@ test("usage does not accept a missing process identity outside the exact idle Cu
     assert.equal(reads, 0);
   }
 });
+
+test("the router's bundled runtime check runs the injected verifier once per call and has nothing to verify without a build", async () => {
+  let calls = 0;
+  const router = new ProviderActionPortRouter({}, async () => { calls += 1; });
+  await router.verifyBundledRuntime();
+  await router.verifyBundledRuntime();
+  assert.equal(calls, 2, "the verifier itself decides what is cached");
+  await assert.rejects(new ProviderActionPortRouter({}, async () => { throw new Error("tree mismatch"); }).verifyBundledRuntime(), /tree mismatch/);
+  // The default verifier imports the Electron build tree; with no bundled runtime in this process it resolves.
+  await new ProviderActionPortRouter().verifyBundledRuntime();
+});

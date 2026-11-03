@@ -16,6 +16,7 @@ import { thisComputerLabel } from "./supervised-agents-support";
  *
  *   prepare            -> Checking sign-in and settings (with the saved agent's
  *                         workspace set-up before the launch)
+ *   runtime_verify     -> Checking the LetAgents runtime (only when it waited)
  *   slot_wait          -> Waiting for a free start slot (only when it waited)
  *   admission, process -> Starting Claude Code | Codex | OpenCode
  *   bootstrap          -> Connecting to <model> (Claude Code only; other
@@ -27,7 +28,7 @@ import { thisComputerLabel } from "./supervised-agents-support";
  * stages follow the manifest milestones alone.
  */
 
-export type AgentStartupStageKey = "prepare" | "slot" | "process" | "bootstrap" | "join" | "context";
+export type AgentStartupStageKey = "prepare" | "runtime" | "slot" | "process" | "bootstrap" | "join" | "context";
 export type AgentStartupStageState = "pending" | "now" | "done" | "failed";
 export type AgentStartupStatus = "running" | "joined" | "failed" | "cancelled";
 export type AgentStartupAction = "sign_in" | "install" | "retry";
@@ -111,6 +112,7 @@ function isClaude(provider: string): boolean {
 export function stageForLaunchPhase(phase: DesktopSupervisorLaunchPhase, provider: string): AgentStartupStageKey {
   switch (phase) {
     case "prepare": return "prepare";
+    case "runtime_verify": return "runtime";
     case "slot_wait": return "slot";
     case "admission":
     case "process": return "process";
@@ -125,12 +127,13 @@ const READING_MAX_MS = 60_000;
 /** How long a retry may wait for the daemon's next launch before an unchanged failure shows again. */
 const RETRY_PENDING_MAX_MS = 20_000;
 
-/** A slot wait shorter than this was not a wait a person would notice. */
+/** A slot or runtime-check wait shorter than this was not a wait a person would notice. */
 const SLOT_WAIT_SHOWN_MS = 500;
 
 function stageLabel(key: AgentStartupStageKey, entry: Entry, roomLabel: string): string {
   switch (key) {
     case "prepare": return "Checking sign-in and settings";
+    case "runtime": return "Checking the LetAgents runtime";
     case "slot": return "Waiting for a free start slot";
     case "process": return `Starting ${agentRuntimeLabel(entry.provider)}`;
     case "bootstrap": return `Connecting to ${entry.model?.trim() || "the model"}`;
@@ -227,6 +230,8 @@ function stageFacts(entry: Entry, progress: DesktopSupervisorLaunchProgress | nu
     ms: prepareEnd != null && prepareStartMs != null ? prepareEnd - prepareStartMs : prepare.ms,
     startMs: prepareStartMs,
   });
+  const runtime = sumOf("runtime");
+  set("runtime", { done: runtime.closed, ms: runtime.ms, startMs: runtime.startMs });
   const slot = sumOf("slot");
   set("slot", { done: slot.closed, ms: slot.ms, startMs: slot.startMs });
   const processStage = sumOf("process");
@@ -254,10 +259,19 @@ function stageFacts(entry: Entry, progress: DesktopSupervisorLaunchProgress | nu
 }
 
 function showsSlot(progress: DesktopSupervisorLaunchProgress | null, nowMs: number): boolean {
-  const wait = progress?.phases.find((phase) => phase.phase === "slot_wait");
+  if ((progress?.current === "slot_wait" && (progress.slotAhead ?? 0) > 0)) return true;
+  return showsWait(progress, "slot_wait", nowMs);
+}
+
+/** The daemon's one-time runtime check is shown only to a launch that really waited for it. */
+function showsRuntime(progress: DesktopSupervisorLaunchProgress | null, nowMs: number): boolean {
+  return showsWait(progress, "runtime_verify", nowMs);
+}
+
+function showsWait(progress: DesktopSupervisorLaunchProgress | null, phase: DesktopSupervisorLaunchPhase, nowMs: number): boolean {
+  const wait = progress?.phases.find((candidate) => candidate.phase === phase);
   if (!wait) return false;
   if (wait.ms != null) return wait.ms >= SLOT_WAIT_SHOWN_MS;
-  if ((progress?.slotAhead ?? 0) > 0) return true;
   const started = time(wait.startedAt);
   return started != null && nowMs - started >= SLOT_WAIT_SHOWN_MS;
 }
@@ -274,6 +288,7 @@ export function agentStartupView(entry: Entry, context: AgentStartupContext, now
     && nowMs - retryAt < RETRY_PENDING_MAX_MS;
   const manifest = supervisedLaunchProgress(entry);
   const keys: AgentStartupStageKey[] = ["prepare"];
+  if (showsRuntime(progress, nowMs)) keys.push("runtime");
   if (showsSlot(progress, nowMs)) keys.push("slot");
   keys.push("process");
   if (isClaude(entry.provider)) keys.push("bootstrap");

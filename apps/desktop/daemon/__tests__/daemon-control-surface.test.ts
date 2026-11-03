@@ -768,12 +768,15 @@ test("a host approval change wakes a waiting manifest.watch_state before its tim
     workspaceRoot: env.root,
   };
   let observed: ((event: { type: "snapshot"; connectionId: string; requests: unknown[] }) => void) | null = null;
+  let runtimeVerifications = 0;
   const provider = {
     observePermissions: async (_handle: unknown, listener: NonNullable<typeof observed>) => { observed = listener; },
+    verifyBundledRuntime: async () => { runtimeVerifications += 1; },
   };
   const daemon = new SupervisorDaemon(paths, "darwin", provider as never);
   try {
     await daemon.start();
+    assert.equal(runtimeVerifications, 1, "the daemon starts the bundled runtime check at its own start");
     const initial = (await daemonRequest(paths.socketPath, "manifest.watch_state", {
       after_daemon_generation: 0, after_sequence: 0, wait_ms: 1_000,
     })).result as { daemon_generation: number; sequence: number };

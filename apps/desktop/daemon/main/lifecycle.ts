@@ -79,6 +79,11 @@ export abstract class SupervisorDaemonLifecycle extends SupervisorDaemonOperatio
     await this.lifecycleAdministration.recoverEphemeralWorkspaces();
     await restoreLocalRoomAuthorities((await this.store.load()).entries, this.singleton.currentGeneration, this.workerRuntimeCustody);
     await this.socket.start();
+    // The bundled MCP runtime's integrity check reads its whole tree once per
+    // daemon; on a fresh install behind an on-access scanner that took over a
+    // minute inside the first agent launch. It starts now, in the background,
+    // and a launch waits on it only while it is still running.
+    void this.providerPort?.verifyBundledRuntime?.().catch(() => undefined);
     // Images an earlier process staged for turns that have long ended.
     void this.roomTurnAttachments.sweep();
     for (const entry of (await this.store.load()).entries) {

@@ -77,6 +77,7 @@ const LAUNCHED: Array<[DesktopSupervisorLaunchProgress["phases"][number]["phase"
 
 test("daemon launch phases map to the plain stages per provider", () => {
   assert.equal(stageForLaunchPhase("prepare", "codex"), "prepare");
+  assert.equal(stageForLaunchPhase("runtime_verify", "codex"), "runtime");
   assert.equal(stageForLaunchPhase("slot_wait", "codex"), "slot");
   assert.equal(stageForLaunchPhase("admission", "codex"), "process");
   assert.equal(stageForLaunchPhase("process", "codex"), "process");
@@ -119,6 +120,24 @@ test("a slot wait shows only when it really waited, with the queue position", ()
   const waited = agentStartupView(entry({ launchProgress: progress([["prepare", 300], ["slot_wait", 2_400], ["admission", 5]], "process") }), context, T0 + 3_000);
   assert.equal(waited.stages[1]!.key, "slot");
   assert.equal(waited.stages[1]!.ms, 2_400);
+});
+
+test("the daemon's runtime check shows only to a launch that really waited for it", () => {
+  const instant = agentStartupView(entry({ launchProgress: progress([["prepare", 300], ["runtime_verify", 2], ["slot_wait", 5]], "admission") }), context, T0 + 600);
+  assert.equal(instant.stages.some((stage) => stage.key === "runtime"), false);
+  const waiting = agentStartupView(entry({ launchProgress: progress([["prepare", 300]], "runtime_verify") }), context, T0 + 2_000);
+  assert.equal(waiting.stages[1]!.key, "runtime");
+  assert.equal(waiting.line, "Checking the LetAgents runtime…");
+  assert.equal(waiting.stages[1]!.state, "now");
+  const waited = agentStartupView(entry({ launchProgress: progress([["prepare", 300], ["runtime_verify", 40_000], ["slot_wait", 5], ["admission", 5]], "process") }), context, T0 + 41_000);
+  assert.deepEqual(waited.stages.map((stage) => [stage.key, stage.state]),
+    [["prepare", "done"], ["runtime", "done"], ["process", "now"], ["bootstrap", "pending"], ["join", "pending"], ["context", "pending"]]);
+  assert.equal(waited.stages[1]!.ms, 40_000);
+  const failed = agentStartupView(entry({ launchProgress: { ...progress([["prepare", 300], ["runtime_verify", 900]], null),
+    state: "failed", failure: { phase: "runtime_verify", action: "retry" } } }), context, T0 + 2_000);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.stages[1]!.key, "runtime");
+  assert.equal(failed.stages[1]!.state, "failed");
 });
 
 test("joining waits for the room bind, reading the room waits for the first output, then it has joined", () => {
