@@ -4,9 +4,21 @@ import { describe, it } from "node:test";
 import {
   INLINE_DEMO_FOCUS_INTENT_MS,
   inlineDemoFrameHeight,
+  inlineDemoMayRestart,
   inlineDemoMayTakeFocus,
+  inlineDemoStoppedText,
   type InlineDemoFocusFacts,
 } from "../src/components/desktop/content/desktop-chat-message/attachments";
+import {
+  dropPendingInlineDemoHeight,
+  INLINE_DEMO_HEIGHT_MIN_SHRINK,
+  INLINE_DEMO_HEIGHT_SETTLE_MS,
+  inlineDemoHeightSettleDelay,
+  newInlineDemoHeight,
+  reportInlineDemoHeight,
+  settleInlineDemoHeight,
+  type InlineDemoHeight,
+} from "../src/components/desktop/content/desktop-chat-message/inline-demo-height";
 import type { DesktopInlineHtmlDemoEvent } from "../../electron/ipc-types";
 import { createInlineDemoEvents } from "../src/components/desktop/content/desktop-chat-message/inline-demo-events";
 import {
@@ -264,5 +276,161 @@ describe("inline demo event hub", () => {
     available = true;
     events.register("letagents-demo://b/", () => undefined);
     assert.equal(subscribes, 2);
+  });
+});
+
+describe("inline demo stopped text", () => {
+  it("says a frozen or crashed demo stopped responding", () => {
+    assert.equal(inlineDemoStoppedText("unresponsive"), "This demo stopped responding.");
+    assert.equal(inlineDemoStoppedText("crashed"), "This demo stopped responding.");
+  });
+
+  it("says an overloaded demo was stopped for slowing down the app", () => {
+    assert.equal(inlineDemoStoppedText("overloaded"), "This demo was stopped because it slowed down the app.");
+  });
+});
+
+describe("inline demo restart limit", () => {
+  it("restarts a lost demo twice in 30 s and then stops", () => {
+    assert.equal(inlineDemoMayRestart(1_000, []), true);
+    assert.equal(inlineDemoMayRestart(2_000, [1_000]), true);
+    assert.equal(inlineDemoMayRestart(3_000, [1_000, 2_000]), false);
+  });
+
+  it("forgets restarts older than 30 s", () => {
+    assert.equal(inlineDemoMayRestart(31_000, [1_000, 2_000]), true);
+    assert.equal(inlineDemoMayRestart(30_999, [1_000, 2_000]), false);
+  });
+});
+
+describe("inline demo height smoothing", () => {
+  const report = (state: InlineDemoHeight, height: number, now: number) => reportInlineDemoHeight(state, height, now);
+
+  it("shows the first report at once, even when it is lower than the starting height", () => {
+    const state = report(newInlineDemoHeight(), 150, 0);
+    assert.equal(state.shown, 150);
+  });
+
+  it("shows a higher height at once", () => {
+    let state = report(newInlineDemoHeight(), 200, 0);
+    state = report(state, 320, 100);
+    assert.equal(state.shown, 320);
+    assert.equal(state.pending, null);
+  });
+
+  it("shows a lower height only after it held for 400 ms", () => {
+    let state = report(newInlineDemoHeight(), 320, 0);
+    state = report(state, 200, 1_000);
+    assert.equal(state.shown, 320);
+    assert.deepEqual(state.pending, { height: 200, since: 1_000 });
+    assert.equal(inlineDemoHeightSettleDelay(state, 1_000), INLINE_DEMO_HEIGHT_SETTLE_MS);
+    assert.equal(inlineDemoHeightSettleDelay(state, 1_350), 50);
+
+    assert.equal(settleInlineDemoHeight(state, 1_399).shown, 320);
+    const settled = settleInlineDemoHeight(state, 1_400);
+    assert.equal(settled.shown, 200);
+    assert.equal(settled.pending, null);
+    assert.equal(inlineDemoHeightSettleDelay(settled, 1_400), null);
+  });
+
+  it("starts the wait again when another lower height arrives, and keeps it for a repeat", () => {
+    let state = report(newInlineDemoHeight(), 320, 0);
+    state = report(state, 200, 1_000);
+    state = report(state, 200, 1_200);
+    assert.deepEqual(state.pending, { height: 200, since: 1_000 });
+    state = report(state, 180, 1_300);
+    assert.deepEqual(state.pending, { height: 180, since: 1_300 });
+  });
+
+  it("drops a pending lower height when the frame grows or the height returns", () => {
+    let state = report(newInlineDemoHeight(), 320, 0);
+    state = report(state, 200, 1_000);
+    assert.equal(report(state, 320, 1_100).pending, null);
+    assert.equal(report(state, 400, 1_100).shown, 400);
+    assert.equal(dropPendingInlineDemoHeight(state).pending, null);
+    assert.equal(dropPendingInlineDemoHeight(state).shown, 320);
+  });
+
+  it("applies a due lower height before it takes the next report", () => {
+    let state = report(newInlineDemoHeight(), 320, 0);
+    state = report(state, 200, 1_000);
+    state = report(state, 150, 1_500);
+    assert.equal(state.shown, 200);
+    assert.deepEqual(state.pending, { height: 150, since: 1_500 });
+  });
+
+  it("ignores a decrease smaller than 24 px but shows any increase at once", () => {
+    assert.equal(INLINE_DEMO_HEIGHT_MIN_SHRINK, 24);
+    const base = report(newInlineDemoHeight(), 300, 0);
+
+    const small = report(base, 277, 1_000);
+    assert.equal(small.shown, 300);
+    assert.equal(small.pending, null);
+    assert.equal(settleInlineDemoHeight(small, 5_000).shown, 300);
+
+    const exact = report(base, 276, 1_000);
+    assert.deepEqual(exact.pending, { height: 276, since: 1_000 });
+    assert.equal(settleInlineDemoHeight(exact, 1_400).shown, 276);
+
+    assert.equal(report(base, 301, 1_000).shown, 301);
+  });
+
+  it("drops a pending shrink when a small decrease arrives after it", () => {
+    let state = report(newInlineDemoHeight(), 320, 0);
+    state = report(state, 200, 1_000);
+    state = report(state, 310, 1_100);
+    assert.equal(state.pending, null);
+    assert.equal(settleInlineDemoHeight(state, 2_000).shown, 320);
+  });
+
+  it("does not creep down when the page follows its frame", () => {
+    let state = report(newInlineDemoHeight(), 228, 0);
+    for (let step = 1; step <= 40; step += 1) {
+      const now = step * 450;
+      state = report(settleInlineDemoHeight(state, now), (state.shown ?? 0) - 12, now);
+    }
+    assert.equal(state.shown, 228);
+    assert.equal(state.held, false);
+  });
+
+  it("works on frame heights, so changes past 560 px do not count", () => {
+    let state = report(newInlineDemoHeight(), 700, 0);
+    assert.equal(state.shown, 560);
+    state = report(state, 900, 100);
+    assert.equal(state.shown, 560);
+    assert.equal(state.changedAt.length, 0);
+  });
+
+  it("holds the largest height when it changes more than 10 times in 2 s", () => {
+    let state = report(newInlineDemoHeight(), 200, 0);
+    for (let index = 1; index <= 11; index += 1) {
+      state = report(state, index % 2 === 0 ? 200 : 300, index * 100);
+    }
+    assert.equal(state.held, true);
+    assert.equal(state.shown, 300);
+
+    state = report(state, 450, 1_300);
+    state = report(state, 130, 1_400);
+    assert.equal(state.shown, 300);
+    assert.equal(state.pending, null);
+  });
+
+  it("does not hold a demo that settles after a few changes, or changes slowly", () => {
+    let state = report(newInlineDemoHeight(), 200, 0);
+    for (let index = 1; index <= 8; index += 1) state = report(state, 200 + index * 10, index * 100);
+    assert.equal(state.held, false);
+
+    let slow = report(newInlineDemoHeight(), 200, 0);
+    for (let index = 1; index <= 30; index += 1) slow = report(slow, index % 2 === 0 ? 200 : 300, index * 500);
+    assert.equal(slow.held, false);
+  });
+
+  it("starts a reload from the shown height without the hold", () => {
+    let state = report(newInlineDemoHeight(), 200, 0);
+    for (let index = 1; index <= 11; index += 1) state = report(state, index % 2 === 0 ? 200 : 300, index * 100);
+    const reloaded = newInlineDemoHeight(state.shown);
+    assert.equal(reloaded.held, false);
+    assert.equal(reloaded.shown, 300);
+    assert.equal(report(reloaded, 150, 5_000).shown, 300);
   });
 });

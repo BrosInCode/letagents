@@ -1,4 +1,7 @@
-import type { DesktopRoomMessageAttachment } from "../../../../../../electron/ipc-types";
+import type {
+  DesktopInlineHtmlDemoEvent,
+  DesktopRoomMessageAttachment,
+} from "../../../../../../electron/ipc-types";
 import { formatBytes } from "../attachments/formatting";
 
 export function formatDisplayBytes(bytes: number): string {
@@ -98,4 +101,25 @@ export function inlineDemoMayTakeFocus(facts: InlineDemoFocusFacts): boolean {
   return facts.holdsFocus
     || withinInlineDemoFocusWindow(facts.now, facts.pointerDownAt)
     || withinInlineDemoFocusWindow(facts.now, facts.tabKeyAt);
+}
+
+export type InlineDemoStopReason = Extract<DesktopInlineHtmlDemoEvent, { type: "stopped" }>["reason"];
+
+/** What a stopped demo tells the person, by the reason main (or the webview) gave. */
+export function inlineDemoStoppedText(reason: InlineDemoStopReason): string {
+  return reason === "overloaded"
+    ? "This demo was stopped because it slowed down the app."
+    : "This demo stopped responding.";
+}
+
+const INLINE_DEMO_RESTART_LIMIT = 2;
+const INLINE_DEMO_RESTART_WINDOW_MS = 30_000;
+
+/**
+ * A demo whose guest vanished is started again by itself, but not in a loop:
+ * after two restarts in 30 s it stays stopped until the person reloads it.
+ */
+export function inlineDemoMayRestart(now: number, restartedAt: readonly number[]): boolean {
+  return restartedAt.filter((at) => now - at >= 0 && now - at < INLINE_DEMO_RESTART_WINDOW_MS).length
+    < INLINE_DEMO_RESTART_LIMIT;
 }

@@ -4,7 +4,7 @@
       <FileCode class="room-inline-demo-icon" :size="16" aria-hidden="true" />
       <span class="room-inline-demo-title">
         <strong :title="fileName">{{ fileName }}</strong>
-        <small>Interactive demo · locked, no network requests</small>
+        <small title="Runs in a locked view on this computer. It cannot load web pages or reach your LetAgents data.">Interactive demo · locked</small>
       </span>
       <button
         class="room-inline-demo-action"
@@ -39,9 +39,10 @@
         class="room-inline-demo-view"
         :partition="lease.partition"
         :src="lease.url"
-        @dom-ready="markRunning"
-        @render-process-gone="markStopped"
+        @dom-ready="onViewReady"
+        @render-process-gone="onViewGone"
         @did-fail-load="onLoadFailed"
+        @destroyed="onViewDestroyed"
         @focus="onViewFocus"
         @blur="onViewBlur"
       />
@@ -59,7 +60,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
 import { FileCode, Maximize2, RotateCw } from "@lucide/vue";
 import type {
   DesktopInlineHtmlDemoEvent,
@@ -68,10 +69,21 @@ import type {
 import {
   htmlDemoErrorText,
   inlineDemoFrameHeight,
+  inlineDemoMayRestart,
   inlineDemoMayTakeFocus,
+  inlineDemoStoppedText,
   withinInlineDemoFocusWindow,
+  type InlineDemoStopReason,
 } from "./attachments";
 import { inlineDemoEvents } from "./inline-demo-events";
+import {
+  dropPendingInlineDemoHeight,
+  inlineDemoHeightSettleDelay,
+  newInlineDemoHeight,
+  reportInlineDemoHeight,
+  settleInlineDemoHeight,
+  type InlineDemoHeight,
+} from "./inline-demo-height";
 import { inlineDemoSlots, MAX_RUNNING_INLINE_DEMOS, type InlineDemoSlot } from "./inline-demo-slots";
 import { desktopIpc } from "../../../../ipc/index";
 
@@ -85,18 +97,21 @@ type DemoStatus = "idle" | "waiting" | "starting" | "running" | "stopped" | "err
 
 // Off screen for this long, a running demo is released; scrolling past one does not restart it.
 const PAUSE_AFTER_OFF_SCREEN_MS = 15_000;
+// A lease whose webview never loads (main refused it, say) ends in the error state.
+const START_TIMEOUT_MS = 15_000;
 
 const card = ref<HTMLElement | null>(null);
 const view = ref<HTMLElement | null>(null);
 const status = ref<DemoStatus>("idle");
 const lease = ref<DesktopInlineHtmlDemoLease | null>(null);
 const errorText = ref("");
+const stoppedReason = ref<InlineDemoStopReason>("unresponsive");
 // Kept across pauses and reloads so the chat does not jump while the demo is away.
-const contentHeight = ref<number | null>(null);
+const heightState = ref<InlineDemoHeight>(newInlineDemoHeight());
 const expanding = ref(false);
 const expandError = ref("");
 
-const frameHeight = computed(() => inlineDemoFrameHeight(contentHeight.value));
+const frameHeight = computed(() => inlineDemoFrameHeight(heightState.value.shown));
 const statusText = computed(() => {
   switch (status.value) {
     case "waiting":
@@ -104,7 +119,7 @@ const statusText = computed(() => {
     case "starting":
       return "Starting the demo…";
     case "stopped":
-      return "This demo stopped responding.";
+      return inlineDemoStoppedText(stoppedReason.value);
     case "error":
       return errorText.value;
     default:
@@ -116,6 +131,11 @@ let observer: IntersectionObserver | undefined;
 let intersecting = false;
 let onScreen = false;
 let pauseTimer: ReturnType<typeof setTimeout> | undefined;
+let startTimer: ReturnType<typeof setTimeout> | undefined;
+let heightTimer: ReturnType<typeof setTimeout> | undefined;
+// The room view is kept alive, not unmounted, when the person opens Settings.
+let deactivated = false;
+let restartedAt: number[] = [];
 let stopEvents: (() => void) | null = null;
 let slot: InlineDemoSlot | null = null;
 // Raised whenever a run starts or ends, so a late answer from main is ignored.
@@ -131,6 +151,11 @@ function stopRun(): void {
   generation++;
   clearTimeout(pauseTimer);
   pauseTimer = undefined;
+  clearTimeout(startTimer);
+  startTimer = undefined;
+  clearTimeout(heightTimer);
+  heightTimer = undefined;
+  heightState.value = dropPendingInlineDemoHeight(heightState.value);
   slot?.release();
   slot = null;
   stopEvents?.();
@@ -165,6 +190,7 @@ async function startRun(version: number): Promise<void> {
     }
     lease.value = next;
     stopEvents = inlineDemoEvents.register(next.url, handleDemoEvent);
+    startTimer = setTimeout(startTimedOut, START_TIMEOUT_MS);
   } catch (error) {
     if (version !== generation) return;
     stopRun();
@@ -176,32 +202,89 @@ async function startRun(version: number): Promise<void> {
 function reload(): void {
   stopRun();
   errorText.value = "";
+  restartedAt = [];
+  heightState.value = newInlineDemoHeight(heightState.value.shown);
   status.value = "idle";
   if (onScreen) requestRun();
 }
 
 function markRunning(): void {
-  if (status.value === "starting") status.value = "running";
+  if (status.value !== "starting") return;
+  clearTimeout(startTimer);
+  startTimer = undefined;
+  status.value = "running";
 }
 
-function markStopped(): void {
+function markStopped(reason: InlineDemoStopReason): void {
   if (!lease.value) return;
   stopRun();
+  stoppedReason.value = reason;
   status.value = "stopped";
+}
+
+function startTimedOut(): void {
+  if (status.value !== "starting" || !lease.value) return;
+  stopRun();
+  errorText.value = "This demo did not start.";
+  status.value = "error";
+}
+
+/** The guest is gone and nothing said why: start a fresh lease if the card is in view. */
+function restartAfterLoss(): void {
+  stopRun();
+  status.value = "idle";
+  if (!onScreen) return;
+  const now = performance.now();
+  if (inlineDemoMayRestart(now, restartedAt)) {
+    restartedAt = [...restartedAt, now].slice(-4);
+    requestRun();
+  } else {
+    stoppedReason.value = "crashed";
+    status.value = "stopped";
+  }
+}
+
+// A webview that was removed can still report late; only the current one counts.
+function ownsEvent(event: Event): boolean {
+  return lease.value !== null && event.target === view.value;
+}
+
+function onViewReady(event: Event): void {
+  if (ownsEvent(event)) markRunning();
+}
+
+function onViewGone(event: Event): void {
+  if (ownsEvent(event)) markStopped("crashed");
+}
+
+function onViewDestroyed(event: Event): void {
+  if (ownsEvent(event) && !deactivated) restartAfterLoss();
 }
 
 function onLoadFailed(event: Event): void {
   // -3 is a load cut short on purpose, as when the webview is removed.
   const { errorCode, isMainFrame } = event as Event & { errorCode?: number; isMainFrame?: boolean };
-  if (isMainFrame && errorCode !== -3) markStopped();
+  if (ownsEvent(event) && isMainFrame && errorCode !== -3) markStopped("crashed");
+}
+
+function scheduleHeightSettle(): void {
+  clearTimeout(heightTimer);
+  heightTimer = undefined;
+  const delay = inlineDemoHeightSettleDelay(heightState.value, performance.now());
+  if (delay === null) return;
+  heightTimer = setTimeout(() => {
+    heightState.value = settleInlineDemoHeight(heightState.value, performance.now());
+    scheduleHeightSettle();
+  }, delay);
 }
 
 function handleDemoEvent(event: DesktopInlineHtmlDemoEvent): void {
   if (event.type === "height") {
-    contentHeight.value = event.height;
+    heightState.value = reportInlineDemoHeight(heightState.value, event.height, performance.now());
+    scheduleHeightSettle();
     markRunning();
   } else {
-    markStopped();
+    markStopped(event.reason);
   }
 }
 
@@ -293,19 +376,43 @@ function onViewBlur(): void {
 
 watch(() => props.href, reload);
 
-onMounted(() => {
-  document.addEventListener("keydown", noteKeyDown, true);
-  document.addEventListener("focusout", noteFocusOut, true);
-  document.addEventListener("visibilitychange", syncOnScreen);
+function observe(): void {
+  observer?.disconnect();
   if (!card.value) return;
   observer = new IntersectionObserver(
     (entries) => {
+      if (deactivated) return;
       intersecting = entries[entries.length - 1]?.isIntersecting ?? false;
       syncOnScreen();
     },
     { root: outermostScroller(card.value), rootMargin: "160px 0px" },
   );
   observer.observe(card.value);
+}
+
+onMounted(() => {
+  document.addEventListener("keydown", noteKeyDown, true);
+  document.addEventListener("focusout", noteFocusOut, true);
+  document.addEventListener("visibilitychange", syncOnScreen);
+  observe();
+});
+
+// Moved out of the document, the webview's guest is destroyed and main ends its
+// lease. The card is not on screen then; coming back starts a fresh lease.
+onDeactivated(() => {
+  deactivated = true;
+  observer?.disconnect();
+  intersecting = false;
+  onScreen = false;
+  const wasRunning = status.value === "waiting" || status.value === "starting" || status.value === "running";
+  stopRun();
+  if (wasRunning) status.value = "idle";
+});
+
+onActivated(() => {
+  if (!deactivated) return;
+  deactivated = false;
+  observe();
 });
 
 onBeforeUnmount(() => {
