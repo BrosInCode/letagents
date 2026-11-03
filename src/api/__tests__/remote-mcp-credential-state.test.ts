@@ -71,12 +71,6 @@ test("the worker cap keeps the most recently used handles, and a handle keeps at
   const projected = projectCredentialState(state({ mcp_workers: workers, agent_sessions: sessions }), 2);
   assert.deepEqual(Object.keys(projected.local.mcp_workers ?? {}).sort(), ["worker_0", "worker_4"]);
   assert.deepEqual(Object.keys(projected.local.agent_sessions ?? {}).sort(), ["s0", "s4"], "only the kept workers' sessions stay");
-  // A worker used within the last record interval counts as used through it, so a burst of
-  // registrations inside one minute does not drop a worker that is busy right now.
-  const busy = { ...workers, worker_0: { ...workers.worker_0!, last_used_at: "2026-11-03T12:59:30.000Z" } };
-  const busySessions = { ...sessions, s4: session("s4", "x", "2026-11-03 14:00:15+01") }; // 13:00:15Z, within 60 s of the use
-  const afterBurst = projectCredentialState(state({ mcp_workers: busy, agent_sessions: busySessions }), 2);
-  assert.ok(Object.hasOwn(afterBurst.local.mcp_workers ?? {}, "worker_0"), "the busy worker is kept through the record interval");
   // A freshly registered worker (Postgres text, a space before the time) is newer than an ISO use earlier the same day.
   const fresh = { ...workers, worker_5: worker("5", { x: "s5" }) };
   const freshSessions = { ...sessions, s5: session("s5", "x", "2026-11-03 15:00:00+01") };
@@ -149,6 +143,28 @@ test("a stale session's older use time does not move a worker's recency backward
   const folded = foldIntoCredential(credential, stale, null);
   assert.equal(folded.local.mcp_workers!.worker_a!.last_used_at, "2026-11-03T12:00:00.000Z");
   assert.deepEqual(Object.keys(folded.local.mcp_workers!.worker_a!.rooms).sort(), ["x", "y"], "the room binding it added is still folded in");
+});
+
+test("a fresh registration survives its own fold, whatever the other workers' recency", () => {
+  // Two workers used within the last minute fill a cap of 2; the session that
+  // registers a third one right now must still see it in the credential.
+  const busyA = { ...worker("a", { x: "sa" }), last_used_at: "2026-11-03T12:00:30.000Z" };
+  const busyB = { ...worker("b", { x: "sb" }), last_used_at: "2026-11-03T12:00:40.000Z" };
+  const sa = session("sa", "x", "2026-11-03 12:00:00+00");
+  const sb = session("sb", "x", "2026-11-03 12:00:00+00");
+  const credential = projectCredentialState(state({ mcp_workers: { worker_a: busyA, worker_b: busyB }, agent_sessions: { sa, sb }, pinned: [sa, sb] }), 2);
+  const sc = session("sc", "x", "2026-11-03 12:00:50+00"); // registered after the two uses were recorded
+  const registering = state({ mcp_workers: { worker_a: busyA, worker_b: busyB, worker_c: worker("c", { x: "sc" }) },
+    agent_sessions: { sa, sb, sc }, pinned: [sa, sb, sc] });
+  const folded = foldIntoCredential(credential, registering, credential, 2);
+  assert.ok(Object.hasOwn(folded.local.mcp_workers!, "worker_c"), "the worker this session registered is kept");
+  assert.equal(Object.keys(folded.local.mcp_workers!).length, 2, "the cap still holds");
+  assert.ok(folded.pinnedConnections.sc, "with its connection");
+  // Another session's fold, which did not touch worker_c, ranks by recency alone: a worker used
+  // since is kept, and worker_c stays ahead of a worker last used before it was registered.
+  const other = state({ mcp_workers: { worker_a: { ...busyA, last_used_at: "2026-11-03T12:01:30.000Z" } }, agent_sessions: { sa }, pinned: [sa] });
+  const afterOther = foldIntoCredential(folded, other, folded, 2);
+  assert.deepEqual(Object.keys(afterOther.local.mcp_workers!).sort(), ["worker_a", "worker_c"]);
 });
 
 test("two sessions that bind one worker in different rooms both keep their binding", () => {

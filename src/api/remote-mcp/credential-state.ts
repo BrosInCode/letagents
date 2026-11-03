@@ -1,5 +1,4 @@
 import type { McpSessionPersistentState } from "../../mcp/server/runtime/session-scope.js";
-import { WORKER_USE_RECORD_INTERVAL_MS } from "../../shared/mcp-worker.js";
 
 /**
  * The state one remote MCP credential keeps for its later sessions, and how a
@@ -152,7 +151,8 @@ function canonical(value: unknown): string {
  * Bounded, so the credential state cannot grow with every call: the least
  * recently used workers and legacy sessions go first.
  */
-export function projectCredentialState(state: McpSessionPersistentState, maxWorkers = credentialMaxWorkers()): McpSessionPersistentState {
+export function projectCredentialState(state: McpSessionPersistentState, maxWorkers = credentialMaxWorkers(),
+  keepFirst: ReadonlySet<string> = new Set()): McpSessionPersistentState {
   const local = state.local;
   const agentSessions = local.agent_sessions ?? {};
   const pinned = state.pinnedConnections ?? {};
@@ -160,16 +160,16 @@ export function projectCredentialState(state: McpSessionPersistentState, maxWork
   const known = (id: string | undefined): id is string => Boolean(id && agentSessions[id]);
   const live = (id: string | undefined): id is string => known(id) && !agentSessions[id]!.ended_at;
 
-  // A worker's recency is its last recorded use (written once per interval, so
-  // a busy worker counts as used through the interval), or else the newest of
-  // its sessions.
-  const usedUntil = (worker: { last_used_at?: string }): number => (worker.last_used_at ? toTime(worker.last_used_at) + WORKER_USE_RECORD_INTERVAL_MS : 0);
+  // A worker's recency is its last recorded use (a remote session records
+  // every call), or else the newest of its sessions. `keepFirst` names the
+  // workers the folding session itself added or changed: a fresh registration
+  // survives its own fold whatever the others' recency.
   const workers = Object.values(local.mcp_workers ?? {})
     .map((worker) => ({
       worker,
-      seen: Math.max(usedUntil(worker), ...Object.values(worker.rooms).map((room) => seenAt(room.session_id))),
+      seen: Math.max(toTime(worker.last_used_at), ...Object.values(worker.rooms).map((room) => seenAt(room.session_id))),
     }))
-    .sort((a, b) => b.seen - a.seen)
+    .sort((a, b) => Number(keepFirst.has(b.worker.worker_id)) - Number(keepFirst.has(a.worker.worker_id)) || b.seen - a.seen)
     .slice(0, Math.max(0, maxWorkers))
     .map(({ worker }) => {
       const rooms = Object.entries(worker.rooms)
@@ -213,6 +213,7 @@ export function projectCredentialState(state: McpSessionPersistentState, maxWork
 export function foldIntoCredential(credential: McpSessionPersistentState, session: McpSessionPersistentState,
   baseline: McpSessionPersistentState | null, maxWorkers = credentialMaxWorkers()): McpSessionPersistentState {
   const out: McpSessionPersistentState = structuredClone(credential);
+  const changedWorkers = new Set<string>();
   const foldMap = (target: JsonRecord, mine: JsonRecord | undefined, base: JsonRecord | undefined): void => {
     for (const [key, entry] of Object.entries(mine ?? {})) {
       if (base && key in base && canonical(base[key]) === canonical(entry)) continue;
@@ -226,6 +227,7 @@ export function foldIntoCredential(credential: McpSessionPersistentState, sessio
     for (const [workerId, entry] of Object.entries(mine ?? {})) {
       const baseWorker = base?.[workerId];
       if (baseWorker !== undefined && canonical(baseWorker) === canonical(entry)) continue;
+      changedWorkers.add(workerId);
       const current = target[workerId];
       if (!isRecord(current) || !isRecord(entry)) {
         target[workerId] = entry;
@@ -249,6 +251,6 @@ export function foldIntoCredential(credential: McpSessionPersistentState, sessio
   }
   foldMap(out.pinnedConnections as unknown as JsonRecord, session.pinnedConnections as unknown as JsonRecord,
     baseline?.pinnedConnections as unknown as JsonRecord | undefined);
-  return projectCredentialState(out, maxWorkers);
+  return projectCredentialState(out, maxWorkers, changedWorkers);
 }
 

@@ -1,7 +1,7 @@
 /**
- * How often a worker's `last_used_at` is written while room tools run as it.
- * It orders which handles a remote credential keeps, so recency reads the
- * stored time plus this interval.
+ * How often a stdio process writes a worker's `last_used_at` to its state
+ * file while room tools run as it. A remote session records every call, since
+ * that time orders which handles its credential keeps.
  */
 export const WORKER_USE_RECORD_INTERVAL_MS = 60_000;
 

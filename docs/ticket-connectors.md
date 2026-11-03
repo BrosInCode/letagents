@@ -964,7 +964,8 @@ into a room another chat of the same sign-in chose. So a client that opens a new
 keeps its worker: `register_agent_session` in one call, `send_message` with the returned `worker_id` in the next,
 with a new session in between (pass `room_id`, or join again). The state is bounded: at most
 `LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS` (32) workers with 16 rooms each, the least recently used dropped first
-(a worker's use is recorded about once a minute), and it is never larger than `LETAGENTS_REMOTE_MCP_MAX_STATE_BYTES`;
+(a remote session records every worker call; a session's own new registrations are kept through its fold), and it is
+never larger than `LETAGENTS_REMOTE_MCP_MAX_STATE_BYTES`;
 a new session's seed is kept under half that cap. A session folds in only the entries it added or changed (a worker's
 room bindings one room at a time), so a stale session cannot undo another session's later change. An ended agent
 session stays ended unless a session holds its renewed registration (same id, new token); a worker's ended session is

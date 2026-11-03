@@ -17,7 +17,7 @@ import { detectAgentIdeLabel, detectAgentRuntimeLabel } from "./identity/config.
 import { getProcessHostId, getSessionLivenessRegistration } from "./identity/liveness.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import { holdProcessConnection } from "./process-connection.js";
-import { scopedMap } from "./session-scope.js";
+import { currentSessionScope, scopedMap } from "./session-scope.js";
 
 export type AdoptedTaskLease = { lease_id: string; task_id: string; kind: string };
 type WorkerConnection = {
@@ -301,8 +301,19 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
 
   // Recover a response lost by an earlier process using its prepared credential.
   // Then rotate once more for this process; never silently share that connection.
+  // A replay the room refuses (409) may still have been committed before its
+  // answer was lost: the room then holds the prepared token, so a fresh
+  // registration that the saved token does not open is tried once with it.
+  let lostProof: string | undefined;
   const pending = getWorker(worker.worker_id, scope).rooms[roomId]?.pending;
-  if (pending) await finishOrClear(pending);
+  if (pending) {
+    try {
+      await finishOrClear(pending);
+    } catch (error) {
+      if (!(error instanceof ApiError && error.status === 409)) throw error;
+      lostProof = pending.connection_token;
+    }
+  }
   const operation = { operation_id: randomUUID(), connection_token: randomBytes(32).toString("base64url") } as NonNullable<StoredMcpWorker["rooms"][string]["pending"]>;
   updateLocalState((state) => {
     const target = state.mcp_workers![worker.worker_id]!.rooms;
@@ -314,7 +325,20 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
     operation.predecessor_token = prior?.session_token;
     target[roomId].pending = operation;
   });
-  const session = await finishOrClear(operation);
+  let session: StoredAgentSessionState;
+  try {
+    session = await finishOrClear(operation);
+  } catch (error) {
+    if (!(lostProof && error instanceof ApiError && error.status === 409 && lostProof !== operation.predecessor_token)) throw error;
+    operation.predecessor_token = lostProof;
+    updateLocalState((state) => {
+      const target = state.mcp_workers![worker.worker_id]!.rooms;
+      target[roomId] ??= {};
+      if (target[roomId].pending) throw new Error("Another registration is in progress for this worker; retry explicitly.");
+      target[roomId].pending = operation;
+    });
+    session = await finishOrClear(operation);
+  }
   pinWorkerConnection(getLocalStatePath(), session);
   if (!local) holdProcessConnection(session);
   return { worker: getWorker(worker.worker_id, scope), session };
@@ -323,8 +347,12 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
 export async function runMcpWorkerCall<T>(workerId: string, roomId: string | undefined,
   callback: (session: StoredAgentSessionState) => T, allowEnded = false): Promise<Awaited<T>> {
   const worker = getWorker(workerId, await workerScope());
+  // Use orders which handles a remote credential keeps, so a remote session
+  // records every call (its state is in memory and saved anyway); the stdio
+  // state file, which no credential reads, is written at most once an interval.
   const now = Date.now();
-  if (!worker.last_used_at || now - Date.parse(worker.last_used_at) > WORKER_USE_RECORD_INTERVAL_MS) {
+  const recordInterval = currentSessionScope() ? 0 : WORKER_USE_RECORD_INTERVAL_MS;
+  if (!worker.last_used_at || now - Date.parse(worker.last_used_at) > recordInterval) {
     updateLocalState((state) => {
       const stored = state.mcp_workers?.[workerId];
       if (stored) stored.last_used_at = new Date(now).toISOString();
