@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 
 import { desktopAssetNames } from "./release-metadata.mjs";
 import { sealedDaemonPipeAddonSha256 } from "../../../../shared/daemon-pipe-native.mjs";
-import { sealedProcessTreeHelperSha256 } from "../../../../shared/process-tree.mjs";
+import { PROCESS_TREE_HELPER_NAME, sealedProcessTreeHelperSha256 } from "../../../../shared/process-tree.mjs";
 import {
   DAEMON_PIPE_ADDON_APP_PATH,
   PROCESS_TREE_HELPER_APP_PATH,
@@ -92,8 +92,9 @@ function runningAppIds() {
   return new Set([...result.stdout.matchAll(/^"[^"]+","(\d+)"/gm)].map((match) => match[1]));
 }
 
-function processRunning(pid) {
-  const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { encoding: "utf8" });
+/** Whether process pid still runs image: a pid alone may name a later process by now. */
+function processRunning(pid, image) {
+  const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FI", `IMAGENAME eq ${image}`, "/FO", "CSV", "/NH"], { encoding: "utf8" });
   return new RegExp(`^"[^"]+","${pid}"`, "m").test(result.stdout);
 }
 
@@ -259,10 +260,10 @@ const agent = run(executable, ["-e", [
   "})().catch((error) => { console.error(error); process.exit(1); });",
 ].join("\n"), installDirectory], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, timeout: 2 * 60_000 });
 const agentHelper = /LETAGENTS_RUNNING_AGENT_HELPER (\d+)/.exec(agent.stdout)?.[1];
-assert(agent.status === 0 && agentHelper && processRunning(agentHelper), "The running agent's helper did not start.");
+assert(agent.status === 0 && agentHelper && processRunning(agentHelper, PROCESS_TREE_HELPER_NAME), "The running agent's helper did not start.");
 const update = run(installer, ["--updated", "--force-run", "/S"], { timeout: 10 * 60_000 });
 assert(update.status === 0, `The update installer exited with ${update.status}.`);
-assert(!processRunning(agentHelper), "The update left the running agent's process-tree helper running.");
+assert(!processRunning(agentHelper, PROCESS_TREE_HELPER_NAME), "The update left the running agent's process-tree helper running.");
 // A process id that was not running before the update is the restarted app;
 // the installer itself refuses to continue while the old app still runs.
 await waitFor("the updated app to start again", () => [...runningAppIds()].some((id) => !before.has(id)));

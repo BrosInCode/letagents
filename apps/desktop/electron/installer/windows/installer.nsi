@@ -97,15 +97,28 @@ Var InstalledHere
   ${EndIf}
 !macroend
 
+; Stops each program running from $INSTDIR except this installer: an agent's
+; process-tree helper keeps running when the app and its daemon have quit
+; (stopping it ends the agent processes in its job), and a model probe's
+; opencode.exe runs on its own. Helpers of any other LetAgents copy are left
+; alone. WMI reads each process's path also from this 32-bit installer; no
+; cmdlets, which can take many seconds to load. The folder reaches PowerShell
+; through the environment, so no path is quoted on its command line.
+!macro STOP_PROGRAMS_IN_INSTDIR
+  System::Call 'Kernel32::SetEnvironmentVariable(t "LETAGENTS_STOP_IN", t "$INSTDIR")'
+  System::Call 'Kernel32::SetEnvironmentVariable(t "LETAGENTS_STOP_SELF", t "$EXEPATH")'
+  nsExec::Exec `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "$$root = $$env:LETAGENTS_STOP_IN.TrimEnd('\') + '\'; foreach ($$p in ([wmisearcher]'SELECT ProcessId, ExecutablePath FROM Win32_Process').Get()) { $$x = $$p.ExecutablePath; if ($$x -and $$x.StartsWith($$root, [StringComparison]::OrdinalIgnoreCase) -and $$x -ne $$env:LETAGENTS_STOP_SELF) { try { [Diagnostics.Process]::GetProcessById([int]$$p.ProcessId).Kill() } catch {} } }"`
+  Pop $R0
+!macroend
+
 ; Wait for the app to quit (electron-updater starts this installer and then
 ; quits the app), then stop what is still running from this folder: the app's
-; own child processes run the same LetAgents.exe, and each agent runs under a
-; process-tree helper, which keeps running when the app and its daemon have
-; quit. Stopping a helper ends the agent processes in its job. taskkill
-; without elevation stops only this user's processes. No /T: electron-updater
-; starts this installer as a child of LetAgents.exe, so a tree kill would stop
-; the installer too. A person running the installer by hand is asked before
-; the app is closed.
+; own child processes run the same LetAgents.exe, and agents and probes run
+; the programs STOP_PROGRAMS_IN_INSTDIR stops. taskkill by name stays as the
+; fallback for LetAgents.exe; without elevation it stops only this user's
+; processes. No /T: electron-updater starts this installer as a child of
+; LetAgents.exe, so a tree kill would stop the installer too. A person
+; running the installer by hand is asked before the app is closed.
 !macro DEFINE_CLOSE_APP PREFIX
 Function ${PREFIX}CloseRunningApp
   ${IfNot} ${FileExists} "$INSTDIR\${EXE_NAME}"
@@ -129,8 +142,7 @@ Function ${PREFIX}CloseRunningApp
       ${EndIf}
       nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM "${EXE_NAME}"'
       Pop $R0
-      nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM "${HELPER_NAME}"'
-      Pop $R0
+      !insertmacro STOP_PROGRAMS_IN_INSTDIR
     ${EndIf}
     ${If} $R1 >= 40
       MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "${PRODUCT_NAME} is still running. Close it, then choose Retry." /SD IDCANCEL IDRETRY retry

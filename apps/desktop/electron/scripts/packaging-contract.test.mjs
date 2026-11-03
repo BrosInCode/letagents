@@ -265,8 +265,13 @@ test("the installer waits for and stops every program the app runs from its fold
     "$INSTDIR\\${RUNTIME_DIR}\\${HELPER_NAME}",
     "$INSTDIR\\${RUNTIME_DIR}\\opencode.exe",
   ]);
+  // LetAgents.exe by name; everything else only when it runs from this install.
   const stopped = [...installer.matchAll(/taskkill\.exe" \/F \/IM "\$\{(\w+)\}"/g)].map((match) => match[1]);
-  assert.deepEqual(stopped, ["EXE_NAME", "HELPER_NAME"]);
+  assert.deepEqual(stopped, ["EXE_NAME"]);
+  assert.match(installer, /SetEnvironmentVariable\(t "LETAGENTS_STOP_IN", t "\$INSTDIR"\)/);
+  assert.match(installer, /\$\$x\.StartsWith\(\$\$root, \[StringComparison\]::OrdinalIgnoreCase\) -and \$\$x -ne \$\$env:LETAGENTS_STOP_SELF/);
+  const forcedClose = installer.slice(installer.indexOf("${If} $R1 = 20"), installer.indexOf("${If} $R1 >= 40"));
+  assert.match(forcedClose, /!insertmacro STOP_PROGRAMS_IN_INSTDIR/);
   // Counting the installed files took minutes; the build gives the size.
   assert.doesNotMatch(installer, /\$\{GetSize\}/);
   assert.match(windowsPackager, /`\/DINSTALLED_KB=\$\{await payloadSizeKb\(packagedApp\)\}`/);
