@@ -5,7 +5,7 @@ export type WakeRuleEvent =
   | "github.review_submitted"
   | "github.pr_closed"
   | "room.message";
-export type WakeRuleStatus = "active" | "fired" | "expired" | "cancelled" | "retired" | "paused";
+export type WakeRuleStatus = "active" | "fired" | "expired" | "cancelled" | "retired" | "paused" | "pending_confirmation";
 export type WakeTaskStatus =
   | "proposed" | "accepted" | "assigned" | "in_progress" | "blocked" | "in_review" | "merged" | "done" | "cancelled";
 export type WakeCheckConclusion =
@@ -30,6 +30,7 @@ export interface WakeRuleArguments {
 
 /** Where a room.message rule delivers. Accepted on input only; never returned. */
 export interface WakeRuleWebhookInput { url: string; secret: string }
+export interface WakeRuleEmailInput { to: string }
 
 export interface WakeRuleInput {
   event: WakeRuleEvent;
@@ -37,8 +38,9 @@ export interface WakeRuleInput {
   repeat?: boolean;
   expires_at?: string | null;
   note?: string | null;
-  /** Required for room.message, refused for every other event. */
+  /** room.message needs exactly one of webhook or email; every other event refuses both. */
   webhook?: WakeRuleWebhookInput;
+  email?: WakeRuleEmailInput;
 }
 
 export interface ParsedWakeRuleInput {
@@ -51,12 +53,12 @@ export interface ParsedWakeRuleInput {
 }
 
 /** How a room.message rule reaches its agent. */
-export type WakeRuleDeliveryKind = "webhook";
+export type WakeRuleDeliveryKind = "webhook" | "email";
 
 /**
  * How a room.message rule's deliveries go. Everyone in the room sees the kind
  * and whether it is paused; the counts and the last result are shown only to
- * the account that owns the agent. The target (URL, secret) is never returned.
+ * the account that owns the agent. The target (URL, secret, address) is never returned.
  */
 export interface WakeRuleDeliverySummary {
   kind: WakeRuleDeliveryKind;
@@ -129,6 +131,7 @@ export interface WakeOccurrenceFacts {
 
 export const WAKE_RULE_EVENTS: readonly WakeRuleEvent[];
 export const WAKE_RULE_STATUSES: readonly WakeRuleStatus[];
+export const WAKE_RULE_DELIVERY_KINDS: readonly WakeRuleDeliveryKind[];
 export const WAKE_NOTICE_SOURCE: "wake_rule";
 export const WAKE_RULE_LIMITS: Readonly<{
   activePerAgent: number;
@@ -148,6 +151,10 @@ export const WAKE_RULE_LIMITS: Readonly<{
   webhookUrlMaxLength: number;
   webhookSecretMinLength: number;
   webhookSecretMaxLength: number;
+  emailMaxLength: number;
+  emailConfirmTtlMs: number;
+  emailConfirmResendMs: number;
+  emailPendingPerAccount: number;
 }>;
 export const WAKE_TASK_STATUSES: readonly WakeTaskStatus[];
 export const WAKE_CHECK_CONCLUSIONS: readonly WakeCheckConclusion[];
@@ -157,6 +164,7 @@ export class WakeRuleError extends Error { status: number; constructor(message: 
 
 export function parseWakeRuleInput(value: unknown, now?: Date): ParsedWakeRuleInput;
 export function parseWakeRuleWebhook(value: unknown): WakeRuleWebhookInput;
+export function parseWakeRuleEmail(value: unknown): WakeRuleEmailInput;
 export function wakeRuleIdentityKey(event: WakeRuleEvent, args: WakeRuleArguments): string;
 export function isFailedCheckConclusion(conclusion: string): boolean;
 

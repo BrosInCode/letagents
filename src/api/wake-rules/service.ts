@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 
 import {
   WakeRuleError,
+  parseWakeRuleEmail,
   parseWakeRuleInput,
   parseWakeRuleWebhook,
   type WakeRule,
@@ -16,12 +17,20 @@ import {
   roomHasRepository,
   wakeRuleEvaluationDeps,
   type WakeRuleRow,
+  type WakeEmailConfirmation,
+  type WakeRuleDeliverySeal,
   type WakeRuleViewer,
-  type WakeRuleWebhookSeal,
 } from "../db/wake-rules.js";
 import { db } from "../db/client.js";
 import { queueWakeRuleInvalidation } from "../server/events.js";
 import { WAKE_RULE_UNMERGED_CLOSE_GRACE_MS } from "./evaluate.js";
+import {
+  EMAIL_NOT_CONFIGURED,
+  hashWakeLinkToken,
+  wakeEmailConfigured,
+  wakeEmailConfirmToken,
+  wakeEmailDisableToken,
+} from "./email.js";
 import { wakeWebhookBinding } from "./webhook-delivery.js";
 import {
   WakeWebhookResolveError,
@@ -53,7 +62,7 @@ type RuleAgent = { agent_key: string; agent_name: string; session_id: string | n
  * resolve only to public addresses; it and the secret are stored sealed with
  * the connector key, and only a keyed hash of the URL tells two rules apart.
  */
-async function sealWakeWebhook(agent: RuleAgent, value: unknown, lookup?: WakeWebhookLookup): Promise<WakeRuleWebhookSeal> {
+async function sealWakeWebhook(agent: RuleAgent, value: unknown, lookup?: WakeWebhookLookup): Promise<WakeRuleDeliverySeal> {
   const target = parseWakeRuleWebhook(value);
   const ownerAccountId = agent.owner_account_id;
   if (!ownerAccountId) throw new WakeRuleError("A webhook rule needs an agent that belongs to an account.", 403);
@@ -68,8 +77,32 @@ async function sealWakeWebhook(agent: RuleAgent, value: unknown, lookup?: WakeWe
   }
   const href = url.href;
   return {
+    kind: "webhook",
     identitySuffix: `webhook:${cipher.fingerprint("wake-webhook-url", href)}`,
     seal: (ruleId) => cipher.encrypt({ url: href, secret: target.secret }, wakeWebhookBinding(ruleId, ownerAccountId)),
+  };
+}
+
+/**
+ * Check an email target and seal the address (personal data) like a webhook
+ * secret. Refused outright, with no rule made, while the server has no SMTP
+ * settings.
+ */
+function sealWakeEmail(agent: RuleAgent, value: unknown): WakeRuleDeliverySeal {
+  const target = parseWakeRuleEmail(value);
+  if (!wakeEmailConfigured()) throw new WakeRuleError(EMAIL_NOT_CONFIGURED, 503);
+  const ownerAccountId = agent.owner_account_id;
+  if (!ownerAccountId) throw new WakeRuleError("An email rule needs an agent that belongs to an account.", 403);
+  const cipher = loadConnectorCipher();
+  if (!cipher) throw new WakeRuleError("Email delivery is not set up on this server.", 503);
+  return {
+    kind: "email",
+    identitySuffix: `email:${cipher.fingerprint("wake-email-to", target.to.toLowerCase())}`,
+    seal: (ruleId) => cipher.encrypt({ to: target.to }, wakeWebhookBinding(ruleId, ownerAccountId)),
+    linkHashes: (ruleId, confirmExpiresAt) => ({
+      confirm: hashWakeLinkToken(wakeEmailConfirmToken(cipher, ruleId, confirmExpiresAt)),
+      disable: hashWakeLinkToken(wakeEmailDisableToken(cipher, ruleId)),
+    }),
   };
 }
 
@@ -79,11 +112,12 @@ export async function addWakeRuleForAgent(input: {
   body: unknown;
   /** Tests resolve webhook hosts without DNS. */
   webhookLookup?: WakeWebhookLookup;
-}): Promise<{ rule: WakeRule; created: boolean }> {
+}): Promise<{ rule: WakeRule; created: boolean; confirmation?: WakeEmailConfirmation & { next_step: string } }> {
   const rule = parseWakeRuleInput(input.body);
-  const webhook = rule.event === "room.message"
-    ? await sealWakeWebhook(input.agent, (input.body as { webhook?: unknown }).webhook, input.webhookLookup)
-    : null;
+  const body = input.body as { webhook?: unknown; email?: unknown };
+  const delivery = rule.event !== "room.message" ? null
+    : body.email !== undefined ? sealWakeEmail(input.agent, body.email)
+      : await sealWakeWebhook(input.agent, body.webhook, input.webhookLookup);
   let baseline: WakeRuleRow["baseline"] = null;
   if (rule.event === "task.status_changed") {
     const task = await findTask(input.roomId, rule.arguments.task_id!);
@@ -105,10 +139,20 @@ export async function addWakeRuleForAgent(input: {
   if (closed && (closed.merged || Date.now() - Date.parse(closed.closed_at) >= WAKE_RULE_UNMERGED_CLOSE_GRACE_MS)) {
     throw new WakeRuleError(`#${rule.arguments.pr} is already ${closed.merged ? "merged" : "closed"}. There is nothing to wait for.`, 409);
   }
-  const result = await createWakeRule({ roomId: input.roomId, agent: input.agent, rule, baseline, webhook });
-  // Adding a webhook rule again may resume it, so people's views refresh then too.
-  if (result.created || webhook) queueWakeRuleInvalidation(input.roomId);
-  return result;
+  const result = await createWakeRule({ roomId: input.roomId, agent: input.agent, rule, baseline, delivery });
+  // Adding a delivery rule again may resume it, so people's views refresh then too.
+  if (result.created || delivery) queueWakeRuleInvalidation(input.roomId);
+  if (!result.confirmation) return { rule: result.rule, created: result.created };
+  return {
+    rule: result.rule,
+    created: result.created,
+    confirmation: {
+      ...result.confirmation,
+      next_step: result.confirmation.sent
+        ? "LetAgents emailed a confirmation link to the address. Nothing else is sent until the address opens it (it works for 24 hours)."
+        : "A confirmation link was emailed to the address a few minutes ago and still works. Nothing else is sent until the address opens it.",
+    },
+  };
 }
 
 /**

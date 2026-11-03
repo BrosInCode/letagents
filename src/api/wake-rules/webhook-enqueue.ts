@@ -1,5 +1,5 @@
 /**
- * Queue wake webhook deliveries for a new room message, inside the message's
+ * Queue wake deliveries (webhook or email) for a new room message, inside the message's
  * own transaction, so a delivery exists exactly when its message does. The
  * notifications worker sends them.
  */
@@ -35,7 +35,7 @@ export interface WakeWebhookRoutingFacts {
   routingMessage: WakeWebhookMessageFacts["routingMessage"];
 }
 
-type RuleRow = { id: string; agent_key: string; agent_name: string; arguments: WakeRuleArguments };
+type RuleRow = { id: string; agent_key: string; agent_name: string; arguments: WakeRuleArguments; delivery_kind: "webhook" | "email" };
 
 export type WakeWebhookEnqueueResult = "queued" | "coalesced" | "dropped";
 
@@ -49,6 +49,7 @@ export async function enqueueWakeWebhookMatchTx(
   ruleId: string,
   message: Pick<MessageRow, "room_id" | "number" | "sender" | "text">,
   now = new Date(),
+  kind: "webhook" | "email" = "webhook",
 ): Promise<WakeWebhookEnqueueResult> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`wake-webhook:${ruleId}`}, 0))`);
   const nowIso = now.toISOString();
@@ -57,8 +58,8 @@ export async function enqueueWakeWebhookMatchTx(
   const preview = wakeWebhookTextPreview(message.text);
   const [state] = (await tx.execute<{ pending_id: string | null; last_scheduled_at: string | null; recent: number }>(sql`
     SELECT
-      (SELECT id FROM wake_webhook_deliveries WHERE rule_id = ${ruleId} AND state = 'queued' LIMIT 1) AS pending_id,
-      (SELECT max(scheduled_at) FROM wake_webhook_deliveries WHERE rule_id = ${ruleId}) AS last_scheduled_at,
+      (SELECT id FROM wake_webhook_deliveries WHERE rule_id = ${ruleId} AND state = 'queued' AND purpose = 'message' LIMIT 1) AS pending_id,
+      (SELECT max(scheduled_at) FROM wake_webhook_deliveries WHERE rule_id = ${ruleId} AND purpose = 'message') AS last_scheduled_at,
       (SELECT count(*)::int FROM wake_webhook_deliveries WHERE rule_id = ${ruleId} AND created_at > ${hourAgo}) AS recent
   `)).rows;
   const base = {
@@ -75,7 +76,7 @@ export async function enqueueWakeWebhookMatchTx(
              message_number = GREATEST(message_number, ${message.number}),
              match_count = match_count + 1,
              updated_at = ${nowIso}
-       WHERE id = ${plan.deliveryId} AND state = 'queued'
+       WHERE id = ${plan.deliveryId} AND state = 'queued' AND purpose = 'message'
       RETURNING id
     `);
     if (folded.rows.length > 0) return "coalesced";
@@ -92,13 +93,13 @@ export async function enqueueWakeWebhookMatchTx(
   const scheduledAt = new Date(plan.scheduledAtMs).toISOString();
   await tx.execute(sql`
     INSERT INTO wake_webhook_deliveries (
-      id, rule_id, room_id, message_number, sender, text_preview, match_count, state, attempt_count,
+      id, rule_id, room_id, kind, purpose, message_number, sender, text_preview, match_count, state, attempt_count,
       scheduled_at, next_attempt_at, created_at, updated_at
     ) VALUES (
-      ${`whd_${randomUUID().replace(/-/g, "")}`}, ${ruleId}, ${message.room_id}, ${message.number}, ${sender}, ${preview},
+      ${`whd_${randomUUID().replace(/-/g, "")}`}, ${ruleId}, ${message.room_id}, ${kind}, 'message', ${message.number}, ${sender}, ${preview},
       1, 'queued', 0, ${scheduledAt}, ${scheduledAt}, ${nowIso}, ${nowIso}
     )
-    ON CONFLICT (rule_id) WHERE state = 'queued' DO UPDATE
+    ON CONFLICT (rule_id, purpose) WHERE state = 'queued' DO UPDATE
        SET message_number = GREATEST(wake_webhook_deliveries.message_number, EXCLUDED.message_number),
            match_count = wake_webhook_deliveries.match_count + 1,
            updated_at = EXCLUDED.updated_at
@@ -119,7 +120,7 @@ export async function enqueueWakeWebhooksForMessageTx(
 ): Promise<number> {
   if (routing.promptOnly) return 0;
   const rules = (await tx.execute<RuleRow>(sql`
-    SELECT id, agent_key, agent_name, arguments
+    SELECT id, agent_key, agent_name, arguments, delivery_kind
       FROM agent_wake_rules
      WHERE room_id = ${message.room_id} AND event = 'room.message' AND status = 'active'
   `)).rows;
@@ -150,7 +151,7 @@ export async function enqueueWakeWebhooksForMessageTx(
       })),
       routingMessage: routing.routingMessage,
     });
-    for (const rule of matches) await enqueueWakeWebhookMatchTx(savepoint, rule.id, message);
+    for (const rule of matches) await enqueueWakeWebhookMatchTx(savepoint, rule.id, message, new Date(), rule.delivery_kind);
     return matches.length;
   }).catch((error: unknown) => {
     console.warn(`[wake webhooks] could not queue deliveries for message ${message.number} in ${message.room_id}`,

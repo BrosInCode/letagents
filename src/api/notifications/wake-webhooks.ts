@@ -1,9 +1,12 @@
 /**
- * The wake webhook half of the notifications worker. Deliveries are claimed
+ * The wake delivery half of the notifications worker (webhooks and email).
+ * Deliveries are claimed
  * like desktop pushes (`FOR UPDATE SKIP LOCKED`, a stale claim is taken back
- * after 5 minutes) and retried with the same backoff: network errors and 5xx
- * are retried up to 10 attempts; 4xx, redirects and refused addresses are
- * final. Five final failures in a row pause the rule.
+ * after 5 minutes) and retried with the same backoff. A webhook: network
+ * errors and 5xx retry, up to 10 attempts; 4xx, redirects and refused
+ * addresses are final. An email: a temporary SMTP reply (4xx) or a connection
+ * error retries; a permanent one (5xx) is final. Five final failures in a row
+ * pause the rule.
  */
 import { randomUUID } from "node:crypto";
 
@@ -20,6 +23,15 @@ import {
   wakeWebhookHeaders,
   wakeWebhookRoomUrl,
 } from "../wake-rules/webhook-delivery.js";
+import {
+  EMAIL_NOT_CONFIGURED,
+  composeWakeEmail,
+  loadWakeMailer,
+  wakeEmailConfirmToken,
+  wakeEmailDisableToken,
+  wakeLinkUrl,
+  type WakeMailer,
+} from "../wake-rules/email.js";
 import { postWakeWebhook, type WakeWebhookSendResult } from "../wake-rules/webhook-url.js";
 import { authorizeDesktopPushNotification, type DesktopPushAuthorizationDecision } from "./authorization.js";
 import { retryDelayMs } from "./delivery-policy.js";
@@ -35,11 +47,16 @@ export interface ClaimedWakeWebhook {
   id: string;
   rule_id: string;
   room_id: string;
-  message_number: number;
+  kind: "webhook" | "email";
+  purpose: "message" | "confirm";
+  message_number: number | null;
   sender: string;
   text_preview: string;
   attempt_count: number;
   rule_status: string;
+  agent_name: string;
+  room_name: string | null;
+  confirm_expires_at: string | null;
   owner_account_id: string | null;
   delivery_target: EncryptedCredentials | null;
 }
@@ -49,6 +66,8 @@ export interface WakeWebhookDeliveryDeps {
   /** Whether the agent's account may still read the room. */
   authorize(accountId: string, roomId: string): Promise<DesktopPushAuthorizationDecision>;
   send(input: { url: string; body: string; headers: Record<string, string> }): Promise<WakeWebhookSendResult>;
+  /** Null while the server has no SMTP settings: email deliveries then wait and retry. */
+  mailer: WakeMailer | null;
   now(): Date;
 }
 
@@ -59,6 +78,7 @@ export function defaultWakeWebhookDeps(): WakeWebhookDeliveryDeps {
       getProject: getProjectById, getAccount: getPushDeliveryAccount, resolveAccess: resolveProjectRepoRoomAccessDecision,
     }),
     send: (input) => postWakeWebhook(input),
+    mailer: loadWakeMailer(),
     now: () => new Date(),
   };
 }
@@ -88,11 +108,13 @@ export async function claimWakeWebhookDeliveries(workerId: string, limit = CLAIM
          WHERE delivery.id = ready.id
         RETURNING delivery.*
       )
-      SELECT claimed.id, claimed.rule_id, claimed.room_id, claimed.message_number, claimed.sender,
-             claimed.text_preview, claimed.attempt_count,
-             rule.status AS rule_status, rule.owner_account_id, rule.delivery_target
+      SELECT claimed.id, claimed.rule_id, claimed.room_id, claimed.kind, claimed.purpose, claimed.message_number,
+             claimed.sender, claimed.text_preview, claimed.attempt_count,
+             rule.status AS rule_status, rule.agent_name, rule.confirm_expires_at, rule.owner_account_id, rule.delivery_target,
+             room.display_name AS room_name
         FROM claimed
         INNER JOIN agent_wake_rules AS rule ON rule.id = claimed.rule_id
+        LEFT JOIN rooms AS room ON room.id = claimed.room_id
     `, [limit, workerId]);
     await client.query("COMMIT");
     return result.rows;
@@ -201,8 +223,13 @@ export async function recordWakeWebhookOutcome(
 }
 
 async function attempt(delivery: ClaimedWakeWebhook, deps: WakeWebhookDeliveryDeps, now: Date): Promise<Outcome> {
-  if (delivery.rule_status !== "active") return { kind: "skipped", error: `The rule is ${delivery.rule_status}.` };
-  if (!delivery.owner_account_id || !delivery.delivery_target) return { kind: "failed", status: 0, error: "The rule has no webhook target." };
+  // A message goes only to a confirmed, active rule; a confirmation only while the rule waits for one.
+  const expected = delivery.purpose === "confirm" ? "pending_confirmation" : "active";
+  if (delivery.rule_status !== expected) return { kind: "skipped", error: `The rule is ${delivery.rule_status}.` };
+  if (delivery.purpose === "confirm" && (!delivery.confirm_expires_at || Date.parse(delivery.confirm_expires_at) <= now.getTime())) {
+    return { kind: "skipped", error: "The confirmation link expired." };
+  }
+  if (!delivery.owner_account_id || !delivery.delivery_target) return { kind: "failed", status: 0, error: "The rule has no delivery target." };
   let access: DesktopPushAuthorizationDecision;
   try {
     access = await deps.authorize(delivery.owner_account_id, delivery.room_id);
@@ -211,15 +238,18 @@ async function attempt(delivery: ClaimedWakeWebhook, deps: WakeWebhookDeliveryDe
   }
   if (access === "retry") return { kind: "retry", status: 0, error: "No usable GitHub credential is available to check room access." };
   if (access === "deny") return { kind: "failed", status: 0, error: "The agent's account can no longer read this room." };
-  if (!deps.cipher) return { kind: "retry", status: 0, error: "Webhook delivery is not set up on this server." };
-  let target: { url: string; secret: string };
+  if (!deps.cipher) return { kind: "retry", status: 0, error: "Wake delivery is not set up on this server." };
+  let opened: Record<string, unknown>;
   try {
-    const opened = deps.cipher.decrypt(delivery.delivery_target, wakeWebhookBinding(delivery.rule_id, delivery.owner_account_id));
-    if (typeof opened.url !== "string" || typeof opened.secret !== "string") throw new Error("bad target");
-    target = { url: opened.url, secret: opened.secret };
+    opened = deps.cipher.decrypt(delivery.delivery_target, wakeWebhookBinding(delivery.rule_id, delivery.owner_account_id));
   } catch {
+    return { kind: "failed", status: 0, error: "The stored delivery target could not be read. Add the rule again." };
+  }
+  if (delivery.kind === "email") return attemptEmail(delivery, deps, deps.cipher, opened);
+  if (typeof opened.url !== "string" || typeof opened.secret !== "string") {
     return { kind: "failed", status: 0, error: "The stored webhook target could not be read. Add the rule again." };
   }
+  const target = { url: opened.url, secret: opened.secret };
   const timestamp = Math.floor(now.getTime() / 1000);
   const body = buildWakeWebhookBody({
     delivery_id: delivery.id,
@@ -240,6 +270,42 @@ async function attempt(delivery: ClaimedWakeWebhook, deps: WakeWebhookDeliveryDe
   }
   if (result.outcome === "delivered") return { kind: "delivered", status: result.status };
   const error = result.error ?? `HTTP ${result.status}`;
+  return result.outcome === "retry" ? { kind: "retry", status: result.status, error } : { kind: "failed", status: result.status, error };
+}
+
+async function attemptEmail(
+  delivery: ClaimedWakeWebhook,
+  deps: WakeWebhookDeliveryDeps,
+  cipher: ConnectorCipher,
+  opened: Record<string, unknown>,
+): Promise<Outcome> {
+  if (typeof opened.to !== "string") return { kind: "failed", status: 0, error: "The stored email address could not be read. Add the rule again." };
+  if (!deps.mailer) return { kind: "retry", status: 0, error: EMAIL_NOT_CONFIGURED };
+  const disableUrl = wakeLinkUrl("disable", wakeEmailDisableToken(cipher, delivery.rule_id));
+  const shared = {
+    to: opened.to,
+    agentName: delivery.agent_name,
+    roomName: delivery.room_name || delivery.room_id,
+    roomUrl: wakeWebhookRoomUrl(delivery.room_id),
+    disableUrl,
+    deliveryId: delivery.id,
+  };
+  const message = delivery.purpose === "confirm"
+    ? composeWakeEmail({
+      ...shared,
+      purpose: "confirm",
+      confirmUrl: wakeLinkUrl("confirm", wakeEmailConfirmToken(cipher, delivery.rule_id, delivery.confirm_expires_at!)),
+    })
+    : composeWakeEmail({
+      ...shared,
+      purpose: "message",
+      sender: delivery.sender,
+      preview: delivery.text_preview,
+      messageId: `msg_${delivery.message_number}`,
+    });
+  const result = await deps.mailer.send(message);
+  if (result.outcome === "delivered") return { kind: "delivered", status: result.status };
+  const error = result.error ?? `SMTP ${result.status}`;
   return result.outcome === "retry" ? { kind: "retry", status: result.status, error } : { kind: "failed", status: result.status, error };
 }
 

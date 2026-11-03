@@ -59,7 +59,7 @@ export function registerWakeRuleRoutes(app: Express, deps: WakeRuleRouteDeps): v
     try {
       const project = await room(req, res); if (!project) return;
       const identity = await worker(req, project.id);
-      const { rule, created } = await addWakeRuleForAgent({
+      const { rule, created, confirmation } = await addWakeRuleForAgent({
         roomId: project.id,
         agent: {
           agent_key: identity.agent_key,
@@ -69,7 +69,7 @@ export function registerWakeRuleRoutes(app: Express, deps: WakeRuleRouteDeps): v
         },
         body: req.body?.rule,
       });
-      res.status(created ? 201 : 200).json({ rule, created });
+      res.status(created ? 201 : 200).json({ rule, created, ...(confirmation ? { confirmation } : {}) });
     } catch (error) { fail(res, error); }
   });
 

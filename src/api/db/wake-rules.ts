@@ -10,6 +10,7 @@ import {
   type WakeRuleActor,
   type WakeRuleEvent,
   type WakeRulePage,
+  type WakeRuleDeliveryKind,
   type WakeRuleDeliverySummary,
 } from "../../../shared/wake-rules.mjs";
 import type { EncryptedCredentials } from "../connectors/crypto.js";
@@ -28,7 +29,7 @@ const RECENT_LIMIT = 50;
 export const WAKE_RULE_RESTORE_WINDOW_MS = 10 * 60 * 1000;
 
 /** Rules an agent still holds: they count against its limit and are listed as current. */
-const HELD_STATUSES = ["active", "paused"] as const;
+const HELD_STATUSES = ["active", "paused", "pending_confirmation"] as const;
 
 export interface WakeRuleViewer {
   /** The account asking. Delivery details of a webhook rule are shown only to the account that owns the agent. */
@@ -82,11 +83,37 @@ export function initialNextCheckAt(input: Pick<ParsedWakeRuleInput, "event" | "a
   return input.event === "timer" ? input.arguments.at! : input.expires_at;
 }
 
-/** A webhook target sealed for the rule it belongs to. */
-export interface WakeRuleWebhookSeal {
-  /** Extra identity: two rules differ when their URLs differ. */
+/** A delivery target (webhook or email) sealed for the rule it belongs to. */
+export interface WakeRuleDeliverySeal {
+  kind: WakeRuleDeliveryKind;
+  /** Extra identity: two rules differ when their targets differ. */
   identitySuffix: string;
   seal(ruleId: string): EncryptedCredentials;
+  /**
+   * Email: the SHA-256 of the rule's stop link token, and of a confirmation
+   * link token that works until `confirmExpiresAt`.
+   */
+  linkHashes?(ruleId: string, confirmExpiresAt: string): { confirm: string; disable: string };
+}
+
+/** Set when an email rule waits for its address: when the link stops working, and whether one was just queued. */
+export interface WakeEmailConfirmation {
+  expires_at: string;
+  sent: boolean;
+}
+
+/** Queue the confirmation email of a pending email rule, in the rule's own transaction. */
+async function queueEmailConfirmationTx(tx: MessageCreateTransaction, rule: { id: string; room_id: string }, nowIso: string): Promise<void> {
+  await tx.execute(sql`
+    INSERT INTO wake_webhook_deliveries (
+      id, rule_id, room_id, kind, purpose, message_number, sender, text_preview, match_count, state, attempt_count,
+      scheduled_at, next_attempt_at, created_at, updated_at
+    ) VALUES (
+      ${`whd_${randomUUID().replace(/-/g, "")}`}, ${rule.id}, ${rule.room_id}, 'email', 'confirm', NULL, '', '', 1, 'queued', 0,
+      ${nowIso}, ${nowIso}, ${nowIso}, ${nowIso}
+    )
+    ON CONFLICT (rule_id, purpose) WHERE state = 'queued' DO NOTHING
+  `);
 }
 
 export async function createWakeRule(input: {
@@ -95,12 +122,15 @@ export async function createWakeRule(input: {
   rule: ParsedWakeRuleInput;
   baseline: WakeRuleRow["baseline"];
   /** room.message rules: where they deliver. */
-  webhook?: WakeRuleWebhookSeal | null;
+  delivery?: WakeRuleDeliverySeal | null;
   now?: Date;
-}): Promise<{ rule: WakeRule; created: boolean }> {
-  const now = (input.now ?? new Date()).toISOString();
-  const identityKey = `${wakeRuleIdentityKey(input.rule.event, input.rule.arguments)}${input.webhook ? `:${input.webhook.identitySuffix}` : ""}`;
+}): Promise<{ rule: WakeRule; created: boolean; confirmation?: WakeEmailConfirmation }> {
+  const nowDate = input.now ?? new Date();
+  const now = nowDate.toISOString();
+  const delivery = input.delivery ?? null;
+  const identityKey = `${wakeRuleIdentityKey(input.rule.event, input.rule.arguments)}${delivery ? `:${delivery.identitySuffix}` : ""}`;
   const viewer = { accountId: input.agent.owner_account_id ?? null };
+  const confirmExpiresAt = new Date(nowDate.getTime() + WAKE_RULE_LIMITS.emailConfirmTtlMs).toISOString();
   return db.transaction(async (tx) => {
     // One agent's rules are counted and deduplicated one request at a time.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`wake-rules:${input.roomId}:${input.agent.agent_key}`}, 0))`);
@@ -110,11 +140,58 @@ export async function createWakeRule(input: {
       eq(agent_wake_rules.identity_key, identityKey),
       inArray(agent_wake_rules.status, [...HELD_STATUSES]),
     )).limit(1);
-    if (existing && input.webhook) {
+    /**
+     * An email address gives consent: a new email rule, or one that was
+     * stopped or paused, waits for the address to confirm. One account may
+     * have only a few such rules waiting, so LetAgents cannot be used to
+     * send confirmation emails in bulk.
+     */
+    const awaitConfirmation = async (ruleId: string) => {
+      const [{ pending }] = await tx.select({ pending: sql<number>`count(*)::int` }).from(agent_wake_rules).where(and(
+        eq(agent_wake_rules.owner_account_id, input.agent.owner_account_id ?? ""),
+        eq(agent_wake_rules.status, "pending_confirmation"),
+        sql`${agent_wake_rules.id} <> ${ruleId}`,
+      ));
+      if (pending >= WAKE_RULE_LIMITS.emailPendingPerAccount) {
+        throw new WakeRuleError(`This account already has ${WAKE_RULE_LIMITS.emailPendingPerAccount} email rules waiting for confirmation. Confirm or cancel one first.`, 429);
+      }
+      const hashes = delivery!.linkHashes!(ruleId, confirmExpiresAt);
+      return {
+        status: "pending_confirmation" as const,
+        confirm_token_hash: hashes.confirm,
+        confirm_expires_at: confirmExpiresAt,
+        disable_token_hash: hashes.disable,
+        // The scheduler ends the rule if the link expires unused.
+        next_check_at: confirmExpiresAt,
+      };
+    };
+    if (existing && delivery?.kind === "email") {
+      if (existing.status === "active") return { rule: toWakeRule(existing, viewer), created: false };
+      const lastIssuedMs = existing.status === "pending_confirmation" && existing.confirm_expires_at
+        ? Date.parse(existing.confirm_expires_at) - WAKE_RULE_LIMITS.emailConfirmTtlMs
+        : -Infinity;
+      if (nowDate.getTime() - lastIssuedMs < WAKE_RULE_LIMITS.emailConfirmResendMs) {
+        return {
+          rule: toWakeRule(existing, viewer),
+          created: false,
+          confirmation: { expires_at: new Date(existing.confirm_expires_at!).toISOString(), sent: false },
+        };
+      }
+      const [kept] = await tx.update(agent_wake_rules).set({
+        ...await awaitConfirmation(existing.id),
+        delivery_target: delivery.seal(existing.id),
+        paused_at: null,
+        delivery_consecutive_failures: 0,
+        updated_at: now,
+      }).where(eq(agent_wake_rules.id, existing.id)).returning();
+      await queueEmailConfirmationTx(tx, kept!, now);
+      return { rule: toWakeRule(kept!, viewer), created: false, confirmation: { expires_at: confirmExpiresAt, sent: true } };
+    }
+    if (existing && delivery) {
       // The same webhook rule again: keep it, take the secret given now (a
       // rotation), and resume it if repeated failures had paused it.
       const [kept] = await tx.update(agent_wake_rules).set({
-        delivery_target: input.webhook.seal(existing.id),
+        delivery_target: delivery.seal(existing.id),
         status: "active",
         paused_at: null,
         delivery_consecutive_failures: existing.status === "paused" ? 0 : existing.delivery_consecutive_failures,
@@ -151,9 +228,14 @@ export async function createWakeRule(input: {
       created_at: now,
       updated_at: now,
       owner_account_id: input.agent.owner_account_id ?? null,
-      delivery_kind: input.webhook ? "webhook" : null,
-      delivery_target: input.webhook ? input.webhook.seal(id) : null,
+      delivery_kind: delivery?.kind ?? null,
+      delivery_target: delivery ? delivery.seal(id) : null,
+      ...(delivery?.kind === "email" ? await awaitConfirmation(id) : {}),
     }).returning();
+    if (delivery?.kind === "email") {
+      await queueEmailConfirmationTx(tx, row!, now);
+      return { rule: toWakeRule(row!, viewer), created: true, confirmation: { expires_at: confirmExpiresAt, sent: true } };
+    }
     return { rule: toWakeRule(row!, viewer), created: true };
   });
 }
@@ -244,6 +326,8 @@ export async function restoreWakeRule(
           sql`${agent_wake_rules.cancelled_by}->>'id' = ${actor.id}`,
           gt(agent_wake_rules.ended_at, restoreAfter),
           or(isNull(agent_wake_rules.expires_at), gt(agent_wake_rules.expires_at, nowIso)),
+          // An email address that never confirmed (or stopped the emails) is not revived by undo.
+          sql`NOT (${agent_wake_rules.delivery_kind} IS NOT DISTINCT FROM 'email' AND ${agent_wake_rules.confirmed_at} IS NULL)`,
         ))
         .returning();
       if (!row) throw new WakeRuleError("This wake rule can no longer be restored.", 409);
@@ -257,11 +341,18 @@ export async function restoreWakeRule(
   });
 }
 
-/** Rules the scheduler must look at now. A paused webhook rule is still due at its expiry. */
+/**
+ * Rules the scheduler must look at now. A paused delivery rule is still due
+ * at its expiry, and an email rule waiting for confirmation when its link
+ * stops working.
+ */
 export async function getDueWakeRules(now: Date, limit = 200): Promise<WakeRuleRow[]> {
   return db.select().from(agent_wake_rules)
     .where(and(
-      or(eq(agent_wake_rules.status, "active"), and(eq(agent_wake_rules.status, "paused"), eq(agent_wake_rules.event, "room.message"))),
+      or(
+        eq(agent_wake_rules.status, "active"),
+        and(inArray(agent_wake_rules.status, ["paused", "pending_confirmation"]), eq(agent_wake_rules.event, "room.message")),
+      ),
       lte(agent_wake_rules.next_check_at, now.toISOString()),
     ))
     .orderBy(asc(agent_wake_rules.next_check_at))
@@ -381,6 +472,85 @@ export async function expireWakeWebhookRule(rule: WakeRuleRow, now = new Date())
     ))
     .returning({ id: agent_wake_rules.id });
   return updated.length === 1;
+}
+
+/** End an email rule whose confirmation link expired unused. */
+export async function endUnconfirmedWakeEmailRule(rule: WakeRuleRow, now = new Date()): Promise<boolean> {
+  const nowIso = now.toISOString();
+  const updated = await db.update(agent_wake_rules)
+    .set({
+      status: "expired", ended_at: nowIso, updated_at: nowIso,
+      ended_reason: "the email address was not confirmed within 24 hours",
+    })
+    .where(and(
+      eq(agent_wake_rules.id, rule.id),
+      eq(agent_wake_rules.status, "pending_confirmation"),
+      lte(agent_wake_rules.confirm_expires_at, nowIso),
+    ))
+    .returning({ id: agent_wake_rules.id });
+  return updated.length === 1;
+}
+
+export type WakeLinkOutcome =
+  | { outcome: "done"; rule: WakeRuleRow }
+  | { outcome: "already"; rule: WakeRuleRow }
+  | { outcome: "expired" | "ended" | "unknown" };
+
+/** Confirm an email rule's address by the hash of its confirmation link. */
+export async function confirmWakeEmailRule(tokenHash: string, now = new Date()): Promise<WakeLinkOutcome> {
+  const nowIso = now.toISOString();
+  const [row] = await db.update(agent_wake_rules)
+    .set({
+      // The hash stays, so the same link opened again answers "already confirmed".
+      status: "active", confirmed_at: nowIso, confirm_expires_at: null, updated_at: nowIso,
+      delivery_consecutive_failures: 0,
+      // From now on messages drive it; the scheduler looks only at its expiry.
+      next_check_at: sql`${agent_wake_rules.expires_at}`,
+    })
+    .where(and(
+      eq(agent_wake_rules.confirm_token_hash, tokenHash),
+      eq(agent_wake_rules.status, "pending_confirmation"),
+      gt(agent_wake_rules.confirm_expires_at, nowIso),
+    ))
+    .returning();
+  if (row) return { outcome: "done", rule: row };
+  const [known] = await db.select().from(agent_wake_rules).where(eq(agent_wake_rules.confirm_token_hash, tokenHash)).limit(1);
+  if (!known) return { outcome: "unknown" };
+  if (known.confirmed_at && known.status === "active") return { outcome: "already", rule: known };
+  return known.status === "pending_confirmation" || known.status === "expired" ? { outcome: "expired" } : { outcome: "ended" };
+}
+
+/**
+ * The recipient stops an email rule from its stop link: the rule pauses,
+ * nothing waiting goes out, and the address must confirm again before the
+ * agent can resume it.
+ */
+export async function stopWakeEmailRule(tokenHash: string, now = new Date()): Promise<WakeLinkOutcome> {
+  const nowIso = now.toISOString();
+  return db.transaction(async (tx) => {
+    const [row] = await tx.update(agent_wake_rules)
+      .set({
+        status: "paused", paused_at: nowIso, updated_at: nowIso, confirmed_at: null,
+        confirm_token_hash: null, confirm_expires_at: null,
+        delivery_last_error: "Stopped by the recipient.",
+      })
+      .where(and(
+        eq(agent_wake_rules.disable_token_hash, tokenHash),
+        inArray(agent_wake_rules.status, ["active", "pending_confirmation"]),
+      ))
+      .returning();
+    if (row) {
+      await tx.execute(sql`
+        UPDATE wake_webhook_deliveries
+           SET state = 'dead', sender = '', text_preview = '', last_error = 'Stopped by the recipient.', updated_at = ${nowIso}
+         WHERE rule_id = ${row.id} AND state IN ('queued', 'retry')
+      `);
+      return { outcome: "done", rule: row };
+    }
+    const [known] = await tx.select().from(agent_wake_rules).where(eq(agent_wake_rules.disable_token_hash, tokenHash)).limit(1);
+    if (!known) return { outcome: "unknown" };
+    return known.status === "paused" ? { outcome: "already", rule: known } : { outcome: "ended" };
+  });
 }
 
 /** Whether GitHub activity can reach this room at all. */

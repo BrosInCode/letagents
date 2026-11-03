@@ -5,6 +5,7 @@ import {
   formatWakeNotice,
 } from "../../../shared/wake-rules.mjs";
 import {
+  endUnconfirmedWakeEmailRule,
   expireWakeWebhookRule,
   getActiveGitHubWakeRulesConcerning,
   getActiveTaskWakeRules,
@@ -85,9 +86,15 @@ export async function checkWakeRules(
 ): Promise<void> {
   for (const rule of rules) {
     try {
+      if (rule.status === "pending_confirmation") {
+        // An email rule whose address never opened the link ends when the link stops working.
+        if (rule.confirm_expires_at && now.getTime() >= Date.parse(rule.confirm_expires_at)
+          && await endUnconfirmedWakeEmailRule(rule, now)) queueWakeRuleInvalidation(rule.room_id);
+        continue;
+      }
       const evaluation = await evaluateWakeRule(rule, now, deps);
       if (rule.event === "room.message") {
-        // A webhook rule is delivered as messages arrive; here it only ends at its expiry, quietly.
+        // A delivery rule is delivered as messages arrive; here it only ends at its expiry, quietly.
         if (evaluation.kind === "expire") {
           if (await expireWakeWebhookRule(rule, now)) queueWakeRuleInvalidation(rule.room_id);
         } else if (rule.expires_at) await scheduleWakeRuleCheck(rule, rule.expires_at);

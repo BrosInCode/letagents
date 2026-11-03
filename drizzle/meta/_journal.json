@@ -918,6 +918,13 @@
       "when": 1793800000000,
       "tag": "0130_wake_webhooks",
       "breakpoints": true
+    },
+    {
+      "idx": 131,
+      "version": "7",
+      "when": 1793900000000,
+      "tag": "0131_wake_email",
+      "breakpoints": true
     }
   ]
 }

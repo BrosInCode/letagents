@@ -6,7 +6,7 @@
         :key="row.rule.id"
         class="wake-rule"
         :data-rule-id="row.rule.id"
-        :data-state="row.cancelled ? 'cancelled' : row.rule.status === 'paused' ? 'paused' : 'active'"
+        :data-state="row.cancelled ? 'cancelled' : row.rule.status === 'active' ? 'active' : row.rule.status"
       >
         <span class="wake-rule-mark"><WakeGlyph :state="row.cancelled || row.rule.status === 'paused' ? 'ended' : 'waiting'" /></span>
         <div class="wake-rule-copy">
@@ -131,9 +131,10 @@ const fullTime = (iso: string | undefined) => iso
   : "";
 const endedAt = (rule: WakeRule) => rule.last_fired_at ?? rule.updated_at;
 const kicker = (row: { rule: WakeRule; cancelled: boolean }) => row.cancelled ? "Cancelled"
-  // A webhook rule stops after repeated failed deliveries; its agent resumes it by adding it again.
-  : row.rule.status === "paused" ? "Paused: deliveries kept failing"
-    : `Waiting ${describe(row.rule).preposition}`;
+  // A delivery rule pauses after repeated failed deliveries (or an email's stop link); its agent adds it again to resume.
+  : row.rule.status === "paused" ? "Paused"
+    : row.rule.status === "pending_confirmation" ? "Waiting for the email address to confirm"
+      : `Waiting ${describe(row.rule).preposition}`;
 const root = ref<HTMLElement | null>(null);
 
 /**

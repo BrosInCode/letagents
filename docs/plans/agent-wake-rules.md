@@ -105,7 +105,7 @@ v1 kinds:
 | `github.check_completed` | exactly one of `branch`, `pr`, `mine: true`; optional `conclusions` (default: any) | `check_run` completed |
 | `github.review_submitted` | `pr` or `mine: true`; optional `states` | `pull_request_review` submitted |
 | `github.pr_closed` | `pr` or `mine: true`; optional `merged_only` | `pull_request` closed |
-| `room.message` | `mentions_me: true` (default) or `any: true`; requires a `webhook` target | room messages, as sent (decision 7) |
+| `room.message` | `mentions_me: true` (default) or `any: true`; requires a `webhook` or `email` target | room messages, as sent (decision 7) |
 
 `mine: true` is resolved when an event arrives, not when the rule is saved. It
 matches the tasks, branches and PRs where the agent holds an active work lease
@@ -242,8 +242,25 @@ the bot's turn. Nothing about it is specific to one platform.
   sees its counts and last result, and only that account (the agent or its
   person) may cancel it.
 
-The receiver checklist and examples are in `docs/ticket-connectors.md`,
-"Remote MCP endpoint", "Wake a bot or service by webhook".
+**Email is a second delivery kind** (`email: { to }`, exactly one of webhook or
+email). Matching, coalescing, the cap and the pause are the same; the delivery
+row has `kind = 'email'`, and the worker sends it through nodemailer's SMTP
+transport (`LETAGENTS_EMAIL_SMTP_URL`, `LETAGENTS_EMAIL_FROM`; without both, an
+email rule is refused). An address is consent, so a new email rule is
+`pending_confirmation`: its first email is a confirmation (a delivery row with
+`purpose = 'confirm'`) whose link (`GET /wake-rules/confirm/<token>`, 24 hours)
+makes it `active`. Every email has a stop link (`GET` or one-click `POST
+/wake-rules/disable/<token>`) that pauses the rule and clears the confirmation,
+so the agent can resume it only after the address confirms again. Link tokens
+are HMACs under the connector key; only their SHA-256 is stored. A confirmation
+link that expires unused ends the rule. One account may have at most 3 email
+rules waiting for confirmation, and a rule sends a confirmation at most every
+10 minutes. Code: `src/api/wake-rules/email.ts`,
+`src/api/routes/wake-rule-links.ts`; migration `0131_wake_email`.
+
+The receiver checklist, examples and the operator checklist for email are in
+`docs/ticket-connectors.md`, "Remote MCP endpoint", "Wake a bot or service by
+webhook or email".
 
 ## Agent tools
 
@@ -294,7 +311,8 @@ against the agent's 20-rule limit like a new rule.
 or desktop app keeps working: it simply has no wake tools and shows wake notices
 as ordinary system messages.
 
-**Wake webhooks:** migration `0130_wake_webhooks` and the API. The remote MCP
+**Wake webhooks and email:** migrations `0130_wake_webhooks` and
+`0131_wake_email`, and the API (email also needs the two SMTP settings). The remote MCP
 endpoint (`/mcp`) runs in the API, so hosted bots can register `room.message`
 rules at once; local agents get the event with the next `letagents` package
 release. A desktop app older than this change shows a webhook rule as
@@ -324,6 +342,13 @@ builds show "Waiting for a message for me · By webhook · Until cancelled".
   mention reaches a local receiver signed; `5xx` retries, `4xx` does not; the
   agent's own message never delivers; others see no URL or secret and cannot
   cancel; five failures pause and adding again resumes.
+- `src/api/__tests__/wake-email.test.ts`: the email subject, body and headers
+  (nodemailer `jsonTransport`), SMTP result classes, link tokens and the
+  address shape.
+- `src/api/__tests__/wake-email-db.test.ts` (PostgreSQL, over `/mcp`): refused
+  without SMTP settings; no delivery before the confirmation link, one after;
+  the hourly cap; the stop link; re-adding needs a new confirmation; the
+  pending cap per account.
 
 ## Open questions
 

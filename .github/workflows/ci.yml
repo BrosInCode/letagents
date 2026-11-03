@@ -756,7 +756,7 @@ jobs:
 
       - name: Test agent wake rules and room resource invalidation
         if: matrix.group == 2
-        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/wake-rules-contract.test.ts src/api/__tests__/wake-rules-evaluate.test.ts src/api/__tests__/wake-rules-db.test.ts src/api/__tests__/wake-webhooks.test.ts src/api/__tests__/wake-webhooks-db.test.ts src/api/__tests__/room-event-broker.test.ts
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/wake-rules-contract.test.ts src/api/__tests__/wake-rules-evaluate.test.ts src/api/__tests__/wake-rules-db.test.ts src/api/__tests__/wake-webhooks.test.ts src/api/__tests__/wake-webhooks-db.test.ts src/api/__tests__/wake-email.test.ts src/api/__tests__/wake-email-db.test.ts src/api/__tests__/room-event-broker.test.ts
 
       - name: Test shared live activity sessions
         if: matrix.group == 4

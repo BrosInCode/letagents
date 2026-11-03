@@ -21,11 +21,15 @@ export const WAKE_RULE_EVENTS = Object.freeze([
  * `retired`: the rule ended early because what it watched is over (its pull
  * request merged or closed, its task done or cancelled); `ended_reason` says
  * which. The agent is told once, unless the rule already woke it for that
- * very end (a close rule, inside the grace for a reopen). `paused`: a webhook
- * rule stopped delivering after repeated failed deliveries; adding the same
- * rule again resumes it.
+ * very end (a close rule, inside the grace for a reopen). `paused`: a
+ * delivery rule stopped after repeated failed deliveries (or, for email, the
+ * recipient's stop link); adding the same rule again resumes it.
+ * `pending_confirmation`: an email rule waits for its address to confirm.
  */
-export const WAKE_RULE_STATUSES = Object.freeze(["active", "fired", "expired", "cancelled", "retired", "paused"]);
+export const WAKE_RULE_STATUSES = Object.freeze(["active", "fired", "expired", "cancelled", "retired", "paused", "pending_confirmation"]);
+
+/** How a room.message rule reaches its agent outside the room. */
+export const WAKE_RULE_DELIVERY_KINDS = Object.freeze(["webhook", "email"]);
 
 /** Source of the room message that wakes an agent. */
 export const WAKE_NOTICE_SOURCE = "wake_rule";
@@ -58,6 +62,13 @@ export const WAKE_RULE_LIMITS = Object.freeze({
   webhookUrlMaxLength: 2048,
   webhookSecretMinLength: 16,
   webhookSecretMaxLength: 256,
+  emailMaxLength: 254,
+  /** How long an email confirmation link works. */
+  emailConfirmTtlMs: 24 * 60 * 60 * 1000,
+  /** A new confirmation for the same rule goes out at most this often. */
+  emailConfirmResendMs: 10 * 60 * 1000,
+  /** Email rules one account may have waiting for confirmation, across rooms. */
+  emailPendingPerAccount: 3,
 });
 
 export const WAKE_TASK_STATUSES = Object.freeze([
@@ -216,6 +227,31 @@ export function parseWakeRuleWebhook(value) {
   return { url: url.trim(), secret };
 }
 
+const EMAIL_LOCAL = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}$/;
+const EMAIL_LABEL = /^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/;
+
+/**
+ * An email target: one plain address (no display name, no list). The domain
+ * is lower-cased; the local part is kept as written.
+ */
+export function parseWakeRuleEmail(value) {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) {
+    throw new WakeRuleError("email must be an object with to.");
+  }
+  allowOnly(value, ["to"], "email");
+  const to = typeof value.to === "string" ? value.to.trim() : "";
+  const at = to.lastIndexOf("@");
+  const local = at > 0 ? to.slice(0, at) : "";
+  const domain = at > 0 ? to.slice(at + 1).toLowerCase() : "";
+  const labels = domain.split(".");
+  if (!to || to.length > WAKE_RULE_LIMITS.emailMaxLength || !EMAIL_LOCAL.test(local) || local.startsWith(".")
+    || local.endsWith(".") || local.includes("..") || labels.length < 2 || !labels.every((label) => EMAIL_LABEL.test(label))
+    || /^\d+$/.test(labels.at(-1))) {
+    throw new WakeRuleError("email.to must be one email address, such as bot@example.com.");
+  }
+  return { to: `${local}@${domain}` };
+}
+
 /**
  * Validate what an agent asked for. Returns the canonical rule input; the
  * expiry of a timer follows its time so it can never outlive what it waits for.
@@ -226,12 +262,14 @@ export function parseWakeRuleInput(value, now = new Date()) {
   if (!WAKE_RULE_EVENTS.includes(input.event)) throw new WakeRuleError(`event must be one of ${WAKE_RULE_EVENTS.join(", ")}.`);
   const args = parseArguments(input.event, input.arguments, nowMs);
   const webhookRule = input.event === "room.message";
-  if (webhookRule && input.webhook === undefined) {
-    throw new WakeRuleError("room.message wakes a hosted bot by webhook: add webhook { url, secret }. An agent that polls is already woken by messages for it.");
+  const targets = ["webhook", "email"].filter((key) => input[key] !== undefined);
+  if (webhookRule && targets.length === 0) {
+    throw new WakeRuleError("room.message reaches a bot outside the room: add webhook { url, secret } or email { to }. An agent that polls is already woken by messages for it.");
   }
-  if (!webhookRule && input.webhook !== undefined) throw new WakeRuleError("Only room.message rules deliver by webhook.");
+  if (webhookRule && targets.length > 1) throw new WakeRuleError("Give room.message either webhook or email, not both.");
+  if (!webhookRule && targets.length > 0) throw new WakeRuleError("Only room.message rules deliver by webhook or email.");
   if (input.repeat !== undefined && typeof input.repeat !== "boolean") throw new WakeRuleError("repeat must be true or false.");
-  if (webhookRule && input.repeat === false) throw new WakeRuleError("A webhook rule keeps delivering until you cancel it; leave repeat out.");
+  if (webhookRule && input.repeat === false) throw new WakeRuleError("A room.message rule keeps delivering until you cancel it; leave repeat out.");
   const repeat = input.event === "timer" ? false : webhookRule || Boolean(input.repeat);
   if (input.repeat === true && input.event === "timer") throw new WakeRuleError("A timer fires once; add another timer to wake again.");
   let expiresMs;
@@ -242,7 +280,7 @@ export function parseWakeRuleInput(value, now = new Date()) {
       expiresMs = Date.parse(String(input.expires_at));
       if (!Number.isFinite(expiresMs)) throw new WakeRuleError("expires_at must be an ISO 8601 time.");
       if (expiresMs < nowMs + WAKE_RULE_LIMITS.minLeadMs) throw new WakeRuleError("expires_at must be at least 30 seconds away.");
-      if (expiresMs > nowMs + WAKE_RULE_LIMITS.webhookMaxTtlMs) throw new WakeRuleError("expires_at can be at most 30 days away for a webhook rule.");
+      if (expiresMs > nowMs + WAKE_RULE_LIMITS.webhookMaxTtlMs) throw new WakeRuleError("expires_at can be at most 30 days away for a room.message rule.");
     }
   } else if (input.event === "timer") {
     if (input.expires_at !== undefined) throw new WakeRuleError("A timer expires when it fires; leave expires_at out.");
