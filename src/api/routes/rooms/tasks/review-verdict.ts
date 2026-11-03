@@ -164,7 +164,7 @@ export function registerTaskReviewVerdictRoute(app: Express, deps: RoomTaskRoute
     const agentSessionId = worker.identity.agent_session_id;
     if (!agentSessionId) {
       res.status(403).json({
-        error: "A registered worker agent_session_id is required to submit a review verdict.",
+        error: "A registered worker identity is required to submit a review verdict. Pass the worker_id returned by register_agent_session (older clients may pass agent_session_id instead).",
         code: "coordination_worker_session_required",
       });
       return;
