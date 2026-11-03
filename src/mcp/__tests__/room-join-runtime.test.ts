@@ -88,6 +88,10 @@ const WORKER_HELD_NEXT_STEP =
   + "If this chat lost its worker_id, call register_agent_session with recover_lost_worker true, this room_id "
   + "and its display_name. A different chat registers with its own registration_key.";
 
+const LEGACY_WORKER_HELD_NEXT_STEP =
+  "A legacy worker registration for this room is already held here. If it is this chat's, pass its agent_session_id "
+  + "to the room tools. A different chat registers with register_agent_session, this room_id and its own registration_key.";
+
 function joinedRoom(roomId: string): RoomState {
   return {
     room_id: roomId,
@@ -175,13 +179,14 @@ test("a join response says the chat is a controller until it has a worker", asyn
   assert.ok(response.agent_identity);
 });
 
-test("a join response says a worker is held once this process registered one for the room", async () => {
+test("a join response says a legacy worker is held once this process registered one for the room", async () => {
   await ensureLocalWorkerAgentSession("room_with_worker", { sessionKind: "worker" });
 
   const response = await joinResponseFor("room_with_worker");
 
   assert.equal(response.worker_status, "worker_held");
-  assert.equal(response.worker_next_step, WORKER_HELD_NEXT_STEP);
+  assert.equal(response.worker_next_step, LEGACY_WORKER_HELD_NEXT_STEP);
+  assert.doesNotMatch(String(response.worker_next_step), /recover_lost_worker/, "a legacy worker has no worker_id to recover");
   assert.equal(response.room_id, "room_with_worker");
 });
 
@@ -206,17 +211,39 @@ test("a saved worker session with no token is not read as held just because noth
   assert.equal((await joinResponseFor("room_corrupt_entry")).worker_status, "controller_only");
 });
 
-test("a join response says a worker is held when the room's current saved session is a live worker of another instance", async () => {
-  saveAgentSession(otherWorkerSession("room_current_legacy"), true);
-  const held = await joinResponseFor("room_current_legacy");
-  assert.equal(held.worker_status, "worker_held");
-  assert.equal(held.worker_next_step, WORKER_HELD_NEXT_STEP);
+test("outside a remote session the room's current saved worker is another process's, so it is not read as held", async () => {
+  // In stdio current_agent_session_ids is in the state file every process of this user shares.
+  saveAgentSession(otherWorkerSession("room_current_stdio"), true);
 
-  saveAgentSession(otherWorkerSession("room_current_ended", { ended_at: "2026-06-30T01:00:00.000Z" }), true);
-  assert.equal((await joinResponseFor("room_current_ended")).worker_status, "controller_only");
+  assert.equal((await joinResponseFor("room_current_stdio")).worker_status, "controller_only");
+});
 
-  saveAgentSession(otherWorkerSession("room_current_controller", { session_kind: "controller" }), true);
-  assert.equal((await joinResponseFor("room_current_controller")).worker_status, "controller_only");
+test("in a remote session the room's current saved worker is held, with the legacy text", async () => {
+  const live = otherWorkerSession("room_current_remote");
+  const scopeWith = (session: StoredAgentSessionState): McpSessionScope => {
+    const scope = remoteScope();
+    scope.state.local = {
+      agent_sessions: { [session.session_id]: session },
+      current_agent_session_ids: { [session.room_id]: session.session_id },
+    };
+    return scope;
+  };
+
+  await runInSessionScope(scopeWith(live), async () => {
+    const held = await joinResponseFor("room_current_remote");
+    assert.equal(held.worker_status, "worker_held");
+    assert.equal(held.worker_next_step, LEGACY_WORKER_HELD_NEXT_STEP);
+  });
+
+  const ended = otherWorkerSession("room_current_ended", { ended_at: "2026-06-30T01:00:00.000Z" });
+  await runInSessionScope(scopeWith(ended), async () => {
+    assert.equal((await joinResponseFor("room_current_ended")).worker_status, "controller_only");
+  });
+
+  const controller = otherWorkerSession("room_current_controller", { session_kind: "controller" });
+  await runInSessionScope(scopeWith(controller), async () => {
+    assert.equal((await joinResponseFor("room_current_controller")).worker_status, "controller_only");
+  });
 });
 
 test("a controller session does not count as a worker in the join response", async () => {
@@ -262,6 +289,7 @@ test("a remote MCP session reads its own state: empty state is controller_only, 
   await runInSessionScope(scope, async () => {
     const held = await joinResponseFor("room_remote_session");
     assert.equal(held.worker_status, "worker_held", "an earlier session of this credential saved it as the room's current worker");
+    assert.equal(held.worker_next_step, LEGACY_WORKER_HELD_NEXT_STEP);
   });
 });
 

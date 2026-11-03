@@ -344,10 +344,10 @@ export function registerAgentSessionTools(server: McpServer): void {
 
   server.tool(
     "disconnect_agent_session",
-    "Disconnect/end a registered worker session from a room. Pass the exact agent_session_id for the worker to disconnect.",
+    "Disconnect/end a registered worker session from a room. Pass the worker_id returned by register_agent_session for the worker to disconnect (older clients may pass the exact agent_session_id instead).",
     {
       room_id: z.string().optional().describe("Canonical room ID. Defaults to the current room or the stored session room."),
-      agent_session_id: z.string().optional().describe("Registered agent session to disconnect."),
+      agent_session_id: z.string().optional().describe("Legacy: registered agent session to disconnect. Prefer worker_id."),
     },
     async ({ room_id, agent_session_id }) => {
       if (requireValidWorkerBearerRuntime().mode === "supervised") {

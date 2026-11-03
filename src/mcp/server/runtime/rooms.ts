@@ -21,6 +21,7 @@ import {
   resolveLocalRoomStorageIdentifiers,
 } from "../../local-state.js";
 import { heldWorkerConnection } from "../../worker-call-context.js";
+import { currentSessionScope } from "./session-scope.js";
 import {
   ApiError,
   apiCall,
@@ -315,6 +316,12 @@ const WORKER_HELD_NEXT_STEP =
   + "this room_id and its display_name. "
   + "A different chat registers with its own registration_key.";
 
+// A legacy registration has no worker_id, so recover_lost_worker does not apply to it.
+const LEGACY_WORKER_HELD_NEXT_STEP =
+  "A legacy worker registration for this room is already held here. "
+  + "If it is this chat's, pass its agent_session_id to the room tools. "
+  + "A different chat registers with register_agent_session, this room_id and its own registration_key.";
+
 /**
  * After a join this chat is a controller: it can read the room, but a write
  * tool refuses until the chat has a worker. Say which case this is, unless the
@@ -324,10 +331,14 @@ const WORKER_HELD_NEXT_STEP =
  * - If the saved worker state cannot be read in full, nothing is claimed.
  *
  * The check is per process or credential, not per chat. A worker counts as held
- * when this process connected it (an MCP worker handle), when this process
- * registered it (a legacy session), or when it is the current worker session
- * saved for the room (a legacy session of this credential, including one an
- * earlier remote /mcp session made). Two chats served by the same process or
+ * in three cases. The first is an MCP worker handle this process connected; its
+ * chat has a worker_id. The second is a legacy session this process registered.
+ * The third is, in a remote /mcp session only, the room's current saved worker
+ * session, which an earlier session of the same credential may have made. A
+ * legacy registration has no worker_id, so it gets its own text. Outside a
+ * remote session the current-session record is not read: in stdio it lives in
+ * the state file that every process of this user shares, so a stale worker of
+ * another process would look held. Two chats served by the same process or
  * credential see the same answer, so "worker_held" says that a worker exists
  * here. It does not say that the worker is this chat's.
  */
@@ -338,20 +349,27 @@ async function workerStatusJoinFields(roomId: string): Promise<Record<string, un
   const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(roomId);
   const statePath = getLocalStatePath();
   const instanceId = agentInstanceUuid();
+  const inRemoteSession = currentSessionScope() !== null;
+  let legacyHeld = false;
   for (const candidateRoomId of new Set([roomId, cloudRoomId ?? roomId])) {
     const routing = getStoredAgentRoutingStateSnapshot(candidateRoomId);
-    const current = getCurrentAgentSessionSnapshot(candidateRoomId);
-    if (!routing.complete || !current.complete) return {};
-    const held = routing.sessions.some((session) => {
-      if (session.agent_instance_id === instanceId) return true;
+    if (!routing.complete) return {};
+    const handleHeld = routing.sessions.some((session) => {
       const pinned = heldWorkerConnection(statePath, session.session_id);
       return pinned != null && pinned.session_token === session.session_token;
-    }) || (
-      current.session?.session_kind === "worker" && current.session.room_id === candidateRoomId
-    );
-    if (held) return { worker_status: "worker_held", worker_next_step: WORKER_HELD_NEXT_STEP };
+    });
+    if (handleHeld) return { worker_status: "worker_held", worker_next_step: WORKER_HELD_NEXT_STEP };
+
+    if (routing.sessions.some((session) => session.agent_instance_id === instanceId)) legacyHeld = true;
+    if (inRemoteSession) {
+      const current = getCurrentAgentSessionSnapshot(candidateRoomId);
+      if (!current.complete) return {};
+      if (current.session?.session_kind === "worker" && current.session.room_id === candidateRoomId) legacyHeld = true;
+    }
   }
-  return { worker_status: "controller_only", worker_next_step: CONTROLLER_ONLY_NEXT_STEP };
+  return legacyHeld
+    ? { worker_status: "worker_held", worker_next_step: LEGACY_WORKER_HELD_NEXT_STEP }
+    : { worker_status: "controller_only", worker_next_step: CONTROLLER_ONLY_NEXT_STEP };
 }
 
 export async function createInviteRoom(): Promise<{
