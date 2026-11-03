@@ -32,6 +32,9 @@ test("compact prompts stay small and point back at the standing instructions", (
     assert.ok(compact.length < buildRoomAgentPrompt(kind).length / 4);
     assert.match(compact, /instructions you already received/);
     assert.match(compact, /wait_for_messages/);
+    // The reminder is all a chat sees after the first prompt, so it names both handles.
+    assert.match(compact, /`worker_id`/);
+    assert.match(compact, /`agent_session_id`/);
   }
   assert.equal(buildCompactRoomAgentPrompt("join"), buildRoomAgentPrompt("join"));
 });
@@ -49,6 +52,23 @@ test("every prompt variant teaches agents to act on liveness signals", () => {
       buildCompactRoomAgentPrompt(kind),
       /offline\/failover system messages as actionable/
     );
+  }
+});
+
+test("no delivered prompt claims authority over the agent's own instructions", () => {
+  for (const kind of ["join", "inline", "auto"] as const) {
+    for (const prompt of [buildRoomAgentPrompt(kind), buildCompactRoomAgentPrompt(kind)]) {
+      assert.doesNotMatch(prompt, /CRITICAL OVERRIDE/);
+      assert.doesNotMatch(prompt, /supersede/i);
+      assert.doesNotMatch(prompt, /NEVER/);
+      assert.doesNotMatch(prompt, /\bMUST\b/);
+      assert.doesNotMatch(prompt, /mandatory|precedence|regardless of/i);
+    }
+  }
+  resetRoomAgentPromptDeliveryForTests();
+  for (const kind of ["join", "inline", "auto"] as const) {
+    const delivered = dispenseRoomAgentPrompt(kind);
+    assert.doesNotMatch(delivered, /CRITICAL OVERRIDE|supersede|NEVER|\bMUST\b/);
   }
 });
 
