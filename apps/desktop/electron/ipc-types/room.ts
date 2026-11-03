@@ -670,7 +670,7 @@ export interface DesktopInlineHtmlDemoLease {
 /** Main's report on an inline demo, keyed by its lease URL. */
 export type DesktopInlineHtmlDemoEvent =
   | { type: "height"; url: string; height: number }
-  | { type: "stopped"; url: string; reason: "unresponsive" | "crashed" };
+  | { type: "stopped"; url: string; reason: "unresponsive" | "crashed" | "overloaded" };
 
 export type DesktopRoomStreamEvent =
   | { type: "typing"; roomIdentifier: string; signal: import("../../../../shared/room-typing.mjs").TypingSignal }
