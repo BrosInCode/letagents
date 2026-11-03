@@ -15,7 +15,8 @@ import {
   authorizeDesktopPushNotification,
   type DesktopPushAuthorizationDecision,
 } from "./authorization.js";
-import { classifyApnsResult, type ApnsDisposition } from "./delivery-policy.js";
+import { classifyApnsResult, retryDelayMs, type ApnsDisposition } from "./delivery-policy.js";
+import { startWakeWebhookWorker } from "./wake-webhooks.js";
 import { getPushDeliveryAccount } from "./push-account.js";
 
 const POLL_INTERVAL_MS = 2_000;
@@ -42,10 +43,6 @@ export interface ClaimedNotification {
   attempt_count: number;
 }
 
-function retryDelayMs(attemptCount: number): number {
-  const exponential = Math.min(60 * 60_000, 5_000 * 2 ** Math.max(0, attemptCount - 1));
-  return Math.floor(exponential * (0.8 + Math.random() * 0.4));
-}
 
 type DeliveryTable = "desktop_push_notifications" | "desktop_reminder_deliveries";
 function deliveryTable(notification: ClaimedNotification): DeliveryTable {
@@ -421,10 +418,12 @@ export function startDesktopPushWorker(): () => Promise<void> {
   const interval = setInterval(() => void tick(), POLL_INTERVAL_MS);
   interval.unref();
   void tick();
+  // Wake webhooks run their own loop: a slow receiver never delays a push.
+  const stopWakeWebhooks = startWakeWebhookWorker();
   return async () => {
     stopped = true;
     clearInterval(interval);
-    await runningPromise;
+    await Promise.all([runningPromise, stopWakeWebhooks()]);
     client?.close();
   };
 }

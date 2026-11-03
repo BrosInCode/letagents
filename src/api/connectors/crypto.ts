@@ -46,6 +46,11 @@ export interface ConnectorCipher {
    * connection id under the server key, so nothing extra is stored.
    */
   webhookSecret(connectionId: string): string;
+  /**
+   * A keyed SHA-256 (HMAC under the server key) of `value` for one purpose,
+   * for looking a value up without storing it.
+   */
+  fingerprint(purpose: string, value: string): string;
 }
 
 export interface CredentialBinding {
@@ -102,6 +107,9 @@ export function createConnectorCipher(rawKey: string): ConnectorCipher {
     },
     webhookSecret(connectionId) {
       return createHmac("sha256", key).update(`letagents-connector-webhook:v1:${connectionId}`, "utf8").digest("hex");
+    },
+    fingerprint(purpose, value) {
+      return createHmac("sha256", key).update(`letagents-fingerprint:v1:${purpose}:${value}`, "utf8").digest("hex");
     },
   };
 }

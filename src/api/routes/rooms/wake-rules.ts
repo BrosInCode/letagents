@@ -31,6 +31,11 @@ async function worker(req: AuthenticatedRequest, roomId: string): Promise<Resolv
   return result.identity;
 }
 
+/** The account asking: it alone sees the delivery details of its own agents' webhook rules. */
+function viewer(req: AuthenticatedRequest): { accountId: string | null } {
+  return { accountId: req.sessionAccount?.account_id ?? req.agentSession?.owner_account_id ?? null };
+}
+
 async function actor(req: AuthenticatedRequest, roomId: string): Promise<WakeRuleActor> {
   const person = human(req);
   if (person) return person;
@@ -45,7 +50,7 @@ export function registerWakeRuleRoutes(app: Express, deps: WakeRuleRouteDeps): v
     try {
       const project = await room(req, res); if (!project) return;
       const agentKey = typeof req.query.agent_key === "string" && req.query.agent_key.trim() ? req.query.agent_key.trim() : undefined;
-      res.json(await listWakeRules(project.id, { agentKey }));
+      res.json(await listWakeRules(project.id, { agentKey, viewer: viewer(req) }));
     } catch (error) { fail(res, error); }
   });
 
@@ -60,6 +65,7 @@ export function registerWakeRuleRoutes(app: Express, deps: WakeRuleRouteDeps): v
           agent_key: identity.agent_key,
           agent_name: identity.display_name || identity.actor_label,
           session_id: identity.agent_session_id,
+          owner_account_id: identity.owner_account_id ?? null,
         },
         body: req.body?.rule,
       });
@@ -71,7 +77,7 @@ export function registerWakeRuleRoutes(app: Express, deps: WakeRuleRouteDeps): v
     app.post(new RegExp(`^/rooms/(.+)/wake-rules/([^/]+)/${action}$`), async (req: AuthenticatedRequest, res) => {
       try {
         const project = await room(req, res); if (!project) return;
-        res.json({ rule: await apply(project.id, routeParam(req, 1), await actor(req, project.id)) });
+        res.json({ rule: await apply(project.id, routeParam(req, 1), await actor(req, project.id), viewer(req)) });
       } catch (error) { fail(res, error); }
     });
   }

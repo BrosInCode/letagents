@@ -3,8 +3,9 @@ export type WakeRuleEvent =
   | "task.status_changed"
   | "github.check_completed"
   | "github.review_submitted"
-  | "github.pr_closed";
-export type WakeRuleStatus = "active" | "fired" | "expired" | "cancelled" | "retired";
+  | "github.pr_closed"
+  | "room.message";
+export type WakeRuleStatus = "active" | "fired" | "expired" | "cancelled" | "retired" | "paused";
 export type WakeTaskStatus =
   | "proposed" | "accepted" | "assigned" | "in_progress" | "blocked" | "in_review" | "merged" | "done" | "cancelled";
 export type WakeCheckConclusion =
@@ -21,22 +22,53 @@ export interface WakeRuleArguments {
   conclusions?: WakeCheckConclusion[];
   states?: WakeReviewState[];
   merged_only?: true;
+  /** room.message: messages for this agent (mentions, replies, its threads, notices addressed to it). The default. */
+  mentions_me?: true;
+  /** room.message: every top-level message except the agent's own. */
+  any?: true;
 }
+
+/** Where a room.message rule delivers. Accepted on input only; never returned. */
+export interface WakeRuleWebhookInput { url: string; secret: string }
 
 export interface WakeRuleInput {
   event: WakeRuleEvent;
   arguments?: Record<string, unknown>;
   repeat?: boolean;
-  expires_at?: string;
+  expires_at?: string | null;
   note?: string | null;
+  /** Required for room.message, refused for every other event. */
+  webhook?: WakeRuleWebhookInput;
 }
 
 export interface ParsedWakeRuleInput {
   event: WakeRuleEvent;
   arguments: WakeRuleArguments;
   repeat: boolean;
-  expires_at: string;
+  /** Null only for a room.message rule, which then lasts until it is cancelled. */
+  expires_at: string | null;
   note: string | null;
+}
+
+/** How a room.message rule reaches its agent. */
+export type WakeRuleDeliveryKind = "webhook";
+
+/**
+ * How a room.message rule's deliveries go. Everyone in the room sees the kind
+ * and whether it is paused; the counts and the last result are shown only to
+ * the account that owns the agent. The target (URL, secret) is never returned.
+ */
+export interface WakeRuleDeliverySummary {
+  kind: WakeRuleDeliveryKind;
+  paused: boolean;
+  delivered_count?: number;
+  /** Deliveries in a row that failed for good; five pause the rule. */
+  consecutive_failures?: number;
+  /** Matches dropped by the hourly cap. */
+  dropped_count?: number;
+  last_status?: number | null;
+  last_error?: string | null;
+  last_attempt_at?: string | null;
 }
 
 export interface WakeRuleActor { kind: "agent" | "human"; id: string; label: string }
@@ -57,6 +89,8 @@ export interface WakeRule extends ParsedWakeRuleInput {
   cancelled_by: WakeRuleActor | null;
   /** Why the rule ended before its expiry, e.g. "#7 was merged" or "task_4 is done". */
   ended_reason: string | null;
+  /** Set for a rule that reaches its agent outside the room, by webhook (absent from older servers). */
+  delivery?: WakeRuleDeliverySummary | null;
 }
 
 export interface WakeRulePage {
@@ -106,6 +140,14 @@ export const WAKE_RULE_LIMITS: Readonly<{
   repeatDebounceMs: number;
   checkSettleMs: number;
   timerGraceMs: number;
+  webhookMaxTtlMs: number;
+  webhookCoalesceMs: number;
+  webhookHourlyCap: number;
+  webhookPauseAfterFailures: number;
+  webhookTextPreviewMax: number;
+  webhookUrlMaxLength: number;
+  webhookSecretMinLength: number;
+  webhookSecretMaxLength: number;
 }>;
 export const WAKE_TASK_STATUSES: readonly WakeTaskStatus[];
 export const WAKE_CHECK_CONCLUSIONS: readonly WakeCheckConclusion[];
@@ -114,6 +156,7 @@ export const WAKE_REVIEW_STATES: readonly WakeReviewState[];
 export class WakeRuleError extends Error { status: number; constructor(message: string, status?: number) }
 
 export function parseWakeRuleInput(value: unknown, now?: Date): ParsedWakeRuleInput;
+export function parseWakeRuleWebhook(value: unknown): WakeRuleWebhookInput;
 export function wakeRuleIdentityKey(event: WakeRuleEvent, args: WakeRuleArguments): string;
 export function isFailedCheckConclusion(conclusion: string): boolean;
 

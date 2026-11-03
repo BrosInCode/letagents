@@ -5,6 +5,7 @@ import {
   formatWakeNotice,
 } from "../../../shared/wake-rules.mjs";
 import {
+  expireWakeWebhookRule,
   getActiveGitHubWakeRulesConcerning,
   getActiveTaskWakeRules,
   getDueWakeRules,
@@ -43,7 +44,7 @@ export async function deliverWakeRule(
   const endedReason = evaluation.kind === "fire" ? evaluation.endedReason ?? null
     : evaluation.kind === "retire" ? evaluation.reason : null;
   const notice = formatWakeNotice({
-    rule: { ...rule, expires_at: new Date(rule.expires_at).toISOString() },
+    rule: { ...rule, expires_at: rule.expires_at ? new Date(rule.expires_at).toISOString() : null },
     outcome,
     facts,
     agentName: rule.agent_name,
@@ -85,6 +86,13 @@ export async function checkWakeRules(
   for (const rule of rules) {
     try {
       const evaluation = await evaluateWakeRule(rule, now, deps);
+      if (rule.event === "room.message") {
+        // A webhook rule is delivered as messages arrive; here it only ends at its expiry, quietly.
+        if (evaluation.kind === "expire") {
+          if (await expireWakeWebhookRule(rule, now)) queueWakeRuleInvalidation(rule.room_id);
+        } else if (rule.expires_at) await scheduleWakeRuleCheck(rule, rule.expires_at);
+        continue;
+      }
       if (evaluation.kind === "wait") await scheduleWakeRuleCheck(rule, evaluation.nextCheckAt, { cursorAt: evaluation.cursorAt });
       else if (evaluation.kind === "retire" && !evaluation.wake) {
         if (await retireWakeRule(rule, evaluation.reason, now)) queueWakeRuleInvalidation(rule.room_id);
