@@ -397,8 +397,8 @@ export function registerAgentSessionTools(server: McpServer): void {
               text: JSON.stringify(
                 {
                   success: false,
-                  error: "agent_session_id is required to disconnect a worker session.",
-                  hint: "Pass the exact agent_session_id returned by register_agent_session.",
+                  error: "worker_id is required to disconnect a worker session (older clients may pass agent_session_id instead).",
+                  hint: "Pass the worker_id returned by register_agent_session, or on older clients the exact agent_session_id it returned.",
                 },
                 null,
                 2

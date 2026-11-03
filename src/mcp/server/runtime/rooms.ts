@@ -12,6 +12,7 @@ import {
   type JoinedVia,
 } from "../../room-id.js";
 import {
+  getCurrentAgentSessionSnapshot,
   getLocalStatePath,
   getStoredAgentRoutingStateSnapshot,
   isLocalRoomStorageEnabled,
@@ -304,19 +305,33 @@ const CONTROLLER_ONLY_NEXT_STEP =
   "You joined as this account's controller and can read the room. "
   + "To post as an agent, call register_agent_session with this room_id and a random registration_key "
   + "generated once for this chat, keep the returned worker_id, and pass worker_id to send_message, "
-  + "send_thread_message and wait_for_messages.";
+  + "send_thread_message and wait_for_messages. "
+  + "If you already have a worker_id or registration_key for this room, reuse it instead.";
+
+const WORKER_HELD_NEXT_STEP =
+  "A worker for this room is already held here. "
+  + "If it is this chat's, pass its worker_id to the room tools. "
+  + "If this chat lost its worker_id, call register_agent_session with recover_lost_worker true, "
+  + "this room_id and its display_name. "
+  + "A different chat registers with its own registration_key.";
 
 /**
  * After a join this chat is a controller: it can read the room, but a write
- * tool refuses until the chat registers a worker. Say so in the join response,
- * unless the chat needs no registration or already has a worker in the room:
+ * tool refuses until the chat has a worker. Say which case this is, unless the
+ * chat needs no registration:
  * - A worker-bearer or supervised runtime brings its own worker identity.
  * - A local room starts its local worker on the first write.
- * - A chat that holds a worker for the room (an MCP worker handle this process
- *   connected, or a legacy session this process registered) can already write.
- * If the saved worker state cannot be read in full, nothing is claimed.
+ * - If the saved worker state cannot be read in full, nothing is claimed.
+ *
+ * The check is per process or credential, not per chat. A worker counts as held
+ * when this process connected it (an MCP worker handle), when this process
+ * registered it (a legacy session), or when it is the current worker session
+ * saved for the room (a legacy session of this credential, including one an
+ * earlier remote /mcp session made). Two chats served by the same process or
+ * credential see the same answer, so "worker_held" says that a worker exists
+ * here. It does not say that the worker is this chat's.
  */
-async function controllerOnlyJoinFields(roomId: string): Promise<Record<string, unknown>> {
+async function workerStatusJoinFields(roomId: string): Promise<Record<string, unknown>> {
   if (requireValidWorkerBearerRuntime().mode !== "owner") return {};
   if (await isLocalRoomStorageEnabled(roomId)) return {};
 
@@ -324,15 +339,19 @@ async function controllerOnlyJoinFields(roomId: string): Promise<Record<string, 
   const statePath = getLocalStatePath();
   const instanceId = agentInstanceUuid();
   for (const candidateRoomId of new Set([roomId, cloudRoomId ?? roomId])) {
-    const { sessions, complete } = getStoredAgentRoutingStateSnapshot(candidateRoomId);
-    if (!complete) return {};
-    const registered = sessions.some((session) =>
-      session.agent_instance_id === instanceId
-      || heldWorkerConnection(statePath, session.session_id)?.session_token === session.session_token
+    const routing = getStoredAgentRoutingStateSnapshot(candidateRoomId);
+    const current = getCurrentAgentSessionSnapshot(candidateRoomId);
+    if (!routing.complete || !current.complete) return {};
+    const held = routing.sessions.some((session) => {
+      if (session.agent_instance_id === instanceId) return true;
+      const pinned = heldWorkerConnection(statePath, session.session_id);
+      return pinned != null && pinned.session_token === session.session_token;
+    }) || (
+      current.session?.session_kind === "worker" && current.session.room_id === candidateRoomId
     );
-    if (registered) return {};
+    if (held) return { worker_status: "worker_held", worker_next_step: WORKER_HELD_NEXT_STEP };
   }
-  return { worker_status: "controller_only", next_step: CONTROLLER_ONLY_NEXT_STEP };
+  return { worker_status: "controller_only", worker_next_step: CONTROLLER_ONLY_NEXT_STEP };
 }
 
 export async function createInviteRoom(): Promise<{
@@ -370,7 +389,7 @@ export async function createInviteRoom(): Promise<{
     response: {
       ...toPublicRoomResponse(project, roomId),
       agent_identity: toPublicAgentIdentity(agentIdentity),
-      ...await controllerOnlyJoinFields(room.room_id),
+      ...await workerStatusJoinFields(room.room_id),
     },
   };
 }
@@ -389,7 +408,7 @@ export async function buildJoinResponse(input: {
 
   return withJoinRoomAgentPrompt({
     ...basePayload,
-    ...await controllerOnlyJoinFields(input.joined.room.room_id),
+    ...await workerStatusJoinFields(input.joined.room.room_id),
   });
 }
 

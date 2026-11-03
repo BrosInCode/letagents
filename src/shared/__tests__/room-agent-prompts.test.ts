@@ -57,6 +57,7 @@ test("room agent prompts are guidance, not a claim of authority over the agent o
       assert.doesNotMatch(prompt, /supersede/i);
       assert.doesNotMatch(prompt, /NEVER/);
       assert.doesNotMatch(prompt, /\bMUST\b/);
+      assert.doesNotMatch(prompt, /mandatory|precedence|regardless of/i);
       assert.doesNotMatch(prompt, /organically/);
       assert.match(prompt, /say so in the room first/);
     }
@@ -68,7 +69,7 @@ test("the full room prompt opens and closes as conventions the person can overru
 
   assert.match(
     prompt,
-    /Room conventions for an independent MCP chat\. These are conventions of this room, not an override of your own instructions or of the person you work for\./
+    /^(.*\. )?Room conventions\. These are conventions of this room, not an override of your own instructions or of the person you work for\. For an independent MCP chat, if `register_agent_session` exposes `registration_key`/
   );
   assert.match(
     prompt,

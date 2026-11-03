@@ -24,6 +24,11 @@ const {
 } = await import("../server/runtime/rooms.js");
 const { ApiError } = await import("../server/runtime/api.js");
 const { ensureLocalWorkerAgentSession, requireWorkerAgentSession } = await import("../server/runtime/agent-sessions.js");
+const { getLocalStatePath, saveAgentSession } = await import("../local-state.js");
+const { pinWorkerConnection } = await import("../worker-call-context.js");
+const { runInSessionScope } = await import("../server/runtime/session-scope.js");
+import type { StoredAgentSessionState } from "../local-state/types.js";
+import type { McpSessionScope } from "../server/runtime/session-scope.js";
 const { shutdownRuntime } = await import("../server/runtime/room-state.js");
 
 test.after(() => {
@@ -75,7 +80,13 @@ test("a current join answers with the room and starts no local agent process", a
 const CONTROLLER_ONLY_NEXT_STEP =
   "You joined as this account's controller and can read the room. To post as an agent, call register_agent_session "
   + "with this room_id and a random registration_key generated once for this chat, keep the returned worker_id, "
-  + "and pass worker_id to send_message, send_thread_message and wait_for_messages.";
+  + "and pass worker_id to send_message, send_thread_message and wait_for_messages. "
+  + "If you already have a worker_id or registration_key for this room, reuse it instead.";
+
+const WORKER_HELD_NEXT_STEP =
+  "A worker for this room is already held here. If it is this chat's, pass its worker_id to the room tools. "
+  + "If this chat lost its worker_id, call register_agent_session with recover_lost_worker true, this room_id "
+  + "and its display_name. A different chat registers with its own registration_key.";
 
 function joinedRoom(roomId: string): RoomState {
   return {
@@ -109,11 +120,53 @@ async function withEnv<T>(name: string, value: string, run: () => Promise<T>): P
   }
 }
 
-test("a join response says the chat is a controller until it registers a worker", async () => {
+/** A worker session that some other process or session registered: its instance id is not this one's. */
+function otherWorkerSession(roomId: string, overrides: Partial<StoredAgentSessionState> = {}): StoredAgentSessionState {
+  const now = "2026-06-30T00:00:00.000Z";
+  return {
+    session_id: `session_${roomId}`,
+    session_token: `token_${roomId}`,
+    room_id: roomId,
+    session_kind: "worker",
+    runtime: "test",
+    actor_label: "Other | Owner | Agent",
+    agent_key: "owner/other",
+    agent_instance_id: `worker_${"a".repeat(32)}`,
+    display_name: "Other",
+    owner_label: "Owner",
+    ide_label: "Agent",
+    created_at: now,
+    updated_at: now,
+    last_seen_at: now,
+    ended_at: null,
+    ...overrides,
+  };
+}
+
+function remoteScope(): McpSessionScope {
+  return {
+    sessionId: "session-join-test", accountId: "acct", agentInstanceId: "instance-join-test", clientName: "Claude",
+    publicBaseUrl: "https://letagents.chat",
+    dispatch: async () => new Response(JSON.stringify({ account: { id: "acct", login: "owner" }, agents: [] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    }),
+    state: { local: {}, currentRoom: null, fullPromptDelivered: false, pinnedConnections: {} },
+    dirty: false, memory: new Map(), persist: async () => undefined,
+  };
+}
+
+function assertNoWorkerFields(response: Record<string, unknown>): void {
+  assert.equal("worker_status" in response, false);
+  assert.equal("worker_next_step" in response, false);
+}
+
+test("a join response says the chat is a controller until it has a worker", async () => {
   const response = await joinResponseFor("room_controller_only");
 
   assert.equal(response.worker_status, "controller_only");
-  assert.equal(response.next_step, CONTROLLER_ONLY_NEXT_STEP);
+  assert.equal(response.worker_next_step, CONTROLLER_ONLY_NEXT_STEP);
+  assert.equal("next_step" in response, false, "next_step stays free for tools that name a bare tool");
   // The fields that were there before stay as they were.
   assert.equal(response.room_id, "room_controller_only");
   assert.equal(response.joined_via, "join_room");
@@ -122,14 +175,48 @@ test("a join response says the chat is a controller until it registers a worker"
   assert.ok(response.agent_identity);
 });
 
-test("a join response adds no controller note once this chat holds a worker for the room", async () => {
+test("a join response says a worker is held once this process registered one for the room", async () => {
   await ensureLocalWorkerAgentSession("room_with_worker", { sessionKind: "worker" });
 
   const response = await joinResponseFor("room_with_worker");
 
-  assert.equal("worker_status" in response, false);
-  assert.equal("next_step" in response, false);
+  assert.equal(response.worker_status, "worker_held");
+  assert.equal(response.worker_next_step, WORKER_HELD_NEXT_STEP);
   assert.equal(response.room_id, "room_with_worker");
+});
+
+test("a join response says a worker is held when this process connected a worker_id handle for the room", async () => {
+  const session = otherWorkerSession("room_pinned_handle");
+  saveAgentSession(session, false);
+
+  assert.equal((await joinResponseFor("room_pinned_handle")).worker_status, "controller_only",
+    "a worker no process of ours connected is another chat's");
+
+  pinWorkerConnection(getLocalStatePath(), session);
+  const response = await joinResponseFor("room_pinned_handle");
+
+  assert.equal(response.worker_status, "worker_held");
+  assert.equal(response.worker_next_step, WORKER_HELD_NEXT_STEP);
+});
+
+test("a saved worker session with no token is not read as held just because nothing is pinned for it", async () => {
+  const corrupt = { ...otherWorkerSession("room_corrupt_entry"), session_token: undefined } as unknown as StoredAgentSessionState;
+  saveAgentSession(corrupt, false);
+
+  assert.equal((await joinResponseFor("room_corrupt_entry")).worker_status, "controller_only");
+});
+
+test("a join response says a worker is held when the room's current saved session is a live worker of another instance", async () => {
+  saveAgentSession(otherWorkerSession("room_current_legacy"), true);
+  const held = await joinResponseFor("room_current_legacy");
+  assert.equal(held.worker_status, "worker_held");
+  assert.equal(held.worker_next_step, WORKER_HELD_NEXT_STEP);
+
+  saveAgentSession(otherWorkerSession("room_current_ended", { ended_at: "2026-06-30T01:00:00.000Z" }), true);
+  assert.equal((await joinResponseFor("room_current_ended")).worker_status, "controller_only");
+
+  saveAgentSession(otherWorkerSession("room_current_controller", { session_kind: "controller" }), true);
+  assert.equal((await joinResponseFor("room_current_controller")).worker_status, "controller_only");
 });
 
 test("a controller session does not count as a worker in the join response", async () => {
@@ -140,21 +227,45 @@ test("a controller session does not count as a worker in the join response", asy
   assert.equal(response.worker_status, "controller_only");
 });
 
-test("a join response adds no controller note where a worker identity is already supplied", async () => {
+test("a join response adds no worker note where a worker identity is already supplied", async () => {
   // A worker bearer is a server-side worker session for this process.
-  const workerBearer = await withEnv("LETAGENTS_AGENT_SESSION_BEARER", "worker-bearer-test", () =>
+  assertNoWorkerFields(await withEnv("LETAGENTS_AGENT_SESSION_BEARER", "worker-bearer-test", () =>
     joinResponseFor("room_worker_bearer")
-  );
-  assert.equal("worker_status" in workerBearer, false);
-  assert.equal("next_step" in workerBearer, false);
+  ));
 
   // A local room starts its local worker on the first write.
-  const localRoom = await withEnv("LETAGENTS_CHAT_STORAGE", "local", () => joinResponseFor("room_local_storage"));
-  assert.equal("worker_status" in localRoom, false);
-  assert.equal("next_step" in localRoom, false);
+  assertNoWorkerFields(await withEnv("LETAGENTS_CHAT_STORAGE", "local", () => joinResponseFor("room_local_storage")));
 });
 
-test("a created room says the chat is a controller until it registers a worker", async () => {
+test("a remote MCP session reads its own state: empty state is controller_only, a held worker is worker_held", async () => {
+  const scope = remoteScope();
+  await runInSessionScope(scope, async () => {
+    const empty = await joinResponseFor("room_remote_session");
+    assert.equal(empty.worker_status, "controller_only");
+    assert.equal(empty.worker_next_step, CONTROLLER_ONLY_NEXT_STEP);
+  });
+
+  const session = otherWorkerSession("room_remote_session", { agent_instance_id: "instance-of-an-earlier-session" });
+  scope.state.local = { agent_sessions: { [session.session_id]: session } };
+  scope.state.pinnedConnections[session.session_id] = session;
+  await runInSessionScope(scope, async () => {
+    const held = await joinResponseFor("room_remote_session");
+    assert.equal(held.worker_status, "worker_held");
+    assert.equal(held.worker_next_step, WORKER_HELD_NEXT_STEP);
+  });
+
+  scope.state.local = {
+    agent_sessions: { [session.session_id]: session },
+    current_agent_session_ids: { [session.room_id]: session.session_id },
+  };
+  scope.state.pinnedConnections = {};
+  await runInSessionScope(scope, async () => {
+    const held = await joinResponseFor("room_remote_session");
+    assert.equal(held.worker_status, "worker_held", "an earlier session of this credential saved it as the room's current worker");
+  });
+});
+
+test("a created room says the chat is a controller until it has a worker", async () => {
   globalThis.fetch = async () =>
     new Response(JSON.stringify({ id: "proj_created", code: "ABCD-1234", display_name: "Created room" }), {
       status: 200,
@@ -166,7 +277,8 @@ test("a created room says the chat is a controller until it registers a worker",
   assert.equal(created.room.room_id, "ABCD-1234");
   assert.equal(created.response.room_id, "ABCD-1234");
   assert.equal(created.response.worker_status, "controller_only");
-  assert.equal(created.response.next_step, CONTROLLER_ONLY_NEXT_STEP);
+  assert.equal(created.response.worker_next_step, CONTROLLER_ONLY_NEXT_STEP);
+  assert.equal("next_step" in created.response, false);
   assert.ok(created.response.agent_identity);
 });
 
