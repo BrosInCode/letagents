@@ -7,6 +7,8 @@
 ;   PAYLOAD_NSH    the generated include with REMOVE_LETAGENTS_PAYLOAD
 ;   ICON_FILE      the app icon (.ico)
 ;   OUTPUT_FILE    the installer to write
+;   HELPER_NAME    the process-tree helper's file name, in RUNTIME_DIR
+;   INSTALLED_KB   the payload's size, for Installed apps
 ;
 ; It installs to %LOCALAPPDATA%\Programs\LetAgents without administrator
 ; rights. electron-updater's NsisUpdater runs the next version's installer
@@ -36,6 +38,8 @@ RequestExecutionLevel user
 !define APP_ID "chat.letagents.desktop"
 !define EXE_NAME "LetAgents.exe"
 !define UNINSTALLER_NAME "Uninstall LetAgents.exe"
+; Programs the app runs from its own folder besides LetAgents.exe.
+!define RUNTIME_DIR "resources\app\runtime"
 !define UNINSTALL_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_ID}"
 !define URL_KEY "Software\Classes\letagents"
 ; Must match updaterCacheDirName in resources\app-update.yml.
@@ -79,12 +83,49 @@ Var InstalledHere
 
 !insertmacro MUI_LANGUAGE "English"
 
+; Clears $R2 when FILE is in use. A running program's file cannot be opened
+; for writing, which is the test.
+!macro CHECK_NOT_RUNNING FILE
+  ${If} ${FileExists} "${FILE}"
+    ClearErrors
+    FileOpen $R0 "${FILE}" a
+    ${If} ${Errors}
+      StrCpy $R2 0
+    ${Else}
+      FileClose $R0
+    ${EndIf}
+  ${EndIf}
+!macroend
+
+; Stops each program running from $INSTDIR\resources: an agent's process-tree
+; helper keeps running when the app and its daemon have quit (stopping it
+; ends the agent processes in its job), and a model probe's opencode.exe runs
+; on its own. Only the app's own resources folder, so a /D= install into a
+; shared folder stops nothing else there, and helpers of any other LetAgents
+; copy are left alone. WMI reads each process's path also from this 32-bit
+; installer; no cmdlets, which can take many seconds to load. The folder
+; reaches PowerShell through the environment, so no path is quoted on its
+; command line. Where PowerShell cannot run this (blocked, or Constrained
+; Language Mode), the helpers are stopped by name instead.
+!macro STOP_PROGRAMS_IN_INSTDIR
+  System::Call 'Kernel32::SetEnvironmentVariable(t "LETAGENTS_STOP_IN", t "$INSTDIR\resources")'
+  nsExec::Exec `"$SYSDIR\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "try { $$root = $$env:LETAGENTS_STOP_IN + '\'; foreach ($$p in ([wmisearcher]'SELECT ProcessId, ExecutablePath FROM Win32_Process').Get()) { $$x = $$p.ExecutablePath; if ($$x -and $$x.StartsWith($$root, [StringComparison]::OrdinalIgnoreCase)) { try { [Diagnostics.Process]::GetProcessById([int]$$p.ProcessId).Kill() } catch {} } }; exit 0 } catch { exit 1 }"`
+  Pop $R0
+  ; The app started with --force-run inherits this installer's environment.
+  System::Call 'Kernel32::SetEnvironmentVariable(t "LETAGENTS_STOP_IN", p 0)'
+  ${If} $R0 != 0
+    nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM "${HELPER_NAME}"'
+    Pop $R0
+  ${EndIf}
+!macroend
+
 ; Wait for the app to quit (electron-updater starts this installer and then
-; quits the app), then stop what is still running: the app's own child
-; processes run the same LetAgents.exe. A running executable cannot be opened
-; for writing, which is the test. taskkill without elevation stops only this
-; user's processes. No /T: electron-updater starts this installer as a child
-; of LetAgents.exe, so a tree kill would stop the installer too. A person
+; quits the app), then stop what is still running from this folder: the app's
+; own child processes run the same LetAgents.exe, and agents and probes run
+; the programs STOP_PROGRAMS_IN_INSTDIR stops. taskkill by name stays as the
+; fallback for LetAgents.exe; without elevation it stops only this user's
+; processes. No /T: electron-updater starts this installer as a child of
+; LetAgents.exe, so a tree kill would stop the installer too. A person
 ; running the installer by hand is asked before the app is closed.
 !macro DEFINE_CLOSE_APP PREFIX
 Function ${PREFIX}CloseRunningApp
@@ -93,21 +134,23 @@ Function ${PREFIX}CloseRunningApp
   ${EndIf}
   StrCpy $R1 0
   ${Do}
-    ClearErrors
-    FileOpen $R0 "$INSTDIR\${EXE_NAME}" a
-    ${IfNot} ${Errors}
-      FileClose $R0
+    StrCpy $R2 1
+    !insertmacro CHECK_NOT_RUNNING "$INSTDIR\${EXE_NAME}"
+    !insertmacro CHECK_NOT_RUNNING "$INSTDIR\${RUNTIME_DIR}\${HELPER_NAME}"
+    !insertmacro CHECK_NOT_RUNNING "$INSTDIR\${RUNTIME_DIR}\opencode.exe"
+    ${If} $R2 = 1
       Return
     ${EndIf}
     IntOp $R1 $R1 + 1
     ${If} $R1 = 20
       ${If} $Updating != "1"
-        MessageBox MB_OKCANCEL|MB_ICONQUESTION "${PRODUCT_NAME} is running. Close it and continue?" /SD IDOK IDOK close
+        MessageBox MB_OKCANCEL|MB_ICONQUESTION "${PRODUCT_NAME} or one of its agents is running. Close them and continue?" /SD IDOK IDOK close
         Abort "${PRODUCT_NAME} is still running."
         close:
       ${EndIf}
       nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM "${EXE_NAME}"'
       Pop $R0
+      !insertmacro STOP_PROGRAMS_IN_INSTDIR
     ${EndIf}
     ${If} $R1 >= 40
       MessageBox MB_RETRYCANCEL|MB_ICONEXCLAMATION "${PRODUCT_NAME} is still running. Close it, then choose Retry." /SD IDCANCEL IDRETRY retry
@@ -236,9 +279,8 @@ Section "Install"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "QuietUninstallString" '"$INSTDIR\${UNINSTALLER_NAME}" /S'
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoModify" 1
   WriteRegDWORD HKCU "${UNINSTALL_KEY}" "NoRepair" 1
-  ${GetSize} "$INSTDIR" "/S=0K" $R0 $R1 $R2
-  IntFmt $R0 "0x%08X" $R0
-  WriteRegDWORD HKCU "${UNINSTALL_KEY}" "EstimatedSize" "$R0"
+  ; From the build: counting the installed folder's files takes minutes.
+  WriteRegDWORD HKCU "${UNINSTALL_KEY}" "EstimatedSize" ${INSTALLED_KB}
 
   ; electron-updater builds the next differential update from the installer
   ; of the installed version, which it looks for here.
