@@ -201,8 +201,8 @@
   bottom: calc(100% + 6px);
   left: 0;
   z-index: 20;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 2px;
   width: 300px;
   padding: 5px;
@@ -213,8 +213,13 @@
   backdrop-filter: blur(24px) saturate(170%);
   box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.6), 0 16px 40px rgba(0, 0, 0, 0.5);
   transform-origin: 20px 100%;
-  /* Everything fits; there is no scrollbar. */
-  overflow: visible;
+  /* The chip sets max-height from the space above it. The model list gives up
+     height first; the menu scrolls only when the window is too short for that. */
+  overflow-y: auto;
+}
+
+.desktop-composer-agent-menu > * {
+  flex: none;
 }
 
 .desktop-composer-agent-menu[data-animate] {
@@ -714,6 +719,14 @@
 }
 
 .desktop-composer-agent-group {
+  flex: 0 1 auto;
   display: grid;
   gap: 2px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* A long list keeps three rows visible before the menu itself scrolls. */
+.desktop-composer-agent-group:has(> :nth-child(4)) {
+  min-height: 106px;
 }
