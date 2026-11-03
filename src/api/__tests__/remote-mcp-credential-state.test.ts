@@ -45,9 +45,11 @@ test("a projection keeps worker handles, their live sessions and cursors, and no
     room: "x",
   }));
   assert.deepEqual(Object.keys(projected.local.mcp_workers ?? {}).sort(), ["worker_a", "worker_b"], "a worker whose session ended keeps its handle");
-  assert.deepEqual(Object.keys(projected.local.agent_sessions ?? {}).sort(), ["s1", "s3"], "ended sessions are dropped; a legacy current session is kept");
+  assert.deepEqual(Object.keys(projected.local.agent_sessions ?? {}).sort(), ["s1", "s2", "s3"],
+    "a worker's ended session is kept (its token is the next registration's proof); a legacy current session is kept");
+  assert.ok(projected.local.agent_sessions!.s2!.ended_at, "and it stays marked ended");
   assert.deepEqual(projected.local.current_agent_session_ids, { y: "s3" }, "a legacy registration whose session ended is dropped");
-  assert.deepEqual(Object.keys(projected.pinnedConnections), ["s1"]);
+  assert.deepEqual(Object.keys(projected.pinnedConnections), ["s1"], "only live sessions keep a pinned connection");
   assert.equal(projected.local.room_sessions?.x?.last_message_id, "msg_9");
   assert.equal(projected.local.agent_identities, undefined);
   assert.equal(projected.local.agent_identity, undefined);
@@ -56,17 +58,24 @@ test("a projection keeps worker handles, their live sessions and cursors, and no
 });
 
 test("the worker cap keeps the most recently used handles, and a handle keeps at most 16 rooms", () => {
+  // Agent sessions carry Postgres text timestamps with the server's zone;
+  // worker use is recorded as ISO UTC. Recency must compare them as times.
   const sessions: Record<string, StoredAgentSessionState> = {};
   const workers: Record<string, StoredMcpWorker> = {};
   for (let i = 0; i < 5; i += 1) {
-    sessions[`s${i}`] = session(`s${i}`, "x", `2026-11-03T1${i}:00:00Z`);
+    sessions[`s${i}`] = session(`s${i}`, "x", `2026-11-03 1${i}:00:00.5+01`);
     workers[`worker_${i}`] = worker(String(i), { x: `s${i}` });
   }
-  // The oldest-registered worker was used most recently, so it stays.
-  workers.worker_0 = { ...workers.worker_0!, last_used_at: "2026-11-03T20:00:00Z" };
+  // worker_0 (registered 10:00+01 = 09:00Z) was used at 13:30Z, after worker_4's registration (14:00+01 = 13:00Z).
+  workers.worker_0 = { ...workers.worker_0!, last_used_at: "2026-11-03T13:30:00.000Z" };
   const projected = projectCredentialState(state({ mcp_workers: workers, agent_sessions: sessions }), 2);
   assert.deepEqual(Object.keys(projected.local.mcp_workers ?? {}).sort(), ["worker_0", "worker_4"]);
   assert.deepEqual(Object.keys(projected.local.agent_sessions ?? {}).sort(), ["s0", "s4"], "only the kept workers' sessions stay");
+  // A freshly registered worker (Postgres text, a space before the time) is newer than an ISO use earlier the same day.
+  const fresh = { ...workers, worker_5: worker("5", { x: "s5" }) };
+  const freshSessions = { ...sessions, s5: session("s5", "x", "2026-11-03 15:00:00+01") };
+  const afterFresh = projectCredentialState(state({ mcp_workers: fresh, agent_sessions: freshSessions }), 2);
+  assert.deepEqual(Object.keys(afterFresh.local.mcp_workers ?? {}).sort(), ["worker_0", "worker_5"], "the newest registration is never dropped for an older use");
 
   const manyRooms: Record<string, string> = {};
   const roomSessions: Record<string, StoredAgentSessionState> = {};
@@ -106,6 +115,29 @@ test("a fold takes only what the session changed since its baseline; an ended en
   const withTombstone = { ...credential, local: { ...credential.local, agent_sessions: { ...credential.local.agent_sessions, s1: { ...seededSession, ended_at: "2026-11-03T12:00:00Z" } } } };
   const revived = foldIntoCredential(withTombstone, stale, null).local.agent_sessions?.s1;
   assert.ok(!revived || revived.ended_at, "ended stays ended");
+  // The server renews a registration under the same id with a new token: that is a revival, not a stale copy.
+  // Here the credential still binds worker_a to the ended s1 (the tombstone that proves the next registration).
+  const endedCredential = projectCredentialState(state({ mcp_workers: { worker_a: worker("a", { x: "s1" }) },
+    agent_sessions: { s1: { ...seededSession, ended_at: "2026-11-03T12:00:00Z" } } }));
+  assert.ok(endedCredential.local.agent_sessions!.s1!.ended_at, "the worker's ended session is kept as proof");
+  const renewed = { ...seededSession, session_token: "tok-s1-renewed", updated_at: "2026-11-03T13:00:00Z", last_seen_at: "2026-11-03T13:00:00Z" };
+  const renewing = state({ mcp_workers: { worker_a: worker("a", { x: "s1" }) }, agent_sessions: { s1: renewed }, pinned: [renewed] });
+  const afterRenewal = foldIntoCredential(endedCredential, renewing, baseline);
+  assert.equal(afterRenewal.local.agent_sessions!.s1!.session_token, "tok-s1-renewed", "a renewed registration replaces the ended record");
+  assert.equal(afterRenewal.local.agent_sessions!.s1!.ended_at, null);
+  assert.ok(afterRenewal.pinnedConnections.s1, "and its connection is kept");
+});
+
+test("a stale session's older use time does not move a worker's recency backwards", () => {
+  const shared = session("s0", "x", "2026-11-03 10:00:00+00");
+  const used = { ...worker("a", { x: "s0" }), last_used_at: "2026-11-03T12:00:00.000Z" };
+  const credential = projectCredentialState(state({ mcp_workers: { worker_a: used }, agent_sessions: { s0: shared }, pinned: [shared] }));
+  const staleWorker = { ...worker("a", { x: "s0", y: "sy" }), last_used_at: "2026-11-03T09:00:00.000Z" };
+  const inY = session("sy", "y", "2026-11-03 11:00:00+00");
+  const stale = state({ mcp_workers: { worker_a: staleWorker }, agent_sessions: { s0: shared, sy: inY }, pinned: [shared, inY] });
+  const folded = foldIntoCredential(credential, stale, null);
+  assert.equal(folded.local.mcp_workers!.worker_a!.last_used_at, "2026-11-03T12:00:00.000Z");
+  assert.deepEqual(Object.keys(folded.local.mcp_workers!.worker_a!.rooms).sort(), ["x", "y"], "the room binding it added is still folded in");
 });
 
 test("two sessions that bind one worker in different rooms both keep their binding", () => {

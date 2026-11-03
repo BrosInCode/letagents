@@ -966,8 +966,9 @@ with a new session in between (pass `room_id`, or join again). The state is boun
 `LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS` (32) workers with 16 rooms each, the least recently used dropped first
 (a worker's use is recorded about once a minute), and it is never larger than `LETAGENTS_REMOTE_MCP_MAX_STATE_BYTES`;
 a new session's seed is kept under half that cap. A session folds in only the entries it added or changed (a worker's
-room bindings one room at a time), so a stale session cannot undo another session's later change, and an ended agent
-session stays ended.
+room bindings one room at a time), so a stale session cannot undo another session's later change. An ended agent
+session stays ended unless a session holds its renewed registration (same id, new token); a worker's ended session is
+kept with its handle, because its token is the proof the worker's next registration in that room presents.
 A request sent without any `Mcp-Session-Id` (and that is not `initialize`) is served in the credential's one
 implicit session (`implicit` = true, `client_name` = `stateless`), which is reused for the next such request and
 re-reads the credential's worker state on every request (not while a request of that session is still running on

@@ -225,16 +225,19 @@ export class RemoteMcpSessions {
     // account-wide backstop bounds the rows an account with many sign-ins holds.
     const stateful = (await listRemoteMcpSessionsForAccount(input.accountId)).filter((row) => !row.implicit);
     const own = stateful.filter((row) => row.token_hash === tokenHash);
-    const excess = implicit ? 0 : Math.max(
-      own.length - this.limits.maxSessionsPerAccount + 1,
-      stateful.length - this.limits.maxSessionsPerAccount * ACCOUNT_BACKSTOP_FACTOR + 1,
-    );
-    if (excess > 0) {
-      // This credential's least recently used first, then the account's; a
-      // session with a request in flight on this process stays.
-      const victims = [...own, ...stateful.filter((row) => row.token_hash !== tokenHash)]
-        .filter((row) => !this.inFlightBySession.has(row.session_id))
-        .slice(0, excess);
+    const ownExcess = implicit ? 0 : own.length - this.limits.maxSessionsPerAccount + 1;
+    const accountExcess = implicit ? 0 : stateful.length - this.limits.maxSessionsPerAccount * ACCOUNT_BACKSTOP_FACTOR + 1;
+    if (ownExcess > 0 || accountExcess > 0) {
+      // Over its own cap, this credential's least recently used sessions go;
+      // over the account backstop, the account's least recently used go,
+      // whichever sign-in they belong to. A session with a request in flight
+      // on this process stays.
+      const idle = (rows: typeof stateful) => rows.filter((row) => !this.inFlightBySession.has(row.session_id));
+      const victims = idle(own).slice(0, Math.max(0, ownExcess));
+      for (const row of idle(stateful)) {
+        if (victims.length >= Math.max(ownExcess, accountExcess)) break;
+        if (!victims.includes(row)) victims.push(row);
+      }
       for (const victim of victims) {
         await deleteRemoteMcpSessionForAccount(victim.session_id, input.accountId);
         this.loaded.delete(victim.session_id);
@@ -339,10 +342,7 @@ export class RemoteMcpSessions {
       current.lastUsedAt = Date.now();
       return current;
     }
-    // The baseline is the credential's own view, so anything this session
-    // holds beyond it (a change an earlier process did not fold) is folded on
-    // the next save. Without a credential row, the session's view stands in.
-    const credential = await this.loadCredentialState(row.token_hash, credentialKey, row.account_id);
+
     const loaded: LoadedRemoteMcpSession = {
       sessionId: row.session_id,
       accountId: row.account_id,
@@ -361,7 +361,11 @@ export class RemoteMcpSessions {
       memory: new Map(),
       saving: Promise.resolve(),
     };
-    loaded.memory.set(BASELINE_KEY, credential ? credential.state : projectCredentialState(incoming));
+    // The baseline is this session's own view at load: the credential is
+    // folded before the row is saved, so a saved row never holds an unfolded
+    // change, and an out-of-date session loaded after a restart does not
+    // mistake the newer credential entries it lacks for its own changes.
+    loaded.memory.set(BASELINE_KEY, projectCredentialState(incoming));
     // A process may have loaded this session before another replica's load;
     // keep the first object so no in-flight call holds a stale copy.
     return this.loaded.get(row.session_id) ?? (this.loaded.set(row.session_id, loaded), loaded);
@@ -499,9 +503,11 @@ export class RemoteMcpSessions {
         await touchRemoteMcpSession(session.sessionId).catch(() => undefined);
         return;
       }
-      if (session.dirty) await this.saveSessionRow(session);
-      // A credential fold that failed earlier is retried here, by the flag.
+      // The credential first: a saved session row then never holds a change
+      // the credential lacks, which keeps the load-time baseline honest.
+      // A fold that failed earlier is retried here, by the flag.
       if (session.credentialDirty) await this.saveCredential(session);
+      if (session.dirty) await this.saveSessionRow(session);
     });
     session.saving = run.catch(() => undefined);
     return run;
