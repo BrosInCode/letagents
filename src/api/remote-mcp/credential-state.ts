@@ -1,4 +1,5 @@
 import type { McpSessionPersistentState } from "../../mcp/server/runtime/session-scope.js";
+import { WORKER_USE_RECORD_INTERVAL_MS } from "../../shared/mcp-worker.js";
 
 /**
  * The state one remote MCP credential keeps for its later sessions, and how a
@@ -110,11 +111,13 @@ function isEnded(entry: unknown): boolean {
 
 /**
  * Whether a live entry may replace an ended one. A stale copy of the same
- * registration carries the ended record's token and must not revive it; a
- * registration the server renewed under the same id carries a new token.
+ * registration carries an older token and an older time and must not revive
+ * it; a registration the server renewed under the same id carries a new
+ * token and a time after the end.
  */
 function revives(ended: unknown, live: unknown): boolean {
-  return isRecord(ended) && isRecord(live) && typeof live.session_token === "string" && live.session_token !== ended.session_token;
+  return isRecord(ended) && isRecord(live) && typeof live.session_token === "string" && live.session_token !== ended.session_token
+    && toTime(live.updated_at) > toTime(ended.ended_at ?? ended.updated_at);
 }
 
 /**
@@ -157,11 +160,14 @@ export function projectCredentialState(state: McpSessionPersistentState, maxWork
   const known = (id: string | undefined): id is string => Boolean(id && agentSessions[id]);
   const live = (id: string | undefined): id is string => known(id) && !agentSessions[id]!.ended_at;
 
-  // A worker's recency is its last recorded use, or else the newest of its sessions.
+  // A worker's recency is its last recorded use (written once per interval, so
+  // a busy worker counts as used through the interval), or else the newest of
+  // its sessions.
+  const usedUntil = (worker: { last_used_at?: string }): number => (worker.last_used_at ? toTime(worker.last_used_at) + WORKER_USE_RECORD_INTERVAL_MS : 0);
   const workers = Object.values(local.mcp_workers ?? {})
     .map((worker) => ({
       worker,
-      seen: Math.max(toTime(worker.last_used_at), ...Object.values(worker.rooms).map((room) => seenAt(room.session_id))),
+      seen: Math.max(usedUntil(worker), ...Object.values(worker.rooms).map((room) => seenAt(room.session_id))),
     }))
     .sort((a, b) => b.seen - a.seen)
     .slice(0, Math.max(0, maxWorkers))

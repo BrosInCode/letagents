@@ -5,13 +5,13 @@ import {
 import type { StoredMcpWorker, StoredAgentSessionState } from "../../local-state/types.js";
 import { isLocalRoomStorageEnabled, resolveLocalRoomStorageIdentifiers } from "../../local-state.js";
 import { assertWorkerConnection, heldWorkerConnection, pinWorkerConnection, pinnedWorkerConnection, withWorkerCall } from "../../worker-call-context.js";
-import { isMcpWorkerId } from "../../../shared/mcp-worker.js";
+import { isMcpWorkerId, WORKER_USE_RECORD_INTERVAL_MS } from "../../../shared/mcp-worker.js";
 import { AGENT_CODENAME_SPACE, pickLocalCodename } from "../../../shared/codenames.js";
 import { buildAgentActorLabel } from "../../../shared/agent-identity.js";
 import { normalizeRoutingHandle, normalizeRoutingSender } from "../../../../shared/routing-aliases.mjs";
 import { encodeRoomIdPath } from "../../room-id.js";
 import { getGitCurrentBranch } from "../../git-remote.js";
-import { apiCall, apiCallWhenFree, getApiUrl, hasLetagentsCredential } from "./api.js";
+import { ApiError, apiCall, apiCallWhenFree, getApiUrl, hasLetagentsCredential } from "./api.js";
 import { resolveOwnerContext } from "./identity/directory.js";
 import { detectAgentIdeLabel, detectAgentRuntimeLabel } from "./identity/config.js";
 import { getProcessHostId, getSessionLivenessRegistration } from "./identity/liveness.js";
@@ -278,10 +278,31 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
     return session;
   }
 
+  /**
+   * A prepared operation stays saved while its answer may have been lost
+   * (a network error, a server error), so a later process can recover it.
+   * An answer that refuses it for good (4xx: another registration won, the
+   * proof is stale) ends it, or the refusal would repeat for every later
+   * session that inherits the saved operation.
+   */
+  async function finishOrClear(operation: NonNullable<StoredMcpWorker["rooms"][string]["pending"]>) {
+    try {
+      return await finish(operation);
+    } catch (error) {
+      if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
+        updateLocalState((state) => {
+          const target = state.mcp_workers?.[worker.worker_id]?.rooms[roomId];
+          if (target?.pending?.operation_id === operation.operation_id) delete target.pending;
+        });
+      }
+      throw error;
+    }
+  }
+
   // Recover a response lost by an earlier process using its prepared credential.
   // Then rotate once more for this process; never silently share that connection.
   const pending = getWorker(worker.worker_id, scope).rooms[roomId]?.pending;
-  if (pending) await finish(pending);
+  if (pending) await finishOrClear(pending);
   const operation = { operation_id: randomUUID(), connection_token: randomBytes(32).toString("base64url") } as NonNullable<StoredMcpWorker["rooms"][string]["pending"]>;
   updateLocalState((state) => {
     const target = state.mcp_workers![worker.worker_id]!.rooms;
@@ -293,14 +314,11 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
     operation.predecessor_token = prior?.session_token;
     target[roomId].pending = operation;
   });
-  const session = await finish(operation);
+  const session = await finishOrClear(operation);
   pinWorkerConnection(getLocalStatePath(), session);
   if (!local) holdProcessConnection(session);
   return { worker: getWorker(worker.worker_id, scope), session };
 }
-
-/** How often a worker's `last_used_at` is written: it orders which handles a remote credential keeps. */
-const WORKER_USE_RECORD_INTERVAL_MS = 60_000;
 
 export async function runMcpWorkerCall<T>(workerId: string, roomId: string | undefined,
   callback: (session: StoredAgentSessionState) => T, allowEnded = false): Promise<Awaited<T>> {

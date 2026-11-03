@@ -433,6 +433,42 @@ test("a worker ended in one per-call session registers again in the next", { ski
   assert.equal(second.isError, undefined, JSON.stringify(second));
 });
 
+test("two parallel re-registrations of one worker leave it usable, whichever one the server refuses", { skip, timeout: 60_000 }, async () => {
+  // Separate per-call sessions do not share the stdio process's in-flight
+  // map, so both reach the server. The refused one must not leave a prepared
+  // operation behind that blocks the worker for every later session.
+  const token = "remote_mcp_owner_token_double";
+  await createOwner("double", token);
+  const step = async <T,>(run: (client: Client) => Promise<T>): Promise<T> => {
+    const { client } = await connect(token);
+    try {
+      return await run(client);
+    } finally {
+      await client.close();
+    }
+  };
+  const joined = await step((client) => call(client, "join_room", { name: "remote-mcp-double" }));
+  const handle = await step((client) => call(client, "register_agent_session",
+    { room_id: joined.room_id, display_name: "Doubled Dot", registration_key: "double-key", runtime: "dot" }));
+  assert.ok(handle.worker_id, JSON.stringify(handle));
+  await step((client) => call(client, "disconnect_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id }));
+  sessions().dropLoaded();
+  const [a, b] = await Promise.all([
+    step((client) => call(client, "register_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id, runtime: "dot" })),
+    step((client) => call(client, "register_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id, runtime: "dot" })),
+  ]);
+  assert.ok([a, b].some((result) => result.isError === undefined), `at least one re-registration succeeds: ${JSON.stringify([a, b])}`);
+  sessions().dropLoaded();
+  const sent = await step((client) => call(client, "send_message", { room_id: joined.room_id, worker_id: handle.worker_id, text: "still here after the race" }));
+  if (sent.isError) {
+    // The winner's connection may have been replaced by the loser's attempt; an explicit reconnect must then work.
+    const again = await step((client) => call(client, "register_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id, runtime: "dot" }));
+    assert.equal(again.isError, undefined, `a later re-registration is not blocked by a leftover prepared operation: ${JSON.stringify(again)}`);
+    const resent = await step((client) => call(client, "send_message", { room_id: joined.room_id, worker_id: handle.worker_id, text: "here after the reconnect" }));
+    assert.equal(resent.isError, undefined, JSON.stringify(resent));
+  }
+});
+
 test("an out-of-date session reloaded after a restart does not write over a worker's newer binding", { skip, timeout: 60_000 }, async () => {
   const token = "remote_mcp_owner_token_reload";
   await createOwner("reload", token);

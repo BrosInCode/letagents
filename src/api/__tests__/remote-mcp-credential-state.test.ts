@@ -71,6 +71,12 @@ test("the worker cap keeps the most recently used handles, and a handle keeps at
   const projected = projectCredentialState(state({ mcp_workers: workers, agent_sessions: sessions }), 2);
   assert.deepEqual(Object.keys(projected.local.mcp_workers ?? {}).sort(), ["worker_0", "worker_4"]);
   assert.deepEqual(Object.keys(projected.local.agent_sessions ?? {}).sort(), ["s0", "s4"], "only the kept workers' sessions stay");
+  // A worker used within the last record interval counts as used through it, so a burst of
+  // registrations inside one minute does not drop a worker that is busy right now.
+  const busy = { ...workers, worker_0: { ...workers.worker_0!, last_used_at: "2026-11-03T12:59:30.000Z" } };
+  const busySessions = { ...sessions, s4: session("s4", "x", "2026-11-03 14:00:15+01") }; // 13:00:15Z, within 60 s of the use
+  const afterBurst = projectCredentialState(state({ mcp_workers: busy, agent_sessions: busySessions }), 2);
+  assert.ok(Object.hasOwn(afterBurst.local.mcp_workers ?? {}, "worker_0"), "the busy worker is kept through the record interval");
   // A freshly registered worker (Postgres text, a space before the time) is newer than an ISO use earlier the same day.
   const fresh = { ...workers, worker_5: worker("5", { x: "s5" }) };
   const freshSessions = { ...sessions, s5: session("s5", "x", "2026-11-03 15:00:00+01") };
@@ -126,6 +132,11 @@ test("a fold takes only what the session changed since its baseline; an ended en
   assert.equal(afterRenewal.local.agent_sessions!.s1!.session_token, "tok-s1-renewed", "a renewed registration replaces the ended record");
   assert.equal(afterRenewal.local.agent_sessions!.s1!.ended_at, null);
   assert.ok(afterRenewal.pinnedConnections.s1, "and its connection is kept");
+  // A copy with another token but a time before the end is a stale copy, not a renewal.
+  const olderCopy = { ...seededSession, session_token: "tok-s1-older", updated_at: "2026-11-03T09:00:00Z", last_seen_at: "2026-11-03T09:00:00Z" };
+  const copying = state({ mcp_workers: { worker_a: worker("a", { x: "s1" }) }, agent_sessions: { s1: olderCopy }, pinned: [olderCopy] });
+  const afterCopy = foldIntoCredential(endedCredential, copying, null);
+  assert.ok(afterCopy.local.agent_sessions!.s1!.ended_at, "an older copy with a different token does not revive the ended record");
 });
 
 test("a stale session's older use time does not move a worker's recency backwards", () => {

@@ -505,9 +505,18 @@ export class RemoteMcpSessions {
       }
       // The credential first: a saved session row then never holds a change
       // the credential lacks, which keeps the load-time baseline honest.
-      // A fold that failed earlier is retried here, by the flag.
-      if (session.credentialDirty) await this.saveCredential(session);
+      // A fold that failed earlier is retried here, by the flag. A failed
+      // fold does not keep the session's own row from being saved.
+      let foldError: unknown;
+      if (session.credentialDirty) {
+        try {
+          await this.saveCredential(session);
+        } catch (error) {
+          foldError = error;
+        }
+      }
       if (session.dirty) await this.saveSessionRow(session);
+      if (foldError !== undefined) throw foldError;
     });
     session.saving = run.catch(() => undefined);
     return run;
@@ -552,7 +561,11 @@ export class RemoteMcpSessions {
         const theirs = openRemoteMcpState(row.state, session.stateKey, { sessionId: session.sessionId, accountId: session.accountId });
         if (theirs === null) return;
         this.counters.conflicts += 1;
-        Object.assign(session.state, mergeSessionStates(session.state, readState(theirs), "ours"));
+        const incoming = readState(theirs);
+        Object.assign(session.state, mergeSessionStates(session.state, incoming, "ours"));
+        // What the other replica saved counts as folded, as on the load path.
+        const baseline = session.memory.get(BASELINE_KEY) as McpSessionPersistentState | undefined;
+        if (baseline) session.memory.set(BASELINE_KEY, foldIntoCredential(baseline, projectCredentialState(incoming), null));
         session.version = row.version;
       }
     throw new Error("The remote MCP session state kept changing; retry the call.");
