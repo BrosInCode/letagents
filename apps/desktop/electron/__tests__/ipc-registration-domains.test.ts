@@ -139,7 +139,9 @@ const expectedDirectChannels = [
   "desktop:room:open-github-install",
   "desktop:room:open-html-demo",
   "desktop:room:poll-agent-work",
+  "desktop:room:prepare-inline-html-demo",
   "desktop:room:release-board-manager",
+  "desktop:room:release-inline-html-demo",
   "desktop:room:rename",
   "desktop:room:repair-stream-delivery",
   "desktop:room:report-typing",
@@ -444,9 +446,12 @@ test("host approval sender accepts only the live trusted main frame", async () =
   const frame = { url: "http://127.0.0.1:4310/room" };
   const contents = { mainFrame: frame, isDestroyed: () => contentsDestroyed,
     setWindowOpenHandler: () => {}, on: () => {}, openDevTools: () => {} };
+  const windowOptions: Array<{ webPreferences?: Record<string, unknown> }> = [];
+  const inlineDemoHosts: unknown[] = [];
   const mocks = [
     mock.module("electron", { defaultExport: { app: {}, BrowserWindow: class {
       webContents = contents;
+      constructor(options: { webPreferences?: Record<string, unknown> }) { windowOptions.push(options); }
       isDestroyed() { return destroyed; }
       async loadURL() {}
       on(event: string, listener: typeof closeWindow) { if (event === "close") closeWindow = listener; }
@@ -457,12 +462,19 @@ test("host approval sender accepts only the live trusted main frame", async () =
     mock.module("../main/paths.js", { namedExports: { devServerUrl: "http://127.0.0.1:4310",
       electronMainDir: "/test", rendererDistPath: "/test/index.html" } }),
     mock.module("../main/external-url.js", { namedExports: { openExternalWebUrl: async () => {} } }),
+    mock.module("../main/attachments/html-demo-inline.js", { namedExports: {
+      installInlineHtmlDemoHost: (window: unknown) => { inlineDemoHosts.push(window); },
+    } }),
   ];
   try {
     const { assertHostApprovalSender, createWindow, allowMainWindowQuit, focusMainWindow } = await import("../main/window.js");
     const event = { sender: contents, senderFrame: frame } as never;
     assert.throws(() => assertHostApprovalSender(event), /main application window/);
     createWindow();
+    // The webview tag is on only together with the host that refuses every non-demo webview.
+    assert.equal(windowOptions[0]?.webPreferences?.webviewTag, true);
+    assert.equal(inlineDemoHosts.length, 1);
+    assert.equal((inlineDemoHosts[0] as { webContents?: unknown }).webContents, contents);
     let prevented = false;
     closeWindow?.({ preventDefault: () => { prevented = true; } });
     assert.equal(hidden, process.platform === "darwin");

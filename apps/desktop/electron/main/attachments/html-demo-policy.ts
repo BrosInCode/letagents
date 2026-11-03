@@ -1,16 +1,40 @@
+import type { WebPreferences } from "electron";
+
 import { attachmentProtocolScheme, htmlDemoProtocolScheme } from "../paths.js";
 
 /**
- * An HTML demo is a single file someone attached to a room message. It opens
- * in its own window with no preload, no Node and no app sign-in, and nothing
- * loads over the network: scripts and styles must be inline, and images must
- * be data: or blob: URLs. Known limits: the page can still cause DNS lookups
- * (DNS prefetch, WebRTC), and it can read a file the person drops or picks in it.
+ * An HTML demo is a single file someone attached to a room message. It runs
+ * inside its message or in its own window, with no preload, no Node and no app
+ * sign-in, and nothing loads over the network: scripts and styles must be
+ * inline, and images must be data: or blob: URLs. Known limits: the page can
+ * still cause DNS lookups (DNS prefetch, WebRTC), and it can read a file the
+ * person drops or picks in it.
  */
 export const MAX_HTML_DEMO_BYTES = 10 * 1024 * 1024;
 export const MAX_OPEN_HTML_DEMOS = 6;
 /** In-memory partition (no `persist:`), so demo storage never reaches disk. */
 export const HTML_DEMO_PARTITION = "letagents-html-demos";
+
+/** Live inline demo leases main allows; the chat itself runs fewer at once. */
+export const MAX_INLINE_HTML_DEMOS = 4;
+/** A prepared inline demo that no webview loads in this time is dropped. */
+export const INLINE_HTML_DEMO_LEASE_MS = 30_000;
+/** Decoded demo files kept for the chat, so a demo that scrolls back does not download again. */
+export const INLINE_HTML_DEMO_CACHE_ENTRIES = 6;
+export const INLINE_HTML_DEMO_CACHE_BYTES = 2 * MAX_HTML_DEMO_BYTES;
+export const MAX_INLINE_HTML_DEMO_HEIGHT = 4000;
+/** Each inline demo reports its height at most once in this time. */
+export const INLINE_HTML_DEMO_HEIGHT_INTERVAL_MS = 100;
+/**
+ * Every interval a running inline demo must answer a trivial script within the
+ * timeout, or it counts as frozen. Chromium's own hang check needs input first.
+ */
+export const INLINE_HTML_DEMO_LIVENESS_INTERVAL_MS = 5_000;
+export const INLINE_HTML_DEMO_LIVENESS_TIMEOUT_MS = 5_000;
+/** An isolated world no other app code uses, so the page can neither see nor answer the check. */
+export const INLINE_HTML_DEMO_LIVENESS_WORLD_ID = 4417;
+
+const INLINE_HTML_DEMO_HOST = /^[0-9a-f]{32}$/;
 
 export const HTML_DEMO_CONTENT_SECURITY_POLICY = [
   "default-src 'none'",
@@ -71,6 +95,79 @@ export function assertHtmlDemoAttachmentHref(rawHref: unknown): string {
     throw new Error("Only room attachments open as demos.");
   }
   return url.toString();
+}
+
+export function inlineHtmlDemoLeaseUrl(host: string): string {
+  return `${htmlDemoProtocolScheme}://${host}/`;
+}
+
+/** The host of a lease URL written exactly as main makes it, or null for anything else. */
+export function inlineHtmlDemoLeaseHost(rawUrl: unknown): string | null {
+  const prefix = `${htmlDemoProtocolScheme}://`;
+  if (typeof rawUrl !== "string" || !rawUrl.startsWith(prefix) || !rawUrl.endsWith("/")) return null;
+  const host = rawUrl.slice(prefix.length, -1);
+  return INLINE_HTML_DEMO_HOST.test(host) ? host : null;
+}
+
+/**
+ * The lease a `<webview>` attaches with: exactly a lease URL, in the demo
+ * partition, and no webview used that lease before. Null refuses the webview.
+ */
+export function inlineHtmlDemoAttachLease(
+  params: Readonly<Record<string, unknown>>,
+  webPreferences: Readonly<{ partition?: unknown }>,
+  leases: ReadonlyMap<string, { attached: boolean }>,
+): string | null {
+  const host = inlineHtmlDemoLeaseHost(params.src);
+  if (!host || params.partition !== HTML_DEMO_PARTITION || webPreferences.partition !== HTML_DEMO_PARTITION) return null;
+  return leases.get(host)?.attached === false ? host : null;
+}
+
+/** The web preferences of every inline demo, the same locks as a demo window. */
+export function inlineHtmlDemoWebPreferences(): WebPreferences & { disablePopups: true } {
+  return {
+    partition: HTML_DEMO_PARTITION,
+    sandbox: true,
+    contextIsolation: true,
+    nodeIntegration: false,
+    nodeIntegrationInSubFrames: false,
+    nodeIntegrationInWorker: false,
+    webSecurity: true,
+    allowRunningInsecureContent: false,
+    plugins: false,
+    webviewTag: false,
+    navigateOnDragDrop: false,
+    spellcheck: false,
+    // alert() and confirm() would show the page's text in a native app dialog.
+    disableDialogs: true,
+    autoplayPolicy: "user-gesture-required",
+    // Reports the page's height, so the message can show all of it.
+    enablePreferredSizeMode: true,
+    disablePopups: true,
+  };
+}
+
+/**
+ * Replace a guest's web preferences, in place, with the inline demo set. Only
+ * the app's zoom carries over: a preload, Blink features or anything else the
+ * `<webview>` asked for is dropped.
+ */
+export function lockInlineHtmlDemoWebPreferences(webPreferences: WebPreferences): WebPreferences {
+  const { zoomFactor } = webPreferences;
+  for (const key of Object.keys(webPreferences)) delete (webPreferences as Record<string, unknown>)[key];
+  Object.assign(webPreferences, inlineHtmlDemoWebPreferences());
+  if (typeof zoomFactor === "number" && Number.isFinite(zoomFactor) && zoomFactor > 0) webPreferences.zoomFactor = zoomFactor;
+  return webPreferences;
+}
+
+/**
+ * A guest's preferred height in the app's CSS pixels: Electron reports it in
+ * screen points, which the app's zoom scales.
+ */
+export function inlineHtmlDemoHeight(preferredHeight: unknown, zoomFactor: unknown = 1): number {
+  if (typeof preferredHeight !== "number" || Number.isNaN(preferredHeight)) return 0;
+  const zoom = typeof zoomFactor === "number" && Number.isFinite(zoomFactor) && zoomFactor > 0 ? zoomFactor : 1;
+  return Math.min(MAX_INLINE_HTML_DEMO_HEIGHT, Math.max(0, Math.ceil(preferredHeight / zoom)));
 }
 
 export function htmlDemoWindowTitle(fileName: unknown, senderLabel: unknown): string {

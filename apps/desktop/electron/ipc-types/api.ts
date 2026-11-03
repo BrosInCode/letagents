@@ -240,7 +240,7 @@ export interface DesktopApi {
       roomIdentifier: string,
       files: DesktopDroppedAttachmentContent[]
     ) => Promise<DesktopStagedAttachment[]>;
-    /** Open an HTML attachment in the locked, offline demo window. */
+    /** Open an HTML attachment in the locked demo window. */
     openHtmlDemo?: (href: string, fileName: string, senderLabel?: string | null) => Promise<void>;
     /** Prepare an HTML attachment to run inside its message, in the locked demo session. */
     prepareInlineHtmlDemo?: (href: string) => Promise<DesktopInlineHtmlDemoLease>;

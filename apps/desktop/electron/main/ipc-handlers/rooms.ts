@@ -16,7 +16,7 @@ import { getDesktopRoomNotificationPreference, listDesktopRoomNotificationPrefer
 import type { RoomNotificationPreferenceChange } from "../../../../../shared/room-notification-preferences.mjs";
 import { cancelDesktopRoomWakeRule, getDesktopRoomWakeRules, restoreDesktopRoomWakeRule } from "../rooms/wake-rules.js";
 import { getDesktopNeedsYou, getDesktopNeedsYouRoom, getDesktopKnowledge, createDesktopKnowledge, reviseDesktopKnowledge, getDesktopMemoryHistory } from "../rooms/knowledge.js";
-import type { IpcMain } from "electron";
+import type { IpcMain, IpcMainInvokeEvent } from "electron";
 
 import type {
   DesktopAccountRoomActionResult,
@@ -31,6 +31,7 @@ import type {
   DesktopGitHubEventsQuery,
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
+  DesktopInlineHtmlDemoLease,
   DesktopInviteRoomCreation,
   DesktopLocalChatSyncResult,
   DesktopLocalRoomMutationResult,
@@ -73,6 +74,7 @@ import {
   stageChosenDesktopAttachments,
   stageDroppedDesktopAttachmentContents,
 } from "../attachments.js";
+import { prepareInlineHtmlDemo, releaseInlineHtmlDemo } from "../attachments/html-demo-inline.js";
 import { openHtmlDemo } from "../attachments/html-demo-window.js";
 import { getMainWindow } from "../window.js";
 import {
@@ -308,8 +310,22 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle(
     "desktop:room:open-html-demo",
     async (event, href: unknown, fileName: unknown, senderLabel: unknown): Promise<void> => {
-      if (event.sender !== getMainWindow()?.webContents) throw new Error("Demos open only from the main window.");
+      assertHtmlDemoSender(event);
       await openHtmlDemo({ href, fileName, senderLabel });
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:prepare-inline-html-demo",
+    async (event, href: unknown): Promise<DesktopInlineHtmlDemoLease> => {
+      assertHtmlDemoSender(event);
+      return prepareInlineHtmlDemo(href);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:release-inline-html-demo",
+    async (event, url: unknown): Promise<void> => {
+      assertHtmlDemoSender(event);
+      releaseInlineHtmlDemo(url);
     },
   );
   targetIpcMain.handle(
@@ -650,4 +666,9 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     ): Promise<DesktopLocalChatSyncResult> =>
       syncDesktopLocalChatRoom(roomIdentifier),
   );
+}
+
+/** Demos run only for the app's own window, never for a demo page or another window. */
+function assertHtmlDemoSender(event: IpcMainInvokeEvent): void {
+  if (event.sender !== getMainWindow()?.webContents) throw new Error("Demos open only from the main window.");
 }
