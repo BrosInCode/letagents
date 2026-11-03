@@ -335,8 +335,9 @@ export interface ProviderActionPort {
    * Resolves once the MCP runtime shipped with the app has passed its sealed
    * tree integrity check in this process, so that no launch pays for that
    * check; rejects with the integrity error when the tree does not match.
-   * The daemon starts it at its own start and a launch waits on it before it
-   * takes a launch slot. Absent where there is no bundled runtime to verify.
+   * The daemon starts it at its own start and a launch waits on it, for a
+   * bounded time, before it takes a launch slot. A launch through a port
+   * without it does not wait; every launch still verifies the runtime itself.
    */
   verifyBundledRuntime?(): Promise<void>;
   /** Verify the selected polling runtime before an existing writer is stopped. */

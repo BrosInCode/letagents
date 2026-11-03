@@ -899,6 +899,16 @@ test("a launch waits for the daemon's runtime verification before it takes a lau
   const legacy = harness({ provider: provider({ spawn: async () => returnedHandle }) });
   await legacy.coordinator.converge("agent-1");
   assert.equal(legacy.installed.length, 1, "a port without the check launches as before");
+
+  const stalled = harness({ provider: provider({
+    verifyBundledRuntime: () => new Promise<void>(() => {}),
+    spawn: async () => returnedHandle,
+  }) });
+  await new ProviderExecutionCoordinator({ ...stalled.options, runtimeVerifyWaitMs: 50 }).converge("agent-1");
+  assert.equal(stalled.installed.length, 1, "a check that never answers holds a launch only for the bound");
+  const bounded = launchProgress.view("agent-1")!;
+  assert.equal(bounded.state, "launched");
+  assert.ok((bounded.phases.find((phase) => phase.phase === "runtime_verify")?.ms ?? 0) >= 50);
 });
 
 test("delivery handoff freezes convergence and draining never creates a successor", async () => {

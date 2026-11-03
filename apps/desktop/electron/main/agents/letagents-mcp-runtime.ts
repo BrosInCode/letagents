@@ -200,11 +200,11 @@ export function clearLetAgentsMcpRuntimeWarmupsForTest(): void {
  * development entry, no bundled runtime). Rejects with the integrity error
  * when the tree does not match; nothing is remembered, and the next call
  * verifies again. A tree written moments ago is hashed again after a short
- * delay until it leaves its racy window, a few times at most.
+ * delay until it leaves its racy window, a few times at most; after that the
+ * next request starts over, and a launch meanwhile verifies as before.
  */
 export function warmLetAgentsMcpRuntime(input: {
   devEntryPath?: string | null;
-  env?: NodeJS.ProcessEnv;
   resourcesPath?: string;
   /** Test-only digest override for a synthetic bundled runtime fixture. */
   expectedBundledTreeSha256?: string;
@@ -219,17 +219,22 @@ export function warmLetAgentsMcpRuntime(input: {
   if (verifiedRuntimeTrees.has(key)) return Promise.resolve();
   const pending = runtimeWarmups.get(key);
   if (pending) return pending;
+  let remembered = false;
   const warmup = (async () => {
     assertUnredirectedRuntimePath(bundled.root, bundled.entry);
     for (let attempt = 1; ; attempt += 1) {
       const walked = await hashRuntimeTreeInBackground(bundled.nodeModules);
       if (walked.digest !== expectedTreeSha256) throw runtimeTreeIntegrityError(expectedTreeSha256, walked.digest);
-      if (rememberVerifiedTree(key, walked) || attempt >= RACY_RETRY_LIMIT) return;
+      remembered = rememberVerifiedTree(key, walked);
+      if (remembered || attempt >= RACY_RETRY_LIMIT) return;
       await sleep(input.racyRetryDelayMs ?? RACY_RETRY_DELAY_MS);
     }
   })();
   runtimeWarmups.set(key, warmup);
-  warmup.catch(() => { if (runtimeWarmups.get(key) === warmup) runtimeWarmups.delete(key); });
+  // Only a remembered tree stays done. A failure, or a tree still racy after
+  // the last attempt, is forgotten so that the next request starts over.
+  const forget = () => { if (runtimeWarmups.get(key) === warmup) runtimeWarmups.delete(key); };
+  warmup.then(() => { if (!remembered) forget(); }, forget);
   return warmup;
 }
 
@@ -266,20 +271,19 @@ async function hashRuntimeTreeInBackground(nodeModulesRoot: string): Promise<Run
   const hash = createHash("sha256");
   const reads: Array<{ file: RuntimeTreeFile; data: Promise<Buffer> }> = [];
   let step = files.next();
-  try {
-    for (;;) {
-      while (!step.done && reads.length < BACKGROUND_READ_CONCURRENCY) {
-        const file = step.value;
-        reads.push({ file, data: readRuntimeFileNoFollowAsync(file.path, file.size) });
-        step = files.next();
-      }
-      const next = reads.shift();
-      if (!next) break;
-      appendRuntimeFile(hash, next.file.relativePath, await next.data);
+  for (;;) {
+    while (!step.done && reads.length < BACKGROUND_READ_CONCURRENCY) {
+      const file = step.value;
+      const data = readRuntimeFileNoFollowAsync(file.path, file.size);
+      // A read that fails while an earlier one is still awaited must not be an
+      // unhandled rejection; its error is rethrown when its turn comes.
+      data.catch(() => undefined);
+      reads.push({ file, data });
+      step = files.next();
     }
-  } catch (error) {
-    for (const read of reads) read.data.catch(() => undefined);
-    throw error;
+    const next = reads.shift();
+    if (!next) break;
+    appendRuntimeFile(hash, next.file.relativePath, await next.data);
   }
   if (!step.done) throw new Error("The LetAgents MCP runtime walk ended early.");
   return { ...step.value, digest: hash.digest("hex") };

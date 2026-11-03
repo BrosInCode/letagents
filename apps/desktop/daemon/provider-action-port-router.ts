@@ -96,15 +96,17 @@ type BundledRuntimeVerifier = () => Promise<void>;
  * launches still verify the runtime themselves, as every launch does.
  */
 const bundledRuntimeVerifierFromBuild: BundledRuntimeVerifier = async () => {
-  let module: { warmLetAgentsMcpRuntime?: (input: { devEntryPath?: string; env: NodeJS.ProcessEnv }) => Promise<void> };
+  let module: { warmLetAgentsMcpRuntime?: (input: { devEntryPath?: string }) => Promise<void> };
   try {
     module = await import(new URL("../dist-electron/main/agents/letagents-mcp-runtime.js", import.meta.url).href);
   } catch (error) {
-    if ((error as { code?: unknown } | null)?.code === "ERR_MODULE_NOT_FOUND") return;
-    throw error;
+    if ((error as { code?: unknown } | null)?.code !== "ERR_MODULE_NOT_FOUND") throw error;
+    // Only a packaged app has a bundled runtime; there a missing module means every launch pays the first hash.
+    if (typeof (process as { resourcesPath?: unknown }).resourcesPath === "string") console.warn("[runtime_verify]", "the Electron build's runtime module is missing; launches verify the runtime themselves");
+    return;
   }
   if (typeof module.warmLetAgentsMcpRuntime !== "function") return;
-  await module.warmLetAgentsMcpRuntime({ devEntryPath: devMcpServerEntryFromEnv() ?? undefined, env: process.env });
+  await module.warmLetAgentsMcpRuntime({ devEntryPath: devMcpServerEntryFromEnv() ?? undefined });
 };
 
 function publicHandle(handle: NativeHandle, appliedConfigurationRevision?: number): ProviderActionHandle {

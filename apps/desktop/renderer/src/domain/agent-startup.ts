@@ -263,9 +263,9 @@ function showsSlot(progress: DesktopSupervisorLaunchProgress | null, nowMs: numb
   return showsWait(progress, "slot_wait", nowMs);
 }
 
-/** The daemon's one-time runtime check is shown only to a launch that really waited for it. */
+/** The daemon's one-time runtime check is shown only to a launch that really waited for it, or failed in it. */
 function showsRuntime(progress: DesktopSupervisorLaunchProgress | null, nowMs: number): boolean {
-  return showsWait(progress, "runtime_verify", nowMs);
+  return progress?.failure?.phase === "runtime_verify" || showsWait(progress, "runtime_verify", nowMs);
 }
 
 function showsWait(progress: DesktopSupervisorLaunchProgress | null, phase: DesktopSupervisorLaunchPhase, nowMs: number): boolean {

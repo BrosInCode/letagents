@@ -133,11 +133,14 @@ test("the daemon's runtime check shows only to a launch that really waited for i
   assert.deepEqual(waited.stages.map((stage) => [stage.key, stage.state]),
     [["prepare", "done"], ["runtime", "done"], ["process", "now"], ["bootstrap", "pending"], ["join", "pending"], ["context", "pending"]]);
   assert.equal(waited.stages[1]!.ms, 40_000);
-  const failed = agentStartupView(entry({ launchProgress: { ...progress([["prepare", 300], ["runtime_verify", 900]], null),
-    state: "failed", failure: { phase: "runtime_verify", action: "retry" } } }), context, T0 + 2_000);
-  assert.equal(failed.status, "failed");
-  assert.equal(failed.stages[1]!.key, "runtime");
-  assert.equal(failed.stages[1]!.state, "failed");
+  for (const ms of [900, 200]) {
+    const failed = agentStartupView(entry({ launchProgress: { ...progress([["prepare", 300], ["runtime_verify", ms]], null),
+      state: "failed", failure: { phase: "runtime_verify", action: "retry" } } }), context, T0 + 2_000);
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.stages[1]!.key, "runtime", `a check that failed after ${ms} ms is shown as the failed stage`);
+    assert.equal(failed.stages[1]!.state, "failed");
+    assert.equal(failed.stages[2]!.state, "pending");
+  }
 });
 
 test("joining waits for the room bind, reading the room waits for the first output, then it has joined", () => {

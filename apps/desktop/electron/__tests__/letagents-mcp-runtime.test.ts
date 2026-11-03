@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, realpathSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, realpathSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -193,7 +193,7 @@ test("the daemon's background verification seeds the memo, so the first resoluti
   const counts = letAgentsMcpRuntimeTreeWalkCountsForTest;
   clearLetAgentsMcpRuntimeVerificationCacheForTest();
   clearLetAgentsMcpRuntimeWarmupsForTest();
-  const input = { resourcesPath: resources, env: {}, expectedBundledTreeSha256, racyRetryDelayMs: 1_100 };
+  const input = { resourcesPath: resources, expectedBundledTreeSha256, racyRetryDelayMs: 1_100 };
 
   // The tree was written moments ago: the first hash matches but is not remembered, so it is hashed again after the delay.
   const before = { ...counts };
@@ -227,7 +227,7 @@ test("a tampered tree fails the background verification closed, remembers nothin
   const counts = letAgentsMcpRuntimeTreeWalkCountsForTest;
   clearLetAgentsMcpRuntimeVerificationCacheForTest();
   clearLetAgentsMcpRuntimeWarmupsForTest();
-  const input = { resourcesPath: resources, env: {}, expectedBundledTreeSha256, racyRetryDelayMs: 10 };
+  const input = { resourcesPath: resources, expectedBundledTreeSha256, racyRetryDelayMs: 10 };
 
   await assert.rejects(warmLetAgentsMcpRuntime(input), /complete tree integrity check/);
   const again = { ...counts };
@@ -245,12 +245,62 @@ test("a tampered tree fails the background verification closed, remembers nothin
   assert.equal(counts.backgroundHashes, redirected.backgroundHashes);
 });
 
+test("a file that cannot be read while an earlier read is still pending fails the verification, never the process", {
+  skip: process.platform === "win32" || process.getuid?.() === 0 ? "needs an unprivileged POSIX user for an unreadable file" : false,
+}, async () => {
+  const resources = join(tempDir, "warm-unreadable");
+  const nodeModules = join(resources, "app", "runtime", "letagents", "node_modules");
+  writeRuntimePackage(join(nodeModules, "letagents"), LETAGENTS_MCP_RUNTIME_VERSION);
+  mkdirSync(join(nodeModules, "dependency"), { recursive: true });
+  // Sorted order: the large file is read first and is still pending when the next read is refused.
+  writeFileSync(join(nodeModules, "dependency", "a-large.js"), Buffer.alloc(24 * 1024 * 1024, 0x2f));
+  const locked = join(nodeModules, "dependency", "b-locked.js");
+  writeFileSync(locked, "module.exports = 'locked';\n");
+  writeFileSync(join(nodeModules, "dependency", "c-after.js"), "module.exports = 3;\n");
+  const expectedBundledTreeSha256 = computeLetAgentsMcpRuntimeTreeSha256(nodeModules);
+  chmodSync(locked, 0o000);
+  clearLetAgentsMcpRuntimeVerificationCacheForTest();
+  clearLetAgentsMcpRuntimeWarmupsForTest();
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    await assert.rejects(warmLetAgentsMcpRuntime({ resourcesPath: resources, expectedBundledTreeSha256, racyRetryDelayMs: 10 }), /EACCES|permission denied/i);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, [], "the refused read is reported through the verification, not as an unhandled rejection");
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    chmodSync(locked, 0o644);
+  }
+});
+
+test("a tree that stays racy through every attempt is given up on, and the next request starts over", async () => {
+  const resources = join(tempDir, "warm-racy");
+  const nodeModules = join(resources, "app", "runtime", "letagents", "node_modules");
+  writeRuntimePackage(join(nodeModules, "letagents"), LETAGENTS_MCP_RUNTIME_VERSION);
+  mkdirSync(join(nodeModules, "dependency"), { recursive: true });
+  writeFileSync(join(nodeModules, "dependency", "index.js"), "module.exports = 1;\n");
+  const expectedBundledTreeSha256 = computeLetAgentsMcpRuntimeTreeSha256(nodeModules);
+  const counts = letAgentsMcpRuntimeTreeWalkCountsForTest;
+  clearLetAgentsMcpRuntimeVerificationCacheForTest();
+  clearLetAgentsMcpRuntimeWarmupsForTest();
+  const input = { resourcesPath: resources, expectedBundledTreeSha256, racyRetryDelayMs: 5 };
+  const before = { ...counts };
+  await warmLetAgentsMcpRuntime(input);
+  assert.equal(counts.backgroundHashes - before.backgroundHashes, 3, "three attempts inside the racy window, then it gives up");
+  await warmLetAgentsMcpRuntime(input);
+  assert.equal(counts.backgroundHashes - before.backgroundHashes, 6, "a given-up verification is not cached as done");
+  const resolved = { ...counts };
+  resolveLetAgentsMcpRuntime({ resourcesPath: resources, env: {}, expectedBundledTreeSha256 });
+  assert.equal(counts.hashes - resolved.hashes, 1, "a launch meanwhile verifies the tree itself, as before");
+});
+
 test("background verification has nothing to do for a development entry or a missing bundled runtime", async () => {
   const counts = letAgentsMcpRuntimeTreeWalkCountsForTest;
   const before = { ...counts };
-  await warmLetAgentsMcpRuntime({ devEntryPath: join(tempDir, "dev-entry.js"), env: {} });
-  await warmLetAgentsMcpRuntime({ resourcesPath: join(tempDir, "missing"), env: {} });
-  await warmLetAgentsMcpRuntime({ resourcesPath: "", env: {} });
+  await warmLetAgentsMcpRuntime({ devEntryPath: join(tempDir, "dev-entry.js") });
+  await warmLetAgentsMcpRuntime({ resourcesPath: join(tempDir, "missing") });
+  await warmLetAgentsMcpRuntime({ resourcesPath: "" });
   assert.deepEqual({ ...counts }, before);
 });
 
