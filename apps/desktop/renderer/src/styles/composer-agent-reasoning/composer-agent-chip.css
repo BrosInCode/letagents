@@ -44,6 +44,20 @@
 .desktop-composer-agent-dot[data-provider="open-model"],
 .desktop-composer-agent-chip-mark[data-provider="open-model"] { background: #b9a7ff; }
 
+/* A provider logo fills the mark; the tint stays only behind the generic robot. */
+.desktop-composer-agent-dot[data-logo],
+.desktop-composer-agent-chip-mark[data-logo] {
+  overflow: hidden;
+  background: transparent;
+}
+
+.desktop-composer-agent-dot img,
+.desktop-composer-agent-chip-mark img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
 /* ---------- The chip ---------- */
 .desktop-composer-agent-tray {
   display: flex;
@@ -213,7 +227,7 @@
   backdrop-filter: blur(24px) saturate(170%);
   box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.6), 0 16px 40px rgba(0, 0, 0, 0.5);
   transform-origin: 20px 100%;
-  /* Everything fits; there is no scrollbar. */
+  /* The menu never scrolls; when space is short, only its list does (fitMenu). */
   overflow: visible;
 }
 
@@ -716,4 +730,10 @@
 .desktop-composer-agent-group {
   display: grid;
   gap: 2px;
+}
+
+/* fitMenu() caps this list when the menu would run past the top of the window. */
+.desktop-composer-agent-group[data-fit] {
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }

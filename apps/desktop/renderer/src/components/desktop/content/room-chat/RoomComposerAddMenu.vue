@@ -81,7 +81,10 @@
         @click="chooseAgent(row.providerId, $event.currentTarget as HTMLElement)"
         @pointermove="focusItem($event.currentTarget as HTMLElement)"
       >
-        <span class="desktop-composer-agent-dot" :data-provider="row.providerId" aria-hidden="true"><Bot :size="12" /></span>
+        <span class="desktop-composer-agent-dot" :data-provider="row.providerId" :data-logo="providerIconSrc(row.providerId) ? true : undefined" aria-hidden="true">
+          <img v-if="providerIconSrc(row.providerId)" :src="providerIconSrc(row.providerId)!" alt="" draggable="false" />
+          <Bot v-else :size="12" />
+        </span>
         <span class="desktop-composer-add-menu-label">{{ row.name }} <span class="desktop-composer-agent-flyout-detail">{{ row.detail }}</span></span>
         <span v-if="row.hint" class="desktop-composer-add-menu-end">{{ row.hint }}</span>
       </button>
@@ -116,6 +119,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from 
 import { Bot, ChevronLeft, ChevronRight, HandHelping, ImagePlay, ListTodo, Paperclip, Plus, Settings2 } from "@lucide/vue";
 import type { DesktopAgentProviderId } from "../../../../../../electron/ipc-types";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
+import { providerIconSrc } from "./provider-icon";
 import { prefersReducedMotion } from "./room-gif-search";
 import type { ComposerAgentRow } from "./useComposerAgentDraft";
 

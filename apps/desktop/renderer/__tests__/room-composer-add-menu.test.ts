@@ -555,3 +555,16 @@ test('App provides the suggestion from the Needs you data', () => {
   const inbox = readFileSync(new URL('../src/composables/app/useAppInbox.ts', import.meta.url), 'utf8');
   assert.match(inbox, /provide\(composerSuggestedReplyKey, \(roomIdentifier\) => roomSuggestedReply\(needsYouData\.value, roomIdentifier\)\)/);
 });
+
+test('agent rows and the chip show the provider logo, and the chip menu list fits the space above', async () => {
+  const icons = await vite.ssrLoadModule('/renderer/src/components/desktop/content/room-chat/provider-icon.ts');
+  for (const id of ['claude-code', 'codex', 'open-model', 'cursor', 'antigravity']) assert.ok(icons.providerIconSrc(id), id);
+  assert.equal(icons.providerIconSrc('some-new-provider'), null);
+  const dir = new URL('../src/components/desktop/content/room-chat/', import.meta.url);
+  const menu = readFileSync(new URL('RoomComposerAddMenu.vue', dir), 'utf8');
+  const chip = readFileSync(new URL('RoomComposerAgentChip.vue', dir), 'utf8');
+  assert.match(menu, /<img v-if="providerIconSrc\(row\.providerId\)"/);
+  assert.match(chip, /<img v-if="chipIcon"/);
+  // Both lists that can grow long (models, worktrees) are the ones fitMenu caps.
+  assert.equal(chip.match(/class="desktop-composer-agent-group" data-fit/g)?.length, 2);
+});
