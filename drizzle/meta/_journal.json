@@ -868,9 +868,9 @@
       "version": "7",
       "when": 1793100000000,
       "tag": "0123_tracker_rules",
-        "breakpoints": true
-      },
-      {
+      "breakpoints": true
+    },
+    {
       "idx": 124,
       "version": "7",
       "when": 1793200000000,
@@ -903,6 +903,13 @@
       "version": "7",
       "when": 1793600000000,
       "tag": "0128_jira_status_category_map",
+      "breakpoints": true
+    },
+    {
+      "idx": 129,
+      "version": "7",
+      "when": 1793700000000,
+      "tag": "0129_remote_mcp_credentials",
       "breakpoints": true
     }
   ]

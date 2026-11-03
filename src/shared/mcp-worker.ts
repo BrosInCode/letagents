@@ -1,3 +1,10 @@
+/**
+ * How often a stdio process writes a worker's `last_used_at` to its state
+ * file while room tools run as it. A remote session records every call, since
+ * that time orders which handles its credential keeps.
+ */
+export const WORKER_USE_RECORD_INTERVAL_MS = 60_000;
+
 /** Durable worker identity is separate from the random MCP process identity. */
 export function isMcpWorkerId(value: unknown): value is string {
   return typeof value === "string" && /^worker_[a-f0-9]{32}$/.test(value);

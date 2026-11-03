@@ -20,6 +20,9 @@ else process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 process.env.LETAGENTS_POLL_MAX_MS = "1500";
 process.env.LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT = "3";
 process.env.LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT_PER_ACCOUNT = "3";
+// The suite opens many short sessions; the growth test needs a small worker bound.
+process.env.LETAGENTS_REMOTE_MCP_SESSIONS_PER_MINUTE = "1000";
+process.env.LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS = "4";
 
 const skip = testDatabaseUrl ? false : "set TEST_DB_URL to run the DB-backed remote MCP tests";
 const dbClient = testDatabaseUrl ? await import("../db/client.js") : null;
@@ -34,6 +37,8 @@ const stateCrypto = await import("../remote-mcp/state-crypto.js");
 let server: Server | null = null;
 let baseUrl = "";
 const TOKEN_A = "remote_mcp_owner_token_a";
+/** A second owner token of account A: another credential, so another credential state. */
+const TOKEN_A2 = "remote_mcp_owner_token_a_second";
 const TOKEN_B = "remote_mcp_owner_token_b";
 
 async function createOwner(suffix: string, token: string) {
@@ -50,6 +55,7 @@ if (testDatabaseUrl) {
     await dbClient!.pool.query("CREATE SCHEMA public");
     await migrate(dbClient!.db, { migrationsFolder: path.resolve(process.cwd(), "drizzle") });
     await createOwner("a", TOKEN_A);
+    await createOwner("a", TOKEN_A2);
     await createOwner("b", TOKEN_B);
     server = appModule!.createApiApp().listen(0, "127.0.0.1");
     await once(server, "listening");
@@ -101,6 +107,32 @@ function rawPost(token: string, sessionId: string, body: unknown) {
       "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
     body: JSON.stringify(body),
   });
+}
+
+/** The tool result inside a streamed (SSE) MCP response, parsed like `call` parses it. */
+async function toolResultOf(response: Response): Promise<Record<string, any>> {
+  const text = await response.text();
+  const data = text.split("\n").filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim());
+  const message = JSON.parse(data.at(-1) ?? "{}") as { result?: { content?: Array<{ type: string; text?: string }>; isError?: boolean }; error?: unknown };
+  if (message.error) return { rpcError: message.error };
+  const part = message.result?.content?.find((entry) => entry.type === "text")?.text ?? "";
+  try {
+    return { ...JSON.parse(part), isError: message.result?.isError };
+  } catch {
+    return { raw: part, isError: message.result?.isError };
+  }
+}
+
+function statelessPost(token: string, body: unknown) {
+  return fetch(`${baseUrl}/mcp`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify(body),
+  });
+}
+
+function toolCall(id: number, name: string, args: Record<string, unknown> = {}) {
+  return { jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } };
 }
 
 async function stdioToolNames(): Promise<string[]> {
@@ -218,6 +250,302 @@ test("a session survives a restart by reloading its state from the table", { ski
   }
 });
 
+test("a new session of the same credential starts from the earlier session's room and worker handle", { skip, timeout: 60_000 }, async () => {
+  // ChatGPT's connector opens a new session for every tool call. The worker it
+  // registered in one call must answer in the next.
+  const first = await connect();
+  let joined: Record<string, any>;
+  let handle: Record<string, any>;
+  try {
+    joined = await call(first.client, "join_room", { name: "remote-mcp-credential" });
+    handle = await call(first.client, "register_agent_session",
+      { room_id: joined.room_id, display_name: "Per-call Dot", registration_key: "credential-key-1", runtime: "dot" });
+    assert.ok(handle.worker_id, JSON.stringify(handle));
+  } finally {
+    await first.client.close();
+  }
+  sessions().dropLoaded(); // another replica, or this one after a restart
+
+  const second = await connect();
+  try {
+    assert.notEqual(second.transport.sessionId, first.transport.sessionId);
+    const room = await call(second.client, "get_current_room");
+    assert.notEqual(room.room_id, "remote-mcp-credential", "a new chat never inherits another chat's joined room");
+    const sent = await call(second.client, "send_message",
+      { room_id: joined.room_id, worker_id: handle.worker_id, text: "sent from the next session" });
+    assert.equal(sent.isError, undefined, `the worker handle came along: ${JSON.stringify(sent)}`);
+    const recovered = await call(second.client, "register_agent_session",
+      { room_id: joined.room_id, display_name: "Per-call Dot", recover_lost_worker: true });
+    assert.equal(recovered.worker_id, handle.worker_id, `a chat that lost its worker_id gets it back: ${JSON.stringify(recovered)}`);
+  } finally {
+    await second.client.close();
+  }
+
+  // A live credential survives the sweep; only a revoked one goes.
+  await sessions().sweep();
+  assert.ok(await remoteSessionsDb!.getRemoteMcpCredential(stateCrypto.hashRemoteMcpToken(TOKEN_A)), "the credential state outlives the sweep");
+
+  // Another credential of the same account has its own state.
+  const other = await connect(TOKEN_A2);
+  try {
+    const refused = await call(other.client, "send_message",
+      { room_id: joined.room_id, worker_id: handle.worker_id, text: "not mine" });
+    assert.equal(refused.isError, true, JSON.stringify(refused));
+    assert.match(String(refused.raw ?? JSON.stringify(refused)), /Unknown worker_id/);
+  } finally {
+    await other.client.close();
+  }
+});
+
+test("requests without a session id run in the credential's implicit session, which the next one reuses", { skip, timeout: 60_000 }, async () => {
+  const first = await statelessPost(TOKEN_A, toolCall(1, "join_room", { name: "remote-mcp-stateless" }));
+  assert.equal(first.status, 200, await first.clone().text());
+  const sessionId = first.headers.get("mcp-session-id");
+  assert.ok(sessionId, "the implicit session has an id, which the client may ignore");
+  const joined = await toolResultOf(first);
+  assert.equal(joined.room_id, "remote-mcp-stateless", JSON.stringify(joined));
+  assert.equal((await remoteSessionsDb!.getRemoteMcpSession(sessionId!))?.client_name, "stateless");
+
+  const registered = await statelessPost(TOKEN_A, toolCall(2, "register_agent_session",
+    { room_id: joined.room_id, display_name: "Stateless Dot", registration_key: "stateless-key-1", runtime: "dot" }));
+  assert.equal(registered.headers.get("mcp-session-id"), sessionId, "the implicit session is reused");
+  const handle = await toolResultOf(registered);
+  assert.ok(handle.worker_id, JSON.stringify(handle));
+
+  sessions().dropLoaded();
+  const sent = await statelessPost(TOKEN_A, toolCall(3, "send_message",
+    { room_id: joined.room_id, worker_id: handle.worker_id, text: "hello without a session id" }));
+  assert.equal(sent.headers.get("mcp-session-id"), sessionId);
+  const result = await toolResultOf(sent);
+  assert.equal(result.isError, undefined, JSON.stringify(result));
+
+  // A stateful client of the same credential starts from the same worker state, in its own session.
+  const stateful = await connect();
+  let later: Record<string, any>;
+  try {
+    assert.notEqual(stateful.transport.sessionId, sessionId);
+    const viaHandle = await call(stateful.client, "send_message",
+      { room_id: joined.room_id, worker_id: handle.worker_id, text: "same worker, stateful session" });
+    assert.equal(viaHandle.isError, undefined, JSON.stringify(viaHandle));
+    // ... and a worker it registers is usable by the next session-less call at once.
+    later = await call(stateful.client, "register_agent_session",
+      { room_id: joined.room_id, display_name: "Later Dot", registration_key: "stateless-key-2", runtime: "dot" });
+    assert.ok(later.worker_id, JSON.stringify(later));
+  } finally {
+    await stateful.client.close();
+  }
+  const fromLater = await statelessPost(TOKEN_A, toolCall(4, "send_message",
+    { room_id: joined.room_id, worker_id: later.worker_id, text: "registered elsewhere, sent without a session id" }));
+  assert.equal(fromLater.headers.get("mcp-session-id"), sessionId, "still the one implicit session");
+  const fromLaterResult = await toolResultOf(fromLater);
+  assert.equal(fromLaterResult.isError, undefined, `the implicit session re-read the credential state: ${JSON.stringify(fromLaterResult)}`);
+});
+
+test("parallel requests without a session id never lose a worker", { skip, timeout: 120_000 }, async () => {
+  // ChatGPT may run several tool calls of one turn at once, all without a
+  // session id. Each registration must survive the others' folds and refreshes.
+  const token = "remote_mcp_owner_token_parallel";
+  await createOwner("parallel", token);
+  const roomId = (await toolResultOf(await statelessPost(token, toolCall(1, "join_room", { name: "remote-mcp-parallel" })))).room_id;
+  assert.ok(roomId);
+  const parallel = Number(process.env.LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT_PER_ACCOUNT);
+  // This test registers more workers than the suite's small credential bound (the bound is read per call).
+  const boundBefore = process.env.LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS;
+  process.env.LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS = "64";
+  const handles: string[] = [];
+  for (let round = 0; round < 4; round += 1) {
+    const results = await Promise.all(Array.from({ length: parallel }, (_, i) => statelessPost(token,
+      toolCall(10 + round * parallel + i, "register_agent_session",
+        { room_id: roomId, display_name: `Parallel ${round}-${i}`, registration_key: `parallel-key-${round}-${i}`, runtime: "dot" }))
+      .then(toolResultOf)));
+    for (const result of results) {
+      assert.ok(result.worker_id, `every parallel registration answered a worker_id: ${JSON.stringify(result)}`);
+      handles.push(result.worker_id);
+    }
+  }
+  sessions().dropLoaded();
+  try {
+    for (const [i, workerId] of handles.entries()) {
+      const sent = await toolResultOf(await statelessPost(token, toolCall(100 + i, "send_message",
+        { room_id: roomId, worker_id: workerId, text: `parallel worker ${i} reporting` })));
+      assert.equal(sent.isError, undefined, `worker ${i} of ${handles.length} is still known: ${JSON.stringify(sent)}`);
+    }
+  } finally {
+    process.env.LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS = boundBefore;
+  }
+});
+
+test("parallel first requests without a session id share one implicit session", { skip, timeout: 60_000 }, async () => {
+  const token = "remote_mcp_owner_token_race";
+  await createOwner("race", token);
+  const parallel = Number(process.env.LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT_PER_ACCOUNT);
+  const responses = await Promise.all(Array.from({ length: parallel }, (_, i) => statelessPost(token, toolCall(1 + i, "get_current_room"))));
+  const ids = new Set(responses.map((response) => response.headers.get("mcp-session-id")));
+  assert.deepEqual(responses.map((response) => response.status), Array.from({ length: parallel }, () => 200));
+  assert.equal(ids.size, 1, `one implicit session for all of them: ${[...ids].join(", ")}`);
+  const rows = await dbClient!.pool.query("SELECT count(*)::int AS n FROM remote_mcp_sessions WHERE token_hash = $1 AND implicit",
+    [stateCrypto.hashRemoteMcpToken(token)]);
+  assert.equal(rows.rows[0].n, 1);
+});
+
+test("the session cap is per credential: one sign-in's churn leaves another's sessions alone", { skip, timeout: 60_000 }, async () => {
+  const keeper = await connect(TOKEN_A);
+  const keeperId = keeper.transport.sessionId!;
+  await keeper.client.close();
+  const cap = Number(process.env.LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT);
+  const churn = [];
+  for (let i = 0; i < cap + 1; i += 1) churn.push(await connect(TOKEN_A2));
+  const churnIds = churn.map((connection) => connection.transport.sessionId!);
+  for (const connection of churn) await connection.client.close().catch(() => undefined);
+  assert.ok(await remoteSessionsDb!.getRemoteMcpSession(keeperId), "the other sign-in's session was not replaced");
+  const remaining = await Promise.all(churnIds.map((id) => remoteSessionsDb!.getRemoteMcpSession(id)));
+  assert.equal(remaining.filter(Boolean).length, cap, "the churning sign-in holds exactly its cap");
+  assert.equal(remaining[0], null, "its least recently used session went");
+});
+
+test("a worker ended in one per-call session registers again in the next", { skip, timeout: 60_000 }, async () => {
+  // ChatGPT's flow when liveness or the agent ends a worker session: each
+  // step is a new MCP session. The ended session's token is the proof the
+  // next registration of the same worker presents, so the credential keeps it.
+  const token = "remote_mcp_owner_token_reregister";
+  await createOwner("reregister", token);
+  const step = async <T,>(run: (client: Client) => Promise<T>): Promise<T> => {
+    const { client } = await connect(token);
+    try {
+      return await run(client);
+    } finally {
+      await client.close();
+      sessions().dropLoaded();
+    }
+  };
+  const joined = await step((client) => call(client, "join_room", { name: "remote-mcp-reregister" }));
+  const handle = await step((client) => call(client, "register_agent_session",
+    { room_id: joined.room_id, display_name: "Returning Dot", registration_key: "reregister-key", runtime: "dot" }));
+  assert.ok(handle.worker_id, JSON.stringify(handle));
+  const first = await step((client) => call(client, "send_message", { room_id: joined.room_id, worker_id: handle.worker_id, text: "first life" }));
+  assert.equal(first.isError, undefined, JSON.stringify(first));
+  const ended = await step((client) => call(client, "disconnect_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id }));
+  assert.equal(ended.isError, undefined, JSON.stringify(ended));
+  const again = await step((client) => call(client, "register_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id, runtime: "dot" }));
+  assert.equal(again.isError, undefined, `the same worker registers again from a new session: ${JSON.stringify(again)}`);
+  assert.equal(again.worker_id, handle.worker_id);
+  const second = await step((client) => call(client, "send_message", { room_id: joined.room_id, worker_id: handle.worker_id, text: "second life" }));
+  assert.equal(second.isError, undefined, JSON.stringify(second));
+});
+
+test("two parallel re-registrations of one worker leave it usable, whichever one the server refuses", { skip, timeout: 60_000 }, async () => {
+  // Separate per-call sessions do not share the stdio process's in-flight
+  // map, so both reach the server. The refused one must not leave a prepared
+  // operation behind that blocks the worker for every later session.
+  const token = "remote_mcp_owner_token_double";
+  await createOwner("double", token);
+  const step = async <T,>(run: (client: Client) => Promise<T>): Promise<T> => {
+    const { client } = await connect(token);
+    try {
+      return await run(client);
+    } finally {
+      await client.close();
+    }
+  };
+  const joined = await step((client) => call(client, "join_room", { name: "remote-mcp-double" }));
+  const handle = await step((client) => call(client, "register_agent_session",
+    { room_id: joined.room_id, display_name: "Doubled Dot", registration_key: "double-key", runtime: "dot" }));
+  assert.ok(handle.worker_id, JSON.stringify(handle));
+  await step((client) => call(client, "disconnect_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id }));
+  sessions().dropLoaded();
+  const [a, b] = await Promise.all([
+    step((client) => call(client, "register_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id, runtime: "dot" })),
+    step((client) => call(client, "register_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id, runtime: "dot" })),
+  ]);
+  assert.ok([a, b].some((result) => result.isError === undefined), `at least one re-registration succeeds: ${JSON.stringify([a, b])}`);
+  sessions().dropLoaded();
+  const sent = await step((client) => call(client, "send_message", { room_id: joined.room_id, worker_id: handle.worker_id, text: "still here after the race" }));
+  if (sent.isError) {
+    // The winner's connection may have been replaced by the loser's attempt; an explicit reconnect must then work.
+    const again = await step((client) => call(client, "register_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id, runtime: "dot" }));
+    assert.equal(again.isError, undefined, `a later re-registration is not blocked by a leftover prepared operation: ${JSON.stringify(again)}`);
+    const resent = await step((client) => call(client, "send_message", { room_id: joined.room_id, worker_id: handle.worker_id, text: "here after the reconnect" }));
+    assert.equal(resent.isError, undefined, JSON.stringify(resent));
+  }
+});
+
+test("an out-of-date session reloaded after a restart does not write over a worker's newer binding", { skip, timeout: 60_000 }, async () => {
+  const token = "remote_mcp_owner_token_reload";
+  await createOwner("reload", token);
+  const one = await connect(token);
+  const joined = await call(one.client, "join_room", { name: "remote-mcp-reload" });
+  const handle = await call(one.client, "register_agent_session",
+    { room_id: joined.room_id, display_name: "Rotating Dot", registration_key: "reload-key", runtime: "dot" });
+  assert.ok(handle.worker_id, JSON.stringify(handle));
+  // A second session of the same sign-in starts from the same worker binding...
+  const two = await connect(token);
+  await call(two.client, "join_room", { name: "remote-mcp-reload" });
+  // ...then the first session ends the worker and registers it again, so its token rotates.
+  await call(one.client, "disconnect_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id });
+  const rotated = await call(one.client, "register_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id, runtime: "dot" });
+  assert.equal(rotated.isError, undefined, JSON.stringify(rotated));
+  await one.client.close();
+  // A restart (or another replica) reloads the out-of-date second session, which then saves something unrelated.
+  sessions().dropLoaded();
+  const unrelated = await call(two.client, "join_room", { name: "remote-mcp-reload-other" });
+  assert.equal(unrelated.isError, undefined, JSON.stringify(unrelated));
+  await two.client.close();
+  sessions().dropLoaded();
+  const fresh = await connect(token);
+  try {
+    const sent = await call(fresh.client, "send_message", { room_id: joined.room_id, worker_id: handle.worker_id, text: "after the rotation and the reload" });
+    assert.equal(sent.isError, undefined, `the rotated binding survived the stale session's save: ${JSON.stringify(sent)}`);
+  } finally {
+    await fresh.client.close();
+  }
+});
+
+test("the credential state stays bounded as per-call sessions keep registering workers", { skip, timeout: 120_000 }, async () => {
+  const token = "remote_mcp_owner_token_growth";
+  await createOwner("growth", token);
+  const maxWorkers = Number(process.env.LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS);
+  let roomId = "";
+  const handles: string[] = [];
+  for (let i = 0; i < maxWorkers + 3; i += 1) {
+    const { client } = await connect(token); // a new session per call, as ChatGPT does
+    try {
+      if (!roomId) roomId = (await call(client, "join_room", { name: "remote-mcp-growth" })).room_id;
+      const handle = await call(client, "register_agent_session",
+        { room_id: roomId, display_name: `Growth ${i}`, registration_key: `growth-key-${i}`, runtime: "dot" });
+      assert.ok(handle.worker_id, JSON.stringify(handle));
+      handles.push(handle.worker_id);
+    } finally {
+      await client.close();
+    }
+    sessions().dropLoaded();
+  }
+  const row = await remoteSessionsDb!.getRemoteMcpCredential(stateCrypto.hashRemoteMcpToken(token));
+  assert.ok(row, "the credential row exists");
+  const state = stateCrypto.openRemoteMcpState(row!.state, stateCrypto.deriveRemoteMcpCredentialStateKey(token),
+    { sessionId: stateCrypto.REMOTE_MCP_CREDENTIAL_BINDING, accountId: row!.account_id }) as {
+      local: { mcp_workers?: Record<string, unknown>; agent_sessions?: Record<string, unknown>; agent_identities?: unknown; agent_identity?: unknown };
+      currentRoom: unknown; fullPromptDelivered: boolean; pinnedConnections: Record<string, unknown>;
+    };
+  assert.equal(Object.keys(state.local.mcp_workers ?? {}).length, maxWorkers, "only the most recently seen workers are kept");
+  assert.ok(Object.keys(state.local.agent_sessions ?? {}).length <= maxWorkers);
+  assert.ok(Object.keys(state.pinnedConnections).length <= maxWorkers);
+  assert.equal(state.local.agent_identities, undefined, "per-instance identities are not kept");
+  assert.equal(state.local.agent_identity, undefined);
+  assert.equal(state.currentRoom, null, "no joined room is kept");
+  assert.equal(state.fullPromptDelivered, false);
+  assert.ok(Object.hasOwn(state.local.mcp_workers ?? {}, handles.at(-1)!), "the newest worker is kept");
+  assert.equal(Object.hasOwn(state.local.mcp_workers ?? {}, handles[0]!), false, "the oldest worker was dropped");
+
+  // The newest handle still works from yet another new session.
+  const { client } = await connect(token);
+  try {
+    const sent = await call(client, "send_message", { room_id: roomId, worker_id: handles.at(-1)!, text: "still bounded, still working" });
+    assert.equal(sent.isError, undefined, JSON.stringify(sent));
+  } finally {
+    await client.close();
+  }
+});
+
 test("wait_for_messages in process is capped by LETAGENTS_POLL_MAX_MS", { skip, timeout: 60_000 }, async () => {
   const { client } = await connect();
   try {
@@ -252,11 +580,15 @@ test("DELETE removes the session, and the account cap replaces the oldest", { sk
 test("revoking the owner token refuses its requests and the sweep deletes its sessions", { skip, timeout: 60_000 }, async () => {
   const created = await createOwner("revoked", "remote_mcp_token_to_revoke");
   const { client, transport } = await connect("remote_mcp_token_to_revoke");
+  await call(client, "join_room", { name: "remote-mcp-revoked" });
+  const credentialHash = stateCrypto.hashRemoteMcpToken("remote_mcp_token_to_revoke");
+  assert.ok(await remoteSessionsDb!.getRemoteMcpCredential(credentialHash), "a call that changed state wrote the credential state");
   await ownerTokens!.deleteOwnerTokenById(created.token_id);
   const refused = await rawPost("remote_mcp_token_to_revoke", transport.sessionId!, { jsonrpc: "2.0", id: 9, method: "tools/list" });
   assert.equal(refused.status, 401);
   await sessions().sweep();
   assert.equal(await remoteSessionsDb!.getRemoteMcpSession(transport.sessionId!), null);
+  assert.equal(await remoteSessionsDb!.getRemoteMcpCredential(credentialHash), null, "the credential state went with the token");
   await client.close().catch(() => undefined);
 });
 

@@ -250,8 +250,11 @@ async function revokeGrantInTransaction(client: PoolClient, grantId: string): Pr
     [grantId]);
   await client.query("DELETE FROM mcp_oauth_tokens WHERE grant_id = $1", [grantId]);
   const secretHash = revoked.rows[0]?.secret_hash;
-  // Remote MCP sessions opened with the grant end now, not at the next sweep.
-  if (secretHash) await client.query("DELETE FROM remote_mcp_sessions WHERE token_hash = $1", [secretHash]);
+  // Remote MCP sessions opened with the grant, and the grant's saved state, end now, not at the next sweep.
+  if (secretHash) {
+    await client.query("DELETE FROM remote_mcp_sessions WHERE token_hash = $1", [secretHash]);
+    await client.query("DELETE FROM remote_mcp_credentials WHERE token_hash = $1", [secretHash]);
+  }
 }
 
 /** Revoke a grant. With accountId, only that account's grant; returns whether one was revoked. */
