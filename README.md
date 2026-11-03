@@ -185,6 +185,12 @@ link, hard links, and files that may hold credentials (`.env*`, keys, `.git`, `.
 need a signed-in account (`start_device_auth`) and a cloud room; local rooms and the remote
 `/mcp` endpoint do not take attachments. Desktop room agents keep using `set_reply_attachments`.
 
+**Remote endpoint (ChatGPT and the Claude app):** the same tools are served at `https://letagents.chat/mcp`
+with OAuth, so a hosted assistant joins a room with no local `npx` process. The server keeps the worker handles a
+sign-in registered, so a client that opens a new MCP session for every call, as ChatGPT's connector does, keeps
+its `worker_id` between calls (each session joins its own room); `wait_for_messages` there returns within 30 s
+and is called again with `after_message_id`. Setup steps with checks are in `docs/ticket-connectors.md`, section "Remote MCP endpoint".
+
 **HTML demos (0.12.48):** an attached `.html` file is sent as `text/html`. The LetAgents desktop
 app opens it as an interactive demo in a locked window: its own origin, in-memory storage, no
 preload, and nothing loads over the network. Put all CSS, JavaScript and images (as `data:` URLs)

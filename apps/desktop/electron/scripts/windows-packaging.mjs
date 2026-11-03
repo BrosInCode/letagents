@@ -1,7 +1,7 @@
 import { execFile, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -331,4 +331,13 @@ export async function listPayloadEntries(directory) {
     name: entry.name,
     directory: entry.isDirectory(),
   }));
+}
+
+/** The payload's size in KiB, for Installed apps: the installer would take minutes to count its files. */
+export async function payloadSizeKb(directory) {
+  let bytes = 0;
+  for (const entry of await readdir(directory, { withFileTypes: true, recursive: true })) {
+    if (entry.isFile()) bytes += (await lstat(join(entry.parentPath, entry.name))).size;
+  }
+  return Math.ceil(bytes / 1024);
 }

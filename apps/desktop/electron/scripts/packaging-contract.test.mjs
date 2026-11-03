@@ -248,3 +248,33 @@ test("the installer's shortcuts and the app's process share one AppUserModelID",
   assert.ok(applied < main.indexOf("prepareDesktopNotifications();\n"));
   assert.ok(applied < main.indexOf("createWindow();"));
 });
+
+test("the installer waits for and stops every program the app runs from its folder", async () => {
+  const [installer, windowsPackager, windowsPackaging] = await Promise.all([
+    source(join(desktopRoot, "electron", "installer", "windows", "installer.nsi")),
+    source(join(scriptsDirectory, "package-windows.mjs")),
+    import("./windows-packaging.mjs"),
+  ]);
+  const runtimeDirectory = /^!define RUNTIME_DIR "([^"]+)"$/m.exec(installer)?.[1];
+  // The helper lives in RUNTIME_DIR, under resources\app, where the app looks for it.
+  assert.equal(`resources\\app\\${windowsPackaging.PROCESS_TREE_HELPER_APP_PATH.replaceAll("/", "\\")}`, `${runtimeDirectory}\\letagents-process-tree.exe`);
+  assert.match(windowsPackager, /`\/DHELPER_NAME=\$\{PROCESS_TREE_HELPER_NAME\}`/);
+  const checked = [...installer.matchAll(/!insertmacro CHECK_NOT_RUNNING "([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(checked, [
+    "$INSTDIR\\${EXE_NAME}",
+    "$INSTDIR\\${RUNTIME_DIR}\\${HELPER_NAME}",
+    "$INSTDIR\\${RUNTIME_DIR}\\opencode.exe",
+  ]);
+  // LetAgents.exe by name; the rest only when it runs from this install's
+  // resources folder, or by name where PowerShell cannot run the check.
+  const stopped = [...installer.matchAll(/taskkill\.exe" \/F \/IM "\$\{(\w+)\}"/g)].map((match) => match[1]);
+  assert.deepEqual(stopped, ["HELPER_NAME", "EXE_NAME"]);
+  assert.match(installer, /SetEnvironmentVariable\(t "LETAGENTS_STOP_IN", t "\$INSTDIR\\resources"\)/);
+  assert.match(installer, /\$\$x\.StartsWith\(\$\$root, \[StringComparison\]::OrdinalIgnoreCase\)/);
+  assert.match(installer, /SetEnvironmentVariable\(t "LETAGENTS_STOP_IN", p 0\)/);
+  const forcedClose = installer.slice(installer.indexOf("${If} $R1 = 20"), installer.indexOf("${If} $R1 >= 40"));
+  assert.match(forcedClose, /!insertmacro STOP_PROGRAMS_IN_INSTDIR/);
+  // Counting the installed files took minutes; the build gives the size.
+  assert.doesNotMatch(installer, /\$\{GetSize\}/);
+  assert.match(windowsPackager, /`\/DINSTALLED_KB=\$\{await payloadSizeKb\(packagedApp\)\}`/);
+});

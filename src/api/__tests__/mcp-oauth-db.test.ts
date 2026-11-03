@@ -234,6 +234,10 @@ test("an MCP SDK client signs in, calls tools, keeps its session across refresh,
     const sameSession = await toolsList(refreshed.body.access_token, sessionId);
     assert.equal(sameSession.status, 200, "the new access token reaches the same session");
 
+    const liveCredential = await dbClient!.pool.query(`SELECT 1 FROM remote_mcp_credentials c JOIN mcp_oauth_grants g ON g.secret_hash = c.token_hash
+      WHERE g.client_id = $1 AND g.revoked_at IS NULL`, [(provider.info as { client_id: string }).client_id]);
+    assert.equal(liveCredential.rowCount, 1, "the join_room call wrote the grant's credential state");
+
     // Revocation (RFC 7009) ends the grant: its access tokens and sessions stop working.
     const revoke = await fetch(`${baseUrl}/oauth/revoke`, {
       method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -244,6 +248,8 @@ test("an MCP SDK client signs in, calls tools, keeps its session across refresh,
     assert.equal(after.status, 401);
     assert.match(after.headers.get("www-authenticate") ?? "", /error="invalid_token"/);
     const sessions = await dbClient!.pool.query("SELECT 1 FROM remote_mcp_sessions WHERE session_id = $1", [sessionId]);
+    const credentials = await dbClient!.pool.query("SELECT 1 FROM remote_mcp_credentials c JOIN mcp_oauth_grants g ON g.secret_hash = c.token_hash WHERE g.revoked_at IS NOT NULL");
+    assert.equal(credentials.rowCount, 0, "revoking the grant deleted its credential state too");
     assert.equal(sessions.rowCount, 0, "the grant's sessions are deleted at once");
   } finally {
     await client.close().catch(() => undefined);

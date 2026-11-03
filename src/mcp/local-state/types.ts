@@ -100,6 +100,8 @@ export interface StoredMcpWorker {
   scope: string;
   registration_key_hash: string;
   display_name: string;
+  /** When a room tool last ran as this worker (recorded about once a minute). */
+  last_used_at?: string;
   rooms: Record<string, {
     session_id?: string;
     pending?: {

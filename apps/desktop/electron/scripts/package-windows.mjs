@@ -19,8 +19,10 @@ import {
   createNsisPayloadInclude,
   findMakensis,
   listPayloadEntries,
+  payloadSizeKb,
   windowsFileVersion,
 } from "./windows-packaging.mjs";
+import { PROCESS_TREE_HELPER_NAME } from "../../../../shared/process-tree.mjs";
 
 // Builds the Windows NSIS installer, its blockmap and electron-updater's
 // latest.yml from the folder package-artifact.mjs assembled. The installer is
@@ -76,6 +78,8 @@ const { stdout: nsisLog } = await execFileAsync(makensis, [
   `/DPAYLOAD_NSH=${payloadInclude}`,
   `/DICON_FILE=${join(packagedApp, "resources", "letagents.ico")}`,
   `/DOUTPUT_FILE=${installer}`,
+  `/DHELPER_NAME=${PROCESS_TREE_HELPER_NAME}`,
+  `/DINSTALLED_KB=${await payloadSizeKb(packagedApp)}`,
   join(root, "electron", "installer", "windows", "installer.nsi"),
 ], { maxBuffer: 64 * 1024 * 1024 });
 if (nsisLog.trim()) console.error(nsisLog.trim());
