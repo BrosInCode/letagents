@@ -55,6 +55,139 @@
   white-space: normal;
 }
 
+.room-inline-demo {
+  display: grid;
+  gap: 8px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--accent-dim);
+  color: var(--text);
+}
+
+.room-inline-demo-header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.room-inline-demo-icon {
+  flex: none;
+  color: var(--text-secondary);
+}
+
+.room-inline-demo-title {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.room-inline-demo-title strong,
+.room-inline-demo-title small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-inline-demo-title small {
+  color: var(--text-tertiary);
+}
+
+.room-inline-demo-action {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out);
+}
+
+.room-inline-demo-action:hover:not(:disabled) {
+  background: var(--accent-hover);
+  color: var(--text);
+}
+
+.room-inline-demo-action:focus-visible,
+.room-inline-demo-status button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 62%, transparent);
+  outline-offset: 2px;
+}
+
+.room-inline-demo-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.room-inline-demo-note {
+  margin: 0;
+  color: var(--red-text, #f87171);
+  font-size: 0.8rem;
+}
+
+.room-inline-demo-body {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+
+.room-inline-demo-view {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  width: 100%;
+  height: 100%;
+  /* A page with no background of its own shows white, as in the demo window. */
+  background: #ffffff;
+}
+
+.room-inline-demo-status {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 12px;
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  text-align: center;
+}
+
+.room-inline-demo-status p {
+  margin: 0;
+}
+
+.room-inline-demo-status.is-error {
+  color: var(--red-text, #f87171);
+}
+
+.room-inline-demo-status button {
+  padding: 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.room-inline-demo-status button:hover {
+  background: var(--accent-hover);
+}
+
 .room-message-attachment img {
   width: 52px;
   height: 52px;

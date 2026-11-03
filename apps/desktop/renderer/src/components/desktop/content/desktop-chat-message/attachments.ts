@@ -41,8 +41,9 @@ export function isImageAttachment(attachment: DesktopRoomMessageAttachment): boo
 }
 
 /**
- * An HTML file opens as an interactive demo in its own locked window. Files
- * agents attached before HTML had a type arrive as octet-stream, so the name decides.
+ * An HTML file runs as an interactive demo, inside its message or in its own
+ * locked window. Files agents attached before HTML had a type arrive as
+ * octet-stream, so the name decides.
  */
 export function isHtmlDemoAttachment(attachment: DesktopRoomMessageAttachment): boolean {
   const href = attachmentHref(attachment);
@@ -58,4 +59,43 @@ export function htmlDemoErrorText(error: unknown): string {
   const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   const text = raw.replace(/^Error invoking remote method '[^']*':\s*/, "").replace(/^(?:[A-Za-z]*Error:\s*)+/, "").trim();
   return text || "The demo could not open.";
+}
+
+const INLINE_DEMO_DEFAULT_HEIGHT = 240;
+const INLINE_DEMO_MIN_HEIGHT = 120;
+const INLINE_DEMO_MAX_HEIGHT = 560;
+
+/**
+ * How tall the demo's frame is for the page height main last reported
+ * (`null` before the first report). A taller page scrolls inside the frame.
+ */
+export function inlineDemoFrameHeight(contentHeight: number | null): number {
+  if (contentHeight === null || !Number.isFinite(contentHeight)) return INLINE_DEMO_DEFAULT_HEIGHT;
+  return Math.min(INLINE_DEMO_MAX_HEIGHT, Math.max(INLINE_DEMO_MIN_HEIGHT, Math.round(contentHeight)));
+}
+
+/** How long a click or Tab key press counts as the reason a demo took focus. */
+export const INLINE_DEMO_FOCUS_INTENT_MS = 1_000;
+
+export interface InlineDemoFocusFacts {
+  /** `performance.now()` when the focus event arrived. */
+  now: number;
+  /** When the person last pressed a pointer button on the demo, if ever. */
+  pointerDownAt: number | null;
+  /** When the person last pressed Tab, if ever. */
+  tabKeyAt: number | null;
+  /** The person already gave the demo focus; the window coming back may focus it again. */
+  holdsFocus: boolean;
+}
+
+/** True when `at` is not in the future and at most the focus window before `now`. */
+export function withinInlineDemoFocusWindow(now: number, at: number | null): boolean {
+  return at !== null && now - at >= 0 && now - at <= INLINE_DEMO_FOCUS_INTENT_MS;
+}
+
+/** A demo takes focus only because the person just clicked it or tabbed to it. */
+export function inlineDemoMayTakeFocus(facts: InlineDemoFocusFacts): boolean {
+  return facts.holdsFocus
+    || withinInlineDemoFocusWindow(facts.now, facts.pointerDownAt)
+    || withinInlineDemoFocusWindow(facts.now, facts.tabKeyAt);
 }

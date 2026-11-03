@@ -5,7 +5,10 @@ import { readFileSync } from "node:fs";
 
 export default defineConfig({
   base: "./",
-  plugins: [vue(), {
+  plugins: [vue({
+    // Electron's <webview> tag: Vue should leave it alone.
+    template: { compilerOptions: { isCustomElement: (tag) => tag === "webview" } },
+  }), {
     name: "workspace-reader-notices",
     generateBundle() {
       const files = [
