@@ -115,6 +115,8 @@ import type {
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
+  DesktopInlineHtmlDemoEvent,
+  DesktopInlineHtmlDemoLease,
   DesktopSendRoomMessageResult,
   DesktopStagedAttachment,
   DesktopChosenAttachment,
@@ -240,6 +242,11 @@ export interface DesktopApi {
     ) => Promise<DesktopStagedAttachment[]>;
     /** Open an HTML attachment in the locked, offline demo window. */
     openHtmlDemo?: (href: string, fileName: string, senderLabel?: string | null) => Promise<void>;
+    /** Prepare an HTML attachment to run inside its message, in the locked demo session. */
+    prepareInlineHtmlDemo?: (href: string) => Promise<DesktopInlineHtmlDemoLease>;
+    /** Release a prepared inline demo the chat no longer shows. Safe to call more than once. */
+    releaseInlineHtmlDemo?: (url: string) => Promise<void>;
+    onInlineHtmlDemoEvent?: (callback: (event: DesktopInlineHtmlDemoEvent) => void) => () => void;
     discardAttachment: (roomIdentifier: string, uploadId: string) => Promise<void>;
     startStream: (roomIdentifier: string, afterMessageId?: string | null) => Promise<void>;
     repairStreamDelivery?: (

@@ -137,6 +137,15 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:stage-dropped-attachment-contents", roomIdentifier, files),
     openHtmlDemo: (href: string, fileName: string, senderLabel?: string | null) =>
       ipcRenderer.invoke("desktop:room:open-html-demo", href, fileName, senderLabel ?? null),
+    prepareInlineHtmlDemo: (href: string) => ipcRenderer.invoke("desktop:room:prepare-inline-html-demo", href),
+    releaseInlineHtmlDemo: (url: string) => ipcRenderer.invoke("desktop:room:release-inline-html-demo", url),
+    onInlineHtmlDemoEvent: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:room:inline-html-demo-event", listener);
+      return () => {
+        ipcRenderer.off("desktop:room:inline-html-demo-event", listener);
+      };
+    },
     discardAttachment: (roomIdentifier: string, uploadId: string) =>
       ipcRenderer.invoke("desktop:room:discard-attachment", roomIdentifier, uploadId),
     startStream: (roomIdentifier: string, afterMessageId?: string | null) =>
