@@ -97,11 +97,6 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
       jsonRpcError(res, 429, "Too many remote MCP requests. Slow down.");
       return;
     }
-    // JSON-RPC batches left the protocol in 2025-06-18; one message per POST.
-    if (req.method === "POST" && Array.isArray(req.body)) {
-      jsonRpcError(res, 400, "JSON-RPC batches are not supported; send one message per request.");
-      return;
-    }
     const declaredLength = Number.parseInt(req.headers["content-length"] ?? "0", 10) || 0;
     const parsedLength = req.body === undefined ? 0 : Buffer.byteLength(JSON.stringify(req.body));
     if (Math.max(declaredLength, parsedLength) > remoteMcpMaxBodyBytes()) {
@@ -148,6 +143,12 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
       jsonRpcError(res, 400, "Send an initialize request first, without an Mcp-Session-Id header.");
       return;
     }
+    // Without a session id the body decides between initialize and a stateless
+    // call, so it must be one message (batches left the protocol in 2025-06-18).
+    if (Array.isArray(req.body)) {
+      jsonRpcError(res, 400, "Send one JSON-RPC message per request; batches are not supported here.");
+      return;
+    }
     // The transport would refuse these with 406; refuse them before a session is stored.
     const accept = String(req.headers.accept ?? "");
     if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
@@ -170,7 +171,8 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
       return;
     }
     const opened = await sessions.open({ accountId, token, clientName: initialize ? clientNameOf(req.body) : null, implicit: !initialize });
-    const session = await sessions.find(opened, token, accountId);
+    // An implicit session that another request created first is found and refreshed like any other.
+    const session = initialize ? await sessions.find(opened, token, accountId) : await sessions.findImplicit({ accountId, token });
     if (!session) {
       jsonRpcError(res, 500, "The remote MCP session could not start.");
       return;

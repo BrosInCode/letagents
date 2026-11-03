@@ -144,9 +144,9 @@ test("a POST without a session id that is not initialize is served in the creden
     const second = await post(url, { Authorization: "Bearer owner-a" }, toolsListBody);
     assert.equal(second.status, 200);
     assert.deepEqual(calls, [
-      "findImplicit:acct_a", "open:implicit:null", "find:implicit-1", "handle:implicit-1",
+      "findImplicit:acct_a", "open:implicit:null", "findImplicit:acct_a", "handle:implicit-1",
       "findImplicit:acct_a", "handle:implicit-1",
-    ], "the first call opens the implicit session, the second reuses it");
+    ], "the first call opens the implicit session and loads it through the refreshing path; the second reuses it");
     assert.equal((await fetch(url, { headers: { Authorization: "Bearer owner-a" } })).status, 400,
       "GET without a session id is still refused");
     assert.equal((await fetch(url, { method: "DELETE", headers: { Authorization: "Bearer owner-a" } })).status, 400,

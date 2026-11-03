@@ -341,6 +341,68 @@ test("requests without a session id run in the credential's implicit session, wh
   assert.equal(fromLaterResult.isError, undefined, `the implicit session re-read the credential state: ${JSON.stringify(fromLaterResult)}`);
 });
 
+test("parallel requests without a session id never lose a worker", { skip, timeout: 120_000 }, async () => {
+  // ChatGPT may run several tool calls of one turn at once, all without a
+  // session id. Each registration must survive the others' folds and refreshes.
+  const token = "remote_mcp_owner_token_parallel";
+  await createOwner("parallel", token);
+  const roomId = (await toolResultOf(await statelessPost(token, toolCall(1, "join_room", { name: "remote-mcp-parallel" })))).room_id;
+  assert.ok(roomId);
+  const parallel = Number(process.env.LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT_PER_ACCOUNT);
+  // This test registers more workers than the suite's small credential bound (the bound is read per call).
+  const boundBefore = process.env.LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS;
+  process.env.LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS = "64";
+  const handles: string[] = [];
+  for (let round = 0; round < 4; round += 1) {
+    const results = await Promise.all(Array.from({ length: parallel }, (_, i) => statelessPost(token,
+      toolCall(10 + round * parallel + i, "register_agent_session",
+        { room_id: roomId, display_name: `Parallel ${round}-${i}`, registration_key: `parallel-key-${round}-${i}`, runtime: "dot" }))
+      .then(toolResultOf)));
+    for (const result of results) {
+      assert.ok(result.worker_id, `every parallel registration answered a worker_id: ${JSON.stringify(result)}`);
+      handles.push(result.worker_id);
+    }
+  }
+  sessions().dropLoaded();
+  try {
+    for (const [i, workerId] of handles.entries()) {
+      const sent = await toolResultOf(await statelessPost(token, toolCall(100 + i, "send_message",
+        { room_id: roomId, worker_id: workerId, text: `parallel worker ${i} reporting` })));
+      assert.equal(sent.isError, undefined, `worker ${i} of ${handles.length} is still known: ${JSON.stringify(sent)}`);
+    }
+  } finally {
+    process.env.LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS = boundBefore;
+  }
+});
+
+test("parallel first requests without a session id share one implicit session", { skip, timeout: 60_000 }, async () => {
+  const token = "remote_mcp_owner_token_race";
+  await createOwner("race", token);
+  const parallel = Number(process.env.LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT_PER_ACCOUNT);
+  const responses = await Promise.all(Array.from({ length: parallel }, (_, i) => statelessPost(token, toolCall(1 + i, "get_current_room"))));
+  const ids = new Set(responses.map((response) => response.headers.get("mcp-session-id")));
+  assert.deepEqual(responses.map((response) => response.status), Array.from({ length: parallel }, () => 200));
+  assert.equal(ids.size, 1, `one implicit session for all of them: ${[...ids].join(", ")}`);
+  const rows = await dbClient!.pool.query("SELECT count(*)::int AS n FROM remote_mcp_sessions WHERE token_hash = $1 AND implicit",
+    [stateCrypto.hashRemoteMcpToken(token)]);
+  assert.equal(rows.rows[0].n, 1);
+});
+
+test("the session cap is per credential: one sign-in's churn leaves another's sessions alone", { skip, timeout: 60_000 }, async () => {
+  const keeper = await connect(TOKEN_A);
+  const keeperId = keeper.transport.sessionId!;
+  await keeper.client.close();
+  const cap = Number(process.env.LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT);
+  const churn = [];
+  for (let i = 0; i < cap + 1; i += 1) churn.push(await connect(TOKEN_A2));
+  const churnIds = churn.map((connection) => connection.transport.sessionId!);
+  for (const connection of churn) await connection.client.close().catch(() => undefined);
+  assert.ok(await remoteSessionsDb!.getRemoteMcpSession(keeperId), "the other sign-in's session was not replaced");
+  const remaining = await Promise.all(churnIds.map((id) => remoteSessionsDb!.getRemoteMcpSession(id)));
+  assert.equal(remaining.filter(Boolean).length, cap, "the churning sign-in holds exactly its cap");
+  assert.equal(remaining[0], null, "its least recently used session went");
+});
+
 test("the credential state stays bounded as per-call sessions keep registering workers", { skip, timeout: 120_000 }, async () => {
   const token = "remote_mcp_owner_token_growth";
   await createOwner("growth", token);

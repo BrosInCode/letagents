@@ -963,12 +963,15 @@ identity: a new session starts from the credential's worker state but joins its 
 into a room another chat of the same sign-in chose. So a client that opens a new MCP session for every tool call
 keeps its worker: `register_agent_session` in one call, `send_message` with the returned `worker_id` in the next,
 with a new session in between (pass `room_id`, or join again). The state is bounded: at most
-`LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS` (32) workers, the least recently seen dropped first, and it is never
-larger than `LETAGENTS_REMOTE_MCP_MAX_STATE_BYTES`. A session folds in only the entries it added or changed, so a
-stale session cannot undo another session's later change, and an ended agent session stays ended.
+`LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS` (32) workers with 16 rooms each, the least recently used dropped first
+(a worker's use is recorded about once a minute), and it is never larger than `LETAGENTS_REMOTE_MCP_MAX_STATE_BYTES`;
+a new session's seed is kept under half that cap. A session folds in only the entries it added or changed (a worker's
+room bindings one room at a time), so a stale session cannot undo another session's later change, and an ended agent
+session stays ended.
 A request sent without any `Mcp-Session-Id` (and that is not `initialize`) is served in the credential's one
 implicit session (`implicit` = true, `client_name` = `stateless`), which is reused for the next such request and
-re-reads the credential's worker state on every request. JSON-RPC batches get `400`.
+re-reads the credential's worker state on every request (not while a request of that session is still running on
+that process). A request without a session id must be one JSON-RPC message; a batch gets `400`.
 Credential state is not deleted when idle; it goes with the owner token or OAuth grant (revocation deletes it in
 the same transaction, the sweep deletes what belongs to a token or grant that no longer exists, and a call that
 outlives a revocation cannot write it back). A worker handle is ended with
@@ -1019,8 +1022,9 @@ npm-package agent does.
 | `LETAGENTS_REMOTE_MCP_SESSIONS_PER_MINUTE` | 30 | New sessions one account may open per minute. |
 
 Each account may open 30 sessions and send 600 requests per minute. The session cap is per credential and counts
-stateful sessions only, so one sign-in's churn never replaces another sign-in's sessions; a credential's one implicit
-session neither counts nor is replaced, and a session with a request in flight on that process is never replaced. A tool call may hold at most 10 000 array
+stateful sessions only, so one sign-in's churn never replaces another sign-in's sessions; an account-wide backstop of
+four times the cap bounds the rows of an account with many sign-ins. A credential's one implicit session neither
+counts nor is replaced, and a session with a request in flight on that process is never replaced. A tool call may hold at most 10 000 array
 elements and object keys. Once a minute, sessions that are idle or whose owner token or OAuth grant was revoked are deleted. A
 client whose session is gone gets `404` and initializes a new one, which starts from the credential's worker state:
 its `worker_id` still works, and it joins its room again (or passes `room_id`). Limits are per account, so people who

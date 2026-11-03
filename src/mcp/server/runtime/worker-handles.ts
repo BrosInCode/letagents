@@ -299,9 +299,19 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
   return { worker: getWorker(worker.worker_id, scope), session };
 }
 
+/** How often a worker's `last_used_at` is written: it orders which handles a remote credential keeps. */
+const WORKER_USE_RECORD_INTERVAL_MS = 60_000;
+
 export async function runMcpWorkerCall<T>(workerId: string, roomId: string | undefined,
   callback: (session: StoredAgentSessionState) => T, allowEnded = false): Promise<Awaited<T>> {
   const worker = getWorker(workerId, await workerScope());
+  const now = Date.now();
+  if (!worker.last_used_at || now - Date.parse(worker.last_used_at) > WORKER_USE_RECORD_INTERVAL_MS) {
+    updateLocalState((state) => {
+      const stored = state.mcp_workers?.[workerId];
+      if (stored) stored.last_used_at = new Date(now).toISOString();
+    });
+  }
   const rooms = Object.keys(worker.rooms);
   const targetRoom = roomId || (rooms.length === 1 ? rooms[0] : null);
   const entry = targetRoom ? worker.rooms[targetRoom] : null;

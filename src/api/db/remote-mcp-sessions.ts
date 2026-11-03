@@ -163,6 +163,12 @@ export async function saveRemoteMcpCredentialState(input: {
   return typeof version === "number" ? version : null;
 }
 
+/** Whether the owner token or OAuth grant behind `tokenHash` is still live. */
+export async function isRemoteMcpCredentialLive(tokenHash: string): Promise<boolean> {
+  const result = await db.execute<{ live: boolean }>(sql`SELECT ${credentialIsLive(tokenHash)} AS live`);
+  return result.rows[0]?.live === true;
+}
+
 /** Delete credential state whose owner token or OAuth grant no longer exists or is revoked. */
 export async function deleteRevokedRemoteMcpCredentials(): Promise<string[]> {
   const rows = await db.delete(remote_mcp_credentials)
