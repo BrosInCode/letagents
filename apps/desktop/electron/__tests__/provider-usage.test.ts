@@ -182,3 +182,18 @@ test("Cursor reads only exact session context from its native SQLite/protobuf st
     assert.equal(readCursorUsageOwner(join(root, "redirected")), null);
   } finally { db.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+test("Claude per-window numbers under unifiedWindows show as account limits", () => {
+  const tracker = new ProviderUsageTracker("session");
+  // The shape Claude Code sends today: no top-level utilization.
+  tracker.claude({ type: "rate_limit_event", session_id: "session", rate_limit_info: { status: "allowed", resetsAt: 1790116200, rateLimitType: "five_hour",
+    overageStatus: "rejected", isUsingOverage: false, unifiedWindows: { five_hour: { utilization: 0.21, resetsAt: 1790116200 } } } }, at);
+  let account = tracker.snapshot("session").account;
+  assert.equal(account.state, "available");
+  assert.deepEqual(account.windows.map(w => [w.id, w.label, w.usedPercent, w.resetsAt]),
+    [["five_hour", "5 hours", 21, new Date(1790116200 * 1000).toISOString()]]);
+  tracker.claude({ type: "rate_limit_event", session_id: "session", rate_limit_info: { status: "allowed", rateLimitType: "seven_day",
+    unifiedWindows: { five_hour: { utilization: 0.3 }, seven_day: { utilization: 0.05, resetsAt: 1790500000 } } } }, at);
+  account = tracker.snapshot("session").account;
+  assert.deepEqual(account.windows.map(w => [w.id, w.usedPercent]), [["five_hour", 30], ["seven_day", 5]]);
+});

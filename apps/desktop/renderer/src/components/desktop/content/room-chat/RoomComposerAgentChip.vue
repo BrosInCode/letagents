@@ -13,7 +13,10 @@
         data-testid="desktop-composer-agent-chip-button"
         @click="toggle($event)"
       >
-        <span class="desktop-composer-agent-chip-mark" :data-provider="chip.providerId" aria-hidden="true"><Bot :size="13" /></span>
+        <span class="desktop-composer-agent-chip-mark" :data-provider="chip.providerId" :data-logo="chipIcon ? true : undefined" aria-hidden="true">
+          <img v-if="chipIcon" :src="chipIcon" alt="" draggable="false" />
+          <Bot v-else :size="13" />
+        </span>
         <span class="desktop-composer-agent-chip-who">New {{ providerName }} agent<template v-if="launching"> · starting…</template></span>
         <span class="desktop-composer-agent-chip-spec">{{ spec }}</span>
         <ChevronUp class="desktop-composer-agent-chip-caret" :size="12" aria-hidden="true" />
@@ -67,7 +70,7 @@
           <ChevronLeft :size="14" aria-hidden="true" /><span class="desktop-composer-agent-menu-label">Works in</span>
         </button>
         <div class="desktop-composer-add-menu-separator" role="separator"></div>
-        <div role="radiogroup" aria-label="Works in" class="desktop-composer-agent-group">
+        <div role="radiogroup" aria-label="Works in" class="desktop-composer-agent-group" data-fit>
         <button
           v-for="worktree in worktrees"
           :key="worktree.rootPath"
@@ -94,7 +97,7 @@
             <ChevronRight :size="14" class="desktop-composer-agent-menu-end" aria-hidden="true" />
           </button>
         </template>
-        <div v-else role="radiogroup" :aria-label="modelHeading" class="desktop-composer-agent-group">
+        <div v-else role="radiogroup" :aria-label="modelHeading" class="desktop-composer-agent-group" data-fit>
         <button
           v-for="(model, index) in models"
           :key="model.id ?? ''"
@@ -169,6 +172,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import ComposerStepSlider from "./ComposerStepSlider.vue";
 import type { ComposerAgentReadiness } from "./composer-agent-launch";
+import { providerIconSrc } from "./provider-icon";
 import type { ComposerAgentChip } from "./useComposerAgentDraft";
 
 export interface ComposerAgentWorktreeOption {
@@ -218,6 +222,8 @@ const animate = ref(false);
 const view = ref<"main" | "where">("main");
 const coachOff = ref(false);
 
+const chipIcon = computed(() => providerIconSrc(props.chip.providerId));
+
 const spec = computed(() => {
   const bits: string[] = [];
   if (props.readiness?.state === "not_set_up") bits.push("Not set up");
@@ -252,7 +258,10 @@ function toggle(event: MouseEvent): void {
   animate.value = event.detail !== 0 && !prefersReducedMotion();
   open.value = true;
   emit("opened");
-  void nextTick(() => focusItem(checkedOrFirst()));
+  void nextTick(() => {
+    fitMenu();
+    focusItem(checkedOrFirst());
+  });
 }
 
 function closeMenu(): void {
@@ -267,12 +276,43 @@ function dismissCoach(): void {
 
 function showWhere(): void {
   view.value = "where";
-  void nextTick(() => focusItem(checkedOrFirst()));
+  void nextTick(() => {
+    fitMenu();
+    focusItem(checkedOrFirst());
+  });
 }
 
 function showMain(from: string): void {
   view.value = "main";
-  void nextTick(() => focusItem(items().find((item) => item.dataset.item === from) ?? null));
+  void nextTick(() => {
+    fitMenu();
+    focusItem(items().find((item) => item.dataset.item === from) ?? null);
+  });
+}
+
+/**
+ * The menu opens upward from the chip. When it is taller than the space above
+ * (a short window, a long model list), the list scrolls instead of being cut off.
+ */
+function fitMenu(): void {
+  const element = menu.value;
+  if (typeof element?.querySelector !== "function" || !root.value) return;
+  const list = element.querySelector<HTMLElement>("[data-fit]");
+  if (!list) return;
+  list.style.maxHeight = "";
+  const room = root.value.getBoundingClientRect().top - 6 - clipTop(root.value) - 12;
+  const over = element.offsetHeight - room;
+  if (over > 0) list.style.maxHeight = `${Math.max(96, list.offsetHeight - over)}px`;
+}
+
+/** The lowest top edge of the window or of an ancestor that clips its overflow. */
+function clipTop(from: HTMLElement): number {
+  let top = 0;
+  if (typeof getComputedStyle !== "function") return top;
+  for (let node = from.parentElement; node; node = node.parentElement) {
+    if (getComputedStyle(node).overflowY !== "visible") top = Math.max(top, node.getBoundingClientRect().top);
+  }
+  return top;
 }
 
 /** Rows and sliders, in order; one of them holds the highlight. */
@@ -286,7 +326,10 @@ function checkedOrFirst(): HTMLElement | null {
 }
 
 function focusItem(item: HTMLElement | null): void {
-  if (item && typeof document !== "undefined" && document.activeElement !== item) item.focus({ preventScroll: true });
+  if (!item || typeof document === "undefined" || document.activeElement === item) return;
+  item.focus({ preventScroll: true });
+  // Only the fitted list scrolls; bring a row in it into view.
+  if (item.closest?.("[data-fit]")) item.scrollIntoView?.({ block: "nearest" });
 }
 
 // The pointer moves the one highlight; it never opens or closes anything.
@@ -340,9 +383,12 @@ function setDocumentListeners(listening: boolean): void {
   const method = listening ? "addEventListener" : "removeEventListener";
   document[method]("pointerdown", closeOnOutsidePointer as EventListener, true);
   document[method]("keydown", closeOnEscape as EventListener, true);
+  if (typeof window !== "undefined") window[method]("resize", fitMenu);
 }
 watch(open, setDocumentListeners);
 watch(() => props.launching, (launching) => { if (launching) closeMenu(); });
+// Models arrive late (a CLI cache read); refit when the list changes under an open menu.
+watch(() => props.models, () => { if (open.value) void nextTick(fitMenu); });
 onBeforeUnmount(() => setDocumentListeners(false));
 
 // The chosen row travels into the tray and becomes the chip.
@@ -371,7 +417,10 @@ function openAt(at: "main" | "where"): void {
   if (at === "where" && props.worktrees.length) showWhere();
   else {
     view.value = "main";
-    void nextTick(() => focusItem(checkedOrFirst()));
+    void nextTick(() => {
+      fitMenu();
+      focusItem(checkedOrFirst());
+    });
   }
 }
 
