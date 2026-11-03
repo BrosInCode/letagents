@@ -6,10 +6,10 @@ export class RemoteMcpBusyError extends Error {
   }
 }
 
-/** Thrown when a session's saved state would exceed its size limit. */
+/** Thrown when a session's or credential's saved state would exceed its size limit. */
 export class RemoteMcpStateTooLargeError extends Error {
   constructor() {
-    super("This remote MCP session's saved state is too large. Start a new session.");
+    super("The saved remote MCP state is too large. End workers you no longer use with disconnect_agent_session, then retry.");
     this.name = "RemoteMcpStateTooLargeError";
   }
 }

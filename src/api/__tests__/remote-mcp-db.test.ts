@@ -20,6 +20,9 @@ else process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 process.env.LETAGENTS_POLL_MAX_MS = "1500";
 process.env.LETAGENTS_REMOTE_MCP_MAX_SESSIONS_PER_ACCOUNT = "3";
 process.env.LETAGENTS_REMOTE_MCP_MAX_IN_FLIGHT_PER_ACCOUNT = "3";
+// The suite opens many short sessions; the growth test needs a small worker bound.
+process.env.LETAGENTS_REMOTE_MCP_SESSIONS_PER_MINUTE = "1000";
+process.env.LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS = "4";
 
 const skip = testDatabaseUrl ? false : "set TEST_DB_URL to run the DB-backed remote MCP tests";
 const dbClient = testDatabaseUrl ? await import("../db/client.js") : null;
@@ -267,7 +270,7 @@ test("a new session of the same credential starts from the earlier session's roo
   try {
     assert.notEqual(second.transport.sessionId, first.transport.sessionId);
     const room = await call(second.client, "get_current_room");
-    assert.equal(room.room_id, "remote-mcp-credential", "the joined room came along from the credential state");
+    assert.notEqual(room.room_id, "remote-mcp-credential", "a new chat never inherits another chat's joined room");
     const sent = await call(second.client, "send_message",
       { room_id: joined.room_id, worker_id: handle.worker_id, text: "sent from the next session" });
     assert.equal(sent.isError, undefined, `the worker handle came along: ${JSON.stringify(sent)}`);
@@ -277,6 +280,10 @@ test("a new session of the same credential starts from the earlier session's roo
   } finally {
     await second.client.close();
   }
+
+  // A live credential survives the sweep; only a revoked one goes.
+  await sessions().sweep();
+  assert.ok(await remoteSessionsDb!.getRemoteMcpCredential(stateCrypto.hashRemoteMcpToken(TOKEN_A)), "the credential state outlives the sweep");
 
   // Another credential of the same account has its own state.
   const other = await connect(TOKEN_A2);
@@ -311,17 +318,72 @@ test("requests without a session id run in the credential's implicit session, wh
   assert.equal(sent.headers.get("mcp-session-id"), sessionId);
   const result = await toolResultOf(sent);
   assert.equal(result.isError, undefined, JSON.stringify(result));
-  assert.ok(result.message_id ?? result.id ?? result.success !== false, JSON.stringify(result));
 
-  // A stateful client of the same credential starts from the same state, in its own session.
+  // A stateful client of the same credential starts from the same worker state, in its own session.
   const stateful = await connect();
+  let later: Record<string, any>;
   try {
     assert.notEqual(stateful.transport.sessionId, sessionId);
     const viaHandle = await call(stateful.client, "send_message",
       { room_id: joined.room_id, worker_id: handle.worker_id, text: "same worker, stateful session" });
     assert.equal(viaHandle.isError, undefined, JSON.stringify(viaHandle));
+    // ... and a worker it registers is usable by the next session-less call at once.
+    later = await call(stateful.client, "register_agent_session",
+      { room_id: joined.room_id, display_name: "Later Dot", registration_key: "stateless-key-2", runtime: "dot" });
+    assert.ok(later.worker_id, JSON.stringify(later));
   } finally {
     await stateful.client.close();
+  }
+  const fromLater = await statelessPost(TOKEN_A, toolCall(4, "send_message",
+    { room_id: joined.room_id, worker_id: later.worker_id, text: "registered elsewhere, sent without a session id" }));
+  assert.equal(fromLater.headers.get("mcp-session-id"), sessionId, "still the one implicit session");
+  const fromLaterResult = await toolResultOf(fromLater);
+  assert.equal(fromLaterResult.isError, undefined, `the implicit session re-read the credential state: ${JSON.stringify(fromLaterResult)}`);
+});
+
+test("the credential state stays bounded as per-call sessions keep registering workers", { skip, timeout: 120_000 }, async () => {
+  const token = "remote_mcp_owner_token_growth";
+  await createOwner("growth", token);
+  const maxWorkers = Number(process.env.LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS);
+  let roomId = "";
+  const handles: string[] = [];
+  for (let i = 0; i < maxWorkers + 3; i += 1) {
+    const { client } = await connect(token); // a new session per call, as ChatGPT does
+    try {
+      if (!roomId) roomId = (await call(client, "join_room", { name: "remote-mcp-growth" })).room_id;
+      const handle = await call(client, "register_agent_session",
+        { room_id: roomId, display_name: `Growth ${i}`, registration_key: `growth-key-${i}`, runtime: "dot" });
+      assert.ok(handle.worker_id, JSON.stringify(handle));
+      handles.push(handle.worker_id);
+    } finally {
+      await client.close();
+    }
+    sessions().dropLoaded();
+  }
+  const row = await remoteSessionsDb!.getRemoteMcpCredential(stateCrypto.hashRemoteMcpToken(token));
+  assert.ok(row, "the credential row exists");
+  const state = stateCrypto.openRemoteMcpState(row!.state, stateCrypto.deriveRemoteMcpCredentialStateKey(token),
+    { sessionId: stateCrypto.REMOTE_MCP_CREDENTIAL_BINDING, accountId: row!.account_id }) as {
+      local: { mcp_workers?: Record<string, unknown>; agent_sessions?: Record<string, unknown>; agent_identities?: unknown; agent_identity?: unknown };
+      currentRoom: unknown; fullPromptDelivered: boolean; pinnedConnections: Record<string, unknown>;
+    };
+  assert.equal(Object.keys(state.local.mcp_workers ?? {}).length, maxWorkers, "only the most recently seen workers are kept");
+  assert.ok(Object.keys(state.local.agent_sessions ?? {}).length <= maxWorkers);
+  assert.ok(Object.keys(state.pinnedConnections).length <= maxWorkers);
+  assert.equal(state.local.agent_identities, undefined, "per-instance identities are not kept");
+  assert.equal(state.local.agent_identity, undefined);
+  assert.equal(state.currentRoom, null, "no joined room is kept");
+  assert.equal(state.fullPromptDelivered, false);
+  assert.ok(Object.hasOwn(state.local.mcp_workers ?? {}, handles.at(-1)!), "the newest worker is kept");
+  assert.equal(Object.hasOwn(state.local.mcp_workers ?? {}, handles[0]!), false, "the oldest worker was dropped");
+
+  // The newest handle still works from yet another new session.
+  const { client } = await connect(token);
+  try {
+    const sent = await call(client, "send_message", { room_id: roomId, worker_id: handles.at(-1)!, text: "still bounded, still working" });
+    assert.equal(sent.isError, undefined, JSON.stringify(sent));
+  } finally {
+    await client.close();
   }
 });
 

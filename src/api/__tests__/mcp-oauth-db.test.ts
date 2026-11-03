@@ -234,6 +234,10 @@ test("an MCP SDK client signs in, calls tools, keeps its session across refresh,
     const sameSession = await toolsList(refreshed.body.access_token, sessionId);
     assert.equal(sameSession.status, 200, "the new access token reaches the same session");
 
+    const liveCredential = await dbClient!.pool.query(`SELECT 1 FROM remote_mcp_credentials c JOIN mcp_oauth_grants g ON g.secret_hash = c.token_hash
+      WHERE g.client_id = $1 AND g.revoked_at IS NULL`, [(provider.info as { client_id: string }).client_id]);
+    assert.equal(liveCredential.rowCount, 1, "the join_room call wrote the grant's credential state");
+
     // Revocation (RFC 7009) ends the grant: its access tokens and sessions stop working.
     const revoke = await fetch(`${baseUrl}/oauth/revoke`, {
       method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },

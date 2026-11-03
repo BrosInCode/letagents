@@ -95,6 +95,8 @@ test("the remote endpoint refuses bad requests before any session work", { timeo
     const wrongAcceptStateless = await fetch(url, { method: "POST", body: JSON.stringify(toolsListBody),
       headers: { Authorization: "Bearer owner-a", "Content-Type": "application/json", Accept: "application/json" } });
     assert.equal(wrongAcceptStateless.status, 406, "a session-less call needs the same Accept header before any session work");
+    const batch = await post(url, { Authorization: "Bearer owner-a" }, [initializeBody]);
+    assert.equal(batch.status, 400, "a JSON-RPC batch is refused before any session work");
     const oversized = await post(url, { Authorization: "Bearer owner-a" },
       { ...initializeBody, params: { ...initializeBody.params, padding: "x".repeat(300 * 1024) } });
     assert.equal(oversized.status, 413, "bodies over the MCP cap never reach SDK validation");
@@ -117,8 +119,8 @@ test("a POST without a session id that is not initialize is served in the creden
       calls.push(`findImplicit:${input.accountId}`);
       return opened ? fakeSession : null;
     },
-    open: async (input: { clientName: string | null }) => {
-      calls.push(`open:${input.clientName}`);
+    open: async (input: { clientName: string | null; implicit?: boolean }) => {
+      calls.push(`open:${input.implicit === true ? "implicit" : "stateful"}:${input.clientName}`);
       opened = true;
       return "implicit-1";
     },
@@ -142,7 +144,7 @@ test("a POST without a session id that is not initialize is served in the creden
     const second = await post(url, { Authorization: "Bearer owner-a" }, toolsListBody);
     assert.equal(second.status, 200);
     assert.deepEqual(calls, [
-      "findImplicit:acct_a", "open:stateless", "find:implicit-1", "handle:implicit-1",
+      "findImplicit:acct_a", "open:implicit:null", "find:implicit-1", "handle:implicit-1",
       "findImplicit:acct_a", "handle:implicit-1",
     ], "the first call opens the implicit session, the second reuses it");
     assert.equal((await fetch(url, { headers: { Authorization: "Bearer owner-a" } })).status, 400,

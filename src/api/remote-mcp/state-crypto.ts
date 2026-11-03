@@ -26,7 +26,9 @@ export function deriveRemoteMcpStateKey(token: string, sessionId: string): Buffe
 export const REMOTE_MCP_CREDENTIAL_BINDING = "credential";
 
 export function deriveRemoteMcpCredentialStateKey(token: string): Buffer {
-  return deriveRemoteMcpStateKey(token, REMOTE_MCP_CREDENTIAL_BINDING);
+  // Its own info label as well as its own salt: never a session's key.
+  return Buffer.from(hkdfSync("sha256", Buffer.from(token, "utf8"), Buffer.from(REMOTE_MCP_CREDENTIAL_BINDING, "utf8"),
+    Buffer.from("letagents remote mcp credential state v1", "utf8"), 32));
 }
 
 export interface SealedRemoteMcpState {

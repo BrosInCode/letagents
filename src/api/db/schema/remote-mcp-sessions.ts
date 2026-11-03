@@ -1,4 +1,5 @@
-import { index, integer, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { boolean, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 import { accounts } from "./core.js";
 
@@ -21,11 +22,14 @@ export const remote_mcp_sessions = pgTable(
     version: integer("version").notNull().default(1),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
     last_seen_at: timestamp("last_seen_at", { mode: "string", withTimezone: true }).notNull().defaultNow(),
+    /** The credential's one session for requests sent without a session id (migration 0129). */
+    implicit: boolean("implicit").notNull().default(false),
   },
   (table) => [
     index("remote_mcp_sessions_account_idx").on(table.account_id, table.last_seen_at),
     index("remote_mcp_sessions_token_idx").on(table.token_hash),
     index("remote_mcp_sessions_last_seen_idx").on(table.last_seen_at),
+    uniqueIndex("remote_mcp_sessions_implicit_token_idx").on(table.token_hash).where(sql`${table.implicit}`),
   ],
 );
 

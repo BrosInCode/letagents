@@ -10,7 +10,7 @@ import {
   deleteRemoteMcpSessionForAccount,
   deleteRevokedRemoteMcpCredentials,
   deleteRevokedRemoteMcpSessions,
-  findLatestRemoteMcpSessionForToken,
+  findImplicitRemoteMcpSession,
   getRemoteMcpCredential,
   getRemoteMcpSession,
   insertRemoteMcpSession,
@@ -50,18 +50,20 @@ import {
  * after a restart, reloads it from `remote_mcp_sessions`.
  *
  * The credential that opened a session (an owner token or an OAuth grant) also
- * has one row in `remote_mcp_credentials`: the merged state of every session
- * it opened, written after each session save. A new session starts from that
- * state. So a client that opens a new MCP session for every tool call, as
- * ChatGPT's connector does, still finds its worker handles, its room and its
- * read cursors; and a client that sends no session id at all is served in the
- * credential's implicit session (`IMPLICIT_CLIENT_NAME`).
+ * has one row in `remote_mcp_credentials`: the worker handles, the agent
+ * sessions and pinned connections they point at, and the read cursors of
+ * every session it opened (`projectCredentialState`), folded in after each
+ * session save. A new session starts from that state, and never from another
+ * session's joined room. So a client that opens a new MCP session for every
+ * tool call, as ChatGPT's connector does, still finds its worker handles; and
+ * a client that sends no session id at all is served in the credential's one
+ * implicit session, which re-reads the credential state on every request.
  */
 
 export { IMPLICIT_CLIENT_NAME };
 
 export interface RemoteMcpLimits {
-  /** Sessions one account may hold; the least recently used one is replaced. */
+  /** Stateful sessions one credential (sign-in) may hold; the least recently used one is replaced. */
   maxSessionsPerAccount: number;
   /** A session unused for this long is deleted. */
   idleTimeoutMs: number;
@@ -168,6 +170,103 @@ function readState(value: unknown): McpSessionPersistentState {
   };
 }
 
+/** The parts of `local` a credential keeps for its later sessions. */
+const CREDENTIAL_LOCAL_KEYS = ["mcp_workers", "agent_sessions", "current_agent_session_ids", "room_sessions"] as const;
+/**
+ * Workers one credential keeps, with their agent sessions and pinned
+ * connections; the least recently seen go first. `LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS`, default 32.
+ */
+export function credentialMaxWorkers(): number {
+  return positiveIntEnv("LETAGENTS_REMOTE_MCP_MAX_CREDENTIAL_WORKERS", 32);
+}
+const CREDENTIAL_MAX_LEGACY_SESSIONS = 32;
+const CREDENTIAL_MAX_ROOM_CURSORS = 32;
+
+function isEnded(entry: unknown): boolean {
+  return isRecord(entry) && Boolean(entry.ended_at);
+}
+
+/** JSON with sorted keys, so two equal entries compare equal. */
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_key, inner) => (isRecord(inner)
+    ? Object.fromEntries(Object.keys(inner).sort().map((key) => [key, inner[key]]))
+    : inner));
+}
+
+/**
+ * What a credential keeps of a session: its worker handles, the live agent
+ * sessions and pinned connections those handles (or legacy registrations)
+ * point at, and its read cursors. Never the joined room, the prompt flag or
+ * an identity: a new chat joins its own room, and identities are per instance.
+ * Bounded, so the credential state cannot grow with every call: the least
+ * recently seen workers and legacy sessions go first.
+ */
+export function projectCredentialState(state: McpSessionPersistentState, maxWorkers = credentialMaxWorkers()): McpSessionPersistentState {
+  const local = state.local;
+  const agentSessions = local.agent_sessions ?? {};
+  const pinned = state.pinnedConnections ?? {};
+  const seen = (id: string | undefined): string => (id ? String(agentSessions[id]?.last_seen_at ?? agentSessions[id]?.updated_at ?? "") : "");
+  const live = (id: string | undefined): id is string => Boolean(id && agentSessions[id] && !agentSessions[id]!.ended_at);
+
+  const workers = Object.values(local.mcp_workers ?? {})
+    .map((worker) => ({ worker, seen: Object.values(worker.rooms).map((room) => seen(room.session_id)).sort().at(-1) ?? "" }))
+    .sort((a, b) => b.seen.localeCompare(a.seen))
+    .slice(0, Math.max(0, maxWorkers))
+    .map((entry) => entry.worker);
+  const legacy = Object.entries(local.current_agent_session_ids ?? {})
+    .filter(([, id]) => live(id))
+    .sort(([, a], [, b]) => seen(b).localeCompare(seen(a)))
+    .slice(0, CREDENTIAL_MAX_LEGACY_SESSIONS);
+  const keep = new Set<string>();
+  for (const worker of workers) for (const room of Object.values(worker.rooms)) if (live(room.session_id)) keep.add(room.session_id);
+  for (const [, id] of legacy) keep.add(id);
+  const cursors = Object.entries(local.room_sessions ?? {})
+    .sort(([, a], [, b]) => String(b.last_seen_at ?? "").localeCompare(String(a.last_seen_at ?? "")))
+    .slice(0, CREDENTIAL_MAX_ROOM_CURSORS);
+  return {
+    local: {
+      ...(workers.length ? { mcp_workers: Object.fromEntries(workers.map((worker) => [worker.worker_id, worker])) } : {}),
+      ...(keep.size ? { agent_sessions: Object.fromEntries([...keep].map((id) => [id, agentSessions[id]!])) } : {}),
+      ...(legacy.length ? { current_agent_session_ids: Object.fromEntries(legacy) } : {}),
+      ...(cursors.length ? { room_sessions: Object.fromEntries(cursors) } : {}),
+    },
+    currentRoom: null,
+    fullPromptDelivered: false,
+    pinnedConnections: Object.fromEntries([...keep].filter((id) => pinned[id] && !pinned[id]!.ended_at).map((id) => [id, pinned[id]!])),
+  };
+}
+
+/**
+ * Fold a session's state into its credential's. An entry the session added
+ * or changed since its baseline (what it was seeded with, or last folded) wins,
+ * except that an ended entry stays ended. An entry the session did not touch
+ * keeps the credential's view, so a stale session cannot undo another
+ * session's later change. The result is bounded like a projection.
+ */
+export function foldIntoCredential(credential: McpSessionPersistentState, session: McpSessionPersistentState,
+  baseline: McpSessionPersistentState | null, maxWorkers = credentialMaxWorkers()): McpSessionPersistentState {
+  const out: McpSessionPersistentState = structuredClone(credential);
+  const foldMap = (target: JsonRecord, mine: JsonRecord | undefined, base: JsonRecord | undefined): void => {
+    for (const [key, entry] of Object.entries(mine ?? {})) {
+      if (base && key in base && canonical(base[key]) === canonical(entry)) continue;
+      if (isEnded(target[key]) && !isEnded(entry)) continue;
+      target[key] = entry;
+    }
+  };
+  const outLocal = out.local as JsonRecord;
+  for (const key of CREDENTIAL_LOCAL_KEYS) {
+    outLocal[key] ??= {};
+    foldMap(outLocal[key] as JsonRecord, (session.local as JsonRecord)[key] as JsonRecord | undefined,
+      baseline ? (baseline.local as JsonRecord)[key] as JsonRecord | undefined : undefined);
+  }
+  foldMap(out.pinnedConnections as unknown as JsonRecord, session.pinnedConnections as unknown as JsonRecord,
+    baseline?.pinnedConnections as unknown as JsonRecord | undefined);
+  return projectCredentialState(out, maxWorkers);
+}
+
+/** Per-process memory key: the credential view this session was last seeded with or folded into. */
+const BASELINE_KEY = "remote-mcp-credential-baseline";
+
 /** One session's loaded state, shared by this process's concurrent requests. */
 export interface LoadedRemoteMcpSession {
   readonly sessionId: string;
@@ -183,6 +282,10 @@ export interface LoadedRemoteMcpSession {
   version: number;
   /** Set by tool calls that changed the state; cleared by a successful save. */
   dirty: boolean;
+  /** Set with `dirty`; cleared only once the credential row holds the change. */
+  credentialDirty: boolean;
+  /** The credential's one session for requests sent without a session id. */
+  readonly implicit: boolean;
   lastUsedAt: number;
   readonly memory: Map<string, unknown>;
   saving: Promise<void>;
@@ -232,46 +335,65 @@ export class RemoteMcpSessions {
     this.loaded.clear();
   }
 
-  /** The credential's merged state, or null when it has none this account can open. */
+  /** The credential's saved state (already a projection), or null when it has none this account can open. */
   private async loadCredentialState(tokenHash: string, credentialKey: Buffer, accountId: string): Promise<{
     state: McpSessionPersistentState; version: number;
   } | null> {
     const row = await getRemoteMcpCredential(tokenHash);
     if (!row || row.account_id !== accountId) return null;
     const opened = openRemoteMcpState(row.state, credentialKey, { sessionId: REMOTE_MCP_CREDENTIAL_BINDING, accountId });
-    return opened === null ? null : { state: readState(opened), version: row.version };
+    return opened === null ? null : { state: projectCredentialState(readState(opened)), version: row.version };
   }
 
   /**
-   * Create a session for an authenticated initialize request. It starts from
-   * the credential's merged state, so a worker registered in an earlier
-   * session of the same credential is usable here.
+   * Create a session for an authenticated initialize request, or the
+   * credential's implicit session. It starts from the credential's saved
+   * worker state (never from another session's room), so a worker registered
+   * in an earlier session of the same credential is usable here. For an
+   * implicit session that already exists, its id is returned instead.
    */
   // Two initializes for one account racing here may both see room under the
   // cap and leave it one or two over; the account's next open trims it back.
   // Rare, and bounded by the per-minute create limit.
-  async open(input: { accountId: string; token: string; clientName: string | null }): Promise<string> {
+  async open(input: { accountId: string; token: string; clientName: string | null; implicit?: boolean }): Promise<string> {
     const tokenHash = hashRemoteMcpToken(input.token);
+    const implicit = input.implicit === true;
     const seed = await this.loadCredentialState(tokenHash, deriveRemoteMcpCredentialStateKey(input.token), input.accountId);
-    const existing = await listRemoteMcpSessionsForAccount(input.accountId);
-    const excess = existing.length - this.limits.maxSessionsPerAccount + 1;
-    for (const victim of existing.slice(0, Math.max(0, excess))) {
-      await deleteRemoteMcpSessionForAccount(victim.session_id, input.accountId);
-      this.loaded.delete(victim.session_id);
-      this.counters.evicted += 1;
-      // Counts only: no account id or token in server logs.
-      console.info("Remote MCP session replaced at the account cap:", JSON.stringify(this.stats()));
+    // The cap bounds the stateful sessions of one credential, so one sign-in's
+    // churn (a client that opens a session per call) never replaces another
+    // sign-in's sessions. A credential's one implicit session is bounded by
+    // being one per credential, so it neither counts nor is replaced.
+    const existing = (await listRemoteMcpSessionsForAccount(input.accountId))
+      .filter((row) => !row.implicit && row.token_hash === tokenHash);
+    const excess = implicit ? 0 : existing.length - this.limits.maxSessionsPerAccount + 1;
+    if (excess > 0) {
+      // Least recently used first; a session with a request in flight on this process stays.
+      const victims = existing.filter((row) => !this.inFlightBySession.has(row.session_id)).slice(0, excess);
+      for (const victim of victims) {
+        await deleteRemoteMcpSessionForAccount(victim.session_id, input.accountId);
+        this.loaded.delete(victim.session_id);
+        this.counters.evicted += 1;
+        // Counts only: no account id or token in server logs.
+        console.info("Remote MCP session replaced at the account cap:", JSON.stringify(this.stats()));
+      }
     }
     const sessionId = randomUUID();
     const key = deriveRemoteMcpStateKey(input.token, sessionId);
-    await insertRemoteMcpSession({
+    const inserted = await insertRemoteMcpSession({
       sessionId,
       accountId: input.accountId,
       tokenHash,
       agentInstanceId: randomUUID(),
-      clientName: input.clientName?.slice(0, 200) ?? null,
+      clientName: implicit ? IMPLICIT_CLIENT_NAME : input.clientName?.slice(0, 200) ?? null,
+      implicit,
       state: sealRemoteMcpState(seed?.state ?? emptyState(), key, { sessionId, accountId: input.accountId }) as unknown as Record<string, unknown>,
     });
+    if (!inserted) {
+      // Only an implicit session can collide: another request created it first.
+      const current = await findImplicitRemoteMcpSession(input.accountId, tokenHash);
+      if (!current) throw new Error("The remote MCP session could not be created.");
+      return current.session_id;
+    }
     this.counters.opened += 1;
     return sessionId;
   }
@@ -296,14 +418,35 @@ export class RemoteMcpSessions {
 
   /**
    * The session that serves this credential's requests sent without a session
-   * id, when one exists: its most recently used implicit session. Such a
-   * client never learns a session id, so it never shares a stateful client's
-   * session either.
+   * id, when it exists. Such a client never learns a session id, so it never
+   * shares a stateful client's session either. Each request re-reads the
+   * credential's worker state, so a worker another session of this credential
+   * registered since is usable at once; the session's own room stays.
    */
   async findImplicit(input: { accountId: string; token: string }): Promise<LoadedRemoteMcpSession | null> {
-    const row = await findLatestRemoteMcpSessionForToken(input.accountId, hashRemoteMcpToken(input.token), IMPLICIT_CLIENT_NAME);
+    const tokenHash = hashRemoteMcpToken(input.token);
+    const row = await findImplicitRemoteMcpSession(input.accountId, tokenHash);
     if (!row) return null;
-    return this.adopt(row, deriveRemoteMcpStateKey(input.token, row.session_id), deriveRemoteMcpCredentialStateKey(input.token));
+    const credentialKey = deriveRemoteMcpCredentialStateKey(input.token);
+    const session = this.adopt(row, deriveRemoteMcpStateKey(input.token, row.session_id), credentialKey);
+    // A change this process has not yet folded into the credential would be
+    // lost under a refresh; the next save folds it, and the refresh follows.
+    if (session && !session.credentialDirty) {
+      const credential = await this.loadCredentialState(tokenHash, credentialKey, input.accountId);
+      if (credential) this.adoptCredentialView(session, credential.state);
+    }
+    return session;
+  }
+
+  /** Replace the session's worker state with the credential's, and make that its baseline. */
+  private adoptCredentialView(session: LoadedRemoteMcpSession, view: McpSessionPersistentState): void {
+    const local = session.state.local as JsonRecord;
+    for (const key of CREDENTIAL_LOCAL_KEYS) {
+      if ((view.local as JsonRecord)[key] !== undefined) local[key] = structuredClone((view.local as JsonRecord)[key]);
+      else delete local[key];
+    }
+    session.state.pinnedConnections = structuredClone(view.pinnedConnections);
+    session.memory.set(BASELINE_KEY, structuredClone(view));
   }
 
   private adopt(row: RemoteMcpSessionRow, stateKey: Buffer, credentialKey: Buffer): LoadedRemoteMcpSession | null {
@@ -331,13 +474,17 @@ export class RemoteMcpSessions {
       credentialKey,
       agentInstanceId: row.agent_instance_id,
       clientName: row.client_name,
+      implicit: row.implicit,
       state: incoming,
       version: row.version,
       dirty: false,
+      credentialDirty: false,
       lastUsedAt: Date.now(),
       memory: new Map(),
       saving: Promise.resolve(),
     };
+    // What this process starts from: later changes are this session's own.
+    loaded.memory.set(BASELINE_KEY, projectCredentialState(incoming));
     this.loaded.set(row.session_id, loaded);
     return loaded;
   }
@@ -377,7 +524,10 @@ export class RemoteMcpSessions {
         }),
         state: session.state,
         get dirty() { return session.dirty; },
-        set dirty(value: boolean) { session.dirty = session.dirty || value; },
+        set dirty(value: boolean) {
+          session.dirty = session.dirty || value;
+          session.credentialDirty = session.credentialDirty || value;
+        },
         memory: session.memory,
         persist: () => this.save(session),
       };
@@ -464,12 +614,13 @@ export class RemoteMcpSessions {
    */
   private save(session: LoadedRemoteMcpSession): Promise<void> {
     const run = session.saving.then(async () => {
-      if (!session.dirty) {
+      if (!session.dirty && !session.credentialDirty) {
         await touchRemoteMcpSession(session.sessionId).catch(() => undefined);
         return;
       }
-      await this.saveSessionRow(session);
-      await this.saveCredential(session);
+      if (session.dirty) await this.saveSessionRow(session);
+      // A credential fold that failed earlier is retried here, by the flag.
+      if (session.credentialDirty) await this.saveCredential(session);
     });
     session.saving = run.catch(() => undefined);
     return run;
@@ -521,27 +672,44 @@ export class RemoteMcpSessions {
   }
 
   /**
-   * Merge this session's state into its credential's row: the row's entries
-   * stay, this session's values win. Written only over the version read, and
-   * retried over a newer row, as the session row is.
+   * Fold this session's worker state into its credential's row (see
+   * `foldIntoCredential`). Written only over the version read, and retried over
+   * a newer row, as the session row is. When the fold would exceed the size
+   * limit, the least recently seen workers are dropped first. Nothing is
+   * written for a credential that is no longer live.
    */
   private async saveCredential(session: LoadedRemoteMcpSession): Promise<void> {
     const binding = { sessionId: REMOTE_MCP_CREDENTIAL_BINDING, accountId: session.accountId };
+    const baseline = (session.memory.get(BASELINE_KEY) as McpSessionPersistentState | undefined) ?? null;
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const row = await getRemoteMcpCredential(session.tokenHash);
       // A row of another account under this hash cannot happen; never write over it.
       if (row && row.account_id !== session.accountId) return;
       const theirs = row ? openRemoteMcpState(row.state, session.credentialKey, binding) : null;
-      const merged = mergeSessionStates(theirs === null ? emptyState() : readState(theirs), session.state, "theirs");
-      pruneState(merged);
-      if (Buffer.byteLength(JSON.stringify(merged)) > this.limits.maxStateBytes) throw new RemoteMcpStateTooLargeError();
+      const credential = theirs === null ? emptyState() : readState(theirs);
+      let folded = foldIntoCredential(credential, session.state, baseline);
+      for (let maxWorkers = credentialMaxWorkers();
+        Buffer.byteLength(JSON.stringify(folded)) > this.limits.maxStateBytes; maxWorkers = Math.floor(maxWorkers / 2)) {
+        if (maxWorkers <= 1) throw new RemoteMcpStateTooLargeError();
+        folded = foldIntoCredential(credential, session.state, baseline, Math.floor(maxWorkers / 2));
+      }
       const version = await saveRemoteMcpCredentialState({
         tokenHash: session.tokenHash,
         accountId: session.accountId,
         expectedVersion: row?.version ?? null,
-        state: sealRemoteMcpState(merged, session.credentialKey, binding) as unknown as Record<string, unknown>,
+        state: sealRemoteMcpState(folded, session.credentialKey, binding) as unknown as Record<string, unknown>,
       });
-      if (version !== null) return;
+      if (version !== null) {
+        session.credentialDirty = false;
+        session.memory.set(BASELINE_KEY, folded);
+        return;
+      }
+      // Not written: the row changed under us, or the credential is gone.
+      if (row === null && (await getRemoteMcpCredential(session.tokenHash)) === null) {
+        // The insert was refused: no live token or grant, so there is nothing to keep.
+        session.credentialDirty = false;
+        return;
+      }
       this.counters.conflicts += 1;
     }
     throw new Error("The remote MCP credential state kept changing; retry the call.");

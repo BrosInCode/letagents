@@ -6,7 +6,6 @@ import { parseBearerAuthorization } from "../../request/bearer-authorization.js"
 import { buildAllowedOrigins, replyInvalidBearer } from "../../http/middleware.js";
 import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
 import type { RemoteMcpSessions } from "../../remote-mcp/sessions.js";
-import { IMPLICIT_CLIENT_NAME } from "../../remote-mcp/implicit-session.js";
 import { RemoteMcpBusyError } from "../../remote-mcp/errors.js";
 import type { OwnerTokenAccount } from "../../db/types/auth.js";
 import { buildInMemoryListingsRateLimiter } from "../rental/renter/rate-limiter.js";
@@ -52,10 +51,12 @@ function clientNameOf(body: unknown): string | null {
 export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps): void {
   const { sessions } = deps;
   const allowRequest = deps.allowRequest ?? buildInMemoryListingsRateLimiter({ capacity: 600, windowMs: 60_000 });
-  // ChatGPT's connector opens one or two sessions per tool call, so the budget
-  // allows a busy agent turn; the per-account session cap bounds the rows.
+  // ChatGPT's connector may open a session per tool call, so the budget allows
+  // a busy agent turn; the per-account session cap bounds the rows.
+  // LETAGENTS_REMOTE_MCP_SESSIONS_PER_MINUTE, default 30.
+  const sessionsPerMinute = Number.parseInt(process.env.LETAGENTS_REMOTE_MCP_SESSIONS_PER_MINUTE ?? "", 10);
   const allowSessionCreate = deps.allowSessionCreate
-    ?? buildInMemoryListingsRateLimiter({ capacity: 30, windowMs: 60_000 });
+    ?? buildInMemoryListingsRateLimiter({ capacity: Number.isFinite(sessionsPerMinute) && sessionsPerMinute > 0 ? sessionsPerMinute : 30, windowMs: 60_000 });
   const allowedOrigins = buildAllowedOrigins();
 
   const handler = async (req: AuthenticatedRequest, res: Response) => {
@@ -94,6 +95,11 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
     const accountId = account.account_id;
     if (!allowRequest(accountId)) {
       jsonRpcError(res, 429, "Too many remote MCP requests. Slow down.");
+      return;
+    }
+    // JSON-RPC batches left the protocol in 2025-06-18; one message per POST.
+    if (req.method === "POST" && Array.isArray(req.body)) {
+      jsonRpcError(res, 400, "JSON-RPC batches are not supported; send one message per request.");
       return;
     }
     const declaredLength = Number.parseInt(req.headers["content-length"] ?? "0", 10) || 0;
@@ -163,7 +169,7 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
       jsonRpcError(res, 429, "Too many new remote MCP sessions. Slow down.");
       return;
     }
-    const opened = await sessions.open({ accountId, token, clientName: initialize ? clientNameOf(req.body) : IMPLICIT_CLIENT_NAME });
+    const opened = await sessions.open({ accountId, token, clientName: initialize ? clientNameOf(req.body) : null, implicit: !initialize });
     const session = await sessions.find(opened, token, accountId);
     if (!session) {
       jsonRpcError(res, 500, "The remote MCP session could not start.");

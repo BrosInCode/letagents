@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { assertWorkerConnection } from "../../../worker-call-context.js";
 import { z } from "zod";
-import { getPollTimeoutCapMs, REMOTE_MCP_WAIT_MAX_MS } from "../../../../shared/poll-timeout-cap.js";
+import { getWaitTimeoutCapMs } from "../../../../shared/poll-timeout-cap.js";
 import { encodeRoomIdPath } from "../../../room-id.js";
 import {
   agentSessionCredentials,
@@ -629,9 +629,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       }
       // A hosted MCP client ends a long tool call on its own, unpublished
       // clock; a remote wait returns well inside it and the agent loops.
-      const maxPollMs = currentSessionScope()
-        ? Math.min(getPollTimeoutCapMs(), REMOTE_MCP_WAIT_MAX_MS)
-        : getPollTimeoutCapMs();
+      const maxPollMs = getWaitTimeoutCapMs(currentSessionScope() !== null);
       const serverTimeout = Math.min(
         Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
         maxPollMs

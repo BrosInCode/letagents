@@ -27,3 +27,9 @@ export function getPollTimeoutCapMs(): number {
  * with `after_message_id` (or `last_observed_message_id`) as its cursor.
  */
 export const REMOTE_MCP_WAIT_MAX_MS = 30_000;
+
+/** The cap a `wait_for_messages` call gets: the server cap, or the remote bound when it runs over `/mcp`. */
+export function getWaitTimeoutCapMs(remote: boolean): number {
+  const cap = getPollTimeoutCapMs();
+  return remote ? Math.min(cap, REMOTE_MCP_WAIT_MAX_MS) : cap;
+}
