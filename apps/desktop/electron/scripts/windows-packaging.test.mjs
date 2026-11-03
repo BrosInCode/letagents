@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { win32 } from "node:path";
@@ -18,6 +18,7 @@ import {
   createIcoFile,
   createNsisPayloadInclude,
   findMakensis,
+  payloadSizeKb,
   readPngDimensions,
   resolveWindowsOpenCodeExecutable,
   stageDaemonPipeAddon,
@@ -259,4 +260,16 @@ test("the installer ships only the sealed daemon pipe addon, where the app looks
   assert.deepEqual(calls, [["--arch", "x64", "--check", "--strict"]]);
   assert.match(built, /win-daemon-pipe[\\/]build[\\/]x64[\\/]letagents-daemon-pipe\.node$/);
   assert.throws(() => buildDaemonPipeAddon({ arch: "x64", env: {}, run: () => ({ status: 1 }) }), /--strict failed/);
+});
+
+test("the payload size counts every file in every folder, in KiB rounded up", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-payload-size-"));
+  try {
+    await mkdir(join(directory, "resources", "app"), { recursive: true });
+    await writeFile(join(directory, "LetAgents.exe"), Buffer.alloc(2048));
+    await writeFile(join(directory, "resources", "app", "main.js"), Buffer.alloc(1025));
+    assert.equal(await payloadSizeKb(directory), 4);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });

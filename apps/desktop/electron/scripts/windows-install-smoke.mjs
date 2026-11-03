@@ -22,7 +22,8 @@ import {
 // real window against seeded local state and exits 0 when it renders), then
 // checks that the installed app finds and uses the sealed process-tree
 // helper, and loads its sealed daemon pipe addon to reach a daemon through
-// it, updates the running app the way electron-updater does, and uninstalls it
+// it, updates the running app the way electron-updater does (with an agent's
+// process-tree helper still running from the install), and uninstalls it
 // and checks that the install folder and registration are gone.
 // For CI runners: it installs into the runner user's own profile.
 
@@ -89,6 +90,11 @@ function shellAppIds(shortcuts) {
 function runningAppIds() {
   const result = spawnSync("tasklist", ["/FI", `IMAGENAME eq ${WINDOWS_EXECUTABLE_NAME}`, "/FO", "CSV", "/NH"], { encoding: "utf8" });
   return new Set([...result.stdout.matchAll(/^"[^"]+","(\d+)"/gm)].map((match) => match[1]));
+}
+
+function processRunning(pid) {
+  const result = spawnSync("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { encoding: "utf8" });
+  return new RegExp(`^"[^"]+","${pid}"`, "m").test(result.stdout);
 }
 
 async function waitFor(label, predicate, timeoutMs = 60_000) {
@@ -237,8 +243,26 @@ rmSync(desktopShortcut);
 spawn(executable, [], { detached: true, stdio: "ignore" }).unref();
 await waitFor("the installed app to start", () => runningAppIds().size > 0);
 const before = runningAppIds();
+// An agent outlives the app and its daemon in its process-tree helper, which
+// runs from the install folder. Its program here is not LetAgents.exe, so only
+// stopping the helper ends it; until then the helper's file cannot be
+// replaced, and a silent install would skip it.
+const agent = run(executable, ["-e", [
+  "(async () => {",
+  "  const path = require('node:path');",
+  "  const install = process.argv[process.argv.length - 1];",
+  "  const tree = await import(require('node:url').pathToFileURL(path.join(install, 'shared', 'process-tree.mjs')).href);",
+  "  const helperPath = tree.processTreeHelperPath({ env: {}, resourcesPath: path.join(install, 'resources'), includeLocalBuild: false });",
+  "  const child = tree.spawnTree(process.env.ComSpec, ['/d', '/c', 'ping -n 600 127.0.0.1 >nul'], { stdio: 'ignore', detached: true }, { helperPath });",
+  "  child.unref();",
+  "  console.log('LETAGENTS_RUNNING_AGENT_HELPER ' + child.pid);",
+  "})().catch((error) => { console.error(error); process.exit(1); });",
+].join("\n"), installDirectory], { env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" }, timeout: 2 * 60_000 });
+const agentHelper = /LETAGENTS_RUNNING_AGENT_HELPER (\d+)/.exec(agent.stdout)?.[1];
+assert(agent.status === 0 && agentHelper && processRunning(agentHelper), "The running agent's helper did not start.");
 const update = run(installer, ["--updated", "--force-run", "/S"], { timeout: 10 * 60_000 });
 assert(update.status === 0, `The update installer exited with ${update.status}.`);
+assert(!processRunning(agentHelper), "The update left the running agent's process-tree helper running.");
 // A process id that was not running before the update is the restarted app;
 // the installer itself refuses to continue while the old app still runs.
 await waitFor("the updated app to start again", () => [...runningAppIds()].some((id) => !before.has(id)));

@@ -248,3 +248,26 @@ test("the installer's shortcuts and the app's process share one AppUserModelID",
   assert.ok(applied < main.indexOf("prepareDesktopNotifications();\n"));
   assert.ok(applied < main.indexOf("createWindow();"));
 });
+
+test("the installer waits for and stops every program the app runs from its folder", async () => {
+  const [installer, windowsPackager, windowsPackaging] = await Promise.all([
+    source(join(desktopRoot, "electron", "installer", "windows", "installer.nsi")),
+    source(join(scriptsDirectory, "package-windows.mjs")),
+    import("./windows-packaging.mjs"),
+  ]);
+  const runtimeDirectory = /^!define RUNTIME_DIR "([^"]+)"$/m.exec(installer)?.[1];
+  // The helper lives in RUNTIME_DIR, under resources\app, where the app looks for it.
+  assert.equal(`resources\\app\\${windowsPackaging.PROCESS_TREE_HELPER_APP_PATH.replaceAll("/", "\\")}`, `${runtimeDirectory}\\letagents-process-tree.exe`);
+  assert.match(windowsPackager, /`\/DHELPER_NAME=\$\{PROCESS_TREE_HELPER_NAME\}`/);
+  const checked = [...installer.matchAll(/!insertmacro CHECK_NOT_RUNNING "([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(checked, [
+    "$INSTDIR\\${EXE_NAME}",
+    "$INSTDIR\\${RUNTIME_DIR}\\${HELPER_NAME}",
+    "$INSTDIR\\${RUNTIME_DIR}\\opencode.exe",
+  ]);
+  const stopped = [...installer.matchAll(/taskkill\.exe" \/F \/IM "\$\{(\w+)\}"/g)].map((match) => match[1]);
+  assert.deepEqual(stopped, ["EXE_NAME", "HELPER_NAME"]);
+  // Counting the installed files took minutes; the build gives the size.
+  assert.doesNotMatch(installer, /\$\{GetSize\}/);
+  assert.match(windowsPackager, /`\/DINSTALLED_KB=\$\{await payloadSizeKb\(packagedApp\)\}`/);
+});
