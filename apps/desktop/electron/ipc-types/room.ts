@@ -8,6 +8,12 @@ import type {
   RoomAgentWorkSummary,
 } from "../../../../shared/room-agent-work.mjs";
 import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
+import type {
+  RoomJoinRequest,
+  RoomJoinRequestSummary,
+  RoomMember,
+  RoomMemberRole,
+} from "../../../../shared/room-membership.mjs";
 
 export interface DesktopRoomAgentWork {
   attemptId: string;
@@ -37,14 +43,58 @@ export type DesktopRoomAgentWorkPollResult =
   | { status: "local" | "access_revoked" | "invalid"; response: null };
 
 export interface DesktopRoomAccess {
-  status: "ready" | "missing_room" | "auth_required" | "forbidden" | "unavailable";
+  status:
+    | "ready"
+    | "missing_room"
+    | "auth_required"
+    | "forbidden"
+    | "membership_required"
+    | "repo_collaborator_required"
+    | "unavailable";
   title: string;
   message: string;
   roomIdentifier: string | null;
   deviceFlowUrl: string | null;
   code: string | null;
   httpStatus: number | null;
+  /** The room's name as a membership refusal gives it, for a room the app cannot open. */
+  displayName?: string | null;
+  /** With `membership_required`: the account's latest request to join, or null. */
+  joinRequest?: RoomJoinRequestSummary | null;
 }
+
+/**
+ * Why a member or join request call did not go through. `code` is the API's
+ * code (for example `ROOM_LAST_ADMIN`); `joinRequest` is the request as it is
+ * now when the API sends one (a cooldown, or a request decided elsewhere).
+ */
+export interface DesktopRoomMembershipFailure {
+  ok: false;
+  status: number | null;
+  code: string | null;
+  message: string;
+  joinRequest: RoomJoinRequestSummary | null;
+}
+
+export type DesktopRoomMembershipResult<T extends object> = ({ ok: true } & T) | DesktopRoomMembershipFailure;
+
+export interface DesktopRoomMemberList {
+  roomId: string;
+  /** The room whose members decide: the parent of a focus room, else the room. */
+  accessRoomId: string;
+  managedBy: "letagents" | "github";
+  canManage: boolean;
+  members: RoomMember[];
+  /** The signed-in account, so the list can mark "you" and offer Leave. */
+  viewerAccountId: string | null;
+}
+
+/** A pending request in a room where the signed-in account is an admin. */
+export type DesktopAccountRoomJoinRequest = RoomJoinRequest & { room_display_name: string | null };
+
+export type DesktopRoomJoinRequestDecision = "approve" | "decline" | "cancel";
+
+export type { RoomJoinRequest, RoomJoinRequestSummary, RoomMember, RoomMemberRole };
 
 export interface DesktopRoomInfo {
   identifier: string;
@@ -780,6 +830,17 @@ export type DesktopRoomStreamEvent =
       type: "session_disconnect" | "error";
       roomIdentifier: string;
       message: string | null;
+    }
+  | {
+      /**
+       * The server refused this account (not a member, no repository role, or
+       * a host that is not GitHub). The stream stopped and does not retry; the
+       * app checks the room again, and a new stream starts when access returns.
+       */
+      type: "access_refused";
+      roomIdentifier: string;
+      code: string;
+      httpStatus: number;
     };
 
 export interface DesktopStagedAttachment {

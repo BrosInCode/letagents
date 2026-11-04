@@ -1,5 +1,5 @@
 import { compareText } from "../../../../domain/formatters";
-import type { DesktopRentalRequest } from '../../../../../../electron/ipc-types.js';
+import type { DesktopAccountRoomJoinRequest, DesktopRentalRequest } from '../../../../../../electron/ipc-types.js';
 import type { DesktopNeedsYou } from '../../../../../../electron/ipc-types/knowledge.js';
 import type { KnowledgeRecord } from '../../../../../../../../shared/room-knowledge.mjs';
 import { buildDesktopInboxItems, desktopInboxItemFingerprint, type DesktopInboxItem } from './items';
@@ -23,13 +23,23 @@ export interface UniversalInboxItem {
   record?: KnowledgeRecord;
   activity?: DesktopInboxItem;
   attention?: AgentAttentionItem;
+  /** A person asks to join a room you admin; you approve or decline it here. */
+  joinRequest?: DesktopAccountRoomJoinRequest;
   taskId?: string;
   fingerprint: string;
 }
 
-export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: DesktopRentalRequest[] = [], attention: readonly AgentAttentionItem[] = []): UniversalInboxItem[] {
+export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: DesktopRentalRequest[] = [], attention: readonly AgentAttentionItem[] = [], joinRequests: readonly DesktopAccountRoomJoinRequest[] = []): UniversalInboxItem[] {
   const result: UniversalInboxItem[] = [];
   const roomNames = new Map((data?.rooms ?? []).map(room => [room.roomIdentifier, room.displayName]));
+  for (const request of joinRequests) {
+    const person = request.display_name || request.login;
+    result.push({ key: JSON.stringify([request.room_id, 'join_request', request.id]), roomIdentifier: request.room_id,
+      roomName: request.room_display_name || roomNames.get(request.room_id) || request.room_id, section: 'needs-you',
+      category: 'room_join_request', title: `${person} asks to join`,
+      body: `@${request.login} asks to join this room. A member can read the room, post in it and ask its agents for work.`,
+      timestamp: request.created_at, actor: person, joinRequest: request, fingerprint: `${request.id}:${request.state}` });
+  }
   for (const item of attention) result.push({ key: item.key, roomIdentifier: item.roomIdentifier,
     roomName: roomNames.get(item.roomIdentifier) || item.roomIdentifier, section: 'needs-you', category: item.kind,
     timestamp: item.timestamp, attention: item, fingerprint: item.timestamp, ...agentAttentionText(item) });
@@ -165,7 +175,8 @@ export function inboxCategoryLabel(category: string): string {
   return ({ question: 'Question', decision: 'Decision', approval: 'Approval', review: 'Review', closed: 'Closed', blocked: 'Blocked task',
     in_review: 'Task review', done: 'Completed', merged: 'Merged', thread: 'Unread replies', github_failure: 'Failed check',
     agent_blocked: 'Blocked agent', agent_offline: 'Agent offline', rental_request: 'Rental request',
-    tool_approval: 'Tool approval', agent_attention: 'Stuck agent', board_intent: 'Board request' } as Record<string, string>)[category] || category;
+    tool_approval: 'Tool approval', agent_attention: 'Stuck agent', board_intent: 'Board request',
+    room_join_request: 'Join request' } as Record<string, string>)[category] || category;
 }
 
 export function filterUniversalInbox(items: UniversalInboxItem[], section: InboxSection, rooms: string[], dismissals: Record<string, string>): UniversalInboxItem[] {

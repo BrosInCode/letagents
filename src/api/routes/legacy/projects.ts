@@ -1,13 +1,13 @@
 import type { Express, Response } from "express";
 
 import {
-  assignProjectAdmin,
   createProject,
   getAgentIdentitiesForOwner,
   getAllProjects,
   getOrCreateCanonicalRoom,
   getProjectByCode,
   getProjectById,
+  recordRoomCreator,
   registerAgentIdentity,
   rotateProjectCode,
   type GitRoomBinding,
@@ -105,7 +105,7 @@ export function registerLegacyProjectRoutes(
   app.post("/projects", async (req: AuthenticatedRequest, res) => {
     const project = await createProject();
     if (req.sessionAccount) {
-      await assignProjectAdmin(project.id, req.sessionAccount.account_id);
+      await recordRoomCreator(project.id, req.sessionAccount.account_id);
       await deps.rememberAccountRoom({
         accountId: req.sessionAccount.account_id,
         roomId: project.id,
@@ -172,7 +172,7 @@ export function registerLegacyProjectRoutes(
       if (projectAccess.isRepoBacked) {
         await deps.resolveProjectRole(project, req.sessionAccount);
       } else {
-        await assignProjectAdmin(project.id, req.sessionAccount.account_id);
+        await recordRoomCreator(project.id, req.sessionAccount.account_id);
       }
     }
 

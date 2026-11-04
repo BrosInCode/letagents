@@ -108,6 +108,10 @@ type ApiErrorPayload = {
   code?: string;
   message?: string;
   room_id?: string;
+  /** Membership refusals name the room and carry the caller's latest join request. */
+  display_name?: string | null;
+  join_request?: unknown;
+  retry_after?: string | null;
   device_flow_url?: string;
   interval?: number;
   expires_in?: number;

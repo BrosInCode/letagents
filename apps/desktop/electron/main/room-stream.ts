@@ -1,4 +1,5 @@
 import { ROOM_TYPING, parseTypingSignal } from "../../../../shared/room-typing.mjs";
+import { roomAccessRefusal } from "../../../../shared/room-membership.mjs";
 import type {
   DesktopRentalActivityEvent,
   DesktopRoomDeliveryRepair,
@@ -26,6 +27,7 @@ import {
   mapRoomMessagePayload,
 } from "./rooms.js";
 import { mapRoomArtifactPayload } from "./rooms/snapshot/mappers.js";
+import { forgetJoinedRoomInfo } from "./rooms/room-info.js";
 import { emitToMainWindow } from "./window.js";
 import {
   createManagedMessageDeliveryTracker,
@@ -39,6 +41,8 @@ let activeRoomStream: {
   reconnectTimer: NodeJS.Timeout | null;
   pollAbortController: AbortController | null;
   retryMs: number;
+  /** The wait the server asked for (Retry-After) before the next connect, or 0. */
+  retryLaterMs: number;
   lastMessageId: string | null;
   lastEventCursor: string | null;
   localRoomIdentifier: string | null;
@@ -155,6 +159,94 @@ function isCurrentRoomStream(
   stream: NonNullable<typeof activeRoomStream>,
 ): boolean {
   return activeRoomStream === stream && !stream.stopped;
+}
+
+/**
+ * A 403 that a retry cannot fix: the account is not a member, has no role on
+ * the repository, or the room is on a host that is not GitHub. Only these
+ * codes stop the stream; any other failure keeps the usual reconnect.
+ */
+class RoomStreamAccessRefusedError extends Error {
+  constructor(readonly httpStatus: number, readonly code: string) {
+    super(`Room stream refused with HTTP ${httpStatus} (${code}).`);
+    this.name = "RoomStreamAccessRefusedError";
+  }
+}
+
+/**
+ * A 503 because GitHub gave no answer to the repository role check. It is not
+ * a refusal: the stream keeps trying, but waits as long as the server asks.
+ */
+class RoomStreamRetryLaterError extends Error {
+  constructor(readonly retryMs: number) {
+    super("GitHub did not answer the repository access check.");
+    this.name = "RoomStreamRetryLaterError";
+  }
+}
+
+const REPO_ACCESS_RETRY_DEFAULT_MS = 30_000;
+
+/** The wait before an SSE reconnect: the usual backoff (at most 30 s), or the server's Retry-After when longer. */
+export function roomStreamReconnectDelayMs(backoffMs: number, retryLaterMs: number): number {
+  return Math.max(Math.min(backoffMs, 30_000), retryLaterMs);
+}
+
+function waitUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
+function retryAfterMs(response: Response): number {
+  const seconds = Number(response.headers.get("retry-after"));
+  if (!Number.isFinite(seconds) || seconds <= 0) return REPO_ACCESS_RETRY_DEFAULT_MS;
+  return Math.min(Math.max(seconds * 1000, 5_000), 5 * 60_000);
+}
+
+async function readRoomStreamRefusal(
+  response: Response,
+): Promise<RoomStreamAccessRefusedError | RoomStreamRetryLaterError | null> {
+  if (response.status !== 403 && response.status !== 503) return null;
+  let body: unknown = null;
+  try {
+    body = await response.json();
+  } catch {
+    return null;
+  }
+  const code = body && typeof body === "object" ? (body as { code?: unknown }).code : null;
+  if (response.status === 503) {
+    return code === "REPO_ACCESS_UNAVAILABLE" ? new RoomStreamRetryLaterError(retryAfterMs(response)) : null;
+  }
+  const refusal = roomAccessRefusal(body);
+  if (refusal === "membership_required") return new RoomStreamAccessRefusedError(403, "ROOM_MEMBERSHIP_REQUIRED");
+  if (refusal === "repo_collaborator_required") return new RoomStreamAccessRefusedError(403, "REPO_COLLABORATOR_REQUIRED");
+  if (code === "UNSUPPORTED_REPO_PROVIDER") return new RoomStreamAccessRefusedError(403, code);
+  return null;
+}
+
+/** Stop for good and tell the app, which checks the room again; it starts a new stream when access returns. */
+function refuseRoomStream(
+  stream: NonNullable<typeof activeRoomStream>,
+  refusal: RoomStreamAccessRefusedError,
+): void {
+  if (!isCurrentRoomStream(stream)) return;
+  stopActiveRoomStream(stream.roomIdentifier);
+  // The app checks the room next; a remembered join must not answer for the server.
+  forgetJoinedRoomInfo(stream.roomIdentifier);
+  forgetJoinedRoomInfo(stream.canonicalRoomIdentifier);
+  emitRoomStreamEvent({
+    type: "access_refused",
+    roomIdentifier: stream.roomIdentifier,
+    code: refusal.code,
+    httpStatus: refusal.httpStatus,
+  });
 }
 
 export function emitRoomStreamEvent(event: DesktopRoomStreamEvent): void {
@@ -747,7 +839,8 @@ async function fetchRoomMessagePollPage(
     { headers: requestHeaders, signal },
   );
   if (!response.ok) {
-    throw new Error(`Room poll failed with HTTP ${response.status}.`);
+    throw await readRoomStreamRefusal(response)
+      ?? new Error(`Room poll failed with HTTP ${response.status}.`);
   }
   const page = (await response.json()) as {
     room_id?: string;
@@ -830,13 +923,20 @@ async function pollDesktopRoomMessages(
         pollAbortController.signal.aborted
       )
         return;
+      if (error instanceof RoomStreamAccessRefusedError) {
+        refuseRoomStream(stream, error);
+        return;
+      }
       emitRoomStreamEvent({
         type: "error",
         roomIdentifier: stream.roomIdentifier,
         message:
           error instanceof Error ? error.message : "Room polling disconnected.",
       });
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      // A poll that was stopped during its wait ends here, so a restarted poll
+      // never runs beside it.
+      await waitUnlessAborted(error instanceof RoomStreamRetryLaterError ? error.retryMs : 2500, pollAbortController.signal);
+      if (pollAbortController.signal.aborted) return;
     } finally {
       if (stream.pollAbortController === pollAbortController) {
         stream.pollAbortController = null;
@@ -856,7 +956,10 @@ async function fetchLatestRoomMessagePage(
     `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
     { headers, signal },
   );
-  if (!response.ok) throw new Error(`Room latest-page fetch failed with HTTP ${response.status}.`);
+  if (!response.ok) {
+    throw await readRoomStreamRefusal(response)
+      ?? new Error(`Room latest-page fetch failed with HTTP ${response.status}.`);
+  }
   const page = await response.json() as { room_id?: string; messages?: Parameters<typeof mapRoomMessagePayload>[0][] };
   for (const rawMessage of page.messages || []) {
     if (!isCurrentRoomStream(stream)) return;
@@ -950,7 +1053,10 @@ async function emitLatestRoomMessageWindow(
     `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
     { headers, signal: stream.abortController.signal },
   );
-  if (!response.ok) throw new Error(`Room latest-window fetch failed with HTTP ${response.status}.`);
+  if (!response.ok) {
+    throw await readRoomStreamRefusal(response)
+      ?? new Error(`Room latest-window fetch failed with HTTP ${response.status}.`);
+  }
   const page = await response.json() as {
     room_id?: string;
     messages?: Parameters<typeof mapRoomMessagePayload>[0][];
@@ -999,7 +1105,11 @@ function repairDurableMessagesAfterBrokerGap(
       commitCompletedGapRepair(stream);
     }
     stopFallbackPoll(stream);
-  }).catch(() => {
+  }).catch((error: unknown) => {
+    if (error instanceof RoomStreamAccessRefusedError) {
+      refuseRoomStream(stream, error);
+      return;
+    }
     if (isCurrentRoomStream(stream) && stream.pollActive) scheduleCatchUpRetry(stream);
   });
 }
@@ -1036,9 +1146,13 @@ function scheduleCatchUpRetry(
           commitCompletedGapRepair(stream);
         }
         stopFallbackPoll(stream);
-      } catch {
+      } catch (error) {
         if (!isCurrentRoomStream(stream) || stream.abortController.signal.aborted)
           return;
+        if (error instanceof RoomStreamAccessRefusedError) {
+          refuseRoomStream(stream, error);
+          return;
+        }
         if (stream.pollActive) {
           scheduleCatchUpRetry(stream);
         }
@@ -1223,7 +1337,8 @@ async function openDesktopRoomStream(
     );
 
     if (!response.ok || !response.body) {
-      throw new Error(`Room stream failed with HTTP ${response.status}.`);
+      throw (!response.ok ? await readRoomStreamRefusal(response) : null)
+        ?? new Error(`Room stream failed with HTTP ${response.status}.`);
     }
 
     stream.retryMs = 1000;
@@ -1293,9 +1408,13 @@ async function openDesktopRoomStream(
         commitCompletedGapRepair(stream);
       }
       stopFallbackPoll(stream);
-    } catch {
+    } catch (error) {
       if (!isCurrentRoomStream(stream) || stream.abortController.signal.aborted)
         return;
+      if (error instanceof RoomStreamAccessRefusedError) {
+        refuseRoomStream(stream, error);
+        return;
+      }
       // A first-connect catch-up may fail before any fallback exists. Bring the
       // durable lane up in both initial and reconnect cases, then keep retrying
       // until the message cursor *and* any pending renderer window are repaired.
@@ -1309,6 +1428,11 @@ async function openDesktopRoomStream(
   } catch (error) {
     if (!isCurrentRoomStream(stream) || stream.abortController.signal.aborted)
       return;
+    if (error instanceof RoomStreamAccessRefusedError) {
+      refuseRoomStream(stream, error);
+      return;
+    }
+    if (error instanceof RoomStreamRetryLaterError) stream.retryLaterMs = error.retryMs;
     emitRoomStreamEvent({
       type: "error",
       roomIdentifier: stream.roomIdentifier,
@@ -1338,7 +1462,8 @@ async function openDesktopRoomStream(
     }
     stream.resolveReady?.();
     stream.resolveReady = null;
-    const retryMs = Math.min(stream.retryMs, 30_000);
+    const retryMs = roomStreamReconnectDelayMs(stream.retryMs, stream.retryLaterMs);
+    stream.retryLaterMs = 0;
     stream.retryMs = Math.min(stream.retryMs * 2, 30_000);
     stream.reconnectTimer = setTimeout(() => {
       stream.reconnectTimer = null;
@@ -1378,6 +1503,7 @@ export async function startDesktopRoomStream(
     reconnectTimer: null,
     pollAbortController: null,
     retryMs: 1000,
+    retryLaterMs: 0,
     lastMessageId: afterMessageId || null,
     lastEventCursor: roomEventCursors.get(trimmedRoomIdentifier) ?? null,
     localRoomIdentifier: null,

@@ -5,6 +5,7 @@ import { normalizeMessageReactionEmoji } from "../../../../../shared/message-rea
 import { ROOM_EXPRESSION_GUIDANCE } from "../../../../../shared/room-expressions.mjs";
 import { encodeRoomIdPath } from "../../../room-id.js";
 import { agentSessionCredentials, getTargetRoomId, isLocalRoomStorageEnabled, resolveWorkerToolIdentity, roomScopedApiCall } from "../../runtime.js";
+import { roomAccessToolResponse } from "../../runtime/room-access.js";
 import { jsonToolResponse } from "./response.js";
 
 const giphy = createGiphyClient();
@@ -34,7 +35,7 @@ export function registerExpressionTools(server: McpServer): void {
       // Model context and durable tool results contain only stable IDs/titles.
       // API credentials and temporary media URLs stay inside this client.
       return jsonToolResponse(result.ok ? { ok: true, provider: "giphy", items: result.items.map(({ id, title }) => ({ id, title })) } : result);
-    } catch { return unavailable(); }
+    } catch (error) { return roomAccessToolResponse(error) ?? unavailable(); }
   });
 
   server.tool("react_to_message", `Add or remove your own emoji reaction. It appears as you, not your human owner. A reaction is not approval, consensus, or completion; finish the turn normally. ${ROOM_EXPRESSION_GUIDANCE}`, {
@@ -52,6 +53,6 @@ export function registerExpressionTools(server: McpServer): void {
         room_path: id => `/rooms/${encodeRoomIdPath(id)}/messages/${message_id}/reactions/${encodeURIComponent(emoji)}`,
         options: { method: remove ? "DELETE" : "PUT", signal: AbortSignal.timeout(5000), body: JSON.stringify(agentSessionCredentials(agentSession)) } });
       return jsonToolResponse({ ok: true, message_id, emoji, removed: remove === true, changed: response.changed });
-    } catch { return unavailable(); }
+    } catch (error) { return roomAccessToolResponse(error) ?? unavailable(); }
   });
 }

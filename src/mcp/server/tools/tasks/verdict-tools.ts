@@ -72,7 +72,7 @@ export function registerTaskVerdictTools(server: McpServer): void {
           agent_identity: toPublicAgentIdentity(identity),
         }, 2);
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     },
   );

@@ -156,15 +156,26 @@
             </div>
           </template>
 
+          <RoomJoinAccess
+            v-else-if="cardState === 'membership' || cardState === 'repo_collaborator'"
+            :access="access"
+            :account="authStatus?.account ?? null"
+            :busy="busy"
+            :now="now"
+            @refresh-room="$emit('refresh-room')"
+            @sign-out="$emit('sign-out')"
+          />
+
           <template v-else-if="cardState === 'missing'">
             <h1>Choose a room to begin</h1>
             <p>Pick a room from the sidebar, or create one to start working with agents.</p>
           </template>
 
           <template v-else>
-            <h1>This room didn't load</h1>
+            <h1>{{ githubUnavailable ? "GitHub is not answering" : "This room didn't load" }}</h1>
             <p>
-              LetAgents couldn't reach the room server.
+              <template v-if="githubUnavailable">LetAgents could not check your role on this repository, because GitHub did not answer.</template>
+              <template v-else>LetAgents couldn't reach the room server.</template>
               <template v-if="retrySecondsLeft !== null">
                 <template v-if="retrySecondsLeft > 0">
                   It usually recovers on its own — retrying in
@@ -201,12 +212,15 @@ import type {
   DesktopRoomAccess,
 } from "../../../../../electron/ipc-types";
 import { friendlyRoomLabel } from "../../../domain/git-rooms";
+import RoomJoinAccess from "./RoomJoinAccess.vue";
 import { loginInitials } from "../../../domain/initials";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import type { SidebarMode } from "../types";
 import {
+  REPO_ACCESS_UNAVAILABLE_CODE,
   nextRetryStep,
   resolveAuthCardState,
+  retryBackoffFor,
   retryDeadlineAt,
   retrySecondsLeft as computeRetrySecondsLeft,
 } from "./auth-onboarding";
@@ -249,8 +263,10 @@ const cardState = computed(() =>
 
 const roomLabel = computed(() => {
   if (cardState.value === "missing") return "LetAgents";
-  // People recognize room names, not canonical identifiers.
-  const label = props.roomLabel || props.access.roomIdentifier || "LetAgents";
+  // People recognize room names, not canonical identifiers. A membership
+  // refusal names a room the app has never opened.
+  const knownLabel = props.roomLabel && props.roomLabel !== props.access.roomIdentifier ? props.roomLabel : null;
+  const label = knownLabel || props.access.displayName || props.roomLabel || props.access.roomIdentifier || "LetAgents";
   return friendlyRoomLabel(label);
 });
 
@@ -261,6 +277,10 @@ const roomSuffix = computed(() => {
     case "connect":
     case "forbidden":
       return "private repo room";
+    case "membership":
+      return "members only";
+    case "repo_collaborator":
+      return "repository room";
     case "code":
       return "signing in";
     case "connected":
@@ -295,12 +315,15 @@ const pendingExpiryLabel = computed(() => {
 // countdown.
 const retryStep = ref(0);
 const retryDeadline = ref(0);
+// GitHub not answering is not a refusal: check again, but at the pace the server asks for.
+const githubUnavailable = computed(() => props.access.code === REPO_ACCESS_UNAVAILABLE_CODE);
+const retryBackoff = computed(() => retryBackoffFor(props.access.code));
 
 const retrySecondsLeft = computed(() => computeRetrySecondsLeft(now.value, retryDeadline.value));
 
 function armRetry(fromStep: number): void {
   retryStep.value = fromStep;
-  retryDeadline.value = retryDeadlineAt(Date.now(), fromStep);
+  retryDeadline.value = retryDeadlineAt(Date.now(), fromStep, retryBackoff.value);
 }
 
 function clearRetry(): void {
@@ -332,6 +355,15 @@ watch(
   },
 );
 
+// A retry is armed before its answer arrives. When the answer turns out to be
+// GitHub not answering (or back to another failure), start that answer's own backoff.
+watch(
+  () => props.access.code,
+  () => {
+    if (cardState.value === "unavailable") armRetry(0);
+  },
+);
+
 function retryNow(): void {
   armRetry(0);
   emit("refresh-room");
@@ -342,7 +374,7 @@ function onTick(): void {
   if (props.busy) return;
 
   if (cardState.value === "unavailable" && retryDeadline.value !== 0 && now.value >= retryDeadline.value) {
-    armRetry(nextRetryStep(retryStep.value));
+    armRetry(nextRetryStep(retryStep.value, retryBackoff.value));
     emit("refresh-room");
   }
 }

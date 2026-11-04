@@ -39,6 +39,10 @@
           <p v-else class="inbox-approval-note inbox-approval-result" role="status">{{ hostApprovalStatusLabel(selectedApproval.status) }}.{{ selectedApproval.status === 'uncertain' ? ' Your decision will not be sent again.' : '' }}</p>
           <p v-if="approvalState.error" class="knowledge-inline-error inbox-approval-error" role="status">{{ approvalState.error }} <button class="knowledge-text-button" :disabled="approvalState.loading" @click="refreshApproval">Refresh approvals</button></p>
         </div>
+        <div v-else-if="selected.joinRequest" class="knowledge-task-action" data-testid="inbox-join-request">
+          <p v-if="joinDecision?.key === selected.key" class="knowledge-success inbox-approval-result" role="status"><CircleCheck :size="16" aria-hidden="true" />{{ joinDecision.label }}</p>
+          <div v-else class="knowledge-source-row"><button class="knowledge-button" :disabled="sending" data-testid="inbox-join-decline" @click="decideJoinRequest('decline')">Decline</button><button class="knowledge-button knowledge-primary" :disabled="sending" data-testid="inbox-join-approve" @click="decideJoinRequest('approve')">{{ sending ? 'Recording…' : 'Approve' }}</button></div>
+        </div>
         <InboxResponse v-else-if="selected.record" :key="selected.key" :id="`response-${selected.record.id}`" v-model="drafts[selected.key]" :suggestion="selected.record.recommendation" :recipient="selected.actor" :disabled="sending" @submit="respond" @close="closeRequest" />
         <div v-else class="knowledge-task-action">
           <div class="knowledge-source-row"><button class="knowledge-button knowledge-primary" @click="openRoom(selected)">{{ actionLabel(selected) }}<ArrowUpRight :size="14" /></button><button v-if="selected.section === 'updates'" class="knowledge-button" @click="markRead([selected])"><Check :size="14" />Mark read</button></div>
@@ -59,7 +63,8 @@ import MessageRemindersSection from "./MessageRemindersSection.vue";
 import { useNow } from "../../../composables/useNow";
 import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { ArrowUpRight, Check, CheckCheck, ChevronDown, CircleCheck, Inbox, Link2, LoaderCircle, MessageSquare, RefreshCw, TriangleAlert, X } from '@lucide/vue';
-import type { DesktopRentalRequest, DesktopRoomThreadInboxPage } from '../../../../../electron/ipc-types.js';
+import type { DesktopAccountRoomJoinRequest, DesktopRentalRequest, DesktopRoomThreadInboxPage } from '../../../../../electron/ipc-types.js';
+import { roomJoinRequests } from '../../../composables/useRoomJoinRequests';
 import type { DesktopNeedsYou } from '../../../../../electron/ipc-types/knowledge.js';
 import type { AttentionNavigationIntent } from './room-shell/types';
 import { desktopBridgeUpgradeMessage, desktopIpc } from '../../../ipc/index.js';
@@ -76,7 +81,7 @@ import ChatAvatar from '../../../../../../../shared/ui/ChatAvatar.vue';
 import './room-knowledge.css';
 import './room-inbox/inbox-view.css';
 
-const props = withDefaults(defineProps<{ data: DesktopNeedsYou | null; attention?: AgentAttentionItem[]; loading: boolean; error: string; rentals?: DesktopRentalRequest[]; rentalError?: string; rooms?: string[]; section?: InboxSection; storageKey?: string }>(), { attention: () => [], rentals: () => [], rentalError: '', rooms: () => [], section: 'needs-you', storageKey: 'local' });
+const props = withDefaults(defineProps<{ data: DesktopNeedsYou | null; attention?: AgentAttentionItem[]; loading: boolean; error: string; rentals?: DesktopRentalRequest[]; rentalError?: string; joinRequests?: readonly DesktopAccountRoomJoinRequest[]; rooms?: string[]; section?: InboxSection; storageKey?: string }>(), { attention: () => [], rentals: () => [], rentalError: '', joinRequests: () => [], rooms: () => [], section: 'needs-you', storageKey: 'local' });
 const emit = defineEmits<{ refresh: []; openRoom: [intent: AttentionNavigationIntent]; openRental: []; 'update:section': [section: InboxSection]; 'update:rooms': [rooms: string[]]; 'threads-loaded': [room: string, page: DesktopRoomThreadInboxPage] }>();
 const layout = ref<{ focusHeading(): void } | null>(null);
 const query = ref('');
@@ -123,7 +128,7 @@ const dismissals = ref<Record<string, string>>({}); const lastRead = ref<InboxRe
 let alive = true;
 // An answer sent from here moves its request to Answered before the next refresh confirms it.
 const sentAnswers = ref<Record<string, KnowledgeRecord>>({});
-const allItems = computed(() => buildUniversalInbox(props.data, props.rentals, props.attention).map(item => {
+const allItems = computed(() => buildUniversalInbox(props.data, props.rentals, props.attention, props.joinRequests).map(item => {
   const record = sentAnswers.value[item.key];
   return record && item.record && record.version > item.record.version
     ? { ...item, record, section: 'answered' as const, category: attentionRecordCategory(record), timestamp: record.response?.at || item.timestamp, fingerprint: String(record.version) } : item;
@@ -144,7 +149,7 @@ const avatars = computed(() => new Map(allItems.value.map(item => {
     : item.activity?.kind === 'agent_offline' ? item.activity.presence.runtime
     : identity?.ideLabel || activityPresence?.runtime || supervised?.provider || agent?.runtime;
   return [item.key, { agent: Boolean(provider || identity || author?.kind === 'agent'), provider,
-    agentKey: activityKey || supervised?.agentKey || agent?.agentKey }];
+    agentKey: activityKey || supervised?.agentKey || agent?.agentKey, avatarUrl: item.joinRequest?.avatar_url }];
 })));
 function selectKey(key: string) { const item = items.value.find(item => item.key === key); if (item) selectItem(item); }
 // The list as last displayed. Arrivals join around the selected row instead of
@@ -249,6 +254,23 @@ async function decideApproval(decision: HostApprovalSelection) {
   const status = state.approvals.find(entry => entry.id === approval.id)?.status ?? approval.status;
   if (!state.error && !isActionableHostApproval({ status })) moveOnFrom(item, list, hostApprovalStatusLabel(status), status === 'decision_sent' || status === 'resolved');
   void nextTick(() => requestHeading.value?.focus({ preventScroll: true }));
+}
+// A decided join request with no request after it stays open with its result.
+const joinDecision = ref<{ key: string; label: string } | null>(null);
+async function decideJoinRequest(decision: 'approve' | 'decline') {
+  const item = selected.value; const request = item?.joinRequest;
+  if (!item || !request || sending.value) return;
+  const list = items.value;
+  selectedKey.value = item.key; decided.value = item; outcome.value = null; sending.value = true; sendError.value = '';
+  try {
+    const result = await roomJoinRequests.decide(request, decision);
+    if (!alive) return;
+    if (!result.ok && result.code !== 'ROOM_JOIN_REQUEST_NOT_PENDING') { sendError.value = result.message || 'Unable to record your decision.'; decided.value = null; return; }
+    const label = !result.ok ? 'Another admin already decided' : decision === 'approve' ? 'Approved' : 'Declined';
+    if (!moveOnFrom(item, list, label, true)) joinDecision.value = { key: item.key, label };
+    void nextTick(() => requestHeading.value?.focus({ preventScroll: true }));
+  } catch (error) { if (alive) { sendError.value = error instanceof Error ? error.message : 'Unable to record your decision.'; decided.value = null; } }
+  finally { if (alive) sending.value = false; }
 }
 function refreshApproval() { if (selected.value?.roomIdentifier) void refreshHostApprovals(selected.value.roomIdentifier); }
 async function openSource(url: string) { try { await desktopIpc.app.openExternalUrl(url); } catch (error) { sendError.value = String(error); } }

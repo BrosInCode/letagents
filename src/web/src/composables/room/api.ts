@@ -1,6 +1,30 @@
+import { roomAccessRefusal } from '../../../../../shared/room-membership.mjs'
+
+export type RoomApiFailure = Error & {
+  status?: number
+  code?: string | null
+  payload?: any
+  /** From a Retry-After header in seconds, when the server sent one. */
+  retryAfterMs?: number | null
+}
+
+type RoomAccessRefusedListener = (path: string, error: RoomApiFailure) => void
+const roomAccessRefusedListeners = new Set<RoomAccessRefusedListener>()
+
+/**
+ * Hears every 403 that says the person is not let into a room, so the open room
+ * can stop its stream and timers instead of retrying a refusal forever.
+ */
+export function onRoomAccessRefused(listener: RoomAccessRefusedListener): () => void {
+  roomAccessRefusedListeners.add(listener)
+  return () => roomAccessRefusedListeners.delete(listener)
+}
+
 export async function apiFetch(
   path: string,
   options?: RequestInit,
+  // Member routes answer a refusal to a person who may still read the room, so they opt out.
+  { reportRoomRefusal = true }: { reportRoomRefusal?: boolean } = {},
 ): Promise<any> {
   const res = await fetch(path, {
     ...options,
@@ -22,14 +46,22 @@ export async function apiFetch(
     }
     const error = new Error(
       payload?.message || payload?.error || rawBody || `HTTP ${res.status}`,
-    ) as Error & {
-      status?: number
-      code?: string | null
-      payload?: any
-    }
+    ) as RoomApiFailure
     error.status = res.status
     error.code = payload?.code || payload?.error || null
     error.payload = payload
+    const retryAfterSeconds = Number(res.headers?.get?.('Retry-After'))
+    error.retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : null
+    if (reportRoomRefusal && res.status === 403 && roomAccessRefusal(payload)) {
+      for (const listener of roomAccessRefusedListeners) {
+        try {
+          listener(path, error)
+        } catch (listenerError) {
+          // The caller still gets the HTTP error below.
+          console.error('[room] access refusal listener failed:', listenerError)
+        }
+      }
+    }
     throw error
   }
   return res.json()

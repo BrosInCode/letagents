@@ -1,4 +1,4 @@
-/** Adapter state, construction, publishing helpers, exit observation and the Read-only and isolation guards. */
+/** Adapter state, construction, publishing helpers, exit observation and the access level and isolation guards. */
 import type { CodexAppServerExit } from "../codex-app-server.js";
 import { sandboxedCodexProjectRefusal } from "../codex-agent-home.js";
 import { STARTS_AGAIN_BY_ITSELF, codexProcessKeepsOwnerSetup } from "../codex-home-harness.js";
@@ -10,7 +10,7 @@ import { errorMessage, safeStreamPayload } from "../provider-evidence.js";
 import { BASE_CODEX_CAPABILITIES, DEFAULT_DEPENDENCIES } from "./launch-contract.js";
 import { COMMAND_OUTPUT_WINDOW_MS, type CodexProviderAdapterDependencies, type CodexProviderAdapterOptions } from "./types.js";
 import { CodexProviderHandle } from "./handle.js";
-import { codexFoundNotReadOnly, codexPolicyIsSandboxed } from "./thread-access.js";
+import { codexFoundNotAtLevel, codexFoundWithoutProfile, codexPolicyIsSandboxed } from "./thread-access.js";
 import { recordValue } from "./notifications.js";
 
 export abstract class CodexAdapterBase {
@@ -163,50 +163,55 @@ export abstract class CodexAdapterBase {
    * an attach with the policy holds it. Every later caller gets the same answer.
    */
   protected bindFoundPolicy(handle: CodexProviderHandle, policy: unknown): CodexProviderHandle | Promise<ProviderAttachTerminal> {
+    const unbound = handle.appliedTurnPolicy() === null;
     const reported = handle.bindTurnPolicy(policy);
-    const notReadOnly = reported && codexFoundNotReadOnly(handle.appliedTurnPolicy(), reported, handle.readOnlyProfile());
-    if (notReadOnly) handle.foundNotReadOnly = { reported: notReadOnly, stopped: null };
-    return this.stopNotReadOnly(handle) ?? handle;
+    const bound = unbound && handle.appliedTurnPolicy() !== null;
+    // What the conversation reported when the process was found, or, for a process found with no loaded conversation, how it was started.
+    const notReadOnly = reported ? codexFoundNotAtLevel(handle.appliedTurnPolicy(), reported, handle.signInProfile())
+      : bound && handle.foundCommandLine !== undefined ? codexFoundWithoutProfile(handle.foundCommandLine, handle.appliedTurnPolicy()!, handle.workAttemptId) : null;
+    if (notReadOnly) handle.foundNotAtLevel = { reported: notReadOnly, stopped: null };
+    return this.stopNotAtLevel(handle) ?? handle;
   }
 
   /**
-   * Codex says so when the settings of a conversation change. For a Read-only
-   * runtime the new settings are held to the level as a reply is: a sandbox,
-   * an approval policy or a permission profile other than Read-only's stops
-   * the runtime, its owner is told, and the daemon starts the agent again.
+   * Codex says so when the settings of a conversation change. For a runtime
+   * at a sandboxed access level the new settings are held to the level as a
+   * reply is: a sandbox, an approval policy or a permission profile other
+   * than the level's stops the runtime, its owner is told, and the daemon
+   * starts the agent again.
    * Nothing LetAgents sends changes them, so a change is Codex's own or some
    * other client's. A notice that holds no settings says nothing either way.
    *
    * This catches a profile that Codex stops reporting. It does not show that
    * the `deny` is in force while the profile is reported: see
-   * assertCodexReadOnlyApplied.
+   * assertCodexSandboxedApplied.
    */
-  protected holdSettingsToReadOnly(handle: CodexProviderHandle, params: unknown): void {
+  protected holdSettingsToLevel(handle: CodexProviderHandle, params: unknown): void {
     const settings = recordValue(recordValue(params)?.threadSettings);
-    if (!settings || handle.foundNotReadOnly) return;
-    const notReadOnly = codexFoundNotReadOnly(handle.appliedTurnPolicy(), {
+    if (!settings || handle.foundNotAtLevel) return;
+    const notReadOnly = codexFoundNotAtLevel(handle.appliedTurnPolicy(), {
       approvalPolicy: settings.approvalPolicy, sandbox: settings.sandboxPolicy, activePermissionProfile: settings.activePermissionProfile,
-    }, handle.readOnlyProfile());
+    }, handle.signInProfile());
     if (!notReadOnly) return;
-    handle.foundNotReadOnly = { reported: notReadOnly, stopped: null };
+    handle.foundNotAtLevel = { reported: notReadOnly, stopped: null };
     // The daemon keeps an agent's activity from its stream, so this is said there before the process goes.
-    this.publishStream(handle, "readOnly/stopped", {}, "provider_event", `Stopped this agent. ${notReadOnly}. ${STARTS_AGAIN_BY_ITSELF}`);
+    this.publishStream(handle, "accessLevel/stopped", {}, "provider_event", `Stopped this agent. ${notReadOnly}. ${STARTS_AGAIN_BY_ITSELF}`);
     // The stop is not waited for here; the daemon sees the process end. One that fails is tried again at the next attach.
-    this.stopNotReadOnly(handle)?.catch(() => undefined);
+    this.stopNotAtLevel(handle)?.catch(() => undefined);
   }
 
   /**
-   * The stop of a runtime that was found not to be Read-only. One stop serves
+   * The stop of a runtime that was found not to be at its level. One stop serves
    * every caller while it runs and once it has ended the process. A stop that
    * failed is not kept: the runtime takes no turn meanwhile, and the next
    * attach, or the next call here, tries again, so its process does not stay
    * until the owner restarts the agent.
    */
-  protected stopNotReadOnly(handle: CodexProviderHandle): Promise<ProviderAttachTerminal> | null {
-    const found = handle.foundNotReadOnly;
+  protected stopNotAtLevel(handle: CodexProviderHandle): Promise<ProviderAttachTerminal> | null {
+    const found = handle.foundNotAtLevel;
     if (!found) return null;
     if (!found.stopped) {
-      const stopping = this.stopFoundNotReadOnly(found.reported, () => this.stop(handle));
+      const stopping = this.stopFoundNotAtLevel(found.reported, () => this.stop(handle));
       found.stopped = stopping;
       stopping.catch(() => { if (found.stopped === stopping) found.stopped = null; });
     }
@@ -214,14 +219,14 @@ export abstract class CodexAdapterBase {
   }
 
   /**
-   * A Read-only runtime found running whose conversation reports another
-   * policy is not kept: a turn it is in would go on with what the level does
+   * A runtime found running at a sandboxed access level whose conversation
+   * reports another policy is not kept: a turn it is in would go on with what the level does
    * not allow. Its process is stopped, and the answer is the proof that it is
    * gone, with a line for its owner. The daemon then closes this runtime and
    * starts the agent again by its normal path. When the process cannot be
    * proved gone, the attach fails: a second writer must not start.
    */
-  protected async stopFoundNotReadOnly(reported: string, stop: () => Promise<ProviderTerminalPayload>): Promise<ProviderAttachTerminal> {
+  protected async stopFoundNotAtLevel(reported: string, stop: () => Promise<ProviderTerminalPayload>): Promise<ProviderAttachTerminal> {
     let terminal: ProviderTerminalPayload;
     try {
       terminal = await stop();

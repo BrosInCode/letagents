@@ -368,6 +368,16 @@ const api: DesktopApi = {
     openVerification: (url: string) => ipcRenderer.invoke("desktop:auth:open-verification", url),
     signOut: () => ipcRenderer.invoke("desktop:auth:sign-out"),
   },
+  roomMembers: {
+    list: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room-members:list", roomIdentifier),
+    remove: (roomIdentifier: string, accountId: string) => ipcRenderer.invoke("desktop:room-members:remove", roomIdentifier, accountId),
+    setRole: (roomIdentifier: string, accountId: string, role) => ipcRenderer.invoke("desktop:room-members:set-role", roomIdentifier, accountId, role),
+    requestJoin: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room-members:request-join", roomIdentifier),
+    listJoinRequests: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room-members:list-join-requests", roomIdentifier),
+    decideJoinRequest: (roomIdentifier: string, requestId: string, decision) =>
+      ipcRenderer.invoke("desktop:room-members:decide-join-request", roomIdentifier, requestId, decision),
+    listAccountJoinRequests: () => ipcRenderer.invoke("desktop:room-members:list-account-join-requests"),
+  },
   connectors: {
     list: () => ipcRenderer.invoke("desktop:connectors:list"),
     connectOAuth: (provider) => ipcRenderer.invoke("desktop:connectors:connect-oauth", provider),

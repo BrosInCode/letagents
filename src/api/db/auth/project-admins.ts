@@ -26,6 +26,22 @@ export async function assignProjectAdminIfRoomHasNoAdmins(
       .where(eq(project_admins.project_id, projectId))
       .limit(1);
     if (existing) return;
+    const [claim] = (await tx.execute(sql`SELECT
+        room.kind,
+        EXISTS (SELECT 1 FROM room_member_removals
+          WHERE room_id = room.id AND account_id = ${accountId}) AS removed,
+        EXISTS (SELECT 1 FROM room_members WHERE room_id = room.id) AS has_members,
+        EXISTS (SELECT 1 FROM room_members
+          WHERE room_id = room.id AND account_id = ${accountId}) AS is_member
+      FROM rooms AS room WHERE room.id = ${projectId}`)).rows as Array<{
+        kind: string; removed: boolean; has_members: boolean; is_member: boolean;
+      }>;
+    // A focus room is governed by its parent's admins: nobody becomes its
+    // admin by opening it. A person removed from a room, or who left, does
+    // not take it back. A room that already has members takes an admin only
+    // from among them.
+    if (!claim || claim.kind !== "main" || claim.removed) return;
+    if (claim.has_members && !claim.is_member) return;
     await tx
       .insert(project_admins)
       .values({
@@ -34,6 +50,10 @@ export async function assignProjectAdminIfRoomHasNoAdmins(
         assigned_at: new Date().toISOString(),
       })
       .onConflictDoNothing();
+    // The first admin of a top-level room is also its first member.
+    await tx.execute(sql`INSERT INTO room_members (room_id, account_id, added_via)
+      VALUES (${projectId}, ${accountId}, 'creator')
+      ON CONFLICT (room_id, account_id) DO NOTHING`);
   });
 }
 
