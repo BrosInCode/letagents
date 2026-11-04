@@ -305,24 +305,35 @@ export interface WakeWebhookSendResult {
   status: number;
   error: WakeDeliveryErrorClass | null;
   /**
-   * 408 or 429: the receiver asked for time. The retry waits for its
+   * 408, 425 or 429: the receiver asked for time. The retry waits for its
    * Retry-After (at most 5 minutes) and does not count toward pausing the rule.
    */
   throttled?: boolean;
+  /** Set from Retry-After on a throttling status and on 503 (which counts as usual). */
   retryAfterMs?: number;
+  /** The start of the response body, only when the caller asked to read it (a verification challenge). */
+  body?: string;
 }
 
-/** 2xx delivers. Network errors, 5xx, 408 and 429 are retried; other 4xx and redirects are final. */
+/** The statuses that mean "not now": the retry waits for Retry-After and never counts toward a pause. */
+export function isThrottlingStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429;
+}
+
+/**
+ * 2xx delivers. Network errors, 5xx, 408, 425 and 429 are retried; other 4xx
+ * (410 Gone and 413 Payload Too Large included) and redirects are final.
+ */
 export function classifyWakeWebhookStatus(status: number): WakeWebhookOutcome {
   if (status >= 200 && status < 300) return "delivered";
-  if (status === 0 || status >= 500 || status === 408 || status === 429) return "retry";
+  if (status === 0 || status >= 500 || isThrottlingStatus(status)) return "retry";
   return "dead";
 }
 
 function statusErrorClass(status: number): WakeDeliveryErrorClass | null {
   if (status >= 200 && status < 300) return null;
   if (status >= 300 && status < 400) return "http_redirect";
-  if (status === 408 || status === 429) return "http_throttled";
+  if (isThrottlingStatus(status)) return "http_throttled";
   if (status >= 500) return "http_5xx";
   return "http_4xx";
 }
@@ -344,8 +355,9 @@ function transportErrorClass(error: NodeJS.ErrnoException, timedOut: boolean): W
 }
 
 /**
- * POST one signed body. The response body is never read; only the status
- * counts. Resolves; never throws.
+ * POST one signed body. The response body is dropped unread (only the status
+ * counts) unless `readBodyBytes` asks for its first bytes, as a verification
+ * challenge does. Resolves; never throws.
  */
 export async function postWakeWebhook(input: {
   url: string;
@@ -353,9 +365,13 @@ export async function postWakeWebhook(input: {
   headers: Readonly<Record<string, string>>;
   timeoutMs?: number;
   lookup?: WakeWebhookLookup;
+  /** The largest body this call may send; a wake webhook's 4 KB unless the caller's contract allows more. */
+  maxBodyBytes?: number;
+  /** Read at most this many bytes of the response body into `body`. */
+  readBodyBytes?: number;
 }): Promise<WakeWebhookSendResult> {
   const bytes = Buffer.byteLength(input.body, "utf8");
-  if (bytes > WAKE_WEBHOOK_MAX_BODY_BYTES) return { outcome: "dead", status: 0, error: "body_too_large" };
+  if (bytes > (input.maxBodyBytes ?? WAKE_WEBHOOK_MAX_BODY_BYTES)) return { outcome: "dead", status: 0, error: "body_too_large" };
   const startedAt = Date.now();
   const timeoutMs = input.timeoutMs ?? WAKE_WEBHOOK_TIMEOUT_MS;
   let url: URL;
@@ -401,15 +417,36 @@ export async function postWakeWebhook(input: {
       headers: { ...input.headers, Host: url.host, "Content-Length": String(bytes) },
     }, (response) => {
       const status = response.statusCode ?? 0;
-      const retryAfterMs = status === 408 || status === 429 ? parseRetryAfter(response.headers["retry-after"]) : undefined;
-      // Only the status matters; drop the body unread.
-      response.destroy();
-      finish({
+      const throttled = isThrottlingStatus(status);
+      const retryAfterMs = throttled || status === 503 ? parseRetryAfter(response.headers["retry-after"]) : undefined;
+      const result: WakeWebhookSendResult = {
         outcome: classifyWakeWebhookStatus(status),
         status,
         error: statusErrorClass(status),
-        ...(status === 408 || status === 429 ? { throttled: true, ...(retryAfterMs ? { retryAfterMs } : {}) } : {}),
+        ...(throttled ? { throttled: true } : {}),
+        ...(retryAfterMs ? { retryAfterMs } : {}),
+      };
+      const readBytes = input.readBodyBytes;
+      if (!readBytes || result.outcome !== "delivered") {
+        // Only the status matters; drop the body unread.
+        response.destroy();
+        finish(result);
+        return;
+      }
+      // A verification answer: keep its first bytes, then stop reading.
+      const chunks: Buffer[] = [];
+      let collected = 0;
+      response.on("data", (chunk: Buffer) => {
+        if (collected >= readBytes) return;
+        const slice = chunk.subarray(0, readBytes - collected);
+        chunks.push(slice);
+        collected += slice.length;
+        if (collected >= readBytes) response.destroy();
       });
+      const done = () => finish({ ...result, body: Buffer.concat(chunks).toString("utf8") });
+      response.on("end", done);
+      response.on("close", done);
+      response.on("error", done);
     });
     const timer = setTimeout(() => {
       timedOut = true;

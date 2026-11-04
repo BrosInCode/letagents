@@ -145,8 +145,12 @@ export type WakeDeliveryOutcome =
    * without counting against the rule (throttling, the operator's SMTP).
    */
   | { kind: "retry"; status: number; error: WakeDeliveryErrorClass; holdMs?: number; uncounted?: boolean }
-  /** Failed for good; counts toward pausing the rule. */
-  | { kind: "failed"; status: number; error: WakeDeliveryErrorClass }
+  /**
+   * Failed for good; counts toward pausing the rule. `retire`: the receiver
+   * said the subscription itself is over (an MCP event answered 410 Gone), so
+   * the rule ends now with this reason instead of waiting for the pause.
+   */
+  | { kind: "failed"; status: number; error: WakeDeliveryErrorClass; retire?: string }
   /** The rule stopped (cancelled, paused, expired, revoked): the delivery is dropped, nothing counts. */
   | { kind: "skipped"; error: string };
 
@@ -159,6 +163,7 @@ export function webhookOutcome(result: WakeWebhookSendResult): WakeDeliveryOutco
     // The receiver asked for time: wait for it (bounded), and never count it against the rule.
     return { kind: "retry", status: result.status, error, holdMs: result.retryAfterMs ?? WAKE_WEBHOOK_MAX_HOLD_MS, uncounted: true };
   }
-  return { kind: "retry", status: result.status, error };
+  // A 503 with Retry-After waits as asked (bounded) but counts like any 5xx.
+  return { kind: "retry", status: result.status, error, ...(result.retryAfterMs ? { holdMs: result.retryAfterMs } : {}) };
 }
 
