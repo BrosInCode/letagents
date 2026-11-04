@@ -31,7 +31,11 @@ export type RoomMemberRouteDeps = Pick<
   getProjectById?: typeof getProjectById;
   resolveProjectRepoAccessTarget?: typeof resolveProjectRepoAccessTarget;
   /** Ends one agent session of a removed member, as a room admin would. */
-  endMemberAgentSession?: (session: databaseStore.RemovedMemberAgentSession, person: SignedInAccount) => Promise<boolean>;
+  endMemberAgentSession?: (
+    session: databaseStore.RemovedMemberAgentSession,
+    person: SignedInAccount,
+    options: { closeOpenRequests: boolean },
+  ) => Promise<boolean>;
 };
 
 /** One room's membership context: the room asked for, and the room whose members decide. */
@@ -45,6 +49,11 @@ const JOIN_REQUEST_LIMIT_PER_HOUR = 20;
 const joinRequestAttempts = new Map<string, number[]>();
 
 function allowJoinRequestAttempt(accountId: string, now = Date.now()): boolean {
+  if (joinRequestAttempts.size > 10_000) {
+    for (const [key, attempts] of joinRequestAttempts) {
+      if (attempts.every((at) => now - at >= 60 * 60_000)) joinRequestAttempts.delete(key);
+    }
+  }
   const recent = (joinRequestAttempts.get(accountId) ?? []).filter((at) => now - at < 60 * 60_000);
   if (recent.length >= JOIN_REQUEST_LIMIT_PER_HOUR) {
     joinRequestAttempts.set(accountId, recent);
@@ -58,6 +67,7 @@ function allowJoinRequestAttempt(accountId: string, now = Date.now()): boolean {
 async function endAgentSessionAsRoomAdmin(
   session: databaseStore.RemovedMemberAgentSession,
   person: SignedInAccount,
+  options: { closeOpenRequests: boolean },
 ): Promise<boolean> {
   const ended = await endRoomAgentSession({
     session_id: session.session_id,
@@ -69,17 +79,23 @@ async function endAgentSessionAsRoomAdmin(
   if (!isMcpWorkerId(ended.agent_instance_id)) {
     await disconnectRoomAgentDeliverySession({ room_id: session.room_id, agent_session_id: session.session_id });
   }
-  await closeRequestsOfRetiredAgent({
-    room_id: session.room_id,
-    agent_key: ended.agent_key,
-    session_id: ended.session_id,
-    person: { id: person.account_id, label: person.login, kind: 'human' },
-  });
+  // An admin who removes someone closes the agent's open requests, as the
+  // admin disconnect does. A person who leaves posts nothing in the room.
+  if (options.closeOpenRequests) {
+    await closeRequestsOfRetiredAgent({
+      room_id: session.room_id,
+      agent_key: ended.agent_key,
+      session_id: ended.session_id,
+      person: { id: person.account_id, label: person.login, kind: 'human' },
+    });
+  }
   return true;
 }
 
 function fail(res: Response, error: unknown): void {
-  const busy = (error as { code?: string } | null)?.code === '55P03';
+  const code = (error as { code?: string } | null)?.code;
+  // Lock timeout or a deadlock with a concurrent change: retrying is safe.
+  const busy = code === '55P03' || code === '40P01';
   if (!busy) console.error('[room members]', error);
   res.status(busy ? 503 : 500).json({
     error: busy ? 'Room members are busy. Please retry.' : 'Room members could not be loaded or saved. Please retry.',
@@ -103,16 +119,17 @@ function requireSignedIn(req: AuthenticatedRequest, res: Response): SignedInAcco
 }
 
 /**
- * Letting a person in or out changes who can read a room and wake its agents,
- * so it needs a person signed in to the app. An agent must not do it, not even
- * with the token of an admin who owns it.
+ * Who is in a room, who asks to join it, and letting people in or out are for
+ * a person signed in to the app. An agent must not read or change them, not
+ * even with the token of an admin who owns it. An owner token (the MCP
+ * client) may only ask to join, read its own state, and leave.
  */
 function requirePerson(req: AuthenticatedRequest, res: Response): SignedInAccount | null {
   const account = requireSignedIn(req, res);
   if (!account) return null;
   if (isHumanAppWrite(req, req.body ?? {})) return account;
   res.status(403).json({
-    error: 'Only a person signed in to the LetAgents app can change room members.',
+    error: 'Only a person signed in to the LetAgents app can see or change room members.',
     code: 'PERSON_REQUIRED',
   });
   return null;
@@ -204,7 +221,7 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
 
   app.get(/^\/rooms\/(.+)\/members$/, async (req: AuthenticatedRequest, res) => {
     try {
-      const account = requireSignedIn(req, res);
+      const account = requirePerson(req, res);
       if (!account) return;
       const member = await requireMember(req, res, account);
       if (!member) return;
@@ -213,7 +230,7 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
         room_id: room.project.id,
         access_room_id: room.accessRoom.id,
         managed_by: room.managedBy,
-        can_manage: role === 'admin' && isHumanAppWrite(req, {}),
+        can_manage: role === 'admin',
         members: room.managedBy === 'github' ? [] : await store.listRoomMembers(room.accessRoom.id),
       });
     } catch (error) { fail(res, error); }
@@ -231,7 +248,11 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
       const room = await requireRoomAdmin(req, res, account);
       if (!room) return;
       const targetAccountId = routeParam(req, 1);
-      const change = await store.setRoomMemberRole(room.accessRoom.id, targetAccountId, role);
+      const change = await store.setRoomMemberRole(room.accessRoom.id, targetAccountId, role, account.account_id);
+      if (change.kind === 'forbidden') {
+        res.status(403).json({ error: 'Admin privileges required' });
+        return;
+      }
       if (change.kind === 'not_member') {
         res.status(404).json({ error: 'That person is not a member of this room.', code: 'ROOM_MEMBER_NOT_FOUND' });
         return;
@@ -262,7 +283,11 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
         res.status(403).json({ error: 'Admin privileges required' });
         return;
       }
-      const removal = await store.removeRoomMember(member.room.accessRoom.id, targetAccountId);
+      const removal = await store.removeRoomMember(member.room.accessRoom.id, targetAccountId, account.account_id);
+      if (removal.kind === 'forbidden') {
+        res.status(403).json({ error: 'Admin privileges required' });
+        return;
+      }
       if (removal.kind === 'not_member') {
         res.status(404).json({ error: 'That person is not a member of this room.', code: 'ROOM_MEMBER_NOT_FOUND' });
         return;
@@ -281,7 +306,7 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
       let ended = 0;
       for (const session of removal.agent_sessions) {
         try {
-          if (await endMemberAgentSession(session, account)) ended += 1;
+          if (await endMemberAgentSession(session, account, { closeOpenRequests: !leaving })) ended += 1;
         } catch (error) {
           console.error('[room members] agent session of a removed member did not end', session.session_id, error);
         }
@@ -329,7 +354,7 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
 
   app.get(/^\/rooms\/(.+)\/join-requests$/, async (req: AuthenticatedRequest, res) => {
     try {
-      const account = requireSignedIn(req, res);
+      const account = requirePerson(req, res);
       if (!account) return;
       const state = req.query?.state === 'all' ? 'all' : 'pending';
       const room = await requireRoomAdmin(req, res, account);
@@ -355,6 +380,10 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
         decision,
         deciderAccountId: account.account_id,
       });
+      if (outcome.kind === 'forbidden') {
+        res.status(403).json({ error: 'Admin privileges required' });
+        return;
+      }
       if (outcome.kind === 'not_found') {
         res.status(404).json({ error: 'Join request not found', code: 'ROOM_JOIN_REQUEST_NOT_FOUND' });
         return;
@@ -405,7 +434,7 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
 
   app.get('/account/room-join-requests', async (req: AuthenticatedRequest, res) => {
     try {
-      const account = requireSignedIn(req, res);
+      const account = requirePerson(req, res);
       if (!account) return;
       res.json({ join_requests: await store.listPendingJoinRequestsForAdmin(account.account_id) });
     } catch (error) { fail(res, error); }

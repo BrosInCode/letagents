@@ -26,6 +26,14 @@ export async function assignProjectAdminIfRoomHasNoAdmins(
       .where(eq(project_admins.project_id, projectId))
       .limit(1);
     if (existing) return;
+    // A person removed from the room, or who left, takes neither it nor one
+    // of its focus rooms back.
+    const [removed] = (await tx.execute(sql`SELECT 1 AS removed FROM room_member_removals
+      WHERE account_id = ${accountId}
+        AND room_id IN (SELECT id FROM rooms WHERE id = ${projectId}
+          UNION SELECT parent_room_id FROM rooms WHERE id = ${projectId} AND parent_room_id IS NOT NULL)
+      LIMIT 1`)).rows;
+    if (removed) return;
     await tx
       .insert(project_admins)
       .values({

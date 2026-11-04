@@ -43,7 +43,10 @@ function harness(options: { roles?: Record<string, RoomMemberRole>; participantD
     resolveProjectRepoAccessTarget: async (project) => project.id.startsWith('github.com/')
       ? { roomName: project.id, repoRoomName: project.id, binding: null }
       : null,
-    endMemberAgentSession: async (session) => { calls.push(`end:${session.session_id}`); return true; },
+    endMemberAgentSession: async (session, _person, options) => {
+      calls.push(`end:${session.session_id}:${options.closeOpenRequests ? 'close' : 'keep'}`);
+      return true;
+    },
     memberStore: {
       getRoomMemberRole: async (roomId: string, accountId: string) => {
         calls.push(`role:${roomId}`);
@@ -56,13 +59,13 @@ function harness(options: { roles?: Record<string, RoomMemberRole>; participantD
       getRoomMember: async (_roomId: string, accountId: string) => roles.has(accountId)
         ? { account_id: accountId, role: roles.get(accountId) }
         : null,
-      setRoomMemberRole: async (_roomId: string, accountId: string, role: RoomMemberRole) => {
-        calls.push(`set-role:${accountId}:${role}`);
+      setRoomMemberRole: async (_roomId: string, accountId: string, role: RoomMemberRole, actor: string) => {
+        calls.push(`set-role:${accountId}:${role}:by:${actor}`);
         roles.set(accountId, role);
         return { kind: 'changed' };
       },
-      removeRoomMember: async (roomId: string, accountId: string) => {
-        calls.push(`remove:${roomId}:${accountId}`);
+      removeRoomMember: async (roomId: string, accountId: string, actor: string) => {
+        calls.push(`remove:${roomId}:${accountId}:by:${actor}`);
         roles.delete(accountId);
         return { kind: 'removed', agent_sessions: [{ session_id: 'ras_1', room_id: 'focus_7', agent_key: 'k', agent_instance_id: null }] };
       },
@@ -164,6 +167,19 @@ test('only a person in the app can admit or remove people; an owner token cannot
   assert.equal(approved.body.join_request.state, 'approved');
 });
 
+test('an owner token reads only its own state: no member list, no requests, no inbox', async () => {
+  const { request } = harness({ roles: { admin: 'admin' } });
+  for (const path of ['/rooms/ops-lounge/members', '/rooms/ops-lounge/join-requests', '/account/room-join-requests']) {
+    const refused = await request('get', path, { auth: 'owner_token' });
+    assert.equal(refused.status, 403, path);
+    assert.equal(refused.body.code, 'PERSON_REQUIRED');
+  }
+  const own = await request('get', '/rooms/ops-lounge/membership', { auth: 'owner_token' });
+  assert.equal(own.status, 200);
+  assert.equal(own.body.role, 'admin');
+  assert.equal((await request('post', '/rooms/ops-lounge/join-requests', { auth: 'owner_token', account: 'asker' })).status, 201);
+});
+
 test('a member who is not an admin cannot admit people, but can leave with an owner token', async () => {
   const { request, calls } = harness({ roles: { admin: 'admin', member: 'member' } });
   const approve = await request('post', '/rooms/ops-lounge/join-requests/rjr_1/approve', { account: 'member' });
@@ -174,8 +190,13 @@ test('a member who is not an admin cannot admit people, but can leave with an ow
   const leave = await request('delete', '/rooms/ops-lounge/members/member', { auth: 'owner_token', account: 'member' });
   assert.equal(leave.status, 200);
   assert.deepEqual(leave.body, { removed: true, account_id: 'member', ended_agent_sessions: 1 });
-  assert.ok(calls.includes('remove:ops-lounge:member'));
-  assert.ok(calls.includes('end:ras_1'), 'the agents of a person who left are ended');
+  assert.ok(calls.includes('remove:ops-lounge:member:by:member'));
+  assert.ok(calls.includes('end:ras_1:keep'), 'the agents of a person who left end, and nothing is posted for them');
+
+  const removed = await request('delete', '/rooms/ops-lounge/members/other', { account: 'admin' });
+  assert.equal(removed.status, 200);
+  assert.ok(calls.includes('remove:ops-lounge:other:by:admin'), 'the store re-checks the admin under its lock');
+  assert.ok(calls.includes('end:ras_1:close'), 'an admin removal closes the agent\'s open requests');
 });
 
 test('repo rooms answer that GitHub roles decide, after the repository access check', async () => {

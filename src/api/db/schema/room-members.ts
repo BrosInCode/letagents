@@ -19,6 +19,19 @@ export const room_members = pgTable('room_members', {
   added_via_check: check('room_members_added_via_check', sql`${table.added_via} IN ('creator', 'seed', 'approved_request')`),
 }));
 
+/**
+ * A person an admin removed from a room, or who left it. A seed never adds
+ * them back; only an approved join request does, and it clears this row.
+ */
+export const room_member_removals = pgTable('room_member_removals', {
+  room_id: text('room_id').notNull().references(() => rooms.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
+  account_id: text('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade' }),
+  removed_by: text('removed_by').references(() => accounts.id, { onDelete: 'set null' }),
+  removed_at: timestamp('removed_at', { mode: 'string', withTimezone: true }).notNull().defaultNow(),
+}, (table) => ({
+  pk: primaryKey({ name: 'room_member_removals_pk', columns: [table.room_id, table.account_id] }),
+}));
+
 export const room_join_requests = pgTable('room_join_requests', {
   id: text('id').primaryKey(),
   room_id: text('room_id').notNull().references(() => rooms.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
