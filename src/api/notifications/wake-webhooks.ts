@@ -238,7 +238,8 @@ export async function recordWakeWebhookOutcome(
         await client.query(`
           UPDATE agent_wake_rules
              SET delivery_consecutive_failures = 0, delivery_delivered_count = delivery_delivered_count + 1,
-                 delivery_last_status = $2, delivery_last_error = NULL, delivery_last_attempt_at = $3
+                 delivery_last_status = $2, delivery_last_error = NULL, delivery_last_attempt_at = $3,
+                 delivery_last_attempt_was_test = false
            WHERE id = $1
         `, [delivery.rule_id, final.status, nowIso]);
         if (delivery.kind === "mcp_event" && delivery.message_number !== null) {
@@ -260,7 +261,9 @@ export async function recordWakeWebhookOutcome(
          WHERE id = $1 AND claimed_by = $2
       `, [delivery.id, workerId, nextAttempt, final.status || null, final.error, nowIso])) {
         await client.query(`
-          UPDATE agent_wake_rules SET delivery_last_status = $2, delivery_last_error = $3, delivery_last_attempt_at = $4 WHERE id = $1
+          UPDATE agent_wake_rules
+             SET delivery_last_status = $2, delivery_last_error = $3, delivery_last_attempt_at = $4, delivery_last_attempt_was_test = false
+           WHERE id = $1
         `, [delivery.rule_id, final.status || null, final.error, nowIso]);
       }
     } else {
@@ -281,7 +284,7 @@ export async function recordWakeWebhookOutcome(
           await client.query(`
             UPDATE agent_wake_rules
                SET delivery_consecutive_failures = $2, delivery_last_status = $3, delivery_last_error = $4,
-                   delivery_last_attempt_at = $5,
+                   delivery_last_attempt_at = $5, delivery_last_attempt_was_test = false,
                    status = CASE WHEN $6::boolean THEN 'paused' ELSE status END,
                    paused_at = CASE WHEN $6::boolean THEN $5::timestamptz ELSE paused_at END,
                    updated_at = CASE WHEN $6::boolean THEN $5::timestamptz ELSE updated_at END

@@ -87,50 +87,29 @@
       Wake a bot by webhook
     </button>
 
-    <ul v-if="ownRules.length" class="wake-webhook-rules" aria-label="Webhook wake-ups">
-      <li
-        v-for="rule in ownRules"
-        :key="rule.id"
-        class="wake-webhook-rule"
-        :data-rule-id="rule.id"
-        :data-state="rule.status"
-      >
-        <div class="wake-webhook-rule-copy">
-          <p class="wake-webhook-rule-title">
-            <strong>{{ rule.agent_name }}</strong>
-            <span class="wake-webhook-status" :data-state="rule.status">{{ wakeWebhookRuleStatusLabel(rule) }}</span>
-          </p>
-          <p v-if="rule.note" class="wake-webhook-rule-note">{{ rule.note }}</p>
-          <p class="wake-webhook-rule-meta">
-            {{ rule.delivery?.delivered_count ?? 0 }} delivered ·
-            {{ rule.delivery?.consecutive_failures ?? 0 }} failed in a row ·
-            {{ wakeWebhookLastResultLabel(rule) }} ·
-            Key: {{ rule.delivery?.has_bearer ? "yes" : "no" }}
-          </p>
-          <p v-if="form.tests.get(rule.id)" class="wake-webhook-test" :data-tone="form.tests.get(rule.id)!.tone ?? 'pending'" role="status">
-            {{ form.tests.get(rule.id)!.text }}
-          </p>
-          <p v-if="form.cancelErrors.get(rule.id)" class="wake-webhook-error" role="alert">{{ form.cancelErrors.get(rule.id) }}</p>
-        </div>
-        <div v-if="rule.status === 'active' || rule.status === 'paused'" class="wake-webhook-rule-actions">
-          <button
-            type="button"
-            class="wake-webhook-button"
-            :disabled="form.tests.get(rule.id)?.state === 'sending'"
-            :aria-label="`Send a test delivery to ${rule.agent_name}'s webhook`"
-            @click="form.sendTest(rule)"
-          >Send test</button>
-          <button
-            type="button"
-            class="wake-webhook-button"
-            :disabled="form.cancelling.has(rule.id)"
-            :aria-label="`Cancel ${rule.agent_name}'s webhook wake-up`"
-            @click="form.cancel(rule)"
-          >Cancel</button>
-        </div>
-      </li>
-    </ul>
-    <p v-else-if="!loading" class="wake-webhook-empty">No webhook wake-ups for your agents in this room yet.</p>
+    <WakeWebhookRuleList
+      v-if="listedRules.length"
+      :rules="listedRules"
+      :form="form"
+      label="Webhook wake-ups"
+      data-testid="wake-webhook-rules"
+    />
+    <p v-else-if="!loading" class="wake-webhook-empty">{{ emptyText }}</p>
+    <button
+      v-if="cancelledRules.length"
+      type="button"
+      class="wake-webhook-link"
+      data-testid="wake-webhook-cancelled-toggle"
+      :aria-expanded="cancelledShown"
+      @click="toggleCancelled"
+    >{{ cancelledToggleLabel }}</button>
+    <WakeWebhookRuleList
+      v-if="cancelledShown"
+      :rules="cancelledRules"
+      :form="form"
+      label="Cancelled webhook wake-ups"
+      data-testid="wake-webhook-cancelled-rules"
+    />
     <p v-if="ownRules.some((rule) => rule.status === 'active' || rule.status === 'paused')" class="wake-webhook-test-help">{{ WAKE_WEBHOOK_TEST_HELP }}</p>
     <p v-if="error" class="wake-webhook-error" role="alert">{{ error }}</p>
   </div>
@@ -140,14 +119,15 @@
 import { computed, ref, toRef } from "vue";
 
 import type { WakeRule, WakeWebhookAgent, WakeWebhookApi } from "../wake-rules.mjs";
+import WakeWebhookRuleList from "./WakeWebhookRuleList.vue";
 import {
   WAKE_WEBHOOK_KEY_HELP,
   WAKE_WEBHOOK_SECRET_NOTICE,
   WAKE_WEBHOOK_TEST_HELP,
   selectOwnWakeWebhookRules,
+  useCancelledWakeWebhookRules,
   useWakeWebhookForm,
-  wakeWebhookLastResultLabel,
-  wakeWebhookRuleStatusLabel,
+  wakeWebhookEmptyText,
 } from "./wake-webhook-form";
 
 const props = withDefaults(defineProps<{
@@ -169,6 +149,15 @@ const form = useWakeWebhookForm({
   onChanged: () => emit("changed"),
 });
 const ownRules = computed(() => selectOwnWakeWebhookRules(props.rules, props.agents));
+// Cancelled rules sit behind a button, closed each time the section is opened; nothing is saved.
+const {
+  listed: listedRules,
+  cancelled: cancelledRules,
+  shown: cancelledShown,
+  toggleLabel: cancelledToggleLabel,
+  toggle: toggleCancelled,
+} = useCancelledWakeWebhookRules(ownRules);
+const emptyText = computed(() => wakeWebhookEmptyText(cancelledRules.value.length));
 const copied = ref(false);
 let copiedTimer: ReturnType<typeof setTimeout> | undefined;
 

@@ -13,9 +13,13 @@ import {
   WAKE_WEBHOOK_TEST_HELP,
   describeWakeTestResult,
   generateWakeWebhookSecret,
+  partitionWakeWebhookRules,
   selectOwnWakeWebhookRules,
+  useCancelledWakeWebhookRules,
   useWakeWebhookForm,
   validateWakeWebhookDraft,
+  wakeWebhookCancelledToggleLabel,
+  wakeWebhookEmptyText,
   wakeWebhookLastResultLabel,
 } from "../../../../shared/ui/wake-webhook-form";
 
@@ -129,6 +133,70 @@ test("the list holds the viewer's webhook rules only, held ones first, and words
   assert.equal(wakeWebhookLastResultLabel(rule({ delivery: { kind: "webhook", paused: false, last_status: null, last_error: null, last_attempt_at: null } })), "no delivery yet");
 });
 
+test("a last result that came from a test says so; one from a room message does not", () => {
+  const delivery = (overrides: NonNullable<WakeRule["delivery"]>) => rule({ delivery: overrides });
+  const base = { kind: "webhook" as const, paused: false, last_attempt_at: "2026-11-04T11:00:00.000Z" };
+  assert.equal(wakeWebhookLastResultLabel(delivery({ ...base, last_status: 200, last_error: null, last_attempt_was_test: true })), "last test 200");
+  assert.equal(wakeWebhookLastResultLabel(delivery({ ...base, last_status: 503, last_error: "http_5xx", last_attempt_was_test: true })), "last test http_5xx (503)");
+  assert.equal(wakeWebhookLastResultLabel(delivery({ ...base, last_status: 0, last_error: "timeout", last_attempt_was_test: true })), "last test timeout");
+  assert.equal(wakeWebhookLastResultLabel(delivery({ ...base, last_status: 200, last_error: null, last_attempt_was_test: false })), "last 200");
+  assert.equal(wakeWebhookLastResultLabel(delivery({ ...base, last_status: 200, last_error: null })), "last 200", "a server that does not send the flag: no word added");
+  assert.equal(
+    wakeWebhookLastResultLabel(delivery({ kind: "webhook", paused: false, last_status: null, last_error: null, last_attempt_at: null, last_attempt_was_test: true })),
+    "no delivery yet",
+    "no attempt, nothing to call a test",
+  );
+});
+
+test("only a cancelled rule is held back; the button reads Show cancelled (N), then Hide cancelled", () => {
+  const rules = [
+    rule({ id: "wake_1" }),
+    rule({ id: "wake_2", status: "paused" }),
+    rule({ id: "wake_3", status: "pending_confirmation" }),
+    rule({ id: "wake_4", status: "retired" }),
+    rule({ id: "wake_5", status: "expired" }),
+    rule({ id: "wake_6", status: "cancelled" }),
+    rule({ id: "wake_7", status: "cancelled" }),
+  ];
+  const parts = partitionWakeWebhookRules(rules);
+  assert.deepEqual(parts.listed.map((item) => item.id), ["wake_1", "wake_2", "wake_3", "wake_4", "wake_5"], "active, paused, pending and ended-by-itself rules stay listed");
+  assert.deepEqual(parts.cancelled.map((item) => item.id), ["wake_6", "wake_7"]);
+  assert.equal(wakeWebhookCancelledToggleLabel(2, false), "Show cancelled (2)");
+  assert.equal(wakeWebhookCancelledToggleLabel(2, true), "Hide cancelled");
+  assert.equal(wakeWebhookEmptyText(0), "No webhook wake-ups for your agents in this room yet.");
+  assert.equal(wakeWebhookEmptyText(3), "No active webhook wake-ups for your agents in this room.");
+});
+
+test("the cancelled rules start hidden, the button shows and hides them, and a count of zero closes it again", () => {
+  const all = ref<WakeRule[]>([rule({ id: "wake_1" }), rule({ id: "wake_2", status: "cancelled" }), rule({ id: "wake_3", status: "cancelled" })]);
+  const view = useCancelledWakeWebhookRules(all);
+  assert.equal(view.shown.value, false, "collapsed by default");
+  assert.deepEqual(view.listed.value.map((item) => item.id), ["wake_1"]);
+  assert.equal(view.toggleLabel.value, "Show cancelled (2)");
+  view.toggle();
+  assert.equal(view.shown.value, true);
+  assert.equal(view.toggleLabel.value, "Hide cancelled");
+  assert.deepEqual(view.cancelled.value.map((item) => item.id), ["wake_2", "wake_3"]);
+  view.toggle();
+  assert.equal(view.shown.value, false);
+  assert.equal(view.toggleLabel.value, "Show cancelled (2)");
+
+  // A second instance has its own state: nothing is shared or saved between components.
+  view.toggle();
+  const other = useCancelledWakeWebhookRules(all);
+  assert.equal(other.shown.value, false);
+
+  // The count follows the rules; an open list closes when its last rule goes, and a later cancel starts closed.
+  all.value = [rule({ id: "wake_1" }), rule({ id: "wake_2", status: "cancelled" })];
+  assert.equal(view.toggleLabel.value, "Hide cancelled", "still open while a cancelled rule remains");
+  all.value = [rule({ id: "wake_1" })];
+  assert.equal(view.shown.value, false);
+  view.toggle();
+  assert.equal(view.shown.value, false, "nothing to show, nothing to toggle");
+  all.value = [rule({ id: "wake_1" }), rule({ id: "wake_4", status: "cancelled" })];
+  assert.equal(view.toggleLabel.value, "Show cancelled (1)");
+});
+
 test("saving makes the secret, sends it once, and shows it until dismissed; a second form never shows it again", async () => {
   const transport = api();
   const changed: number[] = [];
@@ -213,6 +281,7 @@ test("Send test and Cancel call the room's API and keep their result on the row"
 
 let vite: ViteDevServer;
 let WakeWebhookSection: object;
+let WakeWebhookRuleList: object;
 before(async () => {
   vite = await createServer({
     root: fileURLToPath(new URL("../..", import.meta.url)),
@@ -221,6 +290,7 @@ before(async () => {
     server: { middlewareMode: true },
   });
   WakeWebhookSection = (await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/WakeWebhookSection.vue", import.meta.url)))).default;
+  WakeWebhookRuleList = (await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/WakeWebhookRuleList.vue", import.meta.url)))).default;
 });
 after(async () => {
   await vite?.close();
@@ -238,20 +308,68 @@ test("the section shows only for a person with an agent in the room, and lists e
   assert.doesNotMatch(html, /data-testid="wake-webhook-form"/, "the form opens on request");
   assert.doesNotMatch(html, /data-testid="wake-webhook-secret"/, "no secret before a save");
   const rows = [...html.matchAll(/data-rule-id="(wake_\d)"/g)].map((match) => match[1]);
-  assert.deepEqual(rows, ["wake_2", "wake_1", "wake_3"], "held rules first; another account's agent is not listed");
+  assert.deepEqual(rows, ["wake_2", "wake_1"], "held rules first; a cancelled rule and another account's agent are not listed");
   assert.match(html, /data-rule-id="wake_1"[\s\S]*?Active[\s\S]*?3 delivered ·\s*1 failed in a row ·\s*last http_5xx \(503\) ·\s*Key: yes/);
   assert.match(html, /data-rule-id="wake_2"[\s\S]*?Paused[\s\S]*?wake my routine[\s\S]*?0 delivered ·\s*5 failed in a row ·\s*last http_4xx \(401\) ·\s*Key: no/);
-  assert.match(html, /data-rule-id="wake_3"[\s\S]*?Cancelled/);
   // Send test and Cancel on held rules only.
   const actionsOf = (id: string) => html.slice(html.indexOf(`data-rule-id="${id}"`)).split("</li>")[0]!;
   assert.match(actionsOf("wake_1"), /Send test/);
   assert.match(actionsOf("wake_1"), />\s*Cancel\s*</);
   assert.match(actionsOf("wake_2"), /Send test/);
-  assert.doesNotMatch(actionsOf("wake_3"), /Send test/);
+  // The cancelled rule is behind a button, closed.
+  assert.doesNotMatch(html, /data-rule-id="wake_3"/);
+  assert.doesNotMatch(html, /data-testid="wake-webhook-cancelled-rules"/);
+  assert.match(html, /data-testid="wake-webhook-cancelled-toggle"[^>]*aria-expanded="false"[^>]*>Show cancelled \(1\)<\/button>/);
   assert.doesNotMatch(html, /hooks\.example|crsr_/, "no URL or key appears anywhere in the list");
   // Vue's SSR writes the apostrophe as an entity.
   assert.match(html, /A test counts against the rule(&#39;|')s hourly budget of 20 wake-ups\./, "the budget note sits under Send test");
   assert.doesNotMatch(await render({ rules: [rule({ status: "cancelled" })] }), /hourly budget/, "no held rule, no Send test, no note");
+});
+
+test("a row says \"last test 200\" when the last answer came from a test", async () => {
+  const fromTest = rule({ id: "wake_1", delivery: { kind: "webhook", paused: false, has_bearer: true, delivered_count: 2, consecutive_failures: 0, last_status: 200, last_error: null, last_attempt_at: "2026-11-04T11:00:00.000Z", last_attempt_was_test: true } });
+  const fromMessage = rule({ id: "wake_2", delivery: { kind: "webhook", paused: false, has_bearer: false, delivered_count: 2, consecutive_failures: 0, last_status: 200, last_error: null, last_attempt_at: "2026-11-04T11:00:00.000Z", last_attempt_was_test: false } });
+  const html = await render({ rules: [fromTest, fromMessage] });
+  assert.match(html, /data-rule-id="wake_1"[\s\S]*?2 delivered ·\s*0 failed in a row ·\s*last test 200 ·\s*Key: yes/);
+  assert.match(html, /data-rule-id="wake_2"[\s\S]*?2 delivered ·\s*0 failed in a row ·\s*last 200 ·\s*Key: no/);
+  assert.equal(html.match(/last test/g)?.length, 1, "only the test row says test");
+});
+
+test("with no cancelled rule there is no button; with only cancelled rules the list says none are active", async () => {
+  const none = await render({ rules: [rule()] });
+  assert.doesNotMatch(none, /wake-webhook-cancelled-toggle|Show cancelled/);
+
+  const only = await render({ rules: [rule({ id: "wake_1", status: "cancelled" }), rule({ id: "wake_2", status: "cancelled" })] });
+  assert.doesNotMatch(only, /data-rule-id=/, "closed: no rows");
+  assert.match(only, /No active webhook wake-ups for your agents in this room\./);
+  assert.match(only, /data-testid="wake-webhook-cancelled-toggle"[^>]*>Show cancelled \(2\)<\/button>/);
+  assert.doesNotMatch(only, /No webhook wake-ups for your agents in this room yet/, "they existed; this is not the first-time text");
+  assert.doesNotMatch(only, /hourly budget/);
+  // While rules load, the empty line waits; the button does not.
+  assert.doesNotMatch(await render({ rules: [], loading: true }), /No webhook wake-ups|No active webhook/);
+});
+
+test("the cancelled list uses the same row as the main list and offers no Send test or Cancel", async () => {
+  const form = useWakeWebhookForm({ roomId: ref("sky-owl"), agents: ref(agents), api: api() });
+  const cancelled = [
+    rule({ id: "wake_8", status: "cancelled", note: "old routine", delivery: { kind: "webhook", paused: false, has_bearer: true, delivered_count: 4, consecutive_failures: 0, last_status: 200, last_error: null, last_attempt_at: "2026-11-04T11:00:00.000Z", last_attempt_was_test: true } }),
+    rule({ id: "wake_9", status: "cancelled" }),
+  ];
+  const html = await renderToString(createSSRApp({ render: () => h(WakeWebhookRuleList, { rules: cancelled, form, label: "Cancelled webhook wake-ups" }) }));
+  assert.match(html, /<ul class="wake-webhook-rules" aria-label="Cancelled webhook wake-ups">/);
+  assert.deepEqual([...html.matchAll(/data-rule-id="(wake_\d)"/g)].map((match) => match[1]), ["wake_8", "wake_9"]);
+  assert.match(html, /data-rule-id="wake_8"[\s\S]*?GrokBot[\s\S]*?Cancelled[\s\S]*?old routine[\s\S]*?4 delivered ·\s*0 failed in a row ·\s*last test 200 ·\s*Key: yes/);
+  assert.doesNotMatch(html, /Send test|>\s*Cancel\s*</, "an ended rule has no buttons");
+});
+
+test("the section wires the button to the cancelled list: closed at first, the second list only while open", () => {
+  const section = source("../../../../shared/ui/WakeWebhookSection.vue");
+  assert.match(section, /<WakeWebhookRuleList\s+v-if="listedRules\.length"\s+:rules="listedRules"/);
+  assert.match(section, /<button\s+v-if="cancelledRules\.length"\s+type="button"\s+class="wake-webhook-link"[\s\S]*?:aria-expanded="cancelledShown"\s+@click="toggleCancelled"\s*>\{\{ cancelledToggleLabel \}\}<\/button>/);
+  assert.match(section, /<WakeWebhookRuleList\s+v-if="cancelledShown"\s+:rules="cancelledRules"/);
+  // Local state only: nothing here reads or writes storage.
+  assert.doesNotMatch(section, /localStorage|sessionStorage/);
+  assert.doesNotMatch(source("../../../../shared/ui/wake-webhook-form.ts"), /localStorage|sessionStorage/);
 });
 
 test("the empty list says so, and a load error is announced", async () => {

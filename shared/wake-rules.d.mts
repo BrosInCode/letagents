@@ -80,6 +80,8 @@ export interface WakeRuleDeliverySummary {
   last_status?: number | null;
   last_error?: string | null;
   last_attempt_at?: string | null;
+  /** Owner only: whether the last attempt (and so `last_status` and `last_error`) was a person's test, not a delivery of a room message. */
+  last_attempt_was_test?: boolean;
   /**
    * MCP Events subscriptions only (owner view): the id ChatGPT holds, its event
    * name, when it must renew, and the delivered-up-to cursor (the subscribe
