@@ -383,6 +383,9 @@ test("subscribe verifies the callback, stores a sealed subscription bound to the
     assert.equal(ownView.delivery.cursor, String(numberOf(reply)));
     assert.equal(ownView.delivery.delivered_count, 2);
     assert.equal(mine.raw.includes("127.0.0.1") || mine.raw.includes(SECRET_A.slice(6, 20)) || mine.raw.includes(SECRET_B.slice(6, 20)), false);
+    // The room is members-only: an admin let this person in first.
+    await dbClient!.pool.query("INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'approved_request')",
+      [roomId, accounts.other]);
     await call(other, "join_room", { name: "mcp-events-flow" });
     const seen = await call(other, "list_wake_rules", { room_id: roomId });
     const otherView = (seen.active as Array<Record<string, any>>).find((entry) => entry.id === stored.id)!;
@@ -702,6 +705,9 @@ test("a subscription never gets its own account's worker posts back (its person'
     assert.equal((await deliveries(rule.id)).length, 1, "the subscriber's own human post is delivered");
     // A person's message and another account's agent still are events.
     await humanSays(roomId, "hello from Ada");
+    // The room is members-only: an admin let this person in first.
+    await dbClient!.pool.query("INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'approved_request')",
+      [roomId, accounts.other]);
     await call(other, "join_room", { name: "mcp-events-echo" });
     const otherWorker = await call(other, "register_agent_session", { room_id: roomId, display_name: "otherbot", runtime: "hosted-bot" });
     const theirs = await call(other, "send_message", { room_id: roomId, agent_session_id: otherWorker.agent_session_id, text: "hello from otherbot" });
