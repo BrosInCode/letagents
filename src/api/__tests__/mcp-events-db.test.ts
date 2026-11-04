@@ -278,7 +278,8 @@ test("subscribe verifies the callback, stores a sealed subscription bound to the
     assert.match(first.id, /^sub_[0-9a-f]{32}$/);
     closeTo(first.refreshBefore, before + 24 * HOUR);
     assert.equal(first.truncated, false);
-    assert.match(first.cursor, /^\d+$/, "a new subscription starts at the room's current position");
+    const latest = (await dbClient!.pool.query("SELECT COALESCE(max(number), 0)::int AS n FROM messages WHERE room_id = $1", [roomId])).rows[0].n;
+    assert.equal(first.cursor, String(latest), "a new subscription starts at the room's current position");
     assert.deepEqual(Object.keys(first).sort(), ["cursor", "id", "refreshBefore", "truncated"]);
 
     // One verification POST, signed like an event, with the challenge echoed.
@@ -587,7 +588,7 @@ test("renewal with a cursor replays the events after it, in order, with the same
     // Renew with the first event's cursor: the two after it go out again, same ids.
     const renewed = await rpc(bot, "events/subscribe", subscribeParams(roomId, { cursor: String(numberOf(posted[0]!)) }, { any: true }));
     assert.equal(renewed.id, subscribed.id);
-    assert.equal(renewed.cursor, String(numberOf(posted[0]!)), "the client keeps its position; the replayed events carry the newer cursors");
+    assert.equal(renewed.cursor, String(numberOf(posted[0]!)), "the watermark stops before the first event that waits to go out again");
     assert.equal(renewed.truncated, false);
     let rows = await deliveries(rule.id);
     assert.deepEqual(rows.map((row) => row.state), ["delivered", "retry", "retry"]);
@@ -601,25 +602,45 @@ test("renewal with a cursor replays the events after it, in order, with the same
     assert.deepEqual(secondRound.map((body) => body.eventId), firstRound.slice(1).map((body) => body.eventId));
     assert.deepEqual(secondRound.map((body) => body.cursor), firstRound.slice(1).map((body) => body.cursor));
 
-    // A cursor at the newest event replays nothing.
+    // The same old cursor again inside the hour re-queues nothing; the answer is the watermark (delivered up to 3).
+    const repeated = await rpc(bot, "events/subscribe", subscribeParams(roomId, { cursor: String(numberOf(posted[0]!)) }, { any: true }));
+    assert.equal(repeated.cursor, String(numberOf(posted[2]!)));
+    assert.equal(repeated.truncated, false);
+    assert.equal((await deliveries(rule.id)).every((row) => row.state === "delivered"), true, "one replay an hour");
+    // A cursor at the newest event replays nothing either.
+    await dbClient!.pool.query("UPDATE agent_wake_rules SET mcp_replayed_at = NULL WHERE id = $1", [rule.id]);
     const upToDate = await rpc(bot, "events/subscribe", subscribeParams(roomId, { cursor: String(numberOf(posted[2]!)) }, { any: true }));
     assert.equal(upToDate.truncated, false);
+    assert.equal(upToDate.cursor, String(numberOf(posted[2]!)));
     assert.equal((await deliveries(rule.id)).every((row) => row.state === "delivered"), true);
+    // A cursor no message can have (past the integer range) is unknown: nothing to replay, truncated, and not an error.
+    const huge = await rpc(bot, "events/subscribe", subscribeParams(roomId, { cursor: "9999999999" }, { any: true }));
+    assert.equal(huge.truncated, true);
+    assert.equal(huge.cursor, String(numberOf(posted[2]!)));
 
-    // More than 50 events after the cursor: the newest 50 go, truncated says the rest is gone.
-    const nowIso = new Date().toISOString();
+    // More than 50 events after the cursor: the newest 50 go, truncated says the rest is gone; the re-queued
+    // events spend the rule's hourly budget (20, three used), and the rest wait an hour, in order.
+    await dbClient!.pool.query("UPDATE agent_wake_rules SET mcp_replayed_at = NULL WHERE id = $1", [rule.id]);
+    const twoHoursAgo = new Date(Date.now() - 2 * HOUR).toISOString();
     for (let number = 1000; number < 1060; number += 1) {
       await dbClient!.pool.query(`
         INSERT INTO wake_webhook_deliveries (id, rule_id, room_id, kind, purpose, message_number, sender, text_preview, match_count, state, attempt_count,
           scheduled_at, next_attempt_at, created_at, updated_at, owner_account_id, delivered_at)
         VALUES ($1, $2, $3, 'mcp_event', 'message', $4, '', '', 1, 'delivered', 1, $5, $5, $5, $5, $6, $5)
-      `, [`whd_replay_${number}`, rule.id, roomId, number, nowIso, accounts.bot]);
+      `, [`whd_replay_${number}`, rule.id, roomId, number, twoHoursAgo, accounts.bot]);
     }
     const bounded = await rpc(bot, "events/subscribe", subscribeParams(roomId, { cursor: String(numberOf(posted[2]!)) }, { any: true }));
     assert.equal(bounded.truncated, true);
+    assert.equal(bounded.cursor, String(numberOf(posted[2]!)), "the watermark stops before the first event that waits");
     const requeued = (await deliveries(rule.id)).filter((row) => row.state === "retry");
     assert.equal(requeued.length, 50);
     assert.equal(requeued[0]!.message_number, 1010, "the oldest ten are left out");
+    assert.equal(requeued.filter((row) => !row.held_by_cap).length, 17, "the budget had 17 left");
+    assert.equal(requeued.filter((row) => row.held_by_cap).length, 33);
+    assert.equal(requeued.find((row) => row.held_by_cap)!.message_number, 1027, "the held ones are the newest");
+    const heldAt = (await dbClient!.pool.query("SELECT min(next_attempt_at) AS at FROM wake_webhook_deliveries WHERE rule_id = $1 AND held_by_cap", [rule.id])).rows[0].at;
+    assert.ok(Date.parse(heldAt) - Date.now() > 55 * 60_000, "held events wait for the hour");
+    assert.equal((await ruleRow(rule.id)).delivery_over_cap_count, 33);
     // Those messages do not exist: the worker skips them, one pass each, without a POST.
     const before = received.length;
     await makeDue();
@@ -627,6 +648,7 @@ test("renewal with a cursor replays the events after it, in order, with the same
     assert.equal(received.length, before);
     assert.equal((await deliveries(rule.id)).some((row) => row.state === "retry"), false);
     await dbClient!.pool.query("DELETE FROM wake_webhook_deliveries WHERE id LIKE 'whd_replay_%'");
+    await dbClient!.pool.query("UPDATE agent_wake_rules SET mcp_replayed_at = NULL, delivery_over_cap_count = 0 WHERE id = $1", [rule.id]);
 
     // A gap: the subscription was paused (nothing matched meanwhile), so a renewal with a cursor is truncated.
     await dbClient!.pool.query("UPDATE agent_wake_rules SET status = 'paused', paused_at = now(), delivery_consecutive_failures = 5 WHERE id = $1", [rule.id]);
@@ -640,9 +662,11 @@ test("renewal with a cursor replays the events after it, in order, with the same
     // An unknown cursor is truncated too; a cursor for a brand-new subscription is truncated.
     assert.equal((await rpc(bot, "events/subscribe", subscribeParams(roomId, { cursor: "999999" }, { any: true }))).truncated, true);
     const fresh = await call(bot, "join_room", { name: "mcp-events-replay-fresh" });
+    const freshLatest = (await dbClient!.pool.query("SELECT COALESCE(max(number), 0)::int AS n FROM messages WHERE room_id = $1", [fresh.room_id])).rows[0].n;
     const brandNew = await rpc(bot, "events/subscribe", subscribeParams(String(fresh.room_id), { cursor: "1" }, { any: true }));
     assert.equal(brandNew.truncated, true);
-    assert.equal(brandNew.cursor, "1");
+    assert.equal(brandNew.cursor, String(freshLatest), "a new subscription answers the room's newest message number");
+    assert.equal((await ruleBySubscription(brandNew.id)).mcp_cursor, String(freshLatest));
 
     // Past the hourly budget the 21st event waits for the hour's end, in order, instead of being folded away.
     const budget = await ruleBySubscription(subscribed.id);
@@ -655,6 +679,40 @@ test("renewal with a cursor replays the events after it, in order, with the same
     assert.equal((await ruleRow(budget.id)).delivery_over_cap_count, 1);
   } finally {
     await bot.close();
+  }
+});
+
+test("a subscription never gets its own account's worker posts back, even with any and include_agents and no worker", { skip, timeout: 90_000 }, async () => {
+  events!.forgetMcpEventVerificationsForTests();
+  await drainOutbox();
+  const { bot, roomId } = await setUpRoom("mcp-events-echo", TOKEN_BOT, false);
+  const other = await connect(TOKEN_OTHER);
+  try {
+    const subscribed = await rpc(bot, "events/subscribe", subscribeParams(roomId, {}, { any: true, include_agents: true }));
+    const rule = await ruleBySubscription(subscribed.id);
+    assert.equal(rule.agent_key, `${accounts.bot}/mcp-events`, "no worker: a stand-in agent key");
+    // Later the same credential registers a worker and posts: that is the subscriber talking, not an event for it.
+    const worker = await call(bot, "register_agent_session", { room_id: roomId, display_name: "chatgpt-hands", runtime: "chatgpt" });
+    const own = await call(bot, "send_message", { room_id: roomId, agent_session_id: worker.agent_session_id, text: "I am replying to the room" });
+    assert.equal(own.isError, undefined, own.raw);
+    assert.equal((await deliveries(rule.id)).length, 0, "an own-account worker post is not echoed back");
+    // A person's message and another account's agent still are events.
+    await humanSays(roomId, "hello from Ada");
+    await call(other, "join_room", { name: "mcp-events-echo" });
+    const otherWorker = await call(other, "register_agent_session", { room_id: roomId, display_name: "otherbot", runtime: "hosted-bot" });
+    const theirs = await call(other, "send_message", { room_id: roomId, agent_session_id: otherWorker.agent_session_id, text: "hello from otherbot" });
+    assert.equal(theirs.isError, undefined, theirs.raw);
+    const rows = await deliveries(rule.id);
+    assert.equal(rows.length, 2);
+    await makeDue();
+    assert.equal(await runWorker(), 1);
+    assert.equal(await runWorker(), 1);
+    // An agent's sender label carries its owner and app ("otherbot | <owner> | Agent").
+    const senders = received.slice(-2).map((entry) => JSON.parse(entry.body).data.sender as string).sort();
+    assert.equal(senders[0], "Ada");
+    assert.match(senders[1]!, /^otherbot\b/);
+  } finally {
+    await Promise.all([bot.close(), other.close()]);
   }
 });
 

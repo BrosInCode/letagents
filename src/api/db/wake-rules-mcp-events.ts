@@ -15,9 +15,12 @@ import { agent_wake_rules } from "./schema.js";
 import type { WakeRuleRow } from "./wake-rules.js";
 
 const HELD_STATUSES = ["active", "paused", "pending_confirmation"] as const;
+const HOUR_MS = 60 * 60 * 1000;
 
 /** Delivery rows older than this are deleted by the worker's cleanup, so a cursor before it cannot be replayed in full. */
 export const MCP_EVENT_REPLAY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+/** A subscription replays for a renewal at most this often; a renewal inside the window keeps its cursor and re-queues nothing. */
+export const MCP_EVENT_REPLAY_INTERVAL_MS = HOUR_MS;
 
 /** Thrown when the account already holds its maximum of delivery rules (webhook, email and MCP Events together). */
 export class McpEventSubscriptionCapError extends Error {
@@ -65,6 +68,8 @@ export async function saveMcpEventSubscription(input: {
   targetFingerprint: string;
   hostFingerprint: string;
   seal(ruleId: string): EncryptedCredentials;
+  /** A new subscription starts delivered-up-to here: the room's newest message number. */
+  initialCursor: number;
   now?: Date;
 }): Promise<{ rule: WakeRuleRow; created: boolean; previousStatus: WakeRuleRow["status"] | null }> {
   const nowDate = input.now ?? new Date();
@@ -138,7 +143,8 @@ export async function saveMcpEventSubscription(input: {
       mcp_subscription_id: input.subscriptionId,
       mcp_event_name: input.eventName,
       mcp_arguments: input.subscriptionArguments,
-      mcp_cursor: null,
+      mcp_cursor: String(input.initialCursor),
+      mcp_replayed_at: null,
     }).returning();
     return { rule: row!, created: true, previousStatus: null };
   });
@@ -175,41 +181,85 @@ export async function cancelMcpEventSubscription(credentialRef: string, subscrip
   });
 }
 
+export interface McpEventReplay {
+  /** Events that will go (again): re-queued now or held, plus those already waiting. */
+  replayed: number;
+  /** Of those, how many wait for the rule's hourly budget to have room. */
+  held: number;
+  /** More events than the replay bound followed the cursor; the oldest are left out. */
+  truncated: boolean;
+  /** The subscription replayed less than an hour ago: nothing was re-queued this time. */
+  skipped: boolean;
+}
+
 /**
  * Replay for a renewal with a cursor: every event of this subscription after
  * the cursor goes out again (the same event id), newest 50 at most. Rows that
- * are still waiting go as they are. Returns how many will go and whether
- * older ones had to be left out.
+ * are still waiting go as they are. Re-queued rows spend the rule's hourly
+ * budget (20): past it they wait for the budget, in order, like a held match.
+ * One replay an hour per subscription: a renewal inside the hour with the same
+ * old cursor re-queues nothing.
  */
 export async function replayMcpEventDeliveries(
-  ruleId: string,
+  rule: Pick<WakeRuleRow, "id" | "mcp_replayed_at">,
   afterNumber: number,
   now = new Date(),
-): Promise<{ replayed: number; truncated: boolean }> {
+): Promise<McpEventReplay> {
+  const nowMs = now.getTime();
+  if (rule.mcp_replayed_at && Date.parse(rule.mcp_replayed_at) > nowMs - MCP_EVENT_REPLAY_INTERVAL_MS) {
+    return { replayed: 0, held: 0, truncated: false, skipped: true };
+  }
   const max = WAKE_RULE_LIMITS.mcpEventReplayMax;
   const rows = (await pool.query<{ id: string; state: string; message_number: number }>(`
     SELECT id, state, message_number FROM wake_webhook_deliveries
      WHERE rule_id = $1 AND purpose = 'message' AND message_number > $2
      ORDER BY message_number DESC
      LIMIT $3
-  `, [ruleId, afterNumber, max + 1])).rows;
+  `, [rule.id, afterNumber, max + 1])).rows;
   const truncated = rows.length > max;
   const kept = rows.slice(0, max).reverse();
-  const nowMs = now.getTime();
+  const toRequeue = kept.filter((row) => row.state === "delivered" || row.state === "dead");
+  if (toRequeue.length === 0) return { replayed: kept.length, held: 0, truncated, skipped: false };
+  const nowIso = new Date(nowMs).toISOString();
   const client = await pool.connect();
+  let held = 0;
   try {
     await client.query("BEGIN");
-    for (const [index, row] of kept.entries()) {
-      if (row.state !== "delivered" && row.state !== "dead") continue;
-      // In order: each a millisecond after the one before.
-      const at = new Date(nowMs + index).toISOString();
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [`wake-webhook:${rule.id}`]);
+    // The rule's hourly budget, less what is already scheduled in the window (the rows re-queued here are re-timed).
+    const used = (await client.query<{ n: number }>(`
+      SELECT count(*)::int AS n FROM wake_webhook_deliveries
+       WHERE rule_id = $1 AND purpose = 'message' AND scheduled_at > $2 AND NOT (id = ANY($3::text[]))
+    `, [rule.id, new Date(nowMs - HOUR_MS).toISOString(), toRequeue.map((row) => row.id)])).rows[0]?.n ?? 0;
+    let free = Math.max(0, WAKE_RULE_LIMITS.webhookHourlyCap - used);
+    for (const [index, row] of toRequeue.entries()) {
+      // In order: each a millisecond after the one before; past the budget, an hour later.
+      const heldByCap = free <= 0;
+      if (heldByCap) held += 1;
+      else free -= 1;
+      const at = new Date(nowMs + index + (heldByCap ? HOUR_MS : 0)).toISOString();
       await client.query(`
         UPDATE wake_webhook_deliveries
            SET state = 'retry', attempt_count = 0, scheduled_at = $2, next_attempt_at = $2, claimed_at = NULL, claimed_by = NULL,
-               last_status = NULL, last_error = NULL, delivered_at = NULL, held_by_cap = false, updated_at = $3
+               last_status = NULL, last_error = NULL, delivered_at = NULL, held_by_cap = $4, updated_at = $3
          WHERE id = $1 AND state IN ('delivered', 'dead')
-      `, [row.id, at, new Date(nowMs).toISOString()]);
+      `, [row.id, at, nowIso, heldByCap]);
     }
+    if (held > 0) {
+      await client.query("UPDATE agent_wake_rules SET delivery_over_cap_count = delivery_over_cap_count + $2 WHERE id = $1", [rule.id, held]);
+      // The same bound as a held match: at most 50 wait; the oldest beyond it are dropped.
+      await client.query(`
+        UPDATE wake_webhook_deliveries
+           SET state = 'dead', last_error = 'held_overflow', updated_at = $2
+         WHERE id IN (
+           SELECT id FROM wake_webhook_deliveries
+            WHERE rule_id = $1 AND purpose = 'message' AND state = 'retry' AND attempt_count = 0 AND held_by_cap
+            ORDER BY message_number DESC
+           OFFSET $3
+         )
+      `, [rule.id, nowIso, WAKE_RULE_LIMITS.mcpEventHeldMax]);
+    }
+    await client.query("UPDATE agent_wake_rules SET mcp_replayed_at = $2 WHERE id = $1", [rule.id, nowIso]);
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
@@ -217,7 +267,26 @@ export async function replayMcpEventDeliveries(
   } finally {
     client.release();
   }
-  return { replayed: kept.length, truncated };
+  return { replayed: kept.length, held, truncated, skipped: false };
+}
+
+/**
+ * The cursor a subscription is delivered up to: the delivered-up-to number,
+ * but never past an event that still waits to go out (a row on a backoff
+ * while a later one was delivered), so a client that keeps it skips nothing.
+ */
+export async function mcpEventWatermark(ruleId: string): Promise<number | null> {
+  const result = await pool.query<{ cursor: string | null; waiting: number | null }>(`
+    SELECT rule.mcp_cursor AS cursor,
+           (SELECT min(message_number) FROM wake_webhook_deliveries
+             WHERE rule_id = rule.id AND purpose = 'message' AND state IN ('queued', 'retry', 'processing')) AS waiting
+      FROM agent_wake_rules AS rule WHERE rule.id = $1
+  `, [ruleId]);
+  const row = result.rows[0];
+  if (!row) return null;
+  const cursor = row.cursor === null ? null : Number(row.cursor);
+  if (row.waiting !== null) return cursor === null ? row.waiting - 1 : Math.min(cursor, row.waiting - 1);
+  return cursor;
 }
 
 /** The newest message number in the room: the cursor a new subscription starts after. */

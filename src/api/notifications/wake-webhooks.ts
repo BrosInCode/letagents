@@ -135,8 +135,10 @@ export function defaultWakeWebhookDeps(): WakeWebhookDeliveryDeps {
  * Claim up to `limit` due deliveries of one kind, oldest first, but at most
  * `perAccount` for any one account in this claim, and none for an account
  * that already has `WAKE_DELIVERY_IN_FLIGHT_PER_ACCOUNT` in flight. MCP
- * events of one subscription go one at a time, in message order: the next is
- * claimed only once the one before it has finished.
+ * events of one subscription go one at a time, oldest due first: the next is
+ * claimed only once the one before it has finished. That keeps the usual case
+ * in message order, but not every case (an event on a retry backoff lets a
+ * newer one go first), so receivers order by cursor, not by arrival.
  */
 export async function claimWakeWebhookDeliveries(
   workerId: string,

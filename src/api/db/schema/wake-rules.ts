@@ -90,13 +90,15 @@ export const agent_wake_rules = pgTable("agent_wake_rules", {
    * MCP Events subscriptions (`delivery_kind = 'mcp_event'`): the id the
    * client derives its renewals from (`sub_…`, from the credential, callback
    * URL, event name and canonical arguments), the event name, the canonical
-   * subscription arguments as given, and the cursor (room message number) of
-   * the last delivered event. `expires_at` is the `refreshBefore` returned.
+   * subscription arguments as given, the cursor (room message number) the
+   * subscription is delivered up to, and when it last replayed events for a
+   * renewal (one replay an hour). `expires_at` is the `refreshBefore` returned.
    */
   mcp_subscription_id: text("mcp_subscription_id"),
   mcp_event_name: text("mcp_event_name"),
   mcp_arguments: jsonb("mcp_arguments").$type<Record<string, unknown>>(),
   mcp_cursor: text("mcp_cursor"),
+  mcp_replayed_at: timestamp("mcp_replayed_at", { mode: "string", withTimezone: true }),
 }, (table) => ({
   mcp_subscription_check: check("agent_wake_rules_mcp_subscription_check", sql`(${table.delivery_kind} = 'mcp_event') = (${table.mcp_subscription_id} IS NOT NULL AND ${table.mcp_event_name} IS NOT NULL AND ${table.mcp_arguments} IS NOT NULL)`),
   mcp_subscription_uq: uniqueIndex("agent_wake_rules_mcp_subscription_uq").on(table.credential_ref, table.mcp_subscription_id)

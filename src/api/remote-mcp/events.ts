@@ -27,6 +27,7 @@ import {
   cancelMcpEventSubscription,
   findHeldMcpEventRule,
   getMcpEventWorkerSession,
+  mcpEventWatermark,
   replayMcpEventDeliveries,
   roomLatestMessageNumber,
   roomMessagePostedAt,
@@ -59,6 +60,7 @@ import {
   parseMcpEventCursor,
   parseMcpEventSecret,
   parseMcpRoomMessageArguments,
+  rotatedSecretFields,
   type McpRoomMessageArguments,
 } from "../wake-rules/mcp-events.js";
 import { wakeWebhookBinding } from "../wake-rules/webhook-delivery.js";
@@ -254,18 +256,6 @@ async function verifyCallback(input: { url: string; key: Buffer; subscriptionId:
   verified.set(verificationKey(input.principal, input.url), now.getTime() + WAKE_RULE_LIMITS.mcpEventVerificationCacheMs);
 }
 
-/** The previous secret of a renewed subscription, while deliveries still carry its signature. */
-function previousSecret(opened: Record<string, unknown> | null, nextSecret: string, nowMs: number): { previous_secret: string; previous_until: string } | null {
-  if (!opened || typeof opened.secret !== "string") return null;
-  if (opened.secret !== nextSecret) {
-    return { previous_secret: opened.secret, previous_until: new Date(nowMs + WAKE_RULE_LIMITS.mcpEventSecretRotationMs).toISOString() };
-  }
-  if (typeof opened.previous_secret === "string" && typeof opened.previous_until === "string" && Date.parse(opened.previous_until) > nowMs) {
-    return { previous_secret: opened.previous_secret, previous_until: opened.previous_until };
-  }
-  return null;
-}
-
 async function resolveRoom(canonical: McpRoomMessageArguments, context: McpEventsSessionContext, d: McpEventsDeps): Promise<string> {
   const roomId = await resolveCanonicalRoomRequestId(normalizeRoomId(canonical.room_id));
   const access = await d.authorize(context.account.account_id, roomId);
@@ -328,8 +318,9 @@ async function subscribe(params: unknown, context: McpEventsSessionContext): Pro
   const opened = existing?.delivery_target && existing.owner_account_id
     ? openTarget(cipher, existing.delivery_target, existing.id, existing.owner_account_id)
     : null;
-  const rotation = previousSecret(opened, secret, now.getTime());
+  const rotation = rotatedSecretFields(opened, secret, now.getTime());
   const expiresAt = new Date(now.getTime() + ttlMs).toISOString();
+  const roomLatest = await roomLatestMessageNumber(roomId);
   let saved: Awaited<ReturnType<typeof saveMcpEventSubscription>>;
   try {
     saved = await saveMcpEventSubscription({
@@ -344,25 +335,28 @@ async function subscribe(params: unknown, context: McpEventsSessionContext): Pro
       targetFingerprint: cipher.fingerprint("wake-webhook-target", wakeWebhookTargetKey(url)),
       hostFingerprint: cipher.fingerprint("wake-webhook-host", wakeWebhookHost(url)),
       seal: (ruleId) => cipher.encrypt({ url: url.href, secret, ...(rotation ?? {}) }, wakeWebhookBinding(ruleId, accountId)),
+      initialCursor: roomLatest,
       now,
     });
   } catch (error) {
     if (error instanceof McpEventSubscriptionCapError) throw new McpEventsError(MCP_EVENTS_RESOURCE_EXHAUSTED, error.message, { limit: error.scope });
     throw error;
   }
-  // 6. The cursor: a new subscription starts now; a renewal with a cursor replays what came after it.
+  // 6. The cursor. A new subscription starts now; a renewal with a cursor
+  //    replays what came after it (once an hour). The answer is the server's
+  //    watermark: how far the subscription is delivered, never past an event
+  //    that still waits to go out; for a new subscription, the room's newest
+  //    message number.
   let truncated = false;
-  let cursorOut: string;
-  if (cursor === null) {
-    cursorOut = String(await roomLatestMessageNumber(roomId));
-  } else {
-    cursorOut = String(cursor);
+  if (cursor.kind !== "none") {
     if (saved.created) {
       // Nothing was recorded before this subscription existed.
       truncated = true;
+    } else if (cursor.kind === "unknown") {
+      truncated = true;
     } else {
-      const postedAt = await roomMessagePostedAt(roomId, cursor);
-      const replay = await replayMcpEventDeliveries(saved.rule.id, cursor, now);
+      const postedAt = await roomMessagePostedAt(roomId, cursor.number);
+      const replay = await replayMcpEventDeliveries(saved.rule, cursor.number, now);
       // A gap while the rule was paused, a cursor older than the delivery
       // rows kept, an unknown cursor, or more than the replay bound: some
       // history is not available.
@@ -370,8 +364,9 @@ async function subscribe(params: unknown, context: McpEventsSessionContext): Pro
         || Date.parse(postedAt) < now.getTime() - MCP_EVENT_REPLAY_RETENTION_MS;
     }
   }
+  const watermark = saved.created ? roomLatest : await mcpEventWatermark(saved.rule.id);
   queueWakeRuleInvalidation(roomId);
-  return { id: subscriptionId, refreshBefore: expiresAt, cursor: cursorOut, truncated };
+  return { id: subscriptionId, refreshBefore: expiresAt, cursor: String(watermark ?? roomLatest), truncated };
 }
 
 function openTarget(cipher: ConnectorCipher, target: NonNullable<Parameters<ConnectorCipher["decrypt"]>[0]>, ruleId: string, ownerAccountId: string): Record<string, unknown> | null {

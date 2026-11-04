@@ -4,6 +4,7 @@ import test from "node:test";
 
 import { WAKE_RULE_LIMITS } from "../../../shared/wake-rules.mjs";
 import {
+  MCP_EVENT_CURSOR_MAX,
   MCP_EVENT_DEFINITIONS,
   MCP_EVENTS_INVALID_PARAMS,
   McpEventsError,
@@ -20,6 +21,7 @@ import {
   parseMcpEventCursor,
   parseMcpEventSecret,
   parseMcpRoomMessageArguments,
+  rotatedSecretFields,
   verifyMcpEventSignature,
 } from "../wake-rules/mcp-events.js";
 import { webhookOutcome } from "../wake-rules/webhook-delivery.js";
@@ -96,10 +98,17 @@ test("the signature is Standard Webhooks: v1, base64 HMAC-SHA256 of \"<id>.<time
   assert.throws(() => mcpEventSignature([], ID, TIMESTAMP, body));
 });
 
-test("a secret is whsec_ and standard base64 of 24 to 64 bytes; anything else is a bad parameter", () => {
+test("a secret is whsec_ and standard base64 of 24 to 64 bytes, padded or not; anything else is a bad parameter", () => {
   for (const bytes of [24, 32, 64]) {
     assert.equal(parseMcpEventSecret(`whsec_${Buffer.alloc(bytes, 7).toString("base64")}`).length, bytes);
   }
+  // Some clients leave the "=" padding out: 32 bytes are 43 characters then.
+  const unpadded = Buffer.alloc(32, 5).toString("base64").replace(/=+$/, "");
+  assert.equal(unpadded.length, 43);
+  assert.equal(parseMcpEventSecret(`whsec_${unpadded}`).equals(Buffer.alloc(32, 5)), true);
+  assert.equal(parseMcpEventSecret(`whsec_${Buffer.alloc(25, 5).toString("base64").replace(/=+$/, "")}`).length, 25);
+  assert.equal(mcpEventSignature([parseMcpEventSecret(`whsec_${unpadded}`)], ID, TIMESTAMP, "x"),
+    mcpEventSignature([parseMcpEventSecret(`whsec_${unpadded}=`)], ID, TIMESTAMP, "x"), "the same key with or without padding");
   for (const bad of [
     `whsec_${Buffer.alloc(23, 7).toString("base64")}`,
     `whsec_${Buffer.alloc(65, 7).toString("base64")}`,
@@ -198,12 +207,30 @@ test("ttlMs: the default when omitted, never more than asked, at least 5 minutes
   for (const bad of ["3600000", -1, 0, Number.NaN, Number.POSITIVE_INFINITY, {}]) {
     assert.equal(refusal(() => grantMcpEventTtlMs(bad)).code, MCP_EVENTS_INVALID_PARAMS, String(bad));
   }
-  assert.equal(parseMcpEventCursor(null), null);
-  assert.equal(parseMcpEventCursor(undefined), null);
-  assert.equal(parseMcpEventCursor("42"), 42);
+  assert.deepEqual(parseMcpEventCursor(null), { kind: "none" });
+  assert.deepEqual(parseMcpEventCursor(undefined), { kind: "none" });
+  assert.deepEqual(parseMcpEventCursor("42"), { kind: "at", number: 42 });
+  assert.deepEqual(parseMcpEventCursor(String(MCP_EVENT_CURSOR_MAX)), { kind: "at", number: 2147483647 });
+  // Digits no message can have: not an error, but nothing to replay and a truncated history.
+  assert.deepEqual(parseMcpEventCursor("2147483648"), { kind: "unknown" });
+  assert.deepEqual(parseMcpEventCursor("9999999999"), { kind: "unknown" });
   for (const bad of [42, "", "-1", "4.2", "abc", "99999999999"]) {
     assert.equal(refusal(() => parseMcpEventCursor(bad)).code, MCP_EVENTS_INVALID_PARAMS, String(bad));
   }
+});
+
+test("a renewed secret keeps the one it replaces for the rotation window, then drops it", () => {
+  const now = Date.parse("2026-11-04T12:00:00.000Z");
+  const window = WAKE_RULE_LIMITS.mcpEventSecretRotationMs;
+  assert.equal(rotatedSecretFields(null, "whsec_b", now), null, "a new subscription has nothing to rotate from");
+  assert.deepEqual(rotatedSecretFields({ url: "https://x", secret: "whsec_a" }, "whsec_b", now),
+    { previous_secret: "whsec_a", previous_until: new Date(now + window).toISOString() });
+  const open = { url: "https://x", secret: "whsec_b", previous_secret: "whsec_a", previous_until: new Date(now + 1000).toISOString() };
+  assert.deepEqual(rotatedSecretFields(open, "whsec_b", now), { previous_secret: "whsec_a", previous_until: open.previous_until }, "an open window stays");
+  assert.equal(rotatedSecretFields({ ...open, previous_until: new Date(now - 1000).toISOString() }, "whsec_b", now), null,
+    "a window that passed is dropped on the next write");
+  assert.deepEqual(rotatedSecretFields(open, "whsec_c", now), { previous_secret: "whsec_b", previous_until: new Date(now + window).toISOString() },
+    "a second rotation keeps only the secret it replaces");
 });
 
 test("statuses: 410 and 413 are final, 425 and 503 retry; 425 waits uncounted, 503 honours Retry-After and counts", () => {

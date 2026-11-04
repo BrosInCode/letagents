@@ -155,13 +155,16 @@ const BASE64 = /^[A-Za-z0-9+/]+={0,2}$/;
 
 /**
  * The signing key of a Standard Webhooks secret: `whsec_` and standard base64
- * of 24 to 64 key bytes. Anything else is a bad parameter.
+ * (padded or not) of 24 to 64 key bytes. Anything else is a bad parameter.
  */
 export function parseMcpEventSecret(value: unknown): Buffer {
   const refusal = invalid(`delivery.secret must be whsec_ followed by base64 that decodes to ${WAKE_RULE_LIMITS.mcpEventSecretMinBytes} to ${WAKE_RULE_LIMITS.mcpEventSecretMaxBytes} bytes.`);
   if (typeof value !== "string" || !value.startsWith(SECRET_PREFIX)) throw refusal;
-  const encoded = value.slice(SECRET_PREFIX.length);
-  if (!BASE64.test(encoded) || encoded.length % 4 !== 0) throw refusal;
+  const given = value.slice(SECRET_PREFIX.length);
+  if (!BASE64.test(given) || given.length % 4 === 1) throw refusal;
+  // Some clients leave the "=" padding out; add it back before the strict check.
+  const encoded = given.includes("=") ? given : given + "=".repeat((4 - given.length % 4) % 4);
+  if (encoded.length % 4 !== 0) throw refusal;
   const key = Buffer.from(encoded, "base64");
   // Strict: text that Node decodes leniently but would not re-encode the same is not base64.
   if (key.toString("base64") !== encoded) throw refusal;
@@ -290,11 +293,41 @@ export function grantMcpEventTtlMs(ttlMs: unknown): number {
   return Math.min(WAKE_RULE_LIMITS.mcpEventMaxTtlMs, Math.max(WAKE_RULE_LIMITS.mcpEventMinTtlMs, Math.floor(ttlMs)));
 }
 
-/** A room message cursor: the message number as digits, or null for "from now". */
-export function parseMcpEventCursor(cursor: unknown): number | null {
-  if (cursor === undefined || cursor === null) return null;
+/**
+ * The rotation fields of a renewed subscription's sealed target. A new secret
+ * keeps the one it replaces for the rotation window, so deliveries carry both
+ * signatures meanwhile; the same secret keeps an open window as it is; and a
+ * window that has passed is dropped from the target on this write (the
+ * target is sealed anew on every renewal, with exactly these fields).
+ */
+export function rotatedSecretFields(opened: Record<string, unknown> | null, nextSecret: string, nowMs: number): { previous_secret: string; previous_until: string } | null {
+  if (!opened || typeof opened.secret !== "string") return null;
+  if (opened.secret !== nextSecret) {
+    return { previous_secret: opened.secret, previous_until: new Date(nowMs + WAKE_RULE_LIMITS.mcpEventSecretRotationMs).toISOString() };
+  }
+  if (typeof opened.previous_secret === "string" && typeof opened.previous_until === "string" && Date.parse(opened.previous_until) > nowMs) {
+    return { previous_secret: opened.previous_secret, previous_until: opened.previous_until };
+  }
+  return null;
+}
+
+/** The largest message number a cursor can name (a Postgres integer). */
+export const MCP_EVENT_CURSOR_MAX = 2147483647;
+
+export type McpEventCursor =
+  /** No cursor: start from now. */
+  | { kind: "none" }
+  /** A message number to replay after. */
+  | { kind: "at"; number: number }
+  /** Digits, but no message can have that number: nothing to replay, and the history is reported as truncated. */
+  | { kind: "unknown" };
+
+/** A room message cursor: the message number as digits, or null for "from now". Other shapes are a bad parameter. */
+export function parseMcpEventCursor(cursor: unknown): McpEventCursor {
+  if (cursor === undefined || cursor === null) return { kind: "none" };
   if (typeof cursor !== "string" || !/^\d{1,10}$/.test(cursor)) throw invalid("cursor must be the cursor of an earlier event, or null.");
-  return Number(cursor);
+  const number = Number(cursor);
+  return number > MCP_EVENT_CURSOR_MAX ? { kind: "unknown" } : { kind: "at", number };
 }
 
 /** Why a verification POST failed, in the categories the contract names. */

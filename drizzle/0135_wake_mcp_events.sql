@@ -5,8 +5,9 @@
 -- grant or owner token behind the session, sealed like a webhook rule, and
 -- delivers each matching message as one signed event. The rule keeps the
 -- subscription id ChatGPT derives its renewals from, the event name, the
--- canonical subscription arguments and the last delivered cursor (a room
--- message number). `expires_at` is the `refreshBefore` the client was given.
+-- canonical subscription arguments, the delivered-up-to cursor (a room
+-- message number) and when it last replayed events for a renewal (one
+-- replay an hour). `expires_at` is the `refreshBefore` the client was given.
 -- One held rule per credential and subscription id. Deliveries of this kind
 -- are never coalesced: each is one row, inserted as `retry` (waiting) because
 -- `queued` is the one coalescing slot of a webhook or email rule. Older
@@ -26,6 +27,8 @@ ALTER TABLE "agent_wake_rules" ADD COLUMN IF NOT EXISTS "mcp_event_name" text;
 ALTER TABLE "agent_wake_rules" ADD COLUMN IF NOT EXISTS "mcp_arguments" jsonb;
 --> statement-breakpoint
 ALTER TABLE "agent_wake_rules" ADD COLUMN IF NOT EXISTS "mcp_cursor" text;
+--> statement-breakpoint
+ALTER TABLE "agent_wake_rules" ADD COLUMN IF NOT EXISTS "mcp_replayed_at" timestamp with time zone;
 --> statement-breakpoint
 ALTER TABLE "agent_wake_rules" DROP CONSTRAINT IF EXISTS "agent_wake_rules_mcp_subscription_check";
 --> statement-breakpoint
