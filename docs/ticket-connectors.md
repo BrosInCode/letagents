@@ -1042,6 +1042,15 @@ a period, and the request body bytes as received (do not parse and re-serialize 
 HMAC-SHA256 of that string under the secret, in lowercase hex. A retry keeps its `delivery_id` and gets a new timestamp
 and signature, so a receiver drops a `delivery_id` it has already handled.
 
+If the receiver needs a sender key in an Authorization header (Grok Bot's routines do: "Use Authorization: Bearer
+<key>"), pass it as `webhook.bearer`: `webhook: { url, secret, bearer }`, 8 to 512 printable ASCII characters without
+spaces or line breaks. Every attempt, retries included, then carries `Authorization: Bearer <key>` as well as the
+`X-LetAgents-*` headers, and only to the rule's own pinned URL (redirects are never followed). The key is stored sealed
+like the secret and never shown; adding the rule again with another key (or none) replaces it. The two checks are
+independent: the receiver's key check decides whether it accepts the request at all, and `X-LetAgents-Signature`
+proves the body came from LetAgents unchanged. A receiver that answers `401` or `403` counts as a final failure, as
+before.
+
 Verify a delivery (Node, any framework that gives the raw body):
 
 ```js

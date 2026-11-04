@@ -142,7 +142,7 @@ async function humanSays(roomId: string, text: string) {
   return api!.addMessage(roomId, "Ada", text, { source: "browser", account_id: accounts.human });
 }
 
-async function setUpBot(roomName: string, token = TOKEN_BOT) {
+async function setUpBot(roomName: string, token = TOKEN_BOT, bearer?: string) {
   const bot = await connect(token);
   const joined = await call(bot, "join_room", { name: roomName });
   assert.equal(joined.isError, undefined, joined.raw);
@@ -154,7 +154,7 @@ async function setUpBot(roomName: string, token = TOKEN_BOT) {
     agent_session_id: worker.agent_session_id,
     event: "room.message",
     arguments: { mentions_me: true },
-    webhook: { url: hookUrl, secret: SECRET },
+    webhook: { url: hookUrl, secret: SECRET, ...(bearer ? { bearer } : {}) },
     note: "start a turn when someone asks me",
   });
   assert.equal(added.isError, undefined, added.raw);
@@ -189,6 +189,7 @@ test("a mention reaches the bot's webhook once, signed; 5xx retries, 4xx does no
     assert.match(timestamp, /^\d{10}$/);
     assert.ok(Math.abs(Number(timestamp) - Date.now() / 1000) < 60);
     assert.equal(first.headers["content-type"], "application/json");
+    assert.equal(first.headers.authorization, undefined, "no Authorization header without a bearer");
     assert.equal(first.headers["x-letagents-signature"],
       `sha256=${createHmac("sha256", SECRET).update(`${timestamp}.${first.body}`).digest("hex")}`);
     const body = JSON.parse(first.body);
@@ -452,4 +453,69 @@ test("the scheduler ends a delivery rule at its expiry, paused or not, and never
   assert.equal(Date.parse(rearmed.next_check_at), Date.parse(rearmed.expires_at));
   const next = await store!.getNextWakeRuleCheckAt();
   assert.ok(!next || Date.parse(next) > Date.now(), "nothing is left due");
+});
+
+test("a rule's bearer is sealed, never shown, sent on every attempt, and replaced when the rule is added again", { skip, timeout: 90_000 }, async () => {
+  const BEARER = "crsr_test_sender_key_0123456789";
+  const { bot, roomId, sessionId, rule, addedRaw } = await setUpBot("wake-webhook-bearer", TOKEN_BOT, BEARER);
+  const other = await connect(TOKEN_OTHER);
+  try {
+    assert.equal(addedRaw.includes(BEARER), false, "the add answer does not echo it");
+    const stored = (await dbClient!.pool.query(
+      "SELECT delivery_bearer::text AS bearer, delivery_target::text AS target, identity_key FROM agent_wake_rules WHERE id = $1", [rule.id])).rows[0];
+    assert.ok(stored.bearer, "a sealed bearer is stored");
+    assert.equal(stored.bearer.includes(BEARER) || stored.target.includes(BEARER) || stored.identity_key.includes(BEARER), false, "sealed at rest");
+    // Not in any read: the owner's list, another account's list, or the REST route behind them.
+    assert.equal((await call(bot, "list_wake_rules", { room_id: roomId })).raw.includes(BEARER), false);
+    await call(other, "join_room", { name: "wake-webhook-bearer" });
+    assert.equal((await call(other, "list_wake_rules", { room_id: roomId })).raw.includes(BEARER), false);
+
+    // Sent on the first attempt and on the retry, alongside the signature.
+    replies.push(503);
+    await humanSays(roomId, "@relaybot please start");
+    const before = received.length;
+    await makeDue();
+    await runWorker();
+    await makeDue();
+    await runWorker();
+    const attempts = received.slice(before);
+    assert.equal(attempts.length, 2);
+    for (const attempt of attempts) {
+      assert.equal(attempt.headers.authorization, `Bearer ${BEARER}`);
+      assert.match(String(attempt.headers["x-letagents-signature"]), /^sha256=[0-9a-f]{64}$/);
+    }
+    assert.equal(attempts[0]!.headers["x-letagents-delivery"], attempts[1]!.headers["x-letagents-delivery"], "the same delivery, retried");
+
+    // Adding the rule again with another key replaces it; without one, it is removed.
+    const NEXT = "crsr_rotated_sender_key_9876543210";
+    const again = await call(bot, "add_wake_rule", {
+      room_id: roomId, agent_session_id: sessionId, event: "room.message",
+      webhook: { url: hookUrl, secret: SECRET, bearer: NEXT },
+    });
+    assert.equal(again.created, false, again.raw);
+    assert.equal(again.rule.id, rule.id);
+    await humanSays(roomId, "@relaybot with the new key");
+    await makeDue();
+    await runWorker();
+    assert.equal(received.at(-1)!.headers.authorization, `Bearer ${NEXT}`);
+    const cleared = await call(bot, "add_wake_rule", {
+      room_id: roomId, agent_session_id: sessionId, event: "room.message", webhook: { url: hookUrl, secret: SECRET },
+    });
+    assert.equal(cleared.rule.id, rule.id);
+    assert.equal((await dbClient!.pool.query("SELECT delivery_bearer FROM agent_wake_rules WHERE id = $1", [rule.id])).rows[0].delivery_bearer, null);
+    await humanSays(roomId, "@relaybot no key now");
+    await makeDue();
+    await runWorker();
+    assert.equal(received.at(-1)!.headers.authorization, undefined);
+
+    // A malformed key is refused at add time with no rule change.
+    const refused = await call(bot, "add_wake_rule", {
+      room_id: roomId, agent_session_id: sessionId, event: "room.message",
+      webhook: { url: hookUrl, secret: SECRET, bearer: "bad key\r\nX-Evil: 1" },
+    });
+    assert.equal(failed(refused), true, refused.raw);
+    assert.match(refused.raw, /webhook.bearer must be 8 to 512 printable ASCII characters/);
+  } finally {
+    await Promise.all([bot.close(), other.close()]);
+  }
 });

@@ -91,6 +91,8 @@ export interface WakeRuleDeliverySeal {
   /** Keyed fingerprint of the target's host (the URL's host, or the address's domain). */
   hostFingerprint: string;
   seal(ruleId: string): EncryptedCredentials;
+  /** Webhook: the receiver's sender key, sealed for this rule, or null when it needs none. */
+  sealBearer?(ruleId: string): EncryptedCredentials | null;
   /**
    * Email: the SHA-256 of the rule's stop link token, and of a confirmation
    * link token that works until `confirmExpiresAt`.
@@ -240,6 +242,8 @@ export async function createWakeRule(input: {
     // Adding a delivery rule again renews it: its expiry, its credential, its target.
     const renewal = () => ({
       delivery_target: delivery!.seal(existing!.id),
+      // Like the secret, the sender key given now replaces the stored one (or removes it).
+      delivery_bearer: delivery!.sealBearer?.(existing!.id) ?? null,
       delivery_target_fingerprint: delivery!.targetFingerprint,
       delivery_host_fingerprint: delivery!.hostFingerprint,
       credential_kind: input.credential!.kind,
@@ -320,6 +324,7 @@ export async function createWakeRule(input: {
       owner_account_id: ownerAccountId,
       delivery_kind: delivery?.kind ?? null,
       delivery_target: delivery ? delivery.seal(id) : null,
+      delivery_bearer: delivery?.sealBearer?.(id) ?? null,
       delivery_target_fingerprint: delivery?.targetFingerprint ?? null,
       delivery_host_fingerprint: delivery?.hostFingerprint ?? null,
       credential_kind: delivery ? input.credential!.kind : null,

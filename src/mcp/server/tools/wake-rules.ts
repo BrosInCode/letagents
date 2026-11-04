@@ -57,7 +57,8 @@ export function registerWakeRuleTools(server: McpServer): void {
       webhook: z.object({
         url: z.string().max(2048).describe("Public https URL of your inbound trigger. Private and loopback addresses are refused."),
         secret: z.string().min(16).max(256).describe("Shared secret: each POST carries X-LetAgents-Signature, sha256=HMAC-SHA256 of \"<X-LetAgents-Timestamp>.<raw body>\". Stored sealed, never shown."),
-      }).optional().describe("room.message only: where to deliver. The URL and secret are never returned."),
+        bearer: z.string().min(8).max(512).optional().describe("Only if the receiver requires a sender key: sent as \"Authorization: Bearer <bearer>\" with each delivery. Stored sealed, never shown."),
+      }).optional().describe("room.message only: where to deliver. The URL, secret and bearer are never returned."),
       email: z.object({
         to: z.string().max(254).describe("One email address. It gets a confirmation link first; nothing else is sent until it is opened."),
       }).optional().describe("room.message only, instead of webhook: deliver by email. The address is never returned."),

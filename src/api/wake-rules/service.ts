@@ -34,6 +34,7 @@ import {
   wakeEmailDisableToken,
 } from "./email.js";
 import { wakeWebhookBinding } from "./webhook-delivery.js";
+import { wakeWebhookBearerBinding } from "./webhook-bearer.js";
 import {
   WAKE_WEBHOOK_URL_REFUSED,
   WakeWebhookResolveError,
@@ -88,6 +89,7 @@ async function sealWakeWebhook(agent: RuleAgent, value: unknown, lookup?: WakeWe
     targetFingerprint: cipher.fingerprint("wake-webhook-target", wakeWebhookTargetKey(url)),
     hostFingerprint: cipher.fingerprint("wake-webhook-host", wakeWebhookHost(url)),
     seal: (ruleId) => cipher.encrypt({ url: href, secret: target.secret }, wakeWebhookBinding(ruleId, ownerAccountId)),
+    sealBearer: (ruleId) => target.bearer ? cipher.encrypt({ bearer: target.bearer }, wakeWebhookBearerBinding(ruleId, ownerAccountId)) : null,
   };
 }
 

@@ -31,7 +31,12 @@ export interface WakeRuleArguments {
 }
 
 /** Where a room.message rule delivers. Accepted on input only; never returned. */
-export interface WakeRuleWebhookInput { url: string; secret: string }
+export interface WakeRuleWebhookInput {
+  url: string;
+  secret: string;
+  /** Sent as `Authorization: Bearer <bearer>` to receivers that require a sender key. Stored sealed; never returned. */
+  bearer?: string;
+}
 export interface WakeRuleEmailInput { to: string }
 
 export interface WakeRuleInput {
@@ -158,6 +163,8 @@ export const WAKE_RULE_LIMITS: Readonly<{
   webhookUrlMaxLength: number;
   webhookSecretMinLength: number;
   webhookSecretMaxLength: number;
+  webhookBearerMinLength: number;
+  webhookBearerMaxLength: number;
   emailMaxLength: number;
   emailConfirmTtlMs: number;
   emailConfirmResendMs: number;
