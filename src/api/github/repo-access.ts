@@ -492,18 +492,26 @@ export async function isGitHubRepoCollaborator(input: {
     const repo = parseGitHubRepoName(input.roomName);
     if (!repo) return false;
 
-    const ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken, doFetch);
+    let ownerResponse: Response;
+    try {
+      ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken, doFetch);
+    } catch {
+      throw new GitHubAccessUnavailableError(null);
+    }
     if (!ownerResponse.ok) {
       if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(ownerResponse)) {
         throw new Error(`GitHub repo access revalidation was indeterminate (${ownerResponse.status}).`);
       }
+      if (await isGitHubOutageResponse(ownerResponse)) throw new GitHubAccessUnavailableError(ownerResponse.status);
       return false;
     }
 
     const repoPayload = (await ownerResponse.json()) as GitHubRepo;
     let allowed = repoPayload.owner?.login?.toLowerCase() === loginKey;
     if (!allowed) {
-      const permissionResponse = await githubRequest({
+      let permissionResponse: Response;
+      try {
+        permissionResponse = await githubRequest({
         url: buildGitHubApiUrl(
           `/repos/${repo.owner}/${repo.repo}/collaborators/${encodeURIComponent(input.login)}/permission`
         ),
@@ -511,10 +519,14 @@ export async function isGitHubRepoCollaborator(input: {
         fetchImpl: doFetch,
         timeoutMs: GITHUB_ACCESS_FETCH_TIMEOUT_MS,
       });
+      } catch {
+        throw new GitHubAccessUnavailableError(null);
+      }
       if (!permissionResponse.ok) {
         if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(permissionResponse)) {
           throw new Error(`GitHub collaborator revalidation was indeterminate (${permissionResponse.status}).`);
         }
+        if (await isGitHubOutageResponse(permissionResponse)) throw new GitHubAccessUnavailableError(permissionResponse.status);
         return false;
       }
       const permissionPayload = (await permissionResponse.json()) as GitHubPermissionResponse;
@@ -595,7 +607,15 @@ export async function isGitHubPublicRepoRoleHolder(input: {
       return unavailable(null);
     }
     if (!response.ok) {
-      if (isIndeterminateGitHubAccessResponse(response)) return unavailable(response.status);
+      // Authority revalidation keeps its grant on any unanswered check,
+      // a dead owner token included.
+      if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(response)) {
+        throw new Error(`GitHub repo role check was indeterminate (${response.status}).`);
+      }
+      // A dead token (401) or one blocked by the organization (plain 403) is
+      // GitHub's answer for this token: no role. Only an outage is a retry.
+      if (await isGitHubOutageResponse(response)) return unavailable(response.status);
+      publicRepoRoleLastKnown.delete(cacheKey);
       return false;
     }
     const payload = (await response.json()) as GitHubRepo;
@@ -623,6 +643,19 @@ export async function isGitHubPublicRepoRoleHolder(input: {
   });
   publicRepoRoleInflight.set(flightKey, pending);
   return pending;
+}
+
+/**
+ * An answer that says nothing about the person's access: a timeout, a rate
+ * limit (429, or a 403 with rate-limit signs) or a server error. A 401 (dead
+ * token) and a plain 403 (for example SSO not authorized) are answers about
+ * the token and count as no access.
+ */
+async function isGitHubOutageResponse(response: Response): Promise<boolean> {
+  if (response.status === 408 || response.status === 429 || response.status >= 500) return true;
+  if (response.status !== 403) return false;
+  if (response.headers.get("retry-after") !== null || response.headers.get("x-ratelimit-remaining") === "0") return true;
+  return /rate limit|abuse/i.test(await response.clone().text().catch(() => ""));
 }
 
 function isIndeterminateGitHubAccessResponse(response: Response): boolean {
@@ -776,17 +809,17 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
 
   let allowed: boolean;
   try {
-    // Always ask for the throw, so an unanswered check (outage, rate limit,
-    // expired token) is told apart from "no access".
     allowed = await deps.isCollaborator({
       roomName: canonicalRoomName,
       login: input.sessionAccount.login,
       accessToken: input.sessionAccount.provider_access_token,
       bypassCache: input.freshCollaboratorCheck,
-      throwOnIndeterminate: true,
+      throwOnIndeterminate: input.throwOnIndeterminate,
     });
   } catch (error) {
-    if (input.throwOnIndeterminate) throw error;
+    // A GitHub outage is a retry, not "no access"; a dead or blocked token
+    // came back as false above. Authority revalidation keeps its throw.
+    if (input.throwOnIndeterminate || !(error instanceof GitHubAccessUnavailableError)) throw error;
     return { kind: "repo_access_unavailable" };
   }
 

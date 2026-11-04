@@ -31,10 +31,20 @@ async function person(login: string, githubToken?: string) {
   return { id: account.id, login, token };
 }
 
-/** A GitHub API stub: `acme/public` is public; the token `github-token-role` has the triage role on it. */
+/**
+ * A GitHub API stub: `acme/public` is public; the token `github-token-role` has
+ * the triage role on it. `acme/secret` is private: a revoked token gets 401,
+ * a token the organization's SSO has not approved gets a plain 403.
+ */
 async function startGitHubStub() {
   const { createServer } = await import('node:http');
   const server = createServer((req, res) => {
+    if ((req.url ?? '').toLowerCase().startsWith('/repos/acme/secret')) {
+      const dead = req.headers.authorization === 'Bearer github-token-dead';
+      res.writeHead(dead ? 401 : req.headers.authorization ? 403 : 404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ message: dead ? 'Bad credentials' : 'Resource protected by organization SAML enforcement' }));
+      return;
+    }
     const found = (req.url ?? '').toLowerCase().startsWith('/repos/acme/public');
     const role = req.headers.authorization === 'Bearer github-token-role';
     res.writeHead(found ? 200 : 404, { 'content-type': 'application/json' });
@@ -229,11 +239,19 @@ test('the room list shows a public repo room only to people with a GitHub role o
   });
   const reader = await person('reader', 'github-token-none');
   const collaborator = await person('collaborator', 'github-token-role');
-  await pool!.query(`INSERT INTO rooms (id, display_name, created_at) VALUES ('github.com/acme/public', 'acme/public', now())`);
+  const revoked = await person('revoked', 'github-token-dead');
+  const blocked = await person('blocked', 'github-token-sso');
+  await pool!.query(`INSERT INTO rooms (id, display_name, created_at) VALUES
+    ('github.com/acme/public', 'acme/public', now()), ('github.com/acme/secret', 'acme/secret', now())`);
   for (const account of [reader, collaborator]) {
     // Both opened the room before the rule turned on.
     await pool!.query(`INSERT INTO account_room_recents (account_id, room_id, display_name, source, first_opened_at, last_opened_at, updated_at)
       VALUES ($1, 'github.com/acme/public', 'acme/public', 'join', now(), now(), now())`, [account.id]);
+  }
+  for (const account of [revoked, blocked]) {
+    // Former collaborators of the private repository: their tokens no longer work there.
+    await pool!.query(`INSERT INTO account_room_recents (account_id, room_id, display_name, source, first_opened_at, last_opened_at, updated_at)
+      VALUES ($1, 'github.com/acme/secret', 'acme/secret', 'join', now(), now(), now())`, [account.id]);
   }
   const { child, port } = await startApiServer();
   t.after(async () => { await stopChildProcess(child); });
@@ -243,4 +261,10 @@ test('the room list shows a public repo room only to people with a GitHub role o
   assert.deepEqual((await call('GET', '/account/rooms', reader.token)).body.rooms, [], 'no role, no listing');
   assert.deepEqual((await call('GET', '/account/rooms', collaborator.token)).body.rooms.map((room: any) => room.room_id),
     ['github.com/acme/public']);
+  for (const account of [revoked, blocked]) {
+    const read = await call('GET', '/rooms/github.com%2Facme%2Fsecret/messages', account.token);
+    assert.equal(read.status, 403, `${account.login}: a dead or blocked token is a refusal, not a retry`);
+    assert.equal(read.body.code, 'PRIVATE_REPO_NO_ACCESS');
+    assert.deepEqual((await call('GET', '/account/rooms', account.token)).body.rooms, [], `${account.login}: no listing`);
+  }
 });

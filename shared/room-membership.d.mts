@@ -2,7 +2,8 @@ export declare const ROOM_MEMBERSHIP_REQUIRED: Readonly<{ error: 'room_membershi
 export declare const REPO_COLLABORATOR_REQUIRED: Readonly<{ error: 'repo_collaborator_required'; code: 'REPO_COLLABORATOR_REQUIRED' }>;
 export declare const REPO_ROOM_USES_GITHUB_ROLES: Readonly<{ error: 'repo_room_uses_github_roles'; code: 'REPO_ROOM_USES_GITHUB_ROLES' }>;
 export declare const REPO_ACCESS_UNAVAILABLE: Readonly<{ error: 'repo_access_unavailable'; code: 'REPO_ACCESS_UNAVAILABLE' }>;
-export declare const ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY: Readonly<{ error: string; code: 'ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY' }>;
+export declare const ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY: Readonly<{ error: 'room_join_request_main_room_only'; code: 'ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY' }>;
+export declare const ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY_MESSAGE: string;
 export declare const REPO_ACCESS_UNAVAILABLE_MESSAGE: string;
 export declare const ROOM_MEMBERSHIP_REQUIRED_MESSAGE: string;
 export declare const REPO_COLLABORATOR_REQUIRED_MESSAGE: string;

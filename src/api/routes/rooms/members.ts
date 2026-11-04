@@ -4,6 +4,7 @@ import {
   REPO_ROOM_USES_GITHUB_ROLES,
   REPO_ROOM_USES_GITHUB_ROLES_MESSAGE,
   ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY,
+  ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY_MESSAGE,
   ROOM_MEMBER_ROLES,
   roomMembershipRequiredBody,
   type RoomMemberRole,
@@ -362,7 +363,7 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
       }
       if (isFocus(room)) {
         // A person asks to join the room itself, from the link they were given.
-        res.status(400).json(ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY);
+        res.status(400).json({ ...ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY, message: ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY_MESSAGE });
         return;
       }
       if (!allowJoinRequestAttempt(account.account_id)) {

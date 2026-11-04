@@ -27,7 +27,7 @@ export const REPO_ACCESS_UNAVAILABLE = Object.freeze({
 
 /** 400: a join request names a focus room; a person asks to join the main room. */
 export const ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY = Object.freeze({
-  error: 'Ask to join the main room, not one of its focus rooms.',
+  error: 'room_join_request_main_room_only',
   code: 'ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY',
 });
 
@@ -41,6 +41,8 @@ export const ROOM_MEMBERSHIP_REQUIRED_MESSAGE =
   'Only members can open this room. Ask to join, and a room admin can let you in.';
 export const REPO_COLLABORATOR_REQUIRED_MESSAGE =
   'Only people with a role on this GitHub repository can open its room. Ask a repository admin to add you on GitHub.';
+export const ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY_MESSAGE =
+  'Ask to join the main room, not one of its focus rooms.';
 export const REPO_ACCESS_UNAVAILABLE_MESSAGE =
   'GitHub did not answer the repository access check. Please retry.';
 export const REPO_ROOM_USES_GITHUB_ROLES_MESSAGE =

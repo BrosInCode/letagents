@@ -453,7 +453,7 @@ test("a fresh room decision bypasses both visibility and collaborator caches", a
   assert.deepEqual(decision, { kind: "allow" });
   assert.equal(visibilityBypassed, true);
   assert.equal(collaboratorBypassed, true);
-  assert.equal(indeterminateThrows, true, "the decision asks for the throw, to tell 'no answer' from 'no access'");
+  assert.equal(indeterminateThrows, false, "fresh cache bypass does not change existing caller error contracts");
 
   const unanswered = await resolveGitHubRepoRoomAccessDecision(
     {
@@ -463,7 +463,7 @@ test("a fresh room decision bypasses both visibility and collaborator caches", a
     },
     {
       getVisibility: async () => "private",
-      isCollaborator: async () => { throw new Error("GitHub collaborator revalidation was indeterminate (503)."); },
+      isCollaborator: async () => { throw new GitHubAccessUnavailableError(503); },
     },
   );
   assert.deepEqual(unanswered, { kind: "repo_access_unavailable" }, "a caller that did not opt in gets a retry, not a refusal");
@@ -979,4 +979,31 @@ test("a fresh check during a GitHub outage keeps a known collaborator in and ask
     { kind: "repo_access_unavailable" },
     "an unanswered check is a retry, not 'private repo, no access'",
   );
+});
+
+test("a dead or blocked token is a refusal; only a GitHub outage is a retry", async () => {
+  const sessionAccount = { provider: "github", provider_access_token: "token", login: "former" };
+  const decide = async (roomName: string, reply: () => Response) => {
+    globalThis.fetch = (async () => reply()) as typeof fetch;
+    return resolveGitHubRepoRoomAccessDecision({ roomName, sessionAccount, freshCollaboratorCheck: true });
+  };
+  const stamp = Date.now();
+  // Private repositories (no remembered visibility).
+  assert.deepEqual(await decide(`github.com/acme/secret-dead-${stamp}`, () => jsonResponse(401, { message: "Bad credentials" })),
+    { kind: "private_repo_no_access" }, "a revoked or expired token");
+  assert.deepEqual(await decide(`github.com/acme/secret-sso-${stamp}`, () => jsonResponse(403, { message: "Resource protected by organization SAML enforcement" })),
+    { kind: "private_repo_no_access" }, "a token the organization's SSO has not approved");
+  assert.deepEqual(await decide(`github.com/acme/secret-limit-${stamp}`, () => jsonResponse(403, { message: "API rate limit exceeded" }, { "x-ratelimit-remaining": "0" })),
+    { kind: "repo_access_unavailable" }, "a rate limit");
+  assert.deepEqual(await decide(`github.com/acme/secret-down-${stamp}`, () => jsonResponse(503, { message: "unavailable" })),
+    { kind: "repo_access_unavailable" }, "a server error");
+  // A public repository whose role check meets a dead token.
+  const room = `github.com/acme/public-dead-${stamp}`;
+  globalThis.fetch = (async () => jsonResponse(200, { private: false, owner: { login: "acme" }, permissions: { pull: true } })) as typeof fetch;
+  await getGitHubRepoVisibility(room);
+  assert.equal(await isGitHubPublicRepoRoleHolder({ roomName: room, login: "former", accessToken: "token", bypassCache: true })
+    .catch(() => "threw"), false);
+  globalThis.fetch = (async () => jsonResponse(401, { message: "Bad credentials" })) as typeof fetch;
+  assert.equal(await isGitHubPublicRepoRoleHolder({ roomName: room, login: "former", accessToken: "token", bypassCache: true }), false,
+    "a dead token on a public repository is no role, not a retry");
 });
