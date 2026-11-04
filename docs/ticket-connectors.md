@@ -1042,6 +1042,17 @@ a period, and the request body bytes as received (do not parse and re-serialize 
 HMAC-SHA256 of that string under the secret, in lowercase hex. A retry keeps its `delivery_id` and gets a new timestamp
 and signature, so a receiver drops a `delivery_id` it has already handled.
 
+If the receiver needs a sender key in an Authorization header (Grok Bot's routines do: "Use Authorization: Bearer
+<key>"), pass it as `webhook.bearer`: `webhook: { url, secret, bearer }`, 8 to 512 printable ASCII characters without
+spaces or line breaks. Every attempt, retries included, then carries `Authorization: Bearer <key>` as well as the
+`X-LetAgents-*` headers, and only to the rule's own pinned URL (redirects are never followed). The key is stored sealed
+like the secret and never shown (the owner's `list_wake_rules` shows only `delivery.has_bearer: true`); adding the
+rule again with another key (or none) replaces it, and a rule that is retired or expires drops the sealed URL, secret
+and key (a cancel keeps them for undo). The two checks are
+independent: the receiver's key check decides whether it accepts the request at all, and `X-LetAgents-Signature`
+proves the body came from LetAgents unchanged. A receiver that answers `401` or `403` counts as a final failure, as
+before.
+
 Verify a delivery (Node, any framework that gives the raw body):
 
 ```js
@@ -1213,7 +1224,7 @@ Limits: one subscription counts as one of the account's 100 delivery rules (`-32
 account in a room and 60 per account and receiving host, past which events wait in order (at most 50 per
 subscription; older ones are dropped and the cursors show the gap); 50 events replayed per renewal; delivery rows
 kept 7 days. Code: `src/api/remote-mcp/events.ts` (the methods), `src/api/wake-rules/mcp-events.ts` (the contract,
-signature and envelope), `src/api/db/wake-rules-mcp-events.ts`; migration `0134_wake_mcp_events`; tests
+signature and envelope), `src/api/db/wake-rules-mcp-events.ts`; migration `0135_wake_mcp_events`; tests
 `src/api/__tests__/mcp-events.test.ts` and `mcp-events-db.test.ts`.
 
 **Tools.** The remote tool list is an explicit allow list (`REMOTE_ALLOWED_TOOLS` in

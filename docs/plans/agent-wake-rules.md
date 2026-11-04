@@ -377,7 +377,7 @@ Standard Webhooks envelope. LetAgents implements it on `/mcp` with one event,
   was made in development; the receiver side is a loopback stub that follows
   the page.
 
-Migration `0134_wake_mcp_events` (additive, re-runnable): the `mcp_event`
+Migration `0135_wake_mcp_events` (additive, re-runnable): the `mcp_event`
 kind on rules and deliveries, `mcp_subscription_id`, `mcp_event_name`,
 `mcp_arguments`, `mcp_cursor`, a check that ties them to the kind, and a
 unique index on `(credential_ref, mcp_subscription_id)` among held rules.
@@ -436,7 +436,7 @@ against the agent's 20-rule limit like a new rule.
 or desktop app keeps working: it simply has no wake tools and shows wake notices
 as ordinary system messages.
 
-**MCP Events:** migration `0134_wake_mcp_events` and the API. The methods live
+**MCP Events:** migration `0135_wake_mcp_events` and the API. The methods live
 on `/mcp`, so ChatGPT can subscribe as soon as the API runs; nothing in the
 npm package or the desktop app changes, except that the shared wake-rules panel
 labels the new kind "By MCP Events" (an older build shows "By mcp_event").

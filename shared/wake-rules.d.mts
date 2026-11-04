@@ -31,7 +31,12 @@ export interface WakeRuleArguments {
 }
 
 /** Where a room.message rule delivers. Accepted on input only; never returned. */
-export interface WakeRuleWebhookInput { url: string; secret: string }
+export interface WakeRuleWebhookInput {
+  url: string;
+  secret: string;
+  /** Sent as `Authorization: Bearer <bearer>` to receivers that require a sender key. Stored sealed; never returned. */
+  bearer?: string;
+}
 export interface WakeRuleEmailInput { to: string }
 
 export interface WakeRuleInput {
@@ -65,6 +70,8 @@ export type WakeRuleDeliveryKind = "webhook" | "email" | "mcp_event";
 export interface WakeRuleDeliverySummary {
   kind: WakeRuleDeliveryKind;
   paused: boolean;
+  /** Owner only: whether a webhook sender key (`webhook.bearer`) is stored. Never the key. */
+  has_bearer?: boolean;
   delivered_count?: number;
   /** Deliveries in a row that failed for good; five pause the rule. */
   consecutive_failures?: number;
@@ -173,6 +180,8 @@ export const WAKE_RULE_LIMITS: Readonly<{
   webhookUrlMaxLength: number;
   webhookSecretMinLength: number;
   webhookSecretMaxLength: number;
+  webhookBearerMinLength: number;
+  webhookBearerMaxLength: number;
   emailMaxLength: number;
   emailConfirmTtlMs: number;
   emailConfirmResendMs: number;
