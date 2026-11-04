@@ -156,3 +156,23 @@ test('the release seed keeps removals, and gives a room with members but no admi
   assert.deepEqual(admins.rows.map((r) => r.row), ['agent-lounge:agentowner', 'posted-lounge:early'],
     'the first signed-in poster, else the owner of the first agent; a removed person is neither');
 });
+
+test('a rental room goes under the room the renter chose, never one the provider names', databaseTestOptions, async () => {
+  const [renter, provider] = await Promise.all(['renter', 'provider'].map(person));
+  await pool!.query(`INSERT INTO rooms (id, display_name, created_at) VALUES ('renter-lounge', 'R', now()), ('other-lounge', 'O', now())`);
+  await pool!.query(`INSERT INTO rental_listings (id, provider_account_id, display_name, ide_kind) VALUES ('listing_1', $1, 'L', 'codex')`,
+    [provider.id]);
+  await pool!.query(`INSERT INTO rental_sessions (id, listing_id, renter_account_id, provider_account_id, target_room_id,
+      task_title, task_prompt, status) VALUES ('rental_1', 'listing_1', $1, $2, 'renter-lounge', 'Task', 'Do it', 'accepted')`,
+  [renter.id, provider.id]);
+  const { provisionRentalRoomForProvider } = await import('../rental/room-projection.js');
+  await assert.rejects(
+    provisionRentalRoomForProvider({ sessionId: 'rental_1', providerAccountId: provider.id, parentRoomId: 'other-lounge', providerDisplayName: 'P' } as any),
+    /parent_room_mismatch/,
+  );
+  const provisioned = await provisionRentalRoomForProvider({
+    sessionId: 'rental_1', providerAccountId: provider.id, parentRoomId: 'renter-lounge', providerDisplayName: 'P',
+  } as any);
+  const room = await pool!.query<{ parent_room_id: string }>('SELECT parent_room_id FROM rooms WHERE id = $1', [provisioned!.roomId]);
+  assert.equal(room.rows[0]?.parent_room_id, 'renter-lounge');
+});
