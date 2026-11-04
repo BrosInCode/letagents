@@ -44,6 +44,12 @@ export class CodexProviderHandle implements ProviderHandle {
    */
   signInProfileId: string | null = null;
   /**
+   * For a process found running with no loaded conversation: how it was started, read at the attach, so that a
+   * policy bound later can check that its launch defined the profile the policy names (see codexFoundWithoutProfile).
+   * Null when that could not be read. Undefined when a conversation was loaded, and for a launch of this adapter.
+   */
+  foundCommandLine: string | null | undefined = undefined;
+  /**
    * What the loaded conversation of a process found running reported, kept
    * only while the runtime has no policy to hold it to. The daemon can find a
    * process before it supplies the policy.

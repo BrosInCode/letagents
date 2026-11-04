@@ -382,6 +382,8 @@ export function createHarness(harnessOptions: {
   processUnreadable?: boolean;
   /** The running process's command line carries every isolation override, whatever it was started with. */
   commandLineClaimsIsolation?: boolean;
+  /** The command line of a launched process holds no profile, as one started by an earlier LetAgents at its level. */
+  commandLineWithoutProfile?: boolean;
   /** The models the app-server lists instead of the usual two; null is one that cannot list its models, "timeout" one that does not answer in time. */
   models?: readonly FakeCodexModel[] | null | "timeout";
   /** The model list has more pages than the first. */
@@ -507,7 +509,10 @@ export function createHarness(harnessOptions: {
       const launch = launchOptions[launches.findIndex((entry) => entry.pid === pid)];
       if (!launch || options.processUnreadable) return null;
       const isolated = launch.options.homeHarness !== true || options.commandLineClaimsIsolation === true;
-      return `codex app-server ${isolated ? CODEX_OWNER_FEATURE_OVERRIDES.map((override) => `-c ${override}`).join(" ") : ""} --listen ${launch.serverUrl}`;
+      // A launch that named a permission profile defined it with its overrides, which the command line holds as the real one does.
+      const named = (launch.options as { hideSignInProfile?: CodexSignInProfile }).hideSignInProfile;
+      const profile = named && options.commandLineWithoutProfile !== true ? ` -c permissions.${named.id}={ extends = ${JSON.stringify(named.extends)}, filesystem = { } } -c default_permissions=${JSON.stringify(named.id)}` : "";
+      return `codex app-server ${isolated ? CODEX_OWNER_FEATURE_OVERRIDES.map((override) => `-c ${override}`).join(" ") : ""}${profile} --listen ${launch.serverUrl}`;
     },
     assertLiveProjectUnchanged: async (_codexBin, live) => {
       liveChecks.push(live);

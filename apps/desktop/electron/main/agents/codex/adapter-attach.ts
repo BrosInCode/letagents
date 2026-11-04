@@ -7,7 +7,7 @@ import type { ProviderAttachTerminal, ProviderConnectionRef, ProviderContinuatio
 import { errorMessage, observeFencedExit, sameProcessBirthIdentity } from "../provider-evidence.js";
 import { CodexAdapterLaunch } from "./adapter-launch.js";
 import { CodexProviderHandle } from "./handle.js";
-import { type CodexReportedAccess, type CodexThreadResult, codexFoundNotAtLevel, codexFoundProfile, codexTurnPolicyIsReadOnly, isMissingContinuation, isUnmaterializedEmptyThreadRead } from "./thread-access.js";
+import { type CodexReportedAccess, type CodexThreadResult, codexFoundNotAtLevel, codexFoundProfile, codexFoundWithoutProfile, codexTurnPolicyIsReadOnly, isMissingContinuation, isUnmaterializedEmptyThreadRead } from "./thread-access.js";
 import { codexTurnPolicy } from "./launch-contract.js";
 import { recordValue, transcriptLifecycleTurn } from "./notifications.js";
 import { requireLetAgentsWorkplace } from "./room-tools.js";
@@ -107,6 +107,8 @@ export abstract class CodexAdapterAttach extends CodexAdapterLaunch {
         throw new Error("durable endpoint process identity no longer matches its recorded birth");
       }
       const loadedThread = ["idle", "active", "systemError"].includes(String(recordValue(read.thread?.status)?.type));
+      /** How the process was started, read only when no conversation is loaded: see codexFoundWithoutProfile. */
+      let foundCommandLine: string | null | undefined = undefined;
       if (!continuationMissing && !exactEmptyFallback && loadedThread) {
         // thread/read verifies identity but does not subscribe this connection
         // to turn items or approval requests. Resume the exact existing thread
@@ -135,6 +137,12 @@ export abstract class CodexAdapterAttach extends CodexAdapterLaunch {
             throw new Error("Codex subscription snapshot resolved a different durable continuation thread.");
           }
         }
+      } else {
+        // No conversation to hold to its level: the next one will name the profile the policy says, and the process
+        // must have been started with it. A process an earlier LetAgents started at this level was not. Its command
+        // line says, now when the policy is known, or when it is bound later.
+        foundCommandLine = await this.deps.readCommandLine(connection.pid);
+        if (turnPolicy) notReadOnly = codexFoundWithoutProfile(foundCommandLine, turnPolicy, ref.workAttemptId);
       }
       const observedExit = this.deps.observeProcessExit(
         connection.pid,
@@ -167,6 +175,7 @@ export abstract class CodexAdapterAttach extends CodexAdapterLaunch {
       handle.ownerSetup = ownerSetup;
       handle.readOnlyLevel = codexTurnPolicyIsReadOnly(turnPolicy);
       handle.signInProfileId = codexFoundProfile(turnPolicy, ref.workAttemptId);
+      handle.foundCommandLine = foundCommandLine;
       handle.reportedWhenFound = reportedWhenFound;
       // A process found running is held to the same rule as a new one: see requireTurnPolicy.
       handle.codexHome = client.reportedCodexHome?.();

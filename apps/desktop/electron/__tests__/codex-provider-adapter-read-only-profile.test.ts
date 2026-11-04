@@ -821,3 +821,74 @@ test("bounded Codex context reuse resets on exact compaction, failure and reconn
   client.disconnect();
   await run(); assert.doesNotMatch(prompts.at(-1)!, /previously_supplied/);
 });
+
+test("a Codex found running with no loaded conversation names the profile only when its launch defined it: a process started before agents at its level had one, or one whose start cannot be read, is stopped, with its policy at the attach and bound later", { timeout: 120_000 }, async () => {
+  /** The found process has no loaded conversation: its thread is not found, or has had no message yet. */
+  const withoutLoadedConversation = (harness: ReturnType<typeof createHarness>, first: { providerContinuationId: string | null }, how: "missing" | "unmaterialized") => {
+    const createRpcClient = harness.dependencies.createRpcClient;
+    harness.dependencies.createRpcClient = (serverUrl, notify) => {
+      const client = createRpcClient(serverUrl, notify) as FakeRpc;
+      const request = client.request.bind(client);
+      client.request = async <T>(method: string, params?: unknown) => {
+        if (method === "thread/read") {
+          if (how === "missing") throw new Error(`thread not found: ${first.providerContinuationId}`);
+          if ((params as { includeTurns?: boolean }).includeTurns) throw new Error(`thread ${first.providerContinuationId} is not materialized yet; includeTurns is unavailable before first user message`);
+        }
+        return request<T>(method, params);
+      };
+      return client;
+    };
+  };
+  const refOf = (first: { workAttemptId: string; providerContinuationId: string | null; providerConnection: unknown }) =>
+    ({ workAttemptId: first.workAttemptId, providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection as never });
+  const levels = [{ level: READ_ONLY_LAUNCH as Record<string, unknown>, name: "Read-only" }, ...SANDBOXED_APPROVAL_LEVELS().map(({ level, name }) => ({ level: level as Record<string, unknown>, name }))];
+  for (const { level, name } of levels) {
+    for (const how of ["missing", "unmaterialized"] as const) {
+      const what = `${name}, ${how}`;
+      // Started by this LetAgents: its command line holds the profile, and it is attached, with its policy now and bound later.
+      const current = createHarness({ exitOnSignal: true });
+      const first = await new CodexProviderAdapter({ dependencies: current.dependencies }).spawn(spawnRequest(level));
+      withoutLoadedConversation(current, first, how);
+      assertProviderHandle(await new CodexProviderAdapter({ dependencies: current.dependencies }).attach({ ...refOf(first), launchPolicy: level.launchPolicy }));
+      const later = new CodexProviderAdapter({ dependencies: current.dependencies });
+      const early = await later.attach(refOf(first));
+      assertProviderHandle(early);
+      assert.equal(await later.attach({ ...refOf(first), launchPolicy: level.launchPolicy }), early, what);
+      assert.deepEqual(current.signals, [], `${what}: a process that defined the profile is not stopped`);
+
+      // Started by an earlier LetAgents, whose launch defined no profile: stopped at the attach, so that the daemon starts the agent again with one.
+      const old = createHarness({ exitOnSignal: true, commandLineWithoutProfile: true });
+      const oldFirst = await new CodexProviderAdapter({ dependencies: old.dependencies }).spawn(spawnRequest(level));
+      withoutLoadedConversation(old, oldFirst, how);
+      const stopped = await new CodexProviderAdapter({ dependencies: old.dependencies }).attach({ ...refOf(oldFirst), launchPolicy: level.launchPolicy }) as { state?: unknown; notices?: string[] };
+      assert.equal(stopped.state, "terminal", what);
+      assert.equal(stopped.notices?.[0], "Codex was started without the permission profile that keeps your Codex sign-in file from this agent's commands. "
+        + `That is not ${name} access, so LetAgents stopped the agent. It starts again by itself, unless you paused it.`, what);
+      assert.deepEqual(old.signals.map((signal) => signal.signal), ["SIGTERM"], what);
+      assert.equal(old.clients.slice(1).some((client) => client.requests.some((call) => call.method === "thread/start" || call.method === "turn/start")), false, `${what}: no conversation named the profile to it`);
+      // The same when the policy is bound later.
+      const oldLater = createHarness({ exitOnSignal: true, commandLineWithoutProfile: true });
+      const oldLaterFirst = await new CodexProviderAdapter({ dependencies: oldLater.dependencies }).spawn(spawnRequest(level));
+      withoutLoadedConversation(oldLater, oldLaterFirst, how);
+      const binder = new CodexProviderAdapter({ dependencies: oldLater.dependencies });
+      assertProviderHandle(await binder.attach(refOf(oldLaterFirst)));
+      assert.deepEqual(oldLater.signals, [], `${what}: nothing is stopped while no policy says what the process must have defined`);
+      const boundLater = await binder.attach({ ...refOf(oldLaterFirst), launchPolicy: level.launchPolicy }) as { state?: unknown; notices?: string[] };
+      assert.equal(boundLater.state, "terminal", `${what}, bound later`);
+      assert.match(boundLater.notices?.[0] ?? "", /^Codex was started without the permission profile/, `${what}, bound later`);
+    }
+  }
+  // A process whose start cannot be read is stopped too: nothing says that it defined the profile.
+  const unreadable = createHarness({ exitOnSignal: true, processUnreadable: true });
+  const unreadableFirst = await new CodexProviderAdapter({ dependencies: unreadable.dependencies }).spawn(spawnRequest(READ_ONLY_LAUNCH));
+  withoutLoadedConversation(unreadable, unreadableFirst, "missing");
+  const unread = await new CodexProviderAdapter({ dependencies: unreadable.dependencies }).attach({ ...refOf(unreadableFirst), launchPolicy: READ_ONLY_LAUNCH.launchPolicy }) as { state?: unknown; notices?: string[] };
+  assert.equal(unread.state, "terminal");
+  assert.match(unread.notices?.[0] ?? "", /^LetAgents could not read how this agent's Codex was started, so nothing says that your Codex sign-in file is kept from its commands\. That is not Read-only access, so LetAgents stopped the agent\./);
+  // Full access names no profile, and is attached whatever its command line holds, or when it cannot be read.
+  const full = createHarness({ exitOnSignal: true, commandLineWithoutProfile: true, processUnreadable: true });
+  const fullFirst = await new CodexProviderAdapter({ dependencies: full.dependencies }).spawn(spawnRequest(foundAtFullAccess()));
+  withoutLoadedConversation(full, fullFirst, "missing");
+  assertProviderHandle(await new CodexProviderAdapter({ dependencies: full.dependencies }).attach({ ...refOf(fullFirst), launchPolicy: foundAtFullAccess().launchPolicy }));
+  assert.deepEqual(full.signals, []);
+});

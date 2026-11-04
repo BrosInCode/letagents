@@ -274,6 +274,37 @@ export function codexSignInProfileFor(policy: Readonly<Record<string, unknown>> 
   return codexSandboxedProfileId(base, workAttemptId);
 }
 
+/**
+ * Whether a running Codex was started with the launch overrides that define
+ * this permission profile, by its command line: the launch makes the profile
+ * the default with `default_permissions`, and that is read back here. A
+ * process that an earlier LetAgents started at a level that then named no
+ * profile holds no such override, and a conversation that named the profile
+ * to it would be refused for a profile it does not know.
+ */
+export function codexCommandLineDefinesProfile(commandLine: string, profile: string): boolean {
+  return commandLine.includes(`default_permissions=${JSON.stringify(profile)}`);
+}
+
+/**
+ * For a process found running with no loaded conversation, whose reply can
+ * therefore not be held to its level: the line for its owner when its launch
+ * did not define the profile its policy names, or when how it was started
+ * cannot be read. Null when the launch defined it, and for a policy that
+ * names no profile. Such a process is stopped, and the daemon starts the
+ * agent again with a launch that defines the profile.
+ */
+export function codexFoundWithoutProfile(commandLine: string | null, turnPolicy: Readonly<Record<string, unknown>>, workAttemptId: string): string | null {
+  const profile = codexFoundProfile(turnPolicy, workAttemptId);
+  if (profile === null) return null;
+  const level = codexLevelName(normalizeLaunchPolicy(turnPolicy)) ?? "sandboxed";
+  if (!commandLine) {
+    return `LetAgents could not read how this agent's Codex was started, so nothing says that your Codex sign-in file is kept from its commands. That is not ${level} access`;
+  }
+  if (codexCommandLineDefinesProfile(commandLine, profile)) return null;
+  return `Codex was started without the permission profile that keeps your Codex sign-in file from this agent's commands. That is not ${level} access`;
+}
+
 /** The profile a runtime found running names, from its turn policy: see codexSignInProfileFor. */
 export function codexFoundProfile(turnPolicy: Readonly<Record<string, unknown>> | null, workAttemptId: string, platform: NodeJS.Platform = process.platform): string | null {
   return turnPolicy === null ? null : codexSignInProfileFor(normalizeLaunchPolicy(turnPolicy), workAttemptId, platform);

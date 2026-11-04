@@ -10,7 +10,7 @@ import { errorMessage, safeStreamPayload } from "../provider-evidence.js";
 import { BASE_CODEX_CAPABILITIES, DEFAULT_DEPENDENCIES } from "./launch-contract.js";
 import { COMMAND_OUTPUT_WINDOW_MS, type CodexProviderAdapterDependencies, type CodexProviderAdapterOptions } from "./types.js";
 import { CodexProviderHandle } from "./handle.js";
-import { codexFoundNotAtLevel, codexPolicyIsSandboxed } from "./thread-access.js";
+import { codexFoundNotAtLevel, codexFoundWithoutProfile, codexPolicyIsSandboxed } from "./thread-access.js";
 import { recordValue } from "./notifications.js";
 
 export abstract class CodexAdapterBase {
@@ -163,8 +163,12 @@ export abstract class CodexAdapterBase {
    * an attach with the policy holds it. Every later caller gets the same answer.
    */
   protected bindFoundPolicy(handle: CodexProviderHandle, policy: unknown): CodexProviderHandle | Promise<ProviderAttachTerminal> {
+    const unbound = handle.appliedTurnPolicy() === null;
     const reported = handle.bindTurnPolicy(policy);
-    const notReadOnly = reported && codexFoundNotAtLevel(handle.appliedTurnPolicy(), reported, handle.signInProfile());
+    const bound = unbound && handle.appliedTurnPolicy() !== null;
+    // What the conversation reported when the process was found, or, for a process found with no loaded conversation, how it was started.
+    const notReadOnly = reported ? codexFoundNotAtLevel(handle.appliedTurnPolicy(), reported, handle.signInProfile())
+      : bound && handle.foundCommandLine !== undefined ? codexFoundWithoutProfile(handle.foundCommandLine, handle.appliedTurnPolicy()!, handle.workAttemptId) : null;
     if (notReadOnly) handle.foundNotAtLevel = { reported: notReadOnly, stopped: null };
     return this.stopNotAtLevel(handle) ?? handle;
   }
