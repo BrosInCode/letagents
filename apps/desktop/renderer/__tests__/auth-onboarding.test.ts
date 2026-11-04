@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
+  GITHUB_RETRY_BACKOFF_SECONDS,
+  RETRY_BACKOFF_SECONDS,
   isAuthSnapshotPending,
+  isFocusRoomIdentifier,
   isMembershipRefusal,
+  retryBackoffFor,
   joinAskedLabel,
   joinRetryLabel,
   resolveJoinCardState,
@@ -99,4 +103,25 @@ test("the join card follows the latest request and its decline wait", () => {
   assert.equal(joinAskedLabel("2026-11-04T11:59:30.000Z", now), "just now");
   assert.equal(joinAskedLabel("2026-11-04T11:55:00.000Z", now), "5 min ago");
   assert.equal(joinAskedLabel("not a time", now), "earlier");
+});
+
+test("GitHub not answering checks again at the server's pace, other failures as before", () => {
+  assert.equal(retryBackoffFor("REPO_ACCESS_UNAVAILABLE"), GITHUB_RETRY_BACKOFF_SECONDS);
+  assert.equal(GITHUB_RETRY_BACKOFF_SECONDS[0], 30, "the server asks for 30 s");
+  assert.equal(retryBackoffFor(null), RETRY_BACKOFF_SECONDS);
+  assert.equal(retryBackoffFor("ROOM_NOT_FOUND"), RETRY_BACKOFF_SECONDS);
+  assert.equal(retryDeadlineAt(0, 0, retryBackoffFor("REPO_ACCESS_UNAVAILABLE")), 30_000);
+});
+
+test("focus room ids are told apart from main rooms", () => {
+  for (const id of ["focus_61", "FOCUS_7", "github.com/acme/app/focus/task_3", "design-room/focus/notes"]) {
+    assert.equal(isFocusRoomIdentifier(id), true, id);
+  }
+  for (const id of ["design-room", "focus-room", "focus_", "github.com/acme/app", "", null]) {
+    assert.equal(isFocusRoomIdentifier(id), false, String(id));
+  }
+});
+
+test("a focus room with no name sends the person to the main room", () => {
+  assert.deepEqual(resolveJoinCardState(null, 0, true), { kind: "main_room_only" });
 });

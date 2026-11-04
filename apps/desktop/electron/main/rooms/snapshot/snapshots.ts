@@ -196,7 +196,8 @@ export function createApiErrorRoomSnapshot(
     roomIdentifier,
     access: createRoomAccess({
       status: accessStatus,
-      title: API_ERROR_ACCESS_TITLES[accessStatus],
+      // GitHub gave no answer to the role check (503): the app checks again.
+      title: payload?.code === "REPO_ACCESS_UNAVAILABLE" ? "GitHub is not answering" : API_ERROR_ACCESS_TITLES[accessStatus],
       message: payload?.message || error.message,
       roomIdentifier: payload?.room_id || roomIdentifier,
       deviceFlowUrl: payload?.device_flow_url || null,

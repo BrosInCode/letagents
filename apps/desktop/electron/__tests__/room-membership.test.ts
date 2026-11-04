@@ -79,6 +79,26 @@ test("a public-repo 403 for a person with no GitHub role has its own state", () 
   assert.equal(snapshot.access.joinRequest, null);
 });
 
+test("GitHub not answering is a retry, not a refusal", () => {
+  const snapshot = createApiErrorRoomSnapshot("github.com/acme/app", apiError(503, {
+    error: "repo_access_unavailable",
+    code: "REPO_ACCESS_UNAVAILABLE",
+    message: "GitHub did not answer the repository access check. Please retry.",
+    room_id: "github.com/acme/app",
+  }));
+  assert.equal(snapshot.access.status, "unavailable");
+  assert.equal(snapshot.access.title, "GitHub is not answering");
+  assert.equal(snapshot.access.code, "REPO_ACCESS_UNAVAILABLE");
+});
+
+test("a focus room refused to a non-member names no main room and carries no request", () => {
+  const snapshot = createApiErrorRoomSnapshot("focus_61", apiError(403, roomMembershipRequiredBody({ room_id: "focus_61" })));
+  assert.equal(snapshot.access.status, "membership_required");
+  assert.equal(snapshot.access.roomIdentifier, "focus_61");
+  assert.equal(snapshot.access.displayName, null);
+  assert.equal(snapshot.access.joinRequest, null);
+});
+
 test("the existing refusals keep their states", () => {
   assert.equal(createApiErrorRoomSnapshot("github.com/acme/secret", apiError(401, {
     error: "auth_required", code: "NOT_AUTHENTICATED", device_flow_url: "https://letagents.chat/device",

@@ -6,6 +6,7 @@ import { projectRoomName } from "../domain/project-room-name";
 import { repoPickerErrorMessage } from "../domain/repo-picker-error";
 import { rootPathLabel, type RecentRootRoom, type RecentRootRoomKind } from "../domain/sidebar-rooms";
 import { desktopIpc } from "../ipc/index.js";
+import { isMembershipRefusal } from "../components/desktop/content/auth-onboarding";
 
 export type NewRoomStep =
   | "chooser"
@@ -545,6 +546,20 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomFeedbackState.value = "info";
     try {
       const snapshot = await desktopIpc.room.getSnapshot(validation.normalized);
+      if (isMembershipRefusal(snapshot.access.status)) {
+        // A members-only room: open it, so its card offers the request to join
+        // (or says to ask a repository admin, or for the main room's link).
+        newRoomSuccess.value = {
+          kind: "joined",
+          roomName: snapshot.access.displayName || validation.normalized,
+          storageLabel: "Members only",
+          inviteCode: null,
+          snapshot,
+          openOptions: { displayName: snapshot.access.displayName || null, kind: "room", rootPath: null, meta: "Members only" },
+        };
+        openSuccessRoom();
+        return;
+      }
       if (snapshot.access.status !== "ready") {
         newRoomFeedback.value = snapshot.access.message || "You do not have access to that room.";
         newRoomFeedbackState.value = "error";

@@ -97,6 +97,7 @@ const {
   getActiveRoomIdentifier,
   acknowledgeDesktopRoomStreamGapRepair,
   setExecutionDelegationInvalidationHandler,
+  roomStreamReconnectDelayMs,
 } =
   await import("../main/room-stream.js");
 
@@ -118,12 +119,12 @@ const ROOM = "focus_fallback_room";
 type StreamHandler =
   | { kind: "ok"; sse: ControllableSse }
   | { kind: "fail"; status: number }
-  /** A 403 with a JSON body, as the server refuses a room. */
-  | { kind: "refuse"; body: unknown }
+  /** A JSON error body, as the server refuses a room (403) or asks to retry later (503). */
+  | { kind: "refuse"; body: unknown; status?: number; headers?: Record<string, string> }
   | { kind: "hang" };
 
-function refusalResponse(body: unknown): Response {
-  return new Response(JSON.stringify(body), { status: 403, headers: { "Content-Type": "application/json" } });
+function refusalResponse(body: unknown, status = 403, headers: Record<string, string> = {}): Response {
+  return new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json", ...headers } });
 }
 
 type PollRecord = { url: string; after: string | null; timeout: string | null; signal: AbortSignal };
@@ -210,7 +211,7 @@ type CatchUpHandler =
 function installFetchRouter(): {
   streamQueue: StreamHandler[];
   enqueueFallbackPoll(messages: MessagePage): void;
-  enqueueFallbackRefusal(body: unknown): void;
+  enqueueFallbackRefusal(body: unknown, status?: number, headers?: Record<string, string>): void;
   enqueueLatest(messages: MessagePage): void;
   enqueueLatestFailure(status?: number): void;
   enqueueCatchUp(messages: MessagePage, hasMore?: boolean): void;
@@ -222,7 +223,7 @@ function installFetchRouter(): {
 } {
   const previousFetch = globalThis.fetch;
   const streamQueue: StreamHandler[] = [];
-  const fallbackQueue: Array<MessagePage | { refuse: unknown }> = [];
+  const fallbackQueue: Array<MessagePage | { refuse: unknown; status: number; headers: Record<string, string> }> = [];
   const latestQueue: Array<{ messages?: MessagePage; status?: number }> = [];
   const catchUpQueue: CatchUpHandler[] = [];
   const streamCalls: StreamRecord[] = [];
@@ -254,7 +255,7 @@ function installFetchRouter(): {
       if (handler.kind === "fail") {
         return new Response(null, { status: handler.status });
       }
-      if (handler.kind === "refuse") return refusalResponse(handler.body);
+      if (handler.kind === "refuse") return refusalResponse(handler.body, handler.status, handler.headers);
       return handler.sse.response;
     }
 
@@ -282,7 +283,7 @@ function installFetchRouter(): {
         return hangUntilAborted(signal);
       }
       const page = fallbackQueue.shift();
-      if (page && !Array.isArray(page)) return refusalResponse(page.refuse);
+      if (page && !Array.isArray(page)) return refusalResponse(page.refuse, page.status, page.headers);
       if (page) {
         return new Response(JSON.stringify({ room_id: ROOM, messages: page }), {
           status: 200,
@@ -309,7 +310,7 @@ function installFetchRouter(): {
   return {
     streamQueue,
     enqueueFallbackPoll: (messages) => fallbackQueue.push(messages),
-    enqueueFallbackRefusal: (body) => fallbackQueue.push({ refuse: body }),
+    enqueueFallbackRefusal: (body, status = 403, headers = {}) => fallbackQueue.push({ refuse: body, status, headers }),
     enqueueLatest: (messages) => latestQueue.push({ messages }),
     enqueueLatestFailure: (status = 500) => latestQueue.push({ status }),
     enqueueCatchUp: (messages, hasMore = false) => catchUpQueue.push({ kind: "page", messages, hasMore }),
@@ -1002,6 +1003,58 @@ test("a 403 with another code, or with no body, keeps the usual reconnect", asyn
       await stopDesktopRoomStream();
       router.restore();
     }
+  }
+});
+
+test("GitHub not answering keeps the stream, and the poll waits as long as the server asks", async () => {
+  const router = installFetchRouter();
+  try {
+    router.streamQueue.push({ kind: "fail", status: 503 });
+    router.enqueueFallbackRefusal({
+      error: "repo_access_unavailable",
+      code: "REPO_ACCESS_UNAVAILABLE",
+      message: "GitHub did not answer the repository access check. Please retry.",
+      room_id: ROOM,
+    }, 503, { "Retry-After": "5" });
+    await startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.pollCalls.length >= 1);
+    // The usual retry after a failed poll is 2.5 s; this one waits the 5 s the server asked for.
+    await sleep(3_200);
+    assert.equal(router.pollCalls.length, 1, "no new poll before Retry-After");
+    assert.equal(emitted.some((event) => event.type === "access_refused"), false, "not a refusal");
+    assert.equal(getActiveRoomIdentifier(), ROOM, "the stream keeps going");
+    await waitUntil(() => router.pollCalls.length >= 2, 6_000);
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("the reconnect wait keeps its 30 s cap, but a longer Retry-After wins", () => {
+  assert.equal(roomStreamReconnectDelayMs(1_000, 0), 1_000);
+  assert.equal(roomStreamReconnectDelayMs(60_000, 0), 30_000);
+  assert.equal(roomStreamReconnectDelayMs(1_000, 5_000), 5_000);
+  assert.equal(roomStreamReconnectDelayMs(1_000, 45_000), 45_000, "a Retry-After of 45 s is honoured");
+  assert.equal(roomStreamReconnectDelayMs(16_000, 5_000), 16_000);
+});
+
+test("GitHub not answering on connect waits Retry-After before the next connect", async () => {
+  const router = installFetchRouter();
+  try {
+    router.streamQueue.push({ kind: "refuse", status: 503, headers: { "Retry-After": "5" }, body: {
+      error: "repo_access_unavailable", code: "REPO_ACCESS_UNAVAILABLE", room_id: ROOM,
+      message: "GitHub did not answer the repository access check. Please retry.",
+    } });
+    await startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length >= 1);
+    // The usual first reconnect comes after 1 s; this one waits the 5 s the server asked for.
+    await sleep(3_200);
+    assert.equal(router.streamCalls.length, 1, "no reconnect before Retry-After");
+    assert.equal(emitted.some((event) => event.type === "access_refused"), false, "not a refusal");
+    await waitUntil(() => router.streamCalls.length >= 2, 6_000);
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
   }
 });
 

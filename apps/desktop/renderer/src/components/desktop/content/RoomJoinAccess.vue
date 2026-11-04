@@ -5,6 +5,11 @@
       <p>{{ access.message || REPO_COLLABORATOR_REQUIRED_MESSAGE }}</p>
     </template>
 
+    <template v-else-if="joinState.kind === 'main_room_only'">
+      <h1>Ask for the main room's link</h1>
+      <p>This is a focus room in a members-only room. It uses the members of its main room. Ask a member for the main room's link, then ask to join there.</p>
+    </template>
+
     <template v-else-if="joinState.kind === 'pending'">
       <h1>Waiting for an admin</h1>
       <p>You asked to join {{ askedLabel }}. A room admin can let you in. The room opens when you check again after that.</p>
@@ -31,7 +36,7 @@
 
     <div class="auth-actions">
       <button
-        v-if="!repoRoom && joinState.kind !== 'pending'"
+        v-if="!repoRoom && joinState.kind !== 'pending' && joinState.kind !== 'main_room_only'"
         class="primary-button"
         type="button"
         :disabled="disabled || joinState.kind === 'declined'"
@@ -41,7 +46,7 @@
         {{ action === "ask" ? "Asking…" : joinState.kind === "ask" && !joinState.declined ? "Ask to join" : "Ask again" }}
       </button>
       <button
-        :class="repoRoom || joinState.kind === 'pending' ? 'primary-button' : 'ghost-button'"
+        :class="repoRoom || joinState.kind === 'pending' || joinState.kind === 'main_room_only' ? 'primary-button' : 'ghost-button'"
         type="button"
         :disabled="disabled"
         data-testid="room-join-check-button"
@@ -89,7 +94,7 @@ import type {
 import { desktopIpc } from "../../../ipc/index";
 import { loginInitials } from "../../../domain/initials";
 import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
-import { joinAskedLabel, joinRetryLabel, resolveJoinCardState } from "./auth-onboarding";
+import { isFocusRoomIdentifier, joinAskedLabel, joinRetryLabel, resolveJoinCardState } from "./auth-onboarding";
 
 const props = defineProps<{
   access: DesktopRoomAccess;
@@ -108,6 +113,8 @@ const action = ref<"ask" | "cancel" | null>(null);
 const error = ref<string | null>(null);
 // What the last action returned, until the next room check brings the server's own copy.
 const latest = ref<{ room: string | null; joinRequest: RoomJoinRequestSummary | null } | null>(null);
+// The server answered that only the main room takes requests (a focus room).
+const mainRoomOnlyAnswer = ref<string | null>(null);
 
 watch(
   [() => props.access.roomIdentifier, () => props.access.joinRequest],
@@ -116,10 +123,15 @@ watch(
     error.value = null;
   },
 );
+watch(() => props.access.roomIdentifier, () => { mainRoomOnlyAnswer.value = null; });
 
 const joinRequest = computed(() =>
   latest.value?.room === props.access.roomIdentifier ? latest.value.joinRequest : props.access.joinRequest ?? null);
-const joinState = computed(() => resolveJoinCardState(joinRequest.value, props.now));
+// A non-member gets a focus room's refusal with no room name: its main room takes the request.
+const mainRoomOnly = computed(() =>
+  mainRoomOnlyAnswer.value === props.access.roomIdentifier
+  || (isFocusRoomIdentifier(props.access.roomIdentifier) && !props.access.displayName && !props.access.joinRequest));
+const joinState = computed(() => resolveJoinCardState(joinRequest.value, props.now, mainRoomOnly.value));
 const disabled = computed(() => props.busy || action.value !== null);
 const askedLabel = computed(() =>
   joinState.value.kind === "pending" ? joinAskedLabel(joinState.value.askedAt, props.now) : "");
@@ -140,6 +152,8 @@ async function ask(): Promise<void> {
       emit("refresh-room");
     } else if (result.code === "ROOM_JOIN_REQUEST_COOLDOWN" && result.joinRequest) {
       latest.value = { room, joinRequest: result.joinRequest };
+    } else if (result.code === "ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY") {
+      mainRoomOnlyAnswer.value = room;
     } else {
       error.value = result.status === 429
         ? "Too many requests. Wait a minute, then ask again."
