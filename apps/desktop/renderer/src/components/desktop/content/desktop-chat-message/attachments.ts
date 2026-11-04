@@ -77,30 +77,20 @@ export function inlineDemoFrameHeight(contentHeight: number | null): number {
   return Math.min(INLINE_DEMO_MAX_HEIGHT, Math.max(INLINE_DEMO_MIN_HEIGHT, Math.round(contentHeight)));
 }
 
-/** How long a click or Tab key press counts as the reason a demo took focus. */
-export const INLINE_DEMO_FOCUS_INTENT_MS = 1_000;
+/** How soon after an element loses focus a refused demo may hand it back. */
+export const INLINE_DEMO_FOCUS_RESTORE_MS = 1_000;
 
-export interface InlineDemoFocusFacts {
-  /** `performance.now()` when the focus event arrived. */
-  now: number;
-  /** When the person last pressed a pointer button on the demo, if ever. */
-  pointerDownAt: number | null;
-  /** When the person last pressed Tab, if ever. */
-  tabKeyAt: number | null;
-  /** The person already gave the demo focus; the window coming back may focus it again. */
-  holdsFocus: boolean;
-}
-
-/** True when `at` is not in the future and at most the focus window before `now`. */
-export function withinInlineDemoFocusWindow(now: number, at: number | null): boolean {
-  return at !== null && now - at >= 0 && now - at <= INLINE_DEMO_FOCUS_INTENT_MS;
-}
-
-/** A demo takes focus only because the person just clicked it or tabbed to it. */
-export function inlineDemoMayTakeFocus(facts: InlineDemoFocusFacts): boolean {
-  return facts.holdsFocus
-    || withinInlineDemoFocusWindow(facts.now, facts.pointerDownAt)
-    || withinInlineDemoFocusWindow(facts.now, facts.tabKeyAt);
+/**
+ * When main refuses a demo's focus, the element that lost focus to it gets focus
+ * back: only if it is still in the page and lost focus no more than a second ago.
+ */
+export function inlineDemoFocusToRestore<T extends { isConnected: boolean }>(
+  left: { element: T; at: number } | null,
+  now: number,
+): T | null {
+  if (!left?.element.isConnected) return null;
+  const age = now - left.at;
+  return age >= 0 && age <= INLINE_DEMO_FOCUS_RESTORE_MS ? left.element : null;
 }
 
 export type InlineDemoStopReason = Extract<DesktopInlineHtmlDemoEvent, { type: "stopped" }>["reason"];

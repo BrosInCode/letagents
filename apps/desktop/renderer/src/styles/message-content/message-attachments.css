@@ -136,6 +136,8 @@
 .room-inline-demo-body {
   position: relative;
   overflow: hidden;
+  /* The height is the page's viewport, so the border goes outside it. */
+  box-sizing: content-box;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   background: var(--bg-card);

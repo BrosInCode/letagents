@@ -30,7 +30,6 @@
     <div
       class="room-inline-demo-body"
       :style="{ height: `${frameHeight}px` }"
-      @pointerdown.capture="notePointerDown"
     >
       <webview
         v-if="lease"
@@ -43,8 +42,6 @@
         @render-process-gone="onViewGone"
         @did-fail-load="onLoadFailed"
         @destroyed="onViewDestroyed"
-        @focus="onViewFocus"
-        @blur="onViewBlur"
       />
       <div
         v-if="statusText"
@@ -69,10 +66,9 @@ import type {
 import {
   htmlDemoErrorText,
   inlineDemoFrameHeight,
+  inlineDemoFocusToRestore,
   inlineDemoMayRestart,
-  inlineDemoMayTakeFocus,
   inlineDemoStoppedText,
-  withinInlineDemoFocusWindow,
   type InlineDemoStopReason,
 } from "./attachments";
 import { inlineDemoEvents } from "./inline-demo-events";
@@ -279,12 +275,18 @@ function scheduleHeightSettle(): void {
 }
 
 function handleDemoEvent(event: DesktopInlineHtmlDemoEvent): void {
-  if (event.type === "height") {
-    heightState.value = reportInlineDemoHeight(heightState.value, event.height, performance.now());
-    scheduleHeightSettle();
-    markRunning();
-  } else {
-    markStopped(event.reason);
+  switch (event.type) {
+    case "height":
+      heightState.value = reportInlineDemoHeight(heightState.value, event.height, performance.now());
+      scheduleHeightSettle();
+      markRunning();
+      break;
+    case "stopped":
+      markStopped(event.reason);
+      break;
+    case "focus-refused":
+      giveFocusBack();
+      break;
   }
 }
 
@@ -335,20 +337,10 @@ function outermostScroller(element: HTMLElement): HTMLElement | null {
   return found;
 }
 
-// A demo takes focus only when the person clicks it or tabs to it. The webview's
-// focus event is the only sign that a guest page grabbed focus, so it is judged here.
-let pointerDownAt: number | null = null;
-let tabKeyAt: number | null = null;
-let holdsFocus = false;
+// Main refuses a demo's focus when the person did not click or tab into it. Input
+// inside a webview never reaches this page, so only main can tell. Putting focus
+// back needs the element that lost it to the demo.
 let leftFocus: { element: HTMLElement; at: number } | null = null;
-
-function notePointerDown(): void {
-  pointerDownAt = performance.now();
-}
-
-function noteKeyDown(event: KeyboardEvent): void {
-  if (event.key === "Tab") tabKeyAt = performance.now();
-}
 
 function noteFocusOut(event: FocusEvent): void {
   if (event.target instanceof HTMLElement && event.target !== view.value) {
@@ -356,22 +348,14 @@ function noteFocusOut(event: FocusEvent): void {
   }
 }
 
-function onViewFocus(): void {
-  const now = performance.now();
-  if (inlineDemoMayTakeFocus({ now, pointerDownAt, tabKeyAt, holdsFocus })) {
-    holdsFocus = true;
-    return;
-  }
-  view.value?.blur();
-  if (leftFocus?.element.isConnected && withinInlineDemoFocusWindow(now, leftFocus.at)) {
-    leftFocus.element.focus({ preventScroll: true });
-  }
-}
-
-function onViewBlur(): void {
-  // Switching away from the window leaves the webview as the active element; a
-  // move to another element does not.
-  if (document.activeElement !== view.value) holdsFocus = false;
+function giveFocusBack(): void {
+  const demo = view.value;
+  if (!demo) return;
+  const holder = document.activeElement;
+  demo.blur();
+  // Someone who already moved on to another element keeps it.
+  if (holder && holder !== demo && holder !== document.body) return;
+  inlineDemoFocusToRestore(leftFocus, performance.now())?.focus({ preventScroll: true });
 }
 
 watch(() => props.href, reload);
@@ -391,7 +375,6 @@ function observe(): void {
 }
 
 onMounted(() => {
-  document.addEventListener("keydown", noteKeyDown, true);
   document.addEventListener("focusout", noteFocusOut, true);
   document.addEventListener("visibilitychange", syncOnScreen);
   observe();
@@ -417,7 +400,6 @@ onActivated(() => {
 
 onBeforeUnmount(() => {
   observer?.disconnect();
-  document.removeEventListener("keydown", noteKeyDown, true);
   document.removeEventListener("focusout", noteFocusOut, true);
   document.removeEventListener("visibilitychange", syncOnScreen);
   stopRun();

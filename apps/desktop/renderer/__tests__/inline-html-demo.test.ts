@@ -2,12 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  INLINE_DEMO_FOCUS_INTENT_MS,
+  INLINE_DEMO_FOCUS_RESTORE_MS,
+  inlineDemoFocusToRestore,
   inlineDemoFrameHeight,
   inlineDemoMayRestart,
-  inlineDemoMayTakeFocus,
   inlineDemoStoppedText,
-  type InlineDemoFocusFacts,
 } from "../src/components/desktop/content/desktop-chat-message/attachments";
 import {
   dropPendingInlineDemoHeight,
@@ -134,39 +133,34 @@ describe("inline demo frame height", () => {
   });
 });
 
-describe("inline demo focus guard", () => {
-  const facts = (overrides: Partial<InlineDemoFocusFacts>): InlineDemoFocusFacts => ({
-    now: 10_000,
-    pointerDownAt: null,
-    tabKeyAt: null,
-    holdsFocus: false,
-    ...overrides,
+describe("inline demo focus hand-back", () => {
+  const left = (overrides: Partial<{ isConnected: boolean; at: number }> = {}) => ({
+    element: { isConnected: overrides.isConnected ?? true },
+    at: overrides.at ?? 9_900,
   });
 
-  it("refuses focus the person did not ask for", () => {
-    assert.equal(inlineDemoMayTakeFocus(facts({})), false);
-    assert.equal(inlineDemoMayTakeFocus(facts({ pointerDownAt: 4_000, tabKeyAt: 5_000 })), false);
+  it("returns the element that lost focus a moment ago", () => {
+    const candidate = left();
+    assert.equal(inlineDemoFocusToRestore(candidate, 10_000), candidate.element);
+    assert.equal(inlineDemoFocusToRestore(left({ at: 10_000 }), 10_000)?.isConnected, true);
   });
 
-  it("allows focus right after a click or a Tab key press", () => {
-    assert.equal(inlineDemoMayTakeFocus(facts({ pointerDownAt: 9_900 })), true);
-    assert.equal(inlineDemoMayTakeFocus(facts({ tabKeyAt: 9_950 })), true);
-    assert.equal(inlineDemoMayTakeFocus(facts({ pointerDownAt: 10_000 })), true);
+  it("gives back nothing when no element lost focus", () => {
+    assert.equal(inlineDemoFocusToRestore(null, 10_000), null);
   });
 
-  it("allows focus for exactly one second after the input and not after", () => {
-    assert.equal(INLINE_DEMO_FOCUS_INTENT_MS, 1_000);
-    assert.equal(inlineDemoMayTakeFocus(facts({ pointerDownAt: 9_000 })), true);
-    assert.equal(inlineDemoMayTakeFocus(facts({ pointerDownAt: 8_999 })), false);
-    assert.equal(inlineDemoMayTakeFocus(facts({ tabKeyAt: 8_999 })), false);
+  it("gives back nothing when the element left the page", () => {
+    assert.equal(inlineDemoFocusToRestore(left({ isConnected: false }), 10_000), null);
   });
 
-  it("does not trust an input time that is in the future", () => {
-    assert.equal(inlineDemoMayTakeFocus(facts({ pointerDownAt: 10_001 })), false);
+  it("allows exactly one second after the focus left, and not after", () => {
+    assert.equal(INLINE_DEMO_FOCUS_RESTORE_MS, 1_000);
+    assert.notEqual(inlineDemoFocusToRestore(left({ at: 9_000 }), 10_000), null);
+    assert.equal(inlineDemoFocusToRestore(left({ at: 8_999 }), 10_000), null);
   });
 
-  it("lets the window hand focus back to a demo the person already focused", () => {
-    assert.equal(inlineDemoMayTakeFocus(facts({ holdsFocus: true })), true);
+  it("does not trust a time in the future", () => {
+    assert.equal(inlineDemoFocusToRestore(left({ at: 10_001 }), 10_000), null);
   });
 });
 
@@ -213,6 +207,17 @@ describe("inline demo event hub", () => {
 
     assert.deepEqual(seenByA, [{ type: "stopped", url: "letagents-demo://a/", reason: "crashed" }]);
     assert.deepEqual(seenByB, [height("letagents-demo://b/", 300)]);
+  });
+
+  it("routes a focus-refused event to the card that holds its URL", () => {
+    const channel = fakeChannel();
+    const events = createInlineDemoEvents(channel.subscribe);
+    const seen: string[] = [];
+    events.register("letagents-demo://a/", (event) => seen.push(`a:${event.type}`));
+    events.register("letagents-demo://b/", (event) => seen.push(`b:${event.type}`));
+
+    channel.listener?.({ type: "focus-refused", url: "letagents-demo://b/" });
+    assert.deepEqual(seen, ["b:focus-refused"]);
   });
 
   it("stops sending to a card that unregistered, and a second unregister does nothing", () => {
