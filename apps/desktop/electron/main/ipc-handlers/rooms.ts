@@ -10,13 +10,22 @@ import { reportDesktopRoomTyping } from "../rooms/typing.js";
 import { getDesktopPullRequestDiff } from "../rooms/pull-request-diff.js";
 import { getDesktopMessageReactions, setDesktopMessageReaction } from "../rooms/reactions.js";
 import { searchDesktopRoomMessages } from "../rooms/search.js";
+import {
+  decideDesktopRoomJoinRequest,
+  listDesktopAccountRoomJoinRequests,
+  listDesktopRoomJoinRequests,
+  listDesktopRoomMembers,
+  removeDesktopRoomMember,
+  requestDesktopRoomJoin,
+  setDesktopRoomMemberRole,
+} from "../rooms/members.js";
 import { getAccountActivityState, restartAccountActivityStream, stopAccountActivityStream } from "../account-activity-stream.js";
 import { getDesktopGitHubEventFilter, getDesktopRoomAgentGuidelines, setDesktopGitHubEventFilter, setDesktopRoomAgentGuidelines } from "../rooms/room-settings.js";
 import { getDesktopRoomNotificationPreference, listDesktopRoomNotificationPreferences, setDesktopRoomNotificationPreference } from "../rooms/notification-preferences.js";
 import type { RoomNotificationPreferenceChange } from "../../../../../shared/room-notification-preferences.mjs";
 import { cancelDesktopRoomWakeRule, getDesktopRoomWakeRules, restoreDesktopRoomWakeRule } from "../rooms/wake-rules.js";
 import { getDesktopNeedsYou, getDesktopNeedsYouRoom, getDesktopKnowledge, createDesktopKnowledge, reviseDesktopKnowledge, getDesktopMemoryHistory } from "../rooms/knowledge.js";
-import type { IpcMain } from "electron";
+import type { IpcMain, IpcMainInvokeEvent } from "electron";
 
 import type {
   DesktopAccountRoomActionResult,
@@ -31,6 +40,7 @@ import type {
   DesktopGitHubEventsQuery,
   DesktopGitHubIntegrationActionResult,
   DesktopGitHubIntegrationStatus,
+  DesktopInlineHtmlDemoLease,
   DesktopInviteRoomCreation,
   DesktopLocalChatSyncResult,
   DesktopLocalRoomMutationResult,
@@ -73,6 +83,7 @@ import {
   stageChosenDesktopAttachments,
   stageDroppedDesktopAttachmentContents,
 } from "../attachments.js";
+import { prepareInlineHtmlDemo, releaseInlineHtmlDemo } from "../attachments/html-demo-inline.js";
 import { openHtmlDemo } from "../attachments/html-demo-window.js";
 import { getMainWindow } from "../window.js";
 import {
@@ -308,8 +319,22 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle(
     "desktop:room:open-html-demo",
     async (event, href: unknown, fileName: unknown, senderLabel: unknown): Promise<void> => {
-      if (event.sender !== getMainWindow()?.webContents) throw new Error("Demos open only from the main window.");
+      assertHtmlDemoSender(event);
       await openHtmlDemo({ href, fileName, senderLabel });
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:prepare-inline-html-demo",
+    async (event, href: unknown): Promise<DesktopInlineHtmlDemoLease> => {
+      assertHtmlDemoSender(event);
+      return prepareInlineHtmlDemo(href);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:release-inline-html-demo",
+    async (event, url: unknown): Promise<void> => {
+      assertHtmlDemoSender(event);
+      releaseInlineHtmlDemo(url);
     },
   );
   targetIpcMain.handle(
@@ -496,6 +521,14 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     setDesktopMessageReaction(roomIdentifier, messageId, emoji, reacted));
   targetIpcMain.handle("desktop:room:search-messages", (_event, roomIdentifier: string, query: string, beforeMessageId?: string | null) =>
     searchDesktopRoomMessages(roomIdentifier, query, beforeMessageId));
+  targetIpcMain.handle("desktop:room-members:list", (_event, roomIdentifier: string) => listDesktopRoomMembers(roomIdentifier));
+  targetIpcMain.handle("desktop:room-members:remove", (_event, roomIdentifier: string, accountId: string) => removeDesktopRoomMember(roomIdentifier, accountId));
+  targetIpcMain.handle("desktop:room-members:set-role", (_event, roomIdentifier: string, accountId: string, role) => setDesktopRoomMemberRole(roomIdentifier, accountId, role));
+  targetIpcMain.handle("desktop:room-members:request-join", (_event, roomIdentifier: string) => requestDesktopRoomJoin(roomIdentifier));
+  targetIpcMain.handle("desktop:room-members:list-join-requests", (_event, roomIdentifier: string) => listDesktopRoomJoinRequests(roomIdentifier));
+  targetIpcMain.handle("desktop:room-members:decide-join-request", (_event, roomIdentifier: string, requestId: string, decision) =>
+    decideDesktopRoomJoinRequest(roomIdentifier, requestId, decision));
+  targetIpcMain.handle("desktop:room-members:list-account-join-requests", () => listDesktopAccountRoomJoinRequests());
   targetIpcMain.handle("desktop:room:get-account-activity", () => getAccountActivityState());
   targetIpcMain.handle("desktop:room:restart-account-activity", () => restartAccountActivityStream());
   targetIpcMain.handle("desktop:room:stop-account-activity", () => stopAccountActivityStream());
@@ -650,4 +683,9 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     ): Promise<DesktopLocalChatSyncResult> =>
       syncDesktopLocalChatRoom(roomIdentifier),
   );
+}
+
+/** Demos run only for the app's own window, never for a demo page or another window. */
+function assertHtmlDemoSender(event: IpcMainInvokeEvent): void {
+  if (event.sender !== getMainWindow()?.webContents) throw new Error("Demos open only from the main window.");
 }

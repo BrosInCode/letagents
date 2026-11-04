@@ -1,31 +1,24 @@
 import electron from "electron";
-import type { BrowserWindow as ElectronBrowserWindow, Session } from "electron";
+import type { BrowserWindow as ElectronBrowserWindow } from "electron";
 import { randomUUID } from "node:crypto";
 
 import { htmlDemoProtocolScheme } from "../paths.js";
+import { assertHtmlDemoAttachmentHref, htmlDemoWindowTitle, MAX_OPEN_HTML_DEMOS } from "./html-demo-policy.js";
 import {
-  assertHtmlDemoAttachmentHref,
-  HTML_DEMO_PARTITION,
-  HTML_DEMO_RESPONSE_HEADERS,
-  htmlDemoWindowTitle,
-  isAllowedHtmlDemoRequest,
-  MAX_OPEN_HTML_DEMOS,
-  readHtmlDemoBytes,
-} from "./html-demo-policy.js";
-import { attachmentResponse } from "./protocol.js";
+  htmlDemoContents,
+  htmlDemoDocuments,
+  htmlDemoSession,
+  loadHtmlDemoAttachment,
+  lockHtmlDemoContents,
+} from "./html-demo-session.js";
 
-const { BrowserWindow, session } = electron as typeof import("electron");
+const { BrowserWindow } = electron as typeof import("electron");
 
 /** A page that never paints still gets a window the person can see and close. */
 const SHOW_DEMO_WINDOW_AFTER_MS = 1500;
 
-/** Demo documents by window host; a host exists only while its window is open. */
-const demoDocuments = new Map<string, string>();
 const demoWindowsByHref = new Map<string, ElectronBrowserWindow>();
-/** The demo pages' own web contents; DevTools opened on a demo is not one of them. */
-const demoContentsIds = new Set<number>();
 const pendingHrefs = new Set<string>();
-let demoSession: Promise<Session> | null = null;
 
 /** Open a room attachment as an HTML demo, or focus the window that already shows it. */
 export async function openHtmlDemo(input: {
@@ -46,12 +39,7 @@ export async function openHtmlDemo(input: {
   }
   pendingHrefs.add(href);
   try {
-    const response = await attachmentResponse(href);
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      throw new Error(`The demo file could not be loaded (HTTP ${response.status}).`);
-    }
-    const html = new TextDecoder("utf-8").decode(await readHtmlDemoBytes(response));
+    const { html } = await loadHtmlDemoAttachment(href);
     const demoWindow = await openHtmlDemoWindow({ html, title: htmlDemoWindowTitle(input.fileName, input.senderLabel) });
     demoWindowsByHref.set(href, demoWindow);
     demoWindow.once("closed", () => demoWindowsByHref.delete(href));
@@ -70,7 +58,7 @@ export async function openHtmlDemoWindow(input: { html: string; title: string })
   const host = randomUUID().replaceAll("-", "");
   const origin = `${htmlDemoProtocolScheme}://${host}`;
   const ses = await htmlDemoSession();
-  demoDocuments.set(host, input.html);
+  htmlDemoDocuments.set(host, input.html);
 
   const demoWindow = new BrowserWindow({
     width: 1100,
@@ -98,19 +86,8 @@ export async function openHtmlDemoWindow(input: { html: string; title: string })
   });
   const contents = demoWindow.webContents;
   const contentsId = contents.id;
-  demoContentsIds.add(contentsId);
-  contents.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");
-  contents.setWindowOpenHandler(() => ({ action: "deny" }));
-  contents.on("will-navigate", (event) => event.preventDefault());
-  contents.on("will-redirect", (event) => event.preventDefault());
-  contents.on("will-frame-navigate", (event) => {
-    if (!event.isMainFrame) event.preventDefault();
-  });
-  contents.on("will-attach-webview", (event) => event.preventDefault());
-  // A demo cannot keep its window open with a beforeunload prompt.
-  contents.on("will-prevent-unload", (event) => event.preventDefault());
-  // A demo cannot move or resize its window to cover the app or hide off-screen.
-  contents.on("content-bounds-updated", (event) => event.preventDefault());
+  htmlDemoContents.set(contentsId, host);
+  lockHtmlDemoContents(contents);
   // The title bar is the one line the demo cannot draw, so it keeps saying what this is.
   demoWindow.on("page-title-updated", (event) => event.preventDefault());
   // A page that hangs its renderer cannot hold the window (or a demo slot) open.
@@ -126,49 +103,11 @@ export async function openHtmlDemoWindow(input: { html: string; title: string })
   });
   demoWindow.once("closed", () => {
     clearTimeout(showTimer);
-    demoDocuments.delete(host);
-    demoContentsIds.delete(contentsId);
+    htmlDemoDocuments.delete(host);
+    htmlDemoContents.delete(contentsId);
     void ses.clearStorageData({ origin }).catch(() => undefined);
   });
 
   void demoWindow.loadURL(`${origin}/`).catch(() => undefined);
   return demoWindow;
-}
-
-function htmlDemoSession(): Promise<Session> {
-  // A failed setup is not cached, so the next open tries again.
-  demoSession ??= prepareHtmlDemoSession().catch((error: unknown) => {
-    demoSession = null;
-    throw error;
-  });
-  return demoSession;
-}
-
-async function prepareHtmlDemoSession(): Promise<Session> {
-  const ses = session.fromPartition(HTML_DEMO_PARTITION);
-  // Connections that skip the request filter (WebRTC over TCP, preconnect) meet a
-  // closed port. Set first: without it no demo opens, and nothing below is
-  // registered yet, so the next open can set the session up again.
-  try {
-    await ses.setProxy({ proxyRules: "http://127.0.0.1:9", proxyBypassRules: "<-loopback>" });
-  } catch {
-    throw new Error("Demos cannot open because their network block could not be set up.");
-  }
-  ses.protocol.handle(htmlDemoProtocolScheme, (request) => {
-    const url = new URL(request.url);
-    const html = url.pathname === "/" ? demoDocuments.get(url.hostname) : undefined;
-    return html === undefined
-      ? new Response("This demo is closed.", { status: 404, headers: HTML_DEMO_RESPONSE_HEADERS })
-      : new Response(html, { headers: HTML_DEMO_RESPONSE_HEADERS });
-  });
-  ses.webRequest.onBeforeRequest((details, callback) => {
-    // A request without a known non-demo sender counts as the demo's own.
-    const fromDemo = details.webContentsId === undefined || demoContentsIds.has(details.webContentsId);
-    callback({ cancel: !isAllowedHtmlDemoRequest(details.url, { fromDemo }) });
-  });
-  ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-  ses.setPermissionCheckHandler(() => false);
-  ses.setDevicePermissionHandler(() => false);
-  ses.on("will-download", (event) => event.preventDefault());
-  return ses;
 }

@@ -12,6 +12,7 @@ import { useAgentAttention } from "../useAgentAttention";
 import { useInboxRoomFilter } from "../useInboxRoomFilter";
 import { desktopIpc } from "../../ipc/index.js";
 import { roomNotificationPreferences } from "../useRoomNotificationPreferences";
+import { roomJoinRequests } from "../useRoomJoinRequests";
 import type { AppContextOf } from "./context";
 import { composerSuggestedReplyKey, roomSuggestedReply } from "../../components/desktop/content/room-chat/composer-suggested-reply";
 
@@ -71,10 +72,14 @@ export function useAppInboxActions(context: unknown) {
   /** A My work row opens its card, or a linked thread, in its room as an Inbox item does. */
   function openMyWorkCard(roomIdentifier: string, taskId: string) { void openNeedsYouRoom({ roomIdentifier, taskId }); }
   function openMyWorkThread(roomIdentifier: string, threadRootId: string) { void openNeedsYouRoom({ roomIdentifier, threadRootId }); }
-  function openNeedsYou(room?: string) { app.openInboxRooms(room); inboxSection.value = 'needs-you'; app.activeEntry.value = needsYouEntry; void refreshNeedsYou(); }
+  // Opening the Inbox reads join requests by itself (useAppRoomAttention); only a reopen reads them here.
+  function openNeedsYou(room?: string) { const wasOpen = app.activeEntry.value.type === 'inbox'; app.openInboxRooms(room); inboxSection.value = 'needs-you'; app.activeEntry.value = needsYouEntry; void (wasOpen ? refreshInbox() : refreshNeedsYou()); }
   async function refreshNeedsYou() { await Promise.all([app.loadNeedsYou(app.activeEntry.value.type === 'inbox'), app.refreshRentalRequestCount(), app.activeEntry.value.type === 'inbox' ? refreshMessageReminders() : undefined]); await app.refreshAgentApprovals(); }
+  // Join requests have no live update and stay off the one-minute Needs you
+  // check: they are read when the Inbox opens or refreshes (and on focus).
+  async function refreshInbox() { await Promise.all([refreshNeedsYou(), roomJoinRequests.refresh()]); }
   return {
-    openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou,
+    openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou, refreshInbox,
     openMyWork, openMyWorkCard, openMyWorkThread,
   };
 }
@@ -92,7 +97,9 @@ export function useAppInboxState(context: unknown) {
   provide(composerSuggestedReplyKey, (roomIdentifier) => roomSuggestedReply(needsYouData.value, roomIdentifier));
   const { items: agentAttentionItems, refreshApprovals: refreshAgentApprovals, approvalsReady } = useAgentAttention(needsYouData);
   Object.assign(app, { refreshAgentApprovals });
-  const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value + agentAttentionItems.value.length);
+  // Requests to join the rooms you admin wait on you like any other request.
+  const inboxJoinRequests = roomJoinRequests.items;
+  const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value + agentAttentionItems.value.length + inboxJoinRequests.value.length);
   // A room opened from the Inbox loads in place; if that load fails, say so.
   const inboxRoomOpens = inboxRoomOpenReporter((error) => app.pushActionToast(
     `Couldn't load this room. ${safeUserVisibleErrorDetail(error, "Try again from the sidebar.")}`, "error"));
@@ -104,7 +111,7 @@ export function useAppInboxState(context: unknown) {
   return {
     needsYouData, needsYouLoading, needsYouError, humanRequestCount, loadNeedsYou,
     refreshNeedsYouRoom, resetNeedsYou, mergeInboxThreads, agentAttentionItems,
-    refreshAgentApprovals, approvalsReady, needsYouCount, inboxRoomOpens, inboxStorageKey,
+    refreshAgentApprovals, approvalsReady, needsYouCount, inboxJoinRequests, inboxRoomOpens, inboxStorageKey,
     inboxRooms, openInboxRooms, chooseInboxRooms, reloadInboxRooms, pruneInboxRooms,
   };
 }
@@ -121,6 +128,11 @@ export function useAppRoomAttention(context: unknown) {
     account: () => inboxStorageKey.value,
     activeRoom: () => activeEntry.value.type === "room" && !selectedNeedsAccess.value ? selectedRoomInfo.value.identifier : null,
     inboxRooms: () => activeEntry.value.type === "inbox" && inboxSection.value === "needs-you" ? inboxRooms.value : null,
+  });
+
+  // Every way into the Inbox (the sidebar, a notification, back from Settings) reads join requests.
+  watch(() => activeEntry.value.type === "inbox", (open) => {
+    if (open && authStatus.value?.authenticated) void roomJoinRequests.refresh();
   });
 
   watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null, (account) => {

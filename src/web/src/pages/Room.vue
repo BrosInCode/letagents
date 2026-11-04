@@ -17,6 +17,7 @@
       @close="drawerOpen = false"
       @themeChange="theme = $event"
       @openRules="openRulesFromDrawer"
+      @left="handleLeftRoom"
     />
 
     <RoomHeader
@@ -30,6 +31,8 @@
       :canRename="room?.role === 'admin'"
       :showEventsTab="githubEventsSupported"
       :gitRoom="room?.gitRoom || null"
+      :accessLocked="Boolean(accessRefusal)"
+      :waitingForGitHub="accessCheckUnavailable && !isConnected"
       @toggleDrawer="drawerOpen = !drawerOpen"
       @update:activeTab="handleActiveTabChange"
       @update:searchQuery="searchQuery = $event"
@@ -43,11 +46,23 @@
       @close="rulesBoardOpen = false"
     />
 
+    <RoomAccessRequest
+      v-if="connectionState === 'error' && !isConnected && accessRefusal && joinError"
+      :key="`${joinError.roomId}:${accessRefusal}`"
+      :refusal="accessRefusal"
+      :roomId="joinError.roomId || String(route.params.roomId || '')"
+      :displayName="joinError.displayName"
+      :initialRequest="joinError.joinRequest"
+      :login="auth.user.value?.login || null"
+      @retry="retryJoin"
+    />
+
     <RoomConnectionError
-      v-if="connectionState === 'error' && !isConnected"
+      v-else-if="connectionState === 'error' && !isConnected"
       :title="joinErrorTitle"
       :body="joinErrorBody"
-      :showGitHubSignIn="showGitHubSignIn"
+      :showGitHubSignIn="showGitHubSignIn || offerSignInAgain"
+      :note="repoAccessRetryNote"
       @signIn="handleSignIn"
       @retry="retryJoin"
     />
@@ -195,6 +210,7 @@ import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
 import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
 import { messageThreadParentId } from '@/components/room/messageThreading'
+import RoomAccessRequest from './room/RoomAccessRequest.vue'
 import RoomConnectionError from './room/RoomConnectionError.vue'
 import RoomAuthGate from './room/RoomAuthGate.vue'
 import RoomMobileNav from './room/RoomMobileNav.vue'
@@ -207,6 +223,8 @@ import { providePersonWork } from '@/components/room/personWork'
 import { useFocusRoomNavigation } from './room/useFocusRoomNavigation'
 import { useRoomImages } from './room/useRoomImages'
 import { useRoomPresentation } from './room/useRoomPresentation'
+import { useRepoAccessRetry } from './room/useRepoAccessRetry'
+import { formatJoinRequestTime } from '@/composables/room/joinRequestView'
 import { useRoomTabs } from './room/useRoomTabs'
 import { useRoomViewport } from './room/useRoomViewport'
 import { useRoomTaskHandlers } from './room/useRoomTaskHandlers'
@@ -373,6 +391,8 @@ const {
   githubEventsRepository,
   focusSettings,
   showGitHubSignIn,
+  accessRefusal,
+  accessCheckUnavailable,
   joinErrorTitle,
   joinErrorBody,
   stalePromptTaskStates,
@@ -382,6 +402,16 @@ const {
   joinError,
   connectionState,
   authUser: auth.user,
+})
+const { nextRetryAt: repoAccessRetryAt, failedRetries: repoAccessFailedRetries } = useRepoAccessRetry({
+  joinError, roomOpened: messagesLoaded, retry: retryJoin,
+})
+// GitHub also answers this way for a revoked or expired sign-in, which a new sign-in fixes.
+const offerSignInAgain = computed(() => accessCheckUnavailable.value && repoAccessFailedRetries.value >= 2)
+const repoAccessRetryNote = computed(() => {
+  if (!accessCheckUnavailable.value) return ''
+  const next = repoAccessRetryAt.value === null ? '' : `Trying again ${formatJoinRequestTime(repoAccessRetryAt.value, Date.now())}.`
+  return offerSignInAgain.value ? `${next} If this keeps happening, sign in with GitHub again.`.trim() : next
 })
 provideRoomMessageLinkPreviews(useRoomMessageLinkPreviews(computed(() => room.value?.identifier || ''), computed(() => getGitHubSupportIdentifier(room.value))))
 const {
@@ -471,9 +501,18 @@ async function handleRename() {
   }
 }
 
-async function retryJoin() {
+async function retryJoin(): Promise<boolean> {
   const roomId = route.params.roomId as string
-  if (roomId) await joinRoom(roomId)
+  return roomId ? joinRoom(roomId) : false
+}
+
+async function handleLeftRoom(roomName: string) {
+  drawerOpen.value = false
+  rulesBoardOpen.value = false
+  selectedReply.value = null
+  leaveRoom()
+  toast.info(`You left ${roomName}.`)
+  await router.push('/')
 }
 
 async function handleSignIn() {

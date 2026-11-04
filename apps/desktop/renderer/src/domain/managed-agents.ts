@@ -705,7 +705,8 @@ export function supervisedPermissionProfilePresentation(
   if (profile.id === "auto_review" && providerId === "codex") {
     return { ...profile, status: "available",
       description: "Lets Codex decide, without asking you, when a command may go beyond its working folder.",
-      detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project." };
+      detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project."
+        + (isWindowsPlatform(context?.platform) ? "" : " Its commands cannot read your Codex sign-in file, even with Codex's approval.") };
   }
   if (profile.id === "read_only" && providerId === "codex") {
     if (isWindowsPlatform(context?.platform)) return { ...profile, status: "gated", detail: CODEX_READ_ONLY_WINDOWS };
@@ -732,7 +733,8 @@ export function supervisedPermissionProfilePresentation(
     ...profile,
     status: "available",
     description: "Requires approval before Codex can run write-capable commands or apply file changes.",
-    detail: "Starts with read-only file access and no network access. Requests approval when it needs more access.",
+    detail: "Starts with read-only file access and no network access. Requests approval when it needs more access."
+      + (isWindowsPlatform(context?.platform) ? "" : " Its commands cannot read your Codex sign-in file, even with your approval."),
   };
 }
 

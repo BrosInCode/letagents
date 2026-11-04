@@ -16,7 +16,9 @@ const ENDED_REASON = "the sign-in that registered it was revoked";
 export const RETIRE_WAKE_RULES_FOR_CREDENTIAL_SQL = `
   WITH retired AS (
     UPDATE agent_wake_rules
-       SET status = 'retired', ended_at = now(), updated_at = now(), ended_reason = '${ENDED_REASON}'
+       SET status = 'retired', ended_at = now(), updated_at = now(), ended_reason = '${ENDED_REASON}',
+           -- Retired for good: the sealed target and sender key are no longer needed.
+           delivery_target = NULL, delivery_bearer = NULL
      WHERE credential_kind = $1 AND credential_ref = $2
        AND status IN ('active', 'paused', 'pending_confirmation')
     RETURNING id
@@ -34,7 +36,8 @@ export async function retireWakeRulesForCredential(
   await executor.execute(sql`
     WITH retired AS (
       UPDATE agent_wake_rules
-         SET status = 'retired', ended_at = now(), updated_at = now(), ended_reason = ${ENDED_REASON}
+         SET status = 'retired', ended_at = now(), updated_at = now(), ended_reason = ${ENDED_REASON},
+             delivery_target = NULL, delivery_bearer = NULL
        WHERE credential_kind = ${kind} AND credential_ref = ${ref}
          AND status IN ('active', 'paused', 'pending_confirmation')
       RETURNING id

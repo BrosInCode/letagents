@@ -14,8 +14,9 @@ export function workerAwareToolServer(server: McpServer): McpServer {
       }
       return (name: string, description: string, schema: Record<string, unknown>, callback: (...args: any[]) => unknown) => {
         // assign_board_manager's session id names the target, not the caller.
+        // request_room_access asks for the account, which has no worker in that room yet.
         if (name === "register_agent_session" || name === "assign_board_manager"
-          || !schema.room_id) {
+          || name === "request_room_access" || !schema.room_id) {
           return (target.tool as any)(name, description, schema, callback);
         }
         return (target.tool as any)(name, description, {

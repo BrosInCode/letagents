@@ -35,6 +35,7 @@ import {
   type WakeWebhookLookup,
 } from "../wake-rules/webhook-url.js";
 import { makeTestCertificate } from "./wake-test-tls.js";
+import { wakeWebhookBearerHeader } from "../wake-rules/webhook-bearer.js";
 
 /** The refusal reason a URL gets (the caller only ever sees one generic answer). */
 function refusalOf(run: () => unknown): string {
@@ -464,4 +465,15 @@ test("room.message needs a webhook, lasts 30 days unless it sets a sooner end, a
   assert.throws(() => parseWakeRuleWebhook({ url: webhook.url, secret: "has spaces in it ok" }), /without spaces/);
   assert.throws(() => parseWakeRuleWebhook({ url: webhook.url, secret: webhook.secret, headers: {} }), /does not accept headers/);
   assert.throws(() => parseWakeRuleWebhook("https://hooks.example.com"), /object with url and secret/);
+});
+
+test("a webhook may carry the receiver's sender key: 8 to 512 visible ASCII characters, nothing that can break a header", () => {
+  const webhook = { url: "https://hooks.example.com/x", secret: "0123456789abcdef" };
+  assert.deepEqual(parseWakeRuleWebhook({ ...webhook, bearer: "crsr_0123456789abcdef" }), { ...webhook, bearer: "crsr_0123456789abcdef" });
+  assert.deepEqual(parseWakeRuleWebhook(webhook), webhook, "no bearer unless given");
+  assert.equal(parseWakeRuleWebhook({ ...webhook, bearer: "k".repeat(512) }).bearer?.length, 512);
+  for (const bearer of ["short", "k".repeat(513), "key\r\nX-Evil: 1", "key\nvalue12", "kéy-0123456789", "key with space", "", 12345678]) {
+    assert.throws(() => parseWakeRuleWebhook({ ...webhook, bearer }), /webhook.bearer must be 8 to 512 printable ASCII characters/, JSON.stringify(bearer));
+  }
+  assert.deepEqual(wakeWebhookBearerHeader("crsr_0123456789abcdef"), { Authorization: "Bearer crsr_0123456789abcdef" });
 });

@@ -107,6 +107,8 @@
         </div>
       </section>
 
+      <RoomMembers v-if="cloudRoom" :room-identifier="room.identifier" @summary="membersSummary = $event" />
+
       <section
         v-if="cloudRoom"
         class="room-settings-section"
@@ -364,11 +366,12 @@
 
 <script setup lang="ts">
 import RoomNotificationSettings from "./RoomNotificationSettings.vue";
-import { Bell, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, Ticket, X } from "@lucide/vue";
+import { Bell, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, Ticket, Users, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
 import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";
 import RoomConversationRouting from "./RoomConversationRouting.vue";
 import RoomTrackerFilters from "./RoomTrackerFilters.vue";
+import RoomMembers from "./RoomMembers.vue";
 import RoomExpressions from "./RoomExpressions.vue";
 import RoomReplyOrder from "./RoomReplyOrder.vue";
 import RoomHistorySummary from "./RoomHistorySummary.vue";
@@ -435,9 +438,11 @@ const replyOrderSummary = ref<string | null>(null);
 const guidelinesSummary = ref<string | null>(null);
 // Null while the Ticket filters block shows nothing (no filter and no tracker connection).
 const ticketsSummary = ref<string | null>(null);
+// Null while the Members block shows nothing (a server without members, or not a member).
+const membersSummary = ref<string | null>(null);
 const contentElement = ref<HTMLElement | null>(null);
 
-type SectionId = "general" | "conversation" | "tickets" | "guidelines" | "data" | "alerts" | "github";
+type SectionId = "general" | "members" | "conversation" | "tickets" | "guidelines" | "data" | "alerts" | "github";
 type StorageChoice = "inherit" | "cloud" | "local";
 interface SectionLink {
   id: SectionId;
@@ -646,6 +651,9 @@ const sections = computed<SectionLink[]>(() => {
   const soundsOn = Number(props.soundEnabled) + Number(props.notificationsEnabled);
   const all: Array<SectionLink | null> = [
     { id: "general", title: "General", icon: SlidersHorizontal, summary: null },
+    cloudRoom.value && membersSummary.value
+      ? { id: "members", title: "Members", icon: Users, summary: membersSummary.value }
+      : null,
     cloudRoom.value
       ? {
           id: "conversation",

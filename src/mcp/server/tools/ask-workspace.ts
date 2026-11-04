@@ -4,6 +4,7 @@ import { z } from "zod";
 import { roomScopedApiCall } from "../runtime.js";
 import { resolveTaskToolTarget } from "./tasks/context.js";
 import { jsonToolResponse, taskToolError } from "./tasks/response.js";
+import { roomAccessToolResponse } from "../runtime/room-access.js";
 
 /**
  * Code tools for an agent someone gave to another person's room (Ask for an
@@ -26,7 +27,7 @@ async function call(name: "files" | "read" | "search" | "proposals", body: Recor
     });
     return jsonToolResponse(response.result);
   } catch (error) {
-    return taskToolError(error instanceof Error ? error.message : String(error));
+    return roomAccessToolResponse(error) ?? taskToolError(error instanceof Error ? error.message : String(error));
   }
 }
 

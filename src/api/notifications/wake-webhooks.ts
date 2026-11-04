@@ -44,6 +44,7 @@ import {
   wakeWebhookHeaders,
 } from "../wake-rules/webhook-delivery.js";
 import { postWakeWebhook, type WakeWebhookSendResult } from "../wake-rules/webhook-url.js";
+import { wakeWebhookBearerBinding, wakeWebhookBearerHeader } from "../wake-rules/webhook-bearer.js";
 import { authorizeDesktopPushNotification, type DesktopPushAuthorizationDecision } from "./authorization.js";
 import { retryDelayMs } from "./delivery-policy.js";
 import { getPushDeliveryAccount } from "./push-account.js";
@@ -79,6 +80,7 @@ export interface ClaimedWakeWebhook {
   credential_kind: string | null;
   credential_ref: string | null;
   delivery_target: EncryptedCredentials | null;
+  delivery_bearer: EncryptedCredentials | null;
 }
 
 export { webhookOutcome, type WakeDeliveryOutcome };
@@ -160,7 +162,7 @@ export async function claimWakeWebhookDeliveries(
       SELECT claimed.id, claimed.rule_id, claimed.room_id, claimed.kind, claimed.purpose, claimed.message_number,
              claimed.sender, claimed.text_preview, claimed.attempt_count,
              rule.status AS rule_status, rule.agent_name, rule.confirm_expires_at, rule.expires_at,
-             rule.owner_account_id, rule.credential_kind, rule.credential_ref, rule.delivery_target,
+             rule.owner_account_id, rule.credential_kind, rule.credential_ref, rule.delivery_target, rule.delivery_bearer,
              room.display_name AS room_name
         FROM claimed
         INNER JOIN agent_wake_rules AS rule ON rule.id = claimed.rule_id
@@ -316,6 +318,17 @@ async function attempt(delivery: ClaimedWakeWebhook, deps: WakeWebhookDeliveryDe
     sent_at: now.toISOString(),
   });
   const headers = wakeWebhookHeaders({ deliveryId: delivery.id, timestamp, signature: signWakeWebhook(opened.secret, timestamp, body) });
+  if (delivery.delivery_bearer) {
+    // The receiver's sender key goes only to the rule's own pinned URL (no redirects are followed).
+    let sealed: Record<string, unknown>;
+    try {
+      sealed = deps.cipher.decrypt(delivery.delivery_bearer, wakeWebhookBearerBinding(delivery.rule_id, delivery.owner_account_id));
+    } catch {
+      return { kind: "failed", status: 0, error: "target_unreadable" };
+    }
+    if (typeof sealed.bearer !== "string") return { kind: "failed", status: 0, error: "target_unreadable" };
+    Object.assign(headers, wakeWebhookBearerHeader(sealed.bearer));
+  }
   let result: WakeWebhookSendResult;
   try {
     result = await deps.send({ url: opened.url, body, headers });

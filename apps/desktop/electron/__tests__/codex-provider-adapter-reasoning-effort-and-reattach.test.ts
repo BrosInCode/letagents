@@ -25,6 +25,8 @@ import {
   recordedByDaemon,
   effortReportedAsNone,
   FULL_ACCESS,
+  READ_ONLY_PROFILE,
+  APPROVAL_LEVELS_NAME_A_PROFILE,
 } from "./codex-provider-adapter.fixture.js";
 
 test("Codex resume reopens the exact native thread and preserves the same launch policy", async () => {
@@ -591,9 +593,11 @@ test("empty reattachment subscribes after first-turn checkpoint and never replay
     { failSubscription: false, status: "STOPPED" },
     { failSubscription: true, status: "completed" },
   ]) {
+    // An Ask before writes agent: its conversation is held to that level, so the launch is at that level too.
+    const askBeforeWrites = { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } };
     const harness = createHarness();
     const first = await new CodexProviderAdapter({ dependencies: harness.dependencies })
-      .spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+      .spawn(spawnRequest({ deliveryMode: "daemon_inbox", permissionProfileId: "ask_before_write", configurationRevision: 1, launchPolicy: askBeforeWrites }));
     const createRpcClient = harness.dependencies.createRpcClient;
     let materialized = false;
     let checkpointed = false;
@@ -623,8 +627,7 @@ test("empty reattachment subscribes after first-turn checkpoint and never replay
     };
     const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
     const attached = await adapter.attach({ workAttemptId: first.workAttemptId,
-      providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection,
-      launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } } });
+      providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection, launchPolicy: askBeforeWrites });
     assertProviderHandle(attached);
     const result = adapter.runRoomTurn(attached, { inboxItemId: "first-turn", actionId: "first-turn", sourceMessage: {}, activation: {} }, {
       checkpointTurnStarted: async () => { checkpointed = true; },
@@ -639,7 +642,9 @@ test("empty reattachment subscribes after first-turn checkpoint and never replay
     assert.equal(client.requests.filter(request => request.method === "turn/start").length, 1);
     assert.equal(client.permissionResponses.length, 0);
     const policy = requestByMethod(client, "turn/start").params as Record<string, unknown>;
-    assert.deepEqual(policy.sandboxPolicy, { type: "readOnly", networkAccess: false });
+    // The turn names the level's profile in place of its sandbox; on Windows, where there is no profile, the sandbox as before.
+    if (APPROVAL_LEVELS_NAME_A_PROFILE) assert.deepEqual([policy.permissions, policy.sandboxPolicy], [READ_ONLY_PROFILE, undefined]);
+    else assert.deepEqual(policy.sandboxPolicy, { type: "readOnly", networkAccess: false });
     assert.equal(client.listPendingRequests().length, 1);
   }
 });

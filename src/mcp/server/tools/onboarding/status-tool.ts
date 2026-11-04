@@ -83,7 +83,7 @@ function apiUrlHint(health: OnboardingApiHealth): string | null {
 function authHint(authenticated: boolean): string | null {
   return authenticated
     ? null
-    : "Public Git Rooms and ad-hoc rooms can be joined without auth. Private Git Rooms require start_device_auth, browser verification, then poll_device_auth to persist a LetAgents token.";
+    : "Every room needs a sign-in. Run start_device_auth, finish the browser verification, then run poll_device_auth to save a LetAgents token. After that, a public Git Room needs a role on its GitHub repository, a room without a repository needs membership (ask with request_room_access), and a private Git Room needs access to the repository.";
 }
 
 export function registerGetOnboardingStatusTool(server: McpServer): void {
@@ -135,6 +135,8 @@ export function registerGetOnboardingStatusTool(server: McpServer): void {
       let nextStep = "join_room";
       if (!storedAuth && pendingAuth) {
         nextStep = "poll_device_auth";
+      } else if (!authenticated) {
+        nextStep = "start_device_auth";
       } else if (savedCurrentRoom && !getCurrentRoom()) {
         nextStep = "resume_room_session";
       }

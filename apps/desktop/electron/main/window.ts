@@ -5,6 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import { installInlineHtmlDemoHost } from "./attachments/html-demo-inline.js";
 import { classifyLinkNavigation } from "./link-routing.js";
 import { openExternalWebUrl } from "./external-url.js";
 import { devServerUrl, electronMainDir, rendererDistPath } from "./paths.js";
@@ -98,8 +99,13 @@ export function createWindow(): void {
       nodeIntegration: false,
       sandbox: false,
       preload: join(electronMainDir, "preload.js"),
+      // Only for HTML demos inside messages. Safe because the inline demo host
+      // refuses every <webview> that is not a demo lease main made, and forces
+      // the locked demo preferences and session on the ones it lets in.
+      webviewTag: true,
     },
   });
+  installInlineHtmlDemoHost(mainWindow);
   mainWindow.on("close", (event) => {
     // Keep unread tracking alive while macOS leaves the app running in the Dock.
     if (process.platform !== "darwin" || quitting) return;

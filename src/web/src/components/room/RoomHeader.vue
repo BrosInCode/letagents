@@ -16,7 +16,7 @@
         </p>
         <p v-else :title="subtitle">{{ subtitle }}</p>
       </div>
-      <span v-if="connectionState !== 'live'" class="presence" :data-state="connectionState" role="status">{{ presenceLabel }}</span>
+      <span v-if="connectionState !== 'live'" class="presence" :data-state="accessLocked || waitingForGitHub ? 'idle' : connectionState" role="status">{{ presenceLabel }}</span>
     </div>
 
     <div class="header-navigation">
@@ -79,6 +79,10 @@ const props = defineProps<{
   canRename?: boolean
   showEventsTab?: boolean
   gitRoom?: GitRoomInfo | null
+  /** Signed in but not let in: there is nothing to reconnect to. */
+  accessLocked?: boolean
+  /** GitHub did not answer the role check; the page retries on its own. */
+  waitingForGitHub?: boolean
 }>()
 
 defineEmits<{
@@ -97,6 +101,8 @@ const visibleTabs = computed(() => BASE_TABS.filter(tab => !tab.requiresEvents |
 const { tabsElement, indicatorElement, prepareTabChange } = useSlidingTabIndicator(() => props.activeTab)
 const repositoryTitle = computed(() => props.gitRoom ? `${props.gitRoom.repository.full_name} · ${gitRoomRefLabel(props.gitRoom)} · ${gitRoomAccessLabel(props.gitRoom)}` : '')
 const presenceLabel = computed(() => {
+  if (props.accessLocked && props.connectionState === 'error') return 'No access'
+  if (props.waitingForGitHub && props.connectionState === 'error') return 'Waiting for GitHub'
   switch (props.connectionState) {
     case 'live': return 'Connected'
     case 'connecting': return 'Connecting…'

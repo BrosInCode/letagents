@@ -83,6 +83,13 @@ const expectedDirectChannels = [
   "desktop:repos:pick-room",
   "desktop:repos:start-status-watch",
   "desktop:repos:stop-status-watch",
+  "desktop:room-members:decide-join-request",
+  "desktop:room-members:list",
+  "desktop:room-members:list-account-join-requests",
+  "desktop:room-members:list-join-requests",
+  "desktop:room-members:remove",
+  "desktop:room-members:request-join",
+  "desktop:room-members:set-role",
   "desktop:room:add-task",
   "desktop:room:archive-focus-room",
   "desktop:room:assign-board-manager",
@@ -139,7 +146,9 @@ const expectedDirectChannels = [
   "desktop:room:open-github-install",
   "desktop:room:open-html-demo",
   "desktop:room:poll-agent-work",
+  "desktop:room:prepare-inline-html-demo",
   "desktop:room:release-board-manager",
+  "desktop:room:release-inline-html-demo",
   "desktop:room:rename",
   "desktop:room:repair-stream-delivery",
   "desktop:room:report-typing",
@@ -417,7 +426,7 @@ test("desktop IPC channel prefixes stay in their owning domains", () => {
     ],
     rental: [],
     maintenance: ["desktop:maintenance:"],
-    rooms: ["desktop:room:", "desktop:chat-storage:"],
+    rooms: ["desktop:room:", "desktop:room-members:", "desktop:chat-storage:"],
     repos: ["desktop:repos:"],
     supervisor: ["desktop:supervisor:"],
     workers: ["desktop:workers:", "desktop:diagnostics:"],
@@ -444,9 +453,12 @@ test("host approval sender accepts only the live trusted main frame", async () =
   const frame = { url: "http://127.0.0.1:4310/room" };
   const contents = { mainFrame: frame, isDestroyed: () => contentsDestroyed,
     setWindowOpenHandler: () => {}, on: () => {}, openDevTools: () => {} };
+  const windowOptions: Array<{ webPreferences?: Record<string, unknown> }> = [];
+  const inlineDemoHosts: unknown[] = [];
   const mocks = [
     mock.module("electron", { defaultExport: { app: {}, BrowserWindow: class {
       webContents = contents;
+      constructor(options: { webPreferences?: Record<string, unknown> }) { windowOptions.push(options); }
       isDestroyed() { return destroyed; }
       async loadURL() {}
       on(event: string, listener: typeof closeWindow) { if (event === "close") closeWindow = listener; }
@@ -457,12 +469,19 @@ test("host approval sender accepts only the live trusted main frame", async () =
     mock.module("../main/paths.js", { namedExports: { devServerUrl: "http://127.0.0.1:4310",
       electronMainDir: "/test", rendererDistPath: "/test/index.html" } }),
     mock.module("../main/external-url.js", { namedExports: { openExternalWebUrl: async () => {} } }),
+    mock.module("../main/attachments/html-demo-inline.js", { namedExports: {
+      installInlineHtmlDemoHost: (window: unknown) => { inlineDemoHosts.push(window); },
+    } }),
   ];
   try {
     const { assertHostApprovalSender, createWindow, allowMainWindowQuit, focusMainWindow } = await import("../main/window.js");
     const event = { sender: contents, senderFrame: frame } as never;
     assert.throws(() => assertHostApprovalSender(event), /main application window/);
     createWindow();
+    // The webview tag is on only together with the host that refuses every non-demo webview.
+    assert.equal(windowOptions[0]?.webPreferences?.webviewTag, true);
+    assert.equal(inlineDemoHosts.length, 1);
+    assert.equal((inlineDemoHosts[0] as { webContents?: unknown }).webContents, contents);
     let prevented = false;
     closeWindow?.({ preventDefault: () => { prevented = true; } });
     assert.equal(hidden, process.platform === "darwin");
@@ -496,6 +515,7 @@ test("auth/setup IPC wakes grant recovery only from authorization and reports na
   let authorized: () => void = () => { throw new Error("authorized callback was not registered"); };
   let invalidated: () => void = () => { throw new Error("invalidated callback was not registered"); };
   let recoveryWakes = 0;
+  let demoCacheClears = 0;
   let storageAvailable = false;
   const storageObservations: boolean[] = [];
   const unexpected = () => { throw new Error("unexpected auth/setup operation"); };
@@ -514,6 +534,9 @@ test("auth/setup IPC wakes grant recovery only from authorization and reports na
       refreshDesktopNotificationRegistration: async () => {}, unregisterDesktopNotificationAccount: async () => {},
     } }),
     mock.module("../main/rooms.js", { namedExports: { clearJoinedRoomInfoCache: () => {} } }),
+    mock.module("../main/attachments/html-demo-inline.js", { namedExports: {
+      clearInlineHtmlDemoCache: () => { demoCacheClears += 1; },
+    } }),
     mock.module("../main/external-url.js", { namedExports: { openAllowedExternalUrl: unexpected } }),
     mock.module("../main/supervisor-grant.js", { namedExports: {
       getDesktopSupervisorGrantMetadata: unexpected, provisionDesktopSupervisorGrant: unexpected,
@@ -530,10 +553,13 @@ test("auth/setup IPC wakes grant recovery only from authorization and reports na
     const handlers = new Map<string, () => Promise<unknown>>();
     registerDesktopAuthAndSetupIpcHandlers({ handle: (channel: string, handler: () => Promise<unknown>) => handlers.set(channel, handler) } as never);
     assert.equal(recoveryWakes, 0, "registration is not an auth recovery event");
+    assert.equal(demoCacheClears, 0);
     invalidated();
     assert.equal(recoveryWakes, 0, "sign-out cannot activate agents");
+    assert.equal(demoCacheClears, 1, "demo files downloaded with the old sign-in are forgotten");
     authorized();
     assert.equal(recoveryWakes, 1);
+    assert.equal(demoCacheClears, 2, "and again when an account signs in");
     const probe = handlers.get("desktop:supervisor-grant:get-storage-status");
     assert.ok(probe);
     assert.deepEqual(await probe(), { available: false, detail: "native probe", canOpenCredentialStorage: false });
