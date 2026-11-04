@@ -6,11 +6,11 @@
         :key="row.rule.id"
         class="wake-rule"
         :data-rule-id="row.rule.id"
-        :data-state="row.cancelled ? 'cancelled' : 'active'"
+        :data-state="row.cancelled ? 'cancelled' : row.rule.status === 'active' ? 'active' : row.rule.status"
       >
-        <span class="wake-rule-mark"><WakeGlyph :state="row.cancelled ? 'ended' : 'waiting'" /></span>
+        <span class="wake-rule-mark"><WakeGlyph :state="row.cancelled || row.rule.status === 'paused' ? 'ended' : 'waiting'" /></span>
         <div class="wake-rule-copy">
-          <p class="wake-rule-kicker">{{ row.cancelled ? "Cancelled" : `Waiting ${describe(row.rule).preposition}` }}</p>
+          <p class="wake-rule-kicker">{{ kicker(row) }}</p>
           <strong>{{ describe(row.rule).object }}</strong>
           <span v-if="row.rule.note" class="wake-rule-note">{{ row.rule.note }}</span>
           <span class="wake-rule-meta">
@@ -19,8 +19,12 @@
             </template>
             <template v-else>
               <time :datetime="row.rule.created_at" :title="`Since ${fullTime(row.rule.created_at)}`">{{ span(row.rule.created_at) }}</time> so far
-              · {{ row.rule.repeat ? "Repeats until" : "Expires" }}
-              <time :datetime="row.rule.expires_at" :title="fullTime(row.rule.expires_at)">{{ clock(row.rule.expires_at) }}</time>
+              <template v-if="row.rule.delivery"> · By {{ row.rule.delivery.kind }}</template>
+              <template v-if="row.rule.expires_at">
+                · {{ row.rule.repeat ? "Repeats until" : "Expires" }}
+                <time :datetime="row.rule.expires_at" :title="fullTime(row.rule.expires_at)">{{ clock(row.rule.expires_at) }}</time>
+              </template>
+              <template v-else> · Until cancelled</template>
             </template>
           </span>
           <span v-if="row.error" class="wake-rule-error" role="status">{{ row.error }}</span>
@@ -126,6 +130,11 @@ const fullTime = (iso: string | undefined) => iso
   ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })
   : "";
 const endedAt = (rule: WakeRule) => rule.last_fired_at ?? rule.updated_at;
+const kicker = (row: { rule: WakeRule; cancelled: boolean }) => row.cancelled ? "Cancelled"
+  // A delivery rule pauses after repeated failed deliveries (or an email's stop link); its agent adds it again to resume.
+  : row.rule.status === "paused" ? "Paused"
+    : row.rule.status === "pending_confirmation" ? "Waiting for the email address to confirm"
+      : `Waiting ${describe(row.rule).preposition}`;
 const root = ref<HTMLElement | null>(null);
 
 /**
