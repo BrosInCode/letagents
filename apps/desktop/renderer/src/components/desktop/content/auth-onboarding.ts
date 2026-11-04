@@ -1,4 +1,4 @@
-import type { DesktopRoomAccess } from "../../../../../electron/ipc-types";
+import type { DesktopRoomAccess, RoomJoinRequestSummary } from "../../../../../electron/ipc-types";
 
 export type AuthCardState =
   | "loading"
@@ -6,6 +6,8 @@ export type AuthCardState =
   | "code"
   | "connected"
   | "forbidden"
+  | "membership"
+  | "repo_collaborator"
   | "missing"
   | "unavailable";
 
@@ -44,6 +46,10 @@ export function resolveAuthCardState(input: AuthCardStateInput): AuthCardState {
       return "missing";
     case "forbidden":
       return "forbidden";
+    case "membership_required":
+      return "membership";
+    case "repo_collaborator_required":
+      return "repo_collaborator";
     case "unavailable":
       return "unavailable";
     case "auth_required":
@@ -82,4 +88,60 @@ export function nextRetryStep(
   backoff: readonly number[] = RETRY_BACKOFF_SECONDS,
 ): number {
   return Math.min(step + 1, backoff.length - 1);
+}
+
+/** Statuses where the person is signed in but not let in; a re-check can open the room. */
+export function isMembershipRefusal(status: DesktopRoomAccess["status"] | null | undefined): boolean {
+  return status === "membership_required" || status === "repo_collaborator_required";
+}
+
+export type JoinCardState =
+  /** No request yet, or the last one was cancelled: offer "Ask to join". */
+  | { kind: "ask"; declined: false }
+  /** The last request was declined and its wait is over: offer to ask again. */
+  | { kind: "ask"; declined: true }
+  | { kind: "pending"; requestId: string; askedAt: string }
+  /** Declined, and the person must wait until `retryAt` to ask again. */
+  | { kind: "declined"; retryAt: number };
+
+/**
+ * What the join card offers for the person's latest request. An approved
+ * request that still meets a refusal (removed again since) is a fresh start.
+ */
+export function resolveJoinCardState(joinRequest: RoomJoinRequestSummary | null | undefined, now: number): JoinCardState {
+  if (joinRequest?.state === "pending") {
+    return { kind: "pending", requestId: joinRequest.id, askedAt: joinRequest.created_at };
+  }
+  if (joinRequest?.state === "declined") {
+    const retryAt = Date.parse(joinRequest.retry_after || "");
+    if (Number.isFinite(retryAt) && retryAt > now) return { kind: "declined", retryAt };
+    return { kind: "ask", declined: true };
+  }
+  return { kind: "ask", declined: false };
+}
+
+/** "in 5 min", "in 3 h", "tomorrow at 09:30": when a declined person can ask again. */
+export function joinRetryLabel(retryAt: number, now: number): string {
+  const minutes = Math.max(1, Math.ceil((retryAt - now) / 60_000));
+  if (minutes < 60) return `in ${minutes} min`;
+  const hours = Math.ceil(minutes / 60);
+  if (hours < 12) return `in ${hours} h`;
+  const at = new Date(retryAt);
+  const time = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (at.toDateString() === new Date(now).toDateString()) return `today at ${time}`;
+  const tomorrow = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  if (at.toDateString() === tomorrow.toDateString()) return `tomorrow at ${time}`;
+  return `on ${at.toLocaleDateString()} at ${time}`;
+}
+
+/** "just now", "5 min ago", "3 h ago": when the person asked to join. */
+export function joinAskedLabel(askedAt: string, now: number): string {
+  const at = Date.parse(askedAt);
+  if (!Number.isFinite(at)) return "earlier";
+  const minutes = Math.floor((now - at) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours} h ago` : `${Math.floor(hours / 24)} d ago`;
 }

@@ -156,6 +156,16 @@
             </div>
           </template>
 
+          <RoomJoinAccess
+            v-else-if="cardState === 'membership' || cardState === 'repo_collaborator'"
+            :access="access"
+            :account="authStatus?.account ?? null"
+            :busy="busy"
+            :now="now"
+            @refresh-room="$emit('refresh-room')"
+            @sign-out="$emit('sign-out')"
+          />
+
           <template v-else-if="cardState === 'missing'">
             <h1>Choose a room to begin</h1>
             <p>Pick a room from the sidebar, or create one to start working with agents.</p>
@@ -201,6 +211,7 @@ import type {
   DesktopRoomAccess,
 } from "../../../../../electron/ipc-types";
 import { friendlyRoomLabel } from "../../../domain/git-rooms";
+import RoomJoinAccess from "./RoomJoinAccess.vue";
 import { loginInitials } from "../../../domain/initials";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import type { SidebarMode } from "../types";
@@ -249,8 +260,10 @@ const cardState = computed(() =>
 
 const roomLabel = computed(() => {
   if (cardState.value === "missing") return "LetAgents";
-  // People recognize room names, not canonical identifiers.
-  const label = props.roomLabel || props.access.roomIdentifier || "LetAgents";
+  // People recognize room names, not canonical identifiers. A membership
+  // refusal names a room the app has never opened.
+  const knownLabel = props.roomLabel && props.roomLabel !== props.access.roomIdentifier ? props.roomLabel : null;
+  const label = knownLabel || props.access.displayName || props.roomLabel || props.access.roomIdentifier || "LetAgents";
   return friendlyRoomLabel(label);
 });
 
@@ -261,6 +274,10 @@ const roomSuffix = computed(() => {
     case "connect":
     case "forbidden":
       return "private repo room";
+    case "membership":
+      return "members only";
+    case "repo_collaborator":
+      return "repository room";
     case "code":
       return "signing in";
     case "connected":
