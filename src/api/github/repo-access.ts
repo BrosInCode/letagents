@@ -50,6 +50,7 @@ interface RepoRoomAccessDecisionDeps {
     throwOnIndeterminate?: boolean;
   }) => Promise<boolean>;
   isPublicRepoRoleHolder?: typeof isGitHubPublicRepoRoleHolder;
+  getLastKnownVisibility?: (roomName: string) => "public" | "private" | null;
 }
 
 // Repository visibility is shared state, independent of the account asking.
@@ -215,6 +216,9 @@ function forgetRoomAccess(roomKey: string): void {
   for (const [flightKey, flight] of repoVisibilityInflight) {
     if (flight.roomKey === roomKey) repoVisibilityInflight.delete(flightKey);
   }
+  for (const flightKey of publicRepoRoleInflight.keys()) {
+    if (flightKey.includes(`::${roomKey}::`)) publicRepoRoleInflight.delete(flightKey);
+  }
   for (const [flightKey, flight] of repoAccessInflight) {
     if (flight.roomKey === roomKey) repoAccessInflight.delete(flightKey);
   }
@@ -236,6 +240,9 @@ function forgetLoginAccess(loginKey: string): void {
   }
   for (const [flightKey, flight] of repoAccessInflight) {
     if (flight.loginKey === loginKey) repoAccessInflight.delete(flightKey);
+  }
+  for (const flightKey of publicRepoRoleInflight.keys()) {
+    if (flightKey.endsWith(`::${loginKey}`)) publicRepoRoleInflight.delete(flightKey);
   }
 }
 
@@ -723,9 +730,15 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
   }
 
   const accessToken = input.sessionAccount.provider_access_token ?? undefined;
-  const visibility = await deps.getVisibility(canonicalRoomName, accessToken, {
+  let visibility = await deps.getVisibility(canonicalRoomName, accessToken, {
     bypassCache: input.freshCollaboratorCheck,
   });
+  // GitHub gave no answer (a fresh check does not use the remembered one): a
+  // repository known to be public in the last hour goes to its role check,
+  // which retries during an outage instead of refusing like a private repo.
+  if (visibility === "unknown" && (deps.getLastKnownVisibility ?? getLastKnownVisibility)(canonicalRoomName) === "public") {
+    visibility = "public";
+  }
 
   if (visibility === "public") {
     if (

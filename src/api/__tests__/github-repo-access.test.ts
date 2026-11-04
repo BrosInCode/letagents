@@ -941,3 +941,29 @@ test("isGitHubRepoWriter passes owners and writers, and refuses readers and fail
   assert.equal(await check("sam", fetchFor(null)), false);
   assert.equal(await isGitHubRepoWriter({ roomName: "github.com/acme/app", login: "sam", accessToken: "", fetchImpl: fetchFor({ permission: "write" }) }), false);
 });
+
+test("a fresh check during a GitHub outage keeps a known collaborator in and asks a stranger to retry", async () => {
+  const room = `github.com/acme/outage-${Date.now()}`;
+  let outage = false;
+  globalThis.fetch = (async (_input, init) => {
+    if (outage) return jsonResponse(503, { message: "unavailable" });
+    const token = new Headers(init?.headers).get("authorization");
+    const triage = token === "Bearer collab-token";
+    return jsonResponse(200, { private: false, owner: { login: "acme" }, permissions: { pull: true, triage } });
+  }) as typeof fetch;
+  const collaborator = { provider: "github", provider_access_token: "collab-token", login: "collab" };
+  const stranger = { provider: "github", provider_access_token: "stranger-token", login: "stranger" };
+
+  assert.deepEqual(await resolveGitHubRepoRoomAccessDecision({ roomName: room, sessionAccount: collaborator }), { kind: "allow" });
+  outage = true;
+  assert.deepEqual(
+    await resolveGitHubRepoRoomAccessDecision({ roomName: room, sessionAccount: collaborator, freshCollaboratorCheck: true }),
+    { kind: "allow" },
+    "the repository was public and the person had a role an hour ago: the stream stays open",
+  );
+  assert.deepEqual(
+    await resolveGitHubRepoRoomAccessDecision({ roomName: room, sessionAccount: stranger, freshCollaboratorCheck: true }),
+    { kind: "repo_access_unavailable" },
+    "an unanswered check is a retry, not 'private repo, no access'",
+  );
+});
