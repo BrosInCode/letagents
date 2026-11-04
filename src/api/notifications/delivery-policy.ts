@@ -16,3 +16,9 @@ export function classifyApnsResult(result: ApnsSendResult): ApnsDisposition {
   if (result.status === 0 || result.status === 403 || result.status === 429 || result.status >= 500) return "retry";
   return "dead";
 }
+
+/** Exponential backoff with jitter: about 5 s after the first attempt, doubling, at most an hour. */
+export function retryDelayMs(attemptCount: number): number {
+  const exponential = Math.min(60 * 60_000, 5_000 * 2 ** Math.max(0, attemptCount - 1));
+  return Math.floor(exponential * (0.8 + Math.random() * 0.4));
+}
