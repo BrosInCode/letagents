@@ -1046,7 +1046,9 @@ If the receiver needs a sender key in an Authorization header (Grok Bot's routin
 <key>"), pass it as `webhook.bearer`: `webhook: { url, secret, bearer }`, 8 to 512 printable ASCII characters without
 spaces or line breaks. Every attempt, retries included, then carries `Authorization: Bearer <key>` as well as the
 `X-LetAgents-*` headers, and only to the rule's own pinned URL (redirects are never followed). The key is stored sealed
-like the secret and never shown; adding the rule again with another key (or none) replaces it. The two checks are
+like the secret and never shown (the owner's `list_wake_rules` shows only `delivery.has_bearer: true`); adding the
+rule again with another key (or none) replaces it, and a rule that is retired or expires drops the sealed URL, secret
+and key (a cancel keeps them for undo). The two checks are
 independent: the receiver's key check decides whether it accepts the request at all, and `X-LetAgents-Signature`
 proves the body came from LetAgents unchanged. A receiver that answers `401` or `403` counts as a final failure, as
 before.

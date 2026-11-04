@@ -37,11 +37,14 @@ export interface WakeRuleViewer {
 }
 
 function deliverySummary(row: WakeRuleRow, viewer: WakeRuleViewer): WakeRuleDeliverySummary | null {
-  if (!row.delivery_kind || !row.delivery_target) return null;
+  // The kind stays when an ended rule drops its sealed target.
+  if (!row.delivery_kind) return null;
   const base = { kind: row.delivery_kind, paused: row.status === "paused" };
   if (!viewer.accountId || !row.owner_account_id || viewer.accountId !== row.owner_account_id) return base;
   return {
     ...base,
+    // Whether a sender key is stored; never the key.
+    has_bearer: row.delivery_bearer != null,
     delivered_count: row.delivery_delivered_count,
     consecutive_failures: row.delivery_consecutive_failures,
     over_cap_count: row.delivery_over_cap_count,
@@ -564,7 +567,8 @@ export async function retireWakeRule(rule: WakeRuleRow, reason: string, now = ne
 export async function expireWakeWebhookRule(rule: WakeRuleRow, now = new Date()): Promise<boolean> {
   const nowIso = now.toISOString();
   const updated = await db.update(agent_wake_rules)
-    .set({ status: "expired", ended_at: nowIso, updated_at: nowIso })
+    // Expired for good: the sealed target and sender key are no longer needed (a cancel keeps them for undo).
+    .set({ status: "expired", ended_at: nowIso, updated_at: nowIso, delivery_target: null, delivery_bearer: null })
     .where(and(
       eq(agent_wake_rules.id, rule.id),
       inArray(agent_wake_rules.status, [...HELD_STATUSES]),
@@ -591,7 +595,7 @@ export async function endUnconfirmedWakeEmailRule(rule: WakeRuleRow, now = new D
   const nowIso = now.toISOString();
   const updated = await db.update(agent_wake_rules)
     .set({
-      status: "expired", ended_at: nowIso, updated_at: nowIso,
+      status: "expired", ended_at: nowIso, updated_at: nowIso, delivery_target: null, delivery_bearer: null,
       ended_reason: "the email address was not confirmed within 24 hours",
     })
     .where(and(

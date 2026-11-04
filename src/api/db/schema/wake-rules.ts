@@ -92,7 +92,8 @@ export const agent_wake_rules = pgTable("agent_wake_rules", {
   confirm_token_uq: uniqueIndex("agent_wake_rules_confirm_token_uq").on(table.confirm_token_hash).where(sql`${table.confirm_token_hash} IS NOT NULL`),
   disable_token_uq: uniqueIndex("agent_wake_rules_disable_token_uq").on(table.disable_token_hash).where(sql`${table.disable_token_hash} IS NOT NULL`),
   pending_email_idx: index("agent_wake_rules_pending_email_idx").on(table.owner_account_id).where(sql`${table.status} = 'pending_confirmation'`),
-  delivery_check: check("agent_wake_rules_delivery_check", sql`(${table.event} = 'room.message') = (${table.delivery_target} IS NOT NULL AND ${table.delivery_kind} IS NOT NULL)`),
+  // A delivery rule keeps its sealed target while it can still deliver; once retired or expired it drops it.
+  delivery_check: check("agent_wake_rules_delivery_check", sql`((${table.event} = 'room.message') = (${table.delivery_kind} IS NOT NULL)) AND (${table.delivery_kind} IS NULL OR ${table.delivery_target} IS NOT NULL OR ${table.status} IN ('retired', 'expired'))`),
   delivery_bearer_check: check("agent_wake_rules_delivery_bearer_check", sql`${table.delivery_bearer} IS NULL OR ${table.delivery_kind} = 'webhook'`),
   delivery_kind_check: check("agent_wake_rules_delivery_kind_check", sql`${table.delivery_kind} IS NULL OR ${table.delivery_kind} IN ('webhook', 'email')`),
   expiry_check: check("agent_wake_rules_expiry_check", sql`${table.event} = 'room.message' OR (${table.expires_at} IS NOT NULL AND ${table.next_check_at} IS NOT NULL)`),

@@ -134,6 +134,11 @@ async function runWorker(overrides: Partial<import("../notifications/wake-webhoo
   return worker!.processWakeWebhookBatch("wake-webhook-test-worker", { ...worker!.defaultWakeWebhookDeps(), ...overrides });
 }
 
+/** The sealed columns of a rule, as stored. */
+async function sealedOf(ruleId: string): Promise<{ delivery_target: unknown; delivery_bearer: unknown }> {
+  return (await dbClient!.pool.query("SELECT delivery_target, delivery_bearer FROM agent_wake_rules WHERE id = $1", [ruleId])).rows[0];
+}
+
 async function ruleRow(ruleId: string) {
   return (await dbClient!.pool.query("SELECT * FROM agent_wake_rules WHERE id = $1", [ruleId])).rows[0];
 }
@@ -382,14 +387,17 @@ test("revoking the credential that registered a rule ends it: token deleted, tok
   // A token deleted through the account's revoke path retires its rules at once.
   const revocable = "wake_webhook_owner_token_revocable";
   const accountId = await createOwner("revocable", revocable);
-  const first = await setUpBot("wake-webhook-revoke", revocable);
+  const first = await setUpBot("wake-webhook-revoke", revocable, "crsr_revocable_sender_key_01");
   await first.bot.close();
+  assert.ok((await sealedOf(first.rule.id)).delivery_bearer);
   const tokenId = (await dbClient!.pool.query("SELECT token_id FROM owner_tokens WHERE token_hash = $1",
     [createHash("sha256").update(revocable).digest("hex")])).rows[0].token_id;
   await api!.deleteOwnerTokenById(tokenId);
   const retired = await ruleRow(first.rule.id);
   assert.equal(retired.status, "retired");
   assert.match(retired.ended_reason, /revoked/);
+  // Retired for good: the sealed URL, secret and key are gone from the row.
+  assert.deepEqual(await sealedOf(first.rule.id), { delivery_target: null, delivery_bearer: null });
   await humanSays(first.roomId, "@relaybot hello?");
   assert.equal((await deliveries(first.rule.id)).length, 0);
 
@@ -407,6 +415,7 @@ test("revoking the credential that registered a rule ends it: token deleted, tok
   assert.equal(received.length, before, "nothing is sent for a revoked credential");
   assert.equal((await deliveries(second.rule.id))[0]!.state, "dead");
   assert.equal((await ruleRow(second.rule.id)).status, "retired");
+  assert.deepEqual(await sealedOf(second.rule.id), { delivery_target: null, delivery_bearer: null });
 
   // A rule registered with a worker session's bearer ends when the session does.
   const room = await api!.createProjectWithName("wake-webhook-session");
@@ -432,8 +441,7 @@ test("revoking the credential that registered a rule ends it: token deleted, tok
 });
 
 test("the scheduler ends a delivery rule at its expiry, paused or not, and never leaves one due", { skip, timeout: 60_000 }, async () => {
-  const { bot, rule } = await setUpBot("wake-webhook-expiry");
-  await bot.close();
+  const { bot, rule, roomId } = await setUpBot("wake-webhook-expiry", TOKEN_BOT, "crsr_expiring_sender_key_01");
   // Paused, with a past check time: the rule is ended, not left due.
   await dbClient!.pool.query(
     "UPDATE agent_wake_rules SET status = 'paused', expires_at = now() - interval '1 minute', next_check_at = now() - interval '1 minute' WHERE id = $1",
@@ -442,6 +450,12 @@ test("the scheduler ends a delivery rule at its expiry, paused or not, and never
   await scheduler!.checkWakeRules(await store!.getDueWakeRules(now), now);
   const ended = await ruleRow(rule.id);
   assert.equal(ended.status, "expired");
+  assert.deepEqual(await sealedOf(rule.id), { delivery_target: null, delivery_bearer: null }, "expired for good: nothing sealed is kept");
+  const listedAfter = await call(bot, "list_wake_rules", { room_id: roomId });
+  const recentView = (listedAfter.recent as Array<Record<string, any>>).find((entry) => entry.id === rule.id)!;
+  assert.equal(recentView.delivery.kind, "webhook", "an ended rule still shows as a webhook rule");
+  assert.equal(recentView.delivery.has_bearer, false);
+  await bot.close();
   // Another one is due early (a skewed clock): it is moved to its expiry, not left due.
   const other = await setUpBot("wake-webhook-rearm");
   await other.bot.close();
@@ -466,9 +480,15 @@ test("a rule's bearer is sealed, never shown, sent on every attempt, and replace
     assert.ok(stored.bearer, "a sealed bearer is stored");
     assert.equal(stored.bearer.includes(BEARER) || stored.target.includes(BEARER) || stored.identity_key.includes(BEARER), false, "sealed at rest");
     // Not in any read: the owner's list, another account's list, or the REST route behind them.
-    assert.equal((await call(bot, "list_wake_rules", { room_id: roomId })).raw.includes(BEARER), false);
+    const ownList = await call(bot, "list_wake_rules", { room_id: roomId });
+    assert.equal(ownList.raw.includes(BEARER), false);
+    const ownView = (ownList.active as Array<Record<string, any>>).find((entry) => entry.id === rule.id)!;
+    assert.equal(ownView.delivery.has_bearer, true, "the owner sees that a key is stored, never the key");
     await call(other, "join_room", { name: "wake-webhook-bearer" });
-    assert.equal((await call(other, "list_wake_rules", { room_id: roomId })).raw.includes(BEARER), false);
+    const otherList = await call(other, "list_wake_rules", { room_id: roomId });
+    assert.equal(otherList.raw.includes(BEARER), false);
+    const otherView = (otherList.active as Array<Record<string, any>>).find((entry) => entry.id === rule.id)!;
+    assert.deepEqual(otherView.delivery, { kind: "webhook", paused: false }, "another account does not see has_bearer");
 
     // Sent on the first attempt and on the retry, alongside the signature.
     replies.push(503);
@@ -503,6 +523,8 @@ test("a rule's bearer is sealed, never shown, sent on every attempt, and replace
     });
     assert.equal(cleared.rule.id, rule.id);
     assert.equal((await dbClient!.pool.query("SELECT delivery_bearer FROM agent_wake_rules WHERE id = $1", [rule.id])).rows[0].delivery_bearer, null);
+    const afterClear = (await call(bot, "list_wake_rules", { room_id: roomId })).active as Array<Record<string, any>>;
+    assert.equal(afterClear.find((entry) => entry.id === rule.id)!.delivery.has_bearer, false);
     await humanSays(roomId, "@relaybot no key now");
     await makeDue();
     await runWorker();
@@ -515,6 +537,15 @@ test("a rule's bearer is sealed, never shown, sent on every attempt, and replace
     });
     assert.equal(failed(refused), true, refused.raw);
     assert.match(refused.raw, /webhook.bearer must be 8 to 512 printable ASCII characters/);
+
+    // A cancel keeps the sealed target and key, so the 10-minute undo can bring the rule back.
+    await call(bot, "add_wake_rule", {
+      room_id: roomId, agent_session_id: sessionId, event: "room.message", webhook: { url: hookUrl, secret: SECRET, bearer: BEARER },
+    });
+    const cancelled = await call(bot, "cancel_wake_rule", { room_id: roomId, agent_session_id: sessionId, rule_id: rule.id });
+    assert.equal(cancelled.rule.status, "cancelled", cancelled.raw);
+    const kept = await sealedOf(rule.id);
+    assert.ok(kept.delivery_target && kept.delivery_bearer, "kept after cancel");
   } finally {
     await Promise.all([bot.close(), other.close()]);
   }

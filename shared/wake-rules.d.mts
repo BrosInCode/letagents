@@ -70,6 +70,8 @@ export type WakeRuleDeliveryKind = "webhook" | "email";
 export interface WakeRuleDeliverySummary {
   kind: WakeRuleDeliveryKind;
   paused: boolean;
+  /** Owner only: whether a webhook sender key (`webhook.bearer`) is stored. Never the key. */
+  has_bearer?: boolean;
   delivered_count?: number;
   /** Deliveries in a row that failed for good; five pause the rule. */
   consecutive_failures?: number;
