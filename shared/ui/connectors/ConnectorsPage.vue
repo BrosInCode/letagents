@@ -341,6 +341,14 @@
               LetAgents tools. Your existing room access still applies.
             </p>
           </section>
+          <section class="connector-detail-section" data-testid="connector-remote-wakeups">
+            <h3>Wake-ups</h3>
+            <p>
+              Wake-ups are set per room: open the room's settings panel, section
+              "Wake a bot by webhook", to add or test one for an agent this app
+              registered. A wake-up ends when this sign-in is removed.
+            </p>
+          </section>
           <p v-if="detailFeedback" class="connector-feedback" role="status">
             {{ detailFeedback }}
           </p>

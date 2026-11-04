@@ -20,7 +20,7 @@ import type { DesktopAccountActivityState } from "./account-activity.js";
 import type { DesktopAgentAsk, DesktopAgentAskLink, DesktopAgentAskModel, DesktopAgentAskProposal, DesktopAgentAskWorkspace, DesktopAskResult, DesktopCreateAgentAskInput, DesktopGiveAgentInput } from "./asks.js";
 import type { GitHubRoomChatEventFilter, GitHubRoomChatEventKind, RoomAgentGuidelines } from "../../../../shared/room-settings.mjs";
 import type { RoomNotificationPreferenceChange, RoomNotificationPreferenceEntry, RoomNotificationPreferenceList } from "../../../../shared/room-notification-preferences.mjs";
-import type { WakeRule, WakeRulePage } from "../../../../shared/wake-rules.mjs";
+import type { WakeRule, WakeRulePage, WakeRuleTestResult, WakeWebhookAgent, WakeWebhookFormInput } from "../../../../shared/wake-rules.mjs";
 import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 import type { KnowledgeInput, KnowledgePage, KnowledgeRecord, KnowledgeRevisionInput, KnowledgeType } from "../../../../shared/room-knowledge.mjs";
 import type { DesktopAttentionRoom, DesktopNeedsYou } from "./knowledge.js";
@@ -377,6 +377,10 @@ export interface DesktopApi {
     getWakeRules: (roomIdentifier: string) => Promise<WakeRulePage>;
     cancelWakeRule: (roomIdentifier: string, ruleId: string) => Promise<WakeRule>;
     restoreWakeRule: (roomIdentifier: string, ruleId: string) => Promise<WakeRule>;
+    /** The webhook wake-up form in Room settings. Optional so a renderer newer than its main process keeps the rest of the panel. */
+    listWakeWebhookAgents?: (roomIdentifier: string) => Promise<WakeWebhookAgent[]>;
+    addWakeWebhookRule?: (roomIdentifier: string, agentKey: string, input: WakeWebhookFormInput) => Promise<{ rule: WakeRule; created: boolean }>;
+    testWakeRule?: (roomIdentifier: string, ruleId: string) => Promise<WakeRuleTestResult>;
     updateFocusRoomSettings: (
       roomIdentifier: string,
       focusKey: string,

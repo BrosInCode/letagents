@@ -1,0 +1,223 @@
+/*
+ * The webhook wake-up form and its list read like the wake-rules panel: a
+ * quiet state in neutral colour, with one primary action at a time.
+ */
+.wake-webhook {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+.wake-webhook p {
+  margin: 0;
+}
+.wake-webhook-intro,
+.wake-webhook-empty,
+.wake-webhook-test-help,
+.wake-webhook-rule-meta,
+.wake-webhook-field small {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+.wake-webhook-button {
+  appearance: none;
+  padding: 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background 160ms var(--ease-out, ease-out), border-color 160ms var(--ease-out, ease-out);
+}
+.wake-webhook-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+.wake-webhook-button[data-variant="primary"] {
+  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  background: color-mix(in srgb, var(--blue) 16%, transparent);
+}
+.wake-webhook-button[data-variant="primary"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--blue) 26%, transparent);
+}
+.wake-webhook-button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.wake-webhook-add {
+  justify-self: start;
+}
+
+.wake-webhook-form {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--text) 9%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--text) 2.6%, transparent);
+}
+.wake-webhook-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+.wake-webhook-field > span {
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.wake-webhook-field em {
+  color: var(--text-tertiary);
+  font-style: normal;
+  font-weight: 500;
+}
+.wake-webhook-field input,
+.wake-webhook-field select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  padding: 7px 10px;
+  border: 1px solid color-mix(in srgb, var(--text) 16%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+}
+.wake-webhook-field input[aria-invalid="true"],
+.wake-webhook-field select[aria-invalid="true"] {
+  border-color: color-mix(in srgb, var(--red-text, #c0392b) 60%, transparent);
+}
+.wake-webhook-field small[role="alert"],
+.wake-webhook-error {
+  color: var(--red-text, #c0392b);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+.wake-webhook-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wake-webhook-secret {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--blue) 40%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--blue) 7%, transparent);
+  color: var(--text);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+.wake-webhook-secret-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.wake-webhook-secret code {
+  flex: 1 1 200px;
+  min-width: 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  font-size: 0.8rem;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.wake-webhook-secret-notice {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+.wake-webhook-secret .wake-webhook-button[data-variant="primary"] {
+  justify-self: start;
+}
+
+.wake-webhook-rules {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.wake-webhook-rule {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+  padding: 12px 14px;
+  border: 1px solid color-mix(in srgb, var(--text) 7.5%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--text) 2.6%, transparent);
+}
+.wake-webhook-rule[data-state="cancelled"],
+.wake-webhook-rule[data-state="retired"],
+.wake-webhook-rule[data-state="expired"] {
+  opacity: 0.72;
+}
+.wake-webhook-rule-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+.wake-webhook-rule-title {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  color: var(--text);
+  font-size: 0.84rem;
+}
+.wake-webhook-status {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text-secondary) 14%, transparent);
+  color: var(--text-secondary);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.wake-webhook-status[data-state="active"] {
+  background: color-mix(in srgb, var(--blue) 16%, transparent);
+  color: var(--blue);
+}
+.wake-webhook-rule-note {
+  color: var(--text);
+  font-size: 0.8rem;
+}
+.wake-webhook-rule-meta {
+  font-variant-numeric: tabular-nums;
+}
+.wake-webhook-test {
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+.wake-webhook-test[data-tone="ok"] {
+  color: var(--blue);
+}
+.wake-webhook-test[data-tone="rejected"],
+.wake-webhook-test[data-tone="failed"] {
+  color: var(--red-text, #c0392b);
+}
+.wake-webhook-test[data-tone="pending"] {
+  color: var(--text-secondary);
+}
+.wake-webhook-rule-actions {
+  display: grid;
+  gap: 6px;
+}
+@media (max-width: 560px) {
+  .wake-webhook-rule {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .wake-webhook-rule-actions {
+    grid-auto-flow: column;
+    justify-content: start;
+  }
+}

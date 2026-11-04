@@ -146,8 +146,8 @@ export const wake_webhook_deliveries = pgTable("wake_webhook_deliveries", {
     .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
   /** How it goes out: the rule's delivery kind. */
   kind: text("kind").$type<WakeRuleDeliveryKind>().notNull().default("webhook"),
-  /** `confirm`: an email rule's confirmation, which carries no message. */
-  purpose: text("purpose").$type<"message" | "confirm">().notNull().default("message"),
+  /** `confirm`: an email rule's confirmation; `test`: a person's test of a webhook rule. Neither carries a message. */
+  purpose: text("purpose").$type<"message" | "confirm" | "test">().notNull().default("message"),
   message_number: integer("message_number"),
   sender: text("sender").notNull(),
   text_preview: text("text_preview").notNull(),
@@ -173,7 +173,7 @@ export const wake_webhook_deliveries = pgTable("wake_webhook_deliveries", {
 }, (table) => ({
   state_check: check("wake_webhook_deliveries_state_check", sql`${table.state} IN ('queued', 'retry', 'processing', 'delivered', 'dead')`),
   kind_check: check("wake_webhook_deliveries_kind_check", sql`${table.kind} IN ('webhook', 'email', 'mcp_event')`),
-  purpose_check: check("wake_webhook_deliveries_purpose_check", sql`(${table.purpose} = 'message' AND ${table.message_number} IS NOT NULL) OR (${table.purpose} = 'confirm' AND ${table.kind} = 'email')`),
+  purpose_check: check("wake_webhook_deliveries_purpose_check", sql`(${table.purpose} = 'message' AND ${table.message_number} IS NOT NULL) OR (${table.purpose} = 'confirm' AND ${table.kind} = 'email') OR (${table.purpose} = 'test' AND ${table.kind} = 'webhook')`),
   pending_uq: uniqueIndex("wake_webhook_deliveries_pending_uq").on(table.rule_id, table.purpose).where(sql`${table.state} = 'queued'`),
   ready_idx: index("wake_webhook_deliveries_ready_idx").on(table.next_attempt_at).where(sql`${table.state} IN ('queued', 'retry')`),
   rule_idx: index("wake_webhook_deliveries_rule_idx").on(table.rule_id, table.scheduled_at),

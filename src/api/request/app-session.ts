@@ -19,6 +19,22 @@ export function isHumanAppWrite(
   );
 }
 
+/**
+ * Whether a write may be trusted to come from our own UI: cookie-authenticated
+ * writes must carry this app's own Origin (CSRF). A native bearer session
+ * uses no ambient cookie and needs none, and a read changes nothing.
+ */
+export function isSameOriginCookieWrite(req: AuthenticatedRequest): boolean {
+  if (parseBearerAuthorization(req.headers.authorization).kind === "token") return true;
+  if (["GET", "HEAD"].includes(req.method)) return true;
+  const origin = req.headers.origin;
+  if (!origin) return false;
+  const expected = process.env.LETAGENTS_BASE_URL || process.env.PUBLIC_API_URL;
+  return expected ? origin === new URL(expected).origin : origin === `${req.protocol}://${req.get("host")}`;
+}
+
+export const CROSS_SITE_WRITE_REFUSED = "Open this action from LetAgents.";
+
 export function requireAppSession(
   req: AuthenticatedRequest,
   res: Response,
@@ -29,23 +45,9 @@ export function requireAppSession(
       .json({ error: "Sign in to LetAgents to open private messages." });
     return null;
   }
-  // Cookie-authenticated writes must come from our own UI. Native bearer
-  // sessions do not use ambient cookies and are not subject to CSRF.
-  if (
-    parseBearerAuthorization(req.headers.authorization).kind !== "token" &&
-    !["GET", "HEAD"].includes(req.method)
-  ) {
-    const origin = req.headers.origin;
-    const expected =
-      process.env.LETAGENTS_BASE_URL || process.env.PUBLIC_API_URL;
-    if (
-      !origin ||
-      (expected && origin !== new URL(expected).origin) ||
-      (!expected && origin !== `${req.protocol}://${req.get("host")}`)
-    ) {
-      res.status(403).json({ error: "Open this action from LetAgents." });
-      return null;
-    }
+  if (!isSameOriginCookieWrite(req)) {
+    res.status(403).json({ error: CROSS_SITE_WRITE_REFUSED });
+    return null;
   }
   return req.sessionAccount!.account_id;
 }

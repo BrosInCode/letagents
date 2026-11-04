@@ -258,6 +258,10 @@ const api: DesktopApi = {
     getWakeRules: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:get-wake-rules", roomIdentifier),
     cancelWakeRule: (roomIdentifier: string, ruleId: string) => ipcRenderer.invoke("desktop:room:cancel-wake-rule", roomIdentifier, ruleId),
     restoreWakeRule: (roomIdentifier: string, ruleId: string) => ipcRenderer.invoke("desktop:room:restore-wake-rule", roomIdentifier, ruleId),
+    listWakeWebhookAgents: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:list-wake-webhook-agents", roomIdentifier),
+    addWakeWebhookRule: (roomIdentifier: string, agentKey: string, input: import("../../../shared/wake-rules.mjs").WakeWebhookFormInput) =>
+      ipcRenderer.invoke("desktop:room:add-wake-webhook-rule", roomIdentifier, agentKey, input),
+    testWakeRule: (roomIdentifier: string, ruleId: string) => ipcRenderer.invoke("desktop:room:test-wake-rule", roomIdentifier, ruleId),
     updateFocusRoomSettings: (roomIdentifier: string, focusKey: string, settings) =>
       ipcRenderer.invoke("desktop:room:update-focus-room-settings", roomIdentifier, focusKey, settings),
     concludeFocusRoom: (roomIdentifier: string, focusKey: string, summary: string, details, quickClose) =>

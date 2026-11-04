@@ -61,3 +61,21 @@ test('the agent detail shows its wake rules and opens the wake message in the ch
   assert.match(messageList, /restorePosition\(\)\s*setupReadObserver\(\)\s*initialScrollSettled = true\s*revealRequestedMessage\(\)/)
   assert.match(messageList, /MAX_REVEAL_OLDER_PAGES = 20/)
 })
+
+test('the room drawer lets a signed-in person wake their own bot by webhook through the shared form', () => {
+  const drawer = source('../src/components/room/RoomDrawer.vue')
+  const panel = source('../src/components/room/room-drawer/WakeWebhookPanel.vue')
+  const section = source('../../../shared/ui/WakeWebhookSection.vue')
+  assert.match(drawer, /import WakeWebhookPanel from '\.\/room-drawer\/WakeWebhookPanel\.vue'/)
+  assert.match(drawer, /<WakeWebhookPanel v-if="room && room\.authenticated" :open="open" :room="room" \/>/)
+  // The panel shows only for a person who owns an agent here, loads when the drawer opens, and hands the shared section the web transport.
+  assert.match(panel, /<div v-if="agents\.length" class="drawer-section drawer-panel wake-webhook-panel"/)
+  assert.match(panel, /<h2>Wake a bot by webhook<\/h2>/)
+  assert.match(panel, /:api="roomWakeWebhookApi"/)
+  assert.match(panel, /if \(open && authenticated\) void load\(\)/)
+  assert.match(panel, /watch\(lastWakeRuleInvalidation/)
+  // The shared section: one add button, a password field for the key, the secret shown once.
+  assert.match(section, /data-testid="wake-webhook-add"[^>]*>\s*Wake a bot by webhook/)
+  assert.match(section, /v-model="form\.draft\.bearer"\s+type="password"/)
+  assert.match(section, /v-if="form\.revealedSecret\.value"/)
+})
