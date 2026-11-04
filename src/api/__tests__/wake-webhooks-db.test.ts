@@ -238,6 +238,9 @@ test("a mention reaches the bot's webhook once, signed; 5xx retries, 4xx does no
     assert.equal((await deliveries(rule.id)).length, rows.length);
 
     // People in the room see what the rule waits for, never the URL or secret.
+    // The room is members-only: an admin let this person in first.
+    await dbClient!.pool.query("INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'approved_request')",
+      [roomId, accounts.other]);
     const otherJoined = await call(other, "join_room", { name: "wake-webhook-flow" });
     assert.equal(otherJoined.room_id, roomId);
     const seen = await call(other, "list_wake_rules", { room_id: roomId });

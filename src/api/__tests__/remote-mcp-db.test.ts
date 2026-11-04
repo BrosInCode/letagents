@@ -45,7 +45,10 @@ async function createOwner(suffix: string, token: string) {
   const account = await accountSessions!.upsertAccount({
     provider: "github", provider_user_id: `remote-mcp-${suffix}`, login: `remote-mcp-${suffix}`, display_name: `Remote ${suffix}`,
   });
-  return ownerTokens!.createOwnerToken({ accountId: account.id, githubUserId: `remote-mcp-${suffix}`, token });
+  // A GitHub token too, so a public repository room can check the person's role.
+  return ownerTokens!.createOwnerToken({
+    accountId: account.id, githubUserId: `remote-mcp-${suffix}`, token, providerAccessToken: `github-token-${suffix}`,
+  });
 }
 
 if (testDatabaseUrl) {
@@ -473,13 +476,13 @@ test("an out-of-date session reloaded after a restart does not write over a work
   const token = "remote_mcp_owner_token_reload";
   await createOwner("reload", token);
   const one = await connect(token);
-  const joined = await call(one.client, "join_room", { name: "remote-mcp-reload" });
+  const joined = await call(one.client, "join_room", { name: "remote-mcp-reload-stale" });
   const handle = await call(one.client, "register_agent_session",
     { room_id: joined.room_id, display_name: "Rotating Dot", registration_key: "reload-key", runtime: "dot" });
   assert.ok(handle.worker_id, JSON.stringify(handle));
   // A second session of the same sign-in starts from the same worker binding...
   const two = await connect(token);
-  await call(two.client, "join_room", { name: "remote-mcp-reload" });
+  await call(two.client, "join_room", { name: "remote-mcp-reload-stale" });
   // ...then the first session ends the worker and registers it again, so its token rotates.
   await call(one.client, "disconnect_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id });
   const rotated = await call(one.client, "register_agent_session", { room_id: joined.room_id, worker_id: handle.worker_id, runtime: "dot" });
@@ -715,7 +718,9 @@ test("an in-process call re-resolves its owner token: rechecks pass until revoca
   const github = createServer((req, res) => {
     const found = req.url?.toLowerCase().startsWith("/repos/brosincode/remote-mcp-public");
     res.writeHead(found ? 200 : 404, { "content-type": "application/json" });
-    res.end(JSON.stringify(found ? { private: false, owner: { login: "BrosInCode" } } : { message: "Not Found" }));
+    // The caller's own role: a public repository room needs triage or more.
+    const role = req.headers.authorization ? { permissions: { pull: true, triage: true } } : {};
+    res.end(JSON.stringify(found ? { private: false, owner: { login: "BrosInCode" }, ...role } : { message: "Not Found" }));
   });
   github.listen(0, "127.0.0.1");
   await once(github, "listening");
@@ -796,7 +801,8 @@ test("a Git-room long-poll survives a repo-access invalidation and ends when the
     const found = req.url?.toLowerCase().startsWith("/repos/brosincode/remote-mcp-live");
     res.writeHead(found ? 200 : 404, { "content-type": "application/json" });
     res.end(JSON.stringify(found
-      ? { private: false, full_name: "BrosInCode/remote-mcp-live", owner: { login: "BrosInCode" }, default_branch: "main" }
+      ? { private: false, full_name: "BrosInCode/remote-mcp-live", owner: { login: "BrosInCode" }, default_branch: "main",
+        ...(req.headers.authorization ? { permissions: { pull: true, triage: true } } : {}) }
       : { message: "Not Found" }));
   });
   github.listen(0, "127.0.0.1");
