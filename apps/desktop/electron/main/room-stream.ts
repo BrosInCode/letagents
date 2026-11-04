@@ -186,6 +186,11 @@ class RoomStreamRetryLaterError extends Error {
 
 const REPO_ACCESS_RETRY_DEFAULT_MS = 30_000;
 
+/** The wait before an SSE reconnect: the usual backoff (at most 30 s), or the server's Retry-After when longer. */
+export function roomStreamReconnectDelayMs(backoffMs: number, retryLaterMs: number): number {
+  return Math.max(Math.min(backoffMs, 30_000), retryLaterMs);
+}
+
 function waitUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
   if (signal.aborted) return Promise.resolve();
   return new Promise((resolve) => {
@@ -1457,8 +1462,7 @@ async function openDesktopRoomStream(
     }
     stream.resolveReady?.();
     stream.resolveReady = null;
-    // The server's Retry-After wins over the usual backoff, even past its 30 s cap.
-    const retryMs = Math.max(Math.min(stream.retryMs, 30_000), stream.retryLaterMs);
+    const retryMs = roomStreamReconnectDelayMs(stream.retryMs, stream.retryLaterMs);
     stream.retryLaterMs = 0;
     stream.retryMs = Math.min(stream.retryMs * 2, 30_000);
     stream.reconnectTimer = setTimeout(() => {

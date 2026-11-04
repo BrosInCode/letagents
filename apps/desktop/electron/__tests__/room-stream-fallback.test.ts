@@ -97,6 +97,7 @@ const {
   getActiveRoomIdentifier,
   acknowledgeDesktopRoomStreamGapRepair,
   setExecutionDelegationInvalidationHandler,
+  roomStreamReconnectDelayMs,
 } =
   await import("../main/room-stream.js");
 
@@ -1027,6 +1028,14 @@ test("GitHub not answering keeps the stream, and the poll waits as long as the s
     await stopDesktopRoomStream();
     router.restore();
   }
+});
+
+test("the reconnect wait keeps its 30 s cap, but a longer Retry-After wins", () => {
+  assert.equal(roomStreamReconnectDelayMs(1_000, 0), 1_000);
+  assert.equal(roomStreamReconnectDelayMs(60_000, 0), 30_000);
+  assert.equal(roomStreamReconnectDelayMs(1_000, 5_000), 5_000);
+  assert.equal(roomStreamReconnectDelayMs(1_000, 45_000), 45_000, "a Retry-After of 45 s is honoured");
+  assert.equal(roomStreamReconnectDelayMs(16_000, 5_000), 16_000);
 });
 
 test("GitHub not answering on connect waits Retry-After before the next connect", async () => {
