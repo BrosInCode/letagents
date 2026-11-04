@@ -80,7 +80,11 @@ export interface WakeRuleDeliverySummary {
   last_status?: number | null;
   last_error?: string | null;
   last_attempt_at?: string | null;
-  /** MCP Events subscriptions only (owner view): the id ChatGPT holds, its event name, when it must renew, and the last delivered cursor. */
+  /**
+   * MCP Events subscriptions only (owner view): the id ChatGPT holds, its event
+   * name, when it must renew, and the delivered-up-to cursor (the subscribe
+   * answer may give a lower watermark while events still wait to go out).
+   */
   subscription_id?: string;
   event_name?: string;
   refresh_before?: string | null;

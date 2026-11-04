@@ -682,7 +682,7 @@ test("renewal with a cursor replays the events after it, in order, with the same
   }
 });
 
-test("a subscription never gets its own account's worker posts back, even with any and include_agents and no worker", { skip, timeout: 90_000 }, async () => {
+test("a subscription never gets its own account's worker posts back (its person's own posts still wake it), even with any and include_agents and no worker", { skip, timeout: 90_000 }, async () => {
   events!.forgetMcpEventVerificationsForTests();
   await drainOutbox();
   const { bot, roomId } = await setUpRoom("mcp-events-echo", TOKEN_BOT, false);
@@ -696,6 +696,10 @@ test("a subscription never gets its own account's worker posts back, even with a
     const own = await call(bot, "send_message", { room_id: roomId, agent_session_id: worker.agent_session_id, text: "I am replying to the room" });
     assert.equal(own.isError, undefined, own.raw);
     assert.equal((await deliveries(rule.id)).length, 0, "an own-account worker post is not echoed back");
+    // The same person's own post from the app (no publisher_agent_key) is an event: mentioning the worker wakes it.
+    const owner = await api!.addMessage(roomId, "Events bot", "@chatgpt-hands are you there?", { source: "browser", account_id: accounts.bot });
+    assert.equal(owner.publisher_agent_key ?? null, null);
+    assert.equal((await deliveries(rule.id)).length, 1, "the subscriber's own human post is delivered");
     // A person's message and another account's agent still are events.
     await humanSays(roomId, "hello from Ada");
     await call(other, "join_room", { name: "mcp-events-echo" });
@@ -703,14 +707,16 @@ test("a subscription never gets its own account's worker posts back, even with a
     const theirs = await call(other, "send_message", { room_id: roomId, agent_session_id: otherWorker.agent_session_id, text: "hello from otherbot" });
     assert.equal(theirs.isError, undefined, theirs.raw);
     const rows = await deliveries(rule.id);
-    assert.equal(rows.length, 2);
+    assert.equal(rows.length, 3);
     await makeDue();
     assert.equal(await runWorker(), 1);
     assert.equal(await runWorker(), 1);
+    assert.equal(await runWorker(), 1);
     // An agent's sender label carries its owner and app ("otherbot | <owner> | Agent").
-    const senders = received.slice(-2).map((entry) => JSON.parse(entry.body).data.sender as string).sort();
+    const senders = received.slice(-3).map((entry) => JSON.parse(entry.body).data.sender as string).sort();
     assert.equal(senders[0], "Ada");
-    assert.match(senders[1]!, /^otherbot\b/);
+    assert.equal(senders[1], "Events bot");
+    assert.match(senders[2]!, /^otherbot\b/);
   } finally {
     await Promise.all([bot.close(), other.close()]);
   }

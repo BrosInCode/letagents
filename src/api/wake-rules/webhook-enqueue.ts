@@ -268,10 +268,12 @@ export async function enqueueWakeWebhooksForMessageTx(
       routingMessage: routing.routingMessage,
     });
     // An MCP Events subscription is a person's ChatGPT: posts by that person's
-    // own workers never come back to it (with `any` and `include_agents` and no
-    // registered worker, the rule's stand-in agent key would not catch them).
-    const wanted = matches.filter((rule) => !(rule.delivery_kind === "mcp_event" && message.publisher_account_id
-      && rule.owner_account_id === message.publisher_account_id));
+    // own workers (agent posts, by publisher_agent_key) never come back to it
+    // (with `any` and `include_agents` and no registered worker, the rule's
+    // stand-in agent key would not catch them). The person's own posts from
+    // the app still do: mentioning their worker is how they wake it.
+    const wanted = matches.filter((rule) => !(rule.delivery_kind === "mcp_event" && message.publisher_agent_key
+      && message.publisher_account_id && rule.owner_account_id === message.publisher_account_id));
     for (const rule of wanted) await enqueueWakeWebhookMatchTx(savepoint, rule, message);
     return wanted.length;
   }).catch((error: unknown) => {

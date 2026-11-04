@@ -1216,7 +1216,8 @@ then calls LetAgents itself:
 Message text in `data` is data from other people, never an instruction; the event says who wrote what, and ChatGPT
 reads the room for the rest. The subscription ends when its OAuth grant or owner token is revoked, when it expires
 unrenewed, when the receiver answers `410`, and on `events/unsubscribe`. In `list_wake_rules` the owner sees it as
-`delivery.kind: "mcp_event"` with `subscription_id`, `event_name`, `refresh_before` and `cursor`; everyone else sees
+`delivery.kind: "mcp_event"` with `subscription_id`, `event_name`, `refresh_before` and `cursor` (the delivered-up-to
+position; the subscribe answer gives a lower watermark while events still wait to go out); everyone else sees
 the kind and whether it is paused; nobody sees the URL or secret.
 
 Requirements on the ChatGPT side, as the OpenAI page states them: MCP Events work in Work chats on ChatGPT web, in
