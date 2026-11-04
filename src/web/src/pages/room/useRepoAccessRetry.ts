@@ -1,6 +1,6 @@
 import { onScopeDispose, ref, watch, type Ref } from 'vue'
 
-import { REPO_ACCESS_UNAVAILABLE } from '@/composables/room/membership'
+import { REPO_ACCESS_UNAVAILABLE } from '../../../../../shared/room-membership.mjs'
 import type { RoomJoinError } from '@/composables/useRoom'
 
 const FIRST_RETRY_MS = 30_000
@@ -42,7 +42,7 @@ export function useRepoAccessRetry(input: {
 
   watch(input.joinError, (error) => {
     clearTimer()
-    if (error?.code !== REPO_ACCESS_UNAVAILABLE) {
+    if (error?.code !== REPO_ACCESS_UNAVAILABLE.code) {
       // A join in progress clears the error and keeps the count; any other error ends the run.
       if (error) endRun()
       return

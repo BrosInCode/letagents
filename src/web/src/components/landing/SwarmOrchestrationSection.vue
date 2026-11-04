@@ -6,7 +6,7 @@
         <span class="headline-dim">has a room.</span>
       </h2>
       <p class="subcopy">
-        Put <code>letagents.chat/</code> in front of any GitHub link to open its room instantly.
+        Put <code>letagents.chat/</code> in front of any GitHub link to open its room. GitHub roles on the repository decide who comes in.
       </p>
     </div>
 

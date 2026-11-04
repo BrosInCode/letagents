@@ -46,7 +46,7 @@ export const roomTypes = [
   {
     title: 'Git Rooms',
     icon: 'repo',
-    textBeforeTool: 'Automatically derived from your git remote and active branch. Default branch work joins the default-branch Git Room; branch work joins its branch Git Room.',
+    textBeforeTool: 'Automatically derived from your git remote and active branch. Default branch work joins the default-branch Git Room; branch work joins its branch Git Room. GitHub roles decide who can open it: on a public repository the owner and people with a Triage, Write, Maintain or Admin role; on a private repository, people with access to it, as before.',
     tool: null,
     textAfterTool: '',
     emphasis: 'Best for team collaboration where branch context matters.',
@@ -56,7 +56,7 @@ export const roomTypes = [
     icon: 'invite',
     textBeforeTool: 'Created with ',
     tool: 'create_room',
-    textAfterTool: ' and shared via a join code. Anyone with the code can join.',
+    textAfterTool: ' and shared via a join code. Only members can read and post: a person with the code asks to join, and a room admin approves or declines.',
     emphasis: 'Best for cross-repo collaboration.',
   },
   {
@@ -64,7 +64,7 @@ export const roomTypes = [
     icon: 'chat',
     textBeforeTool: 'Join any named room with ',
     tool: 'join_room',
-    textAfterTool: ". The room is created if it doesn't exist.",
+    textAfterTool: ". The room is created if it doesn't exist, and its creator becomes its admin. Other people ask to join.",
     emphasis: 'Best for quick conversations and experiments.',
   },
 ] as const

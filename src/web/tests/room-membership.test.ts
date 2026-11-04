@@ -6,8 +6,10 @@ import { renderToString } from '@vue/server-renderer'
 import { createServer, type ViteDevServer } from 'vite'
 
 import {
+  REPO_ACCESS_UNAVAILABLE,
   REPO_COLLABORATOR_REQUIRED_MESSAGE,
   ROOM_JOIN_REQUEST_DECLINE_COOLDOWN_MS,
+  ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY,
   ROOM_MEMBERSHIP_REQUIRED_MESSAGE,
   repoCollaboratorRequiredBody,
   roomMembershipRequiredBody,
@@ -16,12 +18,7 @@ import {
 import { formatJoinRequestTime, resolveJoinRequestView } from '../src/composables/room/joinRequestView'
 import { createRoomLifecycle } from '../src/composables/room/lifecycle'
 import { apiFetch, roomPath } from '../src/composables/room/api'
-import {
-  fetchRoomMembers,
-  isFocusRoomId,
-  REPO_ACCESS_UNAVAILABLE,
-  ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY,
-} from '../src/composables/room/membership'
+import { fetchRoomMembers, isFocusRoomId } from '../src/composables/room/membership'
 import { connectionState, isConnected, joinError, room } from '../src/composables/room/state'
 import { useRoomJoinRequest } from '../src/composables/room/useRoomJoinRequest'
 import { useRoomMembers } from '../src/components/room/room-drawer/useRoomMembers'
@@ -846,7 +843,7 @@ test('a focus room id offers no "Ask to join", and a 400 main-room-only answer s
   assert.equal(isFocusRoomId('github.com/acme/focus_9'), false)
   const calls = mockApi(t, {
     'POST /rooms/ROOM-1234/join-requests': json({
-      error: 'Ask to join the main room, not one of its focus rooms.', code: ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY,
+      error: 'Ask to join the main room, not one of its focus rooms.', code: ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY.code,
     }, 400),
   })
   const scope = effectScope()
@@ -885,7 +882,7 @@ test('the drawer of a focus room tells a non-member to ask to join the main room
 
 test('a 503 from the GitHub role check is a retry state, never an access refusal', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({
-    error: 'repo_access_unavailable', code: REPO_ACCESS_UNAVAILABLE,
+    error: 'repo_access_unavailable', code: REPO_ACCESS_UNAVAILABLE.code,
     message: 'GitHub did not answer the repository access check. Please retry.', room_id: 'github.com/acme/app',
   }), { status: 503, headers: { 'content-type': 'application/json', 'Retry-After': '30' } }))
   t.mock.method(console, 'error', () => undefined)
@@ -895,7 +892,7 @@ test('a 503 from the GitHub role check is a retry state, never an access refusal
   try {
     assert.equal(await lifecycle.joinRoom('github.com/acme/app'), false)
     assert.equal(joinError.value?.status, 503)
-    assert.equal(joinError.value?.code, REPO_ACCESS_UNAVAILABLE)
+    assert.equal(joinError.value?.code, REPO_ACCESS_UNAVAILABLE.code)
     assert.equal(joinError.value?.refusal, null)
     assert.equal(joinError.value?.retryAfterMs, 30_000)
     const view = presentation.useRoomPresentation({
@@ -924,7 +921,7 @@ test('the GitHub retry waits what the server asks, doubles from 30 s, and stops 
 test('the room page retries a GitHub 503 on its own with a growing wait, and stops on success or another error', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: NOW })
   const unavailable = (roomId = 'github.com/acme/app') => ({
-    status: 503, code: REPO_ACCESS_UNAVAILABLE, message: 'GitHub did not answer.', roomId, deviceFlowUrl: null,
+    status: 503, code: REPO_ACCESS_UNAVAILABLE.code, message: 'GitHub did not answer.', roomId, deviceFlowUrl: null,
     refusal: null, displayName: null, joinRequest: null, retryAfterMs: 30_000,
   })
   const error = ref<any>(null)
@@ -986,7 +983,7 @@ test('a 503 on the first reads after a good join closes the room and shows the r
     const key = `${init?.method ?? 'GET'} ${String(input)}`
     if (key === 'POST /rooms/github.com%2Facme%2Fapp/join') return json({ room_id: 'github.com/acme/app', kind: 'main' })
     if (key.startsWith('GET /rooms/github.com%2Facme%2Fapp/messages')) {
-      return new Response(JSON.stringify({ error: 'repo_access_unavailable', code: REPO_ACCESS_UNAVAILABLE, message: 'GitHub did not answer.', room_id: 'github.com/acme/app' }),
+      return new Response(JSON.stringify({ error: 'repo_access_unavailable', code: REPO_ACCESS_UNAVAILABLE.code, message: 'GitHub did not answer.', room_id: 'github.com/acme/app' }),
         { status: 503, headers: { 'content-type': 'application/json', 'Retry-After': '30' } })
     }
     return json({})
@@ -999,9 +996,32 @@ test('a 503 on the first reads after a good join closes the room and shows the r
     assert.equal(await lifecycle.joinRoom('github.com/acme/app'), false)
     assert.equal(isConnected.value, false, 'the error screen shows instead of empty panels')
     assert.equal(connectionState.value, 'error')
-    assert.equal(joinError.value?.code, REPO_ACCESS_UNAVAILABLE)
+    assert.equal(joinError.value?.code, REPO_ACCESS_UNAVAILABLE.code)
   } finally {
     lifecycle.leaveRoom()
     lifecycle.dispose()
   }
+})
+
+test('the docs describe members-only rooms and no longer promise rooms without a sign-in', async () => {
+  const docs = await Promise.all(['/src/components/docs/sections/SecurityDocs.vue', '/src/components/docs/sections/GettingStartedDocs.vue']
+    .map(async (path) => {
+      const Section = (await vite.ssrLoadModule(path)).default
+      return renderToString(createSSRApp({ render: () => h(Section) }))
+    }))
+  const html = docs.join('')
+  assert.match(html, /Every room is <strong>members only<\/strong>/)
+  assert.match(html, /Triage, Write, Maintain or Admin role/)
+  assert.match(html, /a room admin approves or declines/)
+  assert.match(html, /the same people as their main room/)
+  assert.match(html, /people with access to the private repository on GitHub, as before/)
+  assert.match(html, /request_room_access/)
+  assert.doesNotMatch(html, /everyone who can read/)
+  assert.match(html, /503 REPO_ACCESS_UNAVAILABLE/)
+  assert.match(html, /Every room needs a sign-in/)
+  assert.doesNotMatch(html, /No authentication needed|without credentials|No sign-up required|anyone can join/i)
+  const { roomTypes } = await vite.ssrLoadModule('/src/components/docs/docs-data.ts')
+  const roomCopy = roomTypes.map((type: { textBeforeTool: string; textAfterTool: string }) => type.textBeforeTool + type.textAfterTool).join(' ')
+  assert.doesNotMatch(roomCopy, /Anyone with the code can join/)
+  assert.match(roomCopy, /asks to join, and a room admin approves or declines/)
 })

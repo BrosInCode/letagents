@@ -95,6 +95,8 @@ test('web entry uses the shared tabbed frame and explains browser project suppor
   for (const label of ['Project', 'Blank room', 'Join room']) assert.ok(html.includes(label))
   assert.match(html, /GitHub repository/)
   assert.match(html, /Use the desktop app to create a project or open a folder/)
+  assert.match(html, /GitHub roles on the repository decide who can open it/)
+  assert.doesNotMatch(html, /Private repositories require GitHub sign-in/)
   assert.match(html, /class="new-room-footer"[^>]*>(?:<!--.*?-->)*<button[^>]*class="new-room-primary"[^>]*disabled/)
   assert.ok(html.indexOf('Starting with a folder?') < html.indexOf('class="new-room-footer"'))
   assert.doesNotMatch(html, /Create New Room|class="create-btn"|class="join-row"/)
