@@ -8,7 +8,7 @@ import { isBirthEvidence } from "../../../../../../shared/process-tree.mjs";
 import { CODEX_ACCESS_LEVEL_OPTIONS, normalizeLaunchPolicy } from "./launch-contract.js";
 import { CodexAdapterTurns } from "./adapter-turns.js";
 import { CodexRoomTurnObservationDetachedError, isMethodNotFound } from "./room-tools.js";
-import { type CodexThreadResult, assertCodexReadOnlyApplied, assertCodexReviewerApplied, assertCodexThreadDirectory, codexEffortMismatchNotice, codexEffortNoticeSaidOnce, codexThreadAccess, codexThreadConfig, codexThreadEffort, isMissingContinuation } from "./thread-access.js";
+import { type CodexThreadResult, assertCodexSandboxedApplied, assertCodexReviewerApplied, assertCodexThreadDirectory, codexEffortMismatchNotice, codexEffortNoticeSaidOnce, codexThreadAccess, codexThreadConfig, codexThreadEffort, isMissingContinuation } from "./thread-access.js";
 import { isCodexRuntimeUnavailable } from "./handle.js";
 import { recordValue } from "./notifications.js";
 
@@ -101,13 +101,13 @@ export abstract class CodexAdapterLifecycle extends CodexAdapterTurns {
           const resumed = await handle.client.request<CodexThreadResult>("thread/resume", {
             threadId,
             cwd: request.cwd,
-            ...codexThreadAccess(policy, handle.readOnlyProfile()),
+            ...codexThreadAccess(policy, handle.signInProfile()),
             ...(request.model ? { model: request.model } : {}),
             ...codexThreadConfig(handle.readOnlyLevel, effort),
           });
           assertAttached();
           assertCodexReviewerApplied(policy, resumed);
-          assertCodexReadOnlyApplied(policy, resumed, handle.readOnlyProfile());
+          assertCodexSandboxedApplied(policy, resumed, handle.signInProfile());
           readEffort(resumed);
           if (resumed.thread?.id === threadId) return true;
           throw new Error("Codex continuation repair resolved a different thread.");
@@ -154,13 +154,13 @@ export abstract class CodexAdapterLifecycle extends CodexAdapterTurns {
 
     assertAttached();
     const started = await handle.client.request<CodexThreadResult>("thread/start", {
-      ...codexThreadAccess(policy, handle.readOnlyProfile()),
+      ...codexThreadAccess(policy, handle.signInProfile()),
       historyMode: CODEX_THREAD_HISTORY_MODE,
       ...(request.model ? { model: request.model } : {}),
       ...codexThreadConfig(handle.readOnlyLevel, effort),
     });
     assertCodexReviewerApplied(policy, started);
-    assertCodexReadOnlyApplied(policy, started, handle.readOnlyProfile());
+    assertCodexSandboxedApplied(policy, started, handle.signInProfile());
     assertCodexThreadDirectory(request.cwd, started);
     readEffort(started);
     const replacement = started.thread?.id?.trim();

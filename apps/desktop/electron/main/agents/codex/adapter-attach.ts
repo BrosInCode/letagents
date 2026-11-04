@@ -7,7 +7,7 @@ import type { ProviderAttachTerminal, ProviderConnectionRef, ProviderContinuatio
 import { errorMessage, observeFencedExit, sameProcessBirthIdentity } from "../provider-evidence.js";
 import { CodexAdapterLaunch } from "./adapter-launch.js";
 import { CodexProviderHandle } from "./handle.js";
-import { type CodexReportedAccess, type CodexThreadResult, codexFoundNotReadOnly, codexFoundProfile, codexTurnPolicyIsReadOnly, isMissingContinuation, isUnmaterializedEmptyThreadRead } from "./thread-access.js";
+import { type CodexReportedAccess, type CodexThreadResult, codexFoundNotAtLevel, codexFoundProfile, codexTurnPolicyIsReadOnly, isMissingContinuation, isUnmaterializedEmptyThreadRead } from "./thread-access.js";
 import { codexTurnPolicy } from "./launch-contract.js";
 import { recordValue, transcriptLifecycleTurn } from "./notifications.js";
 import { requireLetAgentsWorkplace } from "./room-tools.js";
@@ -111,7 +111,7 @@ export abstract class CodexAdapterAttach extends CodexAdapterLaunch {
         // thread/read verifies identity but does not subscribe this connection
         // to turn items or approval requests. Resume the exact existing thread
         // without configuration overrides or starting/replaying a turn. It names
-        // no access either, a Read-only runtime's profile included: the reply is
+        // no access either, a sandboxed runtime's profile included: the reply is
         // then what the conversation has, not what this request asked for.
         const subscribed = await client.request<CodexThreadResult>("thread/resume", {
           threadId: ref.providerContinuationId,
@@ -119,9 +119,9 @@ export abstract class CodexAdapterAttach extends CodexAdapterLaunch {
         if (subscribed.thread?.id !== ref.providerContinuationId) {
           throw new Error("Codex subscription resolved a different durable continuation thread.");
         }
-        // The reply names the policy the loaded conversation has. For Read-only it is held to the same check as at a
+        // The reply names the policy the loaded conversation has. At a sandboxed level it is held to the same check as at a
         // start. Without a policy there is nothing to hold it to yet: it is kept for the call that binds one.
-        notReadOnly = codexFoundNotReadOnly(turnPolicy, subscribed, codexFoundProfile(turnPolicy, ref.workAttemptId));
+        notReadOnly = codexFoundNotAtLevel(turnPolicy, subscribed, codexFoundProfile(turnPolicy, ref.workAttemptId));
         if (!turnPolicy) reportedWhenFound = { approvalPolicy: subscribed.approvalPolicy, sandbox: subscribed.sandbox, activePermissionProfile: subscribed.activePermissionProfile };
         // A turn can finish between the first read and subscription without
         // sending this connection a notification. Reconstruct from a fresh
@@ -160,12 +160,13 @@ export abstract class CodexAdapterAttach extends CodexAdapterLaunch {
         turnPolicy,
       );
       this.exitPromises.set(found, launch.exited.then((exit) => this.observeExit(found, exit)));
-      // A runtime that failed the Read-only check is stopped, not attached. It is never kept here
+      // A runtime that failed its level's check is stopped, not attached. It is never kept here
       // or handed to the daemon, and what it still sends on this connection is dropped.
-      if (notReadOnly) return await this.stopFoundNotReadOnly(notReadOnly, () => this.stop(found));
+      if (notReadOnly) return await this.stopFoundNotAtLevel(notReadOnly, () => this.stop(found));
       handle = found;
       handle.ownerSetup = ownerSetup;
       handle.readOnlyLevel = codexTurnPolicyIsReadOnly(turnPolicy);
+      handle.signInProfileId = codexFoundProfile(turnPolicy, ref.workAttemptId);
       handle.reportedWhenFound = reportedWhenFound;
       // A process found running is held to the same rule as a new one: see requireTurnPolicy.
       handle.codexHome = client.reportedCodexHome?.();

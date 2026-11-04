@@ -50,22 +50,33 @@ import { shadowProfileEnvironment, windowsSystemEnvironment } from "./windows-ch
 // made-up sign-in and a made-up token service, before the real link is used.
 //
 // Codex's sandboxes refuse no read, so a command of a sandboxed agent can read
-// the owner's sign-in file, at the owner's path and through the link. A
-// Read-only agent is therefore started with a permission profile of its own:
-// Codex's built-in read-only one, and a `deny` for the sign-in file. Codex's
-// own process is not in the sandbox, so it still reads the file and refreshes
-// it. The profile is given as launch overrides, and nothing is written to the
-// owner's config. That Codex honours such a `deny` is checked for each Codex
-// binary with a made-up file, before a Read-only agent is started.
+// the owner's sign-in file, at the owner's path and through the link. An agent
+// at a sandboxed access level is therefore started with a permission profile
+// of its own: the built-in profile of its sandbox (Codex's read-only one for
+// Read-only and Ask before writes, its workspace one for Auto), and a `deny`
+// for the sign-in file. Codex's own process is not in the sandbox, so it still
+// reads the file and refreshes it. The profile is given as launch overrides,
+// and nothing is written to the owner's config. That Codex honours such a
+// `deny` under each built-in profile is checked for each Codex binary with a
+// made-up file, before an agent is started with it. The `deny` holds for a
+// command the owner or Codex's reviewer approves too: Codex 0.162.1 lets such
+// a command write outside its sandbox, and refuses it the denied file still.
 
 const SIGN_IN_FILE = "auth.json";
 const SIGN_IN_CHECK_TIMEOUT_MS = 15_000;
 const SIGN_IN_CHECK_FOLDER = "codex-sign-in-check-";
 const TOKEN_AFTER_REFRESH = "letagents-check-token-after-refresh";
 const TOKEN_SERVICE_OVERRIDE = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
-const READ_ONLY_PROFILE_PREFIX = "letagents_read_only_";
-/** Codex's own read-only profile, which a Read-only agent's profile extends. Codex reports it back with the profile's name. */
+/** Codex's own read-only profile, which a Read-only or Ask before writes agent's profile extends. Codex reports it back with the profile's name. */
 export const CODEX_BUILT_IN_READ_ONLY_PROFILE = ":read-only";
+/** Codex's own workspace profile: writes in the work folder and the temp folders, which an Auto agent's profile extends. */
+export const CODEX_BUILT_IN_WORKSPACE_PROFILE = ":workspace";
+/** A built-in Codex profile an agent's profile may extend: the one of the sandbox its access level names. */
+export type CodexBuiltInProfile = typeof CODEX_BUILT_IN_READ_ONLY_PROFILE | typeof CODEX_BUILT_IN_WORKSPACE_PROFILE;
+/** What a profile that keeps the owner's sign-in file from an agent's commands is called, by the built-in profile it extends. */
+const SIGN_IN_PROFILE_PREFIX: Record<CodexBuiltInProfile, string> = { ":read-only": "letagents_read_only_", ":workspace": "letagents_workspace_" };
+/** The permission profile a launch at a sandboxed access level names: its name, and the built-in profile it extends. */
+export type CodexSignInProfile = { id: string; extends: CodexBuiltInProfile };
 const DENY_CHECK_TIMEOUT_MS = 15_000;
 const DENY_CHECK_FOLDER = "codex-deny-check-";
 // Windows keeps a folder busy for a moment after a process that ran in it ends.
@@ -333,9 +344,10 @@ function shownAgentHome(home: string): string {
 }
 
 /**
- * The name of the permission profile a Read-only agent's Codex is started
- * with, for one work attempt. Every request of that Codex names it, and every
- * reply is held to it.
+ * The name of the permission profile an agent's Codex is started with at a
+ * sandboxed access level, for one work attempt: by the built-in profile it
+ * extends, which is the one of the level's sandbox. Every request of that
+ * Codex names it, and every reply is held to it.
  *
  * The name is made from the work attempt's own id, which nobody knows before
  * the attempt exists. Codex 0.153.4 was seen to merge a profile of the same
@@ -344,20 +356,21 @@ function shownAgentHome(home: string): string {
  * stayed in force beside the launch's `deny`. A name that cannot be written
  * into a config file beforehand has nothing to be merged with.
  */
-export function codexReadOnlyProfileId(workAttemptId: string): string {
-  return `${READ_ONLY_PROFILE_PREFIX}${createHash("sha256").update(`letagents codex read-only profile\n${workAttemptId}`).digest("hex").slice(0, 24)}`;
+export function codexSandboxedProfileId(base: CodexBuiltInProfile, workAttemptId: string): string {
+  const named = base === CODEX_BUILT_IN_READ_ONLY_PROFILE ? "read-only" : "workspace";
+  return `${SIGN_IN_PROFILE_PREFIX[base]}${createHash("sha256").update(`letagents codex ${named} profile\n${workAttemptId}`).digest("hex").slice(0, 24)}`;
 }
 
 /**
- * The launch overrides that define a profile which extends Codex's built-in
- * read-only one and denies `denied` to every command, and that make it the
+ * The launch overrides that define a profile which extends the built-in
+ * profile `base` and denies `denied` to every command, and that make it the
  * launch's default. A conversation still has to name the profile: one that is
  * started with a named sandbox does not get the default.
  */
-export function codexReadOnlyProfileOverrides(profile: string, denied: readonly string[]): string[] {
+export function codexSandboxedProfileOverrides(profile: string, base: CodexBuiltInProfile, denied: readonly string[]): string[] {
   const entries = [...new Set(denied)].map((path) => `${JSON.stringify(path)} = "deny"`).join(", ");
   return [
-    `permissions.${profile}={ extends = ${JSON.stringify(CODEX_BUILT_IN_READ_ONLY_PROFILE)}, filesystem = { ${entries} } }`,
+    `permissions.${profile}={ extends = ${JSON.stringify(base)}, filesystem = { ${entries} } }`,
     `default_permissions=${JSON.stringify(profile)}`,
   ];
 }
@@ -628,13 +641,13 @@ export async function checkCodexKeepsLinkedSignIn(codexBin: string, env: NodeJS.
  * changes with it. A Codex that does not say what it is is checked at every
  * launch.
  */
-function oncePerCodex(remembered: Map<string, Promise<boolean>>, codexBin: string, version: string | null, check: () => Promise<boolean>): Promise<boolean> {
+function oncePerCodex(remembered: Map<string, Promise<boolean>>, codexBin: string, version: string | null, check: () => Promise<boolean>, scope = ""): Promise<boolean> {
   if (!version) return check();
-  let identity = `${codexBin}\n${version}`;
+  let identity = `${scope}\n${codexBin}\n${version}`;
   try {
     const path = realpathSync(codexBin);
     const file = statSync(path);
-    identity = `${path}\n${file.size}\n${file.mtimeMs}\n${version}`;
+    identity = `${scope}\n${path}\n${file.size}\n${file.mtimeMs}\n${version}`;
   } catch {
     // A command found on PATH is checked under its own name.
   }
@@ -663,8 +676,10 @@ export function codexKeepsLinkedSignIn(codexBin: string, env: NodeJS.ProcessEnv,
 /**
  * Whether this Codex keeps a file that a launch's permission profile denies
  * from a command. Codex is started with a made-up home and a profile, given
- * as launch overrides the way a Read-only launch gives its own, that denies a
- * made-up file and a link to it. It is asked to run a command that reads the
+ * as launch overrides the way a launch at a sandboxed access level gives its
+ * own, that extends the built-in profile `base` and denies a made-up file and
+ * a link to it. Under the workspace profile the made-up file is in the work
+ * folder, which a command may write. It is asked to run a command that reads the
  * file, one that reads it through the link, and one that reads a file beside
  * them. True only when the first two are refused and print nothing of the
  * file, and the third prints its file: a Codex that runs no command at all
@@ -679,7 +694,7 @@ export function codexKeepsLinkedSignIn(codexBin: string, env: NodeJS.ProcessEnv,
  * home and never in a temp folder, it is looked at again just before Codex
  * starts, and it is removed on every path.
  */
-export async function checkCodexHonoursDeny(codexBin: string, env: NodeJS.ProcessEnv, parent: string): Promise<boolean> {
+export async function checkCodexHonoursDeny(codexBin: string, env: NodeJS.ProcessEnv, parent: string, base: CodexBuiltInProfile): Promise<boolean> {
   let scratch: string | null = null;
   try {
     mkdirSync(parent, { recursive: true, mode: 0o700 });
@@ -696,15 +711,17 @@ export async function checkCodexHonoursDeny(codexBin: string, env: NodeJS.Proces
     const toRun = codexCheckEnvironment(env);
     // Exactly what was written above, and nothing else: no config, no rules, nothing unknown.
     if (entriesBelow(scratch).sort().join("\n") !== ["denied.txt", "home", "home/linked.txt", "open.txt"].join("\n")) return false;
+    // The scratch folder is the work folder of the check: under the workspace profile a command may write it, and the
+    // denied file in it must still be refused.
     const folder = scratch;
-    const profile = `${READ_ONLY_PROFILE_PREFIX}check`;
+    const profile = `${SIGN_IN_PROFILE_PREFIX[base]}check`;
     const reads = (path: string) => process.platform === "win32" ? ["cmd.exe", "/d", "/c", "type", path] : ["/bin/cat", path];
     return await askCodexAppServer(codexBin, {
       cwd: folder,
       env: { ...toRun, HOME: folder, CODEX_HOME: home, TMPDIR: folder, ...windowsShadowProfile(folder), ...proxies },
       configOverrides: [
         ...CODEX_OWNER_FEATURE_OVERRIDES, `chatgpt_base_url="${NOWHERE}/"`, `openai_base_url="${NOWHERE}/v1"`,
-        ...codexReadOnlyProfileOverrides(profile, [denied, link]),
+        ...codexSandboxedProfileOverrides(profile, base, [denied, link]),
       ],
       experimentalApi: true,
     }, async (request) => {
@@ -726,17 +743,17 @@ export async function checkCodexHonoursDeny(codexBin: string, env: NodeJS.Proces
 }
 
 const denyChecks = new Map<string, Promise<boolean>>();
-/** The check above, made once for each Codex as it answers now. Only a pass is remembered. */
-export function codexHonoursDeny(codexBin: string, env: NodeJS.ProcessEnv, version: string | null): Promise<boolean> {
-  return oncePerCodex(denyChecks, codexBin, version, () => checkCodexHonoursDeny(codexBin, env, dirname(codexAgentHomeDirectory(env))));
+/** The check above, made once for each Codex and each built-in profile as it answers now. Only a pass is remembered. */
+export function codexHonoursDeny(codexBin: string, env: NodeJS.ProcessEnv, version: string | null, base: CodexBuiltInProfile): Promise<boolean> {
+  return oncePerCodex(denyChecks, codexBin, version, () => checkCodexHonoursDeny(codexBin, env, dirname(codexAgentHomeDirectory(env)), base), base);
 }
 
 export type CodexAgentHomeDependencies = {
   inspect(codexBin: string, options: { cwd: string; env: NodeJS.ProcessEnv; configOverrides: readonly string[] }): Promise<CodexSettingsInspection>;
   /** `version`: what Codex said it is when it answered for its settings. Null when it did not say. */
   keepsLinkedSignIn(codexBin: string, env: NodeJS.ProcessEnv, version: string | null): Promise<boolean>;
-  /** Whether this Codex keeps a file its launch's permission profile denies from a command. Asked only for a Read-only launch. */
-  honoursDeny(codexBin: string, env: NodeJS.ProcessEnv, version: string | null): Promise<boolean>;
+  /** Whether this Codex keeps a file a profile that extends `base` denies from a command. Asked for a launch that names such a profile. */
+  honoursDeny(codexBin: string, env: NodeJS.ProcessEnv, version: string | null, base: CodexBuiltInProfile): Promise<boolean>;
   link(ownerHome: string, agentHome: string): { own: string[]; inPlaceOfOwners: string[] };
   /** The first entries of one folder: none means it holds nothing. It may name more than Codex reads, never less. */
   folderEntries(folder: string): string[];
@@ -784,10 +801,13 @@ const DEFAULT_DEPENDENCIES: CodexAgentHomeDependencies = {
  *   that layer's folder is refused too: it leaves that `.codex` open.
  *
  * A permission profile is not looked at: one that is the config's default was
- * seen not to apply to a conversation that is started with a named sandbox,
- * which is how every conversation with a writable sandbox is started here.
- * A Read-only conversation names a profile of the launch's own, which extends
- * Codex's read-only one and so writes nowhere.
+ * seen not to apply to a conversation that is started with a named sandbox.
+ * A conversation at a sandboxed access level names a profile of the launch's
+ * own instead, and the roots named here do not reach it: Codex 0.162.1 reports
+ * no writable root for such a conversation, and a command of it writes only
+ * the work folder and the temp folders. The roots are still refused as above,
+ * for the Windows launch that names no profile, and for a Codex that would
+ * apply them to a conversation with one.
  */
 function writableRootsRefusal(
   inspection: CodexSettingsInspection,
@@ -896,9 +916,9 @@ async function inspected(
  * The check cannot tell a Codex that is too old from one that is newer than LetAgents knows, so the line claims
  * neither and names what helps in each case.
  */
-export const SIGN_IN_NOT_HIDDEN = "Read-only access keeps your Codex sign-in file from the agent's commands, and LetAgents could not confirm that this version of Codex does that: "
+export const SIGN_IN_NOT_HIDDEN = "A sandboxed access level keeps your Codex sign-in file from the agent's commands, and LetAgents could not confirm that this version of Codex does that: "
   + "it asked Codex to keep a made-up file from a command, and Codex did not show that it does. So LetAgents will not start Codex at this access level. "
-  + "If Codex is not up to date, update it and start the agent again. If it is, update LetAgents, or choose another access level: at every other level the agent's commands can read that file.";
+  + "If Codex is not up to date, update it and start the agent again. If it is, update LetAgents, or give the agent Full access: at that level the agent's commands can read that file.";
 
 /**
  * The Codex home for a launch at a sandboxed access level: the agents' home,
@@ -911,19 +931,21 @@ export const SIGN_IN_NOT_HIDDEN = "Read-only access keeps your Codex sign-in fil
  * one. A launch is refused always when another layer Codex applies holds a
  * command rule: the project's own, or the machine's.
  *
- * For a Read-only launch, which names its permission profile, the answer also
- * holds the launch overrides that define the profile, with a `deny` for the
- * owner's sign-in file. They are given only once this Codex has shown, with a
- * made-up file, that it honours a `deny`. When it has not, the launch is
- * refused: it is never started the old way, without the profile.
+ * For a launch that names its permission profile, the answer also holds the
+ * launch overrides that define the profile, with a `deny` for the owner's
+ * sign-in file. They are given only once this Codex has shown, with a made-up
+ * file, that it honours a `deny` under the built-in profile the agent's
+ * extends. When it has not, the launch is refused: it is never started the
+ * old way, without the profile.
  */
 export async function codexHomeForSandboxedLaunch(
   codexBin: string,
   /**
    * `writableSandbox`: the access level's sandbox lets a command write the project.
-   * `hideSignInProfile`: the launch is a Read-only agent's, and this is the name of its permission profile.
+   * `hideSignInProfile`: the launch names a permission profile that keeps the owner's sign-in file from the agent's
+   * commands: its name, and the built-in profile it extends, which is the one of the level's sandbox.
    */
-  options: { cwd?: string; env: NodeJS.ProcessEnv; writableSandbox?: boolean; hideSignInProfile?: string },
+  options: { cwd?: string; env: NodeJS.ProcessEnv; writableSandbox?: boolean; hideSignInProfile?: CodexSignInProfile },
   dependencies: Partial<CodexAgentHomeDependencies> = {},
 ): Promise<{ codexHome: string | null; notices: string[]; writableFoldersCheck?: CodexWritableFoldersCheck; configOverrides?: string[] }> {
   const deps = { ...DEFAULT_DEPENDENCIES, ...dependencies };
@@ -942,11 +964,12 @@ export async function codexHomeForSandboxedLaunch(
   let named = inspection;
   const checked = <T extends { codexHome: string | null; notices: string[] }>(home: T): T & { writableFoldersCheck?: CodexWritableFoldersCheck } => (writableSandbox
     ? { ...home, writableFoldersCheck: () => writableRootsRefusal(named, options.env, { cwd: options.cwd, runsWith: home.codexHome }) } : home);
-  /** The home a launch runs with, and for a Read-only launch the profile that keeps the sign-in file from its commands. */
+  /** The home a launch runs with, and for a launch that names one the profile that keeps the sign-in file from its commands. */
   const launchedWith = async <T extends { codexHome: string | null; notices: string[] }>(home: T): Promise<T & { configOverrides?: string[] }> => {
-    if (!options.hideSignInProfile) return home;
-    if (!await deps.honoursDeny(codexBin, options.env, inspection.userAgent ?? null)) throw new Error(SIGN_IN_NOT_HIDDEN);
-    return { ...home, configOverrides: codexReadOnlyProfileOverrides(options.hideSignInProfile, codexSignInPaths(options.env, home.codexHome)) };
+    const profile = options.hideSignInProfile;
+    if (!profile) return home;
+    if (!await deps.honoursDeny(codexBin, options.env, inspection.userAgent ?? null, profile.extends)) throw new Error(SIGN_IN_NOT_HIDDEN);
+    return { ...home, configOverrides: codexSandboxedProfileOverrides(profile.id, profile.extends, codexSignInPaths(options.env, home.codexHome)) };
   };
 
   let why: string;

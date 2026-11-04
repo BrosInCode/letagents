@@ -3,14 +3,14 @@ import { RoomTurnContextCache } from "../desktop-event-prompt-format.js";
 import { ProviderUsageTracker } from "../provider-usage.js";
 import type { CodexPermissionFileChange } from "../../../../shared/provider-permissions.js";
 import type { CodexAppServerLaunch } from "../codex-app-server.js";
-import { codexReadOnlyProfileId, sandboxedCodexHomeRefusal, sandboxedCodexProjectRefusal } from "../codex-agent-home.js";
+import { sandboxedCodexHomeRefusal, sandboxedCodexProjectRefusal } from "../codex-agent-home.js";
 import { ProviderExecutionObserver } from "../provider-execution-observer.js";
 import type { HardControlEvidence, NativeExecutionFact } from "../../../../shared/execution-protocol.js";
 import { CodexTurnResultAccumulator } from "../codex-turn-result.js";
 import type { ProviderActivityEvent, ProviderAttachTerminal, ProviderConnectionRef, ProviderHandle, ProviderObservedState, ProviderStreamEvent, ProviderTerminalPayload } from "../provider-adapter.js";
 import { errorMessage } from "../provider-evidence.js";
 import type { CodexAdapterRpc } from "./types.js";
-import { type CodexReportedAccess, codexPolicyIsSandboxed, codexTurnAccess, codexTurnPolicyIsReadOnly } from "./thread-access.js";
+import { type CodexReportedAccess, codexFoundProfile, codexPolicyIsSandboxed, codexTurnAccess, codexTurnPolicyIsReadOnly } from "./thread-access.js";
 import { codexTurnPolicy } from "./launch-contract.js";
 import { declinedOwnerRequestSummary, isUnanswerableOwnerElicitation } from "./permission-requests.js";
 
@@ -30,20 +30,27 @@ export class CodexProviderHandle implements ProviderHandle {
   ownerSetup = false;
   /**
    * This runtime is a Read-only agent's: every conversation it starts or loads
-   * again is given the Read-only config, and names the Read-only permission
-   * profile in place of a sandbox. From its launch, the level by name.
+   * again is given the Read-only config. (Its permission profile, as at every
+   * sandboxed level, is `signInProfileId`.) From its launch, the level by name.
    * For a process found running, whose level is not named, its policy says it:
    * when it is found with its policy, and when the policy is bound later.
    */
   readOnlyLevel = false;
+  /**
+   * The permission profile this runtime names in every request and holds every reply to, or null for
+   * none. From its launch, by the access level the launch named: a launch that named none names no
+   * profile, whatever its policy. For a process found running, whose level is not named, its policy
+   * says it (see codexFoundProfile): when it is found with its policy, and when the policy is bound later.
+   */
+  signInProfileId: string | null = null;
   /**
    * What the loaded conversation of a process found running reported, kept
    * only while the runtime has no policy to hold it to. The daemon can find a
    * process before it supplies the policy.
    */
   reportedWhenFound: CodexReportedAccess | null = null;
-  /** Set when that report was not Read-only for a Read-only runtime: the stop that followed, and what was reported. */
-  foundNotReadOnly: { reported: string; stopped: Promise<ProviderAttachTerminal> | null } | null = null;
+  /** Set when that report was not the level's for a runtime at a sandboxed level: the stop that followed, and what was reported. */
+  foundNotAtLevel: { reported: string; stopped: Promise<ProviderAttachTerminal> | null } | null = null;
   /**
    * The Codex home the app-server said it runs with: null when it did not
    * say. Undefined only for a client that cannot be asked, which is never the
@@ -135,7 +142,7 @@ export class CodexProviderHandle implements ProviderHandle {
   requireTurnPolicy(): Readonly<Record<string, unknown>> {
     if (!this.turnPolicy) throw new Error("Codex cannot start a turn without its exact applied permission policy; restart the agent to apply its configuration.");
     // Its process is being stopped. Should the stop fail, it still takes no turn.
-    if (this.foundNotReadOnly) throw new Error(`${this.foundNotReadOnly.reported}. Restart the agent.`);
+    if (this.foundNotAtLevel) throw new Error(`${this.foundNotAtLevel.reported}. Restart the agent.`);
     if (this.sandboxed()) {
       // A process that was started before agents had a home of their own, or that
       // a daemon found running, is never kept as it is: it takes no turn at a
@@ -152,16 +159,13 @@ export class CodexProviderHandle implements ProviderHandle {
         ?? this.writableFoldersRefusal();
       if (refusal) throw new Error(refusal);
     }
-    // What the turn is started with: for a Read-only runtime its permission profile, never a sandbox by name.
-    return codexTurnAccess(this.turnPolicy, this.readOnlyProfile());
+    // What the turn is started with: for a runtime with a permission profile that profile, never a sandbox by name.
+    return codexTurnAccess(this.turnPolicy, this.signInProfile());
   }
 
-  /**
-   * The permission profile this runtime names in every request and holds every reply to: the one of
-   * its work attempt when it is a Read-only agent's (see `readOnlyLevel`), and none otherwise.
-   */
-  readOnlyProfile(): string | null {
-    return this.readOnlyLevel ? codexReadOnlyProfileId(this.workAttemptId) : null;
+  /** The permission profile this runtime names in every request and holds every reply to: see `signInProfileId`. */
+  signInProfile(): string | null {
+    return this.signInProfileId;
   }
 
   private writableFoldersRefusal(): string | null {
@@ -193,8 +197,9 @@ export class CodexProviderHandle implements ProviderHandle {
     // applied configuration. Bind once; later settings cannot change this birth.
     if (this.turnPolicy !== null || policy === undefined) return null;
     this.turnPolicy = codexTurnPolicy(policy);
-    // As an attach with the policy does it: see `readOnlyLevel`.
+    // As an attach with the policy does it: see `readOnlyLevel` and `signInProfileId`.
     this.readOnlyLevel = codexTurnPolicyIsReadOnly(this.turnPolicy);
+    this.signInProfileId = codexFoundProfile(this.turnPolicy, this.workAttemptId);
     const reported = this.reportedWhenFound;
     this.reportedWhenFound = null;
     return reported;
