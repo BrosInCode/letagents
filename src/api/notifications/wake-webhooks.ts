@@ -24,7 +24,7 @@ import { getProjectById } from "../db.js";
 import { db, pool } from "../db/client.js";
 import { isWakeRuleCredentialLive, retireWakeRulesForCredential } from "../db/wake-rules.js";
 import { loadConnectorCipher, type ConnectorCipher, type EncryptedCredentials } from "../connectors/crypto.js";
-import { resolveProjectRepoRoomAccessDecision } from "../rooms/access.js";
+import { isProjectRoomMember, resolveProjectRepoRoomAccessDecision } from "../rooms/access.js";
 import { queueWakeRuleInvalidation } from "../server/events.js";
 import {
   composeWakeEmail,
@@ -100,6 +100,7 @@ export function defaultWakeWebhookDeps(): WakeWebhookDeliveryDeps {
     cipher: loadConnectorCipher(),
     authorize: (accountId, roomId) => authorizeDesktopPushNotification({ accountId, roomId }, {
       getProject: getProjectById, getAccount: getPushDeliveryAccount, resolveAccess: resolveProjectRepoRoomAccessDecision,
+      isRoomMember: isProjectRoomMember,
     }),
     credentialLive: isWakeRuleCredentialLive,
     send: (input) => postWakeWebhook(input),
