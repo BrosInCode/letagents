@@ -752,7 +752,7 @@ jobs:
 
       - name: Test room members and join requests
         if: matrix.group == 2
-        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-members-routes.test.ts src/api/__tests__/room-members-db.test.ts
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-members-routes.test.ts src/api/__tests__/room-members-db.test.ts src/api/__tests__/room-members-enforcement-db.test.ts
 
       - name: Test My work
         if: matrix.group == 2

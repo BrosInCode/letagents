@@ -295,7 +295,7 @@ test("a lease seeded fresh at entry serves the first body without a recheck, the
   }
 });
 
-test("a bridge loss marker leaves human leases in rooms without a repository alone", async () => {
+test("a bridge loss marker rechecks every lease, rooms without a repository included", async () => {
   const checks = { adHoc: 0, repo: 0 };
   const adHoc = acquireLiveRoomAuthorization({
     req: authenticatedRequest("bridge-loss-ad-hoc-credential"),
@@ -327,13 +327,9 @@ test("a bridge loss marker leaves human leases in rooms without a repository alo
       reason: "listener_disconnected",
       roomId: null,
     });
-    assert.deepEqual(invalidated, { adHoc: 0, repo: 1 }, "only bridge-borne authorization is retired");
+    assert.deepEqual(invalidated, { adHoc: 1, repo: 1 }, "a lost frame may have removed a member, as well as a collaborator");
     assert.deepEqual(await Promise.all([adHoc.check(), repo.check()]), [true, true]);
-    assert.deepEqual(
-      checks,
-      { adHoc: 1, repo: 2 },
-      "a session revoked in the database never travels over the bridge, so no forced read is needed",
-    );
+    assert.deepEqual(checks, { adHoc: 2, repo: 2 }, "each lease asks once more");
   } finally {
     removeAdHoc();
     removeRepo();

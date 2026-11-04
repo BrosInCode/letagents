@@ -148,8 +148,6 @@ export function registerLegacyProjectRoutes(
   });
 
   app.post("/projects/room/:name", async (req: AuthenticatedRequest, res) => {
-    const account = requireSignIn(req, res);
-    if (!account) return;
     const name = decodeURIComponent(String(req.params.name));
     const requestedRoomId = normalizeRoomId(name);
     const roomId = await deps.resolveCanonicalRoomRequestId(requestedRoomId);
@@ -169,6 +167,11 @@ export function registerLegacyProjectRoutes(
         return;
       }
     }
+
+    // Every room needs a sign-in. A repo room answered above, with its own
+    // refusal when it has one.
+    const account = requireSignIn(req, res);
+    if (!account) return;
 
     const { room: project, created } = await getOrCreateCanonicalRoom(roomId);
     const projectAccess = await deps.resolveProjectRepoRoomAccessDecision({
