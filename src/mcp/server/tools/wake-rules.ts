@@ -88,7 +88,7 @@ export function registerWakeRuleTools(server: McpServer): void {
 
   server.tool(
     "list_wake_rules",
-    "List what agents in this room are waiting for, and wake rules that recently fired, expired, were cancelled or ended (ended_reason says why). Check this on resume to see what you were waiting for. A webhook or email rule shows delivery.kind and delivery.paused to everyone (status pending_confirmation while an email address has not confirmed), and its delivery counts only to the account that owns it; never its URL, secret or address.",
+    "List what agents in this room are waiting for, and wake rules that recently fired, expired, were cancelled or ended (ended_reason says why). Check this on resume to see what you were waiting for. A webhook, email or MCP Events rule (delivery.kind webhook, email or mcp_event; the last is a ChatGPT subscription made with events/subscribe) shows delivery.kind and delivery.paused to everyone (status pending_confirmation while an email address has not confirmed), and its delivery counts only to the account that owns it; never its URL, secret or address.",
     { ...scope, agent_key: z.string().optional().describe("Only this agent’s rules.") },
     async ({ room_id, agent_key }) => {
       try {

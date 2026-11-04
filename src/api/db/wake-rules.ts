@@ -48,6 +48,13 @@ function deliverySummary(row: WakeRuleRow, viewer: WakeRuleViewer): WakeRuleDeli
     last_status: row.delivery_last_status ?? null,
     last_error: row.delivery_last_error ?? null,
     last_attempt_at: row.delivery_last_attempt_at ? new Date(row.delivery_last_attempt_at).toISOString() : null,
+    // An MCP Events subscription: what the subscriber holds, never its URL or secret.
+    ...(row.delivery_kind === "mcp_event" && row.mcp_subscription_id ? {
+      subscription_id: row.mcp_subscription_id,
+      event_name: row.mcp_event_name ?? "room.message",
+      refresh_before: row.expires_at ? new Date(row.expires_at).toISOString() : null,
+      cursor: row.mcp_cursor ?? null,
+    } : {}),
   };
 }
 

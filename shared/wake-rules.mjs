@@ -28,8 +28,12 @@ export const WAKE_RULE_EVENTS = Object.freeze([
  */
 export const WAKE_RULE_STATUSES = Object.freeze(["active", "fired", "expired", "cancelled", "retired", "paused", "pending_confirmation"]);
 
-/** How a room.message rule reaches its agent outside the room. */
-export const WAKE_RULE_DELIVERY_KINDS = Object.freeze(["webhook", "email"]);
+/**
+ * How a room.message rule reaches its agent outside the room. `mcp_event`: an
+ * MCP Events subscription (ChatGPT) made over `/mcp`, delivered as a Standard
+ * Webhooks POST; it is managed by `events/subscribe`, not by `add_wake_rule`.
+ */
+export const WAKE_RULE_DELIVERY_KINDS = Object.freeze(["webhook", "email", "mcp_event"]);
 
 /** Source of the room message that wakes an agent. */
 export const WAKE_NOTICE_SOURCE = "wake_rule";
@@ -79,6 +83,22 @@ export const WAKE_RULE_LIMITS = Object.freeze({
   emailConfirmationsPerAddressPerDay: 3,
   /** Confirmation emails one account may cause in a day. */
   emailConfirmationsPerAccountPerDay: 10,
+  /** An MCP Events subscription lasts this long unless `ttlMs` asks for less (never less than the minimum). */
+  mcpEventDefaultTtlMs: 24 * 60 * 60 * 1000,
+  mcpEventMinTtlMs: 5 * 60 * 1000,
+  mcpEventMaxTtlMs: 7 * 24 * 60 * 60 * 1000,
+  /** Events replayed when a subscription is renewed with a cursor; older ones are reported as truncated. */
+  mcpEventReplayMax: 50,
+  /** Events one subscription may hold while an hourly budget is spent; past it the oldest are dropped. */
+  mcpEventHeldMax: 50,
+  /** After a renewal with a new secret, deliveries carry both signatures for this long. */
+  mcpEventSecretRotationMs: 10 * 60 * 1000,
+  /** A verified callback URL is not challenged again for this long (per credential and URL, in memory). */
+  mcpEventVerificationCacheMs: 10 * 60 * 1000,
+  /** The whole request body of one event, as the MCP Events draft bounds it. */
+  mcpEventMaxBodyBytes: 256 * 1024,
+  mcpEventSecretMinBytes: 24,
+  mcpEventSecretMaxBytes: 64,
 });
 
 export const WAKE_TASK_STATUSES = Object.freeze([
