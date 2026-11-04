@@ -172,9 +172,10 @@
           </template>
 
           <template v-else>
-            <h1>This room didn't load</h1>
+            <h1>{{ githubUnavailable ? "GitHub is not answering" : "This room didn't load" }}</h1>
             <p>
-              LetAgents couldn't reach the room server.
+              <template v-if="githubUnavailable">LetAgents could not check your role on this repository, because GitHub did not answer.</template>
+              <template v-else>LetAgents couldn't reach the room server.</template>
               <template v-if="retrySecondsLeft !== null">
                 <template v-if="retrySecondsLeft > 0">
                   It usually recovers on its own — retrying in
@@ -216,8 +217,10 @@ import { loginInitials } from "../../../domain/initials";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import type { SidebarMode } from "../types";
 import {
+  REPO_ACCESS_UNAVAILABLE_CODE,
   nextRetryStep,
   resolveAuthCardState,
+  retryBackoffFor,
   retryDeadlineAt,
   retrySecondsLeft as computeRetrySecondsLeft,
 } from "./auth-onboarding";
@@ -312,12 +315,15 @@ const pendingExpiryLabel = computed(() => {
 // countdown.
 const retryStep = ref(0);
 const retryDeadline = ref(0);
+// GitHub not answering is not a refusal: check again, but at the pace the server asks for.
+const githubUnavailable = computed(() => props.access.code === REPO_ACCESS_UNAVAILABLE_CODE);
+const retryBackoff = computed(() => retryBackoffFor(props.access.code));
 
 const retrySecondsLeft = computed(() => computeRetrySecondsLeft(now.value, retryDeadline.value));
 
 function armRetry(fromStep: number): void {
   retryStep.value = fromStep;
-  retryDeadline.value = retryDeadlineAt(Date.now(), fromStep);
+  retryDeadline.value = retryDeadlineAt(Date.now(), fromStep, retryBackoff.value);
 }
 
 function clearRetry(): void {
@@ -359,7 +365,7 @@ function onTick(): void {
   if (props.busy) return;
 
   if (cardState.value === "unavailable" && retryDeadline.value !== 0 && now.value >= retryDeadline.value) {
-    armRetry(nextRetryStep(retryStep.value));
+    armRetry(nextRetryStep(retryStep.value, retryBackoff.value));
     emit("refresh-room");
   }
 }

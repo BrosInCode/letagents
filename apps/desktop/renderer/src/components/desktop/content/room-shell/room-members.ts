@@ -42,5 +42,6 @@ export function roomMembershipErrorMessage(result: DesktopRoomMembershipFailure)
   // The plain admin refusal has no code; a coded 403 explains itself.
   if (result.status === 403 && !result.code) return "Only room admins can do this.";
   if (result.status === 429) return "Too many changes. Wait a minute, then try again.";
+  if (result.code === "REPO_ACCESS_UNAVAILABLE") return "GitHub is not answering. Try again in a minute.";
   return result.message || "LetAgents could not save the change.";
 }

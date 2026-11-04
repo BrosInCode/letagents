@@ -164,6 +164,24 @@ test("a public-repo refusal sends the person to a repository admin, with no join
   assert.match(html, />\s*Check again\s*</);
 });
 
+test("a focus room refused to a non-member asks for the main room's link instead of a request", async () => {
+  const body = roomMembershipRequiredBody({ room_id: "focus_61" });
+  const html = await renderGate({ status: "membership_required", title: "", message: body.message, roomIdentifier: "focus_61",
+    deviceFlowUrl: null, code: body.code, httpStatus: 403, displayName: null, joinRequest: null }, "focus_61");
+  assert.match(html, /Ask for the main room&#39;s link|Ask for the main room's link/);
+  assert.doesNotMatch(html, /Ask to join/);
+  assert.match(html, />\s*Check again\s*</);
+});
+
+test("GitHub not answering shows its own words and a 30 s retry", async () => {
+  const html = await renderGate({ status: "unavailable", title: "GitHub is not answering", message: "GitHub did not answer the repository access check. Please retry.",
+    roomIdentifier: "github.com/acme/app", deviceFlowUrl: null, code: "REPO_ACCESS_UNAVAILABLE", httpStatus: 503 }, "github.com/acme/app");
+  assert.match(html, /GitHub is not answering/);
+  assert.match(html, /because GitHub did not answer/);
+  assert.doesNotMatch(html, /couldn&#39;t reach the room server|couldn't reach the room server/);
+  assert.doesNotMatch(html, /Ask a repository admin/);
+});
+
 function installBridge(roomMembers: Record<string, (...args: never[]) => unknown>): void {
   Object.assign(globalThis, { window: { matchMedia: () => ({ matches: false }), letagentsDesktop: { roomMembers } } });
 }
@@ -193,6 +211,19 @@ test("Ask to join shows Waiting at once, and Cancel brings Ask back", async () =
     await click(root, "Cancel request");
     assert.match(text(root), /Ask to join this room/);
     assert.deepEqual(calls, [["requestJoin", "design-room"], ["decideJoinRequest", "design-room", "rjr_1", "cancel"]]);
+  } finally { app.unmount(); }
+});
+
+test("the server's main-room-only answer turns the card to the main room's link", async () => {
+  installBridge({ requestJoin: (async () => ({ ok: false, status: 400, code: "ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY",
+    message: "Ask to join the main room, not one of its focus rooms.", joinRequest: null })) as never });
+  // A focus room the server still named (an older server): the card offers a request until the server says no.
+  const { root, app } = mount(RoomJoinAccess, () => ({ access: { ...membershipAccess(null), roomIdentifier: "focus_61" }, account, busy: false, now: Date.now() }));
+  try {
+    await click(root, "Ask to join");
+    assert.match(text(root), /Ask for the main room's link/);
+    assert.equal(button(root, "Ask to join"), undefined);
+    assert.equal(descendants(root).some((node) => node.props["data-testid"] === "room-join-error"), false);
   } finally { app.unmount(); }
 });
 

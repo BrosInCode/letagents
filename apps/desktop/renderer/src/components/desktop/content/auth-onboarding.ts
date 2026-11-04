@@ -63,6 +63,20 @@ export function resolveAuthCardState(input: AuthCardStateInput): AuthCardState {
 export const RETRY_BACKOFF_SECONDS: readonly number[] = [8, 15, 30];
 
 /**
+ * The server's 503 when GitHub gives no answer to a repository role check.
+ * It is not a refusal: the person may have a role, so the app checks again.
+ * The shared room-membership module does not define this code.
+ */
+export const REPO_ACCESS_UNAVAILABLE_CODE = "REPO_ACCESS_UNAVAILABLE";
+
+/** The server asks for 30 s (Retry-After) before a new GitHub check; later checks wait longer. */
+export const GITHUB_RETRY_BACKOFF_SECONDS: readonly number[] = [30, 60, 120];
+
+export function retryBackoffFor(code: string | null | undefined): readonly number[] {
+  return code === REPO_ACCESS_UNAVAILABLE_CODE ? GITHUB_RETRY_BACKOFF_SECONDS : RETRY_BACKOFF_SECONDS;
+}
+
+/**
  * Absolute retry deadline for a backoff step, as a timestamp. Absolute rather
  * than a tick count because throttled or occluded windows batch timers, and a
  * decrement-per-tick countdown silently stalls when that happens.
@@ -95,7 +109,21 @@ export function isMembershipRefusal(status: DesktopRoomAccess["status"] | null |
   return status === "membership_required" || status === "repo_collaborator_required";
 }
 
+/**
+ * A focus room's own id, as the server names it to a person who is not a
+ * member: `focus_12`, or a room path with a `/focus/` part.
+ */
+export function isFocusRoomIdentifier(roomIdentifier: string | null | undefined): boolean {
+  const id = roomIdentifier?.trim() ?? "";
+  return /^focus_\d+$/i.test(id) || /\/focus\/[^/]/i.test(id);
+}
+
 export type JoinCardState =
+  /**
+   * A focus room refused to a non-member: the server names no main room and
+   * takes requests only for the main room, so the card asks for its link.
+   */
+  | { kind: "main_room_only" }
   /** No request yet, or the last one was cancelled: offer "Ask to join". */
   | { kind: "ask"; declined: false }
   /** The last request was declined and its wait is over: offer to ask again. */
@@ -108,7 +136,12 @@ export type JoinCardState =
  * What the join card offers for the person's latest request. An approved
  * request that still meets a refusal (removed again since) is a fresh start.
  */
-export function resolveJoinCardState(joinRequest: RoomJoinRequestSummary | null | undefined, now: number): JoinCardState {
+export function resolveJoinCardState(
+  joinRequest: RoomJoinRequestSummary | null | undefined,
+  now: number,
+  mainRoomOnly = false,
+): JoinCardState {
+  if (mainRoomOnly) return { kind: "main_room_only" };
   if (joinRequest?.state === "pending") {
     return { kind: "pending", requestId: joinRequest.id, askedAt: joinRequest.created_at };
   }

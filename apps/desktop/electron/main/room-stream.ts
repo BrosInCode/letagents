@@ -171,8 +171,29 @@ class RoomStreamAccessRefusedError extends Error {
   }
 }
 
-async function readRoomStreamRefusal(response: Response): Promise<RoomStreamAccessRefusedError | null> {
-  if (response.status !== 403) return null;
+/**
+ * A 503 because GitHub gave no answer to the repository role check. It is not
+ * a refusal: the stream keeps trying, but waits as long as the server asks.
+ */
+class RoomStreamRetryLaterError extends Error {
+  constructor(readonly retryMs: number) {
+    super("GitHub did not answer the repository access check.");
+    this.name = "RoomStreamRetryLaterError";
+  }
+}
+
+const REPO_ACCESS_RETRY_DEFAULT_MS = 30_000;
+
+function retryAfterMs(response: Response): number {
+  const seconds = Number(response.headers.get("retry-after"));
+  if (!Number.isFinite(seconds) || seconds <= 0) return REPO_ACCESS_RETRY_DEFAULT_MS;
+  return Math.min(Math.max(seconds * 1000, 5_000), 5 * 60_000);
+}
+
+async function readRoomStreamRefusal(
+  response: Response,
+): Promise<RoomStreamAccessRefusedError | RoomStreamRetryLaterError | null> {
+  if (response.status !== 403 && response.status !== 503) return null;
   let body: unknown = null;
   try {
     body = await response.json();
@@ -180,6 +201,9 @@ async function readRoomStreamRefusal(response: Response): Promise<RoomStreamAcce
     return null;
   }
   const code = body && typeof body === "object" ? (body as { code?: unknown }).code : null;
+  if (response.status === 503) {
+    return code === "REPO_ACCESS_UNAVAILABLE" ? new RoomStreamRetryLaterError(retryAfterMs(response)) : null;
+  }
   const refusal = roomAccessRefusal(body);
   if (refusal === "membership_required") return new RoomStreamAccessRefusedError(403, "ROOM_MEMBERSHIP_REQUIRED");
   if (refusal === "repo_collaborator_required") return new RoomStreamAccessRefusedError(403, "REPO_COLLABORATOR_REQUIRED");
@@ -889,7 +913,7 @@ async function pollDesktopRoomMessages(
         message:
           error instanceof Error ? error.message : "Room polling disconnected.",
       });
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await new Promise((resolve) => setTimeout(resolve, error instanceof RoomStreamRetryLaterError ? error.retryMs : 2500));
     } finally {
       if (stream.pollAbortController === pollAbortController) {
         stream.pollAbortController = null;
@@ -1385,6 +1409,7 @@ async function openDesktopRoomStream(
       refuseRoomStream(stream, error);
       return;
     }
+    if (error instanceof RoomStreamRetryLaterError) stream.retryMs = Math.max(stream.retryMs, error.retryMs);
     emitRoomStreamEvent({
       type: "error",
       roomIdentifier: stream.roomIdentifier,
