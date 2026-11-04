@@ -879,7 +879,7 @@ test('the drawer of a focus room tells a non-member to ask to join the main room
   })
   await viteAuth.checkSession()
   const html = await renderMembersPanel(roomInfo('focus_9'))
-  assert.match(html, /A focus room uses the members of its main room: ask to join there\./)
+  assert.match(html, /A focus room uses the members of its main room\. If you have not asked to join that room yet, ask there\./)
   assert.doesNotMatch(html, />\s*Ask to join\s*</)
 })
 
@@ -928,27 +928,65 @@ test('the room page retries a GitHub 503 on its own with a growing wait, and sto
     refusal: null, displayName: null, joinRequest: null, retryAfterMs: 30_000,
   })
   const error = ref<any>(null)
-  const connected = ref(false)
   let retries = 0
+  let opens = false
   const scope = effectScope()
-  const state = scope.run(() => retry.useRepoAccessRetry({ joinError: error, isConnected: connected, retry: async () => { retries += 1 } }))!
+  const state = scope.run(() => retry.useRepoAccessRetry({ joinError: error, retry: async () => { retries += 1; return opens } }))!
   const flush = async () => { await tick(); await tick() }
+  const fail = async () => { error.value = null; await flush(); error.value = unavailable(); await flush() }
   try {
     error.value = unavailable(); await flush()
     assert.equal(state.nextRetryAt.value, NOW + 30_000)
     t.mock.timers.tick(29_999); assert.equal(retries, 0)
-    t.mock.timers.tick(1); assert.equal(retries, 1)
-    error.value = null; await flush()
-    error.value = unavailable(); await flush()
+    t.mock.timers.tick(1); await flush()
+    assert.equal(retries, 1)
+    assert.equal(state.failedRetries.value, 1)
+    await fail()
     assert.equal(state.nextRetryAt.value, NOW + 30_000 + 60_000, 'the second wait is longer')
+    t.mock.timers.tick(60_000); await flush()
+    assert.equal(state.failedRetries.value, 2, 'the room page offers GitHub sign-in again from here')
+
+    await fail()
     error.value = null; await flush()
-    connected.value = true; await flush()
-    connected.value = false
+    t.mock.timers.tick(600_000); await flush()
+    assert.equal(retries, 2, 'a manual Retry cancels the waiting automatic try')
+
     error.value = unavailable(); await flush()
-    assert.equal(state.nextRetryAt.value, NOW + 30_000 + 30_000, 'an open room resets the wait')
+    opens = true
+    t.mock.timers.tick(120_000); await flush()
+    assert.equal(retries, 3)
+    assert.equal(state.failedRetries.value, 0, 'a retry that opened the room ends the run')
+    error.value = unavailable(); await flush()
+    assert.equal(state.nextRetryAt.value, Date.now() + 30_000, 'a later outage starts again at 30 s')
+
     error.value = { ...unavailable(), code: 'PRIVATE_REPO_NO_ACCESS', status: 403 }; await flush()
     assert.equal(state.nextRetryAt.value, null)
-    t.mock.timers.tick(600_000)
-    assert.equal(retries, 1, 'another error never retries')
+    t.mock.timers.tick(600_000); await flush()
+    assert.equal(retries, 3, 'another error never retries')
   } finally { scope.stop() }
+})
+
+test('a 503 on the first reads after a good join closes the room and shows the retry screen', async (t) => {
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const key = `${init?.method ?? 'GET'} ${String(input)}`
+    if (key === 'POST /rooms/github.com%2Facme%2Fapp/join') return json({ room_id: 'github.com/acme/app', kind: 'main' })
+    if (key.startsWith('GET /rooms/github.com%2Facme%2Fapp/messages')) {
+      return new Response(JSON.stringify({ error: 'repo_access_unavailable', code: REPO_ACCESS_UNAVAILABLE, message: 'GitHub did not answer.', room_id: 'github.com/acme/app' }),
+        { status: 503, headers: { 'content-type': 'application/json', 'Retry-After': '30' } })
+    }
+    return json({})
+  })
+  t.mock.method(console, 'error', () => undefined)
+  const lifecycle = createRoomLifecycle({
+    startParticipantRefreshLoop() {}, startPresenceRefreshLoop() {}, async startStreaming() {}, finishStreamingBootstrap() {}, stopStreaming() {},
+  })
+  try {
+    assert.equal(await lifecycle.joinRoom('github.com/acme/app'), false)
+    assert.equal(isConnected.value, false, 'the error screen shows instead of empty panels')
+    assert.equal(connectionState.value, 'error')
+    assert.equal(joinError.value?.code, REPO_ACCESS_UNAVAILABLE)
+  } finally {
+    lifecycle.leaveRoom()
+    lifecycle.dispose()
+  }
 })

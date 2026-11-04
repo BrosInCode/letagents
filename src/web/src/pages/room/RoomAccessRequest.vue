@@ -81,7 +81,7 @@ const body = computed(() => {
     return `A room admin declined your request. You can ask again ${formatJoinRequestTime(view.retryAt, now)}.`
   }
   if (view.kind === 'main_room_only') {
-    return 'This is a focus room inside another room, and only that room\'s members can open it. Ask a member for the main room\'s link, then ask to join there.'
+    return 'This is a focus room inside another room, and only that room\'s members can open it. Ask a member for the main room\'s link. If you have not asked to join that room yet, ask there.'
   }
   return view.previouslyDeclined
     ? 'A room admin declined your last request. You can ask again now.'

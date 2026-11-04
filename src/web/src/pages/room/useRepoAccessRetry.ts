@@ -6,7 +6,7 @@ import type { RoomJoinError } from '@/composables/useRoom'
 const FIRST_RETRY_MS = 30_000
 const MAX_RETRY_MS = 5 * 60_000
 
-/** The wait before try `attempt` + 1: at least what the server asked, doubling from 30 s up to 5 min. */
+/** The wait before try `attempt` + 1: doubling from 30 s, at least the server's Retry-After, never above 5 min. */
 export function repoAccessRetryDelay(attempt: number, retryAfterMs: number | null): number {
   const backoff = Math.min(FIRST_RETRY_MS * 2 ** attempt, MAX_RETRY_MS)
   return Math.min(Math.max(backoff, retryAfterMs ?? 0), MAX_RETRY_MS)
@@ -19,12 +19,13 @@ export function repoAccessRetryDelay(attempt: number, retryAfterMs: number | nul
  */
 export function useRepoAccessRetry(input: {
   joinError: Readonly<Ref<RoomJoinError | null>>
-  isConnected: Readonly<Ref<boolean>>
-  retry: () => Promise<unknown>
+  /** Joins again; true when the room opened. */
+  retry: () => Promise<boolean>
 }) {
   const nextRetryAt = ref<number | null>(null)
+  /** Automatic tries that came back with the same answer, for this room. */
+  const failedRetries = ref(0)
   let timer: ReturnType<typeof setTimeout> | null = null
-  let attempt = 0
   let failingRoom: string | null = null
 
   function clearTimer() {
@@ -33,37 +34,35 @@ export function useRepoAccessRetry(input: {
     nextRetryAt.value = null
   }
 
+  function endRun() {
+    failedRetries.value = 0
+    failingRoom = null
+  }
+
   watch(input.joinError, (error) => {
     clearTimer()
     if (error?.code !== REPO_ACCESS_UNAVAILABLE) {
       // A join in progress clears the error and keeps the count; any other error ends the run.
-      if (error) {
-        attempt = 0
-        failingRoom = null
-      }
+      if (error) endRun()
       return
     }
     if (error.roomId !== failingRoom) {
-      attempt = 0
+      endRun()
       failingRoom = error.roomId
     }
-    const delay = repoAccessRetryDelay(attempt, error.retryAfterMs)
+    const delay = repoAccessRetryDelay(failedRetries.value, error.retryAfterMs)
     nextRetryAt.value = Date.now() + delay
     timer = setTimeout(() => {
       timer = null
       nextRetryAt.value = null
-      attempt += 1
-      void input.retry()
+      failedRetries.value += 1
+      // Only a join that fully opened the room ends the run: the live stream can
+      // open before a first read gets the same 503.
+      void input.retry().then((opened) => { if (opened) endRun() })
     }, delay)
-  })
-
-  watch(input.isConnected, (connected) => {
-    if (!connected) return
-    attempt = 0
-    failingRoom = null
   })
 
   onScopeDispose(clearTimer)
 
-  return { nextRetryAt }
+  return { nextRetryAt, failedRetries }
 }

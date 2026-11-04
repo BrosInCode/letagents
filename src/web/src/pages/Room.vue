@@ -32,6 +32,7 @@
       :showEventsTab="githubEventsSupported"
       :gitRoom="room?.gitRoom || null"
       :accessLocked="Boolean(accessRefusal)"
+      :waitingForGitHub="accessCheckUnavailable && !isConnected"
       @toggleDrawer="drawerOpen = !drawerOpen"
       @update:activeTab="handleActiveTabChange"
       @update:searchQuery="searchQuery = $event"
@@ -60,7 +61,7 @@
       v-else-if="connectionState === 'error' && !isConnected"
       :title="joinErrorTitle"
       :body="joinErrorBody"
-      :showGitHubSignIn="showGitHubSignIn"
+      :showGitHubSignIn="showGitHubSignIn || offerSignInAgain"
       :note="repoAccessRetryNote"
       @signIn="handleSignIn"
       @retry="retryJoin"
@@ -391,6 +392,7 @@ const {
   focusSettings,
   showGitHubSignIn,
   accessRefusal,
+  accessCheckUnavailable,
   joinErrorTitle,
   joinErrorBody,
   stalePromptTaskStates,
@@ -401,10 +403,16 @@ const {
   connectionState,
   authUser: auth.user,
 })
-const { nextRetryAt: repoAccessRetryAt } = useRepoAccessRetry({ joinError, isConnected, retry: () => retryJoin() })
-const repoAccessRetryNote = computed(() => repoAccessRetryAt.value === null
-  ? ''
-  : `Trying again ${formatJoinRequestTime(repoAccessRetryAt.value, Date.now())}.`)
+const { nextRetryAt: repoAccessRetryAt, failedRetries: repoAccessFailedRetries } = useRepoAccessRetry({
+  joinError, retry: retryJoin,
+})
+// GitHub also answers this way for a revoked or expired sign-in, which a new sign-in fixes.
+const offerSignInAgain = computed(() => accessCheckUnavailable.value && repoAccessFailedRetries.value >= 2)
+const repoAccessRetryNote = computed(() => {
+  if (!accessCheckUnavailable.value) return ''
+  const next = repoAccessRetryAt.value === null ? '' : `Trying again ${formatJoinRequestTime(repoAccessRetryAt.value, Date.now())}.`
+  return offerSignInAgain.value ? `${next} If this keeps happening, sign in with GitHub again.`.trim() : next
+})
 provideRoomMessageLinkPreviews(useRoomMessageLinkPreviews(computed(() => room.value?.identifier || ''), computed(() => getGitHubSupportIdentifier(room.value))))
 const {
   focusDraftTaskId,
@@ -493,9 +501,9 @@ async function handleRename() {
   }
 }
 
-async function retryJoin() {
+async function retryJoin(): Promise<boolean> {
   const roomId = route.params.roomId as string
-  if (roomId) await joinRoom(roomId)
+  return roomId ? joinRoom(roomId) : false
 }
 
 async function handleLeftRoom(roomName: string) {
