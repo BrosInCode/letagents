@@ -404,7 +404,7 @@ const {
   authUser: auth.user,
 })
 const { nextRetryAt: repoAccessRetryAt, failedRetries: repoAccessFailedRetries } = useRepoAccessRetry({
-  joinError, retry: retryJoin,
+  joinError, roomOpened: messagesLoaded, retry: retryJoin,
 })
 // GitHub also answers this way for a revoked or expired sign-in, which a new sign-in fixes.
 const offerSignInAgain = computed(() => accessCheckUnavailable.value && repoAccessFailedRetries.value >= 2)

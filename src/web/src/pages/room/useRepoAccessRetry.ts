@@ -19,8 +19,9 @@ export function repoAccessRetryDelay(attempt: number, retryAfterMs: number | nul
  */
 export function useRepoAccessRetry(input: {
   joinError: Readonly<Ref<RoomJoinError | null>>
-  /** Joins again; true when the room opened. */
-  retry: () => Promise<boolean>
+  /** True once a join fully opened the room (its first reads all answered). */
+  roomOpened: Readonly<Ref<boolean>>
+  retry: () => Promise<unknown>
 }) {
   const nextRetryAt = ref<number | null>(null)
   /** Automatic tries that came back with the same answer, for this room. */
@@ -56,10 +57,15 @@ export function useRepoAccessRetry(input: {
       timer = null
       nextRetryAt.value = null
       failedRetries.value += 1
-      // Only a join that fully opened the room ends the run: the live stream can
-      // open before a first read gets the same 503.
-      void input.retry().then((opened) => { if (opened) endRun() })
+      void input.retry()
     }, delay)
+  })
+
+  // Any join that fully opened the room ends the run: an automatic try, Retry,
+  // or another route. The live stream can open before a first read gets the
+  // same 503, so the connection state is not the signal.
+  watch(input.roomOpened, (opened) => {
+    if (opened) endRun()
   })
 
   onScopeDispose(clearTimer)

@@ -928,10 +928,13 @@ test('the room page retries a GitHub 503 on its own with a growing wait, and sto
     refusal: null, displayName: null, joinRequest: null, retryAfterMs: 30_000,
   })
   const error = ref<any>(null)
+  const opened = ref(false)
   let retries = 0
   let opens = false
   const scope = effectScope()
-  const state = scope.run(() => retry.useRepoAccessRetry({ joinError: error, retry: async () => { retries += 1; return opens } }))!
+  const state = scope.run(() => retry.useRepoAccessRetry({
+    joinError: error, roomOpened: opened, retry: async () => { retries += 1; if (opens) opened.value = true },
+  }))!
   const flush = async () => { await tick(); await tick() }
   const fail = async () => { error.value = null; await flush(); error.value = unavailable(); await flush() }
   try {
@@ -959,10 +962,22 @@ test('the room page retries a GitHub 503 on its own with a growing wait, and sto
     error.value = unavailable(); await flush()
     assert.equal(state.nextRetryAt.value, Date.now() + 30_000, 'a later outage starts again at 30 s')
 
+    opened.value = false
+    opens = false
+    await fail(); t.mock.timers.tick(30_000); await flush()
+    await fail()
+    assert.equal(state.failedRetries.value, 1)
+    error.value = null; await flush()
+    opened.value = true; await flush()
+    assert.equal(state.failedRetries.value, 0, 'a manual Retry or another join that opens the room also ends the run')
+    opened.value = false
+    error.value = unavailable(); await flush()
+
+    const retriesBefore = retries
     error.value = { ...unavailable(), code: 'PRIVATE_REPO_NO_ACCESS', status: 403 }; await flush()
     assert.equal(state.nextRetryAt.value, null)
     t.mock.timers.tick(600_000); await flush()
-    assert.equal(retries, 3, 'another error never retries')
+    assert.equal(retries, retriesBefore, 'another error never retries')
   } finally { scope.stop() }
 })
 
