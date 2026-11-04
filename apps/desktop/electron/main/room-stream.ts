@@ -1,4 +1,5 @@
 import { ROOM_TYPING, parseTypingSignal } from "../../../../shared/room-typing.mjs";
+import { roomAccessRefusal } from "../../../../shared/room-membership.mjs";
 import type {
   DesktopRentalActivityEvent,
   DesktopRoomDeliveryRepair,
@@ -26,6 +27,7 @@ import {
   mapRoomMessagePayload,
 } from "./rooms.js";
 import { mapRoomArtifactPayload } from "./rooms/snapshot/mappers.js";
+import { forgetJoinedRoomInfo } from "./rooms/room-info.js";
 import { emitToMainWindow } from "./window.js";
 import {
   createManagedMessageDeliveryTracker,
@@ -155,6 +157,52 @@ function isCurrentRoomStream(
   stream: NonNullable<typeof activeRoomStream>,
 ): boolean {
   return activeRoomStream === stream && !stream.stopped;
+}
+
+/**
+ * A 403 that a retry cannot fix: the account is not a member, has no role on
+ * the repository, or the room is on a host that is not GitHub. Only these
+ * codes stop the stream; any other failure keeps the usual reconnect.
+ */
+class RoomStreamAccessRefusedError extends Error {
+  constructor(readonly httpStatus: number, readonly code: string) {
+    super(`Room stream refused with HTTP ${httpStatus} (${code}).`);
+    this.name = "RoomStreamAccessRefusedError";
+  }
+}
+
+async function readRoomStreamRefusal(response: Response): Promise<RoomStreamAccessRefusedError | null> {
+  if (response.status !== 403) return null;
+  let body: unknown = null;
+  try {
+    body = await response.json();
+  } catch {
+    return null;
+  }
+  const code = body && typeof body === "object" ? (body as { code?: unknown }).code : null;
+  const refusal = roomAccessRefusal(body);
+  if (refusal === "membership_required") return new RoomStreamAccessRefusedError(403, "ROOM_MEMBERSHIP_REQUIRED");
+  if (refusal === "repo_collaborator_required") return new RoomStreamAccessRefusedError(403, "REPO_COLLABORATOR_REQUIRED");
+  if (code === "UNSUPPORTED_REPO_PROVIDER") return new RoomStreamAccessRefusedError(403, code);
+  return null;
+}
+
+/** Stop for good and tell the app, which checks the room again; it starts a new stream when access returns. */
+function refuseRoomStream(
+  stream: NonNullable<typeof activeRoomStream>,
+  refusal: RoomStreamAccessRefusedError,
+): void {
+  if (!isCurrentRoomStream(stream)) return;
+  stopActiveRoomStream(stream.roomIdentifier);
+  // The app checks the room next; a remembered join must not answer for the server.
+  forgetJoinedRoomInfo(stream.roomIdentifier);
+  forgetJoinedRoomInfo(stream.canonicalRoomIdentifier);
+  emitRoomStreamEvent({
+    type: "access_refused",
+    roomIdentifier: stream.roomIdentifier,
+    code: refusal.code,
+    httpStatus: refusal.httpStatus,
+  });
 }
 
 export function emitRoomStreamEvent(event: DesktopRoomStreamEvent): void {
@@ -747,7 +795,8 @@ async function fetchRoomMessagePollPage(
     { headers: requestHeaders, signal },
   );
   if (!response.ok) {
-    throw new Error(`Room poll failed with HTTP ${response.status}.`);
+    throw await readRoomStreamRefusal(response)
+      ?? new Error(`Room poll failed with HTTP ${response.status}.`);
   }
   const page = (await response.json()) as {
     room_id?: string;
@@ -830,6 +879,10 @@ async function pollDesktopRoomMessages(
         pollAbortController.signal.aborted
       )
         return;
+      if (error instanceof RoomStreamAccessRefusedError) {
+        refuseRoomStream(stream, error);
+        return;
+      }
       emitRoomStreamEvent({
         type: "error",
         roomIdentifier: stream.roomIdentifier,
@@ -856,7 +909,10 @@ async function fetchLatestRoomMessagePage(
     `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
     { headers, signal },
   );
-  if (!response.ok) throw new Error(`Room latest-page fetch failed with HTTP ${response.status}.`);
+  if (!response.ok) {
+    throw await readRoomStreamRefusal(response)
+      ?? new Error(`Room latest-page fetch failed with HTTP ${response.status}.`);
+  }
   const page = await response.json() as { room_id?: string; messages?: Parameters<typeof mapRoomMessagePayload>[0][] };
   for (const rawMessage of page.messages || []) {
     if (!isCurrentRoomStream(stream)) return;
@@ -950,7 +1006,10 @@ async function emitLatestRoomMessageWindow(
     `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
     { headers, signal: stream.abortController.signal },
   );
-  if (!response.ok) throw new Error(`Room latest-window fetch failed with HTTP ${response.status}.`);
+  if (!response.ok) {
+    throw await readRoomStreamRefusal(response)
+      ?? new Error(`Room latest-window fetch failed with HTTP ${response.status}.`);
+  }
   const page = await response.json() as {
     room_id?: string;
     messages?: Parameters<typeof mapRoomMessagePayload>[0][];
@@ -999,7 +1058,11 @@ function repairDurableMessagesAfterBrokerGap(
       commitCompletedGapRepair(stream);
     }
     stopFallbackPoll(stream);
-  }).catch(() => {
+  }).catch((error: unknown) => {
+    if (error instanceof RoomStreamAccessRefusedError) {
+      refuseRoomStream(stream, error);
+      return;
+    }
     if (isCurrentRoomStream(stream) && stream.pollActive) scheduleCatchUpRetry(stream);
   });
 }
@@ -1036,9 +1099,13 @@ function scheduleCatchUpRetry(
           commitCompletedGapRepair(stream);
         }
         stopFallbackPoll(stream);
-      } catch {
+      } catch (error) {
         if (!isCurrentRoomStream(stream) || stream.abortController.signal.aborted)
           return;
+        if (error instanceof RoomStreamAccessRefusedError) {
+          refuseRoomStream(stream, error);
+          return;
+        }
         if (stream.pollActive) {
           scheduleCatchUpRetry(stream);
         }
@@ -1223,7 +1290,8 @@ async function openDesktopRoomStream(
     );
 
     if (!response.ok || !response.body) {
-      throw new Error(`Room stream failed with HTTP ${response.status}.`);
+      throw (!response.ok ? await readRoomStreamRefusal(response) : null)
+        ?? new Error(`Room stream failed with HTTP ${response.status}.`);
     }
 
     stream.retryMs = 1000;
@@ -1293,9 +1361,13 @@ async function openDesktopRoomStream(
         commitCompletedGapRepair(stream);
       }
       stopFallbackPoll(stream);
-    } catch {
+    } catch (error) {
       if (!isCurrentRoomStream(stream) || stream.abortController.signal.aborted)
         return;
+      if (error instanceof RoomStreamAccessRefusedError) {
+        refuseRoomStream(stream, error);
+        return;
+      }
       // A first-connect catch-up may fail before any fallback exists. Bring the
       // durable lane up in both initial and reconnect cases, then keep retrying
       // until the message cursor *and* any pending renderer window are repaired.
@@ -1309,6 +1381,10 @@ async function openDesktopRoomStream(
   } catch (error) {
     if (!isCurrentRoomStream(stream) || stream.abortController.signal.aborted)
       return;
+    if (error instanceof RoomStreamAccessRefusedError) {
+      refuseRoomStream(stream, error);
+      return;
+    }
     emitRoomStreamEvent({
       type: "error",
       roomIdentifier: stream.roomIdentifier,

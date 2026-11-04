@@ -115,6 +115,14 @@ import type {
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
+  DesktopAccountRoomJoinRequest,
+  DesktopRoomJoinRequestDecision,
+  DesktopRoomMemberList,
+  DesktopRoomMembershipResult,
+  RoomJoinRequest,
+  RoomJoinRequestSummary,
+  RoomMember,
+  RoomMemberRole,
   DesktopSendRoomMessageResult,
   DesktopStagedAttachment,
   DesktopChosenAttachment,
@@ -425,6 +433,24 @@ export interface DesktopApi {
     cancelDeviceFlow: () => Promise<DesktopAuthStatus>;
     openVerification: (url: string) => Promise<void>;
     signOut: () => Promise<DesktopAuthStatus>;
+  };
+  /**
+   * Who may open a room. A room tied to a repository has no member list (its
+   * GitHub roles decide), and a focus room uses the members of its parent.
+   */
+  roomMembers: {
+    list: (roomIdentifier: string) => Promise<DesktopRoomMembershipResult<DesktopRoomMemberList>>;
+    /** Removes a member (admins), or leaves the room when the account is your own. */
+    remove: (roomIdentifier: string, accountId: string) => Promise<DesktopRoomMembershipResult<{ accountId: string }>>;
+    setRole: (roomIdentifier: string, accountId: string, role: RoomMemberRole) => Promise<DesktopRoomMembershipResult<{ member: RoomMember }>>;
+    /** Asks a room admin to let the signed-in account in. */
+    requestJoin: (roomIdentifier: string) => Promise<DesktopRoomMembershipResult<{ joinRequest: RoomJoinRequestSummary }>>;
+    /** Pending requests for one room (admins). */
+    listJoinRequests: (roomIdentifier: string) => Promise<DesktopRoomMembershipResult<{ joinRequests: RoomJoinRequest[] }>>;
+    /** Approve or decline (admins), or cancel your own request. */
+    decideJoinRequest: (roomIdentifier: string, requestId: string, decision: DesktopRoomJoinRequestDecision) => Promise<DesktopRoomMembershipResult<{ joinRequest: RoomJoinRequestSummary }>>;
+    /** Pending requests in every room where the signed-in account is an admin. */
+    listAccountJoinRequests: () => Promise<DesktopRoomMembershipResult<{ joinRequests: DesktopAccountRoomJoinRequest[] }>>;
   };
   /** Connectors: this account's tracker connections (Jira, Linear, GitHub Issues). */
   connectors: {

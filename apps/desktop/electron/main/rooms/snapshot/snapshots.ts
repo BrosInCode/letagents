@@ -1,6 +1,8 @@
+import { roomAccessRefusal } from "../../../../../../shared/room-membership.mjs";
 import type {
   DesktopBoardSettingsSummary,
   DesktopLocalRoomInfo,
+  DesktopRoomAccess,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
   DesktopSnapshotSourceStates,
@@ -18,6 +20,7 @@ import {
 } from "../room-info.js";
 import type { RoomMessagePayload } from "../messages/mappers.js";
 import { mapRoomMessagePayload } from "../messages/mappers.js";
+import { readRoomJoinRequestSummary } from "../join-request-summary.js";
 import { mapSnapshotData } from "./mappers.js";
 import type { RoomSnapshotData } from "./payloads.js";
 
@@ -161,33 +164,46 @@ export function createLocalReadyRoomSnapshot(input: {
   };
 }
 
+const API_ERROR_ACCESS_TITLES: Record<DesktopRoomAccess["status"], string> = {
+  ready: "Room ready",
+  missing_room: "Room unavailable",
+  auth_required: "Connect GitHub to open this room",
+  forbidden: "This account cannot open the room",
+  membership_required: "Ask to join this room",
+  repo_collaborator_required: "Only people with a role on the repository can open this room",
+  unavailable: "Room unavailable",
+};
+
+function apiErrorAccessStatus(error: DesktopApiError): DesktopRoomAccess["status"] {
+  const payload = error.payload;
+  if (payload?.error === "auth_required") return "auth_required";
+  // A signed-in person who is not let in: the card says how to get in.
+  const refusal = roomAccessRefusal(payload);
+  if (refusal === "membership_required") return "membership_required";
+  if (refusal === "repo_collaborator_required") return "repo_collaborator_required";
+  if (payload?.error === "private_repo_no_access") return "forbidden";
+  return "unavailable";
+}
+
 export function createApiErrorRoomSnapshot(
   roomIdentifier: string,
   error: DesktopApiError,
 ): DesktopRoomSnapshot {
   const payload = error.payload;
-  const accessStatus =
-    payload?.error === "auth_required"
-      ? "auth_required"
-      : payload?.error === "private_repo_no_access"
-        ? "forbidden"
-        : "unavailable";
+  const accessStatus = apiErrorAccessStatus(error);
 
   return {
     roomIdentifier,
     access: createRoomAccess({
       status: accessStatus,
-      title:
-        accessStatus === "auth_required"
-          ? "Connect GitHub to open this room"
-          : accessStatus === "forbidden"
-            ? "This account cannot open the room"
-            : "Room unavailable",
+      title: API_ERROR_ACCESS_TITLES[accessStatus],
       message: payload?.message || error.message,
       roomIdentifier: payload?.room_id || roomIdentifier,
       deviceFlowUrl: payload?.device_flow_url || null,
       code: payload?.code || null,
       httpStatus: error.status,
+      displayName: accessStatus === "membership_required" ? payload?.display_name || null : null,
+      joinRequest: accessStatus === "membership_required" ? readRoomJoinRequestSummary(payload?.join_request) : null,
     }),
     room: null,
     storage: cloudStorageState(roomIdentifier),
