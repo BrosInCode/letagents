@@ -18,7 +18,8 @@ export default [
       },
     },
     rules: {
-      "vue/no-undef-components": "error",
+      // <webview> is Electron's tag; vite.config.ts tells Vue to leave it alone.
+      "vue/no-undef-components": ["error", { ignorePatterns: ["^webview$"] }],
     },
   },
 ];

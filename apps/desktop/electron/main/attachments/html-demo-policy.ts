@@ -1,16 +1,61 @@
+import type { WebPreferences } from "electron";
+
 import { attachmentProtocolScheme, htmlDemoProtocolScheme } from "../paths.js";
 
 /**
- * An HTML demo is a single file someone attached to a room message. It opens
- * in its own window with no preload, no Node and no app sign-in, and nothing
- * loads over the network: scripts and styles must be inline, and images must
- * be data: or blob: URLs. Known limits: the page can still cause DNS lookups
- * (DNS prefetch, WebRTC), and it can read a file the person drops or picks in it.
+ * An HTML demo is a single file someone attached to a room message. It runs
+ * inside its message or in its own window, with no preload, no Node and no app
+ * sign-in, and nothing loads over the network: scripts and styles must be
+ * inline, and images must be data: or blob: URLs. Known limits: the page can
+ * still cause DNS lookups (DNS prefetch, WebRTC), and it can read a file the
+ * person drops or picks in it.
  */
 export const MAX_HTML_DEMO_BYTES = 10 * 1024 * 1024;
 export const MAX_OPEN_HTML_DEMOS = 6;
 /** In-memory partition (no `persist:`), so demo storage never reaches disk. */
 export const HTML_DEMO_PARTITION = "letagents-html-demos";
+
+/** Live inline demo leases main allows; the chat itself runs fewer at once. */
+export const MAX_INLINE_HTML_DEMOS = 4;
+/** A prepared inline demo that no webview loads in this time is dropped. */
+export const INLINE_HTML_DEMO_LEASE_MS = 30_000;
+/** Decoded demo files kept for the chat, so a demo that scrolls back does not download again. */
+export const INLINE_HTML_DEMO_CACHE_ENTRIES = 6;
+export const INLINE_HTML_DEMO_CACHE_BYTES = 2 * MAX_HTML_DEMO_BYTES;
+export const INLINE_HTML_DEMO_CACHE_MS = 10 * 60_000;
+/** Different demo files downloading at once, and how long one download may take. */
+export const MAX_INLINE_HTML_DEMO_DOWNLOADS = 4;
+export const INLINE_HTML_DEMO_DOWNLOAD_MS = 20_000;
+export const MAX_INLINE_HTML_DEMO_HEIGHT = 4000;
+/** Each inline demo reports its height at most once in this time. */
+export const INLINE_HTML_DEMO_HEIGHT_INTERVAL_MS = 100;
+/**
+ * Every interval a running inline demo must answer a trivial script within the
+ * timeout, or it counts as frozen. Chromium's own hang check needs input first.
+ */
+export const INLINE_HTML_DEMO_LIVENESS_INTERVAL_MS = 5_000;
+export const INLINE_HTML_DEMO_LIVENESS_TIMEOUT_MS = 5_000;
+/** A timeout that fires this much late means main itself was blocked, so the check proves nothing. */
+export const INLINE_HTML_DEMO_LIVENESS_LATE_MS = 1_000;
+/** An isolated world no other app code uses, so the page can neither see nor answer the check. */
+export const INLINE_HTML_DEMO_LIVENESS_WORLD_ID = 4417;
+/**
+ * Token buckets for what a demo makes Electron forward to its `<webview>`,
+ * through main to the app page: one for events, one for the characters of
+ * their text (console messages, titles, URLs). A demo is stopped only when a
+ * bucket runs dry. In Electron 42 main passes about 65,000 small events, or
+ * about 200 MB of text, a second at full load, so a full bucket costs main at
+ * most about a third of a second. The refill is 10 times the busiest normal
+ * demo measured (60 to 100 events a second, under 1 MB of text a second).
+ */
+export const INLINE_HTML_DEMO_EVENT_BURST = 20_000;
+export const INLINE_HTML_DEMO_EVENTS_PER_SECOND = 1_000;
+export const INLINE_HTML_DEMO_TEXT_BURST = 32 * 1024 * 1024;
+export const INLINE_HTML_DEMO_TEXT_PER_SECOND = 2 * 1024 * 1024;
+/** A demo may take keyboard focus this soon after the person clicks or types in it, or Tabs into it. */
+export const INLINE_HTML_DEMO_FOCUS_GRACE_MS = 1_000;
+
+const INLINE_HTML_DEMO_HOST = /^[0-9a-f]{32}$/;
 
 export const HTML_DEMO_CONTENT_SECURITY_POLICY = [
   "default-src 'none'",
@@ -36,21 +81,25 @@ export const HTML_DEMO_RESPONSE_HEADERS: Readonly<Record<string, string>> = {
   "X-Content-Type-Options": "nosniff",
   "Cache-Control": "no-store",
   "Referrer-Policy": "no-referrer",
-  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), display-capture=(), usb=(), serial=(), hid=(), bluetooth=(), payment=()",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), display-capture=(), usb=(), serial=(), hid=(), bluetooth=(), payment=(), fullscreen=(), picture-in-picture=()",
 };
 
 /**
  * The demo's own document and in-page data are the only requests a demo page
  * makes. DevTools opened on a demo (another web contents) may load its own UI.
  */
-export function isAllowedHtmlDemoRequest(rawUrl: string, sender: { fromDemo: boolean } = { fromDemo: true }): boolean {
+export function isAllowedHtmlDemoRequest(
+  rawUrl: string,
+  sender: { fromDemo: boolean; host?: string } = { fromDemo: true },
+): boolean {
   let url: URL;
   try {
     url = new URL(rawUrl);
   } catch {
     return false;
   }
-  return url.protocol === `${htmlDemoProtocolScheme}:`
+  // A known demo page loads only its own document, never another demo's.
+  return (url.protocol === `${htmlDemoProtocolScheme}:` && (sender.host === undefined || url.hostname === sender.host))
     || url.protocol === "data:"
     || url.protocol === "blob:"
     || (url.protocol === "devtools:" && !sender.fromDemo);
@@ -73,6 +122,135 @@ export function assertHtmlDemoAttachmentHref(rawHref: unknown): string {
   return url.toString();
 }
 
+export function inlineHtmlDemoLeaseUrl(host: string): string {
+  return `${htmlDemoProtocolScheme}://${host}/`;
+}
+
+/** The host of a lease URL written exactly as main makes it, or null for anything else. */
+export function inlineHtmlDemoLeaseHost(rawUrl: unknown): string | null {
+  const prefix = `${htmlDemoProtocolScheme}://`;
+  if (typeof rawUrl !== "string" || !rawUrl.startsWith(prefix) || !rawUrl.endsWith("/")) return null;
+  const host = rawUrl.slice(prefix.length, -1);
+  return INLINE_HTML_DEMO_HOST.test(host) ? host : null;
+}
+
+/**
+ * The lease a `<webview>` attaches with: exactly a lease URL, in the demo
+ * partition, and no webview used that lease before. Null refuses the webview.
+ */
+export function inlineHtmlDemoAttachLease(
+  params: Readonly<Record<string, unknown>>,
+  webPreferences: Readonly<{ partition?: unknown }>,
+  leases: ReadonlyMap<string, { attached: boolean }>,
+): string | null {
+  const host = inlineHtmlDemoLeaseHost(params.src);
+  if (!host || params.partition !== HTML_DEMO_PARTITION || webPreferences.partition !== HTML_DEMO_PARTITION) return null;
+  return leases.get(host)?.attached === false ? host : null;
+}
+
+/** The web preferences of every inline demo, the same locks as a demo window. */
+export function inlineHtmlDemoWebPreferences(): WebPreferences & { disablePopups: true } {
+  return {
+    partition: HTML_DEMO_PARTITION,
+    sandbox: true,
+    contextIsolation: true,
+    nodeIntegration: false,
+    nodeIntegrationInSubFrames: false,
+    nodeIntegrationInWorker: false,
+    webSecurity: true,
+    allowRunningInsecureContent: false,
+    plugins: false,
+    webviewTag: false,
+    navigateOnDragDrop: false,
+    spellcheck: false,
+    // alert() and confirm() would show the page's text in a native app dialog.
+    disableDialogs: true,
+    autoplayPolicy: "user-gesture-required",
+    // Reports the page's height, so the message can show all of it.
+    enablePreferredSizeMode: true,
+    disablePopups: true,
+  };
+}
+
+/**
+ * Replace a guest's web preferences, in place, with the inline demo set. Only
+ * the app's zoom carries over: a preload, Blink features or anything else the
+ * `<webview>` asked for is dropped.
+ */
+export function lockInlineHtmlDemoWebPreferences(webPreferences: WebPreferences): WebPreferences {
+  const { zoomFactor } = webPreferences;
+  for (const key of Object.keys(webPreferences)) delete (webPreferences as Record<string, unknown>)[key];
+  Object.assign(webPreferences, inlineHtmlDemoWebPreferences());
+  if (typeof zoomFactor === "number" && Number.isFinite(zoomFactor) && zoomFactor > 0) webPreferences.zoomFactor = zoomFactor;
+  return webPreferences;
+}
+
+export interface InlineHtmlDemoBucket {
+  capacity: number;
+  perSecond: number;
+  tokens: number;
+  updatedAt: number;
+}
+
+/** A full bucket at `now`. */
+export function inlineHtmlDemoBucket(capacity: number, perSecond: number, now: number): InlineHtmlDemoBucket {
+  return { capacity, perSecond, tokens: capacity, updatedAt: now };
+}
+
+/** Refill for the time since the last call, then take `amount`. False once the bucket has run dry. */
+export function takeInlineHtmlDemoTokens(bucket: InlineHtmlDemoBucket, amount: number, now: number): boolean {
+  const elapsed = Math.max(0, now - bucket.updatedAt);
+  bucket.tokens = Math.min(bucket.capacity, bucket.tokens + (elapsed * bucket.perSecond) / 1000);
+  bucket.updatedAt = Math.max(bucket.updatedAt, now);
+  bucket.tokens -= amount;
+  return bucket.tokens >= 0;
+}
+
+/**
+ * The text an event carries to the app page: its string arguments after the
+ * event object (a console message and its script URL, a title, a URL, favicon
+ * URLs). The event object repeats some of them, so it is not counted.
+ */
+export function inlineHtmlDemoEventText(args: readonly unknown[]): number {
+  let length = 0;
+  for (const arg of args.slice(1)) {
+    if (typeof arg === "string") length += arg.length;
+    else if (Array.isArray(arg)) for (const item of arg) if (typeof item === "string") length += item.length;
+  }
+  return length;
+}
+
+/**
+ * Whether a demo that just took keyboard focus may keep it: the person clicked,
+ * typed or touched inside it, or pressed Tab in the app, a moment ago; or the
+ * person's last input in the window went to this demo before the window lost
+ * focus, and the window is coming back. Electron 42 on macOS refocuses the
+ * demo just before the window's own focus event, so "coming back" is a window
+ * that is still marked blurred, or one that was focused a moment ago.
+ */
+export function inlineHtmlDemoFocusAllowed(input: {
+  now: number;
+  lastInputAt: number;
+  lastTabAt: number;
+  hadLastInputAtWindowBlur: boolean;
+  windowBlurredAt: number;
+  windowFocusedAt: number;
+}): boolean {
+  const recent = (at: number) => input.now - at <= INLINE_HTML_DEMO_FOCUS_GRACE_MS;
+  const windowReturning = input.windowBlurredAt > input.windowFocusedAt || recent(input.windowFocusedAt);
+  return recent(input.lastInputAt) || recent(input.lastTabAt) || (input.hadLastInputAtWindowBlur && windowReturning);
+}
+
+/**
+ * A guest's preferred height in the app's CSS pixels: Electron reports it in
+ * screen points, which the app's zoom scales.
+ */
+export function inlineHtmlDemoHeight(preferredHeight: unknown, zoomFactor: unknown = 1): number {
+  if (typeof preferredHeight !== "number" || Number.isNaN(preferredHeight)) return 0;
+  const zoom = typeof zoomFactor === "number" && Number.isFinite(zoomFactor) && zoomFactor > 0 ? zoomFactor : 1;
+  return Math.min(MAX_INLINE_HTML_DEMO_HEIGHT, Math.max(0, Math.ceil(preferredHeight / zoom)));
+}
+
 export function htmlDemoWindowTitle(fileName: unknown, senderLabel: unknown): string {
   const name = cleanLabel(fileName) || "demo.html";
   const sender = cleanLabel(senderLabel);
@@ -86,8 +264,8 @@ function cleanLabel(value: unknown): string {
     : "";
 }
 
-/** Read a response body, stopping as soon as it passes `limit` bytes. */
-export async function readHtmlDemoBytes(response: Response, limit = MAX_HTML_DEMO_BYTES): Promise<Uint8Array> {
+/** Read a response body, stopping as soon as it passes `limit` bytes or `signal` aborts. */
+export async function readHtmlDemoBytes(response: Response, limit = MAX_HTML_DEMO_BYTES, signal?: AbortSignal): Promise<Uint8Array> {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > limit) {
     await response.body?.cancel().catch(() => undefined);
@@ -95,17 +273,26 @@ export async function readHtmlDemoBytes(response: Response, limit = MAX_HTML_DEM
   }
   if (!response.body) return new Uint8Array();
   const reader = response.body.getReader();
+  // Cancelling wakes a read that waits on a stalled stream.
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal?.addEventListener("abort", cancel, { once: true });
   const chunks: Uint8Array[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel().catch(() => undefined);
-      throw new Error(htmlDemoTooLargeMessage(limit));
+  try {
+    for (;;) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(htmlDemoTooLargeMessage(limit));
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    signal?.removeEventListener("abort", cancel);
   }
   const bytes = new Uint8Array(total);
   let offset = 0;

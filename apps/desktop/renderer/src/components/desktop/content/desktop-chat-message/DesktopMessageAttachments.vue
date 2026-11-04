@@ -26,6 +26,12 @@
           <small>{{ attachmentDisplayMeta(attachment) }}</small>
         </span>
       </button>
+      <DesktopInlineHtmlDemo
+        v-else-if="inlineDemosAvailable && isHtmlDemoAttachment(attachment)"
+        :href="attachmentHref(attachment)"
+        :file-name="attachmentName(attachment)"
+        :sender-label="senderLabel"
+      />
       <button
         v-else-if="isHtmlDemoAttachment(attachment)"
         class="room-message-attachment is-demo"
@@ -84,6 +90,7 @@ import {
   isManagedAgentChangeSummaryAttachment,
 } from "../../../../domain/managed-agent-changes";
 import ManagedAgentChangeSummaryCard from "../ManagedAgentChangeSummaryCard.vue";
+import DesktopInlineHtmlDemo from "./DesktopInlineHtmlDemo.vue";
 
 const props = defineProps<{
   messageId: string;
@@ -94,6 +101,9 @@ const props = defineProps<{
 defineEmits<{
   "open-image": [imageId: string];
 }>();
+
+// An older main process cannot lease a demo to the chat, so its cards keep the window.
+const inlineDemosAvailable = typeof desktopIpc.room?.prepareInlineHtmlDemo === "function";
 
 const remoteChangeSummaries = ref<Record<string, DesktopManagedAgentPublicChangeSummary | null>>({});
 const loadingChangeSummaryKeys = ref<Record<string, boolean>>({});
