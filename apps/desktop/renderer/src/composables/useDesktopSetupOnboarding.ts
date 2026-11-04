@@ -230,6 +230,8 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       }
       options.repoStatus.value = null;
       options.openRoomSnapshot(snapshot, {
+        // A members-only refusal has no room info, but it names the room.
+        ...(snapshot.room ? {} : snapshot.access.displayName ? { displayName: snapshot.access.displayName } : {}),
         kind: "room",
         rootPath: null,
         meta: snapshot.room?.code || "Joined room",
@@ -439,13 +441,16 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
           throw new Error("Restart LetAgents Desktop so the selected room can be verified.");
         }
         const snapshot = await desktopIpc.room.getSnapshot(roomIdentifier);
-        if (snapshot.access.status !== "ready") {
+        // A members-only room finishes setup like an open one: the main window
+        // then shows its card, where the person asks to join.
+        if (snapshot.access.status !== "ready" && !isMembershipRefusal(snapshot.access.status)) {
           firstRunRoomSelected.value = roomNeedsAccessStep(snapshot.access.status);
           options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
           options.authFeedback.value = roomAccessFeedback(snapshot);
           return;
         }
         options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
+        options.authFeedback.value = null;
       }
       options.mcpInstallState.value = await desktopIpc.setup.completeMcpOnboarding();
       await options.refresh();
@@ -521,7 +526,7 @@ function firstRunRoomOpenOptions(
 ): OpenRoomOptions {
   const rootPath = options.repoStatus.value?.rootPath || null;
   return {
-    displayName: snapshot.room?.displayName || options.pinnedRoom.value.title,
+    displayName: snapshot.room?.displayName || snapshot.access.displayName || options.pinnedRoom.value.title,
     kind: rootPath ? "project" : "room",
     rootPath,
     meta: options.repoStatus.value?.branch || snapshot.room?.code || options.pinnedRoom.value.meta || null,

@@ -786,6 +786,49 @@ test("finishFirstRunOnboarding completes room-code setup without reinstalling wi
   assert.equal(state.activeEntry.value.roomIdentifier, "ABCD-1234");
 });
 
+test("a members-only room from an invite code finishes setup, so the main window can ask to join", async () => {
+  let completed = 0;
+  let refreshCount = 0;
+  const opened: Array<{ snapshot: DesktopRoomSnapshot; options: unknown }> = [];
+  // The server's refusal for a signed-in person who is not a member: no room info, but the room's name.
+  const refused: DesktopRoomSnapshot = {
+    ...snapshotFixture("ABCX-7291", "ABCX-7291", {
+      status: "membership_required",
+      title: "Ask to join this room",
+      message: "Only members can open this room. Ask to join, and a room admin can let you in.",
+      code: "ROOM_MEMBERSHIP_REQUIRED",
+      httpStatus: 403,
+      displayName: "Design room",
+      joinRequest: null,
+    }),
+    room: null,
+  };
+  const state = makeSetupState({
+    pinnedRoomIdentifier: "ABCX-7291",
+    repoStatus: null,
+    openRoomSnapshot: (snapshot, options) => { opened.push({ snapshot, options }); },
+    refresh: async () => { refreshCount += 1; },
+    setupBridge: {
+      completeMcpOnboarding: async () => {
+        completed += 1;
+        return mcpInstallStateFixture({ completed: true });
+      },
+    },
+    roomBridge: { getSnapshot: async () => refused },
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.joinRoomCode("ABCX-7291"));
+  assert.equal(state.onboarding.firstRunRoomSelected.value, true, "the refused room can be chosen");
+  assert.match(String(state.authFeedback.value), /Only members can open this room/);
+  assert.equal((opened[0]?.options as { displayName?: string }).displayName, "Design room", "the sidebar names the room");
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.finishFirstRunOnboarding());
+  assert.equal(completed, 1, "setup finishes");
+  assert.equal(refreshCount, 1);
+  assert.equal(state.authFeedback.value, null, "the join card explains the rest");
+  assert.equal(state.activeEntry.value.roomIdentifier, "ABCX-7291");
+});
+
 test("finishFirstRunOnboarding can continue without choosing a room", async () => {
   let completed = false;
   let refreshCount = 0;

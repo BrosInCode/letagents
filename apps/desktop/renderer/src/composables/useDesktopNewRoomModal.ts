@@ -555,7 +555,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
           storageLabel: "Members only",
           inviteCode: null,
           snapshot,
-          openOptions: { kind: "room", rootPath: null, meta: "Members only" },
+          openOptions: { displayName: snapshot.access.displayName || null, kind: "room", rootPath: null, meta: "Members only" },
         };
         openSuccessRoom();
         return;
