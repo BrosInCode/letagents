@@ -355,6 +355,15 @@ watch(
   },
 );
 
+// A retry is armed before its answer arrives. When the answer turns out to be
+// GitHub not answering (or back to another failure), start that answer's own backoff.
+watch(
+  () => props.access.code,
+  () => {
+    if (cardState.value === "unavailable") armRetry(0);
+  },
+);
+
 function retryNow(): void {
   armRetry(0);
   emit("refresh-room");

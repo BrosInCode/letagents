@@ -15,6 +15,7 @@ import { rootPathLabel, type RecentRootRoomKind } from "../domain/sidebar-rooms"
 import { preserveRoomRepoStatistics } from "../domain/repo-status";
 import { repoPickerErrorMessage } from "../domain/repo-picker-error";
 import { desktopIpc } from "../ipc/index.js";
+import { isMembershipRefusal } from "../components/desktop/content/auth-onboarding";
 
 const defaultMcpInstallRevealDelayMs = 160;
 
@@ -197,7 +198,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       });
       firstRunInviteCode.value = null;
       options.authFeedback.value = result.warning
-        || (result.snapshot.access.status === "auth_required" ? roomAccessFeedback(result.snapshot) : null);
+        || (roomNeedsAccessStep(result.snapshot.access.status) ? roomAccessFeedback(result.snapshot) : null);
       firstRunRoomSelected.value = true;
       return true;
     } catch (error) {
@@ -233,7 +234,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         rootPath: null,
         meta: snapshot.room?.code || "Joined room",
       });
-      options.authFeedback.value = snapshot.access.status === "auth_required"
+      options.authFeedback.value = roomNeedsAccessStep(snapshot.access.status)
         ? roomAccessFeedback(snapshot)
         : null;
       firstRunRoomSelected.value = true;
@@ -439,7 +440,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
         }
         const snapshot = await desktopIpc.room.getSnapshot(roomIdentifier);
         if (snapshot.access.status !== "ready") {
-          firstRunRoomSelected.value = snapshot.access.status === "auth_required";
+          firstRunRoomSelected.value = roomNeedsAccessStep(snapshot.access.status);
           options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
           options.authFeedback.value = roomAccessFeedback(snapshot);
           return;
@@ -496,7 +497,15 @@ async function waitForMcpInstallReveal(delayMs: number): Promise<void> {
 }
 
 function canSelectFirstRunRoom(status: DesktopRoomAccess["status"]): boolean {
-  return status === "ready" || status === "auth_required";
+  return status === "ready" || roomNeedsAccessStep(status);
+}
+
+/**
+ * A room the person can still get into from its card: sign in to GitHub, or,
+ * for a members-only room, ask to join (or ask a repository admin).
+ */
+function roomNeedsAccessStep(status: DesktopRoomAccess["status"]): boolean {
+  return status === "auth_required" || isMembershipRefusal(status);
 }
 
 function roomAccessFeedback(snapshot: DesktopRoomSnapshot): string {

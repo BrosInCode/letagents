@@ -97,6 +97,8 @@ before(async () => {
   const ChatAvatar = (await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/ChatAvatar.vue", import.meta.url)))).default;
   await useClientRender(ChatAvatar, fileURLToPath(new URL("../../../../shared/ui/ChatAvatar.vue", import.meta.url)));
   await useClientRender(RoomJoinAccess, desktopRoot("src/components/desktop/content/RoomJoinAccess.vue"));
+  const TransitionPassThrough = defineComponent((_props, { slots }) => () => slots.default?.());
+  await useClientRender(AuthOnboardingView, desktopRoot("src/components/desktop/content/AuthOnboardingView.vue"), { ...Vue, Transition: TransitionPassThrough });
   await useClientRender(RoomMembers, desktopRoot("src/components/desktop/content/room-shell/RoomMembers.vue"));
   for (const relative of ["inbox/InboxLayout.vue", "inbox/InboxResponse.vue"]) {
     const path = fileURLToPath(new URL(`../../../../shared/ui/${relative}`, import.meta.url));
@@ -173,13 +175,52 @@ test("a focus room refused to a non-member asks for the main room's link instead
   assert.match(html, />\s*Check again\s*</);
 });
 
+const githubUnavailable = (): DesktopRoomAccess => ({ status: "unavailable", title: "GitHub is not answering",
+  message: "GitHub did not answer the repository access check. Please retry.", roomIdentifier: "github.com/acme/app",
+  deviceFlowUrl: null, code: "REPO_ACCESS_UNAVAILABLE", httpStatus: 503 });
+
 test("GitHub not answering shows its own words and a 30 s retry", async () => {
-  const html = await renderGate({ status: "unavailable", title: "GitHub is not answering", message: "GitHub did not answer the repository access check. Please retry.",
-    roomIdentifier: "github.com/acme/app", deviceFlowUrl: null, code: "REPO_ACCESS_UNAVAILABLE", httpStatus: 503 }, "github.com/acme/app");
+  const html = await renderGate(githubUnavailable(), "github.com/acme/app");
   assert.match(html, /GitHub is not answering/);
   assert.match(html, /because GitHub did not answer/);
+  assert.match(html, /retrying in\s*<b[^>]*>30<\/b>/, "the first check waits the 30 s the server asks for");
   assert.doesNotMatch(html, /couldn&#39;t reach the room server|couldn't reach the room server/);
   assert.doesNotMatch(html, /Ask a repository admin/);
+  const other = await renderGate({ ...githubUnavailable(), title: "Room unavailable", code: null, httpStatus: 502 }, "github.com/acme/app");
+  assert.match(other, /retrying in\s*<b[^>]*>8<\/b>/, "other failures keep their 8 s first retry");
+});
+
+test("a retry whose answer is GitHub not answering starts the 30 s backoff", async () => {
+  Object.assign(globalThis, { window: { setInterval: () => 0, clearInterval: () => undefined, matchMedia: () => ({ matches: false }) } });
+  const access = Vue.ref<DesktopRoomAccess>({ ...githubUnavailable(), title: "Room unavailable", code: null, httpStatus: 502 });
+  const { root, app } = mount(AuthOnboardingView, () => ({ access: access.value, authStatus, busy: false, feedback: null,
+    roomLabel: "github.com/acme/app", sidebarMode: "expanded" }));
+  try {
+    await flush();
+    const countdown = () => text(descendants(root).find((node) => node.props["data-testid"] === "auth-retry-countdown")!);
+    // The view's clock does not tick here, so a second may round up.
+    assert.match(countdown(), /^(8|9)$/);
+    access.value = githubUnavailable();
+    await flush();
+    assert.match(countdown(), /^(30|31)$/, "the 503 answer re-arms the retry with its own 30 s backoff");
+  } finally { app.unmount(); }
+});
+
+test("the Join room window opens a members-only room, so its card can ask to join", async () => {
+  const { useDesktopNewRoomModal } = await vite.ssrLoadModule("/renderer/src/composables/useDesktopNewRoomModal.ts") as typeof import("../src/composables/useDesktopNewRoomModal");
+  const refused = { roomIdentifier: "design-room", access: membershipAccess(null), room: null };
+  const opened: unknown[] = [];
+  Object.assign(globalThis, { window: { matchMedia: () => ({ matches: false }), letagentsDesktop: { room: {
+    getSnapshot: async () => refused,
+  } } } });
+  const modal = useDesktopNewRoomModal({ openRoomSnapshot: (snapshot) => opened.push(snapshot), setRepoStatus: () => undefined });
+  modal.newRoomModalOpen.value = true;
+  modal.newRoomJoinCode.value = "ABCX-7291";
+  await modal.joinRoomCodeFromModal();
+  assert.equal(opened.length, 1, "the refused room opens, and its card offers Ask to join");
+  assert.equal((opened[0] as typeof refused).access.status, "membership_required");
+  assert.equal(modal.newRoomModalOpen.value, false);
+  assert.notEqual(modal.newRoomStep.value, "error", "no dead-end error step");
 });
 
 function installBridge(roomMembers: Record<string, (...args: never[]) => unknown>): void {

@@ -118,8 +118,8 @@ const ROOM = "focus_fallback_room";
 type StreamHandler =
   | { kind: "ok"; sse: ControllableSse }
   | { kind: "fail"; status: number }
-  /** A 403 with a JSON body, as the server refuses a room. */
-  | { kind: "refuse"; body: unknown }
+  /** A JSON error body, as the server refuses a room (403) or asks to retry later (503). */
+  | { kind: "refuse"; body: unknown; status?: number; headers?: Record<string, string> }
   | { kind: "hang" };
 
 function refusalResponse(body: unknown, status = 403, headers: Record<string, string> = {}): Response {
@@ -254,7 +254,7 @@ function installFetchRouter(): {
       if (handler.kind === "fail") {
         return new Response(null, { status: handler.status });
       }
-      if (handler.kind === "refuse") return refusalResponse(handler.body);
+      if (handler.kind === "refuse") return refusalResponse(handler.body, handler.status, handler.headers);
       return handler.sse.response;
     }
 
@@ -1023,6 +1023,26 @@ test("GitHub not answering keeps the stream, and the poll waits as long as the s
     assert.equal(emitted.some((event) => event.type === "access_refused"), false, "not a refusal");
     assert.equal(getActiveRoomIdentifier(), ROOM, "the stream keeps going");
     await waitUntil(() => router.pollCalls.length >= 2, 6_000);
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("GitHub not answering on connect waits Retry-After before the next connect", async () => {
+  const router = installFetchRouter();
+  try {
+    router.streamQueue.push({ kind: "refuse", status: 503, headers: { "Retry-After": "5" }, body: {
+      error: "repo_access_unavailable", code: "REPO_ACCESS_UNAVAILABLE", room_id: ROOM,
+      message: "GitHub did not answer the repository access check. Please retry.",
+    } });
+    await startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length >= 1);
+    // The usual first reconnect comes after 1 s; this one waits the 5 s the server asked for.
+    await sleep(3_200);
+    assert.equal(router.streamCalls.length, 1, "no reconnect before Retry-After");
+    assert.equal(emitted.some((event) => event.type === "access_refused"), false, "not a refusal");
+    await waitUntil(() => router.streamCalls.length >= 2, 6_000);
   } finally {
     await stopDesktopRoomStream();
     router.restore();

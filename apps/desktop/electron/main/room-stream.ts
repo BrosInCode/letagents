@@ -41,6 +41,8 @@ let activeRoomStream: {
   reconnectTimer: NodeJS.Timeout | null;
   pollAbortController: AbortController | null;
   retryMs: number;
+  /** The wait the server asked for (Retry-After) before the next connect, or 0. */
+  retryLaterMs: number;
   lastMessageId: string | null;
   lastEventCursor: string | null;
   localRoomIdentifier: string | null;
@@ -183,6 +185,19 @@ class RoomStreamRetryLaterError extends Error {
 }
 
 const REPO_ACCESS_RETRY_DEFAULT_MS = 30_000;
+
+function waitUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
 
 function retryAfterMs(response: Response): number {
   const seconds = Number(response.headers.get("retry-after"));
@@ -913,7 +928,10 @@ async function pollDesktopRoomMessages(
         message:
           error instanceof Error ? error.message : "Room polling disconnected.",
       });
-      await new Promise((resolve) => setTimeout(resolve, error instanceof RoomStreamRetryLaterError ? error.retryMs : 2500));
+      // A poll that was stopped during its wait ends here, so a restarted poll
+      // never runs beside it.
+      await waitUnlessAborted(error instanceof RoomStreamRetryLaterError ? error.retryMs : 2500, pollAbortController.signal);
+      if (pollAbortController.signal.aborted) return;
     } finally {
       if (stream.pollAbortController === pollAbortController) {
         stream.pollAbortController = null;
@@ -1409,7 +1427,7 @@ async function openDesktopRoomStream(
       refuseRoomStream(stream, error);
       return;
     }
-    if (error instanceof RoomStreamRetryLaterError) stream.retryMs = Math.max(stream.retryMs, error.retryMs);
+    if (error instanceof RoomStreamRetryLaterError) stream.retryLaterMs = error.retryMs;
     emitRoomStreamEvent({
       type: "error",
       roomIdentifier: stream.roomIdentifier,
@@ -1439,7 +1457,9 @@ async function openDesktopRoomStream(
     }
     stream.resolveReady?.();
     stream.resolveReady = null;
-    const retryMs = Math.min(stream.retryMs, 30_000);
+    // The server's Retry-After wins over the usual backoff, even past its 30 s cap.
+    const retryMs = Math.max(Math.min(stream.retryMs, 30_000), stream.retryLaterMs);
+    stream.retryLaterMs = 0;
     stream.retryMs = Math.min(stream.retryMs * 2, 30_000);
     stream.reconnectTimer = setTimeout(() => {
       stream.reconnectTimer = null;
@@ -1479,6 +1499,7 @@ export async function startDesktopRoomStream(
     reconnectTimer: null,
     pollAbortController: null,
     retryMs: 1000,
+    retryLaterMs: 0,
     lastMessageId: afterMessageId || null,
     lastEventCursor: roomEventCursors.get(trimmedRoomIdentifier) ?? null,
     localRoomIdentifier: null,
