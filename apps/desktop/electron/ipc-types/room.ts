@@ -709,6 +709,21 @@ export interface DesktopLocalRoomMutationResult {
   snapshot: DesktopRoomSnapshot;
 }
 
+/** A room HTML attachment prepared to run inside its message. */
+export interface DesktopInlineHtmlDemoLease {
+  /** `letagents-demo://<host>/`: main lets one webview load it, once. */
+  url: string;
+  /** The webview's partition attribute. Set it before `src`. */
+  partition: string;
+}
+
+/** Main's report on an inline demo, keyed by its lease URL. */
+export type DesktopInlineHtmlDemoEvent =
+  | { type: "height"; url: string; height: number }
+  | { type: "stopped"; url: string; reason: "unresponsive" | "crashed" | "overloaded" }
+  /** The demo took keyboard focus with no click, key or Tab from the person: give focus back. */
+  | { type: "focus-refused"; url: string };
+
 export type DesktopRoomStreamEvent =
   | { type: "typing"; roomIdentifier: string; signal: import("../../../../shared/room-typing.mjs").TypingSignal }
   | {

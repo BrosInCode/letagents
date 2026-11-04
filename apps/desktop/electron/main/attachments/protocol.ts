@@ -23,7 +23,7 @@ export async function handleAttachmentProtocolRequest(request: Request): Promise
 }
 
 /** The bytes behind a `letagents-attachment://` link, as the screen would load them. */
-export async function attachmentResponse(href: string): Promise<Response> {
+export async function attachmentResponse(href: string, signal?: AbortSignal): Promise<Response> {
   try {
     const requestUrl = new URL(href);
     const encodedTarget = requestUrl.pathname.replace(/^\/+/, "");
@@ -33,7 +33,7 @@ export async function attachmentResponse(href: string): Promise<Response> {
     const rawTarget = Buffer.from(encodedTarget, "base64url").toString("utf8");
     return requestUrl.hostname === "local"
       ? await localAttachmentResponse(rawTarget)
-      : await cloudAttachmentResponse(rawTarget);
+      : await cloudAttachmentResponse(rawTarget, signal);
   } catch (error) {
     return new Response(
       error instanceof Error ? error.message : "Attachment unavailable.",
@@ -42,7 +42,7 @@ export async function attachmentResponse(href: string): Promise<Response> {
   }
 }
 
-async function cloudAttachmentResponse(rawTarget: string): Promise<Response> {
+async function cloudAttachmentResponse(rawTarget: string, signal?: AbortSignal): Promise<Response> {
   const apiOrigin = new URL(apiUrl).origin;
   const target = rawTarget.startsWith("/") ? new URL(rawTarget, apiOrigin) : new URL(rawTarget);
   if (target.origin !== apiOrigin) {
@@ -56,7 +56,7 @@ async function cloudAttachmentResponse(rawTarget: string): Promise<Response> {
   if (storedAuth.token) {
     headers.set("Authorization", `Bearer ${storedAuth.token}`);
   }
-  const response = await fetch(target, { headers });
+  const response = await fetch(target, { headers, signal });
   const proxied = new Headers(response.headers);
   // fetch already decoded the body, so its encoding and length no longer apply.
   proxied.delete("Content-Encoding");
