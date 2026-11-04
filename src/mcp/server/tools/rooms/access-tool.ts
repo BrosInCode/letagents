@@ -82,7 +82,7 @@ function requestResult(room: RoomFacts, joinRequest: RoomJoinRequestSummary, req
       retry_after: joinRequest.retry_after,
       next_step: waiting ? "wait_until_retry_after" : "request_room_access",
       message: waiting
-        ? joinRequestInstruction(joinRequest)
+        ? `A room admin declined your request. You can ask again with request_room_access after ${joinRequest.retry_after ?? "the wait the server sets"}.`
         : "A room admin declined your last request. Call request_room_access to ask again.",
     };
   }

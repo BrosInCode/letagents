@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -290,6 +291,31 @@ test("a saved sign-in the room rejects starts the device flow in the same call",
   assert.equal(start.authorization, null, "without the rejected token");
 });
 
+test("calls that meet a rejected saved token at the same time all start the device flow", async () => {
+  setStoredAuth({ token: "revoked-token", stored_at: new Date().toISOString(), source: "device_flow" });
+  rememberRoom(toRoomState({ room_id: "room_adhoc", display_name: "Ad hoc", joined_via: "join_code" }));
+  clearPendingDeviceAuth();
+  refusingServer({ error: "The bearer credential is invalid or expired. Reconnect with a current credential." }, 401);
+  const results = await Promise.all([call("read_messages", {}), call("get_board", {})]);
+  assert.deepEqual(results.map((result) => result.error), ["auth_required", "auth_required"], JSON.stringify(results));
+});
+
+test("initialize_repo keeps the config and gives the next step when the room refuses the auto-join", async () => {
+  for (const [body, status, expected] of [
+    [membershipRefusal, 403, "membership_required"],
+    [{ error: "auth_required", code: "NOT_AUTHENTICATED", room_id: "room_secret" }, 401, "auth_required"],
+  ] as const) {
+    const repo = mkdtempSync(join(tempDir, "repo-"));
+    execFileSync("git", ["init", "--quiet"], { cwd: repo });
+    clearPendingDeviceAuth();
+    refusingServer(body, status);
+    const result = await call("initialize_repo", { cwd: repo, room: "room_secret" });
+    assert.equal(result.success, true, "the config was written");
+    assert.equal(result.joined, false);
+    assert.equal(result.join_refused?.error, expected, JSON.stringify(result));
+  }
+});
+
 test("the room stream stops on a refusal instead of reconnecting", async () => {
   let streams = 0;
   globalThis.fetch = async () => {
@@ -445,7 +471,9 @@ test("request_room_access reports member, declined, cooldown, GitHub roles and o
     joinRequest: () => json({ error: "room_join_request_cooldown", code: "ROOM_JOIN_REQUEST_COOLDOWN",
       join_request: { ...declined, retry_after: pastHere }, retry_after: pastHere }, 429),
   });
-  assert.equal((await call("request_room_access", { room_id: "room_secret" })).next_step, "wait_until_retry_after");
+  const skewed = await call("request_room_access", { room_id: "room_secret" });
+  assert.equal(skewed.next_step, "wait_until_retry_after");
+  assert.match(skewed.message, /ask again with request_room_access after/, "the text says to wait, too");
 
   membershipServer({
     membership: () => json(state()),

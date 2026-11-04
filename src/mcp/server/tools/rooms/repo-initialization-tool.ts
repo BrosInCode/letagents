@@ -13,6 +13,7 @@ import {
 } from "../../repo-context.js";
 import { jsonToolResponse } from "./response.js";
 import { RoomAccessRefusedError } from "../../runtime/api.js";
+import { RepoRoomAuthRequiredError, toRepoRoomAuthRequiredResult } from "../../runtime/device-auth.js";
 import { getRuntimeWorkingDirectory } from "../../runtime/daemon-tool-context.js";
 import { toRoomAccessRefusalResult } from "../../runtime/room-access.js";
 
@@ -137,14 +138,16 @@ async function joinInitializedRoom(input: {
       hint: "Consider adding .letagents.json to git so other contributors auto-join the same room.",
     };
   } catch (err) {
-    const refusal = err instanceof RoomAccessRefusedError ? toRoomAccessRefusalResult(err) : null;
+    const refusal = err instanceof RoomAccessRefusedError ? toRoomAccessRefusalResult(err)
+      : err instanceof RepoRoomAuthRequiredError ? toRepoRoomAuthRequiredResult(err)
+        : null;
     return {
       success: true,
       created: input.configPath,
       room_id: input.roomName,
       joined: false,
       ...(refusal ? { join_refused: refusal } : {}),
-      error: `Config created but auto-join failed: ${refusal ? refusal.message : err instanceof Error ? err.message : err}`,
+      error: `Config created but auto-join failed: ${refusal ? String(refusal.message) : err instanceof Error ? err.message : err}`,
       hint: "The .letagents.json was created. Use join_room to manually connect.",
     };
   }

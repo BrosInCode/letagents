@@ -301,8 +301,13 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
       // stays in the environment. A signed-in account that may not open a
       // room gets a 403 (private repo, not a member), which keeps the sign-in.
       const { clearStoredAuth, getStoredAuth } = await ownerAuthStoreLoader();
-      if (getStoredAuth()?.token === sentOwnerToken) {
+      const saved = getStoredAuth()?.token;
+      if (saved === sentOwnerToken) {
         clearStoredAuth();
+        savedSignInRejected = true;
+      } else if (!saved && !process.env.LETAGENTS_TOKEN?.trim()) {
+        // The saved token was sent, and a call that ran at the same time
+        // has already forgotten it.
         savedSignInRejected = true;
       }
       clearAuthenticatedAccountCache();
