@@ -4,6 +4,7 @@ import type {
   FocusParentVisibility,
   FocusRoomConclusionDetails,
 } from './focus'
+import type { RoomJoinRequestSummary, roomAccessRefusal } from '../../../../../../shared/room-membership.mjs'
 import type { RoomParticipant } from './presence'
 import type { RoomKind } from './shared'
 
@@ -71,12 +72,18 @@ export interface RoomInfo {
 
 export type RoomAgentPromptKind = 'join' | 'inline' | 'auto'
 
+export type RoomAccessRefusal = NonNullable<ReturnType<typeof roomAccessRefusal>>
+
 export interface RoomJoinError {
   status: number | null
   code: string | null
   message: string
   roomId: string | null
   deviceFlowUrl: string | null
+  /** Set when the person is signed in but not allowed in: not a member, or no repository role. */
+  refusal: ReturnType<typeof roomAccessRefusal>
+  displayName: string | null
+  joinRequest: RoomJoinRequestSummary | null
 }
 
 export interface RoomParticipantsPage {

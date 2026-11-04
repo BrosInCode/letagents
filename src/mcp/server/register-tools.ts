@@ -9,6 +9,7 @@ import { registerOnboardingTools } from "./tools/onboarding.js";
 import { registerRentalTools } from "./tools/rental.js";
 import {
   registerRepoInitializationTool,
+  registerRoomAccessTool,
   registerRepoVisibilityTool,
   registerRoomInspectionTools,
   registerRoomJoinTools,
@@ -23,6 +24,7 @@ import { workerAwareToolServer } from "./worker-tool-facade.js";
 import { registerWorkspaceTools } from "./tools/workspace.js";
 import { isGivenAgent, registerAskWorkspaceTools } from "./tools/ask-workspace.js";
 import { remoteToolServer } from "./remote-tool-surface.js";
+import { roomAccessAwareToolServer } from "./room-access-tool-facade.js";
 
 export function registerTools(
   server: McpServer,
@@ -30,6 +32,7 @@ export function registerTools(
   supervisedProvider = process.env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || null,
   options: { executionOwner?: "provider" | "daemon"; apiUrl?: string; remote?: boolean } = {},
 ): void {
+  server = roomAccessAwareToolServer(server);
   // The remote HTTP endpoint shares this registry; it only drops local-machine tools.
   if (options.remote) server = remoteToolServer(server);
   const localRoom = profile === "supervised_room_turn" && isLocalRoomApi(options.apiUrl ?? process.env.LETAGENTS_API_URL);
@@ -68,7 +71,11 @@ export function registerTools(
   });
   if (profile === "supervised_room_turn") registerReplyThreadTool(tools);
   if (profile === "supervised_room_turn" && supervisedProvider === "cursor") registerSupervisedRoomTurnTools(tools);
-  if (surface.onboarding) registerOnboardingTools(tools);
+  if (surface.onboarding) {
+    registerOnboardingTools(tools);
+    // Asking to join is for the account, so supervised agents never discover it.
+    registerRoomAccessTool(tools);
+  }
   if (surface.roomResume) registerRoomResumeTool(tools);
   if (surface.rental) registerRentalTools(tools);
   // A given agent's own server advertises the ask tools (by its entry id); the daemon, which runs every

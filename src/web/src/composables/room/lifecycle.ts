@@ -1,6 +1,9 @@
-import { apiFetch, roomPath } from './api'
+import { roomAccessRefusal } from '../../../../../shared/room-membership.mjs'
+import { apiFetch, onRoomAccessRefused, roomPath, type RoomApiFailure } from './api'
 import { mergeMessages } from './data'
 import { joinRoomSession, loadRoomBootstrap } from './join'
+import { joinRequestFromPayload } from './membership'
+import type { RoomJoinError } from './types'
 import {
   clearPersistedSession,
   loadPersistedSession,
@@ -33,6 +36,7 @@ import {
   resetRoomState,
   room,
   roomArtifacts,
+  roomSessionVersion,
   setLastActivityHistoryRequest,
   taskGithubStatus,
   tasks,
@@ -44,6 +48,24 @@ interface RoomLifecycleDeps {
   startStreaming: (roomIdentifier: string, bootstrap?: boolean) => Promise<void>
   finishStreamingBootstrap: (roomIdentifier: string, snapshotCommitted: boolean) => void
   stopStreaming: () => void
+}
+
+function roomJoinErrorFrom(error: RoomApiFailure, roomIdentifier: string): RoomJoinError {
+  const payload = error.payload as {
+    room_id?: string
+    device_flow_url?: string
+    display_name?: string | null
+  } | null | undefined
+  return {
+    status: error.status ?? null,
+    code: error.code ?? null,
+    message: error.message || 'Could not connect to room.',
+    roomId: payload?.room_id ?? roomIdentifier,
+    deviceFlowUrl: payload?.device_flow_url ?? null,
+    refusal: roomAccessRefusal(payload),
+    displayName: typeof payload?.display_name === 'string' ? payload.display_name : null,
+    joinRequest: joinRequestFromPayload(payload),
+  }
 }
 
 export function createRoomLifecycle(deps: RoomLifecycleDeps) {
@@ -62,6 +84,7 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
         roomId: roomIdentifier,
       },
     })
+    const sessionVersion = roomSessionVersion
 
     try {
       const joinedRoom = await joinRoomSession(roomIdentifier)
@@ -83,6 +106,9 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
         joinedRoom,
         canonicalActivityHistoryRequest,
       )
+      // The room was closed or replaced while it loaded, for example by a
+      // refusal: whoever closed it owns the screen now.
+      if (roomSessionVersion !== sessionVersion) return false
       replaceRoomMessages(mergeMessages([], bootstrap.messagePage.messages))
       messagesHasOlder.value = bootstrap.messagePage.hasOlder
       messagesLoaded.value = true
@@ -121,31 +147,35 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       connectionState.value = 'live'
       return true
     } catch (err) {
+      // A newer join or a refusal owns the room state now; this failure is old news.
+      if (roomSessionVersion !== sessionVersion) return false
       if (bootstrapStreamStarted) {
         deps.finishStreamingBootstrap(streamingRoomIdentifier, false)
       }
       deps.stopStreaming()
       connectionState.value = 'error'
-      const error = err as Error & {
-        status?: number
-        code?: string | null
-        payload?: {
-          room_id?: string
-          device_flow_url?: string
-          message?: string
-        } | null
-      }
-      joinError.value = {
-        status: error.status ?? null,
-        code: error.code ?? null,
-        message: error.message || 'Could not connect to room.',
-        roomId: error.payload?.room_id ?? roomIdentifier,
-        deviceFlowUrl: error.payload?.device_flow_url ?? null,
-      }
+      joinError.value = roomJoinErrorFrom(err as RoomApiFailure, roomIdentifier)
       console.error('[useRoom] joinRoom failed:', err)
       return false
     }
   }
+
+  // A person removed from an open room gets a 403 refusal from its next read.
+  // Close the room and show the access screen instead of retrying the refusal.
+  const stopListening = onRoomAccessRefused((path, error) => {
+    const current = room.value
+    if (!current || !isConnected.value) return
+    const roomPaths = [current.identifier, current.parentRoomId].filter(Boolean).map(id => roomPath(id!))
+    if (!roomPaths.some(prefix => path === prefix || path.startsWith(`${prefix}/`) || path.startsWith(`${prefix}?`))) return
+    deps.stopStreaming()
+    resetRoomState({
+      activityHistoryLoading: false,
+      githubEventsLoading: false,
+      connectionState: 'idle',
+    })
+    connectionState.value = 'error'
+    joinError.value = roomJoinErrorFrom(error, current.identifier)
+  })
 
   function leaveRoom() {
     deps.stopStreaming()
@@ -185,5 +215,7 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
     leaveRoom,
     renameRoom,
     restoreSession,
+    /** Stops listening for refusals; the app keeps one lifecycle for its whole life. */
+    dispose: stopListening,
   }
 }

@@ -24,6 +24,7 @@ import { heldWorkerConnection } from "../../worker-call-context.js";
 import { currentSessionScope } from "./session-scope.js";
 import {
   ApiError,
+  RoomAccessRefusedError,
   apiCall,
   isMissingRouteError,
   parseApiErrorPayload,
@@ -650,8 +651,15 @@ export async function autoJoinFromContext(): Promise<void> {
   } catch (err) {
     if (err instanceof RepoRoomAuthRequiredError) {
       console.error(
-        `🔐 Repo room auth required for '${err.roomId}'. Open ${err.pendingAuth.verification_uri} and enter code ${err.pendingAuth.user_code}, then run poll_device_auth.`
+        `🔐 Room sign-in required for '${err.roomId}'. Open ${err.pendingAuth.verification_uri} and enter code ${err.pendingAuth.user_code}, then run poll_device_auth.`
       );
+      return;
+    }
+
+    if (err instanceof RoomAccessRefusedError) {
+      console.error(err.refusal === "membership_required"
+        ? `🔒 Room '${err.roomId}' is for members only. Call request_room_access to ask to join; a room admin approves.`
+        : `🔒 Room '${err.roomId}' is only for people with a role on its GitHub repository. Ask a repository admin to add you.`);
       return;
     }
 

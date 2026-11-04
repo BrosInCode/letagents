@@ -17,6 +17,7 @@
       @close="drawerOpen = false"
       @themeChange="theme = $event"
       @openRules="openRulesFromDrawer"
+      @left="handleLeftRoom"
     />
 
     <RoomHeader
@@ -30,6 +31,7 @@
       :canRename="room?.role === 'admin'"
       :showEventsTab="githubEventsSupported"
       :gitRoom="room?.gitRoom || null"
+      :accessLocked="Boolean(accessRefusal)"
       @toggleDrawer="drawerOpen = !drawerOpen"
       @update:activeTab="handleActiveTabChange"
       @update:searchQuery="searchQuery = $event"
@@ -43,8 +45,19 @@
       @close="rulesBoardOpen = false"
     />
 
+    <RoomAccessRequest
+      v-if="connectionState === 'error' && !isConnected && accessRefusal && joinError"
+      :key="`${joinError.roomId}:${accessRefusal}`"
+      :refusal="accessRefusal"
+      :roomId="joinError.roomId || String(route.params.roomId || '')"
+      :displayName="joinError.displayName"
+      :initialRequest="joinError.joinRequest"
+      :login="auth.user.value?.login || null"
+      @retry="retryJoin"
+    />
+
     <RoomConnectionError
-      v-if="connectionState === 'error' && !isConnected"
+      v-else-if="connectionState === 'error' && !isConnected"
       :title="joinErrorTitle"
       :body="joinErrorBody"
       :showGitHubSignIn="showGitHubSignIn"
@@ -195,6 +208,7 @@ import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
 import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
 import { messageThreadParentId } from '@/components/room/messageThreading'
+import RoomAccessRequest from './room/RoomAccessRequest.vue'
 import RoomConnectionError from './room/RoomConnectionError.vue'
 import RoomAuthGate from './room/RoomAuthGate.vue'
 import RoomMobileNav from './room/RoomMobileNav.vue'
@@ -373,6 +387,7 @@ const {
   githubEventsRepository,
   focusSettings,
   showGitHubSignIn,
+  accessRefusal,
   joinErrorTitle,
   joinErrorBody,
   stalePromptTaskStates,
@@ -474,6 +489,15 @@ async function handleRename() {
 async function retryJoin() {
   const roomId = route.params.roomId as string
   if (roomId) await joinRoom(roomId)
+}
+
+async function handleLeftRoom(roomName: string) {
+  drawerOpen.value = false
+  rulesBoardOpen.value = false
+  selectedReply.value = null
+  leaveRoom()
+  toast.info(`You left ${roomName}.`)
+  await router.push('/')
 }
 
 async function handleSignIn() {
