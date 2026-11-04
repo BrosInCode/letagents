@@ -258,9 +258,15 @@ function handleGitHubApiRequest(req: IncomingMessage, res: ServerResponse): void
   }
 
   if (pathname === "/repos/brosincode/public-repo") {
+    // GitHub reports the caller's own role. Everyone may read a public
+    // repository; only the collaborator's token has triage or more.
+    const collaborator = authorization === "Bearer github-token-collab";
     writeJson(res, 200, {
       private: false,
       owner: { login: "BrosInCode" },
+      ...(authorization
+        ? { permissions: { pull: true, triage: collaborator, push: collaborator, maintain: false, admin: false } }
+        : {}),
     });
     return;
   }
@@ -437,7 +443,7 @@ if (!requiresDatabase) {
 }
 
 test(
-  "public repo rooms allow anonymous joins through the real room join route",
+  "public repo rooms admit only people with a GitHub role on the repository, through the real join route",
   {
     concurrency: false,
     skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed repo room access integration tests" : false,
@@ -452,20 +458,26 @@ test(
       await stopGitHubApiStub(githubApi.server);
     });
 
+    const collaboratorToken = await createGitHubSessionToken({ login: "collab", accessToken: "github-token-collab" });
+    const outsiderToken = await createGitHubSessionToken({ login: "outsider", accessToken: "github-token-outsider" });
     const { child, port } = await startApiServer(githubApi.baseUrl);
     t.after(async () => {
       await stopChildProcess(child);
     });
 
-    const response = await joinRoom({
-      port,
-      roomName: PUBLIC_ROOM,
-    });
+    const anonymous = await joinRoom({ port, roomName: PUBLIC_ROOM, forwardedFor: "203.0.113.201" });
+    assert.equal(anonymous.status, 401);
+    assert.equal((await anonymous.json()).code, "NOT_AUTHENTICATED");
 
+    const outsider = await joinRoom({ port, roomName: PUBLIC_ROOM, sessionToken: outsiderToken, forwardedFor: "203.0.113.202" });
+    assert.equal(outsider.status, 403, "read access, which everyone has, is not a role");
+    assert.equal((await outsider.json()).code, "REPO_COLLABORATOR_REQUIRED");
+
+    const response = await joinRoom({ port, roomName: PUBLIC_ROOM, sessionToken: collaboratorToken, forwardedFor: "203.0.113.203" });
     assert.equal(response.status, 200);
     const payload = await response.json();
     assert.equal(payload.room_id, PUBLIC_ROOM);
-    assert.equal(payload.authenticated, false);
+    assert.equal(payload.authenticated, true);
   }
 );
 
@@ -667,7 +679,9 @@ test(
       joinRoom({ port, roomName, sessionToken, forwardedFor: `203.0.113.${(address += 1)}` });
 
     for (const alias of publicAliases) {
-      const response = await join(alias);
+      assert.equal((await join(alias)).status, 401, `${alias} anonymous`);
+      assert.equal((await join(alias, outsiderToken)).status, 403, `${alias} outsider`);
+      const response = await join(alias, collaboratorToken);
       assert.equal(response.status, 200, alias);
       const payload = await response.json();
       assert.equal(payload.room_id, PUBLIC_ROOM, alias);
@@ -795,6 +809,7 @@ test(
       title: "Third PR",
     });
 
+    const collaboratorToken = await createGitHubSessionToken({ login: "collab", accessToken: "github-token-collab" });
     const { child, port } = await startApiServer(githubApi.baseUrl);
     t.after(async () => {
       await stopChildProcess(child);
@@ -803,6 +818,7 @@ test(
     const firstPage = await fetchRoomEvents({
       port,
       roomName: PUBLIC_ROOM,
+      sessionToken: collaboratorToken,
       query: "limit=2",
     });
 
@@ -817,6 +833,7 @@ test(
     const nextPage = await fetchRoomEvents({
       port,
       roomName: PUBLIC_ROOM,
+      sessionToken: collaboratorToken,
       query: `limit=2&after=${encodeURIComponent(second.event.id)}`,
     });
 
@@ -880,6 +897,7 @@ test(
       title: "Bob PR",
     });
 
+    const collaboratorToken = await createGitHubSessionToken({ login: "collab", accessToken: "github-token-collab" });
     const { child, port } = await startApiServer(githubApi.baseUrl);
     t.after(async () => {
       await stopChildProcess(child);
@@ -888,6 +906,7 @@ test(
     const response = await fetchRoomEvents({
       port,
       roomName: PUBLIC_ROOM,
+      sessionToken: collaboratorToken,
       query: "event_type=pull_request&actor=alice",
     });
 

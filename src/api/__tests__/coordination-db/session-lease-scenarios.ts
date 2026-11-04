@@ -9,6 +9,7 @@ import {
   databaseTestOptions,
   dbApi,
   dawnActor,
+  seedRoomMember,
   startApiServer,
   stopChildProcess,
 } from "./harness.js";
@@ -54,6 +55,8 @@ test(
 
     const room = await createProjectWithName("coordination-lease-actions-session");
     await assignProjectAdmin(room.id, owner.id);
+    // A member who is not an admin: the release must stop at the admin check.
+    await seedRoomMember(room.id, participant.id);
     const { bayCredentials, dawnCredentials } = await createWorkerPair({
       roomId: room.id,
       ownerAccountId: owner.id,

@@ -90,6 +90,10 @@ async function createAdHocRoom() {
   return project;
 }
 
+async function addMember(roomId: string, accountId: string): Promise<void> {
+  await pool!.query(`INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'seed')`, [roomId, accountId]);
+}
+
 async function createAccount(suffix: string) {
   return accountSessions!.upsertAccount({
     provider: "github",
@@ -105,6 +109,7 @@ test(
   async () => {
     const project = await createAdHocRoom();
     const account = await createAccount("session");
+    await addMember(project.id, account.id);
     const token = "live_recheck_session_token";
     await accountSessions!.createSession(account.id, token, new Date(Date.now() + 60_000).toISOString());
     const sessionAccount = await accountSessions!.getSessionAccountByToken(token);
@@ -129,6 +134,7 @@ test(
   async () => {
     const project = await createAdHocRoom();
     const account = await createAccount("expiry");
+    await addMember(project.id, account.id);
     const token = "live_recheck_expiring_token";
     await accountSessions!.createSession(account.id, token, new Date(Date.now() + 60_000).toISOString());
     const sessionAccount = await accountSessions!.getSessionAccountByToken(token);
@@ -152,6 +158,7 @@ test(
   async () => {
     const project = await createAdHocRoom();
     const account = await createAccount("owner");
+    await addMember(project.id, account.id);
     const token = "live_recheck_owner_token";
     const ownerToken = await ownerTokens!.createOwnerToken({
       accountId: account.id,
@@ -171,13 +178,31 @@ test(
 );
 
 test(
-  "an anonymous reader of a room that is not repo-backed keeps passing the live recheck",
+  "a room that is not repo-backed refuses an anonymous reader and a signed-in stranger, at entry and on recheck",
   { concurrency: false, skip },
   async () => {
     const project = await createAdHocRoom();
-    const req = anonymousRequest();
+    const anonymous = anonymousRequest();
+    const refused = fakeResponse();
+    assert.equal(await access!.requireGitRoomParticipant(anonymous, refused as never, project), false);
+    assert.equal(refused.statusCode, 401);
+    assert.equal(await access!.reauthorizeGitRoomParticipant(anonymous, project), false);
+
+    const account = await createAccount("stranger");
+    const token = "live_recheck_stranger_token";
+    await accountSessions!.createSession(account.id, token, new Date(Date.now() + 60_000).toISOString());
+    const req = sessionRequest(token, (await accountSessions!.getSessionAccountByToken(token))!);
+    const strangerResponse = fakeResponse();
+    assert.equal(await access!.requireGitRoomParticipant(req, strangerResponse as never, project), false);
+    assert.equal(strangerResponse.statusCode, 403);
+    assert.equal((strangerResponse.body as { code?: string }).code, "ROOM_MEMBERSHIP_REQUIRED");
+
+    // A member who is removed while a stream is open fails the next recheck.
+    await addMember(project.id, account.id);
     assert.equal(await access!.requireGitRoomParticipant(req, fakeResponse() as never, project), true);
     assert.equal(await access!.reauthorizeGitRoomParticipant(req, project), true);
+    await pool!.query("DELETE FROM room_members WHERE room_id = $1 AND account_id = $2", [project.id, account.id]);
+    assert.equal(await access!.reauthorizeGitRoomParticipant(req, project), false);
   },
 );
 
@@ -186,8 +211,13 @@ async function startPublicRepoGitHubStub() {
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     requests += 1;
     const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname.toLowerCase();
+    // A signed-in caller of this stub has the triage role on the public repository.
     const reply = pathname === "/repos/brosincode/public-repo"
-      ? { status: 200, payload: { private: false, owner: { login: "BrosInCode" } } }
+      ? { status: 200, payload: {
+        private: false,
+        owner: { login: "BrosInCode" },
+        ...(req.headers.authorization ? { permissions: { pull: true, triage: true } } : {}),
+      } }
       : { status: 404, payload: { message: "Not Found" } };
     res.writeHead(reply.status, { "content-type": "application/json" });
     res.end(JSON.stringify(reply.payload));
@@ -222,7 +252,8 @@ test(
     assert.equal(access!.isRepoBackedProject(project), true, "the room under test is repo-backed");
     const account = await createAccount("public-repo");
     const token = "live_recheck_public_repo_token";
-    await accountSessions!.createSession(account.id, token, new Date(Date.now() + 60_000).toISOString());
+    // A GitHub token, so the role check on the public repository can run.
+    await accountSessions!.createSession(account.id, token, new Date(Date.now() + 60_000).toISOString(), "github-user-token");
     const sessionAccount = await accountSessions!.getSessionAccountByToken(token);
     assert.ok(sessionAccount);
 
@@ -251,6 +282,7 @@ test(
   async () => {
     const project = await createAdHocRoom();
     const account = await createAccount("lease");
+    await addMember(project.id, account.id);
     const token = "live_recheck_lease_token";
     await accountSessions!.createSession(account.id, token, new Date(Date.now() + 60_000).toISOString());
     const sessionAccount = await accountSessions!.getSessionAccountByToken(token);
@@ -295,7 +327,14 @@ test(
     });
 
     const project = await rooms!.createProjectWithName("github.com/brosincode/public-repo");
-    const req = anonymousRequest();
+    const anonymous = fakeResponse();
+    assert.equal(await access!.requireGitRoomParticipant(anonymousRequest(), anonymous as never, project), false);
+    assert.equal(anonymous.statusCode, 401, "a public repository room needs a sign-in too");
+    const account = await createAccount("public-repo-entry");
+    const token = "live_recheck_public_repo_entry";
+    // A GitHub token, so the role check on the public repository can run.
+    await accountSessions!.createSession(account.id, token, new Date(Date.now() + 60_000).toISOString(), "github-user-token");
+    const req = sessionRequest(token, (await accountSessions!.getSessionAccountByToken(token))!);
     assert.equal(await access!.requireGitRoomParticipant(req, fakeResponse() as never, project), true);
     assert.equal(access!.liveRecheckIsFreshAtEntry(req), false, "repository entries may have used a visibility cache");
   },

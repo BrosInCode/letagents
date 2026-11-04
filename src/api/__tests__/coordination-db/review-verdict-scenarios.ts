@@ -6,6 +6,7 @@ import {
   createWorkerPair,
   databaseTestOptions,
   dbApi,
+  seedRoomMember,
   startApiServer,
   stopChildProcess,
 } from "./harness.js";
@@ -24,6 +25,7 @@ test(
       token: "coordination-verdict-owner-token",
     });
     const room = await createProjectWithName("coordination-review-verdict");
+    await seedRoomMember(room.id, owner.id);
     const { dawnCredentials } = await createWorkerPair({ roomId: room.id, ownerAccountId: owner.id, ownerLabel });
     const task = await createTask(room.id, "Page shell", "Human");
     for (const status of ["accepted", "assigned", "in_progress", "in_review", "blocked"] as const) {

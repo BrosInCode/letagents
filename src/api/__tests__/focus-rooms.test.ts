@@ -45,6 +45,36 @@ const conclusionDetails = {
   next_owner: "EmmyMay",
 } as const;
 
+let memberOrdinal = 0;
+
+/**
+ * Headers of a signed-in person who is a member of the room. A room without a
+ * repository, and so its focus rooms, opens only for its members.
+ */
+async function memberHeaders(roomId: string): Promise<Record<string, string>> {
+  if (!dbModule || !pool) {
+    throw new Error("DB-backed focus room tests require TEST_DB_URL");
+  }
+
+  const ordinal = ++memberOrdinal;
+  const account = await dbModule.upsertAccount({
+    provider: "github",
+    provider_user_id: `focus-member-${ordinal}`,
+    login: `focus-member-${ordinal}`,
+    display_name: `Focus Member ${ordinal}`,
+  });
+  const sessionToken = `focus-member-session-${ordinal}`;
+  await dbModule.createSession(account.id, sessionToken, new Date(Date.now() + 60 * 60_000).toISOString());
+  await pool.query(
+    "INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'seed')",
+    [roomId, account.id]
+  );
+  return {
+    "Content-Type": "application/json",
+    Cookie: `letagents_session=${encodeURIComponent(sessionToken)}`,
+  };
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -398,6 +428,7 @@ test(
     const task = await createTask(parent.id, "Share Focus Room results", "FoxSage");
     const focus = await createFocusRoomForTask(parent.id, task.id);
     assert.ok(focus);
+    const headers = await memberHeaders(parent.id);
 
     const { child, port } = await startApiServer();
     t.after(async () => {
@@ -408,7 +439,7 @@ test(
       `http://127.0.0.1:${port}/rooms/${encodeURIComponent(parent.id)}/focus/${encodeURIComponent(task.id)}/conclude`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           summary: "Result summary",
           conclusion_details: conclusionDetails,
@@ -444,7 +475,7 @@ test(
       `http://127.0.0.1:${port}/rooms/${encodeURIComponent(parent.id)}/focus/${encodeURIComponent(task.id)}/conclude`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ summary: "Result summary again" }),
       }
     );
@@ -477,6 +508,7 @@ test(
     const task = await createTask(parent.id, "Share Focus Room structured closeout", "FoxSage");
     const focus = await createFocusRoomForTask(parent.id, task.id);
     assert.ok(focus);
+    const headers = await memberHeaders(parent.id);
 
     const { child, port } = await startApiServer();
     t.after(async () => {
@@ -487,7 +519,7 @@ test(
       `http://127.0.0.1:${port}/rooms/${encodeURIComponent(parent.id)}/focus/${encodeURIComponent(task.id)}/conclude`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ summary: "Result summary" }),
       }
     );
@@ -510,6 +542,7 @@ test(
     }
 
     const parent = await createProjectWithName("focus-adhoc-route-api");
+    const headers = await memberHeaders(parent.id);
 
     const { child, port } = await startApiServer();
     t.after(async () => {
@@ -520,7 +553,7 @@ test(
       `http://127.0.0.1:${port}/rooms/${encodeURIComponent(parent.id)}/focus-rooms`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ title: "Investigate branch room flow" }),
       }
     );
@@ -538,10 +571,12 @@ test(
     const stored = await getFocusRoomByKey(parent.id, payload.focus_room.focus_key);
     assert.equal(stored?.id, payload.focus_room.room_id);
 
-    const joinResponse = await fetch(
-      `http://127.0.0.1:${port}/rooms/${encodeURIComponent(`${parent.id}/focus/${payload.focus_room.focus_key}`)}/join`,
-      { method: "POST" }
-    );
+    const focusJoinUrl = `http://127.0.0.1:${port}/rooms/${encodeURIComponent(`${parent.id}/focus/${payload.focus_room.focus_key}`)}/join`;
+    const anonymousJoin = await fetch(focusJoinUrl, { method: "POST" });
+    assert.equal(anonymousJoin.status, 401, "a focus room needs a sign-in like its parent");
+    assert.equal((await anonymousJoin.json()).code, "NOT_AUTHENTICATED");
+
+    const joinResponse = await fetch(focusJoinUrl, { method: "POST", headers });
     assert.equal(joinResponse.status, 200);
     const joined = await joinResponse.json();
     assert.equal(joined.room_id, payload.focus_room.room_id);
@@ -573,6 +608,7 @@ test(
     await updateFocusRoomSettings(parent.id, task.id, {
       parent_visibility: "silent",
     });
+    const headers = await memberHeaders(parent.id);
 
     const { child, port } = await startApiServer();
     t.after(async () => {
@@ -583,7 +619,7 @@ test(
       `http://127.0.0.1:${port}/rooms/${encodeURIComponent(parent.id)}/focus/${encodeURIComponent(task.id)}/conclude`,
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           summary: "Private result",
           conclusion_details: conclusionDetails,
@@ -631,6 +667,7 @@ test(
     await updateFocusRoomSettings(parent.id, task.id, {
       parent_visibility: "major_activity",
     });
+    const headers = await memberHeaders(parent.id);
 
     const { child, port } = await startApiServer();
     t.after(async () => {
@@ -641,7 +678,7 @@ test(
       `http://127.0.0.1:${port}/rooms/${encodeURIComponent(parent.id)}/tasks/${encodeURIComponent(task.id)}`,
       {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ status: "in_progress" }),
       }
     );
