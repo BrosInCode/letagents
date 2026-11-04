@@ -9,6 +9,7 @@ import {
   type RoomMembershipState,
 } from '../../../../shared/room-membership.mjs';
 import { isMcpWorkerId } from '../../../shared/mcp-worker.js';
+import { cancelAsk, endAsk, getAskById } from '../../agent-asks/store.js';
 import { endRoomAgentSession, getProjectById, type Project } from '../../db.js';
 import * as databaseStore from '../../db/room-members.js';
 import type { AuthenticatedRequest } from '../../http/helpers.js';
@@ -36,6 +37,8 @@ export type RoomMemberRouteDeps = Pick<
     person: SignedInAccount,
     options: { closeOpenRequests: boolean },
   ) => Promise<boolean>;
+  /** Ends an agent ask of a removed member, with its grant and its agent. */
+  endMemberAgentAsk?: (askId: string) => Promise<boolean>;
 };
 
 /** One room's membership context: the room asked for, and the room whose members decide. */
@@ -92,6 +95,13 @@ async function endAgentSessionAsRoomAdmin(
   return true;
 }
 
+async function endAgentAskOfRemovedMember(askId: string): Promise<boolean> {
+  const ask = await getAskById(askId);
+  if (!ask) return false;
+  if (ask.state === 'open' || ask.state === 'claimed') return Boolean(await cancelAsk(ask));
+  return Boolean(await endAsk(ask, 'removed'));
+}
+
 function fail(res: Response, error: unknown): void {
   const code = (error as { code?: string } | null)?.code;
   // Lock timeout or a deadlock with a concurrent change: retrying is safe.
@@ -140,6 +150,7 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
   const findProject = deps.getProjectById ?? getProjectById;
   const repoAccessTarget = deps.resolveProjectRepoAccessTarget ?? resolveProjectRepoAccessTarget;
   const endMemberAgentSession = deps.endMemberAgentSession ?? endAgentSessionAsRoomAdmin;
+  const endMemberAgentAsk = deps.endMemberAgentAsk ?? endAgentAskOfRemovedMember;
 
   async function memberRoom(req: AuthenticatedRequest, res: Response): Promise<MemberRoom | null> {
     const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(routeParam(req, 0)));
@@ -311,7 +322,17 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
           console.error('[room members] agent session of a removed member did not end', session.session_id, error);
         }
       }
-      res.json({ removed: true, account_id: targetAccountId, ended_agent_sessions: ended });
+      // An agent someone lent the person through an agent ask worked for them;
+      // its ask ends, which ends the agent and revokes its grant.
+      let endedAsks = 0;
+      for (const askId of await store.liveAgentAskIdsForAsker(member.room.accessRoom.id, targetAccountId)) {
+        try {
+          if (await endMemberAgentAsk(askId)) endedAsks += 1;
+        } catch (error) {
+          console.error('[room members] agent ask of a removed member did not end', askId, error);
+        }
+      }
+      res.json({ removed: true, account_id: targetAccountId, ended_agent_sessions: ended, ended_agent_asks: endedAsks });
     } catch (error) { fail(res, error); }
   });
 

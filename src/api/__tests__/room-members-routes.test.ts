@@ -47,7 +47,12 @@ function harness(options: { roles?: Record<string, RoomMemberRole>; participantD
       calls.push(`end:${session.session_id}:${options.closeOpenRequests ? 'close' : 'keep'}`);
       return true;
     },
+    endMemberAgentAsk: async (askId) => { calls.push(`end-ask:${askId}`); return true; },
     memberStore: {
+      liveAgentAskIdsForAsker: async (roomId: string, accountId: string) => {
+        calls.push(`asks:${roomId}:${accountId}`);
+        return accountId === 'member' ? ['ask_1'] : [];
+      },
       getRoomMemberRole: async (roomId: string, accountId: string) => {
         calls.push(`role:${roomId}`);
         return roles.get(accountId) ?? null;
@@ -189,7 +194,8 @@ test('a member who is not an admin cannot admit people, but can leave with an ow
   assert.equal(removeOther.status, 403);
   const leave = await request('delete', '/rooms/ops-lounge/members/member', { auth: 'owner_token', account: 'member' });
   assert.equal(leave.status, 200);
-  assert.deepEqual(leave.body, { removed: true, account_id: 'member', ended_agent_sessions: 1 });
+  assert.deepEqual(leave.body, { removed: true, account_id: 'member', ended_agent_sessions: 1, ended_agent_asks: 1 });
+  assert.ok(calls.includes('end-ask:ask_1'), 'an agent lent to the person through an ask ends with its ask');
   assert.ok(calls.includes('remove:ops-lounge:member:by:member'));
   assert.ok(calls.includes('end:ras_1:keep'), 'the agents of a person who left end, and nothing is posted for them');
 

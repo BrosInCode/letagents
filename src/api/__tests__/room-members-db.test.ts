@@ -175,7 +175,7 @@ test('a room creator, a join request and an admin decision, through the real ser
   const promoted = await call('PUT', `/rooms/${roomId}/members/${bob.id}/role`, owner.token, { role: 'admin' });
   assert.equal(promoted.body.member.role, 'admin');
   const left = await call('DELETE', `/rooms/${roomId}/members/${owner.id}`, owner.token);
-  assert.deepEqual(left.body, { removed: true, account_id: owner.id, ended_agent_sessions: 0 });
+  assert.deepEqual(left.body, { removed: true, account_id: owner.id, ended_agent_sessions: 0, ended_agent_asks: 0 });
   assert.equal((await call('GET', `/rooms/${roomId}/membership`, owner.token)).body.member, false);
   assert.equal((await call('DELETE', `/rooms/${roomId}/members/${alice.id}`, bob.token)).status, 404);
 });
@@ -198,17 +198,38 @@ test('removing a member ends their agents in the room and its focus rooms, but n
     VALUES ('grant_ask', $1, 'host', 'install', 'ask:ask_1', 'grant-hash', ARRAY[$2], ARRAY['owner/lentfox'],
       now(), now() + interval '1 hour', now(), now())`, [bob.id, roomId]);
   await pool!.query(`UPDATE room_agent_sessions SET supervisor_grant_id = 'grant_ask' WHERE session_id = $1`, [lent.session_id]);
+  // An agent someone else gave bob through an agent ask, restarted once under its grant.
+  const giver = await person('giver');
+  await pool!.query(`INSERT INTO supervisor_host_grants (grant_id, owner_account_id, host_id, installation_id, scope_key,
+      token_hash, allowed_room_ids, allowed_agent_keys, issued_at, expires_at, created_at, updated_at)
+    VALUES ('grant_given', $1, 'host2', 'install2', 'ask:ask_given', 'given-hash', ARRAY[$2], ARRAY['owner/givenfox'],
+      now(), now() + interval '1 hour', now(), now())`, [giver.id, roomId]);
+  const firstGiven = await agentSession(roomId, giver.id, 'givenfox');
+  await pool!.query(`UPDATE room_agent_sessions SET supervisor_grant_id = 'grant_given', ended_at = now() WHERE session_id = $1`,
+    [firstGiven.session_id]);
+  const restartedGiven = await agentSession(roomId, giver.id, 'givenfox2');
+  await pool!.query(`UPDATE room_agent_sessions SET supervisor_grant_id = 'grant_given' WHERE session_id = $1`, [restartedGiven.session_id]);
+  await pool!.query(`INSERT INTO agent_asks (id, link_token_hash, room_id, asker_account_id, provider_id, model_label, state,
+      expires_at, giver_account_id, grant_id, room_agent_session_id)
+    VALUES ('ask_given', 'given-link', $1, $2, 'claude', 'Claude', 'active', now() + interval '1 day', $3, 'grant_given', $4)`,
+  [roomId, bob.id, giver.id, firstGiven.session_id]);
 
   const removed = await call('DELETE', `/rooms/${roomId}/members/${bob.id}`, owner.token);
   assert.equal(removed.status, 200);
   assert.equal(removed.body.ended_agent_sessions, 2);
+  assert.equal(removed.body.ended_agent_asks, 1);
+  const ask = await pool!.query<{ state: string }>(`SELECT state FROM agent_asks WHERE id = 'ask_given'`);
+  assert.equal(ask.rows[0]?.state, 'ended', 'the ask made by the removed person ends');
+  const grant = await pool!.query<{ revoked: boolean }>(`SELECT revoked_at IS NOT NULL AS revoked FROM supervisor_host_grants WHERE grant_id = 'grant_given'`);
+  assert.equal(grant.rows[0]?.revoked, true, 'and its grant is revoked, so the agent cannot start again');
   const sessions = await pool!.query<{ session_id: string; ended: boolean; end_reason: string | null }>(
     `SELECT session_id, ended_at IS NOT NULL AS ended, end_reason FROM room_agent_sessions`);
   const byId = new Map(sessions.rows.map((row) => [row.session_id, row]));
   assert.equal(byId.get(inRoom.session_id)?.ended, true);
   assert.equal(byId.get(inRoom.session_id)?.end_reason, 'room_admin');
   assert.equal(byId.get(inFocus.session_id)?.ended, true);
-  assert.equal(byId.get(lent.session_id)?.ended, false, 'an agent lent through an ask keeps working under its grant');
+  assert.equal(byId.get(lent.session_id)?.ended, false, 'an agent bob lent to someone else keeps working under its grant');
+  assert.equal(byId.get(restartedGiven.session_id)?.ended, true, 'the restarted agent of bob\'s ask ends too');
 });
 
 test('the seed adds people with proof and nobody else, changes no admin, and is safe to run again', databaseTestOptions, async () => {
@@ -324,10 +345,41 @@ test('admin changes: demotion drops focus-room admin rows, and two admins cannot
   assert.deepEqual(await admins(), [`${roomId}:ada`], 'the demoted admin keeps no admin row in the focus room');
 
   assert.equal((await call('PUT', `/rooms/${roomId}/members/${ben.id}/role`, ada.token, { role: 'admin' })).status, 200);
-  const [first, second] = await Promise.all([
-    call('DELETE', `/rooms/${roomId}/members/${ben.id}`, ada.token),
-    call('DELETE', `/rooms/${roomId}/members/${ada.id}`, ben.token),
-  ]);
-  assert.deepEqual([first.status, second.status].sort(), [200, 403], 'the second removal sees that its caller is no longer an admin');
+  // Hold the room's admin lock, so that both removals pass every check made
+  // before it and must decide under it.
+  const store = await import('../db/room-members.js');
+  const holder = await pool!.connect();
+  try {
+    await holder.query('BEGIN');
+    await holder.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`project_admin:${roomId}`]);
+    const both = Promise.all([
+      store.removeRoomMember(roomId, ben.id, ada.id),
+      store.removeRoomMember(roomId, ada.id, ben.id),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await holder.query('COMMIT');
+    const outcomes = (await both).map((outcome) => outcome.kind).sort();
+    assert.deepEqual(outcomes, ['forbidden', 'removed'], 'the second removal sees that its caller is no longer an admin');
+  } finally {
+    holder.release();
+  }
   assert.equal((await admins()).length, 1, 'the room keeps one admin');
+});
+
+test('opening a room makes nobody an admin of a focus room or of a room whose members were seeded', databaseTestOptions, async (t) => {
+  const seeded = await person('seeded');
+  const stranger = await person('stranger');
+  await pool!.query(`INSERT INTO rooms (id, display_name, created_at) VALUES ('old-lounge', 'Old', now())`);
+  await pool!.query(`INSERT INTO room_members (room_id, account_id, added_via) VALUES ('old-lounge', $1, 'seed')`, [seeded.id]);
+  await insertFocusRoom('focus_45', 'old-lounge');
+  const { child, port } = await startApiServer();
+  t.after(async () => { await stopChildProcess(child); });
+  const call = client(port);
+
+  assert.equal((await call('POST', '/rooms/old-lounge/join', stranger.token)).body.role, 'participant');
+  assert.equal((await call('POST', '/rooms/focus_45/join', seeded.token)).body.role, 'participant');
+  assert.deepEqual(await members(), ['old-lounge:seeded:seed'], 'the stranger got no member row');
+  assert.deepEqual(await admins(), [], 'and nobody became an admin of the room or the focus room');
+  assert.equal((await call('POST', '/rooms/old-lounge/join', seeded.token)).body.role, 'admin',
+    'a member may still take a room that has no admin');
 });

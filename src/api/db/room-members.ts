@@ -227,10 +227,10 @@ export type RoomMemberRemoval =
  * record keeps every seed from adding the account back. `actorAccountId` is
  * the account itself (it leaves) or an admin, checked again under the lock.
  *
- * Returns the live agent sessions that served the account there, for the
- * caller to end: its own agents, and agents lent to it through an agent ask
- * or a rental. An agent the account lent to someone else is that person's, so
- * it is not listed.
+ * Returns the account's own live agent sessions there, for the caller to
+ * end. An agent the account lent to someone else (a rental or an agent ask)
+ * is that person's, so it is not listed; agents lent to the account end with
+ * their ask (liveAgentAskIdsForAsker).
  */
 export async function removeRoomMember(roomId: string, accountId: string, actorAccountId: string): Promise<RoomMemberRemoval> {
   return inTransaction(async (client) => {
@@ -255,20 +255,24 @@ export async function removeRoomMember(roomId: string, accountId: string, actorA
       LEFT JOIN supervisor_host_grants AS grant_row ON grant_row.grant_id = session.supervisor_grant_id
       WHERE session.ended_at IS NULL
         AND (session.room_id = $1 OR session.room_id IN (${FOCUS_ROOMS_OF}))
-        AND (
-          (session.owner_account_id = $2
-            AND grant_row.rental_session_id IS NULL
-            AND COALESCE(grant_row.scope_key, '') NOT LIKE 'ask:%'
-            AND NOT EXISTS (SELECT 1 FROM rental_sessions WHERE room_agent_session_id = session.session_id)
-            AND NOT EXISTS (SELECT 1 FROM agent_asks WHERE room_agent_session_id = session.session_id))
-          OR EXISTS (SELECT 1 FROM agent_asks
-            WHERE room_agent_session_id = session.session_id AND asker_account_id = $2)
-          OR EXISTS (SELECT 1 FROM rental_sessions
-            WHERE room_agent_session_id = session.session_id AND renter_account_id = $2)
-        )
+        AND session.owner_account_id = $2
+        AND grant_row.rental_session_id IS NULL
+        AND COALESCE(grant_row.scope_key, '') NOT LIKE 'ask:%'
+        AND NOT EXISTS (SELECT 1 FROM rental_sessions WHERE room_agent_session_id = session.session_id)
+        AND NOT EXISTS (SELECT 1 FROM agent_asks WHERE room_agent_session_id = session.session_id)
       ORDER BY session.created_at`, [roomId, accountId]);
     return { kind: 'removed', agent_sessions: sessions.rows };
   });
+}
+
+/** Live agent asks the account made in the room or its focus rooms: their agents work for it. */
+export async function liveAgentAskIdsForAsker(roomId: string, accountId: string): Promise<string[]> {
+  const result = await pool.query<{ id: string }>(`SELECT id FROM agent_asks
+    WHERE asker_account_id = $2
+      AND state IN ('open', 'claimed', 'on_hold', 'active', 'paused')
+      AND (room_id = $1 OR room_id IN (${FOCUS_ROOMS_OF}))
+    ORDER BY created_at`, [roomId, accountId]);
+  return result.rows.map((row) => row.id);
 }
 
 const JOIN_REQUEST_COLUMNS = 'id, room_id, account_id, state, created_at, decided_at';
