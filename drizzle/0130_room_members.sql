@@ -4,12 +4,13 @@
 -- Nothing reads these tables for access yet: a later release turns the
 -- members-only rule on, and runs the seed below again before it does.
 --
--- The seed gives each top-level room that is not repo-shaped the people with
--- proof: its admins and the admins of its focus rooms, the people who posted
--- while signed in, and the owners of agents that joined. An agent lent through
--- a rental or an agent ask does not make its owner a member. A room that then
--- has members but no admin gets one: the earliest signed-in poster, else the
--- owner of the earliest agent. Older servers never read these tables.
+-- The seed gives each top-level room that is not tied to a repository (not
+-- repo-shaped, no GitHub binding) the people with proof: its admins, the
+-- people who posted in it or its focus rooms while signed in, and the owners
+-- of agents that joined. An agent lent through a rental or an agent ask does
+-- not make its owner a member. A person an admin removed, or who left, is
+-- recorded in room_member_removals and is never added back by a seed. The
+-- seed changes no admin. Older servers never read these tables.
 SET LOCAL lock_timeout = '3s';
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "room_members" (
@@ -23,6 +24,14 @@ CREATE TABLE IF NOT EXISTS "room_members" (
 );
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "room_members_account_idx" ON "room_members" USING btree ("account_id");
+--> statement-breakpoint
+CREATE TABLE IF NOT EXISTS "room_member_removals" (
+	"room_id" text NOT NULL REFERENCES "rooms"("id") ON DELETE CASCADE ON UPDATE CASCADE,
+	"account_id" text NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+	"removed_by" text REFERENCES "accounts"("id") ON DELETE SET NULL,
+	"removed_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "room_member_removals_pk" PRIMARY KEY ("room_id", "account_id")
+);
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "room_join_requests" (
 	"id" text PRIMARY KEY NOT NULL,
@@ -46,6 +55,10 @@ WITH member_rooms AS (
 	WHERE "kind" = 'main'
 		AND "id" !~ '^[A-Za-z0-9.-]+/[^/]+/[^/]+$'
 		AND NOT (lower(split_part("id", '/', 1)) = 'gitlab.com' AND "id" LIKE '%/%/%')
+		AND NOT EXISTS (
+			SELECT 1 FROM "room_git_bindings" AS binding
+			WHERE binding."room_id" = "rooms"."id" AND binding."provider" = 'github'
+		)
 ), scope AS (
 	SELECT "id" AS room_id, "id" AS access_room_id FROM member_rooms
 	UNION ALL
@@ -63,9 +76,9 @@ WITH member_rooms AS (
 	UNION
 	SELECT "room_agent_session_id" FROM "agent_asks" WHERE "room_agent_session_id" IS NOT NULL
 ), proof AS (
-	SELECT scope.access_room_id AS room_id, admin."account_id"
+	SELECT admin."project_id" AS room_id, admin."account_id"
 	FROM "project_admins" AS admin
-	INNER JOIN scope ON scope.room_id = admin."project_id"
+	INNER JOIN member_rooms ON member_rooms."id" = admin."project_id"
 	UNION
 	SELECT scope.access_room_id, message."publisher_account_id"
 	FROM "messages" AS message
@@ -81,47 +94,8 @@ INSERT INTO "room_members" ("room_id", "account_id", "added_via", "created_at")
 SELECT proof.room_id, proof."account_id", 'seed', now()
 FROM proof
 INNER JOIN "accounts" AS account ON account."id" = proof."account_id"
+WHERE NOT EXISTS (
+	SELECT 1 FROM "room_member_removals" AS removal
+	WHERE removal."room_id" = proof.room_id AND removal."account_id" = proof."account_id"
+)
 ON CONFLICT ("room_id", "account_id") DO NOTHING;
---> statement-breakpoint
-WITH adminless AS (
-	SELECT DISTINCT member."room_id"
-	FROM "room_members" AS member
-	WHERE NOT EXISTS (SELECT 1 FROM "project_admins" AS admin WHERE admin."project_id" = member."room_id")
-), scope AS (
-	SELECT "room_id", "room_id" AS access_room_id FROM adminless
-	UNION ALL
-	SELECT focus."id", focus."parent_room_id"
-	FROM "rooms" AS focus
-	INNER JOIN adminless ON adminless."room_id" = focus."parent_room_id"
-	WHERE focus."kind" = 'focus'
-)
-INSERT INTO "project_admins" ("project_id", "account_id", "assigned_at")
-SELECT DISTINCT ON (scope.access_room_id) scope.access_room_id, message."publisher_account_id", now()
-FROM "messages" AS message
-INNER JOIN scope ON scope."room_id" = message."room_id"
-INNER JOIN "room_members" AS member
-	ON member."room_id" = scope.access_room_id AND member."account_id" = message."publisher_account_id"
-WHERE message."publisher_account_id" IS NOT NULL AND message."publisher_agent_session_id" IS NULL
-ORDER BY scope.access_room_id, message."timestamp", message."number"
-ON CONFLICT DO NOTHING;
---> statement-breakpoint
-WITH adminless AS (
-	SELECT DISTINCT member."room_id"
-	FROM "room_members" AS member
-	WHERE NOT EXISTS (SELECT 1 FROM "project_admins" AS admin WHERE admin."project_id" = member."room_id")
-), scope AS (
-	SELECT "room_id", "room_id" AS access_room_id FROM adminless
-	UNION ALL
-	SELECT focus."id", focus."parent_room_id"
-	FROM "rooms" AS focus
-	INNER JOIN adminless ON adminless."room_id" = focus."parent_room_id"
-	WHERE focus."kind" = 'focus'
-)
-INSERT INTO "project_admins" ("project_id", "account_id", "assigned_at")
-SELECT DISTINCT ON (scope.access_room_id) scope.access_room_id, session."owner_account_id", now()
-FROM "room_agent_sessions" AS session
-INNER JOIN scope ON scope."room_id" = session."room_id"
-INNER JOIN "room_members" AS member
-	ON member."room_id" = scope.access_room_id AND member."account_id" = session."owner_account_id"
-ORDER BY scope.access_room_id, session."created_at", session."session_id"
-ON CONFLICT DO NOTHING;

@@ -133,7 +133,10 @@ test('a room creator, a join request and an admin decision, through the real ser
 
   const requestId = asked.body.join_request.id as string;
   assert.equal((await call('POST', `/rooms/${roomId}/join-requests/${requestId}/approve`, alice.token)).status, 403,
-    'a person cannot admit themselves');
+    'a person who is not an admin cannot decide a request');
+  for (const route of [`/rooms/${roomId}/members`, `/rooms/${roomId}/join-requests`, '/account/room-join-requests']) {
+    assert.equal((await call('GET', route, 'alice_owner_token')).body.code, 'PERSON_REQUIRED', `${route} is for a person in the app`);
+  }
   const declined = await call('POST', `/rooms/${roomId}/join-requests/${requestId}/decline`, owner.token);
   assert.equal(declined.status, 200);
   assert.equal(declined.body.join_request.state, 'declined');
@@ -208,13 +211,31 @@ test('removing a member ends their agents in the room and its focus rooms, but n
   assert.equal(byId.get(lent.session_id)?.ended, false, 'an agent lent through an ask keeps working under its grant');
 });
 
-test('the seed adds people with proof, gives an adminless room an admin, and is safe to run again', databaseTestOptions, async () => {
-  const [admin, poster, agentOwner, lender, focusPoster, repoPoster, early, late, onlyAgent] = await Promise.all(
-    ['admin', 'poster', 'agentowner', 'lender', 'focusposter', 'repoposter', 'early', 'late', 'onlyagent'].map(person));
+test('the seed adds people with proof and nobody else, changes no admin, and is safe to run again', databaseTestOptions, async () => {
+  const [admin, poster, agentOwner, lender, focusPoster, repoPoster, early, late, onlyAgent, focusAdmin, removedPoster, giver, asker] =
+    await Promise.all(['admin', 'poster', 'agentowner', 'lender', 'focusposter', 'repoposter', 'early', 'late', 'onlyagent',
+      'focusadmin', 'removedposter', 'giver', 'asker'].map(person));
   await pool!.query(`INSERT INTO rooms (id, display_name, created_at) VALUES
-    ('lounge-a', 'A', now()), ('lounge-b', 'B', now()), ('lounge-c', 'C', now()), ('github.com/acme/app', 'acme/app', now())`);
+    ('lounge-a', 'A', now()), ('lounge-b', 'B', now()), ('lounge-c', 'C', now()), ('github.com/acme/app', 'acme/app', now()),
+    ('gitlab.com/group/sub/project', 'project', now()), ('bound-lounge', 'Bound', now())`);
   await insertFocusRoom('focus_43', 'lounge-a');
   await dbApi.assignProjectAdmin!('lounge-a', admin.id);
+  // A focus-room admin row alone is not proof: the first joiner of a focus room got one.
+  await dbApi.assignProjectAdmin!('focus_43', focusAdmin.id);
+  // A person removed from the room is never added back by a seed.
+  await insertMessage({ roomId: 'lounge-a', number: 10, accountId: removedPoster.id, at: '2026-08-01T00:05:00Z' });
+  await pool!.query(`INSERT INTO room_member_removals (room_id, account_id) VALUES ('lounge-a', $1)`, [removedPoster.id]);
+  // An agent given through an agent ask: its owner (the giver) is not a member.
+  const given = await agentSession('lounge-a', giver.id, 'givenagent');
+  await pool!.query(`INSERT INTO agent_asks (id, link_token_hash, room_id, asker_account_id, provider_id, model_label,
+      expires_at, room_agent_session_id) VALUES ('ask_seed', 'ask-hash', 'lounge-a', $1, 'claude', 'Claude', now() + interval '1 day', $2)`,
+  [asker.id, given.session_id]);
+  // Rooms whose GitHub role decides get no member rows.
+  await insertMessage({ roomId: 'gitlab.com/group/sub/project', number: 1, accountId: repoPoster.id, at: '2026-08-01T00:00:00Z' });
+  await insertMessage({ roomId: 'bound-lounge', number: 1, accountId: repoPoster.id, at: '2026-08-01T00:00:00Z' });
+  await pool!.query(`INSERT INTO room_git_bindings (room_id, provider, host, repository_full_name, repository_owner,
+      repository_name, ref_type, ref_name, source, created_at, updated_at)
+    VALUES ('bound-lounge', 'github', 'github.com', 'acme/app', 'acme', 'app', 'branch', 'main', 'manual', now(), now())`);
 
   // Room A: a signed-in poster, an anonymous poster, an agent owner, a lent agent whose
   // own messages carry the lender's account, and a poster in a focus room.
@@ -231,16 +252,16 @@ test('the seed adds people with proof, gives an adminless room an admin, and is 
   await insertMessage({ roomId: 'focus_43', number: 1, accountId: focusPoster.id, at: '2026-08-01T00:03:00Z' });
   // A repo room gets no member rows: the GitHub role decides there.
   await insertMessage({ roomId: 'github.com/acme/app', number: 1, accountId: repoPoster.id, at: '2026-08-01T00:00:00Z' });
-  // Room B has no admin: its earliest signed-in poster becomes one.
+  // Rooms B and C have no admin. The seed leaves them so; the release that
+  // turns the members-only rule on gives each one an admin.
   await insertMessage({ roomId: 'lounge-b', number: 1, accountId: late.id, at: '2026-08-02T00:00:00Z' });
   await insertMessage({ roomId: 'lounge-b', number: 2, accountId: early.id, at: '2026-08-01T00:00:00Z' });
-  // Room C has no admin and no signed-in poster: the owner of its earliest agent becomes one.
   await agentSession('lounge-c', onlyAgent.id, 'loneagent');
 
   await pool!.query('DELETE FROM room_members');
-  await pool!.query(`DELETE FROM project_admins WHERE project_id <> 'lounge-a'`);
+  await pool!.query(`DELETE FROM project_admins WHERE project_id NOT IN ('lounge-a', 'focus_43')`);
   const statements = await seedStatements();
-  assert.equal(statements.length, 3);
+  assert.equal(statements.length, 1);
   for (const statement of statements) await pool!.query(statement);
 
   const expectedMembers = [
@@ -253,10 +274,60 @@ test('the seed adds people with proof, gives an adminless room an admin, and is 
     'lounge-c:onlyagent:seed',
   ];
   assert.deepEqual(await members(), expectedMembers);
-  const expectedAdmins = ['lounge-a:admin', 'lounge-b:early', 'lounge-c:onlyagent'];
+  const expectedAdmins = ['focus_43:focusadmin', 'lounge-a:admin'];
   assert.deepEqual(await admins(), expectedAdmins);
 
   for (const statement of statements) await pool!.query(statement);
   assert.deepEqual(await members(), expectedMembers, 'a second run adds nothing');
   assert.deepEqual(await admins(), expectedAdmins);
+});
+
+test('a removed person is not added back by a later seed run; an approved request lets them in again', databaseTestOptions, async (t) => {
+  const owner = await person('owner');
+  const mallory = await person('mallory');
+  const { child, port } = await startApiServer();
+  t.after(async () => { await stopChildProcess(child); });
+  const call = client(port);
+
+  const roomId = (await call('POST', '/projects/room/watch-lounge', owner.token)).body.id as string;
+  // Before the rule is on, a signed-in post is proof for the seed.
+  assert.equal((await call('POST', `/rooms/${roomId}/messages`, mallory.token, { sender: 'mallory', text: 'hi' })).status, 201);
+  const [seed] = await seedStatements();
+  await pool!.query(seed!);
+  assert.equal((await call('GET', `/rooms/${roomId}/membership`, mallory.token)).body.member, true);
+
+  assert.equal((await call('DELETE', `/rooms/${roomId}/members/${mallory.id}`, owner.token)).status, 200);
+  assert.equal((await call('POST', `/rooms/${roomId}/messages`, mallory.token, { sender: 'mallory', text: 'back' })).status, 201);
+  await pool!.query(seed!);
+  assert.equal((await call('GET', `/rooms/${roomId}/membership`, mallory.token)).body.member, false, 'the removal stands');
+
+  const asked = await call('POST', `/rooms/${roomId}/join-requests`, mallory.token);
+  assert.equal((await call('POST', `/rooms/${roomId}/join-requests/${asked.body.join_request.id}/approve`, owner.token)).status, 200);
+  assert.equal((await call('GET', `/rooms/${roomId}/membership`, mallory.token)).body.member, true);
+  const removals = await pool!.query('SELECT 1 FROM room_member_removals WHERE room_id = $1 AND account_id = $2', [roomId, mallory.id]);
+  assert.equal(removals.rowCount, 0, 'the approval clears the removal record');
+});
+
+test('admin changes: demotion drops focus-room admin rows, and two admins cannot remove each other at once', databaseTestOptions, async (t) => {
+  const ada = await person('ada');
+  const ben = await person('ben');
+  const { child, port } = await startApiServer();
+  t.after(async () => { await stopChildProcess(child); });
+  const call = client(port);
+
+  const roomId = (await call('POST', '/projects/room/admin-lounge', ada.token)).body.id as string;
+  await pool!.query(`INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'seed')`, [roomId, ben.id]);
+  await insertFocusRoom('focus_44', roomId);
+  await dbApi.assignProjectAdmin!('focus_44', ben.id);
+  assert.equal((await call('PUT', `/rooms/${roomId}/members/${ben.id}/role`, ada.token, { role: 'admin' })).status, 200);
+  assert.equal((await call('PUT', `/rooms/${roomId}/members/${ben.id}/role`, ada.token, { role: 'member' })).status, 200);
+  assert.deepEqual(await admins(), [`${roomId}:ada`], 'the demoted admin keeps no admin row in the focus room');
+
+  assert.equal((await call('PUT', `/rooms/${roomId}/members/${ben.id}/role`, ada.token, { role: 'admin' })).status, 200);
+  const [first, second] = await Promise.all([
+    call('DELETE', `/rooms/${roomId}/members/${ben.id}`, ada.token),
+    call('DELETE', `/rooms/${roomId}/members/${ada.id}`, ben.token),
+  ]);
+  assert.deepEqual([first.status, second.status].sort(), [200, 403], 'the second removal sees that its caller is no longer an admin');
+  assert.equal((await admins()).length, 1, 'the room keeps one admin');
 });

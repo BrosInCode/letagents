@@ -165,42 +165,45 @@ export async function listMemberRooms(accountId: string): Promise<Array<{ id: st
   return result.rows;
 }
 
+interface StoredRoomMember {
+  account_id: string;
+  login: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  role: RoomMemberRole;
+  added_via: RoomMemberSource | null;
+  joined_at: Date;
+}
+
+/** Members of the room, admins first. `$2` limits it to one account when set. */
+const ROOM_MEMBER_SELECT = `SELECT account.id AS account_id, account.login, account.display_name, account.avatar_url,
+    CASE WHEN admin.account_id IS NOT NULL THEN 'admin' ELSE 'member' END AS role,
+    member.added_via,
+    COALESCE(member.created_at, admin.assigned_at) AS joined_at
+  FROM (
+    SELECT account_id FROM room_members WHERE room_id = $1
+    UNION
+    SELECT account_id FROM project_admins WHERE project_id = $1
+  ) AS ids
+  INNER JOIN accounts AS account ON account.id = ids.account_id
+  LEFT JOIN room_members AS member ON member.room_id = $1 AND member.account_id = account.id
+  LEFT JOIN project_admins AS admin ON admin.project_id = $1 AND admin.account_id = account.id
+  WHERE $2::text IS NULL OR account.id = $2
+  ORDER BY (admin.account_id IS NULL), joined_at, lower(account.login)`;
+
+function toRoomMember(row: StoredRoomMember): RoomMember {
+  return { ...row, joined_at: new Date(row.joined_at).toISOString() };
+}
+
+/** Every member; a room has far fewer than this bound, which only guards the response size. */
 export async function listRoomMembers(roomId: string): Promise<RoomMember[]> {
-  const result = await pool.query<{
-    account_id: string;
-    login: string;
-    display_name: string | null;
-    avatar_url: string | null;
-    role: RoomMemberRole;
-    added_via: RoomMemberSource | null;
-    joined_at: Date;
-  }>(`SELECT account.id AS account_id, account.login, account.display_name, account.avatar_url,
-      CASE WHEN admin.account_id IS NOT NULL THEN 'admin' ELSE 'member' END AS role,
-      member.added_via,
-      COALESCE(member.created_at, admin.assigned_at) AS joined_at
-    FROM (
-      SELECT account_id FROM room_members WHERE room_id = $1
-      UNION
-      SELECT account_id FROM project_admins WHERE project_id = $1
-    ) AS ids
-    INNER JOIN accounts AS account ON account.id = ids.account_id
-    LEFT JOIN room_members AS member ON member.room_id = $1 AND member.account_id = account.id
-    LEFT JOIN project_admins AS admin ON admin.project_id = $1 AND admin.account_id = account.id
-    ORDER BY (admin.account_id IS NULL), joined_at, lower(account.login)
-    LIMIT 2000`, [roomId]);
-  return result.rows.map((row) => ({
-    account_id: row.account_id,
-    login: row.login,
-    display_name: row.display_name,
-    avatar_url: row.avatar_url,
-    role: row.role,
-    added_via: row.added_via,
-    joined_at: new Date(row.joined_at).toISOString(),
-  }));
+  const result = await pool.query<StoredRoomMember>(`${ROOM_MEMBER_SELECT} LIMIT 5000`, [roomId, null]);
+  return result.rows.map(toRoomMember);
 }
 
 export async function getRoomMember(roomId: string, accountId: string): Promise<RoomMember | null> {
-  return (await listRoomMembers(roomId)).find((member) => member.account_id === accountId) ?? null;
+  const result = await pool.query<StoredRoomMember>(ROOM_MEMBER_SELECT, [roomId, accountId]);
+  return result.rows[0] ? toRoomMember(result.rows[0]) : null;
 }
 
 async function countRoomAdmins(client: Queryable, roomId: string): Promise<number> {
@@ -209,14 +212,26 @@ async function countRoomAdmins(client: Queryable, roomId: string): Promise<numbe
   return result.rows[0]?.count ?? 0;
 }
 
+// The focus rooms under a top-level room: their own admin rows go with the
+// parent's, so an admin who stepped down or left keeps no admin anywhere below.
+const FOCUS_ROOMS_OF = `SELECT id FROM rooms WHERE parent_room_id = $1 AND kind = 'focus'`;
+
 export type RoomMemberChange =
   | { kind: 'changed' }
+  | { kind: 'forbidden' }
   | { kind: 'not_member' }
   | { kind: 'last_admin' };
 
-export async function setRoomMemberRole(roomId: string, accountId: string, role: RoomMemberRole): Promise<RoomMemberChange> {
+/** `actorAccountId` must be an admin, checked again under the lock. */
+export async function setRoomMemberRole(
+  roomId: string,
+  accountId: string,
+  role: RoomMemberRole,
+  actorAccountId: string,
+): Promise<RoomMemberChange> {
   return inTransaction(async (client) => {
     await lockRoomAdmins(client, roomId);
+    if (await getRoomMemberRole(roomId, actorAccountId, client) !== 'admin') return { kind: 'forbidden' };
     const current = await getRoomMemberRole(roomId, accountId, client);
     if (!current) return { kind: 'not_member' };
     if (current === role) return { kind: 'changed' };
@@ -228,7 +243,8 @@ export async function setRoomMemberRole(roomId: string, accountId: string, role:
     if (await countRoomAdmins(client, roomId) <= 1) return { kind: 'last_admin' };
     // An admin from before members existed may have no member row yet.
     await addRoomMember({ roomId, accountId, addedVia: 'seed' }, client);
-    await client.query('DELETE FROM project_admins WHERE project_id = $1 AND account_id = $2', [roomId, accountId]);
+    await client.query(`DELETE FROM project_admins WHERE account_id = $2
+      AND (project_id = $1 OR project_id IN (${FOCUS_ROOMS_OF}))`, [roomId, accountId]);
     return { kind: 'changed' };
   });
 }
@@ -243,38 +259,55 @@ export interface RemovedMemberAgentSession {
 
 export type RoomMemberRemoval =
   | { kind: 'removed'; login: string | null; agent_sessions: RemovedMemberAgentSession[] }
+  | { kind: 'forbidden' }
   | { kind: 'not_member' }
   | { kind: 'last_admin' };
 
 /**
  * Removes the account from the room: its member row, its admin rows on the
- * room and on the focus rooms under it. Returns the account's live agent
- * sessions there, for the caller to end. An agent lent through a rental or an
- * agent ask is not the account's own agent in this room, so it is not listed.
+ * room and on the focus rooms under it, and its pending request. A removal
+ * record keeps every seed from adding the account back. `actorAccountId` is
+ * the account itself (it leaves) or an admin, checked again under the lock.
+ *
+ * Returns the live agent sessions that served the account there, for the
+ * caller to end: its own agents, and agents lent to it through an agent ask
+ * or a rental. An agent the account lent to someone else is that person's, so
+ * it is not listed.
  */
-export async function removeRoomMember(roomId: string, accountId: string): Promise<RoomMemberRemoval> {
+export async function removeRoomMember(roomId: string, accountId: string, actorAccountId: string): Promise<RoomMemberRemoval> {
   return inTransaction(async (client) => {
     await lockRoomAdmins(client, roomId);
+    if (actorAccountId !== accountId && await getRoomMemberRole(roomId, actorAccountId, client) !== 'admin') {
+      return { kind: 'forbidden' };
+    }
     const current = await getRoomMemberRole(roomId, accountId, client);
     if (!current) return { kind: 'not_member' };
     if (current === 'admin' && await countRoomAdmins(client, roomId) <= 1) return { kind: 'last_admin' };
     await client.query('DELETE FROM room_members WHERE room_id = $1 AND account_id = $2', [roomId, accountId]);
-    await client.query(`DELETE FROM project_admins WHERE account_id = $2 AND (project_id = $1
-      OR project_id IN (SELECT id FROM rooms WHERE parent_room_id = $1 AND kind = 'focus'))`, [roomId, accountId]);
+    await client.query(`DELETE FROM project_admins WHERE account_id = $2
+      AND (project_id = $1 OR project_id IN (${FOCUS_ROOMS_OF}))`, [roomId, accountId]);
+    await client.query(`INSERT INTO room_member_removals (room_id, account_id, removed_by) VALUES ($1, $2, $3)
+      ON CONFLICT (room_id, account_id) DO UPDATE SET removed_by = EXCLUDED.removed_by, removed_at = now()`,
+    [roomId, accountId, actorAccountId]);
     await client.query(`UPDATE room_join_requests SET state = 'cancelled', decided_at = now()
       WHERE room_id = $1 AND account_id = $2 AND state = 'pending'`, [roomId, accountId]);
     const sessions = await client.query<RemovedMemberAgentSession>(`SELECT session.session_id, session.room_id,
         session.agent_key, session.agent_instance_id
       FROM room_agent_sessions AS session
       LEFT JOIN supervisor_host_grants AS grant_row ON grant_row.grant_id = session.supervisor_grant_id
-      WHERE session.owner_account_id = $2
-        AND session.ended_at IS NULL
-        AND (session.room_id = $1
-          OR session.room_id IN (SELECT id FROM rooms WHERE parent_room_id = $1 AND kind = 'focus'))
-        AND grant_row.rental_session_id IS NULL
-        AND COALESCE(grant_row.scope_key, '') NOT LIKE 'ask:%'
-        AND NOT EXISTS (SELECT 1 FROM rental_sessions WHERE room_agent_session_id = session.session_id)
-        AND NOT EXISTS (SELECT 1 FROM agent_asks WHERE room_agent_session_id = session.session_id)
+      WHERE session.ended_at IS NULL
+        AND (session.room_id = $1 OR session.room_id IN (${FOCUS_ROOMS_OF}))
+        AND (
+          (session.owner_account_id = $2
+            AND grant_row.rental_session_id IS NULL
+            AND COALESCE(grant_row.scope_key, '') NOT LIKE 'ask:%'
+            AND NOT EXISTS (SELECT 1 FROM rental_sessions WHERE room_agent_session_id = session.session_id)
+            AND NOT EXISTS (SELECT 1 FROM agent_asks WHERE room_agent_session_id = session.session_id))
+          OR EXISTS (SELECT 1 FROM agent_asks
+            WHERE room_agent_session_id = session.session_id AND asker_account_id = $2)
+          OR EXISTS (SELECT 1 FROM rental_sessions
+            WHERE room_agent_session_id = session.session_id AND renter_account_id = $2)
+        )
       ORDER BY session.created_at`, [roomId, accountId]);
     const account = await client.query<{ login: string }>('SELECT login FROM accounts WHERE id = $1', [accountId]);
     return { kind: 'removed', login: account.rows[0]?.login ?? null, agent_sessions: sessions.rows };
@@ -361,12 +394,15 @@ export async function listPendingJoinRequestsForAdmin(accountId: string): Promis
 export type RoomJoinRequestDecision =
   | { kind: 'decided'; join_request: RoomJoinRequest }
   | { kind: 'not_pending'; join_request: RoomJoinRequest }
+  | { kind: 'forbidden' }
   | { kind: 'not_found' };
 
 /**
  * Approves or declines a pending request. The same decision again answers as
  * done; another decision on a decided request is refused. An approval adds
- * the person as a member in the same transaction.
+ * the person as a member in the same transaction and clears any removal
+ * record. The decider must be an admin, checked again under the admin lock,
+ * which also orders this change after any removal in the same room.
  */
 export async function decideRoomJoinRequest(input: {
   roomId: string;
@@ -375,6 +411,8 @@ export async function decideRoomJoinRequest(input: {
   deciderAccountId: string;
 }): Promise<RoomJoinRequestDecision> {
   const outcome = await inTransaction(async (client) => {
+    await lockRoomAdmins(client, input.roomId);
+    if (await getRoomMemberRole(input.roomId, input.deciderAccountId, client) !== 'admin') return 'forbidden' as const;
     const locked = await client.query<StoredJoinRequest>(`SELECT ${JOIN_REQUEST_COLUMNS}
       FROM room_join_requests WHERE room_id = $1 AND id = $2 FOR UPDATE`, [input.roomId, input.requestId]);
     const row = locked.rows[0];
@@ -389,10 +427,12 @@ export async function decideRoomJoinRequest(input: {
         addedVia: 'approved_request',
         addedBy: input.deciderAccountId,
       }, client);
+      await client.query('DELETE FROM room_member_removals WHERE room_id = $1 AND account_id = $2',
+        [input.roomId, row.account_id]);
     }
     return 'decided' as const;
   });
-  if (outcome === 'not_found') return { kind: 'not_found' };
+  if (outcome === 'not_found' || outcome === 'forbidden') return { kind: outcome };
   const joinRequest = await getRoomJoinRequest(input.roomId, input.requestId);
   if (!joinRequest) return { kind: 'not_found' };
   return { kind: outcome, join_request: joinRequest };
