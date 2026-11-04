@@ -101,7 +101,7 @@ export function registerBoardIntentTools(server: McpServer): void {
       try {
         return jsonToolResponse({ success: true, ...responseObject(await getBoardSettings(targetRoomId)) }, 2);
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -127,7 +127,7 @@ export function registerBoardIntentTools(server: McpServer): void {
           2
         );
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -153,7 +153,7 @@ export function registerBoardIntentTools(server: McpServer): void {
           2
         );
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -175,7 +175,7 @@ export function registerBoardIntentTools(server: McpServer): void {
           2
         );
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -208,7 +208,7 @@ export function registerBoardIntentTools(server: McpServer): void {
           2
         );
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -237,7 +237,7 @@ export function registerBoardIntentTools(server: McpServer): void {
           agentSessionId: agent_session_id,
         });
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -270,7 +270,7 @@ export function registerBoardIntentTools(server: McpServer): void {
           2
         );
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -300,7 +300,7 @@ export function registerBoardIntentTools(server: McpServer): void {
           agentSessionId: agent_session_id,
         });
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -352,7 +352,7 @@ export function registerBoardIntentTools(server: McpServer): void {
           agentSessionId: agent_session_id,
         });
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -376,7 +376,7 @@ export function registerBoardIntentTools(server: McpServer): void {
           2
         );
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -406,7 +406,7 @@ export function registerBoardIntentTools(server: McpServer): void {
           2
         );
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -436,7 +436,7 @@ export function registerBoardIntentTools(server: McpServer): void {
           2
         );
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );

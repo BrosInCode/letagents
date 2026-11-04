@@ -22,6 +22,8 @@ import {
   type StoredAccount,
 } from "../../runtime.js";
 import { jsonTextResponse } from "./responses.js";
+import { RoomAccessRefusedError } from "../../runtime/api.js";
+import { toRoomAccessRefusalResult } from "../../runtime/room-access.js";
 import { workerModeDisabledToolResult } from "../../runtime/worker-bearer.js";
 
 export function registerDeviceAuthTools(server: McpServer): void {
@@ -172,6 +174,7 @@ function registerPollDeviceAuthTool(server: McpServer): void {
       setAuthenticatedAccountCache(storedAuth.account ?? undefined, storedAuth.account ? "stored" : null, null);
 
       let joinedRoom: RoomState | null = null;
+      let autoJoinRefusal: Record<string, unknown> | null = null;
       const roomToJoin =
         room_id ||
         pendingAuth?.suggested_room_id ||
@@ -181,12 +184,18 @@ function registerPollDeviceAuthTool(server: McpServer): void {
 
       if (auto_join && roomToJoin) {
         const joinedVia: JoinedVia = looksLikeInviteCode(roomToJoin) ? "join_code" : "join_room";
-        const joined = await joinRoomIdentifierWithoutImplicitGitRefCreate(
-          roomToJoin,
-          joinedVia,
-          { fallbackToRepo: true }
-        );
-        joinedRoom = joined.room;
+        try {
+          const joined = await joinRoomIdentifierWithoutImplicitGitRefCreate(
+            roomToJoin,
+            joinedVia,
+            { fallbackToRepo: true }
+          );
+          joinedRoom = joined.room;
+        } catch (error) {
+          // The sign-in is saved either way; say so, and what the room needs.
+          if (!(error instanceof RoomAccessRefusedError)) throw error;
+          autoJoinRefusal = toRoomAccessRefusalResult(error);
+        }
       }
 
       const agentIdentity = await ensureAgentIdentity();
@@ -197,6 +206,7 @@ function registerPollDeviceAuthTool(server: McpServer): void {
         account: storedAuth.account ?? null,
         expires_at: storedAuth.expires_at ?? null,
         auto_joined_room: joinedRoom,
+        ...(autoJoinRefusal ? { auto_join_refused: autoJoinRefusal } : {}),
         ...(joinedRoom?.room_id
           ? withCanonicalRoomLink(joinedRoom.room_id, {})
           : {}),

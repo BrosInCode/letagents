@@ -10,6 +10,7 @@ import {
 } from "../../../../../shared/room-history-summary.mjs";
 import { encodeRoomIdPath } from "../../../room-id.js";
 import { getTargetRoomId, isLocalRoomStorageEnabled, roomScopedApiCall } from "../../runtime.js";
+import { roomAccessToolResponse } from "../../runtime/room-access.js";
 import { jsonToolResponse } from "./response.js";
 
 const roomField = { room_id: z.string().optional().describe("Room ID; defaults to the current room.") };
@@ -45,7 +46,8 @@ export function registerHistorySummaryTools(server: McpServer): void {
         if (view.state === "unavailable") return unavailable("This LetAgents server writes no history summaries.");
         return jsonToolResponse(view);
       } catch (error) {
-        return unavailable(`The history summary could not be read (${error instanceof Error ? error.message : "unknown error"}).`);
+        return roomAccessToolResponse(error)
+          ?? unavailable(`The history summary could not be read (${error instanceof Error ? error.message : "unknown error"}).`);
       }
     });
 
@@ -65,7 +67,8 @@ export function registerHistorySummaryTools(server: McpServer): void {
           room_path: (id) => `/rooms/${encodeRoomIdPath(id)}/history-summary/nodes/${parsed.level}:${parsed.index}`,
           options: { signal: AbortSignal.timeout(15_000) } }));
       } catch (error) {
-        return jsonToolResponse({ ok: false, error: `The line could not be expanded (${error instanceof Error ? error.message : "unknown error"}).` });
+        return roomAccessToolResponse(error)
+          ?? jsonToolResponse({ ok: false, error: `The line could not be expanded (${error instanceof Error ? error.message : "unknown error"}).` });
       }
     });
 }

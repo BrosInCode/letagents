@@ -1,3 +1,5 @@
+import { roomAccessToolResponse } from "../../runtime/room-access.js";
+
 export function jsonToolResponse(value: unknown, space?: number) {
   return {
     content: [
@@ -9,6 +11,8 @@ export function jsonToolResponse(value: unknown, space?: number) {
   };
 }
 
-export function taskToolError(error: string) {
-  return jsonToolResponse({ success: false, error });
+/** A failed tool call. Sign-in and members-only refusals keep their own result. */
+export function taskToolError(error: unknown) {
+  return roomAccessToolResponse(error)
+    ?? jsonToolResponse({ success: false, error: typeof error === "string" ? error : String(error) });
 }

@@ -10,6 +10,7 @@ import {
 import { isLocalRoomStorageEnabled, roomScopedApiCall } from "../runtime.js";
 import { resolveTaskToolIdentity, resolveTaskToolTarget, taskActorPayload } from "./tasks/context.js";
 import { jsonToolResponse, taskToolError } from "./tasks/response.js";
+import { roomAccessToolResponse } from "../runtime/room-access.js";
 
 const scope = {
   room_id: z.string().optional().describe("Exact room ID. Defaults to this worker’s room."),
@@ -30,7 +31,7 @@ function roomPath(suffix: string) {
 }
 
 function toolError(error: unknown) {
-  return taskToolError(error instanceof Error ? error.message : String(error));
+  return roomAccessToolResponse(error) ?? taskToolError(error instanceof Error ? error.message : String(error));
 }
 
 export function registerWakeRuleTools(server: McpServer): void {

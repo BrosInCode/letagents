@@ -622,6 +622,22 @@ test("auto-join from a git remote that uses an SSH config alias reports the unsu
   assert.doesNotMatch(logged[0], /API error 403/);
 });
 
+test("auto-join that a members-only room refuses says what to do, not the raw 403", async () => {
+  const { logged } = await autoJoinWithRemote(
+    "git@github.com:acme/app.git",
+    () => new Response(JSON.stringify({
+      error: "repo_collaborator_required",
+      code: "REPO_COLLABORATOR_REQUIRED",
+      message: "Only people with a role on this GitHub repository can open its room.",
+      room_id: "github.com/acme/app",
+    }), { status: 403, headers: { "Content-Type": "application/json" } })
+  );
+
+  assert.equal(logged.length, 1, logged.join("\n"));
+  assert.match(logged[0], /Room 'github\.com\/acme\/app' is only for people with a role on its GitHub repository/);
+  assert.doesNotMatch(logged[0], /API error 403/);
+});
+
 test("auto-join through ssh.github.com:443 asks for the real github.com room", async () => {
   const { requestedUrls } = await autoJoinWithRemote(
     "ssh://git@ssh.github.com:443/BrosInCode/LetAgents.git",

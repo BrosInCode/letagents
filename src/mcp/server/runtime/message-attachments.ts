@@ -21,7 +21,8 @@ import {
   type WorkspaceAttachmentRoots,
 } from "../../../../shared/workspace-attachment-files.mjs";
 import { encodeRoomIdPath } from "../../room-id.js";
-import { ApiError, getApiUrl, parseApiErrorPayload } from "./api.js";
+import { ApiError, RoomAccessRefusedError, getApiUrl, parseApiErrorPayload } from "./api.js";
+import { RepoRoomAuthRequiredError } from "./device-auth.js";
 import { getDaemonToolExecutionContext } from "./daemon-tool-context.js";
 import { roomScopedApiCall } from "./room-api.js";
 import { currentSessionScope } from "./session-scope.js";
@@ -236,6 +237,8 @@ export async function stageMessageAttachments(
       }));
     } catch (error) {
       await discardMessageAttachments(roomId, staged);
+      // Sign in first, or ask to join: the tool answers these with their next step.
+      if (error instanceof RoomAccessRefusedError || error instanceof RepoRoomAuthRequiredError) throw error;
       throw new Error(stagingErrorText(file.name, error));
     }
   }
