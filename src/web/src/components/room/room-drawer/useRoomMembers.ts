@@ -69,10 +69,11 @@ export function useRoomMembers(room: Readonly<Ref<RoomInfo | null>>, viewerAccou
         }
       }
       // A focus room's members are its parent's; name the parent, once, for the Leave and Remove text.
-      if (members.access_room_id !== members.room_id && !accessRoomName.value) {
-        accessRoomName.value = await fetchRoomMembership(id).then(state => state.display_name, () => '')
-      }
+      const parentName = members.access_room_id !== members.room_id && !accessRoomName.value
+        ? await fetchRoomMembership(id).then(state => state.display_name, () => '')
+        : ''
       if (version !== loadVersion) return
+      if (parentName) accessRoomName.value = parentName
       list.value = members
       requests.value = pending
       requestsError.value = pendingError

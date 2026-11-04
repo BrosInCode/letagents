@@ -147,6 +147,8 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       connectionState.value = 'live'
       return true
     } catch (err) {
+      // A newer join or a refusal owns the room state now; this failure is old news.
+      if (roomSessionVersion !== sessionVersion) return false
       if (bootstrapStreamStarted) {
         deps.finishStreamingBootstrap(streamingRoomIdentifier, false)
       }

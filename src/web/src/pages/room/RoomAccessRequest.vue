@@ -10,13 +10,13 @@
     </div>
     <p v-if="errorText" class="room-access-error" role="alert">{{ errorText }}</p>
     <div ref="actionsElement" class="room-access-actions">
-      <button v-if="state === 'ask'" class="room-access-btn primary" type="button" :disabled="busy" @click="joinRequest.ask">
+      <button v-if="state === 'ask'" class="room-access-btn primary" type="button" :disabled="busy" @click="pressed(joinRequest.ask)">
         {{ joinRequest.busyAction.value === 'ask' ? 'Sending…' : 'Ask to join' }}
       </button>
-      <button v-if="state !== 'ask'" class="room-access-btn" type="button" :disabled="busy" @click="checkAgain">
+      <button v-if="state !== 'ask'" class="room-access-btn" type="button" :disabled="busy" @click="pressed(checkAgain)">
         {{ checking ? 'Checking…' : 'Check again' }}
       </button>
-      <button v-if="state === 'pending'" class="room-access-btn secondary" type="button" :disabled="busy" @click="joinRequest.cancel">
+      <button v-if="state === 'pending'" class="room-access-btn secondary" type="button" :disabled="busy" @click="pressed(joinRequest.cancel)">
         {{ joinRequest.busyAction.value === 'cancel' ? 'Cancelling…' : 'Cancel request' }}
       </button>
     </div>
@@ -126,6 +126,12 @@ const actionsElement = ref<HTMLElement | null>(null)
 // wait for that before choosing where focus goes.
 let restoreFocus = false
 watch(state, () => { restoreFocus = true })
+// A pressed button is disabled while its action runs, and the browser may move
+// focus off it even when the state stays the same.
+function pressed(action: () => Promise<unknown>) {
+  restoreFocus = true
+  return action()
+}
 watch([state, busy], async () => {
   if (!restoreFocus || busy.value) return
   restoreFocus = false

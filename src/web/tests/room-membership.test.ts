@@ -479,6 +479,72 @@ test('after Ask to join, focus moves to the new first button once the request en
   }
 })
 
+test('Check again with no change of state gives focus back when it fell to the page', async (t) => {
+  mockApi(t, {
+    'GET /rooms/ROOM-1234/membership': {
+      room_id: 'ROOM-1234', access_room_id: 'ROOM-1234', display_name: 'Planning', managed_by: 'letagents', member: false, role: null, join_request: request('pending'),
+    },
+  })
+  const body = {}
+  const doc = { body, activeElement: body as unknown }
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: doc })
+  const focused: string[] = []
+  const screen = mountAccess({ refusal: 'membership_required', initialRequest: request('pending') })
+  screen.bindings.actionsElement.value = {
+    querySelector: () => screen.bindings.busy.value ? null : { focus: () => { focused.push('first button'); doc.activeElement = {} } },
+  }
+  try {
+    await screen.bindings.pressed(screen.bindings.checkAgain)
+    for (let index = 0; index < 3; index += 1) await tick()
+    assert.equal(screen.bindings.state.value, 'pending')
+    assert.deepEqual(focused, ['first button'])
+    focused.length = 0
+    screen.focus()
+    for (let index = 0; index < 3; index += 1) await tick()
+    assert.deepEqual(focused, [], 'a check on window focus never moves focus')
+  } finally {
+    screen.unmount()
+    Reflect.deleteProperty(globalThis, 'document')
+  }
+})
+
+test('a join that fails after a newer join started leaves the newer room alone', async (t) => {
+  let failOld!: () => void
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const key = `${init?.method ?? 'GET'} ${String(input)}`
+    if (key === 'POST /rooms/OLD-0001/join') {
+      await new Promise<void>(resolve => { failOld = resolve })
+      return json({ error: 'Room not found' }, 404)
+    }
+    if (key === 'POST /rooms/ROOM-1234/join') return json({ room_id: 'ROOM-1234', display_name: 'Planning', kind: 'main' })
+    return json({})
+  })
+  t.mock.method(console, 'error', () => undefined)
+  let stops = 0
+  const lifecycle = createRoomLifecycle({
+    startParticipantRefreshLoop() {},
+    startPresenceRefreshLoop() {},
+    async startStreaming() {},
+    finishStreamingBootstrap() {},
+    stopStreaming() { stops += 1 },
+  })
+  try {
+    const old = lifecycle.joinRoom('OLD-0001')
+    await tick()
+    assert.equal(await lifecycle.joinRoom('ROOM-1234'), true)
+    const stopsAfterNewJoin = stops
+    failOld()
+    assert.equal(await old, false)
+    assert.equal(connectionState.value, 'live')
+    assert.equal(isConnected.value, true)
+    assert.equal(joinError.value, null)
+    assert.equal(stops, stopsAfterNewJoin, 'the old failure does not stop the new stream')
+  } finally {
+    lifecycle.leaveRoom()
+    lifecycle.dispose()
+  }
+})
+
 test('a refusal while the room loads leaves the access screen, not a half-open room', async (t) => {
   const refusal = roomMembershipRequiredBody({ room_id: 'ROOM-1234', display_name: 'Planning', join_request: null })
   t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
