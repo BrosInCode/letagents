@@ -10,7 +10,7 @@ import { encodeRoomIdPath } from "../../../room-id.js";
 import {
   ApiError,
   RoomAccessRefusedError,
-  apiCall,
+  apiCallWhenFree,
   getLastRefusedRoomId,
   isMissingRouteError,
   parseApiErrorPayload,
@@ -56,10 +56,22 @@ function githubRolesResult(room: RoomFacts) {
   };
 }
 
-function requestResult(room: RoomFacts, joinRequest: RoomJoinRequestSummary, requestedNow: boolean) {
+function privateRepoResult(roomId: string) {
+  return {
+    success: false,
+    state: "github_roles",
+    room_id: roomId,
+    next_step: "ask_repo_admin",
+    message: "This room belongs to a private GitHub repository. Only people with access to the repository can open it; "
+      + "ask a repository admin to give you access on GitHub.",
+  };
+}
+
+function requestResult(room: RoomFacts, joinRequest: RoomJoinRequestSummary, requestedNow: boolean, serverSaysWait = false) {
   if (joinRequest.state === "approved") return memberResult(room, null);
   if (joinRequest.state === "declined") {
-    const waiting = isFuture(joinRequest.retry_after);
+    // The server's cooldown answer wins over this computer's clock.
+    const waiting = serverSaysWait || isFuture(joinRequest.retry_after);
     return {
       success: false,
       state: "declined",
@@ -90,7 +102,8 @@ function requestResult(room: RoomFacts, joinRequest: RoomJoinRequestSummary, req
 
 async function askToJoin(path: string, room: RoomFacts) {
   try {
-    const created = await apiCall<{ join_request: RoomJoinRequestSummary }>(`${path}/join-requests`, { method: "POST" });
+    // Asking again while a request is pending returns that request, so a retry is safe.
+    const created = await apiCallWhenFree<{ join_request: RoomJoinRequestSummary }>(`${path}/join-requests`, { method: "POST" });
     return requestResult(room, created.join_request, true);
   } catch (error) {
     if (!(error instanceof ApiError)) throw error;
@@ -104,7 +117,7 @@ async function askToJoin(path: string, room: RoomFacts) {
         ...joinRequest,
         state: "declined",
         retry_after: typeof payload.retry_after === "string" ? payload.retry_after : joinRequest.retry_after,
-      }, false);
+      }, false, true);
     }
     if (error.status === 429) {
       return {
@@ -136,7 +149,7 @@ export async function requestRoomAccess(roomId: string) {
   const path = `/rooms/${encodeRoomIdPath(roomId)}`;
   let state: RoomMembershipState;
   try {
-    state = await apiCall<RoomMembershipState>(`${path}/membership`);
+    state = await apiCallWhenFree<RoomMembershipState>(`${path}/membership`);
   } catch (error) {
     // A server that gates this route as well still says where the request stands.
     if (error instanceof RoomAccessRefusedError) {
@@ -149,6 +162,18 @@ export async function requestRoomAccess(roomId: string) {
       return askToJoin(path, room);
     }
     await maybeHandleRepoRoomAuthRequired(error, roomId);
+    if (error instanceof ApiError && error.status === 403 && parseApiErrorPayload(error)?.code === "PRIVATE_REPO_NO_ACCESS") {
+      return privateRepoResult(roomId);
+    }
+    // Checked first: the old-server test below also matches "Room not found".
+    if (error instanceof ApiError && error.status === 404 && parseApiErrorPayload(error)?.code === "ROOM_NOT_FOUND") {
+      return {
+        success: false,
+        error: "room_not_found",
+        room_id: roomId,
+        message: "There is no room with this ID. Check the room_id.",
+      };
+    }
     if (isMissingRouteError(error)) {
       return {
         success: false,
@@ -191,7 +216,7 @@ export function registerRoomAccessTool(server: McpServer): void {
       if (!roomId) {
         return jsonToolResponse({
           success: false,
-          error: "No room_id provided, and no room has refused you yet.",
+          error: "No room_id provided, and this session has no room to ask for.",
           hint: "Pass the room_id of the room you want to join.",
         });
       }

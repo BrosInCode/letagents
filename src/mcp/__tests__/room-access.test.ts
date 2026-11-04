@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -24,6 +24,7 @@ const { registerTools } = await import("../server/register-tools.js");
 const { rememberRoom, shutdownRuntime, toRoomState } = await import("../server/runtime/room-state.js");
 const { SseClient, SseRoomAccessRefusedError } = await import("../sse-client.js");
 const { holdProcessConnection, releaseProcessConnection } = await import("../server/runtime/process-connection.js");
+const { pinAttachmentWorkingFolder } = await import("../server/runtime/message-attachments.js");
 
 const originalFetch = globalThis.fetch;
 
@@ -107,7 +108,7 @@ function withEnv<T>(values: Record<string, string | undefined>, callback: () => 
   });
 }
 
-function assertMembershipResult(result: Record<string, any>, name: string) {
+function assertMembershipResult(result: Record<string, any>, name: string, nextStep = "request_room_access") {
   assert.deepEqual({
     success: result.success,
     error: result.error,
@@ -118,13 +119,13 @@ function assertMembershipResult(result: Record<string, any>, name: string) {
   }, {
     success: false,
     error: "membership_required",
-    next_step: "request_room_access",
+    next_step: nextStep,
     room_id: "room_secret",
     display_name: "Secret Room",
     join_request: pendingRequest,
   }, `${name}: ${JSON.stringify(result)}`);
   assert.match(result.message, /Only members can open this room/, name);
-  assert.match(result.message, /waiting for a room admin/, name);
+  assert.match(result.message, nextStep === "request_room_access" ? /waiting for a room admin/ : /Tell your user/, name);
   assert.match(result.message, /Do not retry this room/, name);
 }
 
@@ -176,6 +177,11 @@ test("a 403 never clears the saved sign-in; only a 401 for the saved token does"
 });
 
 test("every room tool answers a members-only refusal with the same result", async () => {
+  const project = join(tempDir, "project");
+  mkdirSync(join(project, ".git"), { recursive: true });
+  writeFileSync(join(project, "note.txt"), "hello");
+  pinAttachmentWorkingFolder(project, project);
+  // A worker credential acts for an agent, which cannot ask to join itself.
   await withEnv({ LETAGENTS_AGENT_SESSION_BEARER: "worker-secret" }, async () => {
     rememberRoom(toRoomState({ room_id: "room_secret", display_name: "Secret Room", joined_via: "join_room" }));
     const cases: Array<[string, Record<string, unknown>, RegExp]> = [
@@ -183,6 +189,8 @@ test("every room tool answers a members-only refusal with the same result", asyn
       ["wait_for_messages", { after_message_id: "msg_1", timeout: 1000 }, /^\/rooms\/room_secret\/messages\/poll$/],
       ["send_message", { text: "hello" }, /^\/rooms\/room_secret\/messages$/],
       ["send_thread_message", { thread_parent_id: "msg_1", text: "hello" }, /^\/rooms\/room_secret\/messages\/msg_1/],
+      ["send_message", { text: "with a file", attachments: ["note.txt"] }, /^\/rooms\/room_secret\/attachments/],
+      ["react_to_message", { message_id: "msg_1", emoji: "👍" }, /^\/rooms\/room_secret\/messages\/msg_1\/reactions/],
       ["get_board", {}, /^\/rooms\/room_secret\/tasks/],
       ["claim_task", { task_id: "task_1" }, /^\/rooms\/room_secret\/tasks\/task_1/],
       ["list_wake_rules", {}, /^\/rooms\/room_secret\/wake-rules/],
@@ -191,10 +199,17 @@ test("every room tool answers a members-only refusal with the same result", asyn
     ];
     for (const [name, input, route] of cases) {
       const requests = refusingServer(membershipRefusal);
-      assertMembershipResult(await call(name, input), name);
+      assertMembershipResult(await call(name, input), name, "ask_your_user");
       assert.ok(requests.some((request) => route.test(request.path)), `${name} asked ${route}: ${JSON.stringify(requests)}`);
     }
   });
+
+  // The account's own client can ask.
+  rememberRoom(toRoomState({ room_id: "room_secret", display_name: "Secret Room", joined_via: "join_room" }));
+  for (const name of ["read_messages", "get_board"]) {
+    refusingServer(membershipRefusal);
+    assertMembershipResult(await call(name), name);
+  }
 });
 
 test("the join tools answer both refusals with a next step", async () => {
@@ -228,7 +243,7 @@ test("wait_for_messages asks once and returns on a refusal instead of polling ag
   await withEnv({ LETAGENTS_AGENT_SESSION_BEARER: "worker-secret" }, async () => {
     rememberRoom(toRoomState({ room_id: "room_secret", display_name: "Secret Room", joined_via: "join_room" }));
     const requests = refusingServer(membershipRefusal);
-    assertMembershipResult(await call("wait_for_messages", { after_message_id: "msg_1", timeout: 1000 }), "wait_for_messages");
+    assertMembershipResult(await call("wait_for_messages", { after_message_id: "msg_1", timeout: 1000 }), "wait_for_messages", "ask_your_user");
     assert.equal(requests.filter((request) => request.path.endsWith("/messages/poll")).length, 1);
   });
 });
@@ -248,6 +263,7 @@ test("a room without a repository that needs sign-in starts the device flow like
     assert.equal(result.error, "auth_required", name);
     assert.equal(result.next_step, "poll_device_auth", name);
     assert.equal(result.pending_device_auth.user_code, "ABCD-EFGH", name);
+    assert.equal("request_id" in result.pending_device_auth, false, `${name}: whoever polls the request id receives the token`);
     assert.match(result.message, /requires sign-in\. Device flow started/, name);
     assert.ok(requests.some((request) => request.path === "/auth/device/start"), name);
   }
@@ -258,6 +274,20 @@ test("a room without a repository that needs sign-in starts the device flow like
   const read = await call("read_messages", {});
   assert.equal(read.error, "auth_required");
   assert.equal(read.room_id, "room_adhoc");
+});
+
+test("a saved sign-in the room rejects starts the device flow in the same call", async () => {
+  setStoredAuth({ token: "revoked-token", stored_at: new Date().toISOString(), source: "device_flow" });
+  rememberRoom(toRoomState({ room_id: "room_adhoc", display_name: "Ad hoc", joined_via: "join_code" }));
+  clearPendingDeviceAuth();
+  const requests = refusingServer({ error: "The bearer credential is invalid or expired. Reconnect with a current credential." }, 401);
+  const read = await call("read_messages", {});
+  assert.equal(read.error, "auth_required", JSON.stringify(read));
+  assert.equal(read.next_step, "poll_device_auth");
+  assert.equal(getStoredAuth(), null);
+  const start = requests.find((request) => request.path === "/auth/device/start");
+  assert.ok(start, "the device flow started");
+  assert.equal(start.authorization, null, "without the rejected token");
 });
 
 test("the room stream stops on a refusal instead of reconnecting", async () => {
@@ -408,6 +438,15 @@ test("request_room_access reports member, declined, cooldown, GitHub roles and o
   const cooldown = await call("request_room_access", { room_id: "room_secret" });
   assert.deepEqual([cooldown.state, cooldown.retry_after], ["declined", retryAfter]);
 
+  // This computer's clock runs ahead of the server's: the server's answer wins.
+  const pastHere = new Date(Date.now() - 60_000).toISOString();
+  membershipServer({
+    membership: () => json(state()),
+    joinRequest: () => json({ error: "room_join_request_cooldown", code: "ROOM_JOIN_REQUEST_COOLDOWN",
+      join_request: { ...declined, retry_after: pastHere }, retry_after: pastHere }, 429),
+  });
+  assert.equal((await call("request_room_access", { room_id: "room_secret" })).next_step, "wait_until_retry_after");
+
   membershipServer({
     membership: () => json(state()),
     joinRequest: () => json({ error: "room_already_member", code: "ROOM_ALREADY_MEMBER" }, 409),
@@ -428,6 +467,14 @@ test("request_room_access reports member, declined, cooldown, GitHub roles and o
 
   membershipServer({ membership: () => new Response("Cannot GET /rooms/room_secret/membership", { status: 404 }) });
   assert.equal((await call("request_room_access", { room_id: "room_secret" })).error, "room_access_requests_unsupported");
+
+  membershipServer({ membership: () => json({ error: "Private repo access required", code: "PRIVATE_REPO_NO_ACCESS" }, 403) });
+  const privateRepo = await call("request_room_access", { room_id: "github.com/acme/secret" });
+  assert.deepEqual([privateRepo.state, privateRepo.next_step], ["github_roles", "ask_repo_admin"]);
+
+  membershipServer({ membership: () => json({ error: "Room not found", code: "ROOM_NOT_FOUND" }, 404) });
+  assert.equal((await call("request_room_access", { room_id: "room_missing" })).error, "room_not_found",
+    "a missing room is not an old server");
 
   membershipServer({
     membership: () => json(state()),

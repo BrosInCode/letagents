@@ -61,25 +61,32 @@ export async function startPendingDeviceAuth(
 
 export async function maybeHandleRepoRoomAuthRequired(error: unknown, roomId: string): Promise<void> {
   const payload = parseApiErrorPayload(error);
-  if (!(error instanceof ApiError) || error.status !== 401 || payload?.error !== "auth_required") {
+  // A saved sign-in the room just rejected (expired, revoked) is gone now, so
+  // the same call starts the device flow instead of answering raw 401 text.
+  if (!(error instanceof ApiError) || error.status !== 401
+    || (payload?.error !== "auth_required" && !error.savedSignInRejected)) {
     return;
   }
 
   const pendingAuth = await startPendingDeviceAuth(
     roomId,
-    typeof payload.device_flow_url === "string" ? payload.device_flow_url : undefined
+    typeof payload?.device_flow_url === "string" ? payload.device_flow_url : undefined
   );
 
   throw new RepoRoomAuthRequiredError(roomId, pendingAuth);
 }
 
 export function toRepoRoomAuthRequiredResult(error: RepoRoomAuthRequiredError): Record<string, unknown> {
+  // The request id is left out: whoever polls with it after the person
+  // approves receives the token, and any room tool may now return this result.
+  // poll_device_auth reads it from local state.
+  const { request_id: _requestId, ...pendingAuth } = error.pendingAuth;
   return {
     success: false,
     error: "auth_required",
     room_id: error.roomId,
     next_step: "poll_device_auth",
-    pending_device_auth: error.pendingAuth,
+    pending_device_auth: pendingAuth,
     message: error.message,
   };
 }

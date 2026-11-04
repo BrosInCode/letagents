@@ -5,6 +5,7 @@ import {
 } from "../../../../shared/room-membership.mjs";
 import { RoomAccessRefusedError } from "./api.js";
 import { RepoRoomAuthRequiredError, toRepoRoomAuthRequiredResult } from "./device-auth.js";
+import { getWorkerBearerRuntime } from "./worker-bearer.js";
 
 function isFuture(iso: string | null | undefined): boolean {
   if (!iso) return false;
@@ -38,15 +39,21 @@ export function toRoomAccessRefusalResult(error: RoomAccessRefusedError): Record
         + "Do not retry this room until you have a role on the repository.",
     };
   }
+  // A worker credential acts for an agent, and only a person's account may
+  // ask to join, so such an agent hands the step to its user.
+  const canAsk = getWorkerBearerRuntime().mode === "owner";
   return {
     success: false,
     error: "membership_required",
-    next_step: "request_room_access",
+    next_step: canAsk ? "request_room_access" : "ask_your_user",
     room_id: error.roomId,
     display_name: error.displayName,
     join_request: error.joinRequest,
-    message: `${error.serverMessage ?? ROOM_MEMBERSHIP_REQUIRED_MESSAGE} ${joinRequestInstruction(error.joinRequest)} `
-      + "Do not retry this room until an admin lets you in.",
+    message: `${error.serverMessage ?? ROOM_MEMBERSHIP_REQUIRED_MESSAGE} `
+      + (canAsk
+        ? joinRequestInstruction(error.joinRequest)
+        : "This agent cannot ask to join. Tell your user: they ask in the LetAgents app, and a room admin approves.")
+      + " Do not retry this room until an admin lets you in.",
   };
 }
 

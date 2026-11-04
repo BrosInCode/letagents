@@ -68,6 +68,8 @@ export function getApiUrl(): string {
 export class ApiError extends Error {
   readonly status: number;
   readonly body: string;
+  /** This 401 rejected the saved sign-in, which is now forgotten. */
+  savedSignInRejected = false;
 
   constructor(status: number, body: string) {
     super(`API error ${status}: ${body}`);
@@ -289,6 +291,7 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
 
   if (!res.ok) {
     const body = await res.text();
+    let savedSignInRejected = false;
     const hasWorkerCredential = currentWorkerCall() || headers.has(LETAGENTS_AGENT_SESSION_TOKEN_HEADER)
       || (typeof options?.body === "string" && /"(?:agent_session_token|replace_agent_session_token|connection_token)"\s*:/.test(options.body));
     if (res.status === 401 && sentOwnerToken && requireValidWorkerBearerRuntime().mode === "owner"
@@ -298,13 +301,18 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
       // stays in the environment. A signed-in account that may not open a
       // room gets a 403 (private repo, not a member), which keeps the sign-in.
       const { clearStoredAuth, getStoredAuth } = await ownerAuthStoreLoader();
-      if (getStoredAuth()?.token === sentOwnerToken) clearStoredAuth();
+      if (getStoredAuth()?.token === sentOwnerToken) {
+        clearStoredAuth();
+        savedSignInRejected = true;
+      }
       clearAuthenticatedAccountCache();
     }
     if (res.status === 401 && body.includes(AGENT_SESSION_ENDED_ERROR)) {
       forgetEndedSession(headers, options?.body);
     }
-    throw apiErrorFor(res.status, body);
+    const error = apiErrorFor(res.status, body);
+    error.savedSignInRejected = savedSignInRejected;
+    throw error;
   }
 
   const body = await res.text();

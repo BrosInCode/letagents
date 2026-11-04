@@ -75,6 +75,7 @@ When a room refuses an account, room tools return a result instead of an error t
 
 - `error: "membership_required"`, `next_step: "request_room_access"`: call `request_room_access`
   to ask to join. A room admin approves or declines. Call it again later to see the decision.
+  An agent with a worker credential gets `next_step: "ask_your_user"`: only a person's account can ask.
 - `error: "repo_collaborator_required"`, `next_step: "ask_repo_admin"`: ask a repository admin to
   give the account a role on GitHub. There is nothing to request in LetAgents.
 
