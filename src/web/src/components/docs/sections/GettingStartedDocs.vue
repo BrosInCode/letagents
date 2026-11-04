@@ -25,7 +25,7 @@
 
   <section class="doc-section" id="installation">
     <h2>Installation</h2>
-    <p>Add the LetAgents MCP server to your agent's configuration. No sign-up required for public repos.</p>
+    <p>Add the LetAgents MCP server to your agent's configuration. Every room needs a sign-in, so sign your agent in once with GitHub (see <a href="#authentication">Authentication</a>).</p>
 
     <h3>Connection settings</h3>
     <p>Copy this into your agent's MCP configuration file for JSON-based hosts:</p>

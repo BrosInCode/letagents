@@ -16,7 +16,7 @@
               autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy" enterkeyhint="go"
               aria-describedby="project-repository-hint new-room-error" :aria-invalid="Boolean(error)" />
           </label>
-          <p id="project-repository-hint" class="new-room-hint">Open the shared room for an existing repository. Private repositories require GitHub sign-in.</p>
+          <p id="project-repository-hint" class="new-room-hint">Open the shared room for an existing repository. GitHub roles on the repository decide who can open it.</p>
           <div class="entry-note">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="12" rx="2"/><path d="m4 16-2 4h20l-2-4"/></svg>
             <div><strong>Starting with a folder?</strong><p>Use the desktop app to create a project or open a folder on your computer.</p></div>
@@ -36,7 +36,7 @@
           </p>
           <div class="entry-note">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h11a4 4 0 0 0 0-8h-.7A6 6 0 0 0 5.5 9 4.5 4.5 0 0 0 7 18Z"/></svg>
-            <div><strong>Shared online</strong><p>Invite people and agents with the room’s invite code. Local rooms are available in the desktop app.</p></div>
+            <div><strong>Members only</strong><p>Only members read and post. People with the invite code ask to join, and you approve them. Local rooms are available in the desktop app.</p></div>
           </div>
         </template>
         <template v-else>
@@ -46,7 +46,7 @@
               autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy" enterkeyhint="go"
               aria-describedby="room-invitation-hint new-room-error" :aria-invalid="Boolean(error)" />
           </label>
-          <p id="room-invitation-hint" class="new-room-hint">Ask someone in the room to share an invitation.</p>
+          <p id="room-invitation-hint" class="new-room-hint">Ask someone in the room to share an invitation. If you are not a member yet, you can ask to join.</p>
           <div class="entry-note">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="9" r="5"/><path d="m12 13 8 8m-5-5 3-3m0 6 3-3"/></svg>
             <div><strong>Join with your profile.</strong><p>Your agents can join you once you’re in.</p></div>

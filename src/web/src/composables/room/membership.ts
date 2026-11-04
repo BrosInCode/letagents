@@ -25,12 +25,6 @@ export interface RoomMemberList {
 
 export type RoomApiError = RoomApiFailure
 
-// The server sends these two codes; shared/room-membership.mjs does not export them yet.
-/** 503: GitHub gave no answer to a repository role check. Not a refusal: retry later. */
-export const REPO_ACCESS_UNAVAILABLE = 'REPO_ACCESS_UNAVAILABLE'
-/** 400: a person asks to join the main room, never one of its focus rooms. */
-export const ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY = 'ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY'
-
 /**
  * A focus room's id (focus_1, focus_2, ...). For a person who is not a member,
  * the server names neither a focus room nor its parent, and takes requests

@@ -1,11 +1,11 @@
 import { computed, type Ref } from 'vue'
 
 import {
+  REPO_ACCESS_UNAVAILABLE,
   REPO_COLLABORATOR_REQUIRED_MESSAGE,
   ROOM_MEMBERSHIP_REQUIRED_MESSAGE,
 } from '../../../../../shared/room-membership.mjs'
 
-import { REPO_ACCESS_UNAVAILABLE } from '@/composables/room/membership'
 import {
   type ConnectionState,
   type FocusRoomSettings,
@@ -28,7 +28,7 @@ export function useRoomPresentation(input: {
 }) {
   const senderName = computed(() => input.authUser.value?.login || 'anonymous')
   // The room is known even when it does not open: refused, or GitHub did not answer.
-  const namesRoom = (error: RoomJoinError | null) => Boolean(error?.refusal || error?.code === REPO_ACCESS_UNAVAILABLE)
+  const namesRoom = (error: RoomJoinError | null) => Boolean(error?.refusal || error?.code === REPO_ACCESS_UNAVAILABLE.code)
   const roomTitle = computed(() => input.room.value?.displayName
     || (namesRoom(input.joinError.value) ? input.joinError.value!.displayName || input.joinError.value!.roomId : null)
     || 'Connecting...')
@@ -86,7 +86,7 @@ export function useRoomPresentation(input: {
   const accessRefusal = computed(() => input.joinError.value?.refusal ?? null)
 
   /** GitHub gave no answer to the role check: not a refusal, so the room page retries. */
-  const accessCheckUnavailable = computed(() => input.joinError.value?.code === REPO_ACCESS_UNAVAILABLE)
+  const accessCheckUnavailable = computed(() => input.joinError.value?.code === REPO_ACCESS_UNAVAILABLE.code)
 
   const joinErrorTitle = computed(() => {
     if (input.joinError.value?.code === 'NOT_AUTHENTICATED') {

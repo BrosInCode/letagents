@@ -23,7 +23,7 @@
       <label for="agent-setup-prompt">{{ selectedAgent.name }} setup prompt · Select and copy</label>
       <textarea id="agent-setup-prompt" :value="selectedPrompt" readonly rows="7" spellcheck="false" @focus="selectPrompt" />
     </details>
-    <p class="manual-link"><RouterLink to="/docs">Manual installation and private-room sign-in →</RouterLink></p>
+    <p class="manual-link"><RouterLink to="/docs">Manual installation and agent sign-in →</RouterLink></p>
   </section>
 </template>
 

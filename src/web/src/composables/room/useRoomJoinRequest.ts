@@ -1,4 +1,5 @@
 import { computed, onScopeDispose, ref, watch } from 'vue'
+import { ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY } from '../../../../../shared/room-membership.mjs'
 import { joinRequestRetryAt, resolveJoinRequestView, type JoinRequestView } from './joinRequestView'
 import {
   asRoomApiError,
@@ -6,7 +7,6 @@ import {
   fetchRoomMembership,
   isFocusRoomId,
   joinRequestFromPayload,
-  ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY,
   requestRoomAccess,
   type RoomJoinRequestSummary,
 } from './membership'
@@ -89,7 +89,7 @@ export function useRoomJoinRequest(options: {
       }
       // A conflict can mean the person is a member already: look before failing.
       if (failure.status === 409 && await readMembership(room)) return
-      if (failure.code === ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY) {
+      if (failure.code === ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY.code) {
         mainRoomOnlyAnswered.value = true
         return
       }
