@@ -1,6 +1,8 @@
+import { roomAccessRefusal } from '../../../../../shared/room-membership.mjs'
 import { apiFetch, roomPath } from './api'
 import { mergeMessages } from './data'
 import { joinRoomSession, loadRoomBootstrap } from './join'
+import { joinRequestFromPayload } from './membership'
 import {
   clearPersistedSession,
   loadPersistedSession,
@@ -133,6 +135,7 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
           room_id?: string
           device_flow_url?: string
           message?: string
+          display_name?: string | null
         } | null
       }
       joinError.value = {
@@ -141,6 +144,9 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
         message: error.message || 'Could not connect to room.',
         roomId: error.payload?.room_id ?? roomIdentifier,
         deviceFlowUrl: error.payload?.device_flow_url ?? null,
+        refusal: roomAccessRefusal(error.payload),
+        displayName: typeof error.payload?.display_name === 'string' ? error.payload.display_name : null,
+        joinRequest: joinRequestFromPayload(error.payload),
       }
       console.error('[useRoom] joinRoom failed:', err)
       return false

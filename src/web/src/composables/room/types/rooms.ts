@@ -4,6 +4,7 @@ import type {
   FocusParentVisibility,
   FocusRoomConclusionDetails,
 } from './focus'
+import type { RoomJoinRequestSummary } from '../../../../../../shared/room-membership.mjs'
 import type { RoomParticipant } from './presence'
 import type { RoomKind } from './shared'
 
@@ -77,6 +78,10 @@ export interface RoomJoinError {
   message: string
   roomId: string | null
   deviceFlowUrl: string | null
+  /** Set when the person is signed in but not allowed in: not a member, or no repository role. */
+  refusal: 'membership_required' | 'repo_collaborator_required' | null
+  displayName: string | null
+  joinRequest: RoomJoinRequestSummary | null
 }
 
 export interface RoomParticipantsPage {

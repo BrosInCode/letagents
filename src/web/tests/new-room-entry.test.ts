@@ -153,17 +153,23 @@ test('join accepts pasted room links and rejects unrelated external URLs', async
   } finally { unmount() }
 })
 
-test('anonymous blank creation keeps the supported unnamed shared room behavior', async () => {
+test('signed-out blank creation starts GitHub sign-in and creates no room', async () => {
   await authenticate(false)
-  const requests: string[] = []
-  globalThis.fetch = async input => { requests.push(String(input)); return new Response(JSON.stringify({ id: 'ROOM-1234' })) }
+  const requests: { input: string; body: unknown }[] = []
+  globalThis.fetch = async (input, init) => {
+    requests.push({ input: String(input), body: init?.body ? JSON.parse(String(init.body)) : null })
+    return new Response(JSON.stringify({}))
+  }
   const { vm, unmount } = mount()
+  const count = navigations.length
   try {
     vm.selectTab('blank')
-    vm.roomName.value = 'Cannot rename anonymously'
+    assert.equal(vm.actionLabel.value, 'Sign in to create')
+    assert.equal(vm.canSubmit.value, true)
     await vm.handleSubmit()
-    assert.deepEqual(requests, ['/projects'])
-    assert.equal(navigations.at(-1), '/in/ROOM-1234')
+    assert.deepEqual(requests, [{ input: '/auth/github/login', body: { redirect_to: '/#start' } }])
+    assert.equal(vm.createdRoomId.value, '')
+    assert.equal(navigations.length, count)
     assert.equal(vm.busy.value, false)
   } finally { unmount() }
 })

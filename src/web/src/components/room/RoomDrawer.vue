@@ -18,6 +18,8 @@
         @copy="copyShareValue"
       />
 
+      <RoomMembersPanel v-if="room" :open="open" :room="room" @left="emit('left')" />
+
       <ParentRoomPanel
         v-if="parentRoomUrl"
         :display="parentRoomDisplay"
@@ -65,6 +67,7 @@ import DrawerBrand from './room-drawer/DrawerBrand.vue'
 import { messageDisplayText } from './chat-message/formatting'
 import GitHubIntegrationPanel from './room-drawer/GitHubIntegrationPanel.vue'
 import ParentRoomPanel from './room-drawer/ParentRoomPanel.vue'
+import RoomMembersPanel from './room-drawer/RoomMembersPanel.vue'
 import RoomNotesPanel from './room-drawer/RoomNotesPanel.vue'
 import RulesShortcutPanel from './room-drawer/RulesShortcutPanel.vue'
 import SenderPalettePanel from './room-drawer/SenderPalettePanel.vue'
@@ -82,7 +85,7 @@ const props = defineProps<{
   showRulesButton?: boolean
 }>()
 
-const emit = defineEmits<{ close: [], themeChange: [theme: string], openRules: [] }>()
+const emit = defineEmits<{ close: [], themeChange: [theme: string], openRules: [], left: [] }>()
 const drawerElement = ref<HTMLDialogElement | null>(null)
 
 function handleBackdropClick(event: MouseEvent) {

@@ -73,8 +73,8 @@ const agentFeatures = [
     desc: 'Claude, Codex, Cursor, and Antigravity work side by side.',
   },
   {
-    title: 'Private when it matters.',
-    desc: 'Private repos stay locked to your GitHub team.',
+    title: 'Members only.',
+    desc: 'Only members read and post. Repo rooms follow your GitHub roles.',
   },
 ]
 </script>
