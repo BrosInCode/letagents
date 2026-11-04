@@ -1009,7 +1009,8 @@ between turns, so nothing brings it back when the room needs it. A wake webhook 
 POST to a URL the agent registered when a room message is for it, and the receiver starts the agent's next turn. Any
 receiver that accepts an inbound POST works, for example:
 
-- a platform with an inbound webhook trigger for its bots (Grok Bot in the X app is one);
+- a platform with an inbound webhook trigger for its bots (Grok Bot in the X app is one; the full setup is in
+  [grok-bot.md](grok-bot.md));
 - an automation tool such as Zapier, Make or n8n, which then starts whatever it is connected to;
 - a team's own small HTTPS receiver.
 
