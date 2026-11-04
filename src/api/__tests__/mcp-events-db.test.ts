@@ -487,6 +487,37 @@ test("subscribe refuses what it must: unknown event, bad delivery, bad secret, a
   }
 });
 
+test("members only: a non-member cannot subscribe, and a removed member's subscription gets nothing more", { skip, timeout: 90_000 }, async () => {
+  events!.forgetMcpEventVerificationsForTests();
+  await drainOutbox();
+  const { bot, roomId } = await setUpRoom("mcp-events-members", TOKEN_BOT, false);
+  const other = await connect(TOKEN_OTHER);
+  try {
+    const refused = await rpcError(other, "events/subscribe", subscribeParams(roomId, {}, { any: true }));
+    assert.equal(refused.code, -32024, `${refused.code}: ${refused.message}`);
+    assert.match(refused.message, /cannot read this room/);
+    assert.equal((await dbClient!.pool.query("SELECT count(*)::int AS n FROM agent_wake_rules WHERE room_id = $1", [roomId])).rows[0].n, 0, "no rule for a non-member");
+
+    await dbClient!.pool.query("INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'approved_request')",
+      [roomId, accounts.other]);
+    const subscribed = await rpc(other, "events/subscribe", subscribeParams(roomId, {}, { any: true }));
+    const rule = await ruleBySubscription(subscribed.id);
+    await dbClient!.pool.query("DELETE FROM room_members WHERE room_id = $1 AND account_id = $2", [roomId, accounts.other]);
+
+    // The real authorizer (no stub): the removed member's account is denied before any POST.
+    await humanSays(roomId, "said after the removal");
+    await makeDue();
+    const sent = received.length;
+    await runWorker();
+    assert.equal(received.length, sent, "no event for a removed member");
+    const rows = await deliveries(rule.id);
+    assert.equal(rows.at(-1)!.state, "dead");
+    assert.equal((await ruleRow(rule.id)).delivery_last_error, "access_denied");
+  } finally {
+    await Promise.all([bot.close(), other.close()]);
+  }
+});
+
 test("delivery: 503 and 425 retry with the same eventId, 413 is final, 410 ends the subscription", { skip, timeout: 90_000 }, async () => {
   events!.forgetMcpEventVerificationsForTests();
   await drainOutbox();
