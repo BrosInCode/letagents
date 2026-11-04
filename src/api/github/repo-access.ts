@@ -479,7 +479,9 @@ export async function isGitHubRepoCollaborator(input: {
     }
   }
   const cacheKey = `${roomKey}::${loginKey}`;
-  const flightKey = `${input.bypassCache ? "fresh" : "cached"}::${cacheKey}`;
+  // A caller that opted into the throw never shares a flight with one that
+  // did not: the same GitHub answer means a throw for one and false for the other.
+  const flightKey = `${input.throwOnIndeterminate ? "strict" : "lenient"}::${input.bypassCache ? "fresh" : "cached"}::${cacheKey}`;
   const existing = repoAccessInflight.get(flightKey);
   if (existing) return existing.promise;
 
@@ -589,7 +591,7 @@ export async function isGitHubPublicRepoRoleHolder(input: {
   }
   if (!parseGitHubRepoName(input.roomName)) return false;
 
-  const flightKey = `${input.bypassCache ? "fresh" : "cached"}::${cacheKey}`;
+  const flightKey = `${input.throwOnIndeterminate ? "strict" : "lenient"}::${input.bypassCache ? "fresh" : "cached"}::${cacheKey}`;
   const existing = publicRepoRoleInflight.get(flightKey);
   if (existing) return existing;
   const pending = (async () => {
