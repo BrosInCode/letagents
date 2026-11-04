@@ -1,6 +1,12 @@
 import type { Response } from "express";
 
 import {
+  REPO_ACCESS_UNAVAILABLE,
+  REPO_ACCESS_UNAVAILABLE_MESSAGE,
+  repoCollaboratorRequiredBody,
+  roomMembershipRequiredBody,
+} from "../../../shared/room-membership.mjs";
+import {
   assignProjectAdmin,
   getGitRoomBindingForRoom,
   isProjectAdmin,
@@ -20,6 +26,7 @@ import {
   type AuthenticatedRequest,
 } from "../http/helpers.js";
 import { resolveRequestAuth } from "../request/auth.js";
+import { getLatestRoomJoinRequest, getRoomMemberRole } from "../db/room-members.js";
 import { isRepoBackedRoomId } from "./room-ids.js";
 
 export { isRepoBackedRoomId };
@@ -150,6 +157,8 @@ function landingRedirectReason(decision: RepoRoomAccessDenial): LandingRedirectR
     case "unsupported_repo_provider":
       return "repo_provider_unsupported";
     case "private_repo_no_access":
+    case "repo_collaborator_required":
+    case "repo_access_unavailable":
       return "repo_access_denied";
   }
 }
@@ -202,7 +211,7 @@ export function replyRepoRoomAccessDecision(
     res.status(401).json({
       error: "auth_required",
       code: "NOT_AUTHENTICATED",
-      message: "Authentication is required for repo-backed rooms",
+      message: "Sign in to LetAgents to open this room",
       room_id: roomName,
       device_flow_url: buildDeviceFlowUrl(roomName),
     });
@@ -217,6 +226,18 @@ export function replyRepoRoomAccessDecision(
       message: unsupportedRepoProviderMessage(roomName),
       room_id: roomName,
     });
+    return false;
+  }
+
+  if (decision.kind === "repo_collaborator_required") {
+    res.status(403).json(repoCollaboratorRequiredBody({ room_id: roomName }));
+    return false;
+  }
+
+  if (decision.kind === "repo_access_unavailable") {
+    // Not a refusal: GitHub gave no answer, so the client should retry.
+    res.setHeader?.("Retry-After", "30");
+    res.status(503).json({ ...REPO_ACCESS_UNAVAILABLE, message: REPO_ACCESS_UNAVAILABLE_MESSAGE, room_id: roomName });
     return false;
   }
 
@@ -289,7 +310,19 @@ async function resolveProjectRoleForAccessDecision(
 ): Promise<RoomRole> {
   const accessRoomId = getProjectAccessRoomId(project);
   if (!sessionAccount) {
-    return accessDecision.isRepoBacked ? "anonymous" : "participant";
+    return "anonymous";
+  }
+
+  if (!accessDecision.isRepoBacked) {
+    // A room without a repository: the role comes from the members of the
+    // access room. A focus-room admin row counts only for a member of the
+    // parent (the old "first joiner" rule left such rows for strangers).
+    const accessRole = await getRoomMemberRole(accessRoomId, sessionAccount.account_id);
+    if (!accessRole) return "anonymous";
+    if (accessRole === "admin") return "admin";
+    return accessRoomId !== project.id && (await isProjectAdmin(project.id, sessionAccount.account_id))
+      ? "admin"
+      : "participant";
   }
 
   if (
@@ -342,6 +375,58 @@ export async function resolveGitRoomProjectRole(
   });
 
   return resolveProjectRoleForAccessDecision(project, sessionAccount, accessDecision);
+}
+
+/** Whether the account is a member of the project's access room (its parent, for a focus room). */
+export async function isProjectRoomMember(project: Project, accountId: string): Promise<boolean> {
+  return (await getRoomMemberRole(getProjectAccessRoomId(project), accountId)) !== null;
+}
+
+export type RoomMembershipDecision =
+  | { kind: "allow" }
+  | { kind: "auth_required" }
+  | { kind: "membership_required" };
+
+/**
+ * A room that is not tied to a repository admits its members only: the
+ * members of the room, or of the parent of a focus room. A room admin is
+ * always a member.
+ */
+export async function resolveRoomMembershipDecision(
+  project: Project,
+  sessionAccount: RequestAccount,
+): Promise<RoomMembershipDecision> {
+  if (!sessionAccount) return { kind: "auth_required" };
+  const role = await getRoomMemberRole(getProjectAccessRoomId(project), sessionAccount.account_id);
+  return role ? { kind: "allow" } : { kind: "membership_required" };
+}
+
+/**
+ * No sign-in is a 401, so the MCP client starts its device flow. A signed-in
+ * person who is not a member is a 403, never a 401: the MCP client deletes its
+ * saved sign-in on any 401. The 403 carries the person's latest join request,
+ * so a client can show "Ask to join", "Waiting" or "Declined" at once.
+ */
+export async function replyRoomMembershipDecision(
+  res: Response,
+  project: Project,
+  sessionAccount: RequestAccount,
+  decision: Exclude<RoomMembershipDecision, { kind: "allow" }>,
+): Promise<false> {
+  const accessRoomId = getProjectAccessRoomId(project);
+  if (decision.kind === "auth_required" || !sessionAccount) {
+    return replyRepoRoomAccessDecision(res, project.id, { kind: "auth_required" });
+  }
+  // Focus room ids are easy to guess (focus_1, focus_2, ...), so a refusal for
+  // one names neither its parent nor the parent's name. A top-level room's
+  // name and the person's request are shown: the caller already has its id.
+  const topLevel = accessRoomId === project.id;
+  res.status(403).json(roomMembershipRequiredBody({
+    room_id: project.id,
+    display_name: topLevel ? project.display_name : null,
+    join_request: topLevel ? await getLatestRoomJoinRequest(accessRoomId, sessionAccount.account_id) : null,
+  }));
+  return false;
 }
 
 export async function requireAdmin(
@@ -401,27 +486,13 @@ function resolveScopedWorkerParticipation(
   return false;
 }
 
+/** The same gate as requireGitRoomParticipant; kept for callers that import this name. */
 export async function requireParticipant(
   req: AuthenticatedRequest,
   res: Response,
   project: Project
 ): Promise<boolean> {
-  const workerParticipation = resolveScopedWorkerParticipation(req, res, project);
-  if (workerParticipation !== null) return workerParticipation;
-  if (!isRepoBackedProject(project)) {
-    return true;
-  }
-
-  const decision = await resolveRepoRoomAccessDecision({
-    roomName: getProjectAccessRoomId(project),
-    sessionAccount: req.sessionAccount,
-  });
-
-  if (decision.kind === "allow") {
-    return true;
-  }
-
-  return replyRepoRoomAccessDecision(res, getProjectAccessRoomId(project), decision);
+  return requireGitRoomParticipant(req, res, project);
 }
 
 export async function requireGitRoomParticipant(
@@ -438,6 +509,15 @@ export async function requireGitRoomParticipant(
   const workerParticipation = resolveScopedWorkerParticipation(req, res, project);
   if (workerParticipation !== null) return workerParticipation;
 
+  // Every room needs a sign-in, so no lookup can admit a caller without one.
+  // A repo-shaped id on a host other than github.com keeps its own 403: no
+  // sign-in could open it, so a sign-in request would mislead.
+  const accessRoomId = getProjectAccessRoomId(project);
+  if (!req.sessionAccount && (!isRepoBackedRoomId(accessRoomId) || parseGitHubRepoName(accessRoomId))) {
+    // The id the caller asked for: a focus room id never reveals its parent.
+    return replyRepoRoomAccessDecision(res, project.id, { kind: "auth_required" });
+  }
+
   const accessDecision = await resolveProjectRepoRoomAccessDecision({
     project,
     sessionAccount: req.sessionAccount,
@@ -450,7 +530,13 @@ export async function requireGitRoomParticipant(
   );
   requestUsesRepoAuthorization.set(req, accessDecision.isRepoBacked);
 
-  if (!accessDecision.isRepoBacked || accessDecision.decision.kind === "allow") {
+  if (!accessDecision.isRepoBacked) {
+    const membership = await resolveRoomMembershipDecision(project, req.sessionAccount);
+    if (membership.kind === "allow") return true;
+    return replyRoomMembershipDecision(res, project, req.sessionAccount, membership);
+  }
+
+  if (accessDecision.decision.kind === "allow") {
     return true;
   }
 
@@ -464,9 +550,8 @@ export async function requireGitRoomParticipant(
 /**
  * True when the entry check of this same request already made the exact
  * decision the live recheck would make now. Rooms without a repository use no
- * visibility or collaborator cache: the request middleware resolved the
- * credential moments ago and anonymous readers are admitted as they are, so
- * the first live body needs no second database read.
+ * cache: the entry check read the membership from the database moments ago,
+ * so the first live body needs no second read.
  */
 export function liveRecheckIsFreshAtEntry(req: AuthenticatedRequest): boolean {
   return requestUsesRepoAuthorization.get(req) === false;
@@ -481,22 +566,18 @@ export async function reauthorizeGitRoomParticipant(
   req: AuthenticatedRequest,
   project: Project,
 ): Promise<boolean> {
-  const humanCredential = req.authKind === "session" || req.authKind === "owner_token";
-  // Unset for worker bearers and for routes that never ran the entry check.
-  const mayUseRepoAuthorization = requestUsesRepoAuthorization.get(req) !== false;
-  // Public and ad-hoc rooms admit anonymous readers, so an anonymous entry has
-  // nothing to re-resolve there. A human credential presented at entry must
-  // still name the same account: a session or owner token revoked after entry
-  // must not keep an open stream alive by degrading to that anonymous access.
-  if (!mayUseRepoAuthorization && !humanCredential) return true;
+  const humanCredential = req.authKind === "session"
+    || req.authKind === "owner_token"
+    || req.authKind === "mcp_oauth";
   const fresh = await resolveRequestAuth(req);
+  // A session or owner token revoked after entry must not keep a stream
+  // alive, and a stream may never move to another account.
   if (
     humanCredential
     && (fresh.authKind !== req.authKind || fresh.account?.account_id !== req.sessionAccount?.account_id)
   ) {
     return false;
   }
-  if (!mayUseRepoAuthorization) return true;
   if (fresh.authKind === "agent_session") {
     return fresh.agentSession?.room_id === project.id;
   }
@@ -505,7 +586,10 @@ export async function reauthorizeGitRoomParticipant(
     sessionAccount: fresh.account,
     freshCollaboratorCheck: true,
   });
-  return !accessDecision.isRepoBacked || accessDecision.decision.kind === "allow";
+  if (!accessDecision.isRepoBacked) {
+    return (await resolveRoomMembershipDecision(project, fresh.account)).kind === "allow";
+  }
+  return accessDecision.decision.kind === "allow";
 }
 
 export async function resolveProjectRoomEntryDecision(input: {
@@ -521,7 +605,13 @@ export async function resolveProjectRoomEntryDecision(input: {
     sessionAccount: input.sessionAccount,
   });
 
-  if (!accessDecision.isRepoBacked || accessDecision.decision.kind === "allow") {
+  // GitHub gave no answer: serve the app, whose own room calls get the 503
+  // and retry, instead of a landing page that says the access is missing.
+  if (
+    !accessDecision.isRepoBacked
+    || accessDecision.decision.kind === "allow"
+    || accessDecision.decision.kind === "repo_access_unavailable"
+  ) {
     return { kind: "allow" };
   }
 
@@ -548,7 +638,7 @@ export async function resolveGitHubRoomEntryDecision(input: {
     sessionAccount: input.sessionAccount,
   });
 
-  if (decision.kind === "allow") {
+  if (decision.kind === "allow" || decision.kind === "repo_access_unavailable") {
     return { kind: "allow" };
   }
 

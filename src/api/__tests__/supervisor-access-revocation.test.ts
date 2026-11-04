@@ -53,12 +53,20 @@ test("unrelated repository and member events do not revoke supervisor grants", (
     repository,
     member: { id: 7, login: "collaborator" },
   }), null);
-  assert.equal(getSupervisorAccessRevocationTarget("member", {
+  assert.equal(getSupervisorAccessRevocationTarget("push", { repository }), null);
+});
+
+test("a collaborator removed from a public repository loses their supervisor grants too", () => {
+  // A public repository's room admits only people with a GitHub role on it.
+  assert.deepEqual(getSupervisorAccessRevocationTarget("member", {
     action: "removed",
     repository: { ...repository, private: false },
     member: { id: 7, login: "collaborator" },
-  }), null);
-  assert.equal(getSupervisorAccessRevocationTarget("push", { repository }), null);
+  }), {
+    repository_full_name: repository.full_name,
+    canonical_room_id: "github.com/brosincode/letagents",
+    owner_login: "collaborator",
+  });
 });
 
 test("authorization-boundary webhooks revoke only after a fresh definitive denial", async () => {

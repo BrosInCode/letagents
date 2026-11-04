@@ -65,6 +65,11 @@ async function seed(options: { delegationTtlMs?: number } = {}) {
     });
   }
   const room = await db!.createProjectWithName(`decision-room-${n}`);
+  // A host grant reads a room without a repository only while its owner is a member of that room.
+  await client!.pool.query(
+    "INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'seed')",
+    [room.id, ownerId],
+  );
   const agent = await db!.registerAgentIdentity({
     owner_account_id: ownerId,
     owner_login: ownerId,

@@ -60,6 +60,11 @@ async function seed() {
     });
   }
   const room = await db!.createProjectWithName(`delegation-room-${n}`);
+  // A host grant reads a room without a repository only while its owner is a member of that room.
+  await client!.pool.query(
+    "INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'seed')",
+    [room.id, ownerId],
+  );
   const agent = await db!.registerAgentIdentity({
     owner_account_id: ownerId,
     owner_login: ownerId,
@@ -736,6 +741,10 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
       owner_account_id: seeded.ownerId,
     });
     const narrowerRoom = await db!.createProjectWithName(`narrower-room-${++ordinal}`);
+    await client!.pool.query(
+      "INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'seed')",
+      [narrowerRoom.id, seeded.ownerId],
+    );
     const narrowerAgent = await db!.registerAgentIdentity({
       owner_account_id: seeded.ownerId,
       owner_login: seeded.ownerId,

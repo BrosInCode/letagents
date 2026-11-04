@@ -311,14 +311,15 @@ test('a removed person is not added back by a later seed run; an approved reques
   const call = client(port);
 
   const roomId = (await call('POST', '/projects/room/watch-lounge', owner.token)).body.id as string;
-  // Before the rule is on, a signed-in post is proof for the seed.
-  assert.equal((await call('POST', `/rooms/${roomId}/messages`, mallory.token, { sender: 'mallory', text: 'hi' })).status, 201);
+  // A signed-in post from before the rule was on is proof for the seed.
+  await insertMessage({ roomId, number: 1, accountId: mallory.id, at: '2026-10-01T00:00:00Z' });
   const [seed] = await seedStatements();
   await pool!.query(seed!);
   assert.equal((await call('GET', `/rooms/${roomId}/membership`, mallory.token)).body.member, true);
 
   assert.equal((await call('DELETE', `/rooms/${roomId}/members/${mallory.id}`, owner.token)).status, 200);
-  assert.equal((await call('POST', `/rooms/${roomId}/messages`, mallory.token, { sender: 'mallory', text: 'back' })).status, 201);
+  assert.equal((await call('POST', `/rooms/${roomId}/messages`, mallory.token, { sender: 'mallory', text: 'back' })).status, 403,
+    'a removed person can no longer post');
   await pool!.query(seed!);
   assert.equal((await call('GET', `/rooms/${roomId}/membership`, mallory.token)).body.member, false, 'the removal stands');
 
@@ -366,7 +367,7 @@ test('admin changes: demotion drops focus-room admin rows, and two admins cannot
   assert.equal((await admins()).length, 1, 'the room keeps one admin');
 });
 
-test('opening a room makes nobody an admin of a focus room or of a room whose members were seeded', databaseTestOptions, async (t) => {
+test('opening a room makes nobody an admin: a stranger is refused, a member stays a member', databaseTestOptions, async (t) => {
   const seeded = await person('seeded');
   const stranger = await person('stranger');
   await pool!.query(`INSERT INTO rooms (id, display_name, created_at) VALUES ('old-lounge', 'Old', now())`);
@@ -376,10 +377,9 @@ test('opening a room makes nobody an admin of a focus room or of a room whose me
   t.after(async () => { await stopChildProcess(child); });
   const call = client(port);
 
-  assert.equal((await call('POST', '/rooms/old-lounge/join', stranger.token)).body.role, 'participant');
+  assert.equal((await call('POST', '/rooms/old-lounge/join', stranger.token)).status, 403);
   assert.equal((await call('POST', '/rooms/focus_45/join', seeded.token)).body.role, 'participant');
+  assert.equal((await call('POST', '/rooms/old-lounge/join', seeded.token)).body.role, 'participant');
   assert.deepEqual(await members(), ['old-lounge:seeded:seed'], 'the stranger got no member row');
-  assert.deepEqual(await admins(), [], 'and nobody became an admin of the room or the focus room');
-  assert.equal((await call('POST', '/rooms/old-lounge/join', seeded.token)).body.role, 'admin',
-    'a member may still take a room that has no admin');
+  assert.deepEqual(await admins(), [], 'and nobody became an admin by opening a room; the release seed names one');
 });

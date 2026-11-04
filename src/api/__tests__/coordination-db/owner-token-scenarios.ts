@@ -9,6 +9,7 @@ import {
   databaseTestOptions,
   dbApi,
   dawnActor,
+  seedRoomMember,
   startApiServer,
   stopChildProcess,
 } from "./harness.js";
@@ -57,6 +58,8 @@ test(
     });
 
     const room = await createProjectWithName("coordination-api-routes");
+    await seedRoomMember(room.id, owner.id);
+    await seedRoomMember(room.id, otherOwner.id);
     const { bayCredentials, dawnCredentials } = await createWorkerPair({
       roomId: room.id,
       ownerAccountId: owner.id,

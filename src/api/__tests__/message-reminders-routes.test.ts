@@ -5,7 +5,7 @@ const { registerMessageReminderRoutes } = await import("../routes/rooms/messages
 const { requiredAgentSessionRouteCapability } = await import("../request/agent-session-route-capabilities.js");
 const { resolveProjectRepoRoomAccessDecision } = await import("../rooms/access.js");
 const id="12345678-1234-4234-8234-123456789abc";
-function harness(options: { deny?: boolean; access?: string; fail?: unknown }={}) {
+function harness(options: { deny?: boolean; access?: string; fail?: unknown; adHoc?: boolean; member?: boolean }={}) {
  const routes:any[]=[]; const calls:any[]=[];
  const row={id,account_id:"me",room_id:"canonical",message_number:12,due_at:new Date(Date.now()+3600000).toISOString(),state:"pending",created_at:"now"};
  registerMessageReminderRoutes(Object.fromEntries(["get","post","delete"].map(method=>[method,(path:any,handler:any)=>routes.push({method,path,handler})])) as any,{
@@ -17,7 +17,8 @@ function harness(options: { deny?: boolean; access?: string; fail?: unknown }={}
    remove:async(account:any,target:any)=>{calls.push(["remove",account,target]);if(options.fail)throw options.fail;},
    list:async(account:any)=>{calls.push(["list",account]);return [row];},
    authorize:async()=>{calls.push(["fresh-worker-access"]);return options.access??"allow";},
-   project:async()=>({id:"github.com/org/repo"}),
+   project:async()=>({id:options.adHoc?"team-lounge":"github.com/org/repo"}),
+   member:async(project:any,account:any)=>{calls.push(["member",project.id,account]);return options.member??false;},
    access:async(input:any)=>resolveProjectRepoRoomAccessDecision(input, {
      getGitRoomBindingForRoom:async()=>null,
      resolveRepoRoomAccessDecision:async(optionsInput)=>{
@@ -66,4 +67,11 @@ test("two list reads use the session room-access path without fresh collaborator
  }
  assert.deepEqual(h.calls.filter(c=>c[0]==="session-access"),[["session-access","me",undefined],["session-access","me",undefined]]);
  assert.ok(!h.calls.some(c=>c[0]==="fresh-worker-access"));
+});
+test("a room without a repository previews reminders for its members only",async()=>{
+ const stranger=harness({adHoc:true,member:false});const hidden=await stranger.request("get","/desktop/reminders");
+ assert.equal(hidden.body.reminders[0].preview,null);assert.ok(!stranger.calls.some(c=>c[0]==="preview"));
+ assert.ok(stranger.calls.some(c=>c[0]==="member"&&c[1]==="team-lounge"&&c[2]==="me"));
+ const member=harness({adHoc:true,member:true});const shown=await member.request("get","/desktop/reminders");
+ assert.equal(shown.body.reminders[0].preview.sender,"Sender");
 });

@@ -7,6 +7,8 @@ interface GitHubRepo {
   owner?: {
     login?: string;
   };
+  // The caller's own role, present when the request carries a user token.
+  permissions?: Partial<Record<"admin" | "maintain" | "push" | "triage" | "pull", boolean>>;
 }
 
 interface GitHubPermissionResponse {
@@ -18,6 +20,12 @@ export type RepoRoomAccessDecision =
   | { kind: "allow" }
   | { kind: "auth_required" }
   | { kind: "private_repo_no_access" }
+  // A public repository: everyone can read the code, but only people with a
+  // GitHub role on it may open its room.
+  | { kind: "repo_collaborator_required" }
+  // GitHub gave no answer to the role check (outage, rate limit, expired
+  // token) and no recent positive answer stands in. Not a refusal: retry.
+  | { kind: "repo_access_unavailable" }
   // The room id has the `host/owner/repo` shape of a repo room, but no
   // visibility or collaborator check exists for its host. Nobody may enter.
   | { kind: "unsupported_repo_provider" };
@@ -41,6 +49,8 @@ interface RepoRoomAccessDecisionDeps {
     bypassCache?: boolean;
     throwOnIndeterminate?: boolean;
   }) => Promise<boolean>;
+  isPublicRepoRoleHolder?: typeof isGitHubPublicRepoRoleHolder;
+  getLastKnownVisibility?: (roomName: string) => "public" | "private" | null;
 }
 
 // Repository visibility is shared state, independent of the account asking.
@@ -57,10 +67,18 @@ const REPO_VISIBILITY_RATE_LIMIT_DEFAULT_BACKOFF_MS = 1000 * 60;
 const REPO_VISIBILITY_RATE_LIMIT_MAX_BACKOFF_MS = 1000 * 60 * 60;
 let anonymousVisibilityLookupsBlockedUntil = 0;
 const REPO_ACCESS_TTL_MS = 1000 * 60 * 30;
+// A "no role" answer for a public repository is kept briefly, so a refused
+// client that reconnects does not spend the person's GitHub rate limit.
+const PUBLIC_REPO_NO_ROLE_TTL_MS = 1000 * 60;
 const REPO_CACHE_MAX_ENTRIES = 5_000;
 const repoVisibilityCache = new Map<string, { visibility: GitHubRepoVisibility; expiresAt: number }>();
 const repoVisibilityLastKnown = new Map<string, { visibility: "public" | "private"; expiresAt: number }>();
 const repoAccessCache = new Map<string, { allowed: boolean; expiresAt: number }>();
+const publicRepoRoleCache = new Map<string, { allowed: boolean; expiresAt: number }>();
+// The last "has a role" answer, kept so that a GitHub outage does not lock a
+// collaborator out. Webhook invalidation (role removed) discards it at once.
+const publicRepoRoleLastKnown = new Map<string, { expiresAt: number }>();
+const publicRepoRoleInflight = new Map<string, Promise<boolean>>();
 const repoVisibilityInflight = new Map<string, {
   roomKey: string;
   promise: Promise<GitHubRepoVisibility>;
@@ -190,13 +208,16 @@ function forgetRoomAccess(roomKey: string): void {
   rotateCacheGeneration(repoRoomCacheGeneration, roomKey);
   repoVisibilityCache.delete(roomKey);
   repoVisibilityLastKnown.delete(roomKey);
-  for (const cacheKey of repoAccessCache.keys()) {
-    if (cacheKey.startsWith(prefix)) {
-      repoAccessCache.delete(cacheKey);
+  for (const cache of [repoAccessCache, publicRepoRoleCache, publicRepoRoleLastKnown]) {
+    for (const cacheKey of cache.keys()) {
+      if (cacheKey.startsWith(prefix)) cache.delete(cacheKey);
     }
   }
   for (const [flightKey, flight] of repoVisibilityInflight) {
     if (flight.roomKey === roomKey) repoVisibilityInflight.delete(flightKey);
+  }
+  for (const flightKey of publicRepoRoleInflight.keys()) {
+    if (flightKey.includes(`::${roomKey}::`)) publicRepoRoleInflight.delete(flightKey);
   }
   for (const [flightKey, flight] of repoAccessInflight) {
     if (flight.roomKey === roomKey) repoAccessInflight.delete(flightKey);
@@ -212,13 +233,16 @@ export function clearGitHubRepoAccessCacheForRoom(roomName: string): void {
 function forgetLoginAccess(loginKey: string): void {
   const suffix = `::${loginKey}`;
   rotateCacheGeneration(repoLoginCacheGeneration, loginKey);
-  for (const cacheKey of repoAccessCache.keys()) {
-    if (cacheKey.endsWith(suffix)) {
-      repoAccessCache.delete(cacheKey);
+  for (const cache of [repoAccessCache, publicRepoRoleCache, publicRepoRoleLastKnown]) {
+    for (const cacheKey of cache.keys()) {
+      if (cacheKey.endsWith(suffix)) cache.delete(cacheKey);
     }
   }
   for (const [flightKey, flight] of repoAccessInflight) {
     if (flight.loginKey === loginKey) repoAccessInflight.delete(flightKey);
+  }
+  for (const flightKey of publicRepoRoleInflight.keys()) {
+    if (flightKey.endsWith(`::${loginKey}`)) publicRepoRoleInflight.delete(flightKey);
   }
 }
 
@@ -455,7 +479,9 @@ export async function isGitHubRepoCollaborator(input: {
     }
   }
   const cacheKey = `${roomKey}::${loginKey}`;
-  const flightKey = `${input.bypassCache ? "fresh" : "cached"}::${cacheKey}`;
+  // A caller that opted into the throw never shares a flight with one that
+  // did not: the same GitHub answer means a throw for one and false for the other.
+  const flightKey = `${input.throwOnIndeterminate ? "strict" : "lenient"}::${input.bypassCache ? "fresh" : "cached"}::${cacheKey}`;
   const existing = repoAccessInflight.get(flightKey);
   if (existing) return existing.promise;
 
@@ -468,18 +494,26 @@ export async function isGitHubRepoCollaborator(input: {
     const repo = parseGitHubRepoName(input.roomName);
     if (!repo) return false;
 
-    const ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken, doFetch);
+    let ownerResponse: Response;
+    try {
+      ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken, doFetch);
+    } catch {
+      throw new GitHubAccessUnavailableError(null);
+    }
     if (!ownerResponse.ok) {
       if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(ownerResponse)) {
         throw new Error(`GitHub repo access revalidation was indeterminate (${ownerResponse.status}).`);
       }
+      if (await isGitHubOutageResponse(ownerResponse)) throw new GitHubAccessUnavailableError(ownerResponse.status);
       return false;
     }
 
     const repoPayload = (await ownerResponse.json()) as GitHubRepo;
     let allowed = repoPayload.owner?.login?.toLowerCase() === loginKey;
     if (!allowed) {
-      const permissionResponse = await githubRequest({
+      let permissionResponse: Response;
+      try {
+        permissionResponse = await githubRequest({
         url: buildGitHubApiUrl(
           `/repos/${repo.owner}/${repo.repo}/collaborators/${encodeURIComponent(input.login)}/permission`
         ),
@@ -487,10 +521,14 @@ export async function isGitHubRepoCollaborator(input: {
         fetchImpl: doFetch,
         timeoutMs: GITHUB_ACCESS_FETCH_TIMEOUT_MS,
       });
+      } catch {
+        throw new GitHubAccessUnavailableError(null);
+      }
       if (!permissionResponse.ok) {
         if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(permissionResponse)) {
           throw new Error(`GitHub collaborator revalidation was indeterminate (${permissionResponse.status}).`);
         }
+        if (await isGitHubOutageResponse(permissionResponse)) throw new GitHubAccessUnavailableError(permissionResponse.status);
         return false;
       }
       const permissionPayload = (await permissionResponse.json()) as GitHubPermissionResponse;
@@ -513,6 +551,113 @@ export async function isGitHubRepoCollaborator(input: {
   });
   repoAccessInflight.set(flightKey, { roomKey, loginKey, promise: pending });
   return pending;
+}
+
+/** GitHub gave no answer to a role check: an outage, a rate limit or an expired token. */
+export class GitHubAccessUnavailableError extends Error {
+  constructor(status: number | null) {
+    super(`GitHub did not answer the repository role check${status ? ` (${status})` : ""}.`);
+    this.name = "GitHubAccessUnavailableError";
+  }
+}
+
+/**
+ * Whether this login has a GitHub role on a public repository: it owns the
+ * repository, or GitHub reports triage, write, maintain or admin for the
+ * person's own token. On a public repository GitHub reports read access for
+ * everyone, and its per-user permission endpoint refuses callers without push
+ * access, so a read-only collaborator cannot be told apart from the public and
+ * does not count.
+ *
+ * When GitHub gives no answer, a positive answer from the last hour stands
+ * in; without one it throws GitHubAccessUnavailableError, never a "no".
+ * Parallel checks for one person and repository share one request.
+ */
+export async function isGitHubPublicRepoRoleHolder(input: {
+  roomName: string;
+  login: string;
+  accessToken: string;
+  bypassCache?: boolean;
+  throwOnIndeterminate?: boolean;
+  fetchImpl?: typeof fetch;
+}): Promise<boolean> {
+  const roomKey = normalizeCacheKey(input.roomName);
+  const loginKey = normalizeCacheKey(input.login);
+  const cacheKey = `${roomKey}::${loginKey}`;
+  if (!input.bypassCache) {
+    const cached = publicRepoRoleCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.allowed;
+    if (cached) publicRepoRoleCache.delete(cacheKey);
+  }
+  if (!parseGitHubRepoName(input.roomName)) return false;
+
+  const flightKey = `${input.throwOnIndeterminate ? "strict" : "lenient"}::${input.bypassCache ? "fresh" : "cached"}::${cacheKey}`;
+  const existing = publicRepoRoleInflight.get(flightKey);
+  if (existing) return existing;
+  const pending = (async () => {
+    const roomGeneration = getCacheGeneration(repoRoomCacheGeneration, roomKey);
+    const loginGeneration = getCacheGeneration(repoLoginCacheGeneration, loginKey);
+    const unavailable = (status: number | null): boolean => {
+      const lastKnown = publicRepoRoleLastKnown.get(cacheKey);
+      if (lastKnown && lastKnown.expiresAt > Date.now()) return true;
+      throw new GitHubAccessUnavailableError(status);
+    };
+    let response: Response;
+    try {
+      response = await fetchGitHubRepo(input.roomName, input.accessToken, input.fetchImpl ?? fetch);
+    } catch {
+      return unavailable(null);
+    }
+    if (!response.ok) {
+      // Authority revalidation keeps its grant on any unanswered check,
+      // a dead owner token included.
+      if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(response)) {
+        throw new Error(`GitHub repo role check was indeterminate (${response.status}).`);
+      }
+      // A dead token (401) or one blocked by the organization (plain 403) is
+      // GitHub's answer for this token: no role. Only an outage is a retry.
+      if (await isGitHubOutageResponse(response)) return unavailable(response.status);
+      publicRepoRoleLastKnown.delete(cacheKey);
+      return false;
+    }
+    const payload = (await response.json()) as GitHubRepo;
+    const permissions = payload.permissions ?? {};
+    const allowed = payload.owner?.login?.toLowerCase() === loginKey
+      || Boolean(permissions.triage || permissions.push || permissions.maintain || permissions.admin);
+    const generationsHold = getCacheGeneration(repoRoomCacheGeneration, roomKey) === roomGeneration
+      && getCacheGeneration(repoLoginCacheGeneration, loginKey) === loginGeneration;
+    if (allowed && generationsHold) {
+      pruneExpiringCache(publicRepoRoleLastKnown, REPO_CACHE_MAX_ENTRIES);
+      publicRepoRoleLastKnown.set(cacheKey, { expiresAt: Date.now() + REPO_VISIBILITY_LAST_KNOWN_MAX_AGE_MS });
+    } else if (!allowed) {
+      publicRepoRoleLastKnown.delete(cacheKey);
+    }
+    if (!input.bypassCache && generationsHold) {
+      pruneExpiringCache(publicRepoRoleCache, REPO_CACHE_MAX_ENTRIES);
+      publicRepoRoleCache.set(cacheKey, {
+        allowed,
+        expiresAt: Date.now() + (allowed ? REPO_ACCESS_TTL_MS : PUBLIC_REPO_NO_ROLE_TTL_MS),
+      });
+    }
+    return allowed;
+  })().finally(() => {
+    if (publicRepoRoleInflight.get(flightKey) === pending) publicRepoRoleInflight.delete(flightKey);
+  });
+  publicRepoRoleInflight.set(flightKey, pending);
+  return pending;
+}
+
+/**
+ * An answer that says nothing about the person's access: a timeout, a rate
+ * limit (429, or a 403 with rate-limit signs) or a server error. A 401 (dead
+ * token) and a plain 403 (for example SSO not authorized) are answers about
+ * the token and count as no access.
+ */
+async function isGitHubOutageResponse(response: Response): Promise<boolean> {
+  if (response.status === 408 || response.status === 429 || response.status >= 500) return true;
+  if (response.status !== 403) return false;
+  if (response.headers.get("retry-after") !== null || response.headers.get("x-ratelimit-remaining") === "0") return true;
+  return /rate limit|abuse/i.test(await response.clone().text().catch(() => ""));
 }
 
 function isIndeterminateGitHubAccessResponse(response: Response): boolean {
@@ -614,16 +759,46 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
   // (`ssh.github.com/owner/repo`) would otherwise keep a stale entry.
   const canonicalRoomName = `github.com/${githubRepo.owner}/${githubRepo.repo}`.toLowerCase();
 
-  const accessToken = input.sessionAccount?.provider_access_token ?? undefined;
-  const visibility = await deps.getVisibility(canonicalRoomName, accessToken, {
-    bypassCache: input.freshCollaboratorCheck,
-  });
-  if (visibility === "public") {
-    return { kind: "allow" };
-  }
-
+  // Every repo room needs a sign-in: no GitHub lookup for a caller without one.
   if (!input.sessionAccount) {
     return { kind: "auth_required" };
+  }
+
+  const accessToken = input.sessionAccount.provider_access_token ?? undefined;
+  let visibility = await deps.getVisibility(canonicalRoomName, accessToken, {
+    bypassCache: input.freshCollaboratorCheck,
+  });
+  // GitHub gave no answer (a fresh check does not use the remembered one): a
+  // repository known to be public in the last hour goes to its role check,
+  // which retries during an outage instead of refusing like a private repo.
+  if (visibility === "unknown" && (deps.getLastKnownVisibility ?? getLastKnownVisibility)(canonicalRoomName) === "public") {
+    visibility = "public";
+  }
+
+  if (visibility === "public") {
+    if (
+      input.sessionAccount.provider !== "github" ||
+      !input.sessionAccount.provider_access_token ||
+      !input.sessionAccount.login
+    ) {
+      return { kind: "repo_collaborator_required" };
+    }
+    const isRoleHolder = deps.isPublicRepoRoleHolder ?? isGitHubPublicRepoRoleHolder;
+    let allowed: boolean;
+    try {
+      allowed = await isRoleHolder({
+        roomName: canonicalRoomName,
+        login: input.sessionAccount.login,
+        accessToken: input.sessionAccount.provider_access_token,
+        bypassCache: input.freshCollaboratorCheck,
+        throwOnIndeterminate: input.throwOnIndeterminate,
+      });
+    } catch (error) {
+      // Authority revalidation keeps its grant on an outage, by the throw.
+      if (input.throwOnIndeterminate || !(error instanceof GitHubAccessUnavailableError)) throw error;
+      return { kind: "repo_access_unavailable" };
+    }
+    return allowed ? { kind: "allow" } : { kind: "repo_collaborator_required" };
   }
 
   if (
@@ -634,13 +809,21 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
     return { kind: "private_repo_no_access" };
   }
 
-  const allowed = await deps.isCollaborator({
-    roomName: canonicalRoomName,
-    login: input.sessionAccount.login,
-    accessToken: input.sessionAccount.provider_access_token,
-    bypassCache: input.freshCollaboratorCheck,
-    throwOnIndeterminate: input.throwOnIndeterminate,
-  });
+  let allowed: boolean;
+  try {
+    allowed = await deps.isCollaborator({
+      roomName: canonicalRoomName,
+      login: input.sessionAccount.login,
+      accessToken: input.sessionAccount.provider_access_token,
+      bypassCache: input.freshCollaboratorCheck,
+      throwOnIndeterminate: input.throwOnIndeterminate,
+    });
+  } catch (error) {
+    // A GitHub outage is a retry, not "no access"; a dead or blocked token
+    // came back as false above. Authority revalidation keeps its throw.
+    if (input.throwOnIndeterminate || !(error instanceof GitHubAccessUnavailableError)) throw error;
+    return { kind: "repo_access_unavailable" };
+  }
 
   return allowed ? { kind: "allow" } : { kind: "private_repo_no_access" };
 }

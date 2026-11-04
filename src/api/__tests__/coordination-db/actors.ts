@@ -1,5 +1,16 @@
-import { databaseSkipReason, dbApi } from "./database.js";
+import { databaseSkipReason, dbApi, pool } from "./database.js";
 import { hashToken } from "../../db/utils.js";
+
+/** Makes the account a member of the room, as a room that is not tied to a repository requires. */
+export async function seedRoomMember(roomId: string, accountId: string): Promise<void> {
+  if (!pool) {
+    throw new Error(`DB-backed coordination tests require ${databaseSkipReason}`);
+  }
+  await pool.query(
+    "INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'seed') ON CONFLICT DO NOTHING",
+    [roomId, accountId],
+  );
+}
 
 export type CoordinationTestActor = {
   actor_label: string;

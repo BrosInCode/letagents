@@ -244,6 +244,9 @@ test("a mention reaches the bot's webhook once, signed; 5xx retries, 4xx does no
     assert.equal((await deliveries(rule.id)).length, rows.length);
 
     // People in the room see what the rule waits for, never the URL or secret.
+    // The room is members-only: an admin let this person in first.
+    await dbClient!.pool.query("INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'approved_request')",
+      [roomId, accounts.other]);
     const otherJoined = await call(other, "join_room", { name: "wake-webhook-flow" });
     assert.equal(otherJoined.room_id, roomId);
     const seen = await call(other, "list_wake_rules", { room_id: roomId });
@@ -484,6 +487,9 @@ test("a rule's bearer is sealed, never shown, sent on every attempt, and replace
     assert.equal(ownList.raw.includes(BEARER), false);
     const ownView = (ownList.active as Array<Record<string, any>>).find((entry) => entry.id === rule.id)!;
     assert.equal(ownView.delivery.has_bearer, true, "the owner sees that a key is stored, never the key");
+    // The room is members-only: an admin let this person in first.
+    await dbClient!.pool.query("INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'approved_request')",
+      [roomId, accounts.other]);
     await call(other, "join_room", { name: "wake-webhook-bearer" });
     const otherList = await call(other, "list_wake_rules", { room_id: roomId });
     assert.equal(otherList.raw.includes(BEARER), false);

@@ -7,6 +7,7 @@ import type {
   ProjectRepoAccessDecision,
   RepoRoomAccessDecision,
   RepoRoomAccessDenial,
+  RoomMembershipDecision,
 } from "../../rooms/access.js";
 import { normalizeRoomId, parseFocusRoomLocator } from "../../rooms/routing.js";
 import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
@@ -51,10 +52,20 @@ export interface RoomJoinRouteDeps {
     displayName?: string | null;
     source?: string | null;
   }): Promise<void>;
-  assignInitialProjectAdmin(input: {
-    projectId: string;
-    accountId: string;
-  }): Promise<void>;
+  /** The room as it exists now, before this request may create it. */
+  resolveExistingRoomRequest(roomId: string): Promise<Project | null | undefined>;
+  /** Makes the person the creator of a room nobody holds yet; false when someone does. */
+  claimRoomAsCreator(input: { projectId: string; accountId: string }): Promise<boolean>;
+  resolveRoomMembershipDecision(
+    project: Project,
+    sessionAccount: AuthenticatedRequest["sessionAccount"],
+  ): Promise<RoomMembershipDecision>;
+  replyRoomMembershipDecision(
+    res: Response,
+    project: Project,
+    sessionAccount: AuthenticatedRequest["sessionAccount"],
+    decision: Exclude<RoomMembershipDecision, { kind: "allow" }>,
+  ): Promise<false>;
   toRoomResponse(
     project: Project,
     options?: {
@@ -155,6 +166,14 @@ export function registerRoomJoinRoutes(
       }
     }
 
+    // Every room needs a sign-in: only members may read a room or wake its
+    // agents. A repo room answered above, with its own refusal when it has one.
+    if (!req.sessionAccount) {
+      deps.replyRepoRoomAccessDecision(res, joinAccessRoomName ?? roomId, { kind: "auth_required" });
+      return;
+    }
+
+    const existedBefore = Boolean(await deps.resolveExistingRoomRequest(roomId));
     const project = await deps.resolveRoomOrReply(roomId, res, {
       allowCreate: allowsJoinCreate(
         (req.query as Record<string, unknown> | undefined)?.create
@@ -176,14 +195,20 @@ export function registerRoomJoinRoutes(
       return;
     }
 
-    if (req.sessionAccount) {
-      if (projectAccess.isRepoBacked) {
-        await deps.resolveProjectRole(project, req.sessionAccount);
-      } else {
-        await deps.assignInitialProjectAdmin({
-          projectId: project.id,
-          accountId: req.sessionAccount.account_id,
-        });
+    if (projectAccess.isRepoBacked) {
+      await deps.resolveProjectRole(project, req.sessionAccount);
+    } else {
+      // The person who creates a room is its first admin and member. Everyone
+      // else must already be a member; a stranger asks to join instead.
+      const claimed = !existedBefore
+        && project.id === accessRoomId
+        && await deps.claimRoomAsCreator({ projectId: project.id, accountId: req.sessionAccount.account_id });
+      if (!claimed) {
+        const membership = await deps.resolveRoomMembershipDecision(project, req.sessionAccount);
+        if (membership.kind !== "allow") {
+          await deps.replyRoomMembershipDecision(res, project, req.sessionAccount, membership);
+          return;
+        }
       }
     }
 

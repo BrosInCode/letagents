@@ -383,6 +383,9 @@ test("subscribe verifies the callback, stores a sealed subscription bound to the
     assert.equal(ownView.delivery.cursor, String(numberOf(reply)));
     assert.equal(ownView.delivery.delivered_count, 2);
     assert.equal(mine.raw.includes("127.0.0.1") || mine.raw.includes(SECRET_A.slice(6, 20)) || mine.raw.includes(SECRET_B.slice(6, 20)), false);
+    // The room is members-only: an admin let this person in first.
+    await dbClient!.pool.query("INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'approved_request')",
+      [roomId, accounts.other]);
     await call(other, "join_room", { name: "mcp-events-flow" });
     const seen = await call(other, "list_wake_rules", { room_id: roomId });
     const otherView = (seen.active as Array<Record<string, any>>).find((entry) => entry.id === stored.id)!;
@@ -481,6 +484,37 @@ test("subscribe refuses what it must: unknown event, bad delivery, bad secret, a
     verifyMode = "echo";
     events!.configureMcpEventsForTests(null);
     await bot.close();
+  }
+});
+
+test("members only: a non-member cannot subscribe, and a removed member's subscription gets nothing more", { skip, timeout: 90_000 }, async () => {
+  events!.forgetMcpEventVerificationsForTests();
+  await drainOutbox();
+  const { bot, roomId } = await setUpRoom("mcp-events-members", TOKEN_BOT, false);
+  const other = await connect(TOKEN_OTHER);
+  try {
+    const refused = await rpcError(other, "events/subscribe", subscribeParams(roomId, {}, { any: true }));
+    assert.equal(refused.code, -32024, `${refused.code}: ${refused.message}`);
+    assert.match(refused.message, /cannot read this room/);
+    assert.equal((await dbClient!.pool.query("SELECT count(*)::int AS n FROM agent_wake_rules WHERE room_id = $1", [roomId])).rows[0].n, 0, "no rule for a non-member");
+
+    await dbClient!.pool.query("INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'approved_request')",
+      [roomId, accounts.other]);
+    const subscribed = await rpc(other, "events/subscribe", subscribeParams(roomId, {}, { any: true }));
+    const rule = await ruleBySubscription(subscribed.id);
+    await dbClient!.pool.query("DELETE FROM room_members WHERE room_id = $1 AND account_id = $2", [roomId, accounts.other]);
+
+    // The real authorizer (no stub): the removed member's account is denied before any POST.
+    await humanSays(roomId, "said after the removal");
+    await makeDue();
+    const sent = received.length;
+    await runWorker();
+    assert.equal(received.length, sent, "no event for a removed member");
+    const rows = await deliveries(rule.id);
+    assert.equal(rows.at(-1)!.state, "dead");
+    assert.equal((await ruleRow(rule.id)).delivery_last_error, "access_denied");
+  } finally {
+    await Promise.all([bot.close(), other.close()]);
   }
 });
 
@@ -702,6 +736,9 @@ test("a subscription never gets its own account's worker posts back (its person'
     assert.equal((await deliveries(rule.id)).length, 1, "the subscriber's own human post is delivered");
     // A person's message and another account's agent still are events.
     await humanSays(roomId, "hello from Ada");
+    // The room is members-only: an admin let this person in first.
+    await dbClient!.pool.query("INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'approved_request')",
+      [roomId, accounts.other]);
     await call(other, "join_room", { name: "mcp-events-echo" });
     const otherWorker = await call(other, "register_agent_session", { room_id: roomId, display_name: "otherbot", runtime: "hosted-bot" });
     const theirs = await call(other, "send_message", { room_id: roomId, agent_session_id: otherWorker.agent_session_id, text: "hello from otherbot" });

@@ -24,6 +24,13 @@ async function seedKatrinPushDevice(): Promise<void> {
      VALUES ('acct-katrin', 'github', $1, 'katrin', $2, $2)`,
     [katrinGitHubUserId, now]
   );
+  // A GitHub sign-in: a public repository room admits a person with a GitHub role only.
+  await dbModule!.createSession(
+    "acct-katrin",
+    "token-katrin",
+    new Date(Date.now() + 60 * 60_000).toISOString(),
+    "github-token-katrin"
+  );
   await pool!.query(`
     INSERT INTO desktop_push_devices (
       id, account_id, installation_id, device_token, token_hash, bundle_id,

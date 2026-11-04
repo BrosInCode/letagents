@@ -12,7 +12,7 @@ import {
   type DesktopPushAuthorizationDecision,
 } from "../notifications/authorization.js";
 import { getPushDeliveryAccount } from "../notifications/push-account.js";
-import { resolveProjectRepoRoomAccessDecision } from "../rooms/access.js";
+import { isProjectRoomMember, resolveProjectRepoRoomAccessDecision } from "../rooms/access.js";
 import type { NormalizedMessageAttachmentReference } from "../messages/attachments.js";
 import type { MessageRecipientAgentTarget } from "../db/types.js";
 import {
@@ -130,6 +130,7 @@ const resolveAccountRoomAccessForEmit: AccountRoomAccessResolver = (input) =>
     getProject: getProjectById,
     getAccount: getPushDeliveryAccount,
     resolveAccess: resolveProjectRepoRoomAccessDecision,
+    isRoomMember: isProjectRoomMember,
   });
 
 export interface AccountIdsWithRoomAccess {
@@ -140,8 +141,9 @@ export interface AccountIdsWithRoomAccess {
 }
 
 /**
- * Keeps the accounts that may read the room. A room that is not backed by a
- * repository keeps every account. An allow goes to both lists. A retry goes
+ * Keeps the accounts that may read the room: members of a room that is not
+ * backed by a repository, people with access to a repo room. An allow goes to
+ * both lists. A retry goes
  * only to notify, because the push worker checks again before it sends. A deny
  * goes to neither list. A thrown error drops the account and never fails the message.
  */

@@ -128,11 +128,12 @@ export function getSupervisorAccessRevocationTarget(
     };
   }
   const memberLogin = payload.member?.login?.trim();
+  // Public repositories too: their rooms admit only people with a GitHub role,
+  // so a removed collaborator's supervised agents must stop as well.
   if (
     eventName === "member"
     && payload.action === "removed"
     && memberLogin
-    && payload.repository?.private !== false
   ) {
     return {
       repository_full_name: repositoryFullName,

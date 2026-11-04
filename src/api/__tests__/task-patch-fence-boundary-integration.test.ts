@@ -857,6 +857,8 @@ test("HTTP verified session-token worker registration supports atomic approval a
   const task = await f.freshTask();
   const token = randomUUID();
   await db!.createOwnerToken({ accountId: f.ownerId, githubUserId: f.ownerId, token });
+  // The owner acts in a room without a repository, so the owner must be a member (not an admin).
+  await client!.pool.query("INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'seed')", [f.room.id, f.ownerId]);
   const registered = await f.request(token, "board-intents", {
     action_type: "task_claim", agent_session_id: f.from.session_id, agent_session_token: f.from.session_token,
     payload: { task_id: task.id, status: "assigned", assignee: f.from.actor_label, assignee_agent_key: f.from.agent_key, pr_url: null },

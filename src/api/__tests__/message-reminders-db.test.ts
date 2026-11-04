@@ -127,7 +127,7 @@ test("access revoked at delivery emits no preview and redacts only that account'
   const claimed=await worker!.claimReminderDeliveries("w"), sent: ApnsNotificationInput[]=[];
   const denied=claimed.find(r=>r.account_id===input.accountId)!;
   await worker!.deliverNotification(client(sent),"w",denied,()=>authorizeDesktopPushNotification({accountId:input.accountId,roomId:input.roomId},{
-    getProject:async()=>({id:input.roomId} as any),getAccount:async()=>({account_id:input.accountId,provider:"github",login:"one",provider_access_token:"test"}),
+    getProject:async()=>({id:input.roomId} as any),getAccount:async()=>({account_id:input.accountId,provider:"github",login:"one",provider_access_token:"test"}),isRoomMember:async()=>false,
     resolveAccess:async({freshCollaboratorCheck})=>{assert.equal(freshCollaboratorCheck,true);return {isRepoBacked:true,decision:{kind:"deny"}} as any;},
   }));
   assert.equal(sent.length,0);

@@ -1,6 +1,9 @@
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
+import { getGitRoomBindingsForRooms } from "../db/git-room-bindings.js";
+import { memberRoomIdsForAccount } from "../db/room-members.js";
+import { isRepoBackedRoomId } from "../rooms/room-ids.js";
 import {
   account_room_recents,
   messages,
@@ -24,6 +27,9 @@ import type {
   AccountRoomCandidate,
   AccountRoomListEntry,
 } from "./types.js";
+
+/** Repo rooms checked at once; each check is cached, so most cost no GitHub call. */
+const REPO_ACCESS_CHECK_CONCURRENCY = 8;
 
 type LatestRoomMessage = {
   latest_message_id: string | null;
@@ -230,6 +236,35 @@ export async function getAccountRoomsForAccount(
         directParentAccess: fallback?.directParentAccess ?? false,
         firstOpenedAt: fallback?.first_opened_at ?? parent.created_at,
         lastOpenedAt: fallback?.last_opened_at ?? parent.created_at,
+      }));
+    }
+  }
+
+  // A room's name and activity are room data, so the list shows a room, with
+  // its focus rooms, only to a person who may open it: a member of a room
+  // that is not tied to a repository; for a repo room, a person the cached
+  // repository access check allows, or cannot decide yet (GitHub gave no
+  // answer). A definite refusal drops the room.
+  const dropParent = (roomId: string) => {
+    parentCandidates.delete(roomId);
+    parentRoomIds.delete(roomId);
+  };
+  const unboundParentIds = [...parentCandidates.keys()].filter((roomId) => !isRepoBackedRoomId(roomId));
+  const [memberRoomIds, bindings] = await Promise.all([
+    memberRoomIdsForAccount(accountId, unboundParentIds),
+    getGitRoomBindingsForRooms(unboundParentIds),
+  ]);
+  const repoParentIds: string[] = [];
+  for (const roomId of parentCandidates.keys()) {
+    if (isRepoBackedRoomId(roomId) || bindings.get(roomId)?.provider === "github") repoParentIds.push(roomId);
+    else if (!memberRoomIds.has(roomId)) dropParent(roomId);
+  }
+  if (repoParentIds.length) {
+    const { filterAccountIdsWithRoomAccess } = await import("../server/events.js");
+    for (let index = 0; index < repoParentIds.length; index += REPO_ACCESS_CHECK_CONCURRENCY) {
+      await Promise.all(repoParentIds.slice(index, index + REPO_ACCESS_CHECK_CONCURRENCY).map(async (roomId) => {
+        const access = await filterAccountIdsWithRoomAccess(roomId, [accountId]);
+        if (!access.notify.includes(accountId)) dropParent(roomId);
       }));
     }
   }

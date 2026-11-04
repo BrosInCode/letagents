@@ -170,13 +170,25 @@ export async function provisionRentalRoom(
       };
     }
 
+    // The rental room goes under the room the renter chose (for a legacy
+    // repository rental, the repository's room), never under a room the
+    // provider names: its worker would read that room's activity.
+    const allowedParentRoomId = session.target_room_id
+      ?? (session.repo_owner && session.repo_name ? `github.com/${session.repo_owner}/${session.repo_name}` : null);
+    if (!allowedParentRoomId || allowedParentRoomId.toLowerCase() !== parentRoomId.toLowerCase()) {
+      throw new Error("parent_room_mismatch");
+    }
+    // The renter's room id as stored (a foreign key), else the repository room
+    // as the provider spelled it, which matched case-insensitively above.
+    const parentId = session.target_room_id ?? parentRoomId;
+
     const focusKey = `rental:${sessionId}`;
     const [existingRoom] = await tx
       .select({ id: rooms.id })
       .from(rooms)
       .where(
         and(
-          eq(rooms.parent_room_id, parentRoomId),
+          eq(rooms.parent_room_id, parentId),
           eq(rooms.focus_key, focusKey),
         ),
       )
@@ -190,7 +202,7 @@ export async function provisionRentalRoom(
         id: roomId,
         display_name: `Rental: ${session.task_title}`,
         kind: "focus",
-        parent_room_id: parentRoomId,
+        parent_room_id: parentId,
         focus_key: focusKey,
         focus_status: "active",
         focus_parent_visibility: "summary_only",

@@ -856,10 +856,14 @@ async function startBoardRouteServer(room: { id: string }) {
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const address = server.address() as { port: number };
   return {
-    async call(method: string, suffix: string, body: unknown, bearer: string | null) {
+    async call(method: string, suffix: string, body: unknown, bearer: string | null, sessionToken?: string) {
       const response = await fetch(`http://127.0.0.1:${address.port}/rooms/${encodeURIComponent(room.id)}/${suffix}`, {
         method, body: JSON.stringify(body),
-        headers: { ...(bearer ? { authorization: `Bearer ${bearer}` } : {}), "content-type": "application/json" },
+        headers: {
+          ...(bearer ? { authorization: `Bearer ${bearer}` } : {}),
+          ...(sessionToken ? { cookie: `letagents_session=${encodeURIComponent(sessionToken)}` } : {}),
+          "content-type": "application/json",
+        },
       });
       return { status: response.status, body: await response.json() as any };
     },
@@ -1173,12 +1177,24 @@ test("approvals end with the task state, mode and manager they were granted unde
     );
     assert.equal((await dbModule!.getTaskById(room.id, task.id))!.status, "merged");
 
-    // Proposer fields sent by an unauthenticated caller prove nothing: a worker
-    // cannot carry out an intent registered that way, even once approved.
-    const spoofed = await call("POST", "board-intents", {
+    // Every room needs a sign-in: a caller with none is refused before any proposer field is read.
+    const anonymous = await call("POST", "board-intents", {
       action_type: "task_close", task_id: task.id, payload: closePayload,
       actor_label: worker.actor_label, actor_key: worker.agent_key, agent_session_id: worker.session_id,
     }, null);
+    assert.equal(anonymous.status, 401, JSON.stringify(anonymous.body));
+    assert.equal(anonymous.body.code, "NOT_AUTHENTICATED");
+
+    // Proposer fields sent by a member who is a person, not a worker, prove
+    // nothing: a worker cannot carry out an intent registered that way, even
+    // once approved.
+    const memberSession = "board-member-session-token";
+    await dbModule!.createSession("acct_bearer_test", memberSession, new Date(Date.now() + 60 * 60_000).toISOString());
+    await pool!.query("INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, 'acct_bearer_test', 'seed')", [room.id]);
+    const spoofed = await call("POST", "board-intents", {
+      action_type: "task_close", task_id: task.id, payload: closePayload,
+      actor_label: worker.actor_label, actor_key: worker.agent_key, agent_session_id: worker.session_id,
+    }, null, memberSession);
     assert.equal(spoofed.status, 201, JSON.stringify(spoofed.body));
     assert.equal(spoofed.body.intent.proposer_agent_session_id, worker.session_id);
     await pool!.query("UPDATE tasks SET assignee_agent_key = $1 WHERE room_id = $2 AND number = $3",
@@ -1193,7 +1209,7 @@ test("approvals end with the task state, mode and manager they were granted unde
     const squatted = await call("POST", "board-intents", {
       action_type: "task_close", task_id: task.id, payload: { ...closePayload, status: "cancelled" },
       actor_label: worker.actor_label, actor_key: worker.agent_key, agent_session_id: worker.session_id,
-    }, null);
+    }, null, memberSession);
     const ownRequest = await register(worker.worker_bearer!, "task_close", { ...closePayload, status: "cancelled" });
     assert.notEqual(ownRequest, squatted.body.intent.id);
     assert.equal(await register(worker.worker_bearer!, "task_close", { ...closePayload, status: "cancelled" }), ownRequest,

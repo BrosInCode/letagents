@@ -3,7 +3,6 @@ import type { Express, Response } from "express";
 import {
   createProject,
   getAgentIdentitiesForOwner,
-  getAllProjects,
   getOrCreateCanonicalRoom,
   getProjectByCode,
   getProjectById,
@@ -17,16 +16,18 @@ import {
   type AuthenticatedRequest,
   type ResolvedRequestAuth,
 } from "../../http/helpers.js";
+import { listMemberRooms } from "../../db/room-members.js";
 import type {
   ProjectRepoAccessDecision,
   RepoRoomAccessDecision,
   RepoRoomAccessDenial,
+  RoomMembershipDecision,
 } from "../../rooms/access.js";
 import {
   formatGitRoomSummary,
   formatManualGitRoomSummaryForRoomId,
 } from "../../rooms/formatting.js";
-import { isInviteCode, isReservedMainRoomCreationId, normalizeRoomId } from "../../rooms/routing.js";
+import { isReservedMainRoomCreationId, normalizeRoomId } from "../../rooms/routing.js";
 import { isMessageSenderWithinBounds } from "../../../../shared/message-contracts.mjs";
 
 export interface LegacyProjectRouteDeps {
@@ -67,6 +68,22 @@ export interface LegacyProjectRouteDeps {
     source?: string | null;
   }): Promise<void>;
   getGitRoomBindingForRoom?(roomId: string): Promise<GitRoomBinding | null>;
+  resolveRoomMembershipDecision(
+    project: Project,
+    sessionAccount: AuthenticatedRequest["sessionAccount"],
+  ): Promise<RoomMembershipDecision>;
+  replyRoomMembershipDecision(
+    res: Response,
+    project: Project,
+    sessionAccount: AuthenticatedRequest["sessionAccount"],
+    decision: Exclude<RoomMembershipDecision, { kind: "allow" }>,
+  ): Promise<false>;
+}
+
+function requireSignIn(req: AuthenticatedRequest, res: Response): NonNullable<AuthenticatedRequest["sessionAccount"]> | null {
+  if (req.sessionAccount) return req.sessionAccount;
+  res.status(401).json({ error: "auth_required", code: "NOT_AUTHENTICATED", message: "Sign in to LetAgents first." });
+  return null;
 }
 
 export function buildLegacyProjectRoomResponse(
@@ -94,30 +111,27 @@ export function registerLegacyProjectRoutes(
       res.status(401).json({ error: "Authentication required" });
       return;
     }
-    const projects = await getAllProjects();
-    // Exclude invite-only rooms; their IDs are their join codes.
-    const safeProjects = projects
-      .filter(({ id }) => !isInviteCode(id))
-      .map(({ id, display_name }) => ({ id, display_name }));
-    res.json({ projects: safeProjects });
+    // Only the rooms the person is a member of: a room's name is room data.
+    res.json({ projects: await listMemberRooms(account.account_id) });
   });
 
   app.post("/projects", async (req: AuthenticatedRequest, res) => {
+    const account = requireSignIn(req, res);
+    if (!account) return;
     const project = await createProject();
-    if (req.sessionAccount) {
-      await recordRoomCreator(project.id, req.sessionAccount.account_id);
-      await deps.rememberAccountRoom({
-        accountId: req.sessionAccount.account_id,
-        roomId: project.id,
-        displayName: project.display_name,
-        source: "create_invite",
-      });
-    }
+    await recordRoomCreator(project.id, account.account_id);
+    await deps.rememberAccountRoom({
+      accountId: account.account_id,
+      roomId: project.id,
+      displayName: project.display_name,
+      source: "create_invite",
+    });
     res.status(201).json(project);
   });
 
-  app.get("/projects/join/:code", async (req, res) => {
-    const code = normalizeRoomId(req.params.code);
+  app.get("/projects/join/:code", async (req: AuthenticatedRequest, res) => {
+    if (!requireSignIn(req, res)) return;
+    const code = normalizeRoomId(String(req.params.code));
     const project = await getProjectByCode(code);
 
     if (!project) {
@@ -154,6 +168,11 @@ export function registerLegacyProjectRoutes(
       }
     }
 
+    // Every room needs a sign-in. A repo room answered above, with its own
+    // refusal when it has one.
+    const account = requireSignIn(req, res);
+    if (!account) return;
+
     const { room: project, created } = await getOrCreateCanonicalRoom(roomId);
     const projectAccess = await deps.resolveProjectRepoRoomAccessDecision({
       project,
@@ -168,11 +187,16 @@ export function registerLegacyProjectRoutes(
       return;
     }
 
-    if (req.sessionAccount && created) {
-      if (projectAccess.isRepoBacked) {
-        await deps.resolveProjectRole(project, req.sessionAccount);
-      } else {
-        await recordRoomCreator(project.id, req.sessionAccount.account_id);
+    if (projectAccess.isRepoBacked) {
+      if (created) await deps.resolveProjectRole(project, account);
+    } else if (created) {
+      await recordRoomCreator(project.id, account.account_id);
+    } else {
+      // An existing room opens for its members only; a stranger asks to join.
+      const membership = await deps.resolveRoomMembershipDecision(project, account);
+      if (membership.kind !== "allow") {
+        await deps.replyRoomMembershipDecision(res, project, account, membership);
+        return;
       }
     }
 

@@ -32,9 +32,12 @@ function createDeps() {
       decision: { kind: "allow" as const },
     }),
     resolveProjectRole: unused,
-    rememberHumanRoomParticipant: unused,
-    rememberAccountRoom: unused,
-    assignInitialProjectAdmin: unused,
+    rememberHumanRoomParticipant: async () => {},
+    rememberAccountRoom: async () => {},
+    resolveExistingRoomRequest: async () => null,
+    claimRoomAsCreator: unused,
+    resolveRoomMembershipDecision: async () => ({ kind: "allow" as const }),
+    replyRoomMembershipDecision: unused,
     toRoomResponse: () => ({}),
   };
 }
@@ -88,8 +91,9 @@ test("join route can resolve existing rooms without creating missing ones", asyn
       resolveOptions.push(options);
       return project as never;
     },
+    resolveExistingRoomRequest: async () => project as never,
     getProjectAccessRoomId: () => project.id,
-    resolveProjectRole: async () => "anonymous",
+    resolveProjectRole: async () => "participant",
     toRoomResponse: () => ({ room_id: project.id }),
   } as never);
 
@@ -100,7 +104,7 @@ test("join route can resolve existing rooms without creating missing ones", asyn
       query: { create: "false" },
       headers: {},
       socket: { remoteAddress: "192.0.2.21" },
-      sessionAccount: null,
+      sessionAccount: { account_id: "acct_member" },
     },
     response as never
   );
@@ -288,71 +292,55 @@ test("join route applies repo access denial before resolving a contextual Git re
   });
 });
 
-test("non-repo joins initialize first admin without forcing every joiner to admin", async () => {
-  let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
-  const app = {
-    post(_path: RegExp, registeredHandler: typeof handler) {
-      handler = registeredHandler;
-    },
-  };
-  const response = {
-    statusCode: 200,
-    body: undefined as unknown,
-    status(code: number) {
-      this.statusCode = code;
-      return this;
-    },
-    json(payload: unknown) {
-      this.body = payload;
-      return this;
-    },
-  };
-  const assignedAdmins: Array<{ projectId: string; accountId: string }> = [];
-  const project = {
-    id: "room_non_repo",
-    display_name: "General Room",
-  };
+test("non-repo joins: the creator of a new room claims it; anyone else must already be a member", async () => {
+  const project = { id: "room_non_repo", display_name: "General Room" };
+  async function join(input: { existed: boolean; member: boolean; claimWins?: boolean }) {
+    let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
+    const response = {
+      statusCode: 200,
+      body: undefined as unknown,
+      status(code: number) { this.statusCode = code; return this; },
+      json(payload: unknown) { this.body = payload; return this; },
+    };
+    const claims: Array<{ projectId: string; accountId: string }> = [];
+    registerRoomJoinRoutes({ post: (_path: RegExp, registered: typeof handler) => { handler = registered; } } as never, {
+      ...createDeps(),
+      resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+      resolveRoomOrReply: async () => project as never,
+      resolveExistingRoomRequest: async () => (input.existed ? project : null) as never,
+      claimRoomAsCreator: async (claim: { projectId: string; accountId: string }) => {
+        claims.push(claim);
+        return input.claimWins ?? true;
+      },
+      resolveRoomMembershipDecision: async () => ({ kind: input.member ? "allow" as const : "membership_required" as const }),
+      replyRoomMembershipDecision: async (res: { status(code: number): { json(body: unknown): unknown } }) => {
+        res.status(403).json({ code: "ROOM_MEMBERSHIP_REQUIRED" });
+        return false;
+      },
+      getProjectAccessRoomId: () => project.id,
+      resolveProjectRole: async () => "admin",
+      toRoomResponse: (_project: unknown, options?: { role?: string }) => ({ id: project.id, role: options?.role }),
+    } as never);
+    await handler!(
+      { params: { 0: "general" }, headers: {}, socket: { remoteAddress: "192.0.2.17" }, sessionAccount: { account_id: "acct_joiner" } },
+      response as never,
+    );
+    return { response, claims };
+  }
 
-  registerRoomJoinRoutes(app as never, {
-    ...createDeps(),
-    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
-    isRepoBackedRoomId: () => false,
-    resolveRoomOrReply: async () => project as never,
-    getProjectAccessRoomId: () => project.id,
-    isRepoBackedProject: () => false,
-    assignInitialProjectAdmin: async (input) => {
-      assignedAdmins.push(input);
-    },
-    resolveProjectRole: async () => "participant",
-    rememberHumanRoomParticipant: async () => {},
-    rememberAccountRoom: async () => {},
-    toRoomResponse: (_project, options) => ({
-      id: project.id,
-      role: options?.role,
-      authenticated: options?.authenticated,
-    }),
-  } as never);
+  const created = await join({ existed: false, member: false });
+  assert.equal(created.response.statusCode, 200);
+  assert.deepEqual(created.claims, [{ projectId: "room_non_repo", accountId: "acct_joiner" }]);
 
-  assert.ok(handler);
-  await handler(
-    {
-      params: { 0: "general" },
-      headers: {},
-      socket: { remoteAddress: "192.0.2.17" },
-      sessionAccount: { account_id: "acct_later_joiner" },
-    },
-    response as never,
-  );
+  const stranger = await join({ existed: true, member: false });
+  assert.equal(stranger.response.statusCode, 403);
+  assert.deepEqual(stranger.claims, [], "nobody claims a room that existed before the request");
 
-  assert.equal(response.statusCode, 200);
-  assert.deepEqual(assignedAdmins, [
-    { projectId: "room_non_repo", accountId: "acct_later_joiner" },
-  ]);
-  assert.deepEqual(response.body, {
-    id: "room_non_repo",
-    role: "participant",
-    authenticated: true,
-  });
+  const member = await join({ existed: true, member: true });
+  assert.equal(member.response.statusCode, 200);
+
+  const lostRace = await join({ existed: false, member: false, claimWins: false });
+  assert.equal(lostRace.response.statusCode, 403, "a person who lost a creation race is a stranger to the room");
 });
 
 test("canonical focus joins authorize after resolution and prefer the current Git Room binding", async () => {
@@ -406,7 +394,7 @@ test("canonical focus joins authorize after resolution and prefer the current Gi
         : roomId === project.parent_room_id
           ? parentBinding as never
           : null,
-    resolveProjectRole: async () => "anonymous",
+    resolveProjectRole: async () => "participant",
     toRoomResponse: (_project, options) => ({
       id: project.id,
       gitRoomBinding: options?.gitRoomBinding,
@@ -419,7 +407,7 @@ test("canonical focus joins authorize after resolution and prefer the current Gi
       params: { 0: project.id },
       headers: {},
       socket: { remoteAddress: "192.0.2.19" },
-      sessionAccount: null,
+      sessionAccount: { account_id: "acct_collaborator" },
     },
     response as never
   );
@@ -566,7 +554,12 @@ test("join route sends GitHub host aliases to the access check as the real githu
   }
 });
 
-async function joinThroughRoute(roomId: string, overrides: Record<string, unknown>, remoteAddress: string) {
+async function joinThroughRoute(
+  roomId: string,
+  overrides: Record<string, unknown>,
+  remoteAddress: string,
+  sessionAccount: Record<string, unknown> | null = null,
+) {
   let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
   const app = {
     post(_path: RegExp, registeredHandler: typeof handler) {
@@ -593,7 +586,7 @@ async function joinThroughRoute(roomId: string, overrides: Record<string, unknow
   } as never);
   assert.ok(handler);
   await handler(
-    { params: { 0: roomId }, headers: {}, socket: { remoteAddress }, sessionAccount: null },
+    { params: { 0: roomId }, headers: {}, socket: { remoteAddress }, sessionAccount },
     response as never
   );
   return response;
@@ -612,11 +605,13 @@ test("join route does not treat a focus locator under an ad-hoc parent as a repo
       },
       replyRepoRoomAccessDecision,
       resolveRoomOrReply: async () => focusRoom,
+      resolveExistingRoomRequest: async () => focusRoom,
       getProjectAccessRoomId: () => focusRoom.parent_room_id,
-      resolveProjectRole: async () => "anonymous",
+      resolveProjectRole: async () => "participant",
       toRoomResponse: () => ({ room_id: focusRoom.id }),
     },
-    "192.0.2.81"
+    "192.0.2.81",
+    { account_id: "acct_member" },
   );
 
   assert.deepEqual(accessChecks, [], "an ad-hoc parent gets no repo pre-check on the raw locator");

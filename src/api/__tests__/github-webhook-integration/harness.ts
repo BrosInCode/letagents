@@ -129,7 +129,15 @@ async function startGitHubApiStub(): Promise<{ baseUrl: string; close: () => Pro
     const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname.toLowerCase();
     const known = req.method === "GET" && pathname === repoPath;
     res.writeHead(known ? 200 : 404, { "content-type": "application/json" });
-    res.end(JSON.stringify(known ? { private: false, full_name: repoRoomName } : { message: "Not Found" }));
+    res.end(JSON.stringify(known
+      ? {
+        private: false,
+        full_name: repoRoomName,
+        // GitHub reports the caller's own role. A caller with a token has the
+        // triage role here, which a public repository room requires.
+        ...(req.headers.authorization ? { permissions: { pull: true, triage: true } } : {}),
+      }
+      : { message: "Not Found" }));
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
   const address = server.address();
