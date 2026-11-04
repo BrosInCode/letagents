@@ -453,7 +453,20 @@ test("a fresh room decision bypasses both visibility and collaborator caches", a
   assert.deepEqual(decision, { kind: "allow" });
   assert.equal(visibilityBypassed, true);
   assert.equal(collaboratorBypassed, true);
-  assert.equal(indeterminateThrows, false, "fresh cache bypass does not change existing caller error contracts");
+  assert.equal(indeterminateThrows, true, "the decision asks for the throw, to tell 'no answer' from 'no access'");
+
+  const unanswered = await resolveGitHubRepoRoomAccessDecision(
+    {
+      roomName: "github.com/brosincode/secret-repo",
+      sessionAccount: { provider: "github", provider_access_token: "secret-token", login: "EmmyMay" },
+      freshCollaboratorCheck: true,
+    },
+    {
+      getVisibility: async () => "private",
+      isCollaborator: async () => { throw new Error("GitHub collaborator revalidation was indeterminate (503)."); },
+    },
+  );
+  assert.deepEqual(unanswered, { kind: "repo_access_unavailable" }, "a caller that did not opt in gets a retry, not a refusal");
 });
 
 test("authority callers explicitly opt into indeterminate provider errors", async () => {

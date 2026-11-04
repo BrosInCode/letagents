@@ -1,6 +1,8 @@
 import type { Response } from "express";
 
 import {
+  REPO_ACCESS_UNAVAILABLE,
+  REPO_ACCESS_UNAVAILABLE_MESSAGE,
   repoCollaboratorRequiredBody,
   roomMembershipRequiredBody,
 } from "../../../shared/room-membership.mjs";
@@ -235,12 +237,7 @@ export function replyRepoRoomAccessDecision(
   if (decision.kind === "repo_access_unavailable") {
     // Not a refusal: GitHub gave no answer, so the client should retry.
     res.setHeader?.("Retry-After", "30");
-    res.status(503).json({
-      error: "repo_access_unavailable",
-      code: "REPO_ACCESS_UNAVAILABLE",
-      message: "GitHub did not answer the repository access check. Please retry.",
-      room_id: roomName,
-    });
+    res.status(503).json({ ...REPO_ACCESS_UNAVAILABLE, message: REPO_ACCESS_UNAVAILABLE_MESSAGE, room_id: roomName });
     return false;
   }
 
@@ -608,7 +605,13 @@ export async function resolveProjectRoomEntryDecision(input: {
     sessionAccount: input.sessionAccount,
   });
 
-  if (!accessDecision.isRepoBacked || accessDecision.decision.kind === "allow") {
+  // GitHub gave no answer: serve the app, whose own room calls get the 503
+  // and retry, instead of a landing page that says the access is missing.
+  if (
+    !accessDecision.isRepoBacked
+    || accessDecision.decision.kind === "allow"
+    || accessDecision.decision.kind === "repo_access_unavailable"
+  ) {
     return { kind: "allow" };
   }
 
@@ -635,7 +638,7 @@ export async function resolveGitHubRoomEntryDecision(input: {
     sessionAccount: input.sessionAccount,
   });
 
-  if (decision.kind === "allow") {
+  if (decision.kind === "allow" || decision.kind === "repo_access_unavailable") {
     return { kind: "allow" };
   }
 

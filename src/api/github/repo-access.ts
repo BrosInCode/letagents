@@ -774,13 +774,21 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
     return { kind: "private_repo_no_access" };
   }
 
-  const allowed = await deps.isCollaborator({
-    roomName: canonicalRoomName,
-    login: input.sessionAccount.login,
-    accessToken: input.sessionAccount.provider_access_token,
-    bypassCache: input.freshCollaboratorCheck,
-    throwOnIndeterminate: input.throwOnIndeterminate,
-  });
+  let allowed: boolean;
+  try {
+    // Always ask for the throw, so an unanswered check (outage, rate limit,
+    // expired token) is told apart from "no access".
+    allowed = await deps.isCollaborator({
+      roomName: canonicalRoomName,
+      login: input.sessionAccount.login,
+      accessToken: input.sessionAccount.provider_access_token,
+      bypassCache: input.freshCollaboratorCheck,
+      throwOnIndeterminate: true,
+    });
+  } catch (error) {
+    if (input.throwOnIndeterminate) throw error;
+    return { kind: "repo_access_unavailable" };
+  }
 
   return allowed ? { kind: "allow" } : { kind: "private_repo_no_access" };
 }

@@ -455,3 +455,20 @@ test("an unanswered GitHub role check answers 503 to retry, never a refusal or a
   assert.equal((state.body as { code?: string }).code, "REPO_ACCESS_UNAVAILABLE");
   assert.equal((state.body as { room_id?: string }).room_id, "github.com/acme/app");
 });
+
+test("a repo room page loads the app while GitHub gives no answer, so the app's calls can retry", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response(JSON.stringify({ message: "unavailable" }), {
+    status: 503, headers: { "content-type": "application/json" },
+  })) as typeof fetch;
+  try {
+    const decision = await resolveGitHubRoomEntryDecision({
+      roomName: `github.com/acme/entry-outage-${Date.now()}`,
+      sessionAccount: { account_id: "acct_1", provider: "github", login: "someone", provider_access_token: "token" },
+      redirectTo: "/in/github.com/acme/app",
+    });
+    assert.deepEqual(decision, { kind: "allow" }, "no 'access denied' landing page for an outage");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
