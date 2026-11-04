@@ -43,7 +43,8 @@ function isWakeRule(value: unknown): value is WakeRule {
     && typeof value.status === 'string'
     && typeof value.created_at === 'string'
     && typeof value.updated_at === 'string'
-    && typeof value.expires_at === 'string'
+    // A webhook rule may last until it is cancelled.
+    && (typeof value.expires_at === 'string' || value.expires_at === null)
 }
 
 export function parseWakeRulePage(value: unknown): WakeRulePage | null {

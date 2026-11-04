@@ -55,6 +55,7 @@ import {
   SupervisorGrantFenceStaleError,
   type SupervisorGrantFence,
 } from "./supervisor-grants.js";
+import { retireWakeRulesForCredential } from "../wake-rule-credentials.js";
 
 const MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION = 128;
 
@@ -1449,6 +1450,8 @@ export async function endRoomAgentSession(input: {
         isNull(room_agent_session_bearers.revoked_at),
       ));
     await retireRoomAgentDeliveryTx(tx, [row.session_id], now);
+    // Webhook and email wake rules this session registered with its bearer stop with it.
+    await retireWakeRulesForCredential(tx, "agent_session", row.session_id);
     credentialInvalidations.push({
       room_id: row.room_id,
       agent_session_id: row.session_id,

@@ -18,6 +18,7 @@ import { resolveMessageRoutingContext } from "./routing-context.js";
 import { routeMessageToActiveSessions } from "./receipt-routing.js";
 import { routeAddressedMessage } from "./addressed.js";
 import { markAnsweredReceiptsReplied } from "./reply-receipts.js";
+import { enqueueWakeWebhooksForMessageTx } from "../../../wake-rules/webhook-enqueue.js";
 
 export async function addMessageWithCreateStatus(
   roomId: string,
@@ -97,6 +98,15 @@ export async function addMessageWithCreateStatus(
         + ` ${activeSessions.length} active sessions, ${receiptCount} receipts)`,
       );
     }
+
+    // Hosted bots woken by webhook follow the same routing decision, committed with the message.
+    await enqueueWakeWebhooksForMessageTx(tx, createdMessage, {
+      promptOnly: createdMessageIsPromptOnly,
+      addressedAgentKey: addressedTo?.agent_key ?? null,
+      recipientAgentKeys,
+      activeSessions,
+      routingMessage: routing.messageForRouting,
+    });
 
     await markAnsweredReceiptsReplied(tx, roomId, createdMessage, clientMessageId, repliedReceiptTargets, releasedReplyTurns);
 

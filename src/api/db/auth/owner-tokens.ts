@@ -4,6 +4,7 @@ import { db } from "../client.js";
 import { accounts, owner_tokens } from "../schema.js";
 import { hashToken, nextPrefixedId } from "../utils.js";
 import type { OwnerToken, OwnerTokenAccount } from "../types.js";
+import { retireWakeRulesForCredential } from "../wake-rule-credentials.js";
 
 export async function createOwnerToken(input: {
   accountId: string;
@@ -62,5 +63,10 @@ export async function getOwnerTokenAccountByTokenHash(tokenHash: string): Promis
 }
 
 export async function deleteOwnerTokenById(tokenId: string): Promise<void> {
-  await db.delete(owner_tokens).where(eq(owner_tokens.token_id, tokenId));
+  await db.transaction(async (tx) => {
+    const [deleted] = await tx.delete(owner_tokens).where(eq(owner_tokens.token_id, tokenId))
+      .returning({ token_hash: owner_tokens.token_hash });
+    // Webhook and email wake rules the token registered stop with it.
+    if (deleted) await retireWakeRulesForCredential(tx, "token", deleted.token_hash);
+  });
 }

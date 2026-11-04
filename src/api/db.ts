@@ -48,6 +48,7 @@ export {
   assignProjectAdminIfRoomHasNoAdmins,
   isProjectAdmin,
 } from "./db/auth.js";
+export { recordRoomCreator } from "./db/room-members.js";
 export {
   getSupervisorGrantOwnerAccount,
   listSupervisorGrantAuthoritiesForRepository,
