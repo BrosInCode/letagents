@@ -65,6 +65,7 @@ let RoomJoinAccess: Component;
 let RoomMembers: Component;
 let InboxView: Component;
 let joinRequestsStore: typeof import("../src/composables/useRoomJoinRequests");
+let roomAccessChangedKey: symbol;
 
 /** Gives a component loaded for SSR the client render function this host renderer needs. */
 async function useClientRender(component: Component, path: string, vue: Record<string, unknown> = Vue): Promise<void> {
@@ -90,6 +91,7 @@ before(async () => {
   RoomMembers = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-shell/RoomMembers.vue")).default;
   InboxView = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/InboxView.vue")).default;
   joinRequestsStore = await vite.ssrLoadModule("/renderer/src/composables/useRoomJoinRequests.ts") as typeof joinRequestsStore;
+  roomAccessChangedKey = (await vite.ssrLoadModule("/renderer/src/composables/roomAccessChanged.ts")).roomAccessChangedKey;
   const ChatAvatar = (await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/ChatAvatar.vue", import.meta.url)))).default;
   await useClientRender(ChatAvatar, fileURLToPath(new URL("../../../../shared/ui/ChatAvatar.vue", import.meta.url)));
   await useClientRender(RoomJoinAccess, desktopRoot("src/components/desktop/content/RoomJoinAccess.vue"));
@@ -164,10 +166,11 @@ function installBridge(roomMembers: Record<string, (...args: never[]) => unknown
   Object.assign(globalThis, { window: { matchMedia: () => ({ matches: false }), letagentsDesktop: { roomMembers } } });
 }
 
-function mount(component: Component, props: () => Record<string, unknown>) {
+function mount(component: Component, props: () => Record<string, unknown>, provides: Array<[symbol | string, unknown]> = []) {
   const root = hostNode("root");
   const app = renderer.createApp(defineComponent(() => () => h(component, props())));
   app.provide(ssrContextKey, { modules: new Set<string>() });
+  for (const [key, value] of provides) app.provide(key, value);
   app.mount(root);
   return { root, app };
 }
@@ -299,6 +302,27 @@ test("a member sees no admin actions, and a repo room says GitHub manages member
     assert.match(text(repo.root), /Members are managed on GitHub/);
     assert.equal(button(repo.root, "Leave"), undefined);
   } finally { repo.app.unmount(); }
+});
+
+test("in a focus room the list is the parent's, and Leave asks the app to check the room", async () => {
+  const calls: unknown[][] = [];
+  installBridge({
+    list: (async () => ({ ok: true, roomId: "focus_9", accessRoomId: "design-room", managedBy: "letagents", canManage: false,
+      members: [member("acct_me", "ada", "member"), member("acct_bo", "bo", "admin")], viewerAccountId: "acct_me" })) as never,
+    listAccountJoinRequests: (async () => ({ ok: true, joinRequests: [] })) as never,
+    remove: (async (...args: unknown[]) => { calls.push(args); return { ok: true, accountId: "acct_me" }; }) as never,
+  });
+  let rechecks = 0;
+  const { root, app } = mount(RoomMembers, () => ({ roomIdentifier: "focus_9" }), [[roomAccessChangedKey, () => { rechecks += 1; }]]);
+  try {
+    await flush();
+    assert.match(text(root), /This focus room uses the members of its parent room/);
+    await click(root, "Leave");
+    await click(root, "Leave parent room");
+    assert.deepEqual(calls, [["focus_9", "acct_me"]]);
+    assert.match(text(root), /You left the parent room and all of its focus rooms/);
+    assert.equal(rechecks, 1, "the app checks the room again after Leave");
+  } finally { app.unmount(); }
 });
 
 test("a server without member routes hides the section", async () => {

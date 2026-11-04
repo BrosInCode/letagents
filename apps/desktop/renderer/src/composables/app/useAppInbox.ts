@@ -72,10 +72,13 @@ export function useAppInboxActions(context: unknown) {
   /** A My work row opens its card, or a linked thread, in its room as an Inbox item does. */
   function openMyWorkCard(roomIdentifier: string, taskId: string) { void openNeedsYouRoom({ roomIdentifier, taskId }); }
   function openMyWorkThread(roomIdentifier: string, threadRootId: string) { void openNeedsYouRoom({ roomIdentifier, threadRootId }); }
-  function openNeedsYou(room?: string) { app.openInboxRooms(room); inboxSection.value = 'needs-you'; app.activeEntry.value = needsYouEntry; void refreshNeedsYou(); }
-  async function refreshNeedsYou() { await Promise.all([app.loadNeedsYou(app.activeEntry.value.type === 'inbox'), app.refreshRentalRequestCount(), roomJoinRequests.refresh(), app.activeEntry.value.type === 'inbox' ? refreshMessageReminders() : undefined]); await app.refreshAgentApprovals(); }
+  function openNeedsYou(room?: string) { app.openInboxRooms(room); inboxSection.value = 'needs-you'; app.activeEntry.value = needsYouEntry; void refreshInbox(); }
+  async function refreshNeedsYou() { await Promise.all([app.loadNeedsYou(app.activeEntry.value.type === 'inbox'), app.refreshRentalRequestCount(), app.activeEntry.value.type === 'inbox' ? refreshMessageReminders() : undefined]); await app.refreshAgentApprovals(); }
+  // Join requests have no live update and stay off the one-minute Needs you
+  // check: they are read when the Inbox opens or refreshes (and on focus).
+  async function refreshInbox() { await Promise.all([refreshNeedsYou(), roomJoinRequests.refresh()]); }
   return {
-    openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou,
+    openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou, refreshInbox,
     openMyWork, openMyWorkCard, openMyWorkThread,
   };
 }

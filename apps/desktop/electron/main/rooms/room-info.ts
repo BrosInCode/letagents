@@ -92,6 +92,20 @@ export function rememberJoinedRoomInfo(
   }
 }
 
+/**
+ * Drops what the app remembers about joining a room, so the next check asks
+ * the server. Called when the server refuses the room or the person leaves it.
+ */
+export function forgetJoinedRoomInfo(roomIdentifier: string | null | undefined): void {
+  const key = roomInfoCacheKey(roomIdentifier);
+  if (!key) return;
+  const remembered = joinedRoomInfoCache.get(key)?.payload;
+  const related = new Set([key, ...(remembered ? roomInfoCacheKeys(key, remembered).map(roomInfoCacheKey) : [])]);
+  for (const [cachedKey, entry] of joinedRoomInfoCache) {
+    if (related.has(cachedKey) || roomInfoCacheKey(entry.payload.room_id) === key) joinedRoomInfoCache.delete(cachedKey);
+  }
+}
+
 export function roomInfoCacheKeys(
   requestedRoomIdentifier: string,
   payload: RoomInfoPayload,

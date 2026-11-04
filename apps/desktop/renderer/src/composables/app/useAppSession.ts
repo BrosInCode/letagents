@@ -4,7 +4,7 @@ import { invalidateRoomMessageLinkPreviews, setMessageLinkPreviewViewer } from "
 import { invalidateRoomMessagePins, setMessagePinViewer } from "../useRoomMessagePins";
 import { receiveRoomTyping, setTypingAccount } from "../useRoomTyping";
 import { invalidateRoomMessageReactions, setMessageReactionViewer } from "../useRoomMessageReactions";
-import { computed, watch } from "vue";
+import { computed, provide, watch } from "vue";
 import type { DesktopNotificationTarget, DesktopRoomStreamEvent } from "../../../../electron/ipc-types";
 import { clearDesktopMessageDrafts, setDesktopMessageDraftAccount } from "../../domain/desktop-message-drafts";
 import { clearDesktopMessageOutbox } from "../../domain/message-outbox";
@@ -15,7 +15,8 @@ import { resetHostApprovals } from "../../components/desktop/content/room-chat/h
 import { roomNotificationPreferences } from "../useRoomNotificationPreferences";
 import { roomJoinRequests } from "../useRoomJoinRequests";
 import { isMembershipRefusal } from "../../components/desktop/content/auth-onboarding";
-import { normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
+import { ROOM_ACCESS_RECHECK_MIN_GAP_MS, shouldRecheckAfterStreamRefusal } from "../../domain/room-access-recheck";
+import { roomAccessChangedKey } from "../roomAccessChanged";
 import type { AppContextOf } from "./context";
 
 /** Window focus and visibility, the desktop session, sign-in entry points, and notification activation. */
@@ -62,25 +63,11 @@ export function useAppSessionActions(context: unknown) {
   // The room whose live stream the server refused. That stream stays stopped
   // until a check shows the room open again.
   let refusedStreamRoom: string | null = null;
-  // Switching windows quickly must not reload the room on every switch.
-  const ACCESS_RECHECK_MIN_GAP_MS = 10_000;
   let lastAccessRecheckAt = 0;
 
-  let queuedRoomsRefresh: (() => void) | null = null;
-
-  /** Check the rooms once now, or as soon as the check already running ends. */
-  function refreshRoomsOnce(): void {
-    if (!loading.value) {
-      void app.refresh();
-      return;
-    }
-    if (queuedRoomsRefresh) return;
-    queuedRoomsRefresh = watch(loading, (busy) => {
-      if (busy) return;
-      queuedRoomsRefresh?.();
-      queuedRoomsRefresh = null;
-      void app.refresh();
-    });
+  function recheckRooms(): void {
+    lastAccessRecheckAt = Date.now();
+    void app.refresh();
   }
 
   /**
@@ -90,17 +77,34 @@ export function useAppSessionActions(context: unknown) {
   function recheckRoomAccess(): void {
     if (app.activeEntry.value.type !== "room" || loading.value) return;
     if (isMembershipRefusal(app.selectedAccess.value.status)) {
-      if (Date.now() - lastAccessRecheckAt < ACCESS_RECHECK_MIN_GAP_MS) return;
-      lastAccessRecheckAt = Date.now();
-      void app.refresh();
+      if (Date.now() - lastAccessRecheckAt >= ROOM_ACCESS_RECHECK_MIN_GAP_MS) recheckRooms();
       return;
     }
+    // A stream stopped by a refusal while the room still shows as open: try it again.
     const room = app.selectedRoomIdentifier.value;
-    if (room && refusedStreamRoom && normalizeRoomIdentifier(room) === normalizeRoomIdentifier(refusedStreamRoom)) {
+    if (room && refusedStreamRoom) {
       refusedStreamRoom = null;
       void app.syncSelectedRoomStream(room);
     }
   }
+
+  function handleStreamRefusal(roomIdentifier: string): void {
+    refusedStreamRoom = roomIdentifier;
+    if (!shouldRecheckAfterStreamRefusal({
+      refusedRoom: roomIdentifier,
+      openRooms: [app.selectedRoomIdentifier.value, selectedSnapshot.value?.roomIdentifier],
+      status: app.selectedAccess.value.status,
+      loading: loading.value,
+      lastRecheckAt: lastAccessRecheckAt,
+      now: Date.now(),
+    })) return;
+    recheckRooms();
+  }
+
+  // Room settings call this after a change to your own access, such as Leave.
+  provide(roomAccessChangedKey, () => {
+    if (!loading.value) recheckRooms();
+  });
 
   function handleVisibilityChange(): void {
     windowHidden.value = document.hidden;
@@ -129,8 +133,7 @@ export function useAppSessionActions(context: unknown) {
     if (event.type === "open" || event.type === "error" || event.type === "session_disconnect" || event.type === "access_refused") receiveRoomTyping(event.roomIdentifier);
     if (event.type === "access_refused") {
       // The stream stopped for good. Check the room once: the card shows how to get in.
-      refusedStreamRoom = event.roomIdentifier;
-      refreshRoomsOnce();
+      handleStreamRefusal(event.roomIdentifier);
       return;
     }
     if (["open", "github_event", "artifact_update"].includes(event.type)) invalidateRoomMessageLinkPreviews(event.roomIdentifier);
@@ -276,7 +279,7 @@ export function useAppAccountSwitch(context: unknown) {
     reloadInboxRooms, rentalRequestCount, resetNeedsYou,
   } = app;
   watch(() => authStatus.value?.account?.id ?? null, (next, previous) => {
-    if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; reloadInboxRooms(); inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); resetNeedsYou(); roomJoinRequests.reset(); resetHostApprovals(); if (next) void refreshNeedsYou(); }
+    if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; reloadInboxRooms(); inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); resetNeedsYou(); roomJoinRequests.reset(); resetHostApprovals(); if (next) { void refreshNeedsYou(); void roomJoinRequests.refresh(); } }
   }, { flush: "sync" });
 
   const showSignedOutGate = computed(() => (

@@ -34,13 +34,14 @@
         <div class="room-settings-row" data-inline="true" data-testid="room-members-left">
           <div class="room-settings-row-copy">
             <p class="room-settings-row-title">You left this room</p>
-            <p class="room-settings-row-description">To come back, ask to join again. A room admin can let you in.</p>
+            <p class="room-settings-row-description">{{ parentAccess ? "You left the parent room and all of its focus rooms." : "" }} To come back, ask to join again. A room admin can let you in.</p>
           </div>
         </div>
       </div>
     </template>
 
     <template v-else-if="view === 'members'">
+      <p v-if="parentAccess" class="room-settings-row-description room-members-note" data-testid="room-members-parent">This focus room uses the members of its parent room. A change here changes the parent room and all of its focus rooms.</p>
       <p v-if="error" class="room-settings-row-description room-members-error" data-tone="error" role="alert" data-testid="room-members-action-error">{{ error }}</p>
 
       <div v-if="requests.length" class="room-settings-list" data-testid="room-members-requests">
@@ -93,7 +94,7 @@
                 :disabled="busy"
                 :data-testid="`room-member-confirm-${member.account_id}`"
                 @click="remove(member)"
-              >{{ confirming.kind === "leave" ? "Leave room" : "Remove" }}</button>
+              >{{ confirming.kind === "leave" ? parentAccess ? "Leave parent room" : "Leave room" : "Remove" }}</button>
             </template>
             <template v-else-if="member.account_id === viewerAccountId">
               <button
@@ -128,7 +129,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopRoomMembershipFailure,
   RoomJoinRequest,
@@ -138,6 +139,7 @@ import type {
 import ChatAvatar from "../../../../../../../../shared/ui/ChatAvatar.vue";
 import { desktopIpc } from "../../../../ipc/index";
 import { roomJoinRequests } from "../../../../composables/useRoomJoinRequests";
+import { roomAccessChangedKey } from "../../../../composables/roomAccessChanged";
 import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
 import { joinAskedLabel } from "../auth-onboarding";
 import { roomMembersSummary, roomMembershipErrorMessage, sortRoomMembers } from "./room-members";
@@ -155,6 +157,9 @@ const viewerAccountId = ref<string | null>(null);
 const busy = ref(false);
 const error = ref<string | null>(null);
 const confirming = ref<{ accountId: string; kind: "remove" | "leave" } | null>(null);
+// A focus room has no members of its own: its parent room's list decides.
+const parentAccess = ref(false);
+const roomAccessChanged = inject(roomAccessChangedKey, () => undefined);
 let generation = 0;
 
 const sortedMembers = computed(() => sortRoomMembers(members.value, viewerAccountId.value));
@@ -193,6 +198,7 @@ async function load(): Promise<void> {
       return;
     }
     viewerAccountId.value = list.viewerAccountId;
+    parentAccess.value = list.accessRoomId !== list.roomId;
     if (list.managedBy === "github") {
       members.value = [];
       requests.value = [];
@@ -280,6 +286,8 @@ function remove(member: RoomMember): Promise<void> {
       members.value = [];
       requests.value = [];
       view.value = "left";
+      // The room may now refuse this account: let the app check it.
+      roomAccessChanged();
       return;
     }
     members.value = members.value.filter((item) => item.account_id !== member.account_id);
@@ -305,6 +313,7 @@ onBeforeUnmount(() => { generation++; });
   font-size: 0.75rem;
   font-weight: 500;
 }
-.room-members-error { padding: 0 2px; max-width: none; }
+.room-members-error,
+.room-members-note { padding: 0 2px; max-width: none; }
 .room-settings-button[data-variant="danger"] { border-color: var(--red-dim); color: var(--red-text); }
 </style>

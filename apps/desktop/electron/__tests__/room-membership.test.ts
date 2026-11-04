@@ -12,7 +12,8 @@ import { createApiErrorRoomSnapshot } from "../main/rooms/snapshot/snapshots.js"
 
 // The real 403 bodies only arrive after the server turns the rule on, so these
 // tests build them from the shared module, as the server will.
-function apiError(status: number, payload: Record<string, unknown> | null): DesktopApiError {
+function apiError(status: number, body: object | null): DesktopApiError {
+  const payload = body as { message?: string; error?: string } | null;
   const error = new Error(String(payload?.message || payload?.error || `API request failed: ${status}`)) as Error & {
     status: number;
     payload: unknown;
@@ -60,7 +61,7 @@ test("a membership 403 with no request, or a malformed one, offers a fresh reque
 });
 
 test("a declined request keeps when the person can ask again", () => {
-  const declined = { ...pending, state: "declined", decided_at: "2026-11-04T09:00:00.000Z", retry_after: "2026-11-05T09:00:00.000Z" };
+  const declined = { ...pending, state: "declined", decided_at: "2026-11-04T09:00:00.000Z", retry_after: "2026-11-05T09:00:00.000Z" } as const;
   const snapshot = createApiErrorRoomSnapshot("design-room", apiError(403, roomMembershipRequiredBody({
     room_id: "design-room",
     join_request: declined,
@@ -116,8 +117,12 @@ async function loadMembers(
     resolveLocalAwareRoomStorageMode: async () => ({ effectiveMode: options.local ? "local" : "cloud" }),
     cloudRoomIdentifierForStorage: (_storage: unknown, identifier: string) => identifier,
   } });
+  const forgotten: string[] = [];
+  t.mock.module("../main/rooms/room-info.js", { namedExports: {
+    forgetJoinedRoomInfo: (identifier: string) => { forgotten.push(identifier); },
+  } });
   const subject = await import(new URL(`../main/rooms/members.js?${encodeURIComponent(t.name)}`, import.meta.url).href) as typeof import("../main/rooms/members.js");
-  return { subject, calls };
+  return { subject, calls, forgotten };
 }
 
 test("member calls reach the room's member routes and mark the signed-in account", async (t) => {
@@ -204,4 +209,12 @@ test("a room kept on this computer has no members and makes no request", async (
 test("an older server without the account route reads as no requests", async (t) => {
   const { subject } = await loadMembers(t, { respond: () => new ApiError(404, { error: "Not found" }) });
   assert.deepEqual(await subject.listDesktopAccountRoomJoinRequests(), { ok: true, joinRequests: [] });
+});
+
+test("leaving forgets the remembered join; removing someone else does not", async (t) => {
+  const { subject, forgotten } = await loadMembers(t, { respond: (path) => ({ removed: true, account_id: path.split("/").at(-1) }) });
+  assert.equal((await subject.removeDesktopRoomMember("design-room", "acct_2")).ok, true);
+  assert.deepEqual(forgotten, []);
+  assert.equal((await subject.removeDesktopRoomMember("design-room", "acct_me")).ok, true);
+  assert.deepEqual(forgotten, ["design-room"]);
 });

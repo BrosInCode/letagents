@@ -1,6 +1,7 @@
 import { onBeforeUnmount, onMounted } from "vue";
 import { ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS } from "../../domain/account-activity";
 import { desktopIpc } from "../../ipc/index.js";
+import { roomJoinRequests } from "../useRoomJoinRequests";
 import type { AppContextOf } from "./context";
 
 /** Mount and unmount: IPC subscriptions, intervals, window listeners, and initial loads. */
@@ -45,6 +46,7 @@ export function useAppLifecycle(context: unknown) {
 
   onMounted(() => {
     void refreshNeedsYou();
+    void roomJoinRequests.refresh();
     needsYouInterval = window.setInterval(() => { if (!document.hidden) void refreshNeedsYou(); }, 60_000);
     unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleDesktopRoomStreamEvent) || null;
     unsubscribeOpenSettings = desktopIpc.ui?.onOpenSettings(openSettingsSurface) || null;

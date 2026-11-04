@@ -281,7 +281,7 @@
         @start-auth="openAccountAuthFlow"
       />
 
-      <InboxView v-else-if="activeEntry.type === 'inbox'" :key="authStatus?.account?.id ?? 'local'" :rooms="inboxRooms" @update:rooms="chooseInboxRooms" v-model:section="inboxSection" :storage-key="inboxStorageKey" :data="needsYouData" :attention="agentAttentionItems" :loading="needsYouLoading" :error="needsYouError" :rentals="inboxRentals" :rental-error="inboxRentalError" :join-requests="inboxJoinRequests" @refresh="refreshNeedsYou" @open-room="openNeedsYouRoom" @open-rental="openRentalRequestInbox" @threads-loaded="mergeInboxThreads" />
+      <InboxView v-else-if="activeEntry.type === 'inbox'" :key="authStatus?.account?.id ?? 'local'" :rooms="inboxRooms" @update:rooms="chooseInboxRooms" v-model:section="inboxSection" :storage-key="inboxStorageKey" :data="needsYouData" :attention="agentAttentionItems" :loading="needsYouLoading" :error="needsYouError" :rentals="inboxRentals" :rental-error="inboxRentalError" :join-requests="inboxJoinRequests" @refresh="refreshInbox" @open-room="openNeedsYouRoom" @open-rental="openRentalRequestInbox" @threads-loaded="mergeInboxThreads" />
 
       <MyWorkView
         v-else-if="activeEntry.type === 'my-work'"
@@ -493,7 +493,7 @@ const {
   sidebarBatchDialogError,
 } = Object.assign(app, useAppState());
 const {
-  openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou,
+  openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshInbox,
   openMyWork, openMyWorkCard, openMyWorkThread,
 } = Object.assign(app, useAppInboxActions(app));
 const {

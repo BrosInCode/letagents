@@ -100,6 +100,7 @@ const {
 } =
   await import("../main/room-stream.js");
 
+const { getJoinedRoomInfo, rememberJoinedRoomInfo } = await import("../main/rooms/room-info.js");
 const boardService = await import("../main/rooms/local-board-service.js");
 // A socket file on POSIX, a named pipe with its proof on Windows.
 const boardEndpoint = daemonEndpoint(env.tempDir);
@@ -981,14 +982,39 @@ test("a repository-role 403 during catch-up stops the stream", async () => {
   }
 });
 
-test("a 403 with no refusal code keeps the usual reconnect", async () => {
+test("a 403 with another code, or with no body, keeps the usual reconnect", async () => {
+  for (const handler of [
+    // A GitHub check that failed for a moment can answer this; a retry may succeed.
+    { kind: "refuse", body: { error: "private_repo_no_access", code: "PRIVATE_REPO_NO_ACCESS", room_id: ROOM } },
+    { kind: "fail", status: 403 },
+  ] as StreamHandler[]) {
+    const router = installFetchRouter();
+    emitted.length = 0;
+    try {
+      router.streamQueue.push(handler);
+      await startDesktopRoomStream(ROOM, "msg_1");
+      await waitUntil(() => router.pollCalls.length >= 1);
+      assert.equal(emitted.some((event) => event.type === "access_refused"), false);
+      assert.equal(getActiveRoomIdentifier(), ROOM);
+      // The SSE reconnects after its 1 s backoff, as before.
+      await waitUntil(() => router.streamCalls.length >= 2, 4000);
+    } finally {
+      await stopDesktopRoomStream();
+      router.restore();
+    }
+  }
+});
+
+test("a refusal forgets the remembered join, so the next room check asks the server", async () => {
   const router = installFetchRouter();
   try {
-    router.streamQueue.push({ kind: "fail", status: 403 });
+    rememberJoinedRoomInfo(ROOM, { room_id: ROOM, name: "remembered-name", code: "" });
+    router.streamQueue.push({ kind: "refuse", body: roomMembershipRequiredBody({ room_id: ROOM }) });
     await startDesktopRoomStream(ROOM, "msg_1");
-    await waitUntil(() => router.pollCalls.length >= 1);
-    assert.equal(emitted.some((event) => event.type === "access_refused"), false);
-    assert.equal(getActiveRoomIdentifier(), ROOM);
+    await waitUntil(() => emitted.some((event) => event.type === "access_refused"));
+    // The router answers the join with an empty room; a remembered join would answer with its name.
+    const joined = await getJoinedRoomInfo(ROOM);
+    assert.notEqual(joined.name, "remembered-name");
   } finally {
     await stopDesktopRoomStream();
     router.restore();

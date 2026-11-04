@@ -15,6 +15,7 @@ import type {
 import { apiFetch, DesktopApiError, readStoredAuth } from "../auth.js";
 import { readRoomJoinRequestSummary } from "./join-request-summary.js";
 import { cloudRoomIdentifierForStorage, resolveLocalAwareRoomStorageMode } from "./local-store.js";
+import { forgetJoinedRoomInfo } from "./room-info.js";
 
 /**
  * Members and join requests live on the server. A room kept only on this
@@ -95,6 +96,8 @@ export async function removeDesktopRoomMember(identifier: string, accountId: str
   const path = typeof account === "string" ? await membersPath(identifier, `/members/${account}`) : account;
   return call(path, async (target) => {
     const response = await apiFetch<{ account_id?: string }>(target, { method: "DELETE" });
+    // Leaving changes this account's own access: the next room check must ask the server.
+    if ((await readStoredAuth()).account?.id === accountId) forgetJoinedRoomInfo(identifier);
     return { accountId: response?.account_id ?? accountId };
   });
 }

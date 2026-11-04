@@ -27,6 +27,7 @@ import {
   mapRoomMessagePayload,
 } from "./rooms.js";
 import { mapRoomArtifactPayload } from "./rooms/snapshot/mappers.js";
+import { forgetJoinedRoomInfo } from "./rooms/room-info.js";
 import { emitToMainWindow } from "./window.js";
 import {
   createManagedMessageDeliveryTracker,
@@ -193,6 +194,9 @@ function refuseRoomStream(
 ): void {
   if (!isCurrentRoomStream(stream)) return;
   stopActiveRoomStream(stream.roomIdentifier);
+  // The app checks the room next; a remembered join must not answer for the server.
+  forgetJoinedRoomInfo(stream.roomIdentifier);
+  forgetJoinedRoomInfo(stream.canonicalRoomIdentifier);
   emitRoomStreamEvent({
     type: "access_refused",
     roomIdentifier: stream.roomIdentifier,
