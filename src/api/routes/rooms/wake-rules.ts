@@ -8,7 +8,9 @@ import { parseBearerAuthorization } from "../../request/bearer-authorization.js"
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { isHumanAppWrite } from "../../request/app-session.js";
 import { requireWorkerRequestAgentIdentity, type ResolvedRequestAgentIdentity } from "../../request/agent-identity.js";
+import { addWakeWebhookRuleForPerson, listOwnedWakeAgents } from "../../wake-rules/person-webhook.js";
 import { addWakeRuleForAgent, cancelWakeRuleAs, restoreWakeRuleAs } from "../../wake-rules/service.js";
+import { testWakeWebhookRule } from "../../wake-rules/webhook-test.js";
 import { resolveParticipantRoom, routeParam } from "./messages/helpers.js";
 import type { RoomMessageRouteDeps } from "./messages/types.js";
 
@@ -26,6 +28,26 @@ function human(req: AuthenticatedRequest): WakeRuleActor | null {
   return req.sessionAccount && isHumanAppWrite(req, req.body ?? {})
     ? { kind: "human", id: req.sessionAccount.account_id, label: req.sessionAccount.login }
     : null;
+}
+
+/**
+ * The person behind an app session, for the routes only a person may call
+ * (adding and testing a webhook rule for an agent they own). An owner token,
+ * a worker bearer or a remote MCP session is not a person here: an agent
+ * adds its own rules. A write authenticated by the session cookie alone must
+ * come from this app's own origin (a bearer session, as the desktop app
+ * sends, carries no ambient cookie and needs no origin).
+ */
+function requirePerson(req: AuthenticatedRequest): { id: string; login: string } {
+  const person = human(req);
+  if (!person) throw new WakeRuleError("Only a signed-in person can do this for an agent they own. Agents add their own wake rules.", 403);
+  if (parseBearerAuthorization(req.headers.authorization).kind !== "token" && !["GET", "HEAD"].includes(req.method)) {
+    const origin = req.headers.origin;
+    const expected = process.env.LETAGENTS_BASE_URL || process.env.PUBLIC_API_URL;
+    const allowed = expected ? new URL(expected).origin : `${req.protocol}://${req.get("host")}`;
+    if (!origin || origin !== allowed) throw new WakeRuleError("Open this action from LetAgents.", 403);
+  }
+  return { id: person.id, login: person.label };
 }
 
 async function worker(req: AuthenticatedRequest, roomId: string): Promise<ResolvedRequestAgentIdentity> {
@@ -63,6 +85,22 @@ async function actor(req: AuthenticatedRequest, roomId: string): Promise<WakeRul
   return { kind: "agent", id: identity.agent_key, label: identity.display_name || identity.actor_label };
 }
 
+/** The form's webhook fields, as the person sent them; the rule body is built on the server. */
+function personWebhookForm(body: Record<string, unknown>): { url: string; secret: string; bearer?: string; note?: string | null } {
+  const rule = body.rule;
+  if (!rule || typeof rule !== "object" || Array.isArray(rule)) throw new WakeRuleError("rule must be an object with webhook { url, secret }.", 400);
+  const { event, webhook, note } = rule as Record<string, unknown>;
+  if (event !== undefined && event !== "room.message") throw new WakeRuleError("The app adds room.message webhook rules only.", 400);
+  if (!webhook || typeof webhook !== "object" || Array.isArray(webhook)) throw new WakeRuleError("rule.webhook must be an object with url and secret.", 400);
+  const { url, secret, bearer } = webhook as Record<string, unknown>;
+  return {
+    url: typeof url === "string" ? url : "",
+    secret: typeof secret === "string" ? secret : "",
+    ...(bearer !== undefined && bearer !== "" ? { bearer: bearer as string } : {}),
+    note: typeof note === "string" ? note : null,
+  };
+}
+
 export function registerWakeRuleRoutes(app: Express, deps: WakeRuleRouteDeps): void {
   const room = (req: AuthenticatedRequest, res: Response) => resolveParticipantRoom(req, res, deps as RoomMessageRouteDeps);
 
@@ -74,10 +112,30 @@ export function registerWakeRuleRoutes(app: Express, deps: WakeRuleRouteDeps): v
     } catch (error) { fail(res, error); }
   });
 
-  // Agents set their own rules. A person reaches an agent by messaging it.
+  // The agents the signed-in person owns in the room: the webhook wake-up form's agent picker.
+  app.get(/^\/rooms\/(.+)\/wake-rules\/my-agents$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const project = await room(req, res); if (!project) return;
+      const person = requirePerson(req);
+      res.json({ room_id: project.id, agents: await listOwnedWakeAgents(project.id, person.id) });
+    } catch (error) { fail(res, error); }
+  });
+
+  // Agents set their own rules. A person adds a webhook rule for an agent
+  // they own by naming it (`agent_key`); the rule is bound to the sign-in
+  // behind that agent, as if the agent had added it.
   app.post(/^\/rooms\/(.+)\/wake-rules$/, async (req: AuthenticatedRequest, res) => {
     try {
       const project = await room(req, res); if (!project) return;
+      const body = (req.body ?? {}) as Record<string, unknown>;
+      if (typeof body.agent_key === "string") {
+        const person = requirePerson(req);
+        const { rule, created } = await addWakeWebhookRuleForPerson({
+          roomId: project.id, accountId: person.id, agentKey: body.agent_key, form: personWebhookForm(body),
+        });
+        res.status(created ? 201 : 200).json({ rule, created });
+        return;
+      }
       const identity = await worker(req, project.id);
       const { rule, created, confirmation } = await addWakeRuleForAgent({
         roomId: project.id,
@@ -91,6 +149,15 @@ export function registerWakeRuleRoutes(app: Express, deps: WakeRuleRouteDeps): v
         credential: registeringCredential(req),
       });
       res.status(created ? 201 : 200).json({ rule, created, ...(confirmation ? { confirmation } : {}) });
+    } catch (error) { fail(res, error); }
+  });
+
+  // One test delivery, by the account that owns the rule's agent; the result comes back at once.
+  app.post(/^\/rooms\/(.+)\/wake-rules\/([^/]+)\/test$/, async (req: AuthenticatedRequest, res) => {
+    try {
+      const project = await room(req, res); if (!project) return;
+      const person = requirePerson(req);
+      res.json(await testWakeWebhookRule({ roomId: project.id, ruleId: routeParam(req, 1), account: person }));
     } catch (error) { fail(res, error); }
   });
 

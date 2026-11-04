@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
@@ -649,4 +650,13 @@ test("clean refresh then edit keeps the draft separate from the saved mapping sn
       ["Waiting", "in_progress"],
     ],
   );
+});
+test("a remote sign-in's detail says wake-ups are set per room, in the room's settings panel", () => {
+  const page = readFileSync(
+    fileURLToPath(new URL("../../../../shared/ui/connectors/ConnectorsPage.vue", import.meta.url)),
+    "utf8",
+  );
+  const remote = page.slice(page.indexOf('<template v-else-if="selectedRemote"'), page.indexOf("selection.kind === 'remote'"));
+  assert.match(remote, /data-testid="connector-remote-wakeups"[\s\S]*?<h3>Wake-ups<\/h3>[\s\S]*?Wake-ups are set per room: open the room's settings panel/);
+  assert.match(remote, /A wake-up ends when this sign-in is removed\./);
 });

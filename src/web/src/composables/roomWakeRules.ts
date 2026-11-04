@@ -34,7 +34,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
 
-function isWakeRule(value: unknown): value is WakeRule {
+export function isWakeRule(value: unknown): value is WakeRule {
   return isRecord(value)
     && typeof value.id === 'string' && value.id.length > 0
     && typeof value.agent_key === 'string' && value.agent_key.length > 0
@@ -57,7 +57,8 @@ export function parseWakeRulePage(value: unknown): WakeRulePage | null {
   }
 }
 
-async function requestJson(path: string, init: RequestInit, fallback: string): Promise<unknown> {
+/** One JSON request with the session cookie; a refusal becomes the server's own sentence. */
+export async function requestWakeRuleJson(path: string, init: RequestInit, fallback: string): Promise<unknown> {
   const response = await fetch(path, {
     ...init,
     credentials: 'same-origin',
@@ -80,7 +81,7 @@ async function requestJson(path: string, init: RequestInit, fallback: string): P
 }
 
 export async function fetchRoomWakeRules(roomIdentifier: string): Promise<WakeRulePage> {
-  const page = parseWakeRulePage(await requestJson(
+  const page = parseWakeRulePage(await requestWakeRuleJson(
     `${roomPath(roomIdentifier)}/wake-rules`,
     {},
     'Wake rules could not be loaded.',
@@ -98,7 +99,7 @@ async function changeRoomWakeRule(
     ? "Couldn't cancel this wake rule. Try again."
     : "Couldn't restore this wake rule."
   if (!RULE_ID.test(ruleId)) throw new Error(fallback)
-  const body = await requestJson(
+  const body = await requestWakeRuleJson(
     `${roomPath(roomIdentifier)}/wake-rules/${encodeURIComponent(ruleId)}/${action}`,
     { method: 'POST', body: '{}' },
     fallback,

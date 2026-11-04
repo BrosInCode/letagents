@@ -67,8 +67,9 @@ async function readCaps(
   const limits = [WAKE_RULE_LIMITS.webhookHourlyCap, WAKE_RULE_LIMITS.roomHourlyCap, WAKE_RULE_LIMITS.hostHourlyCapPerAccount];
   const [row] = (await tx.execute<Record<string, string | number | null>>(sql`
     WITH by_rule AS (
+      -- A person's test deliveries count against the rule's own budget (not the room's or the host's).
       SELECT scheduled_at FROM wake_webhook_deliveries
-       WHERE rule_id = ${rule.id} AND purpose = 'message' AND scheduled_at > ${hourAgo}
+       WHERE rule_id = ${rule.id} AND purpose IN ('message', 'test') AND scheduled_at > ${hourAgo}
     ), by_room AS (
       SELECT scheduled_at FROM wake_webhook_deliveries
        WHERE room_id = ${roomId} AND owner_account_id = ${rule.owner_account_id ?? ""}

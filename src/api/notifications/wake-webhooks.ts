@@ -56,6 +56,7 @@ import {
   oneLine,
   webhookOutcome,
   type WakeDeliveryOutcome,
+  type WakeWebhookPayload,
   signWakeWebhook,
   wakeWebhookBinding,
   wakeWebhookHeaders,
@@ -85,7 +86,7 @@ export interface ClaimedWakeWebhook {
   rule_id: string;
   room_id: string;
   kind: WakeDeliveryKind;
-  purpose: "message" | "confirm";
+  purpose: "message" | "confirm" | "test";
   message_number: number | null;
   sender: string;
   text_preview: string;
@@ -323,6 +324,9 @@ export async function recordWakeWebhookOutcome(
 }
 
 async function attempt(delivery: ClaimedWakeWebhook, deps: WakeWebhookDeliveryDeps, now: Date): Promise<WakeDeliveryOutcome> {
+  // A person's test is sent and recorded in the request that asked for it
+  // (`../wake-rules/webhook-test.ts`); one left behind by a crash is dropped.
+  if (delivery.purpose === "test") return { kind: "skipped", error: "test_stale" };
   // A message goes only to a confirmed, active rule; a confirmation only while the rule waits for one.
   const expected = delivery.purpose === "confirm" ? "pending_confirmation" : "active";
   if (delivery.rule_status !== expected) return { kind: "skipped", error: "rule_inactive" };
@@ -361,23 +365,69 @@ async function attempt(delivery: ClaimedWakeWebhook, deps: WakeWebhookDeliveryDe
   if (delivery.kind === "email") return attemptEmail(delivery, deps, deps.cipher, opened);
   if (typeof opened.url !== "string" || typeof opened.secret !== "string") return { kind: "failed", status: 0, error: "target_unreadable" };
   if (delivery.kind === "mcp_event") return attemptMcpEvent(delivery, deps, opened as { url: string; secret: string }, now);
-  const timestamp = Math.floor(now.getTime() / 1000);
-  const body = buildWakeWebhookBody({
-    delivery_id: delivery.id,
-    room_id: delivery.room_id,
-    message_id: `msg_${delivery.message_number}`,
-    sender: delivery.sender,
-    text_preview: delivery.text_preview,
-    room_url: wakeRoomUrl(delivery.room_id),
+  return postOpenedWakeWebhook({
     rule_id: delivery.rule_id,
-    sent_at: now.toISOString(),
-  });
-  const headers = wakeWebhookHeaders({ deliveryId: delivery.id, timestamp, signature: signWakeWebhook(opened.secret, timestamp, body) });
-  if (delivery.delivery_bearer) {
+    owner_account_id: delivery.owner_account_id,
+    delivery_bearer: delivery.delivery_bearer,
+    target: opened as { url: string; secret: string },
+    payload: {
+      delivery_id: delivery.id,
+      room_id: delivery.room_id,
+      message_id: `msg_${delivery.message_number}`,
+      sender: delivery.sender,
+      text_preview: delivery.text_preview,
+      room_url: wakeRoomUrl(delivery.room_id),
+      rule_id: delivery.rule_id,
+      sent_at: now.toISOString(),
+    },
+  }, deps, now);
+}
+
+/** A webhook rule's sealed columns, opened with the rule's own bindings. */
+export interface SealedWakeWebhookTarget {
+  rule_id: string;
+  owner_account_id: string;
+  delivery_target: EncryptedCredentials;
+  delivery_bearer: EncryptedCredentials | null;
+}
+
+/**
+ * Open a webhook rule's sealed URL and secret. Null when the seal does not
+ * open or holds something else: the delivery then fails as `target_unreadable`.
+ */
+export function openWakeWebhookTarget(cipher: ConnectorCipher, sealed: SealedWakeWebhookTarget): { url: string; secret: string } | null {
+  let opened: Record<string, unknown>;
+  try {
+    opened = cipher.decrypt(sealed.delivery_target, wakeWebhookBinding(sealed.rule_id, sealed.owner_account_id));
+  } catch {
+    return null;
+  }
+  return typeof opened.url === "string" && typeof opened.secret === "string" ? { url: opened.url, secret: opened.secret } : null;
+}
+
+/**
+ * One signed POST of a webhook rule: the exact body, the `X-LetAgents-*`
+ * headers, the receiver's sender key when the rule holds one, then the
+ * pinned-address client (`deps.send`), which follows no redirect. Shared by
+ * the worker's message deliveries and a person's test delivery.
+ */
+export async function postOpenedWakeWebhook(
+  input: Pick<SealedWakeWebhookTarget, "rule_id" | "owner_account_id" | "delivery_bearer"> & {
+    target: { url: string; secret: string };
+    payload: WakeWebhookPayload;
+  },
+  deps: Pick<WakeWebhookDeliveryDeps, "cipher" | "send">,
+  now: Date,
+): Promise<WakeDeliveryOutcome> {
+  if (!deps.cipher) return { kind: "retry", status: 0, error: "not_configured", uncounted: true };
+  const timestamp = Math.floor(now.getTime() / 1000);
+  const body = buildWakeWebhookBody(input.payload);
+  const headers = wakeWebhookHeaders({ deliveryId: input.payload.delivery_id, timestamp, signature: signWakeWebhook(input.target.secret, timestamp, body) });
+  if (input.delivery_bearer) {
     // The receiver's sender key goes only to the rule's own pinned URL (no redirects are followed).
     let sealed: Record<string, unknown>;
     try {
-      sealed = deps.cipher.decrypt(delivery.delivery_bearer, wakeWebhookBearerBinding(delivery.rule_id, delivery.owner_account_id));
+      sealed = deps.cipher.decrypt(input.delivery_bearer, wakeWebhookBearerBinding(input.rule_id, input.owner_account_id));
     } catch {
       return { kind: "failed", status: 0, error: "target_unreadable" };
     }
@@ -386,7 +436,7 @@ async function attempt(delivery: ClaimedWakeWebhook, deps: WakeWebhookDeliveryDe
   }
   let result: WakeWebhookSendResult;
   try {
-    result = await deps.send({ url: opened.url, body, headers });
+    result = await deps.send({ url: input.target.url, body, headers });
   } catch {
     result = { outcome: "retry", status: 0, error: "connect_failed" };
   }

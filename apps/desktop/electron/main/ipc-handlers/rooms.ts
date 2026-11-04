@@ -23,7 +23,14 @@ import { getAccountActivityState, restartAccountActivityStream, stopAccountActiv
 import { getDesktopGitHubEventFilter, getDesktopRoomAgentGuidelines, setDesktopGitHubEventFilter, setDesktopRoomAgentGuidelines } from "../rooms/room-settings.js";
 import { getDesktopRoomNotificationPreference, listDesktopRoomNotificationPreferences, setDesktopRoomNotificationPreference } from "../rooms/notification-preferences.js";
 import type { RoomNotificationPreferenceChange } from "../../../../../shared/room-notification-preferences.mjs";
-import { cancelDesktopRoomWakeRule, getDesktopRoomWakeRules, restoreDesktopRoomWakeRule } from "../rooms/wake-rules.js";
+import {
+  addDesktopRoomWakeWebhookRule,
+  cancelDesktopRoomWakeRule,
+  getDesktopRoomWakeRules,
+  listDesktopRoomWakeWebhookAgents,
+  restoreDesktopRoomWakeRule,
+  testDesktopRoomWakeRule,
+} from "../rooms/wake-rules.js";
 import { getDesktopNeedsYou, getDesktopNeedsYouRoom, getDesktopKnowledge, createDesktopKnowledge, reviseDesktopKnowledge, getDesktopMemoryHistory } from "../rooms/knowledge.js";
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
 
@@ -542,6 +549,10 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:room:get-wake-rules", (_event, roomIdentifier: string) => getDesktopRoomWakeRules(roomIdentifier));
   targetIpcMain.handle("desktop:room:cancel-wake-rule", (_event, roomIdentifier: string, ruleId: string) => cancelDesktopRoomWakeRule(roomIdentifier, ruleId));
   targetIpcMain.handle("desktop:room:restore-wake-rule", (_event, roomIdentifier: string, ruleId: string) => restoreDesktopRoomWakeRule(roomIdentifier, ruleId));
+  targetIpcMain.handle("desktop:room:list-wake-webhook-agents", (_event, roomIdentifier: string) => listDesktopRoomWakeWebhookAgents(roomIdentifier));
+  targetIpcMain.handle("desktop:room:add-wake-webhook-rule", (_event, roomIdentifier: string, agentKey: string, input: import("../../../../../shared/wake-rules.mjs").WakeWebhookFormInput) =>
+    addDesktopRoomWakeWebhookRule(roomIdentifier, agentKey, input));
+  targetIpcMain.handle("desktop:room:test-wake-rule", (_event, roomIdentifier: string, ruleId: string) => testDesktopRoomWakeRule(roomIdentifier, ruleId));
   targetIpcMain.handle(
     "desktop:room:update-focus-room-settings",
     async (

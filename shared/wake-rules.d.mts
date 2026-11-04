@@ -127,6 +127,40 @@ export interface WakeRuleApi {
   restore(roomId: string, ruleId: string): Promise<WakeRule>;
 }
 
+/** One of the viewer's own agents in a room, as the webhook wake-up form's agent picker lists it. */
+export interface WakeWebhookAgent {
+  agent_key: string;
+  agent_name: string;
+  /** Whether the agent holds a live session in the room now. */
+  live: boolean;
+  last_seen_at: string;
+}
+
+/** What a person fills in to wake one of their agents by webhook. The secret is made by the app and shown once. */
+export interface WakeWebhookFormInput {
+  url: string;
+  secret: string;
+  /** The receiver's sender key, sent as `Authorization: Bearer`. */
+  bearer?: string;
+  note?: string | null;
+}
+
+/** The answer to a person's test delivery: the receiver's status, or 0 and an error class when no answer came. */
+export interface WakeRuleTestResult {
+  status: number;
+  error_class: string | null;
+  /** The test delivery's id (the `delivery_id` the receiver saw), or null when nothing was sent. */
+  delivery_id: string | null;
+}
+
+/** Supplied by each app to the shared webhook wake-up form. */
+export interface WakeWebhookApi {
+  listAgents(roomId: string): Promise<WakeWebhookAgent[]>;
+  add(roomId: string, agentKey: string, input: WakeWebhookFormInput): Promise<{ rule: WakeRule; created: boolean }>;
+  test(roomId: string, ruleId: string): Promise<WakeRuleTestResult>;
+  cancel(roomId: string, ruleId: string): Promise<WakeRule>;
+}
+
 /** `ended`: what the rule waited for can no longer happen; `endedReason` says why. */
 export type WakeNoticeOutcome = "fired" | "expired" | "ended";
 
