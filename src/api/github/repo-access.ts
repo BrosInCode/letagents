@@ -7,6 +7,8 @@ interface GitHubRepo {
   owner?: {
     login?: string;
   };
+  // The caller's own role, present when the request carries a user token.
+  permissions?: Partial<Record<"admin" | "maintain" | "push" | "triage" | "pull", boolean>>;
 }
 
 interface GitHubPermissionResponse {
@@ -18,6 +20,9 @@ export type RepoRoomAccessDecision =
   | { kind: "allow" }
   | { kind: "auth_required" }
   | { kind: "private_repo_no_access" }
+  // A public repository: everyone can read the code, but only people with a
+  // GitHub role on it may open its room.
+  | { kind: "repo_collaborator_required" }
   // The room id has the `host/owner/repo` shape of a repo room, but no
   // visibility or collaborator check exists for its host. Nobody may enter.
   | { kind: "unsupported_repo_provider" };
@@ -41,6 +46,7 @@ interface RepoRoomAccessDecisionDeps {
     bypassCache?: boolean;
     throwOnIndeterminate?: boolean;
   }) => Promise<boolean>;
+  isPublicRepoRoleHolder?: typeof isGitHubPublicRepoRoleHolder;
 }
 
 // Repository visibility is shared state, independent of the account asking.
@@ -57,10 +63,14 @@ const REPO_VISIBILITY_RATE_LIMIT_DEFAULT_BACKOFF_MS = 1000 * 60;
 const REPO_VISIBILITY_RATE_LIMIT_MAX_BACKOFF_MS = 1000 * 60 * 60;
 let anonymousVisibilityLookupsBlockedUntil = 0;
 const REPO_ACCESS_TTL_MS = 1000 * 60 * 30;
+// A "no role" answer for a public repository is kept briefly, so a refused
+// client that reconnects does not spend the person's GitHub rate limit.
+const PUBLIC_REPO_NO_ROLE_TTL_MS = 1000 * 60;
 const REPO_CACHE_MAX_ENTRIES = 5_000;
 const repoVisibilityCache = new Map<string, { visibility: GitHubRepoVisibility; expiresAt: number }>();
 const repoVisibilityLastKnown = new Map<string, { visibility: "public" | "private"; expiresAt: number }>();
 const repoAccessCache = new Map<string, { allowed: boolean; expiresAt: number }>();
+const publicRepoRoleCache = new Map<string, { allowed: boolean; expiresAt: number }>();
 const repoVisibilityInflight = new Map<string, {
   roomKey: string;
   promise: Promise<GitHubRepoVisibility>;
@@ -190,9 +200,9 @@ function forgetRoomAccess(roomKey: string): void {
   rotateCacheGeneration(repoRoomCacheGeneration, roomKey);
   repoVisibilityCache.delete(roomKey);
   repoVisibilityLastKnown.delete(roomKey);
-  for (const cacheKey of repoAccessCache.keys()) {
-    if (cacheKey.startsWith(prefix)) {
-      repoAccessCache.delete(cacheKey);
+  for (const cache of [repoAccessCache, publicRepoRoleCache]) {
+    for (const cacheKey of cache.keys()) {
+      if (cacheKey.startsWith(prefix)) cache.delete(cacheKey);
     }
   }
   for (const [flightKey, flight] of repoVisibilityInflight) {
@@ -212,9 +222,9 @@ export function clearGitHubRepoAccessCacheForRoom(roomName: string): void {
 function forgetLoginAccess(loginKey: string): void {
   const suffix = `::${loginKey}`;
   rotateCacheGeneration(repoLoginCacheGeneration, loginKey);
-  for (const cacheKey of repoAccessCache.keys()) {
-    if (cacheKey.endsWith(suffix)) {
-      repoAccessCache.delete(cacheKey);
+  for (const cache of [repoAccessCache, publicRepoRoleCache]) {
+    for (const cacheKey of cache.keys()) {
+      if (cacheKey.endsWith(suffix)) cache.delete(cacheKey);
     }
   }
   for (const [flightKey, flight] of repoAccessInflight) {
@@ -515,6 +525,59 @@ export async function isGitHubRepoCollaborator(input: {
   return pending;
 }
 
+/**
+ * Whether this login has a GitHub role on a public repository: it owns the
+ * repository, or GitHub reports triage, write, maintain or admin for the
+ * person's own token. On a public repository GitHub reports read access for
+ * everyone, and its per-user permission endpoint refuses callers without push
+ * access, so a read-only collaborator cannot be told apart from the public and
+ * does not count.
+ */
+export async function isGitHubPublicRepoRoleHolder(input: {
+  roomName: string;
+  login: string;
+  accessToken: string;
+  bypassCache?: boolean;
+  throwOnIndeterminate?: boolean;
+  fetchImpl?: typeof fetch;
+}): Promise<boolean> {
+  const roomKey = normalizeCacheKey(input.roomName);
+  const loginKey = normalizeCacheKey(input.login);
+  const cacheKey = `${roomKey}::${loginKey}`;
+  if (!input.bypassCache) {
+    const cached = publicRepoRoleCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.allowed;
+    if (cached) publicRepoRoleCache.delete(cacheKey);
+  }
+  if (!parseGitHubRepoName(input.roomName)) return false;
+
+  const roomGeneration = getCacheGeneration(repoRoomCacheGeneration, roomKey);
+  const loginGeneration = getCacheGeneration(repoLoginCacheGeneration, loginKey);
+  const response = await fetchGitHubRepo(input.roomName, input.accessToken, input.fetchImpl ?? fetch);
+  if (!response.ok) {
+    if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(response)) {
+      throw new Error(`GitHub repo role check was indeterminate (${response.status}).`);
+    }
+    return false;
+  }
+  const payload = (await response.json()) as GitHubRepo;
+  const permissions = payload.permissions ?? {};
+  const allowed = payload.owner?.login?.toLowerCase() === loginKey
+    || Boolean(permissions.triage || permissions.push || permissions.maintain || permissions.admin);
+  if (
+    !input.bypassCache
+    && getCacheGeneration(repoRoomCacheGeneration, roomKey) === roomGeneration
+    && getCacheGeneration(repoLoginCacheGeneration, loginKey) === loginGeneration
+  ) {
+    pruneExpiringCache(publicRepoRoleCache, REPO_CACHE_MAX_ENTRIES);
+    publicRepoRoleCache.set(cacheKey, {
+      allowed,
+      expiresAt: Date.now() + (allowed ? REPO_ACCESS_TTL_MS : PUBLIC_REPO_NO_ROLE_TTL_MS),
+    });
+  }
+  return allowed;
+}
+
 function isIndeterminateGitHubAccessResponse(response: Response): boolean {
   return response.status === 401
     || response.status === 403
@@ -618,12 +681,27 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
   const visibility = await deps.getVisibility(canonicalRoomName, accessToken, {
     bypassCache: input.freshCollaboratorCheck,
   });
-  if (visibility === "public") {
-    return { kind: "allow" };
-  }
-
   if (!input.sessionAccount) {
     return { kind: "auth_required" };
+  }
+
+  if (visibility === "public") {
+    if (
+      input.sessionAccount.provider !== "github" ||
+      !input.sessionAccount.provider_access_token ||
+      !input.sessionAccount.login
+    ) {
+      return { kind: "repo_collaborator_required" };
+    }
+    const isRoleHolder = deps.isPublicRepoRoleHolder ?? isGitHubPublicRepoRoleHolder;
+    const allowed = await isRoleHolder({
+      roomName: canonicalRoomName,
+      login: input.sessionAccount.login,
+      accessToken: input.sessionAccount.provider_access_token,
+      bypassCache: input.freshCollaboratorCheck,
+      throwOnIndeterminate: input.throwOnIndeterminate,
+    });
+    return allowed ? { kind: "allow" } : { kind: "repo_collaborator_required" };
   }
 
   if (

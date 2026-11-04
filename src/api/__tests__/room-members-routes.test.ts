@@ -64,7 +64,7 @@ function harness(options: { roles?: Record<string, RoomMemberRole>; participantD
       removeRoomMember: async (roomId: string, accountId: string) => {
         calls.push(`remove:${roomId}:${accountId}`);
         roles.delete(accountId);
-        return { kind: 'removed', agent_sessions: [{ session_id: 'ras_1', room_id: 'focus_7', agent_key: 'k', agent_instance_id: null }] };
+        return { kind: 'removed', login: accountId, agent_sessions: [{ session_id: 'ras_1', room_id: 'focus_7', agent_key: 'k', agent_instance_id: null }] };
       },
       createRoomJoinRequest: async (roomId: string) => {
         calls.push(`request:${roomId}`);

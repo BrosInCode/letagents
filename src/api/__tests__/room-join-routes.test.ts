@@ -34,7 +34,10 @@ function createDeps() {
     resolveProjectRole: unused,
     rememberHumanRoomParticipant: unused,
     rememberAccountRoom: unused,
-    assignInitialProjectAdmin: unused,
+    resolveExistingRoomRequest: async () => null,
+    claimRoomAsCreator: unused,
+    resolveRoomMembershipDecision: async () => ({ kind: "allow" as const }),
+    replyRoomMembershipDecision: unused,
     toRoomResponse: () => ({}),
   };
 }

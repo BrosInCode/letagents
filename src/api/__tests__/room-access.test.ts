@@ -363,7 +363,7 @@ test("replyRepoRoomAccessDecision preserves auth-required response shape", () =>
     assert.deepEqual(state.body, {
       error: "auth_required",
       code: "NOT_AUTHENTICATED",
-      message: "Authentication is required for repo-backed rooms",
+      message: "Sign in to LetAgents to open this room",
       room_id: "github.com/BrosInCode/letagents",
       device_flow_url:
         "https://letagents.test/auth/device/start?room_id=github.com%2FBrosInCode%2Fletagents",
@@ -388,13 +388,14 @@ test("requireAdmin rejects unauthenticated requests before role lookup", async (
   assert.deepEqual(state.body, { error: "Authentication required" });
 });
 
-test("requireParticipant allows non-repo rooms without auth", async () => {
-  const { res } = jsonResponse();
-
-  assert.equal(
-    await requireParticipant({ sessionAccount: null } as never, res, project("invite-room")),
-    true
-  );
+test("requireParticipant refuses every room to a caller with no sign-in, before any lookup", async () => {
+  for (const room of [project("invite-room"), project("github.com/BrosInCode/letagents")]) {
+    const { res, state } = jsonResponse();
+    assert.equal(await requireParticipant({ sessionAccount: null } as never, res, room), false);
+    assert.equal(state.statusCode, 401);
+    assert.equal((state.body as { code?: string }).code, "NOT_AUTHENTICATED");
+    assert.equal((state.body as { room_id?: string }).room_id, room.id);
+  }
 });
 
 test("Git-room participant access accepts only the worker bearer's exact room", async () => {

@@ -37,6 +37,7 @@ import { isRentalSupervisorGrantActive } from "../rental/session-launch.js";
 import { askIdFromGrantScope, isAskGrantActive } from "../agent-asks/store.js";
 import { accountKnowledgeActor, closeRequestsOfRetiredAgent } from "../rooms/attention-answers.js";
 import {
+  isProjectRoomMember,
   resolveProjectRepoAccessTarget,
   resolveRepoRoomAccessDecision,
   type RepoRoomAccessDecision,
@@ -64,6 +65,7 @@ export type RoomResolverDeps = {
     options?: { freshCollaboratorCheck?: boolean; throwOnIndeterminate?: boolean },
   ): Promise<boolean>;
   getProjectById?(roomId: string): Promise<Project | null | undefined>;
+  isProjectRoomMember?(project: Project, accountId: string): Promise<boolean>;
   resolveProjectRepoAccessTarget?(project: Project): Promise<{
     roomName: string;
     repoRoomName: string;
@@ -172,6 +174,7 @@ export async function requireSupervisorGrantRoomAccess(
   const resolveAccess = deps.resolveRepoRoomAccessDecision ?? resolveRepoRoomAccessDecision;
   const findAppRepository = deps.getGitHubAppRepositoryByRoomId ?? getGitHubAppRepositoryByRoomId;
   const findAppInstallation = deps.getGitHubAppInstallationById ?? getGitHubAppInstallationById;
+  const isMember = deps.isProjectRoomMember ?? isProjectRoomMember;
   const requestedRoomIds = await policyRoomIds(grant, res, policy);
   if (!requestedRoomIds) return false;
 
@@ -181,7 +184,20 @@ export async function requireSupervisorGrantRoomAccess(
     const project = await findProject(canonicalRoomId);
     if (!project) return respondSupervisorScopeStale(res, allowedRoomId);
     const target = await resolveTarget(project);
-    if (!target) continue;
+    if (!target) {
+      // A room without a repository: the grant owner must still be a member.
+      // Only this room is refused; the grant keeps its other rooms, and the
+      // owner's agents here already ended when the owner was removed.
+      if (!(await isMember(project, grant.owner_account_id))) {
+        res.status(403).json({
+          error: "The supervisor grant owner is not a member of this room.",
+          code: "SUPERVISOR_ROOM_MEMBERSHIP_REQUIRED",
+          room_id: project.id,
+        });
+        return false;
+      }
+      continue;
+    }
     accessTargets.set(target.repoRoomName.toLowerCase(), target);
   }
   if (accessTargets.size === 0) return true;

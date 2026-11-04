@@ -6,6 +6,7 @@ import {
   clearGitHubRepoAccessCacheForRoom,
   getGitHubRepoVisibility,
   githubRepoAccessInvalidationEvents,
+  isGitHubPublicRepoRoleHolder,
   isGitHubRepoCollaborator,
   isGitHubRepoWriter,
   resetGitHubRepoVisibilityBackoffForTests,
@@ -20,19 +21,68 @@ afterEach(() => {
   resetGitHubRepoVisibilityBackoffForTests();
 });
 
-test("resolveGitHubRepoRoomAccessDecision allows anonymous access to public GitHub repo rooms", async () => {
-  const decision = await resolveGitHubRepoRoomAccessDecision(
-    {
-      roomName: "github.com/brosincode/letagents",
-      sessionAccount: null,
-    },
+test("a public GitHub repo room needs a sign-in and a GitHub role on the repository", async () => {
+  const account = { provider: "github", provider_access_token: "secret-token", login: "EmmyMay" };
+  const roleChecks: string[] = [];
+  const decide = (sessionAccount: typeof account | null, hasRole: boolean) => resolveGitHubRepoRoomAccessDecision(
+    { roomName: "github.com/BrosInCode/letagents", sessionAccount },
     {
       getVisibility: async () => "public",
-      isCollaborator: async () => false,
-    }
+      isCollaborator: async () => { throw new Error("the private-repo check must not decide a public repo"); },
+      isPublicRepoRoleHolder: async (input) => { roleChecks.push(`${input.roomName}:${input.login}`); return hasRole; },
+    },
   );
 
-  assert.deepEqual(decision, { kind: "allow" });
+  assert.deepEqual(await decide(null, true), { kind: "auth_required" });
+  assert.deepEqual(roleChecks, [], "no GitHub lookup for a caller with no sign-in");
+  assert.deepEqual(await decide(account, false), { kind: "repo_collaborator_required" });
+  assert.deepEqual(await decide(account, true), { kind: "allow" });
+  assert.deepEqual(roleChecks, ["github.com/brosincode/letagents:EmmyMay", "github.com/brosincode/letagents:EmmyMay"]);
+  assert.deepEqual(
+    await decide({ ...account, provider_access_token: "" }, true),
+    { kind: "repo_collaborator_required" },
+    "without a GitHub token the role cannot be checked",
+  );
+});
+
+test("a GitHub role on a public repository means owner, triage or more, never read alone", async () => {
+  const room = `github.com/acme/public-${Date.now()}`;
+  const permissionsByLogin: Record<string, Record<string, boolean>> = {
+    reader: { pull: true },
+    triager: { pull: true, triage: true },
+    writer: { pull: true, triage: true, push: true },
+  };
+  let calls = 0;
+  let status = 200;
+  globalThis.fetch = (async (_input, init) => {
+    calls += 1;
+    if (status !== 200) return jsonResponse(status, { message: "unavailable" });
+    const token = new Headers(init?.headers).get("authorization")?.replace(/^Bearer /, "") ?? "";
+    return jsonResponse(200, { private: false, owner: { login: "acme" }, permissions: permissionsByLogin[token] ?? { pull: true } });
+  }) as typeof fetch;
+  const check = (login: string, options: { bypassCache?: boolean; throwOnIndeterminate?: boolean } = {}) =>
+    isGitHubPublicRepoRoleHolder({ roomName: room, login, accessToken: login, ...options });
+
+  assert.equal(await check("acme"), true, "the owner");
+  assert.equal(await check("triager"), true);
+  assert.equal(await check("writer"), true);
+  assert.equal(await check("reader"), false, "read access is what everyone has on a public repository");
+  const afterFirstLookups = calls;
+  assert.equal(await check("reader"), false);
+  assert.equal(calls, afterFirstLookups, "a no-role answer is kept briefly");
+  await withClockOffset(61_000, async () => {
+    assert.equal(await check("reader"), false);
+  });
+  assert.equal(calls, afterFirstLookups + 1, "and asked again after a minute");
+  assert.equal(await check("triager", { bypassCache: true }), true);
+  assert.equal(calls, afterFirstLookups + 2, "a fresh check always asks GitHub");
+
+  status = 503;
+  assert.equal(await check("outage-person"), false);
+  await assert.rejects(check("outage-person", { throwOnIndeterminate: true }), /indeterminate/);
+  status = 200;
+  permissionsByLogin["outage-person"] = { pull: true, triage: true };
+  assert.equal(await check("outage-person"), true, "an outage answer is not kept");
 });
 
 test("resolveGitHubRepoRoomAccessDecision still requires auth for private GitHub repo rooms", async () => {
@@ -181,10 +231,19 @@ for (const roomName of GITHUB_ROOM_SPELLINGS) {
     ) =>
       resolveGitHubRepoRoomAccessDecision(
         { roomName, sessionAccount },
-        { getVisibility: async () => visibility, isCollaborator: async () => isCollaborator }
+        {
+          getVisibility: async () => visibility,
+          isCollaborator: async () => isCollaborator,
+          isPublicRepoRoleHolder: async (input) => {
+            assert.equal(input.roomName, "github.com/brosincode/secret-repo");
+            return isCollaborator;
+          },
+        }
       );
 
-    assert.deepEqual(await decide("public", null, false), { kind: "allow" });
+    assert.deepEqual(await decide("public", null, false), { kind: "auth_required" });
+    assert.deepEqual(await decide("public", collaborator, true), { kind: "allow" });
+    assert.deepEqual(await decide("public", collaborator, false), { kind: "repo_collaborator_required" });
     assert.deepEqual(await decide("private", null, false), { kind: "auth_required" });
     assert.deepEqual(await decide("private", collaborator, true), { kind: "allow" });
     assert.deepEqual(await decide("private", collaborator, false), { kind: "private_repo_no_access" });
@@ -561,7 +620,7 @@ function jsonResponse(status: number, body: unknown, headers: Record<string, str
   });
 }
 
-test("a public room stays public for anonymous readers when GitHub cannot answer a refresh", async () => {
+test("a remembered public visibility stands while GitHub cannot answer a refresh", async () => {
   const roomName = `github.com/brosincode/public-flap-${Date.now()}`;
   const replies: Array<() => Response> = [
     () => jsonResponse(200, { private: false }),
@@ -580,10 +639,6 @@ test("a public room stays public for anonymous readers when GitHub cannot answer
   for (const [index, offsetMs] of [61_000, 122_000, 183_000].entries()) {
     await withClockOffset(offsetMs, async () => {
       assert.equal(await getGitHubRepoVisibility(roomName), "public", `refresh ${index + 1} keeps the known answer`);
-      assert.deepEqual(
-        await resolveGitHubRepoRoomAccessDecision({ roomName, sessionAccount: null }),
-        { kind: "allow" },
-      );
     });
   }
   assert.equal(calls, 4, "each refresh still asks GitHub once");
@@ -691,7 +746,7 @@ test("a secondary rate limit without headers keeps the remembered public answer"
   });
 });
 
-test("an anonymous live-stream recheck keeps a public room open while GitHub is rate-limiting", async () => {
+test("an anonymous live-stream recheck of a public room is refused before any GitHub lookup", async () => {
   const roomName = `github.com/brosincode/live-anonymous-${Date.now()}`;
   let calls = 0;
   globalThis.fetch = (async (_input, init) => {
@@ -705,9 +760,9 @@ test("an anonymous live-stream recheck keeps a public room open while GitHub is 
   assert.equal(await getGitHubRepoVisibility(roomName, undefined, { bypassCache: true }), "public");
   assert.deepEqual(
     await resolveGitHubRepoRoomAccessDecision({ roomName, sessionAccount: null, freshCollaboratorCheck: true }),
-    { kind: "allow" },
+    { kind: "auth_required" },
   );
-  assert.equal(calls, 2, "the second recheck waits for GitHub's retry-after");
+  assert.equal(calls, 2, "no GitHub lookup is spent on a caller with no sign-in");
   assert.equal(
     await getGitHubRepoVisibility(roomName, "token", { bypassCache: true }),
     "unknown",

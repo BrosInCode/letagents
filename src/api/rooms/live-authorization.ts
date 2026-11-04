@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { githubRepoAccessInvalidationEvents } from "../github/repo-access.js";
 import { parseCookies, type AuthenticatedRequest } from "../http/helpers.js";
 import { roomEventBridgeLossEvents } from "../server/bridged-emitter.js";
-import { isRepoBackedRoomId } from "./room-ids.js";
+import { roomMembershipInvalidationEvents } from "./membership-events.js";
 import type { RoomAgentDeliveryCredentialFence } from "../../shared/agent-presence.js";
 import {
   roomAgentCredentialInvalidationEvents,
@@ -72,20 +72,25 @@ githubRepoAccessInvalidationEvents.on("invalidate", (payload: unknown) => {
   );
 });
 
+roomMembershipInvalidationEvents.on("invalidate", (payload: unknown) => {
+  const invalidation = payload && typeof payload === "object"
+    ? payload as { roomId?: unknown; login?: unknown }
+    : {};
+  if (typeof invalidation.roomId !== "string" || typeof invalidation.login !== "string") return;
+  invalidateAuthorizationLeases(invalidation.roomId, invalidation.login);
+});
+
 roomEventBridgeLossEvents.on("loss", (payload: unknown) => {
   const reason = payload && typeof payload === "object"
     ? (payload as { reason?: unknown }).reason
     : null;
   if (reason === "uninterested_reference" || reason === "listener_connected_boundary") return;
-  // A dropped cross-instance frame may itself have been a revocation. Treat
-  // the compact durable loss marker as a global authorization invalidation;
-  // leases still coalesce the resulting fresh checks per room/credential.
-  // Only repository access and worker credential retirements travel over the
-  // bridge. A session or owner token in a room without a repository is revoked
-  // in the database alone, so a lost frame says nothing about it; the periodic
-  // recheck covers it without a forced read on every bridge flap.
-  invalidateAuthorizationLeases(null, null, (lease) =>
-    Boolean(lease.credentialFingerprint) || isRepoBackedRoomId(lease.roomName));
+  // A dropped cross-instance frame may itself have been a revocation: a
+  // repository access change, a worker credential retirement or a person
+  // leaving a room. Treat the compact durable loss marker as a global
+  // authorization invalidation; leases still coalesce the resulting fresh
+  // checks per room/credential.
+  invalidateAuthorizationLeases(null, null);
 });
 
 roomAgentCredentialInvalidationEvents.on("invalidate", (payload: unknown) => {

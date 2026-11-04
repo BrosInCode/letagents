@@ -123,6 +123,48 @@ export async function recordRoomCreator(roomId: string, accountId: string): Prom
   });
 }
 
+/**
+ * Makes the account the creator of a room that nobody holds yet: no admin and
+ * no member. Returns false when someone already holds it, for example when two
+ * people created the same new room at the same moment.
+ */
+export async function claimRoomAsCreator(roomId: string, accountId: string): Promise<boolean> {
+  return inTransaction(async (client) => {
+    await lockRoomAdmins(client, roomId);
+    const held = await client.query<{ held: boolean }>(`SELECT
+        EXISTS (SELECT 1 FROM project_admins WHERE project_id = $1)
+        OR EXISTS (SELECT 1 FROM room_members WHERE room_id = $1) AS held`, [roomId]);
+    if (held.rows[0]?.held) return false;
+    await client.query(`INSERT INTO project_admins (project_id, account_id, assigned_at)
+      VALUES ($1, $2, now()) ON CONFLICT DO NOTHING`, [roomId, accountId]);
+    await addRoomMember({ roomId, accountId, addedVia: 'creator' }, client);
+    return true;
+  });
+}
+
+/** Which of these top-level rooms the account is a member or admin of. */
+export async function memberRoomIdsForAccount(accountId: string, roomIds: readonly string[]): Promise<Set<string>> {
+  if (!roomIds.length) return new Set();
+  const result = await pool.query<{ room_id: string }>(`SELECT room_id FROM room_members
+      WHERE account_id = $1 AND room_id = ANY($2::text[])
+    UNION
+    SELECT project_id FROM project_admins WHERE account_id = $1 AND project_id = ANY($2::text[])`,
+  [accountId, [...roomIds]]);
+  return new Set(result.rows.map((row) => row.room_id));
+}
+
+/** The top-level rooms the account is a member or admin of, by name. */
+export async function listMemberRooms(accountId: string): Promise<Array<{ id: string; display_name: string }>> {
+  const result = await pool.query<{ id: string; display_name: string }>(`SELECT room.id, room.display_name
+    FROM rooms AS room
+    WHERE room.kind = 'main' AND (
+      EXISTS (SELECT 1 FROM room_members WHERE room_id = room.id AND account_id = $1)
+      OR EXISTS (SELECT 1 FROM project_admins WHERE project_id = room.id AND account_id = $1))
+    ORDER BY lower(room.display_name), room.id
+    LIMIT 1000`, [accountId]);
+  return result.rows;
+}
+
 export async function listRoomMembers(roomId: string): Promise<RoomMember[]> {
   const result = await pool.query<{
     account_id: string;
@@ -200,7 +242,7 @@ export interface RemovedMemberAgentSession {
 }
 
 export type RoomMemberRemoval =
-  | { kind: 'removed'; agent_sessions: RemovedMemberAgentSession[] }
+  | { kind: 'removed'; login: string | null; agent_sessions: RemovedMemberAgentSession[] }
   | { kind: 'not_member' }
   | { kind: 'last_admin' };
 
@@ -234,7 +276,8 @@ export async function removeRoomMember(roomId: string, accountId: string): Promi
         AND NOT EXISTS (SELECT 1 FROM rental_sessions WHERE room_agent_session_id = session.session_id)
         AND NOT EXISTS (SELECT 1 FROM agent_asks WHERE room_agent_session_id = session.session_id)
       ORDER BY session.created_at`, [roomId, accountId]);
-    return { kind: 'removed', agent_sessions: sessions.rows };
+    const account = await client.query<{ login: string }>('SELECT login FROM accounts WHERE id = $1', [accountId]);
+    return { kind: 'removed', login: account.rows[0]?.login ?? null, agent_sessions: sessions.rows };
   });
 }
 

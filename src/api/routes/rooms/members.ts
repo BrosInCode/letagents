@@ -17,6 +17,7 @@ import { getProjectAccessRoomId, resolveProjectRepoAccessTarget } from '../../ro
 import { disconnectRoomAgentDeliverySession } from '../../rooms/agent-delivery.js';
 import { announceAgentSessionEnded } from '../../rooms/agent-process-connections.js';
 import { closeRequestsOfRetiredAgent } from '../../rooms/attention-answers.js';
+import { announceRoomMembershipEnded } from '../../rooms/membership-events.js';
 import { normalizeRoomId } from '../../rooms/routing.js';
 import { routeParam } from './messages/helpers.js';
 import type { RoomMessageRouteDeps } from './messages/types.js';
@@ -276,6 +277,8 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
         });
         return;
       }
+      // Their open streams in the room and its focus rooms close now.
+      if (removal.login) announceRoomMembershipEnded(member.room.accessRoom.id, removal.login);
       // The person is out of the room, so their agents are too. A failure to
       // end one is logged; the membership change stands either way.
       let ended = 0;

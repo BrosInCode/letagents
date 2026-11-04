@@ -10,11 +10,11 @@ import { registerAgentAskRoutes } from "../routes/agent-asks.js";
 import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
 import { registerWakeRuleRoutes } from "../routes/rooms/wake-rules.js";
 import { registerRoomMemberRoutes } from "../routes/rooms/members.js";
+import { claimRoomAsCreator } from "../db/room-members.js";
 import type { Express } from "express";
 
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
 import {
-  assignProjectAdminIfRoomHasNoAdmins,
   concludeFocusRoom,
   getGitHubAppInstallationById,
   getGitHubAppRepositoryByRoomId,
@@ -41,6 +41,8 @@ import {
   isRepoBackedProject,
   isRepoBackedRoomId,
   replyRepoRoomAccessDecision,
+  replyRoomMembershipDecision,
+  resolveRoomMembershipDecision,
   requireGitRoomAdmin as requireAdmin,
   requireGitRoomParticipant as requireParticipant,
   resolveGitHubRoomEntryDecision,
@@ -328,6 +330,8 @@ export function registerApiRoutes(app: Express): void {
     rememberHumanRoomParticipant,
     rememberAccountRoom: upsertAccountRoomRecent,
     getGitRoomBindingForRoom,
+    resolveRoomMembershipDecision,
+    replyRoomMembershipDecision,
   } satisfies LegacyProjectRouteDeps;
 
   const legacyProjectMessageRouteDeps = {
@@ -521,8 +525,10 @@ export function registerApiRoutes(app: Express): void {
     resolveProjectRole,
     rememberHumanRoomParticipant,
     rememberAccountRoom: upsertAccountRoomRecent,
-    assignInitialProjectAdmin: ({ projectId, accountId }) =>
-      assignProjectAdminIfRoomHasNoAdmins(projectId, accountId),
+    resolveExistingRoomRequest,
+    claimRoomAsCreator: ({ projectId, accountId }) => claimRoomAsCreator(projectId, accountId),
+    resolveRoomMembershipDecision,
+    replyRoomMembershipDecision,
     toRoomResponse,
   } satisfies RoomJoinRouteDeps;
 

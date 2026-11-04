@@ -1,6 +1,9 @@
 import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
+import { getGitRoomBindingsForRooms } from "../db/git-room-bindings.js";
+import { memberRoomIdsForAccount } from "../db/room-members.js";
+import { isRepoBackedRoomId } from "../rooms/room-ids.js";
 import {
   account_room_recents,
   messages,
@@ -231,6 +234,22 @@ export async function getAccountRoomsForAccount(
         firstOpenedAt: fallback?.first_opened_at ?? parent.created_at,
         lastOpenedAt: fallback?.last_opened_at ?? parent.created_at,
       }));
+    }
+  }
+
+  // A room that is not tied to a repository is listed for its members only,
+  // with its focus rooms: its name and activity are room data. A repo room
+  // stays listed; opening it runs the repository access check.
+  const unboundParentIds = [...parentCandidates.keys()].filter((roomId) => !isRepoBackedRoomId(roomId));
+  if (unboundParentIds.length) {
+    const [memberRoomIds, bindings] = await Promise.all([
+      memberRoomIdsForAccount(accountId, unboundParentIds),
+      getGitRoomBindingsForRooms(unboundParentIds),
+    ]);
+    for (const roomId of unboundParentIds) {
+      if (memberRoomIds.has(roomId) || bindings.get(roomId)?.provider === "github") continue;
+      parentCandidates.delete(roomId);
+      parentRoomIds.delete(roomId);
     }
   }
 
