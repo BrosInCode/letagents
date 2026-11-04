@@ -11,6 +11,7 @@ import {
   INLINE_HTML_DEMO_CACHE_ENTRIES,
   INLINE_HTML_DEMO_CACHE_MS,
   INLINE_HTML_DEMO_DOWNLOAD_MS,
+  INLINE_HTML_DEMO_FOCUS_GRACE_MS,
   INLINE_HTML_DEMO_HEIGHT_INTERVAL_MS,
   INLINE_HTML_DEMO_LEASE_MS,
   INLINE_HTML_DEMO_LIVENESS_INTERVAL_MS,
@@ -20,6 +21,7 @@ import {
   inlineHtmlDemoAttachLease,
   inlineHtmlDemoEventMeter,
   type InlineHtmlDemoEventMeter,
+  inlineHtmlDemoFocusAllowed,
   inlineHtmlDemoHeight,
   inlineHtmlDemoLeaseHost,
   inlineHtmlDemoLeaseUrl,
@@ -39,8 +41,11 @@ const { app } = electron as typeof import("electron");
 
 export const INLINE_HTML_DEMO_EVENT_CHANNEL = "desktop:room:inline-html-demo-event";
 
-/** The first click, key or touch in a demo turns its sound on; the page cannot fake one. */
-const UNMUTE_INPUT_TYPES = new Set<InputEvent["type"]>(["mouseDown", "rawKeyDown", "keyDown", "touchStart"]);
+/**
+ * A click, key or touch the person makes in a demo. The first one turns its
+ * sound on, and each one lets the demo take keyboard focus; the page cannot fake one.
+ */
+const PERSON_INPUT_TYPES = new Set<InputEvent["type"]>(["mouseDown", "rawKeyDown", "keyDown", "touchStart"]);
 
 /**
  * The guest events Electron 42 forwards to the `<webview>` element, each one a
@@ -54,10 +59,17 @@ const FORWARDED_GUEST_EVENTS = [
   "did-start-navigation", "did-redirect-navigation", "did-navigate", "did-frame-navigate",
   "did-navigate-in-page", "page-title-updated", "page-favicon-updated", "enter-html-full-screen",
   "leave-html-full-screen", "media-started-playing", "media-paused", "found-in-page",
-  "did-change-theme-color", "update-target-url",
+  "did-change-theme-color", "update-target-url", "-focus-change",
 ] as const;
 
 type StopReason = Extract<DesktopInlineHtmlDemoEvent, { type: "stopped" }>["reason"];
+
+/** What main knows about the app window an inline demo runs in. */
+interface DemoHostWindow {
+  lastTabAt: number;
+  blurredAt: number;
+  focusedAt: number;
+}
 
 interface InlineHtmlDemoLease {
   host: string;
@@ -66,6 +78,7 @@ interface InlineHtmlDemoLease {
   attached: boolean;
   guest: WebContents | null;
   embedder: WebContents | null;
+  hostWindow: DemoHostWindow | null;
   stopped: boolean;
   attachTimer: ReturnType<typeof setTimeout> | null;
   heightTimer: ReturnType<typeof setTimeout> | null;
@@ -76,6 +89,11 @@ interface InlineHtmlDemoLease {
   livenessTimer: ReturnType<typeof setTimeout> | null;
   livenessCheck: object | null;
   events: InlineHtmlDemoEventMeter;
+  lastInputAt: number;
+  focused: boolean;
+  focusLostAt: number;
+  /** The demo had keyboard focus when the app window lost it, so it may get it back on return. */
+  focusedAtWindowBlur: boolean;
 }
 
 /** Live leases by demo host; a host's document lives exactly as long as its lease. */
@@ -88,7 +106,7 @@ const htmlLoads = new Map<string, Promise<string>>();
 /** Moves on when the cache is cleared, so a download started before then is not cached. */
 let htmlCacheGeneration = 0;
 /** The lease whose webview Electron is creating right now, in this task. */
-let attaching: { lease: InlineHtmlDemoLease; embedder: WebContents } | null = null;
+let attaching: { lease: InlineHtmlDemoLease; embedder: WebContents; hostWindow: DemoHostWindow } | null = null;
 let guestBindingInstalled = false;
 
 /** Load a room HTML attachment for a `<webview>` in the chat; the lease admits one webview, once. */
@@ -107,6 +125,7 @@ export async function prepareInlineHtmlDemo(rawHref: unknown): Promise<DesktopIn
     attached: false,
     guest: null,
     embedder: null,
+    hostWindow: null,
     stopped: false,
     attachTimer: null,
     heightTimer: null,
@@ -116,6 +135,10 @@ export async function prepareInlineHtmlDemo(rawHref: unknown): Promise<DesktopIn
     livenessTimer: null,
     livenessCheck: null,
     events: inlineHtmlDemoEventMeter(),
+    lastInputAt: Number.NEGATIVE_INFINITY,
+    focused: false,
+    focusLostAt: Number.NEGATIVE_INFINITY,
+    focusedAtWindowBlur: false,
   };
   lease.attachTimer = setTimeout(() => {
     if (!lease.guest) endLease(lease);
@@ -158,6 +181,25 @@ export function installInlineHtmlDemoHost(hostWindow: ElectronBrowserWindow): vo
     guestBindingInstalled = true;
   }
   const embedder = hostWindow.webContents;
+  const demoHost: DemoHostWindow = {
+    lastTabAt: Number.NEGATIVE_INFINITY,
+    blurredAt: Number.NEGATIVE_INFINITY,
+    focusedAt: Number.NEGATIVE_INFINITY,
+  };
+  // Tab in the app page may move focus into a demo; the page still gets the key.
+  embedder.on("before-input-event", (_event, input) => {
+    if ((input.type === "keyDown" || input.type === "rawKeyDown") && input.key === "Tab") demoHost.lastTabAt = Date.now();
+  });
+  hostWindow.on("blur", () => {
+    const now = Date.now();
+    demoHost.blurredAt = now;
+    for (const lease of leases.values()) {
+      if (lease.hostWindow !== demoHost) continue;
+      // Electron 42 on macOS blurs the demo just before the window, so "a moment ago" still counts.
+      lease.focusedAtWindowBlur = lease.focused || now - lease.focusLostAt <= INLINE_HTML_DEMO_FOCUS_GRACE_MS;
+    }
+  });
+  hostWindow.on("focus", () => { demoHost.focusedAt = Date.now(); });
   embedder.on("will-attach-webview", (event, webPreferences, params) => {
     const host = inlineHtmlDemoAttachLease(params, webPreferences, leases);
     const lease = host ? leases.get(host) : undefined;
@@ -172,7 +214,7 @@ export function installInlineHtmlDemoHost(hostWindow: ElectronBrowserWindow): vo
     // Electron creates the guest right after this listener returns, in the same
     // task, and reports it to "web-contents-created". A later webview is a later
     // task, so it never finds this lease waiting for it.
-    attaching = { lease, embedder };
+    attaching = { lease, embedder, hostWindow: demoHost };
     queueMicrotask(() => { attaching = null; });
   });
   embedder.on("did-attach-webview", (_event, guest) => {
@@ -189,10 +231,11 @@ function bindAttachingGuest(guest: WebContents): void {
   const current = attaching;
   attaching = null;
   if (!current || guest.getType() !== "webview") return;
-  const { lease, embedder } = current;
+  const { lease, embedder, hostWindow } = current;
   const guestId = guest.id;
   lease.guest = guest;
   lease.embedder = embedder;
+  lease.hostWindow = hostWindow;
   if (lease.attachTimer) clearTimeout(lease.attachTimer);
   lease.attachTimer = null;
   leasesByGuestId.set(guestId, lease);
@@ -212,12 +255,22 @@ function bindAttachingGuest(guest: WebContents): void {
   for (const name of FORWARDED_GUEST_EVENTS) emitter.on(name, countEvent);
 
   guest.setAudioMuted(true);
-  const unmuteOnInput = (_event: Event, input: InputEvent) => {
-    if (!UNMUTE_INPUT_TYPES.has(input.type)) return;
-    guest.off("input-event", unmuteOnInput);
+  let muted = true;
+  guest.on("input-event", (_event: Event, input: InputEvent) => {
+    if (!PERSON_INPUT_TYPES.has(input.type)) return;
+    lease.lastInputAt = Date.now();
+    if (!muted) return;
+    muted = false;
     guest.setAudioMuted(false);
-  };
-  guest.on("input-event", unmuteOnInput);
+  });
+  // Electron 42 does not emit "focus" for a webview guest; its own webview code
+  // uses "-focus-change", sent when the guest page's window gains or loses focus.
+  emitter.on("-focus-change", (_event: unknown, focused: unknown) => {
+    if (focused === true) demoTookFocus(lease);
+    else if (focused === false) demoLostFocus(lease);
+  });
+  guest.on("focus", () => demoTookFocus(lease));
+  guest.on("blur", () => demoLostFocus(lease));
   guest.on("preferred-size-changed", (_event, size) => {
     queueHeight(lease, inlineHtmlDemoHeight(size.height, embedder.isDestroyed() ? 1 : embedder.getZoomFactor()));
   });
@@ -232,6 +285,34 @@ function bindAttachingGuest(guest: WebContents): void {
       .then((ses) => ses.clearStorageData({ origin: lease.url.slice(0, -1) }))
       .catch(() => undefined);
   });
+}
+
+/**
+ * Main hears a demo's input, the app's Tab and the window's focus in the order
+ * they happened, which the app page cannot: a click into a demo never reaches it.
+ */
+function demoTookFocus(lease: InlineHtmlDemoLease): void {
+  if (lease.focused) return;
+  lease.focused = true;
+  const hostWindow = lease.hostWindow;
+  const focusedAtWindowBlur = lease.focusedAtWindowBlur;
+  lease.focusedAtWindowBlur = false;
+  if (!hostWindow || lease.stopped || !isLive(lease)) return;
+  const allowed = inlineHtmlDemoFocusAllowed({
+    now: Date.now(),
+    lastInputAt: lease.lastInputAt,
+    lastTabAt: hostWindow.lastTabAt,
+    focusedAtWindowBlur,
+    windowBlurredAt: hostWindow.blurredAt,
+    windowFocusedAt: hostWindow.focusedAt,
+  });
+  if (!allowed) sendEvent(lease, { type: "focus-refused", url: lease.url });
+}
+
+function demoLostFocus(lease: InlineHtmlDemoLease): void {
+  if (!lease.focused) return;
+  lease.focused = false;
+  lease.focusLostAt = Date.now();
 }
 
 /** A frozen, crashed or flooding demo reports once, gives up its lease, and is closed. */

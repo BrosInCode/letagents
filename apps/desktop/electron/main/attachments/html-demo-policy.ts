@@ -47,6 +47,8 @@ export const INLINE_HTML_DEMO_LIVENESS_WORLD_ID = 4417;
  */
 export const INLINE_HTML_DEMO_EVENTS_PER_SECOND = 1_000;
 export const INLINE_HTML_DEMO_BUSY_SECONDS = 2;
+/** A demo may take keyboard focus this soon after the person clicks or types in it, or Tabs into it. */
+export const INLINE_HTML_DEMO_FOCUS_GRACE_MS = 1_000;
 
 const INLINE_HTML_DEMO_HOST = /^[0-9a-f]{32}$/;
 
@@ -204,6 +206,27 @@ export function countInlineHtmlDemoEvent(meter: InlineHtmlDemoEventMeter, now: n
   }
   meter.count += 1;
   return meter.count === INLINE_HTML_DEMO_EVENTS_PER_SECOND + 1 && meter.busyWindows + 1 >= INLINE_HTML_DEMO_BUSY_SECONDS;
+}
+
+/**
+ * Whether a demo that just took keyboard focus may keep it: the person clicked,
+ * typed or touched inside it, or pressed Tab in the app, a moment ago; or the
+ * demo had focus when the app window lost it, and the window is coming back.
+ * Electron 42 on macOS refocuses the demo just before the window's own focus
+ * event, so "coming back" is a window that is still marked blurred, or one
+ * that was focused a moment ago.
+ */
+export function inlineHtmlDemoFocusAllowed(input: {
+  now: number;
+  lastInputAt: number;
+  lastTabAt: number;
+  focusedAtWindowBlur: boolean;
+  windowBlurredAt: number;
+  windowFocusedAt: number;
+}): boolean {
+  const recent = (at: number) => input.now - at <= INLINE_HTML_DEMO_FOCUS_GRACE_MS;
+  const windowReturning = input.windowBlurredAt > input.windowFocusedAt || recent(input.windowFocusedAt);
+  return recent(input.lastInputAt) || recent(input.lastTabAt) || (input.focusedAtWindowBlur && windowReturning);
 }
 
 /**

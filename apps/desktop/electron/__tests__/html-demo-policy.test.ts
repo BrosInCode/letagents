@@ -14,6 +14,7 @@ import {
   INLINE_HTML_DEMO_CACHE_MS,
   INLINE_HTML_DEMO_DOWNLOAD_MS,
   INLINE_HTML_DEMO_EVENTS_PER_SECOND,
+  INLINE_HTML_DEMO_FOCUS_GRACE_MS,
   INLINE_HTML_DEMO_HEIGHT_INTERVAL_MS,
   INLINE_HTML_DEMO_LEASE_MS,
   INLINE_HTML_DEMO_LIVENESS_INTERVAL_MS,
@@ -22,6 +23,7 @@ import {
   INLINE_HTML_DEMO_LIVENESS_WORLD_ID,
   inlineHtmlDemoAttachLease,
   inlineHtmlDemoEventMeter,
+  inlineHtmlDemoFocusAllowed,
   inlineHtmlDemoHeight,
   inlineHtmlDemoLeaseHost,
   inlineHtmlDemoLeaseUrl,
@@ -343,5 +345,21 @@ describe("HTML demo policy", () => {
     assert.equal(INLINE_HTML_DEMO_CACHE_MS, 10 * 60_000);
     assert.equal(INLINE_HTML_DEMO_LIVENESS_LATE_MS, 1_000);
     assert.ok(INLINE_HTML_DEMO_EVENTS_PER_SECOND >= 500 && INLINE_HTML_DEMO_EVENTS_PER_SECOND <= 5_000);
+  });
+
+  it("lets a demo keep focus only after the person's own click, key, Tab or return to the window", () => {
+    const never = Number.NEGATIVE_INFINITY;
+    const base = { now: 100_000, lastInputAt: never, lastTabAt: never, focusedAtWindowBlur: false, windowBlurredAt: never, windowFocusedAt: never };
+    assert.equal(INLINE_HTML_DEMO_FOCUS_GRACE_MS, 1_000);
+    assert.equal(inlineHtmlDemoFocusAllowed(base), false, "a demo that focuses itself");
+    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, lastInputAt: 99_000 }), true);
+    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, lastInputAt: 98_999 }), false);
+    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, lastTabAt: 99_500 }), true);
+    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, lastTabAt: 90_000 }), false);
+    // Back to a window that is still marked blurred (the macOS order), or that was focused a moment ago.
+    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, focusedAtWindowBlur: true, windowBlurredAt: 40_000, windowFocusedAt: 10_000 }), true);
+    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, focusedAtWindowBlur: true, windowBlurredAt: 40_000, windowFocusedAt: 99_990 }), true);
+    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, focusedAtWindowBlur: true, windowBlurredAt: 40_000, windowFocusedAt: 90_000 }), false);
+    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, focusedAtWindowBlur: false, windowBlurredAt: 40_000, windowFocusedAt: 99_990 }), false);
   });
 });

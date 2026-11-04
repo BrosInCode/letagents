@@ -62,7 +62,8 @@ class FakeGuest extends EventEmitter {
   }
   isDestroyed() { return this.destroyed; }
   isCrashed() { return this.crashed; }
-  setAudioMuted(muted: boolean) { this.muted = muted; }
+  muteCalls: boolean[] = [];
+  setAudioMuted(muted: boolean) { this.muted = muted; this.muteCalls.push(muted); }
   forcefullyCrashRenderer() { this.crashCalls += 1; this.crashed = true; }
   // A guest's close deletes it at once, as Electron 42 does.
   close() {
@@ -84,7 +85,14 @@ class FakeEmbedder extends EventEmitter {
 }
 
 const embedder = new FakeEmbedder();
-installInlineHtmlDemoHost({ webContents: embedder } as never);
+/** The app window: tests set `focused` the way the OS would before emitting its events. */
+const appWindow = Object.assign(new EventEmitter(), {
+  webContents: embedder,
+  focused: true,
+  isFocused() { return this.focused; },
+  isDestroyed() { return false; },
+});
+installInlineHtmlDemoHost(appWindow as never);
 
 function willAttach(params: Record<string, unknown>) {
   const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
@@ -286,7 +294,8 @@ test("sound turns on at the first click or key press, not at a mouse move", asyn
     assert.equal(guest.muted, true);
     guest.emit("input-event", {}, { type: "rawKeyDown" });
     assert.equal(guest.muted, false);
-    assert.equal(guest.listenerCount("input-event"), 0);
+    guest.emit("input-event", {}, { type: "mouseDown" });
+    assert.deepEqual(guest.muteCalls, [true, false], "sound is turned on once");
   } finally {
     releaseAll([lease.url]);
   }
@@ -633,5 +642,165 @@ test("cached demo files expire, and sign-out clears them", async (t) => {
     assert.equal(loads.filter((load) => load === other).length, 2);
   } finally {
     loadOverride = null;
+  }
+});
+
+test("a demo that takes keyboard focus by itself is refused, every time", async (t) => {
+  let now = 3_000_000;
+  t.mock.method(Date, "now", () => now);
+  const lease = await prepareInlineHtmlDemo("letagents-attachment://download/c3RlYWw");
+  try {
+    const { guest } = attach(lease.url)!;
+    const refused = () => embedder.sent.filter((event) => (event as { type: string }).type === "focus-refused");
+    now += 5_000;
+    guest.emit("-focus-change", {}, true);
+    guest.emit("-focus-change", {}, true);
+    assert.deepEqual(refused(), [{ type: "focus-refused", url: lease.url }], "Electron repeats the change; it is refused once");
+    // The chat gives focus back, and the demo grabs it again.
+    guest.emit("-focus-change", {}, false);
+    now += 50;
+    guest.emit("-focus-change", {}, true);
+    assert.equal(refused().length, 2);
+    // A later Electron that emits the documented event is handled the same way, without doubles.
+    guest.emit("blur");
+    now += 50;
+    guest.emit("focus");
+    guest.emit("-focus-change", {}, true);
+    assert.equal(refused().length, 3);
+  } finally {
+    releaseAll([lease.url]);
+  }
+});
+
+test("a click, key or touch in the demo lets it take focus for a moment", async (t) => {
+  let now = 4_000_000;
+  t.mock.method(Date, "now", () => now);
+  const lease = await prepareInlineHtmlDemo("letagents-attachment://download/Y2xpY2s");
+  try {
+    const { guest } = attach(lease.url)!;
+    const focusAfter = (type: string, delay: number) => {
+      guest.emit("-focus-change", {}, false);
+      guest.emit("input-event", {}, { type });
+      now += delay;
+      guest.emit("-focus-change", {}, true);
+      return embedder.sent.length;
+    };
+    // Electron sends the click to the demo first, then moves focus there.
+    assert.equal(focusAfter("mouseDown", 8), 0);
+    assert.equal(focusAfter("rawKeyDown", 5), 0);
+    assert.equal(focusAfter("keyDown", 5), 0);
+    assert.equal(focusAfter("touchStart", 1_000), 0);
+    // Sound stays on and input keeps counting after the first click.
+    assert.equal(guest.muted, false);
+    assert.equal(focusAfter("mouseMove", 5), 1, "moving the pointer over a demo is not a click");
+    assert.equal(focusAfter("mouseDown", 1_001), 2, "a click longer ago does not count");
+    assert.deepEqual(embedder.sent.at(-1), { type: "focus-refused", url: lease.url });
+  } finally {
+    releaseAll([lease.url]);
+  }
+});
+
+test("Tab in the app lets focus move into the demo", async (t) => {
+  let now = 5_000_000;
+  t.mock.method(Date, "now", () => now);
+  const lease = await prepareInlineHtmlDemo("letagents-attachment://download/dGFi");
+  try {
+    const { guest } = attach(lease.url)!;
+    const press = (key: string, type = "keyDown") => embedder.emit("before-input-event", { preventDefault: () => assert.fail("the app page keeps its keys") }, { type, key });
+    press("Tab");
+    now += 4;
+    guest.emit("-focus-change", {}, true);
+    assert.deepEqual(embedder.sent, []);
+    guest.emit("-focus-change", {}, false);
+    press("Tab", "rawKeyDown");
+    now += 1_000;
+    guest.emit("-focus-change", {}, true);
+    assert.deepEqual(embedder.sent, []);
+    guest.emit("-focus-change", {}, false);
+    press("Enter");
+    press("Tab", "keyUp");
+    now += 1_500;
+    guest.emit("-focus-change", {}, true);
+    assert.deepEqual(embedder.sent, [{ type: "focus-refused", url: lease.url }]);
+  } finally {
+    releaseAll([lease.url]);
+  }
+});
+
+test("coming back to the window gives focus back only to the demo that had it", async (t) => {
+  let now = 6_000_000;
+  t.mock.method(Date, "now", () => now);
+  const had = await prepareInlineHtmlDemo("letagents-attachment://download/aGFk");
+  const other = await prepareInlineHtmlDemo("letagents-attachment://download/b3RoZXJ3");
+  try {
+    const hadFocus = attach(had.url)!.guest;
+    const neverFocused = attach(other.url)!.guest;
+    hadFocus.emit("input-event", {}, { type: "mouseDown" });
+    hadFocus.emit("-focus-change", {}, true);
+
+    // macOS order (Electron 42): the demo loses focus, then the window; it gets focus back before the window does.
+    now += 10_000;
+    appWindow.focused = false;
+    hadFocus.emit("-focus-change", {}, false);
+    appWindow.emit("blur");
+    now += 60_000;
+    appWindow.focused = true;
+    hadFocus.emit("-focus-change", {}, true);
+    appWindow.emit("focus");
+    assert.deepEqual(embedder.sent, [], "the demo the person was using gets focus back");
+    // The return is used once: grabbing focus again right after it is refused.
+    hadFocus.emit("-focus-change", {}, false);
+    now += 100;
+    hadFocus.emit("-focus-change", {}, true);
+    assert.deepEqual(embedder.sent, [{ type: "focus-refused", url: had.url }]);
+    embedder.sent = [];
+    hadFocus.emit("-focus-change", {}, false);
+    hadFocus.emit("input-event", {}, { type: "mouseDown" });
+    hadFocus.emit("-focus-change", {}, true);
+
+    // The other order: the window first, then the demo.
+    now += 10_000;
+    appWindow.focused = false;
+    appWindow.emit("blur");
+    hadFocus.emit("-focus-change", {}, false);
+    now += 60_000;
+    appWindow.focused = true;
+    appWindow.emit("focus");
+    now += 20;
+    hadFocus.emit("-focus-change", {}, true);
+    assert.deepEqual(embedder.sent, []);
+
+    // A demo that did not have focus cannot use the return to take it.
+    now += 10_000;
+    appWindow.focused = false;
+    hadFocus.emit("-focus-change", {}, false);
+    appWindow.emit("blur");
+    now += 60_000;
+    appWindow.focused = true;
+    neverFocused.emit("-focus-change", {}, true);
+    appWindow.emit("focus");
+    assert.deepEqual(embedder.sent, [{ type: "focus-refused", url: other.url }]);
+    neverFocused.emit("-focus-change", {}, false);
+
+    // The window came back without refocusing that demo, so it cannot take focus later on its own,
+    // nor at the next return, when it no longer had focus as the window left.
+    now += 2_000;
+    hadFocus.emit("-focus-change", {}, true);
+    assert.deepEqual(embedder.sent.at(-1), { type: "focus-refused", url: had.url });
+    hadFocus.emit("-focus-change", {}, false);
+    now += 5_000;
+    appWindow.focused = false;
+    appWindow.emit("blur");
+    now += 60_000;
+    appWindow.focused = true;
+    hadFocus.emit("-focus-change", {}, true);
+    appWindow.emit("focus");
+    assert.deepEqual(embedder.sent.slice(1), [
+      { type: "focus-refused", url: had.url },
+      { type: "focus-refused", url: had.url },
+    ]);
+  } finally {
+    appWindow.focused = true;
+    releaseAll([had.url, other.url]);
   }
 });
