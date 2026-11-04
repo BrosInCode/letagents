@@ -34,6 +34,11 @@ export async function assignProjectAdminIfRoomHasNoAdmins(
         assigned_at: new Date().toISOString(),
       })
       .onConflictDoNothing();
+    // The first admin of a top-level room is also its first member. A focus
+    // room has no members of its own: it uses those of its parent.
+    await tx.execute(sql`INSERT INTO room_members (room_id, account_id, added_via)
+      SELECT id, ${accountId}, 'creator' FROM rooms WHERE id = ${projectId} AND kind = 'main'
+      ON CONFLICT (room_id, account_id) DO NOTHING`);
   });
 }
 
