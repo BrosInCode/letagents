@@ -37,11 +37,14 @@ export interface WakeRuleViewer {
 }
 
 function deliverySummary(row: WakeRuleRow, viewer: WakeRuleViewer): WakeRuleDeliverySummary | null {
-  if (!row.delivery_kind || !row.delivery_target) return null;
+  // The kind stays when an ended rule drops its sealed target.
+  if (!row.delivery_kind) return null;
   const base = { kind: row.delivery_kind, paused: row.status === "paused" };
   if (!viewer.accountId || !row.owner_account_id || viewer.accountId !== row.owner_account_id) return base;
   return {
     ...base,
+    // Whether a sender key is stored; never the key.
+    has_bearer: row.delivery_bearer != null,
     delivered_count: row.delivery_delivered_count,
     consecutive_failures: row.delivery_consecutive_failures,
     over_cap_count: row.delivery_over_cap_count,
@@ -91,6 +94,8 @@ export interface WakeRuleDeliverySeal {
   /** Keyed fingerprint of the target's host (the URL's host, or the address's domain). */
   hostFingerprint: string;
   seal(ruleId: string): EncryptedCredentials;
+  /** Webhook: the receiver's sender key, sealed for this rule, or null when it needs none. */
+  sealBearer?(ruleId: string): EncryptedCredentials | null;
   /**
    * Email: the SHA-256 of the rule's stop link token, and of a confirmation
    * link token that works until `confirmExpiresAt`.
@@ -240,6 +245,8 @@ export async function createWakeRule(input: {
     // Adding a delivery rule again renews it: its expiry, its credential, its target.
     const renewal = () => ({
       delivery_target: delivery!.seal(existing!.id),
+      // Like the secret, the sender key given now replaces the stored one (or removes it).
+      delivery_bearer: delivery!.sealBearer?.(existing!.id) ?? null,
       delivery_target_fingerprint: delivery!.targetFingerprint,
       delivery_host_fingerprint: delivery!.hostFingerprint,
       credential_kind: input.credential!.kind,
@@ -320,6 +327,7 @@ export async function createWakeRule(input: {
       owner_account_id: ownerAccountId,
       delivery_kind: delivery?.kind ?? null,
       delivery_target: delivery ? delivery.seal(id) : null,
+      delivery_bearer: delivery?.sealBearer?.(id) ?? null,
       delivery_target_fingerprint: delivery?.targetFingerprint ?? null,
       delivery_host_fingerprint: delivery?.hostFingerprint ?? null,
       credential_kind: delivery ? input.credential!.kind : null,
@@ -559,7 +567,8 @@ export async function retireWakeRule(rule: WakeRuleRow, reason: string, now = ne
 export async function expireWakeWebhookRule(rule: WakeRuleRow, now = new Date()): Promise<boolean> {
   const nowIso = now.toISOString();
   const updated = await db.update(agent_wake_rules)
-    .set({ status: "expired", ended_at: nowIso, updated_at: nowIso })
+    // Expired for good: the sealed target and sender key are no longer needed (a cancel keeps them for undo).
+    .set({ status: "expired", ended_at: nowIso, updated_at: nowIso, delivery_target: null, delivery_bearer: null })
     .where(and(
       eq(agent_wake_rules.id, rule.id),
       inArray(agent_wake_rules.status, [...HELD_STATUSES]),
@@ -586,7 +595,7 @@ export async function endUnconfirmedWakeEmailRule(rule: WakeRuleRow, now = new D
   const nowIso = now.toISOString();
   const updated = await db.update(agent_wake_rules)
     .set({
-      status: "expired", ended_at: nowIso, updated_at: nowIso,
+      status: "expired", ended_at: nowIso, updated_at: nowIso, delivery_target: null, delivery_bearer: null,
       ended_reason: "the email address was not confirmed within 24 hours",
     })
     .where(and(
