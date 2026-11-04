@@ -43,8 +43,9 @@ export function registerWakeRuleTools(server: McpServer): void {
       + "task.status_changed {task_id, to?: [statuses]}; "
       + "github.check_completed {branch | pr | mine: true, conclusions?: [...]} (one wake per push, after CI goes quiet); "
       + "github.review_submitted {pr | mine: true, states?: [approved, changes_requested, commented]}; "
-      + "github.pr_closed {pr | mine: true, merged_only?}. "
-      + "`mine` means the branches and pull requests of tasks you are working on. Rules expire after 24 hours unless you set expires_at (at most 7 days). "
+      + "github.pr_closed {pr | mine: true, merged_only?}; "
+      + "room.message {mentions_me: true (default) | any: true, include_agents?} with exactly one of webhook {url, secret} or email {to}: for a hosted bot that cannot poll, LetAgents sends a signed HTTPS POST to url (public https, port 443) or an email to to (after that address confirms) when a room message is for you (with any: every top-level message but yours, and other agents' only with include_agents); it lasts 30 days (adding it again renews it), sends at most one delivery per 10 s and 20 an hour, stops when the sign-in that added it is revoked, and pauses after 5 failed deliveries in a row (add it again to resume). "
+      + "`mine` means the branches and pull requests of tasks you are working on. Other rules expire after 24 hours unless you set expires_at (at most 7 days). "
       + "A rule on one pull request ends when it merges (or stays closed for 10 minutes), and a task rule ends when the task is done or cancelled; you are woken once to say your wait ended. "
       + "Adding the same rule twice returns the existing one. People see what you are waiting for and can cancel it.",
     {
@@ -53,6 +54,13 @@ export function registerWakeRuleTools(server: McpServer): void {
       note: z.string().max(280).optional().describe("Why you are waiting, shown to people and repeated to you when you wake, e.g. \"merge #1440 once CI passes\"."),
       repeat: z.boolean().optional().describe("Keep watching after the first wake (at most one wake a minute) until it expires. Not for timers."),
       expires_at: z.string().optional().describe("ISO time to stop waiting. You are woken once more if nothing happened by then."),
+      webhook: z.object({
+        url: z.string().max(2048).describe("Public https URL of your inbound trigger. Private and loopback addresses are refused."),
+        secret: z.string().min(16).max(256).describe("Shared secret: each POST carries X-LetAgents-Signature, sha256=HMAC-SHA256 of \"<X-LetAgents-Timestamp>.<raw body>\". Stored sealed, never shown."),
+      }).optional().describe("room.message only: where to deliver. The URL and secret are never returned."),
+      email: z.object({
+        to: z.string().max(254).describe("One email address. It gets a confirmation link first; nothing else is sent until it is opened."),
+      }).optional().describe("room.message only, instead of webhook: deliver by email. The address is never returned."),
       ...scope,
     },
     async (input) => {
@@ -61,7 +69,11 @@ export function registerWakeRuleTools(server: McpServer): void {
         if (local) return taskToolError(LOCAL_ROOM_NOTE);
         // The server validates the rule and times it by its own clock, so a
         // timer given as after_ms is not skewed by this machine's clock.
-        const rule = { event: input.event, arguments: input.arguments ?? {}, note: input.note, repeat: input.repeat, expires_at: input.expires_at };
+        const rule = {
+          event: input.event, arguments: input.arguments ?? {}, note: input.note, repeat: input.repeat, expires_at: input.expires_at,
+          ...(input.webhook ? { webhook: input.webhook } : {}),
+          ...(input.email ? { email: input.email } : {}),
+        };
         const { identity, agentSession } = await resolveTaskToolIdentity(target, input.agent_session_id);
         return jsonToolResponse(await roomScopedApiCall<{ rule: WakeRule; created: boolean }>({
           room_id: target.roomId,
@@ -76,7 +88,7 @@ export function registerWakeRuleTools(server: McpServer): void {
 
   server.tool(
     "list_wake_rules",
-    "List what agents in this room are waiting for, and wake rules that recently fired, expired, were cancelled or ended (ended_reason says why). Check this on resume to see what you were waiting for.",
+    "List what agents in this room are waiting for, and wake rules that recently fired, expired, were cancelled or ended (ended_reason says why). Check this on resume to see what you were waiting for. A webhook or email rule shows delivery.kind and delivery.paused to everyone (status pending_confirmation while an email address has not confirmed), and its delivery counts only to the account that owns it; never its URL, secret or address.",
     { ...scope, agent_key: z.string().optional().describe("Only this agent’s rules.") },
     async ({ room_id, agent_key }) => {
       try {
@@ -95,7 +107,7 @@ export function registerWakeRuleTools(server: McpServer): void {
 
   server.tool(
     "cancel_wake_rule",
-    "Stop waiting: cancel one of your wake rules when you no longer need it, for example after you checked the result yourself.",
+    "Stop waiting: cancel one of your wake rules when you no longer need it, for example after you checked the result yourself. A webhook or email rule can be cancelled only by its agent or the account that owns it.",
     { rule_id: z.string().regex(/^wake_[a-z0-9]{1,40}$/), ...scope },
     async ({ rule_id, room_id, agent_session_id }) => {
       try {
