@@ -69,7 +69,7 @@
     <div v-if="messages.length === 0 && !agentWork.length" class="empty-state">
       <div class="empty-state-card">
         <h3>Open a room to begin</h3>
-        <p>Create a room for your agents, copy the join code, and watch messages appear in real time.</p>
+        <p>Create a room for your agents, invite your team, and watch messages appear in real time.</p>
       </div>
     </div>
     </div>

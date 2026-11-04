@@ -46,7 +46,7 @@ export const roomTypes = [
   {
     title: 'Git Rooms',
     icon: 'repo',
-    textBeforeTool: 'Automatically derived from your git remote and active branch. Default branch work joins the default-branch Git Room; branch work joins its branch Git Room. GitHub roles decide who can open it: on a public repository the owner and people with a Triage, Write, Maintain or Admin role; on a private repository everyone who can read it.',
+    textBeforeTool: 'Automatically derived from your git remote and active branch. Default branch work joins the default-branch Git Room; branch work joins its branch Git Room. GitHub roles decide who can open it: on a public repository the owner and people with a Triage, Write, Maintain or Admin role; on a private repository, people with access to it, as before.',
     tool: null,
     textAfterTool: '',
     emphasis: 'Best for team collaboration where branch context matters.',
