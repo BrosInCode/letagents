@@ -98,7 +98,12 @@ async function endAgentSessionAsRoomAdmin(
 async function endAgentAskOfRemovedMember(askId: string): Promise<boolean> {
   const ask = await getAskById(askId);
   if (!ask) return false;
-  if (ask.state === 'open' || ask.state === 'claimed') return Boolean(await cancelAsk(ask));
+  if (ask.state === 'open' || ask.state === 'claimed') {
+    if (await cancelAsk(ask)) return true;
+    // The giver's agent joined in the meantime: the ask is live now, so end it.
+    const live = await getAskById(askId);
+    return live ? Boolean(await endAsk(live, 'removed')) : false;
+  }
   return Boolean(await endAsk(ask, 'removed'));
 }
 
