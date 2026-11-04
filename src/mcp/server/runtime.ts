@@ -19,7 +19,9 @@ export function touchRoomSession(roomId: string, lastMessageId?: string): void {
 export {
   API_URL,
   ApiError,
+  RoomAccessRefusedError,
   apiCall,
+  getLastRefusedRoomId,
   getAuthorizationHeader,
   getLetagentsToken,
   hasLetagentsCredential,
@@ -104,6 +106,11 @@ export {
   syncRoomPresence,
 } from "./runtime/presence.js";
 export { roomScopedApiCall } from "./runtime/room-api.js";
+export {
+  joinRequestInstruction,
+  roomAccessToolResponse,
+  toRoomAccessRefusalResult,
+} from "./runtime/room-access.js";
 export {
   borrowSupervisedWorkerCredential,
   borrowCurrentSupervisedWorkerCredential,

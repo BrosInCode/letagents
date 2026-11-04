@@ -1,3 +1,4 @@
+import { roomAccessRefusal } from "../../shared/room-membership.mjs";
 import { encodeRoomIdPath } from "./room-id.js";
 
 const MAX_SSE_FRAME_BYTES = 1024 * 1024;
@@ -13,6 +14,14 @@ class SseFrameMalformedError extends Error {
   constructor(options?: ErrorOptions) {
     super("SSE frame was malformed", options);
     this.name = "SseFrameMalformedError";
+  }
+}
+
+/** A members-only room refused this account. Reconnecting cannot help. */
+export class SseRoomAccessRefusedError extends Error {
+  constructor(readonly refusal: "membership_required" | "repo_collaborator_required") {
+    super(`SSE request refused: ${refusal}`);
+    this.name = "SseRoomAccessRefusedError";
   }
 }
 
@@ -143,6 +152,8 @@ export class SseClient {
         retryMs = 1_000;
       } catch (error) {
         if (signal.aborted) return;
+        // Until an admin lets the account in, every reconnect is refused too.
+        if (error instanceof SseRoomAccessRefusedError) throw error;
         if (error instanceof SseFrameOverflowError || error instanceof SseFrameMalformedError) {
           lastEventId = null;
         }
@@ -204,6 +215,15 @@ export class SseClient {
     );
 
     if (!response.ok) {
+      if (response.status === 403) {
+        let refusal: ReturnType<typeof roomAccessRefusal> = null;
+        try {
+          refusal = roomAccessRefusal(JSON.parse(await response.text()));
+        } catch {
+          // Not a members-only refusal.
+        }
+        if (refusal) throw new SseRoomAccessRefusedError(refusal);
+      }
       throw new Error(`SSE request failed with status ${response.status}`);
     }
 
