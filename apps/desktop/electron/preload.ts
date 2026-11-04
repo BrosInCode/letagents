@@ -146,6 +146,27 @@ const api: DesktopApi = {
         ipcRenderer.off("desktop:room:inline-html-demo-event", listener);
       };
     },
+    liveDemoJoin: (roomIdentifier: string, demoKey: string, leaseUrl: string | null) =>
+      ipcRenderer.invoke("desktop:room:live-demo-join", roomIdentifier, demoKey, leaseUrl),
+    liveDemoLeave: (roomIdentifier: string, demoKey: string) =>
+      ipcRenderer.invoke("desktop:room:live-demo-leave", roomIdentifier, demoKey),
+    liveDemoSend: (roomIdentifier, frame) => ipcRenderer.invoke("desktop:room:live-demo-send", roomIdentifier, frame),
+    onLiveDemoEvent: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:room:live-demo-event", listener);
+      return () => {
+        ipcRenderer.off("desktop:room:live-demo-event", listener);
+      };
+    },
+    listDemoMarks: (roomIdentifier: string, demoKey: string) =>
+      ipcRenderer.invoke("desktop:room:list-demo-marks", roomIdentifier, demoKey),
+    addDemoMark: (roomIdentifier, input) => ipcRenderer.invoke("desktop:room:add-demo-mark", roomIdentifier, input),
+    removeDemoMark: (roomIdentifier: string, markId: string) =>
+      ipcRenderer.invoke("desktop:room:remove-demo-mark", roomIdentifier, markId),
+    setInlineDemoWidth: (leaseUrl: string, frameWidth: number) =>
+      ipcRenderer.invoke("desktop:room:set-inline-demo-width", leaseUrl, frameWidth),
+    captureDemoMarkup: (roomIdentifier, rect, fileName) =>
+      ipcRenderer.invoke("desktop:room:capture-demo-markup", roomIdentifier, rect, fileName),
     discardAttachment: (roomIdentifier: string, uploadId: string) =>
       ipcRenderer.invoke("desktop:room:discard-attachment", roomIdentifier, uploadId),
     startStream: (roomIdentifier: string, afterMessageId?: string | null) =>
