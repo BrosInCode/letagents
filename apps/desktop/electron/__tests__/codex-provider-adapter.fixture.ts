@@ -510,8 +510,15 @@ export function createHarness(harnessOptions: {
       if (!launch || options.processUnreadable) return null;
       const isolated = launch.options.homeHarness !== true || options.commandLineClaimsIsolation === true;
       // A launch that named a permission profile defined it with its overrides, which the command line holds as the real one does.
-      const named = (launch.options as { hideSignInProfile?: CodexSignInProfile }).hideSignInProfile;
-      const profile = named && options.commandLineWithoutProfile !== true ? ` -c permissions.${named.id}={ extends = ${JSON.stringify(named.extends)}, filesystem = { } } -c default_permissions=${JSON.stringify(named.id)}` : "";
+      // A stand-in launch that named no access level, as many tests make for short, is read as one that defined the profile any
+      // policy it is later attached with would name: the daemon makes no such launch, and the profile's default is one line of
+      // the real command line. A process started with no profile at all, as an earlier LetAgents started one, is asked for
+      // with `commandLineWithoutProfile`.
+      const launched = launch.options as { hideSignInProfile?: CodexSignInProfile };
+      const defined: CodexSignInProfile[] = launched.hideSignInProfile ? [launched.hideSignInProfile]
+        : [{ id: READ_ONLY_PROFILE, extends: ":read-only" }, { id: AUTO_PROFILE, extends: ":workspace" }];
+      const profile = options.commandLineWithoutProfile === true ? ""
+        : defined.map((named) => ` -c permissions.${named.id}={ extends = ${JSON.stringify(named.extends)}, filesystem = { } } -c default_permissions=${JSON.stringify(named.id)}`).join("");
       return `codex app-server ${isolated ? CODEX_OWNER_FEATURE_OVERRIDES.map((override) => `-c ${override}`).join(" ") : ""}${profile} --listen ${launch.serverUrl}`;
     },
     assertLiveProjectUnchanged: async (_codexBin, live) => {
@@ -667,6 +674,24 @@ export const foundAsReadOnly = () => levelLaunch("read_only", structuredClone(CO
 export const foundAsAskBeforeWrites = () => levelLaunch("ask_before_write", { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } });
 export const foundAsAuto = () => levelLaunch("auto_review", { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" });
 export const foundAtFullAccess = () => levelLaunch("full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } });
+/** Whether Ask before writes and Auto name a permission profile here: on Windows they do not, since Codex's sandbox refuses no deny there. */
+export const APPROVAL_LEVELS_NAME_A_PROFILE = process.platform !== "win32";
+/**
+ * On Windows, Ask before writes and Auto are as before: the launch defines no profile, the conversation names its sandbox, and
+ * nothing is held to a profile. The tests that hold them to one call this instead there.
+ */
+export async function assertApprovalLevelsAsBeforeOnWindows(): Promise<void> {
+  assert.equal(APPROVAL_LEVELS_NAME_A_PROFILE, false);
+  for (const { level, name } of SANDBOXED_APPROVAL_LEVELS()) {
+    const harness = createHarness();
+    const handle = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest(level));
+    assert.equal(handle.observedState(), "idle", name);
+    assert.equal(Object.hasOwn(launchAskedFor(harness), "hideSignInProfile"), false, name);
+    const started = requestByMethod(harness.clients[0]!, "thread/start").params as Record<string, unknown>;
+    assert.equal(typeof started.sandbox, "string", name);
+    assert.equal(Object.hasOwn(started, "permissions"), false, name);
+  }
+}
 /** The two levels that, like Read-only, name a permission profile: each with its name, its profile, its approval policy, and what its threads must not be left with. */
 export const SANDBOXED_APPROVAL_LEVELS = () => [
   { level: foundAsAskBeforeWrites(), name: "Ask before writes", profile: { id: READ_ONLY_PROFILE, extends: ":read-only" as const }, approvalPolicy: "on-request", notAtLevel: NOT_ASK_BEFORE_WRITES_REPLIES },

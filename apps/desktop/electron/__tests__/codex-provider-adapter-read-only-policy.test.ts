@@ -17,6 +17,8 @@ import {
   NOT_READ_ONLY_REPLIES,
   STILL_READ_ONLY_REPLIES,
   SANDBOXED_APPROVAL_LEVELS,
+  APPROVAL_LEVELS_NAME_A_PROFILE,
+  assertApprovalLevelsAsBeforeOnWindows,
   foundAsReadOnly,
   foundAtFullAccess,
   foundAtOtherLevels,
@@ -43,8 +45,10 @@ test("Codex ask-before-write keeps its permission profile and its approval polic
   const params = requestByMethod(harness.clients[0]!, "thread/start").params as Record<string, unknown>;
   assert.equal(params.approvalPolicy, "on-request");
   // The profile of this work attempt stands in for the read-only sandbox: the launch defined it, with the owner's sign-in file denied.
-  assert.equal(params.permissions, READ_ONLY_PROFILE);
-  assert.equal(Object.hasOwn(params, "sandbox") || Object.hasOwn(params, "sandboxPolicy"), false, "thread/start names no sandbox");
+  // On Windows there is no profile, and the sandbox is named as before.
+  const access = APPROVAL_LEVELS_NAME_A_PROFILE ? { permissions: READ_ONLY_PROFILE } : { sandbox: "read-only" };
+  assert.deepEqual({ permissions: params.permissions, sandbox: params.sandbox }, { permissions: undefined, sandbox: undefined, ...access });
+  assert.equal(Object.hasOwn(params, "sandboxPolicy"), false);
 
   const attachedAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const attached = await attachedAdapter.attach({ workAttemptId: first.workAttemptId,
@@ -61,8 +65,13 @@ test("Codex ask-before-write keeps its permission profile and its approval polic
     });
     const turn = requestByMethod(client, "turn/start").params as Record<string, unknown>;
     assert.equal(turn.approvalPolicy, "on-request");
-    assert.equal(turn.permissions, READ_ONLY_PROFILE);
-    assert.equal(Object.hasOwn(turn, "sandbox") || Object.hasOwn(turn, "sandboxPolicy"), false, "turn/start names the profile, never a sandbox");
+    if (APPROVAL_LEVELS_NAME_A_PROFILE) {
+      assert.equal(turn.permissions, READ_ONLY_PROFILE);
+      assert.equal(Object.hasOwn(turn, "sandbox") || Object.hasOwn(turn, "sandboxPolicy"), false, "turn/start names the profile, never a sandbox");
+    } else {
+      assert.deepEqual(turn.sandboxPolicy, { type: "readOnly", networkAccess: false });
+      assert.equal(Object.hasOwn(turn, "permissions"), false);
+    }
   }
 
   const unknownAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
@@ -85,8 +94,12 @@ test("Codex ask-before-write keeps its permission profile and its approval polic
   await unknownAdapter.controlTurn(unknown, "Continue after permission recovery.");
   const recoveredTurn = requestByMethod(harness.clients[2]!, "turn/start").params as Record<string, unknown>;
   assert.equal(recoveredTurn.approvalPolicy, "on-request");
-  assert.equal(recoveredTurn.permissions, READ_ONLY_PROFILE, "the first verified contract remains immutable across subsequent attaches");
-  assert.equal(Object.hasOwn(recoveredTurn, "sandboxPolicy"), false);
+  if (APPROVAL_LEVELS_NAME_A_PROFILE) {
+    assert.equal(recoveredTurn.permissions, READ_ONLY_PROFILE, "the first verified contract remains immutable across subsequent attaches");
+    assert.equal(Object.hasOwn(recoveredTurn, "sandboxPolicy"), false);
+  } else {
+    assert.deepEqual(recoveredTurn.sandboxPolicy, { type: "readOnly", networkAccess: false }, "the first verified contract remains immutable across subsequent attaches");
+  }
 });
 
 test("Codex Read-only names its permission profile and nobody to ask on every thread and turn, and never a sandbox", async () => {
@@ -219,6 +232,7 @@ test("Full access starts as it did whatever its conversation reports; Ask before
     const handle = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest(foundAtFullAccess()));
     assert.equal(handle.observedState(), "idle", `full_access: ${what}`);
   }
+  if (!APPROVAL_LEVELS_NAME_A_PROFILE) { await assertApprovalLevelsAsBeforeOnWindows(); return; }
   for (const { level, name, notAtLevel } of SANDBOXED_APPROVAL_LEVELS()) {
     // The level's own reply, as Codex gives it for the profile the launch defined, starts the agent.
     const healthy = createHarness();
@@ -377,7 +391,7 @@ test("a healthy Read-only Codex found running is attached as before, and so is e
     assert.deepEqual(other.harness.signals, [], `full_access: ${what}`);
   }
   // Ask before writes and Auto are held as Read-only is: a healthy one is attached, one that reports another policy is stopped.
-  for (const { level, name, notAtLevel } of SANDBOXED_APPROVAL_LEVELS()) {
+  for (const { level, name, notAtLevel } of APPROVAL_LEVELS_NAME_A_PROFILE ? SANDBOXED_APPROVAL_LEVELS() : []) {
     const healthyOther = await foundRunning(level, null);
     assertProviderHandle(await healthyOther.attach());
     assert.deepEqual(healthyOther.harness.signals, [], name);
@@ -509,7 +523,7 @@ test("a Read-only Codex found before the daemon supplied its policy is held to i
   assert.deepEqual(stuck.harness.signals, []);
 
   // Ask before writes and Auto bound later are held to their level then, as Read-only is.
-  for (const { level, name } of SANDBOXED_APPROVAL_LEVELS()) {
+  for (const { level, name } of APPROVAL_LEVELS_NAME_A_PROFILE ? SANDBOXED_APPROVAL_LEVELS() : []) {
     const scene = await foundRunning(level, (client) => { client.sandboxFromOwnSettings = { type: "dangerFullAccess" }; }, false);
     const early = await scene.attach();
     assertProviderHandle(early);
@@ -603,8 +617,8 @@ test("a Read-only Codex agent's room tools are an exact named list, and every ot
   for (const other of others) {
     assert.deepEqual(other.modes, unchanged);
     assert.equal(other.defaultMode, "writes");
-    assert.deepEqual(other.otherOverrides, other === others[0] ? [] : [...CODEX_APPROVAL_LEVEL_CONFIG_OVERRIDES],
-      "Full access gains no override; Ask before writes and Auto gain the one setting that lets a command ask for the network or a folder");
+    assert.deepEqual(other.otherOverrides, other === others[0] || !APPROVAL_LEVELS_NAME_A_PROFILE ? [] : [...CODEX_APPROVAL_LEVEL_CONFIG_OVERRIDES],
+      "Full access gains no override; Ask before writes and Auto gain the one setting that lets a command ask for the network or a folder, where they name a profile");
     assert.equal(other.override === others[0]!.override, true, "the room server's configuration does not depend on these levels");
   }
   // Apart from the approval modes, a Read-only launch configures the room's server exactly as the others do.

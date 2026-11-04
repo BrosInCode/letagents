@@ -2326,17 +2326,19 @@ test("the launch starts no Codex for the Read-only policy without the level's pr
   const asking = fakeCodex({ userAgent: "codex-stand-in/1.0" });
   await assert.rejects(throughAdapter(asking, { permissionProfileId: "ask_before_write", configurationRevision: 1,
     launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } } }), /Timed out waiting for Codex app-server/);
+  // On Windows, where Codex's sandbox refuses no deny, these two levels start as before: no profile and no such setting.
+  const profiled = process.platform !== "win32";
   const askingStarted = asking.calls().at(-1)!;
-  assert.equal(askingStarted.args.some((arg) => arg.startsWith(`permissions.${codexSandboxedProfileId(":read-only", spawnRequest.workAttemptId)}={ extends = ":read-only"`)), true);
-  assert.equal(askingStarted.args.includes("features.exec_permission_approvals=true"), true);
+  assert.equal(askingStarted.args.some((arg) => arg.startsWith(`permissions.${codexSandboxedProfileId(":read-only", spawnRequest.workAttemptId)}={ extends = ":read-only"`)), profiled);
+  assert.equal(askingStarted.args.includes("features.exec_permission_approvals=true"), profiled);
   assert.equal(askingStarted.args.includes('web_search="disabled"'), false, "web search is Read-only's own");
   // Auto, whose sandbox lets a command write the project, names a profile that extends Codex's workspace one.
   const auto = fakeCodex({ userAgent: "codex-stand-in/1.0" });
   await assert.rejects(throughAdapter(auto, { permissionProfileId: "auto_review", configurationRevision: 1,
     launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" } }), /Timed out waiting for Codex app-server/);
   const autoStarted = auto.calls().at(-1)!;
-  assert.equal(autoStarted.args.some((arg) => arg.startsWith(`permissions.${codexSandboxedProfileId(":workspace", spawnRequest.workAttemptId)}={ extends = ":workspace"`)), true);
-  assert.equal(autoStarted.args.includes("features.exec_permission_approvals=true"), true);
+  assert.equal(autoStarted.args.some((arg) => arg.startsWith(`permissions.${codexSandboxedProfileId(":workspace", spawnRequest.workAttemptId)}={ extends = ":workspace"`)), profiled);
+  assert.equal(autoStarted.args.includes("features.exec_permission_approvals=true"), profiled);
   // Full access names no profile and no such setting.
   const full = fakeCodex({ userAgent: "codex-stand-in/1.0" });
   await assert.rejects(throughAdapter(full, { permissionProfileId: "full_access", configurationRevision: 1,

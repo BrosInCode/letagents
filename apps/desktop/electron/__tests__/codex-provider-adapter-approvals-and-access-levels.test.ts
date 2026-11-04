@@ -23,6 +23,8 @@ import {
   approvalParams,
   genericPermissionParams,
   mcpToolPermissionParams,
+  AUTO_PROFILE,
+  APPROVAL_LEVELS_NAME_A_PROFILE,
 } from "./codex-provider-adapter.fixture.js";
 
 test("Codex observes native MCP tool approvals without invented item coordinates and replies only once", async () => {
@@ -734,7 +736,9 @@ test("Codex Auto keeps project-only writes and its own reviewer on every thread 
   }));
   const thread = requestByMethod(harness.clients[0]!, "thread/start").params as Record<string, unknown>;
   assert.equal(thread.approvalPolicy, "on-request");
-  assert.equal(thread.sandbox, "workspace-write");
+  // The profile of this work attempt, which extends Codex's workspace one, stands in for the sandbox. Not on Windows, where there is no profile.
+  assert.deepEqual({ permissions: thread.permissions, sandbox: thread.sandbox },
+    APPROVAL_LEVELS_NAME_A_PROFILE ? { permissions: AUTO_PROFILE, sandbox: undefined } : { permissions: undefined, sandbox: "workspace-write" });
   assert.equal(thread.approvalsReviewer, "auto_review");
   assert.equal(Object.hasOwn(thread, "sandboxPolicy"), false);
 
@@ -753,7 +757,8 @@ test("Codex Auto keeps project-only writes and its own reviewer on every thread 
     });
     const turn = requestByMethod(client, "turn/start").params as Record<string, unknown>;
     assert.equal(turn.approvalPolicy, "on-request");
-    assert.deepEqual(turn.sandboxPolicy, { type: "workspaceWrite", networkAccess: false });
+    assert.deepEqual({ permissions: turn.permissions, sandboxPolicy: turn.sandboxPolicy },
+      APPROVAL_LEVELS_NAME_A_PROFILE ? { permissions: AUTO_PROFILE, sandboxPolicy: undefined } : { permissions: undefined, sandboxPolicy: { type: "workspaceWrite", networkAccess: false } });
     assert.equal(turn.approvalsReviewer, "auto_review");
   }
 });
@@ -828,7 +833,8 @@ test("Codex continuation repair keeps the access level the runtime was launched 
   assert.equal(result.outcome, "replaced");
   const replacement = client.requests.slice(before).find(request => request.method === "thread/start")!.params as Record<string, unknown>;
   assert.equal(replacement.approvalPolicy, "on-request");
-  assert.equal(replacement.sandbox, "workspace-write");
+  assert.deepEqual({ permissions: replacement.permissions, sandbox: replacement.sandbox },
+    APPROVAL_LEVELS_NAME_A_PROFILE ? { permissions: AUTO_PROFILE, sandbox: undefined } : { permissions: undefined, sandbox: "workspace-write" });
   assert.equal(replacement.approvalsReviewer, "auto_review");
 });
 
