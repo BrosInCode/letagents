@@ -6,6 +6,7 @@ import {
   HTML_DEMO_PARTITION,
   HTML_DEMO_RESPONSE_HEADERS,
   isAllowedHtmlDemoRequest,
+  MAX_HTML_DEMO_BYTES,
   readHtmlDemoBytes,
 } from "./html-demo-policy.js";
 import { attachmentResponse } from "./protocol.js";
@@ -17,18 +18,20 @@ const { session } = electron as typeof import("electron");
  * host exists only while its window is open or its inline demo is live.
  */
 export const htmlDemoDocuments = new Map<string, string>();
-/** The demo pages' own web contents; DevTools opened on a demo is not one of them. */
-export const htmlDemoContentsIds = new Set<number>();
+/** The demo pages' own web contents and the host each one shows; DevTools opened on a demo is not one of them. */
+export const htmlDemoContents = new Map<number, string>();
 let demoSession: Promise<Session> | null = null;
 
 /** The decoded HTML behind a room attachment link, read up to the demo size limit. */
-export async function loadHtmlDemoAttachment(href: string): Promise<{ html: string; byteLength: number }> {
-  const response = await attachmentResponse(href);
+export async function loadHtmlDemoAttachment(href: string, signal?: AbortSignal): Promise<{ html: string; byteLength: number }> {
+  const response = await attachmentResponse(href, signal);
+  // The attachment proxy turns an aborted fetch into an error page; the abort reason says more.
+  signal?.throwIfAborted();
   if (!response.ok) {
     await response.body?.cancel().catch(() => undefined);
     throw new Error(`The demo file could not be loaded (HTTP ${response.status}).`);
   }
-  const bytes = await readHtmlDemoBytes(response);
+  const bytes = await readHtmlDemoBytes(response, MAX_HTML_DEMO_BYTES, signal);
   return { html: new TextDecoder("utf-8").decode(bytes), byteLength: bytes.byteLength };
 }
 
@@ -76,8 +79,9 @@ async function prepareHtmlDemoSession(): Promise<Session> {
   });
   ses.webRequest.onBeforeRequest((details, callback) => {
     // A request without a known non-demo sender counts as the demo's own.
-    const fromDemo = details.webContentsId === undefined || htmlDemoContentsIds.has(details.webContentsId);
-    callback({ cancel: !isAllowedHtmlDemoRequest(details.url, { fromDemo }) });
+    const host = details.webContentsId === undefined ? undefined : htmlDemoContents.get(details.webContentsId);
+    const fromDemo = details.webContentsId === undefined || host !== undefined;
+    callback({ cancel: !isAllowedHtmlDemoRequest(details.url, { fromDemo, host }) });
   });
   ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   ses.setPermissionCheckHandler(() => false);

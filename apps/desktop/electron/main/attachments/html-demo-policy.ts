@@ -22,6 +22,10 @@ export const INLINE_HTML_DEMO_LEASE_MS = 30_000;
 /** Decoded demo files kept for the chat, so a demo that scrolls back does not download again. */
 export const INLINE_HTML_DEMO_CACHE_ENTRIES = 6;
 export const INLINE_HTML_DEMO_CACHE_BYTES = 2 * MAX_HTML_DEMO_BYTES;
+export const INLINE_HTML_DEMO_CACHE_MS = 10 * 60_000;
+/** Different demo files downloading at once, and how long one download may take. */
+export const MAX_INLINE_HTML_DEMO_DOWNLOADS = 4;
+export const INLINE_HTML_DEMO_DOWNLOAD_MS = 20_000;
 export const MAX_INLINE_HTML_DEMO_HEIGHT = 4000;
 /** Each inline demo reports its height at most once in this time. */
 export const INLINE_HTML_DEMO_HEIGHT_INTERVAL_MS = 100;
@@ -31,8 +35,18 @@ export const INLINE_HTML_DEMO_HEIGHT_INTERVAL_MS = 100;
  */
 export const INLINE_HTML_DEMO_LIVENESS_INTERVAL_MS = 5_000;
 export const INLINE_HTML_DEMO_LIVENESS_TIMEOUT_MS = 5_000;
+/** A timeout that fires this much late means main itself was blocked, so the check proves nothing. */
+export const INLINE_HTML_DEMO_LIVENESS_LATE_MS = 1_000;
 /** An isolated world no other app code uses, so the page can neither see nor answer the check. */
 export const INLINE_HTML_DEMO_LIVENESS_WORLD_ID = 4417;
+/**
+ * Events a guest makes Electron forward to its `<webview>`, per one-second
+ * window. A 60 fps demo that logs every frame makes about 60, and 10,000 a
+ * second still left main and the app page responsive in Electron 42; a demo
+ * over the limit for two windows in a row is stopped.
+ */
+export const INLINE_HTML_DEMO_EVENTS_PER_SECOND = 1_000;
+export const INLINE_HTML_DEMO_BUSY_SECONDS = 2;
 
 const INLINE_HTML_DEMO_HOST = /^[0-9a-f]{32}$/;
 
@@ -60,21 +74,25 @@ export const HTML_DEMO_RESPONSE_HEADERS: Readonly<Record<string, string>> = {
   "X-Content-Type-Options": "nosniff",
   "Cache-Control": "no-store",
   "Referrer-Policy": "no-referrer",
-  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), display-capture=(), usb=(), serial=(), hid=(), bluetooth=(), payment=()",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), display-capture=(), usb=(), serial=(), hid=(), bluetooth=(), payment=(), fullscreen=(), picture-in-picture=()",
 };
 
 /**
  * The demo's own document and in-page data are the only requests a demo page
  * makes. DevTools opened on a demo (another web contents) may load its own UI.
  */
-export function isAllowedHtmlDemoRequest(rawUrl: string, sender: { fromDemo: boolean } = { fromDemo: true }): boolean {
+export function isAllowedHtmlDemoRequest(
+  rawUrl: string,
+  sender: { fromDemo: boolean; host?: string } = { fromDemo: true },
+): boolean {
   let url: URL;
   try {
     url = new URL(rawUrl);
   } catch {
     return false;
   }
-  return url.protocol === `${htmlDemoProtocolScheme}:`
+  // A known demo page loads only its own document, never another demo's.
+  return (url.protocol === `${htmlDemoProtocolScheme}:` && (sender.host === undefined || url.hostname === sender.host))
     || url.protocol === "data:"
     || url.protocol === "blob:"
     || (url.protocol === "devtools:" && !sender.fromDemo);
@@ -160,6 +178,34 @@ export function lockInlineHtmlDemoWebPreferences(webPreferences: WebPreferences)
   return webPreferences;
 }
 
+export interface InlineHtmlDemoEventMeter {
+  windowStart: number;
+  count: number;
+  /** Windows in a row, just before the current one, that went over the limit. */
+  busyWindows: number;
+}
+
+export function inlineHtmlDemoEventMeter(): InlineHtmlDemoEventMeter {
+  return { windowStart: Number.NEGATIVE_INFINITY, count: 0, busyWindows: 0 };
+}
+
+/**
+ * Count one forwarded event at `now`. True when this event takes the demo over
+ * the limit in its last busy window: a burst passes, a steady flood does not.
+ */
+export function countInlineHtmlDemoEvent(meter: InlineHtmlDemoEventMeter, now: number): boolean {
+  const elapsed = now - meter.windowStart;
+  if (elapsed >= 1000) {
+    // A window with no events in between ends the run.
+    const lastWasBusy = elapsed < 2000 && meter.count > INLINE_HTML_DEMO_EVENTS_PER_SECOND;
+    meter.busyWindows = lastWasBusy ? meter.busyWindows + 1 : 0;
+    meter.windowStart = now;
+    meter.count = 0;
+  }
+  meter.count += 1;
+  return meter.count === INLINE_HTML_DEMO_EVENTS_PER_SECOND + 1 && meter.busyWindows + 1 >= INLINE_HTML_DEMO_BUSY_SECONDS;
+}
+
 /**
  * A guest's preferred height in the app's CSS pixels: Electron reports it in
  * screen points, which the app's zoom scales.
@@ -183,8 +229,8 @@ function cleanLabel(value: unknown): string {
     : "";
 }
 
-/** Read a response body, stopping as soon as it passes `limit` bytes. */
-export async function readHtmlDemoBytes(response: Response, limit = MAX_HTML_DEMO_BYTES): Promise<Uint8Array> {
+/** Read a response body, stopping as soon as it passes `limit` bytes or `signal` aborts. */
+export async function readHtmlDemoBytes(response: Response, limit = MAX_HTML_DEMO_BYTES, signal?: AbortSignal): Promise<Uint8Array> {
   const declared = Number(response.headers.get("content-length"));
   if (Number.isFinite(declared) && declared > limit) {
     await response.body?.cancel().catch(() => undefined);
@@ -192,17 +238,26 @@ export async function readHtmlDemoBytes(response: Response, limit = MAX_HTML_DEM
   }
   if (!response.body) return new Uint8Array();
   const reader = response.body.getReader();
+  // Cancelling wakes a read that waits on a stalled stream.
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal?.addEventListener("abort", cancel, { once: true });
   const chunks: Uint8Array[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    total += value.byteLength;
-    if (total > limit) {
-      await reader.cancel().catch(() => undefined);
-      throw new Error(htmlDemoTooLargeMessage(limit));
+  try {
+    for (;;) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel().catch(() => undefined);
+        throw new Error(htmlDemoTooLargeMessage(limit));
+      }
+      chunks.push(value);
     }
-    chunks.push(value);
+  } finally {
+    signal?.removeEventListener("abort", cancel);
   }
   const bytes = new Uint8Array(total);
   let offset = 0;

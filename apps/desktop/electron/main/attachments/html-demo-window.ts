@@ -5,7 +5,7 @@ import { randomUUID } from "node:crypto";
 import { htmlDemoProtocolScheme } from "../paths.js";
 import { assertHtmlDemoAttachmentHref, htmlDemoWindowTitle, MAX_OPEN_HTML_DEMOS } from "./html-demo-policy.js";
 import {
-  htmlDemoContentsIds,
+  htmlDemoContents,
   htmlDemoDocuments,
   htmlDemoSession,
   loadHtmlDemoAttachment,
@@ -86,7 +86,7 @@ export async function openHtmlDemoWindow(input: { html: string; title: string })
   });
   const contents = demoWindow.webContents;
   const contentsId = contents.id;
-  htmlDemoContentsIds.add(contentsId);
+  htmlDemoContents.set(contentsId, host);
   lockHtmlDemoContents(contents);
   // The title bar is the one line the demo cannot draw, so it keeps saying what this is.
   demoWindow.on("page-title-updated", (event) => event.preventDefault());
@@ -104,7 +104,7 @@ export async function openHtmlDemoWindow(input: { html: string; title: string })
   demoWindow.once("closed", () => {
     clearTimeout(showTimer);
     htmlDemoDocuments.delete(host);
-    htmlDemoContentsIds.delete(contentsId);
+    htmlDemoContents.delete(contentsId);
     void ses.clearStorageData({ origin }).catch(() => undefined);
   });
 

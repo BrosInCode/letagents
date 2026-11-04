@@ -508,6 +508,7 @@ test("auth/setup IPC wakes grant recovery only from authorization and reports na
   let authorized: () => void = () => { throw new Error("authorized callback was not registered"); };
   let invalidated: () => void = () => { throw new Error("invalidated callback was not registered"); };
   let recoveryWakes = 0;
+  let demoCacheClears = 0;
   let storageAvailable = false;
   const storageObservations: boolean[] = [];
   const unexpected = () => { throw new Error("unexpected auth/setup operation"); };
@@ -526,6 +527,9 @@ test("auth/setup IPC wakes grant recovery only from authorization and reports na
       refreshDesktopNotificationRegistration: async () => {}, unregisterDesktopNotificationAccount: async () => {},
     } }),
     mock.module("../main/rooms.js", { namedExports: { clearJoinedRoomInfoCache: () => {} } }),
+    mock.module("../main/attachments/html-demo-inline.js", { namedExports: {
+      clearInlineHtmlDemoCache: () => { demoCacheClears += 1; },
+    } }),
     mock.module("../main/external-url.js", { namedExports: { openAllowedExternalUrl: unexpected } }),
     mock.module("../main/supervisor-grant.js", { namedExports: {
       getDesktopSupervisorGrantMetadata: unexpected, provisionDesktopSupervisorGrant: unexpected,
@@ -542,10 +546,13 @@ test("auth/setup IPC wakes grant recovery only from authorization and reports na
     const handlers = new Map<string, () => Promise<unknown>>();
     registerDesktopAuthAndSetupIpcHandlers({ handle: (channel: string, handler: () => Promise<unknown>) => handlers.set(channel, handler) } as never);
     assert.equal(recoveryWakes, 0, "registration is not an auth recovery event");
+    assert.equal(demoCacheClears, 0);
     invalidated();
     assert.equal(recoveryWakes, 0, "sign-out cannot activate agents");
+    assert.equal(demoCacheClears, 1, "demo files downloaded with the old sign-in are forgotten");
     authorized();
     assert.equal(recoveryWakes, 1);
+    assert.equal(demoCacheClears, 2, "and again when an account signs in");
     const probe = handlers.get("desktop:supervisor-grant:get-storage-status");
     assert.ok(probe);
     assert.deepEqual(await probe(), { available: false, detail: "native probe", canOpenCredentialStorage: false });

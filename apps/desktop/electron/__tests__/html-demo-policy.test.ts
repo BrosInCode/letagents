@@ -1,20 +1,27 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 
 import {
   assertHtmlDemoAttachmentHref,
+  countInlineHtmlDemoEvent,
   HTML_DEMO_CONTENT_SECURITY_POLICY,
   HTML_DEMO_PARTITION,
   HTML_DEMO_RESPONSE_HEADERS,
   htmlDemoWindowTitle,
   INLINE_HTML_DEMO_CACHE_BYTES,
+  INLINE_HTML_DEMO_BUSY_SECONDS,
   INLINE_HTML_DEMO_CACHE_ENTRIES,
+  INLINE_HTML_DEMO_CACHE_MS,
+  INLINE_HTML_DEMO_DOWNLOAD_MS,
+  INLINE_HTML_DEMO_EVENTS_PER_SECOND,
   INLINE_HTML_DEMO_HEIGHT_INTERVAL_MS,
   INLINE_HTML_DEMO_LEASE_MS,
   INLINE_HTML_DEMO_LIVENESS_INTERVAL_MS,
+  INLINE_HTML_DEMO_LIVENESS_LATE_MS,
   INLINE_HTML_DEMO_LIVENESS_TIMEOUT_MS,
   INLINE_HTML_DEMO_LIVENESS_WORLD_ID,
   inlineHtmlDemoAttachLease,
+  inlineHtmlDemoEventMeter,
   inlineHtmlDemoHeight,
   inlineHtmlDemoLeaseHost,
   inlineHtmlDemoLeaseUrl,
@@ -22,6 +29,7 @@ import {
   isAllowedHtmlDemoRequest,
   lockInlineHtmlDemoWebPreferences,
   MAX_HTML_DEMO_BYTES,
+  MAX_INLINE_HTML_DEMO_DOWNLOADS,
   MAX_INLINE_HTML_DEMO_HEIGHT,
   MAX_INLINE_HTML_DEMOS,
   readHtmlDemoBytes,
@@ -50,6 +58,12 @@ describe("HTML demo policy", () => {
     assert.equal(isAllowedHtmlDemoRequest("devtools://devtools/bundled/devtools_app.html", { fromDemo: false }), true);
     assert.equal(isAllowedHtmlDemoRequest("devtools://devtools/bundled/devtools_app.html", { fromDemo: true }), false);
     assert.equal(isAllowedHtmlDemoRequest("https://example.com/", { fromDemo: false }), false);
+    // A demo page that main knows loads only its own document, never another demo's.
+    assert.equal(isAllowedHtmlDemoRequest("letagents-demo://0123abcd/", { fromDemo: true, host: "0123abcd" }), true);
+    assert.equal(isAllowedHtmlDemoRequest("letagents-demo://0123abcd/x?y#z", { fromDemo: true, host: "0123abcd" }), true);
+    assert.equal(isAllowedHtmlDemoRequest("letagents-demo://fedc9876/", { fromDemo: true, host: "0123abcd" }), false);
+    assert.equal(isAllowedHtmlDemoRequest("data:text/plain,x", { fromDemo: true, host: "0123abcd" }), true);
+    assert.equal(isAllowedHtmlDemoRequest("file:///etc/hosts", { fromDemo: true, host: "0123abcd" }), false);
   });
 
   it("blocks every network connection, frame, form and plugin in the page policy", () => {
@@ -69,6 +83,10 @@ describe("HTML demo policy", () => {
     }
     assert.equal(HTML_DEMO_RESPONSE_HEADERS["Content-Security-Policy"], HTML_DEMO_CONTENT_SECURITY_POLICY);
     assert.equal(HTML_DEMO_RESPONSE_HEADERS["X-Content-Type-Options"], "nosniff");
+    const permissions = HTML_DEMO_RESPONSE_HEADERS["Permissions-Policy"]!.split(", ");
+    for (const feature of ["camera", "microphone", "geolocation", "display-capture", "fullscreen", "picture-in-picture"]) {
+      assert.ok(permissions.includes(`${feature}=()`), feature);
+    }
   });
 
   it("keeps demo storage in memory", () => {
@@ -256,5 +274,74 @@ describe("HTML demo policy", () => {
     assert.equal(INLINE_HTML_DEMO_LIVENESS_TIMEOUT_MS, 5_000);
     // Not the page's own world (0) and not Electron's preload world (999).
     assert.ok(Number.isInteger(INLINE_HTML_DEMO_LIVENESS_WORLD_ID) && ![0, 999].includes(INLINE_HTML_DEMO_LIVENESS_WORLD_ID));
+  });
+
+  it("stops reading a demo when its download is aborted", async () => {
+    const reason = new Error("The demo file took too long to download.");
+    await assert.rejects(readHtmlDemoBytes(new Response("<p>x</p>"), 64, AbortSignal.abort(reason)), reason);
+
+    // A body that never sends anything is woken up by the abort.
+    let cancelled = false;
+    const stalled = new ReadableStream<Uint8Array>({ pull: () => new Promise(() => {}), cancel: () => { cancelled = true; } });
+    const download = new AbortController();
+    const reading = readHtmlDemoBytes(new Response(stalled), 64, download.signal);
+    setTimeout(() => download.abort(reason), 5);
+    await assert.rejects(reading, reason);
+    assert.equal(cancelled, true, "the stream is cancelled, so the fetch behind it stops");
+  });
+
+  it("names the timeout, not the attachment proxy's error page, when a download is aborted", async () => {
+    const mocks = [
+      mock.module("electron", { defaultExport: { session: {} } }),
+      mock.module("../main/attachments/protocol.js", { namedExports: {
+        // The proxy turns an aborted fetch into an error page.
+        attachmentResponse: async () => new Response("aborted", { status: 502 }),
+      } }),
+    ];
+    try {
+      const { loadHtmlDemoAttachment } = await import("../main/attachments/html-demo-session.js");
+      const reason = new Error("The demo file took too long to download.");
+      await assert.rejects(loadHtmlDemoAttachment("letagents-attachment://download/eA", AbortSignal.abort(reason)), reason);
+      await assert.rejects(loadHtmlDemoAttachment("letagents-attachment://download/eA"), /HTTP 502/);
+    } finally {
+      for (const stub of mocks.reverse()) stub.restore();
+    }
+  });
+
+  it("stops a demo only when its event rate stays over the limit for whole seconds in a row", () => {
+    const limit = INLINE_HTML_DEMO_EVENTS_PER_SECOND;
+    const count = (meter: ReturnType<typeof inlineHtmlDemoEventMeter>, at: number, events: number) => {
+      let overloaded = 0;
+      for (let index = 0; index < events; index += 1) if (countInlineHtmlDemoEvent(meter, at)) overloaded += 1;
+      return overloaded;
+    };
+    assert.equal(INLINE_HTML_DEMO_BUSY_SECONDS, 2);
+
+    const steady = inlineHtmlDemoEventMeter();
+    for (let second = 0; second < 30; second += 1) assert.equal(count(steady, second * 1000, 60), 0, "a 60 fps logger");
+
+    const flood = inlineHtmlDemoEventMeter();
+    assert.equal(count(flood, 0, limit * 5), 0, "one busy second is a burst");
+    assert.equal(count(flood, 1000, limit), 0);
+    assert.equal(countInlineHtmlDemoEvent(flood, 1500), true, "the second busy second in a row");
+    assert.equal(count(flood, 1600, 100), 0, "it reports once");
+
+    // A quiet second between two busy ones ends the run.
+    const gaps = inlineHtmlDemoEventMeter();
+    assert.equal(count(gaps, 0, limit + 1), 0);
+    assert.equal(count(gaps, 2500, limit + 1), 0);
+    assert.equal(count(gaps, 3600, limit + 1), 1);
+
+    // Exactly at the limit is still fine.
+    const atLimit = inlineHtmlDemoEventMeter();
+    for (let second = 0; second < 10; second += 1) assert.equal(count(atLimit, second * 1000, limit), 0);
+  });
+
+  it("keeps downloads, the cache and the liveness check bounded", () => {
+    assert.equal(MAX_INLINE_HTML_DEMO_DOWNLOADS, 4);
+    assert.equal(INLINE_HTML_DEMO_DOWNLOAD_MS, 20_000);
+    assert.equal(INLINE_HTML_DEMO_CACHE_MS, 10 * 60_000);
+    assert.equal(INLINE_HTML_DEMO_LIVENESS_LATE_MS, 1_000);
+    assert.ok(INLINE_HTML_DEMO_EVENTS_PER_SECOND >= 500 && INLINE_HTML_DEMO_EVENTS_PER_SECOND <= 5_000);
   });
 });

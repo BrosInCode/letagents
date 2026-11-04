@@ -5,30 +5,36 @@ import test, { mock } from "node:test";
 import {
   HTML_DEMO_PARTITION,
   INLINE_HTML_DEMO_CACHE_ENTRIES,
+  INLINE_HTML_DEMO_EVENTS_PER_SECOND,
   INLINE_HTML_DEMO_LIVENESS_WORLD_ID,
 } from "../main/attachments/html-demo-policy.js";
 
 const app = new EventEmitter();
 const documents = new Map<string, string>();
-const contentsIds = new Set<number>();
+const contents = new Map<number, string>();
 const lockedIds: number[] = [];
 const loads: string[] = [];
 const clearedOrigins: string[] = [];
 let nextLoad: { byteLength: number } | null = null;
+type Loaded = { html: string; byteLength: number };
+/** Replaces the download for one test; the default finishes at once. */
+let loadOverride: ((href: string, signal?: AbortSignal) => Promise<Loaded>) | null = null;
 
 mock.module("electron", { defaultExport: { app } });
 mock.module("../main/attachments/html-demo-session.js", { namedExports: {
   htmlDemoDocuments: documents,
-  htmlDemoContentsIds: contentsIds,
+  htmlDemoContents: contents,
   htmlDemoSession: async () => ({ clearStorageData: async ({ origin }: { origin: string }) => { clearedOrigins.push(origin); } }),
-  loadHtmlDemoAttachment: async (href: string) => {
+  loadHtmlDemoAttachment: async (href: string, signal?: AbortSignal) => {
     loads.push(href);
+    if (loadOverride) return loadOverride(href, signal);
     return { html: `<p>${href}</p>`, byteLength: nextLoad?.byteLength ?? 100 };
   },
   lockHtmlDemoContents: (contents: { id: number }) => { lockedIds.push(contents.id); },
 } });
 
 const {
+  clearInlineHtmlDemoCache,
   INLINE_HTML_DEMO_EVENT_CHANNEL,
   installInlineHtmlDemoHost,
   prepareInlineHtmlDemo,
@@ -155,14 +161,14 @@ test("a lease admits one locked webview, once, and releasing it closes the demo"
     assert.equal(webPreferences.enablePreferredSizeMode, true);
     assert.equal(webPreferences.disablePopups, true);
     assert.equal(guest.muted, true, "sound is off until the person clicks or types");
-    assert.ok(contentsIds.has(guest.id), "the request filter treats the guest as a demo page");
+    assert.equal(contents.get(guest.id), host, "the request filter treats the guest as this demo's page");
     assert.ok(lockedIds.includes(guest.id));
     assert.equal(attach(lease.url), null, "a second webview cannot reuse the lease");
 
     releaseInlineHtmlDemo(lease.url);
     assert.equal(guest.destroyed, true);
     assert.equal(documents.has(host), false);
-    assert.equal(contentsIds.has(guest.id), false);
+    assert.equal(contents.has(guest.id), false);
     await flushImmediates();
     assert.deepEqual(clearedOrigins.at(-1), `letagents-demo://${host}`);
     assert.doesNotThrow(() => releaseInlineHtmlDemo(lease.url));
@@ -435,5 +441,197 @@ test("every way a demo ends stops its liveness check", async (t) => {
   } finally {
     timeouts.restore();
     releaseAll([released.url, removed.url, crashed.url, waiting.url]);
+  }
+});
+
+/** A download the test finishes, fails or leaves hanging. */
+function heldDownload() {
+  let finish!: (loaded: Loaded) => void;
+  let fail!: (error: unknown) => void;
+  const promise = new Promise<Loaded>((resolve, reject) => { finish = resolve; fail = reject; });
+  return { promise, finish, fail };
+}
+
+test("a demo that floods the app with events is stopped once, and a short burst is not", async (t) => {
+  let now = 50_000;
+  t.mock.method(Date, "now", () => now);
+  const burst = await prepareInlineHtmlDemo("letagents-attachment://download/YnVyc3Q");
+  const flood = await prepareInlineHtmlDemo("letagents-attachment://download/Zmxvb2Q");
+  try {
+    const bursting = attach(burst.url)!.guest;
+    const flooding = attach(flood.url)!.guest;
+    const emit = (guest: FakeGuest, name: string, count: number) => {
+      for (let index = 0; index < count; index += 1) guest.emit(name, {});
+    };
+    // A one-second burst far over the limit, then a calm second.
+    emit(bursting, "console-message", 20_000);
+    now += 1_000;
+    emit(bursting, "console-message", 100);
+    now += 1_000;
+    emit(bursting, "console-message", INLINE_HTML_DEMO_EVENTS_PER_SECOND);
+    assert.deepEqual(embedder.sent, [], "a burst or a busy second alone is fine");
+
+    // Every forwarded event counts, not only console messages.
+    emit(flooding, "page-title-updated", INLINE_HTML_DEMO_EVENTS_PER_SECOND);
+    emit(flooding, "did-navigate-in-page", 1);
+    now += 1_000;
+    emit(flooding, "console-message", INLINE_HTML_DEMO_EVENTS_PER_SECOND);
+    assert.deepEqual(embedder.sent, []);
+    emit(flooding, "console-message", 1);
+    assert.deepEqual(embedder.sent, [{ type: "stopped", url: flood.url, reason: "overloaded" }]);
+    assert.equal(flooding.crashCalls, 1, "the flooding process ends at once, before the queued events");
+    emit(flooding, "console-message", 5_000);
+    await flushImmediates();
+    assert.equal(flooding.destroyed, true);
+    assert.equal(embedder.sent.length, 1, "stopped is sent once");
+    assert.equal(bursting.destroyed, false);
+  } finally {
+    releaseAll([burst.url, flood.url]);
+  }
+});
+
+test("a demo that the app page points at another URL stops; its own routes do not", async () => {
+  const lease = await prepareInlineHtmlDemo("letagents-attachment://download/cm91dGVz");
+  const other = await prepareInlineHtmlDemo("letagents-attachment://download/b3RoZXI");
+  try {
+    const { guest } = attach(lease.url)!;
+    const start = (url: string, more: { isMainFrame?: boolean; isSameDocument?: boolean; initiator?: object } = {}) =>
+      guest.emit("did-start-navigation", {
+        url, isMainFrame: more.isMainFrame ?? true, isSameDocument: more.isSameDocument ?? false, initiator: more.initiator ?? null,
+      });
+    start(lease.url);
+    start(`${lease.url}#settings`, { isSameDocument: true });
+    start(`${lease.url}#settings`);
+    start(`${lease.url}?level=2`);
+    start("https://example.com/", { isMainFrame: false });
+    start("about:blank", { isSameDocument: true });
+    // A link the person clicks in the demo is refused by will-navigate; the demo keeps running.
+    start("https://example.com/", { initiator: {} });
+    assert.deepEqual(embedder.sent, []);
+    start(other.url);
+    assert.deepEqual(embedder.sent, [{ type: "stopped", url: lease.url, reason: "crashed" }]);
+    start("file:///etc/hosts");
+    await flushImmediates();
+    assert.equal(guest.destroyed, true);
+    assert.equal(embedder.sent.length, 1);
+  } finally {
+    releaseAll([lease.url, other.url]);
+  }
+});
+
+test("a liveness timeout that fires late asks again instead of stopping the demo", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let now = 1_000_000;
+  t.mock.method(Date, "now", () => now);
+  const lease = await prepareInlineHtmlDemo("letagents-attachment://download/bGF0ZQ");
+  try {
+    const { guest } = attach(lease.url)!;
+    guest.answers = "never";
+    now += 5_000;
+    t.mock.timers.tick(5_000);
+    assert.equal(guest.checks.length, 1);
+    // Main was blocked for 3 s past the deadline: the answer may be queued behind the timer.
+    now += 8_000;
+    t.mock.timers.tick(5_000);
+    assert.deepEqual(embedder.sent, []);
+    assert.equal(guest.checks.length, 2, "a new check starts at once");
+    guest.checks[0]!.answer();
+    await flushImmediates();
+    assert.equal(guest.checks.length, 2, "the old check's answer no longer counts");
+    // On time this time, and still no answer: the demo is frozen.
+    now += 5_000;
+    t.mock.timers.tick(5_000);
+    assert.deepEqual(embedder.sent, [{ type: "stopped", url: lease.url, reason: "unresponsive" }]);
+  } finally {
+    releaseAll([lease.url]);
+  }
+});
+
+test("only live demos use run slots; downloads have their own cap and a time limit", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const held = new Map<string, ReturnType<typeof heldDownload>>();
+  const signals = new Map<string, AbortSignal>();
+  loadOverride = (href, signal) => {
+    const download = heldDownload();
+    held.set(href, download);
+    if (signal) signals.set(href, signal);
+    signal?.addEventListener("abort", () => download.fail(signal.reason));
+    return download.promise;
+  };
+  const urls: string[] = [];
+  const href = (index: number) => `letagents-attachment://download/ZG93bmxvYWQ${index}`;
+  try {
+    for (let index = 0; index < 3; index += 1) {
+      const pending = prepareInlineHtmlDemo(href(index));
+      await flushImmediates();
+      held.get(href(index))!.finish({ html: "<p>live</p>", byteLength: 10 });
+      urls.push((await pending).url);
+    }
+    // Three demos run; two more files download at the same time, and neither holds a slot yet.
+    const fourth = prepareInlineHtmlDemo(href(3));
+    const fifth = prepareInlineHtmlDemo(href(4));
+    const sameFile = prepareInlineHtmlDemo(href(3));
+    await flushImmediates();
+    assert.equal(loads.filter((load) => load === href(3)).length, 1, "a second demo of one file joins its download");
+    held.get(href(3))!.finish({ html: "<p>four</p>", byteLength: 10 });
+    urls.push((await fourth).url);
+    await assert.rejects(sameFile, /At most 4 demos can run/, "the slot check runs again after the download");
+    held.get(href(4))!.finish({ html: "<p>five</p>", byteLength: 10 });
+    await assert.rejects(fifth, /At most 4 demos can run/);
+    releaseAll(urls.splice(0));
+
+    // At most 4 different files download at once.
+    const downloads = [5, 6, 7, 8].map((index) => prepareInlineHtmlDemo(href(index)));
+    for (const download of downloads) download.catch(() => undefined);
+    await flushImmediates();
+    await assert.rejects(prepareInlineHtmlDemo(href(9)), /At most 4 demo files can download at once/);
+    // A download that hangs is cut off, and its signal stops the fetch.
+    t.mock.timers.tick(20_000);
+    for (const download of downloads) await assert.rejects(download, /took too long to download/);
+    assert.equal(signals.get(href(5))?.aborted, true);
+    const after = prepareInlineHtmlDemo(href(9));
+    await flushImmediates();
+    held.get(href(9))!.finish({ html: "<p>after</p>", byteLength: 10 });
+    urls.push((await after).url);
+  } finally {
+    loadOverride = null;
+    releaseAll(urls);
+  }
+});
+
+test("cached demo files expire, and sign-out clears them", async (t) => {
+  let now = 2_000_000;
+  t.mock.method(Date, "now", () => now);
+  const href = "letagents-attachment://download/dHRs";
+  const count = () => loads.filter((load) => load === href).length;
+  try {
+    loads.length = 0;
+    releaseInlineHtmlDemo((await prepareInlineHtmlDemo(href)).url);
+    now += 9 * 60_000;
+    releaseInlineHtmlDemo((await prepareInlineHtmlDemo(href)).url);
+    assert.equal(count(), 1, "a recent file comes from the cache");
+    now += 60_000;
+    releaseInlineHtmlDemo((await prepareInlineHtmlDemo(href)).url);
+    assert.equal(count(), 2, "a file cached 10 minutes ago downloads again");
+
+    clearInlineHtmlDemoCache();
+    releaseInlineHtmlDemo((await prepareInlineHtmlDemo(href)).url);
+    assert.equal(count(), 3, "sign-out empties the cache");
+
+    // A download that started before sign-out is not cached for the next account.
+    const download = heldDownload();
+    loadOverride = () => download.promise;
+    clearInlineHtmlDemoCache();
+    const other = "letagents-attachment://download/YmVmb3Jl";
+    const pending = prepareInlineHtmlDemo(other);
+    await flushImmediates();
+    clearInlineHtmlDemoCache();
+    download.finish({ html: "<p>old account</p>", byteLength: 10 });
+    releaseInlineHtmlDemo((await pending).url);
+    loadOverride = null;
+    releaseInlineHtmlDemo((await prepareInlineHtmlDemo(other)).url);
+    assert.equal(loads.filter((load) => load === other).length, 2);
+  } finally {
+    loadOverride = null;
   }
 });

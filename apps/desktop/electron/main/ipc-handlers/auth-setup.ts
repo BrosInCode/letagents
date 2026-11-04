@@ -12,6 +12,7 @@ import type {
   DesktopSecureStorageStatus,
   DesktopSupervisorGrantMetadata,
 } from "../../ipc-types.js";
+import { clearInlineHtmlDemoCache } from "../attachments/html-demo-inline.js";
 import {
   cancelDeviceAuthFlow,
   getDesktopAuthStatus,
@@ -48,12 +49,14 @@ import { supervisedAgentsSupported } from "../platform-capabilities.js";
 export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): void {
   setAuthAuthorizedHandler(() => {
     clearJoinedRoomInfoCache();
+    clearInlineHtmlDemoCache();
     if (supervisedAgentsSupported()) supervisorGrantCoordinator.scheduleCredentialRecovery();
     void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
     void refreshDesktopNotificationRegistration().catch(() => {});
   });
   setAuthInvalidatedHandler(() => {
     clearJoinedRoomInfoCache();
+    clearInlineHtmlDemoCache();
     void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
     void unregisterDesktopNotificationAccount().catch(() => {});
   });
@@ -87,6 +90,7 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
     "desktop:auth:sign-out",
     async (): Promise<DesktopAuthStatus> => {
       clearJoinedRoomInfoCache();
+      clearInlineHtmlDemoCache();
       await unregisterDesktopNotificationAccount().catch(() => {});
       await signOutDesktopAuth();
       await refreshInstalledLetAgentsMcpServerAuth().catch(() => {});

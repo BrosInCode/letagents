@@ -5,23 +5,30 @@ import { randomUUID } from "node:crypto";
 import type { DesktopInlineHtmlDemoEvent, DesktopInlineHtmlDemoLease } from "../../ipc-types.js";
 import {
   assertHtmlDemoAttachmentHref,
+  countInlineHtmlDemoEvent,
   HTML_DEMO_PARTITION,
   INLINE_HTML_DEMO_CACHE_BYTES,
   INLINE_HTML_DEMO_CACHE_ENTRIES,
+  INLINE_HTML_DEMO_CACHE_MS,
+  INLINE_HTML_DEMO_DOWNLOAD_MS,
   INLINE_HTML_DEMO_HEIGHT_INTERVAL_MS,
   INLINE_HTML_DEMO_LEASE_MS,
   INLINE_HTML_DEMO_LIVENESS_INTERVAL_MS,
+  INLINE_HTML_DEMO_LIVENESS_LATE_MS,
   INLINE_HTML_DEMO_LIVENESS_TIMEOUT_MS,
   INLINE_HTML_DEMO_LIVENESS_WORLD_ID,
   inlineHtmlDemoAttachLease,
+  inlineHtmlDemoEventMeter,
+  type InlineHtmlDemoEventMeter,
   inlineHtmlDemoHeight,
   inlineHtmlDemoLeaseHost,
   inlineHtmlDemoLeaseUrl,
   lockInlineHtmlDemoWebPreferences,
+  MAX_INLINE_HTML_DEMO_DOWNLOADS,
   MAX_INLINE_HTML_DEMOS,
 } from "./html-demo-policy.js";
 import {
-  htmlDemoContentsIds,
+  htmlDemoContents,
   htmlDemoDocuments,
   htmlDemoSession,
   loadHtmlDemoAttachment,
@@ -34,6 +41,23 @@ export const INLINE_HTML_DEMO_EVENT_CHANNEL = "desktop:room:inline-html-demo-eve
 
 /** The first click, key or touch in a demo turns its sound on; the page cannot fake one. */
 const UNMUTE_INPUT_TYPES = new Set<InputEvent["type"]>(["mouseDown", "rawKeyDown", "keyDown", "touchStart"]);
+
+/**
+ * The guest events Electron 42 forwards to the `<webview>` element, each one a
+ * message through main to the app page (lib/browser/web-view-events.ts).
+ * A page can repeat most of them as fast as it likes.
+ */
+const FORWARDED_GUEST_EVENTS = [
+  "load-commit", "did-finish-load", "did-fail-load", "did-frame-finish-load", "did-start-loading",
+  "did-stop-loading", "dom-ready", "console-message", "context-menu", "devtools-open-url",
+  "devtools-opened", "devtools-closed", "devtools-focused", "will-navigate", "will-frame-navigate",
+  "did-start-navigation", "did-redirect-navigation", "did-navigate", "did-frame-navigate",
+  "did-navigate-in-page", "page-title-updated", "page-favicon-updated", "enter-html-full-screen",
+  "leave-html-full-screen", "media-started-playing", "media-paused", "found-in-page",
+  "did-change-theme-color", "update-target-url",
+] as const;
+
+type StopReason = Extract<DesktopInlineHtmlDemoEvent, { type: "stopped" }>["reason"];
 
 interface InlineHtmlDemoLease {
   host: string;
@@ -51,15 +75,18 @@ interface InlineHtmlDemoLease {
   /** Waits for the next liveness check, or for the answer to the one in flight. */
   livenessTimer: ReturnType<typeof setTimeout> | null;
   livenessCheck: object | null;
+  events: InlineHtmlDemoEventMeter;
 }
 
 /** Live leases by demo host; a host's document lives exactly as long as its lease. */
 const leases = new Map<string, InlineHtmlDemoLease>();
 const leasesByGuestId = new Map<number, InlineHtmlDemoLease>();
-let preparing = 0;
-const htmlCache = new Map<string, { html: string; byteLength: number }>();
+const htmlCache = new Map<string, { html: string; byteLength: number; cachedAt: number }>();
 let htmlCacheBytes = 0;
+/** Downloads by link; a demo of a file that is already downloading waits for that download. */
 const htmlLoads = new Map<string, Promise<string>>();
+/** Moves on when the cache is cleared, so a download started before then is not cached. */
+let htmlCacheGeneration = 0;
 /** The lease whose webview Electron is creating right now, in this task. */
 let attaching: { lease: InlineHtmlDemoLease; embedder: WebContents } | null = null;
 let guestBindingInstalled = false;
@@ -67,18 +94,12 @@ let guestBindingInstalled = false;
 /** Load a room HTML attachment for a `<webview>` in the chat; the lease admits one webview, once. */
 export async function prepareInlineHtmlDemo(rawHref: unknown): Promise<DesktopInlineHtmlDemoLease> {
   const href = assertHtmlDemoAttachmentHref(rawHref);
-  if (leases.size + preparing >= MAX_INLINE_HTML_DEMOS) {
-    throw new Error(`At most ${MAX_INLINE_HTML_DEMOS} demos can run in the chat at once.`);
-  }
-  preparing += 1;
-  let html: string;
-  try {
-    // The demo session is locked before any lease exists, so no webview loads without the locks.
-    await htmlDemoSession();
-    html = await inlineHtmlDemoDocument(href);
-  } finally {
-    preparing -= 1;
-  }
+  assertLeaseAvailable();
+  // The demo session is locked before any lease exists, so no webview loads without the locks.
+  await htmlDemoSession();
+  const html = await inlineHtmlDemoDocument(href);
+  // Only real leases count; other demos may have taken the free ones during the download.
+  assertLeaseAvailable();
   const host = randomUUID().replaceAll("-", "");
   const lease: InlineHtmlDemoLease = {
     host,
@@ -94,6 +115,7 @@ export async function prepareInlineHtmlDemo(rawHref: unknown): Promise<DesktopIn
     heightSentAt: Number.NEGATIVE_INFINITY,
     livenessTimer: null,
     livenessCheck: null,
+    events: inlineHtmlDemoEventMeter(),
   };
   lease.attachTimer = setTimeout(() => {
     if (!lease.guest) endLease(lease);
@@ -101,6 +123,20 @@ export async function prepareInlineHtmlDemo(rawHref: unknown): Promise<DesktopIn
   htmlDemoDocuments.set(host, html);
   leases.set(host, lease);
   return { url: lease.url, partition: HTML_DEMO_PARTITION };
+}
+
+/** Forget downloaded demo files, for sign-out and account changes. */
+export function clearInlineHtmlDemoCache(): void {
+  htmlCache.clear();
+  htmlCacheBytes = 0;
+  htmlLoads.clear();
+  htmlCacheGeneration += 1;
+}
+
+function assertLeaseAvailable(): void {
+  if (leases.size >= MAX_INLINE_HTML_DEMOS) {
+    throw new Error(`At most ${MAX_INLINE_HTML_DEMOS} demos can run in the chat at once.`);
+  }
 }
 
 /** Free a lease and its document, and close its demo if one runs. Unknown URLs are ignored. */
@@ -160,8 +196,20 @@ function bindAttachingGuest(guest: WebContents): void {
   if (lease.attachTimer) clearTimeout(lease.attachTimer);
   lease.attachTimer = null;
   leasesByGuestId.set(guestId, lease);
-  htmlDemoContentsIds.add(guestId);
+  htmlDemoContents.set(guestId, lease.host);
   lockHtmlDemoContents(guest);
+  // A load with no initiating frame comes from the app (a webview `src` or `loadURL`); one to
+  // another URL would replace the demo. The page's own attempts are refused by will-navigate.
+  guest.on("did-start-navigation", (details) => {
+    if (details.isMainFrame && !details.isSameDocument && !details.initiator && !details.url.startsWith(lease.url)) {
+      stopGuest(lease, "crashed");
+    }
+  });
+  const emitter: NodeJS.EventEmitter = guest;
+  const countEvent = () => {
+    if (!lease.stopped && countInlineHtmlDemoEvent(lease.events, Date.now())) stopGuest(lease, "overloaded");
+  };
+  for (const name of FORWARDED_GUEST_EVENTS) emitter.on(name, countEvent);
 
   guest.setAudioMuted(true);
   const unmuteOnInput = (_event: Event, input: InputEvent) => {
@@ -178,7 +226,7 @@ function bindAttachingGuest(guest: WebContents): void {
   scheduleLivenessCheck(lease, guest);
   guest.once("destroyed", () => {
     leasesByGuestId.delete(guestId);
-    htmlDemoContentsIds.delete(guestId);
+    htmlDemoContents.delete(guestId);
     endLease(lease);
     void htmlDemoSession()
       .then((ses) => ses.clearStorageData({ origin: lease.url.slice(0, -1) }))
@@ -186,13 +234,15 @@ function bindAttachingGuest(guest: WebContents): void {
   });
 }
 
-/** A frozen or crashed demo reports once, gives up its lease, and is closed. */
-function stopGuest(lease: InlineHtmlDemoLease, reason: "unresponsive" | "crashed"): void {
+/** A frozen, crashed or flooding demo reports once, gives up its lease, and is closed. */
+function stopGuest(lease: InlineHtmlDemoLease, reason: StopReason): void {
   const guest = lease.guest;
   if (lease.stopped || !guest || !isLive(lease)) return;
   lease.stopped = true;
   sendEvent(lease, { type: "stopped", url: lease.url, reason });
   endLease(lease);
+  // A flood queues its events ahead of any later task, so its process ends now.
+  if (reason === "overloaded" && !guest.isCrashed()) guest.forcefullyCrashRenderer();
   // Not inside the guest's own event: closing a guest deletes it at once.
   setImmediate(() => {
     if (guest.isDestroyed()) return;
@@ -232,8 +282,12 @@ function checkLiveness(lease: InlineHtmlDemoLease, guest: WebContents): void {
   if (!isLive(lease) || guest.isDestroyed()) return;
   const check = {};
   lease.livenessCheck = check;
+  const dueAt = Date.now() + INLINE_HTML_DEMO_LIVENESS_TIMEOUT_MS;
   lease.livenessTimer = setTimeout(() => {
-    if (lease.livenessCheck === check) stopGuest(lease, "unresponsive");
+    if (lease.livenessCheck !== check) return;
+    // Main was blocked, so the answer may be waiting behind this timer: ask again instead.
+    if (Date.now() - dueAt > INLINE_HTML_DEMO_LIVENESS_LATE_MS) checkLiveness(lease, guest);
+    else stopGuest(lease, "unresponsive");
   }, INLINE_HTML_DEMO_LIVENESS_TIMEOUT_MS);
   // Any reply, even an error, shows the page's process is still working.
   const answered = () => {
@@ -272,19 +326,36 @@ function inlineHtmlDemoDocument(href: string): Promise<string> {
   const cached = htmlCache.get(href);
   if (cached) {
     htmlCache.delete(href);
-    htmlCache.set(href, cached);
-    return Promise.resolve(cached.html);
+    htmlCacheBytes -= cached.byteLength;
+    if (Date.now() - cached.cachedAt < INLINE_HTML_DEMO_CACHE_MS) {
+      htmlCache.set(href, cached);
+      htmlCacheBytes += cached.byteLength;
+      return Promise.resolve(cached.html);
+    }
   }
-  let load = htmlLoads.get(href);
-  if (!load) {
-    load = loadHtmlDemoAttachment(href)
-      .then(({ html, byteLength }) => {
-        cacheHtml(href, html, byteLength);
-        return html;
-      })
-      .finally(() => htmlLoads.delete(href));
-    htmlLoads.set(href, load);
+  const running = htmlLoads.get(href);
+  if (running) return running;
+  if (htmlLoads.size >= MAX_INLINE_HTML_DEMO_DOWNLOADS) {
+    return Promise.reject(new Error(
+      `At most ${MAX_INLINE_HTML_DEMO_DOWNLOADS} demo files can download at once. Try again in a moment.`,
+    ));
   }
+  const generation = htmlCacheGeneration;
+  const download = new AbortController();
+  const timer = setTimeout(
+    () => download.abort(new Error("The demo file took too long to download.")),
+    INLINE_HTML_DEMO_DOWNLOAD_MS,
+  );
+  const load = loadHtmlDemoAttachment(href, download.signal)
+    .then(({ html, byteLength }) => {
+      if (generation === htmlCacheGeneration) cacheHtml(href, html, byteLength);
+      return html;
+    })
+    .finally(() => {
+      clearTimeout(timer);
+      if (htmlLoads.get(href) === load) htmlLoads.delete(href);
+    });
+  htmlLoads.set(href, load);
   return load;
 }
 
@@ -292,7 +363,7 @@ function cacheHtml(href: string, html: string, byteLength: number): void {
   const previous = htmlCache.get(href);
   if (previous) htmlCacheBytes -= previous.byteLength;
   htmlCache.delete(href);
-  htmlCache.set(href, { html, byteLength });
+  htmlCache.set(href, { html, byteLength, cachedAt: Date.now() });
   htmlCacheBytes += byteLength;
   // Oldest first; one file is never over the byte cap, so the newest always stays.
   for (const [oldestHref, entry] of htmlCache) {
