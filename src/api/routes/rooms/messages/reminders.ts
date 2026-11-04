@@ -4,12 +4,13 @@ import { isAppSession } from "../../../request/app-session.js";
 import { parseScopedId, formatMessageId } from "../../../db/utils.js";
 import { createMessageReminder, deleteMessageReminder, listMessageReminders, loadReminderMessage } from "../../../notifications/reminders.js";
 import { getProjectById } from "../../../db.js";
-import { resolveProjectRepoRoomAccessDecision } from "../../../rooms/access.js";
+import { isProjectRoomMember, resolveProjectRepoRoomAccessDecision } from "../../../rooms/access.js";
 import { resolveParticipantRoom, routeParam } from "./helpers.js";
 import type { RoomMessageRouteDeps } from "./types.js";
 
 const databaseStore = { create: createMessageReminder, remove: deleteMessageReminder, list: listMessageReminders,
-  message: loadReminderMessage, project: getProjectById, access: resolveProjectRepoRoomAccessDecision };
+  message: loadReminderMessage, project: getProjectById, access: resolveProjectRepoRoomAccessDecision,
+  member: isProjectRoomMember };
 export type MessageReminderStore = typeof databaseStore;
 function person(req: AuthenticatedRequest, res: Response): string | null {
   if (isAppSession(req)) return req.sessionAccount!.account_id;
@@ -56,6 +57,8 @@ export function registerMessageReminderRoutes(app: Express, deps: RoomMessageRou
         if (!project) return false;
         // Match ordinary session room reads; fresh checks remain in push delivery.
         const result = await store.access({ project, sessionAccount: req.sessionAccount });
+        // A room without a repository previews for its members only.
+        if (!result.isRepoBacked) return store.member(project, accountId!);
         return result.decision.kind === "allow";
       }
       const reminders = await Promise.all(rows.slice(0, 50).map(async row => {

@@ -159,7 +159,10 @@ export function registerPresenceReadRoutes(
         ? await getFocusRoomsForParent(rootRoom.id)
         : [];
       const rooms = [rootRoom, ...focusRooms];
-      const selectedRoomId = normalizeHistoryRoomId(req.query.room_id) ?? project.id;
+      // A person may look at the parent or a sibling focus room: they share
+      // members. A worker bearer is scoped to its own room and stays there.
+      const selectedRoomId = (req.authKind === "agent_session" ? null : normalizeHistoryRoomId(req.query.room_id))
+        ?? project.id;
       const selectedRoom = rooms.find((room) => room.id === selectedRoomId) ?? project;
       const scopedRooms = rooms.filter((room) => room.id === selectedRoom.id);
       const [

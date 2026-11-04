@@ -625,10 +625,11 @@ async function listRoomNames(accountId: string, login: string | null): Promise<M
 }
 
 /**
- * The room list remembers rooms the account once opened; a private Git Room
- * may have dropped the account since. The cached access decision the push
- * path uses answers that: a room that is not backed by a repository allows
- * every account. Only a confirmed allow counts.
+ * The room list remembers rooms the account once opened; a Git Room may have
+ * dropped the account since, and a room without a repository may have removed
+ * it. The cached access decision the push path uses answers both: the GitHub
+ * role for a Git Room, membership for any other room. Only a confirmed allow
+ * counts.
  */
 async function canReadRoom(accountId: string, roomId: string): Promise<boolean> {
   const { filterAccountIdsWithRoomAccess } = await import("../server/events.js");

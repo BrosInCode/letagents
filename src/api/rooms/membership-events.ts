@@ -6,6 +6,8 @@ import { createBridgedEmitter } from "../server/bridged-emitter.js";
  * periodic recheck. Payload: `{ roomId, login }`, both lowercase.
  */
 export const roomMembershipInvalidationEvents = createBridgedEmitter("room_membership");
+// One listener per open account activity stream, plus the live leases.
+roomMembershipInvalidationEvents.setMaxListeners(0);
 
 export function announceRoomMembershipEnded(roomId: string, login: string): void {
   roomMembershipInvalidationEvents.emit("invalidate", {

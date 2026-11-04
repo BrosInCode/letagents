@@ -170,6 +170,15 @@ export async function provisionRentalRoom(
       };
     }
 
+    // The rental room goes under the room the renter chose (for a legacy
+    // repository rental, the repository's room), never under a room the
+    // provider names: its worker would read that room's activity.
+    const allowedParentRoomId = session.target_room_id
+      ?? (session.repo_owner && session.repo_name ? `github.com/${session.repo_owner}/${session.repo_name}` : null);
+    if (!allowedParentRoomId || allowedParentRoomId.toLowerCase() !== parentRoomId.toLowerCase()) {
+      throw new Error("parent_room_mismatch");
+    }
+
     const focusKey = `rental:${sessionId}`;
     const [existingRoom] = await tx
       .select({ id: rooms.id })

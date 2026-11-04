@@ -461,6 +461,10 @@ export function registerRentalProviderRoutes(
           res.status(409).json({ error: message });
           return;
         }
+        if (message === "parent_room_mismatch") {
+          res.status(403).json({ error: "parent_room_mismatch", message: "A rental room goes under the room the renter chose." });
+          return;
+        }
         res.status(500).json({ error: "Failed to provision session" });
       }
     }

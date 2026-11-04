@@ -4,6 +4,7 @@ import type { AccountActivityHub, AccountRoomActivity } from "../../account-acti
 import type { getAccountRoomsForAccount } from "../../account-room-membership/list.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { openSseConnection } from "../../http/sse.js";
+import { roomMembershipInvalidationEvents } from "../../rooms/membership-events.js";
 
 export interface AccountActivityStreamDeps {
   hub: AccountActivityHub;
@@ -40,6 +41,16 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
     }
 
     const connection = openSseConnection(req, res, `account activity ${req.sessionAccount.account_id}`);
+    // A person removed from a room stops seeing its activity now. Closing the
+    // stream makes the client reconnect and watch its new room list.
+    const login = req.sessionAccount.login.trim().toLowerCase();
+    const watchedRoomIds = new Set(roomIds.map((roomId) => roomId.toLowerCase()));
+    const onMembershipEnded = (payload: unknown) => {
+      const ended = payload && typeof payload === "object" ? payload as { roomId?: unknown; login?: unknown } : {};
+      if (ended.login === login && typeof ended.roomId === "string" && watchedRoomIds.has(ended.roomId)) connection.close();
+    };
+    roomMembershipInvalidationEvents.on("invalidate", onMembershipEnded);
+    connection.addCleanup(() => { roomMembershipInvalidationEvents.off("invalidate", onMembershipEnded); });
     const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     const send = (activity: AccountRoomActivity) => {
       void connection.write(frame("room", activity));

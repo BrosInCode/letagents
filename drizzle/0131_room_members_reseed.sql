@@ -1,8 +1,13 @@
 -- The members-only rule is on from this release: only members read a room
--- that is not tied to a repository, post in it and so wake its agents. Run the
--- seed of 0130 again first, so that the people with proof gained since then
--- (people who posted while signed in, owners of agents that joined) keep
--- their rooms. Same statements as 0130; each adds only what is missing.
+-- that is not tied to a repository, post in it and so wake its agents.
+--
+-- 1. Run the seed of 0130 again (same statement), so the people with proof
+--    gained since then keep their rooms. It adds only what is missing and
+--    never adds back a person in room_member_removals.
+-- 2. A room with members but no admin gets one, so someone can let people
+--    in: the member who posted first while signed in, else the member who
+--    owns the earliest agent. The first person to join no longer becomes
+--    admin, so without this such a room could never admit anyone.
 SET LOCAL lock_timeout = '3s';
 --> statement-breakpoint
 WITH member_rooms AS (
@@ -10,6 +15,10 @@ WITH member_rooms AS (
 	WHERE "kind" = 'main'
 		AND "id" !~ '^[A-Za-z0-9.-]+/[^/]+/[^/]+$'
 		AND NOT (lower(split_part("id", '/', 1)) = 'gitlab.com' AND "id" LIKE '%/%/%')
+		AND NOT EXISTS (
+			SELECT 1 FROM "room_git_bindings" AS binding
+			WHERE binding."room_id" = "rooms"."id" AND binding."provider" = 'github'
+		)
 ), scope AS (
 	SELECT "id" AS room_id, "id" AS access_room_id FROM member_rooms
 	UNION ALL
@@ -27,9 +36,9 @@ WITH member_rooms AS (
 	UNION
 	SELECT "room_agent_session_id" FROM "agent_asks" WHERE "room_agent_session_id" IS NOT NULL
 ), proof AS (
-	SELECT scope.access_room_id AS room_id, admin."account_id"
+	SELECT admin."project_id" AS room_id, admin."account_id"
 	FROM "project_admins" AS admin
-	INNER JOIN scope ON scope.room_id = admin."project_id"
+	INNER JOIN member_rooms ON member_rooms."id" = admin."project_id"
 	UNION
 	SELECT scope.access_room_id, message."publisher_account_id"
 	FROM "messages" AS message
@@ -45,6 +54,10 @@ INSERT INTO "room_members" ("room_id", "account_id", "added_via", "created_at")
 SELECT proof.room_id, proof."account_id", 'seed', now()
 FROM proof
 INNER JOIN "accounts" AS account ON account."id" = proof."account_id"
+WHERE NOT EXISTS (
+	SELECT 1 FROM "room_member_removals" AS removal
+	WHERE removal."room_id" = proof.room_id AND removal."account_id" = proof."account_id"
+)
 ON CONFLICT ("room_id", "account_id") DO NOTHING;
 --> statement-breakpoint
 WITH adminless AS (
