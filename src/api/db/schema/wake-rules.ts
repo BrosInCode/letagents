@@ -86,7 +86,23 @@ export const agent_wake_rules = pgTable("agent_wake_rules", {
   /** Keyed fingerprints of the target (URL without query, or address) and of its host, for budgets and stops. */
   delivery_target_fingerprint: text("delivery_target_fingerprint"),
   delivery_host_fingerprint: text("delivery_host_fingerprint"),
+  /**
+   * MCP Events subscriptions (`delivery_kind = 'mcp_event'`): the id the
+   * client derives its renewals from (`sub_…`, from the credential, callback
+   * URL, event name and canonical arguments), the event name, the canonical
+   * subscription arguments as given, the cursor (room message number) the
+   * subscription is delivered up to, and when it last replayed events for a
+   * renewal (one replay an hour). `expires_at` is the `refreshBefore` returned.
+   */
+  mcp_subscription_id: text("mcp_subscription_id"),
+  mcp_event_name: text("mcp_event_name"),
+  mcp_arguments: jsonb("mcp_arguments").$type<Record<string, unknown>>(),
+  mcp_cursor: text("mcp_cursor"),
+  mcp_replayed_at: timestamp("mcp_replayed_at", { mode: "string", withTimezone: true }),
 }, (table) => ({
+  mcp_subscription_check: check("agent_wake_rules_mcp_subscription_check", sql`(${table.delivery_kind} = 'mcp_event') = (${table.mcp_subscription_id} IS NOT NULL AND ${table.mcp_event_name} IS NOT NULL AND ${table.mcp_arguments} IS NOT NULL)`),
+  mcp_subscription_uq: uniqueIndex("agent_wake_rules_mcp_subscription_uq").on(table.credential_ref, table.mcp_subscription_id)
+    .where(sql`${table.mcp_subscription_id} IS NOT NULL AND ${table.status} IN ('active', 'paused', 'pending_confirmation')`),
   event_check: check("agent_wake_rules_event_check", sql`${table.event} IN ('timer', 'task.status_changed', 'github.check_completed', 'github.review_submitted', 'github.pr_closed', 'room.message')`),
   status_check: check("agent_wake_rules_status_check", sql`${table.status} IN ('active', 'fired', 'expired', 'cancelled', 'retired', 'paused', 'pending_confirmation')`),
   confirm_token_uq: uniqueIndex("agent_wake_rules_confirm_token_uq").on(table.confirm_token_hash).where(sql`${table.confirm_token_hash} IS NOT NULL`),
@@ -95,7 +111,7 @@ export const agent_wake_rules = pgTable("agent_wake_rules", {
   // A delivery rule keeps its sealed target while it can still deliver; once retired or expired it drops it.
   delivery_check: check("agent_wake_rules_delivery_check", sql`((${table.event} = 'room.message') = (${table.delivery_kind} IS NOT NULL)) AND (${table.delivery_kind} IS NULL OR ${table.delivery_target} IS NOT NULL OR ${table.status} IN ('retired', 'expired'))`),
   delivery_bearer_check: check("agent_wake_rules_delivery_bearer_check", sql`${table.delivery_bearer} IS NULL OR ${table.delivery_kind} = 'webhook'`),
-  delivery_kind_check: check("agent_wake_rules_delivery_kind_check", sql`${table.delivery_kind} IS NULL OR ${table.delivery_kind} IN ('webhook', 'email')`),
+  delivery_kind_check: check("agent_wake_rules_delivery_kind_check", sql`${table.delivery_kind} IS NULL OR ${table.delivery_kind} IN ('webhook', 'email', 'mcp_event')`),
   expiry_check: check("agent_wake_rules_expiry_check", sql`${table.event} = 'room.message' OR (${table.expires_at} IS NOT NULL AND ${table.next_check_at} IS NOT NULL)`),
   held_identity_uq: uniqueIndex("agent_wake_rules_held_identity_uq")
     .on(table.room_id, table.agent_key, table.identity_key)
@@ -113,10 +129,13 @@ export const agent_wake_rules = pgTable("agent_wake_rules", {
 }));
 
 /**
- * One outbound wake delivery (a webhook POST or an email), claimed and retried like a desktop push.
- * A rule has at most one message delivery waiting to go out (`state =
+ * One outbound wake delivery (a webhook POST, an email or an MCP event), claimed and retried like a desktop push.
+ * A webhook or email rule has at most one message delivery waiting to go out (`state =
  * 'queued'`), and an email rule at most one confirmation: matches that arrive
  * meanwhile fold into the message delivery and move it to the newest message.
+ * An MCP event is never folded: each match is one row, inserted as `retry`
+ * (waiting, `attempt_count = 0`) because `queued` is the one coalescing slot;
+ * its message is read again when it is sent, so its row carries no text.
  * Terminal rows keep no message text.
  */
 export const wake_webhook_deliveries = pgTable("wake_webhook_deliveries", {
@@ -126,7 +145,7 @@ export const wake_webhook_deliveries = pgTable("wake_webhook_deliveries", {
     .notNull()
     .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
   /** How it goes out: the rule's delivery kind. */
-  kind: text("kind").$type<"webhook" | "email">().notNull().default("webhook"),
+  kind: text("kind").$type<WakeRuleDeliveryKind>().notNull().default("webhook"),
   /** `confirm`: an email rule's confirmation, which carries no message. */
   purpose: text("purpose").$type<"message" | "confirm">().notNull().default("message"),
   message_number: integer("message_number"),
@@ -153,7 +172,7 @@ export const wake_webhook_deliveries = pgTable("wake_webhook_deliveries", {
   held_by_cap: boolean("held_by_cap").notNull().default(false),
 }, (table) => ({
   state_check: check("wake_webhook_deliveries_state_check", sql`${table.state} IN ('queued', 'retry', 'processing', 'delivered', 'dead')`),
-  kind_check: check("wake_webhook_deliveries_kind_check", sql`${table.kind} IN ('webhook', 'email')`),
+  kind_check: check("wake_webhook_deliveries_kind_check", sql`${table.kind} IN ('webhook', 'email', 'mcp_event')`),
   purpose_check: check("wake_webhook_deliveries_purpose_check", sql`(${table.purpose} = 'message' AND ${table.message_number} IS NOT NULL) OR (${table.purpose} = 'confirm' AND ${table.kind} = 'email')`),
   pending_uq: uniqueIndex("wake_webhook_deliveries_pending_uq").on(table.rule_id, table.purpose).where(sql`${table.state} = 'queued'`),
   ready_idx: index("wake_webhook_deliveries_ready_idx").on(table.next_attempt_at).where(sql`${table.state} IN ('queued', 'retry')`),

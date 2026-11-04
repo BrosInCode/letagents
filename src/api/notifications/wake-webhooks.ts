@@ -1,18 +1,22 @@
 /**
- * The wake delivery half of the notifications worker (webhooks and email).
+ * The wake delivery half of the notifications worker (webhooks, email and
+ * MCP events).
  *
  * Deliveries are claimed like desktop pushes (`FOR UPDATE SKIP LOCKED`, a
  * stale claim is taken back after 5 minutes) and retried with the same
- * backoff. Webhooks and email run in separate lanes, each a pool that starts
+ * backoff. Webhooks, email and MCP events run in separate lanes, each a pool that starts
  * the next delivery as soon as one finishes. Claims are fair per account: one
  * account gets at most a few deliveries per claim and in flight at once, so
  * one slow or busy receiver cannot hold everyone else back.
  *
  * Each attempt checks that the rule is still current, that the credential
  * that registered it still works, and that its account can still read the
- * room. A webhook: network errors and 5xx retry, up to 10 attempts; 408 and
- * 429 wait for their Retry-After (at most 5 minutes) and never count toward
- * a pause; other 4xx, redirects and refused addresses are final. An email: a
+ * room. A webhook: network errors and 5xx retry, up to 10 attempts; 408, 425
+ * and 429 wait for their Retry-After (at most 5 minutes) and never count
+ * toward a pause; other 4xx (410 and 413 included), redirects and refused
+ * addresses are final. An MCP event is a webhook in the Standard Webhooks
+ * envelope (`../wake-rules/mcp-events.ts`); a 410 also ends its
+ * subscription. An email: a
  * recipient rejection (5xx to RCPT TO or DATA) is final, a temporary one
  * retries, and the operator's own SMTP problems retry without touching the
  * rule. Five final failures in a row pause the rule. Only error classes are
@@ -20,9 +24,11 @@
  */
 import { randomUUID } from "node:crypto";
 
+import { WAKE_RULE_LIMITS, type WakeRuleDeliveryKind } from "../../../shared/wake-rules.mjs";
 import { getProjectById } from "../db.js";
 import { db, pool } from "../db/client.js";
 import { isWakeRuleCredentialLive, retireWakeRulesForCredential } from "../db/wake-rules.js";
+import { getMcpEventMessage } from "../db/wake-rules-mcp-events.js";
 import { loadConnectorCipher, type ConnectorCipher, type EncryptedCredentials } from "../connectors/crypto.js";
 import { resolveProjectRepoRoomAccessDecision } from "../rooms/access.js";
 import { queueWakeRuleInvalidation } from "../server/events.js";
@@ -33,15 +39,27 @@ import {
   wakeEmailDisableToken,
   type WakeMailer,
 } from "../wake-rules/email.js";
+import {
+  buildMcpEventBody,
+  mcpEventHeaders,
+  mcpEventId,
+  mcpEventSignature,
+  parseMcpEventSecret,
+  MCP_EVENT_ROOM_MESSAGE,
+  type McpRoomMessageData,
+} from "../wake-rules/mcp-events.js";
 import { wakeLinkUrl, wakeRoomUrl } from "../wake-rules/public-url.js";
 import {
+  WAKE_WEBHOOK_SENDER_MAX,
   afterFinalWakeWebhookFailure,
   buildWakeWebhookBody,
+  oneLine,
   webhookOutcome,
   type WakeDeliveryOutcome,
   signWakeWebhook,
   wakeWebhookBinding,
   wakeWebhookHeaders,
+  wakeWebhookTextPreview,
 } from "../wake-rules/webhook-delivery.js";
 import { postWakeWebhook, type WakeWebhookSendResult } from "../wake-rules/webhook-url.js";
 import { wakeWebhookBearerBinding, wakeWebhookBearerHeader } from "../wake-rules/webhook-bearer.js";
@@ -56,10 +74,11 @@ export const WAKE_DELIVERY_IN_FLIGHT_PER_ACCOUNT = 3;
 const CLEANUP_INTERVAL_MS = 60 * 60_000;
 const CLEANUP_BATCH = 5000;
 
-export type WakeDeliveryKind = "webhook" | "email";
+export type WakeDeliveryKind = WakeRuleDeliveryKind;
 
 /** How many deliveries of each kind one process sends at once. */
-export const WAKE_DELIVERY_LANES: Readonly<Record<WakeDeliveryKind, number>> = { webhook: 16, email: 4 };
+export const WAKE_DELIVERY_LANES: Readonly<Record<WakeDeliveryKind, number>> = { webhook: 16, email: 4, mcp_event: 8 };
+const LANE_KINDS = Object.keys(WAKE_DELIVERY_LANES) as WakeDeliveryKind[];
 
 export interface ClaimedWakeWebhook {
   id: string;
@@ -81,6 +100,8 @@ export interface ClaimedWakeWebhook {
   credential_ref: string | null;
   delivery_target: EncryptedCredentials | null;
   delivery_bearer: EncryptedCredentials | null;
+  /** MCP Events subscriptions: the id the receiver knows the subscription by. */
+  mcp_subscription_id: string | null;
 }
 
 export { webhookOutcome, type WakeDeliveryOutcome };
@@ -91,7 +112,7 @@ export interface WakeWebhookDeliveryDeps {
   authorize(accountId: string, roomId: string): Promise<DesktopPushAuthorizationDecision>;
   /** Whether the credential that registered the rule still works. */
   credentialLive(kind: string | null, ref: string | null): Promise<boolean>;
-  send(input: { url: string; body: string; headers: Record<string, string> }): Promise<WakeWebhookSendResult>;
+  send(input: { url: string; body: string; headers: Record<string, string>; maxBodyBytes?: number }): Promise<WakeWebhookSendResult>;
   /** Null while the server has no SMTP settings: email deliveries then wait and retry. */
   mailer: WakeMailer | null;
   now(): Date;
@@ -113,7 +134,11 @@ export function defaultWakeWebhookDeps(): WakeWebhookDeliveryDeps {
 /**
  * Claim up to `limit` due deliveries of one kind, oldest first, but at most
  * `perAccount` for any one account in this claim, and none for an account
- * that already has `WAKE_DELIVERY_IN_FLIGHT_PER_ACCOUNT` in flight.
+ * that already has `WAKE_DELIVERY_IN_FLIGHT_PER_ACCOUNT` in flight. MCP
+ * events of one subscription go one at a time, oldest due first: the next is
+ * claimed only once the one before it has finished. That keeps the usual case
+ * in message order, but not every case (an event on a retry backoff lets a
+ * newer one go first), so receivers order by cursor, not by arrival.
  */
 export async function claimWakeWebhookDeliveries(
   workerId: string,
@@ -134,9 +159,12 @@ export async function claimWakeWebhookDeliveries(
       WITH in_flight AS (
         SELECT owner_account_id, count(*)::int AS n FROM wake_webhook_deliveries
          WHERE state = 'processing' GROUP BY owner_account_id
+      ), rule_in_flight AS (
+        SELECT DISTINCT rule_id FROM wake_webhook_deliveries WHERE state = 'processing' AND kind = 'mcp_event'
       ), ranked AS (
         SELECT delivery.id,
                row_number() OVER (PARTITION BY delivery.owner_account_id ORDER BY delivery.next_attempt_at, delivery.created_at) AS place,
+               row_number() OVER (PARTITION BY delivery.rule_id ORDER BY delivery.next_attempt_at, delivery.message_number, delivery.created_at) AS rule_place,
                COALESCE(in_flight.n, 0) AS busy
           FROM wake_webhook_deliveries AS delivery
           LEFT JOIN in_flight ON in_flight.owner_account_id IS NOT DISTINCT FROM delivery.owner_account_id
@@ -146,6 +174,8 @@ export async function claimWakeWebhookDeliveries(
         SELECT delivery.id FROM wake_webhook_deliveries AS delivery
           JOIN ranked ON ranked.id = delivery.id
          WHERE ranked.place + ranked.busy <= $4
+           AND (delivery.kind <> 'mcp_event'
+                OR (ranked.rule_place = 1 AND NOT EXISTS (SELECT 1 FROM rule_in_flight WHERE rule_in_flight.rule_id = delivery.rule_id)))
            AND delivery.state IN ('queued', 'retry') AND delivery.next_attempt_at <= NOW()
          ORDER BY delivery.next_attempt_at ASC, delivery.created_at ASC
          FOR UPDATE OF delivery SKIP LOCKED
@@ -162,6 +192,7 @@ export async function claimWakeWebhookDeliveries(
              claimed.sender, claimed.text_preview, claimed.attempt_count,
              rule.status AS rule_status, rule.agent_name, rule.confirm_expires_at, rule.expires_at,
              rule.owner_account_id, rule.credential_kind, rule.credential_ref, rule.delivery_target, rule.delivery_bearer,
+             rule.mcp_subscription_id,
              room.display_name AS room_name
         FROM claimed
         INNER JOIN agent_wake_rules AS rule ON rule.id = claimed.rule_id
@@ -177,7 +208,7 @@ export async function claimWakeWebhookDeliveries(
   }
 }
 
-/** Record one attempt. Returns true when the rule paused because of it. */
+/** Record one attempt. Returns true when the rule's status changed because of it (paused, or retired by its receiver). */
 export async function recordWakeWebhookOutcome(
   delivery: ClaimedWakeWebhook,
   workerId: string,
@@ -208,6 +239,14 @@ export async function recordWakeWebhookOutcome(
                  delivery_last_status = $2, delivery_last_error = NULL, delivery_last_attempt_at = $3
            WHERE id = $1
         `, [delivery.rule_id, final.status, nowIso]);
+        if (delivery.kind === "mcp_event" && delivery.message_number !== null) {
+          // The subscription's cursor only moves forward; a replayed older event leaves it.
+          await client.query(`
+            UPDATE agent_wake_rules
+               SET mcp_cursor = CASE WHEN mcp_cursor IS NULL OR mcp_cursor::bigint < $2::bigint THEN $2::text ELSE mcp_cursor END
+             WHERE id = $1
+          `, [delivery.rule_id, delivery.message_number]);
+        }
       }
     } else if (final.kind === "retry") {
       const waitMs = final.holdMs ?? retryDelayMs(delivery.attempt_count);
@@ -253,6 +292,21 @@ export async function recordWakeWebhookOutcome(
                  SET state = 'dead', sender = '', text_preview = '', last_error = 'rule_paused', updated_at = $2
                WHERE rule_id = $1 AND state IN ('queued', 'retry')
             `, [delivery.rule_id, nowIso]);
+          }
+          if (final.retire && (current.status === "active" || current.status === "paused")) {
+            // The receiver said the subscription is over (410 Gone): it ends now, whatever the failure count.
+            await client.query(`
+              UPDATE agent_wake_rules
+                 SET status = 'retired', ended_reason = $2, ended_at = $3, updated_at = $3,
+                     delivery_target = NULL, delivery_bearer = NULL
+               WHERE id = $1 AND status IN ('active', 'paused')
+            `, [delivery.rule_id, final.retire, nowIso]);
+            await client.query(`
+              UPDATE wake_webhook_deliveries
+                 SET state = 'dead', sender = '', text_preview = '', last_error = 'receiver_gone', updated_at = $2
+               WHERE rule_id = $1 AND state IN ('queued', 'retry')
+            `, [delivery.rule_id, nowIso]);
+            paused = true;
           }
         }
       }
@@ -305,6 +359,7 @@ async function attempt(delivery: ClaimedWakeWebhook, deps: WakeWebhookDeliveryDe
   }
   if (delivery.kind === "email") return attemptEmail(delivery, deps, deps.cipher, opened);
   if (typeof opened.url !== "string" || typeof opened.secret !== "string") return { kind: "failed", status: 0, error: "target_unreadable" };
+  if (delivery.kind === "mcp_event") return attemptMcpEvent(delivery, deps, opened as { url: string; secret: string }, now);
   const timestamp = Math.floor(now.getTime() / 1000);
   const body = buildWakeWebhookBody({
     delivery_id: delivery.id,
@@ -334,6 +389,64 @@ async function attempt(delivery: ClaimedWakeWebhook, deps: WakeWebhookDeliveryDe
   } catch {
     result = { outcome: "retry", status: 0, error: "connect_failed" };
   }
+  return webhookOutcome(result);
+}
+
+/**
+ * One MCP event: the message is read now (its row holds no text), wrapped in
+ * the Standard Webhooks envelope and signed with the subscription's secret
+ * (and the previous one while a rotation window is open). The event id is
+ * fixed by the rule and the message, so a retry or a replay repeats it. A 410
+ * ends the subscription.
+ */
+async function attemptMcpEvent(
+  delivery: ClaimedWakeWebhook,
+  deps: WakeWebhookDeliveryDeps,
+  opened: { url: string; secret: string; previous_secret?: unknown; previous_until?: unknown },
+  now: Date,
+): Promise<WakeDeliveryOutcome> {
+  if (delivery.message_number === null || !delivery.mcp_subscription_id) return { kind: "failed", status: 0, error: "target_unreadable" };
+  const message = await getMcpEventMessage(delivery.room_id, delivery.message_number);
+  if (!message) return { kind: "skipped", error: "message_gone" };
+  let keys;
+  try {
+    keys = [parseMcpEventSecret(opened.secret)];
+    if (typeof opened.previous_secret === "string" && typeof opened.previous_until === "string" && Date.parse(opened.previous_until) > now.getTime()) {
+      keys.push(parseMcpEventSecret(opened.previous_secret));
+    }
+  } catch {
+    return { kind: "failed", status: 0, error: "target_unreadable" };
+  }
+  const data: McpRoomMessageData = {
+    room_id: delivery.room_id,
+    message_id: `msg_${message.number}`,
+    sender: oneLine(message.sender, WAKE_WEBHOOK_SENDER_MAX),
+    text_preview: wakeWebhookTextPreview(message.text),
+    room_url: wakeRoomUrl(delivery.room_id),
+    ...(message.thread_root_number !== null ? { thread_root_id: `msg_${message.thread_root_number}` } : {}),
+  };
+  const eventId = mcpEventId(delivery.rule_id, message.number);
+  const body = buildMcpEventBody({
+    eventId,
+    name: MCP_EVENT_ROOM_MESSAGE,
+    timestamp: new Date(message.timestamp).toISOString(),
+    data,
+    cursor: String(message.number),
+  });
+  const timestamp = Math.floor(now.getTime() / 1000);
+  const headers = mcpEventHeaders({
+    id: eventId,
+    timestamp,
+    signature: mcpEventSignature(keys, eventId, timestamp, body),
+    subscriptionId: delivery.mcp_subscription_id,
+  });
+  let result: WakeWebhookSendResult;
+  try {
+    result = await deps.send({ url: opened.url, body, headers, maxBodyBytes: WAKE_RULE_LIMITS.mcpEventMaxBodyBytes });
+  } catch {
+    result = { outcome: "retry", status: 0, error: "connect_failed" };
+  }
+  if (result.status === 410) return { kind: "failed", status: 410, error: "http_4xx", retire: "the receiver answered 410 Gone" };
   return webhookOutcome(result);
 }
 
@@ -394,10 +507,10 @@ async function deliverSafely(delivery: ClaimedWakeWebhook, workerId: string, dep
   }
 }
 
-/** Claim and send everything due now, both kinds, and wait for it (tests and one-off passes). */
+/** Claim and send everything due now, every kind, and wait for it (tests and one-off passes). */
 export async function processWakeWebhookBatch(workerId: string, deps: WakeWebhookDeliveryDeps = defaultWakeWebhookDeps()): Promise<number> {
   let total = 0;
-  for (const kind of ["webhook", "email"] as const) {
+  for (const kind of LANE_KINDS) {
     const deliveries = await claimWakeWebhookDeliveries(workerId, 50, kind);
     total += deliveries.length;
     await Promise.all(deliveries.map((delivery) => deliverSafely(delivery, workerId, deps)));
@@ -426,15 +539,16 @@ export async function cleanupWakeWebhookDeliveries(maxBatches = 20): Promise<num
 }
 
 /**
- * Two lanes (webhook, email), each a pool: whenever it has free slots it
- * claims that many and starts each at once, without waiting for the rest.
+ * One lane per kind (webhook, email, MCP event), each a pool: whenever it has
+ * free slots it claims that many and starts each at once, without waiting for
+ * the rest.
  */
 export function startWakeWebhookWorker(): () => Promise<void> {
   const workerId = randomUUID();
   const deps = defaultWakeWebhookDeps();
   const running = new Set<Promise<void>>();
-  const inLane: Record<WakeDeliveryKind, number> = { webhook: 0, email: 0 };
-  const claiming: Record<WakeDeliveryKind, boolean> = { webhook: false, email: false };
+  const inLane = Object.fromEntries(LANE_KINDS.map((kind) => [kind, 0])) as Record<WakeDeliveryKind, number>;
+  const claiming = Object.fromEntries(LANE_KINDS.map((kind) => [kind, false])) as Record<WakeDeliveryKind, boolean>;
   let stopped = false;
   let lastCleanupAt = 0;
 
@@ -464,8 +578,7 @@ export function startWakeWebhookWorker(): () => Promise<void> {
       lastCleanupAt = Date.now();
       void cleanupWakeWebhookDeliveries().catch(() => undefined);
     }
-    void fill("webhook");
-    void fill("email");
+    for (const kind of LANE_KINDS) void fill(kind);
   };
   const interval = setInterval(tick, POLL_INTERVAL_MS);
   interval.unref();

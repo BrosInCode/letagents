@@ -184,6 +184,25 @@ retired in the last 7 days.
 | `rule_id` | string | ✅ | A rule the calling agent owns, e.g. `wake_3f9c…` |
 | `room_id` | string | — | Canonical room ID. Defaults to current room |
 
+### MCP Events (ChatGPT subscriptions)
+
+Not a tool: three JSON-RPC methods on the remote endpoint `/mcp`, for clients
+that implement OpenAI's MCP Events (ChatGPT Work chats and dots). The server
+advertises `capabilities.events: {}` in its `initialize` result.
+
+| Method | Purpose |
+|--------|---------|
+| `events/list` | The one event type, `room.message`, with its `inputSchema` (`room_id`, `mentions_me`, `any`, `include_agents`, `worker_id`) and `payloadSchema` |
+| `events/subscribe` | `{ name, arguments, delivery: { mode: "webhook", url, secret }, cursor, ttlMs? }` → `{ id, refreshBefore, cursor, truncated }`; verifies the URL with a signed challenge first |
+| `events/unsubscribe` | `{ name, arguments, delivery: { mode: "webhook", url } }` → `{}` |
+
+A subscription is a `room.message` wake rule with `delivery.kind: "mcp_event"`,
+visible in `list_wake_rules`. Each matching message is one signed POST
+(Standard Webhooks headers `webhook-id`, `webhook-timestamp`,
+`webhook-signature`, plus `X-MCP-Subscription-Id`) with `{ eventId, name,
+timestamp, data, cursor }`. Details: `docs/ticket-connectors.md`, "ChatGPT:
+wake by MCP Events".
+
 ## Task Board
 
 ### `add_task`

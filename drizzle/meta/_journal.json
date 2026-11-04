@@ -946,6 +946,13 @@
       "when": 1794200000000,
       "tag": "0134_wake_webhook_bearer",
       "breakpoints": true
+    },
+    {
+      "idx": 135,
+      "version": "7",
+      "when": 1794300000000,
+      "tag": "0135_wake_mcp_events",
+      "breakpoints": true
     }
   ]
 }

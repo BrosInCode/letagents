@@ -7,7 +7,7 @@ import { sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 
 import type { ActivationIdentity } from "../../shared/activation-routing.js";
-import type { WakeRuleArguments } from "../../../shared/wake-rules.mjs";
+import type { WakeRuleArguments, WakeRuleDeliveryKind } from "../../../shared/wake-rules.mjs";
 import type { MessageCreateTransaction } from "../db/messages/create/types.js";
 import type { MessageRow } from "../db/types.js";
 import { WAKE_RULE_LIMITS } from "../../../shared/wake-rules.mjs";
@@ -41,7 +41,7 @@ type RuleRow = {
   agent_key: string;
   agent_name: string;
   arguments: WakeRuleArguments;
-  delivery_kind: "webhook" | "email";
+  delivery_kind: WakeRuleDeliveryKind;
   owner_account_id: string | null;
   delivery_host_fingerprint: string | null;
 };
@@ -100,10 +100,59 @@ async function readCaps(
 }
 
 /**
+ * Queue one MCP event for one subscription. Never folded: each match is one
+ * event, inserted as `retry` (waiting, no attempt yet) because `queued` is
+ * the one coalescing slot of a webhook or email rule. The row carries no
+ * message text; the worker reads the message when it sends. When an hourly
+ * budget is spent the event waits for the budget to have room, in order, and
+ * at most 50 wait: past that the oldest are dropped (each event carries its
+ * own cursor, so the receiver sees the gap and can replay by cursor).
+ */
+async function enqueueMcpEventMatchTx(
+  tx: MessageCreateTransaction,
+  rule: Pick<RuleRow, "id" | "owner_account_id" | "delivery_host_fingerprint">,
+  message: Pick<MessageRow, "room_id" | "number">,
+  now: Date,
+): Promise<WakeWebhookEnqueueResult> {
+  const nowIso = now.toISOString();
+  const plan = planWakeWebhookEnqueue({
+    nowMs: now.getTime(),
+    pendingDeliveryId: null,
+    lastScheduledAtMs: null,
+    caps: await readCaps(tx, rule, message.room_id, now),
+  });
+  if (plan.kind !== "insert") return "coalesced";
+  const scheduledAt = new Date(plan.scheduledAtMs).toISOString();
+  await tx.execute(sql`
+    INSERT INTO wake_webhook_deliveries (
+      id, rule_id, room_id, kind, purpose, message_number, sender, text_preview, match_count, state, attempt_count,
+      scheduled_at, next_attempt_at, created_at, updated_at, owner_account_id, host_fingerprint, held_by_cap
+    ) VALUES (
+      ${`whd_${randomUUID().replace(/-/g, "")}`}, ${rule.id}, ${message.room_id}, 'mcp_event', 'message', ${message.number},
+      '', '', 1, 'retry', 0, ${scheduledAt}, ${scheduledAt}, ${nowIso}, ${nowIso},
+      ${rule.owner_account_id}, ${rule.delivery_host_fingerprint}, ${plan.heldByCap}
+    )
+  `);
+  if (!plan.heldByCap) return "queued";
+  await tx.execute(sql`UPDATE agent_wake_rules SET delivery_over_cap_count = delivery_over_cap_count + 1 WHERE id = ${rule.id}`);
+  await tx.execute(sql`
+    UPDATE wake_webhook_deliveries
+       SET state = 'dead', last_error = 'held_overflow', updated_at = ${nowIso}
+     WHERE id IN (
+       SELECT id FROM wake_webhook_deliveries
+        WHERE rule_id = ${rule.id} AND purpose = 'message' AND state = 'retry' AND attempt_count = 0 AND held_by_cap
+        ORDER BY message_number DESC
+       OFFSET ${WAKE_RULE_LIMITS.mcpEventHeldMax}
+     )
+  `);
+  return "held";
+}
+
+/**
  * Queue one match for one rule: fold it into the message delivery that is
  * waiting, or start one at the end of the rule's coalescing window or, when
  * an hourly budget is spent, when the budget has room again. One match at a
- * time per rule.
+ * time per rule. An MCP event is never folded (see above).
  */
 export async function enqueueWakeWebhookMatchTx(
   tx: MessageCreateTransaction,
@@ -112,6 +161,7 @@ export async function enqueueWakeWebhookMatchTx(
   now = new Date(),
 ): Promise<WakeWebhookEnqueueResult> {
   await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`wake-webhook:${rule.id}`}, 0))`);
+  if (rule.delivery_kind === "mcp_event") return enqueueMcpEventMatchTx(tx, rule, message, now);
   const nowIso = now.toISOString();
   const sender = oneLine(message.sender, WAKE_WEBHOOK_SENDER_MAX);
   const preview = wakeWebhookTextPreview(message.text);
@@ -173,8 +223,8 @@ export async function enqueueWakeWebhookMatchTx(
 }
 
 /**
- * Match a new message against the room's active room.message rules and queue
- * a delivery for each match. Runs inside the message transaction after
+ * Match a new message against the room's active room.message rules (webhook,
+ * email and MCP Events subscriptions alike) and queue a delivery for each match. Runs inside the message transaction after
  * routing. A room without webhook rules costs one indexed read; the writes
  * run in a savepoint, so a failure here never blocks the message.
  */
@@ -217,8 +267,15 @@ export async function enqueueWakeWebhooksForMessageTx(
       })),
       routingMessage: routing.routingMessage,
     });
-    for (const rule of matches) await enqueueWakeWebhookMatchTx(savepoint, rule, message);
-    return matches.length;
+    // An MCP Events subscription is a person's ChatGPT: posts by that person's
+    // own workers (agent posts, by publisher_agent_key) never come back to it
+    // (with `any` and `include_agents` and no registered worker, the rule's
+    // stand-in agent key would not catch them). The person's own posts from
+    // the app still do: mentioning their worker is how they wake it.
+    const wanted = matches.filter((rule) => !(rule.delivery_kind === "mcp_event" && message.publisher_agent_key
+      && message.publisher_account_id && rule.owner_account_id === message.publisher_account_id));
+    for (const rule of wanted) await enqueueWakeWebhookMatchTx(savepoint, rule, message);
+    return wanted.length;
   }).catch((error: unknown) => {
     console.warn(`[wake webhooks] could not queue deliveries for message ${message.number} in ${message.room_id}`,
       error instanceof Error ? error.message : error);
