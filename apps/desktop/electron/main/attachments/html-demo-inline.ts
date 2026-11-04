@@ -5,13 +5,11 @@ import { randomUUID } from "node:crypto";
 import type { DesktopInlineHtmlDemoEvent, DesktopInlineHtmlDemoLease } from "../../ipc-types.js";
 import {
   assertHtmlDemoAttachmentHref,
-  countInlineHtmlDemoEvent,
   HTML_DEMO_PARTITION,
   INLINE_HTML_DEMO_CACHE_BYTES,
   INLINE_HTML_DEMO_CACHE_ENTRIES,
   INLINE_HTML_DEMO_CACHE_MS,
   INLINE_HTML_DEMO_DOWNLOAD_MS,
-  INLINE_HTML_DEMO_FOCUS_GRACE_MS,
   INLINE_HTML_DEMO_HEIGHT_INTERVAL_MS,
   INLINE_HTML_DEMO_LEASE_MS,
   INLINE_HTML_DEMO_LIVENESS_INTERVAL_MS,
@@ -19,14 +17,19 @@ import {
   INLINE_HTML_DEMO_LIVENESS_TIMEOUT_MS,
   INLINE_HTML_DEMO_LIVENESS_WORLD_ID,
   inlineHtmlDemoAttachLease,
-  inlineHtmlDemoEventMeter,
-  type InlineHtmlDemoEventMeter,
+  INLINE_HTML_DEMO_EVENT_BURST,
+  INLINE_HTML_DEMO_EVENTS_PER_SECOND,
+  INLINE_HTML_DEMO_TEXT_BURST,
+  INLINE_HTML_DEMO_TEXT_PER_SECOND,
+  inlineHtmlDemoBucket,
+  inlineHtmlDemoEventText,
   inlineHtmlDemoFocusAllowed,
   inlineHtmlDemoHeight,
   inlineHtmlDemoLeaseHost,
   inlineHtmlDemoLeaseUrl,
   lockInlineHtmlDemoWebPreferences,
   MAX_INLINE_HTML_DEMO_DOWNLOADS,
+  takeInlineHtmlDemoTokens,
   MAX_INLINE_HTML_DEMOS,
 } from "./html-demo-policy.js";
 import {
@@ -64,11 +67,16 @@ const FORWARDED_GUEST_EVENTS = [
 
 type StopReason = Extract<DesktopInlineHtmlDemoEvent, { type: "stopped" }>["reason"];
 
-/** What main knows about the app window an inline demo runs in. */
+/**
+ * What main knows about the app window an inline demo runs in. Only input the
+ * browser saw counts; a demo can fake its own focus and blur events.
+ */
 interface DemoHostWindow {
   lastTabAt: number;
   blurredAt: number;
   focusedAt: number;
+  /** The demo that got the person's last click, key or touch in this window; null for the app page. */
+  lastInputLease: InlineHtmlDemoLease | null;
 }
 
 interface InlineHtmlDemoLease {
@@ -88,12 +96,9 @@ interface InlineHtmlDemoLease {
   /** Waits for the next liveness check, or for the answer to the one in flight. */
   livenessTimer: ReturnType<typeof setTimeout> | null;
   livenessCheck: object | null;
-  events: InlineHtmlDemoEventMeter;
   lastInputAt: number;
-  focused: boolean;
-  focusLostAt: number;
-  /** The demo had keyboard focus when the app window lost it, so it may get it back on return. */
-  focusedAtWindowBlur: boolean;
+  /** The person's last input went to this demo before the app window lost focus, so it may get focus back on return. */
+  hadLastInputAtWindowBlur: boolean;
 }
 
 /** Live leases by demo host; a host's document lives exactly as long as its lease. */
@@ -134,11 +139,8 @@ export async function prepareInlineHtmlDemo(rawHref: unknown): Promise<DesktopIn
     heightSentAt: Number.NEGATIVE_INFINITY,
     livenessTimer: null,
     livenessCheck: null,
-    events: inlineHtmlDemoEventMeter(),
     lastInputAt: Number.NEGATIVE_INFINITY,
-    focused: false,
-    focusLostAt: Number.NEGATIVE_INFINITY,
-    focusedAtWindowBlur: false,
+    hadLastInputAtWindowBlur: false,
   };
   lease.attachTimer = setTimeout(() => {
     if (!lease.guest) endLease(lease);
@@ -185,18 +187,20 @@ export function installInlineHtmlDemoHost(hostWindow: ElectronBrowserWindow): vo
     lastTabAt: Number.NEGATIVE_INFINITY,
     blurredAt: Number.NEGATIVE_INFINITY,
     focusedAt: Number.NEGATIVE_INFINITY,
+    lastInputLease: null,
   };
   // Tab in the app page may move focus into a demo; the page still gets the key.
   embedder.on("before-input-event", (_event, input) => {
     if ((input.type === "keyDown" || input.type === "rawKeyDown") && input.key === "Tab") demoHost.lastTabAt = Date.now();
   });
+  // A click into a demo reaches only the demo, so input here is the person using the app page.
+  embedder.on("input-event", (_event, input) => {
+    if (PERSON_INPUT_TYPES.has(input.type)) demoHost.lastInputLease = null;
+  });
   hostWindow.on("blur", () => {
-    const now = Date.now();
-    demoHost.blurredAt = now;
+    demoHost.blurredAt = Date.now();
     for (const lease of leases.values()) {
-      if (lease.hostWindow !== demoHost) continue;
-      // Electron 42 on macOS blurs the demo just before the window, so "a moment ago" still counts.
-      lease.focusedAtWindowBlur = lease.focused || now - lease.focusLostAt <= INLINE_HTML_DEMO_FOCUS_GRACE_MS;
+      if (lease.hostWindow === demoHost) lease.hadLastInputAtWindowBlur = demoHost.lastInputLease === lease;
     }
   });
   hostWindow.on("focus", () => { demoHost.focusedAt = Date.now(); });
@@ -249,8 +253,15 @@ function bindAttachingGuest(guest: WebContents): void {
     }
   });
   const emitter: NodeJS.EventEmitter = guest;
-  const countEvent = () => {
-    if (!lease.stopped && countInlineHtmlDemoEvent(lease.events, Date.now())) stopGuest(lease, "overloaded");
+  const boundAt = Date.now();
+  const events = inlineHtmlDemoBucket(INLINE_HTML_DEMO_EVENT_BURST, INLINE_HTML_DEMO_EVENTS_PER_SECOND, boundAt);
+  const text = inlineHtmlDemoBucket(INLINE_HTML_DEMO_TEXT_BURST, INLINE_HTML_DEMO_TEXT_PER_SECOND, boundAt);
+  const countEvent = (...args: unknown[]) => {
+    if (lease.stopped) return;
+    const now = Date.now();
+    const eventsLeft = takeInlineHtmlDemoTokens(events, 1, now);
+    const textLeft = takeInlineHtmlDemoTokens(text, inlineHtmlDemoEventText(args), now);
+    if (!eventsLeft || !textLeft) stopGuest(lease, "overloaded");
   };
   for (const name of FORWARDED_GUEST_EVENTS) emitter.on(name, countEvent);
 
@@ -259,18 +270,19 @@ function bindAttachingGuest(guest: WebContents): void {
   guest.on("input-event", (_event: Event, input: InputEvent) => {
     if (!PERSON_INPUT_TYPES.has(input.type)) return;
     lease.lastInputAt = Date.now();
+    hostWindow.lastInputLease = lease;
     if (!muted) return;
     muted = false;
     guest.setAudioMuted(false);
   });
-  // Electron 42 does not emit "focus" for a webview guest; its own webview code
-  // uses "-focus-change", sent when the guest page's window gains or loses focus.
+  // Electron 42 does not emit "focus" for a webview guest. Its own webview code
+  // sends "-focus-change" from listeners in the guest page that do not check
+  // isTrusted, so the page can fake it: each "true" is judged on its own and
+  // never stored. A fake one costs only a needless "focus-refused".
   emitter.on("-focus-change", (_event: unknown, focused: unknown) => {
-    if (focused === true) demoTookFocus(lease);
-    else if (focused === false) demoLostFocus(lease);
+    if (focused === true) judgeDemoFocus(lease);
   });
-  guest.on("focus", () => demoTookFocus(lease));
-  guest.on("blur", () => demoLostFocus(lease));
+  guest.on("focus", () => judgeDemoFocus(lease));
   guest.on("preferred-size-changed", (_event, size) => {
     queueHeight(lease, inlineHtmlDemoHeight(size.height, embedder.isDestroyed() ? 1 : embedder.getZoomFactor()));
   });
@@ -278,6 +290,7 @@ function bindAttachingGuest(guest: WebContents): void {
   guest.on("render-process-gone", () => stopGuest(lease, "crashed"));
   scheduleLivenessCheck(lease, guest);
   guest.once("destroyed", () => {
+    if (hostWindow.lastInputLease === lease) hostWindow.lastInputLease = null;
     leasesByGuestId.delete(guestId);
     htmlDemoContents.delete(guestId);
     endLease(lease);
@@ -291,28 +304,18 @@ function bindAttachingGuest(guest: WebContents): void {
  * Main hears a demo's input, the app's Tab and the window's focus in the order
  * they happened, which the app page cannot: a click into a demo never reaches it.
  */
-function demoTookFocus(lease: InlineHtmlDemoLease): void {
-  if (lease.focused) return;
-  lease.focused = true;
+function judgeDemoFocus(lease: InlineHtmlDemoLease): void {
   const hostWindow = lease.hostWindow;
-  const focusedAtWindowBlur = lease.focusedAtWindowBlur;
-  lease.focusedAtWindowBlur = false;
   if (!hostWindow || lease.stopped || !isLive(lease)) return;
   const allowed = inlineHtmlDemoFocusAllowed({
     now: Date.now(),
     lastInputAt: lease.lastInputAt,
     lastTabAt: hostWindow.lastTabAt,
-    focusedAtWindowBlur,
+    hadLastInputAtWindowBlur: lease.hadLastInputAtWindowBlur,
     windowBlurredAt: hostWindow.blurredAt,
     windowFocusedAt: hostWindow.focusedAt,
   });
   if (!allowed) sendEvent(lease, { type: "focus-refused", url: lease.url });
-}
-
-function demoLostFocus(lease: InlineHtmlDemoLease): void {
-  if (!lease.focused) return;
-  lease.focused = false;
-  lease.focusLostAt = Date.now();
 }
 
 /** A frozen, crashed or flooding demo reports once, gives up its lease, and is closed. */

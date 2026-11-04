@@ -40,13 +40,18 @@ export const INLINE_HTML_DEMO_LIVENESS_LATE_MS = 1_000;
 /** An isolated world no other app code uses, so the page can neither see nor answer the check. */
 export const INLINE_HTML_DEMO_LIVENESS_WORLD_ID = 4417;
 /**
- * Events a guest makes Electron forward to its `<webview>`, per one-second
- * window. A 60 fps demo that logs every frame makes about 60, and 10,000 a
- * second still left main and the app page responsive in Electron 42; a demo
- * over the limit for two windows in a row is stopped.
+ * Token buckets for what a demo makes Electron forward to its `<webview>`,
+ * through main to the app page: one for events, one for the characters of
+ * their text (console messages, titles, URLs). A demo is stopped only when a
+ * bucket runs dry. In Electron 42 main passes about 65,000 small events, or
+ * about 200 MB of text, a second at full load, so a full bucket costs main at
+ * most about a third of a second. The refill is 10 times the busiest normal
+ * demo measured (60 to 100 events a second, under 1 MB of text a second).
  */
+export const INLINE_HTML_DEMO_EVENT_BURST = 20_000;
 export const INLINE_HTML_DEMO_EVENTS_PER_SECOND = 1_000;
-export const INLINE_HTML_DEMO_BUSY_SECONDS = 2;
+export const INLINE_HTML_DEMO_TEXT_BURST = 32 * 1024 * 1024;
+export const INLINE_HTML_DEMO_TEXT_PER_SECOND = 2 * 1024 * 1024;
 /** A demo may take keyboard focus this soon after the person clicks or types in it, or Tabs into it. */
 export const INLINE_HTML_DEMO_FOCUS_GRACE_MS = 1_000;
 
@@ -180,53 +185,60 @@ export function lockInlineHtmlDemoWebPreferences(webPreferences: WebPreferences)
   return webPreferences;
 }
 
-export interface InlineHtmlDemoEventMeter {
-  windowStart: number;
-  count: number;
-  /** Windows in a row, just before the current one, that went over the limit. */
-  busyWindows: number;
+export interface InlineHtmlDemoBucket {
+  capacity: number;
+  perSecond: number;
+  tokens: number;
+  updatedAt: number;
 }
 
-export function inlineHtmlDemoEventMeter(): InlineHtmlDemoEventMeter {
-  return { windowStart: Number.NEGATIVE_INFINITY, count: 0, busyWindows: 0 };
+/** A full bucket at `now`. */
+export function inlineHtmlDemoBucket(capacity: number, perSecond: number, now: number): InlineHtmlDemoBucket {
+  return { capacity, perSecond, tokens: capacity, updatedAt: now };
+}
+
+/** Refill for the time since the last call, then take `amount`. False once the bucket has run dry. */
+export function takeInlineHtmlDemoTokens(bucket: InlineHtmlDemoBucket, amount: number, now: number): boolean {
+  const elapsed = Math.max(0, now - bucket.updatedAt);
+  bucket.tokens = Math.min(bucket.capacity, bucket.tokens + (elapsed * bucket.perSecond) / 1000);
+  bucket.updatedAt = Math.max(bucket.updatedAt, now);
+  bucket.tokens -= amount;
+  return bucket.tokens >= 0;
 }
 
 /**
- * Count one forwarded event at `now`. True when this event takes the demo over
- * the limit in its last busy window: a burst passes, a steady flood does not.
+ * The text an event carries to the app page: its string arguments after the
+ * event object (a console message and its script URL, a title, a URL, favicon
+ * URLs). The event object repeats some of them, so it is not counted.
  */
-export function countInlineHtmlDemoEvent(meter: InlineHtmlDemoEventMeter, now: number): boolean {
-  const elapsed = now - meter.windowStart;
-  if (elapsed >= 1000) {
-    // A window with no events in between ends the run.
-    const lastWasBusy = elapsed < 2000 && meter.count > INLINE_HTML_DEMO_EVENTS_PER_SECOND;
-    meter.busyWindows = lastWasBusy ? meter.busyWindows + 1 : 0;
-    meter.windowStart = now;
-    meter.count = 0;
+export function inlineHtmlDemoEventText(args: readonly unknown[]): number {
+  let length = 0;
+  for (const arg of args.slice(1)) {
+    if (typeof arg === "string") length += arg.length;
+    else if (Array.isArray(arg)) for (const item of arg) if (typeof item === "string") length += item.length;
   }
-  meter.count += 1;
-  return meter.count === INLINE_HTML_DEMO_EVENTS_PER_SECOND + 1 && meter.busyWindows + 1 >= INLINE_HTML_DEMO_BUSY_SECONDS;
+  return length;
 }
 
 /**
  * Whether a demo that just took keyboard focus may keep it: the person clicked,
  * typed or touched inside it, or pressed Tab in the app, a moment ago; or the
- * demo had focus when the app window lost it, and the window is coming back.
- * Electron 42 on macOS refocuses the demo just before the window's own focus
- * event, so "coming back" is a window that is still marked blurred, or one
- * that was focused a moment ago.
+ * person's last input in the window went to this demo before the window lost
+ * focus, and the window is coming back. Electron 42 on macOS refocuses the
+ * demo just before the window's own focus event, so "coming back" is a window
+ * that is still marked blurred, or one that was focused a moment ago.
  */
 export function inlineHtmlDemoFocusAllowed(input: {
   now: number;
   lastInputAt: number;
   lastTabAt: number;
-  focusedAtWindowBlur: boolean;
+  hadLastInputAtWindowBlur: boolean;
   windowBlurredAt: number;
   windowFocusedAt: number;
 }): boolean {
   const recent = (at: number) => input.now - at <= INLINE_HTML_DEMO_FOCUS_GRACE_MS;
   const windowReturning = input.windowBlurredAt > input.windowFocusedAt || recent(input.windowFocusedAt);
-  return recent(input.lastInputAt) || recent(input.lastTabAt) || (input.focusedAtWindowBlur && windowReturning);
+  return recent(input.lastInputAt) || recent(input.lastTabAt) || (input.hadLastInputAtWindowBlur && windowReturning);
 }
 
 /**

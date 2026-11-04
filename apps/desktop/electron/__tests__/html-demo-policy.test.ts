@@ -3,17 +3,18 @@ import { describe, it, mock } from "node:test";
 
 import {
   assertHtmlDemoAttachmentHref,
-  countInlineHtmlDemoEvent,
   HTML_DEMO_CONTENT_SECURITY_POLICY,
   HTML_DEMO_PARTITION,
   HTML_DEMO_RESPONSE_HEADERS,
   htmlDemoWindowTitle,
   INLINE_HTML_DEMO_CACHE_BYTES,
-  INLINE_HTML_DEMO_BUSY_SECONDS,
   INLINE_HTML_DEMO_CACHE_ENTRIES,
   INLINE_HTML_DEMO_CACHE_MS,
   INLINE_HTML_DEMO_DOWNLOAD_MS,
+  INLINE_HTML_DEMO_EVENT_BURST,
   INLINE_HTML_DEMO_EVENTS_PER_SECOND,
+  INLINE_HTML_DEMO_TEXT_BURST,
+  INLINE_HTML_DEMO_TEXT_PER_SECOND,
   INLINE_HTML_DEMO_FOCUS_GRACE_MS,
   INLINE_HTML_DEMO_HEIGHT_INTERVAL_MS,
   INLINE_HTML_DEMO_LEASE_MS,
@@ -22,7 +23,8 @@ import {
   INLINE_HTML_DEMO_LIVENESS_TIMEOUT_MS,
   INLINE_HTML_DEMO_LIVENESS_WORLD_ID,
   inlineHtmlDemoAttachLease,
-  inlineHtmlDemoEventMeter,
+  inlineHtmlDemoBucket,
+  inlineHtmlDemoEventText,
   inlineHtmlDemoFocusAllowed,
   inlineHtmlDemoHeight,
   inlineHtmlDemoLeaseHost,
@@ -35,6 +37,7 @@ import {
   MAX_INLINE_HTML_DEMO_HEIGHT,
   MAX_INLINE_HTML_DEMOS,
   readHtmlDemoBytes,
+  takeInlineHtmlDemoTokens,
 } from "../main/attachments/html-demo-policy.js";
 
 const HOST = "0123456789abcdef0123456789abcdef";
@@ -310,33 +313,48 @@ describe("HTML demo policy", () => {
     }
   });
 
-  it("stops a demo only when its event rate stays over the limit for whole seconds in a row", () => {
-    const limit = INLINE_HTML_DEMO_EVENTS_PER_SECOND;
-    const count = (meter: ReturnType<typeof inlineHtmlDemoEventMeter>, at: number, events: number) => {
-      let overloaded = 0;
-      for (let index = 0; index < events; index += 1) if (countInlineHtmlDemoEvent(meter, at)) overloaded += 1;
-      return overloaded;
-    };
-    assert.equal(INLINE_HTML_DEMO_BUSY_SECONDS, 2);
+  it("runs a bucket dry only when a demo takes more than its burst plus the refill", () => {
+    const bucket = inlineHtmlDemoBucket(10, 2, 0);
+    const take = (amount: number, at: number) => takeInlineHtmlDemoTokens(bucket, amount, at);
+    assert.equal(take(10, 0), true, "a full burst at once");
+    assert.equal(take(1, 0), false, "one more runs it dry");
+    const refill = inlineHtmlDemoBucket(10, 2, 0);
+    assert.equal(takeInlineHtmlDemoTokens(refill, 10, 0), true);
+    assert.equal(takeInlineHtmlDemoTokens(refill, 2, 1_000), true, "two a second come back");
+    assert.equal(takeInlineHtmlDemoTokens(refill, 1, 1_000), false);
+    // It never holds more than its burst, and a clock that goes back does not refill it.
+    const capped = inlineHtmlDemoBucket(10, 2, 0);
+    assert.equal(takeInlineHtmlDemoTokens(capped, 10, 60_000), true);
+    assert.equal(takeInlineHtmlDemoTokens(capped, 1, 60_000), false);
+    const backwards = inlineHtmlDemoBucket(10, 2, 5_000);
+    assert.equal(takeInlineHtmlDemoTokens(backwards, 10, 1_000), true);
+    assert.equal(takeInlineHtmlDemoTokens(backwards, 1, 4_000), false);
+  });
 
-    const steady = inlineHtmlDemoEventMeter();
-    for (let second = 0; second < 30; second += 1) assert.equal(count(steady, second * 1000, 60), 0, "a 60 fps logger");
+  it("chooses event and text buckets between normal demos and what main can carry", () => {
+    // Measured in Electron 42: normal demos make 29 to 100 events a second, main passes about 65,000.
+    assert.equal(INLINE_HTML_DEMO_EVENTS_PER_SECOND, 1_000);
+    assert.equal(INLINE_HTML_DEMO_EVENT_BURST, 20_000);
+    assert.equal(INLINE_HTML_DEMO_TEXT_PER_SECOND, 2 * 1024 * 1024);
+    assert.equal(INLINE_HTML_DEMO_TEXT_BURST, 32 * 1024 * 1024);
+    // One burst over a second boundary (1,001 + 1,001) passes; the old one-second windows refused it.
+    const boundary = inlineHtmlDemoBucket(INLINE_HTML_DEMO_EVENT_BURST, INLINE_HTML_DEMO_EVENTS_PER_SECOND, 0);
+    let passed = true;
+    for (let index = 0; index < 1_001; index += 1) passed &&= takeInlineHtmlDemoTokens(boundary, 1, 999);
+    for (let index = 0; index < 1_001; index += 1) passed &&= takeInlineHtmlDemoTokens(boundary, 1, 1_001);
+    assert.equal(passed, true);
+    // Full bursts 2.5 s apart are stopped; the old windows reset between them.
+    const spaced = inlineHtmlDemoBucket(INLINE_HTML_DEMO_EVENT_BURST, INLINE_HTML_DEMO_EVENTS_PER_SECOND, 0);
+    assert.equal(takeInlineHtmlDemoTokens(spaced, INLINE_HTML_DEMO_EVENT_BURST, 0), true);
+    assert.equal(takeInlineHtmlDemoTokens(spaced, INLINE_HTML_DEMO_EVENT_BURST, 2_500), false);
+  });
 
-    const flood = inlineHtmlDemoEventMeter();
-    assert.equal(count(flood, 0, limit * 5), 0, "one busy second is a burst");
-    assert.equal(count(flood, 1000, limit), 0);
-    assert.equal(countInlineHtmlDemoEvent(flood, 1500), true, "the second busy second in a row");
-    assert.equal(count(flood, 1600, 100), 0, "it reports once");
-
-    // A quiet second between two busy ones ends the run.
-    const gaps = inlineHtmlDemoEventMeter();
-    assert.equal(count(gaps, 0, limit + 1), 0);
-    assert.equal(count(gaps, 2500, limit + 1), 0);
-    assert.equal(count(gaps, 3600, limit + 1), 1);
-
-    // Exactly at the limit is still fine.
-    const atLimit = inlineHtmlDemoEventMeter();
-    for (let second = 0; second < 10; second += 1) assert.equal(count(atLimit, second * 1000, limit), 0);
+  it("counts the text an event carries, once", () => {
+    assert.equal(inlineHtmlDemoEventText([{ message: "hello" }, 0, "hello", 12, "letagents-demo://a/"]), 5 + 19);
+    assert.equal(inlineHtmlDemoEventText([{}, "A title", true]), 7);
+    assert.equal(inlineHtmlDemoEventText([{}, ["data:a", "data:bb"]]), 13);
+    assert.equal(inlineHtmlDemoEventText([{ url: "x".repeat(100) }, { selectionText: "y" }, 3]), 0);
+    assert.equal(inlineHtmlDemoEventText([]), 0);
   });
 
   it("keeps downloads, the cache and the liveness check bounded", () => {
@@ -344,12 +362,11 @@ describe("HTML demo policy", () => {
     assert.equal(INLINE_HTML_DEMO_DOWNLOAD_MS, 20_000);
     assert.equal(INLINE_HTML_DEMO_CACHE_MS, 10 * 60_000);
     assert.equal(INLINE_HTML_DEMO_LIVENESS_LATE_MS, 1_000);
-    assert.ok(INLINE_HTML_DEMO_EVENTS_PER_SECOND >= 500 && INLINE_HTML_DEMO_EVENTS_PER_SECOND <= 5_000);
   });
 
   it("lets a demo keep focus only after the person's own click, key, Tab or return to the window", () => {
     const never = Number.NEGATIVE_INFINITY;
-    const base = { now: 100_000, lastInputAt: never, lastTabAt: never, focusedAtWindowBlur: false, windowBlurredAt: never, windowFocusedAt: never };
+    const base = { now: 100_000, lastInputAt: never, lastTabAt: never, hadLastInputAtWindowBlur: false, windowBlurredAt: never, windowFocusedAt: never };
     assert.equal(INLINE_HTML_DEMO_FOCUS_GRACE_MS, 1_000);
     assert.equal(inlineHtmlDemoFocusAllowed(base), false, "a demo that focuses itself");
     assert.equal(inlineHtmlDemoFocusAllowed({ ...base, lastInputAt: 99_000 }), true);
@@ -357,9 +374,9 @@ describe("HTML demo policy", () => {
     assert.equal(inlineHtmlDemoFocusAllowed({ ...base, lastTabAt: 99_500 }), true);
     assert.equal(inlineHtmlDemoFocusAllowed({ ...base, lastTabAt: 90_000 }), false);
     // Back to a window that is still marked blurred (the macOS order), or that was focused a moment ago.
-    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, focusedAtWindowBlur: true, windowBlurredAt: 40_000, windowFocusedAt: 10_000 }), true);
-    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, focusedAtWindowBlur: true, windowBlurredAt: 40_000, windowFocusedAt: 99_990 }), true);
-    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, focusedAtWindowBlur: true, windowBlurredAt: 40_000, windowFocusedAt: 90_000 }), false);
-    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, focusedAtWindowBlur: false, windowBlurredAt: 40_000, windowFocusedAt: 99_990 }), false);
+    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, hadLastInputAtWindowBlur: true, windowBlurredAt: 40_000, windowFocusedAt: 10_000 }), true);
+    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, hadLastInputAtWindowBlur: true, windowBlurredAt: 40_000, windowFocusedAt: 99_990 }), true);
+    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, hadLastInputAtWindowBlur: true, windowBlurredAt: 40_000, windowFocusedAt: 90_000 }), false);
+    assert.equal(inlineHtmlDemoFocusAllowed({ ...base, hadLastInputAtWindowBlur: false, windowBlurredAt: 40_000, windowFocusedAt: 99_990 }), false);
   });
 });

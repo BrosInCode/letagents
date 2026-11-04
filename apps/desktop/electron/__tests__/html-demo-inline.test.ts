@@ -5,6 +5,7 @@ import test, { mock } from "node:test";
 import {
   HTML_DEMO_PARTITION,
   INLINE_HTML_DEMO_CACHE_ENTRIES,
+  INLINE_HTML_DEMO_EVENT_BURST,
   INLINE_HTML_DEMO_EVENTS_PER_SECOND,
   INLINE_HTML_DEMO_LIVENESS_WORLD_ID,
 } from "../main/attachments/html-demo-policy.js";
@@ -461,41 +462,91 @@ function heldDownload() {
   return { promise, finish, fail };
 }
 
-test("a demo that floods the app with events is stopped once, and a short burst is not", async (t) => {
+test("a demo is stopped once when it floods the app with events, but bursts and a steady trickle pass", async (t) => {
   let now = 50_000;
   t.mock.method(Date, "now", () => now);
   const burst = await prepareInlineHtmlDemo("letagents-attachment://download/YnVyc3Q");
-  const flood = await prepareInlineHtmlDemo("letagents-attachment://download/Zmxvb2Q");
+  const spaced = await prepareInlineHtmlDemo("letagents-attachment://download/c3BhY2Vk");
+  const steady = await prepareInlineHtmlDemo("letagents-attachment://download/c3RlYWR5");
   try {
     const bursting = attach(burst.url)!.guest;
-    const flooding = attach(flood.url)!.guest;
+    const spacing = attach(spaced.url)!.guest;
+    const flooding = attach(steady.url)!.guest;
     const emit = (guest: FakeGuest, name: string, count: number) => {
       for (let index = 0; index < count; index += 1) guest.emit(name, {});
     };
-    // A one-second burst far over the limit, then a calm second.
-    emit(bursting, "console-message", 20_000);
-    now += 1_000;
-    emit(bursting, "console-message", 100);
-    now += 1_000;
-    emit(bursting, "console-message", INLINE_HTML_DEMO_EVENTS_PER_SECOND);
-    assert.deepEqual(embedder.sent, [], "a burst or a busy second alone is fine");
+    // One start-up burst that crosses a second boundary passes, and so does a full bucket at once.
+    emit(bursting, "console-message", 1_001);
+    now += 5;
+    emit(bursting, "console-message", 1_001);
+    emit(bursting, "page-title-updated", INLINE_HTML_DEMO_EVENT_BURST - 2_002);
+    // Then the refill rate, kept up for a minute.
+    for (let second = 0; second < 60; second += 1) {
+      now += 1_000;
+      emit(bursting, "console-message", INLINE_HTML_DEMO_EVENTS_PER_SECOND);
+    }
+    assert.deepEqual(embedder.sent, [], "a burst and the steady rate pass");
 
-    // Every forwarded event counts, not only console messages.
-    emit(flooding, "page-title-updated", INLINE_HTML_DEMO_EVENTS_PER_SECOND);
-    emit(flooding, "did-navigate-in-page", 1);
-    now += 1_000;
-    emit(flooding, "console-message", INLINE_HTML_DEMO_EVENTS_PER_SECOND);
+    // Two full bursts 2.5 s apart: the second one runs the bucket dry.
+    emit(spacing, "console-message", INLINE_HTML_DEMO_EVENT_BURST);
+    now += 2_500;
+    emit(spacing, "did-navigate-in-page", 2_500);
     assert.deepEqual(embedder.sent, []);
-    emit(flooding, "console-message", 1);
-    assert.deepEqual(embedder.sent, [{ type: "stopped", url: flood.url, reason: "overloaded" }]);
-    assert.equal(flooding.crashCalls, 1, "the flooding process ends at once, before the queued events");
-    emit(flooding, "console-message", 5_000);
-    await flushImmediates();
-    assert.equal(flooding.destroyed, true);
+    emit(spacing, "console-message", 1);
+    assert.deepEqual(embedder.sent, [{ type: "stopped", url: spaced.url, reason: "overloaded" }]);
+    assert.equal(spacing.crashCalls, 1, "the flooding process ends at once, before its queued events");
+    emit(spacing, "console-message", 5_000);
     assert.equal(embedder.sent.length, 1, "stopped is sent once");
+
+    // A steady 5,000 a second empties a full bucket in its fifth second.
+    for (let second = 1; second <= 4; second += 1) {
+      now += 1_000;
+      emit(flooding, "console-message", 5_000);
+      assert.equal(embedder.sent.length, 1, `still running after ${second} s`);
+    }
+    now += 1_000;
+    emit(flooding, "console-message", 5_000);
+    assert.deepEqual(embedder.sent.at(-1), { type: "stopped", url: steady.url, reason: "overloaded" });
+    await flushImmediates();
+    assert.equal(spacing.destroyed, true);
+    assert.equal(flooding.destroyed, true);
     assert.equal(bursting.destroyed, false);
   } finally {
-    releaseAll([burst.url, flood.url]);
+    releaseAll([burst.url, spaced.url, steady.url]);
+  }
+});
+
+test("a demo that sends the app too much text is stopped, though a few big logs pass", async (t) => {
+  let now = 70_000;
+  t.mock.method(Date, "now", () => now);
+  const big = await prepareInlineHtmlDemo("letagents-attachment://download/Ymln");
+  const dump = await prepareInlineHtmlDemo("letagents-attachment://download/ZHVtcA");
+  try {
+    const flooding = attach(big.url)!.guest;
+    const dumping = attach(dump.url)!.guest;
+    const megabytes = (count: number) => "x".repeat(count * 1024 * 1024);
+    const log = (guest: FakeGuest, message: string) => guest.emit("console-message", {}, 0, message, 1, "letagents-demo://source/");
+    // One 8 MB dump, then a megabyte a second for a minute.
+    log(dumping, megabytes(8));
+    const oneMegabyte = megabytes(1);
+    for (let second = 0; second < 60; second += 1) {
+      now += 1_000;
+      log(dumping, oneMegabyte);
+    }
+    dumping.emit("page-title-updated", {}, "x".repeat(4096), true);
+    assert.deepEqual(embedder.sent, []);
+
+    // 2 MB logs, far fewer than the event limit, run the text bucket dry within 32 MB.
+    const twoMegabytes = megabytes(2);
+    for (let index = 0; index < 15; index += 1) log(flooding, twoMegabytes);
+    assert.deepEqual(embedder.sent, []);
+    log(flooding, twoMegabytes);
+    assert.deepEqual(embedder.sent, [{ type: "stopped", url: big.url, reason: "overloaded" }]);
+    assert.equal(flooding.crashCalls, 1);
+    log(flooding, twoMegabytes);
+    assert.equal(embedder.sent.length, 1);
+  } finally {
+    releaseAll([big.url, dump.url]);
   }
 });
 
@@ -645,28 +696,32 @@ test("cached demo files expire, and sign-out clears them", async (t) => {
   }
 });
 
-test("a demo that takes keyboard focus by itself is refused, every time", async (t) => {
+test("every focus signal from a demo is judged on its own, so a fake one cannot hide a real one", async (t) => {
   let now = 3_000_000;
   t.mock.method(Date, "now", () => now);
   const lease = await prepareInlineHtmlDemo("letagents-attachment://download/c3RlYWw");
   try {
     const { guest } = attach(lease.url)!;
-    const refused = () => embedder.sent.filter((event) => (event as { type: string }).type === "focus-refused");
+    const refused = () => embedder.sent.filter((event) => (event as { type: string }).type === "focus-refused").length;
+    // The person types in the composer.
+    embedder.emit("input-event", {}, { type: "rawKeyDown" });
     now += 5_000;
+    // The demo fires its own window "focus" event: Electron passes it on as if it were real.
     guest.emit("-focus-change", {}, true);
+    assert.equal(refused(), 1, "a fake signal costs only a needless refusal");
+    // A real focus() that follows, with no fake blur in between, is still refused.
+    now += 50;
     guest.emit("-focus-change", {}, true);
-    assert.deepEqual(refused(), [{ type: "focus-refused", url: lease.url }], "Electron repeats the change; it is refused once");
-    // The chat gives focus back, and the demo grabs it again.
+    assert.equal(refused(), 2);
+    guest.emit("-focus-change", {}, false);
     guest.emit("-focus-change", {}, false);
     now += 50;
     guest.emit("-focus-change", {}, true);
-    assert.equal(refused().length, 2);
-    // A later Electron that emits the documented event is handled the same way, without doubles.
-    guest.emit("blur");
-    now += 50;
+    assert.equal(refused(), 3, "fake blur signals change nothing either");
+    // A later Electron that emits the documented event is judged the same way.
     guest.emit("focus");
-    guest.emit("-focus-change", {}, true);
-    assert.equal(refused().length, 3);
+    assert.equal(refused(), 4);
+    assert.deepEqual(embedder.sent.at(-1), { type: "focus-refused", url: lease.url });
   } finally {
     releaseAll([lease.url]);
   }
@@ -679,21 +734,20 @@ test("a click, key or touch in the demo lets it take focus for a moment", async 
   try {
     const { guest } = attach(lease.url)!;
     const focusAfter = (type: string, delay: number) => {
-      guest.emit("-focus-change", {}, false);
       guest.emit("input-event", {}, { type });
       now += delay;
+      // Electron 42 reports a click's focus twice; both are judged, and both pass.
+      guest.emit("-focus-change", {}, true);
       guest.emit("-focus-change", {}, true);
       return embedder.sent.length;
     };
-    // Electron sends the click to the demo first, then moves focus there.
     assert.equal(focusAfter("mouseDown", 8), 0);
     assert.equal(focusAfter("rawKeyDown", 5), 0);
     assert.equal(focusAfter("keyDown", 5), 0);
     assert.equal(focusAfter("touchStart", 1_000), 0);
-    // Sound stays on and input keeps counting after the first click.
     assert.equal(guest.muted, false);
-    assert.equal(focusAfter("mouseMove", 5), 1, "moving the pointer over a demo is not a click");
-    assert.equal(focusAfter("mouseDown", 1_001), 2, "a click longer ago does not count");
+    assert.equal(focusAfter("mouseMove", 1_001), 2, "moving the pointer over a demo is not a click");
+    assert.equal(focusAfter("mouseDown", 1_001), 4, "a click longer ago does not count");
     assert.deepEqual(embedder.sent.at(-1), { type: "focus-refused", url: lease.url });
   } finally {
     releaseAll([lease.url]);
@@ -711,12 +765,10 @@ test("Tab in the app lets focus move into the demo", async (t) => {
     now += 4;
     guest.emit("-focus-change", {}, true);
     assert.deepEqual(embedder.sent, []);
-    guest.emit("-focus-change", {}, false);
     press("Tab", "rawKeyDown");
     now += 1_000;
     guest.emit("-focus-change", {}, true);
     assert.deepEqual(embedder.sent, []);
-    guest.emit("-focus-change", {}, false);
     press("Enter");
     press("Tab", "keyUp");
     now += 1_500;
@@ -727,80 +779,64 @@ test("Tab in the app lets focus move into the demo", async (t) => {
   }
 });
 
-test("coming back to the window gives focus back only to the demo that had it", async (t) => {
+test("coming back to the window gives focus back only to the demo the person used last", async (t) => {
   let now = 6_000_000;
   t.mock.method(Date, "now", () => now);
-  const had = await prepareInlineHtmlDemo("letagents-attachment://download/aGFk");
-  const other = await prepareInlineHtmlDemo("letagents-attachment://download/b3RoZXJ3");
+  const first = await prepareInlineHtmlDemo("letagents-attachment://download/aGFk");
+  const second = await prepareInlineHtmlDemo("letagents-attachment://download/b3RoZXJ3");
   try {
-    const hadFocus = attach(had.url)!.guest;
-    const neverFocused = attach(other.url)!.guest;
-    hadFocus.emit("input-event", {}, { type: "mouseDown" });
-    hadFocus.emit("-focus-change", {}, true);
+    const demoA = attach(first.url)!.guest;
+    const demoB = attach(second.url)!.guest;
+    const leave = () => {
+      now += 10_000;
+      appWindow.focused = false;
+      demoA.emit("-focus-change", {}, false);
+      appWindow.emit("blur");
+      now += 60_000;
+      appWindow.focused = true;
+    };
+    const refusals = () => embedder.sent.map((event) => (event as { url: string }).url);
 
-    // macOS order (Electron 42): the demo loses focus, then the window; it gets focus back before the window does.
-    now += 10_000;
-    appWindow.focused = false;
-    hadFocus.emit("-focus-change", {}, false);
-    appWindow.emit("blur");
-    now += 60_000;
-    appWindow.focused = true;
-    hadFocus.emit("-focus-change", {}, true);
+    // The person clicks demo A, leaves, and comes back (macOS order: the demo before the window).
+    demoA.emit("input-event", {}, { type: "mouseDown" });
+    leave();
+    demoA.emit("-focus-change", {}, true);
     appWindow.emit("focus");
-    assert.deepEqual(embedder.sent, [], "the demo the person was using gets focus back");
-    // The return is used once: grabbing focus again right after it is refused.
-    hadFocus.emit("-focus-change", {}, false);
-    now += 100;
-    hadFocus.emit("-focus-change", {}, true);
-    assert.deepEqual(embedder.sent, [{ type: "focus-refused", url: had.url }]);
-    embedder.sent = [];
-    hadFocus.emit("-focus-change", {}, false);
-    hadFocus.emit("input-event", {}, { type: "mouseDown" });
-    hadFocus.emit("-focus-change", {}, true);
+    now += 900;
+    demoA.emit("-focus-change", {}, true);
+    assert.deepEqual(refusals(), [], "the demo gets focus back, for a moment after the return");
+    now += 1_200;
+    demoA.emit("-focus-change", {}, true);
+    assert.deepEqual(refusals(), [first.url], "but not long after it");
 
     // The other order: the window first, then the demo.
-    now += 10_000;
-    appWindow.focused = false;
-    appWindow.emit("blur");
-    hadFocus.emit("-focus-change", {}, false);
-    now += 60_000;
-    appWindow.focused = true;
+    leave();
     appWindow.emit("focus");
     now += 20;
-    hadFocus.emit("-focus-change", {}, true);
-    assert.deepEqual(embedder.sent, []);
+    demoA.emit("-focus-change", {}, true);
+    assert.deepEqual(refusals(), [first.url]);
 
-    // A demo that did not have focus cannot use the return to take it.
-    now += 10_000;
-    appWindow.focused = false;
-    hadFocus.emit("-focus-change", {}, false);
-    appWindow.emit("blur");
-    now += 60_000;
-    appWindow.focused = true;
-    neverFocused.emit("-focus-change", {}, true);
+    // The person then used demo B: only B may take focus back.
+    demoB.emit("input-event", {}, { type: "touchStart" });
+    leave();
+    demoA.emit("-focus-change", {}, true);
+    demoB.emit("-focus-change", {}, true);
     appWindow.emit("focus");
-    assert.deepEqual(embedder.sent, [{ type: "focus-refused", url: other.url }]);
-    neverFocused.emit("-focus-change", {}, false);
+    assert.deepEqual(refusals(), [first.url, first.url]);
 
-    // The window came back without refocusing that demo, so it cannot take focus later on its own,
-    // nor at the next return, when it no longer had focus as the window left.
-    now += 2_000;
-    hadFocus.emit("-focus-change", {}, true);
-    assert.deepEqual(embedder.sent.at(-1), { type: "focus-refused", url: had.url });
-    hadFocus.emit("-focus-change", {}, false);
+    // The person typed in the app last: no demo gets focus on return, and the
+    // demo's own fake focus and blur signals around the blur cannot change that.
+    embedder.emit("input-event", {}, { type: "mouseDown" });
     now += 5_000;
-    appWindow.focused = false;
-    appWindow.emit("blur");
-    now += 60_000;
-    appWindow.focused = true;
-    hadFocus.emit("-focus-change", {}, true);
+    demoB.emit("-focus-change", {}, true);
+    demoB.emit("-focus-change", {}, false);
+    leave();
+    demoB.emit("-focus-change", {}, false);
+    demoB.emit("-focus-change", {}, true);
     appWindow.emit("focus");
-    assert.deepEqual(embedder.sent.slice(1), [
-      { type: "focus-refused", url: had.url },
-      { type: "focus-refused", url: had.url },
-    ]);
+    assert.deepEqual(refusals(), [first.url, first.url, second.url, second.url]);
   } finally {
     appWindow.focused = true;
-    releaseAll([had.url, other.url]);
+    releaseAll([first.url, second.url]);
   }
 });
