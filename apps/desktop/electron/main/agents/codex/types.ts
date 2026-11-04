@@ -1,4 +1,5 @@
 /** Shared adapter contracts: the RPC surface, dependencies, options and permission reply types. */
+import type { CodexSignInProfile } from "../codex-agent-home.js";
 import type { CodexAppServerExit, CodexAppServerLaunch } from "../codex-app-server.js";
 import type { CodexLiveProcess } from "../codex-home-harness.js";
 import type { RpcNotification, RpcServerRequest } from "../codex-rpc-client.js";
@@ -44,8 +45,8 @@ export interface CodexProviderAdapterDependencies {
     codexBin: string,
     options: {
       trustedProjectPath: string; configOverrides: string[]; env?: Record<string, string>; homeHarness?: boolean; sandboxed?: boolean; writableSandbox?: boolean;
-      /** A Read-only launch: the name of the permission profile the launch must define, with the sign-in file denied. */
-      hideSignInProfile?: string;
+      /** A launch at a sandboxed access level: the permission profile the launch must define, with the sign-in file denied. */
+      hideSignInProfile?: CodexSignInProfile;
       /** The policy is the Read-only level's own. The launch starts nothing for it without that profile. */
       readOnlySandbox?: boolean;
     },

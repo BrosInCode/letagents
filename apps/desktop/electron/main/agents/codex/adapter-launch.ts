@@ -1,7 +1,6 @@
 /** Starting a Codex app-server process and its first thread. */
 import { CODEX_THREAD_HISTORY_MODE } from "../../../../../../shared/codex-thread-history.mjs";
 import type { CodexAppServerLaunch } from "../codex-app-server.js";
-import { codexReadOnlyProfileId } from "../codex-agent-home.js";
 import { CODEX_GUEST_TOOL_OVERRIDES, codexGuestToolsLocked } from "../codex-guest-lock.js";
 import { apiUrl as desktopApiUrl } from "../../paths.js";
 import type { RpcNotification, TurnStartResult } from "../codex-rpc-client.js";
@@ -13,7 +12,7 @@ import { daemonStateDirEnvironment } from "../windows-child-environment.js";
 import { buildCodexStartPrompt, DEFAULT_CODEX_STOP_PHRASE, looksLikeInviteCode, makeCodexStopToken } from "../codex-start-prompt.js";
 import type { ProviderContinuationRef, ProviderSpawnRequest } from "../provider-adapter.js";
 import { errorMessage, observeFencedExit, terminateFreshLaunch } from "../provider-evidence.js";
-import { CODEX_READ_ONLY_CONFIG_OVERRIDES, type CodexThreadResult, assertCodexReadOnlyApplied, assertCodexReviewerApplied, assertCodexThreadDirectory, codexAgentHomeNoticeSaidOnce, codexEffortMismatchNotice, codexEffortNoticeSaidOnce, codexPolicyIsSandboxed, codexThreadAccess, codexThreadConfig, codexThreadEffort, codexThreadIsReadOnly, sameDirectory } from "./thread-access.js";
+import { CODEX_APPROVAL_LEVEL_CONFIG_OVERRIDES, CODEX_READ_ONLY_CONFIG_OVERRIDES, type CodexThreadResult, assertCodexSandboxedApplied, assertCodexReviewerApplied, assertCodexThreadDirectory, codexAgentHomeNoticeSaidOnce, codexEffortMismatchNotice, codexEffortNoticeSaidOnce, codexPolicyIsSandboxed, codexProfileBase, codexSignInProfileFor, codexThreadAccess, codexThreadConfig, codexThreadEffort, codexThreadIsReadOnly, sameDirectory } from "./thread-access.js";
 import { CodexAdapterEvents } from "./adapter-events.js";
 import { CodexProviderHandle } from "./handle.js";
 import { boundedCodexTools, boundedLaunchContract, boundedMcpEnvironment, codexMcpWorkplaceConfigOverrides, codexTurnPolicy, custodialMcpOverride, custodialPollingTools, normalizeLaunchPolicy } from "./launch-contract.js";
@@ -152,8 +151,11 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
     // The access level itself decides what follows, not the shape of a policy:
     // the attestation above has tied the level to its policy.
     const readOnlyLevel = req.permissionProfileId?.trim() === "read_only";
-    // A Read-only agent's conversations name this permission profile in place of a sandbox. The launch defines it.
-    const readOnlyProfile = readOnlyLevel ? codexReadOnlyProfileId(req.workAttemptId) : null;
+    const approvalLevel = ["ask_before_write", "auto_review"].includes(req.permissionProfileId?.trim() ?? "");
+    // At a sandboxed access level the agent's conversations name this permission profile in place of a sandbox. The
+    // launch defines it, with the owner's sign-in file denied to every command. The level's own policy says which
+    // profile (the attestation tied them together); on Windows only Read-only names one.
+    const signInProfile = readOnlyLevel || approvalLevel ? codexSignInProfileFor(policy, req.workAttemptId) : null;
     // Room tools are approved in advance only for an agent the daemon delivers
     // room messages to. Such an agent's room tools run in the daemon, on its
     // own room and workspace. An agent that collects its own messages runs them
@@ -176,8 +178,10 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
               LETAGENTS_TOKEN: "", LETAGENTS_AGENT_SESSION_BEARER: "", LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "" } : {}),
           }, custodialTools, readOnlyRoomTools)]
         : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides]),
-      // Read-only only: no other access level's launch changes.
+      // Read-only only: no other access level's launch turns web search off.
       ...(readOnlyLevel ? CODEX_READ_ONLY_CONFIG_OVERRIDES : []),
+      // Ask before writes and Auto, when they name a profile: the second way for a command to ask for more.
+      ...(approvalLevel && signInProfile ? CODEX_APPROVAL_LEVEL_CONFIG_OVERRIDES : []),
       ...(guest ? CODEX_GUEST_TOOL_OVERRIDES : []),
     ];
     const launch = await this.deps.launchServer(serverUrl, this.codexBin, {
@@ -187,8 +191,8 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
       // The owner's own Codex setup stays on for this agent's app-server.
       ...(homeHarness ? { homeHarness: true } : {}),
       ...(codexPolicyIsSandboxed(turnPolicy) ? { sandboxed: true, ...(policy.sandbox === "workspace-write" ? { writableSandbox: true } : {}) } : {}),
-      // A Read-only conversation names this profile, so the launch must define it: with the owner's sign-in file denied to every command.
-      ...(readOnlyProfile ? { hideSignInProfile: readOnlyProfile } : {}),
+      // A conversation at this level names this profile, so the launch must define it: with the owner's sign-in file denied to every command.
+      ...(signInProfile ? { hideSignInProfile: { id: signInProfile, extends: codexProfileBase(policy)! } } : {}),
       // The launch is told the policy too, whatever level was named. With this policy and no profile it starts nothing:
       // a caller that left the level's name out would otherwise get Codex's read-only sandbox alone.
       ...(codexThreadIsReadOnly(policy) ? { readOnlySandbox: true } : {}),
@@ -259,7 +263,7 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
           threadResult = await client.request<CodexThreadResult>("thread/resume", {
             threadId: resumeRef.providerContinuationId,
             cwd: req.cwd,
-            ...codexThreadAccess(policy, readOnlyProfile),
+            ...codexThreadAccess(policy, signInProfile),
             ...(req.model ? { model: req.model } : {}),
             ...codexThreadConfig(readOnlyLevel, effort),
           });
@@ -278,7 +282,7 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
         }
       } else {
         threadResult = await client.request<CodexThreadResult>("thread/start", {
-          ...codexThreadAccess(policy, readOnlyProfile),
+          ...codexThreadAccess(policy, signInProfile),
           historyMode: CODEX_THREAD_HISTORY_MODE,
           ...(req.model ? { model: req.model } : {}),
           ...codexThreadConfig(readOnlyLevel, effort),
@@ -286,7 +290,7 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
         assertCodexThreadDirectory(req.cwd, threadResult);
       }
       assertCodexReviewerApplied(policy, threadResult);
-      assertCodexReadOnlyApplied(policy, threadResult, readOnlyProfile);
+      assertCodexSandboxedApplied(policy, threadResult, signInProfile);
       const threadId = threadResult.thread?.id;
       if (!threadId) {
         throw new Error("Codex app-server did not return a thread id.");
@@ -309,6 +313,7 @@ export abstract class CodexAdapterLaunch extends CodexAdapterEvents {
       handle.managedLaunchContract = managedLaunchContract;
       handle.ownerSetup = homeHarness;
       handle.readOnlyLevel = readOnlyLevel;
+      handle.signInProfileId = signInProfile;
       handle.codexHome = reportedHome;
       handle.cwd = req.cwd;
       handle.launchOverrides = launchOverrides;

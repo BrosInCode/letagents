@@ -28,13 +28,13 @@ const codexProfiles: readonly SupervisedPermissionProfile[] = [
     id: "ask_before_write", label: "Ask before writes",
     description: "Requires approval before Codex can run write-capable commands or apply file changes.",
     status: "available", risk: "medium",
-    detail: "Starts with read-only file access and no network access. Requests approval when it needs more access.", isDefault: false,
+    detail: "Starts with read-only file access and no network access. Requests approval when it needs more access. On a Mac, its commands cannot read your Codex sign-in file, even with your approval.", isDefault: false,
   },
   {
     id: "auto_review", label: "Auto",
     description: "Lets Codex decide, without asking you, when a command may go beyond its working folder.",
     status: "available", risk: "high",
-    detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project.", isDefault: false,
+    detail: "Can change files only in its working folder and temporary folders, with no network access, until Codex approves more. Anything a room message asks for counts as approved, including commands that reach outside your project. On a Mac, its commands cannot read your Codex sign-in file, even with Codex's approval.", isDefault: false,
   },
   {
     id: "sandboxed_write", label: "Sandboxed writes",

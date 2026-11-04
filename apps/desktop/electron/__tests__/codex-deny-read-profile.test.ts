@@ -36,7 +36,7 @@ delete process.env.CODEX_HOME;
 // Node asks the keychain for certificates when it starts, which no Codex sandbox lets a command do, with or without a deny.
 delete process.env.NODE_USE_SYSTEM_CA;
 
-const { codexReadOnlyProfileId, codexReadOnlyProfileOverrides, codexSignInPaths, linkCodexAgentHome } = await import("../main/agents/codex-agent-home.js");
+const { codexSandboxedProfileId, codexSandboxedProfileOverrides, codexSignInPaths, linkCodexAgentHome } = await import("../main/agents/codex-agent-home.js");
 const { launchManagedCodexAppServer, terminateSpawnedProcess } = await import("../main/agents/codex-app-server.js");
 const { resolveCodexExecutable } = await import("../main/agents/codex-executable.js");
 const { CodexProviderAdapter } = await import("../main/agents/codex-provider-adapter.js");
@@ -281,6 +281,10 @@ const shell = (cmd: string, options: { escalated?: boolean } = {}): Call => (cal
   type: "function_call", call_id: callId, name: "exec_command",
   arguments: JSON.stringify({ cmd, login: false, ...(options.escalated ? { sandbox_permissions: "require_escalated", justification: "A made-up reason." } : {}) }),
 });
+/** The model asks for a shell command with more of the tool's fields: how it may run, and what more it asks for by name. */
+const exec = (cmd: string, more: Record<string, unknown>): Call => (callId) => ({
+  type: "function_call", call_id: callId, name: "exec_command", arguments: JSON.stringify({ cmd, login: false, ...more }),
+});
 /** The model asks for Codex's own image tool, which reads a file without the shell. */
 const viewImage = (path: string): Call => (callId) => ({ type: "function_call", call_id: callId, name: "view_image", arguments: JSON.stringify({ path }) });
 
@@ -393,7 +397,7 @@ test("Codex's own image tool obeys the deny: it returns an image it may read, an
   });
 });
 
-test("with a deny in its profile, a command that the owner or Codex's reviewer approves stays in the sandbox: it reads no denied file, writes nowhere more, has no network and cannot commit; without a deny it leaves the sandbox", installed, async (t) => {
+test("with a deny in its profile, a command that the owner or Codex's reviewer approves writes outside the sandbox and commits, is still refused the denied file, and gets the network only when it asks for it by name; without a deny it leaves the sandbox whole", installed, async (t) => {
   const model = await standIn(t);
   const owner = ownerHome(model);
   const workspace = fixture("workspace");
@@ -405,13 +409,15 @@ test("with a deny in its profile, a command that the owner or Codex's reviewer a
   git("add", "a.txt");
   git("commit", "-q", "-m", "A made-up commit");
   linkCodexAgentHome(owner.codexHome, owner.agentHome);
-  const overrides = profileOverrides({
+  // The profiles as a launch defines them, and the setting a launch at Ask before writes or Auto adds: a second way for a command to ask.
+  const overrides = [...profileOverrides({
     without_deny: { extends: ":read-only" },
     deny_read_only: { extends: ":read-only", deny: [owner.signIn] },
     deny_workspace: { extends: ":workspace", deny: [owner.signIn] },
-  }, "deny_read_only");
+  }, "deny_read_only"), "features.exec_permission_approvals=true"];
   // Answered 404 by the stand-in service when the command has a network, and not reached at all when it has none.
   const reach = `/usr/bin/curl -s --noproxy '*' -o /dev/null -w 'http=%{http_code}' --max-time 5 ${model.origin}/reach; echo " curl-exit=$?"`;
+  const network = { sandbox_permissions: "with_additional_permissions", additional_permissions: { network: { enabled: true } }, justification: "A made-up reason." };
 
   await withCodex({ owner, codexHome: owner.agentHome, cwd: workspace, model, overrides }, async (codex) => {
     let serial = 0;
@@ -436,24 +442,40 @@ test("with a deny in its profile, a command that the owner or Codex's reviewer a
       assert.match(result.network, /http=404/, `${what}: the approved command reached the network`);
       assert.equal(result.committed, true, `${what}: the approved command committed`);
     };
-    const stayedInTheSandbox = (result: Awaited<ReturnType<typeof approved>>, what: string) => {
-      assert.equal(result.wroteOutside, false, `${what}: the approved command wrote nothing outside the workspace`);
+    // Codex 0.162.1: an approved command runs outside the filesystem sandbox, but the profile's `deny` and its network setting hold for it.
+    const keptTheDenyAndNoNetwork = (result: Awaited<ReturnType<typeof approved>>, what: string) => {
+      assert.equal(result.wroteOutside, true, `${what}: the approved command wrote outside the workspace`);
       assert.match(result.signIn, PERMISSION_ERROR, `${what}: the approved command was refused the sign-in`);
       assert.match(result.network, /curl-exit=7/, `${what}: the approved command had no network`);
-      assert.equal(result.committed, false, `${what}: the approved command could not commit`);
+      assert.equal(result.committed, true, `${what}: the approved command committed`);
+    };
+    /** One conversation in which the model asks for the network by name, and for a read of the denied file by name. */
+    const askedByName = async (start: Record<string, unknown>) => {
+      const asked = { client: codex.approvalsAsked.length, reviewer: model.reviews };
+      const started = await codex.ask<Started>("thread/start", { ...start, ...STAND_IN_THREAD });
+      const [reached, read] = await turn(codex, model, started.thread.id, [
+        exec(reach, network),
+        exec(`cat ${owner.signIn}`, { sandbox_permissions: "with_additional_permissions", additional_permissions: { file_system: { read: [owner.signIn] } }, justification: "A made-up reason." }),
+      ]);
+      return { reached: reached!, read: read!, ownerApprovals: codex.approvalsAsked.length - asked.client, reviewerApprovals: model.reviews - asked.reviewer };
     };
 
     // Ask before writes: the owner is asked, and here says yes each time.
     const askBeforeWrites = { approvalPolicy: "on-request" };
     const today = await approved({ ...askBeforeWrites, sandbox: "read-only" });
     assert.deepEqual([today.ownerApprovals, today.reviewerApprovals], [4, 0]);
-    leftTheSandbox(today, "as LetAgents starts Codex today");
+    leftTheSandbox(today, "with the sandbox named, as LetAgents started Codex before");
     const withoutDeny = await approved({ ...askBeforeWrites, permissions: "without_deny" });
     assert.equal(withoutDeny.ownerApprovals, 4);
     leftTheSandbox(withoutDeny, "with a profile that denies nothing");
     const withDeny = await approved({ ...askBeforeWrites, permissions: "deny_read_only" });
-    assert.equal(withDeny.ownerApprovals, 4, "the owner is still asked, and the approval changes nothing");
-    stayedInTheSandbox(withDeny, "with a profile that denies one file");
+    assert.equal(withDeny.ownerApprovals, 4, "the owner is still asked");
+    keptTheDenyAndNoNetwork(withDeny, "with a profile that denies one file");
+    // The network, asked for by name, is approved by the owner and given. The denied file is not, however it is asked for.
+    const byName = await askedByName({ ...askBeforeWrites, permissions: "deny_read_only" });
+    assert.equal(byName.ownerApprovals, 2, "the owner is asked about each");
+    assert.match(byName.reached, /http=404/, "the approved command reached the network");
+    assert.match(byName.read, PERMISSION_ERROR, "an approved read of the denied file is refused all the same");
 
     // An approved change to a file is another matter: Codex applies it itself, and it still lands.
     const asked = codex.approvalsAsked.length;
@@ -471,11 +493,16 @@ test("with a deny in its profile, a command that the owner or Codex's reviewer a
     const autoToday = await approved({ ...auto, sandbox: "workspace-write" });
     assert.equal(autoToday.ownerApprovals, 0, "the owner is not asked");
     assert.ok(autoToday.reviewerApprovals >= 4, "the reviewer is asked about each command");
-    leftTheSandbox(autoToday, "at Auto as LetAgents starts Codex today");
+    leftTheSandbox(autoToday, "at Auto with the sandbox named, as LetAgents started Codex before");
     const autoWithDeny = await approved({ ...auto, permissions: "deny_workspace" });
     assert.equal(autoWithDeny.ownerApprovals, 0);
     assert.ok(autoWithDeny.reviewerApprovals >= 4);
-    stayedInTheSandbox(autoWithDeny, "at Auto with a profile that denies one file");
+    keptTheDenyAndNoNetwork(autoWithDeny, "at Auto with a profile that denies one file");
+    const autoByName = await askedByName({ ...auto, permissions: "deny_workspace" });
+    assert.equal(autoByName.ownerApprovals, 0);
+    assert.ok(autoByName.reviewerApprovals >= 2, "the reviewer is asked about each");
+    assert.match(autoByName.reached, /http=404/, "a command the reviewer approved reached the network");
+    assert.match(autoByName.read, PERMISSION_ERROR, "a read of the denied file the reviewer approved is refused all the same");
   });
 });
 
@@ -726,7 +753,7 @@ test("a Read-only agent that the adapter itself starts has the profile in its la
   const hasRg = (() => { try { execFileSync("which", ["rg"], { stdio: "ignore" }); return true; } catch { return false; } })();
 
   const workAttemptId = "0f8fad5b-d9cb-469f-a165-70867728950e";
-  const profile = codexReadOnlyProfileId(workAttemptId);
+  const profile = codexSandboxedProfileId(":read-only", workAttemptId);
   const proxies = Object.fromEntries(["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"].map((key) => [key, model.origin]));
   const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
   const launches: Array<{ pid: number | null; exited: Promise<unknown> }> = [];
@@ -774,7 +801,7 @@ test("a Read-only agent that the adapter itself starts has the profile in its la
   const linkedSignIn = join(owner.agentHome, "auth.json");
   assert.equal(lstatSync(linkedSignIn).isSymbolicLink(), true);
   const commandLine = execFileSync("ps", ["-ww", "-p", String(handle.pid), "-o", "command="], { encoding: "utf8" });
-  const overrides = codexReadOnlyProfileOverrides(profile, codexSignInPaths({ HOME: owner.home, CODEX_HOME: owner.codexHome }, owner.agentHome));
+  const overrides = codexSandboxedProfileOverrides(profile, ":read-only", codexSignInPaths({ HOME: owner.home, CODEX_HOME: owner.codexHome }, owner.agentHome));
   assert.deepEqual(overrides, [
     `permissions.${profile}={ extends = ":read-only", filesystem = { ${JSON.stringify(owner.signIn)} = "deny", ${JSON.stringify(linkedSignIn)} = "deny" } }`,
     `default_permissions=${JSON.stringify(profile)}`,
@@ -825,4 +852,119 @@ test("a Read-only agent that the adapter itself starts has the profile in its la
   assert.equal(model.refreshes >= 1, true, "Codex asked the made-up token service");
   assert.equal(lstatSync(linkedSignIn).isSymbolicLink(), true, "the link is still a link");
   assert.equal(readFileSync(owner.signIn, "utf8").includes(REFRESH_AFTER), true, "the owner's own file holds the refreshed sign-in");
+});
+
+test("an Auto agent that the adapter itself starts has the workspace profile in its launch and in every request: its commands are refused the sign-in file by both paths, write the work folder, and git, node and rg still work", installed, async (t) => {
+  const model = await standIn(t);
+  const owner = ownerHome(model);
+  writeFileSync(join(owner.codexHome, "config.toml"), [
+    'model = "stand-in"', 'model_provider = "standin"', 'cli_auth_credentials_store = "file"', "",
+    `chatgpt_base_url = "${model.origin}/"`, "",
+    "[model_providers.standin]", 'name = "standin"', `base_url = "${model.origin}/v1"`,
+    'wire_api = "responses"', "requires_openai_auth = true", "supports_websockets = false", "",
+  ].join("\n"));
+  const accessToken = pretendToken("before");
+  writeFileSync(owner.signIn, JSON.stringify({
+    OPENAI_API_KEY: null,
+    tokens: { id_token: accessToken, access_token: accessToken, refresh_token: REFRESH_BEFORE, account_id: "made-up-account" },
+    last_refresh: new Date().toISOString(),
+  }), { mode: 0o600 });
+  const workspace = fixture("workspace");
+  const outside = fixture("outside-the-workspace");
+  const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=Fake Owner", "-c", "user.email=owner@example.invalid", ...args], { cwd: workspace, stdio: "pipe" });
+  git("init", "-q", "-b", "main");
+  writeFileSync(join(workspace, "a.txt"), "one\n");
+  git("add", "a.txt");
+  git("commit", "-q", "-m", "A made-up commit");
+  const roomServer = standInRoomServer(join(fixture("room-server"), "server.mjs"));
+  const hasRg = (() => { try { execFileSync("which", ["rg"], { stdio: "ignore" }); return true; } catch { return false; } })();
+
+  const workAttemptId = "1a9ebd0c-6f1e-4d2b-9c8e-2b4f7a3d5e60";
+  const profile = codexSandboxedProfileId(":workspace", workAttemptId);
+  const proxies = Object.fromEntries(["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"].map((key) => [key, model.origin]));
+  // The workspace profile leaves the temp folder writable, so the folder outside the work folder must not be below it.
+  const tmp = fixture("tmp");
+  const sent: Array<{ method: string; params: Record<string, unknown> }> = [];
+  const launches: Array<{ pid: number | null; exited: Promise<unknown> }> = [];
+  const clients: Array<InstanceType<typeof CodexRpcClient>> = [];
+  t.after(async () => {
+    for (const client of clients) client.close();
+    for (const launch of launches) {
+      if (launch.pid !== null) terminateSpawnedProcess(launch.pid);
+      await Promise.race([launch.exited, new Promise((resolve) => setTimeout(resolve, 10_000))]);
+    }
+  });
+  const adapter = new CodexProviderAdapter({ codexBin: realCodex!, dependencies: {
+    resolveServerUrl: freeLoopbackUrl,
+    resolveMcpRuntime: () => ({ entryPath: roomServer, readRoots: [join(roomServer, "..")] }),
+    readMcpRuntimeContract: async () => ({ format: 1, profiles: { cursor_supervised_room_turn: { tools: ["claim_task", "get_board", "read_messages", "send_message"] } } }),
+    writeSupervisorBridgeContext: async () => {},
+    launchServer: async (serverUrl, bin, options) => {
+      const launch = await launchManagedCodexAppServer(serverUrl, bin, { ...options, env: { ...options.env, HOME: owner.home, CODEX_HOME: owner.codexHome, TMPDIR: tmp, ...proxies } });
+      launches.push(launch);
+      return launch;
+    },
+    createRpcClient: (serverUrl, notify) => {
+      const client = new CodexRpcClient(serverUrl, notify);
+      const request = client.request.bind(client);
+      client.request = async <T>(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<T> => {
+        sent.push({ method, params: (params ?? {}) as Record<string, unknown> });
+        return request<T>(method, params, options);
+      };
+      clients.push(client);
+      return client;
+    },
+  } });
+  const handle = await adapter.spawn({
+    workAttemptId, roomId: "room_fake", agentDisplayName: "FakeAgent", cwd: workspace,
+    deliveryMode: "daemon_inbox", supervisorEntryId: "supervised_fake", supervisorSocketPath: join(fixture("daemon"), "daemon.sock"),
+    supervisorExecutionGenerationId: "generation", supervisorWorkerSession: { agentSessionId: "session", roomCursor: null, apiUrl: "http://127.0.0.1:9" },
+    permissionProfileId: "auto_review", configurationRevision: 1,
+    launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" },
+  });
+
+  // The launch: Codex runs with the agents' home, and its own command line holds the profile, which extends the workspace one, with the
+  // sign-in file denied at the owner's path and at the link, and the setting that lets a command ask for the network or a folder by name.
+  const linkedSignIn = join(owner.agentHome, "auth.json");
+  assert.equal(lstatSync(linkedSignIn).isSymbolicLink(), true);
+  const commandLine = execFileSync("ps", ["-ww", "-p", String(handle.pid), "-o", "command="], { encoding: "utf8" });
+  const overrides = codexSandboxedProfileOverrides(profile, ":workspace", codexSignInPaths({ HOME: owner.home, CODEX_HOME: owner.codexHome }, owner.agentHome));
+  assert.deepEqual(overrides, [
+    `permissions.${profile}={ extends = ":workspace", filesystem = { ${JSON.stringify(owner.signIn)} = "deny", ${JSON.stringify(linkedSignIn)} = "deny" } }`,
+    `default_permissions=${JSON.stringify(profile)}`,
+  ]);
+  for (const override of [...overrides, "features.exec_permission_approvals=true"]) assert.equal(commandLine.includes(override), true, `the launch gave Codex ${override.split("=")[0]}`);
+
+  // One room turn, as the daemon gives it: the model asks for the sign-in file both ways, writes the work folder and a folder outside it, and runs what a coding agent needs.
+  const works = [
+    "git status --short --branch; echo \"git-status=$?\"", "git log --oneline -1; echo \"git-log=$?\"",
+    `${JSON.stringify(process.execPath)} -e 1; echo "node=$?"`, ...(hasRg ? ["rg --files .; echo \"rg=$?\""] : []),
+    "echo written > written.txt; echo \"write=$?\"", `touch ${JSON.stringify(join(outside, "x"))} 2>/dev/null; echo "outside=$?"`,
+  ].join("; ");
+  const calls = [shell(`cat ${linkedSignIn}`), shell(`cat ${owner.signIn}`), shell(works)];
+  const ids = calls.map((_, index) => `adapter_auto_call_${index}`);
+  calls.forEach((call, index) => model.plan.push(() => [call(ids[index]!)]));
+  model.plan.push(() => [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "done" }] }]);
+  const result = await adapter.runRoomTurn(handle, { inboxItemId: "item-1", actionId: "action-1", sourceMessage: { text: "A made-up room message." }, activation: {} });
+  assert.equal(typeof result.turnId, "string");
+  assert.equal(model.plan.length, 0, "the model was asked for every call and for its last word");
+  const outputs = model.requests.flatMap((request) => request.input ?? []).filter((item) => String(item.type).endsWith("_output"));
+  const [throughLink, ownersPath, worked] = ids.map((id) => String(outputs.find((item) => item.call_id === id)?.output));
+  assert.match(throughLink!, PERMISSION_ERROR, "the sign-in is refused through the link");
+  assert.match(ownersPath!, PERMISSION_ERROR, "the sign-in is refused at the owner's own path");
+  for (const tool of ["git-status", "git-log", "node", ...(hasRg ? ["rg"] : []), "write"]) assert.match(worked!, new RegExp(`${tool}=0\\b`), `${tool} still works`);
+  assert.equal(readFileSync(join(workspace, "written.txt"), "utf8"), "written\n", "the work folder is written");
+  assert.match(worked!, /outside=1\b/, "a folder outside the work folder is not");
+  assert.equal(existsSync(join(outside, "x")), false);
+  assert.equal(JSON.stringify(model.requests).includes(REFRESH_BEFORE), false, "nothing of the sign-in reached the model");
+  assert.equal(model.reviews, 0, "no command asked to leave the sandbox, so the reviewer was never asked");
+
+  // Every request the adapter made: none names a sandbox, and each that gives a conversation or a turn its access names the profile and the reviewer.
+  const access = sent.filter((request) => request.method === "thread/start" || request.method === "thread/resume" || request.method === "turn/start");
+  assert.deepEqual(access.map((request) => request.method), ["thread/start", "turn/start"]);
+  for (const request of access) assert.deepEqual([request.params.permissions, request.params.approvalPolicy, request.params.approvalsReviewer], [profile, "on-request", "auto_review"], request.method);
+  assert.deepEqual(sent.filter((request) => Object.hasOwn(request.params, "sandbox") || Object.hasOwn(request.params, "sandboxPolicy")).map((request) => request.method), []);
+  // Codex itself is not in the sandbox: it signed its requests to the owner's provider with the token in that file.
+  assert.equal(model.authorizations.length > 0 && model.authorizations.every((authorization) => authorization === `Bearer ${accessToken}`), true);
+  await adapter.stop(handle);
 });

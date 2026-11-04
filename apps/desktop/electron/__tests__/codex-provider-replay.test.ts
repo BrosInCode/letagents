@@ -3,7 +3,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 
-import { SIGN_IN_NOT_HIDDEN, codexReadOnlyProfileId } from "../main/agents/codex-agent-home.js";
+import { SIGN_IN_NOT_HIDDEN, codexSandboxedProfileId } from "../main/agents/codex-agent-home.js";
 import { READ_ONLY_POLICY_WITHOUT_LEVEL } from "../main/agents/codex-app-server.js";
 import { CodexProviderAdapter } from "../main/agents/codex-provider-adapter.js";
 import type { ProviderObservedState, ProviderStreamEvent } from "../main/agents/provider-adapter.js";
@@ -37,7 +37,7 @@ const WORKSPACE = "/replay/workspace";
  * Every scenario's agent has the Read-only access level, so its launch defines this permission profile, and
  * its conversations and turns name it in place of a sandbox. The name is made from the work attempt.
  */
-const READ_ONLY_PROFILE = codexReadOnlyProfileId(CODEX_SCENARIO_WORK_ATTEMPT_ID);
+const READ_ONLY_PROFILE = codexSandboxedProfileId(":read-only", CODEX_SCENARIO_WORK_ATTEMPT_ID);
 /** The `config` a conversation of a Read-only agent is started or resumed with, for one reasoning effort. */
 const readOnlyThreadConfig = (effort: string) => ({ model_reasoning_effort: effort, web_search: "disabled" });
 
@@ -516,7 +516,7 @@ test("Codex replay: each recording is a Read-only agent's launch: the launch def
     assert.deepEqual(otherLaunches, [], name);
     assert.deepEqual(
       [launch!.options.sandboxed, launch!.options.readOnlySandbox, launch!.options.hideSignInProfile, Object.hasOwn(launch!.options, "writableSandbox")],
-      [true, true, READ_ONLY_PROFILE, false], name);
+      [true, true, { id: READ_ONLY_PROFILE, extends: ":read-only" }, false], name);
     assert.equal(launch!.options.configOverrides.includes('web_search="disabled"'), true, name);
     // What the product's launch gives Codex for it, once Codex has shown that it keeps a denied file from a command:
     // the profile, which is Codex's read-only one with the sign-in file denied at the owner's path and at the link in
@@ -560,7 +560,7 @@ test("Codex replay: each recording is a Read-only agent's launch: the launch def
 
 test("Codex replay: a start or a resume whose reply does not report the launch's permission profile starts no Read-only agent", async () => {
   const notConfirmed = "This version of Codex did not confirm that it keeps your Codex sign-in file from this agent's commands, so the agent was not started. "
-    + "If Codex is not up to date, update it. If it is, update LetAgents, or choose another access level: at every other level the agent's commands can read that file.";
+    + "If Codex is not up to date, update it. If it is, update LetAgents, or give the agent Full access: at that level the agent's commands can read that file.";
   // Not recordings: the reply that opens the conversation is changed here. Everything else in it stays as Codex sent it.
   const changes: Array<[string, (result: JsonObject) => JsonObject]> = [
     ["no profile", (result) => ({ ...result, activePermissionProfile: null })],
