@@ -58,6 +58,8 @@ export function createRoomAccess(
     deviceFlowUrl: input.deviceFlowUrl || null,
     code: input.code || null,
     httpStatus: input.httpStatus || null,
+    displayName: input.displayName || null,
+    joinRequest: input.joinRequest || null,
   };
 }
 

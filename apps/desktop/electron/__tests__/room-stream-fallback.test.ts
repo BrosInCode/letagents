@@ -12,6 +12,7 @@ import { createElectronTestEnv } from "./harness.js";
 import { PIPE_ALLOWANCE_MS } from "./platform.js";
 import type { DesktopRoomDeliveryRepair, DesktopRoomStreamEvent } from "../ipc-types.js";
 import { DAEMON_STATE_DIR_ENV, daemonEndpoint } from "../../../../shared/daemon-endpoint.mjs";
+import { repoCollaboratorRequiredBody, roomMembershipRequiredBody } from "../../../../shared/room-membership.mjs";
 
 // `paths.ts` reads LETAGENTS_API_URL once at module-eval time; the shared
 // harness pins it to an unroutable address so any un-stubbed fetch fails fast
@@ -116,7 +117,13 @@ const ROOM = "focus_fallback_room";
 type StreamHandler =
   | { kind: "ok"; sse: ControllableSse }
   | { kind: "fail"; status: number }
+  /** A 403 with a JSON body, as the server refuses a room. */
+  | { kind: "refuse"; body: unknown }
   | { kind: "hang" };
+
+function refusalResponse(body: unknown): Response {
+  return new Response(JSON.stringify(body), { status: 403, headers: { "Content-Type": "application/json" } });
+}
 
 type PollRecord = { url: string; after: string | null; timeout: string | null; signal: AbortSignal };
 type StreamRecord = { url: string; signal: AbortSignal; headers: Headers };
@@ -202,6 +209,7 @@ type CatchUpHandler =
 function installFetchRouter(): {
   streamQueue: StreamHandler[];
   enqueueFallbackPoll(messages: MessagePage): void;
+  enqueueFallbackRefusal(body: unknown): void;
   enqueueLatest(messages: MessagePage): void;
   enqueueLatestFailure(status?: number): void;
   enqueueCatchUp(messages: MessagePage, hasMore?: boolean): void;
@@ -213,7 +221,7 @@ function installFetchRouter(): {
 } {
   const previousFetch = globalThis.fetch;
   const streamQueue: StreamHandler[] = [];
-  const fallbackQueue: MessagePage[] = [];
+  const fallbackQueue: Array<MessagePage | { refuse: unknown }> = [];
   const latestQueue: Array<{ messages?: MessagePage; status?: number }> = [];
   const catchUpQueue: CatchUpHandler[] = [];
   const streamCalls: StreamRecord[] = [];
@@ -245,6 +253,7 @@ function installFetchRouter(): {
       if (handler.kind === "fail") {
         return new Response(null, { status: handler.status });
       }
+      if (handler.kind === "refuse") return refusalResponse(handler.body);
       return handler.sse.response;
     }
 
@@ -272,6 +281,7 @@ function installFetchRouter(): {
         return hangUntilAborted(signal);
       }
       const page = fallbackQueue.shift();
+      if (page && !Array.isArray(page)) return refusalResponse(page.refuse);
       if (page) {
         return new Response(JSON.stringify({ room_id: ROOM, messages: page }), {
           status: 200,
@@ -298,6 +308,7 @@ function installFetchRouter(): {
   return {
     streamQueue,
     enqueueFallbackPoll: (messages) => fallbackQueue.push(messages),
+    enqueueFallbackRefusal: (body) => fallbackQueue.push({ refuse: body }),
     enqueueLatest: (messages) => latestQueue.push({ messages }),
     enqueueLatestFailure: (status = 500) => latestQueue.push({ status }),
     enqueueCatchUp: (messages, hasMore = false) => catchUpQueue.push({ kind: "page", messages, hasMore }),
@@ -873,6 +884,111 @@ test("stopDesktopRoomStream aborts both the SSE and the fallback poll", async ()
     assert.ok(sseCall?.signal.aborted, "SSE request aborted on stop");
     assert.ok(pollCall?.signal.aborted, "fallback poll request aborted on stop");
     assert.equal(getActiveRoomIdentifier(), null, "no active room stream after stop");
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("a membership 403 stops the stream with no reconnect and no fallback poll", async () => {
+  const router = installFetchRouter();
+  try {
+    router.streamQueue.push({ kind: "refuse", body: roomMembershipRequiredBody({ room_id: ROOM, display_name: "Fallback room" }) });
+    await startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => emitted.some((event) => event.type === "access_refused"));
+    assert.deepEqual(emitted.find((event) => event.type === "access_refused"), {
+      type: "access_refused",
+      roomIdentifier: ROOM,
+      code: "ROOM_MEMBERSHIP_REQUIRED",
+      httpStatus: 403,
+    });
+    assert.equal(getActiveRoomIdentifier(), null, "the refused stream is gone");
+    // The old loop reconnected after 1 s and polled every 2.5 s; nothing may follow now.
+    await sleep(1_300);
+    assert.equal(router.streamCalls.length, 1, "no reconnect after a refusal");
+    assert.equal(router.pollCalls.length, 0, "no fallback poll after a refusal");
+    assert.equal(emitted.filter((event) => event.type === "error").length, 0);
+
+    // A later check that shows access starts a new stream.
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    router.enqueueCatchUp([]);
+    const ready = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 2);
+    sse.pushRoomSync("msg_1");
+    await ready;
+    assert.equal(getActiveRoomIdentifier(), ROOM);
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("a refusal on the fallback poll stops the poll as well", async () => {
+  const router = installFetchRouter();
+  try {
+    router.streamQueue.push({ kind: "fail", status: 503 });
+    router.enqueueFallbackRefusal({
+      error: "unsupported_repo_provider",
+      code: "UNSUPPORTED_REPO_PROVIDER",
+      message: "Repo rooms are supported for github.com repositories only",
+      room_id: ROOM,
+    });
+    await startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => emitted.some((event) => event.type === "access_refused"));
+    const refused = emitted.find((event) => event.type === "access_refused");
+    assert.equal(refused?.type === "access_refused" && refused.code, "UNSUPPORTED_REPO_PROVIDER");
+    const pollsAtRefusal = router.pollCalls.length;
+    const streamsAtRefusal = router.streamCalls.length;
+    await sleep(1_300);
+    assert.equal(router.pollCalls.length, pollsAtRefusal, "the poll stopped");
+    assert.equal(router.streamCalls.length, streamsAtRefusal, "the SSE reconnect was cancelled");
+    assert.equal(getActiveRoomIdentifier(), null);
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("a repository-role 403 during catch-up stops the stream", async () => {
+  const router = installFetchRouter();
+  const routed = globalThis.fetch;
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    // The SSE opens, then the durable catch-up meets the refusal.
+    const catchUpRefused = new Promise<void>((resolve) => {
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.includes("/messages/poll") && url.includes("timeout=0")) {
+          resolve();
+          return refusalResponse(repoCollaboratorRequiredBody({ room_id: ROOM }));
+        }
+        return routed(input, init);
+      }) as typeof fetch;
+    });
+    void startDesktopRoomStream(ROOM, "msg_1");
+    await catchUpRefused;
+    await waitUntil(() => emitted.some((event) => event.type === "access_refused"));
+    const refused = emitted.find((event) => event.type === "access_refused");
+    assert.equal(refused?.type === "access_refused" && refused.code, "REPO_COLLABORATOR_REQUIRED");
+    assert.equal(getActiveRoomIdentifier(), null);
+    assert.equal(router.streamCalls.at(-1)?.signal.aborted, true, "the open SSE request is closed");
+  } finally {
+    await stopDesktopRoomStream();
+    globalThis.fetch = routed;
+    router.restore();
+  }
+});
+
+test("a 403 with no refusal code keeps the usual reconnect", async () => {
+  const router = installFetchRouter();
+  try {
+    router.streamQueue.push({ kind: "fail", status: 403 });
+    await startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.pollCalls.length >= 1);
+    assert.equal(emitted.some((event) => event.type === "access_refused"), false);
+    assert.equal(getActiveRoomIdentifier(), ROOM);
   } finally {
     await stopDesktopRoomStream();
     router.restore();

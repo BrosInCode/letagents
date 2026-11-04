@@ -12,6 +12,7 @@ import { useAgentAttention } from "../useAgentAttention";
 import { useInboxRoomFilter } from "../useInboxRoomFilter";
 import { desktopIpc } from "../../ipc/index.js";
 import { roomNotificationPreferences } from "../useRoomNotificationPreferences";
+import { roomJoinRequests } from "../useRoomJoinRequests";
 import type { AppContextOf } from "./context";
 import { composerSuggestedReplyKey, roomSuggestedReply } from "../../components/desktop/content/room-chat/composer-suggested-reply";
 
@@ -72,7 +73,7 @@ export function useAppInboxActions(context: unknown) {
   function openMyWorkCard(roomIdentifier: string, taskId: string) { void openNeedsYouRoom({ roomIdentifier, taskId }); }
   function openMyWorkThread(roomIdentifier: string, threadRootId: string) { void openNeedsYouRoom({ roomIdentifier, threadRootId }); }
   function openNeedsYou(room?: string) { app.openInboxRooms(room); inboxSection.value = 'needs-you'; app.activeEntry.value = needsYouEntry; void refreshNeedsYou(); }
-  async function refreshNeedsYou() { await Promise.all([app.loadNeedsYou(app.activeEntry.value.type === 'inbox'), app.refreshRentalRequestCount(), app.activeEntry.value.type === 'inbox' ? refreshMessageReminders() : undefined]); await app.refreshAgentApprovals(); }
+  async function refreshNeedsYou() { await Promise.all([app.loadNeedsYou(app.activeEntry.value.type === 'inbox'), app.refreshRentalRequestCount(), roomJoinRequests.refresh(), app.activeEntry.value.type === 'inbox' ? refreshMessageReminders() : undefined]); await app.refreshAgentApprovals(); }
   return {
     openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshNeedsYou,
     openMyWork, openMyWorkCard, openMyWorkThread,
@@ -92,7 +93,9 @@ export function useAppInboxState(context: unknown) {
   provide(composerSuggestedReplyKey, (roomIdentifier) => roomSuggestedReply(needsYouData.value, roomIdentifier));
   const { items: agentAttentionItems, refreshApprovals: refreshAgentApprovals, approvalsReady } = useAgentAttention(needsYouData);
   Object.assign(app, { refreshAgentApprovals });
-  const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value + agentAttentionItems.value.length);
+  // Requests to join the rooms you admin wait on you like any other request.
+  const inboxJoinRequests = roomJoinRequests.items;
+  const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value + agentAttentionItems.value.length + inboxJoinRequests.value.length);
   // A room opened from the Inbox loads in place; if that load fails, say so.
   const inboxRoomOpens = inboxRoomOpenReporter((error) => app.pushActionToast(
     `Couldn't load this room. ${safeUserVisibleErrorDetail(error, "Try again from the sidebar.")}`, "error"));
@@ -104,7 +107,7 @@ export function useAppInboxState(context: unknown) {
   return {
     needsYouData, needsYouLoading, needsYouError, humanRequestCount, loadNeedsYou,
     refreshNeedsYouRoom, resetNeedsYou, mergeInboxThreads, agentAttentionItems,
-    refreshAgentApprovals, approvalsReady, needsYouCount, inboxRoomOpens, inboxStorageKey,
+    refreshAgentApprovals, approvalsReady, needsYouCount, inboxJoinRequests, inboxRoomOpens, inboxStorageKey,
     inboxRooms, openInboxRooms, chooseInboxRooms, reloadInboxRooms, pruneInboxRooms,
   };
 }

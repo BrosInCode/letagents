@@ -98,8 +98,14 @@
 }
 
 .auth-access-card[data-access-state="forbidden"] .auth-dot,
+.auth-access-card[data-access-state="repo_collaborator"] .auth-dot,
 .auth-access-card[data-access-state="unavailable"] .auth-dot {
   background: var(--red);
+}
+
+/* The join card's parts sit in the state grid like every other card's. */
+.auth-join {
+  display: contents;
 }
 
 .auth-state {

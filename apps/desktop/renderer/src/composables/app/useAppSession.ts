@@ -13,6 +13,9 @@ import { invalidateRentalProviderDashboard } from "../useRentalProviderEvents";
 import { setReminderAccount, refreshMessageReminders } from "../useMessageReminders";
 import { resetHostApprovals } from "../../components/desktop/content/room-chat/host-approvals";
 import { roomNotificationPreferences } from "../useRoomNotificationPreferences";
+import { roomJoinRequests } from "../useRoomJoinRequests";
+import { isMembershipRefusal } from "../../components/desktop/content/auth-onboarding";
+import { normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
 import type { AppContextOf } from "./context";
 
 /** Window focus and visibility, the desktop session, sign-in entry points, and notification activation. */
@@ -53,6 +56,50 @@ export function useAppSessionActions(context: unknown) {
     // SSE kept running while hidden, so event-fed sections are already current.
     void app.refreshSelectedRoomLiveMetadata().catch(() => undefined);
     void app.refreshRentalRequestCount();
+    void roomJoinRequests.refresh();
+  }
+
+  // The room whose live stream the server refused. That stream stays stopped
+  // until a check shows the room open again.
+  let refusedStreamRoom: string | null = null;
+  // Switching windows quickly must not reload the room on every switch.
+  const ACCESS_RECHECK_MIN_GAP_MS = 10_000;
+  let lastAccessRecheckAt = 0;
+
+  let queuedRoomsRefresh: (() => void) | null = null;
+
+  /** Check the rooms once now, or as soon as the check already running ends. */
+  function refreshRoomsOnce(): void {
+    if (!loading.value) {
+      void app.refresh();
+      return;
+    }
+    if (queuedRoomsRefresh) return;
+    queuedRoomsRefresh = watch(loading, (busy) => {
+      if (busy) return;
+      queuedRoomsRefresh?.();
+      queuedRoomsRefresh = null;
+      void app.refresh();
+    });
+  }
+
+  /**
+   * Coming back to the app checks again a room that would not open for this
+   * account, so a person an admin let in sees the room without a timer.
+   */
+  function recheckRoomAccess(): void {
+    if (app.activeEntry.value.type !== "room" || loading.value) return;
+    if (isMembershipRefusal(app.selectedAccess.value.status)) {
+      if (Date.now() - lastAccessRecheckAt < ACCESS_RECHECK_MIN_GAP_MS) return;
+      lastAccessRecheckAt = Date.now();
+      void app.refresh();
+      return;
+    }
+    const room = app.selectedRoomIdentifier.value;
+    if (room && refusedStreamRoom && normalizeRoomIdentifier(room) === normalizeRoomIdentifier(refusedStreamRoom)) {
+      refusedStreamRoom = null;
+      void app.syncSelectedRoomStream(room);
+    }
   }
 
   function handleVisibilityChange(): void {
@@ -68,6 +115,7 @@ export function useAppSessionActions(context: unknown) {
     windowHidden.value = document.hidden;
     app.markActiveRoomRead();
     refreshForegroundData();
+    if (authStatus.value?.authenticated) recheckRoomAccess();
     void roomNotificationPreferences.refreshAll();
     if (app.selectedRoomIdentifier.value) void roomNotificationPreferences.refresh(app.selectedRoomIdentifier.value);
   }
@@ -78,7 +126,13 @@ export function useAppSessionActions(context: unknown) {
 
   function handleDesktopRoomStreamEvent(event: DesktopRoomStreamEvent): void {
     if (event.type === "typing") { receiveRoomTyping(event.roomIdentifier, event.signal); return; }
-    if (event.type === "open" || event.type === "error" || event.type === "session_disconnect") receiveRoomTyping(event.roomIdentifier);
+    if (event.type === "open" || event.type === "error" || event.type === "session_disconnect" || event.type === "access_refused") receiveRoomTyping(event.roomIdentifier);
+    if (event.type === "access_refused") {
+      // The stream stopped for good. Check the room once: the card shows how to get in.
+      refusedStreamRoom = event.roomIdentifier;
+      refreshRoomsOnce();
+      return;
+    }
     if (["open", "github_event", "artifact_update"].includes(event.type)) invalidateRoomMessageLinkPreviews(event.roomIdentifier);
     if (event.type === "resource_invalidation") {
       if (event.resource === "wake_rules") invalidateRoomWakeRules(event.roomIdentifier);
@@ -101,6 +155,7 @@ export function useAppSessionActions(context: unknown) {
     attentionIntent.value = null;
     inboxRentals.value = []; inboxRentalError.value = ''; app.inboxRooms.value = []; inboxSection.value = 'needs-you';
     app.resetNeedsYou();
+    roomJoinRequests.reset();
     resetHostApprovals();
     clearDesktopMessageOutbox();
     clearDesktopMessageDrafts();
@@ -221,7 +276,7 @@ export function useAppAccountSwitch(context: unknown) {
     reloadInboxRooms, rentalRequestCount, resetNeedsYou,
   } = app;
   watch(() => authStatus.value?.account?.id ?? null, (next, previous) => {
-    if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; reloadInboxRooms(); inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); resetNeedsYou(); resetHostApprovals(); if (next) void refreshNeedsYou(); }
+    if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; reloadInboxRooms(); inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); resetNeedsYou(); roomJoinRequests.reset(); resetHostApprovals(); if (next) void refreshNeedsYou(); }
   }, { flush: "sync" });
 
   const showSignedOutGate = computed(() => (
