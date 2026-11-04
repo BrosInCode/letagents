@@ -1,6 +1,6 @@
 import { posix } from "node:path";
 
-import { SIGN_IN_NOT_HIDDEN, codexReadOnlyProfileOverrides } from "../../main/agents/codex-agent-home.js";
+import { SIGN_IN_NOT_HIDDEN, codexSandboxedProfileOverrides } from "../../main/agents/codex-agent-home.js";
 import { READ_ONLY_POLICY_WITHOUT_LEVEL, type CodexAppServerExit } from "../../main/agents/codex-app-server.js";
 import type { CodexProviderAdapterDependencies } from "../../main/agents/codex-provider-adapter.js";
 import { CodexRpcClient, type CodexRpcWebSocketCtor } from "../../main/agents/codex-rpc-client.js";
@@ -180,7 +180,7 @@ export class CodexReplay {
       writeSupervisorBridgeContext: notReplayed("writeSupervisorBridgeContext"),
       resolveServerUrl: async () => REPLAY_SERVER_URL,
       launchServer: (_serverUrl, _codexBin, launch) => {
-        const profile = launch.hideSignInProfile?.trim() || undefined;
+        const profile = launch.hideSignInProfile?.id.trim() ? launch.hideSignInProfile : undefined;
         // What the product's launch refuses: the Read-only policy without the level's profile, before it asks
         // Codex anything; and a Read-only launch for a Codex that did not pass the check.
         if (launch.readOnlySandbox === true && !profile) throw new Error(READ_ONLY_POLICY_WITHOUT_LEVEL);
@@ -190,7 +190,7 @@ export class CodexReplay {
         this.launches.push({
           options: launch,
           codexHome,
-          profileOverrides: profile ? codexReadOnlyProfileOverrides(profile, [
+          profileOverrides: profile ? codexSandboxedProfileOverrides(profile.id, profile.extends, [
             posix.join(REPLAY_HOME_DIRECTORY, ".codex", "auth.json"),
             ...(codexHome ? [posix.join(codexHome, "auth.json")] : []),
           ]) : [],

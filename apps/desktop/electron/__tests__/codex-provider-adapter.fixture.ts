@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CodexAppServerExit, CodexAppServerLaunch } from "../main/agents/codex-app-server.js";
 import { CodexProviderAdapter, type CodexAdapterRpc, type CodexProviderAdapterDependencies } from "../main/agents/codex-provider-adapter.js";
-import { codexReadOnlyProfileId } from "../main/agents/codex-agent-home.js";
+import { type CodexBuiltInProfile, type CodexSignInProfile, codexSandboxedProfileId } from "../main/agents/codex-agent-home.js";
 import { type RpcNotification, type RpcServerRequest } from "../main/agents/codex-rpc-client.js";
 import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../../shared/codex-owner-isolation.mjs";
 import type { ProviderHandle, ProviderRoomTurnRequest, ProviderSpawnRequest } from "../main/agents/provider-adapter.js";
@@ -89,6 +89,8 @@ export class FakeRpc implements CodexAdapterRpc {
       effortFromOwnSettings: string | null | undefined;
       /** Every thread reports `reasoningEffort: null`, whatever it was given: Codex has no effort for it. */
       effortReportedAsNull: boolean;
+      /** The built-in profile each permission profile a launch defined extends, read from the launch's overrides. */
+      profileBases?: ReadonlyMap<string, CodexBuiltInProfile>;
     },
   ) {
     this.reviewerFromOwnSettings = options.reviewerFromOwnSettings;
@@ -141,16 +143,22 @@ export class FakeRpc implements CodexAdapterRpc {
    * A request that names no policy, as a subscription to a loaded conversation does, is told the one the conversation has.
    *
    * A conversation is given a named sandbox or a named permission profile, and Codex refuses both together. This
-   * stand-in knows one kind of profile, the one a Read-only launch defines: Codex's read-only sandbox, extended.
-   * It reports that sandbox for it, and the profile's name, as Codex 0.153.4 does.
+   * stand-in knows the profiles a launch defines, by the built-in profile each extends: Codex's read-only sandbox
+   * for one that extends `:read-only`, its workspace sandbox for one that extends `:workspace`. It reports that
+   * sandbox for it, and the profile's name with what it extends, as Codex 0.162.1 does. A profile no launch defined
+   * is reported as one that extends `:read-only`, as the stand-in did before launches defined any other.
    */
   private appliedThreadPolicy(params: unknown, threadId: string): Record<string, unknown> {
     const requested = (params ?? {}) as { approvalPolicy?: unknown; sandbox?: unknown; permissions?: unknown };
     if (typeof requested.permissions === "string" && requested.sandbox !== undefined) throw new Error("`permissions` cannot be combined with `sandbox`");
     if (typeof requested.permissions === "string") {
+      const base = this.options.profileBases?.get(requested.permissions) ?? ":read-only";
       this.threadPolicies.set(threadId, {
-        approvalPolicy: requested.approvalPolicy, sandbox: { type: "readOnly", networkAccess: false },
-        activePermissionProfile: { id: requested.permissions, extends: ":read-only" },
+        approvalPolicy: requested.approvalPolicy,
+        sandbox: base === ":workspace"
+          ? { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false }
+          : { type: "readOnly", networkAccess: false },
+        activePermissionProfile: { id: requested.permissions, extends: base },
       });
     } else if (requested.approvalPolicy !== undefined || requested.sandbox !== undefined) {
       this.threadPolicies.set(threadId, { approvalPolicy: requested.approvalPolicy, activePermissionProfile: null, sandbox: ({
@@ -374,6 +382,8 @@ export function createHarness(harnessOptions: {
   processUnreadable?: boolean;
   /** The running process's command line carries every isolation override, whatever it was started with. */
   commandLineClaimsIsolation?: boolean;
+  /** The command line of a launched process holds no profile, as one started by an earlier LetAgents at its level. */
+  commandLineWithoutProfile?: boolean;
   /** The models the app-server lists instead of the usual two; null is one that cannot list its models, "timeout" one that does not answer in time. */
   models?: readonly FakeCodexModel[] | null | "timeout";
   /** The model list has more pages than the first. */
@@ -400,6 +410,8 @@ export function createHarness(harnessOptions: {
   const isolation: { changed: string | null } = { changed: null };
   const ruleLoad: { refusal: string | null } = { refusal: null };
   const launches: FakeLaunch[] = [];
+  /** The permission profiles every launch of this harness defined, by name: the built-in profile each extends. */
+  const profileBases = new Map<string, CodexBuiltInProfile>();
   const clients: FakeRpc[] = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const launchOptions: Array<{
@@ -443,6 +455,9 @@ export function createHarness(harnessOptions: {
       launch.processIdentity = processIdentity ?? `fake-process-${launch.pid}-birth-1`;
       launches.push(launch);
       launchOptions.push({ serverUrl, codexBin, options });
+      // What the real launch gives Codex for a profile it names: defined here as the stand-in defines it, so a thread that names it is reported as Codex would.
+      const named = (options as { hideSignInProfile?: CodexSignInProfile }).hideSignInProfile;
+      if (named) profileBases.set(named.id, named.extends);
       return { pid: launch.pid, exited: launch.exited, ...(harnessOptions.launchCodexHome ? { codexHome: harnessOptions.launchCodexHome } : {}) };
     },
     waitForServer: async () => true,
@@ -462,6 +477,7 @@ export function createHarness(harnessOptions: {
         moreModelPages: options.moreModelPages ?? false,
         effortFromOwnSettings: options.effortFromOwnSettings,
         effortReportedAsNull: options.effortReportedAsNull ?? false,
+        profileBases,
       });
       if (reported.codexHome !== undefined) client.reportedCodexHome = () => reported.codexHome!;
       client.threadPolicies = threadPolicies;
@@ -493,7 +509,17 @@ export function createHarness(harnessOptions: {
       const launch = launchOptions[launches.findIndex((entry) => entry.pid === pid)];
       if (!launch || options.processUnreadable) return null;
       const isolated = launch.options.homeHarness !== true || options.commandLineClaimsIsolation === true;
-      return `codex app-server ${isolated ? CODEX_OWNER_FEATURE_OVERRIDES.map((override) => `-c ${override}`).join(" ") : ""} --listen ${launch.serverUrl}`;
+      // A launch that named a permission profile defined it with its overrides, which the command line holds as the real one does.
+      // A stand-in launch that named no access level, as many tests make for short, is read as one that defined the profile any
+      // policy it is later attached with would name: the daemon makes no such launch, and the profile's default is one line of
+      // the real command line. A process started with no profile at all, as an earlier LetAgents started one, is asked for
+      // with `commandLineWithoutProfile`.
+      const launched = launch.options as { hideSignInProfile?: CodexSignInProfile };
+      const defined: CodexSignInProfile[] = launched.hideSignInProfile ? [launched.hideSignInProfile]
+        : [{ id: READ_ONLY_PROFILE, extends: ":read-only" }, { id: AUTO_PROFILE, extends: ":workspace" }];
+      const profile = options.commandLineWithoutProfile === true ? ""
+        : defined.map((named) => ` -c permissions.${named.id}={ extends = ${JSON.stringify(named.extends)}, filesystem = { } } -c default_permissions=${JSON.stringify(named.id)}`).join("");
+      return `codex app-server ${isolated ? CODEX_OWNER_FEATURE_OVERRIDES.map((override) => `-c ${override}`).join(" ") : ""}${profile} --listen ${launch.serverUrl}`;
     },
     assertLiveProjectUnchanged: async (_codexBin, live) => {
       liveChecks.push(live);
@@ -592,7 +618,11 @@ export const CODEX_READ_ONLY_POLICY = { approvalPolicy: "never", sandboxPolicy: 
  * The permission profile every request of a Read-only runtime names in place of a sandbox: the one of its work
  * attempt. The launch defines it, as Codex's read-only sandbox with the owner's sign-in file denied to every command.
  */
-export const READ_ONLY_PROFILE = codexReadOnlyProfileId(spawnRequest().workAttemptId);
+export const READ_ONLY_PROFILE = codexSandboxedProfileId(":read-only", spawnRequest().workAttemptId);
+/** The permission profile of an Auto runtime's work attempt: Codex's workspace sandbox with the owner's sign-in file denied. */
+export const AUTO_PROFILE = codexSandboxedProfileId(":workspace", spawnRequest().workAttemptId);
+/** The reply of Codex 0.162.1 for a conversation with a profile that extends its workspace one: the work folder only, and no network. */
+export const WORKSPACE_REPLY = { type: "workspaceWrite", writableRoots: [], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
 
 export const READ_ONLY_REPLY = { type: "readOnly", networkAccess: false };
 /**
@@ -613,6 +643,22 @@ export const NOT_READ_ONLY_REPLIES: ReadonlyArray<[string, (client: FakeRpc) => 
   ["an approval policy that asks", (client) => { client.approvalPolicyFromOwnSettings = "on-request"; }],
   ["no word on the sandbox or the approval policy", (client) => { client.omitsThreadPolicy = true; }],
 ];
+/** What an Ask before writes thread must not be left with: Read-only's list, with nobody to ask in place of someone. */
+export const NOT_ASK_BEFORE_WRITES_REPLIES: ReadonlyArray<[string, (client: FakeRpc) => void]> = [
+  ...NOT_READ_ONLY_REPLIES.filter(([what]) => what !== "an approval policy that asks"),
+  ["an approval policy that never asks", (client) => { client.approvalPolicyFromOwnSettings = "never"; }],
+];
+/** What an Auto thread must not be left with: another sandbox than the workspace one, one with the network or a folder besides the work folder, nobody to ask, or no word. */
+export const NOT_AUTO_REPLIES: ReadonlyArray<[string, (client: FakeRpc) => void]> = [
+  ["a full-access sandbox", (client) => { client.sandboxFromOwnSettings = { type: "dangerFullAccess" }; }],
+  ["a read-only sandbox", (client) => { client.sandboxFromOwnSettings = { ...READ_ONLY_REPLY }; }],
+  ["a workspace sandbox with network access", (client) => { client.sandboxFromOwnSettings = { ...WORKSPACE_REPLY, networkAccess: true }; }],
+  ["a workspace sandbox that does not say its network access", (client) => { client.sandboxFromOwnSettings = { type: "workspaceWrite", writableRoots: [] }; }],
+  ["a workspace sandbox with a writable folder besides the work folder", (client) => { client.sandboxFromOwnSettings = { ...WORKSPACE_REPLY, writableRoots: ["/tmp"] }; }],
+  ["a workspace sandbox with allowed domains", (client) => { client.sandboxFromOwnSettings = { ...WORKSPACE_REPLY, allowedDomains: ["example.invalid"] }; }],
+  ["an approval policy that never asks", (client) => { client.approvalPolicyFromOwnSettings = "never"; }],
+  ["no word on the sandbox or the approval policy", (client) => { client.omitsThreadPolicy = true; }],
+];
 /** Replies a newer Codex could send for a thread that is Read-only all the same: parts this build does not know, none of which widens the sandbox. */
 export const STILL_READ_ONLY_REPLIES: ReadonlyArray<[string, Record<string, unknown>]> = [
   ["the exact reply of Codex 0.153.4", { ...READ_ONLY_REPLY }],
@@ -625,6 +671,32 @@ export const STILL_READ_ONLY_REPLIES: ReadonlyArray<[string, Record<string, unkn
 export const levelLaunch = (permissionProfileId: string, launchPolicy: Record<string, unknown>) =>
   ({ deliveryMode: "daemon_inbox" as const, permissionProfileId, configurationRevision: 1, launchPolicy });
 export const foundAsReadOnly = () => levelLaunch("read_only", structuredClone(CODEX_READ_ONLY_POLICY));
+export const foundAsAskBeforeWrites = () => levelLaunch("ask_before_write", { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } });
+export const foundAsAuto = () => levelLaunch("auto_review", { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" });
+export const foundAtFullAccess = () => levelLaunch("full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } });
+/** Whether Ask before writes and Auto name a permission profile here: on Windows they do not, since Codex's sandbox refuses no deny there. */
+export const APPROVAL_LEVELS_NAME_A_PROFILE = process.platform !== "win32";
+/**
+ * On Windows, Ask before writes and Auto are as before: the launch defines no profile, the conversation names its sandbox, and
+ * nothing is held to a profile. The tests that hold them to one call this instead there.
+ */
+export async function assertApprovalLevelsAsBeforeOnWindows(): Promise<void> {
+  assert.equal(APPROVAL_LEVELS_NAME_A_PROFILE, false);
+  for (const { level, name } of SANDBOXED_APPROVAL_LEVELS()) {
+    const harness = createHarness();
+    const handle = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(spawnRequest(level));
+    assert.equal(handle.observedState(), "idle", name);
+    assert.equal(Object.hasOwn(launchAskedFor(harness), "hideSignInProfile"), false, name);
+    const started = requestByMethod(harness.clients[0]!, "thread/start").params as Record<string, unknown>;
+    assert.equal(typeof started.sandbox, "string", name);
+    assert.equal(Object.hasOwn(started, "permissions"), false, name);
+  }
+}
+/** The two levels that, like Read-only, name a permission profile: each with its name, its profile, its approval policy, and what its threads must not be left with. */
+export const SANDBOXED_APPROVAL_LEVELS = () => [
+  { level: foundAsAskBeforeWrites(), name: "Ask before writes", profile: { id: READ_ONLY_PROFILE, extends: ":read-only" as const }, approvalPolicy: "on-request", notAtLevel: NOT_ASK_BEFORE_WRITES_REPLIES },
+  { level: foundAsAuto(), name: "Auto", profile: { id: AUTO_PROFILE, extends: ":workspace" as const }, approvalPolicy: "on-request", notAtLevel: NOT_AUTO_REPLIES },
+];
 export const foundAtOtherLevels = () => [
   levelLaunch("full_access", { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }),
   levelLaunch("ask_before_write", { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } }),
@@ -649,7 +721,7 @@ export async function foundRunning(level: ReturnType<typeof levelLaunch>, misrep
 }
 
 /** What an attach answers when the adapter stopped the runtime it found: the proof, and the line for the owner. */
-export function assertStoppedNotReadOnly(answer: unknown, scene: Awaited<ReturnType<typeof foundRunning>>, what: string): string {
+export function assertStoppedNotAtLevel(answer: unknown, scene: Awaited<ReturnType<typeof foundRunning>>, what: string, level = "Read-only"): string {
   const stopped = answer as { state?: unknown; terminal?: Record<string, unknown>; notices?: string[] };
   assert.equal(stopped.state, "terminal", what);
   const pid = scene.harness.launches[0]!.pid;
@@ -663,7 +735,7 @@ export function assertStoppedNotReadOnly(answer: unknown, scene: Awaited<ReturnT
   assert.equal(stopped.notices?.length, 1, what);
   assert.match(stopped.notices![0]!, new RegExp("^Codex reported (?:approval policy (?:\"[a-z-]+\"|none) and sandbox (?:\"[A-Za-z]+\"|none)(?: with [a-z ]+)? for this agent's conversation\\."
     + "|(?:no permission profile|another permission profile than the one LetAgents gave it) for this agent's conversation, so nothing says that your Codex sign-in file is kept from its commands\\.)"
-    + " That is not Read-only access, so LetAgents stopped the agent\\. It starts again by itself, unless you paused it\\.$"), what);
+    + ` That is not ${level} access, so LetAgents stopped the agent\\. It starts again by itself, unless you paused it\\.$`), what);
   // No turn was started on it.
   assert.equal(scene.harness.clients.slice(1).some((client) => client.requests.some((call) => call.method === "turn/start")), false, what);
   return stopped.notices![0]!;
@@ -1444,15 +1516,15 @@ export async function endedTurn(adapter: CodexProviderAdapter, handle: ProviderH
   });
 }
 /** What a launch was asked for besides its folder and its overrides. */
-export const launchAskedFor = (harness: ReturnType<typeof createHarness>, launch = 0) => harness.launchOptions[launch]!.options as { sandboxed?: boolean; hideSignInProfile?: string; readOnlySandbox?: boolean };
+export const launchAskedFor = (harness: ReturnType<typeof createHarness>, launch = 0) => harness.launchOptions[launch]!.options as { sandboxed?: boolean; hideSignInProfile?: CodexSignInProfile; readOnlySandbox?: boolean; configOverrides: string[] };
 // The line is true for a Codex that is too old and for one that is newer than LetAgents knows: it cannot tell which, and names every way out.
 export const SIGN_IN_NOT_CONFIRMED = new RegExp("^Error: This version of Codex did not confirm that it keeps your Codex sign-in file from this agent's commands, so the agent was not started\\. "
-  + "If Codex is not up to date, update it\\. If it is, update LetAgents, or choose another access level: at every other level the agent's commands can read that file\\.$");
+  + "If Codex is not up to date, update it\\. If it is, update LetAgents, or give the agent Full access: at that level the agent's commands can read that file\\.$");
 /** What a Read-only conversation must not report in place of its profile, while its sandbox and approval policy are as they should be. */
 export const NOT_THE_PROFILE_REPLIES: ReadonlyArray<[string, (client: FakeRpc) => void]> = [
   ["no permission profile", (client) => { client.profileFromOwnSettings = null; }],
   ["a profile of the owner's", (client) => { client.profileFromOwnSettings = { id: "owner_profile", extends: ":read-only" }; }],
-  ["another work attempt's profile", (client) => { client.profileFromOwnSettings = { id: codexReadOnlyProfileId("another-work-attempt"), extends: ":read-only" }; }],
+  ["another work attempt's profile", (client) => { client.profileFromOwnSettings = { id: codexSandboxedProfileId(":read-only", "another-work-attempt"), extends: ":read-only" }; }],
   ["the profile as an extension of another built-in one", (client) => { client.profileFromOwnSettings = { id: READ_ONLY_PROFILE, extends: ":workspace" }; }],
   ["the profile with no word on what it extends", (client) => { client.profileFromOwnSettings = { id: READ_ONLY_PROFILE, extends: null }; }],
 ];
