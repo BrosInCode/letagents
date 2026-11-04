@@ -68,6 +68,8 @@ export const WAKE_RULE_LIMITS = Object.freeze({
   webhookUrlMaxLength: 2048,
   webhookSecretMinLength: 16,
   webhookSecretMaxLength: 256,
+  webhookBearerMinLength: 8,
+  webhookBearerMaxLength: 512,
   emailMaxLength: 254,
   /** How long an email confirmation link works. */
   emailConfirmTtlMs: 24 * 60 * 60 * 1000,
@@ -223,8 +225,8 @@ export function parseWakeRuleWebhook(value) {
   if (value == null || typeof value !== "object" || Array.isArray(value)) {
     throw new WakeRuleError("webhook must be an object with url and secret.");
   }
-  allowOnly(value, ["url", "secret"], "webhook");
-  const { url, secret } = value;
+  allowOnly(value, ["url", "secret", "bearer"], "webhook");
+  const { url, secret, bearer } = value;
   if (typeof url !== "string" || !url.trim() || url.trim().length > WAKE_RULE_LIMITS.webhookUrlMaxLength) {
     throw new WakeRuleError(`webhook.url must be an https URL of at most ${WAKE_RULE_LIMITS.webhookUrlMaxLength} characters.`);
   }
@@ -236,7 +238,17 @@ export function parseWakeRuleWebhook(value) {
       `webhook.secret must be ${WAKE_RULE_LIMITS.webhookSecretMinLength} to ${WAKE_RULE_LIMITS.webhookSecretMaxLength} printable characters without spaces.`,
     );
   }
-  return { url: url.trim(), secret };
+  // A receiver's own sender key, sent as `Authorization: Bearer <key>`. Visible
+  // ASCII only, so it can never break the header or add another one.
+  if (bearer !== undefined && (typeof bearer !== "string"
+    || bearer.length < WAKE_RULE_LIMITS.webhookBearerMinLength
+    || bearer.length > WAKE_RULE_LIMITS.webhookBearerMaxLength
+    || !WEBHOOK_SECRET.test(bearer))) {
+    throw new WakeRuleError(
+      `webhook.bearer must be ${WAKE_RULE_LIMITS.webhookBearerMinLength} to ${WAKE_RULE_LIMITS.webhookBearerMaxLength} printable ASCII characters without spaces or line breaks.`,
+    );
+  }
+  return { url: url.trim(), secret, ...(bearer !== undefined ? { bearer } : {}) };
 }
 
 const EMAIL_LOCAL = /^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}$/;
