@@ -4,6 +4,7 @@ import {
 } from '../../../../../shared/room-membership.mjs'
 
 export type JoinRequestView =
+  | { kind: 'main_room_only' }
   | { kind: 'ask'; previouslyDeclined: boolean }
   | { kind: 'pending'; requestId: string; askedAt: string }
   | { kind: 'declined'; retryAt: number }

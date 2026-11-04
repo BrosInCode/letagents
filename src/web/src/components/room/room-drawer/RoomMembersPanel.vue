@@ -138,6 +138,7 @@ const notMemberText = computed(() => {
   const view = access.view.value
   if (view.kind === 'pending') return 'You are not a member yet. Your request is waiting for an admin.'
   if (view.kind === 'declined') return `You are not a member. A room admin declined your request. You can ask again ${formatJoinRequestTime(view.retryAt, access.now.value)}.`
+  if (view.kind === 'main_room_only') return 'You are not a member. A focus room uses the members of its main room. If you have not asked to join that room yet, ask there.'
   return 'You are not a member of this room yet.'
 })
 

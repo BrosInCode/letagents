@@ -65,6 +65,7 @@ function roomJoinErrorFrom(error: RoomApiFailure, roomIdentifier: string): RoomJ
     refusal: roomAccessRefusal(payload),
     displayName: typeof payload?.display_name === 'string' ? payload.display_name : null,
     joinRequest: joinRequestFromPayload(payload),
+    retryAfterMs: error.retryAfterMs ?? null,
   }
 }
 
@@ -153,6 +154,8 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
         deps.finishStreamingBootstrap(streamingRoomIdentifier, false)
       }
       deps.stopStreaming()
+      // A failure after POST /join (in the first reads) still leaves the room closed.
+      isConnected.value = false
       connectionState.value = 'error'
       joinError.value = roomJoinErrorFrom(err as RoomApiFailure, roomIdentifier)
       console.error('[useRoom] joinRoom failed:', err)
