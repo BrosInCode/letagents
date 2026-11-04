@@ -32,7 +32,7 @@
           <p v-if="roomNameError" id="blank-room-name-error" class="new-room-error" role="alert">{{ roomNameError }}</p>
           <p id="blank-room-name-hint" class="new-room-hint">
             <template v-if="auth.isSignedIn.value">A name for the conversation. You can change it later.</template>
-            <template v-else><button class="entry-text-button" type="button" :disabled="busy || auth.isSigningIn.value" @click="auth.signIn('/#start')">Sign in with GitHub</button> to choose a name, or create an unnamed room.</template>
+            <template v-else>Sign in with GitHub to create a room. You become its admin.</template>
           </p>
           <div class="entry-note">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h11a4 4 0 0 0 0-8h-.7A6 6 0 0 0 5.5 9 4.5 4.5 0 0 0 7 18Z"/></svg>
@@ -76,7 +76,9 @@ import { useAuth } from '@/composables/useAuth'
 const router = useRouter()
 const auth = useAuth()
 const tabs = [{ id: 'project', label: 'Project' }, { id: 'blank', label: 'Blank room' }, { id: 'join', label: 'Join room' }] as const
-const tab = ref('project')
+// Sign-in from the Blank room tab comes back to that tab.
+const BLANK_ROOM_RETURN = '/?new=blank#start'
+const tab = ref(typeof window !== 'undefined' && new URLSearchParams(window.location?.search || '').get('new') === 'blank' ? 'blank' : 'project')
 const repository = ref('')
 const invitation = ref('')
 const roomName = ref('')
@@ -87,9 +89,14 @@ const createdRoomId = ref('')
 let mounted = true
 onBeforeUnmount(() => { mounted = false })
 
-const canSubmit = computed(() => !busy.value && (tab.value === 'blank' || Boolean((tab.value === 'project' ? repository.value : invitation.value).trim())))
+// Wait for the session check, so a signed-in person is never sent through sign-in again.
+const canSubmit = computed(() => !busy.value && (tab.value === 'blank'
+  ? auth.hasCheckedSession.value && !auth.isCheckingSession.value && !auth.isSigningIn.value
+  : Boolean((tab.value === 'project' ? repository.value : invitation.value).trim())))
 const actionLabel = computed(() => busy.value ? (tab.value === 'blank' ? 'Creating…' : 'Opening…')
-  : tab.value === 'project' ? 'Open project room' : tab.value === 'blank' ? (createdRoomId.value ? 'Open room' : 'Create room') : 'Join room')
+  : tab.value === 'project' ? 'Open project room'
+    : tab.value === 'blank' ? (!auth.isSignedIn.value ? 'Sign in to create' : createdRoomId.value ? 'Open room' : 'Create room')
+      : 'Join room')
 
 function selectTab(next: string) {
   if (busy.value || !tabs.some(item => item.id === next)) return
@@ -139,8 +146,14 @@ async function handleSubmit() {
     return
   }
 
+  // A room has members, and its creator becomes its first admin, so creating one needs an account.
+  if (!auth.isSignedIn.value) {
+    await auth.signIn(BLANK_ROOM_RETURN)
+    return
+  }
+
   // Match the API's normalizeRoomDisplayName before creating an invite room.
-  const name = auth.isSignedIn.value ? roomName.value.trim().replace(/\s+/g, ' ') : ''
+  const name = roomName.value.trim().replace(/\s+/g, ' ')
   if (name && (name.length < 2 || name.length > 64)) {
     roomNameError.value = 'Use between 2 and 64 characters for the room name.'
     return

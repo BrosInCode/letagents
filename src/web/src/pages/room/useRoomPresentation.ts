@@ -1,6 +1,11 @@
 import { computed, type Ref } from 'vue'
 
 import {
+  REPO_COLLABORATOR_REQUIRED_MESSAGE,
+  ROOM_MEMBERSHIP_REQUIRED_MESSAGE,
+} from '../../../../../shared/room-membership.mjs'
+
+import {
   type ConnectionState,
   type FocusRoomSettings,
   type RoomInfo,
@@ -21,7 +26,9 @@ export function useRoomPresentation(input: {
   authUser: Readonly<Ref<AuthUser | null>>
 }) {
   const senderName = computed(() => input.authUser.value?.login || 'anonymous')
-  const roomTitle = computed(() => input.room.value?.displayName || 'Connecting...')
+  const roomTitle = computed(() => input.room.value?.displayName
+    || (input.joinError.value?.refusal ? input.joinError.value.displayName || input.joinError.value.roomId : null)
+    || 'Connecting...')
 
   const rulesBoardAvailable = computed(() => {
     const identifiers = [
@@ -41,6 +48,9 @@ export function useRoomPresentation(input: {
     if (currentRoom) {
       return `Room: ${currentRoom.name}`
     }
+
+    const refusedRoom = input.joinError.value?.refusal ? input.joinError.value.roomId : null
+    if (refusedRoom) return `Room: ${refusedRoom}`
 
     return input.connectionState.value === 'connecting'
       ? 'Joining room...'
@@ -69,6 +79,9 @@ export function useRoomPresentation(input: {
 
   const showGitHubSignIn = computed(() => input.joinError.value?.code === 'NOT_AUTHENTICATED')
 
+  /** Signed in but not let in: the room page shows the ask-to-join screen instead of an error. */
+  const accessRefusal = computed(() => input.joinError.value?.refusal ?? null)
+
   const joinErrorTitle = computed(() => {
     if (input.joinError.value?.code === 'NOT_AUTHENTICATED') {
       return 'GitHub sign-in required'
@@ -76,13 +89,17 @@ export function useRoomPresentation(input: {
     if (input.joinError.value?.code === 'PRIVATE_REPO_NO_ACCESS') {
       return 'No repo access'
     }
+    if (accessRefusal.value === 'membership_required') return 'Members only'
+    if (accessRefusal.value === 'repo_collaborator_required') return 'GitHub role required'
     return 'Could not connect to room.'
   })
 
   const joinErrorBody = computed(() => {
     if (input.joinError.value?.code === 'NOT_AUTHENTICATED') {
-      return 'This repo-backed room requires GitHub sign-in before you can join.'
+      return 'This room requires GitHub sign-in before you can join.'
     }
+    if (accessRefusal.value === 'membership_required') return ROOM_MEMBERSHIP_REQUIRED_MESSAGE
+    if (accessRefusal.value === 'repo_collaborator_required') return REPO_COLLABORATOR_REQUIRED_MESSAGE
     if (input.joinError.value?.code === 'PRIVATE_REPO_NO_ACCESS') {
       const login = input.authUser.value?.login
       return login
@@ -114,6 +131,7 @@ export function useRoomPresentation(input: {
     githubEventsRepository,
     focusSettings,
     showGitHubSignIn,
+    accessRefusal,
     joinErrorTitle,
     joinErrorBody,
     stalePromptTaskStates,
