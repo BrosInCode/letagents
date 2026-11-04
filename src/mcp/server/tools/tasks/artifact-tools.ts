@@ -99,7 +99,7 @@ export function registerTaskArtifactTools(server: McpServer): void {
           2
         );
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );

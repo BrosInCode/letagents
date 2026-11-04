@@ -1,13 +1,17 @@
 import { clearAuthenticatedAccountCache } from "./auth-cache.js";
 import { currentWorkerCall } from "../../worker-call-context.js";
 import {
+  roomAccessRefusal,
+  type RoomJoinRequestSummary,
+} from "../../../../shared/room-membership.mjs";
+import {
   AGENT_SESSION_ENDED_ERROR,
   LETAGENTS_AGENT_SESSION_ID_HEADER,
   LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
 } from "../../../shared/request-headers.js";
 import { endStoredAgentSession } from "../../local-state/agent-sessions.js";
 import { getDaemonToolExecutionContext } from "./daemon-tool-context.js";
-import { currentSessionScope, requireScopeWhenHosted } from "./session-scope.js";
+import { currentSessionScope, requireScopeWhenHosted, scopedValue } from "./session-scope.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import {
   borrowCurrentSupervisedWorkerCredential,
@@ -64,6 +68,8 @@ export function getApiUrl(): string {
 export class ApiError extends Error {
   readonly status: number;
   readonly body: string;
+  /** This 401 rejected the saved sign-in, which is now forgotten. */
+  savedSignInRejected = false;
 
   constructor(status: number, body: string) {
     super(`API error ${status}: ${body}`);
@@ -71,6 +77,57 @@ export class ApiError extends Error {
     this.status = status;
     this.body = body;
   }
+}
+
+export type RoomAccessRefusalKind = "membership_required" | "repo_collaborator_required";
+
+/**
+ * A 403 from a members-only room. The sign-in is good, but the account is not
+ * a member (a room without a repository) or has no GitHub role on the
+ * repository (a public repo room). Asking again cannot help until an admin
+ * lets the account in, so tools answer with it instead of retrying.
+ */
+export class RoomAccessRefusedError extends ApiError {
+  readonly refusal: RoomAccessRefusalKind;
+  readonly roomId: string | null;
+  readonly displayName: string | null;
+  readonly joinRequest: RoomJoinRequestSummary | null;
+  readonly serverMessage: string | null;
+
+  constructor(status: number, body: string, refusal: RoomAccessRefusalKind, payload: Record<string, unknown>) {
+    super(status, body);
+    this.name = "RoomAccessRefusedError";
+    this.refusal = refusal;
+    this.roomId = typeof payload.room_id === "string" ? payload.room_id : null;
+    this.displayName = typeof payload.display_name === "string" ? payload.display_name : null;
+    this.joinRequest = payload.join_request && typeof payload.join_request === "object"
+      ? payload.join_request as RoomJoinRequestSummary
+      : null;
+    this.serverMessage = typeof payload.message === "string" ? payload.message : null;
+  }
+}
+
+// The room that last refused this runtime, so request_room_access can default
+// to it. Per session in a remote scope, per process otherwise.
+const lastRefusedRoom = scopedValue<string | null>("last-refused-room", () => null);
+
+export function getLastRefusedRoomId(): string | null {
+  return lastRefusedRoom.get();
+}
+
+function apiErrorFor(status: number, body: string): ApiError {
+  if (status !== 403) return new ApiError(status, body);
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return new ApiError(status, body);
+  }
+  const refusal = roomAccessRefusal(payload);
+  if (!refusal) return new ApiError(status, body);
+  const error = new RoomAccessRefusedError(status, body, refusal, payload as Record<string, unknown>);
+  if (error.roomId) lastRefusedRoom.set(error.roomId);
+  return error;
 }
 
 /** Whether this runtime acts for a LetAgents account, without reading a token. */
@@ -204,12 +261,13 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
     const body = await res.text();
     if (!res.ok) {
       if (res.status === 401 && body.includes(AGENT_SESSION_ENDED_ERROR)) forgetEndedSession(headers, options?.body);
-      throw new ApiError(res.status, body);
+      throw apiErrorFor(res.status, body);
     }
     return (body ? JSON.parse(body) : null) as T;
   }
 
   const runtime = requireValidWorkerBearerRuntime();
+  let sentOwnerToken: string | null = null;
   if (runtime.mode === "worker") {
     // The bearer is the complete worker credential. Normalize headers first so
     // every caller spelling of Authorization is overwritten.
@@ -219,9 +277,10 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
     // credential while Codex remains running.
     headers.set("Authorization", `Bearer ${await getSupervisedCredential()}`);
   } else {
-    const authorizationHeader = await getAuthorizationHeader();
-    if (authorizationHeader && !headers.has("Authorization")) {
-      headers.set("Authorization", authorizationHeader);
+    const ownerToken = await getLetagentsToken();
+    if (ownerToken && !headers.has("Authorization")) {
+      headers.set("Authorization", `Bearer ${ownerToken}`);
+      sentOwnerToken = ownerToken;
     }
   }
 
@@ -232,19 +291,33 @@ export async function apiCall<T = unknown>(path: string, options?: RequestInit):
 
   if (!res.ok) {
     const body = await res.text();
+    let savedSignInRejected = false;
     const hasWorkerCredential = currentWorkerCall() || headers.has(LETAGENTS_AGENT_SESSION_TOKEN_HEADER)
       || (typeof options?.body === "string" && /"(?:agent_session_token|replace_agent_session_token|connection_token)"\s*:/.test(options.body));
-    if (res.status === 401 && requireValidWorkerBearerRuntime().mode === "owner" && !hasWorkerCredential) {
-      // Only clear on 401 (invalid/expired credential), NOT on 403
-      // (valid credential but insufficient permissions, e.g., private repo access)
-      const { clearStoredAuth } = await ownerAuthStoreLoader();
-      clearStoredAuth();
+    if (res.status === 401 && sentOwnerToken && requireValidWorkerBearerRuntime().mode === "owner"
+      && !hasWorkerCredential && !body.includes(AGENT_SESSION_ENDED_ERROR)) {
+      // A real 401: the server turned away the owner token this request
+      // carried. Forget it only when it is the saved sign-in; LETAGENTS_TOKEN
+      // stays in the environment. A signed-in account that may not open a
+      // room gets a 403 (private repo, not a member), which keeps the sign-in.
+      const { clearStoredAuth, getStoredAuth } = await ownerAuthStoreLoader();
+      const saved = getStoredAuth()?.token;
+      if (saved === sentOwnerToken) {
+        clearStoredAuth();
+        savedSignInRejected = true;
+      } else if (!saved && !process.env.LETAGENTS_TOKEN?.trim()) {
+        // The saved token was sent, and a call that ran at the same time
+        // has already forgotten it.
+        savedSignInRejected = true;
+      }
       clearAuthenticatedAccountCache();
     }
     if (res.status === 401 && body.includes(AGENT_SESSION_ENDED_ERROR)) {
       forgetEndedSession(headers, options?.body);
     }
-    throw new ApiError(res.status, body);
+    const error = apiErrorFor(res.status, body);
+    error.savedSignInRejected = savedSignInRejected;
+    throw error;
   }
 
   const body = await res.text();
