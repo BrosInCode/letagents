@@ -340,7 +340,8 @@ test("a test delivery goes through the real pipeline and reports the receiver's 
   assert.equal((await testRows(ruleId))[0]!.last_error, null);
 
   // The receiver rejects the key on a paused rule: reported, recorded, never counted toward the pause, still paused.
-  await dbClient!.pool.query("UPDATE agent_wake_rules SET status = 'paused', paused_at = now(), delivery_consecutive_failures = 5 WHERE id = $1", [ruleId]);
+  // The mark is cleared first (as a real delivery would), so only the failed branch of the test route can set it again.
+  await dbClient!.pool.query("UPDATE agent_wake_rules SET status = 'paused', paused_at = now(), delivery_consecutive_failures = 5, delivery_last_attempt_was_test = false WHERE id = $1", [ruleId]);
   replies.push(401);
   const rejected = await send("POST", `/${ruleId}/test`, { cookie: COOKIE.ada, body: {} });
   assert.equal(rejected.status, 200, rejected.text);

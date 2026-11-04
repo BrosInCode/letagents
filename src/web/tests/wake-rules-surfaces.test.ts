@@ -85,6 +85,9 @@ test('the room drawer keeps cancelled webhook wake-ups behind a text button in t
   const section = source('../../../shared/ui/WakeWebhookSection.vue')
   const rows = source('../../../shared/ui/WakeWebhookRuleList.vue')
   const styles = source('../../../shared/ui/wake-webhook.css')
+  // The drawer stays mounted while shut, so the section is told when it closes and shows the cancelled list closed again.
+  assert.match(panel, /<WakeWebhookSection[\s\S]*?:error="error"\s+:open="open"\s+@changed="refreshRules"/)
+  assert.match(section, /useCancelledWakeWebhookRules\(ownRules, toRef\(props, "open"\)\)/)
   // Cancelled rules arrive in the recent list; the panel passes both lists on and the section sorts them.
   assert.match(panel, /\[\.\.\.\(page\.value\?\.active \?\? \[\]\), \.\.\.\(page\.value\?\.recent \?\? \[\]\)\]/)
   // The main list holds the rules that are not cancelled; the button, then the second list, only while open.

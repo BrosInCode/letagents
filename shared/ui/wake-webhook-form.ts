@@ -132,15 +132,17 @@ export function wakeWebhookEmptyText(cancelledCount: number): string {
 /**
  * The state of the cancelled rules' button. It is closed to begin with, kept
  * only by the component that calls this (nothing is saved), and closes again
- * when no cancelled rule is left to show.
+ * when no cancelled rule is left to show, and when the host closes (`open`
+ * turns false: a drawer that stays mounted while it is shut).
  */
-export function useCancelledWakeWebhookRules(rules: Ref<readonly WakeRule[]>) {
+export function useCancelledWakeWebhookRules(rules: Ref<readonly WakeRule[]>, open?: Ref<boolean>) {
   const shown = ref(false);
   const parts = computed(() => partitionWakeWebhookRules(rules.value));
   const listed = computed(() => parts.value.listed);
   const cancelled = computed(() => parts.value.cancelled);
   const toggleLabel = computed(() => wakeWebhookCancelledToggleLabel(cancelled.value.length, shown.value));
   watch(() => cancelled.value.length, (count) => { if (count === 0) shown.value = false; }, { flush: "sync" });
+  if (open) watch(open, (isOpen) => { if (!isOpen) shown.value = false; }, { flush: "sync" });
   function toggle(): void {
     if (cancelled.value.length > 0) shown.value = !shown.value;
   }

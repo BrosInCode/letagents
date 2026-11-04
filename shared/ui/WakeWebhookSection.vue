@@ -139,7 +139,9 @@ const props = withDefaults(defineProps<{
   api: WakeWebhookApi;
   loading?: boolean;
   error?: string | null;
-}>(), { loading: false, error: null });
+  /** Whether the host shows the section now. A host that stays mounted while shut (the web drawer) passes it, so the cancelled list is closed again on the next opening. */
+  open?: boolean;
+}>(), { loading: false, error: null, open: true });
 const emit = defineEmits<{ changed: [] }>();
 
 const form = useWakeWebhookForm({
@@ -149,14 +151,14 @@ const form = useWakeWebhookForm({
   onChanged: () => emit("changed"),
 });
 const ownRules = computed(() => selectOwnWakeWebhookRules(props.rules, props.agents));
-// Cancelled rules sit behind a button, closed each time the section is opened; nothing is saved.
+// Cancelled rules sit behind a button, closed again when the host closes (`open` false) and so on each opening; nothing is saved.
 const {
   listed: listedRules,
   cancelled: cancelledRules,
   shown: cancelledShown,
   toggleLabel: cancelledToggleLabel,
   toggle: toggleCancelled,
-} = useCancelledWakeWebhookRules(ownRules);
+} = useCancelledWakeWebhookRules(ownRules, toRef(props, "open"));
 const emptyText = computed(() => wakeWebhookEmptyText(cancelledRules.value.length));
 const copied = ref(false);
 let copiedTimer: ReturnType<typeof setTimeout> | undefined;

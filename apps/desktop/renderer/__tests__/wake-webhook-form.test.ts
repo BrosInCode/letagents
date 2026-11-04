@@ -362,11 +362,36 @@ test("the cancelled list uses the same row as the main list and offers no Send t
   assert.doesNotMatch(html, /Send test|>\s*Cancel\s*</, "an ended rule has no buttons");
 });
 
+test("the cancelled list closes when the host closes, so a drawer that stays mounted opens with it closed again", () => {
+  const all = ref<WakeRule[]>([rule({ id: "wake_1" }), rule({ id: "wake_2", status: "cancelled" })]);
+  const hostOpen = ref(true);
+  const view = useCancelledWakeWebhookRules(all, hostOpen);
+  view.toggle();
+  assert.equal(view.shown.value, true);
+  assert.equal(view.toggleLabel.value, "Hide cancelled");
+  hostOpen.value = false;
+  assert.equal(view.shown.value, false, "the host closed: the list closed with it");
+  hostOpen.value = true;
+  assert.equal(view.shown.value, false, "opened again: still closed");
+  assert.equal(view.toggleLabel.value, "Show cancelled (1)");
+  // Closing again with the list already closed changes nothing; a host that passes no `open` never resets it.
+  hostOpen.value = false;
+  assert.equal(view.shown.value, false);
+  const free = useCancelledWakeWebhookRules(all);
+  free.toggle();
+  hostOpen.value = true;
+  hostOpen.value = false;
+  assert.equal(free.shown.value, true);
+});
+
 test("the section wires the button to the cancelled list: closed at first, the second list only while open", () => {
   const section = source("../../../../shared/ui/WakeWebhookSection.vue");
   assert.match(section, /<WakeWebhookRuleList\s+v-if="listedRules\.length"\s+:rules="listedRules"/);
   assert.match(section, /<button\s+v-if="cancelledRules\.length"\s+type="button"\s+class="wake-webhook-link"[\s\S]*?:aria-expanded="cancelledShown"\s+@click="toggleCancelled"\s*>\{\{ cancelledToggleLabel \}\}<\/button>/);
   assert.match(section, /<WakeWebhookRuleList\s+v-if="cancelledShown"\s+:rules="cancelledRules"/);
+  // The host's `open` (true unless a host passes it) resets the list.
+  assert.match(section, /open\?: boolean;[\s\S]*?\}>\(\), \{ loading: false, error: null, open: true \}\);/);
+  assert.match(section, /useCancelledWakeWebhookRules\(ownRules, toRef\(props, "open"\)\)/);
   // Local state only: nothing here reads or writes storage.
   assert.doesNotMatch(section, /localStorage|sessionStorage/);
   assert.doesNotMatch(source("../../../../shared/ui/wake-webhook-form.ts"), /localStorage|sessionStorage/);
