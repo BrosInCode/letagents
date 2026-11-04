@@ -1,10 +1,12 @@
 import { computed, onScopeDispose, ref, watch } from 'vue'
-import { joinRequestRetryAt, resolveJoinRequestView } from './joinRequestView'
+import { joinRequestRetryAt, resolveJoinRequestView, type JoinRequestView } from './joinRequestView'
 import {
   asRoomApiError,
   cancelRoomJoinRequest,
   fetchRoomMembership,
+  isFocusRoomId,
   joinRequestFromPayload,
+  ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY,
   requestRoomAccess,
   type RoomJoinRequestSummary,
 } from './membership'
@@ -19,12 +21,18 @@ export function useRoomJoinRequest(options: {
   onMember: () => void
 }) {
   const joinRequest = ref<RoomJoinRequestSummary | null>(options.initialRequest ?? null)
+  // A focus room takes no requests: the person asks to join its main room. The
+  // id tells first; a 400 answer from the server says the same.
+  const mainRoomOnlyAnswered = ref(false)
+  const mainRoomOnly = computed(() => mainRoomOnlyAnswered.value || isFocusRoomId(options.room()))
   /** The action that runs now, so each button can show its own progress. */
   const busyAction = ref<'ask' | 'cancel' | 'check' | null>(null)
   const busy = computed(() => busyAction.value !== null)
   const error = ref('')
   const now = ref(Date.now())
-  const view = computed(() => resolveJoinRequestView(joinRequest.value, now.value))
+  const view = computed<JoinRequestView>(() => mainRoomOnly.value
+    ? { kind: 'main_room_only' }
+    : resolveJoinRequestView(joinRequest.value, now.value))
 
   // One timer flips "Declined" back to "Ask to join" when the wait ends.
   let retryTimer: ReturnType<typeof setTimeout> | null = null
@@ -81,6 +89,10 @@ export function useRoomJoinRequest(options: {
       }
       // A conflict can mean the person is a member already: look before failing.
       if (failure.status === 409 && await readMembership(room)) return
+      if (failure.code === ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY) {
+        mainRoomOnlyAnswered.value = true
+        return
+      }
       throw failure
     }
   }, 'Could not send your request. Try again.')

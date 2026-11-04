@@ -84,6 +84,8 @@ export interface RoomJoinError {
   refusal: ReturnType<typeof roomAccessRefusal>
   displayName: string | null
   joinRequest: RoomJoinRequestSummary | null
+  /** How long the server asked the client to wait before it tries again, if it said. */
+  retryAfterMs: number | null
 }
 
 export interface RoomParticipantsPage {

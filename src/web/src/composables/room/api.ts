@@ -4,6 +4,8 @@ export type RoomApiFailure = Error & {
   status?: number
   code?: string | null
   payload?: any
+  /** From a Retry-After header in seconds, when the server sent one. */
+  retryAfterMs?: number | null
 }
 
 type RoomAccessRefusedListener = (path: string, error: RoomApiFailure) => void
@@ -48,6 +50,8 @@ export async function apiFetch(
     error.status = res.status
     error.code = payload?.code || payload?.error || null
     error.payload = payload
+    const retryAfterSeconds = Number(res.headers?.get?.('Retry-After'))
+    error.retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : null
     if (reportRoomRefusal && res.status === 403 && roomAccessRefusal(payload)) {
       for (const listener of roomAccessRefusedListeners) {
         try {
