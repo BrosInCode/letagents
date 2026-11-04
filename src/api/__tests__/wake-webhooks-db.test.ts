@@ -487,6 +487,9 @@ test("a rule's bearer is sealed, never shown, sent on every attempt, and replace
     assert.equal(ownList.raw.includes(BEARER), false);
     const ownView = (ownList.active as Array<Record<string, any>>).find((entry) => entry.id === rule.id)!;
     assert.equal(ownView.delivery.has_bearer, true, "the owner sees that a key is stored, never the key");
+    // The room is members-only: an admin let this person in first.
+    await dbClient!.pool.query("INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'approved_request')",
+      [roomId, accounts.other]);
     await call(other, "join_room", { name: "wake-webhook-bearer" });
     const otherList = await call(other, "list_wake_rules", { room_id: roomId });
     assert.equal(otherList.raw.includes(BEARER), false);
