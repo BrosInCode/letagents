@@ -8,7 +8,12 @@ import { createHmac } from "node:crypto";
 
 import { WAKE_RULE_LIMITS } from "../../../shared/wake-rules.mjs";
 import type { CredentialBinding } from "../connectors/crypto.js";
-import { WAKE_WEBHOOK_MAX_BODY_BYTES } from "./webhook-url.js";
+import {
+  WAKE_WEBHOOK_MAX_BODY_BYTES,
+  WAKE_WEBHOOK_MAX_HOLD_MS,
+  type WakeDeliveryErrorClass,
+  type WakeWebhookSendResult,
+} from "./webhook-url.js";
 
 export const WAKE_WEBHOOK_SENDER_MAX = 120;
 
@@ -30,14 +35,8 @@ export function wakeWebhookTextPreview(text: string | null | undefined): string 
   return oneLine(text, WAKE_RULE_LIMITS.webhookTextPreviewMax);
 }
 
-/** The room's page in the web app. */
-export function wakeWebhookRoomUrl(roomId: string, baseUrl = publicBaseUrl()): string {
-  return `${baseUrl.replace(/\/+$/, "")}/in/${roomId.split("/").map(encodeURIComponent).join("/")}`;
-}
-
-function publicBaseUrl(): string {
-  return process.env.LETAGENTS_PUBLIC_URL ?? process.env.LETAGENTS_BASE_URL ?? "https://letagents.chat";
-}
+/** The room's page in the web app (one shared helper for every public link). */
+export { wakeRoomUrl as wakeWebhookRoomUrl } from "./public-url.js";
 
 export interface WakeWebhookPayload {
   /** The same for every attempt of one delivery, so a receiver can ignore a retry it already handled. */
@@ -82,36 +81,52 @@ export function wakeWebhookHeaders(input: { deliveryId: string; timestamp: numbe
   };
 }
 
+/**
+ * One hourly budget a new delivery must fit: the rule's own (20), the room's
+ * across all its rules (60), or one account's for one target host (60).
+ * Counted by when deliveries go out, so a delivery held for later counts in
+ * the hour it is sent in.
+ */
+export interface WakeDeliveryCap {
+  /** Deliveries in this scope due in the past hour or later. */
+  count: number;
+  limit: number;
+  /** When the scope has room again: the slot that leaves the window first, plus an hour. */
+  freesAtMs: number | null;
+}
+
 /** What the rule's deliveries look like when a new match arrives. */
 export interface WakeWebhookEnqueueState {
   nowMs: number;
-  /** A delivery that is queued and not yet attempted; a new match folds into it. */
+  /** A message delivery that is queued and not yet attempted; a new match folds into it. */
   pendingDeliveryId: string | null;
-  /** When the rule's newest delivery was (or is) due to go out. */
+  /** When the rule's newest message delivery was (or is) due to go out. */
   lastScheduledAtMs: number | null;
-  /** Deliveries the rule started in the past hour. */
-  startedInLastHour: number;
+  caps: readonly WakeDeliveryCap[];
 }
 
 export type WakeWebhookEnqueuePlan =
   | { kind: "coalesce"; deliveryId: string }
-  | { kind: "drop" }
-  | { kind: "insert"; scheduledAtMs: number };
+  /** `heldByCap`: a budget is spent, so the delivery waits for the end of that hour. */
+  | { kind: "insert"; scheduledAtMs: number; heldByCap: boolean };
 
 /**
  * At most one delivery per rule in each 10-second window. The first match
  * after a quiet window goes out at once; matches inside the window fold into
  * one delivery that goes out when the window ends and carries the newest
- * message. Beyond 20 deliveries an hour a match is dropped (and counted),
- * unless it can fold into a delivery that is already waiting.
+ * message. When an hourly budget is spent, nothing is dropped: one delivery
+ * waits until the budget has room and later matches fold into it.
  */
 export function planWakeWebhookEnqueue(state: WakeWebhookEnqueueState): WakeWebhookEnqueuePlan {
   if (state.pendingDeliveryId) return { kind: "coalesce", deliveryId: state.pendingDeliveryId };
-  if (state.startedInLastHour >= WAKE_RULE_LIMITS.webhookHourlyCap) return { kind: "drop" };
   const windowEndMs = state.lastScheduledAtMs === null
     ? state.nowMs
     : state.lastScheduledAtMs + WAKE_RULE_LIMITS.webhookCoalesceMs;
-  return { kind: "insert", scheduledAtMs: Math.max(state.nowMs, windowEndMs) };
+  const capFreesAtMs = Math.max(-Infinity, ...state.caps
+    .filter((cap) => cap.count >= cap.limit)
+    .map((cap) => cap.freesAtMs ?? state.nowMs + HOUR_MS));
+  const scheduledAtMs = Math.max(state.nowMs, windowEndMs, capFreesAtMs);
+  return { kind: "insert", scheduledAtMs, heldByCap: capFreesAtMs > state.nowMs && capFreesAtMs >= windowEndMs };
 }
 
 export const WAKE_WEBHOOK_HOUR_MS = HOUR_MS;
@@ -121,3 +136,29 @@ export function afterFinalWakeWebhookFailure(consecutiveFailures: number): { con
   const next = consecutiveFailures + 1;
   return { consecutiveFailures: next, pause: next >= WAKE_RULE_LIMITS.webhookPauseAfterFailures };
 }
+
+export type WakeDeliveryOutcome =
+  | { kind: "delivered"; status: number }
+  /**
+   * Try again later. `holdMs` replaces the backoff (a 408 or 429's
+   * Retry-After). `uncounted`: when attempts run out, the delivery ends
+   * without counting against the rule (throttling, the operator's SMTP).
+   */
+  | { kind: "retry"; status: number; error: WakeDeliveryErrorClass; holdMs?: number; uncounted?: boolean }
+  /** Failed for good; counts toward pausing the rule. */
+  | { kind: "failed"; status: number; error: WakeDeliveryErrorClass }
+  /** The rule stopped (cancelled, paused, expired, revoked): the delivery is dropped, nothing counts. */
+  | { kind: "skipped"; error: string };
+
+/** The outcome of a webhook POST, as the worker records it. */
+export function webhookOutcome(result: WakeWebhookSendResult): WakeDeliveryOutcome {
+  if (result.outcome === "delivered") return { kind: "delivered", status: result.status };
+  const error = result.error ?? "connect_failed";
+  if (result.outcome === "dead") return { kind: "failed", status: result.status, error };
+  if (result.throttled) {
+    // The receiver asked for time: wait for it (bounded), and never count it against the rule.
+    return { kind: "retry", status: result.status, error, holdMs: result.retryAfterMs ?? WAKE_WEBHOOK_MAX_HOLD_MS, uncounted: true };
+  }
+  return { kind: "retry", status: result.status, error };
+}
+

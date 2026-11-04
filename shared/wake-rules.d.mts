@@ -24,8 +24,10 @@ export interface WakeRuleArguments {
   merged_only?: true;
   /** room.message: messages for this agent (mentions, replies, its threads, notices addressed to it). The default. */
   mentions_me?: true;
-  /** room.message: every top-level message except the agent's own. */
+  /** room.message: every top-level message except the agent's own (and other agents', unless include_agents). */
   any?: true;
+  /** room.message with any: also messages from other agents. */
+  include_agents?: true;
 }
 
 /** Where a room.message rule delivers. Accepted on input only; never returned. */
@@ -47,7 +49,7 @@ export interface ParsedWakeRuleInput {
   event: WakeRuleEvent;
   arguments: WakeRuleArguments;
   repeat: boolean;
-  /** Null only for a room.message rule, which then lasts until it is cancelled. */
+  /** Always set for new rules (a room.message rule lasts 30 days by default); null only on rules made before that. */
   expires_at: string | null;
   note: string | null;
 }
@@ -66,8 +68,8 @@ export interface WakeRuleDeliverySummary {
   delivered_count?: number;
   /** Deliveries in a row that failed for good; five pause the rule. */
   consecutive_failures?: number;
-  /** Matches dropped by the hourly cap. */
-  dropped_count?: number;
+  /** Matches that arrived while an hourly budget was spent; they folded into the delivery that waits for the hour's end. */
+  over_cap_count?: number;
   last_status?: number | null;
   last_error?: string | null;
   last_attempt_at?: string | null;
@@ -146,6 +148,11 @@ export const WAKE_RULE_LIMITS: Readonly<{
   webhookMaxTtlMs: number;
   webhookCoalesceMs: number;
   webhookHourlyCap: number;
+  roomHourlyCap: number;
+  hostHourlyCapPerAccount: number;
+  deliveryRulesPerAccount: number;
+  emailConfirmationsPerAddressPerDay: number;
+  emailConfirmationsPerAccountPerDay: number;
   webhookPauseAfterFailures: number;
   webhookTextPreviewMax: number;
   webhookUrlMaxLength: number;

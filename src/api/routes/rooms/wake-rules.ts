@@ -1,7 +1,10 @@
 import type { Express, Response } from "express";
 
 import { WakeRuleError, type WakeRuleActor } from "../../../../shared/wake-rules.mjs";
-import { listWakeRules } from "../../db/wake-rules.js";
+import { hashToken } from "../../db/utils.js";
+import { listWakeRules, type WakeRuleCredential } from "../../db/wake-rules.js";
+import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
+import { parseBearerAuthorization } from "../../request/bearer-authorization.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { isHumanAppWrite } from "../../request/app-session.js";
 import { requireWorkerRequestAgentIdentity, type ResolvedRequestAgentIdentity } from "../../request/agent-identity.js";
@@ -29,6 +32,23 @@ async function worker(req: AuthenticatedRequest, roomId: string): Promise<Resolv
   const result = await requireWorkerRequestAgentIdentity({ req, room_id: roomId, body: req.body ?? {} });
   if (!result.ok) throw new WakeRuleError(result.error, result.status);
   return result.identity;
+}
+
+/**
+ * The credential behind this request, which a webhook or email rule is bound
+ * to: a remote MCP session's owner token or OAuth grant (by the hash the
+ * session holds), an owner token sent directly (by its hash), or a worker
+ * bearer's session.
+ */
+function registeringCredential(req: AuthenticatedRequest): WakeRuleCredential | null {
+  const internal = inProcessPrincipal(req);
+  if (internal) return { kind: "token", ref: internal.tokenHash };
+  if (req.authKind === "owner_token") {
+    const bearer = parseBearerAuthorization(req.headers.authorization);
+    return bearer.kind === "token" ? { kind: "token", ref: hashToken(bearer.token) } : null;
+  }
+  if (req.authKind === "agent_session" && req.agentSession) return { kind: "agent_session", ref: req.agentSession.agent_session_id };
+  return null;
 }
 
 /** The account asking: it alone sees the delivery details of its own agents' webhook rules. */
@@ -68,6 +88,7 @@ export function registerWakeRuleRoutes(app: Express, deps: WakeRuleRouteDeps): v
           owner_account_id: identity.owner_account_id ?? null,
         },
         body: req.body?.rule,
+        credential: registeringCredential(req),
       });
       res.status(created ? 201 : 200).json({ rule, created, ...(confirmation ? { confirmation } : {}) });
     } catch (error) { fail(res, error); }

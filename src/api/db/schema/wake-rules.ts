@@ -58,7 +58,8 @@ export const agent_wake_rules = pgTable("agent_wake_rules", {
    */
   delivery_target: jsonb("delivery_target").$type<EncryptedCredentials>(),
   delivery_consecutive_failures: integer("delivery_consecutive_failures").notNull().default(0),
-  delivery_dropped_count: integer("delivery_dropped_count").notNull().default(0),
+  /** Matches that arrived while an hourly budget was spent (they fold into the delivery that waits). */
+  delivery_over_cap_count: integer("delivery_over_cap_count").notNull().default(0),
   delivery_delivered_count: integer("delivery_delivered_count").notNull().default(0),
   delivery_last_status: integer("delivery_last_status"),
   delivery_last_error: text("delivery_last_error"),
@@ -73,6 +74,16 @@ export const agent_wake_rules = pgTable("agent_wake_rules", {
   confirm_expires_at: timestamp("confirm_expires_at", { mode: "string", withTimezone: true }),
   confirmed_at: timestamp("confirmed_at", { mode: "string", withTimezone: true }),
   disable_token_hash: text("disable_token_hash"),
+  /**
+   * The credential that registered a delivery rule: `token` (SHA-256 of an
+   * owner token or OAuth grant secret) or `agent_session` (a worker session
+   * that authenticated with its bearer). Deliveries stop when it is revoked.
+   */
+  credential_kind: text("credential_kind").$type<"token" | "agent_session">(),
+  credential_ref: text("credential_ref"),
+  /** Keyed fingerprints of the target (URL without query, or address) and of its host, for budgets and stops. */
+  delivery_target_fingerprint: text("delivery_target_fingerprint"),
+  delivery_host_fingerprint: text("delivery_host_fingerprint"),
 }, (table) => ({
   event_check: check("agent_wake_rules_event_check", sql`${table.event} IN ('timer', 'task.status_changed', 'github.check_completed', 'github.review_submitted', 'github.pr_closed', 'room.message')`),
   status_check: check("agent_wake_rules_status_check", sql`${table.status} IN ('active', 'fired', 'expired', 'cancelled', 'retired', 'paused', 'pending_confirmation')`),
@@ -82,9 +93,16 @@ export const agent_wake_rules = pgTable("agent_wake_rules", {
   delivery_check: check("agent_wake_rules_delivery_check", sql`(${table.event} = 'room.message') = (${table.delivery_target} IS NOT NULL AND ${table.delivery_kind} IS NOT NULL)`),
   delivery_kind_check: check("agent_wake_rules_delivery_kind_check", sql`${table.delivery_kind} IS NULL OR ${table.delivery_kind} IN ('webhook', 'email')`),
   expiry_check: check("agent_wake_rules_expiry_check", sql`${table.event} = 'room.message' OR (${table.expires_at} IS NOT NULL AND ${table.next_check_at} IS NOT NULL)`),
-  active_identity_uq: uniqueIndex("agent_wake_rules_active_identity_uq")
+  held_identity_uq: uniqueIndex("agent_wake_rules_held_identity_uq")
     .on(table.room_id, table.agent_key, table.identity_key)
-    .where(sql`${table.status} = 'active'`),
+    .where(sql`${table.status} IN ('active', 'paused', 'pending_confirmation')`),
+  held_next_check_idx: index("agent_wake_rules_held_next_check_idx").on(table.next_check_at)
+    .where(sql`${table.status} IN ('active', 'paused', 'pending_confirmation')`),
+  credential_idx: index("agent_wake_rules_credential_idx").on(table.credential_kind, table.credential_ref)
+    .where(sql`${table.status} IN ('active', 'paused', 'pending_confirmation')`),
+  owner_delivery_idx: index("agent_wake_rules_owner_delivery_idx").on(table.owner_account_id)
+    .where(sql`${table.delivery_kind} IS NOT NULL AND ${table.status} IN ('active', 'paused', 'pending_confirmation')`),
+  credential_kind_check: check("agent_wake_rules_credential_kind_check", sql`${table.credential_kind} IS NULL OR ${table.credential_kind} IN ('token', 'agent_session')`),
   active_room_idx: index("agent_wake_rules_active_room_idx").on(table.room_id, table.event).where(sql`${table.status} = 'active'`),
   next_check_idx: index("agent_wake_rules_next_check_idx").on(table.next_check_at).where(sql`${table.status} = 'active'`),
   recent_idx: index("agent_wake_rules_recent_idx").on(table.room_id, table.ended_at).where(sql`${table.status} <> 'active'`),
@@ -124,11 +142,39 @@ export const wake_webhook_deliveries = pgTable("wake_webhook_deliveries", {
   delivered_at: timestamp("delivered_at", { mode: "string", withTimezone: true }),
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
   updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
+  /** The rule's account and target host, for the per-account host budget and fair claiming. */
+  owner_account_id: text("owner_account_id"),
+  host_fingerprint: text("host_fingerprint"),
+  /** Waits for an hourly budget to have room again; matches meanwhile fold into it. */
+  held_by_cap: boolean("held_by_cap").notNull().default(false),
 }, (table) => ({
   state_check: check("wake_webhook_deliveries_state_check", sql`${table.state} IN ('queued', 'retry', 'processing', 'delivered', 'dead')`),
   kind_check: check("wake_webhook_deliveries_kind_check", sql`${table.kind} IN ('webhook', 'email')`),
   purpose_check: check("wake_webhook_deliveries_purpose_check", sql`(${table.purpose} = 'message' AND ${table.message_number} IS NOT NULL) OR (${table.purpose} = 'confirm' AND ${table.kind} = 'email')`),
   pending_uq: uniqueIndex("wake_webhook_deliveries_pending_uq").on(table.rule_id, table.purpose).where(sql`${table.state} = 'queued'`),
   ready_idx: index("wake_webhook_deliveries_ready_idx").on(table.next_attempt_at).where(sql`${table.state} IN ('queued', 'retry')`),
-  rule_idx: index("wake_webhook_deliveries_rule_idx").on(table.rule_id, table.created_at),
+  rule_idx: index("wake_webhook_deliveries_rule_idx").on(table.rule_id, table.scheduled_at),
+  room_idx: index("wake_webhook_deliveries_room_idx").on(table.room_id, table.scheduled_at).where(sql`${table.purpose} = 'message'`),
+  host_idx: index("wake_webhook_deliveries_host_idx").on(table.owner_account_id, table.host_fingerprint, table.scheduled_at)
+    .where(sql`${table.purpose} = 'message'`),
+  in_flight_idx: index("wake_webhook_deliveries_in_flight_idx").on(table.owner_account_id).where(sql`${table.state} = 'processing'`),
 }));
+
+/** Each confirmation email, by the keyed fingerprint of its address: bounded per address and per account per day. */
+export const wake_email_confirmations = pgTable("wake_email_confirmations", {
+  id: text("id").primaryKey(),
+  address_fingerprint: text("address_fingerprint").notNull(),
+  owner_account_id: text("owner_account_id").notNull(),
+  rule_id: text("rule_id"),
+  created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+}, (table) => ({
+  address_idx: index("wake_email_confirmations_address_idx").on(table.address_fingerprint, table.created_at),
+  account_idx: index("wake_email_confirmations_account_idx").on(table.owner_account_id, table.created_at),
+}));
+
+/** Addresses that pressed Stop: no confirmation goes to them until they ask for one from a stop page. */
+export const wake_email_suppressions = pgTable("wake_email_suppressions", {
+  address_fingerprint: text("address_fingerprint").primaryKey(),
+  rule_id: text("rule_id"),
+  created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
+});

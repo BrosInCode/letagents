@@ -6,7 +6,9 @@
 -- have no expiry, so `expires_at` and `next_check_at` become nullable for that
 -- event only. Deliveries are claimed and retried like desktop pushes; one per
 -- rule may wait (`queued`), and matches meanwhile fold into it. Older servers
--- never create room.message rules and never read the new table.
+-- never create room.message rules and never read the new table; an older
+-- scheduler does read an active room.message rule when it comes due (at its
+-- expiry, 30 days out), so all API instances should run the new code by then.
 SET LOCAL lock_timeout = '3s';
 --> statement-breakpoint
 ALTER TABLE "agent_wake_rules" DROP CONSTRAINT IF EXISTS "agent_wake_rules_event_check";

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHmac, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import { createServer, type IncomingHttpHeaders, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -27,6 +27,8 @@ const ownerTokens = testDatabaseUrl ? await import("../db/auth/owner-tokens.js")
 const appModule = testDatabaseUrl ? await import("../server/app.js") : null;
 const routesModule = testDatabaseUrl ? await import("../server/routes.js") : null;
 const service = testDatabaseUrl ? await import("../wake-rules/service.js") : null;
+const store = testDatabaseUrl ? await import("../db/wake-rules.js") : null;
+const scheduler = testDatabaseUrl ? await import("../wake-rules/scheduler.js") : null;
 const worker = testDatabaseUrl ? await import("../notifications/wake-webhooks.js") : null;
 const guard = await import("../wake-rules/webhook-url.js");
 
@@ -66,7 +68,7 @@ if (testDatabaseUrl) {
     await once(server, "listening");
     baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
     // The receiver runs on loopback over http, which only this test switch admits.
-    guard.allowLoopbackHttpWakeWebhooksForTests(true);
+    guard.allowLoopbackWakeWebhooksForTests({});
     receiver = createServer((request, response) => {
       let body = "";
       request.on("data", (chunk) => { body += chunk; });
@@ -80,7 +82,7 @@ if (testDatabaseUrl) {
     hookUrl = `http://127.0.0.1:${(receiver.address() as AddressInfo).port}/hooks/letagents`;
   });
   test.after(async () => {
-    guard.allowLoopbackHttpWakeWebhooksForTests(false);
+    guard.allowLoopbackWakeWebhooksForTests(false);
     routesModule!.closeApiRouteEventBroker();
     server?.closeAllConnections();
     receiver?.closeAllConnections();
@@ -128,16 +130,20 @@ async function makeDue(): Promise<void> {
   );
 }
 
-async function runWorker(): Promise<number> {
-  return worker!.processWakeWebhookBatch("wake-webhook-test-worker");
+async function runWorker(overrides: Partial<import("../notifications/wake-webhooks.js").WakeWebhookDeliveryDeps> = {}): Promise<number> {
+  return worker!.processWakeWebhookBatch("wake-webhook-test-worker", { ...worker!.defaultWakeWebhookDeps(), ...overrides });
+}
+
+async function ruleRow(ruleId: string) {
+  return (await dbClient!.pool.query("SELECT * FROM agent_wake_rules WHERE id = $1", [ruleId])).rows[0];
 }
 
 async function humanSays(roomId: string, text: string) {
   return api!.addMessage(roomId, "Ada", text, { source: "browser", account_id: accounts.human });
 }
 
-async function setUpBot(roomName: string) {
-  const bot = await connect(TOKEN_BOT);
+async function setUpBot(roomName: string, token = TOKEN_BOT) {
+  const bot = await connect(token);
   const joined = await call(bot, "join_room", { name: roomName });
   assert.equal(joined.isError, undefined, joined.raw);
   const roomId = String(joined.room_id);
@@ -162,10 +168,14 @@ test("a mention reaches the bot's webhook once, signed; 5xx retries, 4xx does no
   try {
     // The answer names what the rule waits for, never where it delivers.
     assert.equal(rule.event, "room.message");
-    assert.equal(rule.expires_at, null);
+    // 30 days unless asked for less; adding it again renews it.
+    assert.ok(Math.abs(Date.parse(rule.expires_at) - (Date.now() + 30 * 24 * 3600_000)) < 60_000);
     assert.equal(rule.delivery.kind, "webhook");
     assert.equal(addedRaw.includes(hookUrl) || addedRaw.includes(SECRET), false);
-    const stored = (await dbClient!.pool.query("SELECT delivery_target::text AS target, identity_key FROM agent_wake_rules WHERE id = $1", [rule.id])).rows[0];
+    const stored = (await dbClient!.pool.query("SELECT delivery_target::text AS target, identity_key, credential_kind, credential_ref FROM agent_wake_rules WHERE id = $1", [rule.id])).rows[0];
+    // Bound to the credential that registered it: the owner token behind the /mcp session, by its hash.
+    assert.equal(stored.credential_kind, "token");
+    assert.equal(stored.credential_ref, createHash("sha256").update(TOKEN_BOT).digest("hex"));
     assert.equal(stored.target.includes("127.0.0.1") || stored.target.includes(SECRET), false, "the target is sealed");
     assert.equal(stored.identity_key.includes("127.0.0.1"), false, "only a keyed hash of the URL tells rules apart");
 
@@ -216,6 +226,8 @@ test("a mention reaches the bot's webhook once, signed; 5xx retries, 4xx does no
     rows = await deliveries(rule.id);
     assert.equal(rows.at(-1)!.state, "dead");
     assert.equal(rows.at(-1)!.last_status, 400);
+    // Only an error class is kept, never the receiver's or the network's text.
+    assert.equal((await ruleRow(rule.id)).delivery_last_error, "http_4xx");
     await makeDue();
     assert.equal(await runWorker(), 0);
     assert.equal(received.length, 4, "no retry after a 4xx");
@@ -305,17 +317,139 @@ test("a webhook URL on a private address is refused when the rule is added", { s
   try {
     const joined = await call(bot, "join_room", { name: "wake-webhook-refused" });
     const worker = await call(bot, "register_agent_session", { room_id: joined.room_id, display_name: "refusedbot", runtime: "hosted-bot" });
-    for (const url of ["https://10.0.0.8/hook", "https://169.254.169.254/latest", "https://[fd00::1]/hook"]) {
+    for (const url of ["https://10.0.0.8/hook", "https://169.254.169.254/latest", "https://[fd00::1]/hook", "https://letagents.chat/webhooks/x"]) {
       const refused = await call(bot, "add_wake_rule", {
         room_id: joined.room_id, agent_session_id: worker.agent_session_id, event: "room.message", webhook: { url, secret: SECRET },
       });
       assert.equal(failed(refused), true, url);
-      assert.match(refused.raw, /must reach a public address/, url);
+      // One answer for every refusal: nothing about how the host resolved.
+      assert.match(refused.raw, /The URL is not allowed\. Use a public https URL on port 443\./, url);
     }
     const missing = await call(bot, "add_wake_rule", { room_id: joined.room_id, agent_session_id: worker.agent_session_id, event: "room.message" });
     assert.equal(failed(missing), true);
     assert.match(missing.raw, /add webhook/);
+    guard.allowLoopbackWakeWebhooksForTests(false);
+    const otherPort = await call(bot, "add_wake_rule", {
+      room_id: joined.room_id, agent_session_id: worker.agent_session_id, event: "room.message",
+      webhook: { url: "https://hooks.example.com:8443/hook", secret: SECRET },
+    });
+    guard.allowLoopbackWakeWebhooksForTests({});
+    assert.match(otherPort.raw, /The URL is not allowed/);
   } finally {
     await bot.close();
   }
+});
+
+test("a 429 waits for its Retry-After and does not count; access denied at delivery time counts", { skip, timeout: 90_000 }, async () => {
+  const { bot, roomId, rule } = await setUpBot("wake-webhook-throttle");
+  try {
+    replies.push(429);
+    await humanSays(roomId, "@relaybot are you busy?");
+    await makeDue();
+    const before = received.length;
+    await runWorker();
+    assert.equal(received.length, before + 1);
+    let [row] = await deliveries(rule.id);
+    assert.equal(row!.state, "retry");
+    assert.equal(row!.last_status, 429);
+    const due = (await dbClient!.pool.query("SELECT next_attempt_at FROM wake_webhook_deliveries WHERE rule_id = $1", [rule.id])).rows[0];
+    const waitMs = Date.parse(due.next_attempt_at) - Date.now();
+    assert.ok(waitMs > 4 * 60_000 && waitMs <= 5 * 60_000, `no Retry-After: wait the 5-minute bound, got ${waitMs}`);
+    assert.equal((await ruleRow(rule.id)).delivery_consecutive_failures, 0);
+    assert.equal((await ruleRow(rule.id)).delivery_last_error, "http_throttled");
+    await makeDue();
+    await runWorker();
+    [row] = await deliveries(rule.id);
+    assert.equal(row!.state, "delivered");
+
+    // The agent's account loses access to the room: nothing is sent, and it counts.
+    await humanSays(roomId, "@relaybot still there?");
+    await makeDue();
+    const sent = received.length;
+    await runWorker({ authorize: async () => "deny" });
+    assert.equal(received.length, sent, "no POST without room access");
+    const rows = await deliveries(rule.id);
+    assert.equal(rows.at(-1)!.state, "dead");
+    assert.equal((await ruleRow(rule.id)).delivery_last_error, "access_denied");
+    assert.equal((await ruleRow(rule.id)).delivery_consecutive_failures, 1);
+  } finally {
+    await bot.close();
+  }
+});
+
+test("revoking the credential that registered a rule ends it: token deleted, token gone, worker session ended", { skip, timeout: 90_000 }, async () => {
+  // A token deleted through the account's revoke path retires its rules at once.
+  const revocable = "wake_webhook_owner_token_revocable";
+  const accountId = await createOwner("revocable", revocable);
+  const first = await setUpBot("wake-webhook-revoke", revocable);
+  await first.bot.close();
+  const tokenId = (await dbClient!.pool.query("SELECT token_id FROM owner_tokens WHERE token_hash = $1",
+    [createHash("sha256").update(revocable).digest("hex")])).rows[0].token_id;
+  await api!.deleteOwnerTokenById(tokenId);
+  const retired = await ruleRow(first.rule.id);
+  assert.equal(retired.status, "retired");
+  assert.match(retired.ended_reason, /revoked/);
+  await humanSays(first.roomId, "@relaybot hello?");
+  assert.equal((await deliveries(first.rule.id)).length, 0);
+
+  // A credential that vanished another way is caught at the next attempt.
+  const vanishing = "wake_webhook_owner_token_vanishing";
+  await ownerTokens!.createOwnerToken({ accountId, githubUserId: "wake-webhook-revocable", token: vanishing });
+  const second = await setUpBot("wake-webhook-vanish", vanishing);
+  await second.bot.close();
+  await humanSays(second.roomId, "@relaybot hello?");
+  assert.equal((await deliveries(second.rule.id)).length, 1);
+  await dbClient!.pool.query("DELETE FROM owner_tokens WHERE token_hash = $1", [createHash("sha256").update(vanishing).digest("hex")]);
+  const before = received.length;
+  await makeDue();
+  await runWorker();
+  assert.equal(received.length, before, "nothing is sent for a revoked credential");
+  assert.equal((await deliveries(second.rule.id))[0]!.state, "dead");
+  assert.equal((await ruleRow(second.rule.id)).status, "retired");
+
+  // A rule registered with a worker session's bearer ends when the session does.
+  const room = await api!.createProjectWithName("wake-webhook-session");
+  const session = await api!.createRoomAgentSession({
+    room_id: room.id, session_kind: "worker", runtime: "hosted-bot", actor_label: "sessionbot",
+    agent_key: `${accountId}/sessionbot`, display_name: "sessionbot",
+    owner_account_id: accountId, owner_label: "wake-webhook-revocable", ide_label: "Agent",
+  });
+  const { rule } = await service!.addWakeRuleForAgent({
+    roomId: room.id,
+    agent: { agent_key: session.agent_key, agent_name: "sessionbot", session_id: session.session_id, owner_account_id: accountId },
+    body: { event: "room.message", webhook: { url: hookUrl, secret: SECRET } },
+    credential: { kind: "agent_session", ref: session.session_id },
+  });
+  assert.equal((await ruleRow(rule.id)).status, "active");
+  await api!.endRoomAgentSession({ session_id: session.session_id });
+  assert.equal((await ruleRow(rule.id)).status, "retired");
+  await assert.rejects(service!.addWakeRuleForAgent({
+    roomId: room.id,
+    agent: { agent_key: session.agent_key, agent_name: "sessionbot", session_id: session.session_id, owner_account_id: accountId },
+    body: { event: "room.message", webhook: { url: hookUrl, secret: SECRET } },
+  }), /needs an agent that signed in/, "a delivery rule always has a credential");
+});
+
+test("the scheduler ends a delivery rule at its expiry, paused or not, and never leaves one due", { skip, timeout: 60_000 }, async () => {
+  const { bot, rule } = await setUpBot("wake-webhook-expiry");
+  await bot.close();
+  // Paused, with a past check time: the rule is ended, not left due.
+  await dbClient!.pool.query(
+    "UPDATE agent_wake_rules SET status = 'paused', expires_at = now() - interval '1 minute', next_check_at = now() - interval '1 minute' WHERE id = $1",
+    [rule.id]);
+  const now = new Date();
+  await scheduler!.checkWakeRules(await store!.getDueWakeRules(now), now);
+  const ended = await ruleRow(rule.id);
+  assert.equal(ended.status, "expired");
+  // Another one is due early (a skewed clock): it is moved to its expiry, not left due.
+  const other = await setUpBot("wake-webhook-rearm");
+  await other.bot.close();
+  await dbClient!.pool.query("UPDATE agent_wake_rules SET next_check_at = now() - interval '1 minute' WHERE id = $1", [other.rule.id]);
+  const later = new Date();
+  await scheduler!.checkWakeRules(await store!.getDueWakeRules(later), later);
+  const rearmed = await ruleRow(other.rule.id);
+  assert.equal(rearmed.status, "active");
+  assert.equal(Date.parse(rearmed.next_check_at), Date.parse(rearmed.expires_at));
+  const next = await store!.getNextWakeRuleCheckAt();
+  assert.ok(!next || Date.parse(next) > Date.now(), "nothing is left due");
 });

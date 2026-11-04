@@ -1,22 +1,54 @@
 /**
  * Outbound wake webhooks call a URL that an agent chose. Before LetAgents
- * saves or calls one it must be https, and every address its host resolves
- * to must be a public unicast address: loopback, link-local, private (RFC
- * 1918, CGNAT, ULA), multicast, unspecified and reserved ranges are refused,
- * for IPv4 and IPv6 alike, including IPv4 written inside IPv6. The request
- * then connects to the address that was checked (it is pinned through the
- * socket's `lookup`), so a DNS change between the check and the connect
- * cannot send it anywhere else. No redirect is followed.
+ * saves or calls one it must be https on port 443, it must not name this
+ * server, and every address its host resolves to must be a public unicast
+ * address: loopback, link-local, private (RFC 1918, CGNAT, ULA), multicast,
+ * unspecified and reserved ranges are refused, for IPv4 and IPv6 alike,
+ * including IPv4 written inside IPv6. The request then connects to the
+ * address that was checked (it is pinned through the socket's `lookup`), so a
+ * DNS change between the check and the connect cannot send it anywhere else.
+ * No redirect is followed.
+ *
+ * Errors are classes (`WakeDeliveryErrorClass`), never transport text: what
+ * is stored or shown cannot reveal how a host resolved.
  */
-import { lookup as dnsLookup } from "node:dns/promises";
 import http from "node:http";
 import https from "node:https";
 import { isIP } from "node:net";
 
+import { HostResolveError, resolveWithinDeadline, type HostResolver } from "./dns-resolve.js";
+import { letAgentsPublicHostnames } from "./public-url.js";
+
+/** What went wrong with a delivery, as stored on the rule and shown to its owner. */
+export type WakeDeliveryErrorClass =
+  | "url_not_allowed"
+  | "address_not_allowed"
+  | "dns_timeout"
+  | "dns_failed"
+  | "connect_failed"
+  | "tls_failed"
+  | "timeout"
+  | "http_redirect"
+  | "http_4xx"
+  | "http_throttled"
+  | "http_5xx"
+  | "body_too_large"
+  | "access_denied"
+  | "credential_revoked"
+  | "target_unreadable"
+  | "not_configured"
+  | "smtp_rejected"
+  | "smtp_deferred"
+  | "smtp_operator";
+
+/** The one answer to a refused URL, whatever the reason. */
+export const WAKE_WEBHOOK_URL_REFUSED = "The URL is not allowed. Use a public https URL on port 443.";
+
 export class WakeWebhookUrlError extends Error {
   readonly status = 400;
-  constructor(message: string) {
-    super(message);
+  /** Kept for tests and logs on this server; never shown to the caller. */
+  constructor(readonly reason: string, readonly errorClass: WakeDeliveryErrorClass = "url_not_allowed") {
+    super(WAKE_WEBHOOK_URL_REFUSED);
     this.name = "WakeWebhookUrlError";
   }
 }
@@ -24,8 +56,8 @@ export class WakeWebhookUrlError extends Error {
 /** The host could not be resolved now. At registration it is refused; at delivery it is retried. */
 export class WakeWebhookResolveError extends Error {
   readonly status = 400;
-  constructor(message: string) {
-    super(message);
+  constructor(readonly errorClass: "dns_timeout" | "dns_failed") {
+    super(WAKE_WEBHOOK_URL_REFUSED);
     this.name = "WakeWebhookResolveError";
   }
 }
@@ -35,20 +67,19 @@ export interface ResolvedAddress {
   family: 4 | 6;
 }
 
-/** Every address a host name resolves to, as `dns.lookup(host, { all: true })` returns them. */
-export type WakeWebhookLookup = (hostname: string) => Promise<ReadonlyArray<{ address: string; family: number }>>;
+/** Every address a host name resolves to. Tests pass a stub; the server uses c-ares (`dns-resolve.ts`). */
+export type WakeWebhookLookup = HostResolver;
 
-const systemLookup: WakeWebhookLookup = (hostname) => dnsLookup(hostname, { all: true, verbatim: true });
-
-let loopbackHttpForTests = false;
+let loopbackForTests: { ca?: string } | null = null;
 
 /**
- * Tests only: lets a stub on `http://127.0.0.1` (or `[::1]`) receive
- * deliveries over plain http. No environment variable or setting turns this
- * on; only a test calls it. Private addresses stay refused.
+ * Tests only: lets a stub on `127.0.0.1` or `[::1]` receive deliveries, over
+ * plain http or over https with a certificate signed by `ca`, on any port. No
+ * environment variable or setting turns this on; only a test calls it.
+ * Private addresses stay refused.
  */
-export function allowLoopbackHttpWakeWebhooksForTests(enabled: boolean): void {
-  loopbackHttpForTests = enabled;
+export function allowLoopbackWakeWebhooksForTests(options: { ca?: string } | false): void {
+  loopbackForTests = options === false ? null : { ...options };
 }
 
 type AddressClass = "loopback" | "private" | "link-local" | "multicast" | "unspecified" | "reserved";
@@ -149,9 +180,14 @@ function classifyIPv6(groups: readonly number[]): AddressClass | null {
   if (prefixMatches(groups, [0xfe80], 10)) return "link-local";
   if (prefixMatches(groups, [0xfec0], 10)) return "private";
   if (prefixMatches(groups, [0xff00], 8)) return "multicast";
-  // Teredo hides its IPv4 address; documentation and discard ranges are not hosts.
+  // Teredo hides its IPv4 address; documentation, benchmarking, ORCHID and
+  // discard ranges are not hosts.
   if (prefixMatches(groups, [0x2001, 0], 32)) return "reserved";
+  if (prefixMatches(groups, [0x2001, 0x2, 0], 48)) return "reserved";
+  if (prefixMatches(groups, [0x2001, 0x10], 28)) return "reserved";
+  if (prefixMatches(groups, [0x2001, 0x20], 28)) return "reserved";
   if (prefixMatches(groups, [0x2001, 0xdb8], 32)) return "reserved";
+  if (prefixMatches(groups, [0x3fff, 0], 20)) return "reserved";
   if (prefixMatches(groups, [0x100, 0, 0, 0], 64)) return "reserved";
   // Everything else outside global unicast (2000::/3) is not a public host.
   if (!prefixMatches(groups, [0x2000], 3)) return "reserved";
@@ -178,7 +214,19 @@ function bareHost(url: URL): string {
 }
 
 function loopbackAllowedForTests(address: string): boolean {
-  return loopbackHttpForTests && (address === "127.0.0.1" || address === "::1");
+  return loopbackForTests !== null && (address === "127.0.0.1" || address === "::1");
+}
+
+/**
+ * The target as a rule identifies it: scheme, host and path. Two URLs that
+ * differ only in their query string (or fragment) are one target.
+ */
+export function wakeWebhookTargetKey(url: URL): string {
+  return `${url.protocol}//${bareHost(url).toLowerCase()}:${url.port || "443"}${url.pathname}`;
+}
+
+export function wakeWebhookHost(url: URL): string {
+  return bareHost(url).toLowerCase();
 }
 
 /** Parse and check the URL itself. The fragment is dropped: it never leaves the client. */
@@ -187,17 +235,18 @@ export function parseWakeWebhookUrl(raw: string): URL {
   try {
     url = new URL(raw.trim());
   } catch {
-    throw new WakeWebhookUrlError("webhook.url is not a valid URL.");
+    throw new WakeWebhookUrlError("not a URL");
   }
-  // Under the test switch plain http is accepted; the address check below still admits only loopback for it.
-  const allowHttp = loopbackHttpForTests && url.protocol === "http:";
-  if (url.protocol !== "https:" && !allowHttp) throw new WakeWebhookUrlError("webhook.url must use https.");
-  if (url.username || url.password) throw new WakeWebhookUrlError("webhook.url must not carry a user name or password.");
+  // Under the test switch plain http and any port are accepted; the address
+  // check below still admits only loopback for them.
+  const testing = loopbackForTests !== null;
+  if (url.protocol !== "https:" && !(testing && url.protocol === "http:")) throw new WakeWebhookUrlError("not https");
+  if (url.port && url.port !== "443" && !testing) throw new WakeWebhookUrlError("not port 443");
+  if (url.username || url.password) throw new WakeWebhookUrlError("credentials in the URL");
   const host = bareHost(url).toLowerCase();
-  if (!host) throw new WakeWebhookUrlError("webhook.url needs a host.");
-  if (host === "localhost" || host.endsWith(".localhost")) {
-    throw new WakeWebhookUrlError("webhook.url must reach a public address, not this server.");
-  }
+  if (!host) throw new WakeWebhookUrlError("no host");
+  if (host === "localhost" || host.endsWith(".localhost")) throw new WakeWebhookUrlError("localhost");
+  if (letAgentsPublicHostnames().has(host)) throw new WakeWebhookUrlError("this server");
   url.hash = "";
   return url;
 }
@@ -209,7 +258,8 @@ export function parseWakeWebhookUrl(raw: string): URL {
  */
 export async function resolveWakeWebhookAddress(
   url: URL,
-  lookup: WakeWebhookLookup = systemLookup,
+  lookup?: WakeWebhookLookup,
+  deadlineMs?: number,
 ): Promise<ResolvedAddress> {
   const host = bareHost(url);
   const literal = isIP(host);
@@ -217,18 +267,16 @@ export async function resolveWakeWebhookAddress(
   if (literal) addresses = [{ address: host, family: literal }];
   else {
     try {
-      addresses = await lookup(host);
-    } catch {
-      throw new WakeWebhookResolveError(`webhook.url host ${host} could not be resolved.`);
+      addresses = await resolveWithinDeadline(host, lookup, deadlineMs);
+    } catch (error) {
+      throw new WakeWebhookResolveError(error instanceof HostResolveError && error.reason === "timeout" ? "dns_timeout" : "dns_failed");
     }
   }
-  if (addresses.length === 0) throw new WakeWebhookResolveError(`webhook.url host ${host} could not be resolved.`);
+  if (addresses.length === 0) throw new WakeWebhookResolveError("dns_failed");
   for (const entry of addresses) {
-    if (loopbackAllowedForTests(entry.address) && url.protocol === "http:") continue;
+    if (loopbackAllowedForTests(entry.address)) continue;
     const refused = refusedWebhookAddress(entry.address);
-    if (refused) {
-      throw new WakeWebhookUrlError(`webhook.url must reach a public address; ${host} resolves to a ${refused} address.`);
-    }
+    if (refused) throw new WakeWebhookUrlError(`resolves to a ${refused} address`, "address_not_allowed");
   }
   const first = addresses[0]!;
   return { address: first.address, family: isIP(first.address) === 6 ? 6 : 4 };
@@ -243,6 +291,8 @@ export async function assertWakeWebhookUrl(raw: string, lookup?: WakeWebhookLook
 
 export const WAKE_WEBHOOK_TIMEOUT_MS = 10_000;
 export const WAKE_WEBHOOK_MAX_BODY_BYTES = 4096;
+/** The longest a 408 or 429 answer may hold a delivery back. */
+export const WAKE_WEBHOOK_MAX_HOLD_MS = 5 * 60_000;
 
 export type WakeWebhookOutcome = "delivered" | "retry" | "dead";
 
@@ -250,20 +300,44 @@ export interface WakeWebhookSendResult {
   outcome: WakeWebhookOutcome;
   /** HTTP status, or 0 when no response arrived. */
   status: number;
-  error: string | null;
+  error: WakeDeliveryErrorClass | null;
+  /**
+   * 408 or 429: the receiver asked for time. The retry waits for its
+   * Retry-After (at most 5 minutes) and does not count toward pausing the rule.
+   */
+  throttled?: boolean;
+  retryAfterMs?: number;
 }
 
-/** 2xx delivers. Network errors and 5xx are retried; 4xx and redirects are final. */
+/** 2xx delivers. Network errors, 5xx, 408 and 429 are retried; other 4xx and redirects are final. */
 export function classifyWakeWebhookStatus(status: number): WakeWebhookOutcome {
   if (status >= 200 && status < 300) return "delivered";
-  if (status === 0 || status >= 500) return "retry";
+  if (status === 0 || status >= 500 || status === 408 || status === 429) return "retry";
   return "dead";
 }
 
-function describeStatus(status: number): string | null {
+function statusErrorClass(status: number): WakeDeliveryErrorClass | null {
   if (status >= 200 && status < 300) return null;
-  if (status >= 300 && status < 400) return `HTTP ${status}: redirects are not followed`;
-  return `HTTP ${status}`;
+  if (status >= 300 && status < 400) return "http_redirect";
+  if (status === 408 || status === 429) return "http_throttled";
+  if (status >= 500) return "http_5xx";
+  return "http_4xx";
+}
+
+/** Retry-After as seconds or an HTTP date, bounded to [1 s, 5 min]; undefined when absent or unreadable. */
+export function parseRetryAfter(value: string | string[] | undefined, nowMs = Date.now()): number | undefined {
+  const text = (Array.isArray(value) ? value[0] : value)?.trim();
+  if (!text) return undefined;
+  const ms = /^\d+$/.test(text) ? Number(text) * 1000 : Date.parse(text) - nowMs;
+  if (!Number.isFinite(ms)) return undefined;
+  return Math.min(Math.max(ms, 1000), WAKE_WEBHOOK_MAX_HOLD_MS);
+}
+
+function transportErrorClass(error: NodeJS.ErrnoException, timedOut: boolean): WakeDeliveryErrorClass {
+  if (timedOut) return "timeout";
+  const code = String(error.code ?? "");
+  if (/CERT|SSL|TLS|SELF_SIGNED|UNABLE_TO_VERIFY|ERR_TLS/i.test(code)) return "tls_failed";
+  return "connect_failed";
 }
 
 /**
@@ -278,23 +352,26 @@ export async function postWakeWebhook(input: {
   lookup?: WakeWebhookLookup;
 }): Promise<WakeWebhookSendResult> {
   const bytes = Buffer.byteLength(input.body, "utf8");
-  if (bytes > WAKE_WEBHOOK_MAX_BODY_BYTES) {
-    return { outcome: "dead", status: 0, error: `Request body is ${bytes} bytes; the limit is ${WAKE_WEBHOOK_MAX_BODY_BYTES}.` };
-  }
+  if (bytes > WAKE_WEBHOOK_MAX_BODY_BYTES) return { outcome: "dead", status: 0, error: "body_too_large" };
+  const startedAt = Date.now();
+  const timeoutMs = input.timeoutMs ?? WAKE_WEBHOOK_TIMEOUT_MS;
   let url: URL;
   let pinned: ResolvedAddress;
   try {
     url = parseWakeWebhookUrl(input.url);
-    pinned = await resolveWakeWebhookAddress(url, input.lookup);
+    // DNS gets part of the 10 s, never all of it.
+    pinned = await resolveWakeWebhookAddress(url, input.lookup, Math.min(3_000, Math.max(100, timeoutMs / 3)));
   } catch (error) {
-    if (error instanceof WakeWebhookResolveError) return { outcome: "retry", status: 0, error: error.message };
-    return { outcome: "dead", status: 0, error: error instanceof Error ? error.message : String(error) };
+    if (error instanceof WakeWebhookResolveError) return { outcome: "retry", status: 0, error: error.errorClass };
+    return { outcome: "dead", status: 0, error: error instanceof WakeWebhookUrlError ? error.errorClass : "url_not_allowed" };
   }
   const host = bareHost(url);
   const transport = url.protocol === "https:" ? https : http;
-  const timeoutMs = input.timeoutMs ?? WAKE_WEBHOOK_TIMEOUT_MS;
+  const remainingMs = Math.max(100, timeoutMs - (Date.now() - startedAt));
+  const ca = loopbackForTests?.ca;
   return new Promise<WakeWebhookSendResult>((resolve) => {
     let settled = false;
+    let timedOut = false;
     const finish = (result: WakeWebhookSendResult) => {
       if (settled) return;
       settled = true;
@@ -317,19 +394,27 @@ export async function postWakeWebhook(input: {
       agent: false,
       lookup: pinnedLookup as never,
       ...(url.protocol === "https:" && !isIP(host) ? { servername: host } : {}),
+      ...(url.protocol === "https:" && ca ? { ca } : {}),
       headers: { ...input.headers, Host: url.host, "Content-Length": String(bytes) },
     }, (response) => {
       const status = response.statusCode ?? 0;
+      const retryAfterMs = status === 408 || status === 429 ? parseRetryAfter(response.headers["retry-after"]) : undefined;
       // Only the status matters; drop the body unread.
       response.destroy();
-      finish({ outcome: classifyWakeWebhookStatus(status), status, error: describeStatus(status) });
+      finish({
+        outcome: classifyWakeWebhookStatus(status),
+        status,
+        error: statusErrorClass(status),
+        ...(status === 408 || status === 429 ? { throttled: true, ...(retryAfterMs ? { retryAfterMs } : {}) } : {}),
+      });
     });
     const timer = setTimeout(() => {
-      request.destroy(new Error(`No response within ${Math.round(timeoutMs / 1000)} s.`));
-    }, timeoutMs);
+      timedOut = true;
+      request.destroy(new Error("timeout"));
+    }, remainingMs);
     timer.unref?.();
     request.on("error", (error) => {
-      finish({ outcome: "retry", status: 0, error: error.message.slice(0, 300) || "Network error." });
+      finish({ outcome: "retry", status: 0, error: transportErrorClass(error, timedOut) });
     });
     request.end(input.body);
   });

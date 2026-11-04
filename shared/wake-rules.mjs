@@ -50,12 +50,18 @@ export const WAKE_RULE_LIMITS = Object.freeze({
   checkSettleMs: 90 * 1000,
   /** A timer that could not fire on time still fires within this grace. */
   timerGraceMs: 10 * 60 * 1000,
-  /** A webhook rule has no expiry unless it sets one, and then at most this far away. */
+  /** A webhook or email rule lasts this long unless it sets a sooner end; adding it again renews it. */
   webhookMaxTtlMs: 30 * 24 * 60 * 60 * 1000,
   /** At most one delivery per rule in this window; later matches fold into the next one. */
   webhookCoalesceMs: 10 * 1000,
-  /** Deliveries one rule may start in an hour; matches beyond it are dropped and counted. */
+  /** Deliveries one rule may send in an hour; past it, one delivery waits for the hour's end and later matches fold into it. */
   webhookHourlyCap: 20,
+  /** Deliveries all the rules of one room may send in an hour, the same way. */
+  roomHourlyCap: 60,
+  /** Deliveries one account's rules may send to one target host in an hour, the same way. */
+  hostHourlyCapPerAccount: 60,
+  /** Webhook and email rules one account may hold across all rooms. */
+  deliveryRulesPerAccount: 100,
   /** A rule pauses after this many deliveries in a row failed for good. */
   webhookPauseAfterFailures: 5,
   webhookTextPreviewMax: 200,
@@ -69,6 +75,10 @@ export const WAKE_RULE_LIMITS = Object.freeze({
   emailConfirmResendMs: 10 * 60 * 1000,
   /** Email rules one account may have waiting for confirmation, across rooms. */
   emailPendingPerAccount: 3,
+  /** Confirmation emails one address may get in a day, from any rule, cancelled ones included. */
+  emailConfirmationsPerAddressPerDay: 3,
+  /** Confirmation emails one account may cause in a day. */
+  emailConfirmationsPerAccountPerDay: 10,
 });
 
 export const WAKE_TASK_STATUSES = Object.freeze([
@@ -188,12 +198,14 @@ function parseArguments(event, raw, nowMs) {
       };
     }
     case "room.message": {
-      allowOnly(args, ["mentions_me", "any"], event);
-      for (const key of ["mentions_me", "any"]) {
+      allowOnly(args, ["mentions_me", "any", "include_agents"], event);
+      for (const key of ["mentions_me", "any", "include_agents"]) {
         if (args[key] !== undefined && args[key] !== true) throw new WakeRuleError(`${key} must be true when set.`);
       }
       if (args.mentions_me && args.any) throw new WakeRuleError("room.message takes mentions_me or any, not both.");
-      return args.any ? { any: true } : { mentions_me: true };
+      if (args.include_agents && !args.any) throw new WakeRuleError("include_agents goes with any: a message for you already wakes you, whoever sent it.");
+      // `any` leaves out other agents' messages unless asked, so two bots cannot wake each other in a loop.
+      return args.any ? { any: true, ...(args.include_agents ? { include_agents: true } : {}) } : { mentions_me: true };
     }
     default:
       throw new WakeRuleError(`event must be one of ${WAKE_RULE_EVENTS.join(", ")}.`);
@@ -274,8 +286,8 @@ export function parseWakeRuleInput(value, now = new Date()) {
   if (input.repeat === true && input.event === "timer") throw new WakeRuleError("A timer fires once; add another timer to wake again.");
   let expiresMs;
   if (webhookRule) {
-    // A hosted bot's rule lasts until it is cancelled, unless it asks for an end.
-    if (input.expires_at == null) expiresMs = null;
+    // A delivery rule lasts 30 days unless it asks for a sooner end; adding it again renews it.
+    if (input.expires_at == null) expiresMs = nowMs + WAKE_RULE_LIMITS.webhookMaxTtlMs;
     else {
       expiresMs = Date.parse(String(input.expires_at));
       if (!Number.isFinite(expiresMs)) throw new WakeRuleError("expires_at must be an ISO 8601 time.");

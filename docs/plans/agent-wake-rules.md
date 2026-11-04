@@ -215,48 +215,70 @@ the bot's turn. Nothing about it is specific to one platform.
   some participants matches only a routed recipient. Known gap: a recipient
   that Jev elects after commit (rooms of three or more agents with Jev active)
   does not trigger `mentions_me`; a mention does.
+  `any` leaves out other agents' messages unless `include_agents: true`.
 - **Delivery is an outbox.** A match writes a row in `wake_webhook_deliveries`
   in the same transaction (in a savepoint: a failure never blocks the
-  message). The notifications worker claims rows like desktop pushes and runs
-  its own 2-second loop, so a slow receiver never delays a push
+  message). The notifications worker claims rows like desktop pushes, fairly
+  per account (at most 3 in flight per account), in separate webhook and email
+  lanes that each start the next delivery as soon as one ends, so a slow
+  receiver never delays a push or another account
   (`src/api/notifications/wake-webhooks.ts`). One delivery per rule may wait;
-  matches within 10 s fold into it and move it to the newest message. A rule
-  starts at most 20 deliveries an hour; more matches are dropped and counted.
+  matches within 10 s fold into it and move it to the newest message. Three
+  hourly budgets apply (20 per rule, 60 per room, 60 per account and target
+  host); when one is spent, one delivery waits for the budget to have room and
+  later matches fold into it (`over_cap_count`). An account holds at most 100
+  delivery rules.
 - **Results.** `2xx` delivers; network errors, timeouts and `5xx` retry with
-  the push backoff, up to 10 attempts; `4xx`, redirects and refused addresses
-  are final. Five final failures in a row set `status: "paused"`; adding the
-  same rule again resumes it. A delivered row keeps no message text.
-- **Safety.** https only; every resolved address must be public, checked at
-  registration and again at each attempt, and the socket connects to the
-  checked address (`src/api/wake-rules/webhook-url.ts`). The target is sealed
-  with the connector key and bound to the rule and account; only a keyed hash
-  of the URL is part of the rule's identity. Each attempt re-checks that the
-  agent's account can read the room. The body carries ids, the sender, a
-  200-character preview and the room link; receivers verify
-  `X-LetAgents-Signature` over `<timestamp>.<raw body>` and drop repeated
-  `X-LetAgents-Delivery` ids.
-- **Lifetime and visibility.** A webhook rule has no expiry unless it sets
-  one (at most 30 days) and then ends quietly, without a wake notice. It
-  counts against the 20-rule limit, paused or not. People see it like any
+  the push backoff, up to 10 attempts; `408` and `429` wait for `Retry-After`
+  (at most 5 minutes) and never count; other `4xx`, redirects and refused
+  addresses are final. Five final failures in a row set `status: "paused"`;
+  adding the same rule again resumes it. A delivered row keeps no message
+  text, and the rule keeps only an error class.
+- **Safety.** https on port 443 only, never this server's own host; every
+  resolved address must be public, checked at registration and again at each
+  attempt, with c-ares under a deadline (`dns-resolve.ts`), and the socket
+  connects to the checked address (`webhook-url.ts`). Every refusal gives the
+  same answer. The target is sealed with the connector key and bound to the
+  rule and account; keyed fingerprints of the target (without its query) and
+  of its host are the rule's identity and its budget keys. The rule is bound to
+  the credential that added it (the owner token or OAuth grant behind `/mcp`,
+  or a worker session that used its bearer): revoking it retires the rule in
+  the same transaction (`revokeMcpOAuthGrant`, owner-token delete, agent
+  session end), and each attempt checks it again, as it checks that the
+  agent's account can read the room. Receivers verify `X-LetAgents-Signature`
+  over `<timestamp>.<raw body>` and drop repeated `X-LetAgents-Delivery` ids.
+- **Lifetime and visibility.** A delivery rule lasts 30 days (or until a sooner
+  `expires_at`) and adding it again renews it; it then ends quietly, without a
+  wake notice. The scheduler ends or re-arms a `room.message` rule whatever its
+  status, so none is left due. It counts against the 20-rule limit, paused or
+  not, and the identity is unique across held statuses. People see it like any
   rule plus `delivery: { kind, paused }`; only the account that owns the agent
-  sees its counts and last result, and only that account (the agent or its
-  person) may cancel it.
+  sees its counts and last result. That account or a room admin may cancel
+  it; only that account may undo the cancel or add it again.
 
 **Email is a second delivery kind** (`email: { to }`, exactly one of webhook or
-email). Matching, coalescing, the cap and the pause are the same; the delivery
-row has `kind = 'email'`, and the worker sends it through nodemailer's SMTP
-transport (`LETAGENTS_EMAIL_SMTP_URL`, `LETAGENTS_EMAIL_FROM`; without both, an
-email rule is refused). An address is consent, so a new email rule is
-`pending_confirmation`: its first email is a confirmation (a delivery row with
-`purpose = 'confirm'`) whose link (`GET /wake-rules/confirm/<token>`, 24 hours)
-makes it `active`. Every email has a stop link (`GET` or one-click `POST
-/wake-rules/disable/<token>`) that pauses the rule and clears the confirmation,
-so the agent can resume it only after the address confirms again. Link tokens
-are HMACs under the connector key; only their SHA-256 is stored. A confirmation
-link that expires unused ends the rule. One account may have at most 3 email
-rules waiting for confirmation, and a rule sends a confirmation at most every
-10 minutes. Code: `src/api/wake-rules/email.ts`,
-`src/api/routes/wake-rule-links.ts`; migration `0131_wake_email`.
+email). Matching, coalescing, the budgets and the pause are the same; the
+delivery row has `kind = 'email'`, and the worker sends it through a small
+built-in SMTP client (`smtp.ts`: `smtps://`, or `smtp://` with STARTTLS
+required; AUTH PLAIN/LOGIN; quoted-printable text; no mail library, because
+the root package is also the npm package agents install). It is configured by
+`LETAGENTS_EMAIL_SMTP_URL` and `LETAGENTS_EMAIL_FROM`; without both, an email
+rule is refused. An address is consent, so a new email rule is
+`pending_confirmation`: its first email is a fixed-wording confirmation (only
+the room link; no agent or room text) whose link opens a page with a Confirm
+button; the button's POST makes it `active`, so a link scanner confirms
+nothing. Every email has a stop link: its page's Stop button, or a mail
+client's one-click POST with exactly `List-Unsubscribe=One-Click`, pauses the
+rule, clears the confirmation and remembers the address
+(`wake_email_suppressions`): the agent cannot send it a new request until the
+person asks for one from the Stopped page. Confirmations are logged per
+address fingerprint (`wake_email_confirmations`): at most 3 per address and
+10 per account a day, cancelled and expired rules included. Only a reply to
+RCPT TO or DATA counts against a rule; the operator's SMTP problems retry and
+are logged. Link tokens are HMACs under the connector key; only their SHA-256
+is stored. A confirmation link that expires unused ends the rule. Code:
+`src/api/wake-rules/email.ts`, `smtp.ts`, `src/api/routes/wake-rule-links.ts`;
+migrations `0131_wake_email`, `0132_wake_delivery_hardening`.
 
 The receiver checklist, examples and the operator checklist for email are in
 `docs/ticket-connectors.md`, "Remote MCP endpoint", "Wake a bot or service by
@@ -311,8 +333,12 @@ against the agent's 20-rule limit like a new rule.
 or desktop app keeps working: it simply has no wake tools and shows wake notices
 as ordinary system messages.
 
-**Wake webhooks and email:** migrations `0130_wake_webhooks` and
-`0131_wake_email`, and the API (email also needs the two SMTP settings). The remote MCP
+**Wake webhooks and email:** migrations `0130_wake_webhooks`,
+`0131_wake_email` and `0132_wake_delivery_hardening`, and the API (email also
+needs the two SMTP settings). During a rolling deploy an older API instance
+does read an active `room.message` rule when it comes due, but a new rule is
+due only at its expiry 30 days out, and an older instance never creates one or
+sends a delivery; finish the rollout well within that. The remote MCP
 endpoint (`/mcp`) runs in the API, so hosted bots can register `room.message`
 rules at once; local agents get the event with the next `letagents` package
 release. A desktop app older than this change shows a webhook rule as
@@ -335,20 +361,30 @@ builds show "Waiting for a message for me · By webhook · Until cancelled".
 - `src/mcp/__tests__/execution-profile-tools.test.ts`: tool availability per
   profile, and absence in rooms kept only on this Mac.
 - `src/api/__tests__/wake-webhooks.test.ts`: signature and timestamp over the
-  exact body, address refusal (literals and a resolver stub), the pinned
-  connection, no redirects, coalescing, the hourly cap, own-message exclusion,
-  routing-based matching and the pause count.
+  exact body, address refusal (literals and a resolver stub) with one answer,
+  port 443, this server's host, the DNS deadline and lookup bound, the pinned
+  connection over http and over TLS (a self-signed certificate the test
+  trusts), no redirects, 408/429 holds, coalescing, the hourly budgets,
+  own-message exclusion, `include_agents`, routing-based matching and the pause
+  count.
 - `src/api/__tests__/wake-webhooks-db.test.ts` (PostgreSQL, over `/mcp`): a
-  mention reaches a local receiver signed; `5xx` retries, `4xx` does not; the
-  agent's own message never delivers; others see no URL or secret and cannot
-  cancel; five failures pause and adding again resumes.
-- `src/api/__tests__/wake-email.test.ts`: the email subject, body and headers
-  (nodemailer `jsonTransport`), SMTP result classes, link tokens and the
-  address shape.
+  mention reaches a local receiver signed; `5xx` retries, `4xx` does not, `429`
+  waits and does not count; access denied at delivery counts; others see no
+  URL or secret and cannot cancel; five failures pause and adding again
+  resumes; deleting the owner token, a token that vanished, and an ended worker
+  session each retire the rule; the scheduler ends an expired paused rule and
+  re-arms an early one.
+- `src/api/__tests__/wake-email.test.ts`: the SMTP client against a loopback
+  stub (STARTTLS required, smtps, AUTH PLAIN and LOGIN, dot-stuffing, an
+  untrusted certificate, rejections at each step and their classes), MIME
+  encoding, the fixed confirmation wording, link tokens and the address shape.
 - `src/api/__tests__/wake-email-db.test.ts` (PostgreSQL, over `/mcp`): refused
-  without SMTP settings; no delivery before the confirmation link, one after;
-  the hourly cap; the stop link; re-adding needs a new confirmation; the
-  pending cap per account.
+  without SMTP settings; opening a link changes nothing, the button confirms;
+  no message email before confirmation, one after; the exact one-click body;
+  stop remembers the address until it asks again; add and cancel in a loop is
+  bounded; an unconfirmed link expiry ends the rule; a stop while pending
+  leaves nothing due; past the hourly budget one email waits and later matches
+  fold into it.
 
 ## Open questions
 

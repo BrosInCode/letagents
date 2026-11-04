@@ -11,6 +11,7 @@ import {
   getActiveTaskWakeRules,
   getDueWakeRules,
   getNextWakeRuleCheckAt,
+  rearmWakeDeliveryRule,
   recordWakeRuleFiredTx,
   retireWakeRule,
   scheduleWakeRuleCheck,
@@ -86,20 +87,21 @@ export async function checkWakeRules(
 ): Promise<void> {
   for (const rule of rules) {
     try {
-      if (rule.status === "pending_confirmation") {
-        // An email rule whose address never opened the link ends when the link stops working.
-        if (rule.confirm_expires_at && now.getTime() >= Date.parse(rule.confirm_expires_at)
-          && await endUnconfirmedWakeEmailRule(rule, now)) queueWakeRuleInvalidation(rule.room_id);
+      if (rule.event === "room.message") {
+        // A delivery rule is sent as messages arrive; here it only ends. Whatever
+        // its status, it either ends now or waits for its next deadline, so it
+        // is never left due (a due rule would make the loop spin).
+        let ended = false;
+        if (rule.status === "pending_confirmation" && rule.confirm_expires_at && now.getTime() >= Date.parse(rule.confirm_expires_at)) {
+          ended = await endUnconfirmedWakeEmailRule(rule, now);
+        } else if (rule.expires_at && now.getTime() >= Date.parse(rule.expires_at)) {
+          ended = await expireWakeWebhookRule(rule, now);
+        }
+        if (ended) queueWakeRuleInvalidation(rule.room_id);
+        else await rearmWakeDeliveryRule(rule);
         continue;
       }
       const evaluation = await evaluateWakeRule(rule, now, deps);
-      if (rule.event === "room.message") {
-        // A delivery rule is delivered as messages arrive; here it only ends at its expiry, quietly.
-        if (evaluation.kind === "expire") {
-          if (await expireWakeWebhookRule(rule, now)) queueWakeRuleInvalidation(rule.room_id);
-        } else if (rule.expires_at) await scheduleWakeRuleCheck(rule, rule.expires_at);
-        continue;
-      }
       if (evaluation.kind === "wait") await scheduleWakeRuleCheck(rule, evaluation.nextCheckAt, { cursorAt: evaluation.cursorAt });
       else if (evaluation.kind === "retire" && !evaluation.wake) {
         if (await retireWakeRule(rule, evaluation.reason, now)) queueWakeRuleInvalidation(rule.room_id);
@@ -107,8 +109,10 @@ export async function checkWakeRules(
     } catch (error) {
       console.error(`[wake rules] check failed for ${rule.id}`, error);
       // Push a failing rule back so it neither spins nor crowds out the others.
-      await scheduleWakeRuleCheck(rule, new Date(now.getTime() + RULE_FAILURE_BACKOFF_MS).toISOString(), { capAtExpiry: false })
-        .catch(() => undefined);
+      const later = new Date(now.getTime() + RULE_FAILURE_BACKOFF_MS).toISOString();
+      await (rule.event === "room.message"
+        ? rearmWakeDeliveryRule(rule, later)
+        : scheduleWakeRuleCheck(rule, later, { capAtExpiry: false })).catch(() => undefined);
     }
   }
 }

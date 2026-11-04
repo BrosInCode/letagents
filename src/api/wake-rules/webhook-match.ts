@@ -70,7 +70,9 @@ export function isOwnWakeWebhookMessage(rule: WakeWebhookRuleCandidate, facts: P
  * no live session for routing to consider, a mention that names it and no
  * other agent in the room.
  *
- * `any`: every top-level message, except notices addressed to another agent.
+ * `any`: every top-level message, except notices addressed to another agent
+ * and, unless `include_agents`, other agents' messages: two bots that each
+ * take every message would otherwise wake each other without end.
  *
  * Never the agent's own messages, and never a blank automatic prompt.
  */
@@ -97,7 +99,10 @@ export function matchWakeWebhookRules<T extends WakeWebhookRuleCandidate>(
     if (isOwnWakeWebhookMessage(rule, facts)) return false;
     if (facts.addressedAgentKey) return facts.addressedAgentKey === rule.agent_key;
     const forThisAgent = facts.recipientAgentKeys.has(rule.agent_key);
-    if (rule.arguments.any) return forThisAgent || (!facts.restricted && facts.thread_root_number === null);
+    if (rule.arguments.any) {
+      const fromAgent = facts.source === "agent" || Boolean(facts.publisher_agent_key);
+      return forThisAgent || (!facts.restricted && facts.thread_root_number === null && (!fromAgent || Boolean(rule.arguments.include_agents)));
+    }
     if (forThisAgent) return true;
     return !activeKeys.has(rule.agent_key) && mentionedWithoutSession().has(rule.agent_key);
   });
