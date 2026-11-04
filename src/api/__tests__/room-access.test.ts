@@ -447,3 +447,11 @@ test("resolveGitHubRoomEntryDecision allows non-repo room entries", async () => 
     { kind: "allow" }
   );
 });
+
+test("an unanswered GitHub role check answers 503 to retry, never a refusal or a sign-in request", () => {
+  const { res, state } = jsonResponse();
+  assert.equal(replyRepoRoomAccessDecision(res, "github.com/acme/app", { kind: "repo_access_unavailable" }), false);
+  assert.equal(state.statusCode, 503);
+  assert.equal((state.body as { code?: string }).code, "REPO_ACCESS_UNAVAILABLE");
+  assert.equal((state.body as { room_id?: string }).room_id, "github.com/acme/app");
+});

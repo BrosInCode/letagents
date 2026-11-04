@@ -291,6 +291,11 @@ export async function removeRoomMember(roomId: string, accountId: string, actorA
     [roomId, accountId, actorAccountId]);
     await client.query(`UPDATE room_join_requests SET state = 'cancelled', decided_at = now()
       WHERE room_id = $1 AND account_id = $2 AND state = 'pending'`, [roomId, accountId]);
+    // The person's ticket filters stop bringing their tracker's tickets into
+    // the room as cards. They stay, switched off, for an admin to see.
+    await client.query(`UPDATE room_tracker_filters SET enabled = false
+      WHERE created_by_account_id = $2 AND enabled
+        AND (room_id = $1 OR room_id IN (${FOCUS_ROOMS_OF}))`, [roomId, accountId]);
     const sessions = await client.query<RemovedMemberAgentSession>(`SELECT session.session_id, session.room_id,
         session.agent_key, session.agent_instance_id
       FROM room_agent_sessions AS session

@@ -149,7 +149,18 @@ test('a focus room uses the members and admins of its parent room', async () => 
       member: true, role: 'member', join_request: null,
     },
   );
-  const request_ = await request('post', '/rooms/focus_7/join-requests', { account: 'stranger' });
+  // A focus room id is easy to guess: for a stranger it names no parent and takes no request.
+  const hidden = await request('get', '/rooms/focus_7/membership', { account: 'stranger' });
+  assert.equal(hidden.body.member, false);
+  assert.equal(hidden.body.access_room_id, 'focus_7');
+  assert.equal(hidden.body.display_name, '');
+  const refused = await request('get', '/rooms/focus_7/members', { account: 'stranger' });
+  assert.equal(refused.status, 403);
+  assert.equal(refused.body.display_name, null);
+  const viaFocus = await request('post', '/rooms/focus_7/join-requests', { account: 'stranger' });
+  assert.equal(viaFocus.status, 400);
+  assert.equal(viaFocus.body.code, 'ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY');
+  const request_ = await request('post', '/rooms/ops-lounge/join-requests', { account: 'stranger' });
   assert.equal(request_.status, 201);
   assert.ok(calls.includes('request:ops-lounge'), 'the request is for the parent room');
   assert.ok(calls.every((call) => !call.includes('focus_7') || call.startsWith('end:')), calls.join(', '));

@@ -6,6 +6,7 @@ import {
   clearGitHubRepoAccessCacheForRoom,
   getGitHubRepoVisibility,
   githubRepoAccessInvalidationEvents,
+  GitHubAccessUnavailableError,
   isGitHubPublicRepoRoleHolder,
   isGitHubRepoCollaborator,
   isGitHubRepoWriter,
@@ -78,11 +79,51 @@ test("a GitHub role on a public repository means owner, triage or more, never re
   assert.equal(calls, afterFirstLookups + 2, "a fresh check always asks GitHub");
 
   status = 503;
-  assert.equal(await check("outage-person"), false);
-  await assert.rejects(check("outage-person", { throwOnIndeterminate: true }), /indeterminate/);
+  await assert.rejects(check("outage-person"), { name: "GitHubAccessUnavailableError" },
+    "no answer from GitHub is never a no");
+  assert.equal(await check("triager", { bypassCache: true }), true,
+    "during an outage, a positive answer from the last hour stands in");
   status = 200;
   permissionsByLogin["outage-person"] = { pull: true, triage: true };
   assert.equal(await check("outage-person"), true, "an outage answer is not kept");
+});
+
+test("parallel role checks for one person and repository share one GitHub request", async () => {
+  const room = `github.com/acme/parallel-${Date.now()}`;
+  let calls = 0;
+  globalThis.fetch = (async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return jsonResponse(200, { private: false, owner: { login: "acme" }, permissions: { pull: true } });
+  }) as typeof fetch;
+  const results = await Promise.all(Array.from({ length: 8 }, () =>
+    isGitHubPublicRepoRoleHolder({ roomName: room, login: "someone", accessToken: "token" })));
+  assert.deepEqual(results, Array(8).fill(false));
+  assert.equal(calls, 1);
+});
+
+test("an unanswered role check is a retry, not a refusal, and a sign-in-less caller costs no lookup", async () => {
+  const account = { provider: "github", provider_access_token: "secret-token", login: "EmmyMay" };
+  let visibilityLookups = 0;
+  const deps = {
+    getVisibility: async () => { visibilityLookups += 1; return "public" as const; },
+    isCollaborator: async () => false,
+    isPublicRepoRoleHolder: async () => { throw new GitHubAccessUnavailableError(503); },
+  };
+  assert.deepEqual(
+    await resolveGitHubRepoRoomAccessDecision({ roomName: "github.com/acme/app", sessionAccount: null }, deps),
+    { kind: "auth_required" },
+  );
+  assert.equal(visibilityLookups, 0, "no GitHub lookup for a caller with no sign-in");
+  assert.deepEqual(
+    await resolveGitHubRepoRoomAccessDecision({ roomName: "github.com/acme/app", sessionAccount: account }, deps),
+    { kind: "repo_access_unavailable" },
+  );
+  await assert.rejects(
+    resolveGitHubRepoRoomAccessDecision({ roomName: "github.com/acme/app", sessionAccount: account, throwOnIndeterminate: true }, deps),
+    { name: "GitHubAccessUnavailableError" },
+    "authority revalidation keeps its grant on an outage",
+  );
 });
 
 test("resolveGitHubRepoRoomAccessDecision still requires auth for private GitHub repo rooms", async () => {

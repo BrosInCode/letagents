@@ -165,3 +165,22 @@ test("desktop push for a public repository needs a GitHub role on it", async () 
   );
   assert.equal(decision, "deny");
 });
+
+test("desktop push waits and retries while GitHub gives no answer to the role check", async () => {
+  const decision = await authorizeDesktopPushNotification(
+    { accountId: account.account_id, roomId: "github.com/acme/public" },
+    {
+      getProject: async () => ({ id: "github.com/acme/public" }) as Project,
+      getAccount: async () => account,
+      resolveAccess: async () => ({
+        isRepoBacked: true,
+        roomName: "github.com/acme/public",
+        repoRoomName: "github.com/acme/public",
+        binding: null,
+        decision: { kind: "repo_access_unavailable" },
+      }),
+      isRoomMember: async () => { throw new Error("a repo room has no member list"); },
+    },
+  );
+  assert.equal(decision, "retry");
+});

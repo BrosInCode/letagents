@@ -7,7 +7,6 @@ import {
 import {
   assignProjectAdmin,
   getGitRoomBindingForRoom,
-  getProjectById,
   isProjectAdmin,
   type GitRoomBinding,
   type OwnerTokenAccount,
@@ -157,6 +156,7 @@ function landingRedirectReason(decision: RepoRoomAccessDenial): LandingRedirectR
       return "repo_provider_unsupported";
     case "private_repo_no_access":
     case "repo_collaborator_required":
+    case "repo_access_unavailable":
       return "repo_access_denied";
   }
 }
@@ -232,6 +232,18 @@ export function replyRepoRoomAccessDecision(
     return false;
   }
 
+  if (decision.kind === "repo_access_unavailable") {
+    // Not a refusal: GitHub gave no answer, so the client should retry.
+    res.setHeader?.("Retry-After", "30");
+    res.status(503).json({
+      error: "repo_access_unavailable",
+      code: "REPO_ACCESS_UNAVAILABLE",
+      message: "GitHub did not answer the repository access check. Please retry.",
+      room_id: roomName,
+    });
+    return false;
+  }
+
   res.status(403).json({
     error: "private_repo_no_access",
     code: "PRIVATE_REPO_NO_ACCESS",
@@ -302,6 +314,18 @@ async function resolveProjectRoleForAccessDecision(
   const accessRoomId = getProjectAccessRoomId(project);
   if (!sessionAccount) {
     return "anonymous";
+  }
+
+  if (!accessDecision.isRepoBacked) {
+    // A room without a repository: the role comes from the members of the
+    // access room. A focus-room admin row counts only for a member of the
+    // parent (the old "first joiner" rule left such rows for strangers).
+    const accessRole = await getRoomMemberRole(accessRoomId, sessionAccount.account_id);
+    if (!accessRole) return "anonymous";
+    if (accessRole === "admin") return "admin";
+    return accessRoomId !== project.id && (await isProjectAdmin(project.id, sessionAccount.account_id))
+      ? "admin"
+      : "participant";
   }
 
   if (
@@ -394,13 +418,16 @@ export async function replyRoomMembershipDecision(
 ): Promise<false> {
   const accessRoomId = getProjectAccessRoomId(project);
   if (decision.kind === "auth_required" || !sessionAccount) {
-    return replyRepoRoomAccessDecision(res, accessRoomId, { kind: "auth_required" });
+    return replyRepoRoomAccessDecision(res, project.id, { kind: "auth_required" });
   }
-  const accessRoom = accessRoomId === project.id ? project : await getProjectById(accessRoomId);
+  // Focus room ids are easy to guess (focus_1, focus_2, ...), so a refusal for
+  // one names neither its parent nor the parent's name. A top-level room's
+  // name and the person's request are shown: the caller already has its id.
+  const topLevel = accessRoomId === project.id;
   res.status(403).json(roomMembershipRequiredBody({
     room_id: project.id,
-    display_name: accessRoom?.display_name ?? null,
-    join_request: await getLatestRoomJoinRequest(accessRoomId, sessionAccount.account_id),
+    display_name: topLevel ? project.display_name : null,
+    join_request: topLevel ? await getLatestRoomJoinRequest(accessRoomId, sessionAccount.account_id) : null,
   }));
   return false;
 }
@@ -490,7 +517,8 @@ export async function requireGitRoomParticipant(
   // sign-in could open it, so a sign-in request would mislead.
   const accessRoomId = getProjectAccessRoomId(project);
   if (!req.sessionAccount && (!isRepoBackedRoomId(accessRoomId) || parseGitHubRepoName(accessRoomId))) {
-    return replyRepoRoomAccessDecision(res, accessRoomId, { kind: "auth_required" });
+    // The id the caller asked for: a focus room id never reveals its parent.
+    return replyRepoRoomAccessDecision(res, project.id, { kind: "auth_required" });
   }
 
   const accessDecision = await resolveProjectRepoRoomAccessDecision({

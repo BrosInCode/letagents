@@ -186,8 +186,10 @@ export async function requireSupervisorGrantRoomAccess(
     const target = await resolveTarget(project);
     if (!target) {
       // A room without a repository: the grant owner must still be a member.
-      // Only this room is refused; the grant keeps its other rooms, and the
-      // owner's agents here already ended when the owner was removed.
+      // The call is refused and the grant is kept (it is not revoked); a call
+      // that names every room of the grant, such as renew, is refused until
+      // the host asks for a grant without this room. The owner's agents here
+      // already ended when the owner was removed.
       if (!(await isMember(project, grant.owner_account_id))) {
         res.status(403).json({
           error: "The supervisor grant owner is not a member of this room.",

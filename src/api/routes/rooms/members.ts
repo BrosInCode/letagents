@@ -180,11 +180,15 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
     res.status(409).json({ ...REPO_ROOM_USES_GITHUB_ROLES, message: REPO_ROOM_USES_GITHUB_ROLES_MESSAGE });
   }
 
+  // Focus room ids are easy to guess (focus_1, focus_2, ...): for a person who
+  // is not a member, a focus room names neither its parent nor its name.
+  const isFocus = (room: MemberRoom) => room.project.id !== room.accessRoom.id;
+
   async function refuseNonMember(res: Response, room: MemberRoom, account: SignedInAccount): Promise<void> {
     res.status(403).json(roomMembershipRequiredBody({
       room_id: room.project.id,
-      display_name: room.accessRoom.display_name,
-      join_request: await store.getLatestRoomJoinRequest(room.accessRoom.id, account.account_id),
+      display_name: isFocus(room) ? null : room.accessRoom.display_name,
+      join_request: isFocus(room) ? null : await store.getLatestRoomJoinRequest(room.accessRoom.id, account.account_id),
     }));
   }
 
@@ -223,14 +227,15 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
       if (!room) return;
       const github = room.managedBy === 'github';
       const role = github ? null : await store.getRoomMemberRole(room.accessRoom.id, account.account_id);
+      const hidden = !github && role === null && isFocus(room);
       const state: RoomMembershipState = {
         room_id: room.project.id,
-        access_room_id: room.accessRoom.id,
-        display_name: room.accessRoom.display_name,
+        access_room_id: hidden ? room.project.id : room.accessRoom.id,
+        display_name: hidden ? '' : room.accessRoom.display_name,
         managed_by: room.managedBy,
         member: github ? null : role !== null,
         role,
-        join_request: github ? null : await store.getLatestRoomJoinRequest(room.accessRoom.id, account.account_id),
+        join_request: github || hidden ? null : await store.getLatestRoomJoinRequest(room.accessRoom.id, account.account_id),
       };
       res.json(state);
     } catch (error) { fail(res, error); }
@@ -352,6 +357,11 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
       if (!room) return;
       if (room.managedBy === 'github') {
         refuseRepoRoom(res);
+        return;
+      }
+      if (isFocus(room)) {
+        // A person asks to join the room itself, from the link they were given.
+        res.status(400).json({ error: 'Ask to join the main room, not one of its focus rooms.', code: 'ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY' });
         return;
       }
       if (!allowJoinRequestAttempt(account.account_id)) {

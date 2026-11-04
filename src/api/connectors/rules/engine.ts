@@ -617,10 +617,18 @@ export async function findRoomRuleConnection(roomId: string, provider: TrackerPr
 /** An admin of the room, or of the repository room it belongs to, as the room routes decide it. */
 export async function isRoomAdminAccount(roomId: string, accountId: string): Promise<boolean> {
   const { getProjectById, isProjectAdmin } = await import("../../db.js");
-  const { getProjectAccessRoomId } = await import("../../rooms/access.js");
-  if (await isProjectAdmin(roomId, accountId)) return true;
+  const { getProjectAccessRoomId, resolveProjectRepoAccessTarget } = await import("../../rooms/access.js");
   const project = await getProjectById(roomId);
   const accessRoomId = project ? getProjectAccessRoomId(project) : roomId;
+  if (project && !(await resolveProjectRepoAccessTarget(project))) {
+    // A room without a repository: an admin row counts only for a member of
+    // the access room, as the room routes decide it.
+    const { getRoomMemberRole } = await import("../../db/room-members.js");
+    const role = await getRoomMemberRole(accessRoomId, accountId);
+    if (!role) return false;
+    return role === "admin" || (accessRoomId !== roomId && await isProjectAdmin(roomId, accountId));
+  }
+  if (await isProjectAdmin(roomId, accountId)) return true;
   return accessRoomId !== roomId && await isProjectAdmin(accessRoomId, accountId);
 }
 

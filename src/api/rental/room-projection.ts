@@ -178,6 +178,9 @@ export async function provisionRentalRoom(
     if (!allowedParentRoomId || allowedParentRoomId.toLowerCase() !== parentRoomId.toLowerCase()) {
       throw new Error("parent_room_mismatch");
     }
+    // The renter's room id as stored (a foreign key), else the repository room
+    // as the provider spelled it, which matched case-insensitively above.
+    const parentId = session.target_room_id ?? parentRoomId;
 
     const focusKey = `rental:${sessionId}`;
     const [existingRoom] = await tx
@@ -185,7 +188,7 @@ export async function provisionRentalRoom(
       .from(rooms)
       .where(
         and(
-          eq(rooms.parent_room_id, parentRoomId),
+          eq(rooms.parent_room_id, parentId),
           eq(rooms.focus_key, focusKey),
         ),
       )
@@ -199,7 +202,7 @@ export async function provisionRentalRoom(
         id: roomId,
         display_name: `Rental: ${session.task_title}`,
         kind: "focus",
-        parent_room_id: parentRoomId,
+        parent_room_id: parentId,
         focus_key: focusKey,
         focus_status: "active",
         focus_parent_visibility: "summary_only",

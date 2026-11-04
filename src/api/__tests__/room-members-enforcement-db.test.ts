@@ -19,7 +19,7 @@ import {
 
 const ONE_HOUR = 60 * 60 * 1000;
 
-async function person(login: string) {
+async function person(login: string, githubToken?: string) {
   const account = await dbApi.upsertAccount!({
     provider: 'github',
     provider_user_id: `enforce-${login}`,
@@ -27,8 +27,24 @@ async function person(login: string) {
     display_name: login,
   });
   const token = `enforce_session_${login}`;
-  await dbApi.createSession!(account.id, token, new Date(Date.now() + ONE_HOUR).toISOString());
+  await dbApi.createSession!(account.id, token, new Date(Date.now() + ONE_HOUR).toISOString(), githubToken ?? null);
   return { id: account.id, login, token };
+}
+
+/** A GitHub API stub: `acme/public` is public; the token `github-token-role` has the triage role on it. */
+async function startGitHubStub() {
+  const { createServer } = await import('node:http');
+  const server = createServer((req, res) => {
+    const found = (req.url ?? '').toLowerCase().startsWith('/repos/acme/public');
+    const role = req.headers.authorization === 'Bearer github-token-role';
+    res.writeHead(found ? 200 : 404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(found
+      ? { private: false, owner: { login: 'acme' }, permissions: { pull: true, triage: role } }
+      : { message: 'Not Found' }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const address = server.address() as { port: number };
+  return { baseUrl: `http://127.0.0.1:${address.port}`, close: () => new Promise<void>((resolve) => server.close(() => resolve())) };
 }
 
 function client(port: number) {
@@ -175,4 +191,56 @@ test('a rental room goes under the room the renter chose, never one the provider
   } as any);
   const room = await pool!.query<{ parent_room_id: string }>('SELECT parent_room_id FROM rooms WHERE id = $1', [provisioned!.roomId]);
   assert.equal(room.rows[0]?.parent_room_id, 'renter-lounge');
+});
+
+test('an old focus-room admin row gives a stranger nothing, and refusals for a focus room name no parent', databaseTestOptions, async (t) => {
+  const owner = await person('owner');
+  const stranger = await person('stranger');
+  const { child, port } = await startApiServer();
+  t.after(async () => { await stopChildProcess(child); });
+  const call = client(port);
+
+  const roomId = (await call('POST', '/projects/room/secret-lounge', owner.token)).body.id as string;
+  await pool!.query(`INSERT INTO rooms (id, display_name, kind, parent_room_id, focus_key, focus_status, created_at)
+    VALUES ('focus_61', 'Focus', 'focus', $1, 'focus-61', 'active', now())`, [roomId]);
+  // The old "first joiner" rule left such rows behind for people who were never members.
+  await dbApi.assignProjectAdmin!('focus_61', stranger.id);
+
+  const renamed = await call('PATCH', '/rooms/focus_61', stranger.token, { display_name: 'Taken over' });
+  assert.equal(renamed.status, 403, 'an admin row on a focus room needs membership of its parent');
+  const read = await call('GET', '/rooms/focus_61/messages', stranger.token);
+  assert.equal(read.status, 403);
+  assert.equal(read.body.room_id, 'focus_61');
+  assert.equal(read.body.display_name, null, 'the parent room is not named');
+  const anonymous = await call('GET', '/rooms/focus_61/messages', null);
+  assert.equal(anonymous.status, 401);
+  assert.equal(anonymous.body.room_id, 'focus_61', 'the parent room id is not revealed');
+  assert.equal((await call('POST', '/rooms/focus_61/join-requests', stranger.token)).body.code, 'ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY');
+});
+
+test('the room list shows a public repo room only to people with a GitHub role on it', databaseTestOptions, async (t) => {
+  const github = await startGitHubStub();
+  const previousBaseUrl = process.env.GITHUB_API_BASE_URL;
+  process.env.GITHUB_API_BASE_URL = github.baseUrl;
+  t.after(async () => {
+    if (previousBaseUrl === undefined) delete process.env.GITHUB_API_BASE_URL;
+    else process.env.GITHUB_API_BASE_URL = previousBaseUrl;
+    await github.close();
+  });
+  const reader = await person('reader', 'github-token-none');
+  const collaborator = await person('collaborator', 'github-token-role');
+  await pool!.query(`INSERT INTO rooms (id, display_name, created_at) VALUES ('github.com/acme/public', 'acme/public', now())`);
+  for (const account of [reader, collaborator]) {
+    // Both opened the room before the rule turned on.
+    await pool!.query(`INSERT INTO account_room_recents (account_id, room_id, display_name, source, first_opened_at, last_opened_at, updated_at)
+      VALUES ($1, 'github.com/acme/public', 'acme/public', 'join', now(), now(), now())`, [account.id]);
+  }
+  const { child, port } = await startApiServer();
+  t.after(async () => { await stopChildProcess(child); });
+  const call = client(port);
+
+  assert.equal((await call('GET', '/rooms/github.com%2Facme%2Fpublic/messages', reader.token)).body.code, 'REPO_COLLABORATOR_REQUIRED');
+  assert.deepEqual((await call('GET', '/account/rooms', reader.token)).body.rooms, [], 'no role, no listing');
+  assert.deepEqual((await call('GET', '/account/rooms', collaborator.token)).body.rooms.map((room: any) => room.room_id),
+    ['github.com/acme/public']);
 });

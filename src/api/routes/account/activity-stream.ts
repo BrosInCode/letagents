@@ -5,6 +5,7 @@ import type { getAccountRoomsForAccount } from "../../account-room-membership/li
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { openSseConnection } from "../../http/sse.js";
 import { roomMembershipInvalidationEvents } from "../../rooms/membership-events.js";
+import { roomEventBridgeLossEvents } from "../../server/bridged-emitter.js";
 
 export interface AccountActivityStreamDeps {
   hub: AccountActivityHub;
@@ -51,6 +52,15 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
     };
     roomMembershipInvalidationEvents.on("invalidate", onMembershipEnded);
     connection.addCleanup(() => { roomMembershipInvalidationEvents.off("invalidate", onMembershipEnded); });
+    // A lost cross-instance frame may have been such a removal: reconnect and
+    // read the room list again, as the room streams recheck on a loss.
+    const onBridgeLoss = (payload: unknown) => {
+      const reason = payload && typeof payload === "object" ? (payload as { reason?: unknown }).reason : null;
+      if (reason === "uninterested_reference" || reason === "listener_connected_boundary") return;
+      connection.close();
+    };
+    roomEventBridgeLossEvents.on("loss", onBridgeLoss);
+    connection.addCleanup(() => { roomEventBridgeLossEvents.off("loss", onBridgeLoss); });
     const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
     const send = (activity: AccountRoomActivity) => {
       void connection.write(frame("room", activity));
