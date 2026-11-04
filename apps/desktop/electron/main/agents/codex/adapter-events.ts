@@ -12,7 +12,7 @@ import { CODEX_SYSTEM_ERROR_SETTLE_MS, codexErrorActivitySummary, codexLifecycle
 import { CodexAdapterBase } from "./adapter-base.js";
 import { CodexProviderHandle } from "./handle.js";
 import { CodexRoomTurnObservationDetachedError } from "./room-tools.js";
-import { type CodexThreadResult, codexFoundNotReadOnly } from "./thread-access.js";
+import { type CodexThreadResult, codexFoundNotAtLevel } from "./thread-access.js";
 import { permissionFileChanges } from "./permission-requests.js";
 
 export abstract class CodexAdapterEvents extends CodexAdapterBase {
@@ -45,7 +45,7 @@ export abstract class CodexAdapterEvents extends CodexAdapterBase {
       this.noteExactTurnTerminal(handle, exactTurnKey(exactThreadId, exactTurnId), terminalStatus);
     }
     if (notification.method === "thread/settings/updated" && exactThreadId === handle.providerContinuationId) {
-      this.holdSettingsToReadOnly(handle, notification.params);
+      this.holdSettingsToLevel(handle, notification.params);
     }
     const threadStatus = recordValue(recordValue(notification.params)?.status)?.type
       ?? recordValue(notification.params)?.status;
@@ -315,12 +315,12 @@ export abstract class CodexAdapterEvents extends CodexAdapterBase {
     if (subscribed.thread?.id !== threadId) throw new Error("Codex subscription resolved a different materialized thread.");
     handle.subscriptionAfterMaterialization = false;
     // A runtime that was found with no loaded conversation had no reply to hold to its level then.
-    // This reply is the first word on what the conversation got, so it is held to Read-only as every other is.
-    const notReadOnly = codexFoundNotReadOnly(handle.appliedTurnPolicy(), subscribed, handle.readOnlyProfile());
+    // This reply is the first word on what the conversation got, so it is held to the level as every other is.
+    const notReadOnly = codexFoundNotAtLevel(handle.appliedTurnPolicy(), subscribed, handle.signInProfile());
     if (notReadOnly) {
-      handle.foundNotReadOnly ??= { reported: notReadOnly, stopped: null };
+      handle.foundNotAtLevel ??= { reported: notReadOnly, stopped: null };
       // Its turn must not go on with what the level does not allow. The stop is not waited for here; the daemon sees the process end.
-      this.stopNotReadOnly(handle)?.catch(() => undefined);
+      this.stopNotAtLevel(handle)?.catch(() => undefined);
       throw new Error(`${notReadOnly}, so LetAgents stopped the agent. ${STARTS_AGAIN_BY_ITSELF}`);
     }
     return true;

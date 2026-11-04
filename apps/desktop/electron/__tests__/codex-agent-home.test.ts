@@ -36,7 +36,7 @@ writeFileSync(process.env.LETAGENTS_AGENT_COMMIT_IDENTITY_PATH!, JSON.stringify(
 
 const {
   CODEX_TOKEN_SERVICE_OVERRIDES, CodexAgentHomeError, CodexAgentHomeSignInError, SIGN_IN_NOT_HIDDEN, checkCodexHonoursDeny, checkCodexKeepsLinkedSignIn,
-  codexAgentHomeDirectory, codexHomeForSandboxedLaunch, codexReadOnlyProfileId, codexReadOnlyProfileOverrides, codexSignInPaths,
+  codexAgentHomeDirectory, codexHomeForSandboxedLaunch, codexSandboxedProfileId, codexSandboxedProfileOverrides, codexSignInPaths,
   folderHolds, linkCodexAgentHome, sandboxedCodexHomeRefusal, sandboxedCodexLoadRefusal, sandboxedCodexProjectRefusal,
 } = await import("../main/agents/codex-agent-home.js");
 const {
@@ -45,7 +45,7 @@ const {
 } = await import("../main/agents/codex-home-harness.js");
 const { codexOwnerIsolationOverrides } = await import("../../../../shared/codex-owner-isolation.mjs");
 const {
-  READ_ONLY_POLICY_WITHOUT_LEVEL, READ_ONLY_PROFILE_NOT_GIVEN, codexAppServerEnvironment, launchManagedCodexAppServer, terminateSpawnedProcess, waitForLaunchedCodexAppServer,
+  READ_ONLY_POLICY_WITHOUT_LEVEL, SIGN_IN_PROFILE_NOT_GIVEN, codexAppServerEnvironment, launchManagedCodexAppServer, terminateSpawnedProcess, waitForLaunchedCodexAppServer,
 } = await import("../main/agents/codex-app-server.js");
 const { CodexProviderAdapter } = await import("../main/agents/codex-provider-adapter.js");
 const { CodexRpcClient } = await import("../main/agents/codex-rpc-client.js");
@@ -1755,75 +1755,51 @@ async function adapterStartedCodex(t: { after(cleanup: () => Promise<void> | voi
 /** A command that makes each file and never fails, so nothing is asked of a reviewer. */
 const touchEach = (...files: string[]) => `${files.map((file) => `touch ${JSON.stringify(file)} 2>/dev/null`).join("; ")}; true`;
 
-test("the installed Codex, asked as the adapter asks it at the Auto level, lets a command write each folder the Codex config names, whatever sandbox the turn names", {
+test("the installed Codex, asked as the adapter asks it at the Auto level, writes only the work folder: a folder the Codex config names is not written, and the conversation and each turn name the workspace profile and no sandbox", {
   skip: realCodex ? false : "Codex is not installed",
   timeout: 300_000,
 }, async (t) => {
   const model = await stubModel();
   t.after(() => model.close());
 
-  // A folder the owner's config names, beside the homes: the launch does not refuse it, and a command writes it.
+  // A folder the owner's config names, beside the homes: the launch does not refuse it, and under the profile a command does not write it.
   const owned = await adapterStartedCodex(t, model, { ownerRoots: (scene) => [scene.ownerRoot!] });
   const first = { control: join(owned.scene.control!, "x"), project: join(owned.scene.project!, "in-project"), named: join(owned.scene.ownerRoot!, "x") };
   await owned.turn([touchEach(...Object.values(first))]);
-  assert.deepEqual(Object.values(first).filter((file) => existsSync(file)), [first.project, first.named], "the project and the named folder are written, and nothing else");
-  // These are the adapter's own requests: the conversation start names the level's sandbox, and each turn names it again with no folder beside the project.
+  assert.deepEqual(Object.values(first).filter((file) => existsSync(file)), [first.project], "the project is written, and nothing else");
+  // These are the adapter's own requests: the conversation start names the level's profile in place of its sandbox, and each turn names it again.
+  const profile = codexSandboxedProfileId(":workspace", spawnRequest.workAttemptId);
   const started = owned.sent.find((call) => call.method === "thread/start")!.params;
-  assert.deepEqual({ approvalPolicy: started.approvalPolicy, sandbox: started.sandbox, approvalsReviewer: started.approvalsReviewer },
-    { approvalPolicy: "on-request", sandbox: "workspace-write", approvalsReviewer: "auto_review" });
+  assert.deepEqual({ approvalPolicy: started.approvalPolicy, permissions: started.permissions, approvalsReviewer: started.approvalsReviewer, sandbox: started.sandbox },
+    { approvalPolicy: "on-request", permissions: profile, approvalsReviewer: "auto_review", sandbox: undefined });
   const turned = owned.sent.find((call) => call.method === "turn/start")!.params;
-  assert.deepEqual({ approvalPolicy: turned.approvalPolicy, sandboxPolicy: turned.sandboxPolicy, approvalsReviewer: turned.approvalsReviewer },
-    { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" });
-  // A turn that names an empty list of folders does not take the config's folder away either: nothing a turn names does.
-  const again = join(owned.scene.ownerRoot!, "with-an-empty-list");
-  await owned.turn([touchEach(again)], { type: "workspaceWrite", networkAccess: false, writableRoots: [] });
-  assert.equal(existsSync(again), true);
+  assert.deepEqual({ approvalPolicy: turned.approvalPolicy, permissions: turned.permissions, approvalsReviewer: turned.approvalsReviewer, sandboxPolicy: turned.sandboxPolicy },
+    { approvalPolicy: "on-request", permissions: profile, approvalsReviewer: "auto_review", sandboxPolicy: undefined });
 
-  // A folder that a trusted project's config names (the launch refuses that project, so Codex is started past the launch here).
-  // The project also asks for the network, which the turn's own "no network" withholds.
-  const repository = await adapterStartedCodex(t, model, { asCodexDoes: "the owner's home",
-    projectConfig: (scene) => `[sandbox_workspace_write]\nwritable_roots = [${JSON.stringify(scene.projectRoot)}]\nnetwork_access = true\n` });
-  const second = { control: join(repository.scene.control!, "x"), named: join(repository.scene.projectRoot!, "x"), before: join(repository.scene.project!, "before"), after: join(repository.scene.project!, "after") };
-  await repository.turn([`touch ${JSON.stringify(second.control)} ${JSON.stringify(second.named)} ${JSON.stringify(second.before)} 2>/dev/null; curl -s -m 3 http://127.0.0.1:${model.port}/reached-the-network >/dev/null 2>&1; touch ${JSON.stringify(second.after)}; true`]);
-  assert.deepEqual(Object.values(second).filter((file) => existsSync(file)), [second.named, second.before, second.after], "the project's folder is written; the command ran to its end");
-  assert.deepEqual(model.others, [], "and it did not reach the network");
-
-  // The agents' home below a named folder (the launch refuses that folder too): its rules folder is made writable, and a rule is put in it.
-  const covered = await adapterStartedCodex(t, model, { asCodexDoes: "the agents' home", ownerRoots: (scene) => [scene.data!] });
-  const rules = join(covered.scene.agentHome!, "rules");
-  await covered.turn([`chmod u+w ${JSON.stringify(rules)} 2>/dev/null; ${touchEach(join(rules, "planted.rules"))}`]);
-  assert.deepEqual(readdirSync(rules), ["planted.rules"]);
-
-  // At a level whose sandbox writes nowhere, the same named folder is not written, and neither is the project.
+  // At a level whose sandbox writes nowhere, the same named folder is not written, and neither is the project. Its profile extends the read-only one.
   const asking = await adapterStartedCodex(t, model, { level: "ask", ownerRoots: (scene) => [scene.ownerRoot!] });
   const third = [join(asking.scene.ownerRoot!, "x"), join(asking.scene.project!, "in-project")];
   await asking.turn([touchEach(...third)]);
   assert.deepEqual(third.filter((file) => existsSync(file)), []);
+  const askingStarted = asking.sent.find((call) => call.method === "thread/start")!.params;
+  assert.deepEqual([askingStarted.approvalPolicy, askingStarted.permissions, askingStarted.sandbox],
+    ["on-request", codexSandboxedProfileId(":read-only", spawnRequest.workAttemptId), undefined]);
 });
 
-test("the installed Codex keeps a command from turning a folder it may write into another one: it cannot remove it or move the folder above it, and runs nothing more once it is a link", {
+test("the installed Codex, under the workspace profile, keeps a command to the work folder: not a folder outside it, and not through a link the command made to one", {
   skip: realCodex ? false : "Codex is not installed",
   timeout: 180_000,
 }, async (t) => {
   const model = await stubModel();
   t.after(() => model.close());
-  // Three named folders in the project, where a command can write all around them: two that are there, and one that is not there yet.
-  const agent = await adapterStartedCodex(t, model, { ownerRoots: (scene) => [join(scene.project!, "kept"), join(scene.project!, "a", "below"), join(scene.project!, "b", "later")] });
+  const agent = await adapterStartedCodex(t, model, {});
   const { project, control } = agent.scene as { project: string; control: string };
-  mkdirSync(join(project, "kept"));
-  mkdirSync(join(project, "a", "below"), { recursive: true });
   await agent.turn([
-    `rmdir ${JSON.stringify(join(project, "kept"))} 2>/dev/null; mv ${JSON.stringify(join(project, "a"))} ${JSON.stringify(join(project, "a-moved"))} 2>/dev/null; true`,
-    // The one that is not there yet can be made as a link to a folder outside the project.
-    `mkdir -p ${JSON.stringify(join(project, "b"))}; ln -s ${JSON.stringify(control)} ${JSON.stringify(join(project, "b", "later"))}; ${touchEach(join(control, "through-the-link"))}`,
-    touchEach(join(project, "after-the-link"), join(control, "after-the-link")),
+    `ln -s ${JSON.stringify(control)} ${JSON.stringify(join(project, "link"))}; ${touchEach(join(project, "link", "through-the-link"), join(control, "direct"), join(project, "in-project"))}`,
   ]);
-  assert.equal(lstatSync(join(project, "kept")).isDirectory(), true, "a named folder is not removed");
-  assert.deepEqual([existsSync(join(project, "a", "below")), existsSync(join(project, "a-moved"))], [true, false], "the folder above a named folder is not moved");
-  assert.equal(lstatSync(join(project, "b", "later")).isSymbolicLink(), true);
-  assert.deepEqual(readdirSync(control), [], "the folder the link leads to is not written, by that command or by a later one");
-  assert.equal(existsSync(join(project, "after-the-link")), false, "Codex runs no command while a named folder is a link");
-  assert.match(JSON.stringify(model.requests.at(-1)), /symlinked writable roots are not supported/);
+  assert.equal(lstatSync(join(project, "link")).isSymbolicLink(), true, "the link is made in the work folder");
+  assert.deepEqual(readdirSync(control), [], "the folder outside is not written, directly or through the link");
+  assert.equal(existsSync(join(project, "in-project")), true, "the work folder is written");
 });
 
 test("one folder is told from another name by name and by what it is on disk, so a disk's top, another spelling and a second path are all found", () => {
@@ -2121,15 +2097,15 @@ test("a Read-only agent's permission profile is Codex's read-only one with the s
   const link = join(owner.agentHome, "auth.json");
 
   // The name is the work attempt's, so no config file can hold a profile of that name before the attempt exists.
-  const profile = codexReadOnlyProfileId(READ_ONLY_ATTEMPT);
+  const profile = codexSandboxedProfileId(":read-only", READ_ONLY_ATTEMPT);
   assert.match(profile, /^letagents_read_only_[0-9a-f]{24}$/);
-  assert.equal(codexReadOnlyProfileId(READ_ONLY_ATTEMPT), profile);
-  assert.notEqual(codexReadOnlyProfileId("another-work-attempt"), profile);
+  assert.equal(codexSandboxedProfileId(":read-only", READ_ONLY_ATTEMPT), profile);
+  assert.notEqual(codexSandboxedProfileId(":read-only", "another-work-attempt"), profile);
   assert.equal(profile.includes(READ_ONLY_ATTEMPT), false, "the name does not hold the id it is made from");
 
   // With the agents' home: the owner's file, which the sandbox holds a command to, and the link, so that the deny rests on neither alone.
   assert.deepEqual(codexSignInPaths(owner.env, owner.agentHome), [signIn, link]);
-  assert.deepEqual(codexReadOnlyProfileOverrides(profile, [signIn, link]), [
+  assert.deepEqual(codexSandboxedProfileOverrides(profile, ":read-only", [signIn, link]), [
     `permissions.${profile}={ extends = ":read-only", filesystem = { ${JSON.stringify(signIn)} = "deny", ${JSON.stringify(link)} = "deny" } }`,
     `default_permissions=${JSON.stringify(profile)}`,
   ]);
@@ -2160,7 +2136,7 @@ test("the deny check passes only for a Codex that keeps the denied file from a c
 
   const parent = fixture("beside-the-agents-home");
   const honest = fakeCodex();
-  assert.equal(await checkCodexHonoursDeny(honest.bin, env, parent), true);
+  assert.equal(await checkCodexHonoursDeny(honest.bin, env, parent, ":read-only"), true);
   assert.deepEqual(readdirSync(parent), [], "the check's folder is removed");
   assert.deepEqual(readdirSync(temp), [], "nothing was made in the temp folder");
   // One short-lived Codex, in a home of the check's own beside the agents' home, with the profile given as a launch gives it.
@@ -2170,19 +2146,27 @@ test("the deny check passes only for a Codex that keeps the denied file from a c
   assert.equal(asked!.codexHome, join(asked!.cwd, "home"));
   assert.equal(asked!.refreshUrl, null, "the check gives Codex no token service");
   const overrides = asked!.args.filter((arg, index) => asked!.args[index - 1] === "-c");
-  assert.deepEqual(overrides.slice(-2), codexReadOnlyProfileOverrides("letagents_read_only_check", [join(asked!.cwd, "denied.txt"), join(asked!.cwd, "home", "linked.txt")]));
+  assert.deepEqual(overrides.slice(-2), codexSandboxedProfileOverrides("letagents_read_only_check", ":read-only", [join(asked!.cwd, "denied.txt"), join(asked!.cwd, "home", "linked.txt")]));
   assert.ok(overrides.includes("features.plugins=false") && overrides.includes("notify=[]"), "none of an owner's extensions is on");
   assert.equal(overrides.filter((override) => /base_url=/.test(override)).every((override) => override.includes("http://127.0.0.1:9")), true, "every address leads nowhere");
+
+  // The same check for the workspace profile an Auto agent's extends: the profile named to Codex extends that one, and the
+  // denied file is in the check's work folder, which that profile lets a command write.
+  assert.equal(await checkCodexHonoursDeny(honest.bin, env, parent, ":workspace"), true);
+  const [, askedForWorkspace] = honest.calls();
+  const workspaceOverrides = askedForWorkspace!.args.filter((arg, index) => askedForWorkspace!.args[index - 1] === "-c");
+  assert.deepEqual(workspaceOverrides.slice(-2), codexSandboxedProfileOverrides("letagents_workspace_check", ":workspace", [join(askedForWorkspace!.cwd, "denied.txt"), join(askedForWorkspace!.cwd, "home", "linked.txt")]));
+  assert.deepEqual(readdirSync(parent), [], "the check's folder is removed");
 
   // A Codex that prints the denied file, that prints it through the link, that runs no command, or that does not know the option, does not pass.
   // Nor does one whose command ends well and prints nothing: a read that is refused ends badly, and only that is taken as a refusal.
   for (const deny of ["ignored", "not-through-a-link", "no-commands", "quiet", "no-field"] as const) {
     const beside = fixture("beside");
-    assert.equal(await checkCodexHonoursDeny(fakeCodex({ deny }).bin, env, beside), false, deny);
+    assert.equal(await checkCodexHonoursDeny(fakeCodex({ deny }).bin, env, beside, ":read-only"), false, deny);
     assert.deepEqual(readdirSync(beside), [], `${deny}: the folder is removed all the same`);
   }
   // Nor does a command that is not Codex at all.
-  assert.equal(await checkCodexHonoursDeny(notCodex(), env, fixture("beside")), false);
+  assert.equal(await checkCodexHonoursDeny(notCodex(), env, fixture("beside"), ":read-only"), false);
 
   // Something appears in the check's folder after it is made and before Codex starts: Codex is not started, and the answer is no.
   for (const planted of ["home/config.toml", "home/rules", "config.toml", "anything-else"]) {
@@ -2193,41 +2177,56 @@ test("the deny check passes only for a Codex that keeps the denied file from a c
       if (!existsSync(path)) writeFileSync(path, "planted\n");
       return process.env.PATH;
     } });
-    assert.equal(await checkCodexHonoursDeny(planting.bin, watched, beside), false, planted);
+    assert.equal(await checkCodexHonoursDeny(planting.bin, watched, beside, ":read-only"), false, planted);
     assert.deepEqual(planting.calls(), [], `${planted}: Codex was never started`);
     assert.deepEqual(readdirSync(beside), [], `${planted}: the folder is removed all the same`);
   }
 });
 
 test("a Read-only launch is given its profile only when this Codex has shown that it honours a deny, and is refused otherwise: it is never started without the profile", async () => {
-  const profile = codexReadOnlyProfileId(READ_ONLY_ATTEMPT);
+  const profile = codexSandboxedProfileId(":read-only", READ_ONLY_ATTEMPT);
   const asked: Array<string | null> = [];
   const launch = (owner: ReturnType<typeof ownerHome>, honours: boolean, options: { store?: string; readOnly?: boolean } = {}) => codexHomeForSandboxedLaunch("codex", {
-    env: owner.env, ...(options.readOnly === false ? {} : { hideSignInProfile: profile }),
+    env: owner.env, ...(options.readOnly === false ? {} : { hideSignInProfile: { id: profile, extends: ":read-only" as const } }),
   }, {
     inspect: async () => ({ ...noProject, credentialStore: options.store ?? "file" }), keepsLinkedSignIn: async () => true,
-    honoursDeny: async (_bin, _env, version) => { asked.push(version); return honours; },
+    honoursDeny: async (_bin, _env, version, base) => { asked.push(`${version} ${base}`); return honours; },
   });
 
   // With the agents' home: the owner's sign-in file and the link to it are denied.
   const owner = ownerHome({ rules: false });
   assert.deepEqual(await launch(owner, true), {
     codexHome: owner.agentHome, notices: [],
-    configOverrides: codexReadOnlyProfileOverrides(profile, [join(owner.codexHome, "auth.json"), join(owner.agentHome, "auth.json")]),
+    configOverrides: codexSandboxedProfileOverrides(profile, ":read-only", [join(owner.codexHome, "auth.json"), join(owner.agentHome, "auth.json")]),
   });
-  // The check is asked for the Codex that answered for its settings.
-  assert.deepEqual(asked, ["codex-stand-in/1.0"]);
+  // The check is asked for the Codex that answered for its settings, and for the built-in profile the agent's extends.
+  assert.deepEqual(asked, ["codex-stand-in/1.0 :read-only"]);
+  // An Auto launch names a profile that extends Codex's workspace one: the same deny, and the check is asked for that profile.
+  const workspaceProfile = codexSandboxedProfileId(":workspace", READ_ONLY_ATTEMPT);
+  assert.notEqual(workspaceProfile, profile);
+  assert.match(workspaceProfile, /^letagents_workspace_[0-9a-f]{24}$/);
+  const auto = ownerHome({ rules: false });
+  const autoLaunch = await codexHomeForSandboxedLaunch("codex", { env: auto.env, writableSandbox: true, hideSignInProfile: { id: workspaceProfile, extends: ":workspace" } }, {
+    inspect: async () => ({ ...noProject, credentialStore: "file" }), keepsLinkedSignIn: async () => true,
+    honoursDeny: async (_bin, _env, version, base) => { asked.push(`${version} ${base}`); return true; },
+  });
+  assert.deepEqual([autoLaunch.codexHome, autoLaunch.notices, typeof autoLaunch.writableFoldersCheck], [auto.agentHome, [], "function"]);
+  assert.deepEqual(autoLaunch.configOverrides, [
+    `permissions.${workspaceProfile}={ extends = ":workspace", filesystem = { ${JSON.stringify(join(auto.codexHome, "auth.json"))} = "deny", ${JSON.stringify(join(auto.agentHome, "auth.json"))} = "deny" } }`,
+    `default_permissions=${JSON.stringify(workspaceProfile)}`,
+  ]);
+  assert.deepEqual(asked, ["codex-stand-in/1.0 :read-only", "codex-stand-in/1.0 :workspace"]);
   // With the owner's own home, as when Codex keeps its sign-in elsewhere: the file's path is denied all the same.
   const keyring = ownerHome({ rules: false });
   assert.deepEqual(await launch(keyring, true, { store: "keyring" }), {
-    codexHome: null, notices: [], configOverrides: codexReadOnlyProfileOverrides(profile, [join(keyring.codexHome, "auth.json")]),
+    codexHome: null, notices: [], configOverrides: codexSandboxedProfileOverrides(profile, ":read-only", [join(keyring.codexHome, "auth.json")]),
   });
 
   // A Codex that has not shown it: the launch is refused in words that are true and name a way out, with either home.
   // True for a Codex that is too old and for one that is newer than LetAgents knows: the check cannot tell which.
-  assert.equal(SIGN_IN_NOT_HIDDEN, "Read-only access keeps your Codex sign-in file from the agent's commands, and LetAgents could not confirm that this version of Codex does that: "
+  assert.equal(SIGN_IN_NOT_HIDDEN, "A sandboxed access level keeps your Codex sign-in file from the agent's commands, and LetAgents could not confirm that this version of Codex does that: "
     + "it asked Codex to keep a made-up file from a command, and Codex did not show that it does. So LetAgents will not start Codex at this access level. "
-    + "If Codex is not up to date, update it and start the agent again. If it is, update LetAgents, or choose another access level: at every other level the agent's commands can read that file.");
+    + "If Codex is not up to date, update it and start the agent again. If it is, update LetAgents, or give the agent Full access: at that level the agent's commands can read that file.");
   const refusal = (error: unknown) => (error as Error).message === SIGN_IN_NOT_HIDDEN;
   await assert.rejects(launch(ownerHome({ rules: false }), false), refusal);
   await assert.rejects(launch(ownerHome({ rules: false }), false, { store: "keyring" }), refusal);
@@ -2240,13 +2239,13 @@ test("a Read-only launch is given its profile only when this Codex has shown tha
 });
 
 test("a managed Read-only launch starts Codex with the profile's overrides last, starts nothing when the deny is not honoured, and checks each Codex once", async () => {
-  const profile = codexReadOnlyProfileId(READ_ONLY_ATTEMPT);
+  const profile = codexSandboxedProfileId(":read-only", READ_ONLY_ATTEMPT);
   const project = fixture("project");
   execFileSync("git", ["init", "-q"], { cwd: project });
   const kind = (call: { args: string[] }) => call.args[0] === "mcp" ? "list" : call.args.includes("stdio://") ? "ask" : "launch";
   const given = (call: { args: string[] }) => call.args.filter((arg, index) => call.args[index - 1] === "-c");
   const readOnly = (owner: ReturnType<typeof ownerHome>, codex: ReturnType<typeof fakeCodex>) => launchManagedCodexAppServer("ws://127.0.0.1:1", codex.bin, {
-    trustedProjectPath: project, configOverrides: ['web_search="disabled"'], env: owner.env, sandboxed: true, hideSignInProfile: profile });
+    trustedProjectPath: project, configOverrides: ['web_search="disabled"'], env: owner.env, sandboxed: true, hideSignInProfile: { id: profile, extends: ":read-only" } });
 
   const owner = ownerHome();
   const honest = fakeCodex({ userAgent: "codex-stand-in/1.0" });
@@ -2257,7 +2256,7 @@ test("a managed Read-only launch starts Codex with the profile's overrides last,
   const started = honest.calls().at(-1)!;
   assert.equal(started.codexHome, owner.agentHome);
   assert.deepEqual(given(started).slice(-3), ['web_search="disabled"',
-    ...codexReadOnlyProfileOverrides(profile, [join(owner.codexHome, "auth.json"), join(owner.agentHome, "auth.json")])]);
+    ...codexSandboxedProfileOverrides(profile, ":read-only", [join(owner.codexHome, "auth.json"), join(owner.agentHome, "auth.json")])]);
   // The listings that decide which servers are turned off are not given the profile: it changes none of them.
   assert.equal(honest.calls().filter((call) => kind(call) === "list").some((call) => call.args.some((arg) => arg.startsWith("permissions."))), false);
   assert.deepEqual(readdirSync(join(owner.home, ".letagents")), ["codex-agent-home"], "both checks' folders are removed");
@@ -2278,8 +2277,8 @@ test("a managed Read-only launch starts Codex with the profile's overrides last,
   assert.deepEqual(careless.calls().slice(5).map(kind), ["ask", "ask", "list", "list", "launch", "ask", "list", "list", "launch"]);
 
   // A profile belongs to a sandboxed launch, and every other sandboxed launch is as it was: no profile, and no check for one.
-  await assert.rejects(launchManagedCodexAppServer("ws://127.0.0.1:1", honest.bin, { trustedProjectPath: project, configOverrides: [], env: ownerHome().env, hideSignInProfile: profile }),
-    /^Error: A Codex launch that names a Read-only permission profile must be a sandboxed one\.$/);
+  await assert.rejects(launchManagedCodexAppServer("ws://127.0.0.1:1", honest.bin, { trustedProjectPath: project, configOverrides: [], env: ownerHome().env, hideSignInProfile: { id: profile, extends: ":read-only" } }),
+    /^Error: A Codex launch that names a permission profile must be a sandboxed one\.$/);
   const plain = fakeCodex({ userAgent: "codex-stand-in/1.0" });
   await waitForExit(await launchManagedCodexAppServer("ws://127.0.0.1:1", plain.bin, { trustedProjectPath: project, configOverrides: [], env: ownerHome().env, sandboxed: true }));
   assert.deepEqual(plain.calls().map(kind), ["ask", "ask", "list", "list", "launch"]);
@@ -2321,21 +2320,39 @@ test("the launch starts no Codex for the Read-only policy without the level's pr
   await assert.rejects(throughAdapter(named, { permissionProfileId: "read_only", configurationRevision: 1, launchPolicy: readOnlyPolicy }), /Timed out waiting for Codex app-server/);
   const started = named.calls().at(-1)!;
   assert.equal(started.args.includes("stdio://"), false, "the last call is the launch itself");
-  assert.equal(started.args.some((arg) => arg.startsWith(`permissions.${codexReadOnlyProfileId(spawnRequest.workAttemptId)}=`)), true);
-  // Another level that has the read-only sandbox and asks its owner is not the Read-only policy, and starts as before.
+  assert.equal(started.args.some((arg) => arg.startsWith(`permissions.${codexSandboxedProfileId(":read-only", spawnRequest.workAttemptId)}=`)), true);
+  // Another level that has the read-only sandbox and asks its owner is not the Read-only policy. It starts with a profile of
+  // its own all the same, which extends the same read-only one, and with the setting that lets a command ask for more.
   const asking = fakeCodex({ userAgent: "codex-stand-in/1.0" });
   await assert.rejects(throughAdapter(asking, { permissionProfileId: "ask_before_write", configurationRevision: 1,
     launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } } }), /Timed out waiting for Codex app-server/);
-  assert.equal(asking.calls().some((call) => call.args.some((arg) => arg.startsWith("permissions."))), false);
+  // On Windows, where Codex's sandbox refuses no deny, these two levels start as before: no profile and no such setting.
+  const profiled = process.platform !== "win32";
+  const askingStarted = asking.calls().at(-1)!;
+  assert.equal(askingStarted.args.some((arg) => arg.startsWith(`permissions.${codexSandboxedProfileId(":read-only", spawnRequest.workAttemptId)}={ extends = ":read-only"`)), profiled);
+  assert.equal(askingStarted.args.includes("features.exec_permission_approvals=true"), profiled);
+  assert.equal(askingStarted.args.includes('web_search="disabled"'), false, "web search is Read-only's own");
+  // Auto, whose sandbox lets a command write the project, names a profile that extends Codex's workspace one.
+  const auto = fakeCodex({ userAgent: "codex-stand-in/1.0" });
+  await assert.rejects(throughAdapter(auto, { permissionProfileId: "auto_review", configurationRevision: 1,
+    launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "workspaceWrite", networkAccess: false }, approvalsReviewer: "auto_review" } }), /Timed out waiting for Codex app-server/);
+  const autoStarted = auto.calls().at(-1)!;
+  assert.equal(autoStarted.args.some((arg) => arg.startsWith(`permissions.${codexSandboxedProfileId(":workspace", spawnRequest.workAttemptId)}={ extends = ":workspace"`)), profiled);
+  assert.equal(autoStarted.args.includes("features.exec_permission_approvals=true"), profiled);
+  // Full access names no profile and no such setting.
+  const full = fakeCodex({ userAgent: "codex-stand-in/1.0" });
+  await assert.rejects(throughAdapter(full, { permissionProfileId: "full_access", configurationRevision: 1,
+    launchPolicy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } } }), /Timed out waiting for Codex app-server/);
+  assert.equal(full.calls().at(-1)!.args.some((arg) => /^(?:permissions\.|default_permissions=|features\.exec_permission_approvals=)/.test(arg)), false);
 
   // A Read-only launch that names its profile and is given no overrides for it, whatever decided its home: nothing is started either.
   const notGiven = fakeCodex({ userAgent: "codex-stand-in/1.0" });
   for (const home of [{ codexHome: null, notices: [] }, { codexHome: null, notices: [], configOverrides: [] }]) {
     await assert.rejects(launchManagedCodexAppServer("ws://127.0.0.1:1", notGiven.bin, {
-      trustedProjectPath: project, configOverrides: [], env: ownerHome().env, sandboxed: true, readOnlySandbox: true, hideSignInProfile: codexReadOnlyProfileId(READ_ONLY_ATTEMPT),
-    }, { homeForSandboxedLaunch: async () => home }), exactly(READ_ONLY_PROFILE_NOT_GIVEN));
+      trustedProjectPath: project, configOverrides: [], env: ownerHome().env, sandboxed: true, readOnlySandbox: true, hideSignInProfile: { id: codexSandboxedProfileId(":read-only", READ_ONLY_ATTEMPT), extends: ":read-only" },
+    }, { homeForSandboxedLaunch: async () => home }), exactly(SIGN_IN_PROFILE_NOT_GIVEN));
   }
   assert.deepEqual(notGiven.calls(), [], "Codex was not asked and not started");
-  assert.equal(READ_ONLY_PROFILE_NOT_GIVEN, "LetAgents did not get the permission profile that keeps your Codex sign-in file from a Read-only agent's commands, "
+  assert.equal(SIGN_IN_PROFILE_NOT_GIVEN, "LetAgents did not get the permission profile that keeps your Codex sign-in file from this agent's commands, "
     + "so it will not start Codex at this access level. Start the agent again. If it happens again, choose another access level.");
 });
