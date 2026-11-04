@@ -59,7 +59,7 @@ export function registerTaskMutationTools(server: McpServer): void {
           2
         );
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -124,7 +124,7 @@ export function registerTaskMutationTools(server: McpServer): void {
           2
         );
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );
@@ -164,7 +164,7 @@ export function registerTaskMutationTools(server: McpServer): void {
           2
         );
       } catch (error) {
-        return taskToolError(String(error));
+        return taskToolError(error);
       }
     }
   );

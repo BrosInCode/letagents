@@ -6,6 +6,7 @@ import {
   LETAGENTS_AGENT_SESSION_ID_HEADER,
   LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
 } from "../../../shared/request-headers.js";
+import { roomAccessRefusal } from "../../../../shared/room-membership.mjs";
 import { endStoredAgentSession, getStoredAgentSession } from "../../local-state.js";
 import type { StoredAgentSessionState } from "../../local-state/types.js";
 import { encodeRoomIdPath } from "../../room-id.js";
@@ -54,8 +55,11 @@ const held = new Map<string, HeldConnection>();
  * - refused: the server answered, and declined.
  * - ended: the room says the session has ended.
  * - unsupported: the server does not know of process connections, for now.
+ * - denied: the room is for members only and this account is not one. Asking
+ *   again cannot help until an admin lets it in, and registering again then
+ *   holds a new connection.
  */
-type Outcome = "dropped" | "refused" | "ended" | "unsupported";
+type Outcome = "dropped" | "refused" | "ended" | "unsupported" | "denied";
 
 async function authorization(session: StoredAgentSessionState): Promise<Record<string, string>> {
   const token = await getLetagentsToken();
@@ -111,6 +115,15 @@ async function holdOnce(
     if (response.status >= 500) {
       discard(response);
       return "dropped";
+    }
+    if (response.status === 403) {
+      let refusal: ReturnType<typeof roomAccessRefusal> = null;
+      try {
+        refusal = roomAccessRefusal(JSON.parse(await response.text()));
+      } catch {
+        // Not a members-only refusal.
+      }
+      return refusal ? "denied" : "refused";
     }
     if (!response.ok || !response.body
       || !(response.headers.get("content-type") ?? "").includes("text/event-stream")) {
@@ -189,7 +202,7 @@ async function hold(connection: HeldConnection): Promise<void> {
       // registration starts a session instead of reusing this one.
       endStoredAgentSession(session.session_id, new Date().toISOString(), session.session_token);
     }
-    if (outcome === "ended") {
+    if (outcome === "ended" || outcome === "denied") {
       if (held.get(session.session_id) === connection) held.delete(session.session_id);
       return;
     }

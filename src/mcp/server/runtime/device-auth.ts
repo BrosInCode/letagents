@@ -10,13 +10,18 @@ import {
   resolveApiPath,
 } from "./api.js";
 
+/**
+ * A room answered 401 auth_required: this runtime has no sign-in the room
+ * accepts. Every room needs one (repo rooms and rooms without a repository),
+ * so the device flow starts the same way for each.
+ */
 export class RepoRoomAuthRequiredError extends Error {
   readonly roomId: string;
   readonly pendingAuth: PendingDeviceAuthState;
 
   constructor(roomId: string, pendingAuth: PendingDeviceAuthState) {
     super(
-      `Repo room '${roomId}' requires authentication. Device flow started: open ${pendingAuth.verification_uri} and enter code ${pendingAuth.user_code}, then run poll_device_auth.`
+      `Room '${roomId}' requires sign-in. Device flow started: open ${pendingAuth.verification_uri} and enter code ${pendingAuth.user_code}, then run poll_device_auth.`
     );
     this.name = "RepoRoomAuthRequiredError";
     this.roomId = roomId;

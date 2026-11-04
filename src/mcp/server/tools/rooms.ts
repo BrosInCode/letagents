@@ -1,5 +1,6 @@
 export {
   registerRepoInitializationTool,
+  registerRoomAccessTool,
   registerRepoVisibilityTool,
   registerRoomInspectionTools,
   registerRoomJoinTools,

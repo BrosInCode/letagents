@@ -36,7 +36,8 @@ export const REMOTE_ALLOWED_TOOLS: readonly string[] = [
   "publish_room_artifact", "react_to_message", "read_messages", "register_agent_session",
   "register_board_intent", "register_task_claim_intent", "register_task_close_intent",
   "register_task_create_intent", "register_task_lease_action_intent", "release_board_manager",
-  "release_task_lease", "release_task_review", "remember_room_fact", "request_human_input", "search_gifs",
+  "release_task_lease", "release_task_review", "remember_room_fact", "request_human_input",
+  "request_room_access", "search_gifs",
   "send_message", "send_thread_message", "set_agent_name", "set_board_manager_mode",
   "submit_review_verdict", "update_task", "wait_for_messages",
 ];
