@@ -15,10 +15,12 @@
           <small>@{{ request.login }} · asked {{ askedLabel(request.created_at) }}</small>
         </span>
         <span class="member-actions">
-          <button type="button" class="member-action primary" :disabled="Boolean(busyKey)" @click="decide(request, 'approve')">
+          <button type="button" class="member-action primary" :disabled="Boolean(busyKey)"
+            :aria-label="`Approve ${personName(request)}`" @click="decide(request, 'approve')">
             {{ busyKey === `approve:${request.id}` ? 'Approving…' : 'Approve' }}
           </button>
-          <button type="button" class="member-action" :disabled="Boolean(busyKey)" @click="decide(request, 'decline')">
+          <button type="button" class="member-action" :disabled="Boolean(busyKey)"
+            :aria-label="`Decline ${personName(request)}`" @click="decide(request, 'decline')">
             {{ busyKey === `decline:${request.id}` ? 'Declining…' : 'Decline' }}
           </button>
         </span>
@@ -33,17 +35,17 @@
     </div>
 
     <p v-if="managedOnGitHub" class="members-note">
-      Members are managed on GitHub. People with a role on the repository can open this room.
+      Members are managed on GitHub.
     </p>
     <template v-else-if="notMember">
       <p class="members-note">{{ notMemberText }}</p>
       <p v-if="access.error.value" class="members-error" role="alert">{{ access.error.value }}</p>
       <span class="member-actions">
         <button v-if="access.view.value.kind === 'ask'" type="button" class="member-action primary" :disabled="access.busy.value" @click="access.ask">
-          {{ access.busy.value ? 'Sending…' : 'Ask to join' }}
+          {{ access.busyAction.value === 'ask' ? 'Sending…' : 'Ask to join' }}
         </button>
         <button v-if="access.view.value.kind === 'pending'" type="button" class="member-action" :disabled="access.busy.value" @click="access.cancel">
-          Cancel request
+          {{ access.busyAction.value === 'cancel' ? 'Cancelling…' : 'Cancel request' }}
         </button>
       </span>
     </template>
@@ -69,10 +71,12 @@
             </button>
             <template v-else>
               <button type="button" class="member-action" :disabled="Boolean(busyKey)"
+                :aria-label="`${member.role === 'admin' ? 'Make member' : 'Make admin'}: ${personName(member)}`"
                 @click="setRole(member, member.role === 'admin' ? 'member' : 'admin')">
                 {{ busyKey === `role:${member.account_id}` ? 'Saving…' : member.role === 'admin' ? 'Make member' : 'Make admin' }}
               </button>
-              <button type="button" class="member-action danger" :disabled="Boolean(busyKey)" @click="confirmRemove(member)">
+              <button type="button" class="member-action danger" :disabled="Boolean(busyKey)"
+                :aria-label="`Remove ${personName(member)}`" @click="confirmRemove(member)">
                 {{ busyKey === `remove:${member.account_id}` ? 'Removing…' : 'Remove' }}
               </button>
             </template>
@@ -98,7 +102,7 @@ const props = defineProps<{
   room: RoomInfo | null
 }>()
 
-const emit = defineEmits<{ left: [] }>()
+const emit = defineEmits<{ left: [roomName: string] }>()
 
 const auth = useAuth()
 const viewerAccountId = () => auth.user.value?.id ?? null
@@ -138,12 +142,26 @@ const notMemberText = computed(() => {
 
 watch(() => props.room?.identifier, () => reset())
 watch([() => props.open, () => props.room?.identifier], ([open, roomId]) => {
-  if (open && roomId) void load()
+  if (!open || !roomId) return
+  // A message from the last visit no longer applies.
+  actionError.value = ''
+  void load()
 }, { immediate: true })
 
 function isSelf(member: RoomMember) {
   return member.account_id === viewerAccountId()
 }
+
+function personName(person: Pick<RoomMember, 'display_name' | 'login'>) {
+  return person.display_name || person.login
+}
+
+/**
+ * Membership belongs to the top-level room: leaving or removing someone in a
+ * focus room acts on its parent and on every focus room under it.
+ */
+const memberRoomName = computed(() =>
+  inheritsMembers.value ? list.value?.access_room_id || 'the parent room' : props.room?.displayName || 'this room')
 
 function initial(person: Pick<RoomMember, 'display_name' | 'login'>) {
   return (person.display_name || person.login || '?').trim().charAt(0).toUpperCase() || '?'
@@ -155,13 +173,13 @@ function askedLabel(createdAt: RoomJoinRequest['created_at']) {
 }
 
 async function confirmLeave() {
-  if (!window.confirm('Leave this room? A room admin must let you in again before you can come back.')) return
-  if (await leave()) emit('left')
+  const roomName = memberRoomName.value
+  if (!window.confirm(`Leave ${roomName}? You also leave its focus rooms, and your agents in them stop. To come back, ask to join again.`)) return
+  if (await leave()) emit('left', roomName)
 }
 
 async function confirmRemove(member: RoomMember) {
-  const name = member.display_name || member.login
-  if (!window.confirm(`Remove ${name} from this room? Their agents leave the room too.`)) return
+  if (!window.confirm(`Remove ${personName(member)} from ${memberRoomName.value}? They also leave its focus rooms, and their agents in them stop.`)) return
   await remove(member)
 }
 </script>

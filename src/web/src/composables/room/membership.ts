@@ -5,7 +5,7 @@ import type {
   RoomMemberRole,
   RoomMembershipState,
 } from '../../../../../shared/room-membership.mjs'
-import { apiFetch, roomPath } from './api'
+import { apiFetch, roomPath, type RoomApiFailure } from './api'
 
 export type {
   RoomJoinRequest,
@@ -23,11 +23,10 @@ export interface RoomMemberList {
   members: RoomMember[]
 }
 
-export interface RoomApiError extends Error {
-  status?: number
-  code?: string | null
-  payload?: Record<string, unknown> | null
-}
+export type RoomApiError = RoomApiFailure
+
+// A refusal here is about membership itself, not a reason to close the open room.
+const MEMBER_ROUTE = { reportRoomRefusal: false }
 
 export function asRoomApiError(error: unknown): RoomApiError {
   return (error instanceof Error ? error : new Error(String(error))) as RoomApiError
@@ -56,37 +55,37 @@ const membersPath = (room: string) => `${roomPath(room)}/members`
 const joinRequestsPath = (room: string) => `${roomPath(room)}/join-requests`
 
 export function fetchRoomMembership(room: string): Promise<RoomMembershipState> {
-  return apiFetch(`${roomPath(room)}/membership`)
+  return apiFetch(`${roomPath(room)}/membership`, undefined, MEMBER_ROUTE)
 }
 
 export async function requestRoomAccess(room: string): Promise<RoomJoinRequestSummary | null> {
-  const body = await apiFetch(joinRequestsPath(room), { method: 'POST' })
+  const body = await apiFetch(joinRequestsPath(room), { method: 'POST' }, MEMBER_ROUTE)
   return joinRequestFromPayload(body)
 }
 
 export async function cancelRoomJoinRequest(room: string, requestId: string): Promise<RoomJoinRequestSummary | null> {
-  const body = await apiFetch(`${joinRequestsPath(room)}/${encodeURIComponent(requestId)}/cancel`, { method: 'POST' })
+  const body = await apiFetch(`${joinRequestsPath(room)}/${encodeURIComponent(requestId)}/cancel`, { method: 'POST' }, MEMBER_ROUTE)
   return joinRequestFromPayload(body)
 }
 
 export function fetchRoomMembers(room: string): Promise<RoomMemberList> {
-  return apiFetch(membersPath(room))
+  return apiFetch(membersPath(room), undefined, MEMBER_ROUTE)
 }
 
 export function removeRoomMember(room: string, accountId: string): Promise<{ removed: boolean; account_id: string }> {
-  return apiFetch(`${membersPath(room)}/${encodeURIComponent(accountId)}`, { method: 'DELETE' })
+  return apiFetch(`${membersPath(room)}/${encodeURIComponent(accountId)}`, { method: 'DELETE' }, MEMBER_ROUTE)
 }
 
 export async function setRoomMemberRole(room: string, accountId: string, role: RoomMemberRole): Promise<RoomMember> {
   const body = await apiFetch(`${membersPath(room)}/${encodeURIComponent(accountId)}/role`, {
     method: 'PUT',
     body: JSON.stringify({ role }),
-  })
+  }, MEMBER_ROUTE)
   return body.member
 }
 
 export async function fetchPendingRoomJoinRequests(room: string): Promise<RoomJoinRequest[]> {
-  const body = await apiFetch(`${joinRequestsPath(room)}?state=pending`)
+  const body = await apiFetch(`${joinRequestsPath(room)}?state=pending`, undefined, MEMBER_ROUTE)
   return Array.isArray(body?.join_requests) ? body.join_requests : []
 }
 
@@ -95,5 +94,5 @@ export async function decideRoomJoinRequest(
   requestId: string,
   decision: 'approve' | 'decline',
 ): Promise<{ join_request: RoomJoinRequest; member?: RoomMember }> {
-  return apiFetch(`${joinRequestsPath(room)}/${encodeURIComponent(requestId)}/${decision}`, { method: 'POST' })
+  return apiFetch(`${joinRequestsPath(room)}/${encodeURIComponent(requestId)}/${decision}`, { method: 'POST' }, MEMBER_ROUTE)
 }

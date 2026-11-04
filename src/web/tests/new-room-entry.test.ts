@@ -167,11 +167,34 @@ test('signed-out blank creation starts GitHub sign-in and creates no room', asyn
     assert.equal(vm.actionLabel.value, 'Sign in to create')
     assert.equal(vm.canSubmit.value, true)
     await vm.handleSubmit()
-    assert.deepEqual(requests, [{ input: '/auth/github/login', body: { redirect_to: '/#start' } }])
+    assert.deepEqual(requests, [{ input: '/auth/github/login', body: { redirect_to: '/?new=blank#start' } }])
     assert.equal(vm.createdRoomId.value, '')
     assert.equal(navigations.length, count)
     assert.equal(vm.busy.value, false)
   } finally { unmount() }
+})
+
+test('blank creation waits for the session check, and sign-in returns to the Blank room tab', async () => {
+  let finishSession!: () => void
+  globalThis.fetch = async () => {
+    await new Promise<void>(resolve => { finishSession = resolve })
+    return new Response(JSON.stringify({ authenticated: true, account: { id: 'account_qa', login: 'qa', provider: 'github' } }))
+  }
+  const checking = useAuth().checkSession()
+  const location = (globalThis.window as any).location
+  location.search = '?new=blank'
+  const { vm, unmount } = mount()
+  try {
+    assert.equal(vm.tab.value, 'blank', 'the return address opens the Blank room tab')
+    assert.equal(vm.canSubmit.value, false, 'no sign-in or creation before the session check ends')
+    finishSession()
+    await checking
+    assert.equal(vm.canSubmit.value, true)
+    assert.equal(vm.actionLabel.value, 'Create room')
+  } finally {
+    unmount()
+    delete location.search
+  }
 })
 
 test('invalid optional names are rejected before any room is created', async () => {

@@ -12,7 +12,7 @@
         @click="$emit('copy')"
       >
         <span>
-          <span class="copy-help">{{ shareKind === 'url' ? 'Share this room URL' : 'People with the code ask to join' }}</span>
+          <span class="copy-help">{{ shareKind === 'url' ? 'Share this room URL instantly' : 'Share this room instantly' }}</span>
           <strong :title="shareValue">{{ shareDisplayValue || '----' }}</strong>
         </span>
         <span class="copy-pill">{{ copied ? 'Copied!' : 'Copy' }}</span>

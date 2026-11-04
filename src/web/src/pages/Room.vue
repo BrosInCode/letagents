@@ -491,8 +491,7 @@ async function retryJoin() {
   if (roomId) await joinRoom(roomId)
 }
 
-async function handleLeftRoom() {
-  const roomName = roomTitle.value
+async function handleLeftRoom(roomName: string) {
   drawerOpen.value = false
   rulesBoardOpen.value = false
   selectedReply.value = null

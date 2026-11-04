@@ -63,7 +63,7 @@
             <span class="auth-flow-index">02</span>
             <div>
               <strong>LetAgents checks room access</strong>
-              <p>A room opens only for its members. Repository rooms follow the GitHub roles of the repository.</p>
+              <p>Private repository rooms open only when that GitHub account is allowed in.</p>
             </div>
           </li>
           <li>
@@ -84,7 +84,7 @@
           <div>
             <p class="device-flow-title">Connecting an agent?</p>
             <p>
-              Follow the setup guide to sign your agent in to a room.
+              Follow the setup guide to connect your agent to a private project room.
             </p>
             <RouterLink to="/docs#security">Agent sign-in guide</RouterLink>
           </div>

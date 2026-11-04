@@ -16,7 +16,7 @@
               autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy" enterkeyhint="go"
               aria-describedby="project-repository-hint new-room-error" :aria-invalid="Boolean(error)" />
           </label>
-          <p id="project-repository-hint" class="new-room-hint">Open the shared room for an existing repository. People with a role on the repository on GitHub can open it.</p>
+          <p id="project-repository-hint" class="new-room-hint">Open the shared room for an existing repository. Private repositories require GitHub sign-in.</p>
           <div class="entry-note">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="12" rx="2"/><path d="m4 16-2 4h20l-2-4"/></svg>
             <div><strong>Starting with a folder?</strong><p>Use the desktop app to create a project or open a folder on your computer.</p></div>
@@ -36,7 +36,7 @@
           </p>
           <div class="entry-note">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 18h11a4 4 0 0 0 0-8h-.7A6 6 0 0 0 5.5 9 4.5 4.5 0 0 0 7 18Z"/></svg>
-            <div><strong>Members only</strong><p>Only members can read and post. People with the invite code ask to join, and a room admin lets them in. Local rooms are available in the desktop app.</p></div>
+            <div><strong>Shared online</strong><p>Invite people and agents with the room’s invite code. Local rooms are available in the desktop app.</p></div>
           </div>
         </template>
         <template v-else>
@@ -46,7 +46,7 @@
               autocomplete="off" autocapitalize="none" :spellcheck="false" :disabled="busy" enterkeyhint="go"
               aria-describedby="room-invitation-hint new-room-error" :aria-invalid="Boolean(error)" />
           </label>
-          <p id="room-invitation-hint" class="new-room-hint">Ask someone in the room to share an invitation. If you are not a member yet, you can ask to join.</p>
+          <p id="room-invitation-hint" class="new-room-hint">Ask someone in the room to share an invitation.</p>
           <div class="entry-note">
             <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="9" r="5"/><path d="m12 13 8 8m-5-5 3-3m0 6 3-3"/></svg>
             <div><strong>Join with your profile.</strong><p>Your agents can join you once you’re in.</p></div>
@@ -76,7 +76,9 @@ import { useAuth } from '@/composables/useAuth'
 const router = useRouter()
 const auth = useAuth()
 const tabs = [{ id: 'project', label: 'Project' }, { id: 'blank', label: 'Blank room' }, { id: 'join', label: 'Join room' }] as const
-const tab = ref('project')
+// Sign-in from the Blank room tab comes back to that tab.
+const BLANK_ROOM_RETURN = '/?new=blank#start'
+const tab = ref(typeof window !== 'undefined' && new URLSearchParams(window.location?.search || '').get('new') === 'blank' ? 'blank' : 'project')
 const repository = ref('')
 const invitation = ref('')
 const roomName = ref('')
@@ -87,8 +89,9 @@ const createdRoomId = ref('')
 let mounted = true
 onBeforeUnmount(() => { mounted = false })
 
+// Wait for the session check, so a signed-in person is never sent through sign-in again.
 const canSubmit = computed(() => !busy.value && (tab.value === 'blank'
-  ? !auth.isSigningIn.value
+  ? auth.hasCheckedSession.value && !auth.isCheckingSession.value && !auth.isSigningIn.value
   : Boolean((tab.value === 'project' ? repository.value : invitation.value).trim())))
 const actionLabel = computed(() => busy.value ? (tab.value === 'blank' ? 'Creating…' : 'Opening…')
   : tab.value === 'project' ? 'Open project room'
@@ -145,7 +148,7 @@ async function handleSubmit() {
 
   // A room has members, and its creator becomes its first admin, so creating one needs an account.
   if (!auth.isSignedIn.value) {
-    await auth.signIn('/#start')
+    await auth.signIn(BLANK_ROOM_RETURN)
     return
   }
 

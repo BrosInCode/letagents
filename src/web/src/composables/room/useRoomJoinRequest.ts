@@ -19,7 +19,9 @@ export function useRoomJoinRequest(options: {
   onMember: () => void
 }) {
   const joinRequest = ref<RoomJoinRequestSummary | null>(options.initialRequest ?? null)
-  const busy = ref(false)
+  /** The action that runs now, so each button can show its own progress. */
+  const busyAction = ref<'ask' | 'cancel' | 'check' | null>(null)
+  const busy = computed(() => busyAction.value !== null)
   const error = ref('')
   const now = ref(Date.now())
   const view = computed(() => resolveJoinRequestView(joinRequest.value, now.value))
@@ -38,17 +40,17 @@ export function useRoomJoinRequest(options: {
   }, { immediate: true })
   onScopeDispose(clearRetryTimer)
 
-  async function run(action: (room: string) => Promise<void>, failure: string) {
+  async function run(kind: NonNullable<typeof busyAction.value>, action: (room: string) => Promise<void>, failure: string) {
     const room = options.room()
     if (busy.value || !room) return
-    busy.value = true
+    busyAction.value = kind
     error.value = ''
     try {
       await action(room)
     } catch (cause) {
       error.value = asRoomApiError(cause).message || failure
     } finally {
-      busy.value = false
+      busyAction.value = null
       now.value = Date.now()
     }
   }
@@ -64,9 +66,9 @@ export function useRoomJoinRequest(options: {
     return false
   }
 
-  const check = () => run(async (room) => { await readMembership(room) }, 'Could not check your access. Try again.')
+  const check = () => run('check', async (room) => { await readMembership(room) }, 'Could not check your access. Try again.')
 
-  const ask = () => run(async (room) => {
+  const ask = () => run('ask', async (room) => {
     try {
       joinRequest.value = await requestRoomAccess(room) ?? joinRequest.value
     } catch (cause) {
@@ -83,7 +85,7 @@ export function useRoomJoinRequest(options: {
     }
   }, 'Could not send your request. Try again.')
 
-  const cancel = () => run(async (room) => {
+  const cancel = () => run('cancel', async (room) => {
     const current = view.value
     if (current.kind !== 'pending') return
     try {
@@ -97,5 +99,5 @@ export function useRoomJoinRequest(options: {
     }
   }, 'Could not cancel your request. Try again.')
 
-  return { joinRequest, view, busy, error, now, ask, cancel, check }
+  return { joinRequest, view, busy, busyAction, error, now, ask, cancel, check }
 }

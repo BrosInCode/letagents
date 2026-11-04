@@ -18,7 +18,7 @@
         @copy="copyShareValue"
       />
 
-      <RoomMembersPanel v-if="room" :open="open" :room="room" @left="emit('left')" />
+      <RoomMembersPanel v-if="room" :open="open" :room="room" @left="emit('left', $event)" />
 
       <ParentRoomPanel
         v-if="parentRoomUrl"
@@ -85,7 +85,7 @@ const props = defineProps<{
   showRulesButton?: boolean
 }>()
 
-const emit = defineEmits<{ close: [], themeChange: [theme: string], openRules: [], left: [] }>()
+const emit = defineEmits<{ close: [], themeChange: [theme: string], openRules: [], left: [roomName: string] }>()
 const drawerElement = ref<HTMLDialogElement | null>(null)
 
 function handleBackdropClick(event: MouseEvent) {

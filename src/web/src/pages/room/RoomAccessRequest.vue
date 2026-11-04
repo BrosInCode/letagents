@@ -1,21 +1,23 @@
 <template>
-  <section class="room-access" aria-labelledby="room-access-title" aria-live="polite">
-    <span class="room-access-status" :data-state="state">
-      <span class="room-access-dot" aria-hidden="true" />
-      {{ statusLabel }}
-    </span>
-    <h2 id="room-access-title" class="room-access-title">{{ displayName || roomId }}</h2>
-    <p class="room-access-body">{{ body }}</p>
+  <section class="room-access" aria-labelledby="room-access-title">
+    <div class="room-access-copy" role="status">
+      <span class="room-access-status" :data-state="state">
+        <span class="room-access-dot" aria-hidden="true" />
+        {{ statusLabel }}
+      </span>
+      <h2 id="room-access-title" class="room-access-title">{{ displayName || roomId }}</h2>
+      <p class="room-access-body">{{ body }}</p>
+    </div>
     <p v-if="errorText" class="room-access-error" role="alert">{{ errorText }}</p>
-    <div class="room-access-actions">
+    <div ref="actionsElement" class="room-access-actions">
       <button v-if="state === 'ask'" class="room-access-btn primary" type="button" :disabled="busy" @click="joinRequest.ask">
-        {{ busy ? 'Sending…' : 'Ask to join' }}
+        {{ joinRequest.busyAction.value === 'ask' ? 'Sending…' : 'Ask to join' }}
       </button>
       <button v-if="state !== 'ask'" class="room-access-btn" type="button" :disabled="busy" @click="checkAgain">
-        {{ busy ? 'Checking…' : 'Check again' }}
+        {{ checking ? 'Checking…' : 'Check again' }}
       </button>
       <button v-if="state === 'pending'" class="room-access-btn secondary" type="button" :disabled="busy" @click="joinRequest.cancel">
-        Cancel request
+        {{ joinRequest.busyAction.value === 'cancel' ? 'Cancelling…' : 'Cancel request' }}
       </button>
     </div>
     <p v-if="login" class="room-access-note">Signed in as {{ login }}</p>
@@ -23,19 +25,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   REPO_COLLABORATOR_REQUIRED_MESSAGE,
   ROOM_MEMBERSHIP_REQUIRED_MESSAGE,
   roomAccessRefusal,
 } from '../../../../../shared/room-membership.mjs'
-import { joinRoomSession } from '@/composables/room/join'
 import { formatJoinRequestTime } from '@/composables/room/joinRequestView'
-import { asRoomApiError, type RoomJoinRequestSummary } from '@/composables/room/membership'
+import { asRoomApiError, fetchRoomMembership, type RoomJoinRequestSummary } from '@/composables/room/membership'
+import type { RoomAccessRefusal } from '@/composables/room/types'
 import { useRoomJoinRequest } from '@/composables/room/useRoomJoinRequest'
 
 const props = defineProps<{
-  refusal: 'membership_required' | 'repo_collaborator_required'
+  refusal: RoomAccessRefusal
   roomId: string
   displayName: string | null
   initialRequest: RoomJoinRequestSummary | null
@@ -54,6 +56,7 @@ const repoChecking = ref(false)
 const repoError = ref('')
 const isRepoRoom = computed(() => props.refusal === 'repo_collaborator_required')
 const busy = computed(() => joinRequest.busy.value || repoChecking.value)
+const checking = computed(() => repoChecking.value || joinRequest.busyAction.value === 'check')
 const errorText = computed(() => repoError.value || joinRequest.error.value)
 const state = computed(() => isRepoRoom.value ? 'repo' : joinRequest.view.value.kind)
 
@@ -81,14 +84,14 @@ const body = computed(() => {
     : ROOM_MEMBERSHIP_REQUIRED_MESSAGE
 })
 
-// A repository role is decided on GitHub, so look by joining quietly; the room
-// page reloads only when the join works, and the screen stays put when it does not.
+// A repository role is decided on GitHub. The membership read answers once the
+// person has a role and refuses until then, so the screen stays put on a refusal.
 async function checkRepoAccess() {
   if (repoChecking.value) return
   repoChecking.value = true
   repoError.value = ''
   try {
-    await joinRoomSession(props.roomId)
+    await fetchRoomMembership(props.roomId)
     emit('retry')
   } catch (cause) {
     const failure = asRoomApiError(cause)
@@ -115,6 +118,17 @@ function handleWindowFocus() {
 }
 onMounted(() => window.addEventListener('focus', handleWindowFocus))
 onBeforeUnmount(() => window.removeEventListener('focus', handleWindowFocus))
+
+// The button a person pressed can disappear with the state it belonged to;
+// keep keyboard focus in the screen instead of dropping it to the page.
+const actionsElement = ref<HTMLElement | null>(null)
+watch(state, async () => {
+  await nextTick()
+  const active = typeof document === 'undefined' ? null : document.activeElement
+  // Only take focus back when it fell to the page; never pull it from elsewhere.
+  if (active && active !== document.body) return
+  actionsElement.value?.querySelector<HTMLButtonElement>('button:not(:disabled)')?.focus()
+})
 </script>
 
 <style scoped>
@@ -127,6 +141,13 @@ onBeforeUnmount(() => window.removeEventListener('focus', handleWindowFocus))
   padding: 40px;
   color: var(--text-secondary, #a1a1aa);
   text-align: center;
+}
+
+.room-access-copy {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
 }
 
 .room-access-status {

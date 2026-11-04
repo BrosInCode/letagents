@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { after, before, test, type TestContext } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { computed, createSSRApp, effectScope, h, ref } from 'vue'
+import { computed, createRenderer, createSSRApp, effectScope, h, ref, ssrContextKey } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { createServer, type ViteDevServer } from 'vite'
 
@@ -15,7 +15,9 @@ import {
 } from '../../../shared/room-membership.mjs'
 import { formatJoinRequestTime, resolveJoinRequestView } from '../src/composables/room/joinRequestView'
 import { createRoomLifecycle } from '../src/composables/room/lifecycle'
-import { joinError } from '../src/composables/room/state'
+import { apiFetch, roomPath } from '../src/composables/room/api'
+import { fetchRoomMembers } from '../src/composables/room/membership'
+import { isConnected, joinError, room } from '../src/composables/room/state'
 import { useRoomJoinRequest } from '../src/composables/room/useRoomJoinRequest'
 import { useRoomMembers } from '../src/components/room/room-drawer/useRoomMembers'
 import type { RoomInfo } from '../src/composables/room/types'
@@ -172,9 +174,11 @@ test('a 403 refusal on join becomes an access refusal with the latest request, n
   assert.equal(view.roomTitle.value, 'github.com/acme/app')
   assert.equal(view.joinErrorBody.value, REPO_COLLABORATOR_REQUIRED_MESSAGE)
   lifecycle.leaveRoom()
+  lifecycle.dispose()
 })
 
 test('asking to join moves to "Waiting for an admin", and Cancel moves back to "Ask to join"', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'], now: NOW })
   const calls = mockApi(t, {
     'POST /rooms/ROOM-1234/join-requests': json({ join_request: request('pending') }, 201),
     'POST /rooms/ROOM-1234/join-requests/jr_1/cancel': { join_request: request('cancelled') },
@@ -185,12 +189,53 @@ test('asking to join moves to "Waiting for an admin", and Cancel moves back to "
     assert.equal(access.view.value.kind, 'ask')
     await access.ask()
     assert.equal(access.view.value.kind, 'pending')
+    t.mock.timers.tick(hours(25))
+    await tick()
+    assert.equal(calls.length, 1, 'a pending request is never polled')
     await access.cancel()
     assert.equal(access.view.value.kind, 'ask')
     assert.equal(access.error.value, '')
     assert.deepEqual(calls, ['POST /rooms/ROOM-1234/join-requests', 'POST /rooms/ROOM-1234/join-requests/jr_1/cancel'])
+  } finally { scope.stop() }
+})
+
+test('the Declined screen turns back into "Ask to join" when retry_after passes, with no request', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: NOW })
+  const calls = mockApi(t, {})
+  const scope = effectScope()
+  const access = scope.run(() => useRoomJoinRequest({
+    room: () => 'ROOM-1234', initialRequest: request('declined', { retry_after: iso(NOW + hours(1)) }), onMember() {},
+  }))!
+  try {
+    assert.equal(access.view.value.kind, 'declined')
+    t.mock.timers.tick(hours(1) - 1000)
+    assert.equal(access.view.value.kind, 'declined')
+    t.mock.timers.tick(2000)
+    assert.deepEqual(access.view.value, { kind: 'ask', previouslyDeclined: true })
+    assert.deepEqual(calls, [])
+  } finally { scope.stop() }
+})
+
+test('the busy label belongs to the running action', async (t) => {
+  let finishCancel!: () => void
+  mockApi(t, {
+    'POST /rooms/ROOM-1234/join-requests/jr_1/cancel': () => json({ join_request: request('cancelled') }),
+  })
+  const original = globalThis.fetch
+  t.mock.method(globalThis, 'fetch', async (...args: Parameters<typeof fetch>) => {
+    await new Promise<void>(resolve => { finishCancel = resolve })
+    return original(...args)
+  })
+  const scope = effectScope()
+  const access = scope.run(() => useRoomJoinRequest({ room: () => 'ROOM-1234', initialRequest: request('pending'), onMember() {} }))!
+  try {
+    const cancelling = access.cancel()
+    assert.equal(access.busyAction.value, 'cancel')
+    assert.equal(access.busy.value, true)
     await tick()
-    assert.equal(calls.length, 2, 'nothing polls in the background')
+    finishCancel()
+    await cancelling
+    assert.equal(access.busyAction.value, null)
   } finally { scope.stop() }
 })
 
@@ -281,6 +326,134 @@ test('Check again opens the room once an admin approves, and a 409 on ask looks 
       'GET /rooms/ROOM-1234/membership',
     ])
   } finally { scope.stop() }
+})
+
+test('a refusal from a room read closes the open room; member routes and other rooms do not', async (t) => {
+  let refused = false
+  const calls: string[] = []
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const key = `${init?.method ?? 'GET'} ${String(input)}`
+    calls.push(key)
+    if (key === 'POST /rooms/ROOM-1234/join') return json({ room_id: 'ROOM-1234', display_name: 'Planning', kind: 'main' })
+    const refusal = roomMembershipRequiredBody({ room_id: 'ROOM-1234', display_name: 'Planning', join_request: request('approved') })
+    if (refused && key.startsWith('GET /rooms/')) return json(refusal, 403)
+    return json({})
+  })
+  let stops = 0
+  const lifecycle = createRoomLifecycle({
+    startParticipantRefreshLoop() {},
+    startPresenceRefreshLoop() {},
+    async startStreaming() {},
+    finishStreamingBootstrap() {},
+    stopStreaming() { stops += 1 },
+  })
+  try {
+    assert.equal(await lifecycle.joinRoom('ROOM-1234'), true)
+    assert.equal(isConnected.value, true)
+    refused = true
+    const stopsAfterJoin = stops
+
+    await assert.rejects(fetchRoomMembers('ROOM-1234'))
+    assert.equal(isConnected.value, true, 'a member route refusal is about membership, not reading')
+    await assert.rejects(apiFetch('/rooms/OTHER-0001/presence'))
+    assert.equal(isConnected.value, true, 'another room is not this room')
+    assert.equal(stops, stopsAfterJoin)
+
+    await assert.rejects(apiFetch(`${roomPath('ROOM-1234')}/presence`))
+    assert.equal(isConnected.value, false)
+    assert.equal(room.value, null)
+    assert.equal(stops, stopsAfterJoin + 1, 'the stream and the refresh timers stop')
+    assert.equal(joinError.value?.refusal, 'membership_required')
+    assert.equal(joinError.value?.roomId, 'ROOM-1234')
+    assert.equal(joinError.value?.joinRequest?.state, 'approved')
+  } finally {
+    lifecycle.leaveRoom()
+    lifecycle.dispose()
+  }
+})
+
+/** Mounts the access screen's script without a DOM, to drive its window-focus check. */
+function mountAccess(props: Record<string, unknown>) {
+  const emitted: string[] = []
+  const win = globalThis.window as any
+  const { addEventListener, removeEventListener } = win
+  let focusHandler: (() => void) | null = null
+  win.addEventListener = (type: string, handler: () => void) => { if (type === 'focus') focusHandler = handler }
+  win.removeEventListener = (type: string, handler: () => void) => { if (type === 'focus' && focusHandler === handler) focusHandler = null }
+  const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}),
+    createComment: () => ({}), setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null })
+  let bindings: any
+  const app = renderer.createApp({ setup() {
+    bindings = AccessRequest.setup({ roomId: 'ROOM-1234', displayName: 'Planning', login: 'cy', initialRequest: null, ...props },
+      { expose() {}, emit: (event: string) => emitted.push(event) })
+    return () => h('div')
+  } })
+  app.provide(ssrContextKey, { modules: new Set() })
+  app.mount({})
+  return {
+    emitted,
+    bindings,
+    focus: () => focusHandler?.(),
+    listening: () => Boolean(focusHandler),
+    unmount() {
+      app.unmount()
+      Object.assign(win, { addEventListener, removeEventListener })
+    },
+  }
+}
+
+test('window focus checks a pending request at most once per 5 s and opens the room once approved', async (t) => {
+  let approved = false
+  const calls = mockApi(t, {
+    'GET /rooms/ROOM-1234/membership': () => ({
+      room_id: 'ROOM-1234', access_room_id: 'ROOM-1234', display_name: 'Planning', managed_by: 'letagents',
+      member: approved, role: approved ? 'member' : null, join_request: request(approved ? 'approved' : 'pending'),
+    }),
+  })
+  const screen = mountAccess({ refusal: 'membership_required', initialRequest: request('pending') })
+  try {
+    assert.equal(screen.listening(), true)
+    screen.focus()
+    await tick()
+    screen.focus()
+    await tick()
+    assert.deepEqual(calls, ['GET /rooms/ROOM-1234/membership'], 'a second focus within 5 s does not ask again')
+    assert.deepEqual(screen.emitted, [])
+    approved = true
+    await screen.bindings.checkAgain()
+    assert.deepEqual(screen.emitted, ['retry'])
+  } finally { screen.unmount() }
+  assert.equal(screen.listening(), false, 'the focus listener goes away with the screen')
+})
+
+test('window focus does nothing on "Ask to join"', async (t) => {
+  const calls = mockApi(t, {})
+  const screen = mountAccess({ refusal: 'membership_required' })
+  try {
+    screen.focus()
+    await tick()
+    assert.deepEqual(calls, [])
+  } finally { screen.unmount() }
+})
+
+test('the repo screen checks with a read, stays put while refused, and never re-joins', async (t) => {
+  let collaborator = false
+  const calls = mockApi(t, {
+    'GET /rooms/github.com%2Facme%2Fapp/membership': () => collaborator
+      ? { room_id: 'github.com/acme/app', access_room_id: 'github.com/acme/app', display_name: 'github.com/acme/app', managed_by: 'github', member: null, role: null, join_request: null }
+      : json(repoCollaboratorRequiredBody({ room_id: 'github.com/acme/app' }), 403),
+  })
+  const screen = mountAccess({ refusal: 'repo_collaborator_required', roomId: 'github.com/acme/app', displayName: null })
+  try {
+    screen.focus()
+    await tick()
+    assert.deepEqual(screen.emitted, [])
+    assert.equal(screen.bindings.errorText.value, '', 'still no role is not an error')
+    collaborator = true
+    await screen.bindings.checkAgain()
+    assert.deepEqual(screen.emitted, ['retry'])
+    assert.ok(calls.every(call => call === 'GET /rooms/github.com%2Facme%2Fapp/membership'), 'no POST /join, which has a strict rate limit')
+  } finally { screen.unmount() }
 })
 
 async function renderAccess(props: Record<string, unknown>) {
@@ -475,7 +648,7 @@ test('the drawer shows Requests and member actions to admins, and Leave on your 
   assert.match(html, /<h2[^>]*>Requests<\/h2>/)
   assert.match(html, /1 waiting/)
   assert.match(html, /<strong[^>]*>Cy<\/strong>/)
-  assert.match(html, />\s*Approve\s*</)
+  assert.match(html, /aria-label="Approve Cy"[^>]*>\s*Approve\s*</)
   assert.match(html, />\s*Decline\s*</)
   assert.match(html, /ada<!--\[--> \(you\)/)
   assert.match(html, />\s*Leave\s*</)
@@ -501,6 +674,18 @@ test('the drawer shows a member only Leave, and a repo room says members are man
   const repoView = await renderMembersPanel(roomInfo('github.com/acme/app'))
   assert.match(repoView, /Members are managed on GitHub/)
   assert.doesNotMatch(repoView, /Leave|Requests/)
+})
+
+test('the drawer offers Ask to join to a person who is not a member yet', async (t) => {
+  mockApi(t, {
+    'GET /auth/session': { authenticated: true, account: { id: 'acct_cy', login: 'cy', provider: 'github' } },
+    'GET /rooms/ROOM-1234/members': json(roomMembershipRequiredBody({ room_id: 'ROOM-1234', display_name: 'Planning', join_request: null }), 403),
+  })
+  await viteAuth.checkSession()
+  const html = await renderMembersPanel(roomInfo())
+  assert.match(html, /You are not a member of this room yet\./)
+  assert.match(html, />\s*Ask to join\s*</)
+  assert.doesNotMatch(html, /Leave|Requests|Remove/)
 })
 
 test('presentation keeps the existing sign-in and private-repo errors apart from membership', () => {
