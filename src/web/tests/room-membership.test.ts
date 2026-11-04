@@ -17,7 +17,7 @@ import { formatJoinRequestTime, resolveJoinRequestView } from '../src/composable
 import { createRoomLifecycle } from '../src/composables/room/lifecycle'
 import { apiFetch, roomPath } from '../src/composables/room/api'
 import { fetchRoomMembers } from '../src/composables/room/membership'
-import { isConnected, joinError, room } from '../src/composables/room/state'
+import { connectionState, isConnected, joinError, room } from '../src/composables/room/state'
 import { useRoomJoinRequest } from '../src/composables/room/useRoomJoinRequest'
 import { useRoomMembers } from '../src/components/room/room-drawer/useRoomMembers'
 import type { RoomInfo } from '../src/composables/room/types'
@@ -456,6 +456,57 @@ test('the repo screen checks with a read, stays put while refused, and never re-
   } finally { screen.unmount() }
 })
 
+test('after Ask to join, focus moves to the new first button once the request ends', async (t) => {
+  mockApi(t, { 'POST /rooms/ROOM-1234/join-requests': json({ join_request: request('pending') }, 201) })
+  const body = {}
+  const doc = { body, activeElement: body as unknown }
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: doc })
+  const focused: string[] = []
+  const screen = mountAccess({ refusal: 'membership_required' })
+  screen.bindings.actionsElement.value = {
+    querySelector: (selector: string) => selector === 'button:not(:disabled)' && !screen.bindings.busy.value
+      ? { focus: () => { focused.push('first button'); doc.activeElement = {} } }
+      : null,
+  }
+  try {
+    await screen.bindings.joinRequest.ask()
+    for (let index = 0; index < 3; index += 1) await tick()
+    assert.equal(screen.bindings.state.value, 'pending')
+    assert.deepEqual(focused, ['first button'])
+  } finally {
+    screen.unmount()
+    Reflect.deleteProperty(globalThis, 'document')
+  }
+})
+
+test('a refusal while the room loads leaves the access screen, not a half-open room', async (t) => {
+  const refusal = roomMembershipRequiredBody({ room_id: 'ROOM-1234', display_name: 'Planning', join_request: null })
+  t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+    const key = `${init?.method ?? 'GET'} ${String(input)}`
+    if (key === 'POST /rooms/ROOM-1234/join') return json({ room_id: 'ROOM-1234', display_name: 'Planning', kind: 'main' })
+    if (key.startsWith('GET /rooms/ROOM-1234/presence')) return json(refusal, 403)
+    return json({})
+  })
+  const loops: string[] = []
+  const lifecycle = createRoomLifecycle({
+    startParticipantRefreshLoop() { loops.push('participants') },
+    startPresenceRefreshLoop() { loops.push('presence') },
+    async startStreaming() {},
+    finishStreamingBootstrap() {},
+    stopStreaming() {},
+  })
+  try {
+    assert.equal(await lifecycle.joinRoom('ROOM-1234'), false)
+    assert.equal(isConnected.value, false)
+    assert.equal(connectionState.value, 'error')
+    assert.equal(joinError.value?.refusal, 'membership_required')
+    assert.deepEqual(loops, [], 'no refresh loop starts for a refused room')
+  } finally {
+    lifecycle.leaveRoom()
+    lifecycle.dispose()
+  }
+})
+
 async function renderAccess(props: Record<string, unknown>) {
   return renderToString(createSSRApp({
     render: () => h(AccessRequest, { roomId: 'ROOM-1234', displayName: 'Planning', login: 'cy', initialRequest: null, ...props }),
@@ -526,6 +577,24 @@ test('admins load members and pending requests; repo rooms say GitHub manages me
       'GET /rooms/ROOM-1234/join-requests?state=pending',
       'GET /rooms/github.com%2Facme%2Fapp/members',
     ], 'a repo room never asks for join requests')
+  } finally { scope.stop() }
+})
+
+test('in a focus room the lists name the parent room, read once from the membership state', async (t) => {
+  const calls = mockApi(t, {
+    'GET /rooms/focus_9/members': { ...adminList, room_id: 'focus_9', access_room_id: 'ROOM-1234', can_manage: false },
+    'GET /rooms/focus_9/membership': {
+      room_id: 'focus_9', access_room_id: 'ROOM-1234', display_name: 'Planning', managed_by: 'letagents', member: true, role: 'member', join_request: null,
+    },
+  })
+  const scope = effectScope()
+  const members = scope.run(() => useRoomMembers(ref(roomInfo('focus_9')), () => 'acct_bob'))!
+  try {
+    await members.load()
+    await members.load()
+    assert.equal(members.inheritsMembers.value, true)
+    assert.equal(members.accessRoomName.value, 'Planning')
+    assert.deepEqual(calls, ['GET /rooms/focus_9/members', 'GET /rooms/focus_9/membership', 'GET /rooms/focus_9/members'])
   } finally { scope.stop() }
 })
 

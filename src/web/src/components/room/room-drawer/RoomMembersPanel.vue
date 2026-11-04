@@ -114,6 +114,7 @@ const {
   actionError,
   busyKey,
   notMember,
+  accessRoomName,
   managedOnGitHub,
   canManage,
   inheritsMembers,
@@ -160,8 +161,9 @@ function personName(person: Pick<RoomMember, 'display_name' | 'login'>) {
  * Membership belongs to the top-level room: leaving or removing someone in a
  * focus room acts on its parent and on every focus room under it.
  */
-const memberRoomName = computed(() =>
-  inheritsMembers.value ? list.value?.access_room_id || 'the parent room' : props.room?.displayName || 'this room')
+const memberRoomName = computed(() => inheritsMembers.value
+  ? accessRoomName.value || list.value?.access_room_id || 'the parent room'
+  : props.room?.displayName || 'this room')
 
 function initial(person: Pick<RoomMember, 'display_name' | 'login'>) {
   return (person.display_name || person.login || '?').trim().charAt(0).toUpperCase() || '?'
@@ -174,12 +176,13 @@ function askedLabel(createdAt: RoomJoinRequest['created_at']) {
 
 async function confirmLeave() {
   const roomName = memberRoomName.value
-  if (!window.confirm(`Leave ${roomName}? You also leave its focus rooms, and your agents in them stop. To come back, ask to join again.`)) return
+  if (!window.confirm(`Leave ${roomName}? You also leave its focus rooms, and your agents in ${roomName} and its focus rooms stop. To come back, ask to join again.`)) return
   if (await leave()) emit('left', roomName)
 }
 
 async function confirmRemove(member: RoomMember) {
-  if (!window.confirm(`Remove ${personName(member)} from ${memberRoomName.value}? They also leave its focus rooms, and their agents in them stop.`)) return
+  const roomName = memberRoomName.value
+  if (!window.confirm(`Remove ${personName(member)} from ${roomName}? They also leave its focus rooms, and their agents in ${roomName} and its focus rooms stop.`)) return
   await remove(member)
 }
 </script>

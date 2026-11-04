@@ -49,7 +49,14 @@ export async function apiFetch(
     error.code = payload?.code || payload?.error || null
     error.payload = payload
     if (reportRoomRefusal && res.status === 403 && roomAccessRefusal(payload)) {
-      for (const listener of roomAccessRefusedListeners) listener(path, error)
+      for (const listener of roomAccessRefusedListeners) {
+        try {
+          listener(path, error)
+        } catch (listenerError) {
+          // The caller still gets the HTTP error below.
+          console.error('[room] access refusal listener failed:', listenerError)
+        }
+      }
     }
     throw error
   }

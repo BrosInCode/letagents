@@ -6,6 +6,7 @@ import {
   decideRoomJoinRequest,
   fetchPendingRoomJoinRequests,
   fetchRoomMembers,
+  fetchRoomMembership,
   joinRequestFromPayload,
   removeRoomMember,
   setRoomMemberRole,
@@ -29,6 +30,8 @@ export function useRoomMembers(room: Readonly<Ref<RoomInfo | null>>, viewerAccou
   const busyKey = ref<string | null>(null)
   /** Set when the viewer is not a member: their latest request, if any. */
   const notMember = ref<{ joinRequest: RoomJoinRequestSummary | null } | null>(null)
+  /** The display name of the room whose members these are: a focus room's parent. */
+  const accessRoomName = ref('')
   let loadVersion = 0
 
   const roomId = computed(() => room.value?.identifier || '')
@@ -45,6 +48,7 @@ export function useRoomMembers(room: Readonly<Ref<RoomInfo | null>>, viewerAccou
     loadError.value = ''
     actionError.value = ''
     notMember.value = null
+    accessRoomName.value = ''
   }
 
   async function load() {
@@ -63,6 +67,10 @@ export function useRoomMembers(room: Readonly<Ref<RoomInfo | null>>, viewerAccou
         } catch (cause) {
           pendingError = asRoomApiError(cause).message || 'Could not load requests.'
         }
+      }
+      // A focus room's members are its parent's; name the parent, once, for the Leave and Remove text.
+      if (members.access_room_id !== members.room_id && !accessRoomName.value) {
+        accessRoomName.value = await fetchRoomMembership(id).then(state => state.display_name, () => '')
       }
       if (version !== loadVersion) return
       list.value = members
@@ -140,6 +148,7 @@ export function useRoomMembers(room: Readonly<Ref<RoomInfo | null>>, viewerAccou
     actionError,
     busyKey,
     notMember,
+    accessRoomName,
     managedOnGitHub,
     canManage,
     inheritsMembers,

@@ -36,6 +36,7 @@ import {
   resetRoomState,
   room,
   roomArtifacts,
+  roomSessionVersion,
   setLastActivityHistoryRequest,
   taskGithubStatus,
   tasks,
@@ -83,6 +84,7 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
         roomId: roomIdentifier,
       },
     })
+    const sessionVersion = roomSessionVersion
 
     try {
       const joinedRoom = await joinRoomSession(roomIdentifier)
@@ -104,6 +106,9 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
         joinedRoom,
         canonicalActivityHistoryRequest,
       )
+      // The room was closed or replaced while it loaded, for example by a
+      // refusal: whoever closed it owns the screen now.
+      if (roomSessionVersion !== sessionVersion) return false
       replaceRoomMessages(mergeMessages([], bootstrap.messagePage.messages))
       messagesHasOlder.value = bootstrap.messagePage.hasOlder
       messagesLoaded.value = true

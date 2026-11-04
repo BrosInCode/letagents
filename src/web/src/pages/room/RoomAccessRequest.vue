@@ -122,7 +122,13 @@ onBeforeUnmount(() => window.removeEventListener('focus', handleWindowFocus))
 // The button a person pressed can disappear with the state it belonged to;
 // keep keyboard focus in the screen instead of dropping it to the page.
 const actionsElement = ref<HTMLElement | null>(null)
-watch(state, async () => {
+// Every button is disabled until the action that changed the state ends, so
+// wait for that before choosing where focus goes.
+let restoreFocus = false
+watch(state, () => { restoreFocus = true })
+watch([state, busy], async () => {
+  if (!restoreFocus || busy.value) return
+  restoreFocus = false
   await nextTick()
   const active = typeof document === 'undefined' ? null : document.activeElement
   // Only take focus back when it fell to the page; never pull it from elsewhere.
