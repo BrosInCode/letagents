@@ -19,7 +19,7 @@
             </template>
             <template v-else>
               <time :datetime="row.rule.created_at" :title="`Since ${fullTime(row.rule.created_at)}`">{{ span(row.rule.created_at) }}</time> so far
-              <template v-if="row.rule.delivery"> · By {{ row.rule.delivery.kind }}</template>
+              <template v-if="row.rule.delivery"> · By {{ deliveryLabel(row.rule.delivery.kind) }}</template>
               <template v-if="row.rule.expires_at">
                 · {{ row.rule.repeat ? "Repeats until" : "Expires" }}
                 <time :datetime="row.rule.expires_at" :title="fullTime(row.rule.expires_at)">{{ clock(row.rule.expires_at) }}</time>
@@ -124,6 +124,8 @@ const rows = computed(() => {
 const describe = (rule: Pick<WakeRule, "event" | "arguments">) =>
   describeWakeRule(rule, { formatTime: (iso) => formatWakeClock(iso, now.value) });
 const clock = (iso: string) => formatWakeClock(iso, now.value);
+/** How a delivery rule reaches its agent, in words ("mcp_event" is an MCP Events subscription, ChatGPT's). */
+const deliveryLabel = (kind: string) => kind === "mcp_event" ? "MCP Events" : kind;
 const span = (iso: string) => formatWakeSpan(now.value.getTime() - Date.parse(iso));
 const until = (iso: string) => formatWakeSpan(Date.parse(iso) - now.value.getTime());
 const fullTime = (iso: string | undefined) => iso

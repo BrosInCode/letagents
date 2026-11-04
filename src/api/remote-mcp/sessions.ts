@@ -28,6 +28,7 @@ import {
   type McpSessionPersistentState,
   type McpSessionScope,
 } from "../../mcp/server/runtime/session-scope.js";
+import { registerMcpEventsHandlers } from "./events.js";
 import type { InProcessDispatcher } from "./in-process-dispatch.js";
 import { getPollTimeoutCapMs } from "../../shared/poll-timeout-cap.js";
 import { RemoteMcpBusyError, RemoteMcpStateTooLargeError } from "./errors.js";
@@ -419,6 +420,8 @@ export class RemoteMcpSessions {
       // Each request gets its own server object and stateless transport; the
       // session id and state live in Postgres, not in transport memory.
       const server = createLetAgentsMcpServer({ profile: "autonomous_mcp_worker", supervisedProvider: null, remote: true });
+      // MCP Events (ChatGPT subscriptions) are a remote-only surface, bound to this session's credential.
+      registerMcpEventsHandlers(server.server, { account, tokenHash: session.tokenHash, state: session.state, clientName: session.clientName });
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       await server.connect(transport);
       res.setHeader("Mcp-Session-Id", session.sessionId);

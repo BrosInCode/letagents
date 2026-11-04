@@ -60,7 +60,7 @@ export interface ParsedWakeRuleInput {
 }
 
 /** How a room.message rule reaches its agent. */
-export type WakeRuleDeliveryKind = "webhook" | "email";
+export type WakeRuleDeliveryKind = "webhook" | "email" | "mcp_event";
 
 /**
  * How a room.message rule's deliveries go. Everyone in the room sees the kind
@@ -80,6 +80,15 @@ export interface WakeRuleDeliverySummary {
   last_status?: number | null;
   last_error?: string | null;
   last_attempt_at?: string | null;
+  /**
+   * MCP Events subscriptions only (owner view): the id ChatGPT holds, its event
+   * name, when it must renew, and the delivered-up-to cursor (the subscribe
+   * answer may give a lower watermark while events still wait to go out).
+   */
+  subscription_id?: string;
+  event_name?: string;
+  refresh_before?: string | null;
+  cursor?: string | null;
 }
 
 export interface WakeRuleActor { kind: "agent" | "human"; id: string; label: string }
@@ -160,6 +169,16 @@ export const WAKE_RULE_LIMITS: Readonly<{
   deliveryRulesPerAccount: number;
   emailConfirmationsPerAddressPerDay: number;
   emailConfirmationsPerAccountPerDay: number;
+  mcpEventDefaultTtlMs: number;
+  mcpEventMinTtlMs: number;
+  mcpEventMaxTtlMs: number;
+  mcpEventReplayMax: number;
+  mcpEventHeldMax: number;
+  mcpEventSecretRotationMs: number;
+  mcpEventVerificationCacheMs: number;
+  mcpEventMaxBodyBytes: number;
+  mcpEventSecretMinBytes: number;
+  mcpEventSecretMaxBytes: number;
   webhookPauseAfterFailures: number;
   webhookTextPreviewMax: number;
   webhookUrlMaxLength: number;

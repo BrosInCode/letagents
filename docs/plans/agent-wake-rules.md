@@ -288,6 +288,120 @@ The receiver checklist, examples and the operator checklist for email are in
 `docs/ticket-connectors.md`, "Remote MCP endpoint", "Wake a bot or service by
 webhook or email".
 
+### 8. ChatGPT subscribes by MCP Events
+
+ChatGPT exposes no inbound webhook URL to a person, so a webhook or email rule
+cannot wake it. OpenAI's "MCP Events" (a draft, implemented by ChatGPT Work
+chats and dots) turns the connection around: the MCP server advertises event
+types, the client subscribes with a callback URL and a secret it chose, the
+server verifies the URL with a signed challenge and then POSTs each event in the
+Standard Webhooks envelope. LetAgents implements it on `/mcp` with one event,
+`room.message`, and no new delivery machinery: a subscription is a
+`room.message` wake rule with delivery kind `mcp_event`.
+
+- **Methods.** `events/list`, `events/subscribe`, `events/unsubscribe` are
+  registered on each request's server object next to the tools
+  (`src/api/remote-mcp/events.ts`, called from `sessions.ts`), and
+  `capabilities.events: {}` is advertised in the `initialize` result. The
+  principal is the credential behind the session (the owner token or OAuth
+  grant, by its hash): the subscription is bound to it like a webhook rule, and
+  "me" in the room is the worker that credential registered there
+  (`register_agent_session`; the credential keeps its workers across sessions).
+  `mentions_me` without a worker is `-32602` and says to register one;
+  `any: true` needs none.
+- **Order of a subscribe** (as the page requires): authorize the account for
+  the room (`-32024` Forbidden otherwise) and the worker; validate the
+  arguments (`room_id`, `mentions_me`, `any`, `include_agents`, `worker_id`);
+  require `whsec_` plus base64 of 24 to 64 key bytes; check the URL with the
+  webhook guard (`-32602`, the same one answer); POST the challenge, signed,
+  and require it echoed with a 2xx (constant-time compare); store. A failed
+  verification is `-32015` `CallbackEndpointError` with `data.reason`
+  (`connection_refused`, `timeout`, `tls_error`, `http_4xx`, `http_5xx`,
+  `challenge_failed`). The OpenAI page gives `-32015`; the draft specification
+  later renumbered it to `-32027`; the page wins because ChatGPT follows it.
+  Verification is cached per credential and URL for 10 minutes, in memory,
+  and one credential may cause at most 30 verification POSTs in 10 minutes
+  (`-32025`, `data.limit: "verifications"`): a subscribe makes this server POST
+  to a URL the caller chose, so that is bounded like the request budget.
+- **Identity and renewal.** `id` is `sub_` and 32 hex of SHA-256 over the
+  credential hash, the URL, the event name and the canonical (key-sorted)
+  arguments; the rule stores it (`mcp_subscription_id`, unique per credential
+  among held rules) with the event name and the arguments as given
+  (`mcp_arguments`). The same identity again renews in place: new sealed target
+  (the previous secret stays for 10 minutes and deliveries carry both
+  signatures), new `expires_at`, worker as it is now, `active` again if it had
+  paused. `expires_at` is the `refreshBefore` returned: `ttlMs` as asked,
+  clamped to 5 minutes and 7 days, 24 hours when omitted; `null` (no expiry)
+  is not granted and gets 7 days. The scheduler ends an expired subscription as
+  it ends a webhook rule; an expired one is not matched, so a later renewal
+  reports `truncated: true`.
+- **Cursor and replay.** The cursor is the room message number, as a string.
+  A first subscribe answers the room's current number and stores it as the
+  subscription's delivered-up-to position (`mcp_cursor`), which each delivered
+  event moves forward; each event carries its own cursor. A renewal with a
+  cursor re-queues this subscription's delivery rows after it (the same
+  `eventId`, `evt_<rule>_<number>`), newest 50 at most; `truncated: true`
+  when more exist, when the subscription was paused meanwhile, when the cursor
+  is unknown (no such message, or past the integer range), or when it is older
+  than the 7 days of rows kept. A subscription replays at most once an hour
+  (`mcp_replayed_at`): a second renewal inside the hour re-queues nothing.
+  Re-queued rows spend the rule's hourly budget (20); past it they wait for the
+  budget, in order, bounded like held matches. The result's `cursor` is the
+  server's watermark: the delivered-up-to position, never past an event that
+  still waits to go out (a row on a backoff while a later one was delivered),
+  so a client that keeps it skips nothing. Replay reads the rule's own outbox
+  rows, not the room: a gap while the rule was not active is reported, not
+  filled.
+- **Delivery.** No coalescing: each match is one row (`kind = 'mcp_event'`,
+  inserted as `retry` with no attempt, because `queued` is the one coalescing
+  slot of a webhook or email rule) and one POST, and one row of a subscription
+  is in flight at a time, oldest due first. That keeps the usual case in
+  message order but promises none: an event on a retry backoff lets a newer
+  one go first, so the receiver orders by cursor and drops repeated event ids.
+  Posts by the subscriber's own account's workers are never events for it
+  (with `any` and `include_agents` and no registered worker, the rule's
+  stand-in agent key would otherwise let a later worker of the same account
+  wake its own subscription in a loop). The row holds no message text; the
+  worker reads the message when it sends, which is what makes a replay
+  possible. Envelope `{ eventId, name, timestamp, data, cursor }` with
+  `data` the webhook body's fields minus `delivery_id`, `rule_id` and `sent_at`
+  (`eventId` and `timestamp` cover them) plus `thread_root_id` for a thread
+  reply; headers `webhook-id`, `webhook-timestamp`, `webhook-signature`
+  (`v1,` base64 HMAC-SHA256 of `<id>.<timestamp>.<body>`, two space-separated
+  during a rotation) and `X-MCP-Subscription-Id`; at most 256 KiB, the preview
+  shortened first. The HTTP client is the webhook rules' (`webhook-url.ts`),
+  which now also treats `425` as a throttling status (Retry-After, uncounted),
+  reads Retry-After on `503` (counted) and can read a bounded response body for
+  the challenge. `410` and `413` are final; a `410` retires the subscription
+  at once ("the receiver answered 410 Gone"). The three hourly budgets apply;
+  past one, events wait in order instead of folding, at most 50 per
+  subscription (older ones are dropped, `over_cap_count` counts them, and the
+  receiver sees the gap in the cursors).
+- **Ends.** Revoking the grant or token retires the rule in the same
+  transaction as any delivery rule (`retireWakeRulesForCredential` matches by
+  credential, so no new wiring); expiry stops delivery and the scheduler ends
+  it; `events/unsubscribe` cancels it as the subscriber's own cancel (`{}`,
+  idempotent, matched by the id, so only the subscriber's own); `410` retires
+  it. `list_wake_rules` shows the owner `subscription_id`, `event_name`,
+  `refresh_before` and `cursor` under `delivery`; others see the kind and the
+  pause; the panel labels it "By MCP Events".
+- **Not done.** MCP 2.0 (`server/discover`, protocol `2026-07-28`) is not
+  spoken: the SDK used knows `2025-11-25` at most; the `initialize` path is the
+  one the OpenAI page shows for streamable HTTP. No real ChatGPT subscription
+  was made in development; the receiver side is a loopback stub that follows
+  the page.
+
+Migration `0135_wake_mcp_events` (additive, re-runnable; after
+`0134_wake_webhook_bearer`): the `mcp_event` kind on rules and deliveries,
+`mcp_subscription_id`, `mcp_event_name`, `mcp_arguments`, `mcp_cursor`,
+`mcp_replayed_at`, a check that ties them to the kind, and a unique index on
+`(credential_ref, mcp_subscription_id)` among held rules.
+Code: `src/api/wake-rules/mcp-events.ts` (contract, signature, envelope),
+`src/api/remote-mcp/events.ts` (methods), `src/api/db/wake-rules-mcp-events.ts`
+(storage, replay), `webhook-enqueue.ts` (the un-coalesced branch),
+`notifications/wake-webhooks.ts` (the `mcp_event` lane and attempt). User
+guide: `docs/ticket-connectors.md`, "ChatGPT: wake by MCP Events".
+
 ## Agent tools
 
 These are added to the MCP server in every cloud profile. In the
@@ -336,6 +450,11 @@ against the agent's 20-rule limit like a new rule.
 `package.json` version is bumped). Then the desktop app. An older MCP package
 or desktop app keeps working: it simply has no wake tools and shows wake notices
 as ordinary system messages.
+
+**MCP Events:** migration `0135_wake_mcp_events` and the API. The methods live
+on `/mcp`, so ChatGPT can subscribe as soon as the API runs; nothing in the
+npm package or the desktop app changes, except that the shared wake-rules panel
+labels the new kind "By MCP Events" (an older build shows "By mcp_event").
 
 **Wake webhooks and email:** migrations `0130_wake_webhooks`,
 `0131_wake_email` and `0132_wake_delivery_hardening`, and the API (email also
@@ -389,6 +508,28 @@ builds show "Waiting for a message for me · By webhook · Until cancelled".
   bounded; an unconfirmed link expiry ends the rule; a stop while pending
   leaves nothing due; past the hourly budget one email waits and later matches
   fold into it.
+
+- `src/api/__tests__/mcp-events.test.ts`: the Standard Webhooks signature
+  (a known answer, a receiver written from the description, two signatures
+  during a rotation), the secret shape (24 and 64 bytes accepted, 23 and 65
+  refused, bad prefix and base64 refused), the subscription id and canonical
+  arguments, the argument rules, the envelope and its 256 KiB bound, `ttlMs`
+  and cursor parsing, the final and retry statuses, the failure reasons.
+- `src/api/__tests__/mcp-events-db.test.ts` (PostgreSQL, over `/mcp`):
+  `initialize` advertises `events`, `events/list`; a subscribe verifies the
+  callback (headers, challenge echoed), stores a sealed rule bound to the owner
+  token's hash, renews idempotently with a rotated secret (both signatures),
+  delivers a mention with the exact envelope and headers and a thread reply
+  with its root, excludes the bot's own message, shows the owner view and the
+  others' view, grants `ttlMs` within bounds, unsubscribes idempotently;
+  refusals (unknown event, bad delivery and secret, both filters, bad `ttlMs`
+  and cursor, unknown worker, unreadable room, no worker, private and own-host
+  URLs, every verification failure category, and nothing stored or challenged
+  for any of them); delivery (`503` and `425` retry with the same `eventId`
+  and Retry-After, `413` final, `410` retires); replay by cursor in order with
+  the same ids, the 50 bound, the pause gap, an unknown cursor, a new
+  subscription with a cursor, and an event held past the hourly budget;
+  revocation retires, expiry stops delivery and the scheduler ends it.
 
 ## Open questions
 

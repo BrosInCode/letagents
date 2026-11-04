@@ -951,7 +951,14 @@
       "idx": 135,
       "version": "7",
       "when": 1794300000000,
-      "tag": "0135_room_members_reseed",
+      "tag": "0135_wake_mcp_events",
+      "breakpoints": true
+    },
+    {
+      "idx": 136,
+      "version": "7",
+      "when": 1794400000000,
+      "tag": "0136_room_members_reseed",
       "breakpoints": true
     }
   ]
