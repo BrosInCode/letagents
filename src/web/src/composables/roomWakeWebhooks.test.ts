@@ -44,6 +44,11 @@ function jsonResponse(value: unknown, status = 200): Response {
   return new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
+/** Read through a function: an assignment of null to the ref must not narrow later reads to never. */
+function invalidatedRoom(): string | null {
+  return lastWakeRuleInvalidation.value?.roomId ?? null
+}
+
 function capture(responses: Response[]) {
   const requests: Array<{ url: string; init?: RequestInit }> = []
   globalThis.fetch = async (input, init) => {
@@ -98,15 +103,17 @@ test('a test posts to the rule and parses the receiver answer; the id is checked
   const requests = capture([
     jsonResponse({ status: 200, error_class: null, delivery_id: 'whd_1' }),
     jsonResponse({ status: 401, error_class: 'http_4xx', delivery_id: 'whd_2' }),
+    jsonResponse({ status: 200, error_class: null, delivery_id: 'whd_3', resumed: true }),
     jsonResponse({ error: 'You sent 5 tests in the last 10 minutes. Wait a few minutes, then try again.' }, 429),
   ])
-  assert.deepEqual(await testRoomWakeRule('sky-owl', 'wake_1'), { status: 200, error_class: null, delivery_id: 'whd_1' })
+  assert.deepEqual(await testRoomWakeRule('sky-owl', 'wake_1'), { status: 200, error_class: null, delivery_id: 'whd_1', resumed: false })
   assert.equal(requests[0].url, '/rooms/sky-owl/wake-rules/wake_1/test')
   assert.equal(requests[0].init?.method, 'POST')
-  assert.deepEqual(await testRoomWakeRule('sky-owl', 'wake_1'), { status: 401, error_class: 'http_4xx', delivery_id: 'whd_2' })
+  assert.deepEqual(await testRoomWakeRule('sky-owl', 'wake_1'), { status: 401, error_class: 'http_4xx', delivery_id: 'whd_2', resumed: false })
+  assert.equal((await testRoomWakeRule('sky-owl', 'wake_1')).resumed, true, 'an accepted test that resumed the rule says so')
   await assert.rejects(testRoomWakeRule('sky-owl', 'wake_1'), /5 tests/)
   await assert.rejects(testRoomWakeRule('sky-owl', '../evil'), /could not be sent/)
-  assert.equal(requests.length, 3, 'a bad id never reaches the server')
+  assert.equal(requests.length, 4, 'a bad id never reaches the server')
 })
 
 test('the web transport tells the room to re-read its rules after each change', async () => {
@@ -117,14 +124,14 @@ test('the web transport tells the room to re-read its rules after each change', 
     jsonResponse({ agents: [] }),
   ])
   await roomWakeWebhookApi.add('sky-owl', 'ada/grokbot', { url: 'https://hooks.example/x', secret: 's'.repeat(32) })
-  assert.equal(lastWakeRuleInvalidation.value?.roomId, 'sky-owl')
+  assert.equal(invalidatedRoom(), 'sky-owl')
   lastWakeRuleInvalidation.value = null
   await roomWakeWebhookApi.test('sky-owl', 'wake_new')
-  assert.equal(lastWakeRuleInvalidation.value?.roomId, 'sky-owl')
+  assert.equal(invalidatedRoom(), 'sky-owl')
   lastWakeRuleInvalidation.value = null
   assert.equal((await roomWakeWebhookApi.cancel('sky-owl', 'wake_1')).status, 'cancelled')
-  assert.equal(lastWakeRuleInvalidation.value?.roomId, 'sky-owl')
+  assert.equal(invalidatedRoom(), 'sky-owl')
   lastWakeRuleInvalidation.value = null
   assert.deepEqual(await roomWakeWebhookApi.listAgents('sky-owl'), [])
-  assert.equal(lastWakeRuleInvalidation.value, null, 'a read changes nothing')
+  assert.equal(invalidatedRoom(), null, 'a read changes nothing')
 })

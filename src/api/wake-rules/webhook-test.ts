@@ -5,7 +5,7 @@
  * recorded in the request that asked for it, with the result returned at
  * once. The test counts against the rule's hourly budget and is bounded to
  * five per rule in ten minutes; its failure never counts toward pausing the
- * rule, and its success clears the run of failures like a delivered message.
+ * rule, and its success clears the run of failures and resumes a paused rule.
  */
 import { randomUUID } from "node:crypto";
 import { sql } from "drizzle-orm";
@@ -45,14 +45,6 @@ export async function testWakeWebhookRule(input: {
   if (rule.delivery_kind !== "webhook") throw new WakeRuleError("Only webhook rules can be tested.", 409);
   if (rule.status !== "active" && rule.status !== "paused") throw new WakeRuleError("This wake rule has ended.", 409);
   if (!rule.delivery_target) throw new WakeRuleError("This wake rule has ended.", 409);
-  const windowStart = new Date(now.getTime() - WAKE_WEBHOOK_TEST_WINDOW_MS).toISOString();
-  const [recent] = (await db.execute<{ n: number }>(sql`
-    SELECT count(*)::int AS n FROM wake_webhook_deliveries
-     WHERE rule_id = ${rule.id} AND purpose = 'test' AND created_at > ${windowStart}
-  `)).rows;
-  if (Number(recent?.n ?? 0) >= WAKE_WEBHOOK_TESTS_PER_WINDOW) {
-    throw new WakeRuleError(`You sent ${WAKE_WEBHOOK_TESTS_PER_WINDOW} tests in the last 10 minutes. Wait a few minutes, then try again.`, 429);
-  }
   // The same checks a message delivery makes: the sign-in that registered the rule, then the account's room access.
   let live: boolean;
   try {
@@ -65,7 +57,7 @@ export async function testWakeWebhookRule(input: {
       await retireWakeRulesForCredential(db, rule.credential_kind, rule.credential_ref!);
     }
     queueWakeRuleInvalidation(input.roomId);
-    return { status: 0, error_class: "credential_revoked", delivery_id: null };
+    return { status: 0, error_class: "credential_revoked", delivery_id: null, resumed: false };
   }
   let access;
   try {
@@ -74,24 +66,39 @@ export async function testWakeWebhookRule(input: {
     access = "retry" as const;
   }
   if (access === "retry") throw new WakeRuleError("Your room access could not be checked now. Try again in a minute.", 503);
-  if (access === "deny") return { status: 0, error_class: "access_denied", delivery_id: null };
+  if (access === "deny") return { status: 0, error_class: "access_denied", delivery_id: null, resumed: false };
   if (!deps.cipher) throw new WakeRuleError("Webhook delivery is not set up on this server.", 503);
   const target = openWakeWebhookTarget(deps.cipher, {
     rule_id: rule.id, owner_account_id: rule.owner_account_id, delivery_target: rule.delivery_target, delivery_bearer: rule.delivery_bearer,
   });
-  if (!target) return { status: 0, error_class: "target_unreadable", delivery_id: null };
+  if (!target) return { status: 0, error_class: "target_unreadable", delivery_id: null, resumed: false };
 
-  // Recorded first, like a claimed delivery, so the budget and the rate limit see it even if the send is cut short.
+  // Counted and recorded under the rule's lock (the one createWakeRule takes),
+  // so parallel tests cannot all pass the count. The row is written first,
+  // as `dead` with its own reason, so the budget (by scheduled_at) and the
+  // rate limit see it even if the send is cut short, and no worker, old or
+  // new, ever claims it as a message.
   const deliveryId = `whd_${randomUUID().replace(/-/g, "")}`;
-  await db.execute(sql`
-    INSERT INTO wake_webhook_deliveries (
-      id, rule_id, room_id, kind, purpose, message_number, sender, text_preview, match_count, state, attempt_count,
-      scheduled_at, next_attempt_at, claimed_at, claimed_by, created_at, updated_at, owner_account_id, host_fingerprint
-    ) VALUES (
-      ${deliveryId}, ${rule.id}, ${input.roomId}, 'webhook', 'test', NULL, '', '', 1, 'processing', 1,
-      ${nowIso}, ${nowIso}, ${nowIso}, ${`test:${input.account.id}`}, ${nowIso}, ${nowIso}, ${rule.owner_account_id}, ${rule.delivery_host_fingerprint}
-    )
-  `);
+  const windowStart = new Date(now.getTime() - WAKE_WEBHOOK_TEST_WINDOW_MS).toISOString();
+  await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`wake-rules:${input.roomId}:${rule.agent_key}`}, 0))`);
+    const [recent] = (await tx.execute<{ n: number }>(sql`
+      SELECT count(*)::int AS n FROM wake_webhook_deliveries
+       WHERE rule_id = ${rule.id} AND purpose = 'test' AND created_at > ${windowStart}
+    `)).rows;
+    if (Number(recent?.n ?? 0) >= WAKE_WEBHOOK_TESTS_PER_WINDOW) {
+      throw new WakeRuleError(`You sent ${WAKE_WEBHOOK_TESTS_PER_WINDOW} tests in the last 10 minutes. Wait a few minutes, then try again.`, 429);
+    }
+    await tx.execute(sql`
+      INSERT INTO wake_webhook_deliveries (
+        id, rule_id, room_id, kind, purpose, message_number, sender, text_preview, match_count, state, attempt_count,
+        last_error, scheduled_at, next_attempt_at, created_at, updated_at, owner_account_id, host_fingerprint
+      ) VALUES (
+        ${deliveryId}, ${rule.id}, ${input.roomId}, 'webhook', 'test', NULL, '', '', 1, 'dead', 1,
+        'test_incomplete', ${nowIso}, ${nowIso}, ${nowIso}, ${nowIso}, ${rule.owner_account_id}, ${rule.delivery_host_fingerprint}
+      )
+    `);
+  });
   const outcome = await postOpenedWakeWebhook({
     rule_id: rule.id,
     owner_account_id: rule.owner_account_id,
@@ -111,25 +118,30 @@ export async function testWakeWebhookRule(input: {
   const doneIso = deps.now().toISOString();
   const status = outcome.kind === "skipped" ? 0 : outcome.status;
   const errorClass = outcome.kind === "delivered" ? null : outcome.error;
+  let resumed = false;
   if (outcome.kind === "delivered") {
     await db.execute(sql`
       UPDATE wake_webhook_deliveries
-         SET state = 'delivered', delivered_at = ${doneIso}, last_status = ${status}, last_error = NULL,
-             claimed_at = NULL, claimed_by = NULL, updated_at = ${doneIso}
+         SET state = 'delivered', delivered_at = ${doneIso}, last_status = ${status}, last_error = NULL, updated_at = ${doneIso}
        WHERE id = ${deliveryId}
     `);
-    // A receiver that accepts a test works again: the run of failures ends, as after a delivered message.
-    await db.execute(sql`
+    // A receiver that accepts a test works again: the run of failures ends,
+    // as after a delivered message, and a rule those failures had paused resumes.
+    const [updated] = (await db.execute<{ status: string }>(sql`
       UPDATE agent_wake_rules
-         SET delivery_consecutive_failures = 0, delivery_last_status = ${status}, delivery_last_error = NULL, delivery_last_attempt_at = ${doneIso}
-       WHERE id = ${rule.id}
-    `);
+         SET delivery_consecutive_failures = 0, delivery_last_status = ${status}, delivery_last_error = NULL, delivery_last_attempt_at = ${doneIso},
+             status = CASE WHEN status = 'paused' THEN 'active' ELSE status END,
+             paused_at = CASE WHEN status = 'paused' THEN NULL ELSE paused_at END,
+             updated_at = CASE WHEN status = 'paused' THEN ${doneIso}::timestamptz ELSE updated_at END
+       WHERE id = ${rule.id} AND status IN ('active', 'paused')
+       RETURNING status
+    `)).rows;
+    resumed = rule.status === "paused" && updated?.status === "active";
   } else {
     // A test is never retried, and its failure never counts toward a pause.
     await db.execute(sql`
       UPDATE wake_webhook_deliveries
-         SET state = 'dead', last_status = ${status || null}, last_error = ${errorClass},
-             claimed_at = NULL, claimed_by = NULL, updated_at = ${doneIso}
+         SET last_status = ${status || null}, last_error = ${errorClass}, updated_at = ${doneIso}
        WHERE id = ${deliveryId}
     `);
     await db.execute(sql`
@@ -139,5 +151,5 @@ export async function testWakeWebhookRule(input: {
     `);
   }
   queueWakeRuleInvalidation(input.roomId);
-  return { status, error_class: errorClass, delivery_id: deliveryId };
+  return { status, error_class: errorClass, delivery_id: deliveryId, resumed };
 }

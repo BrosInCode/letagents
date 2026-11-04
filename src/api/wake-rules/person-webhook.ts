@@ -10,7 +10,7 @@ import { and, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import { WakeRuleError, type WakeRule, type WakeWebhookAgent, type WakeWebhookFormInput } from "../../../shared/wake-rules.mjs";
 import { db } from "../db/client.js";
 import { remote_mcp_sessions, room_agent_sessions } from "../db/schema.js";
-import type { WakeRuleCredential } from "../db/wake-rules.js";
+import { isWakeRuleCredentialLive, type WakeRuleCredential } from "../db/wake-rules.js";
 import { addWakeRuleForAgent } from "./service.js";
 import type { WakeWebhookLookup } from "./webhook-url.js";
 
@@ -65,27 +65,35 @@ export async function listOwnedWakeAgents(roomId: string, accountId: string, now
   }));
 }
 
+/** Remote MCP session rows looked at for one worker, newest first. */
+const REMOTE_SESSION_CANDIDATES = 8;
+
 /**
  * The sign-in behind the agent, which the rule is bound to so that it ends
  * when that sign-in is removed. A worker registered over the remote MCP
  * connector (ChatGPT, Grok Bot) is reached through an owner token or an
  * OAuth grant: the remote MCP session that holds the worker names that
  * credential by its hash, and the rule binds to it like a rule the agent
- * added itself over `/mcp`. Any other worker (a desktop-supervised agent, a
- * bot that uses its worker bearer) binds to its live worker session, as a
- * rule added with that bearer does.
+ * added itself over `/mcp`. Only a credential that still works is taken: a
+ * revoked token keeps its session row until the sweep, and two sessions of
+ * one account can share an agent instance, so each candidate is checked,
+ * newest first. Any other worker (a desktop-supervised agent, a bot that
+ * uses its worker bearer) binds to its live worker session, as a rule added
+ * with that bearer does.
  */
 export async function ownedAgentCredential(
   accountId: string,
   session: Pick<OwnedAgentSession, "session_id" | "agent_instance_id" | "ended_at">,
 ): Promise<WakeRuleCredential | null> {
-  const [remote] = await db.select({ token_hash: remote_mcp_sessions.token_hash }).from(remote_mcp_sessions).where(and(
+  const remotes = await db.select({ token_hash: remote_mcp_sessions.token_hash }).from(remote_mcp_sessions).where(and(
     eq(remote_mcp_sessions.account_id, accountId),
     session.agent_instance_id
       ? or(eq(remote_mcp_sessions.worker_session_id, session.session_id), eq(remote_mcp_sessions.agent_instance_id, session.agent_instance_id))
       : eq(remote_mcp_sessions.worker_session_id, session.session_id),
-  )).orderBy(desc(remote_mcp_sessions.last_seen_at)).limit(1);
-  if (remote) return { kind: "token", ref: remote.token_hash };
+  )).orderBy(desc(remote_mcp_sessions.last_seen_at)).limit(REMOTE_SESSION_CANDIDATES);
+  for (const hash of new Set(remotes.map((remote) => remote.token_hash))) {
+    if (await isWakeRuleCredentialLive("token", hash)) return { kind: "token", ref: hash };
+  }
   return session.ended_at === null ? { kind: "agent_session", ref: session.session_id } : null;
 }
 

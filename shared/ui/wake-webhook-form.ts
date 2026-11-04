@@ -21,6 +21,8 @@ export const WAKE_WEBHOOK_SECRET_CHARS = 32;
 export const WAKE_WEBHOOK_KEY_HELP = "The receiver's sender key, sent as Authorization: Bearer. Grok Bot routines need one.";
 /** Shown with the secret, once. */
 export const WAKE_WEBHOOK_SECRET_NOTICE = "Receivers that verify X-LetAgents-Signature need this secret; LetAgents cannot show it again.";
+/** Shown under the list of wake-ups, next to Send test. */
+export const WAKE_WEBHOOK_TEST_HELP = "Send test sends one delivery now and shows the receiver's answer. A test counts against the rule's hourly budget of 20 wake-ups.";
 
 const VISIBLE_ASCII = /^[\x21-\x7e]+$/;
 const CONTROL_CHARACTERS = /[\u0000-\u0008\u000b-\u001f\u007f]/;
@@ -84,7 +86,7 @@ export function validateWakeWebhookDraft(draft: WakeWebhookDraft, agents: readon
 
 /** The one line shown under Send test. */
 export function describeWakeTestResult(result: WakeRuleTestResult): { tone: "ok" | "rejected" | "failed"; text: string } {
-  if (result.status >= 200 && result.status < 300) return { tone: "ok", text: "Accepted" };
+  if (result.status >= 200 && result.status < 300) return { tone: "ok", text: result.resumed ? "Accepted; the rule is active again" : "Accepted" };
   if (result.status === 401 || result.status === 403) return { tone: "rejected", text: "The receiver rejected the key" };
   const status = result.status > 0 ? ` (${result.status})` : "";
   return { tone: "failed", text: `${result.error_class ?? "failed"}${status}` };

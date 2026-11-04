@@ -12,6 +12,7 @@
 }
 .wake-webhook-intro,
 .wake-webhook-empty,
+.wake-webhook-test-help,
 .wake-webhook-rule-meta,
 .wake-webhook-field small {
   color: var(--text-secondary);

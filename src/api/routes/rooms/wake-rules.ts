@@ -6,7 +6,7 @@ import { listWakeRules, type WakeRuleCredential } from "../../db/wake-rules.js";
 import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
 import { parseBearerAuthorization } from "../../request/bearer-authorization.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
-import { isHumanAppWrite } from "../../request/app-session.js";
+import { CROSS_SITE_WRITE_REFUSED, isHumanAppWrite, isSameOriginCookieWrite } from "../../request/app-session.js";
 import { requireWorkerRequestAgentIdentity, type ResolvedRequestAgentIdentity } from "../../request/agent-identity.js";
 import { addWakeWebhookRuleForPerson, listOwnedWakeAgents } from "../../wake-rules/person-webhook.js";
 import { addWakeRuleForAgent, cancelWakeRuleAs, restoreWakeRuleAs } from "../../wake-rules/service.js";
@@ -41,12 +41,7 @@ function human(req: AuthenticatedRequest): WakeRuleActor | null {
 function requirePerson(req: AuthenticatedRequest): { id: string; login: string } {
   const person = human(req);
   if (!person) throw new WakeRuleError("Only a signed-in person can do this for an agent they own. Agents add their own wake rules.", 403);
-  if (parseBearerAuthorization(req.headers.authorization).kind !== "token" && !["GET", "HEAD"].includes(req.method)) {
-    const origin = req.headers.origin;
-    const expected = process.env.LETAGENTS_BASE_URL || process.env.PUBLIC_API_URL;
-    const allowed = expected ? new URL(expected).origin : `${req.protocol}://${req.get("host")}`;
-    if (!origin || origin !== allowed) throw new WakeRuleError("Open this action from LetAgents.", 403);
-  }
+  if (!isSameOriginCookieWrite(req)) throw new WakeRuleError(CROSS_SITE_WRITE_REFUSED, 403);
   return { id: person.id, login: person.label };
 }
 

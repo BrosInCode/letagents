@@ -10,6 +10,7 @@ import type { WakeRule, WakeRuleTestResult, WakeWebhookAgent, WakeWebhookApi } f
 import {
   WAKE_WEBHOOK_KEY_HELP,
   WAKE_WEBHOOK_SECRET_NOTICE,
+  WAKE_WEBHOOK_TEST_HELP,
   describeWakeTestResult,
   generateWakeWebhookSecret,
   selectOwnWakeWebhookRules,
@@ -57,7 +58,7 @@ function api(overrides: Partial<WakeWebhookApi> = {}): WakeWebhookApi & { calls:
     calls,
     async listAgents(roomId) { calls.push(["listAgents", roomId]); return agents; },
     async add(roomId, agentKey, input) { calls.push(["add", roomId, agentKey, input]); return { rule: rule({ id: "wake_new", agent_key: agentKey }), created: true }; },
-    async test(roomId, ruleId) { calls.push(["test", roomId, ruleId]); return { status: 200, error_class: null, delivery_id: "whd_t" }; },
+    async test(roomId, ruleId) { calls.push(["test", roomId, ruleId]); return { status: 200, error_class: null, delivery_id: "whd_t", resumed: false }; },
     async cancel(roomId, ruleId) { calls.push(["cancel", roomId, ruleId]); return rule({ id: ruleId, status: "cancelled" }); },
     ...overrides,
   };
@@ -104,14 +105,15 @@ test("the draft is checked the way the server checks the rule", () => {
 
 test("a test result reads as Accepted, a rejected key, or the error class", () => {
   const describe = (result: WakeRuleTestResult) => describeWakeTestResult(result);
-  assert.deepEqual(describe({ status: 200, error_class: null, delivery_id: "whd_1" }), { tone: "ok", text: "Accepted" });
-  assert.deepEqual(describe({ status: 204, error_class: null, delivery_id: "whd_1" }), { tone: "ok", text: "Accepted" });
-  assert.deepEqual(describe({ status: 401, error_class: "http_4xx", delivery_id: "whd_1" }), { tone: "rejected", text: "The receiver rejected the key" });
-  assert.deepEqual(describe({ status: 403, error_class: "http_4xx", delivery_id: "whd_1" }), { tone: "rejected", text: "The receiver rejected the key" });
-  assert.deepEqual(describe({ status: 404, error_class: "http_4xx", delivery_id: "whd_1" }), { tone: "failed", text: "http_4xx (404)" });
-  assert.deepEqual(describe({ status: 503, error_class: "http_5xx", delivery_id: "whd_1" }), { tone: "failed", text: "http_5xx (503)" });
-  assert.deepEqual(describe({ status: 0, error_class: "timeout", delivery_id: "whd_1" }), { tone: "failed", text: "timeout" });
-  assert.deepEqual(describe({ status: 0, error_class: "url_not_allowed", delivery_id: null }), { tone: "failed", text: "url_not_allowed" });
+  assert.deepEqual(describe({ status: 200, error_class: null, delivery_id: "whd_1", resumed: false }), { tone: "ok", text: "Accepted" });
+  assert.deepEqual(describe({ status: 204, error_class: null, delivery_id: "whd_1", resumed: false }), { tone: "ok", text: "Accepted" });
+  assert.deepEqual(describe({ status: 200, error_class: null, delivery_id: "whd_1", resumed: true }), { tone: "ok", text: "Accepted; the rule is active again" });
+  assert.deepEqual(describe({ status: 401, error_class: "http_4xx", delivery_id: "whd_1", resumed: false }), { tone: "rejected", text: "The receiver rejected the key" });
+  assert.deepEqual(describe({ status: 403, error_class: "http_4xx", delivery_id: "whd_1", resumed: false }), { tone: "rejected", text: "The receiver rejected the key" });
+  assert.deepEqual(describe({ status: 404, error_class: "http_4xx", delivery_id: "whd_1", resumed: false }), { tone: "failed", text: "http_4xx (404)" });
+  assert.deepEqual(describe({ status: 503, error_class: "http_5xx", delivery_id: "whd_1", resumed: false }), { tone: "failed", text: "http_5xx (503)" });
+  assert.deepEqual(describe({ status: 0, error_class: "timeout", delivery_id: "whd_1", resumed: false }), { tone: "failed", text: "timeout" });
+  assert.deepEqual(describe({ status: 0, error_class: "url_not_allowed", delivery_id: null, resumed: false }), { tone: "failed", text: "url_not_allowed" });
 });
 
 test("the list holds the viewer's webhook rules only, held ones first, and words the last result", () => {
@@ -179,9 +181,10 @@ test("a save the server refuses keeps the form open with the server's sentence",
 
 test("Send test and Cancel call the room's API and keep their result on the row", async () => {
   const results: WakeRuleTestResult[] = [
-    { status: 200, error_class: null, delivery_id: "whd_1" },
-    { status: 401, error_class: "http_4xx", delivery_id: "whd_2" },
-    { status: 0, error_class: "timeout", delivery_id: "whd_3" },
+    { status: 200, error_class: null, delivery_id: "whd_1", resumed: false },
+    { status: 401, error_class: "http_4xx", delivery_id: "whd_2", resumed: false },
+    { status: 0, error_class: "timeout", delivery_id: "whd_3", resumed: false },
+    { status: 200, error_class: null, delivery_id: "whd_4", resumed: true },
   ];
   const transport = api({ async test() { return results.shift()!; } });
   const changed: number[] = [];
@@ -193,7 +196,9 @@ test("Send test and Cancel call the room's API and keep their result on the row"
   assert.deepEqual(form.tests.get("wake_1"), { state: "done", tone: "rejected", text: "The receiver rejected the key" });
   await form.sendTest(target);
   assert.deepEqual(form.tests.get("wake_1"), { state: "done", tone: "failed", text: "timeout" });
-  assert.equal(changed.length, 3, "each test refreshes the rules so the counters move");
+  await form.sendTest(target);
+  assert.deepEqual(form.tests.get("wake_1"), { state: "done", tone: "ok", text: "Accepted; the rule is active again" });
+  assert.equal(changed.length, 4, "each test refreshes the rules so the counters move");
 
   const limited = api({ async test() { throw new Error("You sent 5 tests in the last 10 minutes. Wait a few minutes, then try again."); } });
   const limitedForm = useWakeWebhookForm({ roomId: ref("sky-owl"), agents: ref(agents), api: limited });
@@ -203,7 +208,7 @@ test("Send test and Cancel call the room's API and keep their result on the row"
   await form.cancel(target);
   assert.deepEqual(transport.calls.at(-1), ["cancel", "sky-owl", "wake_1"]);
   assert.equal(form.tests.has("wake_1"), false, "a cancelled row drops its test result");
-  assert.equal(changed.length, 4);
+  assert.equal(changed.length, 5);
 });
 
 let vite: ViteDevServer;
@@ -244,6 +249,9 @@ test("the section shows only for a person with an agent in the room, and lists e
   assert.match(actionsOf("wake_2"), /Send test/);
   assert.doesNotMatch(actionsOf("wake_3"), /Send test/);
   assert.doesNotMatch(html, /hooks\.example|crsr_/, "no URL or key appears anywhere in the list");
+  // Vue's SSR writes the apostrophe as an entity.
+  assert.match(html, /A test counts against the rule(&#39;|')s hourly budget of 20 wake-ups\./, "the budget note sits under Send test");
+  assert.doesNotMatch(await render({ rules: [rule({ status: "cancelled" })] }), /hourly budget/, "no held rule, no Send test, no note");
 });
 
 test("the empty list says so, and a load error is announced", async () => {
@@ -256,6 +264,8 @@ test("the form's help text and the secret notice are the agreed sentences, and t
   const section = source("../../../../shared/ui/WakeWebhookSection.vue");
   assert.equal(WAKE_WEBHOOK_KEY_HELP, "The receiver's sender key, sent as Authorization: Bearer. Grok Bot routines need one.");
   assert.equal(WAKE_WEBHOOK_SECRET_NOTICE, "Receivers that verify X-LetAgents-Signature need this secret; LetAgents cannot show it again.");
+  assert.match(WAKE_WEBHOOK_TEST_HELP, /A test counts against the rule's hourly budget of 20 wake-ups\./);
+  assert.match(section, /\{\{ WAKE_WEBHOOK_TEST_HELP \}\}/);
   assert.match(section, /<small v-else>\{\{ WAKE_WEBHOOK_KEY_HELP \}\}<\/small>/);
   assert.match(section, /v-if="form\.revealedSecret\.value"[\s\S]*?data-testid="wake-webhook-secret-value">\{\{ form\.revealedSecret\.value\.secret \}\}<\/code>[\s\S]*?\{\{ WAKE_WEBHOOK_SECRET_NOTICE \}\}/);
   // The key is typed into a password field; the form binds no URL or key from a saved rule.

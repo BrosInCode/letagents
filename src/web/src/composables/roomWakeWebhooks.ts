@@ -68,6 +68,7 @@ export async function testRoomWakeRule(roomIdentifier: string, ruleId: string): 
     status: body.status,
     error_class: typeof body.error_class === 'string' ? body.error_class : null,
     delivery_id: typeof body.delivery_id === 'string' ? body.delivery_id : null,
+    resumed: body.resumed === true,
   }
 }
 

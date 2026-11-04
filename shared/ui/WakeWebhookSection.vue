@@ -131,6 +131,7 @@
       </li>
     </ul>
     <p v-else-if="!loading" class="wake-webhook-empty">No webhook wake-ups for your agents in this room yet.</p>
+    <p v-if="ownRules.some((rule) => rule.status === 'active' || rule.status === 'paused')" class="wake-webhook-test-help">{{ WAKE_WEBHOOK_TEST_HELP }}</p>
     <p v-if="error" class="wake-webhook-error" role="alert">{{ error }}</p>
   </div>
 </template>
@@ -142,6 +143,7 @@ import type { WakeRule, WakeWebhookAgent, WakeWebhookApi } from "../wake-rules.m
 import {
   WAKE_WEBHOOK_KEY_HELP,
   WAKE_WEBHOOK_SECRET_NOTICE,
+  WAKE_WEBHOOK_TEST_HELP,
   selectOwnWakeWebhookRules,
   useWakeWebhookForm,
   wakeWebhookLastResultLabel,

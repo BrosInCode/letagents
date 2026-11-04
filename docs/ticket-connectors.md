@@ -1043,9 +1043,11 @@ when that sign-in is removed, like a rule the agent added itself. Each rule's ro
 pinned-address client, the signature, the key; no redirect is followed) with `message_id: "test"` and
 `text_preview: "Test delivery from LetAgents"`, waits at most 10 s, and answers `{ status, error_class, delivery_id }`
 at once (`200` shows as "Accepted", `401`/`403` as "The receiver rejected the key", anything else as its error class).
-A test counts against the rule's hourly budget and is limited to 5 per rule in 10 minutes; a failed test never counts
-toward pausing the rule, and an accepted one clears the run of failures. Only the owning account or a room admin may
-cancel the rule; only the owning account may restore it or add it again.
+A test counts against the rule's hourly budget of 20 and is limited to 5 per rule in 10 minutes (counted under the
+rule's lock, so parallel tests cannot pass it together); a failed test never counts toward pausing the rule, and an
+accepted one clears the run of failures and resumes a paused rule (the answer then carries `resumed: true`, shown as
+"Accepted; the rule is active again"). Only the owning account or a room admin may cancel the rule; only the owning
+account may restore it or add it again.
 
 A rule lasts 30 days (or until a sooner `expires_at`); adding the same rule again renews it, takes the URL and secret
 given then, and resumes it if it was paused. It is bound to the sign-in that added it (the owner token or OAuth grant

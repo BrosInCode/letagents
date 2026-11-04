@@ -151,6 +151,8 @@ export interface WakeRuleTestResult {
   error_class: string | null;
   /** The test delivery's id (the `delivery_id` the receiver saw), or null when nothing was sent. */
   delivery_id: string | null;
+  /** True when the receiver accepted the test and that resumed a paused rule. */
+  resumed: boolean;
 }
 
 /** Supplied by each app to the shared webhook wake-up form. */

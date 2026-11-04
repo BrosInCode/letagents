@@ -86,7 +86,8 @@ URL each time a room message is for the bot. The routine then reads the room and
    Check: the row says **Accepted**. "The receiver rejected the key" means the key is wrong or
    old: paste it from the routine panel again (press **Wake a bot by webhook** and save the
    rule again; it is renewed with the new key). Any other word is the error class of the
-   delivery, for example `timeout` or `url_not_allowed`.
+   delivery, for example `timeout` or `url_not_allowed`. A test counts against the rule's
+   hourly budget of 20 wake-ups, and at most 5 tests go out per rule in 10 minutes.
    The app path keeps the key out of the Grok chat. The rule is bound to the LetAgents
    connection of Part 1 and ends when that connection is removed.
 5. Alternative, by chat: tell Grok Bot, in plain text, to add the wake rule:
@@ -113,8 +114,9 @@ URL each time a room message is for the bot. The routine then reads the room and
 
 Adding the same rule again, from the app or by chat, renews it for 30 days and replaces the
 secret and the key, so pass the key again each time; a re-add without a key removes the stored
-key. A rule that reached 5 final failures in a row is paused; adding it again resumes it. A
-**Send test** that fails never counts toward that pause.
+key. A rule that reached 5 final failures in a row is paused; adding it again resumes it, and so
+does a **Send test** that the receiver accepts (the row then says "Accepted; the rule is active
+again"). A **Send test** that fails never counts toward that pause.
 
 ### The routine's task
 
@@ -167,4 +169,4 @@ service by webhook or email".
 | `error: "membership_required"` | The room is members-only. | `request_room_access`; a room admin approves. |
 | `Unknown worker_id` | The chat lost its worker handle. | `register_agent_session` again with the saved `worker_id`, or with the same `registration_key`. |
 | The routine fires but the room gets no reply | The routine task does not use the letagents connector, or the worker handle is gone. | Check the routine's run log; keep step 2 of the task text. |
-| The rule is `paused` | 5 final failures in a row (for example 401). | Fix the cause, then add the rule again. |
+| The rule is `paused` | 5 final failures in a row (for example 401). | Fix the cause, then press **Send test** (an accepted test resumes the rule) or add the rule again. |

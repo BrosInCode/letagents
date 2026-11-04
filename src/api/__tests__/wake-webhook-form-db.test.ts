@@ -227,6 +227,27 @@ test("a person adds a webhook rule for their own agent; it is bound to the sign-
   assert.equal(remoteRow.credential_kind, "token");
   assert.equal(remoteRow.credential_ref, createHash("sha256").update(TOKEN_ADA).digest("hex"));
 
+  // A remote MCP session row whose token is gone (revoked, not yet swept) is skipped for a live one;
+  // with no live remote sign-in left, the rule falls back to the worker's live session.
+  const deadHash = createHash("sha256").update("wake_form_revoked_token").digest("hex");
+  const fakeRow = async (sessionId: string, workerSessionId: string) => dbClient!.pool.query(`
+    INSERT INTO remote_mcp_sessions (session_id, account_id, token_hash, agent_instance_id, client_name, worker_session_id, state, version, created_at, last_seen_at, implicit)
+    VALUES ($1, $2, $3, $4, 'Stale app', $5, '{}'::jsonb, 1, now(), now() + interval '1 minute', false)
+  `, [sessionId, accounts.ada, deadHash, `instance_${sessionId}`, workerSessionId]);
+  await fakeRow("rms_dead_remote", adaRemote.session_id);
+  await fakeRow("rms_dead_bot", adaBot.session_id);
+  try {
+    const renewed = await send("POST", "", { cookie: COOKIE.ada, body: form(adaRemote.agent_key) });
+    assert.equal(renewed.status, 200, renewed.text);
+    assert.equal((await ruleRow(renewed.json.rule.id)).credential_ref, createHash("sha256").update(TOKEN_ADA).digest("hex"), "the newest row's dead token is skipped for the live one");
+    const fallback = await send("POST", "", { cookie: COOKIE.ada, body: form(adaBot.agent_key) });
+    assert.equal(fallback.status, 200, fallback.text);
+    const fallbackRow = await ruleRow(fallback.json.rule.id);
+    assert.deepEqual([fallbackRow.credential_kind, fallbackRow.credential_ref], ["agent_session", adaBot.session_id], "no live remote sign-in: the live worker session");
+  } finally {
+    await dbClient!.pool.query("DELETE FROM remote_mcp_sessions WHERE token_hash = $1", [deadHash]);
+  }
+
   // The agent's own list shows the rule with its delivery details to its owner only.
   const mine = await send("GET", "", { cookie: COOKIE.ada });
   const seen = mine.json.active.find((candidate: any) => candidate.id === rule.id);
@@ -307,17 +328,30 @@ test("a test delivery goes through the real pipeline and reports the receiver's 
   assert.equal(row.delivery_consecutive_failures, 0);
   assert.equal((await testRows(ruleId))[0]!.state, "delivered");
 
-  // The receiver rejects the key: reported, recorded, never counted toward the pause.
+  assert.equal(ok.json.resumed, false);
+  assert.equal((await testRows(ruleId))[0]!.last_error, null);
+
+  // The receiver rejects the key on a paused rule: reported, recorded, never counted toward the pause, still paused.
+  await dbClient!.pool.query("UPDATE agent_wake_rules SET status = 'paused', paused_at = now(), delivery_consecutive_failures = 5 WHERE id = $1", [ruleId]);
   replies.push(401);
   const rejected = await send("POST", `/${ruleId}/test`, { cookie: COOKIE.ada, body: {} });
   assert.equal(rejected.status, 200, rejected.text);
-  assert.deepEqual([rejected.json.status, rejected.json.error_class], [401, "http_4xx"]);
+  assert.deepEqual([rejected.json.status, rejected.json.error_class, rejected.json.resumed], [401, "http_4xx", false]);
   row = await ruleRow(ruleId);
-  assert.equal(row.status, "active");
+  assert.equal(row.status, "paused");
   assert.equal(row.delivery_last_status, 401);
   assert.equal(row.delivery_last_error, "http_4xx");
-  assert.equal(row.delivery_consecutive_failures, 0, "a failed test never counts toward pausing the rule");
-  assert.equal((await testRows(ruleId))[1]!.state, "dead");
+  assert.equal(row.delivery_consecutive_failures, 5, "a failed test never counts toward pausing the rule");
+  assert.deepEqual([(await testRows(ruleId))[1]!.state, (await testRows(ruleId))[1]!.last_error], ["dead", "http_4xx"]);
+
+  // The receiver accepts: the run of failures ends and the paused rule is active again.
+  const resumed = await send("POST", `/${ruleId}/test`, { cookie: COOKIE.ada, body: {} });
+  assert.equal(resumed.status, 200, resumed.text);
+  assert.deepEqual([resumed.json.status, resumed.json.error_class, resumed.json.resumed], [200, null, true]);
+  row = await ruleRow(ruleId);
+  assert.equal(row.status, "active");
+  assert.equal(row.paused_at, null);
+  assert.equal(row.delivery_consecutive_failures, 0);
 
   // Only the owner tests; only a webhook rule can be tested.
   assert.equal((await send("POST", `/${ruleId}/test`, { cookie: COOKIE.bob, body: {} })).status, 403);
@@ -339,10 +373,11 @@ test("a test delivery goes through the real pipeline and reports the receiver's 
   } finally {
     guard.allowLoopbackWakeWebhooksForTests({});
   }
-  assert.equal(received.length, 2, "nothing left the server for the refused test");
+  assert.equal(received.length, 3, "nothing left the server for the refused test");
+  assert.equal((await testRows(ruleId)).at(-1)!.last_error, "url_not_allowed");
 
   // Five tests in ten minutes, the refused one included; the sixth waits.
-  for (let n = 0; n < 2; n += 1) assert.equal((await send("POST", `/${ruleId}/test`, { cookie: COOKIE.ada, body: {} })).json.status, 200);
+  assert.equal((await send("POST", `/${ruleId}/test`, { cookie: COOKIE.ada, body: {} })).json.status, 200);
   const limited = await send("POST", `/${ruleId}/test`, { cookie: COOKIE.ada, body: {} });
   assert.equal(limited.status, 429, limited.text);
   assert.match(limited.json.error, /5 tests/);
@@ -364,6 +399,24 @@ test("a test delivery goes through the real pipeline and reports the receiver's 
   )).rows;
   assert.equal(held?.held_by_cap, true, "the budget counted the tests");
   assert.equal((await ruleRow(ruleId)).delivery_over_cap_count, 1);
+});
+
+test("eight tests at once: the rule's lock lets exactly five send and refuses the rest", { skip, timeout: 60_000 }, async () => {
+  const added = await send("POST", "", { cookie: COOKIE.bob, body: form(bobBot.agent_key) });
+  assert.equal(added.status, 201, added.text);
+  const ruleId = added.json.rule.id;
+  const before = received.length;
+  const answers = await Promise.all(Array.from({ length: 8 }, () => send("POST", `/${ruleId}/test`, { cookie: COOKIE.bob, body: {} })));
+  const sent = answers.filter((answer) => answer.status === 200);
+  const refused = answers.filter((answer) => answer.status === 429);
+  assert.equal(sent.length, 5, answers.map((answer) => answer.status).join(","));
+  assert.equal(refused.length, 3);
+  assert.ok(sent.every((answer) => answer.json.status === 200));
+  assert.equal(received.length - before, 5, "at most five deliveries left the server");
+  const rows = await testRows(ruleId);
+  assert.equal(rows.length, 5);
+  assert.ok(rows.every((testRow) => testRow.state === "delivered"));
+  assert.equal((await dbClient!.pool.query("SELECT count(*)::int AS n FROM wake_webhook_deliveries WHERE rule_id = $1 AND last_error = 'test_incomplete'", [ruleId])).rows[0].n, 0);
 });
 
 test("the rule ends when the sign-in behind the agent is removed: the worker session, or the owner token", { skip, timeout: 60_000 }, async () => {
