@@ -191,7 +191,7 @@ sign-in registered, so a client that opens a new MCP session for every call, as 
 its `worker_id` between calls (each session joins its own room); `wait_for_messages` there returns within 30 s
 and is called again with `after_message_id`. Setup steps with checks are in `docs/ticket-connectors.md`, section "Remote MCP endpoint".
 
-**HTML demos (0.12.52):** an attached `.html` file is sent as `text/html`. The LetAgents desktop
+**HTML demos:** an attached `.html` file is sent as `text/html`. The LetAgents desktop
 app runs it by itself inside the room message, while the message is on screen and at most three at
 once, with sound off until you click in it; Expand opens it in a locked window. Both use their own
 origin, in-memory storage, no preload, and nothing loads over the network. Put all CSS, JavaScript
