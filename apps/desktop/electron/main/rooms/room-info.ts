@@ -101,8 +101,9 @@ export function forgetJoinedRoomInfo(roomIdentifier: string | null | undefined):
   if (!key) return;
   const remembered = joinedRoomInfoCache.get(key)?.payload;
   const related = new Set([key, ...(remembered ? roomInfoCacheKeys(key, remembered).map(roomInfoCacheKey) : [])]);
+  // Every alias of the room (its code, a branch name) points at the same room id.
   for (const [cachedKey, entry] of joinedRoomInfoCache) {
-    if (related.has(cachedKey) || roomInfoCacheKey(entry.payload.room_id) === key) joinedRoomInfoCache.delete(cachedKey);
+    if (related.has(cachedKey) || related.has(roomInfoCacheKey(entry.payload.room_id))) joinedRoomInfoCache.delete(cachedKey);
   }
 }
 

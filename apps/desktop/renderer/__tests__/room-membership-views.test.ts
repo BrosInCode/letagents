@@ -66,6 +66,7 @@ let RoomMembers: Component;
 let InboxView: Component;
 let joinRequestsStore: typeof import("../src/composables/useRoomJoinRequests");
 let roomAccessChangedKey: symbol;
+let sessionModule: typeof import("../src/composables/app/useAppSession");
 
 /** Gives a component loaded for SSR the client render function this host renderer needs. */
 async function useClientRender(component: Component, path: string, vue: Record<string, unknown> = Vue): Promise<void> {
@@ -92,6 +93,7 @@ before(async () => {
   InboxView = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/InboxView.vue")).default;
   joinRequestsStore = await vite.ssrLoadModule("/renderer/src/composables/useRoomJoinRequests.ts") as typeof joinRequestsStore;
   roomAccessChangedKey = (await vite.ssrLoadModule("/renderer/src/composables/roomAccessChanged.ts")).roomAccessChangedKey;
+  sessionModule = await vite.ssrLoadModule("/renderer/src/composables/app/useAppSession.ts") as typeof sessionModule;
   const ChatAvatar = (await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/ChatAvatar.vue", import.meta.url)))).default;
   await useClientRender(ChatAvatar, fileURLToPath(new URL("../../../../shared/ui/ChatAvatar.vue", import.meta.url)));
   await useClientRender(RoomJoinAccess, desktopRoot("src/components/desktop/content/RoomJoinAccess.vue"));
@@ -365,4 +367,85 @@ test("an Inbox join request is approved in place and leaves Needs you", async ()
     assert.equal(joinRequestsStore.roomJoinRequests.items.value.length, 0, "the request leaves Needs you");
     assert.match(text(root), /Approved/);
   } finally { app.unmount(); joinRequestsStore.roomJoinRequests.reset(); }
+});
+
+/**
+ * The app's real refusal handling, with a small app context. Every room check
+ * opens the room's stream before its snapshot, so the refresh below sends the
+ * refusal while it runs, as the real one does.
+ */
+function mountSession(status: DesktopRoomAccess["status"] = "ready") {
+  const loading = Vue.ref(false);
+  const access = Vue.ref({ ...membershipAccess(null), status });
+  const refreshes: number[] = [];
+  const syncs: Array<string | null> = [];
+  const app: Record<string, unknown> = {
+    accountRooms: Vue.ref([]), attentionIntent: Vue.ref(null), authDialogOpen: Vue.ref(false), authStatus: Vue.ref(authStatus),
+    firstRunStage: Vue.ref(null), inboxRentalError: Vue.ref(""), inboxRentals: Vue.ref([]), inboxSection: Vue.ref("needs-you"),
+    loading, notificationRevealMessageId: Vue.ref(null), notificationRevealNonce: Vue.ref(0), rentalRequestCount: Vue.ref(0),
+    repoStatus: Vue.ref(null), rootRoomSnapshot: Vue.ref(null), selectedSnapshot: Vue.ref({ roomIdentifier: "design-room" }),
+    settingsAccountRooms: Vue.ref([]), sidebarLatestMessages: Vue.ref({}), windowFocused: Vue.ref(true), windowHidden: Vue.ref(false),
+    workers: Vue.ref([]),
+    activeEntry: Vue.ref({ type: "room" }),
+    selectedAccess: access,
+    selectedRoomIdentifier: Vue.computed(() => access.value.status === "ready" ? "design-room" : null),
+    syncSelectedRoomStream: async (room: string | null) => { syncs.push(room); },
+    handleRoomStreamEvent: () => undefined,
+  };
+  let session!: ReturnType<typeof sessionModule.useAppSessionActions>;
+  let accessChanged!: () => void;
+  const refuse = () => session.handleDesktopRoomStreamEvent({ type: "access_refused", roomIdentifier: "design-room", code: "ROOM_MEMBERSHIP_REQUIRED", httpStatus: 403 });
+  app.refresh = async () => {
+    refreshes.push(1);
+    loading.value = true;
+    await nextTick();
+    refuse();
+    await nextTick();
+    loading.value = false;
+  };
+  // The session provides the access-changed hook to the components below it, as App.vue does.
+  const Consumer = defineComponent(() => { accessChanged = Vue.inject(roomAccessChangedKey as Vue.InjectionKey<() => void>)!; return () => h("div"); });
+  const Provider = defineComponent(() => { session = sessionModule.useAppSessionActions(app); return () => h(Consumer); });
+  const mounted = renderer.createApp(Provider);
+  mounted.provide(ssrContextKey, { modules: new Set<string>() });
+  mounted.mount(hostNode("root"));
+  return { loading, refreshes, syncs, refuse, accessChanged: () => accessChanged(), unmount: () => mounted.unmount() };
+}
+
+test("a refusal checks an open room once, and the check's own refusal starts no loop", async () => {
+  const session = mountSession("ready");
+  try {
+    session.refuse();
+    await flush();
+    assert.equal(session.refreshes.length, 1, "one check, though its own stream was refused during it");
+    session.refuse();
+    await flush();
+    assert.equal(session.refreshes.length, 1, "a refusal within 10 s does not reload the room");
+  } finally { session.unmount(); }
+});
+
+test("a refusal during a check that the app did not start waits for it, then checks once", async () => {
+  const session = mountSession("ready");
+  try {
+    session.loading.value = true;
+    await nextTick();
+    session.refuse();
+    await flush();
+    assert.equal(session.refreshes.length, 0, "nothing starts while a check runs");
+    session.loading.value = false;
+    await flush();
+    assert.equal(session.refreshes.length, 1, "the deferred refusal checks the room once");
+  } finally { session.unmount(); }
+});
+
+test("a room already on the join card is not reloaded by a refusal; Leave asks for one check", async () => {
+  const session = mountSession("membership_required");
+  try {
+    session.refuse();
+    await flush();
+    assert.equal(session.refreshes.length, 0);
+    session.accessChanged();
+    await flush();
+    assert.equal(session.refreshes.length, 1, "Leave checks the room again");
+  } finally { session.unmount(); }
 });

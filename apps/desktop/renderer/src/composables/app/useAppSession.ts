@@ -88,8 +88,16 @@ export function useAppSessionActions(context: unknown) {
     }
   }
 
+  // A refusal that lands during a check waits for it to end; the same rule then
+  // decides. The check may have read a join remembered before the refusal.
+  let deferredRefusalRoom: string | null = null;
+
   function handleStreamRefusal(roomIdentifier: string): void {
     refusedStreamRoom = roomIdentifier;
+    if (loading.value) {
+      deferredRefusalRoom = roomIdentifier;
+      return;
+    }
     if (!shouldRecheckAfterStreamRefusal({
       refusedRoom: roomIdentifier,
       openRooms: [app.selectedRoomIdentifier.value, selectedSnapshot.value?.roomIdentifier],
@@ -100,6 +108,13 @@ export function useAppSessionActions(context: unknown) {
     })) return;
     recheckRooms();
   }
+
+  watch(loading, (busy) => {
+    if (busy || !deferredRefusalRoom) return;
+    const room = deferredRefusalRoom;
+    deferredRefusalRoom = null;
+    handleStreamRefusal(room);
+  });
 
   // Room settings call this after a change to your own access, such as Leave.
   provide(roomAccessChangedKey, () => {

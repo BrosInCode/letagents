@@ -1008,13 +1008,19 @@ test("a 403 with another code, or with no body, keeps the usual reconnect", asyn
 test("a refusal forgets the remembered join, so the next room check asks the server", async () => {
   const router = installFetchRouter();
   try {
-    rememberJoinedRoomInfo(ROOM, { room_id: ROOM, name: "remembered-name", code: "" });
+    // The same room, remembered under its id and under two other names it was opened by.
+    for (const name of [ROOM, "ABCX-7291", "fallback-alias"]) {
+      rememberJoinedRoomInfo(name, { room_id: ROOM, name: "remembered-name", code: "" });
+    }
+    rememberJoinedRoomInfo("other-room", { room_id: "other-room", name: "other-name", code: "" });
     router.streamQueue.push({ kind: "refuse", body: roomMembershipRequiredBody({ room_id: ROOM }) });
-    await startDesktopRoomStream(ROOM, "msg_1");
+    await startDesktopRoomStream("ABCX-7291", "msg_1");
     await waitUntil(() => emitted.some((event) => event.type === "access_refused"));
-    // The router answers the join with an empty room; a remembered join would answer with its name.
-    const joined = await getJoinedRoomInfo(ROOM);
-    assert.notEqual(joined.name, "remembered-name");
+    // The router answers a join with an empty room; a remembered join would answer with its name.
+    for (const name of [ROOM, "ABCX-7291", "fallback-alias"]) {
+      assert.notEqual((await getJoinedRoomInfo(name)).name, "remembered-name", name);
+    }
+    assert.equal((await getJoinedRoomInfo("other-room")).name, "other-name", "another room keeps its join");
   } finally {
     await stopDesktopRoomStream();
     router.restore();

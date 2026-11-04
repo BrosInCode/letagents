@@ -72,7 +72,8 @@ export function useAppInboxActions(context: unknown) {
   /** A My work row opens its card, or a linked thread, in its room as an Inbox item does. */
   function openMyWorkCard(roomIdentifier: string, taskId: string) { void openNeedsYouRoom({ roomIdentifier, taskId }); }
   function openMyWorkThread(roomIdentifier: string, threadRootId: string) { void openNeedsYouRoom({ roomIdentifier, threadRootId }); }
-  function openNeedsYou(room?: string) { app.openInboxRooms(room); inboxSection.value = 'needs-you'; app.activeEntry.value = needsYouEntry; void refreshInbox(); }
+  // Opening the Inbox reads join requests by itself (useAppRoomAttention); only a reopen reads them here.
+  function openNeedsYou(room?: string) { const wasOpen = app.activeEntry.value.type === 'inbox'; app.openInboxRooms(room); inboxSection.value = 'needs-you'; app.activeEntry.value = needsYouEntry; void (wasOpen ? refreshInbox() : refreshNeedsYou()); }
   async function refreshNeedsYou() { await Promise.all([app.loadNeedsYou(app.activeEntry.value.type === 'inbox'), app.refreshRentalRequestCount(), app.activeEntry.value.type === 'inbox' ? refreshMessageReminders() : undefined]); await app.refreshAgentApprovals(); }
   // Join requests have no live update and stay off the one-minute Needs you
   // check: they are read when the Inbox opens or refreshes (and on focus).
@@ -127,6 +128,11 @@ export function useAppRoomAttention(context: unknown) {
     account: () => inboxStorageKey.value,
     activeRoom: () => activeEntry.value.type === "room" && !selectedNeedsAccess.value ? selectedRoomInfo.value.identifier : null,
     inboxRooms: () => activeEntry.value.type === "inbox" && inboxSection.value === "needs-you" ? inboxRooms.value : null,
+  });
+
+  // Every way into the Inbox (the sidebar, a notification, back from Settings) reads join requests.
+  watch(() => activeEntry.value.type === "inbox", (open) => {
+    if (open && authStatus.value?.authenticated) void roomJoinRequests.refresh();
   });
 
   watch(() => authStatus.value?.authenticated ? authStatus.value.account ?? null : null, (account) => {
