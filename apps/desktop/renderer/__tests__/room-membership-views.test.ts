@@ -374,7 +374,7 @@ test("an Inbox join request is approved in place and leaves Needs you", async ()
  * opens the room's stream before its snapshot, so the refresh below sends the
  * refusal while it runs, as the real one does.
  */
-function mountSession(status: DesktopRoomAccess["status"] = "ready") {
+function mountSession(status: DesktopRoomAccess["status"] = "ready", duringCheck: () => void = () => undefined) {
   const loading = Vue.ref(false);
   const access = Vue.ref({ ...membershipAccess(null), status });
   const refreshes: number[] = [];
@@ -397,9 +397,12 @@ function mountSession(status: DesktopRoomAccess["status"] = "ready") {
   const refuse = () => session.handleDesktopRoomStreamEvent({ type: "access_refused", roomIdentifier: "design-room", code: "ROOM_MEMBERSHIP_REQUIRED", httpStatus: 403 });
   app.refresh = async () => {
     refreshes.push(1);
+    // A loop fails the count below instead of hanging the test.
+    if (refreshes.length > 5) return;
     loading.value = true;
     await nextTick();
     refuse();
+    duringCheck();
     await nextTick();
     loading.value = false;
   };
@@ -421,6 +424,27 @@ test("a refusal checks an open room once, and the check's own refusal starts no 
     session.refuse();
     await flush();
     assert.equal(session.refreshes.length, 1, "a refusal within 10 s does not reload the room");
+  } finally { session.unmount(); }
+});
+
+test("a check slower than the gap still never chains the next one", async (context) => {
+  // A server can keep answering the join while it refuses the stream; each check then takes 11 s here.
+  context.mock.timers.enable({ apis: ["Date"], now: Date.parse("2026-11-04T10:00:00.000Z") });
+  const session = mountSession("ready", () => context.mock.timers.tick(11_000));
+  try {
+    session.refuse();
+    await flush();
+    await flush();
+    assert.equal(session.refreshes.length, 1, "the check's own refusal starts nothing, however long it took");
+    context.mock.timers.tick(9_000);
+    session.refuse();
+    await flush();
+    assert.equal(session.refreshes.length, 1, "the gap counts from the end of the last check");
+    context.mock.timers.tick(2_000);
+    session.refuse();
+    await flush();
+    await flush();
+    assert.equal(session.refreshes.length, 2, "a later refusal in an open room checks it again, once");
   } finally { session.unmount(); }
 });
 

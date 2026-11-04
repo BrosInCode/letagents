@@ -64,10 +64,17 @@ export function useAppSessionActions(context: unknown) {
   // until a check shows the room open again.
   let refusedStreamRoom: string | null = null;
   let lastAccessRecheckAt = 0;
+  // A check this code started. Its own stream refusal must never start the next check.
+  let ownCheckRunning = false;
 
   function recheckRooms(): void {
     lastAccessRecheckAt = Date.now();
-    void app.refresh();
+    ownCheckRunning = true;
+    void Promise.resolve(app.refresh()).finally(() => {
+      ownCheckRunning = false;
+      // The gap counts from the end of a check, so a slow check cannot chain the next one.
+      lastAccessRecheckAt = Date.now();
+    });
   }
 
   /**
@@ -88,14 +95,15 @@ export function useAppSessionActions(context: unknown) {
     }
   }
 
-  // A refusal that lands during a check waits for it to end; the same rule then
-  // decides. The check may have read a join remembered before the refusal.
+  // A refusal that lands during a check someone else started (a room switch, a
+  // reload) waits for it to end; the same rule then decides. That check may
+  // have read a join remembered before the refusal.
   let deferredRefusalRoom: string | null = null;
 
   function handleStreamRefusal(roomIdentifier: string): void {
     refusedStreamRoom = roomIdentifier;
     if (loading.value) {
-      deferredRefusalRoom = roomIdentifier;
+      if (!ownCheckRunning) deferredRefusalRoom = roomIdentifier;
       return;
     }
     if (!shouldRecheckAfterStreamRefusal({
