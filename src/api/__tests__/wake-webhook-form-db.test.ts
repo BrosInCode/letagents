@@ -32,6 +32,7 @@ const members = testDatabaseUrl ? await import("../db/room-members.js") : null;
 const appModule = testDatabaseUrl ? await import("../server/app.js") : null;
 const routesModule = testDatabaseUrl ? await import("../server/routes.js") : null;
 const service = testDatabaseUrl ? await import("../wake-rules/service.js") : null;
+const worker = testDatabaseUrl ? await import("../notifications/wake-webhooks.js") : null;
 const guard = await import("../wake-rules/webhook-url.js");
 
 const TOKEN_ADA = "wake_form_owner_token_ada";
@@ -327,12 +328,20 @@ test("a test delivery goes through the real pipeline and reports the receiver's 
   assert.equal(row.delivery_delivered_count, 0, "a test is not a delivered message");
   assert.equal(row.delivery_consecutive_failures, 0);
   assert.equal((await testRows(ruleId))[0]!.state, "delivered");
+  // The rule remembers its last answer was a test, and says so to its owner only.
+  assert.equal(row.delivery_last_attempt_was_test, true);
+  const ownerView = (await send("GET", "", { cookie: COOKIE.ada })).json.active.find((candidate: any) => candidate.id === ruleId);
+  assert.equal(ownerView.delivery.last_attempt_was_test, true);
+  assert.equal(ownerView.delivery.last_status, 200);
+  const otherView = (await send("GET", "", { cookie: COOKIE.bob })).json.active.find((candidate: any) => candidate.id === ruleId);
+  assert.deepEqual(otherView.delivery, { kind: "webhook", paused: false }, "nobody else sees the result, or that it was a test");
 
   assert.equal(ok.json.resumed, false);
   assert.equal((await testRows(ruleId))[0]!.last_error, null);
 
   // The receiver rejects the key on a paused rule: reported, recorded, never counted toward the pause, still paused.
-  await dbClient!.pool.query("UPDATE agent_wake_rules SET status = 'paused', paused_at = now(), delivery_consecutive_failures = 5 WHERE id = $1", [ruleId]);
+  // The mark is cleared first (as a real delivery would), so only the failed branch of the test route can set it again.
+  await dbClient!.pool.query("UPDATE agent_wake_rules SET status = 'paused', paused_at = now(), delivery_consecutive_failures = 5, delivery_last_attempt_was_test = false WHERE id = $1", [ruleId]);
   replies.push(401);
   const rejected = await send("POST", `/${ruleId}/test`, { cookie: COOKIE.ada, body: {} });
   assert.equal(rejected.status, 200, rejected.text);
@@ -341,6 +350,7 @@ test("a test delivery goes through the real pipeline and reports the receiver's 
   assert.equal(row.status, "paused");
   assert.equal(row.delivery_last_status, 401);
   assert.equal(row.delivery_last_error, "http_4xx");
+  assert.equal(row.delivery_last_attempt_was_test, true, "a failed test is a test too");
   assert.equal(row.delivery_consecutive_failures, 5, "a failed test never counts toward pausing the rule");
   assert.deepEqual([(await testRows(ruleId))[1]!.state, (await testRows(ruleId))[1]!.last_error], ["dead", "http_4xx"]);
 
@@ -441,4 +451,43 @@ test("the rule ends when the sign-in behind the agent is removed: the worker ses
   row = await ruleRow(tokenRule.id);
   assert.equal(row.status, "retired");
   assert.match(row.ended_reason, /revoked/);
+});
+
+test("a real delivery attempt clears the test mark: delivered, retried and failed alike", { skip, timeout: 60_000 }, async () => {
+  const ruleId = (await send("GET", "", { cookie: COOKIE.bob })).json.active.find((rule: any) => rule.agent_key === bobBot.agent_key).id;
+  // The eight tests at once (earlier in this file) left a test as the rule's last answer.
+  assert.equal((await ruleRow(ruleId)).delivery_last_attempt_was_test, true);
+  const drain = async () => {
+    await dbClient!.pool.query("UPDATE wake_webhook_deliveries SET next_attempt_at = now() - interval '1 second' WHERE rule_id = $1 AND state IN ('queued', 'retry')", [ruleId]);
+    return worker!.processWakeWebhookBatch("wake-form-test-worker", { ...worker!.defaultWakeWebhookDeps() });
+  };
+  const runOneDelivery = async (text: string) => {
+    await api!.addMessage(roomId, "ada", text, { source: "browser", account_id: accounts.ada });
+    return drain();
+  };
+  const mark = async () => {
+    const row = await ruleRow(ruleId);
+    return [row.delivery_last_attempt_was_test, row.delivery_last_status, row.delivery_last_error];
+  };
+
+  // Delivered.
+  const before = received.length;
+  assert.equal(await runOneDelivery("@bobbot first real message"), 1);
+  assert.equal(received.length, before + 1);
+  assert.deepEqual(await mark(), [false, 200, null]);
+  assert.equal((await send("GET", "", { cookie: COOKIE.bob })).json.active.find((rule: any) => rule.id === ruleId).delivery.last_attempt_was_test, false);
+
+  // Retried (a 5xx), after the mark is set again as a test would set it.
+  await dbClient!.pool.query("UPDATE agent_wake_rules SET delivery_last_attempt_was_test = true WHERE id = $1", [ruleId]);
+  replies.push(503);
+  await runOneDelivery("@bobbot second real message");
+  assert.deepEqual(await mark(), [false, 503, "http_5xx"]);
+  assert.equal(await drain(), 1, "the retry goes out and the receiver accepts it");
+
+  // Failed for good (a 4xx).
+  await dbClient!.pool.query("UPDATE agent_wake_rules SET delivery_last_attempt_was_test = true WHERE id = $1", [ruleId]);
+  replies.push(400);
+  await runOneDelivery("@bobbot third real message");
+  assert.deepEqual(await mark(), [false, 400, "http_4xx"]);
+  assert.equal((await ruleRow(ruleId)).delivery_consecutive_failures, 1);
 });

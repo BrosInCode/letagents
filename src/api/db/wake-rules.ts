@@ -51,6 +51,7 @@ function deliverySummary(row: WakeRuleRow, viewer: WakeRuleViewer): WakeRuleDeli
     last_status: row.delivery_last_status ?? null,
     last_error: row.delivery_last_error ?? null,
     last_attempt_at: row.delivery_last_attempt_at ? new Date(row.delivery_last_attempt_at).toISOString() : null,
+    last_attempt_was_test: row.delivery_last_attempt_was_test,
     // An MCP Events subscription: what the subscriber holds, never its URL or secret.
     ...(row.delivery_kind === "mcp_event" && row.mcp_subscription_id ? {
       subscription_id: row.mcp_subscription_id,

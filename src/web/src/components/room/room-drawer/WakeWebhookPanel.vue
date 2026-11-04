@@ -10,6 +10,7 @@
       :api="roomWakeWebhookApi"
       :loading="loading"
       :error="error"
+      :open="open"
       @changed="refreshRules"
     />
   </div>
