@@ -142,7 +142,7 @@ test('the release seed keeps removals, and gives a room with members but no admi
   } as any);
   await pool!.query('DELETE FROM room_members');
 
-  const sql = await readFile(path.resolve(process.cwd(), 'drizzle/0131_room_members_reseed.sql'), 'utf8');
+  const sql = await readFile(path.resolve(process.cwd(), 'drizzle/0134_room_members_reseed.sql'), 'utf8');
   const statements = sql.split('--> statement-breakpoint').map((part) => part.trim()).filter((part) => part.startsWith('WITH'));
   assert.equal(statements.length, 3);
   for (const statement of statements) await pool!.query(statement);

@@ -68,6 +68,12 @@ export interface GitHubEventFact {
   recorded_at: string;
 }
 
+/** A rule's expiry. Only room.message rules may have none, and they never reach the paths that need one. */
+export function wakeRuleExpiry(rule: Pick<WakeRuleRow, "id" | "expires_at">): string {
+  if (!rule.expires_at) throw new Error(`Wake rule ${rule.id} has no expiry.`);
+  return rule.expires_at;
+}
+
 function iso(ms: number): string {
   return new Date(ms).toISOString();
 }
@@ -79,7 +85,13 @@ export async function evaluateWakeRule(
   deps: WakeRuleEvaluationDeps,
 ): Promise<WakeRuleEvaluation> {
   const nowMs = now.getTime();
-  const expiresMs = Date.parse(rule.expires_at);
+  if (rule.event === "room.message") {
+    // Messages drive a webhook rule as they are sent; the scheduler only ends it at its expiry.
+    if (rule.expires_at && nowMs >= Date.parse(rule.expires_at)) return { kind: "expire" };
+    return { kind: "wait", nextCheckAt: rule.expires_at ?? iso(nowMs + WAKE_RULE_FALLBACK_CHECK_MS) };
+  }
+  const expiresAt = wakeRuleExpiry(rule);
+  const expiresMs = Date.parse(expiresAt);
   // A repeating rule wakes at most once per window, whatever prompted the check.
   const quietUntilMs = rule.repeat && rule.last_fired_at
     ? Date.parse(rule.last_fired_at) + WAKE_RULE_LIMITS.repeatDebounceMs
@@ -190,7 +202,7 @@ async function findWatchedOccurrence(
         eventType: closed ? "pull_request" : "pull_request_review",
         action: closed ? "closed" : "submitted",
         after: rule.cursor_at,
-        until: rule.expires_at,
+        until: wakeRuleExpiry(rule),
         pullRequests,
       });
       const match = events.find((event) => closed
@@ -245,7 +257,7 @@ async function findCheckOccurrence(
   if (branches.length === 0) return { kind: "none" };
   const events = await deps.githubEventsAfter({
     ruleRoomId: rule.room_id, eventType: "check_run", action: "completed",
-    after: rule.cursor_at, until: rule.expires_at, headRefs: branches,
+    after: rule.cursor_at, until: wakeRuleExpiry(rule), headRefs: branches,
   });
   if (events.length === 0) return { kind: "none" };
 
@@ -282,7 +294,7 @@ async function findCheckOccurrence(
 
   const readyUntilMs = ready.at(-1)!.newestMs;
   const overlapping = settling.filter((push) => push.firstMs <= readyUntilMs);
-  const mustWait = rule.repeat && nowMs < Date.parse(rule.expires_at);
+  const mustWait = rule.repeat && nowMs < Date.parse(wakeRuleExpiry(rule));
   if (overlapping.length && mustWait) return { kind: "none", nextCheckMs: Math.max(...overlapping.map(settleAt)) };
 
   const matters = (push: CheckPush) => !args.conclusions

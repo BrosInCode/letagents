@@ -916,14 +916,35 @@
       "idx": 130,
       "version": "7",
       "when": 1793800000000,
-      "tag": "0130_room_members",
+      "tag": "0130_wake_webhooks",
       "breakpoints": true
     },
     {
       "idx": 131,
       "version": "7",
       "when": 1793900000000,
-      "tag": "0131_room_members_reseed",
+      "tag": "0131_wake_email",
+      "breakpoints": true
+    },
+    {
+      "idx": 132,
+      "version": "7",
+      "when": 1794000000000,
+      "tag": "0132_wake_delivery_hardening",
+      "breakpoints": true
+    },
+    {
+      "idx": 133,
+      "version": "7",
+      "when": 1794100000000,
+      "tag": "0133_room_members",
+      "breakpoints": true
+    },
+    {
+      "idx": 134,
+      "version": "7",
+      "when": 1794200000000,
+      "tag": "0134_room_members_reseed",
       "breakpoints": true
     }
   ]

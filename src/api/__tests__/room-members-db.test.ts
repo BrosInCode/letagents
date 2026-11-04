@@ -72,7 +72,7 @@ async function agentSession(roomId: string, ownerAccountId: string, name: string
 }
 
 async function seedStatements(): Promise<string[]> {
-  const sql = await readFile(path.resolve(process.cwd(), 'drizzle/0130_room_members.sql'), 'utf8');
+  const sql = await readFile(path.resolve(process.cwd(), 'drizzle/0133_room_members.sql'), 'utf8');
   return sql.split('--> statement-breakpoint').map((part) => part.trim()).filter((part) => part.startsWith('WITH'));
 }
 

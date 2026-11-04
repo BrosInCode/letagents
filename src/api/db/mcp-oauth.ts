@@ -3,6 +3,7 @@ import type { PoolClient } from "pg";
 
 import { pool } from "./client.js";
 import type { OwnerTokenAccount } from "./types/auth.js";
+import { RETIRE_WAKE_RULES_FOR_CREDENTIAL_SQL } from "./wake-rule-credentials.js";
 
 /**
  * Storage for the remote MCP endpoint's OAuth 2.1 authorization server
@@ -254,6 +255,8 @@ async function revokeGrantInTransaction(client: PoolClient, grantId: string): Pr
   if (secretHash) {
     await client.query("DELETE FROM remote_mcp_sessions WHERE token_hash = $1", [secretHash]);
     await client.query("DELETE FROM remote_mcp_credentials WHERE token_hash = $1", [secretHash]);
+    // Webhook and email wake rules the grant registered stop with it.
+    await client.query(RETIRE_WAKE_RULES_FOR_CREDENTIAL_SQL, ["token", secretHash]);
   }
 }
 

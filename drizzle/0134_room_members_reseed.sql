@@ -1,7 +1,7 @@
 -- The members-only rule is on from this release: only members read a room
 -- that is not tied to a repository, post in it and so wake its agents.
 --
--- 1. Run the seed of 0130 again (same statement), so the people with proof
+-- 1. Run the seed of 0133 again (same statement), so the people with proof
 --    gained since then keep their rooms. It adds only what is missing and
 --    never adds back a person in room_member_removals.
 -- 2. A room with members but no admin gets one, so someone can let people
