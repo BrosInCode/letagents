@@ -246,7 +246,10 @@ export function parseWakeWebhookUrl(raw: string): URL {
   const host = bareHost(url).toLowerCase();
   if (!host) throw new WakeWebhookUrlError("no host");
   if (host === "localhost" || host.endsWith(".localhost")) throw new WakeWebhookUrlError("localhost");
-  if (letAgentsPublicHostnames().has(host)) throw new WakeWebhookUrlError("this server");
+  // This server's own host, and any name under it.
+  for (const own of letAgentsPublicHostnames()) {
+    if (host === own || host.endsWith(`.${own}`)) throw new WakeWebhookUrlError("this server");
+  }
   url.hash = "";
   return url;
 }

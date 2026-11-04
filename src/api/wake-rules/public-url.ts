@@ -11,7 +11,7 @@ export function letAgentsPublicBaseUrl(env: NodeJS.ProcessEnv = process.env): st
   return (configured || DEFAULT_BASE_URL).replace(/\/+$/, "");
 }
 
-/** Every host name this server is reached at publicly. A webhook may never point at one of them. */
+/** Every host name this server is reached at publicly. A webhook may never point at one of them, or at a name under one. */
 export function letAgentsPublicHostnames(env: NodeJS.ProcessEnv = process.env): Set<string> {
   const hosts = new Set<string>();
   for (const value of [env.LETAGENTS_BASE_URL, env.PUBLIC_API_URL, env.LETAGENTS_PUBLIC_URL, DEFAULT_BASE_URL]) {

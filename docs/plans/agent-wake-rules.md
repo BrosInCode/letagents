@@ -224,8 +224,8 @@ the bot's turn. Nothing about it is specific to one platform.
   receiver never delays a push or another account
   (`src/api/notifications/wake-webhooks.ts`). One delivery per rule may wait;
   matches within 10 s fold into it and move it to the newest message. Three
-  hourly budgets apply (20 per rule, 60 per room, 60 per account and target
-  host); when one is spent, one delivery waits for the budget to have room and
+  hourly budgets apply (20 per rule, 60 per account in one room, 60 per
+  account and target host); when one is spent, one delivery waits for the budget to have room and
   later matches fold into it (`over_cap_count`). An account holds at most 100
   delivery rules.
 - **Results.** `2xx` delivers; network errors, timeouts and `5xx` retry with
@@ -234,7 +234,8 @@ the bot's turn. Nothing about it is specific to one platform.
   addresses are final. Five final failures in a row set `status: "paused"`;
   adding the same rule again resumes it. A delivered row keeps no message
   text, and the rule keeps only an error class.
-- **Safety.** https on port 443 only, never this server's own host; every
+- **Safety.** https on port 443 only, never this server's host or a name under
+  it; every
   resolved address must be public, checked at registration and again at each
   attempt, with c-ares under a deadline (`dns-resolve.ts`), and the socket
   connects to the checked address (`webhook-url.ts`). Every refusal gives the
@@ -273,7 +274,10 @@ rule, clears the confirmation and remembers the address
 (`wake_email_suppressions`): the agent cannot send it a new request until the
 person asks for one from the Stopped page. Confirmations are logged per
 address fingerprint (`wake_email_confirmations`): at most 3 per address and
-10 per account a day, cancelled and expired rules included. Only a reply to
+10 per account a day, cancelled and expired rules included. The fingerprint is
+of the mailbox (lower case, no `+tag`, no Gmail dots), so variants of one
+address share the budget and the Stop. A STARTTLS upgrade is refused when the
+server sent anything after its `220` in plain text. Only a reply to
 RCPT TO or DATA counts against a rule; the operator's SMTP problems retry and
 are logged. Link tokens are HMACs under the connector key; only their SHA-256
 is stored. A confirmation link that expires unused ends the rule. Code:

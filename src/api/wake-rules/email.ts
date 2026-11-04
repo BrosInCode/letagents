@@ -112,9 +112,28 @@ export function wakeEmailConfirmToken(cipher: ConnectorCipher, ruleId: string, c
   return cipher.fingerprint("wake-email-confirm", `${ruleId}:${new Date(confirmExpiresAt).toISOString()}`);
 }
 
-/** The keyed fingerprint of an address: confirmations are counted and stops remembered by it. */
+/**
+ * The mailbox an address reaches, for counting only: lower case, no "+tag",
+ * and for Gmail no dots and googlemail.com read as gmail.com. So
+ * `V.ictim+1@googlemail.com` and `victim@gmail.com` share one daily budget and
+ * one Stop. The sealed address is kept exactly as written.
+ */
+export function wakeEmailMailboxKey(address: string): string {
+  const lower = address.trim().toLowerCase();
+  const at = lower.lastIndexOf("@");
+  if (at <= 0) return lower;
+  let local = lower.slice(0, at);
+  let domain = lower.slice(at + 1);
+  const plus = local.indexOf("+");
+  if (plus > 0) local = local.slice(0, plus);
+  if (domain === "googlemail.com") domain = "gmail.com";
+  if (domain === "gmail.com") local = local.replace(/\./g, "");
+  return `${local}@${domain}`;
+}
+
+/** The keyed fingerprint of an address's mailbox: confirmations are counted and stops remembered by it. */
 export function wakeEmailAddressFingerprint(cipher: ConnectorCipher, address: string): string {
-  return cipher.fingerprint("wake-email-to", address.toLowerCase());
+  return cipher.fingerprint("wake-email-to", wakeEmailMailboxKey(address));
 }
 
 export function hashWakeLinkToken(token: string): string {

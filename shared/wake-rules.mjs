@@ -56,7 +56,7 @@ export const WAKE_RULE_LIMITS = Object.freeze({
   webhookCoalesceMs: 10 * 1000,
   /** Deliveries one rule may send in an hour; past it, one delivery waits for the hour's end and later matches fold into it. */
   webhookHourlyCap: 20,
-  /** Deliveries all the rules of one room may send in an hour, the same way. */
+  /** Deliveries one account's rules in one room may send in an hour, the same way. */
   roomHourlyCap: 60,
   /** Deliveries one account's rules may send to one target host in an hour, the same way. */
   hostHourlyCapPerAccount: 60,

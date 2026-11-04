@@ -1066,8 +1066,8 @@ curl -sS -X POST "$URL" -H 'Content-Type: application/json' -H "X-LetAgents-Deli
 
 Delivery rules. Matches for one rule within 10 s are one delivery: the first match after a quiet window goes out at
 once, and later matches inside the window fold into one delivery that goes out when the window ends and carries the
-newest `message_id`. Three hourly budgets apply: 20 deliveries per rule, 60 per room across all its rules, and 60 per
-account to one target host. When one is spent, nothing is dropped: one delivery waits until the budget has room, later
+newest `message_id`. Three hourly budgets apply: 20 deliveries per rule, 60 per account in one room (across its rules there, so one
+member's busy rules never hold back another's), and 60 per account to one target host. When one is spent, nothing is dropped: one delivery waits until the budget has room, later
 matches fold into it, and the owner sees them counted as `over_cap_count`. An account may hold 100 webhook and email
 rules in all. A `2xx` answer delivers. A network error, a timeout (10 s) or a `5xx` is retried with the desktop push
 backoff (about 5 s, doubling, up to 10 attempts); a `408` or `429` waits for its `Retry-After` (at most 5 minutes) and
@@ -1076,7 +1076,8 @@ failures in a row the rule is paused (`status: "paused"`, `delivery.paused: true
 own messages never deliver. Deliveries are sent fairly: one account has at most 3 in flight at once, and webhooks and
 emails have their own lanes.
 
-Safety. The URL must be https on port 443, with no user name or password, and must not name this server. LetAgents
+Safety. The URL must be https on port 443, with no user name or password, and must not name this server or a host
+under it. LetAgents
 resolves the host (with c-ares, 2 s per query, a 3 s deadline, at most 16 lookups at once) before it saves the rule
 and again before each attempt, and refuses the URL when any address is loopback, link-local, private (RFC 1918,
 100.64/10, ULA), multicast, unspecified or reserved (documentation, benchmarking and ORCHID ranges included), IPv4
@@ -1123,7 +1124,9 @@ a permanent one (`5xx`) is final and counts toward the pause, a temporary one (`
 (connection, TLS, greeting, AUTH such as `535`, MAIL FROM) is the operator's: it retries, never pauses a rule, and is
 logged once a minute as an operator problem. The address is sealed like a webhook secret and never returned by the
 API; errors are stored as classes (`smtp_rejected`, `smtp_deferred`, `smtp_operator`), never SMTP text. The links are
-HMACs under `LETAGENTS_CONNECTOR_SECRET_KEY`; the table keeps only their SHA-256.
+HMACs under `LETAGENTS_CONNECTOR_SECRET_KEY`; the table keeps only their SHA-256. The daily budgets and Stop count one
+mailbox once: case, a `+tag` and Gmail's dots (and `googlemail.com`) do not make a new address. A STARTTLS upgrade is
+refused if the server sent anything after its `220` before TLS began.
 
 Operator checklist for email (once per server):
 

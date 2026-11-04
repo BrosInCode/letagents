@@ -176,10 +176,17 @@ class Conversation {
 
   attach(socket: net.Socket): void {
     this.socket = socket;
+    // Nothing read before the TLS upgrade may be taken as a reply after it.
     this.buffer = "";
+    this.lines = [];
     socket.on("data", this.onData);
     socket.on("error", this.onError);
     socket.on("close", this.onClose);
+  }
+
+  /** Whether the server sent anything not yet read: before a TLS upgrade, that is an injection. */
+  hasUnread(): boolean {
+    return this.lines.length > 0 || this.buffer.length > 0;
   }
 
   /** Stop reading the plain socket before TLS takes it over. */
@@ -225,10 +232,11 @@ class Conversation {
       } catch {
         throw new SmtpError(stage, 0);
       }
-      const match = /^(\d{3})([ -])(.*)$/.exec(line);
+      // RFC 5321 4.2: a final line may be the bare code, with no space after it.
+      const match = /^(\d{3})(?:([ -])(.*))?$/.exec(line);
       if (!match || lines.length > 100) throw new SmtpError(stage, 0);
-      lines.push(match[3]!);
-      if (match[2] === " ") return { code: Number(match[1]), lines };
+      lines.push(match[3] ?? "");
+      if (match[2] !== "-") return { code: Number(match[1]), lines };
     }
   }
 
@@ -306,6 +314,8 @@ export async function sendSmtpMail(config: SmtpConfig, message: SmtpMessage, opt
       // smtp:// must upgrade before credentials or mail travel.
       if (!capabilities.some((line) => /^STARTTLS\b/i.test(line))) throw new SmtpError("starttls", 0);
       await conversation.command("starttls", "STARTTLS", [220]);
+      // Anything after the 220 in plain text is not from the TLS session: someone on the path wrote it.
+      if (conversation.hasUnread()) throw new SmtpError("starttls", 0);
       const plain = conversation.detach();
       socket = tls.connect({ socket: plain, ...tlsOptions });
       await connected(socket, "secureConnect", Math.min(timeoutMs, 10_000), "starttls");

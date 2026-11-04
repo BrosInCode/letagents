@@ -2,7 +2,7 @@
 -- A delivery rule records the credential that registered it (an owner token
 -- or OAuth grant by its SHA-256, or a worker session) and stops when it is
 -- revoked; keyed fingerprints of its target and target host bound its hourly
--- budgets. One held rule per identity whatever its status (active, paused or
+-- budgets (per rule, per account in a room, per account and host). One held rule per identity whatever its status (active, paused or
 -- waiting for confirmation). Deliveries carry their account and host for the
 -- budgets; one waiting past a spent budget is marked. Email confirmations are
 -- logged per address fingerprint (counted per day, cancelled rules included),
@@ -22,7 +22,15 @@ ALTER TABLE "agent_wake_rules" ADD COLUMN IF NOT EXISTS "delivery_target_fingerp
 --> statement-breakpoint
 ALTER TABLE "agent_wake_rules" ADD COLUMN IF NOT EXISTS "delivery_host_fingerprint" text;
 --> statement-breakpoint
-ALTER TABLE "agent_wake_rules" RENAME COLUMN "delivery_dropped_count" TO "delivery_over_cap_count";
+DO $$
+BEGIN
+  -- Re-runnable: rename only while the old name is still there.
+  IF EXISTS (SELECT 1 FROM information_schema.columns
+              WHERE table_schema = current_schema() AND table_name = 'agent_wake_rules'
+                AND column_name = 'delivery_dropped_count') THEN
+    ALTER TABLE "agent_wake_rules" RENAME COLUMN "delivery_dropped_count" TO "delivery_over_cap_count";
+  END IF;
+END $$;
 --> statement-breakpoint
 DROP INDEX IF EXISTS "agent_wake_rules_active_identity_uq";
 --> statement-breakpoint
@@ -44,7 +52,7 @@ DROP INDEX IF EXISTS "wake_webhook_deliveries_rule_idx";
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "wake_webhook_deliveries_rule_idx" ON "wake_webhook_deliveries" USING btree ("rule_id", "scheduled_at");
 --> statement-breakpoint
-CREATE INDEX IF NOT EXISTS "wake_webhook_deliveries_room_idx" ON "wake_webhook_deliveries" USING btree ("room_id", "scheduled_at") WHERE "purpose" = 'message';
+CREATE INDEX IF NOT EXISTS "wake_webhook_deliveries_room_account_idx" ON "wake_webhook_deliveries" USING btree ("room_id", "owner_account_id", "scheduled_at") WHERE "purpose" = 'message';
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "wake_webhook_deliveries_host_idx" ON "wake_webhook_deliveries" USING btree ("owner_account_id", "host_fingerprint", "scheduled_at") WHERE "purpose" = 'message';
 --> statement-breakpoint

@@ -52,8 +52,9 @@ const HOUR_MS = 60 * 60 * 1000;
 
 /**
  * The three hourly budgets of a new delivery, read in one statement: the
- * rule's own, the room's across its rules, and the account's for this target
- * host. Each gives how many deliveries fall in the window (held ones
+ * rule's own, the account's in this room (across its rules there, so one
+ * member's busy rules never hold back anyone else's), and the account's for
+ * this target host. Each gives how many deliveries fall in the window (held ones
  * included) and when the window has room again.
  */
 async function readCaps(
@@ -70,7 +71,8 @@ async function readCaps(
        WHERE rule_id = ${rule.id} AND purpose = 'message' AND scheduled_at > ${hourAgo}
     ), by_room AS (
       SELECT scheduled_at FROM wake_webhook_deliveries
-       WHERE room_id = ${roomId} AND purpose = 'message' AND scheduled_at > ${hourAgo}
+       WHERE room_id = ${roomId} AND owner_account_id = ${rule.owner_account_id ?? ""}
+         AND purpose = 'message' AND scheduled_at > ${hourAgo}
     ), by_host AS (
       SELECT scheduled_at FROM wake_webhook_deliveries
        WHERE owner_account_id = ${rule.owner_account_id ?? ""} AND host_fingerprint = ${rule.delivery_host_fingerprint ?? ""}

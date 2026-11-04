@@ -122,6 +122,9 @@ test("a webhook URL must be https on 443, without credentials, not this server, 
   assert.equal(refusalOf(() => parseWakeWebhookUrl("https://user:pw@hooks.example.com/x")), "credentials in the URL");
   assert.equal(refusalOf(() => parseWakeWebhookUrl("https://localhost/x")), "localhost");
   assert.equal(refusalOf(() => parseWakeWebhookUrl("https://letagents.chat/webhooks/x")), "this server");
+  assert.equal(refusalOf(() => parseWakeWebhookUrl("https://www.letagents.chat/webhooks/x")), "this server");
+  assert.equal(refusalOf(() => parseWakeWebhookUrl("https://api.eu.LetAgents.chat/x")), "this server");
+  assert.equal(parseWakeWebhookUrl("https://notletagents.chat/x").hostname, "notletagents.chat", "only names under this server's host");
   assert.equal(refusalOf(() => parseWakeWebhookUrl("not a url")), "not a URL");
   assert.equal(parseWakeWebhookUrl("https://hooks.example.com/x?a=1#frag").href, "https://hooks.example.com/x?a=1");
   // Query-string variants are one target.
@@ -360,7 +363,7 @@ test("past an hourly budget nothing is dropped: one delivery waits for the budge
   // Then the next matches fold into that one.
   assert.deepEqual(planWakeWebhookEnqueue({ nowMs, pendingDeliveryId: "whd_9", lastScheduledAtMs: nowMs + 20 * 60_000, caps: [ruleCap(21)] }),
     { kind: "coalesce", deliveryId: "whd_9" });
-  // The room's budget and the host's hold it the same way; the latest one wins.
+  // The account's room budget and its host budget hold it the same way; the latest one wins.
   assert.deepEqual(planWakeWebhookEnqueue({ nowMs, pendingDeliveryId: null, lastScheduledAtMs: null, caps: [
     ruleCap(3), { count: 60, limit: 60, freesAtMs: nowMs + 5 * 60_000 }, { count: 60, limit: 60, freesAtMs: nowMs + 9 * 60_000 },
   ] }), { kind: "insert", scheduledAtMs: nowMs + 9 * 60_000, heldByCap: true });

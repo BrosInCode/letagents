@@ -82,8 +82,8 @@ export function wakeWebhookHeaders(input: { deliveryId: string; timestamp: numbe
 }
 
 /**
- * One hourly budget a new delivery must fit: the rule's own (20), the room's
- * across all its rules (60), or one account's for one target host (60).
+ * One hourly budget a new delivery must fit: the rule's own (20), one
+ * account's in one room (60), or one account's for one target host (60).
  * Counted by when deliveries go out, so a delivery held for later counts in
  * the hour it is sent in.
  */

@@ -15,12 +15,14 @@ import {
   createSmtpMailer,
   hashWakeLinkToken,
   loadWakeMailer,
+  wakeEmailAddressFingerprint,
+  wakeEmailMailboxKey,
   wakeEmailConfigured,
   wakeEmailConfirmToken,
   wakeEmailDisableToken,
   wakeLinkUrl,
 } from "../wake-rules/email.js";
-import { SmtpError, buildMimeMessage, dotStuff, parseSmtpUrl, quotedPrintable } from "../wake-rules/smtp.js";
+import { SmtpError, buildMimeMessage, dotStuff, parseSmtpUrl, quotedPrintable, sendSmtpMail } from "../wake-rules/smtp.js";
 import { makeTestCertificate } from "./wake-test-tls.js";
 
 const certificate = makeTestCertificate();
@@ -35,6 +37,12 @@ interface StubOptions {
   implicitTls?: boolean;
   auth?: "PLAIN" | "LOGIN" | null;
   fail?: Partial<Record<Stage, number>>;
+  /** Plain text written in the same packet as the "220" to STARTTLS (a man in the middle). */
+  injectAfterStarttls?: string;
+  /** Drop the connection right after the "220" to STARTTLS. */
+  resetAfterStarttls?: boolean;
+  /** End multi-line replies with a bare code ("250"), as RFC 5321 allows. */
+  bareFinalLine?: boolean;
 }
 
 /** A loopback SMTP server that records what it is told. */
@@ -78,9 +86,15 @@ async function smtpStub(options: StubOptions = {}) {
       const verb = line.split(/[ :]/)[0]!.toUpperCase();
       if (verb === "EHLO") {
         const lines = ["stub", ...(options.starttls && !secure ? ["STARTTLS"] : []), ...(options.auth ? [`AUTH ${options.auth}`] : []), "8BITMIME"];
-        lines.forEach((text, index) => say(`250${index === lines.length - 1 ? " " : "-"}${text}`));
+        lines.forEach((text, index) => say(index < lines.length - 1 ? `250-${text}` : options.bareFinalLine ? "250" : `250 ${text}`));
       } else if (verb === "STARTTLS") {
-        say("220 go ahead");
+        if (options.resetAfterStarttls) {
+          say("220 go ahead");
+          current.removeListener("data", onData);
+          setTimeout(() => current.destroy(), 20);
+          return;
+        }
+        current.write(`220 go ahead\r\n${options.injectAfterStarttls ?? ""}`);
         current.removeListener("data", onData);
         const upgraded = new tls.TLSSocket(current, { isServer: true, key: certificate!.key, cert: certificate!.cert });
         upgraded.on("data", onData);
@@ -203,6 +217,53 @@ test("smtp:// is refused when the server does not offer STARTTLS, before any cre
   }
 });
 
+test("plain text written after the STARTTLS 220 is refused, never read as a reply over TLS", needsTls, async () => {
+  // A man in the middle appends a forged EHLO reply that offers AUTH PLAIN; the real one over TLS offers only LOGIN.
+  const stub = await smtpStub({ starttls: true, auth: "LOGIN", injectAfterStarttls: "250-forged\r\n250 AUTH PLAIN\r\n" });
+  try {
+    const config = parseSmtpUrl(`smtp://user:secret@127.0.0.1:${stub.port}`);
+    await assert.rejects(sendSmtpMail(config, { from: FROM, to: "a@example.com", subject: "s", text: "t" }, { ca: certificate!.cert, timeoutMs: 3_000 }),
+      (error: unknown) => error instanceof SmtpError && error.stage === "starttls");
+    assert.deepEqual(stub.commands.filter((command) => command.secure), [], "nothing is sent once the stream is suspect");
+    assert.deepEqual(stub.credentials, []);
+    // It is the operator's problem: retried, never counted against the rule.
+    const result = await createSmtpMailer(config, FROM, { ca: certificate!.cert, timeoutMs: 3_000 }).send(sample);
+    assert.deepEqual(result, { outcome: "retry", status: 0, error: "smtp_operator", operator: true });
+  } finally {
+    await stub.close();
+  }
+});
+
+test("a connection reset during the STARTTLS handshake is a clean SmtpError, with nothing uncaught", needsTls, async () => {
+  const stub = await smtpStub({ starttls: true, auth: "PLAIN", resetAfterStarttls: true });
+  let uncaught: unknown = null;
+  const onUncaught = (error: unknown) => { uncaught = error; };
+  process.on("uncaughtException", onUncaught);
+  try {
+    await assert.rejects(
+      sendSmtpMail(parseSmtpUrl(`smtp://user:secret@127.0.0.1:${stub.port}`), { from: FROM, to: "a@example.com", subject: "s", text: "t" },
+        { ca: certificate!.cert, timeoutMs: 3_000 }),
+      (error: unknown) => error instanceof SmtpError && (error.stage === "starttls" || error.stage === "ehlo"),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(uncaught, null, `uncaught: ${String(uncaught)}`);
+  } finally {
+    process.off("uncaughtException", onUncaught);
+    await stub.close();
+  }
+});
+
+test("a reply whose last line is the bare code is read as final", needsTls, async () => {
+  const stub = await smtpStub({ starttls: true, auth: "PLAIN", bareFinalLine: true });
+  try {
+    const mailer = createSmtpMailer(parseSmtpUrl(`smtp://u:p@127.0.0.1:${stub.port}`), FROM, { ca: certificate!.cert });
+    assert.deepEqual(await mailer.send(sample), { outcome: "delivered", status: 250, error: null });
+    assert.equal(stub.messages.length, 1);
+  } finally {
+    await stub.close();
+  }
+});
+
 test("smtps:// is TLS from the start and signs in with AUTH LOGIN; an untrusted certificate is an operator problem", needsTls, async () => {
   const stub = await smtpStub({ implicitTls: true, auth: "LOGIN" });
   try {
@@ -315,6 +376,23 @@ test("link tokens are HMACs under the server key: a stable stop link, a new conf
   assert.notEqual(wakeEmailConfirmToken(cipher, "wake_a", "2026-11-04T10:10:00.000Z"), first);
   assert.equal(hashWakeLinkToken(first), createHash("sha256").update(first).digest("hex"));
   assert.equal(wakeLinkUrl("confirm", first, "https://letagents.chat/"), `https://letagents.chat/wake-rules/confirm/${first}`);
+});
+
+test("one mailbox is one budget: case, plus tags and Gmail dots do not make a new address", () => {
+  const cipher = createConnectorCipher(randomBytes(32).toString("hex"));
+  const fingerprint = (to: string) => wakeEmailAddressFingerprint(cipher, parseWakeRuleEmail({ to }).to);
+  const victim = fingerprint("victim@gmail.com");
+  for (const variant of ["Victim@gmail.com", "victim+1@gmail.com", "victim+2@gmail.com", "v.ictim@gmail.com", "vi.c.tim+x@GoogleMail.com"]) {
+    assert.equal(fingerprint(variant), victim, variant);
+  }
+  assert.equal(wakeEmailMailboxKey("V.Ictim+tag@googlemail.com"), "victim@gmail.com");
+  // Plus tags go for every domain; dots only where the provider ignores them.
+  assert.equal(wakeEmailMailboxKey("Ops+bots@Example.com"), "ops@example.com");
+  assert.equal(wakeEmailMailboxKey("first.last@example.com"), "first.last@example.com");
+  assert.notEqual(fingerprint("first.last@example.com"), fingerprint("firstlast@example.com"));
+  assert.notEqual(fingerprint("victim@gmail.com"), fingerprint("victim@example.com"));
+  // The sealed address stays as written: only the fingerprint is normalized.
+  assert.deepEqual(parseWakeRuleEmail({ to: "V.ictim+1@gmail.com" }), { to: "V.ictim+1@gmail.com" });
 });
 
 test("an email target is one plain address, and a rule takes webhook or email, not both", () => {

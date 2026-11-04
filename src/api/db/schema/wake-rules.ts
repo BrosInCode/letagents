@@ -154,7 +154,8 @@ export const wake_webhook_deliveries = pgTable("wake_webhook_deliveries", {
   pending_uq: uniqueIndex("wake_webhook_deliveries_pending_uq").on(table.rule_id, table.purpose).where(sql`${table.state} = 'queued'`),
   ready_idx: index("wake_webhook_deliveries_ready_idx").on(table.next_attempt_at).where(sql`${table.state} IN ('queued', 'retry')`),
   rule_idx: index("wake_webhook_deliveries_rule_idx").on(table.rule_id, table.scheduled_at),
-  room_idx: index("wake_webhook_deliveries_room_idx").on(table.room_id, table.scheduled_at).where(sql`${table.purpose} = 'message'`),
+  room_account_idx: index("wake_webhook_deliveries_room_account_idx").on(table.room_id, table.owner_account_id, table.scheduled_at)
+    .where(sql`${table.purpose} = 'message'`),
   host_idx: index("wake_webhook_deliveries_host_idx").on(table.owner_account_id, table.host_fingerprint, table.scheduled_at)
     .where(sql`${table.purpose} = 'message'`),
   in_flight_idx: index("wake_webhook_deliveries_in_flight_idx").on(table.owner_account_id).where(sql`${table.state} = 'processing'`),
