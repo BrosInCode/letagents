@@ -62,6 +62,7 @@ const state = computed(() => isRepoRoom.value ? 'repo' : joinRequest.view.value.
 
 const statusLabel = computed(() => ({
   repo: 'GitHub role required',
+  main_room_only: 'Members only',
   ask: 'Members only',
   pending: 'Waiting for an admin',
   declined: 'Request declined',
@@ -78,6 +79,9 @@ const body = computed(() => {
   }
   if (view.kind === 'declined') {
     return `A room admin declined your request. You can ask again ${formatJoinRequestTime(view.retryAt, now)}.`
+  }
+  if (view.kind === 'main_room_only') {
+    return 'This is a focus room inside another room, and only that room\'s members can open it. Ask a member for the main room\'s link, then ask to join there.'
   }
   return view.previouslyDeclined
     ? 'A room admin declined your last request. You can ask again now.'

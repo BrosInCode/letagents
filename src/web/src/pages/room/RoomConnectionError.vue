@@ -2,6 +2,7 @@
   <div class="room-error">
     <p class="room-error-title">{{ title }}</p>
     <p class="room-error-body">{{ body }}</p>
+    <p v-if="note" class="room-error-note" role="status">{{ note }}</p>
     <div class="room-error-actions">
       <button v-if="showGitHubSignIn" class="retry-btn" type="button" @click="$emit('signIn')">
         Sign in with GitHub
@@ -18,6 +19,7 @@ defineProps<{
   title: string
   body: string
   showGitHubSignIn: boolean
+  note?: string
 }>()
 
 defineEmits<{
@@ -49,6 +51,11 @@ defineEmits<{
   max-width: 420px;
   text-align: center;
   line-height: 1.6;
+}
+
+.room-error-note {
+  margin: 0;
+  font-size: 0.8rem;
 }
 
 .room-error-actions {

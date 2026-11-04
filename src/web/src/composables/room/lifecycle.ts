@@ -65,6 +65,7 @@ function roomJoinErrorFrom(error: RoomApiFailure, roomIdentifier: string): RoomJ
     refusal: roomAccessRefusal(payload),
     displayName: typeof payload?.display_name === 'string' ? payload.display_name : null,
     joinRequest: joinRequestFromPayload(payload),
+    retryAfterMs: error.retryAfterMs ?? null,
   }
 }
 

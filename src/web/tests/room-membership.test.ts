@@ -16,7 +16,12 @@ import {
 import { formatJoinRequestTime, resolveJoinRequestView } from '../src/composables/room/joinRequestView'
 import { createRoomLifecycle } from '../src/composables/room/lifecycle'
 import { apiFetch, roomPath } from '../src/composables/room/api'
-import { fetchRoomMembers } from '../src/composables/room/membership'
+import {
+  fetchRoomMembers,
+  isFocusRoomId,
+  REPO_ACCESS_UNAVAILABLE,
+  ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY,
+} from '../src/composables/room/membership'
 import { connectionState, isConnected, joinError, room } from '../src/composables/room/state'
 import { useRoomJoinRequest } from '../src/composables/room/useRoomJoinRequest'
 import { useRoomMembers } from '../src/components/room/room-drawer/useRoomMembers'
@@ -89,6 +94,7 @@ let AccessRequest: any
 let MembersPanel: any
 let viteAuth: any
 let presentation: any
+let retry: any
 
 before(async () => {
   ;(globalThis as any).localStorage ??= { getItem: () => null, setItem() {}, removeItem() {} }
@@ -106,6 +112,7 @@ before(async () => {
   MembersPanel = (await vite.ssrLoadModule('/src/components/room/room-drawer/RoomMembersPanel.vue')).default
   viteAuth = (await vite.ssrLoadModule('/src/composables/useAuth.ts')).useAuth()
   presentation = await vite.ssrLoadModule('/src/pages/room/useRoomPresentation.ts')
+  retry = await vite.ssrLoadModule('/src/pages/room/useRepoAccessRetry.ts')
 })
 
 after(async () => {
@@ -831,4 +838,117 @@ test('presentation keeps the existing sign-in and private-repo errors apart from
   assert.equal(view.accessRefusal.value, null)
   assert.equal(view.joinErrorTitle.value, 'No repo access')
   assert.equal(view.roomTitle.value, 'Connecting...')
+})
+
+test('a focus room id offers no "Ask to join", and a 400 main-room-only answer says the same', async (t) => {
+  assert.equal(isFocusRoomId('focus_9'), true)
+  assert.equal(isFocusRoomId('ROOM-1234'), false)
+  assert.equal(isFocusRoomId('github.com/acme/focus_9'), false)
+  const calls = mockApi(t, {
+    'POST /rooms/ROOM-1234/join-requests': json({
+      error: 'Ask to join the main room, not one of its focus rooms.', code: ROOM_JOIN_REQUEST_MAIN_ROOM_ONLY,
+    }, 400),
+  })
+  const scope = effectScope()
+  const focus = scope.run(() => useRoomJoinRequest({ room: () => 'focus_9', onMember() {} }))!
+  const aliased = scope.run(() => useRoomJoinRequest({ room: () => 'ROOM-1234', onMember() {} }))!
+  try {
+    assert.deepEqual(focus.view.value, { kind: 'main_room_only' })
+    assert.equal(aliased.view.value.kind, 'ask')
+    await aliased.ask()
+    assert.deepEqual(aliased.view.value, { kind: 'main_room_only' })
+    assert.equal(aliased.error.value, '', 'the answer is a state, not an error')
+    assert.deepEqual(calls, ['POST /rooms/ROOM-1234/join-requests'])
+  } finally { scope.stop() }
+})
+
+test('the access screen for a focus room asks for the main room\'s link instead of offering a request', async () => {
+  const html = await renderAccess({
+    refusal: 'membership_required', roomId: 'focus_9', displayName: null, initialRequest: null,
+  })
+  assert.match(html, /focus_9/)
+  assert.match(html, /Ask a member for the main room&#39;s link/)
+  assert.match(html, />\s*Check again\s*</)
+  assert.doesNotMatch(html, /Ask to join<|Cancel request/)
+})
+
+test('the drawer of a focus room tells a non-member to ask to join the main room', async (t) => {
+  mockApi(t, {
+    'GET /auth/session': { authenticated: true, account: { id: 'acct_cy', login: 'cy', provider: 'github' } },
+    'GET /rooms/focus_9/members': json(roomMembershipRequiredBody({ room_id: 'focus_9', display_name: null, join_request: null }), 403),
+  })
+  await viteAuth.checkSession()
+  const html = await renderMembersPanel(roomInfo('focus_9'))
+  assert.match(html, /A focus room uses the members of its main room: ask to join there\./)
+  assert.doesNotMatch(html, />\s*Ask to join\s*</)
+})
+
+test('a 503 from the GitHub role check is a retry state, never an access refusal', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => new Response(JSON.stringify({
+    error: 'repo_access_unavailable', code: REPO_ACCESS_UNAVAILABLE,
+    message: 'GitHub did not answer the repository access check. Please retry.', room_id: 'github.com/acme/app',
+  }), { status: 503, headers: { 'content-type': 'application/json', 'Retry-After': '30' } }))
+  t.mock.method(console, 'error', () => undefined)
+  const lifecycle = createRoomLifecycle({
+    startParticipantRefreshLoop() {}, startPresenceRefreshLoop() {}, async startStreaming() {}, finishStreamingBootstrap() {}, stopStreaming() {},
+  })
+  try {
+    assert.equal(await lifecycle.joinRoom('github.com/acme/app'), false)
+    assert.equal(joinError.value?.status, 503)
+    assert.equal(joinError.value?.code, REPO_ACCESS_UNAVAILABLE)
+    assert.equal(joinError.value?.refusal, null)
+    assert.equal(joinError.value?.retryAfterMs, 30_000)
+    const view = presentation.useRoomPresentation({
+      room: ref(null), tasks: ref([]), joinError, connectionState: ref('error'), authUser: ref({ login: 'cy' }),
+    })
+    assert.equal(view.accessRefusal.value, null, 'no "Ask a repository admin" screen')
+    assert.equal(view.accessCheckUnavailable.value, true)
+    assert.equal(view.joinErrorTitle.value, 'GitHub is not answering')
+    assert.equal(view.roomTitle.value, 'github.com/acme/app')
+    assert.match(view.joinErrorBody.value, /not a refusal/)
+  } finally {
+    lifecycle.leaveRoom()
+    lifecycle.dispose()
+  }
+})
+
+test('the GitHub retry waits what the server asks, doubles from 30 s, and stops at 5 min', () => {
+  assert.equal(retry.repoAccessRetryDelay(0, null), 30_000)
+  assert.equal(retry.repoAccessRetryDelay(1, 30_000), 60_000)
+  assert.equal(retry.repoAccessRetryDelay(2, 30_000), 120_000)
+  assert.equal(retry.repoAccessRetryDelay(9, 30_000), 300_000)
+  assert.equal(retry.repoAccessRetryDelay(0, 90_000), 90_000, 'a longer Retry-After wins')
+  assert.equal(retry.repoAccessRetryDelay(0, 3_600_000), 300_000)
+})
+
+test('the room page retries a GitHub 503 on its own with a growing wait, and stops on success or another error', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: NOW })
+  const unavailable = (roomId = 'github.com/acme/app') => ({
+    status: 503, code: REPO_ACCESS_UNAVAILABLE, message: 'GitHub did not answer.', roomId, deviceFlowUrl: null,
+    refusal: null, displayName: null, joinRequest: null, retryAfterMs: 30_000,
+  })
+  const error = ref<any>(null)
+  const connected = ref(false)
+  let retries = 0
+  const scope = effectScope()
+  const state = scope.run(() => retry.useRepoAccessRetry({ joinError: error, isConnected: connected, retry: async () => { retries += 1 } }))!
+  const flush = async () => { await tick(); await tick() }
+  try {
+    error.value = unavailable(); await flush()
+    assert.equal(state.nextRetryAt.value, NOW + 30_000)
+    t.mock.timers.tick(29_999); assert.equal(retries, 0)
+    t.mock.timers.tick(1); assert.equal(retries, 1)
+    error.value = null; await flush()
+    error.value = unavailable(); await flush()
+    assert.equal(state.nextRetryAt.value, NOW + 30_000 + 60_000, 'the second wait is longer')
+    error.value = null; await flush()
+    connected.value = true; await flush()
+    connected.value = false
+    error.value = unavailable(); await flush()
+    assert.equal(state.nextRetryAt.value, NOW + 30_000 + 30_000, 'an open room resets the wait')
+    error.value = { ...unavailable(), code: 'PRIVATE_REPO_NO_ACCESS', status: 403 }; await flush()
+    assert.equal(state.nextRetryAt.value, null)
+    t.mock.timers.tick(600_000)
+    assert.equal(retries, 1, 'another error never retries')
+  } finally { scope.stop() }
 })

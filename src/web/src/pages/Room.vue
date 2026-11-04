@@ -61,6 +61,7 @@
       :title="joinErrorTitle"
       :body="joinErrorBody"
       :showGitHubSignIn="showGitHubSignIn"
+      :note="repoAccessRetryNote"
       @signIn="handleSignIn"
       @retry="retryJoin"
     />
@@ -221,6 +222,8 @@ import { providePersonWork } from '@/components/room/personWork'
 import { useFocusRoomNavigation } from './room/useFocusRoomNavigation'
 import { useRoomImages } from './room/useRoomImages'
 import { useRoomPresentation } from './room/useRoomPresentation'
+import { useRepoAccessRetry } from './room/useRepoAccessRetry'
+import { formatJoinRequestTime } from '@/composables/room/joinRequestView'
 import { useRoomTabs } from './room/useRoomTabs'
 import { useRoomViewport } from './room/useRoomViewport'
 import { useRoomTaskHandlers } from './room/useRoomTaskHandlers'
@@ -398,6 +401,10 @@ const {
   connectionState,
   authUser: auth.user,
 })
+const { nextRetryAt: repoAccessRetryAt } = useRepoAccessRetry({ joinError, isConnected, retry: () => retryJoin() })
+const repoAccessRetryNote = computed(() => repoAccessRetryAt.value === null
+  ? ''
+  : `Trying again ${formatJoinRequestTime(repoAccessRetryAt.value, Date.now())}.`)
 provideRoomMessageLinkPreviews(useRoomMessageLinkPreviews(computed(() => room.value?.identifier || ''), computed(() => getGitHubSupportIdentifier(room.value))))
 const {
   focusDraftTaskId,
