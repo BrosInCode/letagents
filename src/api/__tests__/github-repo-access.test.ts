@@ -1042,3 +1042,45 @@ test("a fresh no from GitHub retires a remembered yes for that person and reposi
   assert.equal(await roleCheck(true), false);
   assert.equal(await roleCheck(), false, "the remembered role is gone");
 });
+
+test("a fresh no stops an older check still in flight from caching or sharing its yes", async () => {
+  const roomName = `github.com/brosincode/inflight-denial-${Date.now()}`;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const answer = (allowed: boolean) => (async (input: RequestInfo | URL) => String(input).includes("/collaborators/")
+    ? (allowed ? jsonResponse(200, { permission: "write" }) : jsonResponse(404, { message: "Not Found" }))
+    : jsonResponse(200, { private: true, owner: { login: "brosincode" } })) as typeof fetch;
+  const yesLater = (async (input: RequestInfo | URL) => { await gate; return answer(true)(input); }) as typeof fetch;
+  let laterCalls = 0;
+  const noCounted = (async (input: RequestInfo | URL) => { laterCalls += 1; return answer(false)(input); }) as typeof fetch;
+  const check = (fetchImpl: typeof fetch, bypassCache = false) =>
+    isGitHubRepoCollaborator({ roomName, login: "removed", accessToken: "token", bypassCache, fetchImpl });
+
+  const older = check(yesLater);
+  assert.equal(await check(answer(false), true), false, "the fresh check sees the removal");
+  assert.equal(await check(noCounted), false, "a cached check after it does not join the older flight");
+  release();
+  assert.equal(await older, true, "the older caller gets the answer of its own time");
+  const before = laterCalls;
+  assert.equal(await check(noCounted), false, "and that yes was not cached");
+  assert.ok(laterCalls > before);
+
+  const publicRoom = `github.com/acme/inflight-role-${Date.now()}`;
+  let releaseRole!: () => void;
+  const roleGate = new Promise<void>((resolve) => { releaseRole = resolve; });
+  const roleAnswer = (triage: boolean) => jsonResponse(200, {
+    private: false, owner: { login: "acme" }, permissions: { pull: true, triage },
+  });
+  const role = (triage: boolean) => (async () => roleAnswer(triage)) as typeof fetch;
+  let roleCalls = 0;
+  const roleCheck = (fetchImpl: typeof fetch, bypassCache = false) =>
+    isGitHubPublicRepoRoleHolder({ roomName: publicRoom, login: "removed", accessToken: "token", bypassCache, fetchImpl });
+  const olderRole = roleCheck((async () => { await roleGate; return roleAnswer(true); }) as typeof fetch);
+  assert.equal(await roleCheck(role(false), true), false);
+  assert.equal(await roleCheck((async () => { roleCalls += 1; return roleAnswer(false); }) as typeof fetch), false);
+  releaseRole();
+  assert.equal(await olderRole, true);
+  assert.equal(await roleCheck((async () => { roleCalls += 1; return roleAnswer(false); }) as typeof fetch), false,
+    "the older yes did not replace the no that came after the removal");
+  assert.equal(roleCalls, 1, "that no is the one kept for a minute");
+});

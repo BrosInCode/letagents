@@ -9,7 +9,7 @@ import { liveDemoColor } from '../../../shared/live-demo.mjs';
 import type { LiveDemoAccess, LiveRoomDecision } from '../live-demos/access.js';
 import { createLiveDemoHub, LIVE_DEMO_HUB_LIMITS } from '../live-demos/hub.js';
 import { attachLiveDemoSockets, type LiveDemoSocketLimits } from '../live-demos/sockets.js';
-import { closedWith as closed, joinLive as live, openLive as open, pause, until } from './live-demo-client.js';
+import { closedWith as closed, joinLive as live, openLive, openLive as open, pause, until } from './live-demo-client.js';
 
 // The upgrade handler on a real HTTP server with real `ws` clients. Access is
 // a stub here; live-demos-db.test.ts runs the same checks against Postgres.
@@ -337,4 +337,68 @@ test('an invalidation during an allowing check holds the socket and runs one mor
   open();
   assert.equal((await beaClosed).code, 4403, 'the stale allow was dropped and the next check refused');
   assert.equal(ada.ws.readyState, WebSocket.OPEN);
+});
+
+test('the app\'s pings get a pong; a ping flood from a client that stops reading closes it with nothing queued', async (t) => {
+  const server = await start({ closeGraceMs: 200 });
+  t.after(() => server.stop());
+  const ada = await live(server.port, 'room-a', 'tok-ada');
+  const pong = new Promise<Buffer>((resolve) => ada.ws.once('pong', resolve));
+  ada.ws.ping(Buffer.from('desktop'));
+  assert.equal(String(await pong), 'desktop', 'the desktop app keeps seeing the server alive');
+
+  const bea = await live(server.port, 'room-a', 'tok-bea');
+  const raw = (bea.ws as any)._socket;
+  raw.pause();
+  t.after(() => raw.destroy());
+  let peak = 0;
+  for (let round = 0; round < 10 && server.sockets.stats().sockets === 2; round += 1) {
+    for (let i = 0; i < 1_000; i += 1) bea.ws.ping(Buffer.alloc(125, 7));
+    await pause(10);
+    peak = Math.max(peak, server.sockets.stats().queuedBytes);
+  }
+  t.diagnostic(`peak queue during the ping flood: ${peak} bytes`);
+  await until(() => server.hub.stats().connections === 1, 3_000);
+  await until(() => server.sockets.stats().sockets === 1, 3_000);
+  assert.ok(peak < 4 * 1024, `a few pongs, not one per ping (peak ${peak} bytes)`);
+  assert.equal(ada.ws.readyState, WebSocket.OPEN);
+});
+
+test('an invalidation during an upgrade\'s access check is not lost', async (t) => {
+  const server = await start();
+  t.after(() => server.stop());
+  const views = (who: string) => server.calls.filter((call) => call.startsWith(`view:room-a:${who}:`)).length;
+
+  // Bea is removed while her upgrade's check, which read "member", is running.
+  let open = server.closeGate();
+  const refused = (async () => openLive(server.port, '/rooms/room-a/live', { token: 'tok-bea' }))();
+  await until(() => views('acct_bea') === 1);
+  server.members.delete('room-a:acct_bea');
+  server.sockets.recheckWhere({ accessRoomName: 'room-a', login: 'bea' });
+  open();
+  const answer = await refused;
+  assert.equal(answer.status, 403, 'the stale allow was not used');
+  assert.equal(views('acct_bea'), 2);
+  assert.deepEqual(server.hub.stats(), { rooms: 0, connections: 0 });
+
+  // An invalidation for someone else costs Ada's upgrade nothing.
+  open = server.closeGate();
+  const admitted = (async () => openLive(server.port, '/rooms/room-a/live', { token: 'tok-ada' }))();
+  await until(() => views('acct_ada') === 1);
+  server.sockets.recheckWhere({ accessRoomName: 'room-a', login: 'cy' });
+  open();
+  const first = await admitted;
+  assert.equal(first.status, 101);
+  assert.equal(views('acct_ada'), 1);
+  (first as any).ws.close();
+  await until(() => server.sockets.stats().sockets === 0);
+
+  // A change that leaves Ada a member: checked again, then admitted.
+  open = server.closeGate();
+  const again = (async () => openLive(server.port, '/rooms/room-a/live', { token: 'tok-ada' }))();
+  await until(() => views('acct_ada') === 2);
+  server.sockets.recheckWhere({ accessRoomName: 'room-a', login: 'ada' });
+  open();
+  assert.equal((await again).status, 101);
+  assert.equal(views('acct_ada'), 3);
 });

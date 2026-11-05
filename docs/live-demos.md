@@ -43,15 +43,22 @@ A socket that the same app replaces does not count toward the 4 and the 16.
 "Can read the room" is the same rule as the room's messages: the members of a
 room that is not tied to a repository (a focus room uses its parent), or the
 GitHub role for a repo room. At the upgrade the GitHub role is asked afresh,
-never from the 30-minute cache, and a fresh "no" also removes a cached "yes"
-for that person and repository. Rental rooms have no live demos.
+never from the 30-minute cache. A fresh "no" also removes a cached "yes" for
+that person and repository, and a check that started before it can neither
+cache its "yes" nor share it with a later caller. If a removal or an access
+change may concern an upgrade while its check runs, the server checks again
+before it admits the socket. Rental rooms have no live demos.
 
 About every 60 seconds the server checks the session and the access again. A
 person removed from the room, or whose GitHub access changed, is checked at
-once; until that check allows the socket again, it gets no frames and its
-pointer and ink go nowhere. A change that arrives while a check runs makes the
-check run once more, and an "allow" from before the change is not used. The
-socket then closes with one of these codes:
+once. Until that check allows the socket again, it gets no pointers, ink or
+presence, and its own pointer and ink go nowhere; saved-mark changes and
+errors wait in a queue of at most 64 frames and 256 KB (more closes the socket
+with 1013, and the app reloads the marks when it reconnects). When the check
+allows the socket, it gets the current viewers of each demo, then the queue;
+when it refuses, the queue is dropped. A change that arrives while a check
+runs makes the check run once more, and an "allow" from before the change is
+not used. The socket then closes with one of these codes:
 
 | Code | Meaning |
 |------|---------|
@@ -63,8 +70,10 @@ socket then closes with one of these codes:
 
 The server pings every 30 seconds with a random payload, and closes a peer that
 did not answer the previous ping. Only a pong that echoes that payload counts.
-A peer that does not finish closing within 5 seconds of a server close is cut
-off.
+The server answers the app's own pings itself (not `ws`), at most 5 in 10
+seconds and only within the queue cap; each ping beyond that counts as a bad
+frame. A peer that does not finish closing within 5 seconds of a server close
+is cut off.
 
 ## Frames and limits
 
@@ -86,7 +95,10 @@ join gets an `error` frame with a `demo` field: `demo_not_found`,
 - A socket views at most 8 demos, and makes at most 20 joins in 10 seconds,
   a repeated join of a demo it views included. Every reply to the socket's own
   frames comes from a join, so this bounds them too. Past the limit the socket
-  gets one `rate_limited` error, then nothing until the window ends.
+  gets one `{ t: 'error', code: 'rate_limited', message, retry_after_ms }`
+  with no `demo`, and nothing more until the window ends: every join in
+  between is dropped, so the app sends again, after `retry_after_ms`, each join
+  it has not seen its own presence for.
 - A demo admits 64 viewers.
 - Per socket and demo, the server relays at most 30 `cur` frames and 30 `ink`
   frames a second, and drops the rest without a reply. One `cur` `gone` after a

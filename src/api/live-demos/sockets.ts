@@ -69,7 +69,8 @@ export interface LiveDemoSocketOptions {
 export interface LiveDemoSockets {
   /**
    * Re-checks at once the sockets whose access room or login matches (both
-   * lowercase). They get no frames until the check allows them again.
+   * lowercase). They get no frames until the check allows them again. An
+   * upgrade whose check is running is checked again before it is admitted.
    */
   recheckWhere(match: { accessRoomName?: string | null; login?: string | null }): void;
   /** `queuedBytes`: bytes waiting to be sent, over all sockets. */
@@ -127,10 +128,14 @@ export function attachLiveDemoSockets(server: Server, options: LiveDemoSocketOpt
     noServer: true,
     clientTracking: false,
     perMessageDeflate: false,
+    // `ws` would answer every ping itself, outside the hub's queue cap.
+    autoPong: false,
     maxPayload: limits.maxPayload,
     handleProtocols: (protocols) => (protocols.has(LIVE_DEMO_PROTOCOL) ? LIVE_DEMO_PROTOCOL : false),
   });
   const sockets = new Set<LiveSocket>();
+  /** Upgrades between sign-in and admission; an invalidation bumps their generation. */
+  const pendingUpgrades = new Set<{ login: string | null; generation: number }>();
   const perAccountRoom = new Map<string, number>();
   const perAccount = new Map<string, number>();
   let handshakes = 0;
@@ -278,6 +283,10 @@ export function attachLiveDemoSockets(server: Server, options: LiveDemoSocketOpt
         onError(error);
       }
     });
+    ws.on('ping', (data) => {
+      // Answered through the hub's budget and queue cap; a flood counts as bad frames.
+      if (connection.ping(data.length)) ws.pong(data);
+    });
     ws.on('pong', (data) => {
       // Only the answer to the server's own ping proves the peer reads.
       if (created.pingId && Buffer.isBuffer(data) && data.equals(created.pingId)) {
@@ -339,6 +348,8 @@ export function attachLiveDemoSockets(server: Server, options: LiveDemoSocketOpt
       return;
     }
     handshakes += 1;
+    const pending = { login: null as string | null, generation: 0 };
+    pendingUpgrades.add(pending);
     // A database that hangs must not hold the socket forever.
     const timer = setTimeout(() => socket.destroy(), limits.handshakeMs);
     try {
@@ -347,6 +358,7 @@ export function attachLiveDemoSockets(server: Server, options: LiveDemoSocketOpt
         refuse(socket, 401, 'auth_required', 'Sign in to LetAgents to view demos live.');
         return;
       }
+      pending.login = account.login.trim().toLowerCase();
       const room = await access.findRoom(roomId);
       if (!room) {
         refuse(socket, 404, 'room_not_found', 'Room not found.');
@@ -358,8 +370,19 @@ export function attachLiveDemoSockets(server: Server, options: LiveDemoSocketOpt
         refuse(socket, 429, 'too_many_live_connections', early, { 'Retry-After': '30' });
         return;
       }
-      // Fresh: a cached GitHub answer may be up to 30 minutes old.
-      const view = await access.canView(room, account, { fresh: true });
+      // Fresh: a cached GitHub answer may be up to 30 minutes old. An
+      // invalidation that may concern this upgrade while the check ran makes
+      // its "allow" stale: check again before admitting.
+      let view: Awaited<ReturnType<LiveDemoAccess['canView']>>;
+      for (let round = 0; ; round += 1) {
+        const generation = pending.generation;
+        view = await access.canView(room, account, { fresh: true });
+        if (view.decision !== 'allow' || generation === pending.generation) break;
+        if (round >= STALE_CHECK_ROUNDS) {
+          refuse(socket, 503, 'access_changed', 'Access to this room changed during the check. Try again.', { 'Retry-After': '5' });
+          return;
+        }
+      }
       if (view.decision === 'unavailable') {
         refuse(socket, 503, 'repo_access_unavailable', 'GitHub did not answer the access check. Try again soon.', { 'Retry-After': '30' });
         return;
@@ -387,6 +410,7 @@ export function attachLiveDemoSockets(server: Server, options: LiveDemoSocketOpt
     } finally {
       clearTimeout(timer);
       handshakes -= 1;
+      pendingUpgrades.delete(pending);
     }
   };
 
@@ -424,6 +448,11 @@ export function attachLiveDemoSockets(server: Server, options: LiveDemoSocketOpt
         if (match.accessRoomName && entry.accessRoomName !== match.accessRoomName) continue;
         if (match.login && entry.login !== match.login) continue;
         recheck(entry, true);
+      }
+      // An upgrade's access room is known only after its check: any room may be it.
+      for (const pending of pendingUpgrades) {
+        if (match.login && pending.login && pending.login !== match.login) continue;
+        pending.generation += 1;
       }
     },
     stats: () => {

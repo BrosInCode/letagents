@@ -277,8 +277,8 @@ test('a connection views at most eight demos, joins are rate limited, and a demo
   for (const demo of known.slice(0, 3)) ada.send({ t: 'leave', demo });
   for (const demo of known.slice(8, 11)) ada.send({ t: 'join', demo });
   const limited = ada.socket.take('error');
-  assert.deepEqual(limited.map((frame) => [frame.code, frame.demo]), [['rate_limited', known[9]]],
-    'ten joins in ten seconds, the refused ninth one included; one reply, then silence');
+  assert.deepEqual(limited.map((frame) => [frame.code, frame.demo, frame.retry_after_ms]), [['rate_limited', undefined, 10_000]],
+    'ten joins in ten seconds, the refused ninth one included; one reply for no demo in particular, then silence');
   tick(10_000);
   ada.send({ t: 'join', demo: known[10] });
   await settle();
@@ -357,8 +357,14 @@ test('a flood of repeated or refused joins gets at most one window of replies', 
   await settle();
   const replies = ada.socket.take();
   assert.equal(replies.length, LIVE_DEMO_HUB_LIMITS.joins, 'the first join of the window was the real one');
-  assert.equal(replies.filter((frame) => frame.code === 'rate_limited').length, 1);
-  tick(LIVE_DEMO_HUB_LIMITS.joinWindowMs);
+  const limited = replies.filter((frame) => frame.code === 'rate_limited');
+  assert.equal(limited.length, 1);
+  assert.equal(limited[0].demo, undefined, 'it names no demo: the app re-sends every unconfirmed join');
+  assert.equal(limited[0].retry_after_ms, LIVE_DEMO_HUB_LIMITS.joinWindowMs);
+  tick(4_000);
+  ada.send({ t: 'join', demo: DEMO });
+  assert.deepEqual(ada.socket.take(), [], 'still one reply per window');
+  tick(LIVE_DEMO_HUB_LIMITS.joinWindowMs - 4_000);
   ada.send({ t: 'join', demo: DEMO });
   assert.deepEqual(ada.socket.take().map((frame) => frame.t), ['presence'], 'the next window has room again');
 });
@@ -421,4 +427,60 @@ test('a held socket gets nothing and sends nothing, and gets the current viewers
   assert.deepEqual(rest, []);
   bea.send({ t: 'cur', demo: DEMO, x: 3, y: 3 });
   assert.equal(ada.socket.take('cur').length, 1, 'relayed again');
+});
+
+test('a held socket keeps saved-mark changes in a small queue: flushed on release, dropped on revoke, closed on overflow', async () => {
+  const { connect, hub } = harness({ limits: { heldFrames: 3 } });
+  const ada = connect('Ada');
+  const bea = connect('Bea');
+  ada.send({ t: 'join', demo: DEMO });
+  bea.send({ t: 'join', demo: DEMO });
+  await settle();
+  bea.socket.take();
+  const mark: DemoMark = {
+    id: 'dmk_heldmark', demo: DEMO, kind: 'pin', at: [1, 2], text: 'Here', anchor: null, createdAt: new Date(0).toISOString(),
+    author: { accountId: 'acct_Ada', name: 'Ada', color: liveDemoColor('acct_Ada') },
+  };
+
+  bea.connection.hold(true);
+  hub.broadcast('room-a', DEMO, { t: 'mark', demo: DEMO, mark });
+  hub.broadcast('room-a', DEMO, { t: 'unmark', demo: DEMO, id: mark.id });
+  ada.send({ t: 'cur', demo: DEMO, x: 1, y: 1 });
+  assert.deepEqual(bea.socket.take(), []);
+  bea.connection.hold(false);
+  assert.deepEqual(bea.socket.take().map((frame) => frame.t), ['presence', 'mark', 'unmark'], 'nothing saved was missed');
+
+  bea.connection.hold(true);
+  hub.broadcast('room-a', DEMO, { t: 'mark', demo: DEMO, mark });
+  bea.socket.close(4403, 'Access ended');
+  bea.connection.disconnect();
+  bea.connection.hold(false);
+  assert.deepEqual(bea.socket.take(), [], 'a revoked socket gets nothing it was kept');
+
+  const cy = connect('Cy');
+  cy.send({ t: 'join', demo: DEMO });
+  await settle();
+  cy.socket.take();
+  cy.connection.hold(true);
+  for (let i = 0; i < 4; i += 1) hub.broadcast('room-a', DEMO, { t: 'unmark', demo: DEMO, id: `dmk_gone_${i}` });
+  assert.deepEqual(cy.socket.closed, { code: 1013, reason: 'Too far behind' }, 'past the queue: reconnect and reload');
+  assert.deepEqual(hub.stats(), { rooms: 1, connections: 1 });
+});
+
+test('pings from the app are answered within a budget; a flood is a bad-frame flood', () => {
+  const { connect, tick } = harness();
+  const ada = connect('Ada');
+  const answered = Array.from({ length: LIVE_DEMO_HUB_LIMITS.pings }, () => ada.connection.ping(8));
+  assert.deepEqual(answered, Array(LIVE_DEMO_HUB_LIMITS.pings).fill(true));
+  for (let i = 0; i < LIVE_DEMO_HUB_LIMITS.badFrames; i += 1) assert.equal(ada.connection.ping(8), false);
+  assert.equal(ada.socket.closed, null);
+  assert.equal(ada.connection.ping(8), false);
+  assert.deepEqual(ada.socket.closed, { code: 1008, reason: 'Too many bad frames' });
+
+  const bea = connect('Bea');
+  assert.equal(bea.connection.ping(8), true);
+  tick(LIVE_DEMO_HUB_LIMITS.pingWindowMs);
+  bea.socket.bufferedAmount = LIVE_DEMO_HUB_LIMITS.maxQueuedBytes - 4;
+  assert.equal(bea.connection.ping(8), false, 'no pong past the queue cap');
+  assert.deepEqual(bea.socket.closed, { code: 1013, reason: 'Too far behind' });
 });
