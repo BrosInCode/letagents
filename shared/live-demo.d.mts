@@ -5,6 +5,9 @@ export const LIVE_DEMO: Readonly<{
   marksPerDemo: number; pinText: number; name: number; anchorPath: number;
 }>;
 export const LIVE_DEMO_COLORS: readonly string[];
+export const DEMO_MARK_ID: RegExp;
+export function newDemoMarkId(): string;
+export const DEMO_MARK_RATE_LIMITED_TEXT: string;
 
 export type LiveDemoPoint = [x: number, y: number];
 export interface LiveDemoAnchor { path: string; dx: number; dy: number }
@@ -28,8 +31,8 @@ export type DemoMark =
   | (DemoMarkBase & { kind: 'pin'; at: LiveDemoPoint; text: string });
 
 export type DemoMarkInput =
-  | { demo: string; kind: 'stroke'; points: LiveDemoPoint[]; anchor: LiveDemoAnchor | null }
-  | { demo: string; kind: 'pin'; at: LiveDemoPoint; text: string; anchor: LiveDemoAnchor | null };
+  | { id?: string; demo: string; kind: 'stroke'; points: LiveDemoPoint[]; anchor: LiveDemoAnchor | null }
+  | { id?: string; demo: string; kind: 'pin'; at: LiveDemoPoint; text: string; anchor: LiveDemoAnchor | null };
 
 export type LiveDemoServerFrame =
   | { t: 'hello'; cid: string; name: string; color: string }

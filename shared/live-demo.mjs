@@ -26,6 +26,24 @@ const COLORS = Object.freeze(['#e5484d', '#f76b15', '#ffc53d', '#46a758', '#12a5
 
 export const LIVE_DEMO_COLORS = COLORS;
 
+/**
+ * A mark's id: `dmk_` and 16 random bytes in base64url. The app picks it for a
+ * new mark, so a save it sends again (its answer was lost) names the same mark,
+ * and the server keeps one.
+ */
+export const DEMO_MARK_ID = /^dmk_[A-Za-z0-9_-]{22}$/;
+
+export function newDemoMarkId() {
+  const bytes = new Uint8Array(16);
+  globalThis.crypto.getRandomValues(bytes);
+  let binary = '';
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `dmk_${btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')}`;
+}
+
+/** The server's answer when one person changes marks too fast; the app waits and tries again. */
+export const DEMO_MARK_RATE_LIMITED_TEXT = 'Too many changes to marks. Try again in a moment.';
+
 /** `<messageId>/<attachmentId>`: one demo in one room message. */
 export function liveDemoKey(messageId, attachmentId) {
   const key = `${messageId}/${attachmentId}`;
@@ -132,18 +150,20 @@ export function parseDemoMark(value) {
   return null;
 }
 
-/** A new mark from a desktop app (REST body), or null. */
+/** A new mark from a desktop app (REST body), or null. `id` is optional: the server picks one without it. */
 export function parseDemoMarkInput(value) {
   if (!isRecord(value) || !isLiveDemoKey(value.demo) || !isAnchor(value.anchor ?? null)) return null;
+  if (value.id !== undefined && !(typeof value.id === 'string' && DEMO_MARK_ID.test(value.id))) return null;
+  const id = value.id === undefined ? {} : { id: value.id };
   if (value.kind === 'stroke') {
-    return hasOnlyKeys(value, ['demo', 'kind', 'points', 'anchor']) && isPoints(value.points, 2, LIVE_DEMO.strokePoints)
-      ? { demo: value.demo, kind: 'stroke', points: value.points, anchor: value.anchor ?? null }
+    return hasOnlyKeys(value, ['id', 'demo', 'kind', 'points', 'anchor']) && isPoints(value.points, 2, LIVE_DEMO.strokePoints)
+      ? { ...id, demo: value.demo, kind: 'stroke', points: value.points, anchor: value.anchor ?? null }
       : null;
   }
   if (value.kind === 'pin') {
-    return hasOnlyKeys(value, ['demo', 'kind', 'at', 'text', 'anchor']) && isPoint(value.at)
+    return hasOnlyKeys(value, ['id', 'demo', 'kind', 'at', 'text', 'anchor']) && isPoint(value.at)
       && typeof value.text === 'string' && value.text.trim().length > 0 && value.text.length <= LIVE_DEMO.pinText
-      ? { demo: value.demo, kind: 'pin', at: value.at, text: value.text, anchor: value.anchor ?? null }
+      ? { ...id, demo: value.demo, kind: 'pin', at: value.at, text: value.text, anchor: value.anchor ?? null }
       : null;
   }
   return null;

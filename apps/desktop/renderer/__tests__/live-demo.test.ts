@@ -81,12 +81,12 @@ import {
   type ClipOps,
 } from "../src/components/desktop/content/desktop-chat-message/live-demo/markup";
 import {
+  isRateLimited,
   markBody,
   markInput,
   pendingRetryDelay,
   PENDING_MAX_LIVE_FAILURES,
   PENDING_RETRY_MS,
-  sameMarkBody,
 } from "../src/components/desktop/content/desktop-chat-message/live-demo/pending-marks";
 import { newStrokeId } from "../src/components/desktop/content/desktop-chat-message/live-demo/stroke-id";
 import { createWidthSync } from "../src/components/desktop/content/desktop-chat-message/live-demo/width-sync";
@@ -95,10 +95,12 @@ import {
   type LiveDemoApi,
 } from "../src/components/desktop/content/desktop-chat-message/live-demo/session";
 import {
+  DEMO_MARK_RATE_LIMITED_TEXT,
   LIVE_DEMO,
   LIVE_DEMO_COLORS,
   liveDemoColor,
   liveDemoKey,
+  newDemoMarkId,
   type DemoMark,
   type LiveDemoPoint,
 } from "../src/components/desktop/content/desktop-chat-message/live-demo/protocol";
@@ -1673,6 +1675,7 @@ describe("marks that wait for the link", () => {
   const KEY = liveDemoKey("msg_5", "att_9")!;
   const OWN = { accountId: "acct_1", name: "Emmy", color: liveDemoColor("acct_1") };
   const STROKE: LiveDemoPoint[] = [[1, 1], [20, 30.5]];
+  const RATE_LIMITED = new Error(`Error invoking remote method 'desktop:room:add-demo-mark': DesktopApiError: ${DEMO_MARK_RATE_LIMITED_TEXT}`);
 
   it("says how long ago a mark was made", () => {
     const now = Date.parse("2026-11-05T12:00:00.000Z");
@@ -1683,58 +1686,66 @@ describe("marks that wait for the link", () => {
     assert.equal(markAge("not a date", now), "");
   });
 
-  it("knows a saved mark by what it is, and can put a deleted one back", () => {
+  it("can put a deleted mark back from what it is, under a new id", () => {
     const pin: DemoMark = { id: "mark_aaaaaa", demo: KEY, kind: "pin", at: [3, 4], text: "Hi", author: OWN, anchor: null, createdAt: "x" };
     const stroke: DemoMark = { id: "mark_bbbbbb", demo: KEY, kind: "stroke", points: STROKE, author: OWN, anchor: null, createdAt: "x" };
     assert.deepEqual(markBody(pin), { kind: "pin", at: [3, 4], text: "Hi" });
-    assert.ok(sameMarkBody(markBody(stroke), stroke));
-    // The server keeps a tenth of a pixel: what was sent still matches what it saved.
-    assert.ok(sameMarkBody({ kind: "stroke", points: [[1.04, 0.96], [20.0333, 30.4512]] }, stroke));
-    assert.ok(sameMarkBody({ kind: "pin", at: [3.0412, 3.96], text: "Hi" }, pin));
-    assert.ok(!sameMarkBody({ kind: "stroke", points: [[1, 1], [20, 30]] }, stroke));
-    assert.ok(!sameMarkBody({ kind: "pin", at: [3, 4], text: "Hey" }, pin));
-    assert.ok(!sameMarkBody({ kind: "pin", at: [3, 4], text: "Hi" }, stroke));
-    assert.deepEqual(parseDemoMarkInput(markInput(KEY, markBody(stroke))), { demo: KEY, kind: "stroke", points: STROKE, anchor: null });
+    const id = newDemoMarkId();
+    assert.deepEqual(parseDemoMarkInput(markInput(KEY, markBody(stroke), id)), { id, demo: KEY, kind: "stroke", points: STROKE, anchor: null });
     assert.deepEqual(parseDemoMarkInput(markInput(KEY, markBody(pin))), { demo: KEY, kind: "pin", at: [3, 4], text: "Hi", anchor: null });
+    assert.notEqual(newDemoMarkId(), newDemoMarkId());
   });
 
-  it("waits longer after each failed try, up to a cap", () => {
+  it("waits longer after each failed try, up to a cap, and knows a refusal for the pace", () => {
     assert.equal(pendingRetryDelay(1), PENDING_RETRY_MS[0]);
     assert.equal(pendingRetryDelay(2), PENDING_RETRY_MS[1]);
     assert.equal(pendingRetryDelay(99), PENDING_RETRY_MS[PENDING_RETRY_MS.length - 1]);
     assert.equal(pendingRetryDelay(0), PENDING_RETRY_MS[0]);
+    assert.ok(isRateLimited(RATE_LIMITED));
+    assert.ok(!isRateLimited(new Error("The network is down.")));
+    assert.ok(!isRateLimited("text"));
   });
 
+  /** A fake server like the real one: it keeps marks by id, and a save sent again returns the saved mark. */
   function setup() {
     const handlers = new Set<(event: DesktopLiveDemoEvent) => void>();
-    let failAdds = false;
+    let fail: Error | null = null;
+    // The save reaches the server, but its answer is lost.
+    let loseAnswers = false;
     let failRemoves = 0;
     let seq = 0;
-    const added: unknown[] = [];
+    const server = new Map<string, DemoMark>();
+    const added: Array<{ id?: string }> = [];
     const removed: string[] = [];
     const timers: Array<{ ms: number; run: () => void; cancelled: boolean }> = [];
-    // Each answer waits for the test, so a frame can arrive while a save is on its way.
     let holdAdds = false;
     const held: Array<() => void> = [];
     const api: LiveDemoApi = {
       async join() {},
       async leave() {},
       async send() {},
-      async listMarks() { return []; },
+      async listMarks() { return [...server.values()]; },
       async addMark(_room, input) {
         added.push(input);
         if (holdAdds) await new Promise<void>((resolve) => held.push(resolve));
-        if (failAdds) throw new Error("The network is down.");
-        const id = `mark_saved_${String(++seq).padStart(2, "0")}`;
-        const base = { id, demo: input.demo, author: OWN, anchor: null, createdAt: `2026-01-01T00:00:0${seq}.000Z` };
-        return (input.kind === "pin" ? { ...base, kind: "pin", at: input.at, text: input.text } : { ...base, kind: "stroke", points: input.points }) as DemoMark;
+        if (fail) throw fail;
+        const id = input.id ?? `dmk_server_${String(++seq).padStart(2, "0")}`;
+        let mark = server.get(id);
+        if (!mark) {
+          const base = { id, demo: input.demo, author: OWN, anchor: null, createdAt: `2026-01-01T00:00:${String(++seq).padStart(2, "0")}.000Z` };
+          mark = (input.kind === "pin" ? { ...base, kind: "pin", at: input.at, text: input.text } : { ...base, kind: "stroke", points: input.points }) as DemoMark;
+          server.set(id, mark);
+        }
+        if (loseAnswers) throw new Error("The connection was lost.");
+        return mark;
       },
       async removeMark(_room, id) {
         if (failRemoves > 0) {
           failRemoves--;
-          throw new Error("Too many changes to marks. Try again in a moment.");
+          throw new Error(DEMO_MARK_RATE_LIMITED_TEXT);
         }
         removed.push(id);
+        server.delete(id);
       },
       async viewerAccountId() { return "acct_1"; },
     };
@@ -1767,25 +1778,29 @@ describe("marks that wait for the link", () => {
       return due.map((timer) => timer.ms);
     };
     return {
-      session, status, emit, added, removed, notices, runTimers,
-      failAdds: (value: boolean) => { failAdds = value; },
+      session, status, emit, added, removed, notices, runTimers, server,
+      liveTimers: () => timers.filter((timer) => !timer.cancelled).length,
+      fail: (error: Error | null) => { fail = error; },
+      loseAnswers: (value: boolean) => { loseAnswers = value; },
       failRemoves: (count: number) => { failRemoves = count; },
       hold: (value: boolean) => { holdAdds = value; },
       release: () => { for (const resolve of held.splice(0)) resolve(); },
     };
   }
-  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  const settle = async () => { for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve)); };
 
-  it("shows a mark at once and replaces it with the saved one", async () => {
+  it("shows a mark at once and replaces it with the saved one, under the id it chose", async () => {
     const t = setup();
     t.session.start("lease://one");
     await settle();
     t.session.queueMark({ kind: "stroke", points: STROKE });
-    assert.equal(t.session.pending.value.length, 1);
+    const id = t.session.pending.value[0].id;
+    assert.match(id, /^dmk_[A-Za-z0-9_-]{22}$/);
     assert.equal(t.session.pending.value[0].waiting, false);
     await settle();
     assert.equal(t.session.pending.value.length, 0);
-    assert.deepEqual(t.session.marks.value.map((mark) => mark.id), ["mark_saved_01"]);
+    assert.deepEqual(t.session.marks.value.map((mark) => mark.id), [id]);
+    assert.deepEqual(t.added.map((input) => input.id), [id]);
     assert.deepEqual(t.notices, []);
   });
 
@@ -1795,10 +1810,9 @@ describe("marks that wait for the link", () => {
     t.status("live");
     await settle();
     t.status("reconnecting");
-    t.failAdds(true);
+    t.fail(new Error("The network is down."));
     t.session.queueMark({ kind: "pin", at: [5, 6], text: "Fix this" });
     await settle();
-    assert.equal(t.session.pending.value.length, 1);
     assert.equal(t.session.pending.value[0].waiting, true);
     // More tries while the link is down never give the mark up.
     for (let index = 0; index < 5; index++) {
@@ -1806,13 +1820,58 @@ describe("marks that wait for the link", () => {
       await settle();
     }
     assert.equal(t.session.pending.value.length, 1);
-    t.failAdds(false);
+    t.fail(null);
     t.status("live");
-    await settle();
     await settle();
     assert.equal(t.session.pending.value.length, 0);
     assert.deepEqual(t.session.marks.value.map((mark) => mark.kind === "pin" && mark.text), ["Fix this"]);
     assert.deepEqual(t.notices, ["info: Saved 1 mark."]);
+  });
+
+  it("saves one copy when a save reached the server but its answer and broadcast were lost", async () => {
+    const t = setup();
+    t.session.start("lease://one");
+    t.status("live");
+    await settle();
+    t.loseAnswers(true);
+    t.session.queueMark({ kind: "stroke", points: STROKE });
+    await settle();
+    assert.equal(t.server.size, 1, "the save reached the server");
+    assert.equal(t.session.pending.value[0].waiting, true);
+    t.status("reconnecting");
+    t.loseAnswers(false);
+    // Back: the list and the retry go out together; the retry names the same id.
+    t.status("live");
+    await settle();
+    assert.equal(t.server.size, 1, "no second copy");
+    assert.equal(t.session.marks.value.length, 1);
+    assert.equal(t.session.pending.value.length, 0);
+    assert.deepEqual(t.notices, ["info: Saved 1 mark."]);
+  });
+
+  it("does not give a mark up for refusals of pace, and new marks do not hurry its retry", async () => {
+    const t = setup();
+    t.session.start("lease://one");
+    t.status("live");
+    await settle();
+    t.fail(RATE_LIMITED);
+    t.session.queueMark({ kind: "stroke", points: STROKE });
+    await settle();
+    assert.equal(t.added.length, 1);
+    for (let index = 0; index < 4; index++) t.session.queueMark({ kind: "pin", at: [index, 1], text: `Pin ${index}` });
+    await settle();
+    assert.equal(t.added.length, 1, "the waiting retry keeps its time");
+    for (let round = 0; round < PENDING_MAX_LIVE_FAILURES + 2; round++) {
+      t.runTimers();
+      await settle();
+    }
+    assert.equal(t.session.pending.value.length, 5, "nothing was given up");
+    assert.deepEqual(t.notices, []);
+    t.fail(null);
+    t.runTimers();
+    await settle();
+    assert.equal(t.session.pending.value.length, 0);
+    assert.equal(t.server.size, 5);
   });
 
   it("gives a mark up when the server refuses it while the link works", async () => {
@@ -1820,7 +1879,7 @@ describe("marks that wait for the link", () => {
     t.session.start("lease://one");
     t.status("live");
     await settle();
-    t.failAdds(true);
+    t.fail(new Error("This demo has too many marks. Remove some first."));
     t.session.queueMark({ kind: "stroke", points: STROKE });
     await settle();
     for (let index = 1; index < PENDING_MAX_LIVE_FAILURES; index++) {
@@ -1829,42 +1888,67 @@ describe("marks that wait for the link", () => {
       await settle();
     }
     assert.equal(t.session.pending.value.length, 0);
-    assert.deepEqual(t.notices, ["error: The network is down."]);
+    assert.deepEqual(t.notices, ["error: This demo has too many marks. Remove some first."]);
   });
 
-  it("knows a waiting mark is saved when the server's copy arrives", async () => {
+  it("knows a waiting mark is saved when the server's copy of that id arrives", async () => {
     const t = setup();
     t.session.start("lease://one");
     await settle();
-    t.failAdds(true);
+    t.fail(new Error("The network is down."));
     t.session.queueMark({ kind: "stroke", points: STROKE });
     await settle();
-    assert.equal(t.session.pending.value[0].waiting, true);
-    // The save went through, but its answer was lost: the broadcast copy settles it.
-    t.emit({ t: "mark", demo: KEY, mark: { id: "mark_landed_1", demo: KEY, kind: "stroke", points: STROKE, author: OWN, anchor: null, createdAt: "2026-01-01T00:00:00.000Z" } });
+    const id = t.session.pending.value[0].id;
+    // A mark with the same points but another id is someone else's: it does not settle this one.
+    t.emit({ t: "mark", demo: KEY, mark: { id: "dmk_other_mark_000000000", demo: KEY, kind: "stroke", points: STROKE, author: OWN, anchor: null, createdAt: "2026-01-01T00:00:00.000Z" } });
+    assert.equal(t.session.pending.value.length, 1);
+    t.emit({ t: "mark", demo: KEY, mark: { id, demo: KEY, kind: "stroke", points: STROKE, author: OWN, anchor: null, createdAt: "2026-01-01T00:00:01.000Z" } });
     assert.equal(t.session.pending.value.length, 0);
-    t.failAdds(false);
+    t.fail(null);
     t.runTimers();
     await settle();
-    assert.equal(t.added.length, 1, "no second copy is saved");
+    assert.equal(t.added.length, 1, "no second save");
     assert.deepEqual(t.notices, ["info: Saved 1 mark."]);
   });
 
-  it("deletes a mark that was taken back while its save was on its way", async () => {
+  it("deletes a mark that was taken back while its save was on its way, and keeps the one Undo put back", async () => {
     const t = setup();
     t.session.start("lease://one");
     await settle();
     t.hold(true);
     t.session.queueMark({ kind: "stroke", points: STROKE });
     await settle();
-    const key = t.session.pending.value[0].key;
-    assert.deepEqual(t.session.cancelPending(key), { kind: "stroke", points: STROKE });
-    assert.equal(t.session.pending.value.length, 0);
+    const first = t.session.pending.value[0];
+    const body = t.session.cancelPending(first.key)!;
+    assert.deepEqual(body, { kind: "stroke", points: STROKE });
+    // Undo puts it back at once, while the first save is still on its way.
+    t.session.queueMark(body);
+    const again = t.session.pending.value[0];
+    assert.notEqual(again.id, first.id);
+    t.emit({ t: "mark", demo: KEY, mark: { id: first.id, demo: KEY, kind: "stroke", points: STROKE, author: OWN, anchor: null, createdAt: "2026-01-01T00:00:00.000Z" } });
+    assert.equal(t.session.pending.value.length, 1, "the first save's copy does not settle the new one");
+    t.hold(false);
     t.release();
     await settle();
+    assert.deepEqual(t.removed, [first.id]);
+    assert.deepEqual([...t.server.keys()], [again.id]);
+    assert.ok(t.session.marks.value.some((mark) => mark.id === again.id));
+    assert.equal(t.session.pending.value.length, 0);
+  });
+
+  it("deletes by id a waiting mark that is taken back, as its earlier save may have landed", async () => {
+    const t = setup();
+    t.session.start("lease://one");
     await settle();
-    assert.deepEqual(t.removed, ["mark_saved_01"]);
-    assert.deepEqual(t.session.marks.value, []);
+    t.loseAnswers(true);
+    t.session.queueMark({ kind: "pin", at: [1, 2], text: "Oops" });
+    await settle();
+    const entry = t.session.pending.value[0];
+    assert.equal(entry.attempts, 1);
+    t.session.cancelPending(entry.key);
+    await settle();
+    assert.deepEqual(t.removed, [entry.id]);
+    assert.equal(t.server.size, 0);
   });
 
   it("deletes marks one by one and tries again when the server asks to slow down", async () => {
@@ -1873,7 +1957,6 @@ describe("marks that wait for the link", () => {
     await settle();
     t.session.queueMark({ kind: "stroke", points: STROKE });
     t.session.queueMark({ kind: "pin", at: [1, 2], text: "Two" });
-    await settle();
     await settle();
     const ids = t.session.marks.value.map((mark) => mark.id);
     assert.equal(ids.length, 2);

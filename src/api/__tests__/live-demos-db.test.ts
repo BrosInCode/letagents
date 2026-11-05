@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { LIVE_DEMO, liveDemoColor, parseDemoMark } from '../../../shared/live-demo.mjs';
+import { LIVE_DEMO, liveDemoColor, newDemoMarkId, parseDemoMark } from '../../../shared/live-demo.mjs';
 import {
   databaseTestOptions,
   dbApi,
@@ -180,6 +180,25 @@ test('marks: members read and save them, the author or an admin removes one, vie
   assert.equal(crossSite.status, 403);
 
   viewer.ws.close();
+});
+
+test('a mark sent again with its id stays one mark; another person or demo cannot take the id', databaseTestOptions, async (t) => {
+  const { owner, member, outsider, call, roomId, otherRoomId } = await setup(t);
+  const route = `/rooms/${encodeURIComponent(roomId)}/demo-marks`;
+  const id = newDemoMarkId();
+  const stroke = { id, demo: DEMO, kind: 'stroke', points: [[1, 1], [2, 2]], anchor: null };
+  const first = await call('POST', route, member.token, stroke);
+  assert.deepEqual([first.status, first.body.mark.id], [201, id], 'the app picked the id');
+  // The answer was lost and the app sends the save again: the same mark comes back.
+  const again = await call('POST', route, member.token, stroke);
+  assert.deepEqual([again.status, again.body.mark], [200, first.body.mark]);
+  const rows = await pool!.query(`SELECT COUNT(*)::int AS count FROM demo_marks WHERE id = $1`, [id]);
+  assert.equal(rows.rows[0].count, 1);
+  const byOther = await call('POST', route, owner.token, stroke);
+  assert.deepEqual([byOther.status, byOther.body.error], [409, 'demo_mark_id_taken'], 'another person cannot take the id');
+  const elsewhere = await call('POST', `/rooms/${encodeURIComponent(otherRoomId)}/demo-marks`, outsider.token, stroke);
+  assert.deepEqual([elsewhere.status, elsewhere.body.error], [409, 'demo_mark_id_taken'], 'nor a demo in another room');
+  assert.equal((await call('POST', route, member.token, { ...stroke, id: 'dmk_x' })).status, 400, 'an id in another shape');
 });
 
 test('a demo keeps at most 500 marks, and its marks go with its message', databaseTestOptions, async (t) => {

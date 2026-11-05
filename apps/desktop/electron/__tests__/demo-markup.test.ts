@@ -21,11 +21,16 @@ mock.module("../main/attachments.js", { namedExports: {
 const apiCalls: unknown[][] = [];
 let apiAnswer: unknown = undefined;
 let storageMode: "cloud" | "local" = "cloud";
+class FakeApiError extends Error {
+  constructor(readonly status: number, message: string) { super(message); }
+}
 mock.module("../main/auth.js", { namedExports: {
   apiFetch: async (...args: unknown[]) => {
     apiCalls.push(args);
+    if (apiAnswer instanceof FakeApiError) throw apiAnswer;
     return apiAnswer;
   },
+  DesktopApiError: FakeApiError,
 } });
 mock.module("../main/rooms/local-store.js", { namedExports: {
   resolveLocalAwareRoomStorageMode: async () => ({ effectiveMode: storageMode }),
@@ -170,6 +175,12 @@ test("marks are read and written through the app's own sign-in, and checked both
   assert.equal(apiCalls.length, before, "an invalid mark never reaches the server");
   apiAnswer = { mark: mark("mark_00005", "msg_9/att_9") };
   await assert.rejects(addDesktopDemoMark(ROOM, input), /could not read it back/);
+  // A mark with the id the app chose comes back with that id, or the answer is not this mark.
+  const withId = { ...input, id: "dmk_AAAAAAAAAAAAAAAAAAAAAA" };
+  apiAnswer = { mark: { ...mark("dmk_AAAAAAAAAAAAAAAAAAAAAA"), kind: "stroke", points: [[1, 2], [3, 4]] } };
+  assert.equal((await addDesktopDemoMark(ROOM, withId)).id, "dmk_AAAAAAAAAAAAAAAAAAAAAA");
+  apiAnswer = { mark: { ...mark("dmk_BBBBBBBBBBBBBBBBBBBBBB"), kind: "stroke", points: [[1, 2], [3, 4]] } };
+  await assert.rejects(addDesktopDemoMark(ROOM, withId), /could not read it back/);
 
   apiAnswer = undefined;
   await removeDesktopDemoMark(ROOM, "mark_00004");
@@ -177,6 +188,12 @@ test("marks are read and written through the app's own sign-in, and checked both
     "/rooms/github.com%2FBrosInCode%2Fletagents/demo-marks/mark_00004", { method: "DELETE" }, { credential: "app" },
   ]);
   await assert.rejects(removeDesktopDemoMark(ROOM, "../x"), /cannot be removed/);
+  // Already gone is what the person wanted; any other refusal is still an error.
+  apiAnswer = new FakeApiError(404, "This mark is already gone.");
+  await removeDesktopDemoMark(ROOM, "mark_00004");
+  apiAnswer = new FakeApiError(429, "Too many changes to marks. Try again in a moment.");
+  await assert.rejects(removeDesktopDemoMark(ROOM, "mark_00004"), /Too many changes/);
+  apiAnswer = undefined;
 
   storageMode = "local";
   const count = apiCalls.length;

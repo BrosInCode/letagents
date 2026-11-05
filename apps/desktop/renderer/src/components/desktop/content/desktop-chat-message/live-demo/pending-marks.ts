@@ -1,4 +1,4 @@
-import type { DemoMark, DemoMarkInput, LiveDemoPoint } from "./protocol";
+import { DEMO_MARK_RATE_LIMITED_TEXT, type DemoMark, type DemoMarkInput, type LiveDemoPoint } from "./protocol";
 
 /** What a mark is, without where it is saved or who made it. Undo puts a deleted mark back from this. */
 export type MarkBody =
@@ -11,6 +11,8 @@ export type MarkBody =
  */
 export interface PendingMark {
   key: number;
+  /** The id the server saves it under. A save sent again names the same mark, so the server keeps one. */
+  id: string;
   room: string;
   demo: string;
   body: MarkBody;
@@ -27,6 +29,13 @@ export const PENDING_RETRY_MS = [2_000, 5_000, 10_000, 20_000, 30_000] as const;
 export const PENDING_MAX_LIVE_FAILURES = 3;
 /** Failed saves in all after which a mark is given up. */
 export const PENDING_MAX_ATTEMPTS = 40;
+/** The same once its card is gone (no one sees the mark wait any more). */
+export const PENDING_MAX_ATTEMPTS_AWAY = 10;
+
+/** The server refused for the pace of changes: wait and try again; it says nothing about the mark. */
+export function isRateLimited(error: unknown): boolean {
+  return error instanceof Error && error.message.includes(DEMO_MARK_RATE_LIMITED_TEXT);
+}
 
 export function pendingRetryDelay(attempts: number): number {
   return PENDING_RETRY_MS[Math.min(Math.max(attempts, 1), PENDING_RETRY_MS.length) - 1];
@@ -38,25 +47,9 @@ export function markBody(mark: DemoMark): MarkBody {
     : { kind: "pin", at: [mark.at[0], mark.at[1]], text: mark.text };
 }
 
-export function markInput(demo: string, body: MarkBody): DemoMarkInput {
+export function markInput(demo: string, body: MarkBody, id?: string): DemoMarkInput {
+  const named = id === undefined ? {} : { id };
   return body.kind === "stroke"
-    ? { demo, kind: "stroke", points: body.points, anchor: null }
-    : { demo, kind: "pin", at: body.at, text: body.text, anchor: null };
-}
-
-// The server keeps points to a tenth of a demo pixel, so a saved copy is within half of that.
-const SAVED_POINT_SLACK = 0.051;
-
-function samePoint(a: LiveDemoPoint, b: LiveDemoPoint): boolean {
-  return Math.abs(a[0] - b[0]) <= SAVED_POINT_SLACK && Math.abs(a[1] - b[1]) <= SAVED_POINT_SLACK;
-}
-
-/**
- * True when a saved mark is this body. A save whose answer was lost still
- * reaches the server, and its broadcast copy tells the waiting mark it is saved.
- */
-export function sameMarkBody(body: MarkBody, mark: DemoMark): boolean {
-  if (body.kind === "pin") return mark.kind === "pin" && mark.text === body.text && samePoint(mark.at, body.at);
-  if (mark.kind !== "stroke" || mark.points.length !== body.points.length) return false;
-  return body.points.every((point, index) => samePoint(point, mark.points[index]));
+    ? { ...named, demo, kind: "stroke", points: body.points, anchor: null }
+    : { ...named, demo, kind: "pin", at: body.at, text: body.text, anchor: null };
 }

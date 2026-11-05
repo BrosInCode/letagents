@@ -12,17 +12,19 @@ import { createInkField } from "./ink-field";
 import { createLiveDemoJoins, type LiveDemoJoins } from "./joins";
 import { applyMarkChanges, mergeMark, removeMark, type MarkChange } from "./marks";
 import {
+  isRateLimited,
   markInput,
   pendingRetryDelay,
   PENDING_MAX_ATTEMPTS,
+  PENDING_MAX_ATTEMPTS_AWAY,
   PENDING_MAX_LIVE_FAILURES,
-  sameMarkBody,
   type MarkBody,
   type PendingMark,
 } from "./pending-marks";
 import {
   LIVE_DEMO_COLORS,
   liveDemoColor,
+  newDemoMarkId,
   type DemoMark,
   type DemoMarkInput,
   type LiveDemoPerson,
@@ -363,10 +365,9 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
     return pending.value.length !== before;
   }
 
-  /** A saved mark of yours that is a waiting one: the save went through though its answer was lost. */
+  /** A saved mark that is a waiting one (same id): the save went through though its answer was lost. */
   function settlePendingBy(mark: DemoMark): void {
-    if (!isOwnMark(mark)) return;
-    const match = pending.value.find((entry) => entry.demo === mark.demo && sameMarkBody(entry.body, mark));
+    const match = pending.value.find((entry) => entry.id === mark.id);
     if (!match) return;
     dropPending(match.key);
     if (match.waiting) savedAfterWait++;
@@ -387,9 +388,26 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
     const target = active;
     if (!target) return;
     pending.value = [...pending.value, {
-      key: ++pendingSeq, room: target.room, demo: target.key, body, waiting: false, attempts: 0, liveFailures: 0,
+      key: ++pendingSeq, id: newDemoMarkId(), room: target.room, demo: target.key, body,
+      waiting: false, attempts: 0, liveFailures: 0,
     }];
-    void flushPending();
+    // A wait that is set keeps its time: a new mark does not hurry the one in front of it.
+    if (!cancelRetry) void flushPending();
+  }
+
+  /**
+   * Deletes a mark that may be saved, at a pace the server accepts. Gone already
+   * counts as deleted (main says so); a last failure is left, as nothing waits for it.
+   */
+  async function removeQuietly(room: string, id: string): Promise<void> {
+    for (let tries = 1; tries <= DELETE_TRIES; tries++) {
+      try {
+        await api.removeMark(room, id);
+        return;
+      } catch {
+        if (tries < DELETE_TRIES) await new Promise<void>((resolve) => { delay(DELETE_RETRY_MS, resolve); });
+      }
+    }
   }
 
   async function flushPending(): Promise<void> {
@@ -403,14 +421,21 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
         let saved: DemoMark;
         inFlightKey = entry.key;
         try {
-          saved = await api.addMark(entry.room, markInput(entry.demo, entry.body));
+          saved = await api.addMark(entry.room, markInput(entry.demo, entry.body, entry.id));
         } catch (error) {
           inFlightKey = null;
-          // Taken back (undo) or settled by the server's copy while it was on its way.
-          if (cancelled.delete(entry.key) || !pending.value.some((other) => other.key === entry.key)) continue;
+          if (cancelled.delete(entry.key)) {
+            // Taken back while it was on its way; it may have reached the server anyway.
+            void removeQuietly(entry.room, entry.id);
+            continue;
+          }
+          // Settled by the server's copy while it was on its way.
+          if (!pending.value.some((other) => other.key === entry.key)) continue;
           const attempts = entry.attempts + 1;
-          const liveFailures = entry.liveFailures + (status.value === "live" ? 1 : 0);
-          if (liveFailures >= PENDING_MAX_LIVE_FAILURES || attempts >= PENDING_MAX_ATTEMPTS) {
+          // A refusal for the pace says nothing about the mark; neither does a link that is down.
+          const liveFailures = entry.liveFailures + (status.value === "live" && !isRateLimited(error) ? 1 : 0);
+          const maxAttempts = active ? PENDING_MAX_ATTEMPTS : PENDING_MAX_ATTEMPTS_AWAY;
+          if (liveFailures >= PENDING_MAX_LIVE_FAILURES || attempts >= maxAttempts) {
             dropPending(entry.key);
             const what = entry.body.kind === "pin" ? "the pin" : "the drawing";
             notify({ text: ipcErrorText(error, `Could not save ${what}.`), error: true });
@@ -429,7 +454,7 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
           // Taken back while it saved: the person does not want it.
           dropPending(entry.key);
           marks.value = removeMark(marks.value, saved.id);
-          void api.removeMark(entry.room, saved.id).catch(() => undefined);
+          void removeQuietly(entry.room, saved.id);
           continue;
         }
         // False when the server's copy already settled it.
@@ -445,11 +470,19 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
     }
   }
 
-  /** Takes back a mark that is not saved yet. One on its way is deleted when its save answers. */
+  /**
+   * Takes back a mark that is not saved yet. One on its way is deleted when its
+   * save answers; one whose earlier save failed may still have reached the
+   * server (its answer lost), so that id is deleted too.
+   */
   function cancelPending(key: number): MarkBody | null {
     const entry = pending.value.find((other) => other.key === key);
     if (!entry) return null;
     if (key === inFlightKey) cancelled.add(key);
+    else if (entry.attempts > 0) {
+      marks.value = removeMark(marks.value, entry.id);
+      void removeQuietly(entry.room, entry.id);
+    }
     dropPending(key);
     return entry.body;
   }
@@ -497,7 +530,7 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
   }
 
   return {
-    status, statusReason, joinError, people, selfCid, viewerColor, marks, cursorVersion, cursors, ink,
+    status, statusReason, joinError, people, selfCid, viewerId, viewerColor, marks, cursorVersion, cursors, ink,
     pending: pendingHere,
     start, stop, sendCursor, sendInk, addStroke, addPin, deleteMark, deleteMarks, queueMark, cancelPending,
     isOwnMark, onWake, onNotice, wake,

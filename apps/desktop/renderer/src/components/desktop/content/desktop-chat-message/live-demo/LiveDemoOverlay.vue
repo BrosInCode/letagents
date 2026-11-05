@@ -97,30 +97,12 @@
       >
       <p class="live-demo-pin-hint"><kbd>Enter</kbd> to pin · <kbd>Esc</kbd> to cancel</p>
     </form>
-    <Transition name="live-demo-palette">
-      <div v-if="drawing && !capturing" class="live-demo-palette" role="toolbar" aria-label="Drawing tools">
-        <span class="live-demo-palette-me" title="Your ink colour"><i aria-hidden="true"></i>You</span>
-        <span class="live-demo-palette-sep" aria-hidden="true"></span>
-        <button
-          class="live-demo-palette-button"
-          type="button"
-          :disabled="!canUndo"
-          title="Undo your last mark (⌘Z)"
-          @click="$emit('undo')"
-        >
-          <Undo2 :size="15" aria-hidden="true" />
-          <span>Undo</span>
-        </button>
-        <span class="live-demo-palette-sep" aria-hidden="true"></span>
-        <button class="live-demo-palette-done" type="button" title="Stop drawing (Esc)" @click="$emit('exit')">Done</button>
-      </div>
-    </Transition>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { PenLine, Undo2 } from "@lucide/vue";
+import { PenLine } from "@lucide/vue";
 import { drawStroke, INK_WIDTH_HIGHLIGHT } from "./canvas-draw";
 import { planMarkPaint } from "./marks";
 import { createLatestThrottle, createInkBatcher, CURSOR_INTERVAL_MS, type InkBatcher } from "./throttle";
@@ -144,17 +126,17 @@ const props = defineProps<{
   /** A picture of the card is being taken: other people's pointers stay out of it. */
   capturing: boolean;
   highlightMarkId: string | null;
-  canUndo: boolean;
+  /** The part of the frame the card shows (a tall demo is clipped), so notes open where they can be seen. */
+  visibleHeight: number;
 }>();
 
 const emit = defineEmits<{
-  /** Escape or Done in draw mode. */
+  /** Escape in draw mode. */
   exit: [];
   /** Escape in pin mode. */
   "cancel-pin": [];
   /** The pin is placed (it saves on its own). */
   pinned: [];
-  undo: [];
   /** Delete one of your saved marks, or take back one that is not saved yet. */
   delete: [id: string];
   "cancel-pending": [key: number];
@@ -236,7 +218,7 @@ const pins = computed<PinView[]>(() => {
       id: pin.id, pendingKey: pin.pendingKey, number: pin.number, text: pin.text, author: pin.author,
       color: pin.color, own: pin.own, waiting: pin.waiting, left, top, ink: readableTextColor(pin.color),
       flipped: left > props.width - 250,
-      above: top > props.height - 140,
+      above: top > Math.min(props.height, props.visibleHeight) - 140,
     };
   };
   let number = 0;
@@ -523,8 +505,10 @@ function openPinEditor(at: LiveDemoPoint): void {
   const [left, top] = demoToFrame(at, props.scale);
   const editorLeft = Math.max(4, Math.min(left + 14, props.width - EDITOR_WIDTH - 4));
   const below = top + 14;
-  const editorTop = below + EDITOR_HEIGHT > props.height ? Math.max(4, top - EDITOR_HEIGHT - 14) : below;
-  pinDraft.value = { at, left, top, editorLeft, editorTop, text: "" };
+  const bottom = Math.min(props.height, props.visibleHeight);
+  const editorTop = below + EDITOR_HEIGHT > bottom ? Math.max(4, top - EDITOR_HEIGHT - 14) : below;
+  // A second click moves the pin; what was typed stays.
+  pinDraft.value = { at, left, top, editorLeft, editorTop, text: pinDraft.value?.text ?? "" };
   void nextTick(() => pinInput.value?.focus({ preventScroll: true }));
 }
 
@@ -546,13 +530,22 @@ function removePin(pin: PinView): void {
 function onEscape(event: KeyboardEvent): void {
   if (event.key !== "Escape" || !(props.drawing || props.pinning)) return;
   const target = event.target;
-  if (target instanceof HTMLElement && !root.value?.contains(target) && target.closest("input, textarea, select, [contenteditable]")) return;
+  // Escape that belongs to something else (a dialog, a menu, another card) is left to it.
+  const card = root.value?.closest(".room-inline-demo");
+  const fromPage = target === document.body || target === document.documentElement || target === null;
+  if (!fromPage && target instanceof Node && !card?.contains(target)) return;
   // An open panel (Marks, say) closes first; its own Escape handles that.
   if (target instanceof HTMLElement && target.closest(".live-demo-pop")) return;
   event.preventDefault();
   event.stopPropagation();
   if (props.pinning) emit("cancel-pin");
   else emit("exit");
+}
+
+/** Where a person's pointer is drawn now (frame px), or null when it is not on the demo. */
+function cursorAt(cid: string): { x: number; y: number } | null {
+  const at = props.session.cursors.positionOf(cid, performance.now());
+  return cursorElements.has(cid) && at ? { x: at.x * props.scale, y: at.y * props.scale } : null;
 }
 
 /**
@@ -573,7 +566,7 @@ function ping(cid: string): boolean {
   return true;
 }
 
-defineExpose({ ping });
+defineExpose({ ping, cursorAt });
 
 function onWindowResize(): void {
   const { ratio } = canvasBacking(props.width, props.height, window.devicePixelRatio || 1);

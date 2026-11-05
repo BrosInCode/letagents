@@ -166,11 +166,10 @@
           :pinning="pinning"
           :capturing="capturing"
           :highlight-mark-id="highlightedMarkId"
-          :can-undo="canUndo"
+          :visible-height="clipState?.clipped ? clipState.visibleHeight : frameHeight"
           @exit="exitDraw"
           @cancel-pin="endPin"
           @pinned="endPin"
-          @undo="undoLast"
           @delete="deleteWithUndo([$event])"
           @cancel-pending="cancelPendingWithUndo"
           @notice="showNote($event, true)"
@@ -199,6 +198,25 @@
           <button v-if="note.action" type="button" @click="runNoteAction">{{ note.action.label }}</button>
         </p>
       </Transition>
+      <!-- The drawing bar floats at the bottom of what the card shows, so a tall demo cannot hide it. -->
+      <Transition name="live-demo-palette">
+        <div v-if="drawing && !capturing" class="live-demo-palette" role="toolbar" aria-label="Drawing tools">
+          <span class="live-demo-palette-me" title="Your ink colour"><i aria-hidden="true"></i>You</span>
+          <span class="live-demo-palette-sep" aria-hidden="true"></span>
+          <button
+            class="live-demo-palette-button"
+            type="button"
+            :disabled="!canUndo"
+            title="Undo your last mark (⌘Z)"
+            @click="undoLast"
+          >
+            <Undo2 :size="15" aria-hidden="true" />
+            <span>Undo</span>
+          </button>
+          <span class="live-demo-palette-sep" aria-hidden="true"></span>
+          <button class="live-demo-palette-done" type="button" title="Stop drawing (Esc)" @click="exitDraw">Done</button>
+        </div>
+      </Transition>
     </div>
     <button
       v-if="clipState?.clippable"
@@ -212,7 +230,7 @@
 
 <script setup lang="ts">
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
-import { FileCode, Lock, Maximize2, RotateCw } from "@lucide/vue";
+import { FileCode, Lock, Maximize2, RotateCw, Undo2 } from "@lucide/vue";
 import type {
   DesktopInlineHtmlDemoEvent,
   DesktopInlineHtmlDemoLease,
@@ -257,6 +275,7 @@ import {
   viewportBox,
   visibleCaptureRect,
   type MarkupNotes,
+  type NoteMark,
 } from "./live-demo/markup";
 import { markBody, type MarkBody } from "./live-demo/pending-marks";
 import { liveDemoKey, type DemoMark } from "./live-demo/protocol";
@@ -716,8 +735,12 @@ function observeWidth(): void {
   resizeObserver.observe(body.value);
 }
 
-/** A short line over the demo. One with an action (Undo, Open thread) stays 6 s. */
+/**
+ * A short line over the demo. One with an action (Undo, Open thread) stays 6 s,
+ * and a plain line does not push it out; an error does.
+ */
 function showNote(text: string, error: boolean, action?: { label: string; run: () => void }): void {
+  if (!error && !action && note.value?.action) return;
   clearTimeout(noteTimer);
   note.value = { id: ++noteSeq, text, error, action };
   noteTimer = setTimeout(() => { note.value = null; }, error ? 8_000 : action ? 6_000 : 4_000);
@@ -730,9 +753,11 @@ function runNoteAction(): void {
   action?.run();
 }
 
+/** Closes the open panel. The Send panel drops its picture, but stays while its reply is on the way. */
 function closePop(): void {
-  openPop.value = null;
   highlightedMarkId.value = null;
+  if (openPop.value === "send") cancelSend();
+  else openPop.value = null;
 }
 
 function togglePop(pop: LiveDemoPop): void {
@@ -740,9 +765,10 @@ function togglePop(pop: LiveDemoPop): void {
     closePop();
     return;
   }
+  // A picture that waits for a yes goes when another panel opens; one being sent keeps its panel.
+  closePop();
+  if (openPop.value === "send") return;
   if (pop === "marks") marksNow.value = Date.now();
-  // A picture that waits for a yes goes when another panel opens.
-  if (openPop.value === "send") cancelSend();
   openPop.value = pop;
 }
 
@@ -828,8 +854,9 @@ async function deleteWithUndo(
     if (highlightedMarkId.value && ids.includes(highlightedMarkId.value)) highlightedMarkId.value = null;
     const bodies = [...gone.map(markBody), ...unsaved];
     const count = plural(bodies.length, "mark");
-    showNote(options.cleared ? `Cleared ${count}` : `Deleted ${count}`, false, { label: "Undo", run: () => putBack(bodies) });
-    if (gone.length < ids.length) showNote(`Could not delete ${plural(ids.length - gone.length, "mark")}. Try again.`, true);
+    const failed = ids.length - gone.length;
+    const text = `${options.cleared ? "Cleared" : "Deleted"} ${count}${failed > 0 ? `. Could not delete ${plural(failed, "mark")}` : ""}`;
+    showNote(text, false, { label: "Undo", run: () => putBack(bodies) });
   } catch (error) {
     if (unsaved.length > 0) putBack(unsaved);
     showNote(ipcErrorText(error, "Could not delete the mark. Try again."), true);
@@ -864,11 +891,36 @@ function undoLast(): void {
   if (newest) void deleteWithUndo([newest.id]);
 }
 
-/** Brings the card into view and rings the person's pointer. */
-function findPerson(cid: string): void {
-  card.value?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+/**
+ * Shows the person's pointer and rings it: the card opens past its clip when
+ * the pointer is below it, and the chat scrolls the pointer into view.
+ */
+async function findPerson(cid: string): Promise<void> {
   const name = live.people.value.find((person) => person.cid === cid)?.name ?? "This person";
-  if (!overlay.value?.ping(cid)) showNote(`${name} is not pointing at the demo now.`, false);
+  const at = overlay.value?.cursorAt(cid) ?? null;
+  if (!at) {
+    showNote(`${name} is not pointing at the demo now.`, false);
+    return;
+  }
+  if (clipState.value?.clipped && at.y > clipState.value.visibleHeight - 24) {
+    showAll.value = true;
+    await nextTick();
+  }
+  scrollFrameYIntoView(at.y);
+  overlay.value?.ping(cid);
+}
+
+/** Scrolls the chat (never the clip, which must not scroll) so a height in the demo is in view. */
+function scrollFrameYIntoView(frameY: number): void {
+  const frame = body.value;
+  const scroller = card.value ? outermostScroller(card.value) : null;
+  if (!frame || !scroller) {
+    card.value?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    return;
+  }
+  const y = frame.getBoundingClientRect().top + frameY;
+  const view = scroller.getBoundingClientRect();
+  if (y < view.top + 40 || y > view.bottom - 40) scroller.scrollBy({ top: y - (view.top + view.height / 2), behavior: "smooth" });
 }
 
 /** Keys work while the keyboard is in the card: P pins, D draws, ⌘Z undoes in draw mode, Escape closes. */
@@ -920,8 +972,6 @@ async function sendToThread(): Promise<void> {
   if (sendPhase.value !== "idle" || !sendThreadReply || !props.threadRootId || !room || !captureMarkup || !target) return;
   const run = ++sendRun;
   const current = () => run === sendRun;
-  clearTimeout(noteTimer);
-  note.value = null;
   discardCapture();
   closePop();
   sendPhase.value = "capturing";
@@ -944,8 +994,8 @@ async function sendToThread(): Promise<void> {
       [viewportBox(window.innerWidth, window.innerHeight), ...elementClippingBoxes(target)],
     );
     if (!rect) throw new Error("The demo is not on screen.");
-    // What the marks say, as they are in the picture.
-    const marks = live.marks.value;
+    // What the marks say, as they are in the picture: yours that are not saved yet show there too.
+    const marks = [...live.marks.value, ...unsavedNoteMarks()];
     const staged = await captureMarkup(room, rect, markupFileName(props.fileName));
     uploadId = staged.uploadId;
     if (!current()) return;
@@ -972,6 +1022,17 @@ async function sendToThread(): Promise<void> {
     if (uploadId) void Promise.resolve(desktopIpc.room?.discardAttachment?.(room, uploadId)).catch(() => undefined);
     if (current() && sendPhase.value === "capturing") sendPhase.value = "idle";
   }
+}
+
+/** Your marks that are not saved yet, for the text that goes with the picture. */
+function unsavedNoteMarks(): NoteMark[] {
+  const name = ownMarks.value[0]?.author.name
+    ?? live.people.value.find((person) => person.cid === live.selfCid.value)?.name
+    ?? "You";
+  const author = { accountId: live.viewerId.value ?? "self", name, color: live.viewerColor.value };
+  return live.pending.value.map((entry): NoteMark => entry.body.kind === "pin"
+    ? { kind: "pin", text: entry.body.text, author }
+    : { kind: "stroke", author });
 }
 
 /** The person said yes to the picture: post it, with the marks as text, as a reply in the demo's thread. */
@@ -1010,6 +1071,8 @@ async function confirmSend(personNote: string): Promise<void> {
 }
 
 function cancelSend(): void {
+  // While the reply is on its way the panel stays, so its answer (or its error) has a place.
+  if (sendPhase.value === "sending") return;
   if (openPop.value === "send") openPop.value = null;
   if (sendPhase.value !== "review") return;
   discardCapture();

@@ -1,6 +1,6 @@
 import { isLiveDemoKey, parseDemoMark, parseDemoMarkInput } from "../../../../../shared/live-demo.mjs";
 import type { DesktopDemoMark, DesktopDemoMarkInput } from "../../ipc-types.js";
-import { apiFetch } from "../auth.js";
+import { apiFetch, DesktopApiError } from "../auth.js";
 import { cloudRoomIdentifierForStorage, resolveLocalAwareRoomStorageMode } from "./local-store.js";
 
 const MARK_ID = /^[A-Za-z0-9_-]{8,64}$/;
@@ -47,12 +47,20 @@ export async function addDesktopDemoMark(room: unknown, rawInput: unknown): Prom
     { credential: "app" },
   );
   const mark = parseDemoMark(response?.mark);
-  if (!mark || mark.demo !== input.demo) throw new Error("The mark was saved, but the app could not read it back.");
+  if (!mark || mark.demo !== input.demo || (input.id !== undefined && mark.id !== input.id)) {
+    throw new Error("The mark was saved, but the app could not read it back.");
+  }
   return mark;
 }
 
+/** Removes a mark. One that is already gone counts as removed: that is what the person wanted. */
 export async function removeDesktopDemoMark(room: unknown, markId: unknown): Promise<void> {
   if (typeof markId !== "string" || !MARK_ID.test(markId)) throw new Error("This mark cannot be removed.");
   const path = await requireCloudRoomPath(room);
-  await apiFetch<void>(`${path}/demo-marks/${encodeURIComponent(markId)}`, { method: "DELETE" }, { credential: "app" });
+  try {
+    await apiFetch<void>(`${path}/demo-marks/${encodeURIComponent(markId)}`, { method: "DELETE" }, { credential: "app" });
+  } catch (error) {
+    if (error instanceof DesktopApiError && error.status === 404) return;
+    throw error;
+  }
 }

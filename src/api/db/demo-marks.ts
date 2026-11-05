@@ -38,6 +38,10 @@ export const DEMO_MARK_POINTS_PER_DEMO = 100_000;
 
 export type CreateDemoMarkResult =
   | { kind: 'created'; mark: DemoMark }
+  /** A save sent again (its answer was lost): the mark with this id is already this person's, on this demo. */
+  | { kind: 'exists'; mark: DemoMark }
+  /** The id names another mark (another person's, or on another demo). */
+  | { kind: 'id_taken' }
   | { kind: 'demo_not_found' }
   /** `marks`: 500 marks already; `points`: this mark would pass the points budget. */
   | { kind: 'full'; reason: 'marks' | 'points' };
@@ -89,7 +93,8 @@ export async function listDemoMarks(roomId: string, demo: string): Promise<DemoM
 /**
  * Saves a mark if the demo is an attachment of a message in this room and has
  * room for one more (marks and points). Locking the attachment row makes
- * concurrent saves count one at a time, so the limits hold.
+ * concurrent saves count one at a time, so the limits hold. A mark with an id
+ * the app chose is saved once: sent again, the saved one comes back.
  */
 export async function createDemoMark(roomId: string, accountId: string, input: DemoMarkInput): Promise<CreateDemoMarkResult> {
   const ref = demoRef(input.demo);
@@ -104,6 +109,17 @@ export async function createDemoMark(roomId: string, accountId: string, input: D
       await client.query('ROLLBACK');
       return { kind: 'demo_not_found' };
     }
+    if (input.id) {
+      const known = await client.query<StoredDemoMark & { room_id: string }>(`SELECT ${MARK_COLUMNS}, m.room_id
+        FROM demo_marks m JOIN accounts a ON a.id = m.account_id WHERE m.id = $1`, [input.id]);
+      const row = known.rows[0];
+      if (row) {
+        await client.query('ROLLBACK');
+        const same = row.room_id === roomId && row.account_id === accountId
+          && row.message_number === ref.messageNumber && row.attachment_number === ref.attachmentNumber;
+        return same ? { kind: 'exists', mark: toDemoMark(row) } : { kind: 'id_taken' };
+      }
+    }
     const pointCount = input.kind === 'stroke' ? input.points.length : 1;
     const used = await client.query<{ marks: number; points: number }>(`SELECT COUNT(*)::int AS marks,
         COALESCE(SUM(point_count), 0)::int AS points
@@ -116,11 +132,12 @@ export async function createDemoMark(roomId: string, accountId: string, input: D
     const inserted = await client.query<StoredDemoMark>(`WITH m AS (
         INSERT INTO demo_marks (id, room_id, message_number, attachment_number, account_id, kind, points, pin_at, pin_text, anchor, point_count)
         VALUES ($4, $1, $2, $3, $5, $6, $7::jsonb, $8::jsonb, $9, $10::jsonb, $11)
+        ON CONFLICT (id) DO NOTHING
         RETURNING *
       )
       SELECT ${MARK_COLUMNS} FROM m JOIN accounts a ON a.id = m.account_id`, [
       ...params,
-      `dmk_${crypto.randomBytes(16).toString('base64url')}`,
+      input.id ?? `dmk_${crypto.randomBytes(16).toString('base64url')}`,
       accountId,
       input.kind,
       input.kind === 'stroke' ? JSON.stringify(input.points.map(roundPoint)) : null,
@@ -129,8 +146,13 @@ export async function createDemoMark(roomId: string, accountId: string, input: D
       input.anchor ? JSON.stringify(input.anchor) : null,
       pointCount,
     ]);
+    // The same id on another demo, saved between the check and this insert.
+    if (!inserted.rows[0]) {
+      await client.query('ROLLBACK');
+      return { kind: 'id_taken' };
+    }
     await client.query('COMMIT');
-    return { kind: 'created', mark: toDemoMark(inserted.rows[0]!) };
+    return { kind: 'created', mark: toDemoMark(inserted.rows[0]) };
   } catch (error) {
     await client.query('ROLLBACK').catch(() => {});
     throw error;

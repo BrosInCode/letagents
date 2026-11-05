@@ -13,7 +13,8 @@ type Auth = 'session' | 'owner_token' | 'agent_session' | null;
 const DEMO = 'msg_1/att_1';
 const stroke = { demo: DEMO, kind: 'stroke', points: [[1, 1], [2, 2]], anchor: null };
 
-function harness(options: { decision?: LiveRoomDecision; full?: 'marks' | 'points' } = {}) {
+function harness(options: { decision?: LiveRoomDecision; full?: 'marks' | 'points'; saved?: 'exists' | 'id_taken' } = {}) {
+  const broadcasts: string[] = [];
   const routes: Array<{ method: string; path: RegExp; handler: Function }> = [];
   const app = Object.fromEntries(['get', 'post', 'delete'].map((method) => [
     method,
@@ -33,11 +34,14 @@ function harness(options: { decision?: LiveRoomDecision; full?: 'marks' | 'point
       listDemoMarks: async () => [],
       createDemoMark: async () => (options.full
         ? { kind: 'full', reason: options.full }
-        : { kind: 'created', mark: { id: 'dmk_12345678', demo: DEMO } as any }),
+        : options.saved === 'id_taken'
+          ? { kind: 'id_taken' }
+          : { kind: options.saved ?? 'created', mark: { id: 'dmk_12345678', demo: DEMO } as any }),
       getDemoMarkOwner: async () => ({ accountId: 'ada', demo: DEMO }),
       deleteDemoMark: async () => true,
     },
     resolveProjectRole: async () => 'participant',
+    liveDemoHub: { broadcast: (_room: string, _demo: string, frame: { t: string }) => { broadcasts.push(frame.t); } } as any,
     writeLimit: { burst: 3, perSecond: 1, now: () => clock },
   });
 
@@ -72,7 +76,7 @@ function harness(options: { decision?: LiveRoomDecision; full?: 'marks' | 'point
     return { status, body, headers: sent };
   }
 
-  return { request, calls, tick: (ms: number) => { clock += ms; } };
+  return { request, calls, broadcasts, tick: (ms: number) => { clock += ms; } };
 }
 
 test('the person is checked before the room is looked up', async () => {
@@ -123,6 +127,26 @@ test('saves and removals are rate limited per account; reads are not', async () 
   assert.equal((await request('post', '/rooms/design-lounge/demo-marks', { body: stroke, account: 'bea' })).status, 201, 'another account');
   tick(1_000);
   assert.equal((await request('post', '/rooms/design-lounge/demo-marks', { body: stroke })).status, 201, 'one more a second');
+});
+
+test('a save sent again returns the saved mark without a second broadcast; an id of another mark is refused', async () => {
+  const first = harness();
+  const created = await first.request('post', '/rooms/design-lounge/demo-marks', { body: stroke });
+  assert.deepEqual([created.status, created.body.mark.id, first.broadcasts], [201, 'dmk_12345678', ['mark']]);
+  const again = harness({ saved: 'exists' });
+  const repeated = await again.request('post', '/rooms/design-lounge/demo-marks', { body: stroke });
+  assert.deepEqual([repeated.status, repeated.body.mark.id, again.broadcasts], [200, 'dmk_12345678', []]);
+  const taken = harness({ saved: 'id_taken' });
+  const refused = await taken.request('post', '/rooms/design-lounge/demo-marks', { body: stroke });
+  assert.deepEqual([refused.status, refused.body.error, taken.broadcasts], [409, 'demo_mark_id_taken', []]);
+});
+
+test('a mark id must have the shape the server makes', async () => {
+  const { request } = harness();
+  const bad = await request('post', '/rooms/design-lounge/demo-marks', { body: { ...stroke, id: 'dmk_short' } });
+  assert.deepEqual([bad.status, bad.body.error], [400, 'invalid_mark']);
+  const good = await request('post', '/rooms/design-lounge/demo-marks', { body: { ...stroke, id: 'dmk_AAAAAAAAAAAAAAAAAAAAAA' } });
+  assert.equal(good.status, 201);
 });
 
 test('a full demo answers 409 with the reason', async () => {

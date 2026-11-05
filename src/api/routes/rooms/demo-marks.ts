@@ -1,6 +1,6 @@
 import type { Express, Response } from 'express';
 
-import { isLiveDemoKey, parseDemoMarkInput } from '../../../../shared/live-demo.mjs';
+import { DEMO_MARK_RATE_LIMITED_TEXT, isLiveDemoKey, parseDemoMarkInput } from '../../../../shared/live-demo.mjs';
 import type { Project } from '../../db.js';
 import * as databaseStore from '../../db/demo-marks.js';
 import type { AuthenticatedRequest } from '../../http/helpers.js';
@@ -90,7 +90,7 @@ export function registerDemoMarkRoutes(app: Express, deps: DemoMarkRouteDeps): v
       const wait = takeWrite(account.account_id);
       if (wait > 0) {
         res.setHeader('Retry-After', String(Math.ceil(wait / 1000)));
-        res.status(429).json({ error: 'demo_marks_rate_limited', message: 'Too many changes to marks. Try again in a moment.' });
+        res.status(429).json({ error: 'demo_marks_rate_limited', message: DEMO_MARK_RATE_LIMITED_TEXT });
         return null;
       }
     }
@@ -147,6 +147,15 @@ export function registerDemoMarkRoutes(app: Express, deps: DemoMarkRouteDeps): v
     const result = await store.createDemoMark(project.id, account.account_id, input);
     if (result.kind === 'demo_not_found') {
       res.status(404).json({ error: 'demo_not_found', message: 'This demo is not in this room.' });
+      return;
+    }
+    if (result.kind === 'exists') {
+      // Saved before; its viewers already had the mark frame.
+      res.status(200).json({ mark: result.mark });
+      return;
+    }
+    if (result.kind === 'id_taken') {
+      res.status(409).json({ error: 'demo_mark_id_taken', message: 'This mark id is taken.' });
       return;
     }
     if (result.kind === 'full') {

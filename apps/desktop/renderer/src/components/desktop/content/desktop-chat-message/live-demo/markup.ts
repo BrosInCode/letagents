@@ -24,6 +24,11 @@ function oneLine(text: string, max: number): string {
   return line.length > max ? `${line.slice(0, max - 1)}…` : line;
 }
 
+/** What `markupNotes` reads of a mark; a mark not saved yet has no id or time. */
+export type NoteMark =
+  | { kind: "pin"; text: string; author: DemoMark["author"] }
+  | { kind: "stroke"; author: DemoMark["author"] };
+
 export interface MarkupNotes {
   /** Each pin by its number on the picture. */
   pins: Array<{ number: number; author: string; color: string; text: string }>;
@@ -36,7 +41,7 @@ export interface MarkupNotes {
  * shows only on hover. An agent cannot hover, so the notes and the ink colours
  * go with the picture as text. Pin numbers match the dots (oldest first).
  */
-export function markupNotes(marks: readonly DemoMark[]): MarkupNotes {
+export function markupNotes(marks: readonly NoteMark[]): MarkupNotes {
   const pins: MarkupNotes["pins"] = [];
   const inkBy = new Map<string, MarkupNotes["inkBy"][number]>();
   for (const mark of marks) {

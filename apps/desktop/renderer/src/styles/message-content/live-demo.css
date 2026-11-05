@@ -340,6 +340,11 @@ button.live-demo-face:active {
     display: none;
   }
 
+  /* In Pin mode the hint is the instruction, so it stays. */
+  .live-demo-status.is-task .live-demo-status-hint {
+    display: inline;
+  }
+
   .live-demo-tool {
     padding: 0 8px;
   }
@@ -1122,7 +1127,7 @@ button.live-demo-pin-dot:active {
   opacity: 0.25;
 }
 
-/* The drawing bar floats in the demo, on glass. */
+/* The drawing bar floats over the bottom of what the card shows, on glass. */
 .live-demo-palette {
   position: absolute;
   bottom: 14px;
