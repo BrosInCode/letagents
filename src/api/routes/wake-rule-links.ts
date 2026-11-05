@@ -13,6 +13,7 @@ import express, { type Express, type Request, type Response } from "express";
 import { loadConnectorCipher } from "../connectors/crypto.js";
 import {
   confirmWakeEmailRule,
+  describeWakeEmailStopLink,
   requestWakeEmailConfirmationAgain,
   stopWakeEmailRule,
   type WakeLinkOutcome,
@@ -63,8 +64,24 @@ const rawForm = express.text({ type: () => true, limit: "1kb" });
 const bodyIs = (req: Request, expected: string) => typeof req.body === "string" && req.body === expected;
 
 const INVALID = ["This link is not valid", "Check that the whole link was opened."] as const;
+const ENDED = "This email rule has ended";
 
-function answerFailure(res: Response, result: WakeLinkOutcome): void {
+const againAction = (token: string) => `/wake-rules/disable/${token}/again`;
+
+/**
+ * The page of a stop link whose rule is over. While its address still refuses
+ * new requests, the page keeps the one button that lifts that: the rule row and
+ * the token's hash are never deleted, so the link works for as long as the stop
+ * stands (and, after that, says only that the rule ended).
+ */
+function endedPage(res: Response, token: string, stopped: boolean): void {
+  if (!stopped) return page(res, 410, ENDED, "Nothing more will be sent for it.");
+  page(res, 200, ENDED, "Nothing more will be sent for it. This address is also set to get no new requests.",
+    { field: AGAIN, button: "Allow a new request", action: againAction(token) });
+}
+
+/** `stopToken` is set on the stop link's routes, whose ended page can still lift the address's stop. */
+function answerFailure(res: Response, result: WakeLinkOutcome, stopToken?: string): void {
   switch (result.outcome) {
     case "expired":
       return page(res, 410, "This link has expired", "Ask the agent to add its email rule again for a new link.");
@@ -73,7 +90,7 @@ function answerFailure(res: Response, result: WakeLinkOutcome): void {
     case "limited":
       return page(res, 429, "Too many requests today", "This address already got the most confirmation requests allowed today. Try again tomorrow.");
     case "ended":
-      return page(res, 410, "This email rule has ended", "Nothing more will be sent for it.");
+      return stopToken ? endedPage(res, stopToken, result.stopped === true) : page(res, 410, ENDED, "Nothing more will be sent for it.");
     default:
       return page(res, 404, ...INVALID);
   }
@@ -109,12 +126,17 @@ export function registerWakeRuleLinkRoutes(app: Express): void {
     answerFailure(res, result);
   }));
 
-  app.get("/wake-rules/disable/:token", (req, res) => {
-    if (!tokenOf(req)) return page(res, 404, ...INVALID);
+  // Opening the link reads the rule and changes nothing; an ended rule's page still offers to lift the address's stop.
+  app.get("/wake-rules/disable/:token", (req, res) => guarded(res, async () => {
+    const token = tokenOf(req);
+    if (!token) return page(res, 404, ...INVALID);
+    const link = await describeWakeEmailStopLink(hashWakeLinkToken(token));
+    if (link.state === "unknown") return page(res, 404, ...INVALID);
+    if (link.state === "ended") return endedPage(res, token, link.stopped);
     page(res, 200, "Stop these emails",
       "Press Stop to stop LetAgents emails for this request. The address then gets no new requests until you ask for one.",
       { field: ONE_CLICK, button: "Stop" });
-  });
+  }));
 
   // The page's button and a mail client's one-click unsubscribe both land here.
   app.post("/wake-rules/disable/:token", rawForm, (req, res) => guarded(res, async () => {
@@ -126,12 +148,13 @@ export function registerWakeRuleLinkRoutes(app: Express): void {
     if (result.outcome === "done" || result.outcome === "already") {
       return page(res, 200, "Stopped",
         "LetAgents will not email this address for this request, and sends it no new requests. To allow requests again, press the button.",
-        { field: AGAIN, button: "Allow a new request", action: `/wake-rules/disable/${token}/again` });
+        { field: AGAIN, button: "Allow a new request", action: againAction(token) });
     }
-    answerFailure(res, result);
+    answerFailure(res, result, token);
   }));
 
   // From the Stopped page: the person lifts the stop and gets one new confirmation request.
+  // From the page of an ended rule: the stop is lifted and nothing is sent until an agent asks again.
   app.post("/wake-rules/disable/:token/again", rawForm, (req, res) => guarded(res, async () => {
     const token = tokenOf(req);
     if (!token) return page(res, 404, ...INVALID);
@@ -146,6 +169,9 @@ export function registerWakeRuleLinkRoutes(app: Express): void {
       queueWakeRuleInvalidation(result.rule.room_id);
       return page(res, 200, "Request sent", "A new confirmation request is on its way to this address. Open it and press Confirm to allow the emails.");
     }
-    answerFailure(res, result);
+    if (result.outcome === "lifted") {
+      return page(res, 200, "New requests allowed", "This address can get a new confirmation request. Nothing is sent until an agent asks for one; that email has its own stop link.");
+    }
+    answerFailure(res, result, token);
   }));
 }

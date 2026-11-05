@@ -1179,7 +1179,13 @@ apply; only the delivery differs.
    `List-Unsubscribe=One-Click`.
 
 After Stop the address is remembered: the agent cannot send it a new confirmation request (adding the rule again is
-refused) until the person presses "Allow a new request" on the Stopped page, which sends one new request. An address
+refused) until the person presses "Allow a new request" on the Stopped page, which sends one new request. If the rule
+has ended by then (its agent cancelled it, it expired, or it was retired), its stop link shows "This email rule has
+ended. Nothing more will be sent for it. This address is also set to get no new requests." with the same button:
+pressing it lifts the stop and sends nothing, and the agent's next `add_wake_rule` for the address sends the one
+confirmation, under the same daily budgets. A stop link has no expiry of its own (the rule row keeps the hash of its
+token for good), so the link in an old email lifts the stop for as long as the stop stands; once it is lifted, the
+ended rule's link only says that the rule ended. An address
 gets at most 3 confirmation requests a day and an account may cause at most 10, whether the rules were kept, cancelled
 or expired, so adding and cancelling a rule in a loop cannot flood a mailbox; a rule sends one at most every 10
 minutes, and an account may have 3 rules waiting at once.

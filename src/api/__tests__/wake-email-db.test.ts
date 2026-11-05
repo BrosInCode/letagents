@@ -298,6 +298,85 @@ test("add, cancel and add again cannot send more than 3 confirmations to one add
   }
 });
 
+test("the stop link of an ended rule still lifts the address's stop; without a stop it only says the rule ended; another rule's link lifts nothing", { skip, timeout: 90_000 }, async () => {
+  configure();
+  const bot = await newBot();
+  try {
+    const { add, cancel } = await inRoom(bot, "wake-email-ended-stop");
+    const address = "stopped-then-cancelled@example.com";
+    const other = "never-stopped@example.com";
+    const stops = async (ruleId: string) =>
+      (await dbClient!.pool.query<{ n: number }>("SELECT count(*)::int AS n FROM wake_email_suppressions WHERE rule_id = $1", [ruleId])).rows[0].n;
+    const mailsTo = (to: string) => sent.filter((message) => message.to === to).length;
+
+    // The address presses Stop on the rule's email, then the agent cancels the rule.
+    const added = await add(address);
+    assert.equal(added.confirmation?.sent, true, added.raw);
+    await runWorker();
+    const stopUrl = linkIn(lastTo(address).text, "disable");
+    assert.equal((await form(stopUrl, "List-Unsubscribe=One-Click")).status, 200);
+    assert.equal((await ruleRow(added.rule.id)).status, "paused");
+    assert.equal(await stops(added.rule.id), 1);
+    assert.equal(failed(await cancel(added.rule.id)), false);
+    assert.equal((await ruleRow(added.rule.id)).status, "cancelled");
+
+    // The agent is refused...
+    const blocked = await add(address);
+    assert.equal(failed(blocked), true, blocked.raw);
+    assert.match(blocked.raw, /asked LetAgents to stop emailing it/);
+    // ...and before the fix the stop link only said the rule had ended. Now it keeps the button.
+    const opened = await fetch(stopUrl);
+    assert.equal(opened.status, 200);
+    const endedPage = await opened.text();
+    assert.match(endedPage, /<h1>This email rule has ended<\/h1><p>Nothing more will be sent for it\. This address is also set to get no new requests\.<\/p>/);
+    assert.match(endedPage, /<form method="post" action="\/wake-rules\/disable\/[0-9a-f]{64}\/again"><input type="hidden" name="again" value="yes"><button type="submit">Allow a new request<\/button><\/form>/);
+    assert.doesNotMatch(endedPage, /name="List-Unsubscribe"/, "an ended rule cannot be stopped again");
+    // Stop pressed once more (or a mail client's one-click) changes nothing and shows the same page.
+    const stoppedAgain = await form(stopUrl, "List-Unsubscribe=One-Click");
+    assert.equal(stoppedAgain.status, 200);
+    assert.match(await stoppedAgain.text(), /Allow a new request/);
+    assert.equal((await ruleRow(added.rule.id)).status, "cancelled");
+
+    // Another rule, cancelled without a Stop: its ended page has no button, and its link lifts nothing for the stopped address.
+    const otherAdded = await add(other);
+    assert.equal(otherAdded.confirmation?.sent, true, otherAdded.raw);
+    await runWorker();
+    const otherStopUrl = linkIn(lastTo(other).text, "disable");
+    assert.equal(failed(await cancel(otherAdded.rule.id)), false);
+    const otherOpened = await fetch(otherStopUrl);
+    assert.equal(otherOpened.status, 410);
+    const otherPage = await otherOpened.text();
+    assert.match(otherPage, /<h1>This email rule has ended<\/h1><p>Nothing more will be sent for it\.<\/p>/);
+    assert.doesNotMatch(otherPage, /Allow a new request/);
+    assert.equal((await form(`${otherStopUrl}/again`, "again=yes")).status, 410);
+    assert.equal(await stops(added.rule.id), 1, "another rule's link lifts nothing");
+    assert.equal(failed(await add(address)), true);
+
+    // The button lifts the stop: nothing is sent, the ended rule stays ended, and the agent's next add sends the confirmation.
+    const mailsBefore = mailsTo(address);
+    const lifted = await form(`${stopUrl}/again`, "again=yes");
+    assert.equal(lifted.status, 200);
+    assert.match(await lifted.text(), /<h1>New requests allowed<\/h1>/);
+    assert.equal(await stops(added.rule.id), 0);
+    assert.equal((await ruleRow(added.rule.id)).status, "cancelled");
+    await runWorker();
+    assert.equal(mailsTo(address), mailsBefore, "lifting the stop sends nothing by itself");
+    const readded = await add(address);
+    assert.equal(failed(readded), false, readded.raw);
+    assert.equal(readded.confirmation?.sent, true);
+    assert.notEqual(readded.rule.id, added.rule.id);
+    await runWorker();
+    assert.equal(mailsTo(address), mailsBefore + 1);
+    assert.equal(lastTo(address).subject, "[LetAgents] Confirm email notifications");
+    // With the stop lifted, the ended rule's link only says that the rule ended.
+    assert.equal((await fetch(stopUrl)).status, 410);
+    assert.equal((await form(`${stopUrl}/again`, "again=yes")).status, 410);
+    assert.equal((await fetch(`${baseUrl}/wake-rules/disable/${"0".repeat(64)}`)).status, 404, "an unknown stop link is not valid");
+  } finally {
+    await bot.close();
+  }
+});
+
 test("the scheduler ends an unconfirmed rule when its link expires, and a stop while pending leaves nothing due", { skip, timeout: 60_000 }, async () => {
   configure();
   const bot = await newBot();
