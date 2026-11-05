@@ -40,6 +40,8 @@ const {
   installInlineHtmlDemoHost,
   prepareInlineHtmlDemo,
   releaseInlineHtmlDemo,
+  setInlineHtmlDemoWidth,
+  watchInlineHtmlDemoPointer,
 } = await import("../main/attachments/html-demo-inline.js");
 
 let nextGuestId = 100;
@@ -64,6 +66,10 @@ class FakeGuest extends EventEmitter {
   isDestroyed() { return this.destroyed; }
   isCrashed() { return this.crashed; }
   muteCalls: boolean[] = [];
+  zoom = 1;
+  zoomCalls: number[] = [];
+  getZoomFactor() { return this.zoom; }
+  setZoomFactor(zoom: number) { this.zoom = zoom; this.zoomCalls.push(zoom); }
   setAudioMuted(muted: boolean) { this.muted = muted; this.muteCalls.push(muted); }
   forcefullyCrashRenderer() { this.crashCalls += 1; this.crashed = true; }
   // A guest's close deletes it at once, as Electron 42 does.
@@ -838,5 +844,108 @@ test("coming back to the window gives focus back only to the demo the person use
   } finally {
     appWindow.focused = true;
     releaseAll([first.url, second.url]);
+  }
+});
+
+test("a live demo is laid out 760 CSS px wide, scaled to its frame, and keeps that zoom when Electron resets it", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const lease = await prepareInlineHtmlDemo("letagents-attachment://download/bGl2ZQ");
+  try {
+    assert.equal(setInlineHtmlDemoWidth(lease.url, 380), 0.5, "the scale is set before the webview attaches");
+    const { guest } = attach(lease.url)!;
+    const size = (height: number) => {
+      guest.emit("preferred-size-changed", {}, { width: 380, height });
+      t.mock.timers.tick(100);
+    };
+    // Electron 42 drops a zoom set before the first load: the first size comes at zoom 1.
+    size(1500);
+    assert.deepEqual(guest.zoomCalls, [0.5]);
+    assert.deepEqual(embedder.sent, [], "a size at the wrong zoom is not reported");
+    size(750);
+    assert.deepEqual(embedder.sent, [{ type: "height", url: lease.url, height: 750 }], "750 points at zoom 0.5 is a 750 px frame");
+
+    // The app zooms to 125%: Electron puts the guest at the app's zoom, and main puts it back.
+    embedder.zoom = 1.25;
+    guest.zoom = 1.25;
+    size(1875);
+    assert.deepEqual(guest.zoomCalls, [0.5, 0.625], "380 CSS px at 125% are 475 points, so 760 CSS px need 0.625");
+    assert.equal(embedder.sent.length, 1);
+    size(2000 * 0.625);
+    assert.deepEqual(embedder.sent.at(-1), { type: "height", url: lease.url, height: 1000 }, "a 2000 px demo in a half-width frame");
+
+    assert.equal(setInlineHtmlDemoWidth(lease.url, 760), 1);
+    assert.equal(guest.zoom, 1.25, "a running demo changes zoom at once");
+    // A live demo may be as tall as LIVE_DEMO.maxHeight demo px, past the 4000 px of other demos.
+    size(30_000 * 1.25);
+    assert.deepEqual(embedder.sent.at(-1), { type: "height", url: lease.url, height: 20_000 });
+
+    assert.equal(setInlineHtmlDemoWidth(lease.url, 100), 0.2, "Chromium's smallest zoom, 0.25 at 125%, is the limit");
+    assert.throws(() => setInlineHtmlDemoWidth(lease.url, 0), /positive/);
+    assert.throws(() => setInlineHtmlDemoWidth(lease.url, Number.NaN), /positive/);
+    assert.throws(() => setInlineHtmlDemoWidth(lease.url, "380"), /positive/);
+    assert.throws(() => setInlineHtmlDemoWidth("letagents-demo://00000000000000000000000000000000/", 380), /closed/);
+  } finally {
+    releaseAll([lease.url]);
+  }
+});
+
+test("the pointer over a live demo is reported in demo space, and goes when it leaves", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const lease = await prepareInlineHtmlDemo("letagents-attachment://download/cG9pbnRlcg");
+  try {
+    const seen: unknown[] = [];
+    const stop = watchInlineHtmlDemoPointer(lease.url, (pointer) => seen.push(pointer));
+    assert.ok(stop);
+    assert.equal(watchInlineHtmlDemoPointer("letagents-demo://00000000000000000000000000000000/", () => {}), null);
+    const { guest } = attach(lease.url)!;
+    const move = (x: number, y: number, type = "mouseMove") => guest.emit("input-event", {}, { type, x, y });
+    move(100, 50);
+    assert.deepEqual(seen, [], "no demo space before the live layout");
+
+    setInlineHtmlDemoWidth(lease.url, 380);
+    guest.emit("preferred-size-changed", {}, { width: 380, height: 750 });
+    // Measured in Electron 42: x 100 at guest zoom 0.5 is the page's clientX 200.
+    move(100, 50);
+    move(10, 10, "mouseWheel");
+    assert.deepEqual(seen, [{ x: 200, y: 100 }, { x: 20, y: 20 }]);
+    move(345.29, -7.65, "mouseLeave");
+    move(345.29, -7.65, "mouseLeave");
+    assert.deepEqual(seen.slice(2), [null], "a leave is reported once");
+
+    seen.length = 0;
+    move(100, 50);
+    move(-5, 50);
+    move(100, 760);
+    assert.deepEqual(seen, [{ x: 200, y: 100 }, null], "a drag held outside the demo, or below its 1500 px, is not over it");
+
+    // The app page gets the first move into a demo just before the demo does.
+    seen.length = 0;
+    embedder.emit("input-event", {}, { type: "mouseMove", x: 140, y: 80 });
+    move(100, 50);
+    t.mock.timers.tick(100);
+    assert.deepEqual(seen, [{ x: 200, y: 100 }], "a demo that reports a newer move keeps the pointer");
+    embedder.emit("input-event", {}, { type: "mouseMove", x: 10, y: 10 });
+    assert.deepEqual(seen.length, 1);
+    t.mock.timers.tick(60);
+    embedder.emit("input-event", {}, { type: "mouseMove", x: 12, y: 10 });
+    t.mock.timers.tick(40);
+    assert.deepEqual(seen, [{ x: 200, y: 100 }, null], "moves over the app page alone mean the pointer left, without waiting for them to stop");
+
+    seen.length = 0;
+    move(100, 50);
+    appWindow.emit("hide");
+    assert.deepEqual(seen, [{ x: 200, y: 100 }, null], "a hidden window has no pointer");
+
+    stop!();
+    move(100, 50);
+    assert.equal(seen.length, 2, "a watcher that stopped hears nothing");
+
+    const again: unknown[] = [];
+    watchInlineHtmlDemoPointer(lease.url, (pointer) => again.push(pointer));
+    move(10, 10);
+    releaseInlineHtmlDemo(lease.url);
+    assert.deepEqual(again, [{ x: 20, y: 20 }, null], "a demo that goes away takes its pointer with it");
+  } finally {
+    releaseAll([lease.url]);
   }
 });

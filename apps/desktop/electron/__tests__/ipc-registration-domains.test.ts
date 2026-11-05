@@ -90,11 +90,13 @@ const expectedDirectChannels = [
   "desktop:room-members:remove",
   "desktop:room-members:request-join",
   "desktop:room-members:set-role",
+  "desktop:room:add-demo-mark",
   "desktop:room:add-task",
   "desktop:room:add-wake-webhook-rule",
   "desktop:room:archive-focus-room",
   "desktop:room:assign-board-manager",
   "desktop:room:cancel-wake-rule",
+  "desktop:room:capture-demo-markup",
   "desktop:room:choose-attachments",
   "desktop:room:conclude-focus-room",
   "desktop:room:create-ad-hoc-focus-room",
@@ -139,8 +141,12 @@ const expectedDirectChannels = [
   "desktop:room:knowledge-revise",
   "desktop:room:leave-account-room",
   "desktop:room:list-account-rooms",
+  "desktop:room:list-demo-marks",
   "desktop:room:list-notification-preferences",
   "desktop:room:list-wake-webhook-agents",
+  "desktop:room:live-demo-join",
+  "desktop:room:live-demo-leave",
+  "desktop:room:live-demo-send",
   "desktop:room:mark-thread-read",
   "desktop:room:memory-history",
   "desktop:room:needs-you",
@@ -151,6 +157,7 @@ const expectedDirectChannels = [
   "desktop:room:prepare-inline-html-demo",
   "desktop:room:release-board-manager",
   "desktop:room:release-inline-html-demo",
+  "desktop:room:remove-demo-mark",
   "desktop:room:rename",
   "desktop:room:repair-stream-delivery",
   "desktop:room:report-typing",
@@ -168,6 +175,7 @@ const expectedDirectChannels = [
   "desktop:room:set-expressions",
   "desktop:room:set-github-event-filter",
   "desktop:room:set-history-summary-setting",
+  "desktop:room:set-inline-demo-width",
   "desktop:room:set-message-pin",
   "desktop:room:set-message-reaction",
   "desktop:room:set-notification-preference",
@@ -519,6 +527,7 @@ test("auth/setup IPC wakes grant recovery only from authorization and reports na
   let invalidated: () => void = () => { throw new Error("invalidated callback was not registered"); };
   let recoveryWakes = 0;
   let demoCacheClears = 0;
+  let liveReconnects = 0;
   let storageAvailable = false;
   const storageObservations: boolean[] = [];
   const unexpected = () => { throw new Error("unexpected auth/setup operation"); };
@@ -540,6 +549,7 @@ test("auth/setup IPC wakes grant recovery only from authorization and reports na
     mock.module("../main/attachments/html-demo-inline.js", { namedExports: {
       clearInlineHtmlDemoCache: () => { demoCacheClears += 1; },
     } }),
+    mock.module("../main/rooms/live-demo.js", { namedExports: { reconnectLiveDemos: () => { liveReconnects += 1; } } }),
     mock.module("../main/external-url.js", { namedExports: { openAllowedExternalUrl: unexpected } }),
     mock.module("../main/supervisor-grant.js", { namedExports: {
       getDesktopSupervisorGrantMetadata: unexpected, provisionDesktopSupervisorGrant: unexpected,
@@ -560,9 +570,11 @@ test("auth/setup IPC wakes grant recovery only from authorization and reports na
     invalidated();
     assert.equal(recoveryWakes, 0, "sign-out cannot activate agents");
     assert.equal(demoCacheClears, 1, "demo files downloaded with the old sign-in are forgotten");
+    assert.equal(liveReconnects, 1, "live demo sockets opened with the old sign-in connect again");
     authorized();
     assert.equal(recoveryWakes, 1);
     assert.equal(demoCacheClears, 2, "and again when an account signs in");
+    assert.equal(liveReconnects, 2);
     const probe = handlers.get("desktop:supervisor-grant:get-storage-status");
     assert.ok(probe);
     assert.deepEqual(await probe(), { available: false, detail: "native probe", canOpenCredentialStorage: false });

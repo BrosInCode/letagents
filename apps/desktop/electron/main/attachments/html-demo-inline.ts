@@ -2,6 +2,7 @@ import electron from "electron";
 import type { BrowserWindow as ElectronBrowserWindow, Event, InputEvent, WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 
+import { LIVE_DEMO } from "../../../../../shared/live-demo.mjs";
 import type { DesktopInlineHtmlDemoEvent, DesktopInlineHtmlDemoLease } from "../../ipc-types.js";
 import {
   assertHtmlDemoAttachmentHref,
@@ -27,6 +28,8 @@ import {
   inlineHtmlDemoHeight,
   inlineHtmlDemoLeaseHost,
   inlineHtmlDemoLeaseUrl,
+  inlineHtmlDemoLiveZoom,
+  inlineHtmlDemoPointer,
   lockInlineHtmlDemoWebPreferences,
   MAX_INLINE_HTML_DEMO_DOWNLOADS,
   takeInlineHtmlDemoTokens,
@@ -67,6 +70,19 @@ const FORWARDED_GUEST_EVENTS = [
 
 type StopReason = Extract<DesktopInlineHtmlDemoEvent, { type: "stopped" }>["reason"];
 
+/** The person's pointer over a live demo, in demo space; null when it left the demo. */
+export type InlineHtmlDemoPointer = { x: number; y: number } | null;
+
+/**
+ * The app page sees a pointer move only when the pointer is over it, so over no
+ * demo. Electron 42 also gives the app page the first move into a demo, just
+ * before the demo's own, so a demo's pointer counts as gone only when the demo
+ * reports nothing newer in this time.
+ */
+const POINTER_LEFT_CHECK_MS = 100;
+/** Zoom factors closer than this are the same; Electron rounds them through zoom levels. */
+const ZOOM_EPSILON = 0.001;
+
 /**
  * What main knows about the app window an inline demo runs in. Only input the
  * browser saw counts; a demo can fake its own focus and blur events.
@@ -77,6 +93,11 @@ interface DemoHostWindow {
   focusedAt: number;
   /** The demo that got the person's last click, key or touch in this window; null for the app page. */
   lastInputLease: InlineHtmlDemoLease | null;
+  /** Orders the pointer events of the app page and its demos. */
+  pointerSequence: number;
+  /** The sequence of the app page's latest pointer event. */
+  appPagePointerSequence: number;
+  pointerLeftTimer: ReturnType<typeof setTimeout> | null;
 }
 
 interface InlineHtmlDemoLease {
@@ -99,6 +120,15 @@ interface InlineHtmlDemoLease {
   lastInputAt: number;
   /** The person's last input went to this demo before the app window lost focus, so it may get focus back on return. */
   hadLastInputAtWindowBlur: boolean;
+  /** A live demo: laid out at LIVE_DEMO.width CSS px across a frame this many app CSS px wide. */
+  frameWidth: number | null;
+  /** The demo's own content height in its CSS px, from its preferred size. */
+  demoHeight: number | null;
+  pointerWatchers: Set<(pointer: InlineHtmlDemoPointer) => void>;
+  /** The last pointer report put the pointer over this demo. */
+  pointerOver: boolean;
+  /** The host window's pointer sequence at that report. */
+  pointerSequence: number;
 }
 
 /** Live leases by demo host; a host's document lives exactly as long as its lease. */
@@ -141,6 +171,11 @@ export async function prepareInlineHtmlDemo(rawHref: unknown): Promise<DesktopIn
     livenessCheck: null,
     lastInputAt: Number.NEGATIVE_INFINITY,
     hadLastInputAtWindowBlur: false,
+    frameWidth: null,
+    demoHeight: null,
+    pointerWatchers: new Set(),
+    pointerOver: false,
+    pointerSequence: 0,
   };
   lease.attachTimer = setTimeout(() => {
     if (!lease.guest) endLease(lease);
@@ -166,11 +201,102 @@ function assertLeaseAvailable(): void {
 
 /** Free a lease and its document, and close its demo if one runs. Unknown URLs are ignored. */
 export function releaseInlineHtmlDemo(rawUrl: unknown): void {
-  const host = inlineHtmlDemoLeaseHost(rawUrl);
-  const lease = host ? leases.get(host) : undefined;
+  const lease = leaseFor(rawUrl);
   if (!lease) return;
   endLease(lease);
   if (lease.guest && !lease.guest.isDestroyed()) lease.guest.close();
+}
+
+/**
+ * Lay a live demo out at LIVE_DEMO.width CSS px across a frame `frameWidth` app
+ * CSS px wide: the guest's zoom scales it to fit. Returns the scale the chat
+ * draws with (frame px per demo px). A demo that is not running yet gets its
+ * zoom when its webview attaches.
+ */
+export function setInlineHtmlDemoWidth(rawUrl: unknown, frameWidth: unknown): number {
+  const lease = leaseFor(rawUrl);
+  if (!lease) throw new Error("This demo is closed.");
+  const layout = inlineHtmlDemoLiveZoom(frameWidth, appZoom(lease));
+  if (!layout) throw new Error("The demo width must be a positive number.");
+  lease.frameWidth = frameWidth as number;
+  if (lease.guest && !lease.guest.isDestroyed() && !sameZoom(lease.guest.getZoomFactor(), layout.zoom)) {
+    lease.guest.setZoomFactor(layout.zoom);
+  }
+  return layout.scale;
+}
+
+/**
+ * Follow the person's pointer over a live demo, in demo space, from the input
+ * events main sees; the demo page cannot fake them. The listener hears null
+ * when the pointer leaves, and when the demo goes away. Null for an unknown lease.
+ */
+export function watchInlineHtmlDemoPointer(
+  rawUrl: unknown,
+  listener: (pointer: InlineHtmlDemoPointer) => void,
+): (() => void) | null {
+  const lease = leaseFor(rawUrl);
+  if (!lease) return null;
+  lease.pointerWatchers.add(listener);
+  return () => { lease.pointerWatchers.delete(listener); };
+}
+
+function leaseFor(rawUrl: unknown): InlineHtmlDemoLease | undefined {
+  const host = inlineHtmlDemoLeaseHost(rawUrl);
+  return host ? leases.get(host) : undefined;
+}
+
+function appZoom(lease: InlineHtmlDemoLease): number {
+  const embedder = lease.embedder;
+  return embedder && !embedder.isDestroyed() ? embedder.getZoomFactor() : 1;
+}
+
+function sameZoom(a: number, b: number): boolean {
+  return Math.abs(a - b) < ZOOM_EPSILON;
+}
+
+/** A pointer report from the demo's own input: a point over it, or gone. */
+function reportPointer(lease: InlineHtmlDemoLease, guest: WebContents, input: InputEvent): void {
+  // Demo space exists only in the live layout.
+  if (lease.frameWidth === null || lease.pointerWatchers.size === 0 || !isLive(lease)) return;
+  const position = input as InputEvent & { x?: number; y?: number };
+  const pointer = input.type === "mouseLeave"
+    ? null
+    : inlineHtmlDemoPointer(position.x, position.y, guest.getZoomFactor(), lease.demoHeight ?? LIVE_DEMO.maxHeight);
+  if (!pointer) {
+    pointerGone(lease);
+    return;
+  }
+  lease.pointerOver = true;
+  if (lease.hostWindow) lease.pointerSequence = ++lease.hostWindow.pointerSequence;
+  for (const listener of lease.pointerWatchers) listener(pointer);
+}
+
+function pointerGone(lease: InlineHtmlDemoLease): void {
+  if (!lease.pointerOver) return;
+  lease.pointerOver = false;
+  for (const listener of lease.pointerWatchers) listener(null);
+}
+
+/**
+ * The pointer is over the app page or out of the window: a demo that reported
+ * nothing newer than the app page's latest pointer event has lost it. The check
+ * waits a moment, once, however often the pointer moves over the app page.
+ */
+function pointerLeftDemos(hostWindow: DemoHostWindow, now: boolean): void {
+  hostWindow.appPagePointerSequence = ++hostWindow.pointerSequence;
+  const check = () => {
+    for (const lease of leases.values()) {
+      if (lease.hostWindow === hostWindow && lease.pointerSequence < hostWindow.appPagePointerSequence) pointerGone(lease);
+    }
+  };
+  if (now) {
+    check();
+    return;
+  }
+  hostWindow.pointerLeftTimer ??= setTimeout(() => {
+    hostWindow.pointerLeftTimer = null;
+    check();
+  }, POINTER_LEFT_CHECK_MS);
 }
 
 /**
@@ -188,6 +314,9 @@ export function installInlineHtmlDemoHost(hostWindow: ElectronBrowserWindow): vo
     blurredAt: Number.NEGATIVE_INFINITY,
     focusedAt: Number.NEGATIVE_INFINITY,
     lastInputLease: null,
+    pointerSequence: 0,
+    appPagePointerSequence: 0,
+    pointerLeftTimer: null,
   };
   // Tab in the app page may move focus into a demo; the page still gets the key.
   embedder.on("before-input-event", (_event, input) => {
@@ -196,7 +325,11 @@ export function installInlineHtmlDemoHost(hostWindow: ElectronBrowserWindow): vo
   // A click into a demo reaches only the demo, so input here is the person using the app page.
   embedder.on("input-event", (_event, input) => {
     if (PERSON_INPUT_TYPES.has(input.type)) demoHost.lastInputLease = null;
+    if (input.type === "mouseMove" || input.type === "mouseLeave") pointerLeftDemos(demoHost, false);
   });
+  // A hidden window has no pointer over it, and its demos hear no more input.
+  hostWindow.on("hide", () => pointerLeftDemos(demoHost, true));
+  hostWindow.on("minimize", () => pointerLeftDemos(demoHost, true));
   hostWindow.on("blur", () => {
     demoHost.blurredAt = Date.now();
     for (const lease of leases.values()) {
@@ -268,6 +401,9 @@ function bindAttachingGuest(guest: WebContents): void {
   guest.setAudioMuted(true);
   let muted = true;
   guest.on("input-event", (_event: Event, input: InputEvent) => {
+    if (input.type === "mouseMove" || input.type === "mouseWheel" || input.type === "mouseLeave") {
+      reportPointer(lease, guest, input);
+    }
     if (!PERSON_INPUT_TYPES.has(input.type)) return;
     lease.lastInputAt = Date.now();
     hostWindow.lastInputLease = lease;
@@ -284,13 +420,30 @@ function bindAttachingGuest(guest: WebContents): void {
   });
   guest.on("focus", () => judgeDemoFocus(lease));
   guest.on("preferred-size-changed", (_event, size) => {
-    queueHeight(lease, inlineHtmlDemoHeight(size.height, embedder.isDestroyed() ? 1 : embedder.getZoomFactor()));
+    const zoom = appZoom(lease);
+    const layout = lease.frameWidth === null ? null : inlineHtmlDemoLiveZoom(lease.frameWidth, zoom);
+    if (!layout) {
+      queueHeight(lease, inlineHtmlDemoHeight(size.height, zoom));
+      return;
+    }
+    const guestZoom = guest.getZoomFactor();
+    if (!sameZoom(guestZoom, layout.zoom)) {
+      // Electron 42 drops a guest zoom set before the first load, and puts the
+      // guest back at the app's zoom whenever that changes. The size at the
+      // right zoom follows this one.
+      guest.setZoomFactor(layout.zoom);
+      return;
+    }
+    lease.demoHeight = size.height / guestZoom;
+    queueHeight(lease, inlineHtmlDemoHeight(size.height, zoom, Math.ceil(LIVE_DEMO.maxHeight * layout.scale)));
   });
   guest.on("unresponsive", () => stopGuest(lease, "unresponsive"));
   guest.on("render-process-gone", () => stopGuest(lease, "crashed"));
   scheduleLivenessCheck(lease, guest);
   guest.once("destroyed", () => {
     if (hostWindow.lastInputLease === lease) hostWindow.lastInputLease = null;
+    pointerGone(lease);
+    lease.pointerWatchers.clear();
     leasesByGuestId.delete(guestId);
     htmlDemoContents.delete(guestId);
     endLease(lease);

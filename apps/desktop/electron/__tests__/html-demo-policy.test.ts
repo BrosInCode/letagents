@@ -29,6 +29,8 @@ import {
   inlineHtmlDemoHeight,
   inlineHtmlDemoLeaseHost,
   inlineHtmlDemoLeaseUrl,
+  inlineHtmlDemoLiveZoom,
+  inlineHtmlDemoPointer,
   inlineHtmlDemoWebPreferences,
   isAllowedHtmlDemoRequest,
   lockInlineHtmlDemoWebPreferences,
@@ -265,6 +267,40 @@ describe("HTML demo policy", () => {
       assert.equal(inlineHtmlDemoHeight(600, zoom), 600, String(zoom));
     }
     assert.equal(MAX_INLINE_HTML_DEMO_HEIGHT, 4000);
+    // A live demo has its own cap, in frame px.
+    assert.equal(inlineHtmlDemoHeight(30_000, 1, 20_000), 20_000);
+    // Measured in Electron 42: 1500 CSS px at guest zoom 0.625 and app zoom 1.25 report 937 points.
+    assert.equal(inlineHtmlDemoHeight(937, 1.25, 20_000), 750);
+  });
+
+  it("lays a live demo out 760 CSS px wide across its frame, within Chromium's zoom limits", () => {
+    assert.deepEqual(inlineHtmlDemoLiveZoom(380), { zoom: 0.5, scale: 0.5 });
+    // At app zoom 1.25 a 380 px frame is 475 points; 760 CSS px fit at guest zoom 0.625.
+    assert.deepEqual(inlineHtmlDemoLiveZoom(380, 1.25), { zoom: 0.625, scale: 0.5 });
+    assert.deepEqual(inlineHtmlDemoLiveZoom(1520), { zoom: 2, scale: 2 });
+    assert.deepEqual(inlineHtmlDemoLiveZoom(76), { zoom: 0.25, scale: 0.25 });
+    assert.deepEqual(inlineHtmlDemoLiveZoom(76 * 100), { zoom: 5, scale: 5 });
+    assert.deepEqual(inlineHtmlDemoLiveZoom(760, "x"), { zoom: 1, scale: 1 });
+    for (const width of [0, -10, Number.NaN, Number.POSITIVE_INFINITY, "380", null]) {
+      assert.equal(inlineHtmlDemoLiveZoom(width), null, String(width));
+    }
+  });
+
+  it("turns a guest's input point into demo space, and a point outside the demo into null", () => {
+    assert.deepEqual(inlineHtmlDemoPointer(100, 50, 0.5), { x: 200, y: 100 });
+    // Measured in Electron 42 at app zoom 1.25 and guest zoom 0.625.
+    assert.deepEqual(inlineHtmlDemoPointer(168.75, 87.5, 0.625), { x: 270, y: 140 });
+    assert.deepEqual(inlineHtmlDemoPointer(336.84375, 225.9921875, 0.5), { x: 673.7, y: 452 });
+    assert.deepEqual(inlineHtmlDemoPointer(380, 0, 0.5), { x: 760, y: 0 });
+    assert.equal(inlineHtmlDemoPointer(380.1, 0, 0.5), null);
+    assert.equal(inlineHtmlDemoPointer(-1, 10, 0.5), null);
+    assert.equal(inlineHtmlDemoPointer(10, -7.6, 0.5), null);
+    assert.equal(inlineHtmlDemoPointer(10, 760, 0.5, 1500), null, "below the demo's own height");
+    assert.deepEqual(inlineHtmlDemoPointer(10, 750, 0.5, 1500), { x: 20, y: 1500 });
+    assert.equal(inlineHtmlDemoPointer(10, 10_001, 0.5), null, "past LIVE_DEMO.maxHeight");
+    assert.equal(inlineHtmlDemoPointer(Number.NaN, 1, 1), null);
+    assert.equal(inlineHtmlDemoPointer("1", 1, 1), null);
+    assert.deepEqual(inlineHtmlDemoPointer(1, 1, 0), { x: 1, y: 1 }, "a broken zoom counts as 1");
   });
 
   it("keeps inline demos and their cache small", () => {
