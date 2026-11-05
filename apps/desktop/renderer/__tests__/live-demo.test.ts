@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 
 import type {
@@ -17,6 +18,7 @@ import {
   LIVE_MIN_FRAME_HEIGHT,
   liveClip,
   liveFrameHeight,
+  liveLayoutReady,
   liveReportedHeight,
   liveScale,
 } from "../src/components/desktop/content/desktop-chat-message/live-demo/geometry";
@@ -183,6 +185,15 @@ describe("live demo layout geometry", () => {
     assert.deepEqual(liveClip(2000, true), { clippable: true, clipped: false, visibleHeight: 2000 });
   });
 
+  it("shows the page of a live card only when main has laid it out and sent its scaled height", () => {
+    assert.equal(liveLayoutReady({ liveLayout: true, scaleApplied: false, heightReported: false }), false);
+    assert.equal(liveLayoutReady({ liveLayout: true, scaleApplied: true, heightReported: false }), false, "the scale alone is not enough");
+    assert.equal(liveLayoutReady({ liveLayout: true, scaleApplied: false, heightReported: true }), false, "nor is a height without the scale");
+    assert.equal(liveLayoutReady({ liveLayout: true, scaleApplied: true, heightReported: true }), true);
+    // A card without the live layout has nothing to wait for.
+    assert.equal(liveLayoutReady({ liveLayout: false, scaleApplied: false, heightReported: false }), true);
+  });
+
   it("lowers the pixel ratio of a canvas that would be too big", () => {
     assert.deepEqual(canvasBacking(440, 600, 2), { pixelWidth: 880, pixelHeight: 1200, ratio: 2 });
     const tall = canvasBacking(440, 11_600, 2);
@@ -192,6 +203,53 @@ describe("live demo layout geometry", () => {
     const huge = canvasBacking(760, 20_000, 3);
     assert.ok(huge.pixelWidth * huge.pixelHeight <= 16_000_000);
     assert.deepEqual(canvasBacking(0, 0, Number.NaN), { pixelWidth: 1, pixelHeight: 1, ratio: 1 });
+  });
+});
+
+describe("live card width (styles)", () => {
+  const css = readFileSync(new URL("../src/styles/message-content/live-demo.css", import.meta.url), "utf8");
+
+  /** The declarations of the first rule with exactly this selector. */
+  function declarations(selector: string): Record<string, string> {
+    const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const match = new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`).exec(css);
+    assert.ok(match, `a rule for ${selector}`);
+    return Object.fromEntries(
+      match[1].split(";").map((line) => line.trim()).filter(Boolean).map((line) => {
+        const colon = line.indexOf(":");
+        return [line.slice(0, colon).trim(), line.slice(colon + 1).trim()];
+      }),
+    );
+  }
+
+  it("gives a message with a live card the width of the message column, not the width of its text", () => {
+    const content = declarations(".room-chat-message > .room-chat-message-content:has(.room-inline-demo.is-live)");
+    assert.equal(content.width, "min(100%, 814px)");
+    assert.equal(content["max-width"], "none", "the 78% and 68ch limits of a chat message do not apply");
+    const bubble = declarations(".room-chat-message-content:has(.room-inline-demo.is-live) > .room-message-bubble");
+    assert.equal(bubble.width, "100%", "not fit-content: the bubble does not follow its text or the chips");
+    assert.equal(bubble["max-width"], "none");
+  });
+
+  it("caps the card at what its scale needs, and 814 px is that plus the bubble's padding and border", () => {
+    const demoPadding = 8;
+    const demoBorder = 1;
+    const clipBorder = 1;
+    const bubblePadding = 16;
+    const bubbleBorder = 1;
+    const card = LIVE_DEMO.width + 2 * clipBorder + 2 * (demoPadding + demoBorder);
+    assert.equal(card, 780);
+    assert.equal(declarations(".room-message-attachments:has(.room-inline-demo.is-live)")["max-width"], "min(100%, 780px)");
+    assert.equal(card + 2 * (bubblePadding + bubbleBorder), 814);
+  });
+
+  it("lets the card's one column shrink below its content, so a long title or the chips cannot widen it", () => {
+    const card = declarations(".room-inline-demo.is-live");
+    assert.equal(card["grid-template-columns"], "minmax(0, 1fr)");
+    assert.equal(card["min-width"], "0");
+    assert.equal(declarations(".room-inline-demo-presence")["flex-wrap"], "wrap");
+    assert.equal(declarations(".room-inline-demo-chip")["max-width"], "120px");
+    assert.equal(declarations(".room-inline-demo-live")["flex-wrap"], "wrap");
   });
 });
 

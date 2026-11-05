@@ -37,6 +37,16 @@ export function liveFrameHeight(reported: number | null, scale: number): number 
   return Math.max(LIVE_MIN_FRAME_HEIGHT, height);
 }
 
+/**
+ * A live card shows its page only after main has laid it out at the live width
+ * (it answered with a scale) and has sent the page's scaled height. Before
+ * that, the page would show at the wrong size, and the frame would change height
+ * when the first height came.
+ */
+export function liveLayoutReady(state: { liveLayout: boolean; scaleApplied: boolean; heightReported: boolean }): boolean {
+  return !state.liveLayout || (state.scaleApplied && state.heightReported);
+}
+
 export interface LiveClip {
   /** The card is taller than the clip, so the toggle shows. */
   clippable: boolean;

@@ -6,9 +6,32 @@
  * strokes and pins. It takes the pointer only in Draw mode.
  */
 
-/* A live card may use the width its scale needs: 760 px of demo plus the card's padding and borders. */
+/*
+ * A live card has one width, whatever its message says or who is viewing: the
+ * width of the message column, up to what its scale needs. A message is normally
+ * as wide as its text, so the message with a live card is as wide as the column
+ * (the demo's 760 px, the card's padding and border, and the bubble's padding
+ * and border come to 814 px). The people chips wrap and shorten inside the card
+ * and cannot make it wider; its scale stays the same while people come and go.
+ */
+.room-chat-message > .room-chat-message-content:has(.room-inline-demo.is-live) {
+  width: min(100%, 814px);
+  max-width: none;
+}
+
+.room-chat-message-content:has(.room-inline-demo.is-live) > .room-message-bubble {
+  width: 100%;
+  max-width: none;
+}
+
 .room-message-attachments:has(.room-inline-demo.is-live) {
   max-width: min(100%, 780px);
+}
+
+/* A long name or title cannot widen the card: its one column shrinks below its content. */
+.room-inline-demo.is-live {
+  grid-template-columns: minmax(0, 1fr);
+  min-width: 0;
 }
 
 .room-inline-demo-clip {

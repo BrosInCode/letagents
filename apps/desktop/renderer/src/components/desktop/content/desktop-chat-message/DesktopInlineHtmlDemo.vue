@@ -164,6 +164,7 @@ import {
   LIVE_MIN_FRAME_WIDTH,
   liveClip,
   liveFrameHeight,
+  liveLayoutReady,
   liveReportedHeight,
   liveScale,
 } from "./live-demo/geometry";
@@ -201,6 +202,8 @@ type DemoStatus = "idle" | "waiting" | "starting" | "running" | "stopped" | "err
 const PAUSE_AFTER_OFF_SCREEN_MS = 15_000;
 // A lease whose webview never loads (main refused it, say) ends in the error state.
 const START_TIMEOUT_MS = 15_000;
+// A live card waits this long after the page loaded for its scaled height; a page that sends none is shown anyway.
+const HEIGHT_WAIT_MS = 3_000;
 
 const card = ref<HTMLElement | null>(null);
 const clip = ref<HTMLElement | null>(null);
@@ -225,6 +228,13 @@ const liveLayout = computed(() => widthApiAvailable && Boolean(props.attachmentI
 const frameWidth = ref(0);
 // What main applied; the frame width gives the same number until it answers.
 const appliedScale = ref<number | null>(null);
+// Main's first height for this run. It is already scaled, so it is the one to wait for.
+const heightReported = ref(false);
+const layoutReady = computed(() => liveLayoutReady({
+  liveLayout: liveLayout.value,
+  scaleApplied: appliedScale.value !== null,
+  heightReported: heightReported.value,
+}));
 const showAll = ref(false);
 const scale = computed(() => appliedScale.value ?? liveScale(frameWidth.value) ?? LIVE_FALLBACK_SCALE);
 const frameHeight = computed(() => liveLayout.value
@@ -241,8 +251,8 @@ const demoKey = computed(() =>
 const liveAvailable = liveDemoAvailable();
 const liveEnabled = computed(() => liveAvailable && liveLayout.value && Boolean(liveRoom.value && demoKey.value));
 const live = useLiveDemo({ roomIdentifier: () => liveRoom.value, demoKey: () => demoKey.value });
-// The bar and overlay need a running demo that has its scale.
-const liveReady = computed(() => liveEnabled.value && status.value === "running" && appliedScale.value !== null && frameWidth.value > 0);
+// The bar and overlay need a running demo that has its scale and its scaled height.
+const liveReady = computed(() => liveEnabled.value && status.value === "running" && layoutReady.value && frameWidth.value > 0);
 const liveStatus = computed(() => liveStatusText(live.status.value, live.joinError.value, live.statusReason.value));
 const drawing = ref(false);
 const tool = ref<"pen" | "pin">("pen");
@@ -266,8 +276,8 @@ const statusText = computed(() => {
     case "starting":
       return "Starting the demo…";
     case "running":
-      // The page would show at the wrong size until main has laid it out.
-      return liveLayout.value && appliedScale.value === null ? "Starting the demo…" : "";
+      // The page would show at the wrong size until main has laid it out and sent its height.
+      return layoutReady.value ? "" : "Starting the demo…";
     case "stopped":
       return inlineDemoStoppedText(stoppedReason.value);
     case "error":
@@ -283,6 +293,7 @@ let onScreen = false;
 let pauseTimer: ReturnType<typeof setTimeout> | undefined;
 let startTimer: ReturnType<typeof setTimeout> | undefined;
 let heightTimer: ReturnType<typeof setTimeout> | undefined;
+let heightWaitTimer: ReturnType<typeof setTimeout> | undefined;
 // The room view is kept alive, not unmounted, when the person opens Settings.
 let deactivated = false;
 let restartedAt: number[] = [];
@@ -333,6 +344,9 @@ function stopLive(): void {
   widthSync?.close();
   widthSync = null;
   appliedScale.value = null;
+  heightReported.value = false;
+  clearTimeout(heightWaitTimer);
+  heightWaitTimer = undefined;
 }
 
 function requestRun(): void {
@@ -389,6 +403,9 @@ function markRunning(): void {
   clearTimeout(startTimer);
   startTimer = undefined;
   status.value = "running";
+  if (liveLayout.value && !heightReported.value) {
+    heightWaitTimer ??= setTimeout(() => { heightReported.value = true; }, HEIGHT_WAIT_MS);
+  }
 }
 
 function markStopped(reason: InlineDemoStopReason): void {
@@ -460,6 +477,9 @@ function scheduleHeightSettle(): void {
 function handleDemoEvent(event: DesktopInlineHtmlDemoEvent): void {
   switch (event.type) {
     case "height":
+      heightReported.value = true;
+      clearTimeout(heightWaitTimer);
+      heightWaitTimer = undefined;
       heightState.value = reportInlineDemoHeight(
         heightState.value,
         event.height,
