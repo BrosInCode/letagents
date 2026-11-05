@@ -75,19 +75,40 @@ const configure = () => {
   process.env.LETAGENTS_EMAIL_FROM = "LetAgents <notify@letagents.chat>";
 };
 
-/** A fresh account, its owner token and a connected /mcp client, so daily budgets never leak between tests. */
-async function newBot(): Promise<Client> {
-  owners += 1;
-  const token = `wake_email_owner_token_${owners}`;
-  const account = await accountSessions!.upsertAccount({
-    provider: "github", provider_user_id: `wake-email-bot-${owners}`, login: `wake-email-bot-${owners}`, display_name: "Wake email bot",
-  });
-  await ownerTokens!.createOwnerToken({ accountId: account.id, githubUserId: `wake-email-bot-${owners}`, token });
+const botAccounts = new Map<Client, { accountId: string; githubUserId: string }>();
+
+async function connectWithOwnerToken(token: string): Promise<Client> {
   const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
     requestInit: { headers: { Authorization: `Bearer ${token}` } },
   });
   const client = new Client({ name: "Hosted bot", version: "1" });
   await client.connect(transport);
+  return client;
+}
+
+/** A fresh account, its owner token and a connected /mcp client, so daily budgets never leak between tests. */
+async function newBot(): Promise<Client> {
+  owners += 1;
+  const token = `wake_email_owner_token_${owners}`;
+  const githubUserId = `wake-email-bot-${owners}`;
+  const account = await accountSessions!.upsertAccount({
+    provider: "github", provider_user_id: githubUserId, login: githubUserId, display_name: "Wake email bot",
+  });
+  await ownerTokens!.createOwnerToken({ accountId: account.id, githubUserId, token });
+  const client = await connectWithOwnerToken(token);
+  botAccounts.set(client, { accountId: account.id, githubUserId });
+  return client;
+}
+
+/** The same account signed in once more (a second owner token): another credential, the same owner. */
+async function sameAccountBot(bot: Client): Promise<Client> {
+  const account = botAccounts.get(bot);
+  assert.ok(account, "the bot was made by newBot");
+  owners += 1;
+  const token = `wake_email_owner_token_${owners}`;
+  await ownerTokens!.createOwnerToken({ accountId: account.accountId, githubUserId: account.githubUserId, token });
+  const client = await connectWithOwnerToken(token);
+  botAccounts.set(client, account);
   return client;
 }
 
@@ -423,6 +444,7 @@ test("a bot confirms its own email rule with the code from the mail; another acc
 test("confirm_wake_email takes 10 attempts per credential in 10 minutes: the 11th is refused, right code or wrong", { skip, timeout: 60_000 }, async () => {
   configure();
   const bot = await newBot();
+  const twin = await sameAccountBot(bot);
   const other = await newBot();
   try {
     const { add } = await inRoom(bot, "wake-email-attempts");
@@ -438,10 +460,18 @@ test("confirm_wake_email takes 10 attempts per credential in 10 minutes: the 11t
     assert.equal(eleventh.error, "too_many_attempts");
     assert.match(eleventh.message, /10 confirmation attempts in 10 minutes/);
     assert.equal((await ruleRow(rule.id)).status, "pending_confirmation", "the right code waits too while the budget is spent");
-    // The budget is per credential: another sign-in is not held back by this one's guesses.
+    // The budget is per credential, not per account: the same account's second owner token (its own
+    // token hash, so its own key) is not held back by the first token's guesses...
+    assert.equal((await call(twin, "confirm_wake_email", { code: "e".repeat(64) })).error, "unknown_or_expired");
+    // ...and, being the same account, it confirms the rule the spent token could not.
+    const byTwin = await call(twin, "confirm_wake_email", { code });
+    assert.equal(byTwin.confirmed, true, byTwin.raw);
+    assert.equal((await ruleRow(rule.id)).status, "active");
+    // Another account is not held back either.
     assert.equal((await call(other, "confirm_wake_email", { code: "f".repeat(64) })).error, "unknown_or_expired");
   } finally {
     await bot.close();
+    await twin.close();
     await other.close();
   }
 });
