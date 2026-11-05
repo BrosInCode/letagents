@@ -470,12 +470,74 @@ test("a registration key reused in another room gives a worker that posts in tha
   assert.equal(elsewhere.isError, true, JSON.stringify(elsewhere));
   assert.match(String(elsewhere.raw), /not registered in room/);
   assert.match(String(elsewhere.raw), /call register_agent_session\(worker_id, room_id "remote-mcp-two-rooms-c"\) first/);
+  // A session that joined a room the worker is not registered in gets no help from the join: it names the rooms.
+  const joinedElsewhere = await step(async (client) => {
+    await call(client, "join_room", { name: "remote-mcp-two-rooms-c" });
+    return call(client, "send_message", { worker_id: inB.worker_id, text: "from a chat in C" });
+  });
+  assert.equal(joinedElsewhere.isError, true, JSON.stringify(joinedElsewhere));
+  assert.match(String(joinedElsewhere.raw), /registered in 2 rooms/);
+
+  // The credential's implicit session serves every session-less chat at once, so a join there is not this
+  // chat's choice: "another chat" joins B, and a session-less call without room_id must not land in B.
+  const otherChatJoined = await toolResultOf(await statelessPost(token, toolCall(1, "join_room", { name: "remote-mcp-two-rooms-b" })));
+  assert.equal(otherChatJoined.room_id, roomB.room_id, JSON.stringify(otherChatJoined));
+  const implicitNoRoom = await toolResultOf(await statelessPost(token, toolCall(2, "send_message", { worker_id: inB.worker_id, text: "which chat's room?" })));
+  assert.equal(implicitNoRoom.isError, true, `the implicit session asks for room_id: ${JSON.stringify(implicitNoRoom)}`);
+  assert.match(String(implicitNoRoom.raw), /registered in 2 rooms/);
+  const implicitByRoom = await toolResultOf(await statelessPost(token, toolCall(3, "send_message",
+    { room_id: roomB.room_id, worker_id: inB.worker_id, text: "pinging B without a session id" })));
+  assert.equal(implicitByRoom.isError, undefined, JSON.stringify(implicitByRoom));
+
   const inRoomB = await step((client) => call(client, "read_messages", { room_id: roomB.room_id }));
   const textsB = JSON.stringify(inRoomB);
-  for (const text of ["pinging B from the joined room", "pinging B by room_id", "pinging B after reconnect"]) {
+  for (const text of ["pinging B from the joined room", "pinging B by room_id", "pinging B after reconnect", "pinging B without a session id"]) {
     assert.equal(textsB.includes(text), true, `room B has "${text}"`);
   }
-  assert.equal(textsB.includes("pinging A"), false, "nothing for A landed in B");
+  for (const text of ["pinging A", "from a chat in C", "which chat's room?"]) {
+    assert.equal(textsB.includes(text), false, `"${text}" did not land in B`);
+  }
+});
+
+test("a worker in one room posts there whatever room the chat joined, also after a refused registration elsewhere", { skip, timeout: 60_000 }, async () => {
+  const token = "remote_mcp_owner_token_one_room";
+  await createOwner("one-room", token);
+  const step = async <T,>(run: (client: Client) => Promise<T>): Promise<T> => {
+    const { client } = await connect(token);
+    try {
+      return await run(client);
+    } finally {
+      await client.close();
+      sessions().dropLoaded();
+    }
+  };
+  const roomA = await step((client) => call(client, "join_room", { name: "remote-mcp-one-room-a" }));
+  const handle = await step((client) => call(client, "register_agent_session",
+    { room_id: roomA.room_id, display_name: "Solo", registration_key: "solo-key", runtime: "dot" }));
+  assert.ok(handle.worker_id, JSON.stringify(handle));
+
+  // The chat joined another room: the worker's only room still wins.
+  const fromElsewhere = await step(async (client) => {
+    await call(client, "join_room", { name: "remote-mcp-one-room-other" });
+    return call(client, "send_message", { worker_id: handle.worker_id, text: "solo from a chat in another room" });
+  });
+  assert.equal(fromElsewhere.isError, undefined, JSON.stringify(fromElsewhere));
+
+  // A registration the server refuses (a room that does not exist) leaves no room on the worker.
+  const refused = await step((client) => call(client, "register_agent_session",
+    { room_id: "remote-mcp-one-room-never-made", worker_id: handle.worker_id, runtime: "dot" }));
+  assert.equal(refused.isError, true, JSON.stringify(refused));
+  const afterRefusal = await step((client) => call(client, "send_message", { worker_id: handle.worker_id, text: "solo after a refused registration" }));
+  assert.equal(afterRefusal.isError, undefined, `the only room still wins: ${JSON.stringify(afterRefusal)}`);
+  const elsewhere = await step((client) => call(client, "send_message",
+    { room_id: "remote-mcp-one-room-never-made", worker_id: handle.worker_id, text: "nowhere" }));
+  assert.equal(elsewhere.isError, true, JSON.stringify(elsewhere));
+  assert.match(String(elsewhere.raw), /not registered in room "remote-mcp-one-room-never-made"; it is registered in room "remote-mcp-one-room-a"/);
+
+  const inA = JSON.stringify(await step((client) => call(client, "read_messages", { room_id: roomA.room_id })));
+  for (const text of ["solo from a chat in another room", "solo after a refused registration"]) {
+    assert.equal(inA.includes(text), true, `room A has "${text}"`);
+  }
 });
 
 test("a worker ended in one per-call session registers again in the next", { skip, timeout: 60_000 }, async () => {

@@ -403,6 +403,7 @@ export class RemoteMcpSessions {
         // A stateless client never names itself at initialize; its User-Agent
         // product token stands in, per request.
         clientHint: session.implicit ? clientHintFromUserAgent(req.headers["user-agent"]) : null,
+        implicit: session.implicit,
         publicBaseUrl: this.publicBaseUrl,
         dispatch: (path, init) => bound(path, {
           ...init,
