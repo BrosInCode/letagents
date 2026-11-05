@@ -172,6 +172,10 @@ export function registerWakeRuleLinkRoutes(app: Express): void {
     if (result.outcome === "lifted") {
       return page(res, 200, "New requests allowed", "This address can get a new confirmation request. Nothing is sent until an agent asks for one; that email has its own stop link.");
     }
+    // The rule ended and the address is not stopped (the stop was lifted already, or never pressed).
+    if (result.outcome === "ended" && result.stopped === false) {
+      return page(res, 200, "Nothing to allow", "This address can already get a request.");
+    }
     answerFailure(res, result, token);
   }));
 }

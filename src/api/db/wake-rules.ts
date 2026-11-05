@@ -745,7 +745,9 @@ export async function stopWakeEmailRule(tokenHash: string, now = new Date()): Pr
  * past its own expiry), there is nothing to resume: the stop is lifted and
  * nothing is sent. The next `add_wake_rule` for the address sends the
  * confirmation, under the same daily budgets. Without a stop to lift the link
- * only reports that the rule ended.
+ * only reports that (`stopped: false`). The link of a rule that is active or
+ * still waiting for its address lifts nothing, as before: that rule could
+ * still send, and a stop another rule set for the address must hold.
  */
 export async function requestWakeEmailConfirmationAgain(
   tokenHash: string,
@@ -759,12 +761,15 @@ export async function requestWakeEmailConfirmationAgain(
       const [rule] = await tx.select().from(agent_wake_rules).where(eq(agent_wake_rules.disable_token_hash, tokenHash)).limit(1);
       if (!rule) return { outcome: "unknown" } as const;
       if (!rule.delivery_target_fingerprint) return { outcome: "ended", stopped: false } as const;
-      if (rule.status !== "paused" || (rule.expires_at && Date.parse(rule.expires_at) <= now.getTime())) {
+      const pastExpiry = Boolean(rule.expires_at && Date.parse(rule.expires_at) <= now.getTime());
+      const over = !(HELD_STATUSES as readonly string[]).includes(rule.status) || (rule.status === "paused" && pastExpiry);
+      if (over) {
         const lifted = await tx.execute(sql`DELETE FROM wake_email_suppressions WHERE address_fingerprint = ${rule.delivery_target_fingerprint}`);
         if (!lifted.rowCount) return { outcome: "ended", stopped: false } as const;
         console.info(`[wake email] an address lifted its stop from the link of ended rule ${rule.id}; nothing was sent.`);
         return { outcome: "lifted" } as const;
       }
+      if (rule.status !== "paused") return { outcome: "ended" } as const;
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`wake-delivery-account:${rule.owner_account_id}`}, 0))`);
       await tx.execute(sql`DELETE FROM wake_email_suppressions WHERE address_fingerprint = ${rule.delivery_target_fingerprint}`);
       const [pending] = await tx.update(agent_wake_rules).set({
