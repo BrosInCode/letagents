@@ -92,6 +92,10 @@ const LEGACY_WORKER_HELD_NEXT_STEP =
   "A legacy worker registration for this room is already held here. If it is this chat's, pass its agent_session_id "
   + "to the room tools. A different chat registers with register_agent_session, this room_id and its own registration_key.";
 
+const JOIN_NEXT_STEP =
+  "Register a worker with register_agent_session (room_id, a random registration_key you keep, display_name = your name), "
+  + "then say hi with send_message. If you already have a worker_id for this room, reuse it with register_agent_session(worker_id, room_id).";
+
 function joinedRoom(roomId: string): RoomState {
   return {
     room_id: roomId,
@@ -163,6 +167,7 @@ function remoteScope(): McpSessionScope {
 function assertNoWorkerFields(response: Record<string, unknown>): void {
   assert.equal("worker_status" in response, false);
   assert.equal("worker_next_step" in response, false);
+  assert.equal("next_step" in response, false);
 }
 
 test("a join response says the chat is a controller until it has a worker", async () => {
@@ -170,7 +175,7 @@ test("a join response says the chat is a controller until it has a worker", asyn
 
   assert.equal(response.worker_status, "controller_only");
   assert.equal(response.worker_next_step, CONTROLLER_ONLY_NEXT_STEP);
-  assert.equal("next_step" in response, false, "next_step stays free for tools that name a bare tool");
+  assert.equal(response.next_step, JOIN_NEXT_STEP, "a bot handed a room code reads its one next step here");
   // The fields that were there before stay as they were.
   assert.equal(response.room_id, "room_controller_only");
   assert.equal(response.joined_via, "join_room");
@@ -186,6 +191,7 @@ test("a join response says a legacy worker is held once this process registered 
 
   assert.equal(response.worker_status, "worker_held");
   assert.equal(response.worker_next_step, LEGACY_WORKER_HELD_NEXT_STEP);
+  assert.equal("next_step" in response, false, "a chat with a worker has no registration step");
   assert.doesNotMatch(String(response.worker_next_step), /recover_lost_worker/, "a legacy worker has no worker_id to recover");
   assert.equal(response.room_id, "room_with_worker");
 });
@@ -306,7 +312,7 @@ test("a created room says the chat is a controller until it has a worker", async
   assert.equal(created.response.room_id, "ABCD-1234");
   assert.equal(created.response.worker_status, "controller_only");
   assert.equal(created.response.worker_next_step, CONTROLLER_ONLY_NEXT_STEP);
-  assert.equal("next_step" in created.response, false);
+  assert.equal(created.response.next_step, JOIN_NEXT_STEP, "a created room leaves the chat without a worker too");
   assert.ok(created.response.agent_identity);
 });
 

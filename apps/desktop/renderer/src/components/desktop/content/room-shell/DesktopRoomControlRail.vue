@@ -4,6 +4,7 @@
       :room="room"
       :storage="storage"
       :room-url="roomUrl"
+      :api-url="apiUrl"
       :copied="copied"
       :sound-enabled="soundEnabled"
       :notifications-enabled="notificationsEnabled"
@@ -101,6 +102,8 @@ const props = defineProps<{
   room: DesktopRoomInfo;
   storage: DesktopRoomStorageState;
   roomUrl: string;
+  /** The API this app talks to; the panel names its `/mcp` connector from it. */
+  apiUrl?: string | null;
   copied: boolean;
   soundEnabled: boolean;
   notificationsEnabled: boolean;

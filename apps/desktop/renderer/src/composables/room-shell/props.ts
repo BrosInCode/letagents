@@ -26,6 +26,8 @@ import type { AttentionNavigationIntent } from "../../components/desktop/content
 /** DesktopRoomShell.vue's props, as passed to defineProps. */
 export interface DesktopRoomShellProps {
   viewerLogin?: string | null;
+  /** The API this app talks to; the room panel names its `/mcp` connector from it. */
+  apiUrl?: string | null;
   sidebarMode: SidebarMode;
   roomLoading: boolean;
   room: DesktopRoomInfo;

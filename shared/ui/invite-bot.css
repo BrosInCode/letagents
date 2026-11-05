@@ -1,0 +1,83 @@
+/*
+ * "Invite a bot" reads like the webhook wake-up block: one quiet primary
+ * action, then a picker and the message to copy.
+ */
+.invite-bot {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.invite-bot p {
+  margin: 0;
+}
+.invite-bot-hint {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+.invite-bot-button {
+  appearance: none;
+  padding: 6px 12px;
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  line-height: 1.3;
+  cursor: pointer;
+  transition: background 160ms var(--ease-out, ease-out), border-color 160ms var(--ease-out, ease-out);
+}
+.invite-bot-button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+}
+.invite-bot-button[data-variant="primary"] {
+  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  background: color-mix(in srgb, var(--blue) 16%, transparent);
+}
+.invite-bot-button[data-variant="primary"]:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--blue) 26%, transparent);
+}
+.invite-bot-button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--blue) 70%, transparent);
+  background: color-mix(in srgb, var(--blue) 22%, transparent);
+}
+.invite-bot-button[data-copied="true"] {
+  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  background: color-mix(in srgb, var(--blue) 16%, transparent);
+}
+.invite-bot-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.invite-bot-message {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+.invite-bot-text {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--text) 3%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+.invite-bot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.invite-bot-error {
+  color: var(--red-text, #c0392b);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}

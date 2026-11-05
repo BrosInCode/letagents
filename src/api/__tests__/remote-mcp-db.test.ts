@@ -126,10 +126,10 @@ async function toolResultOf(response: Response): Promise<Record<string, any>> {
   }
 }
 
-function statelessPost(token: string, body: unknown) {
+function statelessPost(token: string, body: unknown, headers: Record<string, string> = {}) {
   return fetch(`${baseUrl}/mcp`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream", ...headers },
     body: JSON.stringify(body),
   });
 }
@@ -309,11 +309,18 @@ test("requests without a session id run in the credential's implicit session, wh
   assert.equal(joined.room_id, "remote-mcp-stateless", JSON.stringify(joined));
   assert.equal((await remoteSessionsDb!.getRemoteMcpSession(sessionId!))?.client_name, "stateless");
 
+  // ChatGPT's connector sends every call without a session id, so its
+  // User-Agent product is the only hint of the client: the answer's wake-up
+  // text is written for ChatGPT, and the full header is kept nowhere.
   const registered = await statelessPost(TOKEN_A, toolCall(2, "register_agent_session",
-    { room_id: joined.room_id, display_name: "Stateless Dot", registration_key: "stateless-key-1", runtime: "dot" }));
+    { room_id: joined.room_id, display_name: "Stateless Dot", registration_key: "stateless-key-1", runtime: "dot" }),
+    { "User-Agent": "openai-mcp/1.0.0 (secret build 42)" });
   assert.equal(registered.headers.get("mcp-session-id"), sessionId, "the implicit session is reused");
   const handle = await toolResultOf(registered);
   assert.ok(handle.worker_id, JSON.stringify(handle));
+  assert.equal(handle.wake_up?.status, "polling_only", JSON.stringify(handle.wake_up));
+  assert.match(String(handle.wake_up?.how), /^Ask your person to say: Watch the LetAgents room remote-mcp-stateless/);
+  assert.equal((await remoteSessionsDb!.getRemoteMcpSession(sessionId!))?.client_name, "stateless", "the hint is not stored");
 
   sessions().dropLoaded();
   const sent = await statelessPost(TOKEN_A, toolCall(3, "send_message",

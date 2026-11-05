@@ -30,6 +30,7 @@
       :room="room"
       :storage="storage"
       :room-url="roomUrl"
+      :api-url="apiUrl"
       :copied="roomLinkCopied"
       :sound-enabled="soundEnabled"
       :notifications-enabled="notificationsEnabled"
