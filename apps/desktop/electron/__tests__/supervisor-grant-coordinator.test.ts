@@ -413,6 +413,23 @@ test("a paused guest that Start reaches keeps its state and gets the reason", as
   assert.deepEqual(g.counts, { joins: 0, provisions: 0 });
 });
 
+test("a guest whose provider crashed in this same daemon is left to the daemon's restart, not stopped", async () => {
+  // The daemon writes failed + none while it starts a replacement with the grant it still holds.
+  const g = guestHarness({ stored: { lastInstalledDaemonGeneration: 7 }, entry: { observedState: "failed", condition: "none", agentSessionBindingState: "historical" } });
+  await g.coordinator.reconcileDesiredRunning();
+  assert.ok(!g.events.some((event) => event.startsWith("set-desired:")), "a crash the daemon restarts is not lost access");
+  assert.deepEqual(g.counts, { joins: 0, provisions: 0 });
+});
+
+test("Start on a retired stopped guest gets the reason: retirement took the daemon's grant with it", async () => {
+  const g = guestHarness({ stored: { lastInstalledDaemonGeneration: 7 }, entry: { desiredState: "stopped", observedState: "stopped", agentSessionBindingState: "historical" } });
+  let activated = false;
+  await assert.rejects(g.coordinator.activateEntry(g.guest, async () => { activated = true; }), /so the agent cannot start\. Remove it, then give or rent it again\.$/);
+  assert.equal(activated, false);
+  assert.ok(!g.events.some((event) => event.startsWith("set-desired:")), "nothing changes a stopped entry's state");
+  assert.deepEqual(g.counts, { joins: 0, provisions: 0 });
+});
+
 test("a guest with no saved record at all is left to the daemon, and never joins", async () => {
   const g = guestHarness({ stored: null, entry: { observedState: "idle" } });
   await g.coordinator.reconcileDesiredRunning();

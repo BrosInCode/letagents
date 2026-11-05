@@ -994,7 +994,10 @@ export class SupervisorGrantCoordinator {
    *   renews it itself, so a saved copy last installed into this very daemon
    *   generation is still the daemon's, whatever its expiry says here; a copy
    *   installed into an earlier generation went with that process;
-   * - the daemon says itself when its grant is gone (auth_blocked, failed).
+   * - the daemon says itself when its grant is gone (auth_blocked; a plain
+   *   "failed" is a provider crash the daemon restarts with the grant it holds);
+   * - retiring a stopped entry deletes the daemon's grant, so a stopped guest
+   *   with no usable saved copy has none to start with.
    * A guest the daemon may still hold is left alone, with one warn line when
    * nothing here can tell. One known to be without access is stopped, with
    * the reason; a paused or stopped one keeps its state, and the reason
@@ -1007,7 +1010,7 @@ export class SupervisorGrantCoordinator {
     why: string,
   ): Promise<void> {
     const current = (await this.daemon.list(null)).find((candidate) => candidate.id === entry.id) ?? entry;
-    const daemonReportsNoAccess = current.condition === "auth_blocked" || current.observedState === "failed";
+    const daemonReportsNoAccess = current.condition === "auth_blocked" || current.desiredState === "stopped";
     const installedIntoAnEarlierDaemon = stored?.entryId === entry.id && stored.lastInstalledDaemonGeneration !== daemonGeneration;
     if (!daemonReportsNoAccess && !installedIntoAnEarlierDaemon) {
       if (stored?.entryId !== entry.id) {
