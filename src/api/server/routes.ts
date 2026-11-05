@@ -10,6 +10,8 @@ import { registerAgentAskRoutes } from "../routes/agent-asks.js";
 import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
 import { registerWakeRuleRoutes } from "../routes/rooms/wake-rules.js";
 import { registerRoomMemberRoutes } from "../routes/rooms/members.js";
+import { registerDemoMarkRoutes } from "../routes/rooms/demo-marks.js";
+import { liveDemoHub } from "../live-demos/service.js";
 import { claimRoomAsCreator } from "../db/room-members.js";
 import { registerWakeRuleLinkRoutes } from "../routes/wake-rule-links.js";
 import type { Express } from "express";
@@ -573,6 +575,7 @@ export function registerApiRoutes(app: Express): void {
 
   registerRoomJoinRoutes(app, roomJoinRouteDeps);
   registerRoomMessageRoutes(app, roomMessageRouteDeps);
+  registerDemoMarkRoutes(app, { ...roomMessageRouteDeps, resolveProjectRole, liveDemoHub });
   registerRoomKnowledgeRoutes(app, roomMessageRouteDeps);
   registerWakeRuleRoutes(app, roomMessageRouteDeps);
   registerWakeRuleLinkRoutes(app);
