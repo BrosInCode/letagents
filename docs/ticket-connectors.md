@@ -970,6 +970,16 @@ a new session's seed is kept under half that cap. A session folds in only the en
 room bindings one room at a time), so a stale session cannot undo another session's later change. An ended agent
 session stays ended unless a session holds its renewed registration (same id, new token); a worker's ended session is
 kept with its handle, because its token is the proof the worker's next registration in that room presents.
+One registration key is one worker handle whatever the room: the same key registered in another room keeps the
+`worker_id` and binds the handle there too, with an agent session of its own in each room. A room tool called with
+`worker_id` acts in `room_id` when the call names one, else in the room the session joined when the worker is
+registered there, else in the worker's only room; with several rooms and none of these it answers which rooms the
+worker has and asks for `room_id`, and a room the worker never registered in answers how to register there. In the
+credential's implicit session (below), which serves every session-less chat of the sign-in and so keeps one joined
+room for all of them, the joined room never chooses: a worker in several rooms needs `room_id` there, so one chat's
+`join_room` cannot send another chat's message into its room. A room whose registration the server refused (unknown,
+or not this account's) is not one of the worker's rooms. (Before this, a handle in two rooms answered "no current
+connection" to every call without `room_id`, and a reconnect did not help.)
 A request sent without any `Mcp-Session-Id` (and that is not `initialize`) is served in the credential's one
 implicit session (`implicit` = true, `client_name` = `stateless`), which is reused for the next such request and
 re-reads the credential's worker state on every request (not while a request of that session is still running on

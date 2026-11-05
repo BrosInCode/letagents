@@ -17,6 +17,7 @@ import { detectAgentIdeLabel, detectAgentRuntimeLabel } from "./identity/config.
 import { getProcessHostId, getSessionLivenessRegistration } from "./identity/liveness.js";
 import { requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import { holdProcessConnection } from "./process-connection.js";
+import { getCurrentRoom } from "./room-state.js";
 import { currentSessionScope, scopedMap } from "./session-scope.js";
 
 export type AdoptedTaskLease = { lease_id: string; task_id: string; kind: string };
@@ -291,8 +292,12 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
     } catch (error) {
       if (error instanceof ApiError && error.status >= 400 && error.status < 500) {
         updateLocalState((state) => {
-          const target = state.mcp_workers?.[worker.worker_id]?.rooms[roomId];
+          const rooms = state.mcp_workers?.[worker.worker_id]?.rooms;
+          const target = rooms?.[roomId];
           if (target?.pending?.operation_id === operation.operation_id) delete target.pending;
+          // A room the registration never reached (unknown, or not this account's) binds nothing:
+          // an empty entry would count as one of the worker's rooms.
+          if (rooms && target && !target.session_id && !target.pending) delete rooms[roomId];
         });
       }
       throw error;
@@ -344,6 +349,45 @@ async function connectWorker(input: { runtime?: string; cwd?: string }, worker: 
   return { worker: getWorker(worker.worker_id, scope), session };
 }
 
+/** A room entry that holds a registration (done or in progress); an empty entry is a room a refused registration left behind. */
+const boundRoom = (entry: StoredMcpWorker["rooms"][string] | undefined): boolean => Boolean(entry?.session_id || entry?.pending);
+
+/**
+ * The room a worker call acts in. One registration key is one worker handle,
+ * and a handle may be registered in several rooms (the same key in another
+ * room binds it there too), so the room must be chosen, not assumed:
+ * `room_id` when the call names one, else the room this session joined when
+ * the worker is registered there, else the worker's only room. With several
+ * rooms and none of these, the answer names them and asks for `room_id`. A
+ * room the worker never registered in says so, and how to register there.
+ *
+ * The joined room counts only for a session of one chat. The credential's
+ * implicit session serves every session-less chat of the sign-in and keeps
+ * one joined room for all of them, so there another chat's join must not
+ * choose this chat's room: a worker in several rooms needs `room_id`.
+ */
+function workerCallRoom(worker: StoredMcpWorker, roomId: string | undefined): string {
+  const rooms = Object.keys(worker.rooms).filter((room) => boundRoom(worker.rooms[room]));
+  const listed = rooms.map((room) => `"${room}"`).join(", ");
+  if (roomId) {
+    if (boundRoom(worker.rooms[roomId])) return roomId;
+    throw new Error(`This worker is not registered in room "${roomId}"`
+      + (rooms.length ? `; it is registered in ${rooms.length === 1 ? "room" : "rooms"} ${listed}. ` : ". ")
+      + `To act there, call register_agent_session(worker_id, room_id "${roomId}") first; a registration key already `
+      + "used in another room keeps the same worker_id and binds it to this room as well.");
+  }
+  if (!currentSessionScope()?.implicit) {
+    const joined = getCurrentRoom()?.room_id;
+    if (joined && boundRoom(worker.rooms[joined])) return joined;
+  }
+  if (rooms.length === 1) return rooms[0]!;
+  if (rooms.length === 0) {
+    throw new Error("This worker is not registered in any room. Call register_agent_session(worker_id, room_id) first.");
+  }
+  throw new Error(`This worker is registered in ${rooms.length} rooms (${listed}) and this chat has not joined one of them. `
+    + "Pass room_id to say which room this call is for.");
+}
+
 export async function runMcpWorkerCall<T>(workerId: string, roomId: string | undefined,
   callback: (session: StoredAgentSessionState) => T, allowEnded = false): Promise<Awaited<T>> {
   const worker = getWorker(workerId, await workerScope());
@@ -358,13 +402,13 @@ export async function runMcpWorkerCall<T>(workerId: string, roomId: string | und
       if (stored) stored.last_used_at = new Date(now).toISOString();
     });
   }
-  const rooms = Object.keys(worker.rooms);
-  const targetRoom = roomId || (rooms.length === 1 ? rooms[0] : null);
-  const entry = targetRoom ? worker.rooms[targetRoom] : null;
+  const targetRoom = workerCallRoom(worker, roomId);
+  const entry = worker.rooms[targetRoom];
   const session = entry?.session_id ? pinnedWorkerConnection(getLocalStatePath(), entry.session_id) : null;
   const stored = entry?.session_id ? snapshot().agent_sessions?.[entry.session_id] : null;
   if (!session || !stored || entry?.pending || stored.ended_at || session.session_token !== stored.session_token) {
-    throw new Error("This worker has no current connection in this process. Reconnect explicitly with register_agent_session(worker_id, room_id).");
+    throw new Error(`This worker has no current connection in this process for room "${targetRoom}". `
+      + `Reconnect explicitly with register_agent_session(worker_id, room_id "${targetRoom}").`);
   }
   return await withWorkerCall(session, async () => {
     const result = await callback(session);

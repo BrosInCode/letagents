@@ -45,6 +45,11 @@ export interface McpSessionScope {
    * request's User-Agent, such as `openai-mcp`. Per request, never stored.
    */
   readonly clientHint?: string | null;
+  /**
+   * The credential's one implicit session, which serves every session-less
+   * chat of the sign-in at once: what it "joined" is not one chat's choice.
+   */
+  readonly implicit?: boolean;
   /** Public origin for room links (never used to make requests). */
   readonly publicBaseUrl: string;
   /** Runs one API request in process as this session's account. */
