@@ -76,8 +76,11 @@ export function elementClippingBoxes(element: Element): ClipBox[] {
 /**
  * The part of the card that may be captured: where the card, the window and
  * every clipping box (see `clippingBoxes`) all overlap, in whole pixels. The
- * window only has the pixels that are on screen. `complete` is false when the
- * card reaches past any of them.
+ * edges round inward (the top left up, the bottom right down), so a clip edge at
+ * 700.2 stops at 700 and the picture never takes a strip of what lies past it. A
+ * part smaller than a pixel counts as not on screen. The window only has the
+ * pixels that are on screen. `complete` is false when the card reaches past any
+ * of them.
  */
 export function visibleCaptureRect(
   card: DesktopWindowRect,
@@ -93,13 +96,11 @@ export function visibleCaptureRect(
     right = Math.min(right, clip.right);
     bottom = Math.min(bottom, clip.bottom);
   }
-  if (right - left < 1 || bottom - top < 1) return { rect: null, complete: false };
-  const rect = {
-    x: Math.floor(left),
-    y: Math.floor(top),
-    width: Math.ceil(right) - Math.floor(left),
-    height: Math.ceil(bottom) - Math.floor(top),
-  };
+  const x = Math.ceil(left);
+  const y = Math.ceil(top);
+  const width = Math.floor(right) - x;
+  const height = Math.floor(bottom) - y;
+  if (!(width >= 1 && height >= 1)) return { rect: null, complete: false };
   const complete = left <= card.x && top <= card.y && right >= card.x + card.width && bottom >= card.y + card.height;
-  return { rect, complete };
+  return { rect: { x, y, width, height }, complete };
 }

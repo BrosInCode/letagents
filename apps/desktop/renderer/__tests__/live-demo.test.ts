@@ -845,6 +845,46 @@ describe("saved marks", () => {
     assert.equal(cleared.paint.length, 3);
   });
 
+  it("repaints everything when a stroke arrives that sorts before one already painted", () => {
+    // A stroke drawn live is saved and painted first; the saved list, with older strokes, arrives after.
+    const live = stroke("mark_live0001", "2026-01-05T10:00:00.000Z");
+    const first = planMarkPaint(new Set(), [live], true);
+    assert.deepEqual(first.paint.map((mark) => mark.id), ["mark_live0001"]);
+    const older1 = stroke("mark_old00001", "2026-01-01T10:00:00.000Z");
+    const older2 = stroke("mark_old00002", "2026-01-02T10:00:00.000Z");
+    const listed = planMarkPaint(first.ids, [older1, older2, live], false);
+    assert.equal(listed.full, true, "painting the older strokes alone would put them over the live one");
+    assert.deepEqual(listed.paint.map((mark) => mark.id), ["mark_old00001", "mark_old00002", "mark_live0001"], "in the order of a full paint");
+    // Once painted in order, a newer stroke paints alone again.
+    const newest = stroke("mark_new00001", "2026-01-06T10:00:00.000Z");
+    const next = planMarkPaint(listed.ids, [older1, older2, live, newest], false);
+    assert.equal(next.full, false);
+    assert.deepEqual(next.paint.map((mark) => mark.id), ["mark_new00001"]);
+  });
+
+  it("orders strokes with the same time by id, and sorts a list that is not in order", () => {
+    const a = stroke("mark_aaaaaaaa", "2026-01-01T00:00:00.000Z");
+    const b = stroke("mark_bbbbbbbb", "2026-01-01T00:00:00.000Z");
+    const painted = planMarkPaint(new Set(), [b], true).ids;
+    // `a` has the same time and a smaller id, so it sorts before `b`.
+    const late = planMarkPaint(painted, [b, a], false);
+    assert.equal(late.full, true);
+    assert.deepEqual(late.paint.map((mark) => mark.id), ["mark_aaaaaaaa", "mark_bbbbbbbb"]);
+    // The other way round it is newer and paints alone.
+    const afterA = planMarkPaint(planMarkPaint(new Set(), [a], true).ids, [b, a], false);
+    assert.equal(afterA.full, false);
+    assert.deepEqual(afterA.paint.map((mark) => mark.id), ["mark_bbbbbbbb"]);
+  });
+
+  it("does not repaint for a pin that sorts before a painted stroke", () => {
+    const early = pin("mark_pinpin01", "2026-01-01");
+    const a = stroke("mark_aaaaaaaa", "2026-01-02");
+    const painted = planMarkPaint(new Set(), [a], true).ids;
+    const plan = planMarkPaint(painted, [early, a], false);
+    assert.equal(plan.full, false);
+    assert.deepEqual(plan.paint, []);
+  });
+
   it("does not paint for pins, and a pin that goes does not clear the strokes", () => {
     const a = stroke("mark_aaaaaa", "2026-01-01");
     const p = pin("mark_pinpin01", "2026-01-02");
@@ -1000,10 +1040,42 @@ describe("send to thread", () => {
     assert.deepEqual(visibleCaptureRect({ x: 0, y: 900, width: 400, height: 300 }, [WINDOW]), { rect: null, complete: false });
   });
 
-  it("rounds a fractional rectangle outward", () => {
+  it("rounds a fractional rectangle inward, so a picture never takes a pixel the card or a clip does not have", () => {
     const result = visibleCaptureRect({ x: 10.4, y: 20.4, width: 100.2, height: 50.2 }, [WINDOW]);
-    assert.deepEqual(result.rect, { x: 10, y: 20, width: 101, height: 51 });
+    assert.deepEqual(result.rect, { x: 11, y: 21, width: 99, height: 49 });
     assert.equal(result.complete, true);
+    // A whole-pixel rectangle is left as it is.
+    assert.deepEqual(visibleCaptureRect({ x: 10, y: 20, width: 100, height: 50 }, [WINDOW]).rect, { x: 10, y: 20, width: 100, height: 50 });
+  });
+
+  it("stops at a clip edge that falls inside a pixel instead of taking the strip past it", () => {
+    const card = { x: 300, y: 300, width: 760, height: 1500 };
+    // The message list ends at 700.2 and the composer starts there.
+    const bottom = visibleCaptureRect(card, [WINDOW, { left: 250, top: 40.2, right: 1100, bottom: 700.2 }]);
+    assert.equal(bottom.rect!.y + bottom.rect!.height, 700, "ends at 700, not 701");
+    // A clip edge at 340.8 on the left starts at 341.
+    const side = visibleCaptureRect(card, [WINDOW, { left: 340.8, top: 0, right: 1100, bottom: 700 }]);
+    assert.equal(side.rect!.x, 341);
+    assert.equal(side.rect!.x + side.rect!.width, 1060);
+    const top = visibleCaptureRect({ x: 0, y: 0, width: 500, height: 500 }, [WINDOW, { left: 0, top: 100.2, right: 500, bottom: 500 }]);
+    assert.equal(top.rect!.y, 101);
+    assert.equal(top.complete, false);
+  });
+
+  it("counts a part smaller than a pixel as not on screen", () => {
+    // Less than one pixel high, and it holds no whole pixel row.
+    assert.deepEqual(visibleCaptureRect({ x: 10, y: 10.1, width: 50, height: 0.8 }, [WINDOW]), { rect: null, complete: false });
+    // 1.5 wide but between two pixel edges.
+    assert.deepEqual(visibleCaptureRect({ x: 10.2, y: 10, width: 1.5, height: 50 }, [WINDOW]), { rect: null, complete: false });
+    // A clip that leaves 0.5 of a pixel.
+    assert.deepEqual(
+      visibleCaptureRect({ x: 0, y: 0, width: 100, height: 100 }, [WINDOW, { left: 0, top: 99.7, right: 100, bottom: 200 }]),
+      { rect: null, complete: false },
+    );
+    // Not a number.
+    assert.deepEqual(visibleCaptureRect({ x: Number.NaN, y: 0, width: 10, height: 10 }, [WINDOW]), { rect: null, complete: false });
+    // Exactly one pixel is enough.
+    assert.deepEqual(visibleCaptureRect({ x: 5, y: 5, width: 1, height: 1 }, [WINDOW]).rect, { x: 5, y: 5, width: 1, height: 1 });
   });
 
   it("cuts the picture to every box that clips the card, so a tall card never reaches the composer", () => {

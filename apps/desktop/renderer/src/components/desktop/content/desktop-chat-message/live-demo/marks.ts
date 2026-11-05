@@ -46,18 +46,34 @@ export type StrokeMark = Extract<DemoMark, { kind: "stroke" }>;
 
 /**
  * What to paint on the layer of saved strokes. A mark is never changed once
- * saved, so a stroke that is already on the canvas stays. A new one is drawn on
- * top of it. Only a stroke that went away, or a layer that was cleared (a new
- * size or scale), needs every stroke drawn again.
+ * saved, so a stroke that is already on the canvas stays, and a newer one is
+ * drawn on top of it, which is where it belongs. The whole layer is painted
+ * again when:
+ * - it was cleared (a new size or scale),
+ * - a stroke went away, or
+ * - a stroke that is not on the canvas sorts before one that is (by `createdAt`,
+ *   then id). That happens when a stroke drawn live is painted before the saved
+ *   list arrives: painting the older ones now would put them on top of it.
  */
 export function planMarkPaint(
   drawn: ReadonlySet<string>,
   marks: readonly DemoMark[],
   layerCleared: boolean,
 ): { full: boolean; paint: StrokeMark[]; ids: Set<string> } {
-  const strokes = marks.filter((mark): mark is StrokeMark => mark.kind === "stroke");
+  const strokes = marks.filter((mark): mark is StrokeMark => mark.kind === "stroke").sort(byAge);
   const ids = new Set(strokes.map((mark) => mark.id));
   let full = layerCleared;
   if (!full) for (const id of drawn) if (!ids.has(id)) { full = true; break; }
+  if (!full) {
+    let newerThanDrawn = false;
+    for (const mark of strokes) {
+      if (!drawn.has(mark.id)) newerThanDrawn = true;
+      else if (newerThanDrawn) {
+        // A stroke on the canvas comes after one that is not: that one belongs under it.
+        full = true;
+        break;
+      }
+    }
+  }
   return { full, paint: full ? strokes : strokes.filter((mark) => !drawn.has(mark.id)), ids };
 }
