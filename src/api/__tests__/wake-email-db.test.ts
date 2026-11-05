@@ -336,3 +336,112 @@ test("past the hourly budget one email waits for the hour's end and later matche
     await bot.close();
   }
 });
+
+/** The code line of a confirmation mail: the link's token, printed for a bot that owns the mailbox. */
+function codeIn(text: string): string {
+  const match = /^Confirmation code: ([0-9a-f]{64})$/m.exec(text);
+  assert.ok(match, `no confirmation code in:\n${text}`);
+  return match[1]!;
+}
+
+test("a bot confirms its own email rule with the code from the mail; another account's bot cannot; the page button still works", { skip, timeout: 90_000 }, async () => {
+  configure();
+  const bot = await newBot();
+  const other = await newBot();
+  try {
+    const { roomId, add } = await inRoom(bot, "wake-email-code");
+    const address = "routine+sky@example.com";
+    const added = await add(address);
+    assert.equal(failed(added), false, added.raw);
+    assert.match(added.confirmation.next_step, /Open the link from that mailbox and press Confirm, or, if the mailbox is yours as a bot, call confirm_wake_email with the code in the mail\.$/);
+    const rule = added.rule as Record<string, any>;
+    await runWorker();
+    const mail = lastTo(address);
+    const code = codeIn(mail.text);
+    assert.equal(code, linkIn(mail.text, "confirm").split("/").pop(), "the code is the link's own token, not a second secret");
+    assert.match(mail.text, /^If you are a bot: call the LetAgents tool confirm_wake_email with this code\.$/m);
+    assert.equal(mail.text.includes("relaybot"), false, "the wording stays fixed: no agent name");
+    const confirm = (client: Client, value: string) => call(client, "confirm_wake_email", { code: value });
+
+    // A wrong or malformed code changes nothing, and the answer says only that no rule waits for it.
+    const wrong = await confirm(bot, "0".repeat(64));
+    assert.equal(wrong.confirmed, false, wrong.raw);
+    assert.equal(wrong.error, "unknown_or_expired");
+    assert.equal((await confirm(bot, "not a code")).error, "unknown_or_expired");
+    assert.equal((await ruleRow(rule.id)).status, "pending_confirmation");
+
+    // The real code in another account's hands: not theirs, and the rule stays pending.
+    const leaked = await confirm(other, code);
+    assert.equal(leaked.confirmed, false, leaked.raw);
+    assert.equal(leaked.error, "not_yours");
+    assert.equal((await ruleRow(rule.id)).status, "pending_confirmation");
+
+    // The owner's bot confirms (spacing and case do not matter): the rule is active.
+    const confirmed = await confirm(bot, ` ${code.toUpperCase()} `);
+    assert.equal(confirmed.confirmed, true, confirmed.raw);
+    assert.equal(confirmed.rule.id, rule.id);
+    assert.equal(confirmed.rule.status, "active");
+    assert.equal(confirmed.rule.delivery.kind, "email");
+    assert.equal(confirmed.raw.includes(address), false, "the address is never returned");
+    const row = await ruleRow(rule.id);
+    assert.equal(row.status, "active");
+    assert.ok(row.confirmed_at, "the confirmation is recorded on the rule");
+    assert.equal(row.confirm_expires_at, null);
+
+    // A second call, and the link's page, both say it is already confirmed.
+    const again = await confirm(bot, code);
+    assert.equal(again.confirmed, false);
+    assert.equal(again.error, "already_active");
+    assert.equal(again.rule?.status, "active");
+    assert.match(await (await form(linkIn(mail.text, "confirm"), "confirm=yes")).text(), /Already confirmed/);
+
+    // Once confirmed by code, a message for the bot is one email, as after the button.
+    await humanSays(roomId, "@relaybot confirmed by code?");
+    await runWorker();
+    assert.match(lastTo(address).subject, /^\[LetAgents\] New message for relaybot in /);
+
+    // An expired code is unknown, and the rule it named stays as it was.
+    const late = (await add("late-code@example.com")).rule as Record<string, any>;
+    await runWorker();
+    const lateCode = codeIn(lastTo("late-code@example.com").text);
+    await dbClient!.pool.query("UPDATE agent_wake_rules SET confirm_expires_at = now() - interval '1 second' WHERE id = $1", [late.id]);
+    assert.equal((await confirm(bot, lateCode)).error, "unknown_or_expired");
+    assert.equal((await ruleRow(late.id)).status, "pending_confirmation");
+
+    // The page's button still confirms a rule the tool never saw.
+    const byButton = (await add("by-button@example.com")).rule as Record<string, any>;
+    await runWorker();
+    const buttonUrl = linkIn(lastTo("by-button@example.com").text, "confirm");
+    assert.equal((await form(buttonUrl, "confirm=yes")).status, 200);
+    assert.equal((await ruleRow(byButton.id)).status, "active");
+  } finally {
+    await bot.close();
+    await other.close();
+  }
+});
+
+test("confirm_wake_email takes 10 attempts per credential in 10 minutes: the 11th is refused, right code or wrong", { skip, timeout: 60_000 }, async () => {
+  configure();
+  const bot = await newBot();
+  const other = await newBot();
+  try {
+    const { add } = await inRoom(bot, "wake-email-attempts");
+    const rule = (await add("guess-target@example.com")).rule as Record<string, any>;
+    await runWorker();
+    const code = codeIn(lastTo("guess-target@example.com").text);
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      const wrong = await call(bot, "confirm_wake_email", { code: attempt.toString(16).padStart(64, "0") });
+      assert.equal(wrong.error, "unknown_or_expired", `attempt ${attempt}: ${wrong.raw}`);
+    }
+    const eleventh = await call(bot, "confirm_wake_email", { code });
+    assert.equal(eleventh.confirmed, false, eleventh.raw);
+    assert.equal(eleventh.error, "too_many_attempts");
+    assert.match(eleventh.message, /10 confirmation attempts in 10 minutes/);
+    assert.equal((await ruleRow(rule.id)).status, "pending_confirmation", "the right code waits too while the budget is spent");
+    // The budget is per credential: another sign-in is not held back by this one's guesses.
+    assert.equal((await call(other, "confirm_wake_email", { code: "f".repeat(64) })).error, "unknown_or_expired");
+  } finally {
+    await bot.close();
+    await other.close();
+  }
+});

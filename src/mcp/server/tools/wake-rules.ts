@@ -9,6 +9,7 @@ import {
   type WakeRulePage,
 } from "../../../../shared/wake-rules.mjs";
 import { isLocalRoomStorageEnabled, roomScopedApiCall } from "../runtime.js";
+import { ApiError, apiCall } from "../runtime/api.js";
 import { resolveTaskToolIdentity, resolveTaskToolTarget, taskActorPayload } from "./tasks/context.js";
 import { jsonToolResponse, taskToolError } from "./tasks/response.js";
 import { roomAccessToolResponse } from "../runtime/room-access.js";
@@ -33,6 +34,17 @@ function roomPath(suffix: string) {
 
 function toolError(error: unknown) {
   return roomAccessToolResponse(error) ?? taskToolError(error instanceof Error ? error.message : String(error));
+}
+
+/** The server's refusal of a confirmation code, as it answered it (`{ confirmed: false, error, message }`), or null for any other failure. */
+function confirmRefusal(error: unknown): Record<string, unknown> | null {
+  if (!(error instanceof ApiError)) return null;
+  try {
+    const body = JSON.parse(error.body) as Record<string, unknown>;
+    return body && body.confirmed === false && typeof body.error === "string" ? body : null;
+  } catch {
+    return null;
+  }
 }
 
 export function registerWakeRuleTools(server: McpServer): void {
@@ -124,6 +136,28 @@ export function registerWakeRuleTools(server: McpServer): void {
           options: { method: "POST", body: JSON.stringify(taskActorPayload(identity, agentSession)) },
         }));
       } catch (error) { return toolError(error); }
+    },
+  );
+
+  server.tool(
+    "confirm_wake_email",
+    "Confirm your own email wake-up when the mailbox is yours, for example when a routine of yours runs on incoming mail: "
+      + "the confirmation mail from add_wake_rule with email {to} has a line \"Confirmation code: <code>\"; pass that code here. "
+      + "It is the same single-use value as the mail's link; people press Confirm on the link instead. "
+      + "The rule must belong to an agent of your account, so a code from another account's mail confirms nothing. "
+      + "Answers {confirmed: true, rule}, or confirmed: false with error unknown_or_expired (no pending rule has this code, or it expired after 24 hours), "
+      + `not_yours, already_active or too_many_attempts (${WAKE_RULE_LIMITS.emailConfirmCodeAttempts} attempts per ${WAKE_RULE_LIMITS.emailConfirmCodeWindowMs / 60_000} minutes). `
+      + "Then end your turn: LetAgents emails that address when a room message is for you.",
+    { code: z.string().min(1).max(200).describe("The code from the mail's \"Confirmation code:\" line (64 hex characters).") },
+    async ({ code }) => {
+      try {
+        return jsonToolResponse(await apiCall<{ confirmed: true; rule: WakeRule }>("/wake-rules/confirm", {
+          method: "POST", body: JSON.stringify({ code }),
+        }));
+      } catch (error) {
+        const refusal = confirmRefusal(error);
+        return refusal ? jsonToolResponse(refusal) : toolError(error);
+      }
     },
   );
 }

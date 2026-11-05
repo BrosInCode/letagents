@@ -174,13 +174,14 @@ test("every cloud profile can wait with a wake rule; listing is a read and chang
     ["supervised_room_turn", "cursor"], ["supervised_room_turn", "codex"], ["supervised_room_turn", "claude-code"],
     ["supervised_mcp_polling", "codex"],
   ] as const) {
-    for (const name of ["add_wake_rule", "list_wake_rules", "cancel_wake_rule"]) {
+    for (const name of ["add_wake_rule", "list_wake_rules", "cancel_wake_rule", "confirm_wake_email"]) {
       assert.equal(discovered(profile, provider).has(name), true, `${profile}/${provider} has ${name}`);
     }
   }
   assert.equal(supervisedToolIsMutation("list_wake_rules"), false);
   assert.equal(supervisedToolIsMutation("add_wake_rule"), true);
   assert.equal(supervisedToolIsMutation("cancel_wake_rule"), true);
+  assert.equal(supervisedToolIsMutation("confirm_wake_email"), true);
 });
 
 test("local native discovery and runtime contract agree and expose an executable closeout path", async () => {

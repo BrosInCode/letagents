@@ -618,10 +618,16 @@ export async function endUnconfirmedWakeEmailRule(rule: WakeRuleRow, now = new D
 export type WakeLinkOutcome =
   | { outcome: "done"; rule: WakeRuleRow }
   | { outcome: "already"; rule: WakeRuleRow }
-  | { outcome: "expired" | "ended" | "unknown" | "conflict" | "limited" };
+  | { outcome: "expired" | "ended" | "unknown" | "conflict" | "limited" | "not_yours" };
 
-/** Confirm an email rule's address by the hash of its confirmation link. */
-export async function confirmWakeEmailRule(tokenHash: string, now = new Date()): Promise<WakeLinkOutcome> {
+/**
+ * Confirm an email rule's address by the hash of its confirmation link. The
+ * link's page passes no account: the token alone is the proof. The
+ * `confirm_wake_email` tool passes the caller's account, and then only a rule
+ * of an agent that account owns is confirmed: a code that leaked to another
+ * account answers `not_yours` and changes nothing.
+ */
+export async function confirmWakeEmailRule(tokenHash: string, now = new Date(), ownerAccountId?: string): Promise<WakeLinkOutcome> {
   const nowIso = now.toISOString();
   let row: WakeRuleRow | undefined;
   try {
@@ -635,6 +641,7 @@ export async function confirmWakeEmailRule(tokenHash: string, now = new Date()):
     })
     .where(and(
       eq(agent_wake_rules.confirm_token_hash, tokenHash),
+      ...(ownerAccountId ? [eq(agent_wake_rules.owner_account_id, ownerAccountId)] : []),
       eq(agent_wake_rules.status, "pending_confirmation"),
       gt(agent_wake_rules.confirm_expires_at, nowIso),
       // A rule past its own expiry is not revived by a late confirmation.
@@ -649,6 +656,7 @@ export async function confirmWakeEmailRule(tokenHash: string, now = new Date()):
   if (row) return { outcome: "done", rule: row };
   const [known] = await db.select().from(agent_wake_rules).where(eq(agent_wake_rules.confirm_token_hash, tokenHash)).limit(1);
   if (!known) return { outcome: "unknown" };
+  if (ownerAccountId && known.owner_account_id !== ownerAccountId) return { outcome: "not_yours" };
   if (known.confirmed_at && known.status === "active") return { outcome: "already", rule: known };
   return known.status === "pending_confirmation" || known.status === "expired" ? { outcome: "expired" } : { outcome: "ended" };
 }

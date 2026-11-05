@@ -16,6 +16,8 @@ const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSes
   { method: "GET", path: /^\/rooms\/.+\/agent-guidelines$/, capability: "coordination.read" },
   { method: "GET", path: /^\/rooms\/.+\/wake-rules$/, capability: "coordination.read" },
   { method: "POST", path: /^\/rooms\/.+\/wake-rules(?:\/[^/]+\/(?:cancel|restore))?$/, capability: "coordination.self_write" },
+  // A worker confirms its own email wake-up with the code from the mail; the route checks that its account owns the rule.
+  { method: "POST", path: /^\/wake-rules\/confirm$/, capability: "coordination.self_write" },
   { method: "POST", path: /^\/rooms\/.+\/(?:memory|attention)$/, capability: "coordination.propose" },
   { method: "GET", path: /^\/rooms\/.+\/messages$/, capability: "messages.read" },
   { method: "GET", path: /^\/rooms\/.+\/messages\/(?:poll|stream|threads|msg_\d+|msg_\d+\/thread|msg_\d+\/info)$/, capability: "messages.read" },
