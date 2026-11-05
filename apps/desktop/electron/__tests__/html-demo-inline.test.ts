@@ -7,6 +7,8 @@ import {
   INLINE_HTML_DEMO_CACHE_ENTRIES,
   INLINE_HTML_DEMO_EVENT_BURST,
   INLINE_HTML_DEMO_EVENTS_PER_SECOND,
+  INLINE_HTML_DEMO_LIVE_ROOT_CSS,
+  INLINE_HTML_DEMO_LIVE_WIDTH_SCRIPT,
   INLINE_HTML_DEMO_LIVENESS_WORLD_ID,
 } from "../main/attachments/html-demo-policy.js";
 
@@ -56,12 +58,26 @@ class FakeGuest extends EventEmitter {
   answers: "now" | "never" = "now";
   checks: Array<{ worldId: number; code: string; answer: () => void }> = [];
   getType() { return "webview"; }
+  /** The page's layout width in CSS px as main's own world reads it: the frame's points over the zoom the page runs at. */
+  framePoints = 380;
+  renderedZoom: number | null = null;
+  layoutChecks: Array<{ worldId: number; code: string }> = [];
   executeJavaScriptInIsolatedWorld(worldId: number, scripts: Array<{ code: string }>) {
+    const code = scripts.map((script) => script.code).join(";");
+    if (code === INLINE_HTML_DEMO_LIVE_WIDTH_SCRIPT) {
+      this.layoutChecks.push({ worldId, code });
+      return Promise.resolve(this.framePoints / (this.renderedZoom ?? this.zoom));
+    }
     return new Promise<unknown>((resolve) => {
-      const check = { worldId, code: scripts.map((script) => script.code).join(";"), answer: () => resolve(1) };
+      const check = { worldId, code, answer: () => resolve(1) };
       this.checks.push(check);
       if (this.answers === "now") check.answer();
     });
+  }
+  css: Array<{ css: string; options: unknown }> = [];
+  insertCSS(css: string, options: unknown) {
+    this.css.push({ css, options });
+    return Promise.resolve(`key${this.css.length}`);
   }
   isDestroyed() { return this.destroyed; }
   isCrashed() { return this.crashed; }
@@ -853,37 +869,144 @@ test("a live demo is laid out 760 CSS px wide, scaled to its frame, and keeps th
   try {
     assert.equal(setInlineHtmlDemoWidth(lease.url, 380), 0.5, "the scale is set before the webview attaches");
     const { guest } = attach(lease.url)!;
-    const size = (height: number) => {
+    const size = async (height: number) => {
       guest.emit("preferred-size-changed", {}, { width: 380, height });
+      await flushImmediates();
       t.mock.timers.tick(100);
     };
     // Electron 42 drops a zoom set before the first load: the first size comes at zoom 1.
-    size(1500);
+    await size(1500);
     assert.deepEqual(guest.zoomCalls, [0.5]);
     assert.deepEqual(embedder.sent, [], "a size at the wrong zoom is not reported");
-    size(750);
-    assert.deepEqual(embedder.sent, [{ type: "height", url: lease.url, height: 750 }], "750 points at zoom 0.5 is a 750 px frame");
+    await size(750);
+    assert.deepEqual(guest.layoutChecks, [{ worldId: INLINE_HTML_DEMO_LIVENESS_WORLD_ID, code: INLINE_HTML_DEMO_LIVE_WIDTH_SCRIPT }]);
+    // One point more than the rounded preferred height, so the frame is never a fraction short of the page.
+    assert.deepEqual(embedder.sent, [{ type: "height", url: lease.url, height: 751 }]);
+    await size(800);
+    assert.deepEqual(embedder.sent.at(-1), { type: "height", url: lease.url, height: 801 });
+    assert.equal(guest.layoutChecks.length, 1, "checked once per zoom");
 
     // The app zooms to 125%: Electron puts the guest at the app's zoom, and main puts it back.
     embedder.zoom = 1.25;
     guest.zoom = 1.25;
-    size(1875);
+    guest.framePoints = 475;
+    await size(1875);
     assert.deepEqual(guest.zoomCalls, [0.5, 0.625], "380 CSS px at 125% are 475 points, so 760 CSS px need 0.625");
-    assert.equal(embedder.sent.length, 1);
-    size(2000 * 0.625);
-    assert.deepEqual(embedder.sent.at(-1), { type: "height", url: lease.url, height: 1000 }, "a 2000 px demo in a half-width frame");
+    assert.equal(embedder.sent.length, 2);
+    await size(2000 * 0.625);
+    assert.deepEqual(embedder.sent.at(-1), { type: "height", url: lease.url, height: 1001 }, "a 2000 px demo in a half-width frame");
 
+    guest.framePoints = 950;
     assert.equal(setInlineHtmlDemoWidth(lease.url, 760), 1);
     assert.equal(guest.zoom, 1.25, "a running demo changes zoom at once");
     // A live demo may be as tall as LIVE_DEMO.maxHeight demo px, past the 4000 px of other demos.
-    size(30_000 * 1.25);
-    assert.deepEqual(embedder.sent.at(-1), { type: "height", url: lease.url, height: 20_000 });
+    await size(30_000 * 1.25);
+    assert.deepEqual(embedder.sent.at(-1), { type: "height", url: lease.url, height: 20_001 });
 
     assert.equal(setInlineHtmlDemoWidth(lease.url, 100), 0.2, "Chromium's smallest zoom, 0.25 at 125%, is the limit");
     assert.throws(() => setInlineHtmlDemoWidth(lease.url, 0), /positive/);
     assert.throws(() => setInlineHtmlDemoWidth(lease.url, Number.NaN), /positive/);
     assert.throws(() => setInlineHtmlDemoWidth(lease.url, "380"), /positive/);
     assert.throws(() => setInlineHtmlDemoWidth("letagents-demo://00000000000000000000000000000000/", 380), /closed/);
+  } finally {
+    releaseAll([lease.url]);
+  }
+});
+
+test("a live demo's heights wait until the page lays out at the live zoom", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const lease = await prepareInlineHtmlDemo("letagents-attachment://download/c3RhbGU");
+  try {
+    const { guest } = attach(lease.url)!;
+    const size = async (height: number) => {
+      guest.emit("preferred-size-changed", {}, { width: 380, height });
+      await flushImmediates();
+      t.mock.timers.tick(100);
+    };
+    // Measured in Electron 42: with the zoom set at DOMContentLoaded, getZoomFactor
+    // reports 0.33 at once, but the next size is the page laid out at zoom 1.
+    guest.emit("dom-ready");
+    setInlineHtmlDemoWidth(lease.url, 380);
+    assert.equal(guest.zoom, 0.5);
+    guest.renderedZoom = 1;
+    await size(6000);
+    assert.deepEqual(embedder.sent, [], "the page still lays out 380 CSS px wide");
+    t.mock.timers.tick(1000);
+    await flushImmediates();
+    assert.deepEqual(embedder.sent, [], "a check on its own sends no height without a newer size");
+    guest.renderedZoom = null;
+    await size(1500);
+    assert.deepEqual(embedder.sent, [{ type: "height", url: lease.url, height: 1501 }], "the first height is the scaled one");
+  } finally {
+    releaseAll([lease.url]);
+  }
+});
+
+test("a live zoom is corrected until the frame's whole points hold exactly 760 CSS px", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const lease = await prepareInlineHtmlDemo("letagents-attachment://download/Y29ycmVjdA");
+  try {
+    const { guest } = attach(lease.url)!;
+    // The frame is 607.6 px, and the chat sends 607: measured in Electron 42, the page laid out 761.25 px wide.
+    guest.framePoints = 607.6;
+    setInlineHtmlDemoWidth(lease.url, 607);
+    assert.equal(guest.zoom, 607 / 760);
+    guest.emit("preferred-size-changed", {}, { width: 607, height: 1776 });
+    await flushImmediates();
+    assert.equal(guest.zoomCalls.length, 2, "corrected once");
+    assert.ok(Math.abs(guest.zoom - 607.6 / 760) < 1e-9, String(guest.zoom));
+    assert.deepEqual(embedder.sent, []);
+    // A zoom this close may bring no new size: main checks again on its own.
+    t.mock.timers.tick(200);
+    await flushImmediates();
+    t.mock.timers.tick(100);
+    assert.deepEqual(embedder.sent, [{ type: "height", url: lease.url, height: 1777 }]);
+    assert.ok(Math.abs(guest.framePoints / guest.zoom - 760) < 1e-9, "the page lays out exactly 760 CSS px wide");
+  } finally {
+    releaseAll([lease.url]);
+  }
+});
+
+test("a live demo's root cannot scroll: each document gets a user !important rule", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const plain = await prepareInlineHtmlDemo("letagents-attachment://download/cGxhaW4");
+  const early = await prepareInlineHtmlDemo("letagents-attachment://download/ZWFybHk");
+  const late = await prepareInlineHtmlDemo("letagents-attachment://download/bGF0ZQ");
+  try {
+    const plainGuest = attach(plain.url)!.guest;
+    plainGuest.emit("dom-ready");
+    assert.deepEqual(plainGuest.css, [], "a demo outside the live layout is left alone");
+
+    setInlineHtmlDemoWidth(early.url, 380);
+    const earlyGuest = attach(early.url)!.guest;
+    assert.deepEqual(earlyGuest.css, [], "no document yet");
+    earlyGuest.emit("dom-ready");
+    assert.deepEqual(earlyGuest.css, [{ css: INLINE_HTML_DEMO_LIVE_ROOT_CSS, options: { cssOrigin: "user" } }]);
+    assert.equal(INLINE_HTML_DEMO_LIVE_ROOT_CSS, "html, body { overflow: hidden !important; }");
+    setInlineHtmlDemoWidth(early.url, 400);
+    assert.equal(earlyGuest.css.length, 1, "once per document");
+    earlyGuest.emit("dom-ready");
+    assert.equal(earlyGuest.css.length, 2, "a reloaded document gets it again");
+
+    const lateGuest = attach(late.url)!.guest;
+    lateGuest.emit("dom-ready");
+    setInlineHtmlDemoWidth(late.url, 380);
+    assert.equal(lateGuest.css.length, 1, "a demo that goes live after loading gets it at once");
+  } finally {
+    releaseAll([plain.url, early.url, late.url]);
+  }
+});
+
+test("going live drops a plain-layout height that has not gone out yet", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const lease = await prepareInlineHtmlDemo("letagents-attachment://download/ZHJvcA");
+  try {
+    const { guest } = attach(lease.url)!;
+    guest.emit("preferred-size-changed", {}, { width: 380, height: 120 });
+    setInlineHtmlDemoWidth(lease.url, 380);
+    t.mock.timers.tick(100);
+    await flushImmediates();
+    assert.deepEqual(embedder.sent, []);
   } finally {
     releaseAll([lease.url]);
   }
@@ -904,6 +1027,7 @@ test("the pointer over a live demo is reported in demo space, and goes when it l
 
     setInlineHtmlDemoWidth(lease.url, 380);
     guest.emit("preferred-size-changed", {}, { width: 380, height: 750 });
+    await flushImmediates();
     // Measured in Electron 42: x 100 at guest zoom 0.5 is the page's clientX 200.
     move(100, 50);
     move(10, 10, "mouseWheel");

@@ -600,7 +600,8 @@ function observeWidth(): void {
   if (!body.value || !widthApiAvailable || !props.attachmentId || typeof ResizeObserver === "undefined") return;
   resizeObserver = new ResizeObserver((entries) => {
     const width = entries[entries.length - 1]?.contentRect.width ?? 0;
-    frameWidth.value = Math.floor(width);
+    // Unrounded, so main's zoom fills exactly LIVE_DEMO.width CSS px.
+    frameWidth.value = width;
   });
   resizeObserver.observe(body.value);
 }

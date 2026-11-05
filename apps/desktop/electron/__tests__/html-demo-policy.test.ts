@@ -29,6 +29,8 @@ import {
   inlineHtmlDemoHeight,
   inlineHtmlDemoLeaseHost,
   inlineHtmlDemoLeaseUrl,
+  inlineHtmlDemoLiveHeight,
+  inlineHtmlDemoLiveLayoutCheck,
   inlineHtmlDemoLiveZoom,
   inlineHtmlDemoPointer,
   inlineHtmlDemoWebPreferences,
@@ -284,6 +286,28 @@ describe("HTML demo policy", () => {
     for (const width of [0, -10, Number.NaN, Number.POSITIVE_INFINITY, "380", null]) {
       assert.equal(inlineHtmlDemoLiveZoom(width), null, String(width));
     }
+  });
+
+  it("judges a live demo's measured layout width: not at the zoom yet, a fraction off, or right", () => {
+    // Measured in Electron 42: the page still at zoom 1 in a 250 px frame, and a 607.6 px frame sent as 607.
+    assert.deepEqual(inlineHtmlDemoLiveLayoutCheck(250.4, 760), { state: "pending" });
+    assert.deepEqual(inlineHtmlDemoLiveLayoutCheck(951.5, 760), { state: "pending" });
+    assert.deepEqual(inlineHtmlDemoLiveLayoutCheck(761.252, 760), { state: "correct", factor: 761.252 / 760 });
+    assert.deepEqual(inlineHtmlDemoLiveLayoutCheck(760.5, 760), { state: "correct", factor: 760.5 / 760 });
+    assert.deepEqual(inlineHtmlDemoLiveLayoutCheck(760.00006, 760), { state: "ready" });
+    assert.deepEqual(inlineHtmlDemoLiveLayoutCheck(759.8, 760), { state: "ready" });
+    for (const width of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, "760", null, undefined]) {
+      assert.deepEqual(inlineHtmlDemoLiveLayoutCheck(width, 760), { state: "pending" }, String(width));
+    }
+  });
+
+  it("gives a live frame one point more than the rounded preferred height, within the live cap", () => {
+    // Measured in Electron 42: 1776 points for a 2224 px page at zoom 0.7987 left the frame 0.3 CSS px short.
+    assert.equal(inlineHtmlDemoLiveHeight(1776, 1, 0.7987), 1777);
+    assert.equal(inlineHtmlDemoLiveHeight(2500, 1.25, 1), 2001);
+    assert.equal(inlineHtmlDemoLiveHeight(10_000_000, 1, 0.5), 10_001);
+    assert.equal(inlineHtmlDemoLiveHeight(Number.NaN, 1, 1), 0);
+    assert.equal(inlineHtmlDemoLiveHeight("100", 1, 1), 0);
   });
 
   it("turns a guest's input point into demo space, and a point outside the demo into null", () => {
