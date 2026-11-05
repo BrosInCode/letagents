@@ -802,7 +802,7 @@ export class SupervisorGrantCoordinator {
       && await this.reconcilePendingRoomMoveWithinEntryTail(entry.id, daemonGeneration)) return;
     const agentKey = await this.operations.readEntryAgentKey(entry.id);
     if (!agentKey) {
-      if (isGuestEntryId(entry.id)) return this.settleGuestWithoutSavedAuthority(entry, "has no saved identity on this computer");
+      if (isGuestEntryId(entry.id)) return this.settleGuestWithoutSavedAuthority(entry, daemonGeneration, null, "has no saved identity on this computer");
       // Legacy entries can be recovered only from a durable mapping or by
       // creating a new explicit identity. Labels are never identity inputs.
       await this.assertSupervisionAvailable();
@@ -817,7 +817,7 @@ export class SupervisorGrantCoordinator {
     const stored = await this.operations.readGrant(agentKey);
     if (!stored || stored.entryId !== entry.id || !this.grantExactlyScopes(stored, entry.roomId, agentKey)) {
       if (isGuestEntryId(entry.id)) {
-        return this.settleGuestWithoutSavedAuthority(entry, stored && stored.entryId === entry.id && Date.parse(stored.metadata.expiresAt) <= Date.now()
+        return this.settleGuestWithoutSavedAuthority(entry, daemonGeneration, stored, stored && stored.entryId === entry.id && Date.parse(stored.metadata.expiresAt) <= Date.now()
           ? "its saved access expired" : "has no saved access for its room on this computer");
       }
       // A pre-case-preservation registry can contain a truthy but invalid
@@ -834,7 +834,6 @@ export class SupervisorGrantCoordinator {
     }
     if (!Number.isFinite(new Date(stored.metadata.expiresAt).getTime())
       || new Date(stored.metadata.expiresAt).getTime() <= Date.now()) {
-      if (isGuestEntryId(entry.id)) return this.settleGuestWithoutSavedAuthority(entry, "its saved access expired");
       // A daemon can rotate its short-lived worker bearer on its own while
       // this host grant remains current. Once host authority expires, only
       // Electron may recover it, before the next worker rotation wedges.
@@ -989,20 +988,37 @@ export class SupervisorGrantCoordinator {
    * owner cannot mint a replacement: rooms admit members only, so the owner's
    * join (resolveRoomId) and POST /supervisor-host-grants both answer 403 for
    * a guest's room, and an owner grant would also give the guest delegation
-   * provenance it must never have. So when the saved access is unusable there
-   * is nothing this computer can do: a guest the daemon still runs with its
-   * own live access is left alone (the daemon renewed what this computer
-   * saved), and any other is stopped, with the reason.
+   * provenance it must never have. So when the saved access is unusable, all
+   * this computer can do is tell whether the daemon still has what it needs:
+   * - the daemon keeps a grant in memory for the life of its process and
+   *   renews it itself, so a saved copy last installed into this very daemon
+   *   generation is still the daemon's, whatever its expiry says here; a copy
+   *   installed into an earlier generation went with that process;
+   * - the daemon says itself when its grant is gone (auth_blocked, failed).
+   * A guest the daemon may still hold is left alone, with one warn line when
+   * nothing here can tell. One known to be without access is stopped, with
+   * the reason; a paused or stopped one keeps its state, and the reason
+   * answers the Start that reached here.
    */
-  private async settleGuestWithoutSavedAuthority(entry: DesktopSupervisorManifestEntry, why: string): Promise<void> {
+  private async settleGuestWithoutSavedAuthority(
+    entry: DesktopSupervisorManifestEntry,
+    daemonGeneration: number,
+    stored: Awaited<ReturnType<SupervisorGrantCoordinatorOperations["readGrant"]>>,
+    why: string,
+  ): Promise<void> {
     const current = (await this.daemon.list(null)).find((candidate) => candidate.id === entry.id) ?? entry;
-    const liveWithTheDaemon = current.desiredState === "running" && current.agentSessionBindingState === "active"
-      && current.condition === "none" && (current.observedState === "working" || current.observedState === "idle");
-    if (liveWithTheDaemon) return;
-    const wasStopped = current.desiredState === "stopped";
-    if (!wasStopped) await this.daemon.setDesiredState(entry.id, "stopped");
+    const daemonReportsNoAccess = current.condition === "auth_blocked" || current.observedState === "failed";
+    const installedIntoAnEarlierDaemon = stored?.entryId === entry.id && stored.lastInstalledDaemonGeneration !== daemonGeneration;
+    if (!daemonReportsNoAccess && !installedIntoAnEarlierDaemon) {
+      if (stored?.entryId !== entry.id) {
+        console.warn(`[supervisor grants] ${entry.id} is a guest with no saved access on this computer; left to the daemon, which may still hold its own.`);
+      }
+      return;
+    }
+    const running = current.desiredState === "running";
+    if (running) await this.daemon.setDesiredState(entry.id, "stopped");
     throw new Error(`${entry.displayName} runs as a guest in someone else's room and ${why}. `
-      + `This computer cannot renew a guest's access, so the agent ${wasStopped ? "stays" : "was"} stopped. Remove it, then give or rent it again.`);
+      + `This computer cannot renew a guest's access, so the agent ${running ? "was stopped" : "cannot start"}. Remove it, then give or rent it again.`);
   }
 
   private async provisionAndInstall(
