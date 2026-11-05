@@ -198,9 +198,13 @@ export const wake_email_confirmations = pgTable("wake_email_confirmations", {
   account_idx: index("wake_email_confirmations_account_idx").on(table.owner_account_id, table.created_at),
 }));
 
-/** Addresses that pressed Stop: no confirmation goes to them until they ask for one from a stop page. */
+/**
+ * Addresses that pressed Stop: no confirmation goes to them until they ask for
+ * one from a stop link. The row goes with the rule that set it (deleted only
+ * with its room), or the address would stay stopped with no link to lift it.
+ */
 export const wake_email_suppressions = pgTable("wake_email_suppressions", {
   address_fingerprint: text("address_fingerprint").primaryKey(),
-  rule_id: text("rule_id"),
+  rule_id: text("rule_id").references(() => agent_wake_rules.id, { onDelete: "cascade" }),
   created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
 });

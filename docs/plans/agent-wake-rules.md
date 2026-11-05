@@ -272,7 +272,10 @@ nothing. Every email has a stop link: its page's Stop button, or a mail
 client's one-click POST with exactly `List-Unsubscribe=One-Click`, pauses the
 rule, clears the confirmation and remembers the address
 (`wake_email_suppressions`): the agent cannot send it a new request until the
-person asks for one from the Stopped page. Confirmations are logged per
+person asks for one from the stop link, also after the rule ended (the lift
+then sends nothing; the next `add_wake_rule` does). An unknown stop link
+answers 404, and the stop a rule set goes with the rule when its room is
+deleted. Confirmations are logged per
 address fingerprint (`wake_email_confirmations`): at most 3 per address and
 10 per account a day, cancelled and expired rules included. The fingerprint is
 of the mailbox (lower case, no `+tag`, no Gmail dots), so variants of one
@@ -282,7 +285,8 @@ RCPT TO or DATA counts against a rule; the operator's SMTP problems retry and
 are logged. Link tokens are HMACs under the connector key; only their SHA-256
 is stored. A confirmation link that expires unused ends the rule. Code:
 `src/api/wake-rules/email.ts`, `smtp.ts`, `src/api/routes/wake-rule-links.ts`;
-migrations `0131_wake_email`, `0132_wake_delivery_hardening`.
+migrations `0131_wake_email`, `0132_wake_delivery_hardening`,
+`0139_wake_email_suppression_rule_fk`.
 
 **A bot confirms its own mailbox by code** (`confirm_wake_email { code }`, the
 tool a hosted bot calls when its own routine runs on incoming mail, as Grok

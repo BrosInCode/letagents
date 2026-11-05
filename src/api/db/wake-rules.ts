@@ -618,7 +618,36 @@ export async function endUnconfirmedWakeEmailRule(rule: WakeRuleRow, now = new D
 export type WakeLinkOutcome =
   | { outcome: "done"; rule: WakeRuleRow }
   | { outcome: "already"; rule: WakeRuleRow }
-  | { outcome: "expired" | "ended" | "unknown" | "conflict" | "limited" | "not_yours" };
+  /** The rule is over. `stopped` (stop links only) says whether its address still refuses new requests. */
+  | { outcome: "ended"; stopped?: boolean }
+  /** An ended rule's address refuses requests no more; nothing was sent, the next `add_wake_rule` asks it. */
+  | { outcome: "lifted" }
+  | { outcome: "expired" | "unknown" | "conflict" | "limited" | "not_yours" };
+
+/** The rule's address pressed Stop and has not asked again. */
+async function ruleAddressStoppedTx(tx: MessageCreateTransaction, rule: Pick<WakeRuleRow, "delivery_target_fingerprint">): Promise<boolean> {
+  return rule.delivery_target_fingerprint ? addressSuppressedTx(tx, rule.delivery_target_fingerprint) : false;
+}
+
+/**
+ * What a stop link can do when it is opened: stop the rule (it is active,
+ * waiting for its address or already paused), or, once the rule ended, lift the
+ * stop its address pressed. The rule row and its token hash are never deleted,
+ * so a link from an old email keeps working for as long as the stop stands.
+ */
+export type WakeStopLinkState =
+  | { state: "unknown" }
+  | { state: "open" }
+  | { state: "ended"; stopped: boolean };
+
+export async function describeWakeEmailStopLink(tokenHash: string): Promise<WakeStopLinkState> {
+  return db.transaction(async (tx) => {
+    const [rule] = await tx.select().from(agent_wake_rules).where(eq(agent_wake_rules.disable_token_hash, tokenHash)).limit(1);
+    if (!rule) return { state: "unknown" };
+    if ((HELD_STATUSES as readonly string[]).includes(rule.status)) return { state: "open" };
+    return { state: "ended", stopped: await ruleAddressStoppedTx(tx, rule) };
+  });
+}
 
 /**
  * Confirm an email rule's address by the hash of its confirmation link. The
@@ -701,7 +730,9 @@ export async function stopWakeEmailRule(tokenHash: string, now = new Date()): Pr
     }
     const [known] = await tx.select().from(agent_wake_rules).where(eq(agent_wake_rules.disable_token_hash, tokenHash)).limit(1);
     if (!known) return { outcome: "unknown" };
-    return known.status === "paused" ? { outcome: "already", rule: known } : { outcome: "ended" };
+    if (known.status === "paused") return { outcome: "already", rule: known };
+    // The rule is over; its stop link can still lift the stop of its address.
+    return { outcome: "ended", stopped: await ruleAddressStoppedTx(tx, known) };
   });
 }
 
@@ -709,6 +740,14 @@ export async function stopWakeEmailRule(tokenHash: string, now = new Date()): Pr
  * The person behind a stopped address asks, from the stop page, to allow
  * requests again: the stop is lifted and one new confirmation is sent, within
  * the address's and the account's daily budgets. Confirming it resumes the rule.
+ *
+ * When the rule is already over (cancelled, expired, retired, or a paused rule
+ * past its own expiry), there is nothing to resume: the stop is lifted and
+ * nothing is sent. The next `add_wake_rule` for the address sends the
+ * confirmation, under the same daily budgets. Without a stop to lift the link
+ * only reports that (`stopped: false`). The link of a rule that is active or
+ * still waiting for its address lifts nothing, as before: that rule could
+ * still send, and a stop another rule set for the address must hold.
  */
 export async function requestWakeEmailConfirmationAgain(
   tokenHash: string,
@@ -721,8 +760,16 @@ export async function requestWakeEmailConfirmationAgain(
     return await db.transaction(async (tx) => {
       const [rule] = await tx.select().from(agent_wake_rules).where(eq(agent_wake_rules.disable_token_hash, tokenHash)).limit(1);
       if (!rule) return { outcome: "unknown" } as const;
-      if (rule.status !== "paused" || !rule.delivery_target_fingerprint) return { outcome: "ended" } as const;
-      if (rule.expires_at && Date.parse(rule.expires_at) <= now.getTime()) return { outcome: "ended" } as const;
+      if (!rule.delivery_target_fingerprint) return { outcome: "ended", stopped: false } as const;
+      const pastExpiry = Boolean(rule.expires_at && Date.parse(rule.expires_at) <= now.getTime());
+      const over = !(HELD_STATUSES as readonly string[]).includes(rule.status) || (rule.status === "paused" && pastExpiry);
+      if (over) {
+        const lifted = await tx.execute(sql`DELETE FROM wake_email_suppressions WHERE address_fingerprint = ${rule.delivery_target_fingerprint}`);
+        if (!lifted.rowCount) return { outcome: "ended", stopped: false } as const;
+        console.info(`[wake email] an address lifted its stop from the link of ended rule ${rule.id}; nothing was sent.`);
+        return { outcome: "lifted" } as const;
+      }
+      if (rule.status !== "paused") return { outcome: "ended" } as const;
       await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`wake-delivery-account:${rule.owner_account_id}`}, 0))`);
       await tx.execute(sql`DELETE FROM wake_email_suppressions WHERE address_fingerprint = ${rule.delivery_target_fingerprint}`);
       const [pending] = await tx.update(agent_wake_rules).set({
