@@ -450,11 +450,17 @@ export class SupervisorGrantCoordinator {
     else assertRentalSafePermissionProfile(input.providerId, input.permissionProfileId);
     return this.serialize(entryId, async () => {
       await this.daemon.ensureRunning();
-      const roomId = await this.resolveRoomId(input.roomIdentifier);
+      // A guest's room belongs to someone else (the renter, or the person who
+      // asked for an agent), and rooms admit their members only, so the join
+      // that resolveRoomId makes as the owner is refused there. The server
+      // named the room when it minted this grant: that is the room, and the
+      // caller's identifier must be that same id.
+      const roomId = input.roomIdentifier.trim();
       const agentKey = input.agentKey.trim();
       const grant = input.preparedGrant;
       if (!agentKey || !grant.token.trim()) throw new Error("Rental launch authority is incomplete.");
-      if (grant.metadata.allowedRoomIds.length !== 1
+      if (!roomId
+        || grant.metadata.allowedRoomIds.length !== 1
         || grant.metadata.allowedRoomIds[0] !== roomId
         || grant.metadata.allowedAgentKeys.length !== 1
         || grant.metadata.allowedAgentKeys[0] !== agentKey) {

@@ -317,6 +317,41 @@ test("fresh rental launch queues its accepted task once while recovery paths omi
   assert.deepEqual(h.bootstrapMessages, [undefined], "an existing agent bootstrap never replays its stored legacy charter");
 });
 
+/**
+ * A rental or an agent given through "Ask for an agent" runs in a room its
+ * owner is no member of, and rooms admit their members only: the owner's own
+ * join (resolveRoomId) answers 403 there. The server named the room in the
+ * grant, so a guest launch never joins, and a room the grant did not name is
+ * refused before anything is saved.
+ */
+test("a guest launch never joins the room as its owner: the grant's room is the room", async () => {
+  const h = harness();
+  const request = (async () => { throw new Error("unexpected request"); }) as never;
+  let joins = 0;
+  const refusedJoin = async () => { joins += 1; throw new Error("HTTP 403: membership_required"); };
+  const coordinator = new SupervisorGrantCoordinator(h.daemon as never, request, () => "host_1", h.operations, refusedJoin);
+  const guest = (roomIdentifier: string) => ({
+    creationRequestId: "rental_ask_1234567890abcdef1234567890abcdef",
+    roomIdentifier, displayName: "Sam's helper", providerId: "codex" as const,
+    charter: "help Sam", model: null, permissionProfileId: "read_only", repoRootPath: null,
+    agentKey: "giver/helper",
+    preparedGrant: { metadata: metadata("giver/helper", "grant_ask", "room_of_asker"), authority: null, token: "secret_gift" },
+  });
+  const given = await coordinator.createRentalPausedAndInstall(guest("room_of_asker"));
+  assert.equal(joins, 0, "the owner's own join is never made for a guest's room");
+  assert.equal(given.entry.roomId, "room_of_asker", "the entry is saved in the room the grant named");
+  assert.ok(h.events.includes("create:room_of_asker"), "the daemon saves the entry in the grant's room");
+  assert.deepEqual(h.createOptions, [{ desiredState: "paused" }]);
+
+  h.events.length = 0;
+  await assert.rejects(
+    coordinator.createRentalPausedAndInstall({ ...guest("another_room"), creationRequestId: "rental_ask_fedcba0987654321fedcba0987654321" }),
+    /does not match the selected room and agent/,
+  );
+  assert.equal(joins, 0);
+  assert.ok(!h.events.some((event) => event.startsWith("create:")), "a room the grant did not name is refused before anything is saved");
+});
+
 test("fresh Open Model launch installs the desktop-held endpoint credential before convergence", async () => {
   for (const savedModel of ["qwen/default-model", "qwen/agent-model"]) {
     const h = harness();
