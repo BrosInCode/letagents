@@ -41,6 +41,7 @@ import {
 } from "./identity.js";
 import { withJoinRoomAgentPrompt } from "./messages.js";
 import { syncRoomPresence } from "./presence.js";
+import { JOIN_NEXT_STEP } from "./wake-up.js";
 import {
   rememberRoom,
   toPublicRoomResponse,
@@ -342,6 +343,9 @@ const LEGACY_WORKER_HELD_NEXT_STEP =
  * another process would look held. Two chats served by the same process or
  * credential see the same answer, so "worker_held" says that a worker exists
  * here. It does not say that the worker is this chat's.
+ *
+ * A controller-only answer also carries `next_step`: the one sentence a bot
+ * that was handed a room code follows next (register, then say hi).
  */
 async function workerStatusJoinFields(roomId: string): Promise<Record<string, unknown>> {
   if (requireValidWorkerBearerRuntime().mode !== "owner") return {};
@@ -370,7 +374,7 @@ async function workerStatusJoinFields(roomId: string): Promise<Record<string, un
   }
   return legacyHeld
     ? { worker_status: "worker_held", worker_next_step: LEGACY_WORKER_HELD_NEXT_STEP }
-    : { worker_status: "controller_only", worker_next_step: CONTROLLER_ONLY_NEXT_STEP };
+    : { worker_status: "controller_only", worker_next_step: CONTROLLER_ONLY_NEXT_STEP, next_step: JOIN_NEXT_STEP };
 }
 
 export async function createInviteRoom(): Promise<{

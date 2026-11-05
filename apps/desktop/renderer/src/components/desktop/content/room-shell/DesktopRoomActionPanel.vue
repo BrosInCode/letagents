@@ -104,6 +104,14 @@
               </button>
             </div>
           </div>
+
+          <div v-if="cloudRoom" class="room-settings-row room-invite-bot-row" data-testid="desktop-room-invite-bot">
+            <div class="room-settings-row-copy">
+              <p class="room-settings-row-title">Invite a bot</p>
+              <p class="room-settings-row-description">One message for the bot's owner. Their bot connects, joins this room and is guided from there.</p>
+            </div>
+            <InviteBotSection :room="inviteBotRoom" />
+          </div>
         </div>
       </section>
 
@@ -382,6 +390,8 @@ import RoomGitHubEventFilter from "./RoomGitHubEventFilter.vue";
 import SmoothHeight from "./SmoothHeight.vue";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import { usePinnedMessageVisibility } from "../../../../../../../../shared/ui/usePinnedMessageVisibility";
+import InviteBotSection from "../../../../../../../../shared/ui/InviteBotSection.vue";
+import { inviteBotConnectorUrl, type InviteBotRoom } from "../../../../../../../../shared/ui/invite-bot";
 import { useSectionScrollSpy } from "./useSectionScrollSpy";
 import type {
   DesktopGitHubIntegrationStatus,
@@ -461,6 +471,23 @@ interface SectionLink {
 const cloudRoom = computed(() => props.storage.effectiveMode === "cloud");
 const { activeSection, indicatorReady, syncActiveSection, releaseSectionLock, goToSection } =
   useSectionScrollSpy<SectionId>(contentElement, "general");
+
+// The message a member hands to a friend for their bot: the room id (an ad-hoc
+// room's code, or github.com/owner/repo) and this server's connector address.
+const inviteBotRoom = computed<InviteBotRoom>(() => ({
+  roomId: props.room.identifier,
+  roomName: props.room.displayName,
+  gitRoom: props.room.gitRoom !== null,
+  connectorUrl: inviteBotConnectorUrl(roomOrigin.value),
+}));
+
+const roomOrigin = computed(() => {
+  try {
+    return new URL(props.roomUrl).origin;
+  } catch {
+    return null;
+  }
+});
 
 const shortRoomUrl = computed(() => {
   try {
@@ -799,3 +826,9 @@ function discardRenameOnEscape(event: KeyboardEvent): void {
   renameDraft.value = props.room.displayName;
 }
 </script>
+
+<style>
+.room-invite-bot-row {
+  display: block;
+}
+</style>
