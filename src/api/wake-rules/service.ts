@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import {
+  WAKE_RULE_LIMITS,
   WakeRuleError,
   parseWakeRuleEmail,
   parseWakeRuleInput,
@@ -11,10 +12,12 @@ import {
 import { loadConnectorCipher } from "../connectors/crypto.js";
 import {
   cancelWakeRule,
+  confirmWakeEmailRule,
   createWakeRule,
   getWakeRule,
   restoreWakeRule,
   roomHasRepository,
+  toWakeRule,
   wakeRuleEvaluationDeps,
   type WakeRuleRow,
   type WakeEmailConfirmation,
@@ -23,10 +26,12 @@ import {
   type WakeRuleViewer,
 } from "../db/wake-rules.js";
 import { db } from "../db/client.js";
+import { buildInMemoryListingsRateLimiter, type ListingsRateLimiter } from "../routes/rental/renter/rate-limiter.js";
 import { queueWakeRuleInvalidation } from "../server/events.js";
 import { WAKE_RULE_UNMERGED_CLOSE_GRACE_MS } from "./evaluate.js";
 import {
   EMAIL_NOT_CONFIGURED,
+  WAKE_LINK_TOKEN,
   hashWakeLinkToken,
   wakeEmailAddressFingerprint,
   wakeEmailConfigured,
@@ -117,6 +122,9 @@ function sealWakeEmail(agent: RuleAgent, value: unknown): WakeRuleDeliverySeal {
   };
 }
 
+/** How an email rule's address confirms: a person by the link, a bot that owns the mailbox by the code. */
+const CONFIRM_NEXT_STEP = "Open the link from that mailbox and press Confirm, or, if the mailbox is yours as a bot, call confirm_wake_email with the code in the mail.";
+
 export async function addWakeRuleForAgent(input: {
   roomId: string;
   agent: RuleAgent;
@@ -161,11 +169,72 @@ export async function addWakeRuleForAgent(input: {
     created: result.created,
     confirmation: {
       ...result.confirmation,
-      next_step: result.confirmation.sent
-        ? "LetAgents emailed a confirmation request to the address. No room messages are emailed until the address confirms it (the link works for 24 hours)."
-        : "A confirmation request went to the address a few minutes ago and still works. No room messages are emailed until the address confirms it.",
+      next_step: (result.confirmation.sent
+        ? "LetAgents emailed a confirmation request to the address. No room messages are emailed until the address confirms it (the link works for 24 hours). "
+        : "A confirmation request went to the address a few minutes ago and still works. No room messages are emailed until the address confirms it. ")
+        + CONFIRM_NEXT_STEP,
     },
   };
+}
+
+export type WakeEmailCodeRefusal = "unknown_or_expired" | "not_yours" | "already_active" | "too_many_attempts";
+
+export type WakeEmailCodeResult =
+  | { confirmed: true; rule: WakeRule }
+  | { confirmed: false; error: WakeEmailCodeRefusal; message: string; status: number; rule?: WakeRule };
+
+const CODE_REFUSALS: Record<WakeEmailCodeRefusal, { status: number; message: string }> = {
+  unknown_or_expired: { status: 404, message: "No email rule is waiting for this code, or the code expired. Add the rule again for a new mail, then use the code in that mail." },
+  not_yours: { status: 403, message: "This code belongs to an email rule of another account's agent. Nothing changed." },
+  already_active: { status: 409, message: "This email rule is already active. Nothing changed." },
+  too_many_attempts: { status: 429, message: `You made ${WAKE_RULE_LIMITS.emailConfirmCodeAttempts} confirmation attempts in ${WAKE_RULE_LIMITS.emailConfirmCodeWindowMs / 60_000} minutes. Wait, then use the code from the newest mail.` },
+};
+
+/** Attempts per credential: a wrong code is guessed no faster than this. One process; the token has 256 bits anyway. */
+const allowConfirmAttempt: ListingsRateLimiter = buildInMemoryListingsRateLimiter({
+  capacity: WAKE_RULE_LIMITS.emailConfirmCodeAttempts,
+  windowMs: WAKE_RULE_LIMITS.emailConfirmCodeWindowMs,
+});
+
+/**
+ * `confirm_wake_email`: a bot confirms its own email rule with the code from
+ * the confirmation mail, which is the link's token. The checks are the page
+ * button's (lookup by SHA-256 of the token, not expired, still pending; a
+ * stopped address has no token, so its old code is unknown), plus one: the
+ * rule's agent must belong to the caller's account. Only the outcome class is
+ * logged, never the code.
+ */
+export async function confirmWakeEmailByCode(input: {
+  code: unknown;
+  accountId: string;
+  /** What the attempt budget is counted by: the owner token, OAuth grant or worker session behind the call. */
+  credentialKey: string;
+  now?: Date;
+}): Promise<WakeEmailCodeResult> {
+  const refuse = (error: WakeEmailCodeRefusal, rule?: WakeRule): WakeEmailCodeResult => {
+    console.info(`[wake email] confirm by code: ${error}`);
+    return { confirmed: false, error, ...CODE_REFUSALS[error], ...(rule ? { rule } : {}) };
+  };
+  if (!allowConfirmAttempt(input.credentialKey)) return refuse("too_many_attempts");
+  const code = typeof input.code === "string" ? input.code.trim().toLowerCase() : "";
+  if (!WAKE_LINK_TOKEN.test(code)) return refuse("unknown_or_expired");
+  const viewer: WakeRuleViewer = { accountId: input.accountId };
+  const result = await confirmWakeEmailRule(hashWakeLinkToken(code), input.now ?? new Date(), input.accountId);
+  switch (result.outcome) {
+    case "done":
+      queueWakeRuleInvalidation(result.rule.room_id);
+      console.info("[wake email] confirm by code: confirmed");
+      return { confirmed: true, rule: toWakeRule(result.rule, viewer) };
+    case "already":
+      return refuse("already_active", toWakeRule(result.rule, viewer));
+    case "conflict":
+      // The agent already holds the same rule another way; that one is the active one.
+      return refuse("already_active");
+    case "not_yours":
+      return refuse("not_yours");
+    default:
+      return refuse("unknown_or_expired");
+  }
 }
 
 /** Whether a person may cancel a webhook or email rule they do not own: room admins may. */

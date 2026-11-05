@@ -795,6 +795,7 @@ export const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused
   register_task_lease_action_intent: "refused",
   // Things that outlast the conversation or act later.
   publish_room_artifact: "refused", remember_room_fact: "refused", add_wake_rule: "refused", cancel_wake_rule: "refused",
+  confirm_wake_email: "refused",
 };
 
 /** Runs one bounded room turn and returns the exact `input` Codex received in `turn/start`. */

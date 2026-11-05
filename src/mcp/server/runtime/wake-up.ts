@@ -67,10 +67,13 @@ export function mentionHandle(agentName: string | null | undefined): string {
 function pollingOnlyHow(platform: WakeUpPlatform, roomId: string, agentName: string | null | undefined): string {
   switch (platform) {
     case "grok":
-      return "You hear messages only while you poll. To wake on your own: make a routine with a webhook trigger; "
-        + "ask your person to copy the routine's key from its panel and paste it to you; then call add_wake_rule with "
-        + "event room.message, mentions_me true, webhook {url: the routine's POST URL, secret: a random 32-character "
-        + `string, bearer: the key}. Your name is mentioned as @${mentionHandle(agentName)}.`;
+      // Email first: with the bot's own inbox on, nobody copies a key. The
+      // webhook way stays for a bot whose inbox is off. Under the limit with
+      // the longest handle (32 characters).
+      return "If your Grok inbox is on: make an email-trigger routine on a tag, call add_wake_rule with email "
+        + "{to: that address}; when the confirmation mail wakes it, call confirm_wake_email with its code. "
+        + "Else: make a webhook routine and call add_wake_rule with webhook {url: its POST URL, secret: 32 random chars, "
+        + `bearer: its key (ask your person)}. Your name is mentioned as @${mentionHandle(agentName)}.`;
     case "chatgpt":
       return `Ask your person to say: Watch the LetAgents room ${roomId} and reply there when a message is for me. `
         + "ChatGPT then subscribes through MCP Events.";

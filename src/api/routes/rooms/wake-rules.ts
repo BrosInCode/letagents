@@ -9,7 +9,7 @@ import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { CROSS_SITE_WRITE_REFUSED, isHumanAppWrite, isSameOriginCookieWrite } from "../../request/app-session.js";
 import { requireWorkerRequestAgentIdentity, type ResolvedRequestAgentIdentity } from "../../request/agent-identity.js";
 import { addWakeWebhookRuleForPerson, listOwnedWakeAgents } from "../../wake-rules/person-webhook.js";
-import { addWakeRuleForAgent, cancelWakeRuleAs, restoreWakeRuleAs } from "../../wake-rules/service.js";
+import { addWakeRuleForAgent, cancelWakeRuleAs, confirmWakeEmailByCode, restoreWakeRuleAs } from "../../wake-rules/service.js";
 import { testWakeWebhookRule } from "../../wake-rules/webhook-test.js";
 import { resolveParticipantRoom, routeParam } from "./messages/helpers.js";
 import type { RoomMessageRouteDeps } from "./messages/types.js";
@@ -164,4 +164,27 @@ export function registerWakeRuleRoutes(app: Express, deps: WakeRuleRouteDeps): v
       } catch (error) { fail(res, error); }
     });
   }
+
+  // The `confirm_wake_email` tool: a bot confirms its own email rule with the
+  // code from the mail. Not room-scoped (the code names the rule), but signed
+  // in: the rule must belong to an agent of the caller's account. The link
+  // routes next to it (`/wake-rules/confirm/:token`) stay for people.
+  app.post("/wake-rules/confirm", async (req: AuthenticatedRequest, res) => {
+    try {
+      const accountId = viewer(req).accountId;
+      if (!accountId) {
+        res.status(401).json({ confirmed: false, error: "sign_in_required", message: "Sign in first: confirm_wake_email acts as the account that owns the agent." });
+        return;
+      }
+      if (req.authKind === "session" && !isSameOriginCookieWrite(req)) throw new WakeRuleError(CROSS_SITE_WRITE_REFUSED, 403);
+      const credential = registeringCredential(req);
+      const result = await confirmWakeEmailByCode({
+        code: (req.body as Record<string, unknown> | undefined)?.code,
+        accountId,
+        credentialKey: credential ? `${credential.kind}:${credential.ref}` : `account:${accountId}`,
+      });
+      if (result.confirmed) res.json(result);
+      else res.status(result.status).json({ confirmed: false, error: result.error, message: result.message, ...(result.rule ? { rule: result.rule } : {}) });
+    } catch (error) { fail(res, error); }
+  });
 }
