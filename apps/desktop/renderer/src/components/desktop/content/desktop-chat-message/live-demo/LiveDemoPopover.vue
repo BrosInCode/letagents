@@ -55,6 +55,8 @@ function close(focusAnchor: boolean): void {
   emit("close");
   if (!focusAnchor) return;
   void nextTick(() => {
+    // Still open (a send on its way keeps it): the keyboard stays in it.
+    if (props.open) return;
     const anchor = props.anchor;
     const target = anchor && !anchor.matches(":disabled")
       ? anchor
@@ -63,11 +65,12 @@ function close(focusAnchor: boolean): void {
   });
 }
 
-// A click in the demo goes to its own page, not this one; the demo taking the keyboard is the sign.
+// A click in this card's demo goes to the demo's own page, not this one; the demo taking the keyboard is the sign.
+// Another card's demo can take focus as it starts, so only this card's counts.
 function onFocusIn(event: FocusEvent): void {
   const target = event.target;
-  if (!(target instanceof Node) || root.value?.contains(target) || props.anchor?.contains(target)) return;
-  if (target instanceof HTMLElement && target.tagName === "WEBVIEW") close(false);
+  if (!(target instanceof HTMLElement) || target.tagName !== "WEBVIEW") return;
+  if (props.container?.contains(target)) close(false);
 }
 
 function onPointerDown(event: PointerEvent): void {

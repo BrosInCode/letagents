@@ -681,7 +681,7 @@ button.live-demo-face:active {
  */
 .room-inline-demo-live-note {
   position: absolute;
-  bottom: 12px;
+  bottom: calc(12px + var(--live-lift, 0px));
   left: 50%;
   z-index: 6;
   display: flex;
@@ -703,7 +703,7 @@ button.live-demo-face:active {
 }
 
 .room-inline-demo.is-drawing .room-inline-demo-live-note {
-  bottom: 64px;
+  bottom: calc(64px + var(--live-lift, 0px));
 }
 
 .room-inline-demo-live-note.has-action {
@@ -1130,7 +1130,7 @@ button.live-demo-pin-dot:active {
 /* The drawing bar floats over the bottom of what the card shows, on glass. */
 .live-demo-palette {
   position: absolute;
-  bottom: 14px;
+  bottom: calc(14px + var(--live-lift, 0px));
   left: 50%;
   z-index: 5;
   display: flex;

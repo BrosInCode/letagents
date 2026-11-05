@@ -1861,6 +1861,7 @@ describe("marks that wait for the link", () => {
     for (let index = 0; index < 4; index++) t.session.queueMark({ kind: "pin", at: [index, 1], text: `Pin ${index}` });
     await settle();
     assert.equal(t.added.length, 1, "the waiting retry keeps its time");
+    assert.ok(t.session.pending.value.every((entry) => entry.waiting), "the marks behind the waiting one wait too, and show so");
     for (let round = 0; round < PENDING_MAX_LIVE_FAILURES + 2; round++) {
       t.runTimers();
       await settle();
@@ -1872,6 +1873,51 @@ describe("marks that wait for the link", () => {
     await settle();
     assert.equal(t.session.pending.value.length, 0);
     assert.equal(t.server.size, 5);
+    assert.deepEqual(t.notices, ["info: Saved 5 marks."]);
+  });
+
+  it("starts the next mark at once when the waiting one in front is taken back", async () => {
+    const t = setup();
+    t.session.start("lease://one");
+    t.status("live");
+    await settle();
+    t.fail(RATE_LIMITED);
+    t.session.queueMark({ kind: "stroke", points: STROKE });
+    await settle();
+    t.session.queueMark({ kind: "pin", at: [1, 1], text: "Next" });
+    const [front, next] = t.session.pending.value;
+    t.fail(null);
+    t.session.cancelPending(front.key);
+    await settle();
+    assert.equal(t.liveTimers(), 0, "the old wait is gone");
+    assert.deepEqual([...t.server.keys()], [next.id]);
+    assert.equal(t.session.pending.value.length, 0);
+  });
+
+  it("keeps a delete through an outage and runs it when the link is back; the mark stays hidden meanwhile", async () => {
+    const t = setup();
+    t.session.start("lease://one");
+    t.status("live");
+    await settle();
+    // The save lands, its answer is lost, then the link goes down.
+    t.loseAnswers(true);
+    t.session.queueMark({ kind: "pin", at: [1, 2], text: "Oops" });
+    await settle();
+    const entry = t.session.pending.value[0];
+    t.status("reconnecting");
+    t.failRemoves(99);
+    t.session.cancelPending(entry.key);
+    for (let round = 0; round < 3; round++) {
+      t.runTimers();
+      await settle();
+    }
+    assert.ok(t.server.has(entry.id), "the delete has not reached the server yet");
+    t.loseAnswers(false);
+    t.failRemoves(0);
+    t.status("live");
+    await settle();
+    assert.equal(t.server.size, 0, "deleted once the link is back");
+    assert.ok(t.session.marks.value.every((mark) => mark.id !== entry.id), "the reloaded list does not bring it back");
   });
 
   it("gives a mark up when the server refuses it while the link works", async () => {

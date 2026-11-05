@@ -136,7 +136,7 @@
       ref="clip"
       class="room-inline-demo-clip"
       :class="{ 'is-clipped': clipState?.clipped }"
-      :style="clipState?.clipped ? { height: `${clipState.visibleHeight + 2}px` } : undefined"
+      :style="{ ...(clipState?.clipped ? { height: `${clipState.visibleHeight + 2}px` } : {}), '--live-lift': `${liveLift}px` }"
     >
       <div
         ref="body"
@@ -739,8 +739,9 @@ function observeWidth(): void {
  * A short line over the demo. One with an action (Undo, Open thread) stays 6 s,
  * and a plain line does not push it out; an error does.
  */
-function showNote(text: string, error: boolean, action?: { label: string; run: () => void }): void {
-  if (!error && !action && note.value?.action) return;
+function showNote(text: string, error: boolean, action?: { label: string; run: () => void }, answersClick = false): void {
+  // A direct answer to a click is news the person waits for, so it may take the place of an Undo.
+  if (!error && !action && !answersClick && note.value?.action) return;
   clearTimeout(noteTimer);
   note.value = { id: ++noteSeq, text, error, action };
   noteTimer = setTimeout(() => { note.value = null; }, error ? 8_000 : action ? 6_000 : 4_000);
@@ -812,6 +813,42 @@ function endPin(): void {
   pinning.value = false;
   if (!drawing.value) void nextTick(() => toolButton("pin")?.focus({ preventScroll: true }));
 }
+
+// While drawing, the bar (and a note) rise by how far the card runs past the bottom of the
+// list, so a card taller than the window ("Show all") keeps Undo and Done in view.
+const liveLift = ref(0);
+let liftFrame = 0;
+let liftScroller: HTMLElement | null = null;
+
+function measureLift(): void {
+  liftFrame = 0;
+  const box = clip.value;
+  if (!box || !liftScroller || !drawing.value) {
+    liveLift.value = 0;
+    return;
+  }
+  const c = box.getBoundingClientRect();
+  const view = liftScroller.getBoundingClientRect();
+  liveLift.value = Math.round(Math.max(0, Math.min(c.bottom - view.bottom, c.height - 80)));
+}
+
+function scheduleLift(): void {
+  if (!liftFrame) liftFrame = requestAnimationFrame(measureLift);
+}
+
+function followScroll(on: boolean): void {
+  liftScroller?.removeEventListener("scroll", scheduleLift);
+  window.removeEventListener("resize", scheduleLift);
+  liftScroller = on && card.value ? outermostScroller(card.value) : null;
+  if (on) {
+    liftScroller?.addEventListener("scroll", scheduleLift, { passive: true });
+    window.addEventListener("resize", scheduleLift);
+  }
+  scheduleLift();
+}
+
+watch(drawing, (on) => followScroll(on));
+watch([showAll, frameHeight], () => scheduleLift());
 
 // Offline or refused: Pin and Draw are off, so their modes end too.
 watch(canMark, (can) => {
@@ -899,7 +936,7 @@ async function findPerson(cid: string): Promise<void> {
   const name = live.people.value.find((person) => person.cid === cid)?.name ?? "This person";
   const at = overlay.value?.cursorAt(cid) ?? null;
   if (!at) {
-    showNote(`${name} is not pointing at the demo now.`, false);
+    showNote(`${name} is not pointing at the demo now.`, false, undefined, true);
     return;
   }
   if (clipState.value?.clipped && at.y > clipState.value.visibleHeight - 24) {
@@ -1120,6 +1157,8 @@ onActivated(() => {
 
 onBeforeUnmount(() => {
   stopNotices();
+  followScroll(false);
+  if (liftFrame) cancelAnimationFrame(liftFrame);
   observer?.disconnect();
   resizeObserver?.disconnect();
   clearTimeout(noteTimer);

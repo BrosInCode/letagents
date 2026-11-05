@@ -147,6 +147,14 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
   // Taken back while their save was on its way.
   const cancelled = new Set<number>();
   let cancelRetry: (() => void) | null = null;
+  /**
+   * Marks of yours to delete that may be saved (a save whose answer was lost).
+   * A delete that fails waits for the link like a save, and the mark stays
+   * hidden meanwhile, so it cannot come back with the next list.
+   */
+  const deleteQueue = new Map<string, { room: string; attempts: number }>();
+  let flushingDeletes = false;
+  let cancelDeleteRetry: (() => void) | null = null;
   // Marks that had to wait and are saved now; the person hears about them once the queue is empty.
   let savedAfterWait = 0;
 
@@ -177,7 +185,7 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
     try {
       const listed = await api.listMarks(target.room, target.key);
       if (run !== generation) return;
-      marks.value = applyMarkChanges(listed, changes);
+      marks.value = applyMarkChanges(listed, changes).filter((mark) => !deleteQueue.has(mark.id));
       for (const mark of marks.value) settlePendingBy(mark);
     } catch {
       // The marks already on screen stay; the next reconnect tries again.
@@ -218,6 +226,7 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
       }
       // The link is back: save what waited now, not at the next timer.
       if (event.status === "live" && pending.value.some((entry) => entry.waiting)) void flushPending();
+      if (event.status === "live" && deleteQueue.size > 0) void flushDeletes();
       return;
     }
     const frame = event.frame;
@@ -251,6 +260,8 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
         wake();
         break;
       case "mark":
+        // A mark of yours on its way out stays out.
+        if (deleteQueue.has(frame.mark.id)) break;
         marks.value = mergeMark(marks.value, frame.mark);
         loadingMarks?.push({ t: "mark", mark: frame.mark });
         settlePendingBy(frame.mark);
@@ -389,24 +400,45 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
     if (!target) return;
     pending.value = [...pending.value, {
       key: ++pendingSeq, id: newDemoMarkId(), room: target.room, demo: target.key, body,
-      waiting: false, attempts: 0, liveFailures: 0,
+      // Behind a mark that waits, this one waits too.
+      waiting: Boolean(cancelRetry), attempts: 0, liveFailures: 0,
     }];
     // A wait that is set keeps its time: a new mark does not hurry the one in front of it.
     if (!cancelRetry) void flushPending();
   }
 
-  /**
-   * Deletes a mark that may be saved, at a pace the server accepts. Gone already
-   * counts as deleted (main says so); a last failure is left, as nothing waits for it.
-   */
-  async function removeQuietly(room: string, id: string): Promise<void> {
-    for (let tries = 1; tries <= DELETE_TRIES; tries++) {
-      try {
-        await api.removeMark(room, id);
-        return;
-      } catch {
-        if (tries < DELETE_TRIES) await new Promise<void>((resolve) => { delay(DELETE_RETRY_MS, resolve); });
+  /** Deletes a mark of yours that may be saved; it waits for the link if it must. Gone already counts as deleted. */
+  function queueDelete(room: string, id: string): void {
+    marks.value = removeMark(marks.value, id);
+    deleteQueue.set(id, { room, attempts: 0 });
+    if (!cancelDeleteRetry) void flushDeletes();
+  }
+
+  async function flushDeletes(): Promise<void> {
+    if (flushingDeletes) return;
+    flushingDeletes = true;
+    cancelDeleteRetry?.();
+    cancelDeleteRetry = null;
+    try {
+      for (const [id, entry] of [...deleteQueue]) {
+        try {
+          await api.removeMark(entry.room, id);
+          deleteQueue.delete(id);
+        } catch {
+          entry.attempts++;
+          if (entry.attempts >= PENDING_MAX_ATTEMPTS) {
+            deleteQueue.delete(id);
+            continue;
+          }
+          cancelDeleteRetry = delay(pendingRetryDelay(entry.attempts), () => {
+            cancelDeleteRetry = null;
+            void flushDeletes();
+          });
+          return;
+        }
       }
+    } finally {
+      flushingDeletes = false;
     }
   }
 
@@ -426,7 +458,7 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
           inFlightKey = null;
           if (cancelled.delete(entry.key)) {
             // Taken back while it was on its way; it may have reached the server anyway.
-            void removeQuietly(entry.room, entry.id);
+            queueDelete(entry.room, entry.id);
             continue;
           }
           // Settled by the server's copy while it was on its way.
@@ -441,8 +473,9 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
             notify({ text: ipcErrorText(error, `Could not save ${what}.`), error: true });
             continue;
           }
+          // The marks behind it wait too, and show so.
           pending.value = pending.value.map((other) =>
-            other.key === entry.key ? { ...other, waiting: true, attempts, liveFailures } : other);
+            other.key === entry.key ? { ...other, waiting: true, attempts, liveFailures } : { ...other, waiting: true });
           cancelRetry = delay(pendingRetryDelay(attempts), () => {
             cancelRetry = null;
             void flushPending();
@@ -453,8 +486,7 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
         if (cancelled.delete(entry.key)) {
           // Taken back while it saved: the person does not want it.
           dropPending(entry.key);
-          marks.value = removeMark(marks.value, saved.id);
-          void removeQuietly(entry.room, saved.id);
+          queueDelete(entry.room, saved.id);
           continue;
         }
         // False when the server's copy already settled it.
@@ -478,12 +510,16 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
   function cancelPending(key: number): MarkBody | null {
     const entry = pending.value.find((other) => other.key === key);
     if (!entry) return null;
+    const wasFirst = pending.value[0]?.key === key;
     if (key === inFlightKey) cancelled.add(key);
-    else if (entry.attempts > 0) {
-      marks.value = removeMark(marks.value, entry.id);
-      void removeQuietly(entry.room, entry.id);
-    }
+    else if (entry.attempts > 0) queueDelete(entry.room, entry.id);
     dropPending(key);
+    // The one in front waited for a retry; the next one need not wait out its time.
+    if (wasFirst && cancelRetry) {
+      cancelRetry();
+      cancelRetry = null;
+      void flushPending();
+    }
     return entry.body;
   }
 
