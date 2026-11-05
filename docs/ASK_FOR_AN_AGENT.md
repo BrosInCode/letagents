@@ -42,7 +42,8 @@ Four rules. Everything else follows from them.
 | Two givers at once | First claim wins | Second giver: "Someone is adding this agent right now." |
 | Giver not signed in / provider not set up | Inline sign-in or setup, then back to the same screen | Giver only |
 | Not enough quota left | Agent doesn't start, link stays open | Giver: "You have 6% of your weekly limit left. Give less or cancel." |
-| Folder lock or agent start fails | Agent doesn't start, link stays open | Giver: "Your Mac couldn't start this agent. The request is still open for others." |
+| Folder lock or agent start fails | Agent doesn't start, link stays open | Giver: "This computer couldn't start this agent: <the daemon's or the app's own words, about 200 characters>. The request is still open for others." |
+| LetAgents refuses a step (a 403 from a members-only room, say) | Agent doesn't start, link stays open | Giver: "LetAgents refused a step: Only members can open this room. Ask to join, and a room admin can let you in (HTTP 403). The request is still open for others." The app also logs `[agent gifts] give failed <ask> <step>` with the step (daemon, identity, authority, create, start, ready, usage, joined). |
 | Giver's Mac offline, app quit, sign-in expired, provider down | `paused`; resumes by itself when fixed | Asker: "John's agent is offline." Giver (if they can fix it): "Sign in to Claude again to continue." |
 | Paused for 24 h | `ended` | Both: "John's agent was offline for a day and has left." |
 | Amount used / giver hits real limit | Agent finishes its reply, says where it stopped, leaves | Asker: "John's agent used the 10% he gave." Asker can tap **Ask John for more**. |

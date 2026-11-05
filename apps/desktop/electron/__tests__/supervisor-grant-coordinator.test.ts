@@ -352,6 +352,103 @@ test("a guest launch never joins the room as its owner: the grant's room is the 
   assert.ok(!h.events.some((event) => event.startsWith("create:")), "a room the grant did not name is refused before anything is saved");
 });
 
+/**
+ * On restart the owner's path provisions a new grant through the owner's own
+ * room join and POST /supervisor-host-grants. For a guest both answer 403
+ * (members only), so a guest never joins. The daemon keeps a guest's grant in
+ * memory for the life of its process and renews it itself, while the copy
+ * saved here keeps the first expiry: a copy last installed into this very
+ * daemon generation means the daemon still holds the grant, so the guest is
+ * left alone; a copy installed into an earlier generation, or a daemon that
+ * reports lost authority, means the guest is stopped, with the reason.
+ */
+const GUEST_ID = "supervised_rental_ask_0123456789abcdef0123456789abcdef";
+function guestHarness(input: { stored: { lastInstalledDaemonGeneration: number | null } | null; entry: Partial<DesktopSupervisorManifestEntry> }) {
+  const h = harness();
+  const key = "giver/helper";
+  const guest = { ...entry(GUEST_ID), roomId: "room_of_asker", displayName: "Sam's helper", ...input.entry };
+  const counts = { joins: 0, provisions: 0 };
+  const daemon = { ...h.daemon, async list() { return [guest]; } };
+  const coordinator = new SupervisorGrantCoordinator(daemon as never, (async () => { throw new Error("unexpected request"); }) as never, () => "host_1", {
+    ...h.operations,
+    readEntryAgentKey: async () => key,
+    // The saved copy keeps the first expiry; the daemon renews its own with the bearer.
+    readGrant: async () => input.stored && { metadata: { ...metadata(key, "grant_ask", "room_of_asker"), expiresAt: "2000-01-01T00:00:00.000Z" },
+      authority: null, token: "secret_gift", entryId: GUEST_ID, lastInstalledDaemonGeneration: input.stored.lastInstalledDaemonGeneration },
+    provision: async () => { counts.provisions += 1; throw new Error("HTTP 403: room_membership_required"); },
+  }, async () => { counts.joins += 1; throw new Error("HTTP 403: room_membership_required"); });
+  return { ...h, guest, counts, coordinator };
+}
+
+test("a guest whose saved access went into an earlier daemon is stopped on restart, with the reason, and never joins as the owner", async () => {
+  const g = guestHarness({ stored: { lastInstalledDaemonGeneration: 6 }, entry: { observedState: "recovering", agentSessionBindingState: "none" } });
+  await assert.rejects(g.coordinator.reconcileDesiredRunning(),
+    /Sam's helper runs as a guest in someone else's room and its saved access expired\. This computer cannot renew a guest's access, so the agent was stopped\. Remove it, then give or rent it again\.$/);
+  assert.deepEqual(g.counts, { joins: 0, provisions: 0 }, "no owner join and no owner provisioning for a guest's room");
+  assert.ok(g.events.includes(`set-desired:${GUEST_ID}:stopped`), "the guest is stopped");
+  assert.ok(!g.events.some((event) => event.startsWith("install:")), "nothing is installed");
+});
+
+test("a guest whose saved access went into this same daemon is left alone, even while it restarts with an expired saved copy", async () => {
+  const g = guestHarness({ stored: { lastInstalledDaemonGeneration: 7 }, entry: { observedState: "recovering", agentSessionBindingState: "none" } });
+  await g.coordinator.reconcileDesiredRunning();
+  assert.deepEqual(g.counts, { joins: 0, provisions: 0 });
+  assert.ok(!g.events.some((event) => event.startsWith("set-desired:")), "a guest the daemon still holds is not stopped");
+  assert.ok(!g.events.some((event) => event.startsWith("install:")), "an expired copy is not installed over the daemon's live one");
+});
+
+test("a guest the daemon reports without authority is stopped even when its saved access went into this daemon", async () => {
+  const g = guestHarness({ stored: { lastInstalledDaemonGeneration: 7 }, entry: { observedState: "recovering", condition: "auth_blocked" } });
+  await assert.rejects(g.coordinator.reconcileDesiredRunning(), /so the agent was stopped\. Remove it, then give or rent it again\.$/);
+  assert.ok(g.events.includes(`set-desired:${GUEST_ID}:stopped`));
+  assert.deepEqual(g.counts, { joins: 0, provisions: 0 });
+});
+
+test("a paused guest that Start reaches keeps its state and gets the reason", async () => {
+  const g = guestHarness({ stored: { lastInstalledDaemonGeneration: 6 }, entry: { desiredState: "paused", observedState: "paused", agentSessionBindingState: "none" } });
+  let activated = false;
+  await assert.rejects(g.coordinator.activateEntry(g.guest, async () => { activated = true; }), /so the agent cannot start\. Remove it, then give or rent it again\.$/);
+  assert.equal(activated, false, "activation never follows a failed reconcile");
+  assert.ok(!g.events.some((event) => event.startsWith("set-desired:")), "a paused gift stays paused for its asker's acceptance");
+  assert.deepEqual(g.counts, { joins: 0, provisions: 0 });
+});
+
+test("a guest whose provider crashed in this same daemon is left to the daemon's restart, not stopped", async () => {
+  // The daemon writes failed + none while it starts a replacement with the grant it still holds.
+  const g = guestHarness({ stored: { lastInstalledDaemonGeneration: 7 }, entry: { observedState: "failed", condition: "none", agentSessionBindingState: "historical" } });
+  await g.coordinator.reconcileDesiredRunning();
+  assert.ok(!g.events.some((event) => event.startsWith("set-desired:")), "a crash the daemon restarts is not lost access");
+  assert.deepEqual(g.counts, { joins: 0, provisions: 0 });
+});
+
+test("Start on a retired stopped guest gets the reason: retirement took the daemon's grant with it", async () => {
+  // Retirement clears last_worker_binding with the grant, so a retired entry has no binding left.
+  const g = guestHarness({ stored: { lastInstalledDaemonGeneration: 7 }, entry: { desiredState: "stopped", observedState: "stopped", agentSessionBindingState: "none" } });
+  let activated = false;
+  await assert.rejects(g.coordinator.activateEntry(g.guest, async () => { activated = true; }), /so the agent cannot start\. Remove it, then give or rent it again\.$/);
+  assert.equal(activated, false);
+  assert.ok(!g.events.some((event) => event.startsWith("set-desired:")), "nothing changes a stopped entry's state");
+  assert.deepEqual(g.counts, { joins: 0, provisions: 0 });
+});
+
+test("a guest that was only stopped, not retired, keeps its last binding, and Start is left to the daemon", async () => {
+  // Stop leaves last_worker_binding in place; the daemon may still hold the grant it renewed while the guest ran.
+  const g = guestHarness({ stored: { lastInstalledDaemonGeneration: 7 }, entry: { desiredState: "stopped", observedState: "stopped", agentSessionBindingState: "historical" } });
+  let activated = false;
+  await g.coordinator.activateEntry(g.guest, async () => { activated = true; });
+  assert.equal(activated, true, "a day-old guest that was stopped can start again on the daemon's own grant");
+  assert.deepEqual(g.counts, { joins: 0, provisions: 0 });
+  assert.ok(!g.events.some((event) => event.startsWith("install:")), "an expired copy is not installed over the daemon's live one");
+});
+
+test("a guest with no saved record at all is left to the daemon, and never joins", async () => {
+  const g = guestHarness({ stored: null, entry: { observedState: "idle" } });
+  await g.coordinator.reconcileDesiredRunning();
+  assert.deepEqual(g.counts, { joins: 0, provisions: 0 });
+  assert.ok(!g.events.some((event) => event.startsWith("set-desired:")), "nothing here can tell, so nothing is stopped");
+  assert.ok(!g.events.some((event) => event.startsWith("install:")));
+});
+
 test("fresh Open Model launch installs the desktop-held endpoint credential before convergence", async () => {
   for (const savedModel of ["qwen/default-model", "qwen/agent-model"]) {
     const h = harness();

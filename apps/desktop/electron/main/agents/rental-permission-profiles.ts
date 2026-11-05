@@ -53,6 +53,15 @@ export function isGivenAgentEntryId(entryId: string | null | undefined): boolean
   return Boolean(entryId?.startsWith("supervised_rental_ask_"));
 }
 
+/**
+ * Entries that run as a guest in a room their owner is no member of: a rental
+ * from the marketplace, or an agent given through Ask for an agent. Every
+ * guest safeguard keys on this prefix.
+ */
+export function isGuestEntryId(entryId: string | null | undefined): boolean {
+  return Boolean(entryId?.startsWith("supervised_rental_"));
+}
+
 function profilesFrom(
   table: typeof RENTAL_SAFE_PROFILE_IDS,
   providerId: DesktopAgentProviderId,
