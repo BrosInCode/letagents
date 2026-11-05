@@ -39,7 +39,7 @@ export type LiveDemoServerFrame =
   | { t: 'ink'; demo: string; cid: string; id: string; pts: LiveDemoPoint[]; end?: true }
   | { t: 'mark'; demo: string; mark: DemoMark }
   | { t: 'unmark'; demo: string; id: string }
-  | { t: 'error'; code: string; message: string; demo?: string };
+  | { t: 'error'; code: string; message: string; demo?: string; retry_after_ms?: number };
 
 export function liveDemoKey(messageId: string, attachmentId: string): string | null;
 export function isLiveDemoKey(value: unknown): value is string;

@@ -12,7 +12,10 @@ const DEFAULT_FILE_NAME = "demo-marks.png";
  * The part of the window to capture, in window points. The chat measures in
  * its CSS px (getBoundingClientRect); `capturePage` takes points, which the
  * app's zoom scales (measured in Electron 42: at zoom 1.25 a 200 point
- * rectangle holds 160 CSS px). Cut to the window; null when nothing is left.
+ * rectangle holds 160 CSS px). The chat has already cut the card to what is
+ * visible, so each edge rounds inward: a clip edge at 700.2 never takes in
+ * pixel 700, the composer's first row. Cut to the window; null when nothing
+ * is left.
  */
 export function demoMarkupCaptureRect(
   rect: unknown,
@@ -27,17 +30,19 @@ export function demoMarkupCaptureRect(
   if ((width as number) <= 0 || (height as number) <= 0) return null;
   const zoom = Number.isFinite(appZoom) && appZoom > 0 ? appZoom : 1;
   const clamp = (value: number, max: number) => Math.min(max, Math.max(0, value));
-  const left = clamp(Math.floor((x as number) * zoom), windowSize.width);
-  const top = clamp(Math.floor((y as number) * zoom), windowSize.height);
-  const right = clamp(Math.ceil(((x as number) + (width as number)) * zoom), windowSize.width);
-  const bottom = clamp(Math.ceil(((y as number) + (height as number)) * zoom), windowSize.height);
+  // Rounding noise (10 × 1.1 is 11.000000000000002) must not move an edge by a whole pixel.
+  const points = (value: number) => Math.round(value * zoom * 1000) / 1000;
+  const left = clamp(Math.ceil(points(x as number)), windowSize.width);
+  const top = clamp(Math.ceil(points(y as number)), windowSize.height);
+  const right = clamp(Math.floor(points((x as number) + (width as number))), windowSize.width);
+  const bottom = clamp(Math.floor(points((y as number) + (height as number))), windowSize.height);
   return right - left >= 1 && bottom - top >= 1 ? { x: left, y: top, width: right - left, height: bottom - top } : null;
 }
 
 /** A plain file name ending in .png; no folders, no control characters. */
 export function demoMarkupFileName(raw: unknown): string {
   const cleaned = typeof raw === "string"
-    ? raw.replace(/[\u0000-\u001f\u007f-\u009f؜‎‏‪-‮⁦-⁩]/g, "").replace(/[\\/:*?"<>|]/g, "-").trim()
+    ? raw.replace(/[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "").replace(/[\\/:*?"<>|]/g, "-").trim()
     : "";
   const base = cleaned.replace(/\.png$/i, "").replace(/^\.+/, "").slice(0, 120).trim();
   return base ? `${base}.png` : DEFAULT_FILE_NAME;

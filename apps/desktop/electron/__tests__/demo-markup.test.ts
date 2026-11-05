@@ -84,9 +84,19 @@ test("the capture rectangle is the chat's CSS px times the app's zoom, cut to th
   const size = { width: 1200, height: 800 };
   assert.deepEqual(demoMarkupCaptureRect({ x: 100, y: 50, width: 400, height: 300 }, 1, size), { x: 100, y: 50, width: 400, height: 300 });
   // Measured in Electron 42: at app zoom 1.25, capturePage takes window points, not CSS px.
-  assert.deepEqual(demoMarkupCaptureRect({ x: 100.4, y: 50, width: 400, height: 300 }, 1.25, size), { x: 125, y: 62, width: 501, height: 376 });
+  // Each edge rounds inward: 125.5 to 126 and 625.5 to 625 across, 62.5 to 63 and 437.5 to 437 down.
+  assert.deepEqual(demoMarkupCaptureRect({ x: 100.4, y: 50, width: 400, height: 300 }, 1.25, size), { x: 126, y: 63, width: 499, height: 374 });
   assert.deepEqual(demoMarkupCaptureRect({ x: -50, y: 600, width: 2000, height: 500 }, 1.25, size), { x: 0, y: 750, width: 1200, height: 50 });
   assert.equal(demoMarkupCaptureRect({ x: 0, y: 900, width: 100, height: 100 }, 1, size), null, "below the window");
+  // A clip edge at 700.2 points (the composer starts at row 700) never takes in row 700.
+  assert.deepEqual(demoMarkupCaptureRect({ x: 0, y: 400, width: 100, height: 160.16 }, 1.25, size), { x: 0, y: 500, width: 125, height: 200 });
+  assert.deepEqual(demoMarkupCaptureRect({ x: 0, y: 0, width: 100, height: 700.2 }, 1, size), { x: 0, y: 0, width: 100, height: 700 });
+  // Rounding noise does not cost a pixel: 10 × 1.1 is 11.000000000000002.
+  assert.deepEqual(demoMarkupCaptureRect({ x: 10, y: 10, width: 100, height: 100 }, 1.1, size), { x: 11, y: 11, width: 110, height: 110 });
+  // A sliver that holds no whole pixel once rounded inward is refused.
+  assert.equal(demoMarkupCaptureRect({ x: 10.1, y: 10, width: 0.5, height: 100 }, 1, size), null);
+  assert.equal(demoMarkupCaptureRect({ x: 10, y: 10.6, width: 100, height: 0.9 }, 1, size), null);
+  assert.deepEqual(demoMarkupCaptureRect({ x: 10, y: 10.6, width: 100, height: 1.4 }, 1, size), { x: 10, y: 11, width: 100, height: 1 });
   assert.equal(demoMarkupCaptureRect({ x: 10, y: 10, width: 0, height: 100 }, 1, size), null);
   assert.equal(demoMarkupCaptureRect({ x: 10, y: 10, width: 100, height: -5 }, 1, size), null, "a card scrolled out of sight");
   assert.equal(demoMarkupCaptureRect({ x: 10, y: 10, width: -0.5, height: 100 }, 1, size), null);
@@ -109,8 +119,8 @@ test("a capture of the demo is staged in the room as a PNG, as a picked image is
   staged.length = 0;
   const { window, captures } = fakeWindow({ zoom: 1.25 });
   const attachment = await captureDesktopDemoMarkup(window as never, ROOM, { x: 10, y: 20, width: 380, height: 300 }, "Checkout demo");
-  // Rounded outward, so the whole card is in the picture.
-  assert.deepEqual(captures, [{ x: 12, y: 25, width: 476, height: 375 }]);
+  // Rounded inward, so nothing past the visible card is in the picture.
+  assert.deepEqual(captures, [{ x: 13, y: 25, width: 474, height: 375 }]);
   assert.equal(staged.length, 1);
   assert.equal(staged[0]!.room, ROOM);
   assert.deepEqual(staged[0]!.file, { fileName: "Checkout demo.png", mimeType: "image/png", bytes: PNG });

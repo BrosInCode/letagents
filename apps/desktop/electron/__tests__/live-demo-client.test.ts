@@ -12,10 +12,13 @@ import {
   LIVE_DEMO_CLOSE_REPLACED,
   LIVE_DEMO_IDLE_CLOSE_MS,
   LIVE_DEMO_PING_MS,
+  LIVE_DEMO_REJOIN_MAX_MS,
+  LIVE_DEMO_REJOIN_MIN_MS,
   LIVE_DEMO_REJOIN_MS,
   LIVE_DEMO_RETRY_MAX_MS,
   LIVE_DEMO_STABLE_MS,
   LiveDemoClient,
+  liveDemoRejoinDelayMs,
   liveDemoRetryDelayMs,
   liveDemoSocketUrl,
   type LiveDemoPointer,
@@ -242,7 +245,12 @@ test("a refusal stops retrying until the chat joins again", async (t) => {
   }
 });
 
-test("a join the server refuses for now is asked again ten seconds later", async (t) => {
+const SELF = { cid: "c_self", name: "Me", color: "#46a758" };
+const peer = { cid: "c_peer", name: "Bea", color: "#0090ff" };
+const hello = { t: "hello", ...SELF };
+const presenceOf = (demo: string, people: unknown[]) => ({ t: "presence", demo, people });
+
+test("a join the server refuses for one demo is asked again once, after the wait it gives", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
   const h = harness();
   h.client.join(ROOM, DEMO, null);
@@ -250,17 +258,90 @@ test("a join the server refuses for now is asked again ten seconds later", async
   await settle();
   const socket = h.last();
   socket.open();
+  socket.receive(hello);
+  socket.receive(presenceOf(OTHER, [SELF, peer]));
   socket.sent.length = 0;
-  socket.receive({ t: "error", code: "rate_limited", message: "Too many demos opened at once.", demo: DEMO });
-  socket.receive({ t: "error", code: "rate_limited", message: "Too many demos opened at once.", demo: DEMO });
+  socket.receive({ t: "error", code: "rate_limited", message: "Too many demos opened at once.", demo: DEMO, retry_after_ms: 2000 });
+  socket.receive({ t: "error", code: "rate_limited", message: "Too many demos opened at once.", demo: DEMO, retry_after_ms: 2000 });
   socket.receive({ t: "error", code: "demo_not_found", message: "No such demo.", demo: OTHER });
-  assert.equal(h.frames().length, 3, "the chat hears every refusal");
-  t.mock.timers.tick(LIVE_DEMO_REJOIN_MS);
-  assert.deepEqual(socket.types(), [`join:${DEMO}`], "once, and only for a refusal that may pass later");
+  assert.equal(h.frames().filter((frame) => frame.t === "error").length, 3, "the chat hears every refusal");
+  // The harness's jitter is the largest: a quarter more than the wait.
+  t.mock.timers.tick(2499);
+  assert.deepEqual(socket.types(), []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(socket.types(), [`join:${DEMO}`], "once; the confirmed demo is not joined again");
   socket.receive({ t: "error", code: "unavailable", message: "Try again.", demo: DEMO });
   h.client.leave(ROOM, DEMO);
-  t.mock.timers.tick(LIVE_DEMO_REJOIN_MS);
+  t.mock.timers.tick(LIVE_DEMO_REJOIN_MAX_MS);
   assert.deepEqual(socket.types(), [`join:${DEMO}`, `leave:${DEMO}`], "a demo that was left is not joined again");
+});
+
+test("one rate_limited error with no demo sends every unconfirmed join again, once", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const h = harness();
+  const [a, b, c] = ["msg_1/att_1", "msg_2/att_2", "msg_3/att_3"];
+  for (const demo of [a, b, c]) h.client.join(ROOM, demo, null);
+  await settle();
+  const socket = h.last();
+  socket.open();
+  assert.deepEqual(socket.types(), [`join:${a}`, `join:${b}`, `join:${c}`]);
+  socket.receive(hello);
+  socket.receive(presenceOf(a, [peer, SELF]));
+  // Presence that lists only others does not confirm this app's join.
+  socket.receive(presenceOf(b, [peer]));
+  socket.sent.length = 0;
+  const burst = { t: "error", code: "rate_limited", message: "Too many demos opened at once.", retry_after_ms: 4000 };
+  socket.receive(burst);
+  socket.receive(burst);
+  assert.deepEqual(h.frames().filter((frame) => frame.t === "error"), [burst, burst], "the chat hears it too");
+  t.mock.timers.tick(4999);
+  assert.deepEqual(socket.types(), []);
+  t.mock.timers.tick(1);
+  assert.deepEqual(socket.types(), [`join:${b}`, `join:${c}`], "only the joins the server has not confirmed, in one round");
+  t.mock.timers.tick(LIVE_DEMO_REJOIN_MAX_MS);
+  assert.equal(socket.sent.length, 2);
+
+  // Confirmed now: a later error sends nothing.
+  socket.receive(presenceOf(b, [peer, SELF]));
+  socket.receive(presenceOf(c, [SELF]));
+  socket.receive({ ...burst, retry_after_ms: 0 });
+  t.mock.timers.tick(LIVE_DEMO_REJOIN_MAX_MS);
+  assert.equal(socket.sent.length, 2);
+
+  // A presence that drops this app (the server lost the join) makes it unconfirmed again.
+  socket.receive(presenceOf(c, [peer]));
+  socket.receive(burst);
+  t.mock.timers.tick(5000);
+  assert.deepEqual(socket.types().slice(2), [`join:${c}`]);
+
+  // A round waiting when the socket drops is dropped with it: the new socket joins everything on open.
+  socket.receive(burst);
+  socket.serverClose(1006);
+  t.mock.timers.tick(LIVE_DEMO_RETRY_MAX_MS);
+  await settle();
+  const next = h.last();
+  assert.notEqual(next, socket);
+  next.open();
+  t.mock.timers.tick(LIVE_DEMO_REJOIN_MAX_MS);
+  assert.deepEqual(next.types(), [`join:${a}`, `join:${b}`, `join:${c}`]);
+  // The old socket's cid confirms nothing on the new one.
+  next.receive({ t: "hello", cid: "c_next", name: "Me", color: "#46a758" });
+  next.receive(presenceOf(a, [SELF]));
+  next.sent.length = 0;
+  next.receive(burst);
+  t.mock.timers.tick(5000);
+  assert.deepEqual(next.types(), [`join:${a}`, `join:${b}`, `join:${c}`]);
+});
+
+test("the wait before a refused join goes again follows the server, within bounds", () => {
+  assert.equal(liveDemoRejoinDelayMs(4000, () => 0), 4000);
+  assert.equal(liveDemoRejoinDelayMs(4000, () => 1), 5000);
+  assert.equal(liveDemoRejoinDelayMs(undefined, () => 0), LIVE_DEMO_REJOIN_MS, "no wait given");
+  assert.equal(liveDemoRejoinDelayMs("soon", () => 0), LIVE_DEMO_REJOIN_MS);
+  assert.equal(liveDemoRejoinDelayMs(0, () => 0), LIVE_DEMO_REJOIN_MIN_MS, "never at once");
+  assert.equal(liveDemoRejoinDelayMs(-5, () => 1), Math.round(LIVE_DEMO_REJOIN_MIN_MS * 1.25));
+  assert.equal(liveDemoRejoinDelayMs(10 * 60_000, () => 1), LIVE_DEMO_REJOIN_MAX_MS, "capped, jitter included");
+  assert.equal(liveDemoRejoinDelayMs(Number.POSITIVE_INFINITY, () => 0), LIVE_DEMO_REJOIN_MS);
 });
 
 test("no socket opens without the app's sign-in, or for a room kept on this computer", async (t) => {

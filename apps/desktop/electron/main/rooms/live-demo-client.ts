@@ -35,8 +35,14 @@ export const LIVE_DEMO_PING_MS = 25_000;
 export const LIVE_DEMO_CLIENT_HEADER = "X-LetAgents-Live-Client";
 /** The server closed an older socket that a newer one with the same client id replaced. */
 export const LIVE_DEMO_CLOSE_REPLACED = 4409;
-/** A join the server refused for now (`rate_limited`, `unavailable`) is sent again after this time. */
+/**
+ * A join the server refused for now (`rate_limited`, `unavailable`) is sent
+ * again after the error's `retry_after_ms`, or this time when it gives none,
+ * kept between the bounds below and stretched by up to a quarter at random.
+ */
 export const LIVE_DEMO_REJOIN_MS = 10_000;
+export const LIVE_DEMO_REJOIN_MIN_MS = 250;
+export const LIVE_DEMO_REJOIN_MAX_MS = 60_000;
 /** A saved stroke of LIVE_DEMO.strokePoints points is the largest frame the server sends, about 40 KB. */
 export const LIVE_DEMO_MAX_INCOMING_BYTES = 256 * 1024;
 const CURSOR_INTERVAL_MS = 1000 / LIVE_DEMO.cursorHz;
@@ -88,6 +94,8 @@ interface LiveDemo {
   cursorSends: number[];
   inkSends: number[];
   rejoinTimer: ReturnType<typeof setTimeout> | null;
+  /** A `presence` frame for this demo has listed this socket's own cid since its last join went out. */
+  confirmed: boolean;
 }
 
 interface LiveRoom {
@@ -109,6 +117,10 @@ interface LiveRoom {
   retryTimer: ReturnType<typeof setTimeout> | null;
   idleTimer: ReturnType<typeof setTimeout> | null;
   pingTimer: ReturnType<typeof setInterval> | null;
+  /** This socket's connection id, from the server's `hello`. */
+  cid: string | null;
+  /** Sends every join the server has not confirmed yet, after a `rate_limited` error. */
+  joinRetryTimer: ReturnType<typeof setTimeout> | null;
 }
 
 /**
@@ -137,6 +149,13 @@ export function liveDemoSocketUrl(apiUrl: string, cloudRoom: string): string {
 export function liveDemoRetryDelayMs(attempt: number, random: () => number = Math.random): number {
   const step = Math.min(LIVE_DEMO_RETRY_MAX_MS, LIVE_DEMO_RETRY_BASE_MS * 2 ** Math.min(Math.max(0, attempt), 16));
   return Math.round(step / 2 + (random() * step) / 2);
+}
+
+/** The wait before a refused join goes out again: the server's `retry_after_ms`, bounded, plus up to a quarter at random. */
+export function liveDemoRejoinDelayMs(retryAfterMs: unknown, random: () => number = Math.random): number {
+  const asked = typeof retryAfterMs === "number" && Number.isFinite(retryAfterMs) ? retryAfterMs : LIVE_DEMO_REJOIN_MS;
+  const wait = Math.min(LIVE_DEMO_REJOIN_MAX_MS, Math.max(LIVE_DEMO_REJOIN_MIN_MS, asked));
+  return Math.min(LIVE_DEMO_REJOIN_MAX_MS, Math.round(wait + (random() * wait) / 4));
 }
 
 /** The wait before one more send fits in the last second; 0 when it fits now. */
@@ -210,7 +229,7 @@ export class LiveDemoClient {
       }
       demo = newDemo(demoKey);
       room.demos.set(demoKey, demo);
-      this.sendFrame(room, { t: "join", demo: demoKey });
+      this.sendJoin(room, demo);
     }
     this.linkPointer(room, demo, leaseUrl ?? null);
     if (room.idleTimer) clearTimeout(room.idleTimer);
@@ -314,6 +333,8 @@ export class LiveDemoClient {
       retryTimer: null,
       idleTimer: null,
       pingTimer: null,
+      cid: null,
+      joinRetryTimer: null,
     };
   }
 
@@ -365,7 +386,7 @@ export class LiveDemoClient {
       room.openedAt = Date.now();
       room.alive = true;
       this.setStatus(room, "live");
-      for (const key of room.demos.keys()) this.sendFrame(room, { t: "join", demo: key });
+      for (const demo of room.demos.values()) this.sendJoin(room, demo);
       this.startPing(room, socket);
     });
     socket.on("pong", () => {
@@ -395,22 +416,52 @@ export class LiveDemoClient {
     }
     const frame = parseLiveServerFrame(value);
     if (!frame) return;
+    if (frame.t === "hello") room.cid = frame.cid;
     const key = "demo" in frame ? frame.demo : undefined;
-    // Frames for a demo this app has left are late; the chat no longer shows it.
     const demo = key === undefined ? undefined : room.demos.get(key);
+    if (frame.t === "presence" && demo) demo.confirmed = room.cid !== null && frame.people.some((person) => person.cid === room.cid);
+    if (frame.t === "error") {
+      const retryAfterMs = (frame as { retry_after_ms?: unknown }).retry_after_ms;
+      // A burst of joins past the server's limit gets one error, with no demo, and
+      // the joins after it are dropped without a word.
+      if (frame.code === "rate_limited") this.retryUnconfirmedJoins(room, retryAfterMs);
+      if (demo && (frame.code === "rate_limited" || frame.code === "unavailable")) this.rejoinLater(room, demo, retryAfterMs);
+    }
+    // Frames for a demo this app has left are late; the chat no longer shows it.
     if (key !== undefined && !demo) return;
-    if (frame.t === "error" && demo && (frame.code === "rate_limited" || frame.code === "unavailable")) this.rejoinLater(room, demo);
     this.deps.emit({ type: "frame", roomIdentifier: room.identifier, frame });
   }
 
-  /** The server refused a join for now; ask again once, a little later, while the demo is still joined. */
-  private rejoinLater(room: LiveRoom, demo: LiveDemo): void {
+  private sendJoin(room: LiveRoom, demo: LiveDemo): void {
+    demo.confirmed = false;
+    this.sendFrame(room, { t: "join", demo: demo.key });
+  }
+
+  /** The server refused this demo's join for now; ask again once, a little later, while it is joined and unconfirmed. */
+  private rejoinLater(room: LiveRoom, demo: LiveDemo, retryAfterMs: unknown): void {
     if (demo.rejoinTimer) return;
     const socket = room.socket;
     demo.rejoinTimer = setTimeout(() => {
       demo.rejoinTimer = null;
-      if (room.demos.get(demo.key) === demo && room.socket === socket) this.sendFrame(room, { t: "join", demo: demo.key });
-    }, LIVE_DEMO_REJOIN_MS);
+      if (room.demos.get(demo.key) === demo && room.socket === socket && !demo.confirmed) this.sendJoin(room, demo);
+    }, liveDemoRejoinDelayMs(retryAfterMs, this.random));
+  }
+
+  /**
+   * After a `rate_limited` error, send once more every join the server has not
+   * confirmed with this app's cid in a `presence` frame. One round per error; a
+   * demo with its own retry waiting is left to it.
+   */
+  private retryUnconfirmedJoins(room: LiveRoom, retryAfterMs: unknown): void {
+    if (room.joinRetryTimer) return;
+    const socket = room.socket;
+    room.joinRetryTimer = setTimeout(() => {
+      room.joinRetryTimer = null;
+      if (room.socket !== socket || this.rooms.get(room.identifier) !== room) return;
+      for (const demo of room.demos.values()) {
+        if (!demo.confirmed && !demo.rejoinTimer) this.sendJoin(room, demo);
+      }
+    }, liveDemoRejoinDelayMs(retryAfterMs, this.random));
   }
 
   private closed(room: LiveRoom, code: number, httpStatus: number | null): void {
@@ -475,10 +526,14 @@ export class LiveDemoClient {
     const socket = room.socket;
     room.socket = null;
     room.openedAt = null;
+    room.cid = null;
     if (room.pingTimer) clearInterval(room.pingTimer);
     room.pingTimer = null;
+    if (room.joinRetryTimer) clearTimeout(room.joinRetryTimer);
+    room.joinRetryTimer = null;
     for (const demo of room.demos.values()) {
       demo.pendingCursor = null;
+      demo.confirmed = false;
       for (const timer of [demo.cursorTimer, demo.rejoinTimer]) if (timer) clearTimeout(timer);
       demo.cursorTimer = null;
       demo.rejoinTimer = null;
@@ -593,5 +648,6 @@ function newDemo(key: string): LiveDemo {
     cursorSends: [],
     inkSends: [],
     rejoinTimer: null,
+    confirmed: false,
   };
 }
