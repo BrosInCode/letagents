@@ -26,7 +26,7 @@ import { suggestLetAgentsCodename } from "./agents/codenames.js";
 import { agentDisplayNameKey, isPlaceholderAgentDisplayName } from "../../../../shared/agent-codenames.mjs";
 import { PacedQueue } from "../../../../shared/paced-queue.mjs";
 import { readOpenModelSettings, type StoredOpenModelSettings } from "./agents/open-model-settings.js";
-import { assertGuestSafePermissionProfile, assertRentalSafePermissionProfile, isGivenAgentEntryId } from "./agents/rental-permission-profiles.js";
+import { assertGuestSafePermissionProfile, assertRentalSafePermissionProfile, isGivenAgentEntryId, isGuestEntryId } from "./agents/rental-permission-profiles.js";
 import type { DesktopSupervisorCreateInput, DesktopSupervisorManifestEntry, DesktopSupervisorRoomMove } from "../ipc-types.js";
 
 type GrantResponse = {
@@ -802,6 +802,7 @@ export class SupervisorGrantCoordinator {
       && await this.reconcilePendingRoomMoveWithinEntryTail(entry.id, daemonGeneration)) return;
     const agentKey = await this.operations.readEntryAgentKey(entry.id);
     if (!agentKey) {
+      if (isGuestEntryId(entry.id)) return this.settleGuestWithoutSavedAuthority(entry, daemonGeneration, null, "has no saved identity on this computer");
       // Legacy entries can be recovered only from a durable mapping or by
       // creating a new explicit identity. Labels are never identity inputs.
       await this.assertSupervisionAvailable();
@@ -815,6 +816,10 @@ export class SupervisorGrantCoordinator {
     }
     const stored = await this.operations.readGrant(agentKey);
     if (!stored || stored.entryId !== entry.id || !this.grantExactlyScopes(stored, entry.roomId, agentKey)) {
+      if (isGuestEntryId(entry.id)) {
+        return this.settleGuestWithoutSavedAuthority(entry, daemonGeneration, stored, stored && stored.entryId === entry.id && Date.parse(stored.metadata.expiresAt) <= Date.now()
+          ? "its saved access expired" : "has no saved access for its room on this computer");
+      }
       // A pre-case-preservation registry can contain a truthy but invalid
       // lowercase key. Re-resolve the deterministic server identity before
       // provisioning whenever no usable encrypted grant proves this local
@@ -973,6 +978,53 @@ export class SupervisorGrantCoordinator {
       move.agentSessionId ?? entry.agentSessionId ?? undefined,
     );
     await this.install(entry, agentKey, grant, status.generation, true);
+  }
+
+  /**
+   * A guest (a rental, or an agent given through Ask for an agent) runs in a
+   * room its owner is no member of. The server minted its access when it was
+   * given or rented, and only that access's own bearer can renew it: the
+   * daemon renews it before it expires, and a daemon handoff rotates it. The
+   * owner cannot mint a replacement: rooms admit members only, so the owner's
+   * join (resolveRoomId) and POST /supervisor-host-grants both answer 403 for
+   * a guest's room, and an owner grant would also give the guest delegation
+   * provenance it must never have. So when the saved access is unusable, all
+   * this computer can do is tell whether the daemon still has what it needs:
+   * - the daemon keeps a grant in memory for the life of its process and
+   *   renews it itself, so a saved copy last installed into this very daemon
+   *   generation is still the daemon's, whatever its expiry says here; a copy
+   *   installed into an earlier generation went with that process;
+   * - the daemon says itself when its grant is gone (auth_blocked; a plain
+   *   "failed" is a provider crash the daemon restarts with the grant it holds);
+   * - retiring a stopped entry deletes the daemon's grant together with its
+   *   worker binding, so a stopped guest with no binding left and no usable
+   *   saved copy has none to start with; a stopped guest that keeps its last
+   *   binding was only stopped, and the daemon may still hold its renewed grant.
+   * A guest the daemon may still hold is left alone, with one warn line when
+   * nothing here can tell. One known to be without access is stopped, with
+   * the reason; a paused or stopped one keeps its state, and the reason
+   * answers the Start that reached here.
+   */
+  private async settleGuestWithoutSavedAuthority(
+    entry: DesktopSupervisorManifestEntry,
+    daemonGeneration: number,
+    stored: Awaited<ReturnType<SupervisorGrantCoordinatorOperations["readGrant"]>>,
+    why: string,
+  ): Promise<void> {
+    const current = (await this.daemon.list(null)).find((candidate) => candidate.id === entry.id) ?? entry;
+    const retired = current.desiredState === "stopped" && current.agentSessionBindingState === "none";
+    const daemonReportsNoAccess = current.condition === "auth_blocked" || retired;
+    const installedIntoAnEarlierDaemon = stored?.entryId === entry.id && stored.lastInstalledDaemonGeneration !== daemonGeneration;
+    if (!daemonReportsNoAccess && !installedIntoAnEarlierDaemon) {
+      if (stored?.entryId !== entry.id) {
+        console.warn(`[supervisor grants] ${entry.id} is a guest with no saved access on this computer; left to the daemon, which may still hold its own.`);
+      }
+      return;
+    }
+    const running = current.desiredState === "running";
+    if (running) await this.daemon.setDesiredState(entry.id, "stopped");
+    throw new Error(`${entry.displayName} runs as a guest in someone else's room and ${why}. `
+      + `This computer cannot renew a guest's access, so the agent ${running ? "was stopped" : "cannot start"}. Remove it, then give or rent it again.`);
   }
 
   private async provisionAndInstall(

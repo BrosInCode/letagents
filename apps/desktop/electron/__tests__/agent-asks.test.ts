@@ -15,8 +15,9 @@ const app = { isReady: () => false, isPackaged: false, setAsDefaultProtocolClien
   instanceLock: true, requestSingleInstanceLock() { return this.instanceLock; } };
 const autoUpdater = { on() {} };
 mock.module("electron", { defaultExport: { app, autoUpdater }, namedExports: { app, autoUpdater } });
-const { AskGiveCoordinator, GIVE_UP_PURGE_TRIES, countUsage, giftEntryId, giftPermissionProfile, mainWindow, resetAgentGiftJournalForTests, usedUpLimit } = await import("../asks/give-coordinator.js");
+const { AskGiveCoordinator, GIVE_UP_PURGE_TRIES, countUsage, giftEntryId, giftPermissionProfile, giveFailureMessage, mainWindow, resetAgentGiftJournalForTests, usedUpLimit } = await import("../asks/give-coordinator.js");
 const { AskGiveError } = await import("../asks/api.js");
+const { DesktopApiError } = await import("../main/auth.js");
 const { askLinkFromArgv, claimDesktopInstance, parseAskLink, registerAskLinks } = await import("../main/ask-links.js");
 const { readFileSync, writeFileSync } = await import("node:fs");
 
@@ -59,13 +60,13 @@ test("the gift counts against the longest limit and survives a window reset", ()
   assert.equal(gift.consumedPercent, 9);
 });
 
-function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; readyFails?: boolean; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean; purgeAnswers?: Array<Record<string, unknown>> } = {}) {
+function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; readyFails?: boolean; lastError?: string; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean; purgeAnswers?: Array<Record<string, unknown>>; authorityFails?: unknown; installFails?: unknown } = {}) {
   const calls: string[] = [];
   const requestIds: string[] = [];
   const api = {
     claim: async () => { calls.push("claim"); if (overrides.claimFails) throw new Error("Someone is adding this agent right now."); return { id: "ask_1", asker: "Sam", state: "claimed" }; },
     release: async (_token: string, cantHelp: boolean) => { calls.push(`release:${cantHelp}`); return overrides.release ?? { ok: true }; },
-    launchAuthority: async () => { calls.push("authority"); return { room_id: "room", grant: { supervisor_grant: "t", grant_id: "g", expires_at: "2099-01-01T00:00:00Z" } }; },
+    launchAuthority: async () => { calls.push("authority"); if (overrides.authorityFails) throw overrides.authorityFails; return { room_id: "room", grant: { supervisor_grant: "t", grant_id: "g", expires_at: "2099-01-01T00:00:00Z" } }; },
     joined: async () => { calls.push("joined"); return { id: "ask_1", state: overrides.joinedState ?? "active" }; },
     models: async () => [{ providerId: "cursor", model: null, label: "Cursor" }, { providerId: "claude-code", model: "claude-opus-5-5", label: "Claude Opus 5.5" }],
     preview: async () => ({ ask: { state: "active", is_giver: true, ...overrides.preview }, unavailable: null }), end: async () => ({}),
@@ -76,7 +77,7 @@ function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; rea
   const daemon = {
     ensureRunning: async () => ({ generation: 1 }),
     compareAndSetDesiredState: async (_id: string, from: string, to: string) => { states.push(`${from}->${to}`); return true; },
-    list: async () => [overrides.readyFails || stopped ? { ...entry, observedState: stopped ? "stopped" : "failed" } : entry],
+    list: async () => [overrides.readyFails || stopped ? { ...entry, observedState: stopped ? "stopped" : "failed", lastError: overrides.lastError ?? null } : entry],
     getAgentInspectorDetail: async () => ({ usage: { account: { state: "available", windows: [{ id: "seven_day", label: "Weekly", usedPercent: overrides.usedPercent ?? 10 },
       ...(overrides.shortUsedPercent === undefined ? [] : [{ id: "five_hour", label: "5 hours", usedPercent: overrides.shortUsedPercent }])] } } }),
     setDesiredState: async () => { stopped = true; calls.push("stop"); },
@@ -84,6 +85,7 @@ function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; rea
   };
   const grants = { createRentalPausedAndInstall: async (input: { creationRequestId: string }) => {
     calls.push("install"); requestIds.push(input.creationRequestId);
+    if (overrides.installFails) throw overrides.installFails;
     entry.id = `supervised_${input.creationRequestId}`;
     return { entry, agentKey: "john/helper" };
   } };
@@ -401,4 +403,49 @@ test("the app claims its instance before starting anything", () => {
   for (const startup of ["prepareDesktopNotifications();", "registerAskLinks();", "registerDesktopIpcHandlers();", 'app.once("ready"']) {
     assert.ok(main.indexOf(startup) > main.indexOf("function startDesktopApp(): void {"), `${startup} runs only in the first instance`);
   }
+});
+
+// A failed gift names its cause. The 2026-11-05 cross-account gifts failed with the one
+// generic sentence while the real cause was a 403 from a members-only room, found only in
+// the server's logs: Electron main has no log file, so the dialog must carry the cause.
+const refusal = () => new DesktopApiError(403, { error: "room_membership_required", code: "ROOM_MEMBERSHIP_REQUIRED",
+  message: "Only members can open this room. Ask to join, and a room admin can let you in." });
+
+test("a refusal from LetAgents reaches the giver in the server's words, and the log names the step", async () => {
+  const error = refusal();
+  const { coordinator, calls } = fakes({ authorityFails: error });
+  const { warnings } = await quietly(() => assert.rejects(coordinator.give(give), (thrown: Error) => thrown instanceof AskGiveError && thrown.message
+    === "LetAgents refused a step: Only members can open this room. Ask to join, and a room admin can let you in (HTTP 403). The request is still open for others."));
+  assert.ok(!calls.includes("install"), "nothing was created after the refusal");
+  assert.equal(calls.at(-1), "release:false", "the link is given back");
+  const logged = warnings.find(line => line[0] === "[agent gifts] give failed");
+  assert.deepEqual(logged?.slice(1), ["ask_1", "authority", error]);
+});
+
+test("a failure on this computer reaches the giver with its message, cut to about 200 characters", async () => {
+  const { coordinator, calls } = fakes({ installFails: new Error(`The daemon refused the folder lock: ${"x".repeat(300)}`) });
+  const { warnings } = await quietly(() => assert.rejects(coordinator.give(give), (thrown: Error) => {
+    assert.match(thrown.message, /^This computer couldn't start this agent: The daemon refused the folder lock: x+… The request is still open for others\.$/);
+    assert.ok(thrown.message.length <= 300, `cut to about 200 characters of cause: ${thrown.message.length}`);
+    return thrown instanceof AskGiveError;
+  }));
+  assert.ok(calls.includes("purge"), "whatever the attempt left in the daemon is removed");
+  assert.equal(calls.at(-1), "release:false");
+  assert.deepEqual(warnings.find(line => line[0] === "[agent gifts] give failed")?.slice(1, 3), ["ask_1", "create"]);
+});
+
+test("a start the daemon reports as failed carries the daemon's own words", async () => {
+  const { coordinator } = fakes({ readyFails: true, lastError: "Codex exited before it registered with the room." });
+  await quietly(() => assert.rejects(coordinator.give(give),
+    /: This computer couldn't start this agent: Codex exited before it registered with the room\. The request is still open for others\.$/));
+});
+
+test("the giver's sentence takes the server's sentence from either field, and always ends with the open link", () => {
+  assert.equal(giveFailureMessage(new DesktopApiError(400, { code: "invalid_launch", error: "Choose a model from the list, then try again." })),
+    "LetAgents refused a step: Choose a model from the list, then try again (HTTP 400). The request is still open for others.");
+  assert.equal(giveFailureMessage(new DesktopApiError(502, null)),
+    "LetAgents refused a step: API request failed: 502 (HTTP 502). The request is still open for others.");
+  assert.equal(giveFailureMessage(new Error("")), "This computer couldn't start this agent. The request is still open for others.");
+  assert.equal(giveFailureMessage(new Error("Timed out waiting for the supervisor daemon: unreachable")),
+    "This computer couldn't start this agent: Timed out waiting for the supervisor daemon: unreachable. The request is still open for others.");
 });

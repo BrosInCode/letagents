@@ -8,6 +8,7 @@ import type { DesktopSupervisorManifestEntry } from "../ipc-types/agents.js";
 import type { DesktopAgentAsk, DesktopGiveAgentInput } from "../ipc-types/asks.js";
 import type { ProviderUsage } from "../../shared/provider-usage.js";
 import { getOrCreateDesktopHostId } from "../main/agents/state.js";
+import { DesktopApiError } from "../main/auth.js";
 import { listGuestSafePermissionProfiles } from "../main/agents/rental-permission-profiles.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
 import { getOrCreateDesktopSupervisorAgentIdentity } from "../main/supervisor-grant.js";
@@ -24,6 +25,33 @@ const WATCH_MS = 15_000;
 const FINISHED = new Set(["ended", "expired", "cancelled", "open"]);
 /** Removal tries (one per watch tick) before a gift the daemon will not remove is left to the owner. */
 export const GIVE_UP_PURGE_TRIES = 40;
+const STILL_OPEN = "The request is still open for others.";
+const CAUSE_MAX_CHARS = 200;
+
+/** The steps of a gift after the claim, in order. A failure is logged with the step it happened in. */
+export type GiveStep = "daemon" | "identity" | "authority" | "create" | "start" | "ready" | "usage" | "joined";
+
+/** The cause in one line, in the server's or this computer's own words, cut to about 200 characters. */
+function causeText(cause: unknown): string {
+  const raw = cause instanceof DesktopApiError
+    // The server writes the sentence for people in `error` or, when `error` is a code, in `message`.
+    ? [cause.payload?.error, cause.payload?.message].map(value => typeof value === "string" ? value.trim() : "").find(value => /\s/.test(value)) || cause.message
+    : cause instanceof Error ? cause.message : typeof cause === "string" ? cause : "";
+  const text = raw.replace(/\s+/g, " ").trim().replace(/[.!?]+$/, "");
+  return text.length > CAUSE_MAX_CHARS ? `${text.slice(0, CAUSE_MAX_CHARS - 1).trimEnd()}…` : text;
+}
+
+/**
+ * What the giver reads when a gift fails after the claim: the cause, so a
+ * refusal from LetAgents (a 403 from a members-only room, say) is not hidden
+ * behind "couldn't start", and then that the link is not lost.
+ */
+export function giveFailureMessage(cause: unknown): string {
+  const text = causeText(cause);
+  if (cause instanceof DesktopApiError) return `LetAgents refused a step: ${text || "no reason given"} (HTTP ${cause.status}). ${STILL_OPEN}`;
+  if (!text) return `This computer couldn't start this agent. ${STILL_OPEN}`;
+  return `This computer couldn't start this agent: ${text}${text.endsWith("…") ? "" : "."} ${STILL_OPEN}`;
+}
 
 /**
  * A given agent runs as a guest: its entry id carries the `supervised_rental_`
@@ -202,13 +230,16 @@ export class AskGiveCoordinator {
     const entryId = giftEntryId(claimed.id, randomUUID());
     let prepared: DesktopSupervisorManifestEntry | null = null;
     let creating = false;
+    let step: GiveStep = "daemon";
     this.giving.add(input.token);
     try {
-      await this.daemon.ensureRunning().catch(() => { throw new AskGiveError("This computer couldn't start this agent. The request is still open for others."); });
+      await this.daemon.ensureRunning();
+      step = "identity";
       const displayName = `${claimed.asker}'s helper`;
       const agentKey = await this.resolveIdentity({ entryId, displayName, providerId: input.providerId });
       const hostId = this.hostId();
       const installationId = rentalProviderInstallationId(hostId);
+      step = "authority";
       const authority = await this.api.launchAuthority(input.token, {
         host_id: hostId, installation_id: installationId, agent_key: agentKey, provider_id: input.providerId,
         model: input.model, model_label: input.modelLabel, amount_percent: input.amountPercent,
@@ -218,6 +249,7 @@ export class AskGiveCoordinator {
       const token = String(grant.supervisor_grant ?? ""); const grantId = String(grant.grant_id ?? ""); const expiresAt = String(grant.expires_at ?? "");
       if (!roomId || !token || !grantId || !expiresAt) throw new AskGiveError("LetAgents didn't confirm the agent's access. Try again.");
       // Recorded before the daemon has the agent: if this attempt dies here, the watcher removes what it left.
+      step = "create";
       await updateJournal(journal => {
         journal.gifts[entryId] = { token: input.token, askId: claimed.id, entryId, roomId, providerId: input.providerId, model: input.model, amountPercent: input.amountPercent,
           windowId: null, lastUsedPercent: null, consumedPercent: 0, starting: true };
@@ -241,10 +273,13 @@ export class AskGiveCoordinator {
         journal.gifts[entry.id] = { token: input.token, askId: claimed.id, entryId: entry.id, roomId, providerId: input.providerId, model: input.model, amountPercent: input.amountPercent,
           windowId: null, lastUsedPercent: null, consumedPercent: 0 };
       });
+      step = "start";
       if (!await this.daemon.compareAndSetDesiredState(entry.id, "paused", "running")) {
-        throw new AskGiveError("This computer couldn't start this agent. The request is still open for others.");
+        throw new AskGiveError(giveFailureMessage("the agent was no longer paused when it was started"));
       }
+      step = "ready";
       const ready = await this.waitUntilReady(entry.id);
+      step = "usage";
       const usage = await this.readUsage(ready.id, roomId);
       // Any limit already used up (a 5-hour one, say) means the agent couldn't do anything.
       const usedUp = usedUpLimit(usage, input.providerId, input.model);
@@ -258,6 +293,7 @@ export class AskGiveCoordinator {
       if (window && left < input.amountPercent) {
         throw new AskGiveError(`You have ${Math.max(0, Math.round(left))}% of your ${window.label.toLowerCase()} limit left${promised ? " after your other gifts" : ""}. Give less or try later.`);
       }
+      step = "joined";
       const joined = await this.api.joined(input.token, ready.agentSessionId!);
       // A different model than asked for joins on hold: it does nothing until the asker accepts it.
       const waitingForAsker = joined.state === "on_hold"
@@ -269,6 +305,8 @@ export class AskGiveCoordinator {
       this.startWatching();
       return joined;
     } catch (error) {
+      // The one record of why: Electron main has no log file of its own, so the dialog's sentence carries the cause too.
+      console.warn("[agent gifts] give failed", claimed.id, step, error instanceof AskGiveError ? error.message : error);
       // The daemon may hold the agent once creation began, even when the call itself failed.
       const stopped = creating
         ? await this.stopAndPurge(prepared?.id ?? entryId).then(() => true, (reason: unknown) => {
@@ -284,7 +322,7 @@ export class AskGiveCoordinator {
         this.startWatching();
       }
       await this.api.release(input.token, false).catch(() => undefined);
-      throw error instanceof AskGiveError ? error : new AskGiveError("This computer couldn't start this agent. The request is still open for others.");
+      throw error instanceof AskGiveError ? error : new AskGiveError(giveFailureMessage(error));
     } finally {
       this.giving.delete(input.token);
     }
@@ -400,13 +438,18 @@ export class AskGiveCoordinator {
 
   private async waitUntilReady(entryId: string): Promise<DesktopSupervisorManifestEntry> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
+    let last: DesktopSupervisorManifestEntry | undefined;
     while (Date.now() < deadline) {
-      const entry = (await this.daemon.list(null)).find(candidate => candidate.id === entryId);
+      const entry = last = (await this.daemon.list(null)).find(candidate => candidate.id === entryId);
       if (entry?.observedState === "failed" || entry?.condition === "quarantined") break;
       if (entry && entry.desiredState === "running" && entry.agentSessionId && entry.agentSessionBindingState === "active" && entry.readyReachedAt) return entry;
       await new Promise<void>(resolve => setTimeout(resolve, READY_POLL_MS));
     }
-    throw new AskGiveError("This computer couldn't start this agent. The request is still open for others.");
+    // The daemon's own words for a failed start are the giver's best clue (a provider that would not launch, say).
+    const why = last?.observedState === "failed" || last?.condition === "quarantined"
+      ? last.lastError?.trim() || `the agent ${last.condition === "quarantined" ? "was quarantined" : "failed"} while starting`
+      : `the agent was not ready after ${Math.round(READY_TIMEOUT_MS / 1000)} seconds`;
+    throw new AskGiveError(giveFailureMessage(why));
   }
 
   /**
