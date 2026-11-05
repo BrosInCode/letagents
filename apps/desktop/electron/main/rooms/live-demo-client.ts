@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { randomUUID } from "node:crypto";
 
 import WebSocket from "ws";
 
@@ -26,6 +27,14 @@ export const LIVE_DEMO_RETRY_MAX_MS = 30_000;
 export const LIVE_DEMO_STABLE_MS = 30_000;
 /** A socket that does not answer a ping in this time is dead (a laptop that slept, a changed network). */
 export const LIVE_DEMO_PING_MS = 25_000;
+/**
+ * Names this app's socket for one room across its reconnects, so the server
+ * can close an older socket of the same app (a half-open one after a network
+ * change) instead of showing the person twice.
+ */
+export const LIVE_DEMO_CLIENT_HEADER = "X-LetAgents-Live-Client";
+/** The server closed an older socket that a newer one with the same client id replaced. */
+export const LIVE_DEMO_CLOSE_REPLACED = 4409;
 /** A join the server refused for now (`rate_limited`, `unavailable`) is sent again after this time. */
 export const LIVE_DEMO_REJOIN_MS = 10_000;
 /** A saved stroke of LIVE_DEMO.strokePoints points is the largest frame the server sends, about 40 KB. */
@@ -53,8 +62,8 @@ export type LiveDemoPointer = { x: number; y: number } | null;
 
 export interface LiveDemoClientDeps {
   apiUrl: string;
-  /** Open a room's live socket with the app's bearer token. */
-  connect(url: string, token: string): LiveDemoSocket;
+  /** Open a room's live socket with the app's bearer token and this app's client id for the room. */
+  connect(url: string, token: string, clientId: string): LiveDemoSocket;
   /** The room's identifier on the server, or null for a room kept only on this computer. */
   cloudRoom(roomIdentifier: string): Promise<string | null>;
   /** The app's own sign-in token; never an agent's. */
@@ -107,9 +116,9 @@ interface LiveRoom {
  * bearer goes only in the Authorization header of the upgrade, with no cookie
  * and no Origin, so a web page cannot open the same socket.
  */
-export function connectLiveDemoSocket(url: string, token: string): LiveDemoSocket {
+export function connectLiveDemoSocket(url: string, token: string, clientId: string): LiveDemoSocket {
   return new WebSocket(url, LIVE_DEMO_PROTOCOL, {
-    headers: { Authorization: `Bearer ${token}` },
+    headers: { Authorization: `Bearer ${token}`, [LIVE_DEMO_CLIENT_HEADER]: clientId },
     handshakeTimeout: 15_000,
     maxPayload: LIVE_DEMO_MAX_INCOMING_BYTES,
     perMessageDeflate: false,
@@ -176,6 +185,8 @@ function alwaysPasses(frame: DesktopLiveDemoClientFrame): boolean {
 
 export class LiveDemoClient {
   private readonly rooms = new Map<string, LiveRoom>();
+  /** One random id per room for this app run (a UUID: 36 of [0-9a-f-]), kept when the room's socket closes. */
+  private readonly clientIds = new Map<string, string>();
   private readonly random: () => number;
 
   constructor(private readonly deps: LiveDemoClientDeps) {
@@ -272,6 +283,15 @@ export class LiveDemoClient {
     }
   }
 
+  private clientId(identifier: string): string {
+    let id = this.clientIds.get(identifier);
+    if (!id) {
+      id = randomUUID();
+      this.clientIds.set(identifier, id);
+    }
+    return id;
+  }
+
   /** For tests and diagnostics: a room's state and joined demos. */
   inspect(rawRoom: string): { status: DesktopLiveDemoStatus | null; demos: string[]; connected: boolean } | null {
     const room = this.rooms.get(rawRoom.trim());
@@ -327,7 +347,7 @@ export class LiveDemoClient {
     }
     let socket: LiveDemoSocket;
     try {
-      socket = this.deps.connect(liveDemoSocketUrl(this.deps.apiUrl, cloudRoom), token);
+      socket = this.deps.connect(liveDemoSocketUrl(this.deps.apiUrl, cloudRoom), token, this.clientId(room.identifier));
     } catch {
       this.scheduleRetry(room);
       return;
@@ -356,6 +376,9 @@ export class LiveDemoClient {
       room.alive = true;
       this.receive(room, data, isBinary);
     });
+    // A socket this app already replaced may still close late, with 4409 when
+    // the server saw its replacement: it changes nothing. On the current socket,
+    // 4409 is an ordinary drop and the room connects again.
     socket.on("close", (code) => {
       if (current()) this.closed(room, code, httpStatus);
     });

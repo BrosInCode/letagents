@@ -23,6 +23,8 @@ export function demoMarkupCaptureRect(
   const { x, y, width, height } = rect as Record<string, unknown>;
   const values = [x, y, width, height];
   if (!values.every((value) => typeof value === "number" && Number.isFinite(value))) return null;
+  // The chat cuts the card to what is visible; nothing visible is nothing to send.
+  if ((width as number) <= 0 || (height as number) <= 0) return null;
   const zoom = Number.isFinite(appZoom) && appZoom > 0 ? appZoom : 1;
   const clamp = (value: number, max: number) => Math.min(max, Math.max(0, value));
   const left = clamp(Math.floor((x as number) * zoom), windowSize.width);
@@ -44,7 +46,9 @@ export function demoMarkupFileName(raw: unknown): string {
 /**
  * A picture of part of the app window (a demo with its marks; Electron 42
  * captures the webview's pixels and the chat drawn over it), staged as a PNG
- * attachment for the next message in `room`, as a picked image is.
+ * attachment for the next message in `room`, as a picked image is. The staged
+ * attachment carries its preview, which the chat shows before the person
+ * decides to post it.
  */
 export async function captureDesktopDemoMarkup(
   appWindow: BrowserWindow,

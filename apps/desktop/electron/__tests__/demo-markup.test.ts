@@ -2,14 +2,17 @@ import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import test, { mock } from "node:test";
 
+const { stagedAttachment } = await import("../main/attachments/store.js");
+
 const staged: Array<{ room: string; file: { fileName: string; mimeType: string; bytes: Buffer } }> = [];
+// The real stores stage through stagedAttachment, which gives an image its preview.
 mock.module("../main/attachments.js", { namedExports: {
   resolveAttachmentStore: async (room: string) => ({
     kind: "cloud",
     roomIdentifier: room,
     stage: async (file: { fileName: string; mimeType: string; bytes: Buffer }) => {
       staged.push({ room, file });
-      return { uploadId: "upload_1", fileName: file.fileName, mimeType: file.mimeType, sizeBytes: file.bytes.byteLength, previewDataUrl: null };
+      return stagedAttachment(file, "upload_1");
     },
     discard: async () => {},
   }),
@@ -85,6 +88,8 @@ test("the capture rectangle is the chat's CSS px times the app's zoom, cut to th
   assert.deepEqual(demoMarkupCaptureRect({ x: -50, y: 600, width: 2000, height: 500 }, 1.25, size), { x: 0, y: 750, width: 1200, height: 50 });
   assert.equal(demoMarkupCaptureRect({ x: 0, y: 900, width: 100, height: 100 }, 1, size), null, "below the window");
   assert.equal(demoMarkupCaptureRect({ x: 10, y: 10, width: 0, height: 100 }, 1, size), null);
+  assert.equal(demoMarkupCaptureRect({ x: 10, y: 10, width: 100, height: -5 }, 1, size), null, "a card scrolled out of sight");
+  assert.equal(demoMarkupCaptureRect({ x: 10, y: 10, width: -0.5, height: 100 }, 1, size), null);
   assert.equal(demoMarkupCaptureRect({ x: 10, y: 10, width: Number.NaN, height: 100 }, 1, size), null);
   assert.equal(demoMarkupCaptureRect({ x: "10", y: 10, width: 10, height: 100 }, 1, size), null);
   assert.equal(demoMarkupCaptureRect(null, 1, size), null);
@@ -110,6 +115,7 @@ test("a capture of the demo is staged in the room as a PNG, as a picked image is
   assert.equal(staged[0]!.room, ROOM);
   assert.deepEqual(staged[0]!.file, { fileName: "Checkout demo.png", mimeType: "image/png", bytes: PNG });
   assert.equal(attachment.uploadId, "upload_1");
+  assert.equal(attachment.previewDataUrl, `data:image/png;base64,${PNG.toString("base64")}`, "the chat shows it before posting");
 });
 
 test("a large capture is scaled down, and an empty or off-screen one is refused", async () => {

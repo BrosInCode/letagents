@@ -9,6 +9,7 @@ import { WebSocketServer } from "ws";
 import type { DesktopLiveDemoEvent } from "../ipc-types.js";
 import {
   connectLiveDemoSocket,
+  LIVE_DEMO_CLOSE_REPLACED,
   LIVE_DEMO_IDLE_CLOSE_MS,
   LIVE_DEMO_PING_MS,
   LIVE_DEMO_REJOIN_MS,
@@ -33,7 +34,7 @@ class FakeSocket extends EventEmitter {
   answersPings = true;
   closedWith: number | null = null;
   terminated = false;
-  constructor(readonly url: string, readonly token: string) { super(); }
+  constructor(readonly url: string, readonly token: string, readonly clientId: string) { super(); }
   send(data: string) {
     assert.equal(this.readyState, 1, "nothing is sent on a socket that is not open");
     this.sent.push(JSON.parse(data) as Record<string, unknown>);
@@ -74,8 +75,8 @@ function harness(options: { token?: string | null; cloudRoom?: string | null } =
   const state = { token: options.token === undefined ? "app_session" : options.token };
   const client = new LiveDemoClient({
     apiUrl: "https://api.example.test/",
-    connect: (url, token) => {
-      const socket = new FakeSocket(url, token);
+    connect: (url, token, clientId) => {
+      const socket = new FakeSocket(url, token, clientId);
       sockets.push(socket);
       return socket;
     },
@@ -539,6 +540,7 @@ test("the real ws client offers the protocol with the bearer only, and a refused
     assert.equal(upgrade.headers["sec-websocket-protocol"], "live_demo_v1");
     assert.equal(upgrade.headers.origin, undefined, "no Origin, as from a web page");
     assert.equal(upgrade.headers.cookie, undefined);
+    assert.match(String(upgrade.headers["x-letagents-live-client"]), /^[A-Za-z0-9_-]{1,64}$/, "the app's client id for this room");
     assert.deepEqual(received, [{ t: "join", demo: DEMO }]);
     assert.deepEqual(events.find((event) => event.type === "frame"), { type: "frame", roomIdentifier: ROOM, frame: presence(DEMO) });
 
@@ -552,4 +554,68 @@ test("the real ws client offers the protocol with the bearer only, and a refused
     for (const socket of server.clients) socket.terminate();
     server.close();
   }
+});
+
+test("each room's socket carries one client id for the app run, the same after every reconnect", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const h = harness();
+  h.client.join(ROOM, DEMO, null);
+  h.client.join("focus_27", OTHER, null);
+  await settle();
+  const [first, other] = h.sockets;
+  const lastForRoom = () => h.sockets.filter((socket) => socket.url === first!.url).at(-1)!;
+  assert.match(first!.clientId, /^[A-Za-z0-9_-]{1,64}$/);
+  assert.notEqual(first!.clientId, other!.clientId, "another room has its own id");
+  first!.open();
+  first!.serverClose(1006);
+  t.mock.timers.tick(1000);
+  await settle();
+  assert.equal(lastForRoom().clientId, first!.clientId, "a reconnect keeps the id");
+  h.state.token = "next_session";
+  h.client.reconnectAll();
+  await settle();
+  assert.equal(lastForRoom().clientId, first!.clientId, "a new sign-in keeps it too");
+  // A room the app left and joins again later is still the same app.
+  lastForRoom().open();
+  h.client.leave(ROOM, DEMO);
+  t.mock.timers.tick(LIVE_DEMO_IDLE_CLOSE_MS);
+  assert.equal(h.client.inspect(ROOM), null);
+  h.client.join(ROOM, DEMO, null);
+  await settle();
+  assert.equal(lastForRoom().clientId, first!.clientId);
+});
+
+test("4409 on a socket the app already replaced changes nothing; on the current socket it reconnects", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] });
+  const h = harness();
+  h.client.join(ROOM, DEMO, null);
+  await settle();
+  const old = h.last();
+  old.answersPings = false;
+  old.open();
+  // A half-open socket after a network change: main gives up on it and opens a new one.
+  t.mock.timers.tick(LIVE_DEMO_PING_MS * 2);
+  assert.equal(old.terminated, true);
+  t.mock.timers.tick(LIVE_DEMO_RETRY_MAX_MS);
+  await settle();
+  const current = h.last();
+  assert.notEqual(current, old);
+  current.open();
+  const statuses = h.statuses().length;
+  // The server sees the new socket and closes the old one late.
+  old.serverClose(LIVE_DEMO_CLOSE_REPLACED);
+  t.mock.timers.tick(LIVE_DEMO_RETRY_MAX_MS);
+  await settle();
+  assert.equal(h.statuses().length, statuses, "no status change");
+  assert.equal(h.last(), current, "no retry");
+  assert.equal(current.readyState, 1);
+
+  current.serverClose(LIVE_DEMO_CLOSE_REPLACED);
+  assert.equal(h.statuses().at(-1), "reconnecting");
+  t.mock.timers.tick(LIVE_DEMO_RETRY_MAX_MS);
+  await settle();
+  assert.notEqual(h.last(), current, "the room connects again");
+  assert.equal(h.last().clientId, current.clientId);
+  h.last().open();
+  assert.deepEqual(h.last().types(), [`join:${DEMO}`]);
 });
