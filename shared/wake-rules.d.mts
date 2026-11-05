@@ -207,6 +207,8 @@ export const WAKE_RULE_LIMITS: Readonly<{
   deliveryRulesPerAccount: number;
   emailConfirmationsPerAddressPerDay: number;
   emailConfirmationsPerAccountPerDay: number;
+  emailConfirmCodeAttempts: number;
+  emailConfirmCodeWindowMs: number;
   mcpEventDefaultTtlMs: number;
   mcpEventMinTtlMs: number;
   mcpEventMaxTtlMs: number;

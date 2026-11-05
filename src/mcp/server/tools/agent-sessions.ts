@@ -28,7 +28,18 @@ import { readAdoptedTaskLeases, recoverMcpWorker, registerMcpWorker, type Adopte
 import { holdProcessConnection, releaseProcessConnection } from "../runtime/process-connection.js";
 import { apiCallWhenFree } from "../runtime/api.js";
 import { getProcessHostId } from "../runtime/identity/liveness.js";
+import { wakeUpForAgents } from "../runtime/wake-up.js";
 import { WORKSPACE_CAPTURE_INSTRUCTIONS } from './workspace.js';
+
+/**
+ * `{ wake_up }` for the worker just registered: how the bot is woken when a
+ * room message is for it, read from the room's rules for this agent. Nothing
+ * when the server gave no answer.
+ */
+async function wakeUpFields(session: { room_id: string; agent_key: string; display_name: string }): Promise<Record<string, unknown>> {
+  const wakeUp = await wakeUpForAgents({ roomId: session.room_id, agentKeys: [session.agent_key], agentName: session.display_name });
+  return wakeUp ? { wake_up: wakeUp } : {};
+}
 
 /** Tells an agent which of its earlier work it holds again. */
 function describeAdoptedTaskLeases(leases: AdoptedTaskLease[] | undefined): { resumed_work?: string } {
@@ -98,6 +109,7 @@ export function registerAgentSessionTools(server: McpServer): void {
           } : {}),
           ...describeAdoptedTaskLeases(result.adopted_task_leases),
           instruction: "Keep worker_id for this chat and pass it to room tools. After an MCP restart, reconnect with register_agent_session(worker_id, room_id). A separate chat needs its own registration_key. Credentials stay private to MCP.",
+          ...(await isLocalRoomStorageEnabled(roomId) ? {} : await wakeUpFields(result.session)),
           workspace_instructions: WORKSPACE_CAPTURE_INSTRUCTIONS,
         }) }] };
       }
@@ -330,6 +342,7 @@ export function registerAgentSessionTools(server: McpServer): void {
                 agent_session_id: session.session_id,
                 ...describeAdoptedTaskLeases(readAdoptedTaskLeases(created.adopted_task_leases)),
                 use_agent_session_id: "Pass this exact agent_session_id to wait_for_messages, send_message, send_thread_message, post_status, and task tools for this specific worker. Do not rely on a shared current session.",
+                ...(session.session_kind === "worker" ? await wakeUpFields(session) : {}),
               },
               null,
               2

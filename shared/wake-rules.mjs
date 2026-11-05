@@ -85,6 +85,9 @@ export const WAKE_RULE_LIMITS = Object.freeze({
   emailConfirmationsPerAddressPerDay: 3,
   /** Confirmation emails one account may cause in a day. */
   emailConfirmationsPerAccountPerDay: 10,
+  /** `confirm_wake_email` calls one credential may make in `emailConfirmCodeWindowMs`, right or wrong. */
+  emailConfirmCodeAttempts: 10,
+  emailConfirmCodeWindowMs: 10 * 60 * 1000,
   /** An MCP Events subscription lasts this long unless `ttlMs` asks for less (never less than the minimum). */
   mcpEventDefaultTtlMs: 24 * 60 * 60 * 1000,
   mcpEventMinTtlMs: 5 * 60 * 1000,

@@ -15,6 +15,7 @@ import {
   createSmtpMailer,
   hashWakeLinkToken,
   loadWakeMailer,
+  wakeConfirmCodeOf,
   wakeEmailAddressFingerprint,
   wakeEmailMailboxKey,
   wakeEmailConfigured,
@@ -327,7 +328,7 @@ test("the message is plain-text MIME: quoted-printable, encoded words, dot-stuff
   assert.match(mime, /^Message-ID: <[0-9a-f-]+@letagents\.chat>$/m);
 });
 
-test("a confirmation is fixed wording: no agent or room name, only the room link and the two links", () => {
+test("a confirmation is fixed wording: no agent or room name, only the room link, the two links and the link's code", () => {
   const confirmUrl = "https://letagents.chat/wake-rules/confirm/" + "c".repeat(64);
   const mail = composeWakeEmail({ purpose: "confirm", to: "bot-inbox@example.com", roomUrl: "https://letagents.chat/in/free-money", disableUrl, confirmUrl });
   assert.equal(mail.subject, "[LetAgents] Confirm email notifications");
@@ -335,6 +336,26 @@ test("a confirmation is fixed wording: no agent or room name, only the room link
   assert.ok(mail.text.includes(confirmUrl));
   assert.ok(mail.text.includes(disableUrl));
   assert.equal(mail.headers["List-Unsubscribe"], `<${disableUrl}>`);
+  // For a bot that owns the mailbox: the link's token as a code, on its own line after the link, and the tool to call.
+  assert.equal(wakeConfirmCodeOf(confirmUrl), "c".repeat(64));
+  assert.deepEqual(mail.text.split("\n").slice(4, 8), [
+    `To allow these emails, open this link and press Confirm (it works for 24 hours): ${confirmUrl}`,
+    "",
+    `Confirmation code: ${"c".repeat(64)}`,
+    "If you are a bot: call the LetAgents tool confirm_wake_email with this code.",
+  ]);
+  assert.equal((mail.text.match(/c{64}/g) ?? []).length, 2, "the link and the code carry the one token; no second secret");
+  // Still nothing an agent or a room chose: the whole text is the fixed lines and the three values above.
+  const fixed = mail.text.replaceAll(confirmUrl, "").replaceAll(disableUrl, "").replaceAll("c".repeat(64), "").replaceAll("https://letagents.chat/in/free-money", "");
+  assert.equal(fixed, [
+    "An agent in a LetAgents room asked to email this address when a message in the room is for it.",
+    "", "The room: ", "",
+    "To allow these emails, open this link and press Confirm (it works for 24 hours): ",
+    "", "Confirmation code: ",
+    "If you are a bot: call the LetAgents tool confirm_wake_email with this code.",
+    "", "If you did not expect this email, ignore it: nothing else is sent unless you confirm.",
+    "To refuse further requests for this address: ",
+  ].join("\n"));
   // A message email, sent only after confirmation, names the agent and the room.
   assert.equal(sample.subject, "[LetAgents] New message for relaybot in Déploiements");
   assert.match(sample.text, /^From: Ada$/m);

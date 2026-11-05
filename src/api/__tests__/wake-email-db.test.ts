@@ -75,19 +75,40 @@ const configure = () => {
   process.env.LETAGENTS_EMAIL_FROM = "LetAgents <notify@letagents.chat>";
 };
 
-/** A fresh account, its owner token and a connected /mcp client, so daily budgets never leak between tests. */
-async function newBot(): Promise<Client> {
-  owners += 1;
-  const token = `wake_email_owner_token_${owners}`;
-  const account = await accountSessions!.upsertAccount({
-    provider: "github", provider_user_id: `wake-email-bot-${owners}`, login: `wake-email-bot-${owners}`, display_name: "Wake email bot",
-  });
-  await ownerTokens!.createOwnerToken({ accountId: account.id, githubUserId: `wake-email-bot-${owners}`, token });
+const botAccounts = new Map<Client, { accountId: string; githubUserId: string }>();
+
+async function connectWithOwnerToken(token: string): Promise<Client> {
   const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
     requestInit: { headers: { Authorization: `Bearer ${token}` } },
   });
   const client = new Client({ name: "Hosted bot", version: "1" });
   await client.connect(transport);
+  return client;
+}
+
+/** A fresh account, its owner token and a connected /mcp client, so daily budgets never leak between tests. */
+async function newBot(): Promise<Client> {
+  owners += 1;
+  const token = `wake_email_owner_token_${owners}`;
+  const githubUserId = `wake-email-bot-${owners}`;
+  const account = await accountSessions!.upsertAccount({
+    provider: "github", provider_user_id: githubUserId, login: githubUserId, display_name: "Wake email bot",
+  });
+  await ownerTokens!.createOwnerToken({ accountId: account.id, githubUserId, token });
+  const client = await connectWithOwnerToken(token);
+  botAccounts.set(client, { accountId: account.id, githubUserId });
+  return client;
+}
+
+/** The same account signed in once more (a second owner token): another credential, the same owner. */
+async function sameAccountBot(bot: Client): Promise<Client> {
+  const account = botAccounts.get(bot);
+  assert.ok(account, "the bot was made by newBot");
+  owners += 1;
+  const token = `wake_email_owner_token_${owners}`;
+  await ownerTokens!.createOwnerToken({ accountId: account.accountId, githubUserId: account.githubUserId, token });
+  const client = await connectWithOwnerToken(token);
+  botAccounts.set(client, account);
   return client;
 }
 
@@ -277,6 +298,132 @@ test("add, cancel and add again cannot send more than 3 confirmations to one add
   }
 });
 
+test("the stop link of an ended rule still lifts the address's stop; a live or another rule's link lifts nothing; the stop goes with a deleted room", { skip, timeout: 90_000 }, async () => {
+  configure();
+  const bot = await newBot();
+  try {
+    const { add, cancel } = await inRoom(bot, "wake-email-ended-stop");
+    const elsewhere = await inRoom(bot, "wake-email-ended-stop-elsewhere");
+    const address = "stopped-then-cancelled@example.com";
+    const other = "never-stopped@example.com";
+    const third = "also-stopped@example.com";
+    const stops = async (ruleId: string) =>
+      (await dbClient!.pool.query<{ n: number }>("SELECT count(*)::int AS n FROM wake_email_suppressions WHERE rule_id = $1", [ruleId])).rows[0].n;
+    const mailsTo = (to: string) => sent.filter((message) => message.to === to).length;
+    const stopLinkFor = async (to: string) => {
+      await runWorker();
+      return linkIn(lastTo(to).text, "disable");
+    };
+
+    // The address presses Stop on the rule's email, then the agent cancels the rule.
+    const added = await add(address);
+    assert.equal(added.confirmation?.sent, true, added.raw);
+    const stopUrl = await stopLinkFor(address);
+    // The same address also waits on a second rule in another room, which stays pending.
+    const live = await elsewhere.add(address);
+    assert.equal(live.confirmation?.sent, true, live.raw);
+    const liveStopUrl = await stopLinkFor(address);
+    assert.notEqual(liveStopUrl, stopUrl);
+    assert.equal((await form(stopUrl, "List-Unsubscribe=One-Click")).status, 200);
+    assert.equal((await ruleRow(added.rule.id)).status, "paused");
+    assert.equal(await stops(added.rule.id), 1);
+    assert.equal((await ruleRow(live.rule.id)).status, "pending_confirmation", "a stop is per rule");
+    assert.equal(failed(await cancel(added.rule.id)), false);
+    assert.equal((await ruleRow(added.rule.id)).status, "cancelled");
+
+    // The agent is refused...
+    const blocked = await add(address);
+    assert.equal(failed(blocked), true, blocked.raw);
+    assert.match(blocked.raw, /asked LetAgents to stop emailing it/);
+    // ...and before the fix the stop link only said the rule had ended. Now it keeps the button.
+    const opened = await fetch(stopUrl);
+    assert.equal(opened.status, 200);
+    const endedPage = await opened.text();
+    assert.match(endedPage, /<h1>This email rule has ended<\/h1><p>Nothing more will be sent for it\. This address is also set to get no new requests\.<\/p>/);
+    assert.match(endedPage, /<form method="post" action="\/wake-rules\/disable\/[0-9a-f]{64}\/again"><input type="hidden" name="again" value="yes"><button type="submit">Allow a new request<\/button><\/form>/);
+    assert.doesNotMatch(endedPage, /name="List-Unsubscribe"/, "an ended rule cannot be stopped again");
+    // Stop pressed once more (or a mail client's one-click) changes nothing and shows the same page.
+    const stoppedAgain = await form(stopUrl, "List-Unsubscribe=One-Click");
+    assert.equal(stoppedAgain.status, 200);
+    assert.match(await stoppedAgain.text(), /Allow a new request/);
+    assert.equal((await ruleRow(added.rule.id)).status, "cancelled");
+
+    // The link of the rule that still waits for the address lifts nothing: it could still send.
+    assert.match(await (await fetch(liveStopUrl)).text(), /name="List-Unsubscribe" value="One-Click"/);
+    assert.equal((await form(`${liveStopUrl}/again`, "again=yes")).status, 410);
+    assert.equal(await stops(added.rule.id), 1, "a live rule's link lifts no stop");
+    assert.equal((await ruleRow(live.rule.id)).status, "pending_confirmation");
+
+    // Another rule, cancelled without a Stop: its ended page has no button, and its link lifts nothing for the stopped address.
+    const otherAdded = await add(other);
+    assert.equal(otherAdded.confirmation?.sent, true, otherAdded.raw);
+    const otherStopUrl = await stopLinkFor(other);
+    assert.equal(failed(await cancel(otherAdded.rule.id)), false);
+    const otherOpened = await fetch(otherStopUrl);
+    assert.equal(otherOpened.status, 410);
+    const otherPage = await otherOpened.text();
+    assert.match(otherPage, /<h1>This email rule has ended<\/h1><p>Nothing more will be sent for it\.<\/p>/);
+    assert.doesNotMatch(otherPage, /Allow a new request/);
+    const nothing = await form(`${otherStopUrl}/again`, "again=yes");
+    assert.equal(nothing.status, 200);
+    assert.match(await nothing.text(), /<h1>Nothing to allow<\/h1><p>This address can already get a request\.<\/p>/);
+    assert.equal(await stops(added.rule.id), 1, "another rule's link lifts nothing");
+    assert.equal(failed(await add(address)), true);
+
+    // Two stopped addresses: the third's ended link lifts the third only; the first stays stopped.
+    const thirdAdded = await add(third);
+    assert.equal(thirdAdded.confirmation?.sent, true, thirdAdded.raw);
+    const thirdStopUrl = await stopLinkFor(third);
+    assert.equal((await form(thirdStopUrl, "List-Unsubscribe=One-Click")).status, 200);
+    assert.equal(failed(await cancel(thirdAdded.rule.id)), false);
+    assert.equal(await stops(thirdAdded.rule.id), 1);
+    assert.match(await (await fetch(thirdStopUrl)).text(), /Allow a new request/);
+    assert.match(await (await form(`${thirdStopUrl}/again`, "again=yes")).text(), /<h1>New requests allowed<\/h1>/);
+    assert.equal(await stops(thirdAdded.rule.id), 0);
+    assert.equal(await stops(added.rule.id), 1, "the first address stays stopped");
+    assert.equal(failed(await add(address)), true);
+
+    // The button lifts the stop: nothing is sent, the ended rule stays ended, and the agent's next add sends the confirmation.
+    const mailsBefore = mailsTo(address);
+    const lifted = await form(`${stopUrl}/again`, "again=yes");
+    assert.equal(lifted.status, 200);
+    assert.match(await lifted.text(), /<h1>New requests allowed<\/h1>/);
+    assert.equal(await stops(added.rule.id), 0);
+    assert.equal((await ruleRow(added.rule.id)).status, "cancelled");
+    await runWorker();
+    assert.equal(mailsTo(address), mailsBefore, "lifting the stop sends nothing by itself");
+    const readded = await add(address);
+    assert.equal(failed(readded), false, readded.raw);
+    assert.equal(readded.confirmation?.sent, true);
+    assert.notEqual(readded.rule.id, added.rule.id);
+    await runWorker();
+    assert.equal(mailsTo(address), mailsBefore + 1);
+    assert.equal(lastTo(address).subject, "[LetAgents] Confirm email notifications");
+    // With the stop lifted, the ended rule's link says that the rule ended, and its button that there is nothing to allow.
+    assert.equal((await fetch(stopUrl)).status, 410);
+    const liftedTwice = await form(`${stopUrl}/again`, "again=yes");
+    assert.equal(liftedTwice.status, 200);
+    assert.match(await liftedTwice.text(), /<h1>Nothing to allow<\/h1>/);
+    assert.equal((await fetch(`${baseUrl}/wake-rules/disable/${"0".repeat(64)}`)).status, 404, "an unknown stop link is not valid");
+
+    // A stop goes with the rule that set it when its room is deleted: no address stays stopped with no link to lift it.
+    const doomed = await inRoom(bot, "wake-email-ended-stop-deleted-room");
+    const doomedAdded = await doomed.add("deleted-room@example.com");
+    assert.equal(doomedAdded.confirmation?.sent, true, doomedAdded.raw);
+    const doomedStopUrl = await stopLinkFor("deleted-room@example.com");
+    assert.equal((await form(doomedStopUrl, "List-Unsubscribe=One-Click")).status, 200);
+    assert.equal(await stops(doomedAdded.rule.id), 1);
+    await dbClient!.pool.query("DELETE FROM rooms WHERE id = $1", [doomed.roomId]);
+    assert.equal(await ruleRow(doomedAdded.rule.id), undefined, "the rule went with its room");
+    assert.equal(await stops(doomedAdded.rule.id), 0, "and the stop it set went with it");
+    assert.equal((await fetch(doomedStopUrl)).status, 404);
+    const afterDelete = await add("deleted-room@example.com");
+    assert.equal(failed(afterDelete), false, afterDelete.raw);
+  } finally {
+    await bot.close();
+  }
+});
+
 test("the scheduler ends an unconfirmed rule when its link expires, and a stop while pending leaves nothing due", { skip, timeout: 60_000 }, async () => {
   configure();
   const bot = await newBot();
@@ -334,5 +481,123 @@ test("past the hourly budget one email waits for the hour's end and later matche
     assert.equal((await ruleRow(rule.id)).delivery_over_cap_count, 2);
   } finally {
     await bot.close();
+  }
+});
+
+/** The code line of a confirmation mail: the link's token, printed for a bot that owns the mailbox. */
+function codeIn(text: string): string {
+  const match = /^Confirmation code: ([0-9a-f]{64})$/m.exec(text);
+  assert.ok(match, `no confirmation code in:\n${text}`);
+  return match[1]!;
+}
+
+test("a bot confirms its own email rule with the code from the mail; another account's bot cannot; the page button still works", { skip, timeout: 90_000 }, async () => {
+  configure();
+  const bot = await newBot();
+  const other = await newBot();
+  try {
+    const { roomId, add } = await inRoom(bot, "wake-email-code");
+    const address = "routine+sky@example.com";
+    const added = await add(address);
+    assert.equal(failed(added), false, added.raw);
+    assert.match(added.confirmation.next_step, /Open the link from that mailbox and press Confirm, or, if the mailbox is yours as a bot, call confirm_wake_email with the code in the mail\.$/);
+    const rule = added.rule as Record<string, any>;
+    await runWorker();
+    const mail = lastTo(address);
+    const code = codeIn(mail.text);
+    assert.equal(code, linkIn(mail.text, "confirm").split("/").pop(), "the code is the link's own token, not a second secret");
+    assert.match(mail.text, /^If you are a bot: call the LetAgents tool confirm_wake_email with this code\.$/m);
+    assert.equal(mail.text.includes("relaybot"), false, "the wording stays fixed: no agent name");
+    const confirm = (client: Client, value: string) => call(client, "confirm_wake_email", { code: value });
+
+    // A wrong or malformed code changes nothing, and the answer says only that no rule waits for it.
+    const wrong = await confirm(bot, "0".repeat(64));
+    assert.equal(wrong.confirmed, false, wrong.raw);
+    assert.equal(wrong.error, "unknown_or_expired");
+    assert.equal((await confirm(bot, "not a code")).error, "unknown_or_expired");
+    assert.equal((await ruleRow(rule.id)).status, "pending_confirmation");
+
+    // The real code in another account's hands: not theirs, and the rule stays pending.
+    const leaked = await confirm(other, code);
+    assert.equal(leaked.confirmed, false, leaked.raw);
+    assert.equal(leaked.error, "not_yours");
+    assert.equal((await ruleRow(rule.id)).status, "pending_confirmation");
+
+    // The owner's bot confirms (spacing and case do not matter): the rule is active.
+    const confirmed = await confirm(bot, ` ${code.toUpperCase()} `);
+    assert.equal(confirmed.confirmed, true, confirmed.raw);
+    assert.equal(confirmed.rule.id, rule.id);
+    assert.equal(confirmed.rule.status, "active");
+    assert.equal(confirmed.rule.delivery.kind, "email");
+    assert.equal(confirmed.raw.includes(address), false, "the address is never returned");
+    const row = await ruleRow(rule.id);
+    assert.equal(row.status, "active");
+    assert.ok(row.confirmed_at, "the confirmation is recorded on the rule");
+    assert.equal(row.confirm_expires_at, null);
+
+    // A second call, and the link's page, both say it is already confirmed.
+    const again = await confirm(bot, code);
+    assert.equal(again.confirmed, false);
+    assert.equal(again.error, "already_active");
+    assert.equal(again.rule?.status, "active");
+    assert.match(await (await form(linkIn(mail.text, "confirm"), "confirm=yes")).text(), /Already confirmed/);
+
+    // Once confirmed by code, a message for the bot is one email, as after the button.
+    await humanSays(roomId, "@relaybot confirmed by code?");
+    await runWorker();
+    assert.match(lastTo(address).subject, /^\[LetAgents\] New message for relaybot in /);
+
+    // An expired code is unknown, and the rule it named stays as it was.
+    const late = (await add("late-code@example.com")).rule as Record<string, any>;
+    await runWorker();
+    const lateCode = codeIn(lastTo("late-code@example.com").text);
+    await dbClient!.pool.query("UPDATE agent_wake_rules SET confirm_expires_at = now() - interval '1 second' WHERE id = $1", [late.id]);
+    assert.equal((await confirm(bot, lateCode)).error, "unknown_or_expired");
+    assert.equal((await ruleRow(late.id)).status, "pending_confirmation");
+
+    // The page's button still confirms a rule the tool never saw.
+    const byButton = (await add("by-button@example.com")).rule as Record<string, any>;
+    await runWorker();
+    const buttonUrl = linkIn(lastTo("by-button@example.com").text, "confirm");
+    assert.equal((await form(buttonUrl, "confirm=yes")).status, 200);
+    assert.equal((await ruleRow(byButton.id)).status, "active");
+  } finally {
+    await bot.close();
+    await other.close();
+  }
+});
+
+test("confirm_wake_email takes 10 attempts per credential in 10 minutes: the 11th is refused, right code or wrong", { skip, timeout: 60_000 }, async () => {
+  configure();
+  const bot = await newBot();
+  const twin = await sameAccountBot(bot);
+  const other = await newBot();
+  try {
+    const { add } = await inRoom(bot, "wake-email-attempts");
+    const rule = (await add("guess-target@example.com")).rule as Record<string, any>;
+    await runWorker();
+    const code = codeIn(lastTo("guess-target@example.com").text);
+    for (let attempt = 1; attempt <= 10; attempt += 1) {
+      const wrong = await call(bot, "confirm_wake_email", { code: attempt.toString(16).padStart(64, "0") });
+      assert.equal(wrong.error, "unknown_or_expired", `attempt ${attempt}: ${wrong.raw}`);
+    }
+    const eleventh = await call(bot, "confirm_wake_email", { code });
+    assert.equal(eleventh.confirmed, false, eleventh.raw);
+    assert.equal(eleventh.error, "too_many_attempts");
+    assert.match(eleventh.message, /10 confirmation attempts in 10 minutes/);
+    assert.equal((await ruleRow(rule.id)).status, "pending_confirmation", "the right code waits too while the budget is spent");
+    // The budget is per credential, not per account: the same account's second owner token (its own
+    // token hash, so its own key) is not held back by the first token's guesses...
+    assert.equal((await call(twin, "confirm_wake_email", { code: "e".repeat(64) })).error, "unknown_or_expired");
+    // ...and, being the same account, it confirms the rule the spent token could not.
+    const byTwin = await call(twin, "confirm_wake_email", { code });
+    assert.equal(byTwin.confirmed, true, byTwin.raw);
+    assert.equal((await ruleRow(rule.id)).status, "active");
+    // Another account is not held back either.
+    assert.equal((await call(other, "confirm_wake_email", { code: "f".repeat(64) })).error, "unknown_or_expired");
+  } finally {
+    await bot.close();
+    await twin.close();
+    await other.close();
   }
 });

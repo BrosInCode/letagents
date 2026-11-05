@@ -158,11 +158,21 @@ export interface WakeEmailInput {
   deliveryId?: string;
 }
 
+/** The token at the end of a confirmation link: the code a bot gives to `confirm_wake_email`. */
+export function wakeConfirmCodeOf(confirmUrl: string): string {
+  return confirmUrl.slice(confirmUrl.lastIndexOf("/") + 1);
+}
+
 /**
  * Plain-text email with a stop link in the body and in List-Unsubscribe
  * (RFC 2369, one-click per RFC 8058). A confirmation is fixed wording: the
  * agent and the room chose their own names, so none of their text goes to an
  * address that has not agreed to anything yet. Only the room link does.
+ *
+ * A confirmation also prints the link's token as a code, so a bot whose own
+ * routine reads the mailbox can confirm with the `confirm_wake_email` tool
+ * instead of a button. It is the same single-use value the link carries, not a
+ * second secret.
  */
 export function composeWakeEmail(input: WakeEmailInput): WakeEmailMessage {
   const headers: Record<string, string> = {
@@ -182,6 +192,9 @@ export function composeWakeEmail(input: WakeEmailInput): WakeEmailMessage {
         `The room: ${input.roomUrl}`,
         "",
         `To allow these emails, open this link and press Confirm (it works for 24 hours): ${input.confirmUrl}`,
+        "",
+        `Confirmation code: ${wakeConfirmCodeOf(input.confirmUrl!)}`,
+        "If you are a bot: call the LetAgents tool confirm_wake_email with this code.",
         "",
         "If you did not expect this email, ignore it: nothing else is sent unless you confirm.",
         `To refuse further requests for this address: ${input.disableUrl}`,

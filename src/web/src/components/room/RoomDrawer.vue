@@ -18,6 +18,8 @@
         @copy="copyShareValue"
       />
 
+      <InviteBotPanel v-if="room && room.authenticated" :room="room" />
+
       <RoomMembersPanel v-if="room" :open="open" :room="room" @left="emit('left', $event)" />
 
       <WakeWebhookPanel v-if="room && room.authenticated" :open="open" :room="room" />
@@ -68,6 +70,7 @@ import { type RoomInfo, type RoomMessage, useRoom } from '@/composables/useRoom'
 import DrawerBrand from './room-drawer/DrawerBrand.vue'
 import { messageDisplayText } from './chat-message/formatting'
 import GitHubIntegrationPanel from './room-drawer/GitHubIntegrationPanel.vue'
+import InviteBotPanel from './room-drawer/InviteBotPanel.vue'
 import ParentRoomPanel from './room-drawer/ParentRoomPanel.vue'
 import RoomMembersPanel from './room-drawer/RoomMembersPanel.vue'
 import RoomNotesPanel from './room-drawer/RoomNotesPanel.vue'

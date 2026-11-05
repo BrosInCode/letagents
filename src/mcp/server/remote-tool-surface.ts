@@ -28,7 +28,7 @@ export const REMOTE_EXCLUDED_TOOLS: Readonly<Record<string, string>> = {
  */
 export const REMOTE_ALLOWED_TOOLS: readonly string[] = [
   "add_task", "add_wake_rule", "approve_board_intent", "assign_board_manager", "cancel_wake_rule",
-  "claim_task", "claim_task_review", "complete_task", "create_project", "create_room", "deny_board_intent",
+  "claim_task", "claim_task_review", "complete_task", "confirm_wake_email", "create_project", "create_room", "deny_board_intent",
   "disconnect_agent_session", "expand_room_history_summary", "get_board", "get_board_settings",
   "get_current_room", "get_human_requests", "get_room_artifacts", "get_room_events", "get_room_guidelines",
   "get_room_history_summary", "get_room_memory", "handoff_task_lease", "join_code", "join_project",

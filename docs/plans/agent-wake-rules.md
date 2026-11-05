@@ -272,7 +272,10 @@ nothing. Every email has a stop link: its page's Stop button, or a mail
 client's one-click POST with exactly `List-Unsubscribe=One-Click`, pauses the
 rule, clears the confirmation and remembers the address
 (`wake_email_suppressions`): the agent cannot send it a new request until the
-person asks for one from the Stopped page. Confirmations are logged per
+person asks for one from the stop link, also after the rule ended (the lift
+then sends nothing; the next `add_wake_rule` does). An unknown stop link
+answers 404, and the stop a rule set goes with the rule when its room is
+deleted. Confirmations are logged per
 address fingerprint (`wake_email_confirmations`): at most 3 per address and
 10 per account a day, cancelled and expired rules included. The fingerprint is
 of the mailbox (lower case, no `+tag`, no Gmail dots), so variants of one
@@ -282,7 +285,26 @@ RCPT TO or DATA counts against a rule; the operator's SMTP problems retry and
 are logged. Link tokens are HMACs under the connector key; only their SHA-256
 is stored. A confirmation link that expires unused ends the rule. Code:
 `src/api/wake-rules/email.ts`, `smtp.ts`, `src/api/routes/wake-rule-links.ts`;
-migrations `0131_wake_email`, `0132_wake_delivery_hardening`.
+migrations `0131_wake_email`, `0132_wake_delivery_hardening`,
+`0139_wake_email_suppression_rule_fk`.
+
+**A bot confirms its own mailbox by code** (`confirm_wake_email { code }`, the
+tool a hosted bot calls when its own routine runs on incoming mail, as Grok
+Bot's does on a tagged address of its inbox). The confirmation mail prints the
+link's token after the link, as `Confirmation code: <token>`, with one fixed
+line that names the tool; it is the same single-use value the link carries, so
+nothing new is minted or stored and the page's button keeps working. The tool
+(`POST /wake-rules/confirm`, signed in; `src/api/wake-rules/service.ts`,
+`confirmWakeEmailByCode`) runs the page's checks through the same
+`confirmWakeEmailRule` (lookup by SHA-256, not expired, still pending; a
+stopped address has no token) and one more: the rule's `owner_account_id`
+must be the caller's account, in the same `UPDATE … WHERE`, so a code that
+leaked to another account answers `not_yours` and changes nothing. Attempts
+are bounded per credential (owner token hash, OAuth grant or worker session;
+10 in 10 minutes, right or wrong, in memory per API process, the renter
+rate-limiter pattern), and only the outcome class is logged. Refusals:
+`unknown_or_expired`, `not_yours`, `already_active`, `too_many_attempts`.
+The Grok `wake_up.how` text puts this way first, since nobody copies a key.
 
 The receiver checklist, examples and the operator checklist for email are in
 `docs/ticket-connectors.md`, "Remote MCP endpoint", "Wake a bot or service by
@@ -416,6 +438,9 @@ is a read. Rooms kept only on this Mac do not offer them.
   identity).
 - `list_wake_rules` shows the agent's active rules in this room.
 - `cancel_wake_rule { rule_id }`.
+- `confirm_wake_email { code }`: a bot that owns the mailbox of its email rule
+  confirms it with the code from the confirmation mail (decision 7). Not
+  room-scoped; the rule must belong to an agent of the calling account.
 
 The supervised turn instructions (`MANAGED_ROOM_WORK_INSTRUCTIONS`) gain one
 line: *if you are waiting on something, add a wake rule and end your turn
@@ -507,7 +532,18 @@ builds show "Waiting for a message for me · By webhook · Until cancelled".
   stop remembers the address until it asks again; add and cancel in a loop is
   bounded; an unconfirmed link expiry ends the rule; a stop while pending
   leaves nothing due; past the hourly budget one email waits and later matches
-  fold into it.
+  fold into it; `confirm_wake_email` by the owner's bot makes the rule active
+  with `confirmed_at` set, a wrong, malformed or expired code is
+  `unknown_or_expired`, another account's bot gets `not_yours` and the rule
+  stays pending, a second call is `already_active`, the page button still
+  works, and the eleventh call of one credential in 10 minutes is
+  `too_many_attempts` while another credential is not held back.
+- `src/mcp/__tests__/confirm-wake-email-tool.test.ts`: the tool's one input
+  and description, the POST to `/wake-rules/confirm` as the signed-in account,
+  refusals passed through as answered; `wake-up.test.ts`: the Grok text names
+  `confirm_wake_email` first and stays under 400 characters with a 32-character
+  handle; `execution-profile-tools.test.ts` and `remote-tool-surface.test.ts`:
+  the tool is on every cloud profile, a mutation, and on the remote surface.
 
 - `src/api/__tests__/mcp-events.test.ts`: the Standard Webhooks signature
   (a known answer, a receiver written from the description, two signatures

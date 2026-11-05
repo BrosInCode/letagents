@@ -134,7 +134,7 @@ a second. Past that the answer is 429 `demo_marks_rate_limited` with
 `Retry-After`. Reads are not limited.
 
 After a save or a removal, the demo's live viewers get `mark` or `unmark`.
-Marks are in the `demo_marks` table (migration `0139_demo_marks`). A removed
+Marks are in the `demo_marks` table (migration `0140_demo_marks`). A removed
 mark is deleted, and the marks of a demo go when its message goes.
 
 ## In the app
