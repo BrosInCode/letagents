@@ -79,3 +79,23 @@ test('the room drawer lets a signed-in person wake their own bot by webhook thro
   assert.match(section, /v-model="form\.draft\.bearer"\s+type="password"/)
   assert.match(section, /v-if="form\.revealedSecret\.value"/)
 })
+
+test('the room drawer keeps cancelled webhook wake-ups behind a text button in the shared section', () => {
+  const panel = source('../src/components/room/room-drawer/WakeWebhookPanel.vue')
+  const section = source('../../../shared/ui/WakeWebhookSection.vue')
+  const rows = source('../../../shared/ui/WakeWebhookRuleList.vue')
+  const styles = source('../../../shared/ui/wake-webhook.css')
+  // The drawer stays mounted while shut, so the section is told when it closes and shows the cancelled list closed again.
+  assert.match(panel, /<WakeWebhookSection[\s\S]*?:error="error"\s+:open="open"\s+@changed="refreshRules"/)
+  assert.match(section, /useCancelledWakeWebhookRules\(ownRules, toRef\(props, "open"\)\)/)
+  // Cancelled rules arrive in the recent list; the panel passes both lists on and the section sorts them.
+  assert.match(panel, /\[\.\.\.\(page\.value\?\.active \?\? \[\]\), \.\.\.\(page\.value\?\.recent \?\? \[\]\)\]/)
+  // The main list holds the rules that are not cancelled; the button, then the second list, only while open.
+  assert.match(section, /<WakeWebhookRuleList\s+v-if="listedRules\.length"/)
+  assert.match(section, /v-if="cancelledRules\.length"[\s\S]*?class="wake-webhook-link"[\s\S]*?:aria-expanded="cancelledShown"\s+@click="toggleCancelled"/)
+  assert.match(section, /<WakeWebhookRuleList\s+v-if="cancelledShown"\s+:rules="cancelledRules"/)
+  // One row for both lists; Send test and Cancel stay on held rules only, and the last result comes from the shared label.
+  assert.match(rows, /v-if="rule\.status === 'active' \|\| rule\.status === 'paused'" class="wake-webhook-rule-actions"/)
+  assert.match(rows, /\{\{ wakeWebhookLastResultLabel\(rule\) \}\}/)
+  assert.match(styles, /\.wake-webhook-link \{[^}]*border: 0;[^}]*background: none;/)
+})

@@ -66,6 +66,8 @@ export const agent_wake_rules = pgTable("agent_wake_rules", {
   delivery_last_status: integer("delivery_last_status"),
   delivery_last_error: text("delivery_last_error"),
   delivery_last_attempt_at: timestamp("delivery_last_attempt_at", { mode: "string", withTimezone: true }),
+  /** Whether the last attempt above was a person's test (set by the test route, cleared by every real delivery attempt). */
+  delivery_last_attempt_was_test: boolean("delivery_last_attempt_was_test").notNull().default(false),
   paused_at: timestamp("paused_at", { mode: "string", withTimezone: true }),
   /**
    * Email rules: SHA-256 of the confirmation link's token while the address is

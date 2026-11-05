@@ -221,3 +221,21 @@
     justify-content: start;
   }
 }
+
+.wake-webhook-link {
+  appearance: none;
+  justify-self: start;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 600;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.wake-webhook-link:hover {
+  color: var(--text);
+  text-decoration: underline;
+}

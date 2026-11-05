@@ -130,6 +130,7 @@ export async function testWakeWebhookRule(input: {
     const [updated] = (await db.execute<{ status: string }>(sql`
       UPDATE agent_wake_rules
          SET delivery_consecutive_failures = 0, delivery_last_status = ${status}, delivery_last_error = NULL, delivery_last_attempt_at = ${doneIso},
+             delivery_last_attempt_was_test = true,
              status = CASE WHEN status = 'paused' THEN 'active' ELSE status END,
              paused_at = CASE WHEN status = 'paused' THEN NULL ELSE paused_at END,
              updated_at = CASE WHEN status = 'paused' THEN ${doneIso}::timestamptz ELSE updated_at END
@@ -146,7 +147,8 @@ export async function testWakeWebhookRule(input: {
     `);
     await db.execute(sql`
       UPDATE agent_wake_rules
-         SET delivery_last_status = ${status || null}, delivery_last_error = ${errorClass}, delivery_last_attempt_at = ${doneIso}
+         SET delivery_last_status = ${status || null}, delivery_last_error = ${errorClass}, delivery_last_attempt_at = ${doneIso},
+             delivery_last_attempt_was_test = true
        WHERE id = ${rule.id}
     `);
   }
