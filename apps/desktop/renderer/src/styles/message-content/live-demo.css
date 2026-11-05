@@ -2,8 +2,10 @@
  * Live demos. An inline demo with an attachment id is laid out 760 px wide,
  * scaled to fit the card, at its full height; a card taller than 800 px is
  * clipped by the card with a "Show all" button (nothing scrolls inside the
- * demo). Over the demo sits an overlay: other people's cursors, ink, saved
- * strokes and pins. It takes the pointer only in Draw mode.
+ * demo). The header holds who is here and the tools; panels open over the demo
+ * from their buttons, so nothing above the demo ever moves it. Over the demo
+ * sits an overlay: other people's cursors, ink, saved strokes and pins. It takes
+ * the pointer only in Draw and Pin mode.
  */
 
 /*
@@ -11,8 +13,8 @@
  * width of the message column, up to what its scale needs. A message is normally
  * as wide as its text, so the message with a live card is as wide as the column
  * (the demo's 760 px, the card's padding and border, and the bubble's padding
- * and border come to 814 px). The people chips wrap and shorten inside the card
- * and cannot make it wider; its scale stays the same while people come and go.
+ * and border come to 814 px). The faces and tools shorten inside the card and
+ * cannot make it wider; its scale stays the same while people come and go.
  */
 .room-chat-message > .room-chat-message-content:has(.room-inline-demo.is-live) {
   width: min(100%, 814px);
@@ -30,8 +32,10 @@
 
 /* A long name or title cannot widen the card: its one column shrinks below its content. */
 .room-inline-demo.is-live {
+  position: relative;
   grid-template-columns: minmax(0, 1fr);
   min-width: 0;
+  container-type: inline-size;
 }
 
 .room-inline-demo-clip {
@@ -61,152 +65,619 @@
   pointer-events: none;
 }
 
+/* Shared buttons: Show all, and the actions in the panels. */
 .room-inline-demo-more,
-.room-inline-demo-live-tools button,
-.room-inline-demo-preview-actions button,
-.live-demo-pin-actions button,
-.room-inline-demo-marks button {
+.live-demo-button {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
-  min-height: 26px;
-  padding: 3px 10px;
+  min-height: 28px;
+  padding: 3px 12px;
   border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
-  border-radius: 999px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--text);
   font: inherit;
   font-size: 12px;
+  font-weight: 500;
   cursor: pointer;
   transition:
     background var(--duration-fast) var(--ease-out),
-    border-color var(--duration-fast) var(--ease-out);
+    transform 120ms var(--ease-out);
 }
 
 .room-inline-demo-more {
   justify-self: center;
+  border-radius: 999px;
 }
 
 .room-inline-demo-more:hover,
-.room-inline-demo-live-tools button:hover:not(:disabled),
-.room-inline-demo-preview-actions button:hover:not(:disabled),
-.live-demo-pin-actions button:hover:not(:disabled),
-.room-inline-demo-marks button:hover:not(:disabled) {
+.live-demo-button:hover:not(:disabled) {
   background: var(--accent-hover);
 }
 
-.room-inline-demo-more:focus-visible,
-.room-inline-demo-live-tools button:focus-visible,
-.room-inline-demo-preview-actions button:focus-visible,
-.live-demo-pin-actions button:focus-visible,
-.room-inline-demo-marks button:focus-visible,
-.live-demo-pin-dot:focus-visible,
-.live-demo-pin-delete:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--blue) 62%, transparent);
-  outline-offset: 2px;
+.room-inline-demo-more:active,
+.live-demo-button:active:not(:disabled) {
+  transform: scale(0.97);
 }
 
-.room-inline-demo-live-tools button:disabled,
-.room-inline-demo-preview-actions button:disabled,
-.live-demo-pin-actions button:disabled,
-.room-inline-demo-marks button:disabled {
-  opacity: 0.5;
-  cursor: default;
-}
-
-.room-inline-demo-live-tools button.is-primary,
-.room-inline-demo-preview-actions button.is-primary,
-.live-demo-pin-actions button.is-primary {
+.live-demo-button.is-primary {
   border-color: transparent;
   background: var(--blue);
   color: #ffffff;
 }
 
-.room-inline-demo-live-tools button.is-primary:hover:not(:disabled),
-.room-inline-demo-preview-actions button.is-primary:hover:not(:disabled),
-.live-demo-pin-actions button.is-primary:hover:not(:disabled) {
+.live-demo-button.is-primary:hover:not(:disabled) {
   background: color-mix(in srgb, var(--blue) 86%, #000000);
 }
 
-/* The bar under the header: who is here, the connection, and the tools. Its place is kept while the demo starts. */
-.room-inline-demo-live {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 10px;
-  min-height: 28px;
+.live-demo-button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
-.room-inline-demo-presence {
+.room-inline-demo-more:focus-visible,
+.live-demo-button:focus-visible,
+.live-demo-tool:focus-visible,
+.live-demo-face:focus-visible,
+.live-demo-pop button:focus-visible,
+.live-demo-palette button:focus-visible,
+.live-demo-pin-dot:focus-visible,
+.live-demo-pin-delete:focus-visible,
+.room-inline-demo-live-note button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 62%, transparent);
+  outline-offset: 2px;
+}
+
+/* One header row: the demo, its live state, who is here, the tools. It sits above the demo, so tooltips are never cut off. */
+.room-inline-demo-header.is-live-head {
+  position: relative;
+  z-index: 3;
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 4px;
+  gap: 10px;
+  min-height: 32px;
+}
+
+.room-inline-demo-header.is-live-head .room-inline-demo-title {
+  flex: 1;
+}
+
+.live-demo-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   min-width: 0;
+  color: var(--text-tertiary);
+  white-space: nowrap;
 }
 
-.room-inline-demo-chip {
+.live-demo-status-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+  transition: background var(--duration-normal) ease, box-shadow var(--duration-normal) ease;
+}
+
+.live-demo-status.is-live .live-demo-status-dot {
+  background: var(--green);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 22%, transparent);
+}
+
+.live-demo-status.is-waiting .live-demo-status-dot {
+  background: var(--amber);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--amber) 22%, transparent);
+}
+
+.live-demo-status-hint {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.live-demo-status.is-task .live-demo-status-hint {
+  color: var(--text);
+}
+
+/* Faces: one per person in their pointer colour, you first. */
+.live-demo-faces {
+  display: flex;
+  flex: none;
+  align-items: center;
+  padding-left: 6px;
+}
+
+.live-demo-face {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  margin-left: -6px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--live-color, var(--accent-active));
+  box-shadow: 0 0 0 2px var(--bg-card);
+  color: var(--live-ink, var(--text));
+  font: 700 9.5px/1 var(--font-sans);
+  letter-spacing: 0.02em;
+  cursor: default;
+  transition:
+    opacity var(--duration-normal) ease,
+    transform var(--duration-fast) var(--ease-out);
+}
+
+@starting-style {
+  .live-demo-face {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+}
+
+button.live-demo-face {
+  cursor: pointer;
+}
+
+button.live-demo-face:hover {
+  transform: translateY(-1px);
+}
+
+button.live-demo-face:active {
+  transform: scale(0.95);
+}
+
+.live-demo-face.is-more {
+  background: var(--accent-active);
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.live-demo-face[data-tip]:hover::after,
+.live-demo-face[data-tip]:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 50%;
+  z-index: 30;
+  padding: 3px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+  color: var(--text);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  white-space: nowrap;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+/* The tools. Pin and Draw show your colour while they are on. */
+.live-demo-tools {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  padding-left: 6px;
+  border-left: 1px solid var(--border);
+}
+
+.live-demo-tool {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  max-width: 120px;
-  padding: 2px 8px 2px 6px;
+  gap: 6px;
+  height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    transform 120ms var(--ease-out);
+}
+
+.live-demo-tool.is-icon {
+  justify-content: center;
+  width: 30px;
+  padding: 0;
+}
+
+.live-demo-tool:hover:not(:disabled) {
+  background: var(--accent-hover);
+  color: var(--text);
+}
+
+.live-demo-tool:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.live-demo-tool[aria-pressed="true"],
+.live-demo-tool[aria-expanded="true"] {
+  background: var(--accent-active);
+  color: var(--text);
+}
+
+.live-demo-tool[aria-pressed="true"] svg {
+  color: var(--live-self, var(--blue));
+}
+
+.live-demo-tool:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.live-demo-tool svg {
+  flex: none;
+}
+
+.live-demo-tool-count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
   border-radius: 999px;
   background: var(--accent-hover);
   color: var(--text-secondary);
-  font-size: 11.5px;
-  line-height: 16px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
-.room-inline-demo-chip i {
+@container (max-width: 600px) {
+  .live-demo-tool-label,
+  .live-demo-status-hint {
+    display: none;
+  }
+
+  .live-demo-tool {
+    padding: 0 8px;
+  }
+}
+
+/* Panels grow from the button that opened them and lie over the demo. */
+.live-demo-pop {
+  position: absolute;
+  z-index: 20;
+  width: 320px;
+  max-width: calc(100% - 12px);
+  padding: 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  outline: none;
+  transform-origin: top right;
+}
+
+.live-demo-pop.is-menu {
+  width: 224px;
+}
+
+.live-demo-pop-enter-active {
+  transition:
+    opacity 160ms var(--ease-out),
+    transform 200ms var(--ease-out);
+}
+
+.live-demo-pop-leave-active {
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+}
+
+.live-demo-pop-enter-from,
+.live-demo-pop-leave-to {
+  opacity: 0;
+  transform: translateY(-4px) scale(0.97);
+}
+
+.live-demo-pop-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 6px 8px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.live-demo-pop-title button {
+  padding: 2px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+.live-demo-pop-title button:hover:not(:disabled) {
+  background: var(--accent-hover);
+  color: var(--text);
+}
+
+/* The ⋯ menu. */
+.live-demo-pop.is-menu > button,
+.live-demo-menu-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 32px;
+  margin: 0;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.live-demo-pop.is-menu > button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.live-demo-pop.is-menu > button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.live-demo-pop.is-menu svg {
   flex: none;
+  color: var(--text-secondary);
+}
+
+.live-demo-menu-info {
+  margin-top: 4px;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  color: var(--text-secondary);
+  cursor: default;
+}
+
+.live-demo-menu-info small {
+  margin-left: auto;
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+/* Marks: who marked what. Hovering a row lights its mark and dims the rest. */
+.live-demo-marks ul {
+  display: grid;
+  gap: 1px;
+  max-height: 260px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.live-demo-marks-empty {
+  margin: 0;
+  padding: 10px 8px 12px;
+  color: var(--text-tertiary);
+  font-size: 12.5px;
+}
+
+.live-demo-mark-row {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 4px 6px 4px 8px;
+  border-radius: var(--radius-md);
+  font-size: 12.5px;
+}
+
+.live-demo-mark-row:hover,
+.live-demo-mark-row:focus-within {
+  background: var(--accent-hover);
+}
+
+.live-demo-mark-row i {
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--live-color);
 }
 
-.room-inline-demo-chip span {
+.live-demo-mark-row.is-pending i {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--live-color);
+}
+
+.live-demo-mark-text {
+  display: grid;
+  min-width: 0;
+}
+
+.live-demo-mark-text strong {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.live-demo-mark-text span {
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-demo-mark-row time {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.live-demo-mark-delete {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--duration-fast) ease, background var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+
+.live-demo-mark-row:hover .live-demo-mark-delete,
+.live-demo-mark-delete:focus-visible {
+  opacity: 1;
+}
+
+.live-demo-mark-delete:hover:not(:disabled) {
+  background: var(--red-dim);
+  color: var(--red-text);
+}
+
+/* Send to thread: the picture, what goes with it as text, an optional note. */
+.live-demo-send {
+  display: grid;
+  gap: 8px;
+  padding: 2px;
+}
+
+.live-demo-send-shot {
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: calc(var(--radius-md) - 2px);
+  background: var(--bg);
+}
+
+.live-demo-send-shot img {
+  display: block;
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  background: #ffffff;
+}
+
+.live-demo-send-shot p,
+.live-demo-send-meta,
+.live-demo-send-notes p {
+  margin: 0;
+}
+
+.live-demo-send-shot p {
+  padding: 18px 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-align: center;
+}
+
+.live-demo-send-meta {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.live-demo-send-notes {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  font-size: 12px;
+}
+
+.live-demo-send-notes-head {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.live-demo-send-note {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--text-secondary);
+}
+
+.live-demo-send-note.is-more,
+.live-demo-send-note.is-ink {
+  grid-template-columns: minmax(0, 1fr);
+  color: var(--text-tertiary);
+}
+
+.live-demo-send-note i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--live-color);
+}
+
+.live-demo-send-note span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.room-inline-demo-live-status {
-  color: var(--text-tertiary);
-  font-size: 11.5px;
+.live-demo-send-note b {
+  color: var(--text);
+  font-weight: 600;
 }
 
-.room-inline-demo-live-tools {
+.live-demo-send-input {
+  width: 100%;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  color: var(--text);
+  font: inherit;
+  font-size: 12.5px;
+}
+
+.live-demo-send-input:focus-visible,
+.live-demo-pin-editor input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 62%, transparent);
+  outline-offset: 1px;
+}
+
+.live-demo-send-error {
+  margin: 0;
+  color: var(--red-text);
+  font-size: 12px;
+}
+
+.live-demo-send-actions {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
+  justify-content: flex-end;
   gap: 6px;
-  margin-left: auto;
 }
 
-.room-inline-demo-tool-group {
-  display: inline-flex;
-  border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
-  border-radius: 999px;
-  overflow: hidden;
-}
-
-.room-inline-demo-live-tools .room-inline-demo-tool-group button {
-  border: 0;
-  border-radius: 0;
-}
-
-.room-inline-demo-live-tools .room-inline-demo-tool-group button.is-active {
-  background: var(--accent-active);
-}
-
-/* A short message over the top of the card, so showing it moves nothing. */
+/* A short message over the top of the demo, so showing it moves nothing. */
 .room-inline-demo-live-note {
   position: absolute;
   top: 8px;
   left: 50%;
-  z-index: 5;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   max-width: calc(100% - 24px);
   margin: 0;
   padding: 5px 12px;
@@ -222,109 +693,69 @@
   pointer-events: none;
 }
 
-.room-inline-demo-live-note.is-error {
-  border-color: color-mix(in srgb, var(--red) 50%, transparent);
-  color: var(--red-text, #f87171);
+.room-inline-demo-live-note.has-action {
+  padding-right: 4px;
+  pointer-events: auto;
 }
 
-/* The picture "Send to thread" took, shown before it is posted. */
-.room-inline-demo-preview {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  background: var(--bg-elevated);
-}
-
-.room-inline-demo-preview img {
-  flex: none;
-  max-width: min(100%, 240px);
-  max-height: 170px;
-  border: 1px solid var(--border-strong);
-  border-radius: 6px;
-  background: #ffffff;
-  object-fit: contain;
-}
-
-.room-inline-demo-preview-side {
-  display: grid;
-  flex: 1;
-  gap: 6px;
-  min-width: 160px;
-}
-
-.room-inline-demo-preview-side p {
-  margin: 0;
-}
-
-.room-inline-demo-preview-title {
-  color: var(--text);
-  font-size: 12.5px;
+.room-inline-demo-live-note button {
+  padding: 2px 9px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--blue);
+  font: inherit;
   font-weight: 600;
+  cursor: pointer;
+  transition: background var(--duration-fast) ease, transform 120ms var(--ease-out);
 }
 
-.room-inline-demo-preview-none,
-.room-inline-demo-preview-note {
-  color: var(--text-secondary);
-  font-size: 12px;
-}
-
-.room-inline-demo-preview-note.is-error {
-  color: var(--red-text, #f87171);
-}
-
-.room-inline-demo-preview-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-/* Who marked what. */
-.room-inline-demo-marks {
-  display: grid;
-  gap: 2px;
-  max-height: 150px;
-  margin: 0;
-  padding: 0;
-  overflow-y: auto;
-  list-style: none;
-}
-
-.room-inline-demo-marks li {
-  display: grid;
-  grid-template-columns: auto minmax(0, auto) minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 8px;
-  min-height: 28px;
-  padding: 0 4px;
-  border-radius: var(--radius-md);
-  font-size: 12px;
-}
-
-.room-inline-demo-marks li:hover {
+.room-inline-demo-live-note button:hover {
   background: var(--accent-hover);
 }
 
-.room-inline-demo-marks i {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
+.room-inline-demo-live-note button:active {
+  transform: scale(0.97);
 }
 
-.room-inline-demo-mark-who {
-  color: var(--text);
-  font-weight: 600;
-  white-space: nowrap;
+.room-inline-demo-live-note.is-error {
+  border-color: color-mix(in srgb, var(--red) 50%, transparent);
+  background: var(--red-dim);
+  color: var(--red-text);
 }
 
-.room-inline-demo-mark-what {
-  overflow: hidden;
-  color: var(--text-secondary);
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.live-demo-note-enter-active {
+  transition:
+    opacity 180ms var(--ease-out),
+    transform 180ms var(--ease-out);
+}
+
+.live-demo-note-leave-active {
+  transition: opacity 120ms ease;
+}
+
+.live-demo-note-enter-from {
+  opacity: 0;
+  transform: translate(-50%, -6px);
+}
+
+.live-demo-note-leave-to {
+  opacity: 0;
+}
+
+/* The shutter after a picture is taken. */
+.live-demo-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 7;
+  background: #ffffff;
+  pointer-events: none;
+  animation: live-demo-flash 260ms ease-out forwards;
+}
+
+@keyframes live-demo-flash {
+  from { opacity: 0.32; }
+  to { opacity: 0; }
 }
 
 /* The overlay above the demo. It has the frame's size and lets the pointer through. */
@@ -334,10 +765,13 @@
   left: 0;
   overflow: hidden;
   pointer-events: none;
+  transition: box-shadow var(--duration-fast) var(--ease-out);
 }
 
-.live-demo-overlay.is-drawing {
-  box-shadow: inset 0 0 0 2px var(--blue);
+/* In Draw and Pin mode the frame is ringed in your colour: your clicks make marks, not presses. */
+.live-demo-overlay.is-drawing,
+.live-demo-overlay.is-pinning {
+  box-shadow: inset 0 0 0 2px var(--live-self, var(--blue));
 }
 
 .live-demo-canvas {
@@ -347,6 +781,7 @@
   width: 100%;
   height: 100%;
   pointer-events: none;
+  transition: opacity var(--duration-fast) ease;
 }
 
 .live-demo-cursors,
@@ -366,11 +801,12 @@
 }
 
 .live-demo-cursor-arrow {
+  position: relative;
   display: block;
   fill: var(--live-color);
   stroke: #ffffff;
   stroke-width: 1.25;
-  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.25));
 }
 
 .live-demo-cursor-tag {
@@ -389,18 +825,60 @@
   line-height: 16px;
   text-overflow: ellipsis;
   white-space: nowrap;
+  transform-origin: top left;
+  transition:
+    opacity 220ms ease,
+    transform 220ms var(--ease-out);
+}
+
+/* A resting pointer keeps its arrow; its name fades until it moves again. */
+.live-demo-cursor.is-idle .live-demo-cursor-tag {
+  opacity: 0;
+  transform: scale(0.92);
+}
+
+.live-demo-cursor-pen {
+  display: none;
+  margin-right: 3px;
+  vertical-align: -1px;
+}
+
+.live-demo-cursor.is-drawing .live-demo-cursor-pen {
+  display: inline-block;
 }
 
 .live-demo-cursor.is-left .live-demo-cursor-tag {
   right: 6px;
   left: auto;
+  transform-origin: top right;
 }
 
 .live-demo-cursor.is-above .live-demo-cursor-tag {
   top: -22px;
 }
 
-/* In Draw mode this layer owns the pointer. */
+/* "Find a person": their pointer rings twice. */
+.live-demo-cursor-ring {
+  position: absolute;
+  top: -10px;
+  left: -10px;
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--live-color);
+  border-radius: 50%;
+  opacity: 0;
+}
+
+.live-demo-cursor.is-pinged .live-demo-cursor-ring {
+  animation: live-demo-ping 900ms var(--ease-out) 2;
+}
+
+@keyframes live-demo-ping {
+  from { opacity: 0.9; transform: scale(0.6); }
+  to { opacity: 0; transform: scale(2.2); }
+}
+
+/* In Draw and Pin mode this layer owns the pointer. */
 .live-demo-surface {
   position: absolute;
   inset: 0;
@@ -410,10 +888,17 @@
   touch-action: none;
 }
 
+/* The pin you place follows the pointer in its place. */
+.live-demo-overlay.is-pinning .live-demo-surface {
+  cursor: none;
+}
+
+/* A pin's point is the bottom left corner of its dot. */
 .live-demo-pin {
   position: absolute;
   width: 0;
   height: 0;
+  transition: opacity var(--duration-fast) ease;
 }
 
 .live-demo-pin:hover,
@@ -423,50 +908,101 @@
 
 .live-demo-pin-dot {
   position: absolute;
-  top: -10px;
-  left: -10px;
+  bottom: 0;
+  left: 0;
   display: grid;
   place-items: center;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 2px solid #ffffff;
-  border-radius: 50%;
+  border-radius: 50% 50% 50% 4px;
   background: var(--live-color);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
   color: var(--live-ink);
-  font: 700 10px/1 var(--font-sans);
+  font: 700 10.5px/1 var(--font-sans);
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
   pointer-events: auto;
+  transform-origin: bottom left;
+  transition: transform 100ms var(--ease-out);
+}
+
+button.live-demo-pin-dot:active {
+  transform: scale(0.94);
+}
+
+@starting-style {
+  .live-demo-pin-dot {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.85);
+  }
 }
 
 .live-demo-pin.is-highlighted .live-demo-pin-dot {
-  outline: 2px solid var(--blue);
+  outline: 2px solid var(--live-color);
   outline-offset: 2px;
+}
+
+.live-demo-pin.is-pending .live-demo-pin-dot {
+  border-style: dashed;
+  opacity: 0.65;
+}
+
+.live-demo-pin.is-draft .live-demo-pin-dot {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.live-demo-pin-ghost {
+  top: 0;
+  left: 0;
+  z-index: 2;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 100ms ease;
+}
+
+.live-demo-pin-ghost.is-on {
+  opacity: 0.85;
+}
+
+.live-demo-pin-ghost .live-demo-pin-dot {
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
 }
 
 .live-demo-pin-card {
   position: absolute;
   top: 8px;
   left: 8px;
-  display: none;
+  display: grid;
   gap: 4px;
   width: max-content;
-  max-width: 220px;
+  max-width: 230px;
   padding: 8px 10px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   background: var(--bg-elevated);
   box-shadow: var(--shadow-md);
   color: var(--text);
-  font-size: 12px;
-  line-height: 1.35;
-  pointer-events: auto;
+  font-size: 12.5px;
+  line-height: 1.4;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-2px) scale(0.96);
+  transform-origin: top left;
+  transition:
+    opacity 140ms var(--ease-out),
+    transform 140ms var(--ease-out),
+    visibility 0s linear 140ms;
 }
 
 .live-demo-pin-card strong {
   color: var(--text-secondary);
   font-size: 11px;
+  font-weight: 600;
 }
 
 .live-demo-pin-card p {
@@ -475,20 +1011,34 @@
   white-space: pre-wrap;
 }
 
+.live-demo-pin-card .live-demo-pin-state {
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
 .live-demo-pin:hover .live-demo-pin-card,
 .live-demo-pin:focus-within .live-demo-pin-card,
 .live-demo-pin.is-highlighted .live-demo-pin-card {
-  display: grid;
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+  transform: none;
+  transition:
+    opacity 140ms var(--ease-out),
+    transform 140ms var(--ease-out),
+    visibility 0s;
 }
 
 .live-demo-pin.is-flipped .live-demo-pin-card {
   right: 8px;
   left: auto;
+  transform-origin: top right;
 }
 
 .live-demo-pin.is-above .live-demo-pin-card {
   top: auto;
-  bottom: 8px;
+  bottom: 30px;
+  transform-origin: bottom left;
 }
 
 .live-demo-pin-delete {
@@ -497,7 +1047,7 @@
   border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
   border-radius: 999px;
   background: transparent;
-  color: var(--red-text, #f87171);
+  color: var(--red-text);
   font: inherit;
   font-size: 11px;
   cursor: pointer;
@@ -507,63 +1057,224 @@
   background: var(--accent-hover);
 }
 
-.live-demo-pin-draft {
-  position: absolute;
-  width: 14px;
-  height: 14px;
-  margin: -7px 0 0 -7px;
-  border: 2px solid #ffffff;
-  border-radius: 50%;
-  background: var(--live-color);
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
-}
-
+/* The note of a new pin, beside it. */
 .live-demo-pin-editor {
   position: absolute;
   z-index: 4;
   display: grid;
-  gap: 6px;
-  width: 236px;
-  padding: 8px;
+  gap: 8px;
+  width: 248px;
+  padding: 10px;
   border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
+  border-radius: var(--radius-lg);
   background: var(--bg-elevated);
-  box-shadow: var(--shadow-md);
+  box-shadow: var(--shadow-lg);
   pointer-events: auto;
+  transform-origin: top left;
+  transition:
+    opacity 180ms var(--ease-out),
+    transform 180ms var(--ease-out);
+}
+
+@starting-style {
+  .live-demo-pin-editor {
+    opacity: 0;
+    transform: scale(0.96);
+  }
 }
 
 .live-demo-pin-editor input {
   width: 100%;
-  padding: 6px 8px;
+  height: 32px;
+  padding: 0 10px;
   border: 1px solid var(--border-strong);
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--bg-subtle);
   color: var(--text);
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
 }
 
-.live-demo-pin-editor input:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--blue) 62%, transparent);
-  outline-offset: 1px;
-}
-
-.live-demo-pin-error {
+.live-demo-pin-hint {
   margin: 0;
-  color: var(--red-text, #f87171);
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.live-demo-pin-hint kbd {
+  padding: 0 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  font: 500 10px/14px var(--font-sans);
+}
+
+/* While a list row points at a mark, the other marks step back. */
+.live-demo-overlay.has-highlight .live-demo-canvas.is-saved,
+.live-demo-overlay.has-highlight .live-demo-pin:not(.is-highlighted) {
+  opacity: 0.25;
+}
+
+/* The drawing bar floats in the demo, on glass. */
+.live-demo-palette {
+  position: absolute;
+  bottom: 14px;
+  left: 50%;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--bg-elevated) 78%, transparent);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+  transform: translateX(-50%);
+  backdrop-filter: blur(18px) saturate(170%);
+  pointer-events: auto;
+}
+
+.live-demo-palette-enter-active {
+  transition:
+    opacity 180ms var(--ease-out),
+    transform 220ms var(--ease-out);
+}
+
+.live-demo-palette-leave-active {
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+
+.live-demo-palette-enter-from,
+.live-demo-palette-leave-to {
+  opacity: 0;
+  transform: translate(-50%, 8px) scale(0.97);
+}
+
+.live-demo-palette-me {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 6px;
+  color: var(--text-tertiary);
   font-size: 11.5px;
 }
 
-.live-demo-pin-actions {
-  display: flex;
-  justify-content: flex-end;
+.live-demo-palette-me i {
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, #ffffff 80%, transparent);
+  border-radius: 50%;
+  background: var(--live-self, var(--blue));
+  box-shadow: 0 0 0 1px var(--border-strong);
+}
+
+.live-demo-palette-sep {
+  width: 1px;
+  height: 18px;
+  margin: 0 4px;
+  background: var(--border-strong);
+}
+
+.live-demo-palette-button,
+.live-demo-palette-done {
+  display: inline-flex;
+  align-items: center;
   gap: 6px;
+  height: 32px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    transform 120ms var(--ease-out);
+}
+
+.live-demo-palette-button:hover:not(:disabled) {
+  background: var(--accent-hover);
+  color: var(--text);
+}
+
+.live-demo-palette-button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.live-demo-palette-done {
+  padding: 0 14px;
+  background: var(--blue);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.live-demo-palette-done:hover {
+  background: color-mix(in srgb, var(--blue) 86%, #000000);
+}
+
+.live-demo-palette-button:active:not(:disabled),
+.live-demo-palette-done:active {
+  transform: scale(0.96);
+}
+
+/* While the picture is taken: no pointers, no notes, no fade. Pin notes go as text instead. */
+.live-demo-overlay.is-capturing .live-demo-cursors,
+.live-demo-overlay.is-capturing .live-demo-pin-ghost,
+.live-demo-overlay.is-capturing .live-demo-pin-editor,
+.live-demo-overlay.is-capturing .live-demo-pin-card,
+.room-inline-demo.is-capturing .room-inline-demo-fade,
+.room-inline-demo.is-capturing .room-inline-demo-live-note,
+.room-inline-demo.is-capturing .room-inline-demo-more {
+  visibility: hidden;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .live-demo-cursor,
+  .live-demo-cursor-tag,
+  .live-demo-face,
+  .live-demo-tool,
+  .live-demo-pin-card,
+  .live-demo-pin-dot,
+  .live-demo-pin-editor,
   .room-inline-demo-more,
-  .room-inline-demo-live-tools button {
-    transition: none;
+  .live-demo-button {
+    transition: opacity var(--duration-fast) ease;
+  }
+
+  .live-demo-pop-enter-from,
+  .live-demo-pop-leave-to,
+  .live-demo-note-enter-from {
+    transform: none;
+  }
+
+  .live-demo-note-enter-from {
+    transform: translateX(-50%);
+  }
+
+  .live-demo-palette-enter-from,
+  .live-demo-palette-leave-to {
+    transform: translateX(-50%);
+  }
+
+  .live-demo-cursor.is-pinged .live-demo-cursor-ring {
+    animation-duration: 1ms;
+  }
+
+  .live-demo-flash {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .live-demo-palette {
+    background: var(--bg-elevated);
+    backdrop-filter: none;
   }
 }

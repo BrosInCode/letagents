@@ -12,3 +12,8 @@ export type RoomThreadReply = (
 ) => Promise<boolean>;
 
 export const roomThreadReplyKey: InjectionKey<RoomThreadReply> = Symbol("room-thread-reply");
+
+/** Opens a message's thread in the thread panel, as its reply count does. */
+export type RoomThreadOpen = (threadRootId: string) => void;
+
+export const roomThreadOpenKey: InjectionKey<RoomThreadOpen> = Symbol("room-thread-open");

@@ -2,10 +2,15 @@
   <div
     ref="root"
     class="live-demo-overlay"
-    :class="{ 'is-drawing': drawing }"
-    :style="{ width: `${width}px`, height: `${height}px` }"
+    :class="{
+      'is-drawing': drawing,
+      'is-pinning': pinning,
+      'is-capturing': capturing,
+      'has-highlight': Boolean(highlightMarkId),
+    }"
+    :style="{ width: `${width}px`, height: `${height}px`, '--live-self': session.viewerColor.value }"
   >
-    <canvas ref="marksCanvas" class="live-demo-canvas" aria-hidden="true" />
+    <canvas ref="marksCanvas" class="live-demo-canvas is-saved" aria-hidden="true" />
     <canvas ref="inkCanvas" class="live-demo-canvas" aria-hidden="true" />
     <div class="live-demo-cursors" aria-hidden="true">
       <div
@@ -15,17 +20,17 @@
         class="live-demo-cursor"
         :style="{ '--live-color': cursor.color, '--live-ink': cursor.ink }"
       >
+        <span class="live-demo-cursor-ring"></span>
         <svg class="live-demo-cursor-arrow" width="16" height="22" viewBox="0 0 16 22">
           <path d="M1.5 1.5v16.2l4.3-4 3.3 7 2.9-1.4-3.3-6.9h6.1L1.5 1.5z" />
         </svg>
-        <span class="live-demo-cursor-tag">{{ cursor.name }}</span>
+        <span class="live-demo-cursor-tag"><PenLine class="live-demo-cursor-pen" :size="10" aria-hidden="true" />{{ cursor.name }}</span>
       </div>
     </div>
     <div
-      v-if="drawing"
+      v-if="drawing || pinning"
       ref="surface"
       class="live-demo-surface"
-      :class="`is-${tool}`"
       tabindex="-1"
       @mousedown.prevent
       @pointerdown="onPointerDown"
@@ -40,7 +45,12 @@
         v-for="pin in pins"
         :key="pin.id"
         class="live-demo-pin"
-        :class="{ 'is-flipped': pin.flipped, 'is-above': pin.above, 'is-highlighted': pin.id === highlightMarkId }"
+        :class="{
+          'is-flipped': pin.flipped,
+          'is-above': pin.above,
+          'is-highlighted': pin.id === highlightMarkId,
+          'is-pending': pin.waiting,
+        }"
         :style="{ left: `${pin.left}px`, top: `${pin.top}px`, '--live-color': pin.color, '--live-ink': pin.ink }"
       >
         <button
@@ -49,16 +59,27 @@
           :aria-label="`Pin ${pin.number} by ${pin.author}: ${pin.text}`"
         >{{ pin.number }}</button>
         <div class="live-demo-pin-card">
-          <strong>{{ pin.author }}</strong>
+          <strong>{{ pin.author }} · pin {{ pin.number }}</strong>
           <p>{{ pin.text }}</p>
-          <button v-if="pin.own" class="live-demo-pin-delete" type="button" @click="removePin(pin.id)">Delete</button>
+          <p v-if="pin.waiting" class="live-demo-pin-state">Not saved yet. It is saved when the link is back.</p>
+          <button v-if="pin.own" class="live-demo-pin-delete" type="button" @click="removePin(pin)">Delete</button>
         </div>
       </div>
-      <span
+      <div
         v-if="pinDraft"
-        class="live-demo-pin-draft"
-        :style="{ left: `${pinDraft.left}px`, top: `${pinDraft.top}px`, '--live-color': session.viewerColor.value }"
-      />
+        class="live-demo-pin is-draft"
+        :style="{ left: `${pinDraft.left}px`, top: `${pinDraft.top}px`, '--live-color': session.viewerColor.value, '--live-ink': selfInk }"
+      >
+        <span class="live-demo-pin-dot">{{ nextPinNumber }}</span>
+      </div>
+    </div>
+    <div
+      ref="ghost"
+      class="live-demo-pin live-demo-pin-ghost"
+      :style="{ '--live-color': session.viewerColor.value, '--live-ink': selfInk }"
+      aria-hidden="true"
+    >
+      <span class="live-demo-pin-dot">{{ nextPinNumber }}</span>
     </div>
     <form
       v-if="pinDraft"
@@ -73,21 +94,33 @@
         :maxlength="PIN_TEXT_MAX"
         placeholder="Add a note"
         aria-label="Note for this pin"
-        :disabled="pinDraft.saving"
       >
-      <p v-if="pinDraft.error" class="live-demo-pin-error" role="alert">{{ pinDraft.error }}</p>
-      <div class="live-demo-pin-actions">
-        <button type="button" :disabled="pinDraft.saving" @click="closePinEditor">Cancel</button>
-        <button type="submit" class="is-primary" :disabled="pinDraft.saving || !pinDraft.text.trim()">
-          {{ pinDraft.saving ? "Saving…" : "Add pin" }}
-        </button>
-      </div>
+      <p class="live-demo-pin-hint"><kbd>Enter</kbd> to pin · <kbd>Esc</kbd> to cancel</p>
     </form>
+    <Transition name="live-demo-palette">
+      <div v-if="drawing && !capturing" class="live-demo-palette" role="toolbar" aria-label="Drawing tools">
+        <span class="live-demo-palette-me" title="Your ink colour"><i aria-hidden="true"></i>You</span>
+        <span class="live-demo-palette-sep" aria-hidden="true"></span>
+        <button
+          class="live-demo-palette-button"
+          type="button"
+          :disabled="!canUndo"
+          title="Undo your last mark (⌘Z)"
+          @click="$emit('undo')"
+        >
+          <Undo2 :size="15" aria-hidden="true" />
+          <span>Undo</span>
+        </button>
+        <span class="live-demo-palette-sep" aria-hidden="true"></span>
+        <button class="live-demo-palette-done" type="button" title="Stop drawing (Esc)" @click="$emit('exit')">Done</button>
+      </div>
+    </Transition>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { PenLine, Undo2 } from "@lucide/vue";
 import { drawStroke, INK_WIDTH_HIGHLIGHT } from "./canvas-draw";
 import { planMarkPaint } from "./marks";
 import { createLatestThrottle, createInkBatcher, CURSOR_INTERVAL_MS, type InkBatcher } from "./throttle";
@@ -106,14 +139,26 @@ const props = defineProps<{
   /** How much demo space is scaled to fit the frame. */
   scale: number;
   drawing: boolean;
-  tool: "pen" | "pin";
+  /** The next click on the demo places a pin. */
+  pinning: boolean;
+  /** A picture of the card is being taken: other people's pointers stay out of it. */
+  capturing: boolean;
   highlightMarkId: string | null;
+  canUndo: boolean;
 }>();
 
 const emit = defineEmits<{
-  /** Escape in draw mode. */
+  /** Escape or Done in draw mode. */
   exit: [];
-  /** Something the person should read (a mark that was not saved). */
+  /** Escape in pin mode. */
+  "cancel-pin": [];
+  /** The pin is placed (it saves on its own). */
+  pinned: [];
+  undo: [];
+  /** Delete one of your saved marks, or take back one that is not saved yet. */
+  delete: [id: string];
+  "cancel-pending": [key: number];
+  /** Something the person should read. */
   notice: [text: string];
 }>();
 
@@ -125,8 +170,10 @@ const MAX_RAW_POINTS = 20_000;
 // Room a cursor's name tag needs to its right and below it (CSS px).
 const CURSOR_TAG_ROOM_X = 150;
 const CURSOR_TAG_ROOM_Y = 34;
-const EDITOR_WIDTH = 236;
-const EDITOR_HEIGHT = 112;
+// A name tag fades after this long without a move, and comes back with the next one.
+const CURSOR_IDLE_MS = 2_500;
+const EDITOR_WIDTH = 248;
+const EDITOR_HEIGHT = 80;
 
 type PinMark = Extract<DemoMark, { kind: "pin" }>;
 
@@ -137,8 +184,6 @@ interface PinDraft {
   editorLeft: number;
   editorTop: number;
   text: string;
-  saving: boolean;
-  error: string;
 }
 
 interface ActiveStroke {
@@ -147,14 +192,32 @@ interface ActiveStroke {
   batcher: InkBatcher;
 }
 
+interface PinView {
+  id: string;
+  pendingKey: number | null;
+  number: number;
+  left: number;
+  top: number;
+  text: string;
+  author: string;
+  color: string;
+  ink: string;
+  own: boolean;
+  waiting: boolean;
+  flipped: boolean;
+  above: boolean;
+}
+
 const root = ref<HTMLElement | null>(null);
 const marksCanvas = ref<HTMLCanvasElement | null>(null);
 const inkCanvas = ref<HTMLCanvasElement | null>(null);
 const surface = ref<HTMLElement | null>(null);
+const ghost = ref<HTMLElement | null>(null);
 const pinInput = ref<HTMLInputElement | null>(null);
 const pinDraft = ref<PinDraft | null>(null);
 
 const peopleByCid = computed(() => new Map(props.session.people.value.map((person) => [person.cid, person])));
+const selfInk = computed(() => readableTextColor(props.session.viewerColor.value));
 
 const shownCursors = computed(() => {
   // Raised when a cursor appears or goes; the cursors themselves move outside Vue.
@@ -165,31 +228,46 @@ const shownCursors = computed(() => {
   });
 });
 
-const pins = computed(() => {
-  const list = props.session.marks.value.filter((mark): mark is PinMark => mark.kind === "pin");
-  return list.map((mark, index) => {
-    const [left, top] = demoToFrame(mark.at, props.scale);
+// Saved pins first, oldest first, then yours that are not saved yet: the numbers match the Marks list and the sent text.
+const pins = computed<PinView[]>(() => {
+  const view = (pin: Omit<PinView, "left" | "top" | "flipped" | "above" | "ink"> & { at: LiveDemoPoint }): PinView => {
+    const [left, top] = demoToFrame(pin.at, props.scale);
     return {
-      id: mark.id,
-      number: index + 1,
-      left,
-      top,
-      text: mark.text,
-      author: mark.author.name,
-      color: mark.author.color,
-      ink: readableTextColor(mark.author.color),
-      own: props.session.isOwnMark(mark),
+      id: pin.id, pendingKey: pin.pendingKey, number: pin.number, text: pin.text, author: pin.author,
+      color: pin.color, own: pin.own, waiting: pin.waiting, left, top, ink: readableTextColor(pin.color),
       flipped: left > props.width - 250,
       above: top > props.height - 140,
     };
-  });
+  };
+  let number = 0;
+  const list: PinView[] = [];
+  for (const mark of props.session.marks.value) {
+    if (mark.kind !== "pin") continue;
+    const pin = mark as PinMark;
+    list.push(view({
+      id: pin.id, pendingKey: null, number: ++number, at: pin.at, text: pin.text, author: pin.author.name,
+      color: pin.author.color, own: props.session.isOwnMark(pin), waiting: false,
+    }));
+  }
+  for (const entry of props.session.pending.value) {
+    if (entry.body.kind !== "pin") continue;
+    list.push(view({
+      id: `pending-${entry.key}`, pendingKey: entry.key, number: ++number, at: entry.body.at, text: entry.body.text,
+      author: "You", color: props.session.viewerColor.value, own: true, waiting: entry.waiting,
+    }));
+  }
+  return list;
 });
+
+const nextPinNumber = computed(() => pins.value.length + 1);
 
 // Cursors move in a frame loop: a network frame only adds a sample (see cursor-interpolation.ts).
 const cursorElements = new Map<string, HTMLElement>();
 const cursorBinders = new Map<string, (element: unknown) => void>();
 /** Where each cursor is drawn now ("hidden" before its first sample), to skip a write that changes nothing. */
 const cursorPlaced = new Map<string, string>();
+/** When each cursor last moved, so its name tag can fade while it rests. */
+const cursorMovedAt = new Map<string, number>();
 
 /** A stable function ref per person, so Vue calls it when the element mounts or unmounts, not on every render. */
 function cursorRef(cid: string): (element: unknown) => void {
@@ -201,6 +279,7 @@ function cursorRef(cid: string): (element: unknown) => void {
       } else {
         cursorElements.delete(cid);
         cursorPlaced.delete(cid);
+        cursorMovedAt.delete(cid);
         cursorBinders.delete(cid);
       }
     };
@@ -210,6 +289,7 @@ function cursorRef(cid: string): (element: unknown) => void {
 }
 
 let frameHandle = 0;
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let inkDirty = true;
 let inkSignature = "";
 // The saved strokes are painted on their own canvas, and a new one is added on top
@@ -220,8 +300,6 @@ let marksCleared = true;
 let marksDrawn: ReadonlySet<string> = new Set();
 let backingRatio = 1;
 let activeStroke: ActiveStroke | null = null;
-let pendingSeq = 0;
-const pendingStrokes = new Map<number, LiveDemoPoint[]>();
 const cursorThrottle = createLatestThrottle<LiveDemoPoint>(CURSOR_INTERVAL_MS, (point) => props.session.sendCursor(point));
 let stopWake: (() => void) | null = null;
 
@@ -234,6 +312,10 @@ function frame(): void {
   const now = performance.now();
   const { cursors, ink } = props.session;
   cursors.prune(now);
+  if (ink.prune(now)) inkDirty = true;
+  const strokes = ink.strokes();
+  const drawingCids = new Set(strokes.filter((stroke) => !stroke.ended).map((stroke) => stroke.cid));
+  let nextIdleAt = Number.POSITIVE_INFINITY;
   for (const [cid, element] of cursorElements) {
     const at = cursors.positionOf(cid, now);
     const placed = cursorPlaced.get(cid);
@@ -247,17 +329,24 @@ function frame(): void {
     const x = at.x * props.scale;
     const y = at.y * props.scale;
     const key = `${x.toFixed(1)},${y.toFixed(1)}`;
-    if (placed === key) continue;
-    element.style.transform = `translate3d(${x}px, ${y}px, 0)`;
-    if (placed === undefined || placed === "hidden") element.style.opacity = "1";
-    // The name tag stays inside the frame: it turns to the left and above near the right and bottom edges.
-    element.classList.toggle("is-left", x > props.width - CURSOR_TAG_ROOM_X);
-    element.classList.toggle("is-above", y > props.height - CURSOR_TAG_ROOM_Y);
-    cursorPlaced.set(cid, key);
+    if (placed !== key) {
+      element.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+      if (placed === undefined || placed === "hidden") element.style.opacity = "1";
+      // The name tag stays inside the frame: it turns to the left and above near the right and bottom edges.
+      element.classList.toggle("is-left", x > props.width - CURSOR_TAG_ROOM_X);
+      element.classList.toggle("is-above", y > props.height - CURSOR_TAG_ROOM_Y);
+      cursorPlaced.set(cid, key);
+      cursorMovedAt.set(cid, now);
+    }
+    const movedAt = cursorMovedAt.get(cid) ?? now;
+    const drawingNow = drawingCids.has(cid);
+    // Someone drawing keeps their name on show.
+    const idle = !drawingNow && now - movedAt >= CURSOR_IDLE_MS;
+    element.classList.toggle("is-idle", idle);
+    element.classList.toggle("is-drawing", drawingNow);
+    if (!idle) nextIdleAt = Math.min(nextIdleAt, movedAt + CURSOR_IDLE_MS);
   }
   if (marksDirty) paintMarks();
-  if (ink.prune(now)) inkDirty = true;
-  const strokes = ink.strokes();
   let signature = String(strokes.length);
   for (const stroke of strokes) signature += `:${stroke.points.length}${stroke.ended ? "e" : ""}`;
   if (signature !== inkSignature) {
@@ -269,7 +358,13 @@ function frame(): void {
     redrawInk();
   }
   // Strokes of others still need frames: an ended one must be dropped on time.
-  if (cursors.animating(now) || strokes.length > 0) frameHandle = requestAnimationFrame(frame);
+  if (cursors.animating(now) || strokes.length > 0) {
+    frameHandle = requestAnimationFrame(frame);
+  } else if (Number.isFinite(nextIdleAt)) {
+    // A resting cursor needs one more frame, when its tag should fade.
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(wake, Math.max(16, nextIdleAt - now + 16));
+  }
 }
 
 function context(canvas: HTMLCanvasElement | null): CanvasRenderingContext2D | null {
@@ -323,7 +418,19 @@ function redrawInk(): void {
     : undefined;
   if (highlighted?.kind === "stroke") drawStroke(ctx, highlighted.points, props.scale, highlighted.author.color, INK_WIDTH_HIGHLIGHT);
   const mine = props.session.viewerColor.value;
-  for (const points of pendingStrokes.values()) drawStroke(ctx, points, props.scale, mine);
+  // Yours that the server does not have yet: solid while the save is on its way, dashed once it had to wait.
+  for (const entry of props.session.pending.value) {
+    if (entry.body.kind !== "stroke") continue;
+    if (!entry.waiting) {
+      drawStroke(ctx, entry.body.points, props.scale, mine);
+      continue;
+    }
+    ctx.save();
+    ctx.setLineDash([7, 6]);
+    ctx.globalAlpha = 0.6;
+    drawStroke(ctx, entry.body.points, props.scale, mine);
+    ctx.restore();
+  }
   if (activeStroke) drawStroke(ctx, activeStroke.points, props.scale, mine);
 }
 
@@ -336,12 +443,24 @@ function pointFor(event: { clientX: number; clientY: number }, rect: DOMRect): L
   return frameToDemo(event.clientX - rect.left, event.clientY - rect.top, props.scale);
 }
 
+function showGhost(event: PointerEvent | null, rect?: DOMRect): void {
+  const element = ghost.value;
+  if (!element) return;
+  if (!event || !rect || !props.pinning || pinDraft.value) {
+    element.classList.remove("is-on");
+    return;
+  }
+  element.style.transform = `translate3d(${event.clientX - rect.left}px, ${event.clientY - rect.top}px, 0)`;
+  element.classList.add("is-on");
+}
+
 function onPointerDown(event: PointerEvent): void {
   const element = surface.value;
   if (!element || event.button !== 0 || !event.isPrimary) return;
   const point = pointFor(event, element.getBoundingClientRect());
-  if (props.tool === "pin") {
+  if (props.pinning) {
     openPinEditor(point);
+    showGhost(null);
     return;
   }
   if (activeStroke) return;
@@ -358,6 +477,7 @@ function onPointerMove(event: PointerEvent): void {
   if (!element) return;
   const rect = element.getBoundingClientRect();
   cursorThrottle.push(pointFor(event, rect));
+  showGhost(event, rect);
   const stroke = activeStroke;
   if (!stroke || event.pointerId !== stroke.pointerId) return;
   // A fast pointer reports several positions per event.
@@ -373,91 +493,87 @@ function onPointerMove(event: PointerEvent): void {
 }
 
 function onPointerUp(event: PointerEvent): void {
-  if (activeStroke && event.pointerId === activeStroke.pointerId) void finishStroke(true);
+  if (activeStroke && event.pointerId === activeStroke.pointerId) finishStroke(true);
 }
 
 function onPointerCancel(event: PointerEvent): void {
   // Losing the pointer mid-stroke ends it where it was; nothing is lost.
-  if (activeStroke && event.pointerId === activeStroke.pointerId) void finishStroke(true);
+  if (activeStroke && event.pointerId === activeStroke.pointerId) finishStroke(true);
 }
 
 function onPointerLeave(): void {
+  showGhost(null);
   if (activeStroke) return;
   cursorThrottle.cancel();
   props.session.sendCursor(null);
 }
 
-async function finishStroke(save: boolean): Promise<void> {
+function finishStroke(save: boolean): void {
   const stroke = activeStroke;
   activeStroke = null;
   if (!stroke) return;
   stroke.batcher.end();
   const points = save ? simplifyStroke(stroke.points) : [];
-  if (points.length < 2) {
-    markInkDirty();
-    return;
-  }
-  const key = ++pendingSeq;
-  // The stroke stays on screen while it saves; the saved mark replaces it.
-  pendingStrokes.set(key, points);
+  // It stays on screen from here: as a mark of yours that is saving, then as the saved mark.
+  if (points.length >= 2) props.session.queueMark({ kind: "stroke", points });
   markInkDirty();
-  try {
-    await props.session.addStroke(points);
-  } catch {
-    emit("notice", "Could not save the drawing. Try again.");
-  } finally {
-    pendingStrokes.delete(key);
-    markInkDirty();
-  }
 }
 
 function openPinEditor(at: LiveDemoPoint): void {
   const [left, top] = demoToFrame(at, props.scale);
-  const editorLeft = Math.max(4, Math.min(left - 10, props.width - EDITOR_WIDTH - 4));
-  const below = top + 16;
-  const editorTop = below + EDITOR_HEIGHT > props.height ? Math.max(4, top - EDITOR_HEIGHT - 8) : below;
-  pinDraft.value = { at, left, top, editorLeft, editorTop, text: "", saving: false, error: "" };
+  const editorLeft = Math.max(4, Math.min(left + 14, props.width - EDITOR_WIDTH - 4));
+  const below = top + 14;
+  const editorTop = below + EDITOR_HEIGHT > props.height ? Math.max(4, top - EDITOR_HEIGHT - 14) : below;
+  pinDraft.value = { at, left, top, editorLeft, editorTop, text: "" };
   void nextTick(() => pinInput.value?.focus({ preventScroll: true }));
 }
 
-function closePinEditor(): void {
-  pinDraft.value = null;
-  void nextTick(() => surface.value?.focus({ preventScroll: true }));
-}
-
-async function savePin(): Promise<void> {
+function savePin(): void {
   const draft = pinDraft.value;
   const text = draft?.text.trim() ?? "";
-  if (!draft || draft.saving || !text) return;
-  draft.saving = true;
-  draft.error = "";
-  try {
-    await props.session.addPin(draft.at, text);
-    if (pinDraft.value === draft) closePinEditor();
-  } catch {
-    draft.saving = false;
-    draft.error = "Could not save the pin. Try again.";
-  }
+  if (!draft || !text) return;
+  props.session.queueMark({ kind: "pin", at: draft.at, text });
+  pinDraft.value = null;
+  emit("pinned");
 }
 
-async function removePin(id: string): Promise<void> {
-  try {
-    await props.session.deleteMark(id);
-  } catch {
-    emit("notice", "Could not delete the pin. Try again.");
-  }
+function removePin(pin: PinView): void {
+  if (pin.pendingKey !== null) emit("cancel-pending", pin.pendingKey);
+  else emit("delete", pin.id);
 }
 
-/** Escape closes the pin note first and then leaves draw mode, unless the person is typing elsewhere. */
+/** Escape cancels the pin, or leaves draw mode, unless the person is typing somewhere else. */
 function onEscape(event: KeyboardEvent): void {
-  if (event.key !== "Escape" || !props.drawing) return;
+  if (event.key !== "Escape" || !(props.drawing || props.pinning)) return;
   const target = event.target;
   if (target instanceof HTMLElement && !root.value?.contains(target) && target.closest("input, textarea, select, [contenteditable]")) return;
+  // An open panel (Marks, say) closes first; its own Escape handles that.
+  if (target instanceof HTMLElement && target.closest(".live-demo-pop")) return;
   event.preventDefault();
   event.stopPropagation();
-  if (pinDraft.value) closePinEditor();
+  if (props.pinning) emit("cancel-pin");
   else emit("exit");
 }
+
+/**
+ * Rings a person's pointer twice and shows their name. False when their pointer
+ * is not on the demo, so the card can say so.
+ */
+function ping(cid: string): boolean {
+  const element = cursorElements.get(cid);
+  const placed = cursorPlaced.get(cid);
+  if (!element || placed === undefined || placed === "hidden") return false;
+  cursorMovedAt.set(cid, performance.now());
+  element.classList.remove("is-idle", "is-pinged");
+  // Restarts the ring if it is still running.
+  void element.offsetWidth;
+  element.classList.add("is-pinged");
+  setTimeout(() => element.classList.remove("is-pinged"), 2_000);
+  wake();
+  return true;
+}
+
+defineExpose({ ping });
 
 function onWindowResize(): void {
   const { ratio } = canvasBacking(props.width, props.height, window.devicePixelRatio || 1);
@@ -466,30 +582,41 @@ function onWindowResize(): void {
   markInkDirty();
 }
 
-function stopDrawing(): void {
-  window.removeEventListener("keydown", onEscape, true);
-  void finishStroke(true);
-  pinDraft.value = null;
-  cursorThrottle.cancel();
-  props.session.sendCursor(null);
+function listenForEscape(on: boolean): void {
+  if (on) window.addEventListener("keydown", onEscape, true);
+  else window.removeEventListener("keydown", onEscape, true);
 }
 
 watch(
-  () => props.drawing,
-  (drawing) => {
-    if (drawing) {
-      window.addEventListener("keydown", onEscape, true);
+  () => props.drawing || props.pinning,
+  (active, before) => {
+    listenForEscape(active);
+    if (active && !before) {
       void nextTick(() => surface.value?.focus({ preventScroll: true }));
-    } else {
-      stopDrawing();
+    } else if (!active) {
+      finishStroke(true);
+      pinDraft.value = null;
+      showGhost(null);
+      cursorThrottle.cancel();
+      props.session.sendCursor(null);
     }
   },
 );
 
-watch(() => props.tool, () => { pinDraft.value = null; });
+watch(
+  () => props.pinning,
+  (pinning) => {
+    if (pinning) return;
+    pinDraft.value = null;
+    showGhost(null);
+    // Back to drawing after a pin: the keyboard goes back to the surface.
+    if (props.drawing) void nextTick(() => surface.value?.focus({ preventScroll: true }));
+  },
+);
 
 // A new mark only adds a stroke; a removed one makes `paintMarks` start over.
 watch(() => props.session.marks.value, () => invalidateMarks(false));
+watch(() => props.session.pending.value, () => markInkDirty());
 watch(() => props.highlightMarkId, () => markInkDirty());
 
 watch(
@@ -518,21 +645,22 @@ onMounted(() => {
   sizeCanvases();
   stopWake = props.session.onWake(wake);
   window.addEventListener("resize", onWindowResize);
-  if (props.drawing) window.addEventListener("keydown", onEscape, true);
+  if (props.drawing || props.pinning) listenForEscape(true);
   wake();
 });
 
 onBeforeUnmount(() => {
   stopWake?.();
   window.removeEventListener("resize", onWindowResize);
-  window.removeEventListener("keydown", onEscape, true);
+  listenForEscape(false);
   if (frameHandle) cancelAnimationFrame(frameHandle);
   frameHandle = 0;
+  clearTimeout(idleTimer);
   cursorThrottle.cancel();
   if (activeStroke) {
     activeStroke.batcher.end();
     activeStroke = null;
   }
-  if (props.drawing) props.session.sendCursor(null);
+  if (props.drawing || props.pinning) props.session.sendCursor(null);
 });
 </script>

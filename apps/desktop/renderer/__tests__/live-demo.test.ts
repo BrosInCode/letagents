@@ -52,6 +52,7 @@ import { createLiveDemoJoins } from "../src/components/desktop/content/desktop-c
 import {
   applyMarkChanges,
   describeMark,
+  markAge,
   mergeMark,
   normalizeMarks,
   planMarkPaint,
@@ -64,18 +65,29 @@ import {
   INK_STALE_MS,
 } from "../src/components/desktop/content/desktop-chat-message/live-demo/ink-field";
 import {
-  liveStatusText,
-  presenceChips,
+  initials,
+  liveStatusLine,
+  presenceFaces,
   readableTextColor,
 } from "../src/components/desktop/content/desktop-chat-message/live-demo/people";
 import {
   clippingBoxes,
+  inkColorName,
   markupFileName,
+  markupNotes,
   markupReplyText,
   viewportBox,
   visibleCaptureRect,
   type ClipOps,
 } from "../src/components/desktop/content/desktop-chat-message/live-demo/markup";
+import {
+  markBody,
+  markInput,
+  pendingRetryDelay,
+  PENDING_MAX_LIVE_FAILURES,
+  PENDING_RETRY_MS,
+  sameMarkBody,
+} from "../src/components/desktop/content/desktop-chat-message/live-demo/pending-marks";
 import { newStrokeId } from "../src/components/desktop/content/desktop-chat-message/live-demo/stroke-id";
 import { createWidthSync } from "../src/components/desktop/content/desktop-chat-message/live-demo/width-sync";
 import {
@@ -243,13 +255,15 @@ describe("live card width (styles)", () => {
     assert.equal(card + 2 * (bubblePadding + bubbleBorder), 814);
   });
 
-  it("lets the card's one column shrink below its content, so a long title or the chips cannot widen it", () => {
+  it("lets the card's one column shrink below its content, so a long title, the faces or the tools cannot widen it", () => {
     const card = declarations(".room-inline-demo.is-live");
     assert.equal(card["grid-template-columns"], "minmax(0, 1fr)");
     assert.equal(card["min-width"], "0");
-    assert.equal(declarations(".room-inline-demo-presence")["flex-wrap"], "wrap");
-    assert.equal(declarations(".room-inline-demo-chip")["max-width"], "120px");
-    assert.equal(declarations(".room-inline-demo-live")["flex-wrap"], "wrap");
+    // The header's width comes from the card, and a narrow card drops the tool labels.
+    assert.equal(card["container-type"], "inline-size");
+    assert.equal(declarations(".room-inline-demo-header.is-live-head .room-inline-demo-title").flex, "1");
+    assert.match(css, /@container \(max-width: 600px\) \{\s*\.live-demo-tool-label,\s*\.live-demo-status-hint \{\s*display: none;/);
+    assert.equal(declarations(".live-demo-status-hint")["text-overflow"], "ellipsis");
   });
 });
 
@@ -1025,21 +1039,32 @@ describe("ink from other people", () => {
 describe("live demo people and status", () => {
   const person = (cid: string, name: string) => ({ cid, name, color: LIVE_DEMO_COLORS[0] });
 
-  it("shows no chips while you are alone", () => {
-    assert.deepEqual(presenceChips([person("a", "Emmy")], "a"), { chips: [], more: 0 });
-    assert.deepEqual(presenceChips([], null), { chips: [], more: 0 });
+  it("shows you even when you are alone, so you know the view is live", () => {
+    const alone = presenceFaces([person("a", "Emmy May")], "a");
+    assert.deepEqual(alone.faces.map((face) => [face.name, face.self, face.initials]), [["Emmy May", true, "EM"]]);
+    assert.deepEqual(presenceFaces([], null), { faces: [], more: 0 });
   });
 
   it("puts you first and counts the people who do not fit", () => {
     const people = [person("a", "Ann"), person("b", "Bo"), person("c", "Cy"), person("d", "Di"), person("e", "Ed"), person("f", "Flo")];
-    const result = presenceChips(people, "c");
-    assert.deepEqual(result.chips.map((chip) => chip.name), ["Cy", "Ann", "Bo", "Di"]);
-    assert.equal(result.chips[0].self, true);
+    const result = presenceFaces(people, "c");
+    assert.deepEqual(result.faces.map((face) => face.name), ["Cy", "Ann", "Bo", "Di"]);
+    assert.equal(result.faces[0].self, true);
     assert.equal(result.more, 2);
   });
 
   it("does not mark anyone as you when the greeting is unknown", () => {
-    assert.ok(presenceChips([person("a", "Ann"), person("b", "Bo")], null).chips.every((chip) => !chip.self));
+    assert.ok(presenceFaces([person("a", "Ann"), person("b", "Bo")], null).faces.every((face) => !face.self));
+  });
+
+  it("gives each face one or two letters", () => {
+    assert.equal(initials("Emmy May"), "EM");
+    assert.equal(initials("KD"), "KD");
+    assert.equal(initials("kdnotfound"), "KD");
+    assert.equal(initials("  ada   lovelace  byron "), "AL");
+    assert.equal(initials("émile zola"), "ÉZ");
+    assert.equal(initials("@@@"), "?");
+    assert.equal(initials(""), "?");
   });
 
   it("picks dark text on the light colours and white on the dark ones", () => {
@@ -1050,21 +1075,25 @@ describe("live demo people and status", () => {
     for (const color of LIVE_DEMO_COLORS) assert.match(readableTextColor(color), /^#(111111|ffffff)$/);
   });
 
-  it("says nothing while the connection works and a short sentence when it does not", () => {
-    assert.equal(liveStatusText(null, null), "");
-    assert.equal(liveStatusText("connecting", null), "");
-    assert.equal(liveStatusText("live", null), "");
-    assert.equal(liveStatusText("reconnecting", null), "Reconnecting…");
-    assert.equal(liveStatusText("offline", null), "Offline. Live view is paused.");
-    assert.equal(liveStatusText("refused", null), "Live view is not available here.");
+  it("says what the connection means for the person", () => {
+    assert.deepEqual(liveStatusLine("live", null), { tone: "live", label: "Live", hint: "People here see your pointer", canMark: true });
+    assert.deepEqual(liveStatusLine(null, null), { tone: "waiting", label: "Connecting…", hint: "", canMark: true });
+    assert.deepEqual(liveStatusLine("connecting", null), { tone: "waiting", label: "Connecting…", hint: "", canMark: true });
+    const reconnecting = liveStatusLine("reconnecting", null);
+    assert.equal(reconnecting.tone, "waiting");
+    assert.equal(reconnecting.canMark, true);
+    assert.match(reconnecting.hint, /kept and saved when the link is back/);
+    assert.deepEqual(liveStatusLine("offline", null), { tone: "off", label: "Offline", hint: "Only you see this demo now", canMark: false });
+    assert.deepEqual(liveStatusLine("refused", null), { tone: "off", label: "Not live", hint: "Live view is not available here", canMark: false });
   });
 
   it("gives the reason main or the server gave, on one line", () => {
-    assert.equal(liveStatusText("refused", null, "You are not a member of this room."), "Live view is off. You are not a member of this room.");
-    assert.equal(liveStatusText("offline", null, "This room is only on this computer."), "Live view is off. This room is only on this computer.");
-    assert.equal(liveStatusText("live", "Too many people are viewing this demo live."), "Too many people are viewing this demo live.");
-    assert.equal(liveStatusText("refused", "  Too\n many  "), "Too many");
-    assert.equal(liveStatusText("live", "x".repeat(300)).length, 120);
+    assert.equal(liveStatusLine("refused", null, "You are not a member of this room.").hint, "You are not a member of this room.");
+    assert.equal(liveStatusLine("offline", null, "This room is only on this computer.").hint, "This room is only on this computer.");
+    const full = liveStatusLine("live", "Too many people are viewing this demo live.");
+    assert.deepEqual(full, { tone: "off", label: "Not live", hint: "Too many people are viewing this demo live.", canMark: false });
+    assert.equal(liveStatusLine("refused", "  Too\n many  ").hint, "Too many");
+    assert.equal(liveStatusLine("live", "x".repeat(300)).hint.length, 120);
   });
 
   it("gives an account the same colour every time", () => {
@@ -1081,9 +1110,56 @@ describe("send to thread", () => {
     assert.equal(markupFileName(""), "Demo marked up.png");
   });
 
-  it("writes a short reply text", () => {
-    assert.equal(markupReplyText("pricing.html", 3), "Marked-up picture of the demo pricing.html.");
-    assert.equal(markupReplyText("pricing.html", 0), "Picture of the demo pricing.html.");
+  const author = (accountId: string, name: string, color: string) => ({ accountId, name, color });
+  const EMMY = author("acct_1", "EmmyMay", LIVE_DEMO_COLORS[5]);
+  const KD = author("acct_2", "KD", LIVE_DEMO_COLORS[1]);
+  const at = (id: string, createdAt: string) => ({ id, demo: "d", anchor: null, createdAt });
+  const marked: DemoMark[] = [
+    { ...at("m1", "2026-01-01T00:00:01.000Z"), kind: "stroke", points: [[1, 1], [2, 2]], author: KD },
+    { ...at("m2", "2026-01-01T00:00:02.000Z"), kind: "pin", at: [5, 5], text: "Make the yearly\nsaving easier to spot", author: KD },
+    { ...at("m3", "2026-01-01T00:00:03.000Z"), kind: "stroke", points: [[3, 3], [4, 4]], author: EMMY },
+    { ...at("m4", "2026-01-01T00:00:04.000Z"), kind: "pin", at: [6, 6], text: "Seats label is small", author: EMMY },
+    { ...at("m5", "2026-01-01T00:00:05.000Z"), kind: "stroke", points: [[5, 5], [6, 6]], author: KD },
+  ];
+
+  it("writes a short reply text when the demo has no marks", () => {
+    assert.equal(markupReplyText("pricing.html", markupNotes([])), "Picture of the demo pricing.html.");
+    assert.equal(markupReplyText("pricing.html", markupNotes([]), "  Look at this  "), "Look at this\nPicture of the demo pricing.html.");
+  });
+
+  it("sends the pin notes and who drew in which colour, because an agent cannot hover a pin", () => {
+    const notes = markupNotes(marked);
+    assert.deepEqual(notes.pins.map((pin) => [pin.number, pin.author, pin.text]), [
+      [1, "KD", "Make the yearly saving easier to spot"],
+      [2, "EmmyMay", "Seats label is small"],
+    ]);
+    assert.deepEqual(notes.inkBy.map((ink) => [ink.author, ink.colorName]), [["KD", "orange"], ["EmmyMay", "blue"]]);
+    assert.equal(markupReplyText("pricing.html", notes, "Two fixes"), [
+      "Two fixes",
+      "Marked-up picture of the demo pricing.html.",
+      "",
+      "Pins:",
+      "1. KD: Make the yearly saving easier to spot",
+      "2. EmmyMay: Seats label is small",
+      "",
+      "Drawings: KD (orange), EmmyMay (blue).",
+    ].join("\n"));
+  });
+
+  it("keeps the reply short when there are many or long pins", () => {
+    const many: DemoMark[] = Array.from({ length: 23 }, (_, index) => ({
+      ...at(`p${index}`, `2026-01-01T00:00:${String(index).padStart(2, "0")}.000Z`),
+      kind: "pin" as const, at: [1, 1] as LiveDemoPoint, text: "x".repeat(400), author: KD,
+    }));
+    const text = markupReplyText("a.html", markupNotes(many));
+    assert.match(text, /\n20\. KD: x{199}…\n…and 3 more\.$/);
+    assert.equal(text.split("\n").filter((line) => /^\d+\. /.test(line)).length, 20);
+  });
+
+  it("names the ink colours, grey for one it does not know", () => {
+    assert.deepEqual(LIVE_DEMO_COLORS.map(inkColorName), ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"]);
+    assert.equal(inkColorName("#0090FF"), "blue");
+    assert.equal(inkColorName("#123456"), "grey");
   });
 
   const WINDOW = viewportBox(1200, 800);
@@ -1589,5 +1665,225 @@ describe("live demo session", () => {
   it("refuses to save a mark when it is not joined", async () => {
     const t = setup();
     await assert.rejects(t.session.addPin([1, 1], "x"), /Update LetAgents/);
+  });
+});
+
+describe("marks that wait for the link", () => {
+  const ROOM = "github.com/org/repo";
+  const KEY = liveDemoKey("msg_5", "att_9")!;
+  const OWN = { accountId: "acct_1", name: "Emmy", color: liveDemoColor("acct_1") };
+  const STROKE: LiveDemoPoint[] = [[1, 1], [20, 30.5]];
+
+  it("says how long ago a mark was made", () => {
+    const now = Date.parse("2026-11-05T12:00:00.000Z");
+    assert.equal(markAge("2026-11-05T11:59:30.000Z", now), "now");
+    assert.equal(markAge("2026-11-05T11:56:00.000Z", now), "4 min");
+    assert.equal(markAge("2026-11-05T09:00:00.000Z", now), "3 h");
+    assert.match(markAge("2026-11-01T09:00:00.000Z", now), /1/);
+    assert.equal(markAge("not a date", now), "");
+  });
+
+  it("knows a saved mark by what it is, and can put a deleted one back", () => {
+    const pin: DemoMark = { id: "mark_aaaaaa", demo: KEY, kind: "pin", at: [3, 4], text: "Hi", author: OWN, anchor: null, createdAt: "x" };
+    const stroke: DemoMark = { id: "mark_bbbbbb", demo: KEY, kind: "stroke", points: STROKE, author: OWN, anchor: null, createdAt: "x" };
+    assert.deepEqual(markBody(pin), { kind: "pin", at: [3, 4], text: "Hi" });
+    assert.ok(sameMarkBody(markBody(stroke), stroke));
+    // The server keeps a tenth of a pixel: what was sent still matches what it saved.
+    assert.ok(sameMarkBody({ kind: "stroke", points: [[1.04, 0.96], [20.0333, 30.4512]] }, stroke));
+    assert.ok(sameMarkBody({ kind: "pin", at: [3.0412, 3.96], text: "Hi" }, pin));
+    assert.ok(!sameMarkBody({ kind: "stroke", points: [[1, 1], [20, 30]] }, stroke));
+    assert.ok(!sameMarkBody({ kind: "pin", at: [3, 4], text: "Hey" }, pin));
+    assert.ok(!sameMarkBody({ kind: "pin", at: [3, 4], text: "Hi" }, stroke));
+    assert.deepEqual(parseDemoMarkInput(markInput(KEY, markBody(stroke))), { demo: KEY, kind: "stroke", points: STROKE, anchor: null });
+    assert.deepEqual(parseDemoMarkInput(markInput(KEY, markBody(pin))), { demo: KEY, kind: "pin", at: [3, 4], text: "Hi", anchor: null });
+  });
+
+  it("waits longer after each failed try, up to a cap", () => {
+    assert.equal(pendingRetryDelay(1), PENDING_RETRY_MS[0]);
+    assert.equal(pendingRetryDelay(2), PENDING_RETRY_MS[1]);
+    assert.equal(pendingRetryDelay(99), PENDING_RETRY_MS[PENDING_RETRY_MS.length - 1]);
+    assert.equal(pendingRetryDelay(0), PENDING_RETRY_MS[0]);
+  });
+
+  function setup() {
+    const handlers = new Set<(event: DesktopLiveDemoEvent) => void>();
+    let failAdds = false;
+    let failRemoves = 0;
+    let seq = 0;
+    const added: unknown[] = [];
+    const removed: string[] = [];
+    const timers: Array<{ ms: number; run: () => void; cancelled: boolean }> = [];
+    // Each answer waits for the test, so a frame can arrive while a save is on its way.
+    let holdAdds = false;
+    const held: Array<() => void> = [];
+    const api: LiveDemoApi = {
+      async join() {},
+      async leave() {},
+      async send() {},
+      async listMarks() { return []; },
+      async addMark(_room, input) {
+        added.push(input);
+        if (holdAdds) await new Promise<void>((resolve) => held.push(resolve));
+        if (failAdds) throw new Error("The network is down.");
+        const id = `mark_saved_${String(++seq).padStart(2, "0")}`;
+        const base = { id, demo: input.demo, author: OWN, anchor: null, createdAt: `2026-01-01T00:00:0${seq}.000Z` };
+        return (input.kind === "pin" ? { ...base, kind: "pin", at: input.at, text: input.text } : { ...base, kind: "stroke", points: input.points }) as DemoMark;
+      },
+      async removeMark(_room, id) {
+        if (failRemoves > 0) {
+          failRemoves--;
+          throw new Error("Too many changes to marks. Try again in a moment.");
+        }
+        removed.push(id);
+      },
+      async viewerAccountId() { return "acct_1"; },
+    };
+    const events = {
+      register(_room: string, _key: string, handler: (event: DesktopLiveDemoEvent) => void) {
+        handlers.add(handler);
+        return () => { handlers.delete(handler); };
+      },
+    };
+    const session = useLiveDemo({
+      roomIdentifier: () => ROOM,
+      demoKey: () => KEY,
+      api,
+      events,
+      delay: (ms, run) => {
+        const timer = { ms, run, cancelled: false };
+        timers.push(timer);
+        return () => { timer.cancelled = true; };
+      },
+    });
+    const notices: string[] = [];
+    session.onNotice((notice) => notices.push(`${notice.error ? "error" : "info"}: ${notice.text}`));
+    const status = (value: "connecting" | "live" | "reconnecting" | "offline" | "refused") => {
+      for (const handler of [...handlers]) handler({ type: "status", roomIdentifier: ROOM, status: value });
+    };
+    const emit = (frame: DesktopLiveDemoServerFrame) => { for (const handler of [...handlers]) handler({ type: "frame", roomIdentifier: ROOM, frame }); };
+    const runTimers = () => {
+      const due = timers.splice(0).filter((timer) => !timer.cancelled);
+      for (const timer of due) timer.run();
+      return due.map((timer) => timer.ms);
+    };
+    return {
+      session, status, emit, added, removed, notices, runTimers,
+      failAdds: (value: boolean) => { failAdds = value; },
+      failRemoves: (count: number) => { failRemoves = count; },
+      hold: (value: boolean) => { holdAdds = value; },
+      release: () => { for (const resolve of held.splice(0)) resolve(); },
+    };
+  }
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  it("shows a mark at once and replaces it with the saved one", async () => {
+    const t = setup();
+    t.session.start("lease://one");
+    await settle();
+    t.session.queueMark({ kind: "stroke", points: STROKE });
+    assert.equal(t.session.pending.value.length, 1);
+    assert.equal(t.session.pending.value[0].waiting, false);
+    await settle();
+    assert.equal(t.session.pending.value.length, 0);
+    assert.deepEqual(t.session.marks.value.map((mark) => mark.id), ["mark_saved_01"]);
+    assert.deepEqual(t.notices, []);
+  });
+
+  it("keeps a mark through a bad link, dashed, and saves it when the link is back", async () => {
+    const t = setup();
+    t.session.start("lease://one");
+    t.status("live");
+    await settle();
+    t.status("reconnecting");
+    t.failAdds(true);
+    t.session.queueMark({ kind: "pin", at: [5, 6], text: "Fix this" });
+    await settle();
+    assert.equal(t.session.pending.value.length, 1);
+    assert.equal(t.session.pending.value[0].waiting, true);
+    // More tries while the link is down never give the mark up.
+    for (let index = 0; index < 5; index++) {
+      t.runTimers();
+      await settle();
+    }
+    assert.equal(t.session.pending.value.length, 1);
+    t.failAdds(false);
+    t.status("live");
+    await settle();
+    await settle();
+    assert.equal(t.session.pending.value.length, 0);
+    assert.deepEqual(t.session.marks.value.map((mark) => mark.kind === "pin" && mark.text), ["Fix this"]);
+    assert.deepEqual(t.notices, ["info: Saved 1 mark."]);
+  });
+
+  it("gives a mark up when the server refuses it while the link works", async () => {
+    const t = setup();
+    t.session.start("lease://one");
+    t.status("live");
+    await settle();
+    t.failAdds(true);
+    t.session.queueMark({ kind: "stroke", points: STROKE });
+    await settle();
+    for (let index = 1; index < PENDING_MAX_LIVE_FAILURES; index++) {
+      assert.equal(t.session.pending.value.length, 1);
+      t.runTimers();
+      await settle();
+    }
+    assert.equal(t.session.pending.value.length, 0);
+    assert.deepEqual(t.notices, ["error: The network is down."]);
+  });
+
+  it("knows a waiting mark is saved when the server's copy arrives", async () => {
+    const t = setup();
+    t.session.start("lease://one");
+    await settle();
+    t.failAdds(true);
+    t.session.queueMark({ kind: "stroke", points: STROKE });
+    await settle();
+    assert.equal(t.session.pending.value[0].waiting, true);
+    // The save went through, but its answer was lost: the broadcast copy settles it.
+    t.emit({ t: "mark", demo: KEY, mark: { id: "mark_landed_1", demo: KEY, kind: "stroke", points: STROKE, author: OWN, anchor: null, createdAt: "2026-01-01T00:00:00.000Z" } });
+    assert.equal(t.session.pending.value.length, 0);
+    t.failAdds(false);
+    t.runTimers();
+    await settle();
+    assert.equal(t.added.length, 1, "no second copy is saved");
+    assert.deepEqual(t.notices, ["info: Saved 1 mark."]);
+  });
+
+  it("deletes a mark that was taken back while its save was on its way", async () => {
+    const t = setup();
+    t.session.start("lease://one");
+    await settle();
+    t.hold(true);
+    t.session.queueMark({ kind: "stroke", points: STROKE });
+    await settle();
+    const key = t.session.pending.value[0].key;
+    assert.deepEqual(t.session.cancelPending(key), { kind: "stroke", points: STROKE });
+    assert.equal(t.session.pending.value.length, 0);
+    t.release();
+    await settle();
+    await settle();
+    assert.deepEqual(t.removed, ["mark_saved_01"]);
+    assert.deepEqual(t.session.marks.value, []);
+  });
+
+  it("deletes marks one by one and tries again when the server asks to slow down", async () => {
+    const t = setup();
+    t.session.start("lease://one");
+    await settle();
+    t.session.queueMark({ kind: "stroke", points: STROKE });
+    t.session.queueMark({ kind: "pin", at: [1, 2], text: "Two" });
+    await settle();
+    await settle();
+    const ids = t.session.marks.value.map((mark) => mark.id);
+    assert.equal(ids.length, 2);
+    t.failRemoves(1);
+    const done = t.session.deleteMarks(ids);
+    await settle();
+    assert.deepEqual(t.runTimers(), [1_100]);
+    const gone = await done;
+    assert.deepEqual(gone.map((mark) => mark.id), ids);
+    assert.deepEqual(t.removed, ids);
+    assert.deepEqual(t.session.marks.value, []);
   });
 });

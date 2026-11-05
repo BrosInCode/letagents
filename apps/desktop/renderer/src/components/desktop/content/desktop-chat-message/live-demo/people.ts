@@ -1,25 +1,32 @@
 import type { DesktopLiveDemoStatus } from "../../../../../../../electron/ipc-types";
 import type { LiveDemoPerson } from "./protocol";
 
-export interface PresenceChips {
-  chips: Array<LiveDemoPerson & { self: boolean }>;
-  /** People beyond the chips that fit. */
+export interface PresenceFaces {
+  faces: Array<LiveDemoPerson & { self: boolean; initials: string }>;
+  /** People beyond the faces that fit. */
   more: number;
 }
 
+/** One or two letters for a face: the first letters of the first two words, or the first two letters. */
+export function initials(name: string): string {
+  const words = name.replace(/[^\p{L}\p{N}\s]/gu, " ").trim().split(/\s+/).filter(Boolean);
+  if (words.length === 0) return "?";
+  const letters = words.length > 1 ? [...words[0]][0] + [...words[1]][0] : [...words[0]].slice(0, 2).join("");
+  return letters.toUpperCase();
+}
+
 /**
- * The people on a demo, as chips: you first, then the others in the order the
- * server listed them. Nothing shows while you are the only one.
+ * The people on a demo, as faces: you first, then the others in the order the
+ * server listed them. You show even when alone, so you know the view is live.
  */
-export function presenceChips(
+export function presenceFaces(
   people: readonly LiveDemoPerson[],
   selfCid: string | null,
   max = 4,
-): PresenceChips {
-  if (people.length < 2) return { chips: [], more: 0 };
-  const marked = people.map((person) => ({ ...person, self: person.cid === selfCid }));
+): PresenceFaces {
+  const marked = people.map((person) => ({ ...person, self: person.cid === selfCid, initials: initials(person.name) }));
   const ordered = [...marked.filter((person) => person.self), ...marked.filter((person) => !person.self)];
-  return { chips: ordered.slice(0, max), more: Math.max(0, ordered.length - max) };
+  return { faces: ordered.slice(0, max), more: Math.max(0, ordered.length - max) };
 }
 
 function channel(value: number): number {
@@ -47,21 +54,38 @@ function plainReason(reason: string | null | undefined): string {
   return (reason ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
 }
 
+export interface LiveStatusLine {
+  /** The dot: green while live, amber while it connects again, grey while off. */
+  tone: "live" | "waiting" | "off";
+  label: string;
+  /** What that means for the person, after the label. */
+  hint: string;
+  /** Pin, Draw and Send work. A mark made while the link is down waits and is saved later. */
+  canMark: boolean;
+}
+
 /**
- * What the card says about the live connection. Nothing while it works, or while
- * it is first connecting. `joinError` is why the room refused this demo's join
- * (for example, too many viewers), `reason` why the connection is off.
+ * The line under the demo's name. `joinError` is why the room refused this
+ * demo's join (for example, too many viewers), `reason` why the connection is off.
  */
-export function liveStatusText(
+export function liveStatusLine(
   status: DesktopLiveDemoStatus | null,
   joinError: string | null,
   reason: string | null = null,
-): string {
+): LiveStatusLine {
   const joinText = plainReason(joinError);
-  if (joinText) return joinText;
+  if (joinText) return { tone: "off", label: "Not live", hint: joinText, canMark: false };
   const why = plainReason(reason);
-  if (status === "refused") return why ? `Live view is off. ${why}` : "Live view is not available here.";
-  if (status === "offline") return why ? `Live view is off. ${why}` : "Offline. Live view is paused.";
-  if (status === "reconnecting") return "Reconnecting…";
-  return "";
+  switch (status) {
+    case "live":
+      return { tone: "live", label: "Live", hint: "People here see your pointer", canMark: true };
+    case "reconnecting":
+      return { tone: "waiting", label: "Reconnecting…", hint: "Your marks are kept and saved when the link is back", canMark: true };
+    case "offline":
+      return { tone: "off", label: "Offline", hint: why || "Only you see this demo now", canMark: false };
+    case "refused":
+      return { tone: "off", label: "Not live", hint: why || "Live view is not available here", canMark: false };
+    default:
+      return { tone: "waiting", label: "Connecting…", hint: "", canMark: true };
+  }
 }

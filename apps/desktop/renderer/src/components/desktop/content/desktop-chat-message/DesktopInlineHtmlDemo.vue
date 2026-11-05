@@ -2,70 +2,134 @@
   <section
     ref="card"
     class="room-inline-demo"
-    :class="{ 'is-live': liveLayout }"
+    :class="{ 'is-live': liveLayout, 'is-capturing': capturing }"
+    :style="liveEnabled ? { '--live-self': live.viewerColor.value } : undefined"
     :aria-label="`Interactive demo ${fileName}`"
+    @keydown="onCardKey"
   >
-    <header class="room-inline-demo-header">
+    <header class="room-inline-demo-header" :class="{ 'is-live-head': liveEnabled }">
       <FileCode class="room-inline-demo-icon" :size="16" aria-hidden="true" />
       <span class="room-inline-demo-title">
         <strong :title="fileName">{{ fileName }}</strong>
-        <small title="Runs in a locked view on this computer. It cannot load web pages or reach your LetAgents data.">Interactive demo · locked</small>
+        <small
+          v-if="liveReady"
+          class="live-demo-status"
+          :class="[`is-${statusLine.tone}`, { 'is-task': pinning }]"
+          role="status"
+        >
+          <i class="live-demo-status-dot" aria-hidden="true"></i>
+          <span>{{ statusLine.label }}</span>
+          <span v-if="statusHint" class="live-demo-status-hint">· {{ statusHint }}</span>
+        </small>
+        <small v-else title="Runs in a locked view on this computer. It cannot load web pages or reach your LetAgents data.">Interactive demo · locked</small>
       </span>
-      <button
-        class="room-inline-demo-action"
-        type="button"
-        aria-label="Reload demo"
-        title="Reload demo"
-        @click="reload"
-      >
-        <RotateCw :size="14" aria-hidden="true" />
-      </button>
-      <button
-        class="room-inline-demo-action"
-        type="button"
-        aria-label="Expand demo"
-        title="Open in a larger window"
-        :disabled="expanding"
-        @click="expand"
-      >
-        <Maximize2 :size="14" aria-hidden="true" />
-      </button>
+      <template v-if="liveEnabled">
+        <LiveDemoFaces
+          v-if="liveReady"
+          :people="live.people.value"
+          :self-cid="live.selfCid.value"
+          @find="findPerson"
+        />
+        <LiveDemoTools
+          :ready="liveReady"
+          :can-mark="canMark"
+          :pinning="pinning"
+          :drawing="drawing"
+          :mark-count="markCount"
+          :can-send="canSend"
+          :send-busy="sendPhase !== 'idle' || !statusLine.canMark"
+          :open-pop="openPop"
+          @pin="togglePin"
+          @draw="toggleDraw"
+          @send="sendToThread"
+          @toggle-pop="togglePop"
+        />
+      </template>
+      <template v-else>
+        <button
+          class="room-inline-demo-action"
+          type="button"
+          aria-label="Reload demo"
+          title="Reload demo"
+          @click="reload"
+        >
+          <RotateCw :size="14" aria-hidden="true" />
+        </button>
+        <button
+          class="room-inline-demo-action"
+          type="button"
+          aria-label="Expand demo"
+          title="Open in a larger window"
+          :disabled="expanding"
+          @click="expand"
+        >
+          <Maximize2 :size="14" aria-hidden="true" />
+        </button>
+      </template>
     </header>
-    <LiveDemoBar
-      v-if="liveReady"
-      :people="live.people.value"
-      :self-cid="live.selfCid.value"
-      :status-text="liveStatus"
-      :drawing="drawing"
-      :tool="tool"
-      :draw-disabled="live.status.value === 'refused' || Boolean(live.joinError.value)"
-      :mark-count="live.marks.value.length"
-      :marks-open="marksOpen"
-      :can-send="canSend"
-      :send-phase="sendPhase"
-      @toggle-draw="toggleDraw"
-      @set-tool="tool = $event"
-      @toggle-marks="marksOpen = !marksOpen"
-      @send="sendToThread"
-    />
-    <div v-else-if="liveEnabled && (status === 'starting' || status === 'running')" class="room-inline-demo-live is-placeholder" aria-hidden="true"></div>
-    <LiveDemoSendPreview
-      v-if="capture"
-      :preview-url="capture.previewDataUrl"
-      :partial="capture.partial"
-      :sending="sendPhase === 'sending'"
-      :error="sendError"
-      @confirm="confirmSend"
-      @cancel="cancelSend"
-    />
-    <LiveDemoMarkList
-      v-if="liveReady && marksOpen && live.marks.value.length > 0"
-      :marks="live.marks.value"
-      :is-own="live.isOwnMark"
-      :busy-ids="deletingMarkIds"
-      @highlight="highlightedMarkId = $event"
-      @delete="deleteMark"
-    />
+    <LiveDemoPopover
+      :open="openPop === 'marks' && liveReady"
+      :anchor="popAnchor('marks')"
+      :container="card"
+      label="Marks on this demo"
+      @close="closePop"
+    >
+      <LiveDemoMarks
+        :marks="live.marks.value"
+        :pending="live.pending.value"
+        :is-own="live.isOwnMark"
+        :self-color="live.viewerColor.value"
+        :busy="deleting"
+        :now="marksNow"
+        @highlight="highlightMark"
+        @delete="deleteWithUndo([$event])"
+        @cancel-pending="cancelPendingWithUndo"
+        @clear-mine="clearMine"
+      />
+    </LiveDemoPopover>
+    <LiveDemoPopover
+      :open="openPop === 'send' && Boolean(capture)"
+      :anchor="popAnchor('send')"
+      :container="card"
+      label="Send a picture to the thread"
+      extra-class="is-send"
+      @close="cancelSend"
+    >
+      <LiveDemoSendPanel
+        v-if="capture"
+        :preview-url="capture.previewDataUrl"
+        :partial="capture.partial"
+        :mark-count="capture.markCount"
+        :notes="capture.notes"
+        :sending="sendPhase === 'sending'"
+        :error="sendError"
+        @confirm="confirmSend"
+        @cancel="cancelSend"
+      />
+    </LiveDemoPopover>
+    <LiveDemoPopover
+      :open="openPop === 'more'"
+      :anchor="popAnchor('more')"
+      :container="card"
+      label="More"
+      role="menu"
+      extra-class="is-menu"
+      @close="closePop"
+    >
+      <button type="button" role="menuitem" data-autofocus @click="closePop(); reload()">
+        <RotateCw :size="14" aria-hidden="true" />
+        <span>Reload demo</span>
+      </button>
+      <button type="button" role="menuitem" :disabled="expanding" @click="closePop(); expand()">
+        <Maximize2 :size="14" aria-hidden="true" />
+        <span>Open larger</span>
+      </button>
+      <p class="live-demo-menu-info" title="Runs in a locked view on this computer. It cannot load web pages or reach your LetAgents data.">
+        <Lock :size="14" aria-hidden="true" />
+        <span>Runs locked</span>
+        <small>No web, no data</small>
+      </p>
+    </LiveDemoPopover>
     <p v-if="expandError" class="room-inline-demo-note" role="alert">{{ expandError }}</p>
     <div
       ref="clip"
@@ -92,14 +156,22 @@
         />
         <LiveDemoOverlay
           v-if="liveReady"
+          ref="overlay"
           :session="live"
           :width="frameWidth"
           :height="frameHeight"
           :scale="scale"
           :drawing="drawing"
-          :tool="tool"
+          :pinning="pinning"
+          :capturing="capturing"
           :highlight-mark-id="highlightedMarkId"
-          @exit="drawing = false"
+          :can-undo="canUndo"
+          @exit="exitDraw"
+          @cancel-pin="endPin"
+          @pinned="endPin"
+          @undo="undoLast"
+          @delete="deleteWithUndo([$event])"
+          @cancel-pending="cancelPendingWithUndo"
           @notice="showNote($event, true)"
         />
         <div
@@ -113,12 +185,19 @@
         </div>
       </div>
       <div v-if="clipState?.clipped" class="room-inline-demo-fade" aria-hidden="true"></div>
-      <p
-        v-if="note"
-        class="room-inline-demo-live-note"
-        :class="{ 'is-error': note.error }"
-        :role="note.error ? 'alert' : 'status'"
-      >{{ note.text }}</p>
+      <div v-if="flashing" class="live-demo-flash" aria-hidden="true" @animationend="flashing = false"></div>
+      <Transition name="live-demo-note">
+        <p
+          v-if="note"
+          :key="note.id"
+          class="room-inline-demo-live-note"
+          :class="{ 'is-error': note.error, 'has-action': Boolean(note.action) }"
+          :role="note.error ? 'alert' : 'status'"
+        >
+          <span>{{ note.text }}</span>
+          <button v-if="note.action" type="button" @click="runNoteAction">{{ note.action.label }}</button>
+        </p>
+      </Transition>
     </div>
     <button
       v-if="clipState?.clippable"
@@ -131,8 +210,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
-import { FileCode, Maximize2, RotateCw } from "@lucide/vue";
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
+import { FileCode, Lock, Maximize2, RotateCw } from "@lucide/vue";
 import type {
   DesktopInlineHtmlDemoEvent,
   DesktopInlineHtmlDemoLease,
@@ -158,7 +237,7 @@ import {
 import { inlineDemoSlots, MAX_RUNNING_INLINE_DEMOS, type InlineDemoSlot } from "./inline-demo-slots";
 import { desktopIpc } from "../../../../ipc/index";
 import { isLocalRoomIdentifier } from "../../../../domain/room-urls";
-import { roomThreadReplyKey } from "../../../../composables/roomThreadReply";
+import { roomThreadOpenKey, roomThreadReplyKey } from "../../../../composables/roomThreadReply";
 import {
   LIVE_FALLBACK_SCALE,
   LIVE_MIN_FRAME_WIDTH,
@@ -168,21 +247,26 @@ import {
   liveReportedHeight,
   liveScale,
 } from "./live-demo/geometry";
-import { liveStatusText } from "./live-demo/people";
+import { liveStatusLine } from "./live-demo/people";
 import {
   elementClippingBoxes,
   markupFileName,
+  markupNotes,
   markupReplyText,
   viewportBox,
   visibleCaptureRect,
+  type MarkupNotes,
 } from "./live-demo/markup";
-import { liveDemoKey } from "./live-demo/protocol";
+import { markBody, type MarkBody } from "./live-demo/pending-marks";
+import { liveDemoKey, type DemoMark } from "./live-demo/protocol";
 import { liveDemoAvailable, useLiveDemo } from "./live-demo/session";
 import { createWidthSync, type WidthSync } from "./live-demo/width-sync";
-import LiveDemoBar from "./live-demo/LiveDemoBar.vue";
-import LiveDemoMarkList from "./live-demo/LiveDemoMarkList.vue";
+import LiveDemoFaces from "./live-demo/LiveDemoFaces.vue";
+import LiveDemoMarks from "./live-demo/LiveDemoMarks.vue";
 import LiveDemoOverlay from "./live-demo/LiveDemoOverlay.vue";
-import LiveDemoSendPreview from "./live-demo/LiveDemoSendPreview.vue";
+import LiveDemoPopover from "./live-demo/LiveDemoPopover.vue";
+import LiveDemoSendPanel from "./live-demo/LiveDemoSendPanel.vue";
+import LiveDemoTools, { type LiveDemoPop } from "./live-demo/LiveDemoTools.vue";
 
 const props = defineProps<{
   href: string;
@@ -251,20 +335,43 @@ const demoKey = computed(() =>
 const liveAvailable = liveDemoAvailable();
 const liveEnabled = computed(() => liveAvailable && liveLayout.value && Boolean(liveRoom.value && demoKey.value));
 const live = useLiveDemo({ roomIdentifier: () => liveRoom.value, demoKey: () => demoKey.value });
-// The bar and overlay need a running demo that has its scale and its scaled height.
+// "Saved 2 marks", or why a mark of yours was given up.
+const stopNotices = live.onNotice((notice) => showNote(notice.text, notice.error));
+// The tools and overlay need a running demo that has its scale and its scaled height.
 const liveReady = computed(() => liveEnabled.value && status.value === "running" && layoutReady.value && frameWidth.value > 0);
-const liveStatus = computed(() => liveStatusText(live.status.value, live.joinError.value, live.statusReason.value));
+const statusLine = computed(() => liveStatusLine(live.status.value, live.joinError.value, live.statusReason.value));
 const drawing = ref(false);
-const tool = ref<"pen" | "pin">("pen");
-const marksOpen = ref(false);
+// The next click on the demo places a pin; then the card goes back to what it was doing.
+const pinning = ref(false);
+const canMark = computed(() => liveReady.value && statusLine.value.canMark);
+const statusHint = computed(() => pinning.value ? "Click where the note goes · Esc to cancel" : statusLine.value.hint);
+const openPop = ref<LiveDemoPop | null>(null);
+const overlay = ref<InstanceType<typeof LiveDemoOverlay> | null>(null);
 const highlightedMarkId = ref<string | null>(null);
-const deletingMarkIds = shallowRef<ReadonlySet<string>>(new Set());
-const note = ref<{ text: string; error: boolean } | null>(null);
+const deleting = ref(false);
+// The Marks list's ages are read when it opens.
+const marksNow = ref(Date.now());
+const ownMarks = computed(() => live.marks.value.filter((mark) => live.isOwnMark(mark)));
+const markCount = computed(() => live.marks.value.length + live.pending.value.length);
+const canUndo = computed(() => live.pending.value.length > 0 || ownMarks.value.length > 0);
+let noteSeq = 0;
+const note = ref<{ id: number; text: string; error: boolean; action?: { label: string; run: () => void } } | null>(null);
 // Send to thread: capture, then the person looks at the picture ("review"), then it is sent.
 const sendPhase = ref<"idle" | "capturing" | "review" | "sending">("idle");
-const capture = ref<{ room: string; uploadId: string; previewDataUrl: string | null; partial: boolean } | null>(null);
+const capture = ref<{
+  room: string;
+  uploadId: string;
+  previewDataUrl: string | null;
+  partial: boolean;
+  markCount: number;
+  notes: MarkupNotes;
+} | null>(null);
+// While the picture is taken: pointers, the fade and the notes stay out of it.
+const capturing = ref(false);
+const flashing = ref(false);
 const sendError = ref("");
 const sendThreadReply = inject(roomThreadReplyKey, null);
+const openThread = inject(roomThreadOpenKey, null);
 const canSend = computed(() =>
   Boolean(sendThreadReply && props.threadRootId && liveRoom.value)
   && typeof desktopIpc.room?.captureDemoMarkup === "function");
@@ -337,8 +444,10 @@ function stopLive(): void {
   sendRun++;
   sendPhase.value = "idle";
   discardCapture();
+  capturing.value = false;
   drawing.value = false;
-  marksOpen.value = false;
+  pinning.value = false;
+  openPop.value = null;
   highlightedMarkId.value = null;
   live.stop();
   widthSync?.close();
@@ -606,28 +715,180 @@ function observeWidth(): void {
   resizeObserver.observe(body.value);
 }
 
-function showNote(text: string, error: boolean): void {
+/** A short line over the demo. One with an action (Undo, Open thread) stays 6 s. */
+function showNote(text: string, error: boolean, action?: { label: string; run: () => void }): void {
   clearTimeout(noteTimer);
-  note.value = { text, error };
-  noteTimer = setTimeout(() => { note.value = null; }, error ? 8_000 : 5_000);
+  note.value = { id: ++noteSeq, text, error, action };
+  noteTimer = setTimeout(() => { note.value = null; }, error ? 8_000 : action ? 6_000 : 4_000);
+}
+
+function runNoteAction(): void {
+  const action = note.value?.action;
+  clearTimeout(noteTimer);
+  note.value = null;
+  action?.run();
+}
+
+function closePop(): void {
+  openPop.value = null;
+  highlightedMarkId.value = null;
+}
+
+function togglePop(pop: LiveDemoPop): void {
+  if (openPop.value === pop) {
+    closePop();
+    return;
+  }
+  if (pop === "marks") marksNow.value = Date.now();
+  // A picture that waits for a yes goes when another panel opens.
+  if (openPop.value === "send") cancelSend();
+  openPop.value = pop;
+}
+
+function popAnchor(pop: LiveDemoPop): HTMLElement | null {
+  return card.value?.querySelector<HTMLElement>(`[data-pop="${pop}"]`) ?? null;
+}
+
+function toolButton(tool: "pin" | "draw"): HTMLElement | null {
+  return card.value?.querySelector<HTMLElement>(`[data-tool="${tool}"]`) ?? null;
+}
+
+function togglePin(): void {
+  if (pinning.value || !canMark.value) {
+    pinning.value = false;
+    return;
+  }
+  closePop();
+  pinning.value = true;
 }
 
 function toggleDraw(): void {
-  drawing.value = !drawing.value && liveReady.value;
+  pinning.value = false;
+  if (drawing.value) {
+    exitDraw();
+    return;
+  }
+  if (!canMark.value) return;
+  closePop();
+  drawing.value = true;
 }
 
-async function deleteMark(id: string): Promise<void> {
-  if (deletingMarkIds.value.has(id)) return;
-  deletingMarkIds.value = new Set([...deletingMarkIds.value, id]);
+/** Leaves draw mode; the keyboard goes back to the Draw button, not to the page. */
+function exitDraw(): void {
+  pinning.value = false;
+  drawing.value = false;
+  void nextTick(() => toolButton("draw")?.focus({ preventScroll: true }));
+}
+
+/** The pin is placed or cancelled. In draw mode the drawing goes on; otherwise the keyboard goes back to the Pin button. */
+function endPin(): void {
+  pinning.value = false;
+  if (!drawing.value) void nextTick(() => toolButton("pin")?.focus({ preventScroll: true }));
+}
+
+// Offline or refused: Pin and Draw are off, so their modes end too.
+watch(canMark, (can) => {
+  if (can) return;
+  pinning.value = false;
+  drawing.value = false;
+});
+
+/** A mark of yours below the clip cannot be seen: the card opens to show it. */
+function highlightMark(id: string | null): void {
+  highlightedMarkId.value = id;
+  if (!id || !clipState.value?.clipped) return;
+  const mark = live.marks.value.find((other) => other.id === id);
+  if (!mark) return;
+  const ys = mark.kind === "pin" ? [mark.at[1]] : mark.points.map((point) => point[1]);
+  if (Math.min(...ys) * scale.value > clipState.value.visibleHeight - 24) showAll.value = true;
+}
+
+function plural(count: number, word: string): string {
+  return `${count} ${word}${count === 1 ? "" : "s"}`;
+}
+
+function putBack(bodies: readonly MarkBody[]): void {
+  for (const body of bodies) live.queueMark(body);
+}
+
+/**
+ * Deletes saved marks of yours; for 6 s, Undo puts them back (with `unsaved`,
+ * marks of yours that were taken back before the server had them).
+ */
+async function deleteWithUndo(
+  ids: readonly string[],
+  options: { cleared?: boolean; unsaved?: readonly MarkBody[] } = {},
+): Promise<void> {
+  const unsaved = options.unsaved ?? [];
+  if (deleting.value || ids.length + unsaved.length === 0) return;
+  deleting.value = true;
   try {
-    await live.deleteMark(id);
-  } catch {
-    showNote("Could not delete the mark. Try again.", true);
+    const gone: DemoMark[] = ids.length > 0 ? await live.deleteMarks(ids) : [];
+    if (highlightedMarkId.value && ids.includes(highlightedMarkId.value)) highlightedMarkId.value = null;
+    const bodies = [...gone.map(markBody), ...unsaved];
+    const count = plural(bodies.length, "mark");
+    showNote(options.cleared ? `Cleared ${count}` : `Deleted ${count}`, false, { label: "Undo", run: () => putBack(bodies) });
+    if (gone.length < ids.length) showNote(`Could not delete ${plural(ids.length - gone.length, "mark")}. Try again.`, true);
+  } catch (error) {
+    if (unsaved.length > 0) putBack(unsaved);
+    showNote(ipcErrorText(error, "Could not delete the mark. Try again."), true);
   } finally {
-    const rest = new Set(deletingMarkIds.value);
-    rest.delete(id);
-    deletingMarkIds.value = rest;
-    if (highlightedMarkId.value === id) highlightedMarkId.value = null;
+    deleting.value = false;
+  }
+}
+
+function cancelPendingWithUndo(key: number): void {
+  const body = live.cancelPending(key);
+  if (body) showNote("Deleted 1 mark", false, { label: "Undo", run: () => putBack([body]) });
+}
+
+/** Your marks that wait for the link go at once; the saved ones go one by one. */
+function clearMine(): void {
+  if (deleting.value) return;
+  const unsaved = live.pending.value
+    .map((entry) => live.cancelPending(entry.key))
+    .filter((body): body is MarkBody => body !== null);
+  void deleteWithUndo(ownMarks.value.map((mark) => mark.id), { cleared: true, unsaved });
+}
+
+/** ⌘Z in draw mode, or Undo on the drawing bar: your newest mark goes. */
+function undoLast(): void {
+  const waiting = live.pending.value;
+  const last = waiting[waiting.length - 1];
+  if (last) {
+    cancelPendingWithUndo(last.key);
+    return;
+  }
+  const newest = [...ownMarks.value].sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0))[0];
+  if (newest) void deleteWithUndo([newest.id]);
+}
+
+/** Brings the card into view and rings the person's pointer. */
+function findPerson(cid: string): void {
+  card.value?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  const name = live.people.value.find((person) => person.cid === cid)?.name ?? "This person";
+  if (!overlay.value?.ping(cid)) showNote(`${name} is not pointing at the demo now.`, false);
+}
+
+/** Keys work while the keyboard is in the card: P pins, D draws, ⌘Z undoes in draw mode, Escape closes. */
+function onCardKey(event: KeyboardEvent): void {
+  if (!liveReady.value || event.defaultPrevented) return;
+  const target = event.target;
+  if (target instanceof HTMLElement && target.closest("input, textarea, select, [contenteditable]")) return;
+  const key = event.key.toLowerCase();
+  const command = event.metaKey || event.ctrlKey;
+  if (key === "escape" && openPop.value) {
+    event.preventDefault();
+    closePop();
+  } else if (command && key === "z" && !event.shiftKey && drawing.value) {
+    event.preventDefault();
+    undoLast();
+  } else if (!command && !event.altKey && key === "p") {
+    event.preventDefault();
+    togglePin();
+  } else if (!command && !event.altKey && key === "d") {
+    event.preventDefault();
+    toggleDraw();
   }
 }
 
@@ -661,12 +922,16 @@ async function sendToThread(): Promise<void> {
   clearTimeout(noteTimer);
   note.value = null;
   discardCapture();
+  closePop();
   sendPhase.value = "capturing";
   let uploadId: string | null = null;
   try {
-    // Leaving draw mode also closes an unsaved pin note, which should not be in the picture.
+    // Leaving draw and pin mode also closes an unsaved pin note, which should not be in the picture.
     drawing.value = false;
+    pinning.value = false;
     highlightedMarkId.value = null;
+    // Other people's pointers, the fade and Show all stay out of the picture.
+    capturing.value = true;
     await nextTick();
     target.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
     await nextFrame();
@@ -678,24 +943,38 @@ async function sendToThread(): Promise<void> {
       [viewportBox(window.innerWidth, window.innerHeight), ...elementClippingBoxes(target)],
     );
     if (!rect) throw new Error("The demo is not on screen.");
+    // What the marks say, as they are in the picture.
+    const marks = live.marks.value;
     const staged = await captureMarkup(room, rect, markupFileName(props.fileName));
     uploadId = staged.uploadId;
     if (!current()) return;
-    capture.value = { room, uploadId, previewDataUrl: staged.previewDataUrl, partial: !complete };
+    capture.value = {
+      room,
+      uploadId,
+      previewDataUrl: staged.previewDataUrl,
+      // The card's own clip cuts a tall demo too.
+      partial: !complete || Boolean(clipState.value?.clipped),
+      markCount: marks.length,
+      notes: markupNotes(marks),
+    };
     uploadId = null;
     sendError.value = "";
     sendPhase.value = "review";
+    capturing.value = false;
+    if (!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) flashing.value = true;
+    openPop.value = "send";
   } catch (error) {
     if (current()) showNote(ipcErrorText(error, "Could not take the picture. Try again."), true);
   } finally {
+    if (current()) capturing.value = false;
     // A picture that was taken but is not waiting for a yes is of no use.
     if (uploadId) void Promise.resolve(desktopIpc.room?.discardAttachment?.(room, uploadId)).catch(() => undefined);
     if (current() && sendPhase.value === "capturing") sendPhase.value = "idle";
   }
 }
 
-/** The person said yes to the picture: post it as a reply in the demo's thread. */
-async function confirmSend(): Promise<void> {
+/** The person said yes to the picture: post it, with the marks as text, as a reply in the demo's thread. */
+async function confirmSend(personNote: string): Promise<void> {
   const reply = sendThreadReply;
   const waiting = capture.value;
   const threadRoot = props.threadRootId;
@@ -707,7 +986,7 @@ async function confirmSend(): Promise<void> {
   try {
     const accepted = await reply(
       threadRoot,
-      markupReplyText(props.fileName, live.marks.value.length),
+      markupReplyText(props.fileName, waiting.notes, personNote),
       [{ upload_id: waiting.uploadId }],
     );
     if (!current()) return;
@@ -719,7 +998,9 @@ async function confirmSend(): Promise<void> {
     // The message owns the picture now.
     capture.value = null;
     sendPhase.value = "idle";
-    showNote("Sent to the thread.", false);
+    openPop.value = null;
+    const open = openThread;
+    showNote("Sent to the thread", false, open ? { label: "Open thread", run: () => open(threadRoot) } : undefined);
   } catch (error) {
     if (!current()) return;
     sendError.value = ipcErrorText(error, "Could not send the picture. Try again.");
@@ -728,6 +1009,7 @@ async function confirmSend(): Promise<void> {
 }
 
 function cancelSend(): void {
+  if (openPop.value === "send") openPop.value = null;
   if (sendPhase.value !== "review") return;
   discardCapture();
   sendPhase.value = "idle";
@@ -773,6 +1055,7 @@ onActivated(() => {
 });
 
 onBeforeUnmount(() => {
+  stopNotices();
   observer?.disconnect();
   resizeObserver?.disconnect();
   clearTimeout(noteTimer);

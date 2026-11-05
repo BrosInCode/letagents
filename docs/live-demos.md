@@ -137,6 +137,28 @@ After a save or a removal, the demo's live viewers get `mark` or `unmark`.
 Marks are in the `demo_marks` table (migration `0139_demo_marks`). A removed
 mark is deleted, and the marks of a demo go when its message goes.
 
+## In the app
+
+The card has one header row: the demo's name, a status dot with what the
+connection means ("People here see your pointer"), a face for each person
+(you first; click another face to ring that person's pointer), and the tools.
+
+- **Pin** (P) works from any mode: the next click on the demo places a pin,
+  whose number follows the pointer. Enter saves the note; the card goes back
+  to what it was doing. Escape cancels.
+- **Draw** (D) rings the demo in your colour and shows a bar inside the demo:
+  your colour, Undo (⌘Z) and Done (Escape).
+- **Marks** and **Send to thread** open panels over the demo from their
+  buttons, so nothing above the demo moves it. Hovering a mark in the list
+  lights it and dims the rest. A delete, or Clear mine, offers Undo for 6 s.
+- A mark of yours shows at once and saves in the background. A save that fails
+  keeps the mark on screen, dashed, and tries again when the link is back
+  (a matching `mark` frame settles it, so a lost answer saves no second copy).
+- **Send to thread** takes the picture without other people's pointers, the
+  fade or the notes, and says when the card's clip or the window cut it. The
+  reply carries the person's note, each pin's number, author and note, and who
+  drew in which colour, because an agent cannot hover a pin.
+
 ## Reverse proxy
 
 A proxy in front of the API must pass the WebSocket upgrade for the live path.

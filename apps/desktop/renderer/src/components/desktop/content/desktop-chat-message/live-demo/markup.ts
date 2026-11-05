@@ -1,4 +1,5 @@
 import type { DesktopWindowRect } from "../../../../../../../electron/ipc-types";
+import { LIVE_DEMO_COLORS, type DemoMark } from "./protocol";
 
 /** The picture's file name: the demo's name without its extension, then " marked up.png". */
 export function markupFileName(demoFileName: string): string {
@@ -6,10 +7,62 @@ export function markupFileName(demoFileName: string): string {
   return `${base || "Demo"} marked up.png`;
 }
 
-/** The short text of the thread reply that carries the picture. */
-export function markupReplyText(demoFileName: string, markCount: number): string {
+// The palette's colours by name, in LIVE_DEMO_COLORS order, so a reader of the text can match the ink.
+const COLOR_NAMES = ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"] as const;
+
+export function inkColorName(color: string): string {
+  const index = LIVE_DEMO_COLORS.indexOf(color.toLowerCase());
+  return index >= 0 ? COLOR_NAMES[index] ?? "grey" : "grey";
+}
+
+// The reply stays short enough to read; a long note is cut, and many pins are counted.
+const NOTE_MAX = 200;
+const PINS_LISTED = 20;
+
+function oneLine(text: string, max: number): string {
+  const line = text.replace(/\s+/g, " ").trim();
+  return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+}
+
+export interface MarkupNotes {
+  /** Each pin by its number on the picture. */
+  pins: Array<{ number: number; author: string; color: string; text: string }>;
+  /** Who drew, with their ink colour, in the order they first drew. */
+  inkBy: Array<{ author: string; color: string; colorName: string }>;
+}
+
+/**
+ * What the picture cannot say by itself: a pin is a numbered dot, and its note
+ * shows only on hover. An agent cannot hover, so the notes and the ink colours
+ * go with the picture as text. Pin numbers match the dots (oldest first).
+ */
+export function markupNotes(marks: readonly DemoMark[]): MarkupNotes {
+  const pins: MarkupNotes["pins"] = [];
+  const inkBy = new Map<string, MarkupNotes["inkBy"][number]>();
+  for (const mark of marks) {
+    if (mark.kind === "pin") {
+      pins.push({ number: pins.length + 1, author: mark.author.name, color: mark.author.color, text: oneLine(mark.text, NOTE_MAX) });
+    } else if (!inkBy.has(mark.author.accountId)) {
+      inkBy.set(mark.author.accountId, { author: mark.author.name, color: mark.author.color, colorName: inkColorName(mark.author.color) });
+    }
+  }
+  return { pins, inkBy: [...inkBy.values()] };
+}
+
+/** The text of the thread reply that carries the picture: the person's note, then what the marks say. */
+export function markupReplyText(demoFileName: string, notes: MarkupNotes, note = ""): string {
   const name = demoFileName.replace(/\s+/g, " ").trim() || "the demo";
-  return markCount > 0 ? `Marked-up picture of the demo ${name}.` : `Picture of the demo ${name}.`;
+  const marked = notes.pins.length > 0 || notes.inkBy.length > 0;
+  const lines = [oneLine(note, 1_000), marked ? `Marked-up picture of the demo ${name}.` : `Picture of the demo ${name}.`].filter(Boolean);
+  if (notes.pins.length > 0) {
+    lines.push("", "Pins:");
+    for (const pin of notes.pins.slice(0, PINS_LISTED)) lines.push(`${pin.number}. ${pin.author}: ${pin.text}`);
+    if (notes.pins.length > PINS_LISTED) lines.push(`…and ${notes.pins.length - PINS_LISTED} more.`);
+  }
+  if (notes.inkBy.length > 0) {
+    lines.push("", `Drawings: ${notes.inkBy.map((ink) => `${ink.author} (${ink.colorName})`).join(", ")}.`);
+  }
+  return lines.join("\n");
 }
 
 /** A box by its edges. An edge is infinite on a side that does not clip. */

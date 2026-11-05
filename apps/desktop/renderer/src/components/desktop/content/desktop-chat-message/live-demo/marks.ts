@@ -42,6 +42,17 @@ export function describeMark(mark: DemoMark): string {
   return text.length > 60 ? `${text.slice(0, 59)}…` : text || "Pin";
 }
 
+/** How long ago a mark was made, short: "now", "4 min", "3 h", or the day ("Nov 5"). */
+export function markAge(createdAt: string, now: number): string {
+  const at = Date.parse(createdAt);
+  if (!Number.isFinite(at)) return "";
+  const seconds = Math.max(0, (now - at) / 1000);
+  if (seconds < 45) return "now";
+  if (seconds < 3_600) return `${Math.max(1, Math.round(seconds / 60))} min`;
+  if (seconds < 86_400) return `${Math.round(seconds / 3_600)} h`;
+  return new Date(at).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 export type StrokeMark = Extract<DemoMark, { kind: "stroke" }>;
 
 /**
