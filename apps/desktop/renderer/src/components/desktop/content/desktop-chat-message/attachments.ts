@@ -57,11 +57,16 @@ export function isHtmlDemoAttachment(attachment: DesktopRoomMessageAttachment): 
     || (mimeType === "application/octet-stream" && /\.html?$/i.test(attachmentName(attachment)));
 }
 
-/** Main's reason a demo did not open, without Electron's IPC wrapper. */
-export function htmlDemoErrorText(error: unknown): string {
+/** Main's reason for a failure, without Electron's IPC wrapper; `fallback` when it gave none. */
+export function ipcErrorText(error: unknown, fallback: string): string {
   const raw = error instanceof Error ? error.message : typeof error === "string" ? error : "";
   const text = raw.replace(/^Error invoking remote method '[^']*':\s*/, "").replace(/^(?:[A-Za-z]*Error:\s*)+/, "").trim();
-  return text || "The demo could not open.";
+  return text || fallback;
+}
+
+/** Main's reason a demo did not open, without Electron's IPC wrapper. */
+export function htmlDemoErrorText(error: unknown): string {
+  return ipcErrorText(error, "The demo could not open.");
 }
 
 const INLINE_DEMO_DEFAULT_HEIGHT = 240;

@@ -1,0 +1,485 @@
+/*
+ * Live demos. An inline demo with an attachment id is laid out 760 px wide,
+ * scaled to fit the card, at its full height; a card taller than 800 px is
+ * clipped by the card with a "Show all" button (nothing scrolls inside the
+ * demo). Over the demo sits an overlay: other people's cursors, ink, saved
+ * strokes and pins. It takes the pointer only in Draw mode.
+ */
+
+/* A live card may use the width its scale needs: 760 px of demo plus the card's padding and borders. */
+.room-message-attachments:has(.room-inline-demo.is-live) {
+  max-width: min(100%, 780px);
+}
+
+.room-inline-demo-clip {
+  position: relative;
+}
+
+.room-inline-demo.is-live .room-inline-demo-clip {
+  overflow: hidden;
+  box-sizing: border-box;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+}
+
+/* The frame has the size of the scaled demo; the clip around it carries the border. */
+.room-inline-demo.is-live .room-inline-demo-body {
+  box-sizing: border-box;
+  border: 0;
+  border-radius: 0;
+}
+
+.room-inline-demo-fade {
+  position: absolute;
+  inset: auto 0 0;
+  height: 72px;
+  background: linear-gradient(to bottom, transparent, var(--bg-card));
+  pointer-events: none;
+}
+
+.room-inline-demo-more,
+.room-inline-demo-live-tools button,
+.live-demo-pin-actions button,
+.room-inline-demo-marks button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background var(--duration-fast) var(--ease-out),
+    border-color var(--duration-fast) var(--ease-out);
+}
+
+.room-inline-demo-more {
+  justify-self: center;
+}
+
+.room-inline-demo-more:hover,
+.room-inline-demo-live-tools button:hover:not(:disabled),
+.live-demo-pin-actions button:hover:not(:disabled),
+.room-inline-demo-marks button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.room-inline-demo-more:focus-visible,
+.room-inline-demo-live-tools button:focus-visible,
+.live-demo-pin-actions button:focus-visible,
+.room-inline-demo-marks button:focus-visible,
+.live-demo-pin-dot:focus-visible,
+.live-demo-pin-delete:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 62%, transparent);
+  outline-offset: 2px;
+}
+
+.room-inline-demo-live-tools button:disabled,
+.live-demo-pin-actions button:disabled,
+.room-inline-demo-marks button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.room-inline-demo-live-tools button.is-primary,
+.live-demo-pin-actions button.is-primary {
+  border-color: transparent;
+  background: var(--blue);
+  color: #ffffff;
+}
+
+.room-inline-demo-live-tools button.is-primary:hover:not(:disabled),
+.live-demo-pin-actions button.is-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--blue) 86%, #000000);
+}
+
+/* The bar under the header: who is here, the connection, and the tools. Its place is kept while the demo starts. */
+.room-inline-demo-live {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  min-height: 28px;
+}
+
+.room-inline-demo-presence {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.room-inline-demo-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 120px;
+  padding: 2px 8px 2px 6px;
+  border-radius: 999px;
+  background: var(--accent-hover);
+  color: var(--text-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+
+.room-inline-demo-chip i {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--live-color);
+}
+
+.room-inline-demo-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.room-inline-demo-live-status {
+  color: var(--text-tertiary);
+  font-size: 11.5px;
+}
+
+.room-inline-demo-live-tools {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.room-inline-demo-tool-group {
+  display: inline-flex;
+  border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.room-inline-demo-live-tools .room-inline-demo-tool-group button {
+  border: 0;
+  border-radius: 0;
+}
+
+.room-inline-demo-live-tools .room-inline-demo-tool-group button.is-active {
+  background: var(--accent-active);
+}
+
+/* A short message over the top of the card, so showing it moves nothing. */
+.room-inline-demo-live-note {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  z-index: 5;
+  max-width: calc(100% - 24px);
+  margin: 0;
+  padding: 5px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: center;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.room-inline-demo-live-note.is-error {
+  border-color: color-mix(in srgb, var(--red) 50%, transparent);
+  color: var(--red-text, #f87171);
+}
+
+/* Who marked what. */
+.room-inline-demo-marks {
+  display: grid;
+  gap: 2px;
+  max-height: 150px;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.room-inline-demo-marks li {
+  display: grid;
+  grid-template-columns: auto minmax(0, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 4px;
+  border-radius: var(--radius-md);
+  font-size: 12px;
+}
+
+.room-inline-demo-marks li:hover {
+  background: var(--accent-hover);
+}
+
+.room-inline-demo-marks i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.room-inline-demo-mark-who {
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.room-inline-demo-mark-what {
+  overflow: hidden;
+  color: var(--text-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The overlay above the demo. It has the frame's size and lets the pointer through. */
+.live-demo-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.live-demo-overlay.is-drawing {
+  box-shadow: inset 0 0 0 2px var(--blue);
+}
+
+.live-demo-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.live-demo-cursors,
+.live-demo-pins {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.live-demo-cursor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  opacity: 0;
+  transition: opacity var(--duration-fast) var(--ease-out);
+  will-change: transform;
+}
+
+.live-demo-cursor-arrow {
+  display: block;
+  fill: var(--live-color);
+  stroke: #ffffff;
+  stroke-width: 1.25;
+  filter: drop-shadow(0 1px 1px rgba(0, 0, 0, 0.35));
+}
+
+.live-demo-cursor-tag {
+  position: absolute;
+  top: 16px;
+  left: 12px;
+  max-width: 140px;
+  padding: 1px 7px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--live-color);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  color: var(--live-ink);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live-demo-cursor.is-left .live-demo-cursor-tag {
+  right: 6px;
+  left: auto;
+}
+
+.live-demo-cursor.is-above .live-demo-cursor-tag {
+  top: -22px;
+}
+
+/* In Draw mode this layer owns the pointer. */
+.live-demo-surface {
+  position: absolute;
+  inset: 0;
+  outline: none;
+  cursor: crosshair;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.live-demo-pin {
+  position: absolute;
+  width: 0;
+  height: 0;
+}
+
+.live-demo-pin:hover,
+.live-demo-pin:focus-within {
+  z-index: 3;
+}
+
+.live-demo-pin-dot {
+  position: absolute;
+  top: -10px;
+  left: -10px;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: var(--live-color);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  color: var(--live-ink);
+  font: 700 10px/1 var(--font-sans);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.live-demo-pin.is-highlighted .live-demo-pin-dot {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.live-demo-pin-card {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  display: none;
+  gap: 4px;
+  width: max-content;
+  max-width: 220px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.35;
+  pointer-events: auto;
+}
+
+.live-demo-pin-card strong {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.live-demo-pin-card p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.live-demo-pin:hover .live-demo-pin-card,
+.live-demo-pin:focus-within .live-demo-pin-card,
+.live-demo-pin.is-highlighted .live-demo-pin-card {
+  display: grid;
+}
+
+.live-demo-pin.is-flipped .live-demo-pin-card {
+  right: 8px;
+  left: auto;
+}
+
+.live-demo-pin.is-above .live-demo-pin-card {
+  top: auto;
+  bottom: 8px;
+}
+
+.live-demo-pin-delete {
+  justify-self: start;
+  padding: 2px 8px;
+  border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--red-text, #f87171);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.live-demo-pin-delete:hover {
+  background: var(--accent-hover);
+}
+
+.live-demo-pin-draft {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border: 2px solid #ffffff;
+  border-radius: 50%;
+  background: var(--live-color);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+.live-demo-pin-editor {
+  position: absolute;
+  z-index: 4;
+  display: grid;
+  gap: 6px;
+  width: 236px;
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-md);
+  pointer-events: auto;
+}
+
+.live-demo-pin-editor input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--bg-subtle);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.live-demo-pin-editor input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--blue) 62%, transparent);
+  outline-offset: 1px;
+}
+
+.live-demo-pin-error {
+  margin: 0;
+  color: var(--red-text, #f87171);
+  font-size: 11.5px;
+}
+
+.live-demo-pin-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-demo-cursor,
+  .room-inline-demo-more,
+  .room-inline-demo-live-tools button {
+    transition: none;
+  }
+}

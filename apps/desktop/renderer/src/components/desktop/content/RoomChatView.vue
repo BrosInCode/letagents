@@ -268,6 +268,7 @@ import { desktopIpc } from "../../../ipc/index.js";
 import { roomMessageRevealDestination } from "../../../domain/room-message-reveal";
 import { attentionResponseAgentNames, attentionResponseAgentNamesKey } from "../../../domain/attention-response";
 import { buildRoomMentionDirectory, roomMentionDirectoryKey } from "../../../domain/room-mention-links";
+import { roomThreadReplyKey } from "../../../composables/roomThreadReply";
 
 const props = defineProps<{
   active: boolean;
@@ -408,6 +409,9 @@ provide(attentionResponseAgentNamesKey, computed(() =>
 ));
 // @mentions in messages open the participant they name.
 provide(roomMentionDirectoryKey, computed(() => buildRoomMentionDirectory(props.participants, props.presence)));
+// A demo's "Send to thread" posts through the thread composer's own path.
+provide(roomThreadReplyKey, (threadRootId, text, attachments) =>
+  new Promise<boolean>((resolve) => sendThreadMessage(text, threadRootId, null, attachments, resolve)));
 const messagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.messages));
 const threadMessagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.threadMessages));
 const activeThreadParent = computed(() =>

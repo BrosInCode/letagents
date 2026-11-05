@@ -1,5 +1,10 @@
 <template>
-  <section ref="card" class="room-inline-demo" :aria-label="`Interactive demo ${fileName}`">
+  <section
+    ref="card"
+    class="room-inline-demo"
+    :class="{ 'is-live': liveLayout }"
+    :aria-label="`Interactive demo ${fileName}`"
+  >
     <header class="room-inline-demo-header">
       <FileCode class="room-inline-demo-icon" :size="16" aria-hidden="true" />
       <span class="room-inline-demo-title">
@@ -26,38 +31,98 @@
         <Maximize2 :size="14" aria-hidden="true" />
       </button>
     </header>
+    <LiveDemoBar
+      v-if="liveReady"
+      :people="live.people.value"
+      :self-cid="live.selfCid.value"
+      :status-text="liveStatus"
+      :drawing="drawing"
+      :tool="tool"
+      :draw-disabled="live.status.value === 'refused' || Boolean(live.joinError.value)"
+      :mark-count="live.marks.value.length"
+      :marks-open="marksOpen"
+      :can-send="canSend"
+      :sending="sendPhase !== 'idle'"
+      @toggle-draw="toggleDraw"
+      @set-tool="tool = $event"
+      @toggle-marks="marksOpen = !marksOpen"
+      @send="sendToThread"
+    />
+    <div v-else-if="liveEnabled && (status === 'starting' || status === 'running')" class="room-inline-demo-live is-placeholder" aria-hidden="true"></div>
+    <LiveDemoMarkList
+      v-if="liveReady && marksOpen && live.marks.value.length > 0"
+      :marks="live.marks.value"
+      :is-own="live.isOwnMark"
+      :busy-ids="deletingMarkIds"
+      @highlight="highlightedMarkId = $event"
+      @delete="deleteMark"
+    />
     <p v-if="expandError" class="room-inline-demo-note" role="alert">{{ expandError }}</p>
     <div
-      class="room-inline-demo-body"
-      :style="{ height: `${frameHeight}px` }"
+      ref="clip"
+      class="room-inline-demo-clip"
+      :class="{ 'is-clipped': clipState?.clipped }"
+      :style="clipState?.clipped ? { height: `${clipState.visibleHeight + 2}px` } : undefined"
     >
-      <webview
-        v-if="lease"
-        :key="lease.url"
-        ref="view"
-        class="room-inline-demo-view"
-        :partition="lease.partition"
-        :src="lease.url"
-        @dom-ready="onViewReady"
-        @render-process-gone="onViewGone"
-        @did-fail-load="onLoadFailed"
-        @destroyed="onViewDestroyed"
-      />
       <div
-        v-if="statusText"
-        class="room-inline-demo-status"
-        :class="{ 'is-error': status === 'error' }"
-        :role="status === 'error' ? 'alert' : 'status'"
+        ref="body"
+        class="room-inline-demo-body"
+        :style="{ height: `${frameHeight}px` }"
       >
-        <p>{{ statusText }}</p>
-        <button v-if="status === 'stopped' || status === 'error'" type="button" @click="reload">Reload</button>
+        <webview
+          v-if="lease"
+          :key="lease.url"
+          ref="view"
+          class="room-inline-demo-view"
+          :partition="lease.partition"
+          :src="lease.url"
+          @dom-ready="onViewReady"
+          @render-process-gone="onViewGone"
+          @did-fail-load="onLoadFailed"
+          @destroyed="onViewDestroyed"
+        />
+        <LiveDemoOverlay
+          v-if="liveReady"
+          :session="live"
+          :width="frameWidth"
+          :height="frameHeight"
+          :scale="scale"
+          :drawing="drawing"
+          :tool="tool"
+          :highlight-mark-id="highlightedMarkId"
+          @exit="drawing = false"
+          @notice="showNote($event, true)"
+        />
+        <div
+          v-if="statusText"
+          class="room-inline-demo-status"
+          :class="{ 'is-error': status === 'error' }"
+          :role="status === 'error' ? 'alert' : 'status'"
+        >
+          <p>{{ statusText }}</p>
+          <button v-if="status === 'stopped' || status === 'error'" type="button" @click="reload">Reload</button>
+        </div>
       </div>
+      <div v-if="clipState?.clipped" class="room-inline-demo-fade" aria-hidden="true"></div>
+      <p
+        v-if="note"
+        class="room-inline-demo-live-note"
+        :class="{ 'is-error': note.error }"
+        :role="note.error ? 'alert' : 'status'"
+      >{{ note.text }}</p>
     </div>
+    <button
+      v-if="clipState?.clippable"
+      class="room-inline-demo-more"
+      type="button"
+      :aria-expanded="showAll"
+      @click="showAll = !showAll"
+    >{{ showAll ? "Show less" : "Show all" }}</button>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
+import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
 import { FileCode, Maximize2, RotateCw } from "@lucide/vue";
 import type {
   DesktopInlineHtmlDemoEvent,
@@ -69,6 +134,7 @@ import {
   inlineDemoFocusToRestore,
   inlineDemoMayRestart,
   inlineDemoStoppedText,
+  ipcErrorText,
   type InlineDemoStopReason,
 } from "./attachments";
 import { inlineDemoEvents } from "./inline-demo-events";
@@ -82,11 +148,35 @@ import {
 } from "./inline-demo-height";
 import { inlineDemoSlots, MAX_RUNNING_INLINE_DEMOS, type InlineDemoSlot } from "./inline-demo-slots";
 import { desktopIpc } from "../../../../ipc/index";
+import { isLocalRoomIdentifier } from "../../../../domain/room-urls";
+import { roomThreadReplyKey } from "../../../../composables/roomThreadReply";
+import {
+  LIVE_FALLBACK_SCALE,
+  LIVE_MIN_FRAME_WIDTH,
+  liveClip,
+  liveFrameHeight,
+  liveReportedHeight,
+  liveScale,
+} from "./live-demo/geometry";
+import { liveStatusText } from "./live-demo/people";
+import { markupFileName, markupReplyText, visibleCaptureRect } from "./live-demo/markup";
+import { liveDemoKey } from "./live-demo/protocol";
+import { liveDemoAvailable, useLiveDemo } from "./live-demo/session";
+import { createWidthSync, type WidthSync } from "./live-demo/width-sync";
+import LiveDemoBar from "./live-demo/LiveDemoBar.vue";
+import LiveDemoMarkList from "./live-demo/LiveDemoMarkList.vue";
+import LiveDemoOverlay from "./live-demo/LiveDemoOverlay.vue";
 
 const props = defineProps<{
   href: string;
   fileName: string;
   senderLabel?: string | null;
+  /** With the message and attachment ids, these make the demo live: shared with the room. */
+  roomIdentifier?: string | null;
+  messageId?: string | null;
+  attachmentId?: string | null;
+  /** The thread a picture of the demo is sent to. */
+  threadRootId?: string | null;
 }>();
 
 type DemoStatus = "idle" | "waiting" | "starting" | "running" | "stopped" | "error";
@@ -97,6 +187,8 @@ const PAUSE_AFTER_OFF_SCREEN_MS = 15_000;
 const START_TIMEOUT_MS = 15_000;
 
 const card = ref<HTMLElement | null>(null);
+const clip = ref<HTMLElement | null>(null);
+const body = ref<HTMLElement | null>(null);
 const view = ref<HTMLElement | null>(null);
 const status = ref<DemoStatus>("idle");
 const lease = ref<DesktopInlineHtmlDemoLease | null>(null);
@@ -107,13 +199,56 @@ const heightState = ref<InlineDemoHeight>(newInlineDemoHeight());
 const expanding = ref(false);
 const expandError = ref("");
 
-const frameHeight = computed(() => inlineDemoFrameHeight(heightState.value.shown));
+// Live layout: the demo is laid out 760 px wide, scaled to the card, at its full
+// height (main reports that height already scaled, in frame px). Any demo with an
+// attachment id gets it when main can do it; the rest keep the fixed-height frame
+// with scrolling inside.
+const widthApiAvailable = typeof desktopIpc.room?.setInlineDemoWidth === "function";
+const layoutFailed = ref(false);
+const liveLayout = computed(() => widthApiAvailable && Boolean(props.attachmentId) && !layoutFailed.value);
+const frameWidth = ref(0);
+// What main applied; the frame width gives the same number until it answers.
+const appliedScale = ref<number | null>(null);
+const showAll = ref(false);
+const scale = computed(() => appliedScale.value ?? liveScale(frameWidth.value) ?? LIVE_FALLBACK_SCALE);
+const frameHeight = computed(() => liveLayout.value
+  ? liveFrameHeight(heightState.value.shown, scale.value)
+  : inlineDemoFrameHeight(heightState.value.shown));
+const clipState = computed(() => liveLayout.value ? liveClip(frameHeight.value, showAll.value) : null);
+
+// Live session: who is on the demo, their cursors, the ink and the saved marks.
+const liveRoom = computed(() => props.roomIdentifier && !isLocalRoomIdentifier(props.roomIdentifier) ? props.roomIdentifier : null);
+const demoKey = computed(() =>
+  props.messageId && props.attachmentId && !props.messageId.startsWith("pending:")
+    ? liveDemoKey(props.messageId, props.attachmentId)
+    : null);
+const liveAvailable = liveDemoAvailable();
+const liveEnabled = computed(() => liveAvailable && liveLayout.value && Boolean(liveRoom.value && demoKey.value));
+const live = useLiveDemo({ roomIdentifier: () => liveRoom.value, demoKey: () => demoKey.value });
+// The bar and overlay need a running demo that has its scale.
+const liveReady = computed(() => liveEnabled.value && status.value === "running" && appliedScale.value !== null && frameWidth.value > 0);
+const liveStatus = computed(() => liveStatusText(live.status.value, live.joinError.value, live.statusReason.value));
+const drawing = ref(false);
+const tool = ref<"pen" | "pin">("pen");
+const marksOpen = ref(false);
+const highlightedMarkId = ref<string | null>(null);
+const deletingMarkIds = shallowRef<ReadonlySet<string>>(new Set());
+const note = ref<{ text: string; error: boolean } | null>(null);
+const sendPhase = ref<"idle" | "capturing" | "sending">("idle");
+const sendThreadReply = inject(roomThreadReplyKey, null);
+const canSend = computed(() =>
+  Boolean(sendThreadReply && props.threadRootId && liveRoom.value)
+  && typeof desktopIpc.room?.captureDemoMarkup === "function");
+
 const statusText = computed(() => {
   switch (status.value) {
     case "waiting":
       return `Waiting: ${MAX_RUNNING_INLINE_DEMOS} demos are running. This one starts when one stops.`;
     case "starting":
       return "Starting the demo…";
+    case "running":
+      // The page would show at the wrong size until main has laid it out.
+      return liveLayout.value && appliedScale.value === null ? "Starting the demo…" : "";
     case "stopped":
       return inlineDemoStoppedText(stoppedReason.value);
     case "error":
@@ -136,6 +271,11 @@ let stopEvents: (() => void) | null = null;
 let slot: InlineDemoSlot | null = null;
 // Raised whenever a run starts or ends, so a late answer from main is ignored.
 let generation = 0;
+let widthSync: WidthSync | null = null;
+let resizeObserver: ResizeObserver | undefined;
+let noteTimer: ReturnType<typeof setTimeout> | undefined;
+// Raised by each "Send to thread", so a card that left or restarted drops a late answer.
+let sendRun = 0;
 
 function releaseLease(url: string): void {
   // Main also drops a lease when its guest is gone, so a failed release is not news.
@@ -156,13 +296,32 @@ function stopRun(): void {
   slot = null;
   stopEvents?.();
   stopEvents = null;
+  stopLive();
   const url = lease.value?.url;
   lease.value = null;
   if (url) releaseLease(url);
 }
 
+/** Leaves the live session and forgets the layout main applied to the guest that is gone. */
+function stopLive(): void {
+  sendRun++;
+  sendPhase.value = "idle";
+  drawing.value = false;
+  marksOpen.value = false;
+  highlightedMarkId.value = null;
+  live.stop();
+  widthSync?.close();
+  widthSync = null;
+  appliedScale.value = null;
+}
+
 function requestRun(): void {
   const version = ++generation;
+  if (layoutFailed.value) {
+    // A new run tries the live layout again. The kept height was for the plain frame.
+    layoutFailed.value = false;
+    heightState.value = newInlineDemoHeight();
+  }
   status.value = "waiting";
   slot = inlineDemoSlots.request(() => {
     if (version === generation) void startRun(version);
@@ -187,6 +346,7 @@ async function startRun(version: number): Promise<void> {
     lease.value = next;
     stopEvents = inlineDemoEvents.register(next.url, handleDemoEvent);
     startTimer = setTimeout(startTimedOut, START_TIMEOUT_MS);
+    if (liveEnabled.value) live.start(next.url);
   } catch (error) {
     if (version !== generation) return;
     stopRun();
@@ -246,7 +406,10 @@ function ownsEvent(event: Event): boolean {
 }
 
 function onViewReady(event: Event): void {
-  if (ownsEvent(event)) markRunning();
+  if (!ownsEvent(event)) return;
+  markRunning();
+  // The page may have been reloaded, which resets its zoom.
+  syncWidth(true);
 }
 
 function onViewGone(event: Event): void {
@@ -277,7 +440,12 @@ function scheduleHeightSettle(): void {
 function handleDemoEvent(event: DesktopInlineHtmlDemoEvent): void {
   switch (event.type) {
     case "height":
-      heightState.value = reportInlineDemoHeight(heightState.value, event.height, performance.now());
+      heightState.value = reportInlineDemoHeight(
+        heightState.value,
+        event.height,
+        performance.now(),
+        liveLayout.value ? liveReportedHeight : undefined,
+      );
       scheduleHeightSettle();
       markRunning();
       break;
@@ -360,6 +528,122 @@ function giveFocusBack(): void {
 
 watch(() => props.href, reload);
 
+/**
+ * Tells main how wide the frame is, so it lays the page out at 760 px and scales
+ * it to fit. Main may hear it before the webview attaches and applies it then.
+ */
+function syncWidth(force = false): void {
+  const url = lease.value?.url;
+  const width = frameWidth.value;
+  const setWidth = desktopIpc.room?.setInlineDemoWidth;
+  if (!liveLayout.value || !url || !setWidth || width < LIVE_MIN_FRAME_WIDTH) return;
+  widthSync ??= createWidthSync(
+    (next) => setWidth(url, next),
+    (applied) => { appliedScale.value = applied; },
+    onWidthFailed,
+  );
+  widthSync.request(width, force);
+}
+
+/** Main cannot lay the page out at the live width: the card falls back to the plain frame. */
+function onWidthFailed(): void {
+  if (!liveLayout.value) return;
+  stopLive();
+  layoutFailed.value = true;
+  heightState.value = newInlineDemoHeight();
+}
+
+watch([frameWidth, () => lease.value?.url], () => syncWidth());
+
+function observeWidth(): void {
+  resizeObserver?.disconnect();
+  if (!body.value || !widthApiAvailable || !props.attachmentId || typeof ResizeObserver === "undefined") return;
+  resizeObserver = new ResizeObserver((entries) => {
+    const width = entries[entries.length - 1]?.contentRect.width ?? 0;
+    frameWidth.value = Math.floor(width);
+  });
+  resizeObserver.observe(body.value);
+}
+
+function showNote(text: string, error: boolean): void {
+  clearTimeout(noteTimer);
+  note.value = { text, error };
+  noteTimer = setTimeout(() => { note.value = null; }, error ? 8_000 : 5_000);
+}
+
+function toggleDraw(): void {
+  drawing.value = !drawing.value && liveReady.value;
+}
+
+async function deleteMark(id: string): Promise<void> {
+  if (deletingMarkIds.value.has(id)) return;
+  deletingMarkIds.value = new Set([...deletingMarkIds.value, id]);
+  try {
+    await live.deleteMark(id);
+  } catch {
+    showNote("Could not delete the mark. Try again.", true);
+  } finally {
+    const rest = new Set(deletingMarkIds.value);
+    rest.delete(id);
+    deletingMarkIds.value = rest;
+    if (highlightedMarkId.value === id) highlightedMarkId.value = null;
+  }
+}
+
+function nextFrame(): Promise<void> {
+  return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+}
+
+/**
+ * Posts a picture of the card, with its marks, as a reply in the demo's thread.
+ * The window only has the pixels that are on screen, so the card is scrolled
+ * into view first.
+ */
+async function sendToThread(): Promise<void> {
+  const reply = sendThreadReply;
+  const room = liveRoom.value;
+  const threadRoot = props.threadRootId;
+  const capture = desktopIpc.room?.captureDemoMarkup;
+  const target = clip.value;
+  if (sendPhase.value !== "idle" || !reply || !room || !threadRoot || !capture || !target) return;
+  const run = ++sendRun;
+  const current = () => run === sendRun;
+  clearTimeout(noteTimer);
+  note.value = null;
+  sendPhase.value = "capturing";
+  let uploadId: string | null = null;
+  try {
+    // Leaving draw mode also closes an unsaved pin note, which should not be in the picture.
+    drawing.value = false;
+    highlightedMarkId.value = null;
+    await nextTick();
+    target.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+    await nextFrame();
+    await nextFrame();
+    if (!current()) return;
+    const box = target.getBoundingClientRect();
+    const { rect, complete } = visibleCaptureRect(
+      { x: box.left, y: box.top, width: box.width, height: box.height },
+      { width: window.innerWidth, height: window.innerHeight },
+    );
+    if (!rect) throw new Error("The demo is not on screen.");
+    const staged = await capture(room, rect, markupFileName(props.fileName));
+    uploadId = staged.uploadId;
+    if (!current()) return;
+    sendPhase.value = "sending";
+    const accepted = await reply(threadRoot, markupReplyText(props.fileName, live.marks.value.length), [{ upload_id: staged.uploadId }]);
+    if (!accepted) throw new Error("The reply was not sent.");
+    // The message owns the picture now.
+    uploadId = null;
+    if (current()) showNote(complete ? "Sent to the thread." : "Sent to the thread. The picture shows only the part on screen.", false);
+  } catch (error) {
+    if (current()) showNote(ipcErrorText(error, "Could not send the picture. Try again."), true);
+  } finally {
+    if (uploadId) void Promise.resolve(desktopIpc.room?.discardAttachment?.(room, uploadId)).catch(() => undefined);
+    if (current()) sendPhase.value = "idle";
+  }
+}
+
 function observe(): void {
   observer?.disconnect();
   if (!card.value) return;
@@ -378,6 +662,7 @@ onMounted(() => {
   document.addEventListener("focusout", noteFocusOut, true);
   document.addEventListener("visibilitychange", syncOnScreen);
   observe();
+  observeWidth();
 });
 
 // Moved out of the document, the webview's guest is destroyed and main ends its
@@ -400,6 +685,8 @@ onActivated(() => {
 
 onBeforeUnmount(() => {
   observer?.disconnect();
+  resizeObserver?.disconnect();
+  clearTimeout(noteTimer);
   document.removeEventListener("focusout", noteFocusOut, true);
   document.removeEventListener("visibilitychange", syncOnScreen);
   stopRun();
