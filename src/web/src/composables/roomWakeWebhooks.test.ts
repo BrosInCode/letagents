@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { afterEach, test } from 'node:test'
 import type { WakeRule } from '../../../../shared/wake-rules.mjs'
+import { fetchRoomWakeRules } from './roomWakeRules.js'
 import { lastWakeRuleInvalidation } from './roomWakeRuleInvalidation.js'
 import {
   addRoomWakeWebhookRule,
@@ -134,4 +135,21 @@ test('the web transport tells the room to re-read its rules after each change', 
   lastWakeRuleInvalidation.value = null
   assert.deepEqual(await roomWakeWebhookApi.listAgents('sky-owl'), [])
   assert.equal(invalidatedRoom(), null, 'a read changes nothing')
+})
+
+test('the rules the drawer reads keep the owner-only test mark, and the cancelled ones arrive in the recent list', async () => {
+  const delivery = { kind: 'webhook' as const, paused: false, has_bearer: true, delivered_count: 3, consecutive_failures: 0, last_status: 200, last_error: null, last_attempt_at: '2026-11-04T11:00:00.000Z' }
+  capture([jsonResponse({
+    room_id: 'sky-owl',
+    active: [
+      rule({ id: 'wake_1', delivery: { ...delivery, last_attempt_was_test: true } }),
+      rule({ id: 'wake_2', delivery: { ...delivery, last_attempt_was_test: false } }),
+      rule({ id: 'wake_4', delivery: { ...delivery } }),
+    ],
+    recent: [rule({ id: 'wake_3', status: 'cancelled', cancelled_by: { kind: 'human', id: 'acct_1', label: 'ada' } })],
+  })])
+  const page = await fetchRoomWakeRules('sky-owl')
+  // The shared row words the mark as "last test 200" (see the desktop suite, which runs the shared code).
+  assert.deepEqual(page.active.map((item) => item.delivery?.last_attempt_was_test), [true, false, undefined], 'the mark passes through the read; an older server sends none')
+  assert.deepEqual(page.recent.map((item) => [item.id, item.status]), [['wake_3', 'cancelled']])
 })

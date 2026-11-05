@@ -5,7 +5,7 @@
  * state as a composable, so the desktop and web apps render one behaviour
  * and the tests drive it without a DOM.
  */
-import { computed, reactive, ref, shallowRef, type Ref } from "vue";
+import { computed, reactive, ref, shallowRef, watch, type Ref } from "vue";
 
 import {
   WAKE_RULE_LIMITS,
@@ -105,6 +105,50 @@ export function selectOwnWakeWebhookRules(rules: readonly WakeRule[], agents: re
       || right.created_at.localeCompare(left.created_at) || right.id.localeCompare(left.id));
 }
 
+/**
+ * The rows the list shows and the rows behind the button: every rule that is
+ * not cancelled (active, paused, waiting, ended by itself) is listed, and
+ * only a cancelled rule is held back.
+ */
+export function partitionWakeWebhookRules(rules: readonly WakeRule[]): { listed: WakeRule[]; cancelled: WakeRule[] } {
+  return {
+    listed: rules.filter((rule) => rule.status !== "cancelled"),
+    cancelled: rules.filter((rule) => rule.status === "cancelled"),
+  };
+}
+
+/** The text button under the list: "Show cancelled (2)", then "Hide cancelled". */
+export function wakeWebhookCancelledToggleLabel(cancelledCount: number, shown: boolean): string {
+  return shown ? "Hide cancelled" : `Show cancelled (${cancelledCount})`;
+}
+
+/** The line that stands in for an empty list; rules that are all cancelled are not "none yet". */
+export function wakeWebhookEmptyText(cancelledCount: number): string {
+  return cancelledCount > 0
+    ? "No active webhook wake-ups for your agents in this room."
+    : "No webhook wake-ups for your agents in this room yet.";
+}
+
+/**
+ * The state of the cancelled rules' button. It is closed to begin with, kept
+ * only by the component that calls this (nothing is saved), and closes again
+ * when no cancelled rule is left to show, and when the host closes (`open`
+ * turns false: a drawer that stays mounted while it is shut).
+ */
+export function useCancelledWakeWebhookRules(rules: Ref<readonly WakeRule[]>, open?: Ref<boolean>) {
+  const shown = ref(false);
+  const parts = computed(() => partitionWakeWebhookRules(rules.value));
+  const listed = computed(() => parts.value.listed);
+  const cancelled = computed(() => parts.value.cancelled);
+  const toggleLabel = computed(() => wakeWebhookCancelledToggleLabel(cancelled.value.length, shown.value));
+  watch(() => cancelled.value.length, (count) => { if (count === 0) shown.value = false; }, { flush: "sync" });
+  if (open) watch(open, (isOpen) => { if (!isOpen) shown.value = false; }, { flush: "sync" });
+  function toggle(): void {
+    if (cancelled.value.length > 0) shown.value = !shown.value;
+  }
+  return { listed, cancelled, shown, toggleLabel, toggle };
+}
+
 export function wakeWebhookRuleStatusLabel(rule: Pick<WakeRule, "status">): string {
   switch (rule.status) {
     case "active": return "Active";
@@ -116,12 +160,13 @@ export function wakeWebhookRuleStatusLabel(rule: Pick<WakeRule, "status">): stri
   }
 }
 
-/** "last 200" or "last http_4xx (401)" or "no delivery yet". */
+/** "last 200" or "last http_4xx (401)" or "no delivery yet"; "last test 200" when the answer came from a person's test. */
 export function wakeWebhookLastResultLabel(rule: WakeRule): string {
   const delivery = rule.delivery;
   if (!delivery || delivery.last_attempt_at == null) return "no delivery yet";
-  if (delivery.last_error) return `last ${delivery.last_error}${delivery.last_status ? ` (${delivery.last_status})` : ""}`;
-  return delivery.last_status ? `last ${delivery.last_status}` : "no delivery yet";
+  const last = delivery.last_attempt_was_test ? "last test" : "last";
+  if (delivery.last_error) return `${last} ${delivery.last_error}${delivery.last_status ? ` (${delivery.last_status})` : ""}`;
+  return delivery.last_status ? `${last} ${delivery.last_status}` : "no delivery yet";
 }
 
 export interface RevealedWakeWebhookSecret {
