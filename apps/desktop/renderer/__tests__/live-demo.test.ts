@@ -1720,6 +1720,8 @@ describe("marks that wait for the link", () => {
     const timers: Array<{ ms: number; run: () => void; cancelled: boolean }> = [];
     let holdAdds = false;
     const held: Array<() => void> = [];
+    let holdRemoves = false;
+    const heldRemoves: Array<() => void> = [];
     const api: LiveDemoApi = {
       async join() {},
       async leave() {},
@@ -1740,6 +1742,7 @@ describe("marks that wait for the link", () => {
         return mark;
       },
       async removeMark(_room, id) {
+        if (holdRemoves) await new Promise<void>((resolve) => heldRemoves.push(resolve));
         if (failRemoves > 0) {
           failRemoves--;
           throw new Error(DEMO_MARK_RATE_LIMITED_TEXT);
@@ -1785,6 +1788,8 @@ describe("marks that wait for the link", () => {
       failRemoves: (count: number) => { failRemoves = count; },
       hold: (value: boolean) => { holdAdds = value; },
       release: () => { for (const resolve of held.splice(0)) resolve(); },
+      holdRemoves: (value: boolean) => { holdRemoves = value; },
+      releaseRemoves: () => { for (const resolve of heldRemoves.splice(0)) resolve(); },
     };
   }
   const settle = async () => { for (let i = 0; i < 4; i++) await new Promise((resolve) => setImmediate(resolve)); };
@@ -1892,6 +1897,32 @@ describe("marks that wait for the link", () => {
     assert.equal(t.liveTimers(), 0, "the old wait is gone");
     assert.deepEqual([...t.server.keys()], [next.id]);
     assert.equal(t.session.pending.value.length, 0);
+  });
+
+  it("sends a delete that is added while another delete is on its way", async () => {
+    const t = setup();
+    t.session.start("lease://one");
+    await settle();
+    t.hold(true);
+    t.holdRemoves(true);
+    t.session.queueMark({ kind: "stroke", points: STROKE });
+    t.session.queueMark({ kind: "pin", at: [1, 1], text: "Two" });
+    await settle();
+    const [first, second] = t.session.pending.value;
+    t.session.cancelPending(first.key);
+    // The first save answers: it is deleted, and that delete waits on the server.
+    t.release();
+    await settle();
+    // The second save is on its way now; it is taken back too, and answers while the first delete still waits.
+    t.session.cancelPending(second.key);
+    t.release();
+    await settle();
+    t.releaseRemoves();
+    await settle();
+    t.releaseRemoves();
+    await settle();
+    assert.deepEqual(t.removed.sort(), [first.id, second.id].sort());
+    assert.equal(t.server.size, 0, "neither mark stays on the server");
   });
 
   it("keeps a delete through an outage and runs it when the link is back; the mark stays hidden meanwhile", async () => {

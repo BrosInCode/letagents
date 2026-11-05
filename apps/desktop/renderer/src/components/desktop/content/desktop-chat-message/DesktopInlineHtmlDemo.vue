@@ -815,7 +815,9 @@ function endPin(): void {
 }
 
 // While drawing, the bar (and a note) rise by how far the card runs past the bottom of the
-// list, so a card taller than the window ("Show all") keeps Undo and Done in view.
+// list, so a card taller than the window ("Show all") keeps Undo and Done in view. The list's
+// last strip of height may hold a floating bar of its own (agent activity), so that is kept clear.
+const LIFT_CLEARANCE = 56;
 const liveLift = ref(0);
 let liftFrame = 0;
 let liftScroller: HTMLElement | null = null;
@@ -829,7 +831,7 @@ function measureLift(): void {
   }
   const c = box.getBoundingClientRect();
   const view = liftScroller.getBoundingClientRect();
-  liveLift.value = Math.round(Math.max(0, Math.min(c.bottom - view.bottom, c.height - 80)));
+  liveLift.value = Math.round(Math.max(0, Math.min(c.bottom - (view.bottom - LIFT_CLEARANCE), c.height - 80)));
 }
 
 function scheduleLift(): void {

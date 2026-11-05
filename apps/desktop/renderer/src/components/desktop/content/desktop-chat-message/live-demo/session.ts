@@ -420,7 +420,9 @@ export function useLiveDemo(options: UseLiveDemoOptions) {
     cancelDeleteRetry?.();
     cancelDeleteRetry = null;
     try {
-      for (const [id, entry] of [...deleteQueue]) {
+      // Until the queue is empty: a delete added while one is on its way is sent in this pass too.
+      for (let next = deleteQueue.entries().next(); !next.done; next = deleteQueue.entries().next()) {
+        const [id, entry] = next.value;
         try {
           await api.removeMark(entry.room, id);
           deleteQueue.delete(id);
