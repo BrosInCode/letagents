@@ -352,6 +352,57 @@ test("a guest launch never joins the room as its owner: the grant's room is the 
   assert.ok(!h.events.some((event) => event.startsWith("create:")), "a room the grant did not name is refused before anything is saved");
 });
 
+/**
+ * On restart the owner's path provisions a new grant through the owner's own
+ * room join and POST /supervisor-host-grants. For a guest both answer 403
+ * (members only), so a guest whose saved grant is unusable is stopped with the
+ * reason, and never joins; one the daemon still runs is left alone.
+ */
+test("a guest with no usable saved grant is stopped on restart, with the reason, and never joins as the owner", async () => {
+  const h = harness();
+  const guest = { ...entry("supervised_rental_ask_0123456789abcdef0123456789abcdef"), roomId: "room_of_asker", displayName: "Sam's helper",
+    observedState: "recovering" as const, agentSessionBindingState: "none" as const };
+  let joins = 0;
+  let provisions = 0;
+  const daemon = { ...h.daemon, async list() { h.events.push("list"); return [guest]; } };
+  const refusedJoin = async () => { joins += 1; throw new Error("HTTP 403: room_membership_required"); };
+  const coordinator = new SupervisorGrantCoordinator(daemon as never, (async () => { throw new Error("unexpected request"); }) as never, () => "host_1", {
+    ...h.operations,
+    readEntryAgentKey: async () => "giver/helper",
+    readGrant: async () => null,
+    provision: async () => { provisions += 1; throw new Error("HTTP 403: room_membership_required"); },
+  }, refusedJoin);
+  await assert.rejects(coordinator.reconcileDesiredRunning(),
+    /Sam's helper runs as a guest in someone else's room and has no saved access for its room on this computer\. This computer cannot renew a guest's access, so the agent was stopped\. Remove it, then give or rent it again\.$/);
+  assert.equal(joins, 0, "the owner's own join is never made for a guest's room");
+  assert.equal(provisions, 0, "owner provisioning is never attempted for a guest");
+  assert.ok(h.events.includes(`set-desired:${guest.id}:stopped`), "the guest is stopped");
+  assert.ok(!h.events.some((event) => event.startsWith("install:")), "nothing is installed");
+});
+
+test("a guest the daemon still runs with its own live access is left alone when the saved copy expired", async () => {
+  const h = harness();
+  const key = "giver/helper";
+  const guest = { ...entry("supervised_rental_ask_0123456789abcdef0123456789abcdef"), roomId: "room_of_asker",
+    observedState: "idle" as const, agentSessionBindingState: "active" as const };
+  let joins = 0;
+  let provisions = 0;
+  const daemon = { ...h.daemon, async list() { return [guest]; } };
+  const coordinator = new SupervisorGrantCoordinator(daemon as never, (async () => { throw new Error("unexpected request"); }) as never, () => "host_1", {
+    ...h.operations,
+    readEntryAgentKey: async () => key,
+    // The daemon renewed this grant with its own bearer; the copy saved here kept the first expiry.
+    readGrant: async () => ({ metadata: { ...metadata(key, "grant_ask", "room_of_asker"), expiresAt: "2000-01-01T00:00:00.000Z" },
+      authority: null, token: "secret_gift", entryId: guest.id, lastInstalledDaemonGeneration: 7 }),
+    provision: async () => { provisions += 1; throw new Error("must not provision"); },
+  }, async () => { joins += 1; throw new Error("HTTP 403: room_membership_required"); });
+  await coordinator.reconcileDesiredRunning();
+  assert.equal(joins, 0);
+  assert.equal(provisions, 0);
+  assert.ok(!h.events.some((event) => event.startsWith("set-desired:")), "a working guest is not stopped");
+  assert.ok(!h.events.some((event) => event.startsWith("install:")), "an expired copy is not installed over the daemon's live one");
+});
+
 test("fresh Open Model launch installs the desktop-held endpoint credential before convergence", async () => {
   for (const savedModel of ["qwen/default-model", "qwen/agent-model"]) {
     const h = harness();

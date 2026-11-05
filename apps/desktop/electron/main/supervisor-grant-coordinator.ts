@@ -26,7 +26,7 @@ import { suggestLetAgentsCodename } from "./agents/codenames.js";
 import { agentDisplayNameKey, isPlaceholderAgentDisplayName } from "../../../../shared/agent-codenames.mjs";
 import { PacedQueue } from "../../../../shared/paced-queue.mjs";
 import { readOpenModelSettings, type StoredOpenModelSettings } from "./agents/open-model-settings.js";
-import { assertGuestSafePermissionProfile, assertRentalSafePermissionProfile, isGivenAgentEntryId } from "./agents/rental-permission-profiles.js";
+import { assertGuestSafePermissionProfile, assertRentalSafePermissionProfile, isGivenAgentEntryId, isGuestEntryId } from "./agents/rental-permission-profiles.js";
 import type { DesktopSupervisorCreateInput, DesktopSupervisorManifestEntry, DesktopSupervisorRoomMove } from "../ipc-types.js";
 
 type GrantResponse = {
@@ -802,6 +802,7 @@ export class SupervisorGrantCoordinator {
       && await this.reconcilePendingRoomMoveWithinEntryTail(entry.id, daemonGeneration)) return;
     const agentKey = await this.operations.readEntryAgentKey(entry.id);
     if (!agentKey) {
+      if (isGuestEntryId(entry.id)) return this.settleGuestWithoutSavedAuthority(entry, "has no saved identity on this computer");
       // Legacy entries can be recovered only from a durable mapping or by
       // creating a new explicit identity. Labels are never identity inputs.
       await this.assertSupervisionAvailable();
@@ -815,6 +816,10 @@ export class SupervisorGrantCoordinator {
     }
     const stored = await this.operations.readGrant(agentKey);
     if (!stored || stored.entryId !== entry.id || !this.grantExactlyScopes(stored, entry.roomId, agentKey)) {
+      if (isGuestEntryId(entry.id)) {
+        return this.settleGuestWithoutSavedAuthority(entry, stored && stored.entryId === entry.id && Date.parse(stored.metadata.expiresAt) <= Date.now()
+          ? "its saved access expired" : "has no saved access for its room on this computer");
+      }
       // A pre-case-preservation registry can contain a truthy but invalid
       // lowercase key. Re-resolve the deterministic server identity before
       // provisioning whenever no usable encrypted grant proves this local
@@ -829,6 +834,7 @@ export class SupervisorGrantCoordinator {
     }
     if (!Number.isFinite(new Date(stored.metadata.expiresAt).getTime())
       || new Date(stored.metadata.expiresAt).getTime() <= Date.now()) {
+      if (isGuestEntryId(entry.id)) return this.settleGuestWithoutSavedAuthority(entry, "its saved access expired");
       // A daemon can rotate its short-lived worker bearer on its own while
       // this host grant remains current. Once host authority expires, only
       // Electron may recover it, before the next worker rotation wedges.
@@ -973,6 +979,30 @@ export class SupervisorGrantCoordinator {
       move.agentSessionId ?? entry.agentSessionId ?? undefined,
     );
     await this.install(entry, agentKey, grant, status.generation, true);
+  }
+
+  /**
+   * A guest (a rental, or an agent given through Ask for an agent) runs in a
+   * room its owner is no member of. The server minted its access when it was
+   * given or rented, and only that access's own bearer can renew it: the
+   * daemon renews it before it expires, and a daemon handoff rotates it. The
+   * owner cannot mint a replacement: rooms admit members only, so the owner's
+   * join (resolveRoomId) and POST /supervisor-host-grants both answer 403 for
+   * a guest's room, and an owner grant would also give the guest delegation
+   * provenance it must never have. So when the saved access is unusable there
+   * is nothing this computer can do: a guest the daemon still runs with its
+   * own live access is left alone (the daemon renewed what this computer
+   * saved), and any other is stopped, with the reason.
+   */
+  private async settleGuestWithoutSavedAuthority(entry: DesktopSupervisorManifestEntry, why: string): Promise<void> {
+    const current = (await this.daemon.list(null)).find((candidate) => candidate.id === entry.id) ?? entry;
+    const liveWithTheDaemon = current.desiredState === "running" && current.agentSessionBindingState === "active"
+      && current.condition === "none" && (current.observedState === "working" || current.observedState === "idle");
+    if (liveWithTheDaemon) return;
+    const wasStopped = current.desiredState === "stopped";
+    if (!wasStopped) await this.daemon.setDesiredState(entry.id, "stopped");
+    throw new Error(`${entry.displayName} runs as a guest in someone else's room and ${why}. `
+      + `This computer cannot renew a guest's access, so the agent ${wasStopped ? "stays" : "was"} stopped. Remove it, then give or rent it again.`);
   }
 
   private async provisionAndInstall(
