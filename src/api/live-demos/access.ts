@@ -4,6 +4,7 @@ import {
   getProjectAccessRoomId,
   resolveProjectRepoRoomAccessDecision,
   resolveRoomMembershipDecision,
+  type RoomAccessAccount,
 } from '../rooms/access.js';
 import { resolveExistingRoomRequest } from '../rooms/resolution.js';
 
@@ -13,13 +14,19 @@ export type LiveRoomDecision = 'allow' | 'deny' | 'unavailable';
 export interface LiveDemoAccess {
   /** The person behind an app-session bearer token. Owner tokens, agent bearers and host grants are not one. */
   authenticate(token: string): Promise<SessionAccount | null>;
+  /**
+   * The room by its id, as the app knows it (a focus room by id or locator).
+   * Not by invite code: a code is a secret for joining, and live demos and
+   * marks are for people already in the room. The socket and the marks
+   * routes both look rooms up here.
+   */
   findRoom(roomId: string): Promise<Project | null>;
   /**
    * The same rule as the room's messages: members of a room that is not tied
    * to a repository (a focus room uses its parent), the GitHub role for a repo
    * room. `accessRoomName` is the room the membership and GitHub events name.
    */
-  canView(room: Project, account: SessionAccount, options?: { fresh?: boolean }): Promise<{ decision: LiveRoomDecision; accessRoomName: string }>;
+  canView(room: Project, account: RoomAccessAccount, options?: { fresh?: boolean }): Promise<{ decision: LiveRoomDecision; accessRoomName: string }>;
   /** Whether the demo key names an attachment of a message in this room. */
   demoExists(roomId: string, demo: string): Promise<boolean>;
 }

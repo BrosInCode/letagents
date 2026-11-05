@@ -18,6 +18,8 @@ export const demo_marks = pgTable('demo_marks', {
   attachment_number: integer('attachment_number').notNull(),
   account_id: text('account_id').notNull().references(() => accounts.id, { onDelete: 'cascade', onUpdate: 'cascade' }),
   kind: text('kind').notNull(),
+  /** Points of a stroke, 1 for a pin: the per-demo size budget counts these. */
+  point_count: integer('point_count').notNull(),
   points: jsonb('points').$type<LiveDemoPoint[]>(),
   pin_at: jsonb('pin_at').$type<LiveDemoPoint>(),
   pin_text: text('pin_text'),
@@ -31,6 +33,7 @@ export const demo_marks = pgTable('demo_marks', {
   }).onDelete('cascade').onUpdate('cascade'),
   demo_idx: index('demo_marks_demo_idx').on(table.room_id, table.message_number, table.attachment_number, table.created_at, table.id),
   account_idx: index('demo_marks_account_idx').on(table.account_id),
+  point_count_check: check('demo_marks_point_count_check', sql`${table.point_count} > 0`),
   kind_check: check('demo_marks_kind_check', sql`(${table.kind} = 'stroke' AND ${table.points} IS NOT NULL AND ${table.pin_at} IS NULL AND ${table.pin_text} IS NULL)
     OR (${table.kind} = 'pin' AND ${table.points} IS NULL AND ${table.pin_at} IS NOT NULL AND ${table.pin_text} IS NOT NULL)`),
 }));

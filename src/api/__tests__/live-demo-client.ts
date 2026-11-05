@@ -62,8 +62,8 @@ export function openLive(
 }
 
 /** An open live socket after its hello. */
-export async function joinLive(port: number, room: string, token: string) {
-  const opened = await openLive(port, `/rooms/${encodeURIComponent(room)}/live`, { token });
+export async function joinLive(port: number, room: string, token: string, headers: Record<string, string> = {}) {
+  const opened = await openLive(port, `/rooms/${encodeURIComponent(room)}/live`, { token, headers });
   assert.equal(opened.status, 101, `${token} opens ${room}`);
   const { ws, inbox: frames } = opened as Extract<Opened, { status: 101 }>;
   const hello = await frames.next((frame) => frame.t === 'hello');

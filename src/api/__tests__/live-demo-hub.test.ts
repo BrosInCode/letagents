@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { LIVE_DEMO, liveDemoColor, parseLiveServerFrame, type DemoMark } from '../../../shared/live-demo.mjs';
-import { createInMemoryLiveDemoBus, createLiveDemoHub, type LiveDemoHubOptions } from '../live-demos/hub.js';
+import { createInMemoryLiveDemoBus, createLiveDemoHub, LIVE_DEMO_HUB_LIMITS, type LiveDemoHubOptions } from '../live-demos/hub.js';
 
 const DEMO = 'msg_1/att_1';
 const OTHER_DEMO = 'msg_2/att_1';
@@ -10,11 +10,14 @@ const OTHER_DEMO = 'msg_2/att_1';
 class FakeSocket {
   readyState = 1;
   bufferedAmount = 0;
+  /** A peer that stops reading: every frame stays queued. */
+  reading = true;
   sent: any[] = [];
   closed: { code: number; reason: string } | null = null;
   send(data: string) {
     const frame = JSON.parse(data);
     assert.ok(parseLiveServerFrame(frame), `the app can read ${data}`);
+    if (!this.reading) this.bufferedAmount += Buffer.byteLength(data);
     this.sent.push(frame);
   }
   close(code: number, reason: string) {
@@ -273,9 +276,9 @@ test('a connection views at most eight demos, joins are rate limited, and a demo
 
   for (const demo of known.slice(0, 3)) ada.send({ t: 'leave', demo });
   for (const demo of known.slice(8, 11)) ada.send({ t: 'join', demo });
-  const [limited] = ada.socket.take('error');
-  assert.equal(limited.code, 'rate_limited', 'ten joins in ten seconds');
-  assert.equal(limited.demo, known[10]);
+  const limited = ada.socket.take('error');
+  assert.deepEqual(limited.map((frame) => [frame.code, frame.demo]), [['rate_limited', known[9]]],
+    'ten joins in ten seconds, the refused ninth one included; one reply, then silence');
   tick(10_000);
   ada.send({ t: 'join', demo: known[10] });
   await settle();
@@ -316,7 +319,8 @@ test('a socket that is far behind skips cursors but still gets presence', async 
   bea.send({ t: 'join', demo: DEMO });
   await settle();
   bea.socket.take();
-  bea.socket.bufferedAmount = 10 * 1024 * 1024;
+  // Behind, but under the hard cap.
+  bea.socket.bufferedAmount = (LIVE_DEMO_HUB_LIMITS.slowSocketBytes + LIVE_DEMO_HUB_LIMITS.maxQueuedBytes) / 2;
   ada.send({ t: 'cur', demo: DEMO, x: 1, y: 1 });
   ada.send({ t: 'leave', demo: DEMO });
   assert.deepEqual(bea.socket.take().map((frame) => frame.t), ['presence']);
@@ -338,4 +342,83 @@ test('a closed connection (for example after a revoke) is gone from every demo a
   await settle();
   assert.deepEqual(ada.socket.take().map((frame) => frame.t), ['cur', 'presence']);
   assert.deepEqual(hub.stats(), { rooms: 1, connections: 1 });
+});
+
+test('a flood of repeated or refused joins gets at most one window of replies', async () => {
+  const { connect, tick } = harness({ known: [DEMO] });
+  const ada = connect('Ada');
+  ada.send({ t: 'join', demo: DEMO });
+  await settle();
+  ada.socket.take();
+  for (let i = 0; i < 2_000; i += 1) {
+    ada.send({ t: 'join', demo: DEMO });
+    ada.send({ t: 'join', demo: `msg_${i + 2}/att_1` });
+  }
+  await settle();
+  const replies = ada.socket.take();
+  assert.equal(replies.length, LIVE_DEMO_HUB_LIMITS.joins, 'the first join of the window was the real one');
+  assert.equal(replies.filter((frame) => frame.code === 'rate_limited').length, 1);
+  tick(LIVE_DEMO_HUB_LIMITS.joinWindowMs);
+  ada.send({ t: 'join', demo: DEMO });
+  assert.deepEqual(ada.socket.take().map((frame) => frame.t), ['presence'], 'the next window has room again');
+});
+
+test('a socket that stops reading skips cursors, then closes before its queue passes the hard cap', async () => {
+  const { connect, hub } = harness();
+  const ada = connect('Ada');
+  const bea = connect('Bea');
+  ada.send({ t: 'join', demo: DEMO });
+  bea.send({ t: 'join', demo: DEMO });
+  await settle();
+  ada.socket.take();
+  bea.socket.take();
+  ada.socket.reading = false;
+
+  const big: DemoMark = {
+    id: 'dmk_bigstroke', demo: DEMO, kind: 'stroke', anchor: null, createdAt: new Date(0).toISOString(),
+    author: { accountId: 'acct_Bea', name: 'Bea', color: liveDemoColor('acct_Bea') },
+    points: Array.from({ length: LIVE_DEMO.strokePoints }, (_, i) => [i % 760, i]),
+  };
+  let cursorsBeforeClose = 0;
+  for (let i = 0; i < 200 && !ada.socket.closed; i += 1) {
+    hub.broadcast('room-a', DEMO, { t: 'mark', demo: DEMO, mark: big });
+    const before = ada.socket.sent.length;
+    bea.send({ t: 'cur', demo: DEMO, x: i, y: i });
+    if (ada.socket.sent.length > before) cursorsBeforeClose += 1;
+    assert.ok(ada.socket.bufferedAmount <= LIVE_DEMO_HUB_LIMITS.maxQueuedBytes, 'never queued past the cap');
+  }
+  assert.deepEqual(ada.socket.closed, { code: 1013, reason: 'Too far behind' });
+  assert.ok(cursorsBeforeClose < 5, 'cursors stopped once it fell behind');
+  const toBea = bea.socket.take();
+  assert.ok(toBea.some((frame) => frame.t === 'cur' && frame.cid === ada.connection.cid && frame.gone));
+  assert.deepEqual(toBea.filter((frame) => frame.t === 'presence').at(-1).people.map((p: any) => p.name), ['Bea'],
+    'gone from presence at once');
+  assert.deepEqual(hub.stats(), { rooms: 1, connections: 1 });
+});
+
+test('a held socket gets nothing and sends nothing, and gets the current viewers when released', async () => {
+  const { connect } = harness();
+  const ada = connect('Ada');
+  const bea = connect('Bea');
+  const cy = connect('Cy');
+  ada.send({ t: 'join', demo: DEMO });
+  bea.send({ t: 'join', demo: DEMO });
+  await settle();
+  for (const person of [ada, bea, cy]) person.socket.take();
+
+  bea.connection.hold(true);
+  ada.send({ t: 'cur', demo: DEMO, x: 1, y: 1 });
+  bea.send({ t: 'cur', demo: DEMO, x: 2, y: 2 });
+  bea.send({ t: 'ink', demo: DEMO, id: 'stroke_held', pts: [[1, 1]] });
+  cy.send({ t: 'join', demo: DEMO });
+  await settle();
+  assert.deepEqual(bea.socket.take(), [], 'nothing while held');
+  assert.deepEqual(ada.socket.take().map((frame) => frame.t), ['presence'], 'only Cy arriving, no cursor or ink from Bea');
+
+  bea.connection.hold(false);
+  const [presence, ...rest] = bea.socket.take();
+  assert.deepEqual(presence.people.map((p: any) => p.name), ['Ada', 'Bea', 'Cy']);
+  assert.deepEqual(rest, []);
+  bea.send({ t: 'cur', demo: DEMO, x: 3, y: 3 });
+  assert.equal(ada.socket.take('cur').length, 1, 'relayed again');
 });

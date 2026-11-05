@@ -575,7 +575,7 @@ export function registerApiRoutes(app: Express): void {
 
   registerRoomJoinRoutes(app, roomJoinRouteDeps);
   registerRoomMessageRoutes(app, roomMessageRouteDeps);
-  registerDemoMarkRoutes(app, { ...roomMessageRouteDeps, resolveProjectRole, liveDemoHub });
+  registerDemoMarkRoutes(app, { resolveProjectRole, liveDemoHub });
   registerRoomKnowledgeRoutes(app, roomMessageRouteDeps);
   registerWakeRuleRoutes(app, roomMessageRouteDeps);
   registerWakeRuleLinkRoutes(app);

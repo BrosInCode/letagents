@@ -130,7 +130,11 @@ test('marks: members read and save them, the author or an admin removes one, vie
 
   const stroke = { demo: DEMO, kind: 'stroke', points: [[10.04, 20.06], [30, 40.55], [50, 60]], anchor: null };
   assert.equal((await call('POST', route, null, stroke)).status, 401);
-  assert.equal((await call('POST', route, stranger.token, stroke)).status, 403);
+  const refused = await call('POST', route, stranger.token, stroke);
+  assert.deepEqual(refused, { status: 403, body: {
+    error: 'room_access_required', message: 'Only people who can open this room can see its demo marks.',
+  } }, 'a plain refusal: no room name, no join request');
+  assert.equal((await call('POST', `/rooms/no-such-room/demo-marks`, null, stroke)).status, 401, 'no sign-in, no room lookup');
   assert.equal((await call('POST', route, member.token, { ...stroke, points: [[1, 1]] })).status, 400, 'a stroke needs two points');
   assert.equal((await call('POST', route, member.token, { ...stroke, demo: 'msg_99/att_1' })).status, 404, 'not a demo of this room');
 
@@ -181,8 +185,8 @@ test('marks: members read and save them, the author or an admin removes one, vie
 test('a demo keeps at most 500 marks, and its marks go with its message', databaseTestOptions, async (t) => {
   const { owner, call, roomId } = await setup(t);
   const route = `/rooms/${encodeURIComponent(roomId)}/demo-marks`;
-  await pool!.query(`INSERT INTO demo_marks (id, room_id, message_number, attachment_number, account_id, kind, pin_at, pin_text)
-    SELECT 'dmk_seed_' || n, $1, 1, 1, $2, 'pin', '[1, 1]'::jsonb, 'seed' FROM generate_series(1, $3::int - 1) AS n`,
+  await pool!.query(`INSERT INTO demo_marks (id, room_id, message_number, attachment_number, account_id, kind, point_count, pin_at, pin_text)
+    SELECT 'dmk_seed_' || n, $1, 1, 1, $2, 'pin', 1, '[1, 1]'::jsonb, 'seed' FROM generate_series(1, $3::int - 1) AS n`,
   [roomId, owner.id, LIVE_DEMO.marksPerDemo]);
   const pin = { demo: DEMO, kind: 'pin', at: [1, 2], text: 'Last one' };
   const results = await Promise.all([call('POST', route, owner.token, pin), call('POST', route, owner.token, pin)]);
@@ -194,4 +198,28 @@ test('a demo keeps at most 500 marks, and its marks go with its message', databa
   await pool!.query('DELETE FROM message_attachments WHERE room_id = $1', [roomId]);
   const left = await pool!.query(`SELECT COUNT(*)::int AS count FROM demo_marks WHERE room_id = $1`, [roomId]);
   assert.equal(left.rows[0].count, 0);
+});
+
+test('a demo keeps at most 100,000 points of marks, and one account makes at most 20 changes at once', databaseTestOptions, async (t) => {
+  const { owner, member, call, roomId } = await setup(t);
+  const route = `/rooms/${encodeURIComponent(roomId)}/demo-marks`;
+  // 50 strokes of 1,999 points (stored as 2 points each; the budget counts point_count).
+  await pool!.query(`INSERT INTO demo_marks (id, room_id, message_number, attachment_number, account_id, kind, point_count, points)
+    SELECT 'dmk_heavy_' || n, $1, 1, 1, $2, 'stroke', 1999, '[[1, 1], [2, 2]]'::jsonb FROM generate_series(1, 50) AS n`,
+  [roomId, owner.id]);
+  const stroke = (points: number) => ({
+    demo: DEMO, kind: 'stroke', anchor: null, points: Array.from({ length: points }, (_, i) => [i % 760, i]),
+  });
+  assert.equal((await call('POST', route, owner.token, stroke(50))).status, 201, '99,950 + 50 fits');
+  const tooLarge = await call('POST', route, owner.token, stroke(2));
+  assert.deepEqual([tooLarge.status, tooLarge.body.error], [409, 'demo_marks_too_large']);
+  const pin = await call('POST', route, owner.token, { demo: DEMO, kind: 'pin', at: [1, 1], text: 'One more' });
+  assert.equal(pin.status, 409, 'a pin counts one point');
+
+  const statuses: number[] = [];
+  for (let i = 0; i < 22; i += 1) statuses.push((await call('DELETE', `${route}/dmk_missing_${i}`, member.token)).status);
+  assert.deepEqual(statuses.slice(0, 20), Array(20).fill(404));
+  assert.deepEqual(statuses.slice(20), [429, 429], 'the 21st change in a burst waits');
+  assert.equal((await call('GET', `${route}?demo=${encodeURIComponent(DEMO)}`, member.token)).status, 200, 'reading is not limited');
+  assert.equal((await call('DELETE', `${route}/dmk_missing_x`, owner.token)).status, 404, 'another account is not limited');
 });

@@ -1007,3 +1007,38 @@ test("a dead or blocked token is a refusal; only a GitHub outage is a retry", as
   assert.equal(await isGitHubPublicRepoRoleHolder({ roomName: room, login: "former", accessToken: "token", bypassCache: true }), false,
     "a dead token on a public repository is no role, not a retry");
 });
+
+test("a fresh no from GitHub retires a remembered yes for that person and repository", async () => {
+  const roomName = `github.com/brosincode/fresh-denial-${Date.now()}`;
+  let collaborator = true;
+  let calls = 0;
+  const fetchImpl = (async (input: RequestInfo | URL) => {
+    calls += 1;
+    if (String(input).includes("/collaborators/")) {
+      return collaborator ? jsonResponse(200, { permission: "write" }) : jsonResponse(404, { message: "Not Found" });
+    }
+    return jsonResponse(200, { private: true, owner: { login: "brosincode" } });
+  }) as typeof fetch;
+  const check = (bypassCache = false) => isGitHubRepoCollaborator({ roomName, login: "removed", accessToken: "token", bypassCache, fetchImpl });
+
+  assert.equal(await check(), true);
+  const remembered = calls;
+  assert.equal(await check(), true, "the yes is remembered");
+  assert.equal(calls, remembered);
+  collaborator = false;
+  assert.equal(await check(true), false, "a fresh check sees the removal");
+  assert.equal(await check(), false, "and the remembered yes is gone");
+  assert.ok(calls > remembered + 2, "the cached check asked GitHub again");
+
+  const publicRoom = `github.com/acme/fresh-role-${Date.now()}`;
+  let role = true;
+  globalThis.fetch = (async () => jsonResponse(200, {
+    private: false, owner: { login: "acme" }, permissions: { pull: true, triage: role },
+  })) as typeof fetch;
+  const roleCheck = (bypassCache = false) => isGitHubPublicRepoRoleHolder({ roomName: publicRoom, login: "removed", accessToken: "token", bypassCache });
+  assert.equal(await roleCheck(), true);
+  role = false;
+  assert.equal(await roleCheck(), true, "remembered");
+  assert.equal(await roleCheck(true), false);
+  assert.equal(await roleCheck(), false, "the remembered role is gone");
+});

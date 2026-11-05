@@ -7,9 +7,9 @@ import WebSocket from 'ws';
 
 import { liveDemoColor } from '../../../shared/live-demo.mjs';
 import type { LiveDemoAccess, LiveRoomDecision } from '../live-demos/access.js';
-import { createLiveDemoHub } from '../live-demos/hub.js';
+import { createLiveDemoHub, LIVE_DEMO_HUB_LIMITS } from '../live-demos/hub.js';
 import { attachLiveDemoSockets, type LiveDemoSocketLimits } from '../live-demos/sockets.js';
-import { closedWith as closed, joinLive as live, openLive as open, until } from './live-demo-client.js';
+import { closedWith as closed, joinLive as live, openLive as open, pause, until } from './live-demo-client.js';
 
 // The upgrade handler on a real HTTP server with real `ws` clients. Access is
 // a stub here; live-demos-db.test.ts runs the same checks against Postgres.
@@ -33,13 +33,19 @@ async function start(limits: Partial<LiveDemoSocketLimits> = {}) {
     ['github.com/acme/app', { id: 'github.com/acme/app', focus_key: null }]]);
   const calls: string[] = [];
   let repoDecision: LiveRoomDecision = 'unavailable';
+  // While set, a check decides at once but answers only when the gate opens.
+  let gate: Promise<void> | null = null;
   const access: LiveDemoAccess = {
     authenticate: async (token) => { calls.push(`auth:${token}`); return (tokens.get(token) ?? null) as any; },
     findRoom: async (id) => (rooms.get(id) ?? null) as any,
-    canView: async (room, person) => ({
-      decision: room.id.startsWith('github.com/') ? repoDecision : members.has(`${room.id}:${person.account_id}`) ? 'allow' : 'deny',
-      accessRoomName: room.id,
-    }),
+    canView: async (room, person, options) => {
+      calls.push(`view:${room.id}:${person.account_id}:${options?.fresh ? 'fresh' : 'cached'}`);
+      const decision: LiveRoomDecision = room.id.startsWith('github.com/')
+        ? repoDecision
+        : members.has(`${room.id}:${person.account_id}`) ? 'allow' : 'deny';
+      if (gate) await gate;
+      return { decision, accessRoomName: room.id };
+    },
     demoExists: async (_roomId, demo) => demo === DEMO,
   };
   const hub = createLiveDemoHub({ demoExists: access.demoExists, onError: () => {} });
@@ -50,6 +56,12 @@ async function start(limits: Partial<LiveDemoSocketLimits> = {}) {
   return {
     port, hub, sockets, members, tokens, calls,
     setRepoDecision: (decision: LiveRoomDecision) => { repoDecision = decision; },
+    /** Holds every access check until the returned function is called. */
+    closeGate() {
+      let open!: () => void;
+      gate = new Promise<void>((resolve) => { open = resolve; });
+      return () => { gate = null; open(); };
+    },
     async stop() {
       await sockets.close();
       await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -82,7 +94,11 @@ test('every refusal is a plain HTTP answer before the upgrade', async (t) => {
   }
   assert.equal(server.calls.filter((call) => call === 'auth:tok-ada').length, 3, 'cheap refusals read nothing');
   assert.deepEqual(server.hub.stats(), { rooms: 0, connections: 0 });
-  assert.deepEqual(server.sockets.stats(), { sockets: 0, handshakes: 0 });
+  assert.deepEqual(server.sockets.stats(), { sockets: 0, handshakes: 0, queuedBytes: 0 });
+  assert.ok(server.calls.filter((call) => call.startsWith('view:')).every((call) => call.endsWith(':fresh')),
+    'the upgrade asks GitHub afresh, never a cached answer');
+  const badClient = await open(port, '/rooms/room-a/live', { token: 'tok-ada', headers: { 'x-letagents-live-client': 'not ok!' } });
+  assert.deepEqual([badClient.status, (badClient as any).body.error], [400, 'invalid_client_id']);
 
   // A plain request still reaches the app.
   assert.equal(await (await fetch(`http://127.0.0.1:${port}/rooms/room-a/live`)).text(), 'plain');
@@ -186,4 +202,139 @@ test('shutdown closes every socket with 1001 and refuses new upgrades', async ()
   await server.sockets.close();
   assert.equal((await adaClosed).code, 1001);
   await server.stop();
+});
+
+test('one account holds a fixed number of sockets over all rooms', async (t) => {
+  const server = await start({ perAccount: 2 });
+  t.after(() => server.stop());
+  server.members.add('room-b:acct_ada');
+  await live(server.port, 'room-a', 'tok-ada');
+  await live(server.port, 'room-b', 'tok-ada');
+  const third = await open(server.port, '/rooms/room-a/live', { token: 'tok-ada' });
+  assert.equal(third.status, 429);
+  assert.match((third as any).body.message, /too many rooms/);
+  assert.ok(!server.calls.slice(-1)[0]!.startsWith('view:'), 'a capped account costs no access check');
+  await live(server.port, 'room-a', 'tok-bea');
+});
+
+test('a new socket from the same app replaces the old one at once (4409)', async (t) => {
+  const server = await start({ perAccountRoom: 1 });
+  t.after(() => server.stop());
+  const client = { 'x-letagents-live-client': 'run_7f3a-room-a' };
+  const bea = await live(server.port, 'room-a', 'tok-bea');
+  const first = await live(server.port, 'room-a', 'tok-ada', client);
+  bea.send({ t: 'join', demo: DEMO });
+  first.send({ t: 'join', demo: DEMO });
+  await bea.frames.next((frame) => frame.t === 'presence' && frame.people.length === 2);
+
+  const firstClosed = closed(first.ws);
+  const second = await live(server.port, 'room-a', 'tok-ada', client);
+  assert.deepEqual(await firstClosed, { code: 4409, reason: 'Replaced by a newer connection' });
+  assert.deepEqual(await bea.frames.next((frame) => frame.t === 'cur'), { t: 'cur', demo: DEMO, cid: first.hello.cid, gone: true });
+  assert.deepEqual((await bea.frames.next((frame) => frame.t === 'presence')).people.map((p: any) => p.cid), [bea.hello.cid]);
+  second.send({ t: 'join', demo: DEMO });
+  const both = await bea.frames.next((frame) => frame.t === 'presence' && frame.people.length === 2);
+  assert.deepEqual(both.people.map((p: any) => p.cid).sort(), [bea.hello.cid, second.hello.cid].sort(), 'Ada shows once');
+
+  const other = await open(server.port, '/rooms/room-a/live', { token: 'tok-ada', headers: { 'x-letagents-live-client': 'another-run' } });
+  assert.equal(other.status, 429, 'another app run replaces nothing');
+  assert.equal(second.ws.readyState, WebSocket.OPEN);
+});
+
+test('pongs the server did not ask for do not keep a silent peer alive', async (t) => {
+  const server = await start({ pingMs: 50 });
+  t.after(() => server.stop());
+  const ada = await live(server.port, 'room-a', 'tok-ada');
+  const raw = (ada.ws as any)._socket;
+  raw.pause();
+  const spam = setInterval(() => ada.ws.pong(Buffer.from('alive')), 5);
+  t.after(() => { clearInterval(spam); raw.destroy(); });
+  await until(() => server.sockets.stats().sockets === 0, 3_000);
+});
+
+test('probe: a client that stops reading and floods joins keeps nothing queued and is dropped', async (t) => {
+  const server = await start({ pingMs: 200 });
+  t.after(() => server.stop());
+  const ada = await live(server.port, 'room-a', 'tok-ada');
+  ada.send({ t: 'join', demo: DEMO });
+  await ada.frames.next((frame) => frame.t === 'presence');
+  const raw = (ada.ws as any)._socket;
+  raw.pause();
+  t.after(() => raw.destroy());
+  let peak = 0;
+  for (let round = 0; round < 20 && server.sockets.stats().sockets; round += 1) {
+    for (let i = 0; i < 1_000; i += 1) ada.send({ t: 'join', demo: DEMO });
+    await pause(20);
+    peak = Math.max(peak, server.sockets.stats().queuedBytes);
+  }
+  t.diagnostic(`peak queue during the join flood: ${peak} bytes`);
+  assert.ok(peak < 16 * 1024, `about ${LIVE_DEMO_HUB_LIMITS.joins} small replies, not one per join (peak ${peak} bytes)`);
+  await until(() => server.sockets.stats().sockets === 0, 3_000);
+});
+
+test('probe: a viewer that stops reading under a flood of frames is closed at the queue cap', async (t) => {
+  const server = await start({ closeGraceMs: 200 });
+  t.after(() => server.stop());
+  const ada = await live(server.port, 'room-a', 'tok-ada');
+  const bea = await live(server.port, 'room-a', 'tok-bea');
+  ada.send({ t: 'join', demo: DEMO });
+  bea.send({ t: 'join', demo: DEMO });
+  await bea.frames.next((frame) => frame.t === 'presence' && frame.people.length === 2);
+  const raw = (ada.ws as any)._socket;
+  raw.pause();
+  t.after(() => raw.destroy());
+
+  const mark = {
+    id: 'dmk_floodmark', demo: DEMO, kind: 'stroke' as const, anchor: null, createdAt: new Date(0).toISOString(),
+    author: { accountId: 'acct_bea', name: 'bea', color: liveDemoColor('acct_bea') },
+    points: Array.from({ length: 2_000 }, (_, i) => [i % 760, i] as [number, number]),
+  };
+  const frameBytes = Buffer.byteLength(JSON.stringify({ t: 'mark', demo: DEMO, mark }));
+  let peak = 0;
+  let sent = 0;
+  // Far more than the kernel buffers hold: the queue in the server must fill.
+  while (server.hub.stats().connections === 2 && sent < 4_000) {
+    server.hub.broadcast('room-a', DEMO, { t: 'mark', demo: DEMO, mark });
+    sent += 1;
+    peak = Math.max(peak, server.sockets.stats().queuedBytes);
+    // One turn of the event loop per frame, so the reading viewer keeps up.
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  t.diagnostic(`dropped after ${sent} frames of ${frameBytes} bytes; peak queue ${peak} bytes`);
+  assert.equal(server.hub.stats().connections, 1, `the silent viewer was dropped after ${sent} frames`);
+  assert.ok(peak <= LIVE_DEMO_HUB_LIMITS.maxQueuedBytes + 2 * frameBytes, `queued at most the cap (peak ${peak} bytes)`);
+  assert.deepEqual((await bea.frames.next((frame) => frame.t === 'presence' && frame.people.length === 1)).people[0].cid, bea.hello.cid);
+  await until(() => server.sockets.stats().sockets === 1, 3_000);
+});
+
+test('an invalidation during an allowing check holds the socket and runs one more check', async (t) => {
+  const server = await start({ recheckMs: 60_000 });
+  t.after(() => server.stop());
+  const ada = await live(server.port, 'room-a', 'tok-ada');
+  const bea = await live(server.port, 'room-a', 'tok-bea');
+  ada.send({ t: 'join', demo: DEMO });
+  bea.send({ t: 'join', demo: DEMO });
+  await bea.frames.next((frame) => frame.t === 'presence' && frame.people.length === 2);
+
+  // A check that allows: Bea is held during it and released after.
+  let open = server.closeGate();
+  server.sockets.recheckWhere({ accessRoomName: 'room-a', login: 'bea' });
+  ada.send({ t: 'cur', demo: DEMO, x: 5, y: 5 });
+  await pause(100);
+  assert.equal(bea.frames.frames.filter((frame) => frame.t === 'cur').length, 0, 'nothing while held');
+  open();
+  await bea.frames.next((frame) => frame.t === 'presence', 2_000);
+  ada.send({ t: 'cur', demo: DEMO, x: 6, y: 6 });
+  assert.equal((await bea.frames.next((frame) => frame.t === 'cur')).x, 6, 'released');
+
+  // Bea is removed while a check that read "member" is still running.
+  open = server.closeGate();
+  server.sockets.recheckWhere({ accessRoomName: 'room-a', login: 'bea' });
+  await pause(20);
+  server.members.delete('room-a:acct_bea');
+  server.sockets.recheckWhere({ accessRoomName: 'room-a', login: 'bea' });
+  const beaClosed = closed(bea.ws);
+  open();
+  assert.equal((await beaClosed).code, 4403, 'the stale allow was dropped and the next check refused');
+  assert.equal(ada.ws.readyState, WebSocket.OPEN);
 });

@@ -62,12 +62,17 @@ export interface LiveDemoHubLimits {
   badFrameWindowMs: number;
   checkedDemos: number;
   slowSocketBytes: number;
+  maxQueuedBytes: number;
 }
 
 export const LIVE_DEMO_HUB_LIMITS: Readonly<LiveDemoHubLimits> = Object.freeze({
   /** A presence frame lists at most 64 people, so a demo admits 64 viewers. */
   viewersPerDemo: 64,
-  /** Joins per connection per window. A join may cost one database read and wakes every viewer. */
+  /**
+   * Joins per connection per window, a repeated join included. A join may cost
+   * one database read and wakes every viewer, and every reply to a socket's own
+   * frames comes from a join, so this also bounds those replies.
+   */
   joins: 20,
   joinWindowMs: 10_000,
   /** Bad frames per connection per window; the next one closes the socket. */
@@ -76,7 +81,9 @@ export const LIVE_DEMO_HUB_LIMITS: Readonly<LiveDemoHubLimits> = Object.freeze({
   /** Demo keys a connection remembers as checked. */
   checkedDemos: 256,
   /** A socket this far behind gets no cursor or ink frames until it catches up. */
-  slowSocketBytes: 512 * 1024,
+  slowSocketBytes: 64 * 1024,
+  /** A frame that would queue more than this for one socket closes it (1013). */
+  maxQueuedBytes: 256 * 1024,
 });
 
 export interface LiveDemoHubOptions {
@@ -96,6 +103,12 @@ export interface LiveDemoConnection {
   receive(data: string | Buffer, isBinary?: boolean): void;
   /** The socket closed: leave every demo. Safe to call more than once. */
   disconnect(): void;
+  /**
+   * While held (its access is being checked again) the socket gets no frames
+   * and its cursor and ink go nowhere. On release it gets the current viewers
+   * of each demo it views.
+   */
+  hold(held: boolean): void;
 }
 
 export interface LiveDemoHub {
@@ -107,6 +120,8 @@ export interface LiveDemoHub {
 
 /** Bad frames close with 1008 (policy violation). */
 export const LIVE_DEMO_CLOSE_BAD_FRAMES = 1008;
+/** A socket that does not read its frames closes with 1013 (try again later). */
+export const LIVE_DEMO_CLOSE_TOO_SLOW = 1013;
 
 interface Window { start: number; count: number }
 
@@ -124,8 +139,11 @@ interface Connection extends LiveDemoConnection {
   readonly pending: Set<string>;
   readonly checked: Set<string>;
   readonly joins: Window;
+  /** The join window in which this socket was told it is rate limited. */
+  limitToldAt: number | null;
   readonly bad: Window;
   closed: boolean;
+  held: boolean;
 }
 
 interface Room {
@@ -163,11 +181,29 @@ export function createLiveDemoHub(options: LiveDemoHubOptions): LiveDemoHub {
   const rooms = new Map<string, Room>();
   let connections = 0;
 
-  const send = (connection: Connection, text: string, volatile: boolean) => {
+  const closeConnection = (connection: Connection, code: number, reason: string) => {
+    try {
+      connection.socket.close(code, reason);
+    } catch (error) {
+      onError(error);
+    }
+    disconnect(connection);
+  };
+
+  /**
+   * Every frame to every socket goes through here. A slow reader skips cursor
+   * and ink frames; a frame that would queue past the hard cap closes the
+   * socket instead, so one socket that stops reading cannot fill the memory.
+   */
+  const send = (connection: Connection, text: string, volatile: boolean, bytes = Buffer.byteLength(text)) => {
     const { socket } = connection;
-    if (connection.closed || socket.readyState !== OPEN) return;
-    // A slow reader skips cursor and ink frames rather than queueing them.
-    if (volatile && socket.bufferedAmount > limits.slowSocketBytes) return;
+    if (connection.closed || connection.held || socket.readyState !== OPEN) return;
+    const queued = socket.bufferedAmount;
+    if (volatile && queued > limits.slowSocketBytes) return;
+    if (queued + bytes > limits.maxQueuedBytes) {
+      closeConnection(connection, LIVE_DEMO_CLOSE_TOO_SLOW, 'Too far behind');
+      return;
+    }
     try {
       socket.send(text);
     } catch (error) {
@@ -179,8 +215,9 @@ export function createLiveDemoHub(options: LiveDemoHubOptions): LiveDemoHub {
     const viewers = room.viewers.get(demo);
     if (!viewers?.size) return;
     const text = JSON.stringify(frame);
+    const bytes = Buffer.byteLength(text);
     const volatile = frame.t === 'cur' || frame.t === 'ink';
-    for (const viewer of viewers) if (viewer.cid !== from) send(viewer, text, volatile);
+    for (const viewer of [...viewers]) if (viewer.cid !== from) send(viewer, text, volatile, bytes);
   };
 
   const presence = (room: Room, demo: string): LiveDemoServerFrame => ({
@@ -258,6 +295,14 @@ export function createLiveDemoHub(options: LiveDemoHubOptions): LiveDemoHub {
   };
 
   const join = (connection: Connection, demo: string) => {
+    // Every join counts, a repeated one too: each may send a reply.
+    if (!take(connection.joins, limits.joins, limits.joinWindowMs, now())) {
+      // One `rate_limited` reply per window; later joins in it are dropped.
+      if (connection.limitToldAt === connection.joins.start) return;
+      connection.limitToldAt = connection.joins.start;
+      sendError(connection, 'rate_limited', 'Too many demos opened at once. Try again in a moment.', demo);
+      return;
+    }
     const room = rooms.get(connection.roomId);
     if (connection.demos.has(demo)) {
       // Already viewing: answer with the current viewers, to this app only.
@@ -267,10 +312,6 @@ export function createLiveDemoHub(options: LiveDemoHubOptions): LiveDemoHub {
     if (connection.pending.has(demo)) return;
     if (connection.demos.size + connection.pending.size >= LIVE_DEMO.demosPerConnection) {
       sendError(connection, 'too_many_demos', `Up to ${LIVE_DEMO.demosPerConnection} demos can be live at once.`, demo);
-      return;
-    }
-    if (!take(connection.joins, limits.joins, limits.joinWindowMs, now())) {
-      sendError(connection, 'rate_limited', 'Too many demos opened at once. Try again in a moment.', demo);
       return;
     }
     if (connection.checked.has(demo)) {
@@ -357,12 +398,16 @@ export function createLiveDemoHub(options: LiveDemoHubOptions): LiveDemoHub {
 
   const badFrame = (connection: Connection) => {
     if (take(connection.bad, limits.badFrames, limits.badFrameWindowMs, now())) return;
-    try {
-      connection.socket.close(LIVE_DEMO_CLOSE_BAD_FRAMES, 'Too many bad frames');
-    } catch (error) {
-      onError(error);
-    }
-    disconnect(connection);
+    closeConnection(connection, LIVE_DEMO_CLOSE_BAD_FRAMES, 'Too many bad frames');
+  };
+
+  const hold = (connection: Connection, held: boolean) => {
+    if (connection.closed || connection.held === held) return;
+    connection.held = held;
+    const room = rooms.get(connection.roomId);
+    if (held || !room) return;
+    // Back from a check: what changed while held, in one frame per demo.
+    for (const demo of connection.demos.keys()) send(connection, JSON.stringify(presence(room, demo)), false);
   };
 
   const receive = (connection: Connection, data: string | Buffer, isBinary = false) => {
@@ -388,8 +433,8 @@ export function createLiveDemoHub(options: LiveDemoHubOptions): LiveDemoHub {
       case 'leave':
         if (!connection.pending.delete(frame.demo)) drop(connection, frame.demo);
         return;
-      case 'cur': cursor(connection, frame); return;
-      case 'ink': ink(connection, frame); return;
+      case 'cur': if (!connection.held) cursor(connection, frame); return;
+      case 'ink': if (!connection.held) ink(connection, frame); return;
     }
   };
 
@@ -407,10 +452,13 @@ export function createLiveDemoHub(options: LiveDemoHubOptions): LiveDemoHub {
         pending: new Set(),
         checked: new Set(),
         joins: { start: 0, count: 0 },
+        limitToldAt: null,
         bad: { start: 0, count: 0 },
         closed: false,
+        held: false,
         receive: (data, isBinary) => receive(connection, data, isBinary),
         disconnect: () => disconnect(connection),
+        hold: (held) => hold(connection, held),
       };
       room.local.add(connection);
       connections += 1;

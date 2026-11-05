@@ -544,7 +544,12 @@ export async function isGitHubRepoCollaborator(input: {
       setCachedRepoAccess(input.roomName, input.login, true);
     }
     return allowed;
-  })().finally(() => {
+  })().then((allowed) => {
+    // A fresh "no" is GitHub's answer now (an outage throws instead), so a
+    // remembered "yes" for the same person and repository is stale.
+    if (!allowed && input.bypassCache) repoAccessCache.delete(cacheKey);
+    return allowed;
+  }).finally(() => {
     if (repoAccessInflight.get(flightKey)?.promise === pending) {
       repoAccessInflight.delete(flightKey);
     }
@@ -640,7 +645,11 @@ export async function isGitHubPublicRepoRoleHolder(input: {
       });
     }
     return allowed;
-  })().finally(() => {
+  })().then((allowed) => {
+    // As for collaborators: a fresh "no" retires a remembered "yes".
+    if (!allowed && input.bypassCache && publicRepoRoleCache.get(cacheKey)?.allowed) publicRepoRoleCache.delete(cacheKey);
+    return allowed;
+  }).finally(() => {
     if (publicRepoRoleInflight.get(flightKey) === pending) publicRepoRoleInflight.delete(flightKey);
   });
   publicRepoRoleInflight.set(flightKey, pending);
