@@ -195,7 +195,7 @@
   place-items: center;
   width: 24px;
   height: 24px;
-  margin-left: -6px;
+  margin-left: -4px;
   padding: 0;
   border: 0;
   border-radius: 50%;
@@ -669,10 +669,14 @@ button.live-demo-face:active {
   gap: 6px;
 }
 
-/* A short message over the top of the demo, so showing it moves nothing. */
+/*
+ * A short message over the bottom of the demo, so showing it moves nothing and
+ * a panel opened from the header never covers its Undo. In Draw mode it sits
+ * above the drawing bar.
+ */
 .room-inline-demo-live-note {
   position: absolute;
-  top: 8px;
+  bottom: 12px;
   left: 50%;
   z-index: 6;
   display: flex;
@@ -691,6 +695,10 @@ button.live-demo-face:active {
   text-align: center;
   transform: translateX(-50%);
   pointer-events: none;
+}
+
+.room-inline-demo.is-drawing .room-inline-demo-live-note {
+  bottom: 64px;
 }
 
 .room-inline-demo-live-note.has-action {
@@ -736,7 +744,7 @@ button.live-demo-face:active {
 
 .live-demo-note-enter-from {
   opacity: 0;
-  transform: translate(-50%, -6px);
+  transform: translate(-50%, 6px);
 }
 
 .live-demo-note-leave-to {
@@ -1110,7 +1118,7 @@ button.live-demo-pin-dot:active {
 
 /* While a list row points at a mark, the other marks step back. */
 .live-demo-overlay.has-highlight .live-demo-canvas.is-saved,
-.live-demo-overlay.has-highlight .live-demo-pin:not(.is-highlighted) {
+.live-demo-overlay.has-highlight .live-demo-pins .live-demo-pin:not(.is-highlighted) {
   opacity: 0.25;
 }
 

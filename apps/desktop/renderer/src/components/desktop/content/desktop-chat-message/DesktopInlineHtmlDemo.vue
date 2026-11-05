@@ -2,7 +2,7 @@
   <section
     ref="card"
     class="room-inline-demo"
-    :class="{ 'is-live': liveLayout, 'is-capturing': capturing }"
+    :class="{ 'is-live': liveLayout, 'is-capturing': capturing, 'is-drawing': drawing }"
     :style="liveEnabled ? { '--live-self': live.viewerColor.value } : undefined"
     :aria-label="`Interactive demo ${fileName}`"
     @keydown="onCardKey"
@@ -18,8 +18,9 @@
           role="status"
         >
           <i class="live-demo-status-dot" aria-hidden="true"></i>
-          <span>{{ statusLine.label }}</span>
-          <span v-if="statusHint" class="live-demo-status-hint">· {{ statusHint }}</span>
+          <!-- In Pin mode the line is the instruction only, so it fits. -->
+          <span v-if="!pinning">{{ statusLine.label }}</span>
+          <span v-if="statusHint" class="live-demo-status-hint">{{ pinning ? statusHint : `· ${statusHint}` }}</span>
         </small>
         <small v-else title="Runs in a locked view on this computer. It cannot load web pages or reach your LetAgents data.">Interactive demo · locked</small>
       </span>
