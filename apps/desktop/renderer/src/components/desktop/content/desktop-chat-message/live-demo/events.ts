@@ -12,9 +12,13 @@ export interface LiveDemoEvents {
   register(roomIdentifier: string, demoKey: string, handler: LiveDemoEventHandler): () => void;
 }
 
-/** Rooms are compared the way the rest of the app compares them: trimmed, lower case. */
+/**
+ * Room ids are case-sensitive for main and the server (`Design` and `design` are
+ * two rooms). Main trims the id it is given, so the id is compared trimmed and
+ * as it is.
+ */
 function roomId(roomIdentifier: string): string {
-  return roomIdentifier.trim().toLowerCase();
+  return roomIdentifier.trim();
 }
 
 interface RoomState {

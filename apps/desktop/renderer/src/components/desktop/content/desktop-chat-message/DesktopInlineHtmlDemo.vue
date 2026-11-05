@@ -42,13 +42,22 @@
       :mark-count="live.marks.value.length"
       :marks-open="marksOpen"
       :can-send="canSend"
-      :sending="sendPhase !== 'idle'"
+      :send-phase="sendPhase"
       @toggle-draw="toggleDraw"
       @set-tool="tool = $event"
       @toggle-marks="marksOpen = !marksOpen"
       @send="sendToThread"
     />
     <div v-else-if="liveEnabled && (status === 'starting' || status === 'running')" class="room-inline-demo-live is-placeholder" aria-hidden="true"></div>
+    <LiveDemoSendPreview
+      v-if="capture"
+      :preview-url="capture.previewDataUrl"
+      :partial="capture.partial"
+      :sending="sendPhase === 'sending'"
+      :error="sendError"
+      @confirm="confirmSend"
+      @cancel="cancelSend"
+    />
     <LiveDemoMarkList
       v-if="liveReady && marksOpen && live.marks.value.length > 0"
       :marks="live.marks.value"
@@ -159,13 +168,20 @@ import {
   liveScale,
 } from "./live-demo/geometry";
 import { liveStatusText } from "./live-demo/people";
-import { markupFileName, markupReplyText, visibleCaptureRect } from "./live-demo/markup";
+import {
+  elementClippingBoxes,
+  markupFileName,
+  markupReplyText,
+  viewportBox,
+  visibleCaptureRect,
+} from "./live-demo/markup";
 import { liveDemoKey } from "./live-demo/protocol";
 import { liveDemoAvailable, useLiveDemo } from "./live-demo/session";
 import { createWidthSync, type WidthSync } from "./live-demo/width-sync";
 import LiveDemoBar from "./live-demo/LiveDemoBar.vue";
 import LiveDemoMarkList from "./live-demo/LiveDemoMarkList.vue";
 import LiveDemoOverlay from "./live-demo/LiveDemoOverlay.vue";
+import LiveDemoSendPreview from "./live-demo/LiveDemoSendPreview.vue";
 
 const props = defineProps<{
   href: string;
@@ -234,7 +250,10 @@ const marksOpen = ref(false);
 const highlightedMarkId = ref<string | null>(null);
 const deletingMarkIds = shallowRef<ReadonlySet<string>>(new Set());
 const note = ref<{ text: string; error: boolean } | null>(null);
-const sendPhase = ref<"idle" | "capturing" | "sending">("idle");
+// Send to thread: capture, then the person looks at the picture ("review"), then it is sent.
+const sendPhase = ref<"idle" | "capturing" | "review" | "sending">("idle");
+const capture = ref<{ room: string; uploadId: string; previewDataUrl: string | null; partial: boolean } | null>(null);
+const sendError = ref("");
 const sendThreadReply = inject(roomThreadReplyKey, null);
 const canSend = computed(() =>
   Boolean(sendThreadReply && props.threadRootId && liveRoom.value)
@@ -306,6 +325,7 @@ function stopRun(): void {
 function stopLive(): void {
   sendRun++;
   sendPhase.value = "idle";
+  discardCapture();
   drawing.value = false;
   marksOpen.value = false;
   highlightedMarkId.value = null;
@@ -594,22 +614,32 @@ function nextFrame(): Promise<void> {
   return new Promise((resolve) => requestAnimationFrame(() => resolve()));
 }
 
+/** Drops the picture that waits for a yes, from main's staging. */
+function discardCapture(): void {
+  const waiting = capture.value;
+  capture.value = null;
+  sendError.value = "";
+  if (waiting) void Promise.resolve(desktopIpc.room?.discardAttachment?.(waiting.room, waiting.uploadId)).catch(() => undefined);
+}
+
 /**
- * Posts a picture of the card, with its marks, as a reply in the demo's thread.
- * The window only has the pixels that are on screen, so the card is scrolled
- * into view first.
+ * Takes a picture of the card, with its marks, and shows it. Nothing is posted
+ * until the person says yes (`confirmSend`). The window only has the pixels
+ * that are on screen, so the card is scrolled into view first, and the picture
+ * is cut to where the card, the window and every box that clips the card
+ * overlap. That keeps the composer, which lies outside the message list, out of
+ * a card that is taller than the list.
  */
 async function sendToThread(): Promise<void> {
-  const reply = sendThreadReply;
   const room = liveRoom.value;
-  const threadRoot = props.threadRootId;
-  const capture = desktopIpc.room?.captureDemoMarkup;
+  const captureMarkup = desktopIpc.room?.captureDemoMarkup;
   const target = clip.value;
-  if (sendPhase.value !== "idle" || !reply || !room || !threadRoot || !capture || !target) return;
+  if (sendPhase.value !== "idle" || !sendThreadReply || !props.threadRootId || !room || !captureMarkup || !target) return;
   const run = ++sendRun;
   const current = () => run === sendRun;
   clearTimeout(noteTimer);
   note.value = null;
+  discardCapture();
   sendPhase.value = "capturing";
   let uploadId: string | null = null;
   try {
@@ -624,24 +654,62 @@ async function sendToThread(): Promise<void> {
     const box = target.getBoundingClientRect();
     const { rect, complete } = visibleCaptureRect(
       { x: box.left, y: box.top, width: box.width, height: box.height },
-      { width: window.innerWidth, height: window.innerHeight },
+      [viewportBox(window.innerWidth, window.innerHeight), ...elementClippingBoxes(target)],
     );
     if (!rect) throw new Error("The demo is not on screen.");
-    const staged = await capture(room, rect, markupFileName(props.fileName));
+    const staged = await captureMarkup(room, rect, markupFileName(props.fileName));
     uploadId = staged.uploadId;
     if (!current()) return;
-    sendPhase.value = "sending";
-    const accepted = await reply(threadRoot, markupReplyText(props.fileName, live.marks.value.length), [{ upload_id: staged.uploadId }]);
-    if (!accepted) throw new Error("The reply was not sent.");
-    // The message owns the picture now.
+    capture.value = { room, uploadId, previewDataUrl: staged.previewDataUrl, partial: !complete };
     uploadId = null;
-    if (current()) showNote(complete ? "Sent to the thread." : "Sent to the thread. The picture shows only the part on screen.", false);
+    sendError.value = "";
+    sendPhase.value = "review";
   } catch (error) {
-    if (current()) showNote(ipcErrorText(error, "Could not send the picture. Try again."), true);
+    if (current()) showNote(ipcErrorText(error, "Could not take the picture. Try again."), true);
   } finally {
+    // A picture that was taken but is not waiting for a yes is of no use.
     if (uploadId) void Promise.resolve(desktopIpc.room?.discardAttachment?.(room, uploadId)).catch(() => undefined);
-    if (current()) sendPhase.value = "idle";
+    if (current() && sendPhase.value === "capturing") sendPhase.value = "idle";
   }
+}
+
+/** The person said yes to the picture: post it as a reply in the demo's thread. */
+async function confirmSend(): Promise<void> {
+  const reply = sendThreadReply;
+  const waiting = capture.value;
+  const threadRoot = props.threadRootId;
+  if (sendPhase.value !== "review" || !reply || !waiting || !threadRoot) return;
+  const run = sendRun;
+  const current = () => run === sendRun;
+  sendPhase.value = "sending";
+  sendError.value = "";
+  try {
+    const accepted = await reply(
+      threadRoot,
+      markupReplyText(props.fileName, live.marks.value.length),
+      [{ upload_id: waiting.uploadId }],
+    );
+    if (!current()) return;
+    if (!accepted) {
+      sendError.value = "Could not send the picture. Try again.";
+      sendPhase.value = "review";
+      return;
+    }
+    // The message owns the picture now.
+    capture.value = null;
+    sendPhase.value = "idle";
+    showNote("Sent to the thread.", false);
+  } catch (error) {
+    if (!current()) return;
+    sendError.value = ipcErrorText(error, "Could not send the picture. Try again.");
+    sendPhase.value = "review";
+  }
+}
+
+function cancelSend(): void {
+  if (sendPhase.value !== "review") return;
+  discardCapture();
+  sendPhase.value = "idle";
 }
 
 function observe(): void {

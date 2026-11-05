@@ -41,3 +41,23 @@ export function describeMark(mark: DemoMark): string {
   const text = mark.text.replace(/\s+/g, " ").trim();
   return text.length > 60 ? `${text.slice(0, 59)}…` : text || "Pin";
 }
+
+export type StrokeMark = Extract<DemoMark, { kind: "stroke" }>;
+
+/**
+ * What to paint on the layer of saved strokes. A mark is never changed once
+ * saved, so a stroke that is already on the canvas stays. A new one is drawn on
+ * top of it. Only a stroke that went away, or a layer that was cleared (a new
+ * size or scale), needs every stroke drawn again.
+ */
+export function planMarkPaint(
+  drawn: ReadonlySet<string>,
+  marks: readonly DemoMark[],
+  layerCleared: boolean,
+): { full: boolean; paint: StrokeMark[]; ids: Set<string> } {
+  const strokes = marks.filter((mark): mark is StrokeMark => mark.kind === "stroke");
+  const ids = new Set(strokes.map((mark) => mark.id));
+  let full = layerCleared;
+  if (!full) for (const id of drawn) if (!ids.has(id)) { full = true; break; }
+  return { full, paint: full ? strokes : strokes.filter((mark) => !drawn.has(mark.id)), ids };
+}

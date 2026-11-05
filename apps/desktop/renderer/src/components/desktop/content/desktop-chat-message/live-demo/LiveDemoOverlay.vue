@@ -89,6 +89,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { drawStroke, INK_WIDTH_HIGHLIGHT } from "./canvas-draw";
+import { planMarkPaint } from "./marks";
 import { createLatestThrottle, createInkBatcher, CURSOR_INTERVAL_MS, type InkBatcher } from "./throttle";
 import { canvasBacking, demoToFrame, frameToDemo } from "./geometry";
 import { readableTextColor } from "./people";
@@ -211,6 +212,12 @@ function cursorRef(cid: string): (element: unknown) => void {
 let frameHandle = 0;
 let inkDirty = true;
 let inkSignature = "";
+// The saved strokes are painted on their own canvas, and a new one is added on top
+// of those there; the whole layer is painted again only when it was cleared or a
+// stroke went away.
+let marksDirty = true;
+let marksCleared = true;
+let marksDrawn: ReadonlySet<string> = new Set();
 let backingRatio = 1;
 let activeStroke: ActiveStroke | null = null;
 let pendingSeq = 0;
@@ -248,6 +255,7 @@ function frame(): void {
     element.classList.toggle("is-above", y > props.height - CURSOR_TAG_ROOM_Y);
     cursorPlaced.set(cid, key);
   }
+  if (marksDirty) paintMarks();
   if (ink.prune(now)) inkDirty = true;
   const strokes = ink.strokes();
   let signature = String(strokes.length);
@@ -275,23 +283,33 @@ function sizeCanvases(): void {
   backingRatio = ratio;
   for (const canvas of [marksCanvas.value, inkCanvas.value]) {
     if (!canvas) continue;
+    // A new size empties the canvas.
     canvas.width = pixelWidth;
     canvas.height = pixelHeight;
   }
+  invalidateMarks(true);
+}
+
+/** Paints the saved strokes at the next frame; `cleared` when the canvas is empty or its scale changed. */
+function invalidateMarks(cleared: boolean): void {
+  marksDirty = true;
+  if (cleared) marksCleared = true;
+  wake();
 }
 
 function personColor(cid: string): string {
   return peopleByCid.value.get(cid)?.color ?? "#71717a";
 }
 
-function redrawMarks(): void {
+function paintMarks(): void {
   const ctx = context(marksCanvas.value);
   if (!ctx) return;
-  ctx.clearRect(0, 0, props.width, props.height);
-  for (const mark of props.session.marks.value) {
-    if (mark.kind !== "stroke") continue;
-    drawStroke(ctx, mark.points, props.scale, mark.author.color, mark.id === props.highlightMarkId ? INK_WIDTH_HIGHLIGHT : undefined);
-  }
+  marksDirty = false;
+  const plan = planMarkPaint(marksDrawn, props.session.marks.value, marksCleared);
+  if (plan.full) ctx.clearRect(0, 0, props.width, props.height);
+  for (const mark of plan.paint) drawStroke(ctx, mark.points, props.scale, mark.author.color);
+  marksDrawn = plan.ids;
+  marksCleared = false;
 }
 
 function redrawInk(): void {
@@ -299,6 +317,11 @@ function redrawInk(): void {
   if (!ctx) return;
   ctx.clearRect(0, 0, props.width, props.height);
   for (const stroke of props.session.ink.strokes()) drawStroke(ctx, stroke.points, props.scale, personColor(stroke.cid));
+  // The stroke a list row points at is drawn thick over the saved one, so hovering never repaints the saved layer.
+  const highlighted = props.highlightMarkId
+    ? props.session.marks.value.find((mark) => mark.id === props.highlightMarkId)
+    : undefined;
+  if (highlighted?.kind === "stroke") drawStroke(ctx, highlighted.points, props.scale, highlighted.author.color, INK_WIDTH_HIGHLIGHT);
   const mine = props.session.viewerColor.value;
   for (const points of pendingStrokes.values()) drawStroke(ctx, points, props.scale, mine);
   if (activeStroke) drawStroke(ctx, activeStroke.points, props.scale, mine);
@@ -440,7 +463,6 @@ function onWindowResize(): void {
   const { ratio } = canvasBacking(props.width, props.height, window.devicePixelRatio || 1);
   if (ratio === backingRatio) return;
   sizeCanvases();
-  redrawMarks();
   markInkDirty();
 }
 
@@ -466,17 +488,14 @@ watch(
 
 watch(() => props.tool, () => { pinDraft.value = null; });
 
-watch(
-  [() => props.session.marks.value, () => props.scale, () => props.highlightMarkId],
-  () => redrawMarks(),
-  { flush: "post" },
-);
+// A new mark only adds a stroke; a removed one makes `paintMarks` start over.
+watch(() => props.session.marks.value, () => invalidateMarks(false));
+watch(() => props.highlightMarkId, () => markInkDirty());
 
 watch(
   [() => props.width, () => props.height],
   () => {
     sizeCanvases();
-    redrawMarks();
     markInkDirty();
   },
   { flush: "post" },
@@ -486,6 +505,7 @@ watch(
   () => props.scale,
   () => {
     cursorPlaced.clear();
+    invalidateMarks(true);
     markInkDirty();
   },
 );
@@ -496,7 +516,6 @@ watch(() => props.session.people.value, () => markInkDirty());
 
 onMounted(() => {
   sizeCanvases();
-  redrawMarks();
   stopWake = props.session.onWake(wake);
   window.addEventListener("resize", onWindowResize);
   if (props.drawing) window.addEventListener("keydown", onEscape, true);

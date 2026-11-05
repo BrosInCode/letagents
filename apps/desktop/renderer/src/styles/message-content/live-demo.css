@@ -40,6 +40,7 @@
 
 .room-inline-demo-more,
 .room-inline-demo-live-tools button,
+.room-inline-demo-preview-actions button,
 .live-demo-pin-actions button,
 .room-inline-demo-marks button {
   display: inline-flex;
@@ -65,6 +66,7 @@
 
 .room-inline-demo-more:hover,
 .room-inline-demo-live-tools button:hover:not(:disabled),
+.room-inline-demo-preview-actions button:hover:not(:disabled),
 .live-demo-pin-actions button:hover:not(:disabled),
 .room-inline-demo-marks button:hover:not(:disabled) {
   background: var(--accent-hover);
@@ -72,6 +74,7 @@
 
 .room-inline-demo-more:focus-visible,
 .room-inline-demo-live-tools button:focus-visible,
+.room-inline-demo-preview-actions button:focus-visible,
 .live-demo-pin-actions button:focus-visible,
 .room-inline-demo-marks button:focus-visible,
 .live-demo-pin-dot:focus-visible,
@@ -81,6 +84,7 @@
 }
 
 .room-inline-demo-live-tools button:disabled,
+.room-inline-demo-preview-actions button:disabled,
 .live-demo-pin-actions button:disabled,
 .room-inline-demo-marks button:disabled {
   opacity: 0.5;
@@ -88,6 +92,7 @@
 }
 
 .room-inline-demo-live-tools button.is-primary,
+.room-inline-demo-preview-actions button.is-primary,
 .live-demo-pin-actions button.is-primary {
   border-color: transparent;
   background: var(--blue);
@@ -95,6 +100,7 @@
 }
 
 .room-inline-demo-live-tools button.is-primary:hover:not(:disabled),
+.room-inline-demo-preview-actions button.is-primary:hover:not(:disabled),
 .live-demo-pin-actions button.is-primary:hover:not(:disabled) {
   background: color-mix(in srgb, var(--blue) 86%, #000000);
 }
@@ -196,6 +202,61 @@
 .room-inline-demo-live-note.is-error {
   border-color: color-mix(in srgb, var(--red) 50%, transparent);
   color: var(--red-text, #f87171);
+}
+
+/* The picture "Send to thread" took, shown before it is posted. */
+.room-inline-demo-preview {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.room-inline-demo-preview img {
+  flex: none;
+  max-width: min(100%, 240px);
+  max-height: 170px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: #ffffff;
+  object-fit: contain;
+}
+
+.room-inline-demo-preview-side {
+  display: grid;
+  flex: 1;
+  gap: 6px;
+  min-width: 160px;
+}
+
+.room-inline-demo-preview-side p {
+  margin: 0;
+}
+
+.room-inline-demo-preview-title {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.room-inline-demo-preview-none,
+.room-inline-demo-preview-note {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.room-inline-demo-preview-note.is-error {
+  color: var(--red-text, #f87171);
+}
+
+.room-inline-demo-preview-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 /* Who marked what. */

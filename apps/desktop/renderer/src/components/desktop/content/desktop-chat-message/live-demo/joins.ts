@@ -28,7 +28,8 @@ export function createLiveDemoJoins(api: LiveDemoJoinApi): LiveDemoJoins {
 
   return {
     join(roomIdentifier, demoKey, leaseUrl) {
-      const id = `${roomIdentifier.trim().toLowerCase()}\u0000${demoKey}`;
+      // Case-sensitive, like main and the server: `Design` and `design` are two rooms.
+      const id = `${roomIdentifier.trim()}\u0000${demoKey}`;
       const holder: Holder = { leaseUrl };
       const list = holders.get(id) ?? [];
       holders.set(id, list);

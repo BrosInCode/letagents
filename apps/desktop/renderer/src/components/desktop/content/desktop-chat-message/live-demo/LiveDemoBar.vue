@@ -59,11 +59,11 @@
         v-if="canSend"
         type="button"
         title="Post a picture of this demo, with its marks, as a reply in the thread"
-        :disabled="sending"
+        :disabled="sendPhase !== 'idle'"
         @click="$emit('send')"
       >
         <Send :size="13" aria-hidden="true" />
-        <span>{{ sending ? "Sending…" : "Send to thread" }}</span>
+        <span>{{ sendLabel }}</span>
       </button>
     </div>
   </div>
@@ -85,7 +85,7 @@ const props = defineProps<{
   markCount: number;
   marksOpen: boolean;
   canSend: boolean;
-  sending: boolean;
+  sendPhase: "idle" | "capturing" | "review" | "sending";
 }>();
 
 defineEmits<{
@@ -96,4 +96,6 @@ defineEmits<{
 }>();
 
 const chips = computed(() => presenceChips(props.people, props.selfCid));
+const sendLabel = computed(() =>
+  props.sendPhase === "capturing" ? "Capturing…" : props.sendPhase === "sending" ? "Sending…" : "Send to thread");
 </script>

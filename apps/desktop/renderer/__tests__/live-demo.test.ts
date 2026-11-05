@@ -52,6 +52,7 @@ import {
   describeMark,
   mergeMark,
   normalizeMarks,
+  planMarkPaint,
   removeMark,
 } from "../src/components/desktop/content/desktop-chat-message/live-demo/marks";
 import {
@@ -66,9 +67,12 @@ import {
   readableTextColor,
 } from "../src/components/desktop/content/desktop-chat-message/live-demo/people";
 import {
+  clippingBoxes,
   markupFileName,
   markupReplyText,
+  viewportBox,
   visibleCaptureRect,
+  type ClipOps,
 } from "../src/components/desktop/content/desktop-chat-message/live-demo/markup";
 import { newStrokeId } from "../src/components/desktop/content/desktop-chat-message/live-demo/stroke-id";
 import { createWidthSync } from "../src/components/desktop/content/desktop-chat-message/live-demo/width-sync";
@@ -554,13 +558,42 @@ describe("live demo event router", () => {
     assert.equal(a.length, 1);
   });
 
-  it("compares rooms without regard to case or spaces", () => {
+  it("compares room ids exactly, as main and the server do: two rooms that differ in case are two rooms", () => {
+    const hub = makeHub();
+    const events = createLiveDemoEvents(hub.subscribe);
+    const design: DesktopLiveDemoEvent[] = [];
+    const lower: DesktopLiveDemoEvent[] = [];
+    events.register("Design", K1, (event) => design.push(event));
+    events.register("design", K1, (event) => lower.push(event));
+    hub.emit(frame("design", { t: "cur", demo: K1, cid: "p1", gone: true }));
+    assert.equal(design.length, 0);
+    assert.equal(lower.length, 1);
+    hub.emit(frame("Design", { t: "cur", demo: K1, cid: "p1", gone: true }));
+    assert.equal(design.length, 1);
+    assert.equal(lower.length, 1);
+    hub.emit({ type: "status", roomIdentifier: "Design", status: "reconnecting" });
+    assert.equal(design.length, 2);
+    assert.equal(lower.length, 1);
+  });
+
+  it("ignores spaces around a room id, which main trims", () => {
     const hub = makeHub();
     const events = createLiveDemoEvents(hub.subscribe);
     const seen: DesktopLiveDemoEvent[] = [];
-    events.register(" GitHub.com/Org/Repo ", K1, (event) => seen.push(event));
+    events.register(" github.com/org/repo ", K1, (event) => seen.push(event));
     hub.emit(frame("github.com/org/repo", { t: "cur", demo: K1, cid: "p1", gone: true }));
     assert.equal(seen.length, 1);
+  });
+
+  it("does not tell a card the greeting or state of a room that differs only in case", () => {
+    const hub = makeHub();
+    const events = createLiveDemoEvents(hub.subscribe);
+    events.register("Design", K1, () => undefined);
+    hub.emit(frame("Design", { t: "hello", cid: "me", name: "Emmy", color: LIVE_DEMO_COLORS[0] }));
+    hub.emit({ type: "status", roomIdentifier: "Design", status: "live" });
+    const other: DesktopLiveDemoEvent[] = [];
+    events.register("design", K1, (event) => other.push(event));
+    assert.deepEqual(other, []);
   });
 
   it("sends the connection state and greeting of a room to every card in it", () => {
@@ -693,7 +726,7 @@ describe("live demo joins", () => {
     const { calls, api } = makeApi();
     const joins = createLiveDemoJoins(api);
     const first = joins.join("r", "msg_1/a", "lease-1");
-    const second = joins.join("R ", "msg_1/a", "lease-2");
+    const second = joins.join("r ", "msg_1/a", "lease-2");
     assert.deepEqual(calls, ["join r msg_1/a lease-1"]);
     second.leave();
     second.leave();
@@ -709,6 +742,18 @@ describe("live demo joins", () => {
     joins.join("r", "msg_1/a", "lease-2");
     first.leave();
     assert.deepEqual(calls, ["join r msg_1/a lease-1", "join r msg_1/a lease-2"]);
+  });
+
+  it("keeps rooms that differ in case apart", () => {
+    const { calls, api } = makeApi();
+    const joins = createLiveDemoJoins(api);
+    const design = joins.join("Design", "msg_1/a", "lease-1");
+    const lower = joins.join("design", "msg_1/a", "lease-2");
+    assert.deepEqual(calls, ["join Design msg_1/a lease-1", "join design msg_1/a lease-2"]);
+    design.leave();
+    assert.deepEqual(calls.slice(2), ["leave Design msg_1/a"]);
+    lower.leave();
+    assert.deepEqual(calls.slice(3), ["leave design msg_1/a"]);
   });
 
   it("keeps separate demos apart", () => {
@@ -774,6 +819,51 @@ describe("saved marks", () => {
       { t: "mark", mark: stroke("mark_cccccc", "2026-01-03") },
     ]);
     assert.deepEqual(result.map((mark) => mark.id), ["mark_bbbbbb", "mark_cccccc"]);
+  });
+
+  it("paints only the new stroke when a mark arrives, and everything when a stroke goes or the layer was cleared", () => {
+    const a = stroke("mark_aaaaaa", "2026-01-01");
+    const b = stroke("mark_bbbbbb", "2026-01-02");
+    const c = stroke("mark_cccccc", "2026-01-03");
+    // The first paint draws all.
+    const first = planMarkPaint(new Set(), [a, b], true);
+    assert.equal(first.full, true);
+    assert.deepEqual(first.paint.map((mark) => mark.id), ["mark_aaaaaa", "mark_bbbbbb"]);
+    // One new stroke: only it is drawn.
+    const added = planMarkPaint(first.ids, [a, b, c], false);
+    assert.equal(added.full, false);
+    assert.deepEqual(added.paint.map((mark) => mark.id), ["mark_cccccc"]);
+    // The same list again draws nothing.
+    assert.deepEqual(planMarkPaint(added.ids, [a, b, c], false).paint, []);
+    // A removed stroke needs the whole layer again.
+    const removed = planMarkPaint(added.ids, [a, c], false);
+    assert.equal(removed.full, true);
+    assert.deepEqual(removed.paint.map((mark) => mark.id), ["mark_aaaaaa", "mark_cccccc"]);
+    // A new size or scale clears the canvas.
+    const cleared = planMarkPaint(added.ids, [a, b, c], true);
+    assert.equal(cleared.full, true);
+    assert.equal(cleared.paint.length, 3);
+  });
+
+  it("does not paint for pins, and a pin that goes does not clear the strokes", () => {
+    const a = stroke("mark_aaaaaa", "2026-01-01");
+    const p = pin("mark_pinpin01", "2026-01-02");
+    const drawn = planMarkPaint(new Set(), [a], true).ids;
+    assert.deepEqual(planMarkPaint(drawn, [a, p], false), { full: false, paint: [], ids: drawn });
+    assert.equal(planMarkPaint(drawn, [a], false).full, false);
+  });
+
+  it("paints 500 saved strokes in one full pass and a new one on its own", () => {
+    const many = Array.from({ length: 500 }, (_, index) => stroke(`mark_${String(index).padStart(6, "0")}`, `2026-01-01T00:00:${String(index % 60).padStart(2, "0")}.${String(Math.floor(index / 60)).padStart(3, "0")}Z`));
+    const first = planMarkPaint(new Set(), many, true);
+    assert.equal(first.paint.length, 500);
+    const next = stroke("mark_zzzzzz", "2026-02-01");
+    const added = planMarkPaint(first.ids, mergeMark(many, next).slice(-500), false);
+    // The oldest fell off the 500 cap, so the layer starts over; a list that grows paints one.
+    assert.equal(added.full, true);
+    const few = many.slice(0, 100);
+    const small = planMarkPaint(planMarkPaint(new Set(), few, true).ids, [...few, next], false);
+    assert.deepEqual(small.paint.map((mark) => mark.id), ["mark_zzzzzz"]);
   });
 
   it("describes a mark in a line", () => {
@@ -898,20 +988,104 @@ describe("send to thread", () => {
     assert.equal(markupReplyText("pricing.html", 0), "Picture of the demo pricing.html.");
   });
 
+  const WINDOW = viewportBox(1200, 800);
+
   it("captures only the part of the card that is on screen", () => {
-    const whole = visibleCaptureRect({ x: 100, y: 50, width: 400, height: 300 }, { width: 1200, height: 800 });
+    const whole = visibleCaptureRect({ x: 100, y: 50, width: 400, height: 300 }, [WINDOW]);
     assert.deepEqual(whole, { rect: { x: 100, y: 50, width: 400, height: 300 }, complete: true });
-    const cut = visibleCaptureRect({ x: 100, y: 600, width: 400, height: 300 }, { width: 1200, height: 800 });
+    const cut = visibleCaptureRect({ x: 100, y: 600, width: 400, height: 300 }, [WINDOW]);
     assert.deepEqual(cut, { rect: { x: 100, y: 600, width: 400, height: 200 }, complete: false });
-    const above = visibleCaptureRect({ x: 0, y: -100, width: 400, height: 300 }, { width: 1200, height: 800 });
+    const above = visibleCaptureRect({ x: 0, y: -100, width: 400, height: 300 }, [WINDOW]);
     assert.deepEqual(above, { rect: { x: 0, y: 0, width: 400, height: 200 }, complete: false });
-    assert.deepEqual(visibleCaptureRect({ x: 0, y: 900, width: 400, height: 300 }, { width: 1200, height: 800 }), { rect: null, complete: false });
+    assert.deepEqual(visibleCaptureRect({ x: 0, y: 900, width: 400, height: 300 }, [WINDOW]), { rect: null, complete: false });
   });
 
   it("rounds a fractional rectangle outward", () => {
-    const result = visibleCaptureRect({ x: 10.4, y: 20.4, width: 100.2, height: 50.2 }, { width: 1200, height: 800 });
+    const result = visibleCaptureRect({ x: 10.4, y: 20.4, width: 100.2, height: 50.2 }, [WINDOW]);
     assert.deepEqual(result.rect, { x: 10, y: 20, width: 101, height: 51 });
     assert.equal(result.complete, true);
+  });
+
+  it("cuts the picture to every box that clips the card, so a tall card never reaches the composer", () => {
+    // The window is 800 high. The message list ends at 700; the composer fills 700 to 800.
+    const messageList = { left: 250, top: 40, right: 1100, bottom: 700 };
+    const card = { x: 300, y: 300, width: 760, height: 1500 };
+    const result = visibleCaptureRect(card, [WINDOW, messageList]);
+    assert.deepEqual(result, { rect: { x: 300, y: 300, width: 760, height: 400 }, complete: false });
+    assert.ok(result.rect!.y + result.rect!.height <= messageList.bottom, "ends where the list ends");
+    // Without the list's box, the window alone would let the picture run into the composer.
+    assert.equal(visibleCaptureRect(card, [WINDOW]).rect!.height, 500);
+  });
+
+  it("uses the smallest of several clipping boxes", () => {
+    const rect = visibleCaptureRect(
+      { x: 0, y: 0, width: 500, height: 500 },
+      [WINDOW, { left: 0, top: 0, right: 450, bottom: 480 }, { left: 20, top: 30, right: 1000, bottom: 400 }],
+    );
+    assert.deepEqual(rect, { rect: { x: 20, y: 30, width: 430, height: 370 }, complete: false });
+  });
+
+  it("gives nothing when a clipping box leaves no part of the card", () => {
+    assert.deepEqual(
+      visibleCaptureRect({ x: 0, y: 0, width: 100, height: 100 }, [WINDOW, { left: 0, top: 200, right: 500, bottom: 300 }]),
+      { rect: null, complete: false },
+    );
+  });
+
+  it("keeps a card that fits every box whole", () => {
+    const result = visibleCaptureRect(
+      { x: 300, y: 100, width: 400, height: 300 },
+      [WINDOW, { left: 250, top: 40, right: 1100, bottom: 700 }, { left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity }],
+    );
+    assert.deepEqual(result, { rect: { x: 300, y: 100, width: 400, height: 300 }, complete: true });
+  });
+
+  describe("clipping ancestors", () => {
+    interface Node {
+      name: string;
+      parent: Node | null;
+      clipX: boolean;
+      clipY: boolean;
+      box: { x: number; y: number; width: number; height: number };
+    }
+    const node = (name: string, parent: Node | null, box: Node["box"], clip: [boolean, boolean] = [false, false]): Node =>
+      ({ name, parent, clipX: clip[0], clipY: clip[1], box });
+    const ops: ClipOps<Node> = {
+      parent: (n) => n.parent,
+      clips: (n) => ({ x: n.clipX, y: n.clipY }),
+      box: (n) => n.box,
+    };
+
+    it("collects the boxes of the ancestors that clip, nearest first, and not the card itself", () => {
+      const page = node("page", null, { x: 0, y: 0, width: 1200, height: 800 }, [true, true]);
+      const main = node("main", page, { x: 250, y: 0, width: 900, height: 800 });
+      const viewport = node("viewport", main, { x: 250, y: 40, width: 850, height: 660 }, [true, true]);
+      const list = node("list", viewport, { x: 250, y: 40, width: 850, height: 660 }, [false, true]);
+      const row = node("row", list, { x: 300, y: 300, width: 760, height: 1500 });
+      const card = node("card", row, { x: 300, y: 300, width: 760, height: 1500 }, [true, true]);
+      const boxes = clippingBoxes(card, ops);
+      assert.equal(boxes.length, 3);
+      assert.deepEqual(boxes[0], { left: -Infinity, right: Infinity, top: 40, bottom: 700 });
+      assert.deepEqual(boxes[1], { left: 250, right: 1100, top: 40, bottom: 700 });
+      assert.deepEqual(boxes[2], { left: 0, right: 1200, top: 0, bottom: 800 });
+    });
+
+    it("stops the picture at the end of the message list, above the composer", () => {
+      const page = node("page", null, { x: 0, y: 0, width: 1200, height: 800 }, [true, true]);
+      const viewport = node("viewport", page, { x: 250, y: 40, width: 850, height: 660 }, [true, true]);
+      const card = node("card", viewport, { x: 300, y: 300, width: 760, height: 1500 }, [true, true]);
+      const box = card.box;
+      const result = visibleCaptureRect(box, [WINDOW, ...clippingBoxes(card, ops)]);
+      assert.equal(result.rect!.y + result.rect!.height, 700);
+      assert.equal(result.complete, false);
+    });
+
+    it("finds no box when nothing above the card clips", () => {
+      const page = node("page", null, { x: 0, y: 0, width: 1200, height: 800 });
+      const card = node("card", page, { x: 0, y: 0, width: 10, height: 10 });
+      assert.deepEqual(clippingBoxes(card, ops), []);
+      assert.deepEqual(clippingBoxes(page, ops), []);
+    });
   });
 });
 
