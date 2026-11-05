@@ -94,7 +94,7 @@ const LEGACY_WORKER_HELD_NEXT_STEP =
 
 const JOIN_NEXT_STEP =
   "Register a worker with register_agent_session (room_id, a random registration_key you keep, display_name = your name), "
-  + "then say hi with send_message.";
+  + "then say hi with send_message. If you already have a worker_id for this room, reuse it with register_agent_session(worker_id, room_id).";
 
 function joinedRoom(roomId: string): RoomState {
   return {

@@ -46,7 +46,7 @@ import {
 } from "./credential-state.js";
 
 export { credentialMaxWorkers, foldIntoCredential, mergeSessionStates, projectCredentialState } from "./credential-state.js";
-import { IMPLICIT_CLIENT_NAME } from "./implicit-session.js";
+import { IMPLICIT_CLIENT_NAME, clientHintFromUserAgent } from "./implicit-session.js";
 import {
   deriveRemoteMcpCredentialStateKey,
   deriveRemoteMcpStateKey,
@@ -400,6 +400,9 @@ export class RemoteMcpSessions {
         accountId: session.accountId,
         agentInstanceId: session.agentInstanceId,
         clientName: session.clientName,
+        // A stateless client never names itself at initialize; its User-Agent
+        // product token stands in, per request.
+        clientHint: session.implicit ? clientHintFromUserAgent(req.headers["user-agent"]) : null,
         publicBaseUrl: this.publicBaseUrl,
         dispatch: (path, init) => bound(path, {
           ...init,

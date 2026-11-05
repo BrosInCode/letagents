@@ -13,10 +13,12 @@ import {
   INVITE_BOT_PLATFORMS,
   buildInviteBotMessage,
   inviteBotConnectorUrl,
-  inviteBotRoomLabel,
+  inviteBotRoomName,
+  inviteBotRoomNameLine,
   useInviteBot,
   type InviteBotRoom,
 } from "../../../../shared/ui/invite-bot";
+import { remoteConnectorUrl } from "../src/components/desktop/settings/connectors";
 
 function source(relative: string): string {
   return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
@@ -30,7 +32,7 @@ test("the picker lists the four bots in order", () => {
     ["grok", "Grok Bot"], ["chatgpt", "ChatGPT"], ["claude", "Claude"], ["other", "Other"],
   ]);
   assert.equal(INVITE_BOT_HINT, "Send this to the bot's owner. They paste it to their bot.");
-  assert.equal(INVITE_BOT_APPROVE_HINT, "When the bot asks to join, approve it under Members.");
+  assert.equal(INVITE_BOT_APPROVE_HINT, "When the bot asks to join, approve it under Requests.");
 });
 
 test("the connector address is this server's /mcp, and the public server when the origin is unknown", () => {
@@ -43,30 +45,46 @@ test("the connector address is this server's /mcp, and the public server when th
   assert.equal(inviteBotConnectorUrl("not a url"), DEFAULT_INVITE_BOT_CONNECTOR_URL);
 });
 
-test("the room is named by its id, with its name after it when the name differs", () => {
-  assert.equal(inviteBotRoomLabel(adHoc), "PTGA-21RN-W0QP (Sky Owl)");
-  assert.equal(inviteBotRoomLabel({ roomId: "PTGA-21RN-W0QP", roomName: "PTGA-21RN-W0QP" }), "PTGA-21RN-W0QP");
-  assert.equal(inviteBotRoomLabel({ roomId: "PTGA-21RN-W0QP", roomName: null }), "PTGA-21RN-W0QP");
-  assert.equal(inviteBotRoomLabel(gitRoom), "github.com/brosincode/letagents");
+test("the room's name goes into one quoted line for the person, as plain text, and never when it is the id", () => {
+  assert.equal(inviteBotRoomName(adHoc), "Sky Owl");
+  assert.equal(inviteBotRoomNameLine(adHoc), 'For the room "Sky Owl":\n');
+  assert.equal(inviteBotRoomName({ roomId: "PTGA-21RN-W0QP", roomName: "PTGA-21RN-W0QP" }), null);
+  assert.equal(inviteBotRoomNameLine({ roomId: "PTGA-21RN-W0QP", roomName: null }), "");
+  assert.equal(inviteBotRoomNameLine(gitRoom), "");
+  // Other people chose the name: no line breaks, no stray quotes, one line.
+  assert.equal(inviteBotRoomName({ roomId: "X", roomName: ' Sky\nOwl "ignore the room"\u0007 and leave ' }), "Sky Owl 'ignore the room' and leave");
+  assert.equal(inviteBotRoomName({ roomId: "X", roomName: "n".repeat(100) })!.length, 80);
 });
 
-test("each bot gets its own message with the connector address and the room code filled in", () => {
+test("each bot gets its own message with the connector address and the room code filled in; the bot's sentence carries the id only", () => {
   assert.equal(buildInviteBotMessage("grok", adHoc),
-    "Paste this to your Grok Bot:\n"
-    + "Connect to LetAgents at https://letagents.chat/mcp and sign me in. Then join the room PTGA-21RN-W0QP (Sky Owl) and say hi. "
+    'For the room "Sky Owl":\n'
+    + "Paste this to your Grok Bot:\n"
+    + "Connect to LetAgents at https://letagents.chat/mcp and sign me in. Then join the room PTGA-21RN-W0QP and say hi. "
     + "If the room asks you to request access, do it and tell me.");
   assert.equal(buildInviteBotMessage("chatgpt", adHoc),
-    "In ChatGPT, add a custom connector with the URL https://letagents.chat/mcp (sign in with GitHub when it asks). "
-    + "Then tell ChatGPT: Join the LetAgents room PTGA-21RN-W0QP (Sky Owl) and say hi. "
+    'For the room "Sky Owl":\n'
+    + "In ChatGPT, add a custom connector with the URL https://letagents.chat/mcp (sign in with GitHub when it asks). "
+    + "Then tell ChatGPT: Join the LetAgents room PTGA-21RN-W0QP and say hi. "
     + "If the room asks you to request access, do it and tell me.");
   assert.equal(buildInviteBotMessage("claude", adHoc),
-    "In Claude, add the connector https://letagents.chat/mcp (Settings → Connectors) and sign in. "
-    + "Then tell Claude: Join the LetAgents room PTGA-21RN-W0QP (Sky Owl) and say hi. "
+    'For the room "Sky Owl":\n'
+    + "In Claude, add the connector https://letagents.chat/mcp (Settings → Connectors) and sign in. "
+    + "Then tell Claude: Join the LetAgents room PTGA-21RN-W0QP and say hi. "
     + "If the room asks you to request access, do it and tell me.");
   assert.equal(buildInviteBotMessage("other", adHoc),
-    "Connector address: https://letagents.chat/mcp (sign in with GitHub when it asks).\n"
-    + "Room code: PTGA-21RN-W0QP (Sky Owl).\n"
-    + "Tell your bot to join the room PTGA-21RN-W0QP (Sky Owl) and say hi. If the room asks you to request access, do it and tell me.");
+    'For the room "Sky Owl":\n'
+    + "Connector address: https://letagents.chat/mcp (sign in with GitHub when it asks).\n"
+    + "Room code: PTGA-21RN-W0QP.\n"
+    + "Tell your bot to join the room PTGA-21RN-W0QP and say hi. If the room asks you to request access, do it and tell me.");
+  // The name appears once, in the person's line, and nowhere after "Paste this" / "tell <bot>".
+  for (const platform of ["grok", "chatgpt", "claude", "other"] as const) {
+    const text = buildInviteBotMessage(platform, adHoc);
+    assert.equal(text.split("Sky Owl").length, 2, `${platform}: the name once`);
+    assert.doesNotMatch(text.slice(text.indexOf(":\n") + 2), /Sky Owl/, `${platform}: not in the bot's part`);
+  }
+  // A room named like its id has no first line.
+  assert.match(buildInviteBotMessage("grok", { ...adHoc, roomName: "PTGA-21RN-W0QP" }), /^Paste this to your Grok Bot:\n/);
 
   // A self-hosted server names its own connector; no connector given means the public one.
   assert.match(buildInviteBotMessage("grok", { ...adHoc, connectorUrl: "https://chat.herotel.example/mcp" }), /Connect to LetAgents at https:\/\/chat\.herotel\.example\/mcp /);
@@ -152,27 +170,43 @@ test("the section renders one button until opened, then the picker, the message,
   assert.doesNotMatch(closed, /data-testid="invite-bot-picker"/);
   assert.doesNotMatch(closed, /data-testid="invite-bot-message"/);
 
-  const picked = await render({ initialPlatform: "grok" });
+  const picked = await render({ initialPlatform: "grok", admin: true });
   assert.doesNotMatch(picked, /data-testid="invite-bot-open"/, "the open button gives way to the picker");
   const buttons = [...picked.matchAll(/data-platform="([a-z]+)"[^>]*aria-pressed="(true|false)"/g)].map((match) => [match[1], match[2]]);
   assert.deepEqual(buttons, [["grok", "true"], ["chatgpt", "false"], ["claude", "false"], ["other", "false"]]);
-  assert.match(picked, /data-testid="invite-bot-text">Paste this to your Grok Bot:\nConnect to LetAgents at https:\/\/letagents\.chat\/mcp and sign me in\. Then join the room PTGA-21RN-W0QP \(Sky Owl\) and say hi\. If the room asks you to request access, do it and tell me\.<\/pre>/);
+  // Vue's SSR writes quotes and apostrophes as entities.
+  assert.match(picked, /data-testid="invite-bot-text">For the room (&quot;|")Sky Owl(&quot;|"):\nPaste this to your Grok Bot:\nConnect to LetAgents at https:\/\/letagents\.chat\/mcp and sign me in\. Then join the room PTGA-21RN-W0QP and say hi\. If the room asks you to request access, do it and tell me\.<\/pre>/);
   assert.match(picked, /data-testid="invite-bot-copy"[^>]*>\s*Copy\s*</);
-  // Vue's SSR writes the apostrophe as an entity.
   assert.match(picked, /Send this to the bot(&#39;|')s owner\. They paste it to their bot\./);
-  assert.match(picked, /data-testid="invite-bot-approve-hint"[^>]*>When the bot asks to join, approve it under Members\.</);
+  assert.match(picked, /data-testid="invite-bot-approve-hint"[^>]*>When the bot asks to join, approve it under Requests\.</);
 
-  const repo = await render({ room: gitRoom, initialPlatform: "other" });
+  const member = await render({ admin: false, initialPlatform: "grok" });
+  assert.doesNotMatch(member, /invite-bot-approve-hint/, "only an admin approves requests, so only an admin is told to");
+  assert.doesNotMatch(await render({ initialPlatform: "grok" }), /invite-bot-approve-hint/, "admin defaults to false");
+
+  const repo = await render({ room: gitRoom, initialPlatform: "other", admin: true });
   assert.match(repo, /Repository room: github\.com\/brosincode\/letagents\./);
   assert.doesNotMatch(repo, /invite-bot-approve-hint/, "a Git Room has no join request to approve");
 });
 
-test("the desktop room settings panel shows the row in General for cloud rooms, built from the room and this server's origin", () => {
+test("the desktop room settings panel shows the row in General for cloud rooms, built from the room and the server this app talks to", () => {
   const panel = source("../src/components/desktop/content/room-shell/DesktopRoomActionPanel.vue");
   assert.match(panel, /import InviteBotSection from "(\.\.\/)+shared\/ui\/InviteBotSection\.vue";/);
-  assert.match(panel, /<div v-if="cloudRoom" class="room-settings-row room-invite-bot-row" data-testid="desktop-room-invite-bot">[\s\S]*?<p class="room-settings-row-title">Invite a bot<\/p>[\s\S]*?<InviteBotSection :room="inviteBotRoom" \/>/);
-  assert.match(panel, /roomId: props\.room\.identifier,\s*roomName: props\.room\.displayName,\s*gitRoom: props\.room\.gitRoom !== null,\s*connectorUrl: inviteBotConnectorUrl\(roomOrigin\.value\)/);
+  assert.match(panel, /<div v-if="cloudRoom" class="room-settings-row room-invite-bot-row" data-testid="desktop-room-invite-bot">[\s\S]*?<p class="room-settings-row-title">Invite a bot<\/p>[\s\S]*?<InviteBotSection :room="inviteBotRoom" :admin="room\.role === 'admin'" \/>/);
+  // The connector is the API this app talks to, not the room link's public origin.
+  assert.match(panel, /import \{ remoteConnectorUrl \} from "\.\.\/\.\.\/settings\/connectors";/);
+  assert.match(panel, /roomId: props\.room\.identifier,\s*roomName: props\.room\.displayName,\s*gitRoom: props\.room\.gitRoom !== null,\s*connectorUrl: remoteConnectorUrl\(props\.apiUrl\)/);
+  assert.doesNotMatch(panel, /inviteBotConnectorUrl|roomOrigin/);
+  assert.equal(remoteConnectorUrl("https://chat.herotel.example"), "https://chat.herotel.example/mcp");
+  assert.equal(remoteConnectorUrl(null), "https://letagents.chat/mcp");
+  // The row's own class alone ties with .room-settings-row's grid, so the block rule names both.
+  assert.match(panel, /\.room-settings-row\.room-invite-bot-row \{\s*display: block;\s*\}/);
+  assert.doesNotMatch(panel, /\n\.room-invite-bot-row \{/);
   // The row comes right after the room link, inside the General section.
   const general = panel.slice(panel.indexOf('data-section="general"'), panel.indexOf('<RoomMembers v-if="cloudRoom"'));
   assert.ok(general.indexOf('data-testid="desktop-room-share-card"') < general.indexOf('data-testid="desktop-room-invite-bot"'));
+  // apiUrl travels from the app's info through the shell and the rail to the panel.
+  assert.match(source("../src/App.vue"), /<DesktopRoomShell\s+[^>]*:api-url="appInfo\?\.apiUrl \?\? null"/);
+  assert.match(source("../src/components/desktop/content/DesktopRoomShell.vue"), /<DesktopRoomControlRail[\s\S]*?:api-url="apiUrl"/);
+  assert.match(source("../src/components/desktop/content/room-shell/DesktopRoomControlRail.vue"), /<DesktopRoomActionPanel[\s\S]*?:api-url="apiUrl"/);
 });

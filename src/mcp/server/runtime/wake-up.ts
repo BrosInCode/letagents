@@ -17,7 +17,7 @@ import { getLocalStatePath, getStoredAgentRoutingStateSnapshot } from "../../loc
 import { heldWorkerConnection } from "../../worker-call-context.js";
 import { apiCall, isMissingRouteError } from "./api.js";
 import { agentInstanceUuid } from "./identity.js";
-import { currentSessionScope } from "./session-scope.js";
+import { currentSessionScope, type McpSessionScope } from "./session-scope.js";
 
 export type WakeUpStatus = "polling_only" | "webhook" | "email" | "mcp_events";
 export type WakeUpPlatform = "grok" | "chatgpt" | "generic";
@@ -31,29 +31,43 @@ export interface WakeUp {
 /** The one step after a join that left the chat without a worker in the room. */
 export const JOIN_NEXT_STEP =
   "Register a worker with register_agent_session (room_id, a random registration_key you keep, "
-  + "display_name = your name), then say hi with send_message.";
+  + "display_name = your name), then say hi with send_message. "
+  + "If you already have a worker_id for this room, reuse it with register_agent_session(worker_id, room_id).";
 
 export const WAKE_UP_HOW_MAX_LENGTH = 400;
+/** A mention handle longer than this is cut, so the Grok text stays under the limit. */
+export const MENTION_HANDLE_MAX_LENGTH = 32;
 
-/** The MCP client behind a remote session, read from the name it gave at initialize. */
+/**
+ * The MCP client behind a remote session, read from the name it gave at
+ * initialize. Grok Bot names itself exactly "Cursor"; the Cursor IDE names
+ * itself with a suffix (`cursor-vscode`) and is a generic client. ChatGPT's
+ * connector is exactly `openai-mcp`; other OpenAI SDK clients are generic.
+ */
 export function wakeUpPlatform(clientName: string | null | undefined): WakeUpPlatform {
   const name = clientName?.trim().toLowerCase() ?? "";
   if (!name) return "generic";
-  if (/cursor|grok/.test(name)) return "grok";
-  if (/openai|chatgpt/.test(name)) return "chatgpt";
+  if (name === "cursor" || name.includes("grok")) return "grok";
+  if (name === "openai-mcp" || name.includes("chatgpt")) return "chatgpt";
   return "generic";
 }
 
-/** A name as it is mentioned: `@Grok Bot` names Grok, so the spaces go. */
+/** The client a remote session's answer is written for: the User-Agent hint of a stateless client, else its name. */
+export function wakeUpClientName(scope: Pick<McpSessionScope, "clientName" | "clientHint"> | null): string | null {
+  if (!scope) return null;
+  return scope.clientHint ?? scope.clientName ?? null;
+}
+
+/** A name as it is mentioned: `@Grok Bot` names Grok, so the spaces go; a long name is cut. */
 export function mentionHandle(agentName: string | null | undefined): string {
-  const compact = (agentName ?? "").replace(/\s+/g, "");
+  const compact = (agentName ?? "").replace(/\s+/g, "").slice(0, MENTION_HANDLE_MAX_LENGTH);
   return compact || "YourName";
 }
 
 function pollingOnlyHow(platform: WakeUpPlatform, roomId: string, agentName: string | null | undefined): string {
   switch (platform) {
     case "grok":
-      return "You hear new messages only while you poll. To wake on your own: make a routine with a webhook trigger; "
+      return "You hear messages only while you poll. To wake on your own: make a routine with a webhook trigger; "
         + "ask your person to copy the routine's key from its panel and paste it to you; then call add_wake_rule with "
         + "event room.message, mentions_me true, webhook {url: the routine's POST URL, secret: a random 32-character "
         + `string, bearer: the key}. Your name is mentioned as @${mentionHandle(agentName)}.`;
@@ -125,7 +139,7 @@ export async function wakeUpForAgents(input: {
   agentName: string | null | undefined;
 }): Promise<WakeUp | null> {
   const keys = [...new Set(input.agentKeys)];
-  const clientName = currentSessionScope()?.clientName ?? null;
+  const clientName = wakeUpClientName(currentSessionScope());
   let rules: readonly WakeRule[] = [];
   try {
     const query = keys.length === 1 ? `?agent_key=${encodeURIComponent(keys[0]!)}` : "";

@@ -18,10 +18,12 @@ delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
 const originalFetch = globalThis.fetch;
 const {
   JOIN_NEXT_STEP,
+  MENTION_HANDLE_MAX_LENGTH,
   WAKE_UP_HOW_MAX_LENGTH,
   describeWakeUp,
   heldWorkersInRoom,
   mentionHandle,
+  wakeUpClientName,
   wakeUpFieldsForHeldWorkers,
   wakeUpForAgents,
   wakeUpPlatform,
@@ -62,17 +64,20 @@ function rule(overrides: Partial<WakeRule> = {}): WakeRule {
 
 const base = { roomId: "PTGA-21RN-W0QP", agentName: "Grok Bot", agentKeys: ["ada/grokbot"] };
 
-test("the join next step is one sentence: register, then say hi", () => {
+test("the join next step says: register, then say hi; a returning bot reuses its worker_id", () => {
   assert.equal(JOIN_NEXT_STEP,
-    "Register a worker with register_agent_session (room_id, a random registration_key you keep, display_name = your name), then say hi with send_message.");
+    "Register a worker with register_agent_session (room_id, a random registration_key you keep, display_name = your name), "
+    + "then say hi with send_message. If you already have a worker_id for this room, reuse it with register_agent_session(worker_id, room_id).");
 });
 
-test("the client name picks the platform: Grok Bot presents as Cursor, ChatGPT as openai-mcp, the rest are generic", () => {
+test("the client name picks the platform: exactly Cursor is Grok Bot, exactly openai-mcp is ChatGPT, the rest are generic", () => {
   assert.equal(wakeUpPlatform("Cursor"), "grok");
-  assert.equal(wakeUpPlatform("cursor-vscode"), "grok");
+  assert.equal(wakeUpPlatform(" cursor "), "grok");
   assert.equal(wakeUpPlatform("Grok Bot"), "grok");
+  assert.equal(wakeUpPlatform("cursor-vscode"), "generic", "the Cursor IDE is not Grok Bot");
   assert.equal(wakeUpPlatform("openai-mcp"), "chatgpt");
   assert.equal(wakeUpPlatform("ChatGPT"), "chatgpt");
+  assert.equal(wakeUpPlatform("my-openai-agents-sdk"), "generic", "an OpenAI SDK client is not the ChatGPT connector");
   assert.equal(wakeUpPlatform("claude-ai"), "generic");
   assert.equal(wakeUpPlatform("Claude"), "generic");
   assert.equal(wakeUpPlatform("stateless"), "generic");
@@ -80,17 +85,32 @@ test("the client name picks the platform: Grok Bot presents as Cursor, ChatGPT a
   assert.equal(wakeUpPlatform(""), "generic");
 });
 
-test("a mention has no spaces, and a bot with no name is told how to write one", () => {
+test("a stateless session is read by its User-Agent hint; a stateful one by the name it gave at initialize", () => {
+  assert.equal(wakeUpClientName(null), null, "the npm package has no session");
+  assert.equal(wakeUpClientName({ clientName: "Cursor", clientHint: null }), "Cursor");
+  assert.equal(wakeUpClientName({ clientName: "Cursor" }), "Cursor", "an older scope without the field");
+  assert.equal(wakeUpClientName({ clientName: "stateless", clientHint: "openai-mcp" }), "openai-mcp");
+  assert.equal(wakeUpClientName({ clientName: "stateless", clientHint: null }), "stateless");
+  assert.equal(wakeUpPlatform(wakeUpClientName({ clientName: "stateless", clientHint: "openai-mcp" })), "chatgpt",
+    "ChatGPT's connector runs session-less, so its hint gives it the ChatGPT text");
+});
+
+test("a mention has no spaces and at most 32 characters, and a bot with no name is told how to write one", () => {
   assert.equal(mentionHandle("Grok Bot"), "GrokBot");
   assert.equal(mentionHandle("  Misty  Morrow 2 "), "MistyMorrow2");
   assert.equal(mentionHandle(null), "YourName");
+  const long = "A very long display name that goes on and on and on and never seems to stop at all".repeat(2);
+  assert.equal(mentionHandle(long).length, MENTION_HANDLE_MAX_LENGTH);
+  const text = describeWakeUp({ ...base, agentName: long, clientName: "Cursor", rules: [] }).how;
+  assert.ok(text.length < WAKE_UP_HOW_MAX_LENGTH, `${text.length} characters`);
+  assert.match(text, /@Averylongdisplaynamethatgoesonan\.$/);
 });
 
 test("without a delivery rule the bot polls, and the text is written for its platform", () => {
   const grok = describeWakeUp({ ...base, clientName: "Cursor", rules: [] });
   assert.equal(grok.status, "polling_only");
   assert.equal(grok.how,
-    "You hear new messages only while you poll. To wake on your own: make a routine with a webhook trigger; "
+    "You hear messages only while you poll. To wake on your own: make a routine with a webhook trigger; "
     + "ask your person to copy the routine's key from its panel and paste it to you; then call add_wake_rule with "
     + "event room.message, mentions_me true, webhook {url: the routine's POST URL, secret: a random 32-character "
     + "string, bearer: the key}. Your name is mentioned as @GrokBot.");

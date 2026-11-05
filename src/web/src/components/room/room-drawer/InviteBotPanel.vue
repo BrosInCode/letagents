@@ -4,7 +4,7 @@
       <h2>Invite a bot</h2>
       <span>One message for the bot's owner</span>
     </div>
-    <InviteBotSection :room="inviteRoom" />
+    <InviteBotSection :room="inviteRoom" :admin="room.role === 'admin'" />
   </div>
 </template>
 

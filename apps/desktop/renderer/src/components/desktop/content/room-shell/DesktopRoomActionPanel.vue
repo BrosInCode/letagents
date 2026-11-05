@@ -110,7 +110,7 @@
               <p class="room-settings-row-title">Invite a bot</p>
               <p class="room-settings-row-description">One message for the bot's owner. Their bot connects, joins this room and is guided from there.</p>
             </div>
-            <InviteBotSection :room="inviteBotRoom" />
+            <InviteBotSection :room="inviteBotRoom" :admin="room.role === 'admin'" />
           </div>
         </div>
       </section>
@@ -391,7 +391,8 @@ import SmoothHeight from "./SmoothHeight.vue";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import { usePinnedMessageVisibility } from "../../../../../../../../shared/ui/usePinnedMessageVisibility";
 import InviteBotSection from "../../../../../../../../shared/ui/InviteBotSection.vue";
-import { inviteBotConnectorUrl, type InviteBotRoom } from "../../../../../../../../shared/ui/invite-bot";
+import type { InviteBotRoom } from "../../../../../../../../shared/ui/invite-bot";
+import { remoteConnectorUrl } from "../../settings/connectors";
 import { useSectionScrollSpy } from "./useSectionScrollSpy";
 import type {
   DesktopGitHubIntegrationStatus,
@@ -409,6 +410,8 @@ const props = defineProps<{
   room: DesktopRoomInfo;
   storage: DesktopRoomStorageState;
   roomUrl: string;
+  /** The API this app talks to: the "Invite a bot" message names its `/mcp` connector. */
+  apiUrl?: string | null;
   copied: boolean;
   soundEnabled: boolean;
   notificationsEnabled: boolean;
@@ -473,21 +476,14 @@ const { activeSection, indicatorReady, syncActiveSection, releaseSectionLock, go
   useSectionScrollSpy<SectionId>(contentElement, "general");
 
 // The message a member hands to a friend for their bot: the room id (an ad-hoc
-// room's code, or github.com/owner/repo) and this server's connector address.
+// room's code, or github.com/owner/repo) and the connector of the server this
+// app talks to (the room link always names the public server, so it is not used).
 const inviteBotRoom = computed<InviteBotRoom>(() => ({
   roomId: props.room.identifier,
   roomName: props.room.displayName,
   gitRoom: props.room.gitRoom !== null,
-  connectorUrl: inviteBotConnectorUrl(roomOrigin.value),
+  connectorUrl: remoteConnectorUrl(props.apiUrl),
 }));
-
-const roomOrigin = computed(() => {
-  try {
-    return new URL(props.roomUrl).origin;
-  } catch {
-    return null;
-  }
-});
 
 const shortRoomUrl = computed(() => {
   try {
@@ -828,7 +824,8 @@ function discardRenameOnEscape(event: KeyboardEvent): void {
 </script>
 
 <style>
-.room-invite-bot-row {
+/* The row's own class alone ties with .room-settings-row's grid; the pair wins. */
+.room-settings-row.room-invite-bot-row {
   display: block;
 }
 </style>

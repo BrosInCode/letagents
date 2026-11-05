@@ -19,8 +19,8 @@ export const INVITE_BOT_PLATFORMS: ReadonlyArray<{ id: InviteBotPlatform; label:
 
 /** Under the message. */
 export const INVITE_BOT_HINT = "Send this to the bot's owner. They paste it to their bot.";
-/** For a members-only room: what the inviter does when the bot asks to join. */
-export const INVITE_BOT_APPROVE_HINT = "When the bot asks to join, approve it under Members.";
+/** For a room admin of a members-only room: what to do when the bot asks to join. */
+export const INVITE_BOT_APPROVE_HINT = "When the bot asks to join, approve it under Requests.";
 
 /** The connector address on the LetAgents server that serves this app. */
 export const DEFAULT_INVITE_BOT_CONNECTOR_URL = "https://letagents.chat/mcp";
@@ -52,17 +52,35 @@ export function inviteBotConnectorUrl(origin: string | null | undefined): string
   }
 }
 
-/** "PTGA-21RN-W0QP (Sky Owl)", or the id alone when the name repeats it or is missing. */
-export function inviteBotRoomLabel(room: Pick<InviteBotRoom, "roomId" | "roomName">): string {
-  const id = room.roomId.trim();
-  const name = room.roomName?.trim();
-  return name && name !== id ? `${id} (${name})` : id;
+const ROOM_NAME_MAX_LENGTH = 80;
+
+/**
+ * The room's name as the human line shows it: one line of plain text in
+ * quotes. The name is text other people chose, so it is never put into the
+ * sentence the bot executes; line breaks and control characters go, and a
+ * double quote becomes a single one so the quotes stay closed.
+ */
+export function inviteBotRoomName(room: Pick<InviteBotRoom, "roomId" | "roomName">): string | null {
+  const name = (room.roomName ?? "")
+    .replace(/[\u0000-\u001f\u007f]+/g, " ")
+    .replace(/"/g, "'")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, ROOM_NAME_MAX_LENGTH);
+  return name && name !== room.roomId.trim() ? name : null;
+}
+
+/** `For the room "Sky Owl":` and a line break, for the person; nothing when the name is the id. */
+export function inviteBotRoomNameLine(room: Pick<InviteBotRoom, "roomId" | "roomName">): string {
+  const name = inviteBotRoomName(room);
+  return name ? `For the room "${name}":\n` : "";
 }
 
 function joinSentence(room: InviteBotRoom): string {
+  const id = room.roomId.trim();
   return room.gitRoom
-    ? `join the repository room ${inviteBotRoomLabel(room)} and say hi.`
-    : `join the room ${inviteBotRoomLabel(room)} and say hi.`;
+    ? `join the repository room ${id} and say hi.`
+    : `join the room ${id} and say hi.`;
 }
 
 function closingLine(room: InviteBotRoom): string {
@@ -70,27 +88,32 @@ function closingLine(room: InviteBotRoom): string {
 }
 
 /**
- * The message for one platform. Each one names the connector address and the
- * room, then says what the bot does. A Git Room's message names the repository
- * room and the GitHub role it needs; an ad-hoc room's tells the bot to ask for
- * access when the room is for members only, so the inviter can let it in.
+ * The message for one platform. A first line for the person names the room
+ * when it has a name; the rest names the connector address and the room id,
+ * then says what the bot does. The sentence the bot executes carries the id
+ * only, never the name. A Git Room's message names the repository room and
+ * the GitHub role it needs; an ad-hoc room's tells the bot to ask for access
+ * when the room is for members only, so the inviter can let it in.
  */
 export function buildInviteBotMessage(platform: InviteBotPlatform, room: InviteBotRoom): string {
   const connector = room.connectorUrl?.trim() || DEFAULT_INVITE_BOT_CONNECTOR_URL;
+  const id = room.roomId.trim();
+  const named = inviteBotRoomNameLine(room);
   const join = joinSentence(room);
   const closing = closingLine(room);
+  const kind = room.gitRoom ? "repository room" : "room";
   switch (platform) {
     case "grok":
-      return `Paste this to your Grok Bot:\nConnect to LetAgents at ${connector} and sign me in. Then ${join} ${closing}`;
+      return `${named}Paste this to your Grok Bot:\nConnect to LetAgents at ${connector} and sign me in. Then ${join} ${closing}`;
     case "chatgpt":
-      return `In ChatGPT, add a custom connector with the URL ${connector} (sign in with GitHub when it asks). `
-        + `Then tell ChatGPT: Join the LetAgents ${room.gitRoom ? "repository " : ""}room ${inviteBotRoomLabel(room)} and say hi. ${closing}`;
+      return `${named}In ChatGPT, add a custom connector with the URL ${connector} (sign in with GitHub when it asks). `
+        + `Then tell ChatGPT: Join the LetAgents ${kind} ${id} and say hi. ${closing}`;
     case "claude":
-      return `In Claude, add the connector ${connector} (Settings → Connectors) and sign in. `
-        + `Then tell Claude: Join the LetAgents ${room.gitRoom ? "repository " : ""}room ${inviteBotRoomLabel(room)} and say hi. ${closing}`;
+      return `${named}In Claude, add the connector ${connector} (Settings → Connectors) and sign in. `
+        + `Then tell Claude: Join the LetAgents ${kind} ${id} and say hi. ${closing}`;
     case "other":
-      return `Connector address: ${connector} (sign in with GitHub when it asks).\n`
-        + `${room.gitRoom ? "Repository room" : "Room code"}: ${inviteBotRoomLabel(room)}.\n`
+      return `${named}Connector address: ${connector} (sign in with GitHub when it asks).\n`
+        + `${room.gitRoom ? "Repository room" : "Room code"}: ${id}.\n`
         + `Tell your bot to ${join} ${closing}`;
   }
 }

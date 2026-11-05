@@ -43,7 +43,7 @@
         </div>
         <p v-if="invite.copyError.value" class="invite-bot-error" role="alert">{{ invite.copyError.value }}</p>
         <p class="invite-bot-hint">{{ INVITE_BOT_HINT }}</p>
-        <p v-if="!room.gitRoom" class="invite-bot-hint" data-testid="invite-bot-approve-hint">{{ INVITE_BOT_APPROVE_HINT }}</p>
+        <p v-if="admin && !room.gitRoom" class="invite-bot-hint" data-testid="invite-bot-approve-hint">{{ INVITE_BOT_APPROVE_HINT }}</p>
       </div>
       <p v-else class="invite-bot-hint">Pick the bot the message is for.</p>
     </template>
@@ -64,9 +64,11 @@ import {
 
 const props = withDefaults(defineProps<{
   room: InviteBotRoom;
+  /** Whether the viewer is a room admin, who approves the bot's request to join. */
+  admin?: boolean;
   /** Start with this bot picked (deep links and tests). */
   initialPlatform?: InviteBotPlatform | null;
-}>(), { initialPlatform: null });
+}>(), { admin: false, initialPlatform: null });
 
 const invite = useInviteBot({ room: toRef(props, "room"), initialPlatform: props.initialPlatform });
 </script>
