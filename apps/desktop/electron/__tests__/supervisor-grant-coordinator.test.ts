@@ -422,12 +422,23 @@ test("a guest whose provider crashed in this same daemon is left to the daemon's
 });
 
 test("Start on a retired stopped guest gets the reason: retirement took the daemon's grant with it", async () => {
-  const g = guestHarness({ stored: { lastInstalledDaemonGeneration: 7 }, entry: { desiredState: "stopped", observedState: "stopped", agentSessionBindingState: "historical" } });
+  // Retirement clears last_worker_binding with the grant, so a retired entry has no binding left.
+  const g = guestHarness({ stored: { lastInstalledDaemonGeneration: 7 }, entry: { desiredState: "stopped", observedState: "stopped", agentSessionBindingState: "none" } });
   let activated = false;
   await assert.rejects(g.coordinator.activateEntry(g.guest, async () => { activated = true; }), /so the agent cannot start\. Remove it, then give or rent it again\.$/);
   assert.equal(activated, false);
   assert.ok(!g.events.some((event) => event.startsWith("set-desired:")), "nothing changes a stopped entry's state");
   assert.deepEqual(g.counts, { joins: 0, provisions: 0 });
+});
+
+test("a guest that was only stopped, not retired, keeps its last binding, and Start is left to the daemon", async () => {
+  // Stop leaves last_worker_binding in place; the daemon may still hold the grant it renewed while the guest ran.
+  const g = guestHarness({ stored: { lastInstalledDaemonGeneration: 7 }, entry: { desiredState: "stopped", observedState: "stopped", agentSessionBindingState: "historical" } });
+  let activated = false;
+  await g.coordinator.activateEntry(g.guest, async () => { activated = true; });
+  assert.equal(activated, true, "a day-old guest that was stopped can start again on the daemon's own grant");
+  assert.deepEqual(g.counts, { joins: 0, provisions: 0 });
+  assert.ok(!g.events.some((event) => event.startsWith("install:")), "an expired copy is not installed over the daemon's live one");
 });
 
 test("a guest with no saved record at all is left to the daemon, and never joins", async () => {
