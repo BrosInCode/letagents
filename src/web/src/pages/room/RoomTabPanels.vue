@@ -73,7 +73,7 @@ const roomScrollPositions = new Map<string, ChatScrollPosition>()
 
       <TaskBoard
         v-else-if="activeTab === 'board'"
-        key="board"
+        :key="`board:${room?.identifier}`"
         class="room-tab-panel"
         :tasks="tasks"
         :presence="boardHandoffPresence"
@@ -82,6 +82,7 @@ const roomScrollPositions = new Map<string, ChatScrollPosition>()
         :selectedTaskId="selectedBoardTaskId"
         :roomIdentifier="room?.identifier || null"
         @addTask="emit('addTask', $event)"
+        @refresh="emit('refreshBoard')"
         @updateTask="emit('updateTask', $event)"
         @closeTask="emit('closeTask')"
         @leaseAction="emit('leaseAction', $event)"
@@ -250,13 +251,14 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   refreshGitHubEvents: []
+  refreshBoard: []
   loadOlderGitHubEvents: []
   loadOlder: []
   reply: [message: RoomMessage]
   threadMessages: [messages: RoomMessage[]]
   openImageViewer: [imageId: string]
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
-  addTask: [title: string]
+  addTask: [input: import('@/components/room/task-board/types').TaskCreatePayload]
   updateTask: [payload: TaskUpdatePayload]
   closeTask: []
   leaseAction: [payload: TaskLeaseActionPayload]

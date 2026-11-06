@@ -21,7 +21,7 @@
 import { ref } from 'vue'
 import TaskBoard from '../../src/components/room/TaskBoard.vue'
 import type { RoomTask } from '../../src/composables/useRoom'
-import type { TaskUpdatePayload, TaskLeaseActionPayload, TaskReviewLeaseActionPayload } from '../../src/components/room/task-board/types'
+import type { TaskCreatePayload, TaskUpdatePayload, TaskLeaseActionPayload, TaskReviewLeaseActionPayload } from '../../src/components/room/task-board/types'
 
 const params = new URLSearchParams(location.search)
 const light = ref(params.get('theme') === 'light')
@@ -50,7 +50,11 @@ const tasks = ref(params.has('empty') ? [] : [
   task(26, 'Verify the approval handoff end to end', 'in_review', 'DawnRidge'),
   task(28, 'Readable manager notifications', 'done'),
 ])
-function addTask(title: string) { tasks.value.push(task(100 + tasks.value.length, title, 'proposed')) }
+function addTask(input: TaskCreatePayload) {
+  const created = { ...task(100 + tasks.value.length, input.title, 'proposed'), description: input.description || '' }
+  tasks.value.push(created)
+  input.onSettled?.(true, created.id)
+}
 async function updateTask(payload: TaskUpdatePayload) {
   if (params.has('slow')) await new Promise(resolve => setTimeout(resolve, 2000))
   if (params.has('error')) {

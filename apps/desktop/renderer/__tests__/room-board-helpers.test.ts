@@ -26,6 +26,7 @@ import {
   taskMatchesBoardSearch,
   visibleBoardGroups,
 } from "../src/components/desktop/content/room-board/board-presentation";
+import { desktopBoardTask } from "../src/components/desktop/content/room-board/board-workspace-tasks";
 import { findLocalRoomWorker } from "../src/components/desktop/content/room-board/board-workers";
 import { useRoomBoardPresentation } from "../src/components/desktop/content/room-board/useRoomBoardPresentation";
 import {
@@ -392,13 +393,13 @@ describe("board toolbar count", () => {
     });
   }
 
-  it("feeds the toolbar from the board manager count in the board view", () => {
+  it("keeps the manager pending count in the new board action slot", () => {
     const view = readFileSync(fileURLToPath(new URL(
       "../src/components/desktop/content/RoomBoardView.vue",
       import.meta.url,
     )), "utf8");
     assert.match(view, /useBoardGovernance\(props\.roomIdentifier, \(\) => props\.boardSettings\)/);
-    assert.match(view, /:pending-intent-count="pendingIntentCount"/);
+    assert.match(view, /v-if="pendingIntentCount" class="board-host-count"/);
   });
 });
 
@@ -765,9 +766,24 @@ describe("room board helpers", () => {
     assert.deepEqual(statuses("mine", [assigned]).sort(), ["assigned", "blocked", "in_progress"]);
   });
 
-  it("the board view gives focused views the drop targets of each card's actions", () => {
-    const view = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/RoomBoardView.vue", import.meta.url)), "utf8");
-    assert.match(view, /useRoomBoardPresentation\(props, emit, \{\s*dropTargets: \(task\) => actionsFor\(task\)\.flatMap\(\(action\) => action\.targetStatus/);
+  it("normalizes only authoritative move actions and exact provider identity for the shared board", () => {
+    const assigned = task({ assignee: "Blake | Codex", assigneeAgentKey: "codex/blake" });
+    const row = desktopBoardTask(assigned, [presence()], [
+      { id: "start", label: "Start", tone: "primary", targetStatus: "in_progress", run: async candidate => candidate },
+      { id: "release", label: "Release", tone: "neutral", run: async candidate => candidate },
+    ]);
+    assert.equal(row.provider, "codex");
+    assert.equal(row.assigneeLabel, "Blake");
+    assert.deepEqual(row.allowedTransitions, [{ id: "start", label: "Start", targetStatus: "in_progress" }]);
+    assert.equal(desktopBoardTask({ ...assigned, assigneeAgentKey: null }, [presence()], []).provider, null, "a matching display name is not provider identity");
+  });
+
+  it("keeps the displayed PR number and state tied to the selected PR URL", () => {
+    const row = desktopBoardTask(task({ prUrl: "https://github.com/org/repo/pull/42", workflowArtifacts: [
+      { kind: "pull_request", provider: "github", url: "https://github.com/org/repo/pull/8", number: 8, state: "merged" } as DesktopTaskSummary["workflowArtifacts"][number],
+    ] }), [], []);
+    assert.equal(row.pr?.number, 42);
+    assert.equal(row.pr?.state, undefined);
   });
 
   it("keeps board empty-state copy and actions deterministic", () => {

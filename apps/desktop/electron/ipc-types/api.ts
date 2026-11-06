@@ -117,6 +117,11 @@ import type {
   DesktopRoomStreamEvent,
   DesktopInlineHtmlDemoEvent,
   DesktopInlineHtmlDemoLease,
+  DesktopDemoMark,
+  DesktopDemoMarkInput,
+  DesktopLiveDemoClientFrame,
+  DesktopLiveDemoEvent,
+  DesktopWindowRect,
   DesktopAccountRoomJoinRequest,
   DesktopRoomJoinRequestDecision,
   DesktopRoomMemberList,
@@ -255,6 +260,23 @@ export interface DesktopApi {
     /** Release a prepared inline demo the chat no longer shows. Safe to call more than once. */
     releaseInlineHtmlDemo?: (url: string) => Promise<void>;
     onInlineHtmlDemoEvent?: (callback: (event: DesktopInlineHtmlDemoEvent) => void) => () => void;
+    /**
+     * Take part in a demo's live session. Main opens the room's live channel if
+     * needed, joins the demo, and sends this app's cursor while the pointer is
+     * over the demo's webview (`leaseUrl`). Joins survive reconnects until left.
+     */
+    liveDemoJoin?: (roomIdentifier: string, demoKey: string, leaseUrl: string | null) => Promise<void>;
+    liveDemoLeave?: (roomIdentifier: string, demoKey: string) => Promise<void>;
+    /** Send a `cur` or `ink` frame the chat owns (the pointer in draw mode). Other frame types are refused. */
+    liveDemoSend?: (roomIdentifier: string, frame: DesktopLiveDemoClientFrame) => Promise<void>;
+    onLiveDemoEvent?: (callback: (event: DesktopLiveDemoEvent) => void) => () => void;
+    listDemoMarks?: (roomIdentifier: string, demoKey: string) => Promise<DesktopDemoMark[]>;
+    addDemoMark?: (roomIdentifier: string, input: DesktopDemoMarkInput) => Promise<DesktopDemoMark>;
+    removeDemoMark?: (roomIdentifier: string, markId: string) => Promise<void>;
+    /** Lay a running inline demo out at LIVE_DEMO.width CSS px, scaled to `frameWidth`. Returns the scale. */
+    setInlineDemoWidth?: (leaseUrl: string, frameWidth: number) => Promise<number>;
+    /** Capture `rect` of the app window (demo and marks) and stage it as an image for a thread reply. */
+    captureDemoMarkup?: (roomIdentifier: string, rect: DesktopWindowRect, fileName: string) => Promise<DesktopStagedAttachment>;
     discardAttachment: (roomIdentifier: string, uploadId: string) => Promise<void>;
     startStream: (roomIdentifier: string, afterMessageId?: string | null) => Promise<void>;
     repairStreamDelivery?: (
@@ -313,6 +335,9 @@ export interface DesktopApi {
       taskId: string,
       input: DesktopTaskReviewWorkerActionInput
     ) => Promise<DesktopTaskMutationResult>;
+    /** Native board planning; optional for a renderer talking to an older desktop bridge. */
+    getBoardPlanning?: (roomIdentifier: string) => Promise<import("../../../../shared/board-planning.mjs").BoardPlanningSnapshot>;
+    updateBoardPlanning?: (roomIdentifier: string, input: import("../../../../shared/board-planning.mjs").BoardPlanningUpdate) => Promise<import("../../../../shared/board-planning.mjs").BoardPlanningSnapshot>;
     getBoardGovernance: (roomIdentifier: string) => Promise<DesktopBoardGovernanceSnapshot>;
     assignBoardManager: (
       roomIdentifier: string,

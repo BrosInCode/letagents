@@ -696,6 +696,8 @@ export interface DesktopLocalRoomInfo {
 }
 
 export interface DesktopLocalChatSyncResult {
+  /** A non-fatal planning transfer issue; message and task counts remain valid. */
+  planningNote?: string | null;
   roomIdentifier: string;
   cloudRoomIdentifier: string | null;
   syncedCount: number;
@@ -723,6 +725,22 @@ export type DesktopInlineHtmlDemoEvent =
   | { type: "stopped"; url: string; reason: "unresponsive" | "crashed" | "overloaded" }
   /** The demo took keyboard focus with no click, key or Tab from the person: give focus back. */
   | { type: "focus-refused"; url: string };
+
+export type DesktopLiveDemoServerFrame = import("../../../../shared/live-demo.mjs").LiveDemoServerFrame;
+export type DesktopLiveDemoClientFrame = import("../../../../shared/live-demo.mjs").LiveDemoClientFrame;
+export type DesktopDemoMark = import("../../../../shared/live-demo.mjs").DemoMark;
+export type DesktopDemoMarkInput = import("../../../../shared/live-demo.mjs").DemoMarkInput;
+
+/** The state of this app's live connection to one room. */
+export type DesktopLiveDemoStatus = "connecting" | "live" | "reconnecting" | "offline" | "refused";
+
+/** Main's report on live demos: a frame from the room, or the connection state. */
+export type DesktopLiveDemoEvent =
+  | { type: "frame"; roomIdentifier: string; frame: DesktopLiveDemoServerFrame }
+  | { type: "status"; roomIdentifier: string; status: DesktopLiveDemoStatus; reason?: string };
+
+/** A rectangle in the app window's CSS px, as getBoundingClientRect gives it. */
+export interface DesktopWindowRect { x: number; y: number; width: number; height: number }
 
 export type DesktopRoomStreamEvent =
   | { type: "typing"; roomIdentifier: string; signal: import("../../../../shared/room-typing.mjs").TypingSignal }

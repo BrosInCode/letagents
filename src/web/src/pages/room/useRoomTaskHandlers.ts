@@ -7,10 +7,11 @@ import type {
   TaskLeaseActionPayload,
   TaskReviewLeaseActionPayload,
   TaskUpdatePayload,
+  TaskCreatePayload,
 } from './types'
 
 interface RoomTaskHandlerDeps {
-  addTask: (title: string) => Promise<boolean>
+  addTask: (input: string | Pick<TaskCreatePayload, 'title' | 'description'>, onCreated?: (taskId: string) => void) => Promise<boolean>
   updateTask: (taskId: string, updates: Partial<RoomTask>) => Promise<boolean>
   updateTaskLease: (taskId: string, input: TaskLeaseActionInput) => Promise<boolean>
   updateTaskReviewLease: (
@@ -28,8 +29,15 @@ interface RoomTaskHandlerDeps {
 }
 
 export function useRoomTaskHandlers(deps: RoomTaskHandlerDeps) {
-  async function handleAddTask(title: string) {
-    await deps.addTask(title)
+  async function handleAddTask(input: string | TaskCreatePayload) {
+    let created = false
+    let createdTaskId: string | undefined
+    try {
+      created = await deps.addTask(typeof input === 'string' ? input : { title: input.title, description: input.description }, id => { createdTaskId = id })
+      if (!created) deps.toast.error('Task could not be created.')
+    } finally {
+      if (typeof input !== 'string') input.onSettled?.(created, created ? createdTaskId : undefined)
+    }
   }
 
   async function handleUpdateTask(payload: TaskUpdatePayload) {
