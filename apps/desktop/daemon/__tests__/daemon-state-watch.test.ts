@@ -394,3 +394,58 @@ test("failed shared reads release their slot and post-read fence loss rejects ev
   heldRead.resolve([]);
   await lost;
 });
+
+function view(id: string, revision: number): DaemonManifestEntryView {
+  return { id, room_id: "room_1", display_name: `Agent ${id} r${revision}`, activity: [] } as unknown as DaemonManifestEntryView;
+}
+
+test("a subscriber that asks for changes gets only the entries whose view changed since its sequence, and the whole state when the watch cannot tell", async () => {
+  let generation = 5;
+  let entries = [view("a", 1), view("b", 1)];
+  const watch = new DaemonStateWatch({
+    currentGeneration: () => generation,
+    isHandoffScheduled: () => false,
+    assertCurrent: async () => undefined,
+    // Fresh objects on every read: only the content may say what changed.
+    entries: async () => entries.map((item) => ({ ...item })),
+  });
+
+  // Nothing was tracked before the first snapshot: the whole state.
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 0, afterSequence: 0, waitMs: 0, changedOnly: true }),
+    { daemon_generation: 5, sequence: 1, entries: [view("a", 1), view("b", 1)] });
+
+  entries = [view("a", 1), view("b", 2), view("c", 1)];
+  watch.notify();
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 5, afterSequence: 1, waitMs: 0, changedOnly: true }), {
+    daemon_generation: 5, sequence: 2, complete: false,
+    entries: [view("b", 2), view("c", 1)], removed_entry_ids: [], entry_order: ["a", "b", "c"],
+  });
+
+  entries = [view("c", 1)];
+  watch.notify();
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 5, afterSequence: 2, waitMs: 0, changedOnly: true }), {
+    daemon_generation: 5, sequence: 3, complete: false, entries: [], removed_entry_ids: ["a", "b"], entry_order: ["c"],
+  });
+  // A subscriber two snapshots behind gets everything since its own sequence.
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 5, afterSequence: 1, waitMs: 0, changedOnly: true }), {
+    daemon_generation: 5, sequence: 3, complete: false, entries: [view("c", 1)], removed_entry_ids: ["a", "b"], entry_order: ["c"],
+  });
+  // An unchanged state answers with no entries at all.
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 5, afterSequence: 3, waitMs: 0, changedOnly: true }), {
+    daemon_generation: 5, sequence: 3, complete: false, entries: [], removed_entry_ids: [], entry_order: ["c"],
+  });
+  // A subscriber that does not ask for changes, or holds a cursor from before tracking or from another generation, gets the whole state.
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 5, afterSequence: 3, waitMs: 0 }),
+    { daemon_generation: 5, sequence: 3, entries: [view("c", 1)] });
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 5, afterSequence: 0, waitMs: 0, changedOnly: true }),
+    { daemon_generation: 5, sequence: 3, entries: [view("c", 1)] });
+  generation = 6;
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 5, afterSequence: 3, waitMs: 0, changedOnly: true }),
+    { daemon_generation: 6, sequence: 3, entries: [view("c", 1)] });
+  // Tracking starts again with the new generation.
+  entries = [view("c", 2)];
+  watch.notify();
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 6, afterSequence: 3, waitMs: 0, changedOnly: true }), {
+    daemon_generation: 6, sequence: 4, complete: false, entries: [view("c", 2)], removed_entry_ids: [], entry_order: ["c"],
+  });
+});

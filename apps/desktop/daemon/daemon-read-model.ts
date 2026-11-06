@@ -15,6 +15,7 @@ import {
 } from "./room-agent-state-projection.js";
 import type { SupervisedAgentDelivery } from "./supervised-agent-delivery.js";
 import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
+import { deepFreeze } from "./deep-freeze.js";
 import {
   DAEMON_IMPLEMENTATION_VERSION,
   DAEMON_PROTOCOL_VERSION,
@@ -61,7 +62,7 @@ export type DaemonReadModelPorts = {
   inbox: Pick<
     SupervisedAgentInboxStore,
     "detail" | "ingressHealth" | "latestContinuationRepair" | "receiptProjection"
-  > & Partial<Pick<SupervisedAgentInboxStore, "blockedHeadSkip" | "committedStateVersion">>;
+  > & Partial<Pick<SupervisedAgentInboxStore, "blockedHeadSkip" | "inboxStateVersions">>;
   durability: Pick<WorkDurabilityStore, "getAttempt">;
   workerAuthority: Pick<WorkerAuthorityCoordinator, "currentHostGrant" | "pollingContract">;
   liveHandles: Map<string, ProviderActionHandle>;
@@ -78,25 +79,20 @@ type StoredInboxInputs = {
   continuationRepair: Awaited<ReturnType<SupervisedAgentInboxStore["latestContinuationRepair"]>>;
   ingressHealth: Awaited<ReturnType<SupervisedAgentInboxStore["ingressHealth"]>>;
 };
-
-/** Freeze plain stored data (objects and arrays) in place, all the way down. */
-function deepFreeze<T>(value: T): T {
-  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
-  Object.freeze(value);
-  for (const child of Object.values(value)) deepFreeze(child);
-  return value;
-}
+type KeptInboxInputs = { version: number; inputs: StoredInboxInputs };
 
 /** Owns read-only control-surface projections over daemon authority state. */
 export class DaemonReadModel {
   /**
-   * The inbox inputs of the last projection that asked to keep them, and the
-   * database version read before any of them. They are used again only while
-   * that version is unchanged, that is while no row of the database has been
-   * written since. They hold one item per entry of that projection, and
-   * nothing reads or changes them in place.
+   * The inbox inputs of the last projection that asked to keep them, each
+   * under the agent's inbox version read before it (the database's own
+   * counter, see SupervisedAgentInboxStore.inboxStateVersions). An agent's
+   * inputs are used again only while its version is unchanged, that is while
+   * no row about that agent has been written since, by any connection. They
+   * hold one item per entry of that projection, and nothing reads or changes
+   * them in place.
    */
-  private keptInboxInputs: { version: string; inputs: Map<string, StoredInboxInputs> } | null = null;
+  private keptInboxInputs: { scope: string; byAgent: Map<string, KeptInboxInputs> } | null = null;
 
   constructor(private readonly ports: DaemonReadModelPorts) {}
 
@@ -185,27 +181,34 @@ export class DaemonReadModel {
   /**
    * With `reuseUnchangedInboxInputs`, an entry's inbox inputs (its delivery
    * receipts, blocked-head skip, latest continuation repair and ingress health)
-   * are read again only when the database has changed since the last such
-   * projection. Every view is still derived again: liveness depends on the
-   * clock, and the authority facts (binding, credential, host grant, live
-   * handle, lifecycle admission) and every other stored input are read each time.
+   * are read again only when that agent's inbox rows have changed since the
+   * last such projection; a change for one agent costs no other agent a read.
+   * Every view is still derived again: liveness depends on the clock, and the
+   * authority facts (binding, credential, host grant, live handle, lifecycle
+   * admission) and every other stored input are read each time.
    */
   async entriesWithDerivedLiveness(
     entries: DaemonManifestEntry[],
     options: { reuseUnchangedInboxInputs?: boolean } = {},
   ): Promise<DaemonManifestEntryView[]> {
-    // Read before every input: an input kept under it was read after it.
-    const version = options.reuseUnchangedInboxInputs
-      ? await this.ports.inbox.committedStateVersion?.().catch(() => null) ?? null
+    // Versions before every input: an input kept under one was read after it.
+    const versions = options.reuseUnchangedInboxInputs
+      ? await this.ports.inbox.inboxStateVersions?.().catch(() => null) ?? null
       : null;
-    const kept = version !== null && this.keptInboxInputs?.version === version ? this.keptInboxInputs.inputs : undefined;
-    const keep = version !== null ? new Map<string, StoredInboxInputs>() : undefined;
+    const kept = versions && this.keptInboxInputs?.scope === versions.scope ? this.keptInboxInputs.byAgent : undefined;
+    const keep = versions ? new Map<string, KeptInboxInputs>() : undefined;
     const bindings = new Map(
       (await this.ports.bindings.list()).map((binding) => [binding.entry_id, binding]),
     );
-    const views = await Promise.all(entries.map((entry) =>
-      this.entryWithDerivedLiveness(entry, bindings.get(entry.id) ?? null, keep && { kept: kept?.get(entry.id), keep })));
-    if (version !== null && keep) this.keptInboxInputs = { version, inputs: keep };
+    const views = await Promise.all(entries.map((entry) => {
+      const version = versions?.byAgent.get(entry.id) ?? 0;
+      const previous = kept?.get(entry.id);
+      return this.entryWithDerivedLiveness(entry, bindings.get(entry.id) ?? null, keep && {
+        kept: previous?.version === version ? previous.inputs : undefined,
+        keep: (inputs) => keep.set(entry.id, { version, inputs }),
+      });
+    }));
+    if (versions && keep) this.keptInboxInputs = { scope: versions.scope, byAgent: keep };
     return views;
   }
 
@@ -222,7 +225,7 @@ export class DaemonReadModel {
   async entryWithDerivedLiveness(
     entry: DaemonManifestEntry,
     projectedBinding?: WorkerSessionBinding | null,
-    inboxInputs?: { kept: StoredInboxInputs | undefined; keep: Map<string, StoredInboxInputs> },
+    inboxInputs?: { kept: StoredInboxInputs | undefined; keep: (inputs: StoredInboxInputs) => void },
   ): Promise<DaemonManifestEntryView> {
     const projectionNowMs = this.ports.nowMs();
     const binding = projectedBinding === undefined
@@ -236,7 +239,7 @@ export class DaemonReadModel {
       // changing the inputs a later wake reuses.
       if (inboxInputs) stored = deepFreeze(stored);
     }
-    inboxInputs?.keep.set(entry.id, stored);
+    inboxInputs?.keep(stored);
     const { receipts, blockedHeadSkip, continuationRepair, ingressHealth: persistedIngress } = stored;
     const credential = bindingMatchesRoomAgentGeneration(entry, binding)
       ? await this.ports.bindings.credentialFor(binding)

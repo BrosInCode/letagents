@@ -22,7 +22,7 @@ export interface DaemonControlOperations {
   prepareHandoff(): unknown;
   /** Null lists every entry; a room identifier scopes the read to that room. */
   listManifest(roomId: string | null): unknown;
-  watchState(input: { afterDaemonGeneration: number; afterSequence: number; waitMs: number }): unknown;
+  watchState(input: { afterDaemonGeneration: number; afterSequence: number; waitMs: number; changedOnly?: boolean }): unknown;
   watchAgentStream(input: { entryId: string; afterSequence: number; waitMs: number }): unknown;
   retryRoomDelivery(input: RoomDeliveryControl): unknown;
   restoreAgentConversation(input: RoomDeliveryControl): unknown;
@@ -336,6 +336,7 @@ export function createDaemonControlRequestHandler(
         afterDaemonGeneration: Number(params.after_daemon_generation ?? 0),
         afterSequence: Number(params.after_sequence ?? 0),
         waitMs: Number(params.wait_ms ?? 25_000),
+        changedOnly: params.changed_only === true,
       });
     }
     if (request.method === "supervisor.watch_agent_stream") {

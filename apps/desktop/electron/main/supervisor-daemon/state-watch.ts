@@ -6,6 +6,7 @@ import type {
   DesktopSupervisorStateSnapshot,
 } from "../../ipc-types.js";
 import { SupervisorDaemonClient } from "./client.js";
+import { applySupervisorStateChanges } from "./state-watch-changes.js";
 import { STATE_WATCH_RETRY_BASE_MS, supervisorStateWatchAcceptsStatus, supervisorStateWatchRetryDelay } from "./state-watch-policy.js";
 
 /**
@@ -110,10 +111,21 @@ async function watchSupervisorState(): Promise<void> {
         afterDaemonGeneration = 0;
         afterSequence = 0;
       }
-      const snapshot = await supervisorDaemonClient.watchState({
-        afterDaemonGeneration,
-        afterSequence,
-      });
+      // With a state held, ask only for what changed since it; the whole
+      // state is read once per daemon generation and whenever the changes do
+      // not fit the state held.
+      const held = latestSupervisorState;
+      const result = held && held.daemonGeneration === afterDaemonGeneration && afterSequence > 0
+        ? await supervisorDaemonClient.watchStateChanges({ afterDaemonGeneration, afterSequence })
+        : { complete: true as const, ...(await supervisorDaemonClient.watchState({ afterDaemonGeneration, afterSequence })) };
+      const snapshot = result.complete
+        ? { daemonGeneration: result.daemonGeneration, sequence: result.sequence, entries: result.entries }
+        : held && applySupervisorStateChanges(held, result);
+      if (!snapshot) {
+        latestSupervisorState = null;
+        afterSequence = 0;
+        continue;
+      }
       afterDaemonGeneration = snapshot.daemonGeneration;
       afterSequence = snapshot.sequence;
       consecutiveFailures = 0;

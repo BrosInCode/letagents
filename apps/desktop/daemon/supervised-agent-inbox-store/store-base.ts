@@ -10,6 +10,14 @@ import { rowToItem } from "./row-mapping.js";
 /** Tells one opened connection from the next, so a version read on a replaced connection never equals an older one. */
 const connectionIdentities = new WeakMap<DatabaseSync, number>();
 let nextConnectionIdentity = 1;
+function connectionIdentity(database: DatabaseSync): number {
+  let identity = connectionIdentities.get(database);
+  if (identity === undefined) { identity = nextConnectionIdentity++; connectionIdentities.set(database, identity); }
+  return identity;
+}
+
+/** Per-agent inbox versions under one connection-and-schema scope; see InboxStoreBase.inboxStateVersions. */
+export type InboxStateVersions = { scope: string; byAgent: Map<string, number> };
 
 export abstract class InboxStoreBase {
   private database: DatabaseSync | null = null;
@@ -50,12 +58,31 @@ export abstract class InboxStoreBase {
   async committedStateVersion(): Promise<string | null> {
     return this.read((database) => {
       if (database.isTransaction) return null;
-      let identity = connectionIdentities.get(database);
-      if (identity === undefined) { identity = nextConnectionIdentity++; connectionIdentities.set(database, identity); }
+      const identity = connectionIdentity(database);
       const dataVersion = (this.reads.get(database, "dataVersion").get() as Row).data_version;
       const totalChanges = (this.reads.get(database, "totalChanges").get() as Row).value;
       const schemaVersion = (this.reads.get(database, "schemaVersion").get() as Row).schema_version;
       return `${identity}:${String(dataVersion)}:${String(totalChanges)}:${String(schemaVersion)}`;
+    });
+  }
+
+  /**
+   * The inbox version of every agent, as the database itself counts it: the
+   * `agent_state_versions` triggers (daemon-state-database/shared.ts) move an
+   * agent's `inbox_version` on every row change, by any connection or process,
+   * in the tables its inbox inputs are read from. An agent without a row is at
+   * version 0. The scope tells one connection and schema from the next, so a
+   * version read on a replaced connection or after a schema change never
+   * equals an older one. Null while this connection has a transaction open,
+   * as committedStateVersion() is.
+   */
+  async inboxStateVersions(): Promise<InboxStateVersions | null> {
+    return this.read((database) => {
+      if (database.isTransaction) return null;
+      const schemaVersion = (this.reads.get(database, "schemaVersion").get() as Row).schema_version;
+      const byAgent = new Map<string, number>();
+      for (const row of this.reads.get(database, "agentStateVersions").all() as Row[]) byAgent.set(String(row.agent_id), Number(row.inbox_version));
+      return { scope: `${connectionIdentity(database)}:${String(schemaVersion)}`, byAgent };
     });
   }
 

@@ -61,7 +61,7 @@ async function fixture() {
       latestContinuationRepair: (agentId) => { reads.repairs += 1; return store.latestContinuationRepair(agentId); },
       ingressHealth: (agentId) => { reads.ingress += 1; return store.ingressHealth(agentId); },
       blockedHeadSkip: (agentId) => store.blockedHeadSkip(agentId),
-      committedStateVersion: () => store.committedStateVersion(),
+      inboxStateVersions: () => store.inboxStateVersions(),
     },
     durability: { getAttempt: async () => { throw new Error("unused"); } },
     workerAuthority: { currentHostGrant: () => authority.hostGrant ? {} as never : null, pollingContract: async () => null },
@@ -220,6 +220,40 @@ test("reused inputs never hold back the clock or an authority change", async () 
     assert.equal((await env.watch([starting]))[0]!.room_agent_state?.connection.detail, "Restoring the provider and exact worker binding.");
     assert.equal(env.reads.receipts, 1);
   } finally {
+    await env.cleanup();
+  }
+});
+
+test("a write for one agent costs no other agent a read, whichever connection writes it", async () => {
+  const env = await fixture();
+  const second: DaemonManifestEntry = { ...entry, id: "agent_2" };
+  const other = new DatabaseSync(env.path);
+  try {
+    await env.ingest("1");
+    await env.watch([entry, second]);
+    assert.deepEqual(env.reads, { receipts: 2, repairs: 2, ingress: 2 });
+
+    // This connection writes agent_1's inbox: only agent_1 is read again.
+    await env.ingest("2");
+    await env.watch([entry, second]);
+    assert.deepEqual(env.reads, { receipts: 3, repairs: 3, ingress: 3 });
+
+    // Another connection writes agent_2's inbox: only agent_2 is read again.
+    await env.store.ingestPoll({ agent_id: second.id, room_id: second.room_id, last_observed_message_id: "9",
+      messages: [{ source_message_id: "9", source_message: { id: "9", text: "hello" }, activation: { for_current_agent: true } }] });
+    await env.watch([entry, second]);
+    assert.deepEqual(env.reads, { receipts: 4, repairs: 4, ingress: 4 });
+    other.prepare("UPDATE supervised_agent_inbox SET last_error='changed elsewhere' WHERE agent_id='agent_2'").run();
+    const views = await env.watch([entry, second]);
+    assert.deepEqual(env.reads, { receipts: 5, repairs: 5, ingress: 5 });
+    assert.equal(views[1]?.delivery_receipts?.[0]?.error, "changed elsewhere");
+    assert.equal(views[0]?.delivery_receipts?.length, 2);
+
+    // Nothing written: nothing read.
+    await env.watch([entry, second]);
+    assert.deepEqual(env.reads, { receipts: 5, repairs: 5, ingress: 5 });
+  } finally {
+    other.close();
     await env.cleanup();
   }
 });
