@@ -48,6 +48,8 @@ export class ManifestStore {
   writes: Promise<void> = Promise.resolve();
   closed = false;
   pendingActivityState: ((agentId: string) => { observedState: DaemonManifestEntry["observed_state"] | null } | null) | null = null;
+  /** The entries loadForStateWatch last projected, each under the manifest version read before it; see entry-reads.ts. */
+  stateWatchEntries: { database: DatabaseSync; byAgent: Map<string, { version: number; entry: DaemonManifestEntry }> } | null = null;
 
   constructor(
     readonly path: string,

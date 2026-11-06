@@ -26,7 +26,7 @@ import {
 import { mapAgentConfiguration, mapAgentInspectorDetail, mapRoomMove } from "./agent-mapping.js";
 import { mapActivity, mapEntry } from "./entry-mapping.js";
 import { supervisorStateWatchAcceptsStatus } from "./state-watch-policy.js";
-import type { WireActivityEvent, WireEntry } from "./types.js";
+import type { DesktopSupervisorStateWatchResult, WireActivityEvent, WireEntry } from "./types.js";
 import { nonEmptyString, record, validTurnControlActionId } from "./wire-values.js";
 import { SupervisorDaemonHostApprovalClient } from "./client-host-approvals.js";
 
@@ -69,15 +69,42 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     afterSequence: number;
     waitMs?: number;
   }): Promise<DesktopSupervisorStateSnapshot> {
+    const result = await this.requestStateWatch(input, false);
+    if (!result.complete) throw new Error("Supervisor daemon returned state changes where the whole state was requested.");
+    return { daemonGeneration: result.daemonGeneration, sequence: result.sequence, entries: result.entries };
+  }
+
+  /**
+   * The state since the sequence the caller holds, when the daemon still
+   * remembers that sequence: only the entries whose view changed, the ids of
+   * entries that are gone, and the order of every entry now. Otherwise, and
+   * from a daemon older than this request, the whole state as watchState gives it.
+   */
+  async watchStateChanges(input: {
+    afterDaemonGeneration: number;
+    afterSequence: number;
+    waitMs?: number;
+  }): Promise<DesktopSupervisorStateWatchResult> {
+    return this.requestStateWatch(input, true);
+  }
+
+  private async requestStateWatch(
+    input: { afterDaemonGeneration: number; afterSequence: number; waitMs?: number },
+    changedOnly: boolean,
+  ): Promise<DesktopSupervisorStateWatchResult> {
     const waitMs = Math.max(0, Math.min(30_000, input.waitMs ?? 25_000));
     const value = await this.request<{
       daemon_generation: number;
       sequence: number;
       entries: WireEntry[];
+      complete?: unknown;
+      removed_entry_ids?: unknown;
+      entry_order?: unknown;
     }>("manifest.watch_state", {
       after_daemon_generation: input.afterDaemonGeneration,
       after_sequence: input.afterSequence,
       wait_ms: waitMs,
+      ...(changedOnly ? { changed_only: true } : {}),
     }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, waitMs + this.requestTimeoutMs, true);
     if (
       !Number.isSafeInteger(value.daemon_generation)
@@ -88,10 +115,22 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     ) {
       throw new Error("Supervisor daemon returned an invalid state snapshot.");
     }
+    const entries = value.entries.map((entry) => mapEntry(entry, SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT));
+    if (value.complete !== false) {
+      return { complete: true, daemonGeneration: value.daemon_generation, sequence: value.sequence, entries };
+    }
+    const ids = (list: unknown): string[] | null =>
+      Array.isArray(list) && list.every((id) => typeof id === "string" && id.length > 0) ? list as string[] : null;
+    const removedEntryIds = ids(value.removed_entry_ids);
+    const entryOrder = ids(value.entry_order);
+    if (!removedEntryIds || !entryOrder) throw new Error("Supervisor daemon returned invalid state changes.");
     return {
+      complete: false,
       daemonGeneration: value.daemon_generation,
       sequence: value.sequence,
-      entries: value.entries.map((entry) => mapEntry(entry, SUPERVISOR_STATE_ACTIVITY_SUMMARY_LIMIT)),
+      changedEntries: entries,
+      removedEntryIds,
+      entryOrder,
     };
   }
 

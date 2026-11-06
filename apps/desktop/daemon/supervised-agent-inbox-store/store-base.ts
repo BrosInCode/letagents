@@ -2,6 +2,7 @@ import { RoomLatencyTrace } from "../room-latency-trace.js";
 import { PreparedReadStatements } from "../prepared-reads.js";
 import { DatabaseSync } from "node:sqlite";
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "../daemon-state-database.js";
+import { applyAgentStateVersionSchema } from "../daemon-state-database/shared.js";
 import { pruneSupervisedAgentHistory, settleSupervisedTerminalItem } from "../supervised-agent-history-retention.js";
 import type { SupervisedInboxItem, SupervisedInboxEvent, Row } from "./types.js";
 import { run, INBOX_READS } from "./sql.js";
@@ -10,6 +11,14 @@ import { rowToItem } from "./row-mapping.js";
 /** Tells one opened connection from the next, so a version read on a replaced connection never equals an older one. */
 const connectionIdentities = new WeakMap<DatabaseSync, number>();
 let nextConnectionIdentity = 1;
+function connectionIdentity(database: DatabaseSync): number {
+  let identity = connectionIdentities.get(database);
+  if (identity === undefined) { identity = nextConnectionIdentity++; connectionIdentities.set(database, identity); }
+  return identity;
+}
+
+/** Per-agent inbox versions under one connection-and-schema scope; see InboxStoreBase.inboxStateVersions. */
+export type InboxStateVersions = { scope: string; byAgent: Map<string, number> };
 
 export abstract class InboxStoreBase {
   private database: DatabaseSync | null = null;
@@ -37,25 +46,22 @@ export abstract class InboxStoreBase {
   }
 
   /**
-   * A token that is equal on two reads only if neither the rows nor the schema
-   * of this database file changed between them, by any connection. Another
-   * connection's commit changes `PRAGMA data_version` here; a row change made
-   * on this connection (committed or not) changes `total_changes()`; a schema
-   * change made on this connection (which changes neither of those) changes
-   * `PRAGMA schema_version`. Null while this connection has a transaction
-   * open, because its reads then see rows that may still be rolled back. Its
-   * parts are SQLite's own counters, so a writer that forgets to report a
-   * change cannot leave it unchanged.
+   * The inbox version of every agent, as the database itself counts it: the
+   * `agent_state_versions` triggers (daemon-state-database/shared.ts) move an
+   * agent's `inbox_version` on every row change, by any connection or process,
+   * in the tables its inbox inputs are read from. An agent without a row is at
+   * version 0. The scope tells one connection and schema from the next, so a
+   * version read on a replaced connection or after a schema change never
+   * equals an older one. Null while this connection has a transaction open,
+   * because its reads then see rows that may still be rolled back.
    */
-  async committedStateVersion(): Promise<string | null> {
+  async inboxStateVersions(): Promise<InboxStateVersions | null> {
     return this.read((database) => {
       if (database.isTransaction) return null;
-      let identity = connectionIdentities.get(database);
-      if (identity === undefined) { identity = nextConnectionIdentity++; connectionIdentities.set(database, identity); }
-      const dataVersion = (this.reads.get(database, "dataVersion").get() as Row).data_version;
-      const totalChanges = (this.reads.get(database, "totalChanges").get() as Row).value;
       const schemaVersion = (this.reads.get(database, "schemaVersion").get() as Row).schema_version;
-      return `${identity}:${String(dataVersion)}:${String(totalChanges)}:${String(schemaVersion)}`;
+      const byAgent = new Map<string, number>();
+      for (const row of this.reads.get(database, "agentStateVersions").all() as Row[]) byAgent.set(String(row.agent_id), Number(row.inbox_version));
+      return { scope: `${connectionIdentity(database)}:${String(schemaVersion)}`, byAgent };
     });
   }
 
@@ -109,7 +115,11 @@ export abstract class InboxStoreBase {
     if (!this.initializing) this.initializing = (this.schemaPrepared
       ? openPreparedDaemonStateDatabase(this.databasePath)
       : openDaemonStateDatabase(this.databasePath, (database) => new DaemonStateSchema().createSchema(database)))
-      .then((database) => { this.database = database; return database; });
+      .then((database) => {
+        // A repair on another connection may have rebuilt a table and lost the version triggers this store reads by.
+        applyAgentStateVersionSchema(database);
+        this.database = database; return database;
+      });
     return this.initializing;
   }
   protected require(value: string, field: string): void { if (!value?.trim()) throw new Error(`Supervised inbox ${field} is required.`); }

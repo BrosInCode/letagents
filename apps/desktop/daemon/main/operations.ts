@@ -10,6 +10,7 @@ import type { ConvergenceRequestKind } from "../provider-execution-coordinator.j
 import type { DaemonReconcileInput } from "../provider-reconciliation-coordinator.js";
 import type { TerminalCommitFence } from "../provider-terminal-coordinator.js";
 import type { DaemonActivityEvent, DaemonAgentStreamEvent, DaemonManifestEntry, DaemonManifestEntryView, DaemonRoomMoveRecord, ExecutionTerminalPayload, ObservedState, PolicyCondition, ReconciliationNotice } from "../types.js";
+import type { DaemonStateWatchResult } from "../daemon-state-watch.js";
 import type { WorkerSessionBinding } from "../worker-binding-store.js";
 import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { SupervisorDaemonState } from "./state.js";
@@ -173,11 +174,8 @@ export abstract class SupervisorDaemonOperations extends SupervisorDaemonState {
     afterDaemonGeneration: number;
     afterSequence: number;
     waitMs: number;
-  }): Promise<{
-    daemon_generation: number;
-    sequence: number;
-    entries: DaemonManifestEntryView[];
-  }> {
+    changedOnly?: boolean;
+  }): Promise<DaemonStateWatchResult> {
     return this.stateWatch.watch(input);
   }
 

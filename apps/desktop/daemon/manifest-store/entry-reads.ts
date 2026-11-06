@@ -11,6 +11,7 @@ import { executionRuntimeStorageIdentity } from "../execution-shadow-store.js";
 import { lifecycleAuthorityModeSchema, type LifecycleAuthorityMode } from "../lifecycle-authority-mode.js";
 import type { DaemonManifest, DaemonManifestEntry, DaemonProviderConnection } from "../types.js";
 import { type Row, type ActivityShape, type PendingTypedLifecycleEffect, type TypedLifecycleEffectInstallation, ManifestConflictError, storeMethods } from "./shared.js";
+import { deepFreeze } from "../deep-freeze.js";
 
 export const entryReads = storeMethods({
   async load(activityMode: "full" | "summary" = "full"): Promise<DaemonManifest> {
@@ -21,6 +22,58 @@ export const entryReads = storeMethods({
     return { generation, entries };
   },
 
+  /**
+   * The manifest as the state watch reads it: every entry in summary activity
+   * mode, projected again only for an agent whose manifest rows changed since
+   * the last such read. The database counts those changes itself
+   * (`agent_state_versions.manifest_version`, moved by triggers on every table
+   * an entry is projected from, by any connection), so a writer cannot leave an
+   * entry stale, and a change for one agent costs no other agent a read.
+   * Entries are frozen and shared between reads: a caller that edits one
+   * throws instead of changing what a later read hands out.
+   */
+  async loadForStateWatch(): Promise<DaemonManifest> {
+    const database = await this.getDatabase();
+    const generation = Number((this.reads.get(database, "generation").get() as Row).generation);
+    const project = (row: Row): DaemonManifestEntry => deepFreeze(composeDaemonManifestEntry(this.projectionFromRow(database, row, "summary")));
+    // Rows of a transaction still open on this connection may yet roll back,
+    // and their versions with them: project them, but keep nothing.
+    if (database.isTransaction) {
+      return { generation, entries: (this.reads.get(database, "allEntries").all() as Row[]).map(project) };
+    }
+    const kept = this.stateWatchEntries?.database === database
+      ? this.stateWatchEntries.byAgent : new Map<string, { version: number; entry: DaemonManifestEntry }>();
+    // Versions before rows: an entry kept under a version was projected after it was read.
+    const versions = new Map<string, number>();
+    for (const row of this.reads.get(database, "agentManifestVersions").all() as Row[]) versions.set(String(row.agent_id), Number(row.manifest_version));
+    const keep = new Map<string, { version: number; entry: DaemonManifestEntry }>();
+    const entries: DaemonManifestEntry[] = [];
+    if (kept.size === 0) {
+      for (const row of this.reads.get(database, "allEntries").all() as Row[]) {
+        const entry = project(row);
+        keep.set(entry.id, { version: versions.get(entry.id) ?? 0, entry });
+        entries.push(entry);
+      }
+    } else {
+      for (const idRow of this.reads.get(database, "entryIds").all() as Row[]) {
+        const id = String(idRow.agent_id);
+        const version = versions.get(id) ?? 0;
+        const previous = kept.get(id);
+        if (previous && previous.version === version) {
+          keep.set(id, previous);
+          entries.push(previous.entry);
+          continue;
+        }
+        const row = this.reads.get(database, "entry").get(id) as Row | undefined;
+        if (!row) continue;
+        const entry = project(row);
+        keep.set(id, { version, entry });
+        entries.push(entry);
+      }
+    }
+    this.stateWatchEntries = { database, byAgent: keep };
+    return { generation, entries };
+  },
   async getEntry(agentId: string, activityMode: "full" | "summary" = "full"): Promise<DaemonManifestEntry | undefined> {
     const database = await this.getDatabase();
     return this.readEntryFromDatabase(database, agentId, activityMode);

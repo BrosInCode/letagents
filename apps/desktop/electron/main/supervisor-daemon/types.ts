@@ -175,3 +175,20 @@ export interface SupervisorDaemonLifecycleOptions {
    */
   readyStatusTtlMs?: number;
 }
+
+/**
+ * What the state watch learns from one answer: the whole state, or the state
+ * since the sequence it holds (the entries whose view changed, the ids of
+ * entries that are gone, and the order of every entry now).
+ */
+export type DesktopSupervisorStateChanges = {
+  complete: false;
+  daemonGeneration: number;
+  sequence: number;
+  changedEntries: import("../../ipc-types.js").DesktopSupervisorManifestEntry[];
+  removedEntryIds: string[];
+  entryOrder: string[];
+};
+export type DesktopSupervisorStateWatchResult =
+  | ({ complete: true } & import("../../ipc-types.js").DesktopSupervisorStateSnapshot)
+  | DesktopSupervisorStateChanges;

@@ -204,6 +204,8 @@ export const MANIFEST_ENTRY_SELECT = `
 export const MANIFEST_READS = {
   generation: "SELECT generation FROM manifest_metadata WHERE singleton = 1",
   allEntries: `${MANIFEST_ENTRY_SELECT} ORDER BY i.sort_order`,
+  entryIds: "SELECT agent_id FROM agent_identities ORDER BY sort_order",
+  agentManifestVersions: "SELECT agent_id, manifest_version FROM agent_state_versions",
   roomEntries: `${MANIFEST_ENTRY_SELECT} WHERE m.room_id = ? ORDER BY i.sort_order`,
   entry: `${MANIFEST_ENTRY_SELECT} WHERE i.agent_id = ?`,
   activityState: `SELECT observed_state,
