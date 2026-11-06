@@ -179,11 +179,13 @@ test("Needs you merges changes-only answers, reads the whole state again when th
     { complete: false, daemonGeneration: 1, sequence: 3, changedEntries: [], removedEntryIds: [], entryOrder: ["a", "b", "c"] },
     // The daemon restarted between two polls. The cursor is from another
     // generation, so the new daemon answers its whole state; the watch keeps
-    // none of it until it has negotiated with this daemon.
-    { complete: true, daemonGeneration: 2, sequence: 1, entries: [entry("a", "running")] },
+    // none of it until it has negotiated with this daemon (an entry only this
+    // answer names would otherwise show in the snapshots below).
+    { complete: true, daemonGeneration: 2, sequence: 1, entries: [entry("leaked", "running")] },
   ];
   let connects = 0;
-  supervisorDaemonClient.connectIfRunning = (async () => { connects += 1; return running ? status : null; }) as typeof supervisorDaemonClient.connectIfRunning;
+  // Counted while the script runs: once it is exhausted the loop may negotiate once more before the subscriber leaves.
+  supervisorDaemonClient.connectIfRunning = (async () => { if (running) connects += 1; return running ? status : null; }) as typeof supervisorDaemonClient.connectIfRunning;
   supervisorDaemonClient.watchState = (async (input: { afterDaemonGeneration: number; afterSequence: number }) => {
     wholeReads.push({ afterDaemonGeneration: input.afterDaemonGeneration, afterSequence: input.afterSequence });
     const answer = wholeAnswers.shift();
