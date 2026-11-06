@@ -60,6 +60,7 @@ const roomScrollPositions = new Map<string, ChatScrollPosition>()
         key="events"
         class="room-tab-panel"
         :events="githubEvents"
+        :selected-event-id="selectedActivityEventId"
         :roomIdentifier="room?.identifier || ''"
         @refresh="emit('refreshGitHubEvents')"
         @loadOlder="emit('loadOlderGitHubEvents')"
@@ -157,7 +158,11 @@ import { onScopeDispose } from "vue";
 import { useRoomUnread } from "@/composables/roomUnread";
 import PinnedMessages from '../../../../../shared/ui/PinnedMessages.vue'
 import { injectRoomMessagePins } from '@/composables/roomMessagePins'
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, provide, ref, watch } from 'vue'
+import { roomGitHubActivityKey } from '../../../../../shared/ui/room-github-activity'
+import { groupActivity, githubUrl } from '../../../../../shared/ui/activity/model'
+import { githubChatHighlights, githubUpdateRows } from '../../../../../shared/grouped-github-updates'
+import { parseGitHubEventPresentation } from '@/components/room/githubEventMessage'
 
 import { asyncRoomPanel } from './asyncRoomPanel'
 import MessageList from '@/components/room/MessageList.vue'
@@ -273,7 +278,19 @@ const emit = defineEmits<{
   updateFocusSettings: [focusKey: string, settings: FocusRoomSettings]
   openTask: [taskId: string]
   openChat: []
+  openEvents: []
 }>()
+
+const selectedActivityEventId = ref<string | null>(null)
+provide(roomGitHubActivityKey, {
+  available: computed(() => props.githubEventsSupported),
+  highlights: computed(() => githubChatHighlights(githubUpdateRows(props.messages, parseGitHubEventPresentation), groupActivity(props.githubEvents))),
+  open: (url, eventId) => {
+    const target = githubUrl(url)?.toLowerCase()
+    selectedActivityEventId.value = eventId || (target ? props.githubEvents.find(event => githubUrl(event.github_object_url)?.toLowerCase() === target)?.id || null : null)
+    emit('openEvents')
+  },
+})
 
 const messagePins = injectRoomMessagePins()
 const roomUnread = useRoomUnread();
@@ -331,6 +348,7 @@ watch(() => props.activeTab, (tab) => {
 })
 watch(() => props.room?.identifier, () => {
   revealMessageId.value = null
+  selectedActivityEventId.value = null
 })
 
 function emitShareResults(summary: string, details: FocusRoomConclusionDetails | null) {

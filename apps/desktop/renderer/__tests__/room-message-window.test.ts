@@ -609,7 +609,7 @@ test("a 1,000-event GitHub run mounts a bounded number of rows and opens a hidde
     view.props.messages = [...messages, ...githubRun(1000, messages.at(-1)!.timestamp)];
     await flush();
     const rows = descendants(view.list).filter(node => String(node.props.class ?? "").split(/\s+/).includes("github-update-row"));
-    assert.ok(rows.length <= githubGroupRowLimit, `${rows.length} group rows`);
+    assert.equal(rows.length, 0, "routine event rows stay unmounted until the digest is opened");
     assert.ok(view.mounted().length <= messageWindowSize, `${view.mounted().length} message rows: closed history is not mounted`);
     assert.ok(!view.mounted().includes("gh_10"));
     assert.equal(view.viewport().scrollToMessage("gh_10"), true, "an event in the group is never sent to history paging");

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { after, before, test } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { createSSRApp, createRenderer, h, nextTick, reactive, ssrContextKey } from 'vue'
+import { createSSRApp, createRenderer, h, nextTick, reactive, ref, ssrContextKey } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { createServer, type ViteDevServer } from 'vite'
 
@@ -10,6 +10,7 @@ let GitHubEventCard: unknown
 let Group: any
 let Disclosure: any
 let ThreadTransition: any
+let activityKey: symbol
 
 before(async () => {
   vite = await createServer({
@@ -22,6 +23,7 @@ before(async () => {
   Disclosure = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/DisclosurePanel.vue', import.meta.url)))).default
   ThreadTransition = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/ThreadTransition.vue', import.meta.url)))).default
   Group = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/RoomGitHubUpdates.vue', import.meta.url)))).default
+  activityKey = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/room-github-activity.ts', import.meta.url)))).roomGitHubActivityKey
 })
 
 after(async () => {
@@ -72,7 +74,10 @@ test('whole-group collapse retains individual history state; revealing a hidden 
   const messages = [{ id: 'msg_1', timestamp: '2026-10-12T02:41:15Z' }]
   const props = { grouped: true, messages, parseEvent: () => historyEvent }
   const html = await renderToString(createSSRApp({ render: () => h(Group, props) }))
-  assert.match(html, /<button[^>]*class="[^"]*github-updates-heading[^"]*"[^>]*aria-expanded="true"[^>]*aria-controls=/)
+  assert.match(html, /<button[^>]*class="[^"]*github-updates-heading[^"]*"[^>]*aria-expanded="false"[^>]*aria-controls=/)
+  assert.match(html, /Repository activity/)
+  assert.match(html, /1 event/)
+  assert.doesNotMatch(html, /class="github-update-row[" ]/)
   let vm: any
   const events: string[] = []
   const app = renderer.createApp({ setup() {
@@ -83,6 +88,7 @@ test('whole-group collapse retains individual history state; revealing a hidden 
   app.mount({})
   try {
     const key = vm.rows.value[0].key
+    await vm.toggleGroup({ detail: 0 })
     await vm.toggle(key, { detail: 0 })
     assert.equal(vm.open.value.has(key), true)
     await vm.toggleGroup({ detail: 0 })
@@ -96,7 +102,32 @@ test('whole-group collapse retains individual history state; revealing a hidden 
     assert.equal(vm.collapsed.value, false)
     assert.equal(vm.open.value.has(key), true)
     assert.equal(ready, true)
-    assert.equal(events.filter(name => name === 'layoutStart').length, 2)
+    assert.equal(events.filter(name => name === 'layoutStart').length, 3)
+  } finally { app.unmount() }
+})
+
+test('Chat renders highlights only in their owning block and opens the selected Activity event', async () => {
+  const event = { ...historyEvent, statusLabel: 'merged', headline: 'PR #800 merged by Ada' }
+  const props = reactive({ grouped: true, messages: [{ id: 'msg_1', timestamp: '2026-10-12T02:41:15Z' }], parseEvent: () => event })
+  const opened: unknown[] = []
+  const available = ref(true)
+  let vm: any, prevented = 0
+  const app = renderer.createApp({ setup() { vm = Group.setup(props, { expose() {}, emit() {} }); return () => h('div') } })
+  app.provide(ssrContextKey, { modules: new Set() })
+  app.provide(activityKey, { highlights: ref([{ sourceMessageId: 'msg_2', merged: true, activityEventId: 'activity_merge' }]), available, open: (url: string, eventId: string) => opened.push({ url, eventId }) })
+  app.mount({})
+  try {
+    assert.equal(vm.highlights.value.length, 0)
+    props.messages = [{ id: 'msg_2', timestamp: '2026-10-12T02:42:15Z' }]
+    assert.equal(vm.highlights.value.length, 1)
+    vm.openActivity({ preventDefault() { prevented++ } }, event.url, vm.highlights.value[0].activityEventId)
+    assert.deepEqual(opened, [{ url: event.url, eventId: 'activity_merge' }])
+    assert.equal(prevented, 1)
+    vm.openActivity({ metaKey: true, preventDefault() { prevented++ } }, event.url)
+    available.value = false
+    vm.openActivity({ preventDefault() { prevented++ } }, event.url)
+    assert.deepEqual(opened, [{ url: event.url, eventId: 'activity_merge' }])
+    assert.equal(prevented, 1)
   } finally { app.unmount() }
 })
 
@@ -108,6 +139,7 @@ for (const atBottom of [false, true]) {
     app.provide(ssrContextKey, { modules: new Set() }); app.mount({})
     try {
       const key = vm.rows.value[0].key
+      await vm.toggleGroup({ detail: 0 })
       let top = atBottom ? 400 : 120, height = 500
       const el: any = { get scrollTop() { return top }, set scrollTop(value) { top = Math.min(value, height - 100) },
         get clientHeight() { return vm.collapsed.value ? 0 : 100 }, get scrollHeight() { return vm.collapsed.value ? 0 : height },

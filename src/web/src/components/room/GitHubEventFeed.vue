@@ -1,12 +1,12 @@
 <template>
   <div class="web-room-activity">
-    <ActivityFeed :events="events" :room-identifier="roomIdentifier" :available="isAvailable" :has-more="hasMore" :error="errorMessage" :loading="isLoading" :loading-older="isLoading" @refresh="emit('refresh')" @load-older="emit('loadOlder')" @open-task="emit('openTask', $event)" />
+    <ActivityFeed :events="events" :room-identifier="roomIdentifier" :selected-event-id="selectedEventId" :available="isAvailable" :has-more="hasMore" :error="errorMessage" :loading="isLoading" :loading-older="isLoading" @refresh="emit('refresh')" @load-older="emit('loadOlder')" @open-task="emit('openTask', $event)" />
   </div>
 </template>
 <script setup lang="ts">
 import ActivityFeed from '../../../../../shared/ui/activity/ActivityFeed.vue'
 import type { RoomGitHubEvent } from '@/composables/useRoom'
-defineProps<{ events: readonly RoomGitHubEvent[]; roomIdentifier: string; repository?: string | null; isAvailable: boolean; hasMore?: boolean; errorMessage?: string | null; isLoading?: boolean }>()
+defineProps<{ events: readonly RoomGitHubEvent[]; roomIdentifier: string; selectedEventId?: string | null; repository?: string | null; isAvailable: boolean; hasMore?: boolean; errorMessage?: string | null; isLoading?: boolean }>()
 const emit = defineEmits<{ refresh: []; loadOlder: []; openTask: [id: string] }>()
 </script>
 <style scoped>

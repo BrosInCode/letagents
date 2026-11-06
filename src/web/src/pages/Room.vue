@@ -136,6 +136,7 @@
       @shareResults="handleShareFocusResults"
       @updateFocusSettings="handleUpdateFocusSettings"
       @openChat="handleActiveTabChange('chat')"
+      @openEvents="handleActiveTabChange('events')"
     >
       <template #thread-composer="{ parent, quote, clearQuote, sent }">
         <Composer v-if="isConnected" :inline-thread="true" :thread-root-id="parent.id" :sender-name="senderName"
