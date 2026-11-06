@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { Buffer } from "node:buffer";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   canonicalSupervisorGrantAgentKey,
   clearDesktopSupervisorGrantRegistryCacheForTest,
@@ -1291,14 +1291,71 @@ test("a registry read that fails after a good one keeps the last known agent key
   });
 });
 
-test("a registry read that fails before any good read rejects instead of mislabelling every agent", async () => {
+test("a corrupt registry on the first read still lists every agent, with null keys, and warns once", async () => {
   await withRegistry(async path => {
     clearDesktopSupervisorGrantRegistryCacheForTest();
-    await writeFile(path, "{ this is not json ");
-    await assert.rejects(projectDesktopSupervisorAgentKeys([{ id: "copper", agentKey: null }]), /could not be read/);
-    // The failure is not cached: the same call succeeds as soon as the file is good.
-    await writeFile(path, registryWithKeys({ copper: "EmmyMay/copper" }));
-    assert.equal((await projectDesktopSupervisorAgentKeys([{ id: "copper", agentKey: null }]))[0]!.agentKey, "EmmyMay/copper");
+    await withCapturedWarnings(async warnings => {
+      await writeFile(path, "{ this is not json ");
+      const input = [{ id: "copper", agentKey: null }, { id: "explicit", agentKey: "Jessica/agent" }, { id: "local", agentKey: null, localRoomId: "room" }];
+      // It must not reject: a rejection would hide running agents from the user.
+      const projected = await projectDesktopSupervisorAgentKeys(input);
+      assert.deepEqual(projected.map(entry => entry.id), ["copper", "explicit", "local"]);
+      assert.deepEqual(projected.map(entry => entry.agentKey), [null, "Jessica/agent", "local/supervised/local"]);
+      await projectDesktopSupervisorAgentKeys(input);
+      assert.equal(warnings.length, 1, "one warning for the whole failure streak");
+      // The failure is not cached: the same call gets the keys once the file is good.
+      await writeFile(path, registryWithKeys({ copper: "EmmyMay/copper" }));
+      assert.equal((await projectDesktopSupervisorAgentKeys(input))[0]!.agentKey, "EmmyMay/copper");
+    });
+  });
+});
+
+test("replaying remembered keys after a failed read never gives one key to two asked entries", async () => {
+  await withRegistry(async path => {
+    clearDesktopSupervisorGrantRegistryCacheForTest();
+    await withCapturedWarnings(async () => {
+      // Two retired entries recorded the same key and nothing live holds it.
+      await writeFile(path, JSON.stringify({
+        version: 7, grants: {}, entryAgentKeys: { live: "owner/live" }, credentialRevocations: {},
+        purgeRevocationReceipts: {
+          older: retirementReceipt("owner/agent", "2026-11-05T00:00:00.000Z"),
+          newer: retirementReceipt("owner/agent", "2026-11-06T00:00:00.000Z"),
+        },
+      }));
+      const older = { id: "older", agentKey: null };
+      const newer = { id: "newer", agentKey: null };
+      const live = { id: "live", agentKey: null };
+      // A full read gives the key to the newest retirement only.
+      assert.deepEqual((await projectDesktopSupervisorAgentKeys([older, newer, live])).map(entry => entry.agentKey), [null, "owner/agent", "owner/live"]);
+      // A list for a room that holds only the older entry gives it to that entry.
+      assert.deepEqual((await projectDesktopSupervisorAgentKeys([older])).map(entry => entry.agentKey), ["owner/agent"]);
+      // The registry breaks. Both entries would get the key from memory, so neither does.
+      await writeFile(path, "{ broken, and longer than the registry file before it was rewritten ".repeat(8));
+      assert.deepEqual((await projectDesktopSupervisorAgentKeys([older, newer, live])).map(entry => entry.agentKey), [null, null, "owner/live"]);
+      // Asked about alone, one entry is the only claimant and keeps its key.
+      assert.deepEqual((await projectDesktopSupervisorAgentKeys([newer])).map(entry => entry.agentKey), ["owner/agent"]);
+    });
+  });
+});
+
+test("a registry that becomes unreadable after a good read is a failure, not a missing file", async t => {
+  if (process.platform === "win32" || process.getuid?.() === 0) {
+    t.skip("directory permissions do not block the owner on Windows or for root");
+    return;
+  }
+  await withRegistry(async path => {
+    clearDesktopSupervisorGrantRegistryCacheForTest();
+    await withCapturedWarnings(async warnings => {
+      const input = [{ id: "copper", agentKey: null }];
+      await writeFile(path, registryWithKeys({ copper: "EmmyMay/copper" }));
+      assert.equal((await projectDesktopSupervisorAgentKeys(input))[0]!.agentKey, "EmmyMay/copper");
+      // With the parent folder closed, stat fails too, but the file is not missing.
+      await chmod(dirname(path), 0o000);
+      try {
+        assert.equal((await projectDesktopSupervisorAgentKeys(input))[0]!.agentKey, "EmmyMay/copper");
+        assert.equal(warnings.length, 1);
+      } finally { await chmod(dirname(path), 0o700); }
+    });
   });
 });
 

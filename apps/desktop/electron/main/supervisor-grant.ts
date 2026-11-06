@@ -423,7 +423,13 @@ async function readRegistryShared(): Promise<Readonly<StoredGrantRegistry> | nul
   if (cached && cached.path === path && cached.fingerprint === fingerprint) return cached.registry;
   let registry: StoredGrantRegistry | null;
   let readFailed = false;
-  try { registry = registryFrom(JSON.parse(await readFile(path, "utf8"))); } catch { registry = null; readFailed = fingerprint !== null; }
+  try { registry = registryFrom(JSON.parse(await readFile(path, "utf8"))); } catch (error) {
+    registry = null;
+    // Only a file that is truly absent is "missing". Any other error (a denied
+    // read, an unreadable parent folder, bad JSON) is a failure, even when the
+    // stat above failed for the same reason and gave no fingerprint.
+    readFailed = (error as NodeJS.ErrnoException | undefined)?.code !== "ENOENT";
+  }
   registrySnapshot = { path, fingerprint, registry, ...(readFailed ? { readFailed } : {}) };
   return registry;
 }
@@ -1100,9 +1106,33 @@ export async function readDesktopSupervisorGrantAgentKeysForEntries(
  * The agent keys of the last successful projection read, merged across calls.
  * Null until one read succeeds. A later read that fails keeps serving these, so
  * a transient registry fault cannot relabel every supervised agent as External.
+ * Before any good read, a failing registry gives an empty map: every agent still
+ * shows, with External labels, so the user can see and stop it.
  */
 let lastGoodAgentKeys: Map<string, string> | null = null;
 let agentKeyReadFailureLogged = false;
+
+/**
+ * The remembered keys, minus any key that more than one asked entry would get.
+ * A normal read gives a retired agent key to one claimant among the entries it
+ * asked about. The remembered map merges winners from reads that asked about
+ * different rooms, so replaying it for one set of entries can hand one key to
+ * two of them, which the renderer reads as ambiguous.
+ */
+function lastGoodAgentKeysWithoutSharedKeys(askedEntryIds: readonly string[]): ReadonlyMap<string, string> {
+  const remembered = lastGoodAgentKeys ?? new Map<string, string>();
+  const holders = new Map<string, string[]>();
+  for (const rawEntryId of askedEntryIds) {
+    const entryId = rawEntryId.trim();
+    const agentKey = entryId ? remembered.get(entryId) : undefined;
+    if (agentKey) holders.set(agentKey, [...holders.get(agentKey) ?? [], entryId]);
+  }
+  const served = new Map(remembered);
+  for (const entryIds of holders.values()) {
+    if (entryIds.length > 1) for (const entryId of entryIds) served.delete(entryId);
+  }
+  return served;
+}
 
 /** Both list reads and live snapshots need the same durable renderer identity. */
 export async function projectDesktopSupervisorAgentKeys<T extends { id: string; agentKey?: string | null; localRoomId?: string }>(
@@ -1126,13 +1156,13 @@ export async function projectDesktopSupervisorAgentKeys<T extends { id: string; 
     agentKeyReadFailureLogged = false;
     agentKeys = fresh;
   } catch (error) {
-    // With nothing remembered, an answer would be a guess: fail the caller.
-    if (!lastGoodAgentKeys) throw error;
+    // Never reject here: a registry that stays unreadable must not hide running
+    // agents from the list, the service snapshot or the state push.
     if (!agentKeyReadFailureLogged) {
       agentKeyReadFailureLogged = true;
-      console.warn(`[supervisor grants] Using the last known agent keys; the registry read failed: ${error instanceof Error ? error.message : String(error)}`);
+      console.warn(`[supervisor grants] ${lastGoodAgentKeys ? "Using the last known agent keys" : "No agent keys are known yet"}; the registry read failed: ${error instanceof Error ? error.message : String(error)}`);
     }
-    agentKeys = lastGoodAgentKeys;
+    agentKeys = lastGoodAgentKeysWithoutSharedKeys(askedEntryIds);
   }
   return entries.map(entry => ({ ...entry, agentKey: entry.localRoomId ? `local/supervised/${entry.id}` : entry.agentKey ?? agentKeys.get(entry.id) ?? null }));
 }
