@@ -215,6 +215,8 @@ test("Inbox deep links open where the item can be acted on, and an agent link wa
     openBoardTask: (id) => calls.push(`task:${id}`), openThread: (id) => calls.push(`thread:${id}`),
     openEvent: (id, url) => calls.push(`event:${id}:${url}`), openReasoning: (id) => calls.push(`reasoning:${id}`),
     revealMessage: (id) => calls.push(`message:${id}`), openAgentDiagnostics: (entry) => calls.push(`diagnostics:${entry.id}`),
+    openAgentInspector: (request) => calls.push(`inspector:${request.target.agentKey}`),
+    openAddAgent: () => calls.push("add-agent"),
     // App clears the intent once the room reports it opened.
     opened: () => { calls.push("opened"); intent.value = null; },
   }));
@@ -236,6 +238,15 @@ test("Inbox deep links open where the item can be acted on, and an agent link wa
     activeTab.value = "chat";
     await open({ agentEntryId: "supervised_gone" });
     assert.equal(activeTab.value, "activity", "an agent that is gone is shown in Activity");
+
+    const inspector = { kind: "participant", target: { messageId: null, clientMessageId: null, messageSource: null, actorLabel: "Same name", displayName: "Same name", ownerAttribution: null, ideLabel: "Codex", sender: "Same name", agentKey: "owner/exact-agent", agentSessionId: "session-exact" } } as const;
+    agentsSettled.value = false;
+    await open({ agentInspector: inspector });
+    assert.deepEqual(calls, [], "settings waits for the room roster before resolving management access");
+    agentsSettled.value = true; await nextTick();
+    assert.deepEqual(calls, ["inspector:owner/exact-agent", "opened"]);
+    await open({ addAgent: true });
+    assert.deepEqual(calls, ["add-agent", "opened"], "settings reuses the room's Add agent flow");
 
     for (const [next, expected] of [
       [{ taskId: "task_7" }, "task:task_7"], [{ threadRootId: "msg_1" }, "thread:msg_1"],

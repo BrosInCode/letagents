@@ -115,7 +115,14 @@ export function registerDesktopSupervisorIpcHandlers(ipcMain: IpcMain): void {
   );
   targetIpcMain.handle(
     "desktop:supervisor:get-service-snapshot",
-    async () => supervisorDaemonClient.getServiceSnapshot(),
+    async () => {
+      const snapshot = await supervisorDaemonClient.getServiceSnapshot();
+      if (!snapshot.state) return snapshot;
+      return {
+        ...snapshot,
+        state: { ...snapshot.state, entries: await projectDesktopSupervisorAgentKeys(snapshot.state.entries) },
+      };
+    },
   );
   targetIpcMain.handle(
     "desktop:supervisor:list-agents",

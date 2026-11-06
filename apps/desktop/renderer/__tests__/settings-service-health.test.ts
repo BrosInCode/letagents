@@ -7,6 +7,9 @@ import * as Vue from "vue";
 import type { DesktopSupervisorManifestEntry, DesktopSupervisorServiceSnapshot, DesktopSupervisorStateSnapshot } from "../../electron/ipc-types";
 import type { DesktopApi } from "../../electron/ipc-types/api";
 import { projectServiceHealth, updateServiceEvents } from "../src/domain/service-health";
+import { useSettingsAgents } from "../src/composables/useSettingsAgents";
+import type { DesktopAccountRoomEntry, DesktopRoomLiveMetadata } from "../../electron/ipc-types";
+import { overrideSupervisedAgentsSupported } from "../src/domain/supervised-agents-support";
 
 type Host = { children: Host[]; parent: Host | null; props: Record<string, any>; text: string };
 const node = (text = ""): Host => ({ children: [], parent: null, props: {}, text });
@@ -215,4 +218,73 @@ test("approval failures stay unknown and periodic read checks stop when the page
     mounted.app.unmount(); mounted = undefined;
     assert.equal(cancelled, true); tick(); await flush(); assert.equal(readCount, 2);
   } finally { mounted?.app.unmount(); globalThis.setInterval = set; globalThis.clearInterval = clear; }
+});
+
+function liveMetadata(): DesktopRoomLiveMetadata {
+  return { roomIdentifier: "room-a", participants: [{ participantKey: "remote", kind: "agent", displayName: "Remote agent",
+    actorLabel: "remote", agentKey: "other/remote", ideLabel: "Cursor", hiddenAt: null, activityState: "active" }], presence: [],
+    sourceStates: { participants: { status: "ready" }, presence: { status: "ready" } } } as unknown as DesktopRoomLiveMetadata;
+}
+
+async function mountAgents(supervisor: Partial<DesktopApi["supervisor"]>, readMetadata = async () => liveMetadata()) {
+  const originalWindow = globalThis.window;
+  const originalDocument = globalThis.document;
+  const listeners = new Map<string, unknown>();
+  Object.assign(globalThis, {
+    window: { letagentsDesktop: { supervisor, room: { getLiveMetadata: readMetadata }, workers: { listAgentProviders: async () => [] } } },
+    document: { visibilityState: "visible", addEventListener: (name: string, fn: unknown) => listeners.set(name, fn), removeEventListener: (name: string) => listeners.delete(name) },
+  });
+  let agents!: ReturnType<typeof useSettingsAgents>;
+  const rooms = Vue.ref([{ roomIdentifier: "room-a", name: "Main", displayName: "Main", focusRooms: [], archived: false }] as DesktopAccountRoomEntry[]);
+  const app = renderer.createApp({ setup() { agents = useSettingsAgents(() => rooms.value); return () => null; } });
+  app.mount(node());
+  return { agents, rooms, listeners, close() { app.unmount(); Object.assign(globalThis, { window: originalWindow, document: originalDocument }); } };
+}
+
+test("Agents roster keeps newer live state, retains stale rooms, retries and releases its subscription", async () => {
+  let push!: (state: DesktopSupervisorStateSnapshot) => void;
+  let resolve!: (value: DesktopSupervisorServiceSnapshot) => void;
+  let stops = 0;
+  let failMetadata = false;
+  let next: DesktopSupervisorServiceSnapshot | null = null;
+  const mounted = await mountAgents({
+    getServiceSnapshot: () => next ? Promise.resolve(next) : new Promise(done => { resolve = done; }),
+    onState: callback => { push = callback; return () => { stops++; }; },
+    listHostApprovals: async () => ({ available: true, error: null, approvals: [] }),
+  }, async () => { if (failMetadata) throw new Error("offline"); return liveMetadata(); });
+  try {
+    push(snapshot([agent({ displayName: "Newer live name" })], 1, 8).state!);
+    next = snapshot(); resolve(next); await flush(); await flush();
+    assert.ok(mounted.agents.rows.value.some(row => row.name === "Newer live name"));
+    assert.ok(mounted.agents.rows.value.some(row => row.name === "Remote agent" && row.external));
+    push(snapshot([agent({ displayName: "Outdated name" })], 1, 7).state!); await flush();
+    assert.ok(!mounted.agents.rows.value.some(row => row.name === "Outdated name"));
+    failMetadata = true;
+    next = { ...snapshot(), status: null, state: null };
+    await mounted.agents.refresh(); await flush();
+    assert.equal(mounted.agents.rows.value.length, 2, "a failure preserves known rows");
+    assert.ok(mounted.agents.rows.value.every(row => row.stale));
+    assert.ok(mounted.agents.errors.value.some(error => /Could not refresh 1 room/.test(error)));
+    failMetadata = false; next = snapshot([agent()], 2);
+    await mounted.agents.refresh(); await flush();
+    assert.deepEqual(mounted.agents.errors.value, []);
+    assert.ok(mounted.agents.rows.value.every(row => !row.stale));
+    mounted.rooms.value = []; await flush(); await flush();
+    assert.equal(mounted.agents.rows.value.length, 0, "leaving a room removes its rows");
+  } finally { mounted.close(); }
+  assert.equal(stops, 1);
+  assert.equal(mounted.listeners.size, 0);
+});
+
+test("Agents roster still shows external room agents on hosts without managed agent support", async () => {
+  overrideSupervisedAgentsSupported(false);
+  let reads = 0;
+  const mounted = await mountAgents({ getServiceSnapshot: async () => { reads++; return snapshot(); } });
+  try {
+    await flush(); await flush();
+    assert.equal(reads, 0);
+    assert.equal(mounted.agents.rows.value.length, 1);
+    assert.equal(mounted.agents.rows.value[0]!.external, true);
+    assert.deepEqual(mounted.agents.errors.value, []);
+  } finally { mounted.close(); overrideSupervisedAgentsSupported(true); }
 });

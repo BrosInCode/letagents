@@ -45,10 +45,17 @@ after(async () => {
 });
 
 test("the Agents pane offers the commit identity as the shared switch", async () => {
-  const html = await renderToString(createSSRApp(SettingsAgentsPane as never, { workers: [], rooms: [] }));
+  const html = await renderToString(createSSRApp(SettingsAgentsPane as never, { rooms: [] }));
   assert.match(html, /class="desktop-switch"[^>]*role="switch"[^>]*aria-checked="false"[^>]*aria-label="Commit as your GitHub account"/);
   assert.match(html, /aria-describedby="settings-agent-commit-identity-description"/);
   assert.match(html, /id="settings-agent-commit-identity-description"[^>]*>Checking how agents commit…</);
   assert.match(html, /data-testid="settings-agent-commit-identity"/);
   assert.match(html, /No agents yet\./);
+  assert.match(html, /Room agents/);
+  assert.match(html, /Providers &amp; access/);
+  assert.match(html, /class="desktop-select-field"/);
+  assert.match(html, /data-testid="agents-room-filter"/);
+  assert.match(html, /desktop-select-caret/);
+  assert.match(html, /context window, usage limits/);
+  assert.match(html, /role="tablist"/);
 });
