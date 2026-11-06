@@ -54,11 +54,12 @@ export async function fetchTasksAndPresence(
 
 export async function createRoomTask(
   roomIdentifier: string,
-  title: string,
+  input: string | { title: string; description?: string | null },
 ): Promise<RoomTask | null> {
+  const task = typeof input === 'string' ? { title: input } : input
   const data = await apiFetch(`${roomPath(roomIdentifier)}/tasks`, {
     method: 'POST',
-    body: JSON.stringify({ title, created_by: 'human' }),
+    body: JSON.stringify({ title: task.title, description: task.description, created_by: 'human' }),
   })
   return taskFromCreateTaskResponse(data)
 }

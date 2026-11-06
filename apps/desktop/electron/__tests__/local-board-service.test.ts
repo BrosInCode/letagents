@@ -165,3 +165,24 @@ test("valid large edits and board imports retain their existing input capacity",
   assert.equal(imported.length, 2);
   assert.ok(imported.every(row => row.description === description));
 });
+
+test("local sprint planning persists with revision conflicts, isolation and unchanged task authority", async () => {
+  const { defaultBoardPlanning } = await import("../../../../shared/board-planning.mjs");
+  const room = await store.createLocalRoom({ roomIdentifier: "planning-room", displayName: "Planning" });
+  const task = await mutate("addLocalTask", [room.roomIdentifier, { title: "Planned work" }]) as { id: string };
+  const initial = await mutate("getLocalBoardPlanning", [room.roomIdentifier]) as import("../../../../shared/board-planning.mjs").BoardPlanningSnapshot;
+  assert.equal(initial.revision, 0);
+  const document = defaultBoardPlanning();
+  document.sprints.push({ id: "sprint-1", name: "Sprint 1", state: "active", startDate: "2026-11-02", endDate: "2026-11-13", goal: null });
+  document.tasks[task.id] = { sprintId: "sprint-1", estimate: 8 };
+  const saved = await mutate("updateLocalBoardPlanning", [room.roomIdentifier, { expectedRevision: 0, document }]) as typeof initial;
+  assert.equal(saved.revision, 1);
+  assert.equal(saved.document.tasks[task.id].estimate, 8);
+  assert.equal(saved.taskFacts.find(fact => fact.id === task.id)?.status, "proposed");
+  assert.equal((await store.getLocalTask(room.roomIdentifier, task.id))?.assigneeAgentKey, null);
+  await assert.rejects(mutate("updateLocalBoardPlanning", [room.roomIdentifier, { expectedRevision: 0, document }]), /board changed/);
+  const other = await store.createLocalRoom({ roomIdentifier: "other-planning-room" });
+  await assert.rejects(mutate("updateLocalBoardPlanning", [other.roomIdentifier, { expectedRevision: 0, document }]), /no longer exists in this room/);
+  const reread = await mutate("getLocalBoardPlanning", [room.roomIdentifier]) as typeof initial;
+  assert.deepEqual(reread.document, saved.document);
+});

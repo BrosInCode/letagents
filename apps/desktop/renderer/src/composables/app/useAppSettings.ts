@@ -255,11 +255,11 @@ export function useAppSettingsActions(context: unknown) {
       if (generation !== sessionGeneration.value
         || (app.selectedRoomIdentifier.value || selectedRootRoomIdentifier.value) !== roomIdentifier) return;
       chatStorageFeedback.value = {
-        state: result.skippedCount > 0 || result.skippedTaskCount > 0 ? "info" : "success",
-        message:
+        state: result.skippedCount > 0 || result.skippedTaskCount > 0 || result.planningNote ? "info" : "success",
+        message: `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks.${
           result.skippedCount > 0 || result.skippedTaskCount > 0
-            ? `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks. ${result.skippedCount + result.skippedTaskCount} items were skipped.`
-            : `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks.`,
+            ? ` ${result.skippedCount + result.skippedTaskCount} items were skipped.` : ""
+        }${result.planningNote ? ` ${result.planningNote}` : ""}`,
       };
       if ((app.selectedRoomIdentifier.value || selectedRootRoomIdentifier.value) === roomIdentifier) {
         const snapshot = await desktopIpc.room.getSnapshot(roomIdentifier);

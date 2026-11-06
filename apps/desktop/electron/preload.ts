@@ -222,6 +222,10 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:run-task-worker-action", roomIdentifier, taskId, input),
     runTaskReviewWorkerAction: (roomIdentifier: string, taskId: string, input) =>
       ipcRenderer.invoke("desktop:room:run-task-review-worker-action", roomIdentifier, taskId, input),
+    getBoardPlanning: (roomIdentifier: string) =>
+      ipcRenderer.invoke("desktop:room:get-board-planning", roomIdentifier),
+    updateBoardPlanning: (roomIdentifier: string, input) =>
+      ipcRenderer.invoke("desktop:room:update-board-planning", roomIdentifier, input),
     getBoardGovernance: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:get-board-governance", roomIdentifier),
     assignBoardManager: (roomIdentifier: string, input) =>

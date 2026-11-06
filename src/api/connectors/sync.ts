@@ -9,6 +9,7 @@
  * the card's work `status`.
  */
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
 import { and, eq, inArray, sql } from "drizzle-orm";
 
@@ -40,6 +41,8 @@ import {
 } from "./room-filters.js";
 import { githubFilterAllows } from "./providers/github.js";
 import { jiraFilterClause } from "./providers/jira.js";
+import { asRecord } from "./providers/http.js";
+import { jiraIteration } from "./providers/planning.js";
 import { trackerConnectionStore, type TrackerConnectionRow, type TrackerConnectionStore } from "./store.js";
 import { recordTrackerTicketEvent } from "./tracker-events.js";
 
@@ -59,6 +62,8 @@ const MAX_AUTO_IMPORT_KEYS = 3;
 const NOT_FOUND_TTL_MS = 10 * 60_000;
 const ERROR_SKIP_MS = 60_000;
 const MAX_TITLE_LENGTH = 500;
+const MAX_PLANNING_REFRESH_KEYS = 50;
+const PLANNING_REFRESH_MS = 2 * 60_000;
 
 export function trackerPollIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env[TRACKER_POLL_MS_ENV]);
@@ -203,6 +208,13 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
       // newer one; the cached copy still creates cards a matching room lacks.
       const stale = Boolean(cached && isOlder(item.tracker_updated_at, cached.tracker_updated_at));
       if (stale) item = rowToItem(cached!);
+      else if (cached && asRecord(item.payload.planning).iterationsAvailable === false) {
+        // A denied optional metadata read is not evidence that the ticket left
+        // its sprint. Keep membership visible, explicitly marked unavailable.
+        const iterations = asRecord(cached.payload?.planning).iterations;
+        if (Array.isArray(iterations)) item = { ...item, payload: { ...item.payload,
+          planning: { ...asRecord(item.payload.planning), iterations } } };
+      }
 
       const syncedAt = now().toISOString();
       const itemChanged = !stale && (!cached
@@ -212,6 +224,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
         || cached.assignee_id !== item.assignee_id
         || cached.assignee_label !== item.assignee_label
         || cached.url !== item.url
+        || !isDeepStrictEqual(cached.payload ?? {}, item.payload)
         || !sameTime(cached.tracker_updated_at, item.tracker_updated_at));
       const itemId = cached?.id ?? `xitem_${randomUUID()}`;
       if (itemChanged) {
@@ -243,6 +256,10 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
             synced_at: syncedAt,
           },
         });
+      } else if (cached && !stale) {
+        // Sprint state can be unchanged while freshly verified. This timestamp
+        // is not a task update and must not reorder cards or broadcast a change.
+        await tx.update(external_items).set({ synced_at: syncedAt }).where(eq(external_items.id, cached.id));
       }
       // Events are recorded only on a card change under the item lock, so this
       // id never repeats a write; the time keeps A → B → A distinct without
@@ -268,7 +285,10 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
         const syncedTitle = cached ? cardTitle(rowToItem(cached)) : null;
         if (isTrackerImportCreator(card.created_by) && card.title !== cardTitle(item)
           && (syncedTitle === null || card.title === syncedTitle)) patch.title = cardTitle(item);
-        if (Object.keys(patch).length === 0) continue;
+        // A sprint/estimate update also needs a live board refresh, even if the
+        // ticket's title and state did not change. Work status stays untouched.
+        const planningChanged = !isDeepStrictEqual(cached?.payload?.planning, item.payload.planning);
+        if (Object.keys(patch).length === 0 && !planningChanged) continue;
         const [row] = await tx.update(tasks).set({ ...patch, updated_at: syncedAt })
           .where(and(eq(tasks.room_id, card.room_id), eq(tasks.number, card.number)))
           .returning() as TaskRow[];
@@ -369,6 +389,68 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     return LOCAL_SYNC_ERROR;
   }
 
+  /** Jira can start/close a sprint without changing any issue's updated time. */
+  async function refreshJiraIterations(connection: TrackerConnectionRow, filter: RoomTrackerFilterRow, startedAt: string) {
+    if (connection.provider !== "jira") return { changed: 0, warning: null };
+    const rows = await db.select({ key: external_items.key, payload: external_items.payload, syncedAt: external_items.synced_at })
+      .from(tasks).innerJoin(external_items, eq(tasks.external_item_id, external_items.id))
+      .where(and(eq(tasks.room_id, filter.room_id), eq(external_items.connection_id, connection.id)))
+      .orderBy(external_items.synced_at, external_items.key);
+    // A deleted or newly out-of-filter representative must not starve other
+    // tickets in the same sprint; unsuccessful attempts rotate to the back.
+    const attemptedAt = (row: typeof rows[number]) => Math.max(Date.parse(row.syncedAt),
+      Date.parse(String(asRecord(row.payload?.planning).iterationRefreshAttemptedAt ?? "")) || 0);
+    rows.sort((a, b) => attemptedAt(a) - attemptedAt(b) || a.key.localeCompare(b.key));
+    const recent = new Set<string>(), selected = new Set<string>(), keys = new Set<string>();
+    const cutoff = Date.parse(startedAt) - PLANNING_REFRESH_MS;
+    for (const row of rows) {
+      const planning = asRecord(row.payload?.planning);
+      if (planning.iterationsAvailable === false || Date.parse(row.syncedAt) < cutoff) continue;
+      for (const value of Array.isArray(planning.iterations) ? planning.iterations : []) {
+        const iteration = jiraIteration(value);
+        if (iteration) recent.add(iteration.id);
+      }
+    }
+    for (const row of rows) {
+      const planning = asRecord(row.payload?.planning);
+      if (!Object.keys(planning).length || !/^[A-Z][A-Z0-9_]*-\d{1,12}$/.test(row.key)) continue;
+      const ids = (Array.isArray(planning.iterations) ? planning.iterations : [])
+        .flatMap(value => { const iteration = jiraIteration(value); return iteration ? [iteration.id] : []; });
+      const needed = ids.filter(id => !recent.has(id) && !selected.has(id));
+      if (!needed.length && planning.iterationsAvailable !== false) continue;
+      if (Date.parse(row.syncedAt) >= Date.parse(startedAt)) continue;
+      keys.add(row.key);
+      needed.forEach(id => selected.add(id));
+      if (keys.size >= MAX_PLANNING_REFRESH_KEYS) break;
+    }
+    if (!keys.size) return { changed: 0, warning: null };
+    const clause = jiraFilterClause(filter.filter) || null;
+    const scoped = `${clause ? `(${clause}) AND ` : ""}key in (${[...keys].map(key => `"${key}"`).join(",")})`;
+    try {
+      const items = await deps.providers.jira.listItems(deps.connections.open(connection), scoped,
+        { limit: MAX_PLANNING_REFRESH_KEYS, includePlanning: true });
+      let changed = 0;
+      for (const item of items) {
+        if (!keys.has(item.key)) continue;
+        // Already-bound cards only: this supplementary read cannot import new work.
+        if ((await applyItem(connection, item)).changed) changed += 1;
+        keys.delete(item.key);
+      }
+      if (!keys.size) return { changed, warning: null };
+      // A representative no longer matching the room filter is not fresh evidence.
+      await markUnavailable();
+      return { changed, warning: "Some sprint statuses could not be refreshed. Ticket updates are current." };
+    } catch {
+      await markUnavailable();
+      return { changed: 0, warning: "Sprint statuses could not be refreshed. Ticket updates are current." };
+    }
+    async function markUnavailable() {
+      await db.update(external_items).set({ payload: sql`jsonb_set(jsonb_set(${external_items.payload}, '{planning,iterationsAvailable}', 'false'::jsonb),
+        '{planning,iterationRefreshAttemptedAt}', to_jsonb(${startedAt}::text))` })
+        .where(and(eq(external_items.connection_id, connection.id), inArray(external_items.key, [...keys])));
+    }
+  }
+
   async function syncFilter(filter: RoomTrackerFilterRow, intervalMs = trackerPollIntervalMs()) {
     const claimedAt = filter.sync_claimed_at;
     const startedAt = now().toISOString();
@@ -395,6 +477,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
           updatedSince: since,
           updatedBefore: before,
           limit: MAX_ITEMS_PER_POLL,
+          includePlanning: true,
         });
         await deps.store.addUnmapped(connection.id, [...new Set(items.filter((item) => item.unmapped).map((item) => item.raw_status))]);
         seen += items.length;
@@ -409,9 +492,11 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
         if (oldest === undefined || (before !== undefined && oldest >= Date.parse(before))) break;
         before = new Date(oldest).toISOString();
       }
+      const planning = await refreshJiraIterations(connection, filter, startedAt);
+      changed += planning.changed;
       const warning = capped
         ? `More than ${MAX_ITEMS_PER_POLL * MAX_BATCHES_PER_POLL} tickets changed in one poll; the oldest changes were skipped. Narrow the filter.`
-        : null;
+        : planning.warning;
       await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, advance: true, error: warning });
       return { seen, changed, error: warning };
     } catch (error) {
@@ -442,7 +527,7 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
         // The payload only names the ticket: it is read again so the webhook
         // maps it exactly as a poll would. It updates bound cards only; new
         // tickets wait for the poll, which checks the room's filter.
-        const item = await provider.getItem(deps.connections.open(connection), key);
+        const item = await provider.getItem(deps.connections.open(connection), key, { includePlanning: true });
         if (!item) continue;
         const result = await applyItem(connection, item);
         if (result.changed) applied += 1;
@@ -488,14 +573,14 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     const open = deps.connections.open(connection);
     // Read the ticket first: a key that does not exist is a 404 (null), while
     // JQL naming a missing key is an error.
-    const item = await deps.providers[source.provider].getItem(open, key);
+    const item = await deps.providers[source.provider].getItem(open, key, { includePlanning: true });
     if (!item) return null;
     if (source.provider === "linear") return linearFilterAllows(source.filter, item) ? item : null;
     if (source.provider === "github") return githubFilterAllows(source.filter, item) ? item : null;
     const base = jiraFilterClause(source.filter.trim() || null);
     if (!base) return item;
     try {
-      const [match] = await deps.providers.jira.listItems(open, `(${base}) AND key = "${item.key}"`, { limit: 1 });
+      const [match] = await deps.providers.jira.listItems(open, `(${base}) AND key = "${item.key}"`, { limit: 1, includePlanning: true });
       return match && match.key === item.key ? match : null;
     } catch (error) {
       // Jira refuses JQL that names a key it cannot see: not a match.

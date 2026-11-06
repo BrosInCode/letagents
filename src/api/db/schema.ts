@@ -12,6 +12,7 @@ export * from "./schema/messages.js";
 export * from "./schema/tasks.js";
 export * from "./schema/coordination.js";
 export * from "./schema/board.js";
+export * from "./schema/board-planning.js";
 export * from "./schema/effects.js";
 export * from "./schema/connectors.js";
 export * from "./schema/desktop-push.js";

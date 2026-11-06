@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict'
 import test, { before, after } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { createSSRApp, h, ref } from 'vue'
+import { createSSRApp, h, ref, nextTick } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { createServer, type ViteDevServer } from 'vite'
 
 import type { RoomTask } from '../src/composables/useRoom'
+import { webBoardTask } from '../src/components/room/task-board/workspace-tasks'
 import { boardOwnerKey, filterBoardTasks, useTaskGroups } from '../src/components/room/task-board/model'
 import { useRoomTaskHandlers } from '../src/pages/room/useRoomTaskHandlers'
 import { applyMarkdownTool, taskContentPatch } from '../../../shared/task-markdown-editing.mjs'
@@ -164,6 +165,8 @@ let vite: ViteDevServer
 let TaskBoardCard: object
 let TaskBoardTaskDialog: object
 let TaskBoard: object
+let BoardCreateTaskDialog: object
+let TaskMarkdownEditor: object
 before(async () => {
   vite = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
@@ -172,23 +175,25 @@ before(async () => {
   TaskBoardCard = (await vite.ssrLoadModule('/src/components/room/task-board/TaskBoardCard.vue')).default
   TaskBoardTaskDialog = (await vite.ssrLoadModule('/src/components/room/task-board/TaskBoardTaskDialog.vue')).default
   TaskBoard = (await vite.ssrLoadModule('/src/components/room/TaskBoard.vue')).default
+  BoardCreateTaskDialog = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/board/BoardCreateTaskDialog.vue', import.meta.url)))).default
+  TaskMarkdownEditor = (await vite.ssrLoadModule('/src/components/room/task-board/TaskMarkdownEditor.vue')).default
 })
 after(async () => { await vite?.close() })
 
-test('board filters reuse the shared select with labelled native controls', async () => {
+test('the shared board presents searchable assignee and sprint filters', async () => {
   const html = await renderToString(createSSRApp({
     render: () => h(TaskBoard, {
       tasks: [], presence: [], canManageLeases: false,
       roomIdentifier: 'test-room', taskGithubStatus: {}, selectedTaskId: null,
     }),
   }))
-  assert.equal((html.match(/class="app-select"/g) || []).length, 3)
-  for (const label of ['Filter by owner', 'Filter by status', 'Sort tasks']) {
-    assert.match(html, new RegExp(`<select[^>]*aria-label="${label}"[^>]*class="app-select__control"`))
-  }
-  assert.match(html, /value="oldest"[^>]*>Oldest first/)
-  assert.match(html, /value="done"[^>]*>Done/)
+  assert.match(html, /aria-label="Board view"/)
+  assert.match(html, /aria-label="Assignee"/)
+  assert.match(html, /aria-label="Sprint"/)
+  assert.match(html, /aria-label="Search tasks"/)
+  assert.doesNotMatch(html, /<select/)
 })
+
 
 function detailTask(): RoomTask {
   return {
@@ -227,4 +232,61 @@ test('task modal retains description, all links, metadata, and secondary actions
   assert.match(html, /PR #3/)
   assert.match(html, />Cancel task<\/button>/)
   assert.match(html, /role="alert"[^>]*>Task could not be updated/)
+})
+
+test('board normalization does not infer providers from display names or reuse stale PR state', () => {
+  const row = webBoardTask({ ...detailTask(), assignee: 'BrookCopper', assignee_agent_key: 'agent_brook', pr_url: 'https://github.com/org/repo/pull/42' }, [
+    { agent_key: 'someone_else', display_name: 'BrookCopper', runtime: 'claude' } as never,
+  ], { pr_url: 'https://github.com/org/repo/pull/8', pr_number: 8, pr_state: 'closed', pr_merged: true } as never)
+  assert.equal(row.provider, null)
+  assert.equal(row.pr?.number, 42)
+  assert.equal(row.pr?.state, undefined)
+  assert.deepEqual(row.allowedTransitions.map(action => action.targetStatus), ['accepted', 'cancelled'])
+  const matched = webBoardTask({ ...detailTask(), assignee_agent_key: 'agent_brook' }, [{ agent_key: 'agent_brook', runtime: 'codex' } as never])
+  assert.equal(matched.provider, 'codex')
+})
+
+test('creation forwards Markdown and returns the created ID only on success', async () => {
+  const results: Array<[boolean, string | undefined]> = []
+  const created: unknown[] = []
+  let success = false
+  const handlers = useRoomTaskHandlers({
+    addTask: async (input, onCreated) => { created.push(input); if (success) onCreated?.('task_created'); return success },
+    updateTask: async () => true, updateTaskLease: async () => true,
+    updateTaskReviewLease: async () => true, setTaskStalePromptMute: async () => true,
+    toast: { error() {} },
+  })
+  const input = { title: 'New task', description: '## Acceptance\n- [ ] Preserve Markdown', onSettled: (value: boolean, id?: string) => results.push([value, id]) }
+  await handlers.handleAddTask(input)
+  success = true
+  await handlers.handleAddTask(input)
+  assert.deepEqual(results, [[false, undefined], [true, 'task_created']])
+  assert.deepEqual(created, [{ title: input.title, description: input.description }, { title: input.title, description: input.description }])
+})
+
+
+test('the shared create form renders the web Markdown editor without desktop runtime imports', async () => {
+  // The shared dialog focuses on opening; SSR has no real browser focus target.
+  const originalDocument = globalThis.document
+  const originalElement = globalThis.HTMLElement
+  globalThis.document = { activeElement: null } as unknown as Document
+  globalThis.HTMLElement = class {} as typeof HTMLElement
+  let html: string
+  try {
+    html = await renderToString(createSSRApp({
+      render: () => h(BoardCreateTaskDialog, {
+        open: true, busyAction: null, error: null, markdownEditor: TaskMarkdownEditor,
+      }),
+    }))
+    await nextTick()
+  } finally {
+    globalThis.document = originalDocument
+    globalThis.HTMLElement = originalElement
+  }
+  assert.match(html, /Create a task/)
+  assert.match(html, /aria-label="Markdown formatting"/)
+  assert.match(html, /aria-label="Heading"/)
+  assert.match(html, /aria-label="Checklist"/)
+  assert.match(html, /id="desktop-create-task-description"/)
+  assert.match(html, /Preview/)
 })

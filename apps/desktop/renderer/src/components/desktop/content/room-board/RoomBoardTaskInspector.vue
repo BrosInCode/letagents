@@ -19,13 +19,10 @@
           >{{ ticket.providerLabel }}: {{ ticketState }}</span>
         </div>
         <h3>{{ task.title }}</h3>
+        <a v-if="primaryPr" class="board-inspector-pr" :href="primaryPr.url" target="_blank" rel="noopener noreferrer"><GitPullRequest :size="16" aria-hidden="true" />{{ primaryPr.label }}<ArrowUpRight :size="15" aria-hidden="true" /></a>
       </div>
       <button v-if="canEdit" type="button" class="desktop-task-detail-button" title="Edit task" aria-label="Edit task" :disabled="busyAction !== null" @click="emit('edit')"><Pencil :size="16" aria-hidden="true" /></button>
     </header>
-
-    <MarkdownBlock v-if="task.description" class="task-markdown-preview" :text="task.description" :mentions="false" preserve-paths />
-    <p v-else class="desktop-task-detail-muted">No task description yet.</p>
-    <p v-if="error" class="desktop-task-dialog-error" role="alert">{{ error }}</p>
 
     <section class="desktop-task-detail-grid" aria-label="Task ownership">
       <span>
@@ -46,6 +43,18 @@
       </span>
     </section>
 
+    <slot name="planning" />
+
+    <section class="board-inspector-description">
+      <h4>Description</h4>
+      <MarkdownBlock v-if="task.description" class="task-markdown-preview" :text="task.description" :mentions="false" preserve-paths />
+      <p v-else class="desktop-task-detail-muted">No description yet.</p>
+    </section>
+    <p v-if="error" class="desktop-task-dialog-error" role="alert">{{ error }}</p>
+
+    <details v-if="showAuthority || showReviewPanel || coordinationItems.length" class="board-agent-details">
+      <summary>Agent details <ChevronDown :size="16" aria-hidden="true" /></summary>
+      <div class="board-agent-details-content">
     <section
       v-if="showAuthority"
       class="desktop-task-detail-section desktop-task-authority-panel"
@@ -127,11 +136,14 @@
       </div>
     </section>
 
-    <section v-if="taskWorkflowRefs.length || hasArtifactNavigationRefs" class="desktop-task-detail-section">
+      </div>
+    </details>
+
+    <section v-if="secondaryWorkflowRefs.length || hasArtifactNavigationRefs" class="desktop-task-detail-section">
       <h4>Workflow</h4>
-      <div v-if="taskWorkflowRefs.length" class="desktop-task-detail-list">
+      <div v-if="secondaryWorkflowRefs.length" class="desktop-task-detail-list">
         <a
-          v-for="ref in taskWorkflowRefs"
+          v-for="ref in secondaryWorkflowRefs"
           :key="ref.url"
           class="desktop-task-detail-link"
           :href="ref.url"
@@ -262,7 +274,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
-import { Pencil } from '@lucide/vue';
+import { Pencil, GitPullRequest, ArrowUpRight, ChevronDown } from '@lucide/vue';
 import MarkdownBlock from '../formatting/MarkdownBlock.vue';
 import TaskLinkedThreads from './TaskLinkedThreads.vue';
 import type { DesktopAgentPresence, DesktopTaskSummary, DesktopTaskTicket } from "../../../../../../electron/ipc-types";
@@ -364,6 +376,13 @@ const reviewAuthorityState = computed(() => reviewPanelState(props.task));
 const taskWorkLease = computed(() => workLease(props.task));
 const taskSecondaryLeases = computed(() => secondaryLeases(props.task));
 const taskWorkflowRefs = computed(() => workflowRefs(props.task));
+const primaryPr = computed(() => {
+  const url = props.task.prUrl || props.task.workflowArtifacts.find(item => item.kind === "pull_request")?.url;
+  if (!url || !/^https?:\/\//i.test(url)) return null;
+  const number = /\/pull\/(\d+)(?:[/?#]|$)/.exec(url)?.[1];
+  return { url, label: number ? `#${number}` : "Open pull request" };
+});
+const secondaryWorkflowRefs = computed(() => taskWorkflowRefs.value.filter(ref => ref.url !== primaryPr.value?.url));
 const hasGitHubEventRefs = computed(() =>
   Boolean(props.task.prUrl)
   || props.task.workflowArtifacts.some((artifact) => artifact.provider === "github")
@@ -405,3 +424,27 @@ function onReviewerChange(event: Event): void {
   emit("update:selected-reviewer", (event.target as HTMLSelectElement).value);
 }
 </script>
+
+<style scoped>
+.desktop-task-detail-panel { gap: 28px; font-size: 14px; }
+.desktop-task-detail-header { gap: 16px; padding-right: 42px; }
+.desktop-task-detail-header h3 { margin: 14px 0 0; font-size: 28px; font-weight: 600; line-height: 1.3; letter-spacing: -.65px; overflow-wrap: anywhere; }
+.desktop-task-detail-status-row { gap: 10px; font-size: 13px; }
+.desktop-task-detail-panel .desktop-task-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 28px; padding: 0; }
+.desktop-task-detail-grid small { font-size: 12px; }
+.desktop-task-detail-grid strong { color: var(--text); font-size: 14px; font-weight: 450; }
+.board-inspector-pr { display: inline-flex; align-items: center; gap: 7px; margin-top: 16px; color: var(--blue); font-size: 14px; font-weight: 550; text-decoration: none; }
+.board-inspector-description h4 { margin: 0 0 12px; font-size: 14px; font-weight: 550; }
+.board-inspector-description .task-markdown-preview { color: var(--text); font-size: 15px; line-height: 1.75; }
+.board-agent-details { min-width: 0; }
+.board-agent-details > summary { display: flex; align-items: center; justify-content: space-between; min-height: 40px; list-style: none; cursor: pointer; color: var(--text-secondary); font-size: 14px; }
+.board-agent-details > summary::-webkit-details-marker { display: none; }
+.board-agent-details > summary svg { transition: transform 180ms ease; }
+.board-agent-details[open] > summary svg { transform: rotate(180deg); }
+.board-agent-details-content { display: grid; gap: 20px; padding-top: 14px; }
+.board-agent-details-content :is(.desktop-task-detail-section, .desktop-task-review-panel) { border: 0; background: transparent; padding: 0; }
+.desktop-task-detail-panel > .desktop-task-detail-section { border: 0; padding: 0; }
+.desktop-task-detail-panel :is(a, summary):focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
+@media (max-width: 600px) { .desktop-task-detail-header h3 { font-size: 24px; } .desktop-task-detail-panel { gap: 24px; } }
+@media (prefers-reduced-motion: reduce) { .board-agent-details > summary svg { transition: none; } }
+</style>

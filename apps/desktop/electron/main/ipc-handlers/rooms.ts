@@ -1,3 +1,5 @@
+import { getDesktopBoardPlanning, updateDesktopBoardPlanning } from "../rooms/board-planning.js";
+import type { BoardPlanningUpdate } from "../../../../../shared/board-planning.mjs";
 import type { RoomGif, RoomExpressionsSetting } from "../../../../../shared/room-expressions.mjs";
 import { createDesktopMessageReminder, getDesktopMessageReminders, deleteDesktopMessageReminder } from "../rooms/reminders.js";
 import { getDesktopConversationRouting, setDesktopConversationRouting } from "../rooms/conversation-routing.js";
@@ -518,6 +520,10 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     ): Promise<DesktopTaskMutationResult> =>
       runDesktopRoomTaskReviewWorkerAction(roomIdentifier, taskId, input),
   );
+  targetIpcMain.handle("desktop:room:get-board-planning", async (_event, roomIdentifier: string) =>
+    getDesktopBoardPlanning(roomIdentifier));
+  targetIpcMain.handle("desktop:room:update-board-planning", async (_event, roomIdentifier: string, input: BoardPlanningUpdate) =>
+    updateDesktopBoardPlanning(roomIdentifier, input));
   targetIpcMain.handle(
     "desktop:room:get-board-governance",
     async (_event, roomIdentifier: string) => isDesktopSmokeCheck()

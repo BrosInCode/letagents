@@ -4,7 +4,8 @@ import test from "node:test";
 
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
-import type { ExternalItem, ProviderConnection, WorkItemProvider } from "../connectors/providers/types.js";
+import type { ExternalItem, ListItemsOptions, ProviderConnection, WorkItemProvider } from "../connectors/providers/types.js";
+import { linearPlanning } from "../connectors/providers/planning.js";
 
 const url = process.env.TEST_DB_URL;
 if (url) process.env.DB_URL = url;
@@ -17,6 +18,7 @@ const filters = url ? await import("../connectors/room-filters.js") : null;
 const merge = url ? await import("../connectors/card-merge.js") : null;
 const keys = url ? await import("../connectors/key-task-resolution.js") : null;
 const details = url ? await import("../connectors/ticket-details.js") : null;
+const planning = url ? await import("../connectors/board-planning.js") : null;
 test.before(async () => { if (client) await migrate(client.db, { migrationsFolder: resolve("drizzle") }); });
 test.after(async () => { await client?.pool.end(); });
 const options = { skip: !url ? "Set TEST_DB_URL to run PostgreSQL integration tests." : false };
@@ -49,12 +51,14 @@ function fakeJira(tickets: Map<string, ExternalItem>) {
   const calls = {
     listItems: [] as Array<{ filter: string | null; updatedSince?: string; updatedBefore?: string }>,
     getItem: [] as string[],
+    planningReads: [] as string[],
   };
   const failures = { listItems: null as Error | null, getItem: null as Error | null };
   const provider = {
     name: "jira",
-    async listItems(_conn: ProviderConnection, filter: string | null, opts: { updatedSince?: string; updatedBefore?: string; limit?: number }) {
+    async listItems(_conn: ProviderConnection, filter: string | null, opts: ListItemsOptions) {
       calls.listItems.push({ filter, updatedSince: opts.updatedSince, updatedBefore: opts.updatedBefore });
+      if (opts.includePlanning) calls.planningReads.push("list");
       if (failures.listItems) throw failures.listItems;
       const project = /project = (\w+)/.exec(filter ?? "")?.[1];
       const key = /key = "([^"]+)"/.exec(filter ?? "")?.[1];
@@ -65,8 +69,9 @@ function fakeJira(tickets: Map<string, ExternalItem>) {
         .sort((a, b) => Date.parse(b.tracker_updated_at!) - Date.parse(a.tracker_updated_at!))
         .slice(0, opts.limit ?? 50);
     },
-    async getItem(_conn: ProviderConnection, key: string) {
+    async getItem(_conn: ProviderConnection, key: string, opts?: { includePlanning?: boolean }) {
       calls.getItem.push(key);
+      if (opts?.includePlanning) calls.planningReads.push(key);
       if (failures.getItem) throw failures.getItem;
       return tickets.get(key) ?? null;
     },
@@ -74,7 +79,7 @@ function fakeJira(tickets: Map<string, ExternalItem>) {
   return { provider, calls, failures };
 }
 
-async function setup(label: string, tickets = new Map<string, ExternalItem>()) {
+async function setup(label: string, tickets = new Map<string, ExternalItem>(), opts: { now?: () => Date; provider?: "jira" | "linear" } = {}) {
   const now = new Date().toISOString();
   const accountId = unique(`acct-${label}`);
   await client!.db.insert(schema!.accounts).values({
@@ -83,16 +88,17 @@ async function setup(label: string, tickets = new Map<string, ExternalItem>()) {
   });
   const connectionId = `tcon_${crypto.randomUUID()}`;
   const [connection] = await client!.db.insert(schema!.tracker_connections).values({
-    id: connectionId, account_id: accountId, provider: "jira", display_name: "acme", site_key: unique("acme.atlassian.net"),
+    id: connectionId, account_id: accountId, provider: opts.provider ?? "jira", display_name: "acme", site_key: unique("acme.atlassian.net"),
     site_url: "https://acme.atlassian.net", auth_kind: "api_token", credentials_ciphertext: "sealed", credentials_iv: "iv",
     credentials_version: 1, tracker_user_id: "acc-1", tracker_user_label: "Emmy", status_map: {},
   }).returning();
   const room = await db!.createProjectWithName(unique(`tickets-${label}`));
-  await filters!.upsertRoomTrackerFilter({ room_id: room.id, connection_id: connectionId, provider: "jira", filter: "project = HT", enabled: true, account_id: accountId });
+  await filters!.upsertRoomTrackerFilter({ room_id: room.id, connection_id: connectionId, provider: opts.provider ?? "jira", filter: opts.provider === "linear" ? "team:HT" : "project = HT", enabled: true, account_id: accountId });
   const [filter] = await client!.db.select().from(schema!.room_tracker_filters)
     .where((await import("drizzle-orm")).eq(schema!.room_tracker_filters.room_id, room.id));
   const jira = fakeJira(tickets);
   const service = sync!.createTrackerSync({
+    now: opts.now,
     providers: { jira: jira.provider, linear: jira.provider },
     connections: {
       open: () => ({ id: connectionId } as ProviderConnection),
@@ -125,6 +131,7 @@ test("poll and webhook deliver the same change with one upsert and no duplicate 
   assert.deepEqual(first, { seen: 1, changed: 1, error: null });
   assert.equal(ctx.jira.calls.listItems[0]?.filter, "project = HT");
   assert.equal(ctx.jira.calls.listItems[0]?.updatedSince, undefined);
+  assert.deepEqual(ctx.jira.calls.planningReads, ["list"]);
   const [card] = await roomTasks(ctx.room.id);
   assert.equal(card?.external_ref, "jira:HT-1");
   assert.equal(card?.ticket_state, "todo");
@@ -134,6 +141,7 @@ test("poll and webhook deliver the same change with one upsert and no duplicate 
   // The tracker moves the ticket; the webhook arrives first, then a poll sees the same change.
   ctx.tickets.set("HT-1", item("HT-1", "in_progress", "2026-10-21T10:05:00.000Z"));
   assert.deepEqual(await ctx.service.handleWebhook(ctx.connection, [{ key: "HT-1", item: null, deleted: false }]), { applied: 1 });
+  assert.deepEqual(ctx.jira.calls.planningReads, ["list", "HT-1"], "webhook reads enrich planning too");
   const [refreshed] = await client!.db.select().from(schema!.room_tracker_filters)
     .where((await import("drizzle-orm")).eq(schema!.room_tracker_filters.id, ctx.filter.id));
   const second = await ctx.service.syncFilter({ ...refreshed!, sync_claimed_at: refreshed!.sync_claimed_at });
@@ -185,6 +193,164 @@ test("a ticket moved to Done updates ticket_state only and leaves the work state
   assert.equal(after?.assignee, "agent-1");
   // A person renamed the imported card, so the rename stays.
   assert.equal(after?.title, "Our own title");
+});
+
+test("planning-only imports refresh bound cards once, stay room-scoped, and preserve native execution", options, async () => {
+  const ctx = await setup("planning");
+  const original = item("HT-21", "in_progress", "2026-11-06T10:00:00.000Z");
+  ctx.tickets.set(original.key, original);
+  await ctx.service.syncFilter(ctx.filter);
+  const [card] = await roomTasks(ctx.room.id);
+  await db!.updateTask(ctx.room.id, card!.id, { status: "accepted" });
+  await db!.updateTask(ctx.room.id, card!.id, { status: "assigned", assignee: "agent-1" });
+  await db!.updateTask(ctx.room.id, card!.id, { status: "in_progress" });
+  const eventCount = await trackerEvents(ctx.room.id);
+  const currentSprint = { id: "24", name: "Sprint 24", state: "active", startDate: "2026-11-02", endDate: "2026-11-13", goal: null };
+  const previousSprint = { ...currentSprint, id: "23", name: "Sprint 23", state: "closed", startDate: "2026-10-19", endDate: "2026-10-30" };
+  const enriched = { ...original, payload: { planning: {
+    estimate: 0, estimateAvailable: true, iterationsAvailable: true,
+    iterations: [previousSprint, currentSprint], assigneeAvatarUrl: "https://avatar.example/emmy.png",
+  } } };
+  const first = await ctx.service.applyItem(ctx.connection, enriched);
+  assert.equal(first.changed, true, "metadata is added even when Jira's updated time did not change");
+  assert.equal(first.updated.length, 1, "the board receives a live refresh for the planning change");
+  const repeated = await ctx.service.applyItem(ctx.connection, enriched);
+  assert.equal(repeated.changed, false);
+  assert.equal(repeated.updated.length, 0);
+  assert.equal(await trackerEvents(ctx.room.id), eventCount, "planning does not fabricate a ticket-state event");
+  const after = await db!.getTaskById(ctx.room.id, card!.id);
+  assert.equal(after?.status, "in_progress");
+  assert.equal(after?.assignee, "agent-1");
+
+  const imported = await planning!.getImportedBoardPlanning(ctx.room.id);
+  const prefix = `imported:jira:${ctx.connection.id}:`;
+  assert.equal(imported.tasks[card!.id].estimate, 0, "zero is a known estimate");
+  assert.equal(imported.tasks[card!.id].sprintId, `${prefix}24`);
+  assert.deepEqual(imported.tasks[card!.id].sprintIds, [`${prefix}23`, `${prefix}24`]);
+  assert.equal(imported.tasks[card!.id].assigneeId, `jira:${ctx.connection.id}:acc-1`);
+  assert.equal(imported.tasks[card!.id].assigneeAvatarUrl, "https://avatar.example/emmy.png");
+  assert.equal(imported.tasks[card!.id].done, false);
+  assert.equal(imported.tasks[card!.id].ticketState, "in_progress");
+  const source = imported.sprints.find(sprint => sprint.id === `${prefix}24`)!.source!;
+  assert.deepEqual({ provider: source.provider, id: source.id, connectionId: source.connectionId },
+    { provider: "jira", id: "24", connectionId: ctx.connection.id });
+  assert.equal(source.stale, false);
+
+  const other = await setup("planning-other");
+  assert.deepEqual(await planning!.getImportedBoardPlanning(other.room.id), { sprints: [], tasks: {} });
+  await other.service.applyItem(other.connection, { ...enriched, payload: { planning: {
+    ...enriched.payload.planning, estimate: null, iterations: [currentSprint],
+  } } }, { roomIds: [other.room.id] });
+  const otherPlanning = await planning!.getImportedBoardPlanning(other.room.id);
+  assert.equal(otherPlanning.sprints[0].id, `imported:jira:${other.connection.id}:24`, "identical Jira sprint IDs from different sites do not collide");
+  assert.equal(Object.values(otherPlanning.tasks)[0].estimate, null, "unknown estimates do not turn into zero");
+  const stale = await ctx.service.applyItem(ctx.connection, { ...original, tracker_updated_at: "2026-11-05T10:00:00.000Z" });
+  assert.equal(stale.stale, true);
+  assert.deepEqual(await planning!.getImportedBoardPlanning(ctx.room.id), imported);
+});
+
+test("Linear board reads cross exact cycle boundaries without an issue edit", options, async () => {
+  const ctx = await setup("linear-cycle-clock", new Map(), { provider: "linear" });
+  const cycle = { id: "cycle-24", name: "Cycle 24", startsAt: "2026-11-06T09:00:00+01:00", endsAt: "2026-11-20T09:00:00+01:00", completedAt: null };
+  const metadata = linearPlanning({ estimate: 8, cycle }, new Date("2026-11-06T07:00:00Z"));
+  await ctx.service.applyItem(ctx.connection, { ...item("HT-1", "in_progress", "2026-11-01T10:00:00Z"), provider: "linear", payload: { planning: metadata } }, { roomIds: [ctx.room.id] });
+  const stateAt = async (time: string) => (await planning!.getImportedBoardPlanning(ctx.room.id, new Date(time))).sprints[0];
+  assert.equal((await stateAt("2026-11-06T07:59:59Z")).state, "future");
+  assert.equal((await stateAt("2026-11-06T08:00:00Z")).state, "active");
+  assert.equal((await stateAt("2026-11-20T07:59:59Z")).state, "active");
+  assert.equal((await stateAt("2026-11-20T08:00:00Z")).state, "closed");
+  assert.equal((await stateAt("2026-11-20T08:00:00Z")).source?.stale, false);
+});
+
+test("Jira refreshes sprint authority during incremental polls and marks failed metadata stale", options, async () => {
+  let clock = new Date("2026-11-06T08:00:00Z");
+  const ctx = await setup("jira-sprint-refresh", new Map(), { now: () => clock });
+  const issue = { ...item("HT-1", "in_progress", "2026-11-01T10:00:00Z"), payload: { planning: {
+    estimate: 8, estimateAvailable: true, iterationsAvailable: true,
+    iterations: [{ id: "24", name: "Sprint 24", state: "future", startDate: "2026-11-06", endDate: "2026-11-20", goal: null }],
+  } } };
+  ctx.tickets.set(issue.key, issue);
+  await ctx.service.syncFilter(ctx.filter);
+  const originalList = ctx.jira.provider.listItems;
+  let fail = false;
+  ctx.jira.provider.listItems = async (conn, filter, opts) => {
+    if (opts.updatedSince) return [];
+    assert.match(filter ?? "", /^\(project = HT\) AND key in \("HT-1"\)$/);
+    if (fail) throw new Error("metadata unavailable");
+    return originalList(conn, filter, opts);
+  };
+  const nextPoll = async () => {
+    const [filter] = await client!.db.select().from(schema!.room_tracker_filters)
+      .where((await import("drizzle-orm")).eq(schema!.room_tracker_filters.id, ctx.filter.id));
+    return ctx.service.syncFilter(filter!);
+  };
+  clock = new Date("2026-11-06T08:03:00Z");
+  issue.payload.planning.iterations[0].state = "active";
+  assert.deepEqual(await nextPoll(), { seen: 0, changed: 1, error: null });
+  let imported = await planning!.getImportedBoardPlanning(ctx.room.id, clock);
+  assert.equal(imported.sprints[0].state, "active");
+  assert.equal(imported.sprints[0].source?.stale, false);
+  assert.equal(imported.sprints[0].source?.checkedAt, clock.toISOString());
+
+  // A fresh unchanged read renews authority without changing or reordering cards.
+  clock = new Date("2026-11-06T08:06:00Z");
+  assert.deepEqual(await nextPoll(), { seen: 0, changed: 0, error: null });
+  const [card] = await roomTasks(ctx.room.id);
+  assert.equal(new Date(card.updated_at).toISOString(), "2026-11-06T08:03:00.000Z");
+  assert.equal((await planning!.getImportedBoardPlanning(ctx.room.id, clock)).sprints[0].source?.checkedAt, clock.toISOString());
+
+  clock = new Date("2026-11-06T08:09:00Z");
+  fail = true;
+  assert.match((await nextPoll()).error ?? "", /Sprint statuses could not be refreshed/);
+  imported = await planning!.getImportedBoardPlanning(ctx.room.id, clock);
+  assert.equal(imported.sprints[0].source?.stale, true);
+  assert.equal(Object.values(imported.tasks)[0].sprintId, imported.sprints[0].id, "a failure does not erase known membership");
+  assert.equal((await roomTasks(ctx.room.id)).length, 1, "the refresh creates no cards");
+
+  // Discovery denial also preserves membership but never pretends estimates are known.
+  await ctx.service.applyItem(ctx.connection, { ...issue, payload: { planning: {
+    estimate: null, estimateAvailable: false, iterationsAvailable: false, iterations: [],
+  } } });
+  imported = await planning!.getImportedBoardPlanning(ctx.room.id, clock);
+  assert.equal(imported.sprints[0].source?.stale, true);
+  assert.equal(Object.values(imported.tasks)[0].estimate, null);
+  assert.equal(Object.values(imported.tasks)[0].sprintId, imported.sprints[0].id);
+
+  fail = false;
+  clock = new Date("2026-11-06T08:12:00Z");
+  issue.payload.planning.iterations[0].state = "closed";
+  await nextPoll();
+  imported = await planning!.getImportedBoardPlanning(ctx.room.id, clock);
+  assert.equal(imported.sprints[0].state, "closed");
+  assert.equal(imported.sprints[0].source?.stale, false);
+  const expired = await planning!.getImportedBoardPlanning(ctx.room.id, new Date("2026-11-06T08:23:00Z"));
+  assert.equal(expired.sprints[0].source?.stale, true, "a stopped connector cannot leave authoritative active metrics forever");
+});
+
+test("an out-of-filter Jira representative does not starve another ticket in its sprint", options, async () => {
+  let clock = new Date("2026-11-06T08:00:00Z");
+  const ctx = await setup("jira-representative-rotation", new Map(), { now: () => clock });
+  const metadata = { estimate: 3, estimateAvailable: true, iterationsAvailable: true,
+    iterations: [{ id: "24", name: "Sprint 24", state: "future", startDate: "2026-11-06", endDate: "2026-11-20", goal: null }] };
+  for (const key of ["HT-1", "HT-2"]) ctx.tickets.set(key, { ...item(key, "todo", "2026-11-01T10:00:00Z"), payload: { planning: metadata } });
+  await ctx.service.syncFilter(ctx.filter);
+  const reads: string[] = [];
+  ctx.jira.provider.listItems = async (_conn, filter, opts) => {
+    if (opts.updatedSince) return [];
+    reads.push(filter!);
+    return filter!.includes('"HT-2"') ? [{ ...ctx.tickets.get("HT-2")!, payload: { planning: {
+      ...metadata, iterations: [{ ...metadata.iterations[0], state: "active" }],
+    } } }] : [];
+  };
+  for (const time of ["2026-11-06T08:03:00Z", "2026-11-06T08:06:00Z"]) {
+    clock = new Date(time);
+    await ctx.service.syncFilter({ ...ctx.filter, last_synced_at: "2026-11-06T08:00:00Z" });
+  }
+  assert.equal(reads.length, 2);
+  assert.match(reads[1], /"HT-2"/);
+  const imported = await planning!.getImportedBoardPlanning(ctx.room.id, clock);
+  assert.equal(imported.sprints[0].state, "active");
+  assert.equal(imported.sprints[0].source?.stale, false);
 });
 
 test("linking a native card merges the imported card and keeps artifacts and mentions", options, async () => {
