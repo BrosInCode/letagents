@@ -229,16 +229,17 @@ function liveMetadata(): DesktopRoomLiveMetadata {
 async function mountAgents(
   supervisor: Partial<DesktopApi["supervisor"]>,
   readMetadata: (roomIdentifier: string, options?: unknown) => Promise<DesktopRoomLiveMetadata> = async () => liveMetadata(),
+  archiveAgents?: DesktopApi["room"]["archiveAgents"],
 ) {
   const originalWindow = globalThis.window;
   const originalDocument = globalThis.document;
   const listeners = new Map<string, unknown>();
   Object.assign(globalThis, {
-    window: { letagentsDesktop: { supervisor, room: { getLiveMetadata: readMetadata }, workers: { listAgentProviders: async () => [] } } },
+    window: { letagentsDesktop: { supervisor, room: { getLiveMetadata: readMetadata, archiveAgents }, workers: { listAgentProviders: async () => [] } } },
     document: { visibilityState: "visible", addEventListener: (name: string, fn: unknown) => listeners.set(name, fn), removeEventListener: (name: string) => listeners.delete(name) },
   });
   let agents!: ReturnType<typeof useSettingsAgents>;
-  const rooms = Vue.ref([{ roomIdentifier: "room-a", name: "Main", displayName: "Main", focusRooms: [], archived: false }] as DesktopAccountRoomEntry[]);
+  const rooms = Vue.ref([{ roomIdentifier: "room-a", name: "Main", displayName: "Main", focusRooms: [], archived: false, role: "admin" }] as DesktopAccountRoomEntry[]);
   const app = renderer.createApp({ setup() { agents = useSettingsAgents(() => rooms.value); return () => null; } });
   app.mount(node());
   return { agents, rooms, listeners, close() { app.unmount(); Object.assign(globalThis, { window: originalWindow, document: originalDocument }); } };
@@ -323,4 +324,48 @@ test("the Agents roster signs approval reads only for rooms hosting a local agen
     assert.ok(metadataReads.every(read => read.roomIdentifier === "room-a"));
     assert.ok(metadataReads.every(read => JSON.stringify(read.options) === JSON.stringify({ include: ["participants", "presence"] })));
   } finally { mounted?.close(); globalThis.setInterval = set; globalThis.clearInterval = clear; }
+});
+
+test("archive targets exact offline rows, preserves unrelated rows and reports partial room failures", async () => {
+  const old = { ...liveMetadata().participants[0], participantKey: "old", displayName: "Old", activityState: "offline" as const };
+  const remaining = new Map([['room-a', [old, { ...old, participantKey: "keep", displayName: "Keep" }]], ['room-b', [old]]]);
+  const calls: unknown[] = [];
+  const mounted = await mountAgents({ getServiceSnapshot: async () => snapshot([]) }, async room => ({
+    ...liveMetadata(), roomIdentifier: room, participants: remaining.get(room)!,
+  }), async (room, keys) => {
+    calls.push([room, keys]);
+    if (room === 'room-b') throw Error('Forbidden');
+    remaining.set(room, remaining.get(room)!.filter(p => !keys.includes(p.participantKey)));
+    return { archivedParticipantKeys: keys, skippedParticipantKeys: [] };
+  });
+  try {
+    mounted.rooms.value.push({ ...mounted.rooms.value[0], roomIdentifier: 'room-b', displayName: 'Second' });
+    await flush(); await flush(); await mounted.agents.refresh();
+    await mounted.agents.archiveAgents(['room-a:old', 'room-b:old']);
+    await flush(); await flush();
+    assert.deepEqual(calls, [['room-a', ['old']], ['room-b', ['old']]]);
+    assert.deepEqual(mounted.agents.rows.value.map(row => row.id).sort(), ['room-a:keep', 'room-b:old']);
+    assert.match(mounted.agents.archiveFeedback.value!, /1 agent archived/);
+    assert.match(mounted.agents.archiveError.value!, /Second/);
+    assert.equal(mounted.agents.archiveBusy.value, false);
+  } finally { mounted.close(); }
+});
+
+test("archive rechecks current eligibility and reports a reconnect without hiding the agent", async () => {
+  const old = { ...liveMetadata().participants[0], activityState: 'offline' as const };
+  let calls = 0;
+  const mounted = await mountAgents({ getServiceSnapshot: async () => snapshot([]) }, async () => ({ ...liveMetadata(), participants: [old] }), async () => {
+    calls++;
+    return { archivedParticipantKeys: [], skippedParticipantKeys: ['remote'] };
+  });
+  try {
+    await flush(); await flush();
+    await mounted.agents.archiveAgents(['room-a:remote']);
+    assert.equal(calls, 1);
+    assert.equal(mounted.agents.rows.value.length, 1);
+    assert.match(mounted.agents.archiveFeedback.value!, /1 agent was skipped/);
+    mounted.rooms.value[0].role = 'participant'; await flush(); await flush();
+    await mounted.agents.archiveAgents(['room-a:remote']);
+    assert.equal(calls, 1, 'lost room-admin access is rechecked before dispatch');
+  } finally { mounted.close(); }
 });

@@ -426,6 +426,7 @@ export interface DesktopApi {
       roomIdentifier: string,
       focusKey: string
     ) => Promise<DesktopFocusRoomMutationResult>;
+    archiveAgents?: (roomIdentifier: string, participantKeys: string[]) => Promise<{ archivedParticipantKeys: string[]; skippedParticipantKeys: string[] }>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
     createInviteRoom: () => Promise<DesktopInviteRoomCreation>;
     getPullRequestDiff?: (roomIdentifier: string, number: number) => Promise<import("./room.js").DesktopPullRequestDiffResult>;

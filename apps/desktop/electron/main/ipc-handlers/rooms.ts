@@ -108,6 +108,7 @@ import {
 import {
   addDesktopRoomTask,
   archiveDesktopFocusRoom,
+  archiveDesktopRoomAgents,
   assignDesktopBoardManager,
   concludeDesktopFocusRoom,
   createDesktopAdHocFocusRoom,
@@ -586,6 +587,7 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:room:set-reply-order", (_event, roomIdentifier: string, enabled: boolean) => setDesktopReplyOrder(roomIdentifier, enabled));
   targetIpcMain.handle("desktop:room:get-message-link-previews", (_event, roomIdentifier: string, references) => getDesktopMessageLinkPreviews(roomIdentifier, references));
   targetIpcMain.handle("desktop:room:get-message-pins", (_event, roomIdentifier: string) => getDesktopMessagePins(roomIdentifier));
+  targetIpcMain.handle("desktop:room:archive-agents", (_event, room: string, participantKeys: string[]) => archiveDesktopRoomAgents(room, participantKeys));
   targetIpcMain.handle("desktop:room:create-message-reminder", (_event, room: string, message: string, dueAt: string) => createDesktopMessageReminder(room, message, dueAt));
   targetIpcMain.handle("desktop:room:get-message-reminders", (_event, offset?: number) => getDesktopMessageReminders(offset));
   targetIpcMain.handle("desktop:room:delete-message-reminder", (_event, id: string) => deleteDesktopMessageReminder(id));

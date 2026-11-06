@@ -4,6 +4,7 @@ import type { AgentInspectorRequest } from "../components/desktop/content/deskto
 import { projectAgentInspectors } from "./agent-inspector";
 import { participantAgentInspectorRequest, resolveSupervisorEntryId, supervisedAgentInspectorRequest } from "./agent-inspector-identity";
 import { managedAgentProviderLabel, mergeReachableAgentPresenceParticipants } from "./managed-agents";
+import { isLocalRoomIdentifier } from "./room-urls";
 
 export type SettingsAgentFilter = "all" | "attention" | "active" | "paused" | "external" | "retired";
 export interface SettingsAgentRow {
@@ -22,17 +23,19 @@ export interface SettingsAgentRow {
   external: boolean;
   stale: boolean;
   approvals: number;
+  archiveParticipantKey: string | null;
   request: AgentInspectorRequest;
 }
 
 export function settingsAgentRooms(rooms: readonly DesktopAccountRoomEntry[]) {
   return [...new Map(rooms.filter(room => !room.archived).flatMap(room => [room, ...room.focusRooms])
-    .map(room => [room.roomIdentifier, { id: room.roomIdentifier, name: room.displayName || room.name }])).values()];
+    .map(room => [room.roomIdentifier, { id: room.roomIdentifier, name: room.displayName || room.name,
+      canArchive: room.role === "admin" && !isLocalRoomIdentifier(room.roomIdentifier) }])).values()];
 }
 
 /** Use the same state and exact identity projections as the room inspector. */
 export function settingsAgentRows(input: {
-  rooms: readonly { id: string; name: string }[];
+  rooms: readonly { id: string; name: string; canArchive?: boolean }[];
   entries: readonly DesktopSupervisorManifestEntry[];
   supervisorFresh: boolean;
   metadata: ReadonlyMap<string, DesktopRoomLiveMetadata>;
@@ -55,6 +58,7 @@ export function settingsAgentRows(input: {
         attention: !retired && (projection.overallState === "needs_attention" || approvals > 0),
         active: ["online", "responding", "starting", "recovering", "reconnecting", "restoring_conversation"].includes(projection.overallState),
         paused: projection.overallState === "paused", retired, external: false, stale: !input.supervisorFresh, approvals,
+        archiveParticipantKey: null,
         request: supervisedAgentInspectorRequest(projection.entry, { displayName: projection.displayName, ownerAttribution: projection.ownerAttribution }),
       });
     }
@@ -77,6 +81,8 @@ export function settingsAgentRows(input: {
         searchText: participant.ownerLabel || "",
         status: stale ? "Status unavailable" : active ? "Online" : "Offline",
         attention: !stale && presence?.status === "blocked", active, paused: false, retired: false, external, stale, approvals: 0,
+        archiveParticipantKey: room.canArchive && external && !stale && !active
+          && participant.activityState === "offline" ? participant.participantKey : null,
         request: participantAgentInspectorRequest({
           messageId: null, clientMessageId: null, messageSource: null,
           actorLabel: participant.actorLabel, displayName: participant.displayName, sender: participant.displayName,

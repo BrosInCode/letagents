@@ -15,6 +15,7 @@ const {
   resolveReplayCanonicalBase,
 } = await import("../routes/rooms/presence/agent-session-routes.js");
 const { nativeHarnessPresenceForStatus } = await import("../db/presence/liveness.js");
+const { registerDisconnectedParticipantRoutes } = await import("../routes/rooms/presence/disconnected-routes.js");
 const {
   isActiveRoomAgentSessionStaleForRegistration,
   SAME_INSTANCE_RECLAIM_STALE_AFTER_MS,
@@ -140,7 +141,7 @@ test("registerRoomPresenceRoutes preserves canonical presence route order", () =
     { method: "get", path: "/^(?:\\/api)?\\/rooms\\/(.+)\\/presence$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/participants$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/activity-history$/" },
-    { method: "post", path: "/^\\/rooms\\/(.+)\\/participants\\/(?:clear|archive)-disconnected$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/participants\\/((?:clear|archive)-disconnected|archive-selected)$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/process$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/process\\/exit$/" },
@@ -200,6 +201,55 @@ function makeParticipant(overrides: Partial<RoomParticipant> = {}): RoomParticip
     ...overrides,
   };
 }
+
+test("selected archive reuses hiding and suppression, preserves unrelated participants, and skips reconnects", async () => {
+  let handler!: Function;
+  const participants = [
+    makeParticipant({ participant_key: "old", actor_label: "Old", agent_key: "owner/old" }),
+    makeParticipant({ participant_key: "other", actor_label: "Other", agent_key: "owner/other" }),
+    makeParticipant({ participant_key: "back", actor_label: "Old name", agent_key: "owner/back" }),
+    makeParticipant({ participant_key: "person", kind: "human" }),
+  ];
+  const writes: unknown[] = [];
+  let admin = true;
+  let reads = 0;
+  registerDisconnectedParticipantRoutes({ post(_path: RegExp, next: Function) { handler = next; } } as never, {
+    ...createDeps(), resolveCanonicalRoomRequestId: async (id: string) => id,
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireAdmin: async (_req: unknown, res: any) => { if (!admin) res.status(403).json({ error: "Forbidden" }); return admin; },
+  } as never, {
+    getRoomParticipantsForRooms: async () => { reads++; return participants; },
+    getRoomAgentPresenceSnapshot: async () => [
+      makePresence({ actor_label: "Old", agent_key: "owner/old", source_flags: ["delivery"], last_heartbeat_at: new Date().toISOString() }),
+      makePresence({ actor_label: "New name", agent_key: "owner/back", freshness: "active", source_flags: ["delivery"] }),
+    ],
+    setRoomParticipantsHidden: async input => { writes.push(input); return input.participant_keys.length; },
+    setRoomLiveAgentSuppressed: async input => { writes.push(input); return input.actor_labels.length; },
+  });
+  async function request(body: unknown, action = "archive-selected") {
+    const res = { code: 200, body: null as any, status(code: number) { this.code = code; return this; }, json(body: unknown) { this.body = body; return this; } };
+    await handler({ params: { 0: "room_1", 1: action }, body, sessionAccount: { login: "admin" } }, res);
+    return res;
+  }
+  const selected = await request({ participant_keys: ["old", "back", "person", "missing", "old"] });
+  assert.deepEqual(selected.body.archived_participant_keys, ["old"]);
+  assert.deepEqual(selected.body.skipped_participant_keys, ["back", "person", "missing"]);
+  assert.deepEqual(writes, [
+    { room_id: "room_1", participant_keys: ["old"], hidden: true, hidden_by: "admin" },
+    { room_id: "room_1", actor_labels: ["Old"], suppressed: true, suppressed_by: "admin" },
+  ], "only existing roster visibility operations run; no identity, history, or runtime deletion");
+  writes.length = 0;
+  for (const body of [undefined, {}, { participant_keys: [] }, { participant_keys: [" "] }, { participant_keys: [1] }, { participant_keys: Array(501).fill("old") }]) {
+    assert.equal((await request(body)).code, 400);
+  }
+  assert.equal(reads, 1); assert.deepEqual(writes, []);
+  admin = false;
+  assert.equal((await request({ participant_keys: ["old"] })).code, 403);
+  assert.equal(reads, 1); assert.deepEqual(writes, []);
+  admin = true;
+  await request({}, "clear-disconnected");
+  assert.deepEqual((writes[0] as any).participant_keys, ["old", "other", "back"], "legacy cleanup retains its room-wide behavior");
+});
 
 test("buildRoomActivityHistoryParticipants preserves status-only presence as history", () => {
   const participants = buildRoomActivityHistoryParticipants({

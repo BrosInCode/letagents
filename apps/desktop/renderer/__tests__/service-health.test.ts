@@ -160,6 +160,22 @@ test("Agents settings surfaces approval and recovery needs without exposing appr
   assert.doesNotMatch(JSON.stringify(rows), /private command/);
 });
 
+test("only current offline room participants with admin access can be archived", () => {
+  const rooms = [{ id: "room_a", name: "Main", canArchive: true }];
+  const participants = [
+    { participantKey: "old", kind: "agent", displayName: "Old", activityState: "offline" },
+    { participantKey: "online", kind: "agent", displayName: "Online", activityState: "active" },
+    { participantKey: "unknown", kind: "agent", displayName: "Unknown" },
+  ];
+  const input = { rooms, entries: [entry("managed")], supervisorFresh: true,
+    metadata: new Map([["room_a", { participants, presence: [] } as unknown as DesktopRoomLiveMetadata]]),
+    staleRooms: new Set<string>(), approvals: [] };
+  assert.deepEqual(settingsAgentRows(input).filter(row => row.archiveParticipantKey).map(row => row.archiveParticipantKey), ["old"]);
+  for (const change of [{ supervisorFresh: false }, { staleRooms: new Set(["room_a"]) }, { rooms: [{ ...rooms[0], canArchive: false }] }]) {
+    assert.ok(settingsAgentRows({ ...input, ...change }).every(row => row.archiveParticipantKey === null));
+  }
+});
+
 test("a retired agent only stays one row while its identity key survives the retirement", () => {
   const rooms = [{ id: "room_a", name: "Main" }];
   const participants = [{
