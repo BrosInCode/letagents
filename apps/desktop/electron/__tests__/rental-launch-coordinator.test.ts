@@ -31,7 +31,7 @@ async function recoveryFixture(t: TestContext) {
     desiredState: "running", observedState: "recovering", condition: "auth_blocked", agentSessionId: "same_worker",
     agentSessionBindingState: "historical", readyReachedAt: "2026-09-27T00:00:00.000Z" };
   let observation = { attempt: new Promise<void>(() => {}), status: "pending", current: true, error: undefined as unknown };
-  const calls = { grants: 0, complete: 0, stop: 0, purge: 0, refresh: 0, ack: 0, list: 0, getEntry: 0 };
+  const calls = { grants: 0, complete: 0, stop: 0, purge: 0, refresh: 0, ack: 0, list: 0, getEntry: 0, ensure: 0 };
   const api = {
     async getSession() { calls.refresh++; return { ok: true as const, status: 200, body: session({ id: launch.sessionId, status: "active" }) }; },
     async completeSession() { calls.complete++; return { ok: true as const, status: 200, body: session({ status: "completed" }) }; },
@@ -43,7 +43,7 @@ async function recoveryFixture(t: TestContext) {
     async getEntry(id: string) { calls.getEntry++; return entryById([entry], id); },
     async setDesiredState() { calls.stop++; entry.desiredState = "stopped"; entry.observedState = "stopped"; },
     async isMaintenanceHeld() { return false; },
-    async ensureRunning() { return { generation: 1 }; },
+    async ensureRunning() { calls.ensure++; return { generation: 1 }; },
     async purgeAgent() { calls.purge++; return { outcome: "purged" }; },
   };
   const grants = {
@@ -219,9 +219,13 @@ test("a periodic pass with no live launch reads nothing from the daemon", async 
   const h = await recoveryFixture(t);
   await writeRentalLaunch({ ...h.launch, state: "stopped" });
   await writeRentalLaunch({ ...h.launch, sessionId: "rsess_failed", entryId: "entry_failed", state: "failed" });
-  for (let i = 0; i < 3; i++) await h.tick();
+  await h.tick();
   assert.equal(h.calls.list, 0, "the whole manifest is never read");
   assert.equal(h.calls.getEntry, 0, "no finished launch has an entry to look up");
+  assert.equal(h.calls.ensure, 1, "the pass still runs the daemon restart check once");
+  for (let i = 0; i < 2; i++) await h.tick();
+  assert.equal(h.calls.list + h.calls.getEntry, 0);
+  assert.equal(h.calls.ensure, 3, "once per pass");
   assert.equal(h.calls.refresh + h.calls.complete + h.calls.stop + h.calls.purge + h.calls.ack, 0);
   assert.equal((await readRentalLaunch(h.launch.sessionId))?.state, "stopped");
   assert.equal((await readRentalLaunch("rsess_failed"))?.state, "failed");
@@ -229,6 +233,24 @@ test("a periodic pass with no live launch reads nothing from the daemon", async 
   await writeFile(h.path, JSON.stringify({ version: 1, entries: {} }));
   await h.tick();
   assert.equal(h.calls.list + h.calls.getEntry, 0);
+  assert.equal(h.calls.ensure, 4, "an empty journal is still a pass");
+});
+
+test("a failed daemon restart check leaves a live launch untouched and reads nothing else", async (t) => {
+  const h = await recoveryFixture(t);
+  h.observe("succeeded");
+  h.daemon.ensureRunning = async () => { h.calls.ensure++; throw new Error("daemon will not start"); };
+  await h.tick();
+  assert.equal(h.calls.ensure, 1);
+  assert.equal(h.calls.getEntry + h.calls.list, 0, "an unreachable daemon is not asked for the entry");
+  assert.equal(h.calls.refresh + h.calls.complete + h.calls.stop + h.calls.purge + h.calls.ack, 0, "unknown is not absent");
+  assert.deepEqual(await readRentalLaunch(h.launch.sessionId), h.launch);
+  // The next pass tries again, and reads the entry once the daemon is back.
+  h.daemon.ensureRunning = async () => { h.calls.ensure++; return { generation: 2 }; };
+  await h.tick();
+  assert.ok(h.calls.getEntry >= 1, "the entry is read once the daemon is back");
+  assert.equal(h.calls.list, 0);
+  assert.equal(h.calls.complete, 1, "the pass then acts on what it reads, as the grant recovery tests above show");
 });
 
 test("a periodic pass reads only the entry of each live launch and never the whole manifest", async (t) => {
@@ -565,7 +587,7 @@ test("recovery completes an active server rental when its daemon worker is absen
       async getSession() { refreshed += 1; return { ok: true as const, status: 200, body: session({ status: "active" }) }; },
       async completeSession() { completed += 1; return { ok: true as const, status: 200, body: session({ status: "completed" }) }; },
     } as never,
-    { async isMaintenanceHeld() { return false; }, async getEntry() { return null; } } as never,
+    { async isMaintenanceHeld() { return false; }, async ensureRunning() { return { generation: 1 }; }, async getEntry() { return null; } } as never,
     restoredGrants as never,
   );
   try {
@@ -674,7 +696,7 @@ test("one malformed recovered launch does not stop reconciliation of the others"
         return { ok: true as const, status: 200, body: session({ id, status: "active" }) };
       },
     } as never,
-    { async isMaintenanceHeld() { return false; }, async getEntry(id: string) { return entryById([bad, good], id); } } as never,
+    { async isMaintenanceHeld() { return false; }, async ensureRunning() { return { generation: 1 }; }, async getEntry(id: string) { return entryById([bad, good], id); } } as never,
     restoredGrants as never,
   );
   try {
@@ -783,7 +805,7 @@ test("recovery resumes a durable pre-accept intent instead of stranding capacity
       },
     } as never,
     // An accepting launch has no entry yet, so recovery must not ask the daemon about it.
-    { async isMaintenanceHeld() { return false; }, async getEntry() { daemonReads += 1; return null; } } as never,
+    { async isMaintenanceHeld() { return false; }, async ensureRunning() { return { generation: 1 }; }, async getEntry() { daemonReads += 1; return null; } } as never,
     restoredGrants as never,
     () => "host",
     async () => "agent_rental",
@@ -869,7 +891,7 @@ test("maintenance blocks rental admission and reclassification while durable dea
   await assert.rejects(h.coordinator.acceptAndLaunch("new", { providerId: "cursor", permissionProfileId: "sandboxed_write" }), /maintenance/);
   await h.coordinator.recover(); await h.tick();
   assert.deepEqual(await readRentalLaunch(h.launch.sessionId), h.launch);
-  assert.deepEqual(h.calls, { grants: 0, complete: 0, stop: 0, purge: 0, refresh: 0, ack: 0, list: 0, getEntry: 0 });
+  assert.deepEqual(h.calls, { grants: 0, complete: 0, stop: 0, purge: 0, refresh: 0, ack: 0, list: 0, getEntry: 0, ensure: 0 });
   await writeRentalLaunch({ ...h.launch, deadlineAt: new Date(Date.now() - 1).toISOString() });
   const deadline = t.mock.method(h.coordinator as unknown as { completeAtDeadline(id: string): Promise<void> }, "completeAtDeadline");
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });

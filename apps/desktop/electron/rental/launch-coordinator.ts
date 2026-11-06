@@ -510,6 +510,15 @@ export class RentalLaunchCoordinator {
       void this.grants.reconcileDesiredRunning().catch(() => undefined);
       grants = this.grants.getReconciliationObservation();
     }
+    // This is the periodic daemon restart check. The whole-manifest read that
+    // used to run here called ensureRunning() as a side effect, and it was the
+    // only periodic path that restarts a crashed daemon while the window is
+    // hidden: the renderer's refresh timer skips while hidden, and the state
+    // subscription uses connectIfRunning, which never starts one. Keep the call
+    // on purpose, once per pass, whether or not a launch is live. A failure is
+    // swallowed as the old read's was: no launch that needs the daemon is read
+    // or recorded this pass, and the next tick tries again.
+    const daemonRunning = await this.daemon.ensureRunning().then(() => true, () => false);
     // Only a launch in a live state needs the daemon, and only its own entry:
     // this runs every RECONCILE_MS, and the whole manifest is tens of megabytes.
     // With no live launch there is nothing to read.
@@ -518,9 +527,9 @@ export class RentalLaunchCoordinator {
       // A failed daemon read is not absence: `daemonRead` false means the daemon
       // could not be asked, while an entry it does not have reads as undefined.
       // An accepting launch has no entry yet and is accepted without the daemon.
-      let daemonRead = true;
+      let daemonRead = daemonRunning || saved.state === "accepting";
       let entry: DesktopSupervisorManifestEntry | undefined;
-      if (saved.state !== "accepting") {
+      if (daemonRunning && saved.state !== "accepting") {
         try {
           entry = await this.daemon.getEntry(saved.entryId) ?? undefined;
         } catch {
