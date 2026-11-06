@@ -12,6 +12,7 @@ import { ManifestStore } from "../manifest-store.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { CONTINUATION_REPAIR_EXHAUSTED_ERROR, continuationRepairExhaustionNeedsPersistence, continuationRepairMissingContinuation, isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, resolveReadyReachedAt, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
 import { type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView } from "../types.js";
+import { STATE_WATCH_ACTIVITY_SUMMARY_LIMIT } from "../state-watch-projection.js";
 import { loadSupervisedToolRuntimeAt } from "../supervised-tool-runtime.js";
 import { productionSupervisorGrantHttp } from "../cloud-http.js";
 import type { ProviderActionPort } from "../provider-action-port.js";
@@ -20,6 +21,7 @@ import type { RuntimeRecoveryCoordinator } from "../runtime-recovery-coordinator
 import type { ProcessIdentity } from "../process-identity.js";
 import {
   SupervisorDaemon,
+  appendNativeActivity,
   fixture,
   daemonRequest,
   TEST_SUPERVISOR,
@@ -846,6 +848,133 @@ test("manifest.list scopes to one room on request and still lists everything wit
 
     for (const invalid of ["", "  ", " room_a", 7, true]) {
       assert.match(String((await list({ room_id: invalid })).error), /exact non-empty room identifier/);
+    }
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("manifest.get_entry reads one entry as manifest.list shows it, answers null for an unknown id, and needs an entry_id", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    ...testDaemonEndpoint(env.root),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"),
+    attemptsRoot: join(env.root, "attempt-data"),
+    workspaceRoot: env.root,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const getEntry = async (params?: unknown) => daemonRequest(paths.socketPath, "manifest.get_entry", params);
+  try {
+    await daemon.start();
+    for (const put of [
+      { ...entry, id: "single_a", room_id: "room_a" },
+      { ...entry, id: "single_b", room_id: "room_b", desired_state: "stopped" as const, observed_state: "stopped" as const },
+    ]) assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: put })).ok, true, put.id);
+    // History is what the whole-manifest read ships and the single read must keep.
+    for (let sequence = 1; sequence <= 20; sequence += 1) {
+      await appendNativeActivity(daemon, "single_a", {
+        observed_at: new Date(1_800_000_000_000 + sequence).toISOString(), sequence, provider: "codex", kind: "tool",
+        method: "item/commandExecution", summary: `step ${sequence}`, status: "working", payload: { step: sequence },
+        payload_truncated: false, payload_redacted: false, durable_payload_ref: null,
+      });
+    }
+
+    const listed = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[];
+    for (const id of ["single_a", "single_b"]) {
+      const response = await getEntry({ entry_id: id });
+      assert.equal(response.ok, true, response.error);
+      assert.deepEqual(response.result, listed.find((row) => row.id === id), id);
+    }
+    const one = (await getEntry({ entry_id: "single_a" })).result as DaemonManifestEntryView;
+    assert.equal(one.activity?.length, 20, "the whole history, not a summary");
+    assert.deepEqual(one.activity?.at(-1)?.payload, { step: 20 });
+    assert.ok(one.workplace_liveness, "the derived liveness fields are there");
+
+    // An unknown id is an answer, not an error.
+    const unknown = await getEntry({ entry_id: "no_such_agent" });
+    assert.equal(unknown.ok, true);
+    assert.equal(unknown.result, null);
+
+    assert.match(String((await getEntry()).error), /params must be an object/);
+    for (const invalid of [{}, { entry_id: null }, { entry_id: "" }, { entry_id: "  " }, { entry_id: " single_a" }, { entry_id: 7 }, { id: "single_a" }]) {
+      assert.match(String((await getEntry(invalid)).error), /manifest\.get_entry requires an exact non-empty entry_id/, JSON.stringify(invalid));
+    }
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("manifest.list keeps full activity by default and returns the state watch's activity summary on request", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    ...testDaemonEndpoint(env.root),
+    manifestPath: join(env.root, "daemon-state.sqlite"),
+    auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"),
+    attemptsRoot: join(env.root, "attempt-data"),
+    workspaceRoot: env.root,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const list = async (params?: unknown) => daemonRequest(paths.socketPath, "manifest.list", params);
+  const events = 3 * STATE_WATCH_ACTIVITY_SUMMARY_LIMIT;
+  try {
+    await daemon.start();
+    for (const put of [
+      { ...entry, id: "summary_a", room_id: "room_a" },
+      { ...entry, id: "summary_b", room_id: "room_b" },
+    ]) assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: put })).ok, true, put.id);
+    for (let sequence = 1; sequence <= events; sequence += 1) {
+      await appendNativeActivity(daemon, "summary_a", {
+        observed_at: new Date(1_800_000_000_000 + sequence).toISOString(), sequence, provider: "codex", kind: "tool",
+        method: "item/commandExecution", summary: `step ${sequence}`, status: "working", payload: { step: sequence },
+        payload_truncated: false, payload_redacted: false, durable_payload_ref: null,
+      });
+    }
+    const activityOf = (result: unknown, id: string) => (result as DaemonManifestEntryView[]).find((row) => row.id === id)?.activity;
+
+    // Absent, null and "full" are the history every existing caller reads.
+    const full = (await list()).result;
+    assert.equal(activityOf(full, "summary_a")?.length, events);
+    assert.deepEqual(activityOf(full, "summary_a")?.at(-1)?.payload, { step: events });
+    assert.deepEqual((await list({ activity: "full" })).result, full);
+    assert.deepEqual((await list({ activity: null })).result, full);
+    assert.deepEqual((await list({ room_id: null })).result, full);
+
+    // The summary keeps the newest events, in order, without payloads.
+    const summary = (await list({ activity: "summary" })).result as DaemonManifestEntryView[];
+    assert.deepEqual(summary.map((row) => row.id), (full as DaemonManifestEntryView[]).map((row) => row.id));
+    const capped = activityOf(summary, "summary_a")!;
+    assert.equal(capped.length, STATE_WATCH_ACTIVITY_SUMMARY_LIMIT);
+    assert.deepEqual(capped.map((event) => event.sequence),
+      Array.from({ length: STATE_WATCH_ACTIVITY_SUMMARY_LIMIT }, (_unused, index) => events - STATE_WATCH_ACTIVITY_SUMMARY_LIMIT + index + 1));
+    assert.ok(capped.every((event) => event.payload === null));
+    // Only activity differs: the entry is otherwise the one the full read ships.
+    for (const row of summary) {
+      const { activity: _summary, ...rest } = row;
+      const { activity: _full, ...fullRest } = (full as DaemonManifestEntryView[]).find((candidate) => candidate.id === row.id)!;
+      assert.deepEqual(rest, fullRest, row.id);
+    }
+
+    // It is the same activity the state watch publishes.
+    const watched = (await daemonRequest(paths.socketPath, "manifest.watch_state", {
+      after_daemon_generation: 0, after_sequence: 0, wait_ms: 0,
+    })).result as { entries: DaemonManifestEntryView[] };
+    assert.deepEqual(activityOf(watched.entries, "summary_a"), capped);
+
+    // A room scope and the summary combine.
+    const scoped = (await list({ room_id: "room_a", activity: "summary" })).result as DaemonManifestEntryView[];
+    assert.deepEqual(scoped.map((row) => row.id), ["summary_a"]);
+    assert.deepEqual(activityOf(scoped, "summary_a"), capped);
+    assert.equal(activityOf((await list({ room_id: "room_a" })).result, "summary_a")?.length, events);
+
+    for (const invalid of ["brief", "", "SUMMARY", " summary", 7, true, {}]) {
+      assert.match(String((await list({ activity: invalid })).error), /manifest\.list activity must be "full" or "summary"/, JSON.stringify(invalid));
     }
   } finally {
     await daemon.stop();
