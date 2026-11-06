@@ -90,26 +90,35 @@ async function watchSupervisorState(): Promise<void> {
   let afterDaemonGeneration = 0;
   let afterSequence = 0;
   let consecutiveFailures = 0;
+  // The daemon this watch negotiated with, kept for its generation. Every
+  // answer names the generation it came from, so a daemon that was replaced
+  // between two polls shows in its first answer and is negotiated with before
+  // any of its state is projected. A negotiate before every poll, one per
+  // state change, told the watch nothing it did not learn from the answer.
+  let watchedGeneration: number | null = null;
   while (stateEmitter.listenerCount("state") > 0) {
     try {
-      const status = await supervisorDaemonClient.connectIfRunning();
-      if (!status) return;
-      if (!supervisorStateWatchAcceptsStatus(status)) {
-        latestSupervisorState = null;
-        // Startup may briefly attach to the previous desktop build's daemon
-        // while the lifecycle owner performs a negotiated handoff. Do not
-        // project its additive wire shape as current durable state.
-        await unrefDelay(STATE_WATCH_RETRY_BASE_MS);
-        continue;
-      }
-      if (stateWatchUnsupportedGeneration === status.generation) return;
-      if (!status.capabilities.agentStateSubscription) {
-        stateWatchUnsupportedGeneration = status.generation;
-        return;
-      }
-      if (afterDaemonGeneration !== status.generation) {
-        afterDaemonGeneration = 0;
-        afterSequence = 0;
+      if (watchedGeneration === null) {
+        const status = await supervisorDaemonClient.connectIfRunning();
+        if (!status) return;
+        if (!supervisorStateWatchAcceptsStatus(status)) {
+          latestSupervisorState = null;
+          // Startup may briefly attach to the previous desktop build's daemon
+          // while the lifecycle owner performs a negotiated handoff. Do not
+          // project its additive wire shape as current durable state.
+          await unrefDelay(STATE_WATCH_RETRY_BASE_MS);
+          continue;
+        }
+        if (stateWatchUnsupportedGeneration === status.generation) return;
+        if (!status.capabilities.agentStateSubscription) {
+          stateWatchUnsupportedGeneration = status.generation;
+          return;
+        }
+        if (afterDaemonGeneration !== status.generation) {
+          afterDaemonGeneration = 0;
+          afterSequence = 0;
+        }
+        watchedGeneration = status.generation;
       }
       // With a state held, ask only for what changed since it; the whole
       // state is read once per daemon generation and whenever the changes do
@@ -118,6 +127,15 @@ async function watchSupervisorState(): Promise<void> {
       const result = held && held.daemonGeneration === afterDaemonGeneration && afterSequence > 0
         ? await supervisorDaemonClient.watchStateChanges({ afterDaemonGeneration, afterSequence })
         : { complete: true as const, ...(await supervisorDaemonClient.watchState({ afterDaemonGeneration, afterSequence })) };
+      if (result.daemonGeneration !== watchedGeneration) {
+        // Another daemon answered. Its version and capabilities are unknown
+        // until negotiated with, so none of this answer is kept.
+        watchedGeneration = null;
+        latestSupervisorState = null;
+        afterDaemonGeneration = 0;
+        afterSequence = 0;
+        continue;
+      }
       const snapshot = result.complete
         ? { daemonGeneration: result.daemonGeneration, sequence: result.sequence, entries: result.entries }
         : held && applySupervisorStateChanges(held, result);
@@ -135,12 +153,26 @@ async function watchSupervisorState(): Promise<void> {
       // The renderer keeps its last authoritative snapshot. Reconnection is a
       // transport concern and must not transiently dismantle its live controls.
       // A capped exponential delay avoids turning a persistent failure into a
-      // tight background loop.
+      // tight background loop. The daemon is negotiated with again first: a
+      // failed poll is how a stopped or replaced daemon shows itself here.
+      watchedGeneration = null;
       latestSupervisorState = null;
       consecutiveFailures += 1;
       await unrefDelay(supervisorStateWatchRetryDelay(consecutiveFailures));
     }
   }
+}
+
+/**
+ * Resolves once the state watch loop has ended; tests wait on it between
+ * subscriptions. The loop's own delays do not keep the process alive, so this
+ * holds a timer until the loop is gone.
+ */
+export function supervisorStateWatchSettledForTest(): Promise<void> {
+  const operation = stateWatchOperation;
+  if (!operation) return Promise.resolve();
+  const keepAlive = setInterval(() => undefined, 50);
+  return operation.finally(() => clearInterval(keepAlive));
 }
 
 function unrefDelay(ms: number): Promise<void> {

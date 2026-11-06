@@ -30,4 +30,5 @@ export {
   projectLiveSupervisorEntries,
   setFocusedAgentStream,
   supervisorDaemonClient,
+  supervisorStateWatchSettledForTest,
 } from "./state-watch.js";

@@ -7,7 +7,7 @@ createElectronTestEnv({ prefix: "needs-you-sources-" }).resetState({});
 
 const { mayHoldPendingBoardIntents, readPendingBoardIntents } = await import("../main/rooms/knowledge.js");
 const { mapDesktopBoardIntent } = await import("../main/rooms/board-governance/mappers.js");
-const { liveSupervisorStateEntries, onSupervisorState, projectLiveSupervisorEntries, supervisorDaemonClient, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION } = await import("../main/supervisor-daemon.js");
+const { liveSupervisorStateEntries, onSupervisorState, projectLiveSupervisorEntries, supervisorDaemonClient, supervisorStateWatchSettledForTest, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION } = await import("../main/supervisor-daemon.js");
 
 test("Inbox asks only admin rooms active within an intent's lifetime for pending board intents", () => {
   const now = Date.parse("2026-09-30T16:30:00.000Z");
@@ -74,18 +74,21 @@ test("Needs you forgets agent state once the daemon stops or its watch fails", a
   let failNext = false;
   // This process never reaches a real daemon.
   supervisorDaemonClient.connectIfRunning = (async () => (running ? status : null)) as typeof supervisorDaemonClient.connectIfRunning;
+  // A stopped daemon answers no poll: the watch learns of its end from the failed poll, not from a negotiate before it.
   supervisorDaemonClient.watchState = (async () => {
     watches += 1;
+    if (!running) throw new Error("connect ECONNREFUSED");
     if (failNext) throw new Error("socket closed");
     return { daemonGeneration: 1, sequence: watches + 1, entries: [entry("running", "running"), entry("retired", "stopped")] };
   }) as unknown as typeof supervisorDaemonClient.watchState;
-  // Once it holds a state, the watch asks for changes only; the same failure applies.
+  // Once it holds a state, the watch asks for changes only; the same failures apply.
   supervisorDaemonClient.watchStateChanges = (async () => {
     watches += 1;
+    if (!running) throw new Error("connect ECONNREFUSED");
     if (failNext) throw new Error("socket closed");
     return { complete: false, daemonGeneration: 1, sequence: watches + 1, changedEntries: [], removedEntryIds: [], entryOrder: ["running", "retired"] };
   }) as unknown as typeof supervisorDaemonClient.watchStateChanges;
-  const settle = async (done: () => boolean) => { for (let i = 0; i < 200 && !done(); i += 1) await new Promise(resolve => setImmediate(resolve)); };
+  const settle = async (done: () => boolean) => { for (let i = 0; i < 400 && !done(); i += 1) await new Promise(resolve => setTimeout(resolve, 10)); };
 
   const snapshots: unknown[] = [];
   const stop = onSupervisorState((snapshot) => {
@@ -97,6 +100,7 @@ test("Needs you forgets agent state once the daemon stops or its watch fails", a
   stop();
   assert.equal(snapshots.length, 1);
   assert.equal(liveSupervisorStateEntries(), null, "a stopped daemon's agents are not shown");
+  await supervisorStateWatchSettledForTest();
 
   running = true;
   const again: unknown[] = [];
@@ -109,6 +113,7 @@ test("Needs you forgets agent state once the daemon stops or its watch fails", a
   await settle(() => liveSupervisorStateEntries() === null);
   stopAgain();
   assert.equal(liveSupervisorStateEntries(), null, "a failing watch forgets what it can no longer confirm");
+  await supervisorStateWatchSettledForTest();
 });
 
 test("Needs you marks each focus room with the room it is listed under, and says whether it read updates", async (t) => {
@@ -172,8 +177,13 @@ test("Needs you merges changes-only answers, reads the whole state again when th
     { complete: false, daemonGeneration: 1, sequence: 2, changedEntries: [entry("a", "paused")], removedEntryIds: [], entryOrder: ["a", "b"] },
     // Names an entry neither side has: does not fit the state held.
     { complete: false, daemonGeneration: 1, sequence: 3, changedEntries: [], removedEntryIds: [], entryOrder: ["a", "b", "c"] },
+    // The daemon restarted between two polls. The cursor is from another
+    // generation, so the new daemon answers its whole state; the watch keeps
+    // none of it until it has negotiated with this daemon.
+    { complete: true, daemonGeneration: 2, sequence: 1, entries: [entry("a", "running")] },
   ];
-  supervisorDaemonClient.connectIfRunning = (async () => (running ? status : null)) as typeof supervisorDaemonClient.connectIfRunning;
+  let connects = 0;
+  supervisorDaemonClient.connectIfRunning = (async () => { connects += 1; return running ? status : null; }) as typeof supervisorDaemonClient.connectIfRunning;
   supervisorDaemonClient.watchState = (async (input: { afterDaemonGeneration: number; afterSequence: number }) => {
     wholeReads.push({ afterDaemonGeneration: input.afterDaemonGeneration, afterSequence: input.afterSequence });
     const answer = wholeAnswers.shift();
@@ -195,14 +205,17 @@ test("Needs you merges changes-only answers, reads the whole state again when th
   await settle(() => snapshots.length === 4);
   await settle(() => liveSupervisorStateEntries() === null);
   stop();
+  await supervisorStateWatchSettledForTest();
   assert.deepEqual(snapshots.map((snapshot) => [snapshot.daemonGeneration, snapshot.sequence, snapshot.entries.map((item) => `${item.id}:${item.desiredState}`)]), [
     [1, 1, ["a:running", "b:stopped"]],
     [1, 2, ["a:paused", "b:stopped"]],
     [1, 3, ["a:paused", "b:stopped", "c:running"]],
     [2, 1, ["a:running"]],
   ]);
-  assert.deepEqual(changeReads.map((read) => read.afterSequence), [1, 2], "changes are asked for from the sequence held");
+  assert.deepEqual(changeReads.map((read) => read.afterSequence), [1, 2, 3, 1],
+    "changes are asked for from the sequence held; the poll at 3 reached the restarted daemon, the one at 1 is the last poll of the new one");
   assert.equal(wholeReads.length, 3);
   assert.equal(wholeReads[1]!.afterSequence, 0, "a refused merge reads the whole state again");
   assert.deepEqual(wholeReads[2], { afterDaemonGeneration: 0, afterSequence: 0 }, "a new daemon generation starts over");
+  assert.equal(connects, 2, "negotiated once at the start and once when an answer named another daemon: not before each of the seven polls");
 });
