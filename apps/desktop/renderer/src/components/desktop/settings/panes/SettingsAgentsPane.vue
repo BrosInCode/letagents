@@ -247,6 +247,10 @@ async function toggleCommitIdentity(): Promise<void> {
   .agents-portal-heading :deep(button) { white-space: nowrap; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .agents-portal *, .agent-row-enter-active, .agent-row-move, .agents-reveal-enter-active { transition: none !important; transform: none !important; }
+  /* Stop the motion, not the layout. Scoped styles compile `.agents-portal *`
+     to an unqualified descendant selector, so `transform: none` here also hit
+     the shared switch knob offset and the select caret centring inside child
+     components. Transitions and animations alone carry the motion. */
+  .agents-portal *, .agent-row-enter-active, .agent-row-move, .agents-reveal-enter-active { transition: none !important; animation: none !important; }
 }
 </style>

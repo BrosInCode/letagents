@@ -288,3 +288,31 @@ test("Agents roster still shows external room agents on hosts without managed ag
     assert.deepEqual(mounted.agents.errors.value, []);
   } finally { mounted.close(); overrideSupervisedAgentsSupported(true); }
 });
+
+test("the Agents roster signs approval reads only for rooms hosting a local agent and refreshes a minute apart", async () => {
+  const set = globalThis.setInterval; const clear = globalThis.clearInterval;
+  let intervalMs = 0;
+  globalThis.setInterval = ((_callback: () => void, ms: number) => { intervalMs = ms; return 7; }) as any;
+  globalThis.clearInterval = (() => {}) as any;
+  const approvalReads: string[] = [];
+  let withLocalAgent = false;
+  let mounted: Awaited<ReturnType<typeof mountAgents>> | undefined;
+  try {
+    mounted = await mountAgents({
+      getServiceSnapshot: async () => (withLocalAgent ? snapshot([agent()], 1) : snapshot([], 1)),
+      onState: () => () => {},
+      listHostApprovals: async (roomIdentifier: string) => {
+        approvalReads.push(roomIdentifier);
+        return { available: true, error: null, approvals: [] };
+      },
+    });
+    await flush(); await flush();
+    // An agent-free room must not cost a signed daemon read every round.
+    assert.deepEqual(approvalReads, []);
+    withLocalAgent = true;
+    await mounted.agents.refresh(); await flush();
+    assert.deepEqual(approvalReads, ["room-a"]);
+    // The roster is the only clocked read left, and it is no longer 15s.
+    assert.equal(intervalMs, 60_000);
+  } finally { mounted?.close(); globalThis.setInterval = set; globalThis.clearInterval = clear; }
+});

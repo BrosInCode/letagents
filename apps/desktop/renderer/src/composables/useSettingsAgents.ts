@@ -5,6 +5,14 @@ import { desktopIpc } from "../ipc/index.js";
 import { supervisedAgentsSupported } from "../domain/supervised-agents-support";
 import { settingsAgentRooms, settingsAgentRows } from "../domain/settings-agents";
 
+/**
+ * Supervised agents arrive over the state push this composable subscribes to,
+ * so the only thing left on a clock is the server-side room roster, which has
+ * no push here. That read is a whole-account fan-out, so it runs a minute
+ * apart rather than every 15 s.
+ */
+const ROSTER_REFRESH_MS = 60_000;
+
 /** Settings reads joined rooms without starting/stopping the active room's stream. */
 export function useSettingsAgents(accountRooms: () => readonly DesktopAccountRoomEntry[]) {
   const rooms = computed(() => settingsAgentRooms(accountRooms()));
@@ -20,6 +28,7 @@ export function useSettingsAgents(accountRooms: () => readonly DesktopAccountRoo
   let mounted = false;
   let disposed = false;
   let pending = false;
+  let running = false;
   let roomEpoch = 0;
   let stopState: (() => void) | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -30,10 +39,17 @@ export function useSettingsAgents(accountRooms: () => readonly DesktopAccountRoo
       || (next.daemonGeneration === current.daemonGeneration && next.sequence >= current.sequence)) state.value = next;
   }
 
-  async function refresh(): Promise<void> {
+  /**
+   * A background round keeps `busy` untouched, so an automatic refresh cannot
+   * flip the header button to "Refreshing" or blank the empty state under a
+   * reader who never asked for it.
+   */
+  async function refresh(options: { background?: boolean } = {}): Promise<void> {
     if (disposed) return;
-    if (busy.value) { pending = true; return; }
-    busy.value = true;
+    const background = options.background === true;
+    if (running) { pending = true; return; }
+    running = true;
+    if (!background) busy.value = true;
     const epoch = roomEpoch;
     const current = () => !disposed && epoch === roomEpoch;
     const nextErrors: string[] = [];
@@ -64,6 +80,12 @@ export function useSettingsAgents(accountRooms: () => readonly DesktopAccountRoo
             if (current()) providers.value = next;
           } catch { nextErrors.push("Provider information is unavailable."); }
         })(),
+      ]);
+      if (!current()) return;
+      // With the supervisor snapshot already in hand, the room pass can skip
+      // the signed approval read for every room that hosts no local agent.
+      const roomsWithLocalAgents = new Set((state.value?.entries ?? []).map(entry => entry.roomId));
+      await Promise.all([
         ...Array.from({ length: Math.min(4, queue.length) }, async () => {
           for (let room = queue.shift(); room && current(); room = queue.shift()) {
             const selectedRoom = room;
@@ -84,7 +106,7 @@ export function useSettingsAgents(accountRooms: () => readonly DesktopAccountRoo
                 } catch { nextStaleRooms.add(selectedRoom.id); }
               })(),
               (async () => {
-                if (!supervisedAgentsSupported.value) return;
+                if (!supervisedAgentsSupported.value || !roomsWithLocalAgents.has(selectedRoom.id)) return;
                 try {
                   const result = await desktopIpc.supervisor?.listHostApprovals?.(selectedRoom.id);
                   if (!result?.available) throw new Error("unavailable");
@@ -103,12 +125,13 @@ export function useSettingsAgents(accountRooms: () => readonly DesktopAccountRoo
       errors.value = [...new Set(nextErrors)];
       loaded.value = true;
     } finally {
-      busy.value = false;
-      if (pending && !disposed) { pending = false; void refresh(); }
+      running = false;
+      if (!background) busy.value = false;
+      if (pending && !disposed) { pending = false; void refresh({ background }); }
     }
   }
 
-  function visibleRefresh(): void { if (document.visibilityState !== "hidden") void refresh(); }
+  function visibleRefresh(): void { if (document.visibilityState !== "hidden") void refresh({ background: true }); }
   watch(() => rooms.value.map(room => room.id).join("\n"), () => {
     roomEpoch++;
     if (mounted) void refresh();
@@ -125,7 +148,7 @@ export function useSettingsAgents(accountRooms: () => readonly DesktopAccountRoo
       }
     });
     void refresh();
-    timer = setInterval(visibleRefresh, 15_000);
+    timer = setInterval(visibleRefresh, ROSTER_REFRESH_MS);
     document.addEventListener("visibilitychange", visibleRefresh);
   });
   onBeforeUnmount(() => {

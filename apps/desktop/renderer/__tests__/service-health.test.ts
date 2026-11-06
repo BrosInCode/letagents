@@ -159,3 +159,35 @@ test("Agents settings surfaces approval and recovery needs without exposing appr
   assert.equal(rows.at(-1)!.id, "idle");
   assert.doesNotMatch(JSON.stringify(rows), /private command/);
 });
+
+test("a retired agent only stays one row while its identity key survives the retirement", () => {
+  const rooms = [{ id: "room_a", name: "Main" }];
+  const participants = [{
+    participantKey: "retired-echo", kind: "agent", displayName: "Retired agent",
+    actorLabel: "retired actor", agentKey: "owner/retired", ideLabel: "Codex",
+    hiddenAt: null, activityState: "offline",
+  }];
+  const input = {
+    rooms,
+    entries: [entry("retired", { agentKey: "owner/retired", desiredState: "stopped", observedState: "stopped" })],
+    supervisorFresh: true,
+    metadata: new Map([["room_a", { participants, presence: [] } as unknown as DesktopRoomLiveMetadata]]),
+    staleRooms: new Set<string>(),
+    approvals: [],
+  };
+  const resolved = settingsAgentRows(input);
+  assert.deepEqual(resolved.map(row => row.id), ["retired"]);
+  assert.equal(resolved[0]!.retired, true);
+  assert.equal(resolved.some(row => row.external), false);
+  /**
+   * The renderer can only deduplicate on an exact key, so this pins why the
+   * main process must still project one for a retired entry: without it the
+   * live participant reappears as a second, External row.
+   */
+  const unresolved = settingsAgentRows({
+    ...input,
+    entries: [entry("retired", { agentKey: null, agentSessionId: null, desiredState: "stopped", observedState: "stopped" })],
+  });
+  assert.equal(unresolved.length, 2);
+  assert.deepEqual(unresolved.filter(row => row.external).map(row => row.name), ["Retired agent"]);
+});
