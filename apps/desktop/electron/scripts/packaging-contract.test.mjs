@@ -278,3 +278,20 @@ test("the installer waits for and stops every program the app runs from its fold
   assert.doesNotMatch(installer, /\$\{GetSize\}/);
   assert.match(windowsPackager, /`\/DINSTALLED_KB=\$\{await payloadSizeKb\(packagedApp\)\}`/);
 });
+
+test("live demos ship the protocol and the same exact `ws` the server runs", async () => {
+  const [packager, desktopPackage, desktopLock, rootPackage] = await Promise.all([
+    source(join(scriptsDirectory, "package-artifact.mjs")),
+    source(join(desktopRoot, "package.json")).then(JSON.parse),
+    source(join(desktopRoot, "package-lock.json")).then(JSON.parse),
+    source(join(repositoryRoot, "package.json")).then(JSON.parse),
+  ]);
+  // A production dependency, so `npm ci --omit=dev` installs it into the app.
+  assert.match(desktopPackage.dependencies.ws, /^\d+\.\d+\.\d+$/);
+  assert.equal(desktopPackage.dependencies.ws, rootPackage.dependencies.ws);
+  assert.equal(desktopLock.packages["node_modules/ws"].version, desktopPackage.dependencies.ws);
+  assert.notEqual(desktopLock.packages["node_modules/ws"].dev, true);
+  assert.match(packager, /"node_modules\/ws\/package\.json",\s*"node_modules\/ws\/wrapper\.mjs"/);
+  assert.match(packager, /"shared\/live-demo\.mjs"/);
+  assert.match(packager, /"live-demo-client\.js"/);
+});

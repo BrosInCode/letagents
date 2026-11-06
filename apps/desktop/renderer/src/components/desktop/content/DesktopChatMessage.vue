@@ -178,6 +178,8 @@
           :message-id="message.id"
           :attachments="message.attachments"
           :sender-label="displayName"
+          :room-identifier="roomIdentifier"
+          :thread-root-id="message.threadRootId || message.id"
           @open-image="$emit('open-image', $event)"
         />
       <button

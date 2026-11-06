@@ -18,7 +18,7 @@ export const INLINE_DEMO_JITTER_WINDOW_MS = 2_000;
  * would move the chat, so growth shows at once, shrinking waits for a quiet
  * moment (and only counts when it is big enough), and a page that will not
  * settle is frozen at its largest height.
- * All heights are frame heights, already clamped.
+ * All heights are already clamped: frame heights, or demo heights in a live layout.
  */
 export interface InlineDemoHeight {
   /** The frame height now; `null` until the first report. */
@@ -56,15 +56,20 @@ export function dropPendingInlineDemoHeight(state: InlineDemoHeight): InlineDemo
   return state.pending ? { ...state, pending: null } : state;
 }
 
-/** Takes a page height (CSS px) that main reported at `now`. */
+/**
+ * Takes a page height (CSS px) that main reported at `now`. `clamp` turns it into
+ * the height the state keeps: the frame height for a plain card, or the demo's
+ * full height in a live layout.
+ */
 export function reportInlineDemoHeight(
   previous: InlineDemoHeight,
   contentHeight: number,
   now: number,
+  clamp: (contentHeight: number) => number = inlineDemoFrameHeight,
 ): InlineDemoHeight {
   const state = settleInlineDemoHeight(previous, now);
   if (state.held) return state;
-  const height = inlineDemoFrameHeight(contentHeight);
+  const height = clamp(contentHeight);
   const largest = Math.max(state.largest, height);
   if (state.shown === null) {
     return { ...state, shown: height, latest: height, largest };

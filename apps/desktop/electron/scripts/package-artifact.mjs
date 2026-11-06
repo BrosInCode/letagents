@@ -350,6 +350,9 @@ const requiredAppFiles = [
   "dist-renderer/index.html",
   "LICENSE",
   "node_modules/vue/package.json",
+  // Main's live demo socket (Electron's own WebSocket cannot send the Authorization header).
+  "node_modules/ws/package.json",
+  "node_modules/ws/wrapper.mjs",
   "runtime/letagents/node_modules/letagents/dist/mcp/server.js",
   "runtime/letagents/node_modules/letagents/dist/mcp/server/daemon-tool-executor.js",
   "runtime/letagents/node_modules/letagents/package.json",
@@ -381,6 +384,7 @@ const required = [
     "shared/credential-paths.mjs",
     "shared/git-executable.mjs",
     "shared/live-activity-summary.mjs",
+    "shared/live-demo.mjs",
     "shared/message-attachments.mjs",
     "shared/message-contracts.mjs",
     "shared/message-link-previews.mjs",
@@ -431,6 +435,18 @@ const packagedLocalStore = await import(pathToFileURL(join(
 )).href);
 if (typeof packagedLocalStore.addLocalChatMessage !== "function") {
   throw new Error("Packaged local chat failed to import its external shared contracts.");
+}
+// Live demos: the protocol from Contents/shared and `ws` from the app's own node_modules.
+const packagedLiveDemos = await import(pathToFileURL(join(
+  app,
+  "dist-electron",
+  "main",
+  "rooms",
+  "live-demo-client.js",
+)).href);
+const packagedWebSocket = await import(pathToFileURL(join(app, "node_modules", "ws", "wrapper.mjs")).href);
+if (typeof packagedLiveDemos.liveDemoSocketUrl !== "function" || typeof packagedWebSocket.default !== "function") {
+  throw new Error("Packaged live demos failed to import their protocol or WebSocket client.");
 }
 await writeFile(join(app, "package-artifact-manifest.json"), `${JSON.stringify({
   format: 2,

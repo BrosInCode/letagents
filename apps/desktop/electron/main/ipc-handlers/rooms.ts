@@ -7,6 +7,8 @@ import { getDesktopReplyOrder, setDesktopReplyOrder } from "../rooms/reply-order
 import { getDesktopMessageLinkPreviews } from "../rooms/link-previews.js";
 import { getDesktopMessagePins, setDesktopMessagePin } from "../rooms/pins.js";
 import { reportDesktopRoomTyping } from "../rooms/typing.js";
+import { addDesktopDemoMark, listDesktopDemoMarks, removeDesktopDemoMark } from "../rooms/demo-marks.js";
+import { joinLiveDemo, leaveLiveDemo, sendLiveDemoFrame, watchLiveDemoOwner } from "../rooms/live-demo.js";
 import { getDesktopPullRequestDiff } from "../rooms/pull-request-diff.js";
 import { getDesktopMessageReactions, setDesktopMessageReaction } from "../rooms/reactions.js";
 import { searchDesktopRoomMessages } from "../rooms/search.js";
@@ -69,6 +71,7 @@ import type {
   DesktopRoomThreadReadResult,
   DesktopSendRoomMessageResult,
   DesktopChosenAttachment,
+  DesktopDemoMark,
   DesktopStagedAttachment,
   DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
@@ -90,7 +93,8 @@ import {
   stageChosenDesktopAttachments,
   stageDroppedDesktopAttachmentContents,
 } from "../attachments.js";
-import { prepareInlineHtmlDemo, releaseInlineHtmlDemo } from "../attachments/html-demo-inline.js";
+import { captureDesktopDemoMarkup } from "../attachments/demo-markup.js";
+import { prepareInlineHtmlDemo, releaseInlineHtmlDemo, setInlineHtmlDemoWidth } from "../attachments/html-demo-inline.js";
 import { openHtmlDemo } from "../attachments/html-demo-window.js";
 import { getMainWindow } from "../window.js";
 import {
@@ -342,6 +346,63 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     async (event, url: unknown): Promise<void> => {
       assertHtmlDemoSender(event);
       releaseInlineHtmlDemo(url);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:set-inline-demo-width",
+    async (event, url: unknown, frameWidth: unknown): Promise<number> => {
+      assertHtmlDemoSender(event);
+      return setInlineHtmlDemoWidth(url, frameWidth);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:live-demo-join",
+    async (event, roomIdentifier: unknown, demoKey: unknown, leaseUrl: unknown): Promise<void> => {
+      assertHtmlDemoSender(event);
+      watchLiveDemoOwner(event.sender);
+      joinLiveDemo(roomIdentifier, demoKey, leaseUrl);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:live-demo-leave",
+    async (event, roomIdentifier: unknown, demoKey: unknown): Promise<void> => {
+      assertHtmlDemoSender(event);
+      leaveLiveDemo(roomIdentifier, demoKey);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:live-demo-send",
+    async (event, roomIdentifier: unknown, frame: unknown): Promise<void> => {
+      assertHtmlDemoSender(event);
+      sendLiveDemoFrame(roomIdentifier, frame);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:list-demo-marks",
+    async (event, roomIdentifier: unknown, demoKey: unknown): Promise<DesktopDemoMark[]> => {
+      assertHtmlDemoSender(event);
+      return listDesktopDemoMarks(roomIdentifier, demoKey);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:add-demo-mark",
+    async (event, roomIdentifier: unknown, input: unknown): Promise<DesktopDemoMark> => {
+      assertHtmlDemoSender(event);
+      return addDesktopDemoMark(roomIdentifier, input);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:remove-demo-mark",
+    async (event, roomIdentifier: unknown, markId: unknown): Promise<void> => {
+      assertHtmlDemoSender(event);
+      await removeDesktopDemoMark(roomIdentifier, markId);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:capture-demo-markup",
+    async (event, roomIdentifier: unknown, rect: unknown, fileName: unknown): Promise<DesktopStagedAttachment> => {
+      const mainWindow = assertHtmlDemoSender(event);
+      return captureDesktopDemoMarkup(mainWindow, roomIdentifier, rect, fileName);
     },
   );
   targetIpcMain.handle(
@@ -696,7 +757,9 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   );
 }
 
-/** Demos run only for the app's own window, never for a demo page or another window. */
-function assertHtmlDemoSender(event: IpcMainInvokeEvent): void {
-  if (event.sender !== getMainWindow()?.webContents) throw new Error("Demos open only from the main window.");
+/** Demos, live demos and their marks run only for the app's own window, never for a demo page or another window. */
+function assertHtmlDemoSender(event: IpcMainInvokeEvent): NonNullable<ReturnType<typeof getMainWindow>> {
+  const mainWindow = getMainWindow();
+  if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error("Demos open only from the main window.");
+  return mainWindow;
 }

@@ -90,6 +90,9 @@ const repoAccessInflight = new Map<string, {
 }>();
 const repoRoomCacheGeneration = new Map<string, object>();
 const repoLoginCacheGeneration = new Map<string, object>();
+// Per person and repository (`room::login`). A fresh "no" advances it, so an
+// older check still in flight neither caches nor shares its "yes".
+const repoPersonCacheGeneration = new Map<string, object>();
 const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
 
 // The same emitter handles process-local invalidation immediately and relays
@@ -221,6 +224,23 @@ function forgetRoomAccess(roomKey: string): void {
   }
   for (const [flightKey, flight] of repoAccessInflight) {
     if (flight.roomKey === roomKey) repoAccessInflight.delete(flightKey);
+  }
+}
+
+/**
+ * A fresh "no" from GitHub for one person on one repository (an outage
+ * throws instead): forget every remembered "yes" for them, and let no check
+ * that started earlier cache or share its answer.
+ */
+function forgetPersonAccess(roomKey: string, loginKey: string): void {
+  const cacheKey = `${roomKey}::${loginKey}`;
+  rotateCacheGeneration(repoPersonCacheGeneration, cacheKey);
+  for (const cache of [repoAccessCache, publicRepoRoleCache, publicRepoRoleLastKnown]) cache.delete(cacheKey);
+  for (const [flightKey, flight] of repoAccessInflight) {
+    if (flight.roomKey === roomKey && flight.loginKey === loginKey) repoAccessInflight.delete(flightKey);
+  }
+  for (const flightKey of publicRepoRoleInflight.keys()) {
+    if (flightKey.endsWith(`::${cacheKey}`)) publicRepoRoleInflight.delete(flightKey);
   }
 }
 
@@ -487,6 +507,7 @@ export async function isGitHubRepoCollaborator(input: {
 
   const roomGeneration = getCacheGeneration(repoRoomCacheGeneration, roomKey);
   const loginGeneration = getCacheGeneration(repoLoginCacheGeneration, loginKey);
+  const personGeneration = getCacheGeneration(repoPersonCacheGeneration, cacheKey);
   const doFetch = input.fetchImpl ?? fetch;
 
   let pending!: Promise<boolean>;
@@ -540,11 +561,15 @@ export async function isGitHubRepoCollaborator(input: {
       && !input.bypassCache
       && getCacheGeneration(repoRoomCacheGeneration, roomKey) === roomGeneration
       && getCacheGeneration(repoLoginCacheGeneration, loginKey) === loginGeneration
+      && getCacheGeneration(repoPersonCacheGeneration, cacheKey) === personGeneration
     ) {
       setCachedRepoAccess(input.roomName, input.login, true);
     }
     return allowed;
-  })().finally(() => {
+  })().then((allowed) => {
+    if (!allowed && input.bypassCache) forgetPersonAccess(roomKey, loginKey);
+    return allowed;
+  }).finally(() => {
     if (repoAccessInflight.get(flightKey)?.promise === pending) {
       repoAccessInflight.delete(flightKey);
     }
@@ -597,6 +622,7 @@ export async function isGitHubPublicRepoRoleHolder(input: {
   const pending = (async () => {
     const roomGeneration = getCacheGeneration(repoRoomCacheGeneration, roomKey);
     const loginGeneration = getCacheGeneration(repoLoginCacheGeneration, loginKey);
+    const personGeneration = getCacheGeneration(repoPersonCacheGeneration, cacheKey);
     const unavailable = (status: number | null): boolean => {
       const lastKnown = publicRepoRoleLastKnown.get(cacheKey);
       if (lastKnown && lastKnown.expiresAt > Date.now()) return true;
@@ -625,7 +651,8 @@ export async function isGitHubPublicRepoRoleHolder(input: {
     const allowed = payload.owner?.login?.toLowerCase() === loginKey
       || Boolean(permissions.triage || permissions.push || permissions.maintain || permissions.admin);
     const generationsHold = getCacheGeneration(repoRoomCacheGeneration, roomKey) === roomGeneration
-      && getCacheGeneration(repoLoginCacheGeneration, loginKey) === loginGeneration;
+      && getCacheGeneration(repoLoginCacheGeneration, loginKey) === loginGeneration
+      && getCacheGeneration(repoPersonCacheGeneration, cacheKey) === personGeneration;
     if (allowed && generationsHold) {
       pruneExpiringCache(publicRepoRoleLastKnown, REPO_CACHE_MAX_ENTRIES);
       publicRepoRoleLastKnown.set(cacheKey, { expiresAt: Date.now() + REPO_VISIBILITY_LAST_KNOWN_MAX_AGE_MS });
@@ -640,7 +667,10 @@ export async function isGitHubPublicRepoRoleHolder(input: {
       });
     }
     return allowed;
-  })().finally(() => {
+  })().then((allowed) => {
+    if (!allowed && input.bypassCache) forgetPersonAccess(roomKey, loginKey);
+    return allowed;
+  }).finally(() => {
     if (publicRepoRoleInflight.get(flightKey) === pending) publicRepoRoleInflight.delete(flightKey);
   });
   publicRepoRoleInflight.set(flightKey, pending);
