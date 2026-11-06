@@ -210,8 +210,24 @@ export function validateAgentStateVersionSchema(database: DatabaseSync): void {
     }
   }
 }
-/** Create the table and every missing or outdated trigger of a source table that exists; then validate. Idempotent. */
+/**
+ * Create the table and every missing or outdated trigger of a source table
+ * that exists; then validate. Idempotent, and atomic against another process
+ * opening the same fresh database: the checks and the creates share one write
+ * transaction (an outer transaction, if any, is used as it is).
+ */
 export function applyAgentStateVersionSchema(database: DatabaseSync): void {
+  if (database.isTransaction) { applyAgentStateVersionSchemaInTransaction(database); return; }
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    applyAgentStateVersionSchemaInTransaction(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+function applyAgentStateVersionSchemaInTransaction(database: DatabaseSync): void {
   if (!tableExists(database, AGENT_STATE_VERSIONS_TABLE)) database.exec(agentStateVersionsTableSql);
   const expected = new Set<string>();
   for (const source of agentStateVersionSources) {
