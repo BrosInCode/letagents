@@ -39,7 +39,9 @@
       @view-events="emit('view-events', $event)"
       @view-artifacts="emit('view-artifacts', $event)"
       @open-thread="emit('open-thread', $event)"
-    />
+    >
+      <template #planning><slot name="planning" /></template>
+    </RoomBoardTaskInspector>
   </DesktopDialogShell>
 </template>
 
@@ -104,4 +106,11 @@ const emit = defineEmits<{
 <style scoped>
 .desktop-task-discard { display: grid; gap: 12px; margin-bottom: 24px; padding: 14px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-subtle); }
 .desktop-task-discard p { margin: 0; font-size: 14px; }
+</style>
+
+<style>
+.desktop-task-inspector-backdrop { padding: 12px; }
+.desktop-task-modal.desktop-task-inspector-modal { width: min(760px, 100%); height: 100%; max-height: 100%; padding: 36px; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--bg); overscroll-behavior: contain; }
+.desktop-task-inspector-modal > .desktop-task-modal-close { position: absolute; top: 24px; right: 24px; border: 0; background: transparent; }
+@media (max-width: 600px) { .desktop-task-inspector-backdrop { padding: 0; } .desktop-task-modal.desktop-task-inspector-modal { width: 100%; padding: 24px 20px; border: 0; border-radius: 0; } .desktop-task-inspector-modal > .desktop-task-modal-close { top: 16px; right: 12px; } }
 </style>

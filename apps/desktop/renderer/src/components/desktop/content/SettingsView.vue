@@ -16,13 +16,13 @@
         <button
           class="ghost-button settings-header-button"
           type="button"
-          :disabled="busy || diagnosticsPane?.busy"
+          :disabled="busy || diagnosticsPane?.busy || agentsPane?.busy"
           data-testid="settings-refresh"
           @click="refresh"
         >
           <RefreshCw aria-hidden="true" />
           <span>{{
-            busy || diagnosticsPane?.busy ? "Refreshing" : "Refresh"
+            busy || diagnosticsPane?.busy || agentsPane?.busy ? "Refreshing" : "Refresh"
           }}</span>
         </button>
       </header>
@@ -169,8 +169,10 @@
 
       <SettingsAgentsPane
         v-else-if="activePane === 'system:agents'"
-        :workers="workers"
+        ref="agentsPane"
         :rooms="accountRooms"
+        @open-agent="$emit('open-agent', $event)"
+        @open-connectors="selectPane('account:connectors-agents')"
       />
 
       <SettingsDiagnosticsPane
@@ -294,6 +296,7 @@ const diagnosticsPane = ref<{
   refresh: () => Promise<void>;
   busy: boolean;
 } | null>(null);
+const agentsPane = ref<InstanceType<typeof SettingsAgentsPane> | null>(null);
 
 const activeSection = computed(() => settingsSectionFor(activePane.value));
 const subsections = computed(() =>
@@ -365,6 +368,11 @@ function openAgentSetup(id: DesktopMcpInstallTargetId) {
 }
 
 function refresh(): void {
+  if (activePane.value === "system:agents" && agentsPane.value) {
+    void agentsPane.value.refresh();
+    emit("refresh");
+    return;
+  }
   if (activePane.value === "system:diagnostics" && diagnosticsPane.value) {
     void diagnosticsPane.value.refresh();
     return;

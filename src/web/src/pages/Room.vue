@@ -121,6 +121,7 @@
       @openImageViewer="openImageViewer"
       @toggleStalePromptMute="handleToggleStalePromptMute"
       @addTask="handleAddTask"
+      @refreshBoard="refreshRoomBoard"
       @updateTask="handleUpdateTask"
       @closeTask="clearBoardTask"
       @leaseAction="handleTaskLeaseAction"

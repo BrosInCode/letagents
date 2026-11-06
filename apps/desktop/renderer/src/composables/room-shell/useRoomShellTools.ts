@@ -127,7 +127,7 @@ export function useRoomShellToolActions(context: unknown) {
       await nextTick();
       if (props.room.identifier !== roomIdentifier && props.room.identifier !== snapshot?.roomIdentifier) return;
       const skipped = result.skippedCount + result.skippedTaskCount;
-      storageFeedback.value = { error: false, message: `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks.${skipped ? ` ${skipped} items remain local and can be retried.` : ""} Storage remains Local until you choose Cloud.` };
+      storageFeedback.value = { error: false, message: `Published ${result.syncedCount} messages and ${result.syncedTaskCount} tasks.${skipped ? ` ${skipped} items remain local and can be retried.` : ""} Storage remains Local until you choose Cloud.${result.planningNote ? ` ${result.planningNote}` : ""}` };
     } catch (error) {
       if (props.room.identifier === roomIdentifier) storageFeedback.value = {
         error: true,

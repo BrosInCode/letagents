@@ -12,4 +12,5 @@ export type {
   TaskLeaseActionPayload,
   TaskReviewLeaseActionPayload,
   TaskUpdatePayload,
+  TaskCreatePayload,
 } from '@/components/room/task-board/types'

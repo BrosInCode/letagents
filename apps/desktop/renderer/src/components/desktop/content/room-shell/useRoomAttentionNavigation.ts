@@ -1,6 +1,7 @@
 import { watch, type Ref } from "vue";
 import type { DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
 import type { AttentionNavigationIntent, RoomTabId } from "./types";
+import type { AgentInspectorRequest } from "../desktop-chat-message/types";
 
 export interface RoomAttentionNavigationOptions {
   intent: () => AttentionNavigationIntent | null | undefined;
@@ -18,6 +19,8 @@ export interface RoomAttentionNavigationOptions {
   openReasoning: (sessionId: string) => void;
   revealMessage: (messageId: string) => void;
   openAgentDiagnostics: (entry: DesktopSupervisorManifestEntry) => void;
+  openAgentInspector: (request: AgentInspectorRequest) => void;
+  openAddAgent: () => void;
   opened: () => void;
 }
 
@@ -25,9 +28,11 @@ export interface RoomAttentionNavigationOptions {
 export function useRoomAttentionNavigation(options: RoomAttentionNavigationOptions): void {
   watch(() => [options.intent(), options.roomLoading(), options.agentsSettled()] as const, ([intent, loading, agentsSettled]) => {
     if (!intent || loading || options.roomIdentifier() !== intent.roomIdentifier) return;
-    if (intent.agentEntryId && !agentsSettled) return; // Wait for this room's agents.
+    if ((intent.agentEntryId || intent.agentInspector) && !agentsSettled) return; // Wait for this room's agents.
     const agent = intent.agentEntryId ? options.agents().find(entry => entry.id === intent.agentEntryId) : undefined;
-    if (agent) options.openAgentDiagnostics(agent);
+    if (intent.agentInspector) options.openAgentInspector(intent.agentInspector);
+    else if (intent.addAgent) options.openAddAgent();
+    else if (agent) options.openAgentDiagnostics(agent);
     else if (intent.agentEntryId) options.activeTab.value = "activity"; // Gone or unreadable: show it in Activity.
     else if (intent.boardRequests) { options.boardGovernanceSection.value = "pending"; options.activeTab.value = "board"; }
     else if (intent.approvals) options.activeTab.value = "chat";

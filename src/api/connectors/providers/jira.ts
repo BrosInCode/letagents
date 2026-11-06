@@ -3,6 +3,7 @@ import { isAtlassianCloudId, normalizeJiraSiteUrl } from "../site-url.js";
 import { asRecord, asString, trackerRequest } from "./http.js";
 import { freshCredentials, type TokenRefresher } from "./oauth-refresh.js";
 import { parseJiraWebhook, verifyJiraWebhook } from "./webhooks.js";
+import { jiraIteration, planningEstimate, trackerAvatarUrl, type TrackerPlanning } from "./planning.js";
 import {
   type ExternalItem,
   type JiraCredentials,
@@ -23,6 +24,41 @@ const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
 /** How far back a changelog entry may precede the effect (clock skew). */
 const TRANSITION_SKEW_MS = 60_000;
+const PLANNING_FIELDS_TTL_MS = 5 * 60_000;
+
+interface JiraPlanningFields { sprint: string[]; estimate: string | null }
+
+/** No fixed custom-field IDs: each Jira site creates its own. Ambiguous estimates stay unknown. */
+function discoverPlanningFields(value: unknown): JiraPlanningFields {
+  const fields = Array.isArray(value) ? value.map(asRecord) : [];
+  const id = (field: Record<string, unknown>) => {
+    const value = asString(field.id);
+    return value && /^customfield_\d+$/.test(value) ? value : null;
+  };
+  const sprint = fields.filter(field => asRecord(field.schema).custom === "com.pyxis.greenhopper.jira:gh-sprint")
+    .flatMap(field => id(field) ? [id(field)!] : []);
+  const estimates = fields.filter(field => asRecord(field.schema).type === "number"
+    && /^(story points|story point estimate)$/i.test(asString(field.name)?.trim() ?? ""))
+    .flatMap(field => id(field) ? [id(field)!] : []);
+  return { sprint: [...new Set(sprint)], estimate: estimates.length === 1 ? estimates[0] : null };
+}
+
+function issuePlanning(fields: Record<string, unknown>, mapping: JiraPlanningFields | null): TrackerPlanning {
+  const iterations = (mapping?.sprint ?? []).flatMap(field => {
+    const values = fields[field];
+    return (Array.isArray(values) ? values : values ? [values] : []).flatMap(value => {
+      const sprint = jiraIteration(value);
+      return sprint ? [sprint] : [];
+    });
+  });
+  return {
+    estimate: mapping?.estimate ? planningEstimate(fields[mapping.estimate]) : null,
+    assigneeAvatarUrl: trackerAvatarUrl(asRecord(asRecord(fields.assignee).avatarUrls)["48x48"]),
+    estimateAvailable: Boolean(mapping?.estimate && Object.hasOwn(fields, mapping.estimate)),
+    iterationsAvailable: Boolean(mapping?.sprint.some(field => Object.hasOwn(fields, field))),
+    iterations: [...new Map(iterations.map(sprint => [sprint.id, sprint])).values()],
+  };
+}
 
 export interface JiraProviderOptions {
   fetchImpl?: typeof fetch;
@@ -97,6 +133,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
   const fetchImpl = options.fetchImpl ?? fetch;
   const env = options.env ?? process.env;
   const now = options.now ?? (() => new Date());
+  const planningFields = new Map<string, { expires: number; value: JiraPlanningFields | null }>();
 
   async function api(conn: ProviderConnection, path: string, init: { method?: "GET" | "POST"; body?: unknown; write?: boolean } = {}) {
     const credentials = await freshCredentials(conn as ProviderConnection<JiraCredentials>, options.refresh ?? null, now);
@@ -130,7 +167,26 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
     return site ? `${site}${path}` : null;
   }
 
-  function toItem(conn: ProviderConnection, issue: unknown): ExternalItem | null {
+  async function readPlanningFields(conn: ProviderConnection): Promise<JiraPlanningFields | null> {
+    const cached = planningFields.get(conn.id);
+    if (cached && cached.expires > now().getTime()) return cached.value;
+    let value: JiraPlanningFields | null = null;
+    try {
+      value = discoverPlanningFields((await api(conn, "/field")).json);
+    } catch {
+      // Planning is optional. A denied metadata read must not stop the ticket's
+      // normal import; the normal read below still checks ticket authorization.
+    }
+    if (planningFields.size >= 100) planningFields.clear();
+    planningFields.set(conn.id, { value, expires: now().getTime() + PLANNING_FIELDS_TTL_MS });
+    return value;
+  }
+
+  function fieldsWithPlanning(mapping: JiraPlanningFields | null | undefined): string[] {
+    return [...ITEM_FIELDS, ...(mapping?.sprint ?? []), ...(mapping?.estimate ? [mapping.estimate] : [])];
+  }
+
+  function toItem(conn: ProviderConnection, issue: unknown, mapping?: JiraPlanningFields | null): ExternalItem | null {
     const record = asRecord(issue);
     const key = asString(record.key);
     if (!key) return null;
@@ -155,15 +211,17 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
       payload: {
         id: asString(record.id),
         status_category: statusCategory,
+        ...(mapping !== undefined ? { planning: issuePlanning(fields, mapping) } : {}),
       },
     };
   }
 
-  async function getItem(conn: ProviderConnection, rawKey: string): Promise<ExternalItem | null> {
+  async function getItem(conn: ProviderConnection, rawKey: string, opts?: { includePlanning?: boolean }): Promise<ExternalItem | null> {
     const key = assertJiraKey(rawKey);
+    const mapping = opts?.includePlanning ? await readPlanningFields(conn) : undefined;
     try {
-      const response = await api(conn, `/issue/${encodeURIComponent(key)}?fields=${ITEM_FIELDS.join(",")}`);
-      return toItem(conn, response.json);
+      const response = await api(conn, `/issue/${encodeURIComponent(key)}?fields=${fieldsWithPlanning(mapping).join(",")}`);
+      return toItem(conn, response.json, mapping);
     } catch (error) {
       if (error instanceof TrackerProviderError && error.status === 404) return null;
       throw error;
@@ -214,6 +272,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
         clauses.push(`updated <= -${minutes}m`);
       }
       const jql = `${clauses.join(" AND ")} ORDER BY updated DESC`.trim();
+      const mapping = opts.includePlanning ? await readPlanningFields(conn) : undefined;
       const items: ExternalItem[] = [];
       let nextPageToken: string | null = null;
       do {
@@ -221,7 +280,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
           method: "POST",
           body: {
             jql,
-            fields: ITEM_FIELDS,
+            fields: fieldsWithPlanning(mapping),
             maxResults: Math.min(PAGE_SIZE, limit - items.length),
             ...(nextPageToken ? { nextPageToken } : {}),
           },
@@ -229,7 +288,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
         const page = asRecord(response.json);
         const issues = Array.isArray(page.issues) ? page.issues : [];
         for (const issue of issues) {
-          const item = toItem(conn, issue);
+          const item = toItem(conn, issue, mapping);
           if (item) items.push(item);
           if (items.length >= limit) break;
         }

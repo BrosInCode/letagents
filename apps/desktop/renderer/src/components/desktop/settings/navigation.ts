@@ -10,7 +10,7 @@ export const settingsNavGroups: SettingsNavGroup[] = [
   { label: "Workspace", items: [
     { id: "rooms:defaults", title: "Rooms", description: "Manage rooms, pins, and access", icon: SlidersHorizontal },
     { id: "storage:chat", title: "Storage", description: "Local data and cloud publishing", icon: Cloud },
-    { id: "system:agents", title: "Agents", description: "Agent status and availability", icon: Bot },
+    { id: "system:agents", title: "Agents", description: "Your agents, their work, and what you can control across your rooms", icon: Bot },
   ] },
   { label: "Application", items: [
     { id: "system:app-agent", title: "Assistant", description: "Choose how the app assistant helps you", icon: Sparkles },

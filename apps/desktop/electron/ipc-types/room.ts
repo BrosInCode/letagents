@@ -696,6 +696,8 @@ export interface DesktopLocalRoomInfo {
 }
 
 export interface DesktopLocalChatSyncResult {
+  /** A non-fatal planning transfer issue; message and task counts remain valid. */
+  planningNote?: string | null;
   roomIdentifier: string;
   cloudRoomIdentifier: string | null;
   syncedCount: number;

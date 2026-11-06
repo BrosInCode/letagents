@@ -316,7 +316,7 @@ function pageTuples(rows: readonly CandidateRow[], roomColumn: unknown, numberCo
   return sql`(${roomColumn}, ${numberColumn}) IN (${sql.join(rows.map((row) => sql`(${row.room_id}, ${row.number})`), sql`, `)})`;
 }
 
-async function readAgents(rows: readonly CandidateRow[]) {
+export async function readTaskAgents(rows: readonly Pick<CandidateRow, "room_id" | "assignee_agent_key">[]) {
   const withAgent = rows.filter((row) => row.assignee_agent_key);
   const result = new Map<string, { provider: string | null; display_name: string | null; status: string | null; status_text: string | null; last_heartbeat_at: string | null }>();
   if (!withAgent.length) return result;
@@ -551,7 +551,7 @@ async function buildCards(
   if (!rows.length) return [];
   const pageRoomIds = [...new Set(rows.map((row) => row.room_id))];
   const [presence, mentions] = await Promise.all([
-    readAgents(rows),
+    readTaskAgents(rows),
     readMentions(rows),
     fillRequestCache(cache, rows, login),
   ]);

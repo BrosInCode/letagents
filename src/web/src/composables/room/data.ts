@@ -160,8 +160,21 @@ export async function fetchActivityHistory(
 
 export async function fetchTasks(roomIdentifier: string): Promise<RoomTask[]> {
   try {
-    const data = await apiFetch(`${roomPath(roomIdentifier)}/tasks`)
-    return data.tasks || []
+    const tasks = new Map<string, RoomTask>()
+    const cursors = new Set<string>()
+    let after: string | undefined
+    for (;;) {
+      const params = new URLSearchParams({ limit: '200' })
+      if (after) params.set('after', after)
+      const page = await apiFetch(`${roomPath(roomIdentifier)}/tasks?${params}`)
+      for (const task of page.tasks || []) tasks.set(task.id, task)
+      if (!page.has_more) return [...tasks.values()]
+      const cursor = page.tasks?.at(-1)?.id
+      // A broken cursor cannot be presented as a complete sprint's work.
+      if (!cursor || cursors.has(cursor)) throw new Error('Task pagination did not advance.')
+      cursors.add(cursor)
+      after = cursor
+    }
   } catch {
     return []
   }

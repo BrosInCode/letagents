@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
 import type { TaskEditPatch } from './ticket-ref';
 import type {
   DesktopAgentPresence,
@@ -34,21 +34,31 @@ export function useRoomBoardController(
   const busyAction = ref<string | null>(null);
   const errorMessage = ref<string | null>(null);
   const selectedReviewerByTask = ref<Record<string, string>>({});
+  let requestVersion = 0;
+  watch(() => props.roomIdentifier, () => {
+    requestVersion += 1;
+    busyAction.value = null;
+    errorMessage.value = null;
+    selectedReviewerByTask.value = {};
+  });
 
   const localWorker = computed(() =>
     findLocalRoomWorker(props.workers, props.roomIdentifier)
   );
 
-  async function addTask(input: DesktopTaskCreateInput): Promise<boolean> {
+  async function addTask(input: DesktopTaskCreateInput): Promise<string | null> {
     const title = input.title.trim();
-    if (!title) return false;
-    return runBoardMutation("add", async () => {
+    if (!title) return null;
+    let createdId: string | null = null;
+    const saved = await runBoardMutation("add", async () => {
       const result = await desktopIpc.room.addTask(props.roomIdentifier, {
         title,
         description: input.description?.trim() || null,
       });
+      createdId = result.task.id;
       return result.task;
     });
+    return saved ? createdId : null;
   }
 
   function actionsFor(task: DesktopTaskSummary): TaskAction[] {
@@ -171,8 +181,8 @@ export function useRoomBoardController(
     return getReviewAssignmentCandidates(task, props.presence);
   }
 
-  async function runTaskAction(task: DesktopTaskSummary, action: TaskAction): Promise<void> {
-    await runBoardMutation(`${task.id}:${action.id}`, () => action.run(task));
+  async function runTaskAction(task: DesktopTaskSummary, action: TaskAction): Promise<boolean> {
+    return runBoardMutation(`${task.id}:${action.id}`, () => action.run(task));
   }
 
   async function saveTaskContent(task: DesktopTaskSummary, input: TaskEditPatch): Promise<boolean> {
@@ -197,18 +207,21 @@ export function useRoomBoardController(
 
   async function runBoardMutation(id: string, mutation: () => Promise<DesktopTaskSummary>): Promise<boolean> {
     if (busyAction.value !== null) return false;
+    const request = ++requestVersion;
+    const room = props.roomIdentifier;
     busyAction.value = id;
     errorMessage.value = null;
     try {
       const task = await mutation();
+      if (request !== requestVersion || room !== props.roomIdentifier) return false;
       emit("task-updated", task);
       emit("refresh-room");
       return true;
     } catch (error) {
-      errorMessage.value = error instanceof Error ? error.message : "Task update failed.";
+      if (request === requestVersion) errorMessage.value = error instanceof Error ? error.message : "Task update failed.";
       return false;
     } finally {
-      busyAction.value = null;
+      if (request === requestVersion) busyAction.value = null;
     }
   }
 

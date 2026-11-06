@@ -1807,3 +1807,89 @@ test("Publish uses GitHub's default branch when an initial push has no origin HE
     assert.deepEqual(calls, [`/rooms/${fixture.repository}/join`, `/rooms/${target}/join`]);
   } finally { globalThis.fetch = previousFetch; }
 });
+
+test("local publication preserves message/task success and copies native planning with exact cloud task IDs", async () => {
+  const { defaultBoardPlanning } = await import("../../../../shared/board-planning.mjs");
+  const { getLocalBoardPlanning, updateLocalBoardPlanning } = await import("../main/rooms/local-board-planning.js");
+  const room = "local-board-planning-publish";
+  const cloudRoom = "github.com/example/board-planning";
+  await createLocalRoom({ roomIdentifier: room, cloudRoomIdentifier: cloudRoom });
+  await addLocalChatMessage(room, { sender: "Emmy", text: "Planning work", source: "browser", control_authorized: true });
+  const task = await addLocalTask(room, { title: "Sprint task", createdBy: "Emmy" });
+  const document = defaultBoardPlanning();
+  document.columns[0]!.name = "Ready";
+  document.defaultTargetPoints = 18;
+  document.sprints = [{ id: "native-sprint", name: "Sprint one", state: "active", startDate: "2026-11-02", endDate: "2026-11-13", goal: "Ship the board" }];
+  document.sprintTargets = { "native-sprint": 20 };
+  document.tasks[task.id] = { sprintId: "native-sprint", estimate: 5, columnId: "todo", type: "feature", priority: "high" };
+  await updateLocalBoardPlanning(room, { expectedRevision: 0, document });
+  const cloudTaskId = "task_cloud_704";
+  let cloud = { roomId: cloudRoom, revision: 0, canEdit: true, document: defaultBoardPlanning(), imported: { sprints: [], tasks: {} }, taskFacts: [{ id: cloudTaskId }] };
+  let failPlanning = true;
+  const planningWrites: Array<{ expectedRevision: number; document: typeof document }> = [];
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    const path = decodeURIComponent(new URL(String(url)).pathname);
+    if (path.endsWith("/messages")) return Response.json({ id: "msg_published_board" });
+    if (path.endsWith("/tasks")) return Response.json({ id: cloudTaskId, status: "proposed" });
+    assert.equal(path, `/rooms/${cloudRoom}/board-planning`);
+    if (init?.method === "PATCH") {
+      const input = JSON.parse(String(init.body));
+      planningWrites.push(input);
+      if (failPlanning) return Response.json({ error: "Interrupted" }, { status: 503 });
+      cloud = { ...cloud, revision: 1, document: input.document };
+    }
+    return Response.json(cloud);
+  };
+  try {
+    const first = await syncDesktopLocalChatRoom(room);
+    assert.equal(first.syncedCount, 1);
+    assert.equal(first.syncedTaskCount, 1);
+    assert.match(first.planningNote!, /could not be published/);
+    assert.deepEqual((await getLocalBoardPlanning(room)).document, document, "failed cloud planning writes leave local planning intact");
+    failPlanning = false;
+    const retry = await syncDesktopLocalChatRoom(room);
+    assert.equal(retry.syncedCount, 0);
+    assert.equal(retry.syncedTaskCount, 0);
+    assert.equal(retry.planningNote, null);
+    assert.equal(planningWrites.length, 2);
+    assert.equal(planningWrites[1]!.expectedRevision, 0);
+    assert.deepEqual(planningWrites[1]!.document, { ...document, tasks: { [cloudTaskId]: document.tasks[task.id] } });
+    assert.equal(Object.hasOwn(planningWrites[1]!, "imported"), false);
+    assert.equal((await syncDesktopLocalChatRoom(room)).planningNote, null, "repeating the exact transfer is a no-op");
+    assert.equal(planningWrites.length, 2);
+  } finally { globalThis.fetch = previousFetch; }
+});
+
+test("planning publication refuses missing task mappings, existing cloud planning, and insufficient permission", async () => {
+  const { defaultBoardPlanning } = await import("../../../../shared/board-planning.mjs");
+  const { updateLocalBoardPlanning } = await import("../main/rooms/local-board-planning.js");
+  const { publishLocalBoardPlanning } = await import("../main/rooms/board-planning.js");
+  const room = "local-board-planning-refusal";
+  await createLocalRoom({ roomIdentifier: room, cloudRoomIdentifier: "cloud-board-planning-refusal" });
+  const task = await addLocalTask(room, { title: "Same title", createdBy: "Emmy" });
+  const document = defaultBoardPlanning();
+  document.tasks[task.id] = { estimate: 3 };
+  await updateLocalBoardPlanning(room, { expectedRevision: 0, document });
+  let cloud = { roomId: "cloud-board-planning-refusal", revision: 0, canEdit: true, document: defaultBoardPlanning(), taskFacts: [{ id: "task_exact", title: task.title }], imported: { sprints: [], tasks: {} } };
+  const previousFetch = globalThis.fetch;
+  let patches = 0;
+  globalThis.fetch = async (_url, init) => {
+    if (init?.method === "PATCH") { patches++; return Response.json({ error: "Board changed" }, { status: 409 }); }
+    return Response.json(cloud);
+  };
+  try {
+    assert.match((await publishLocalBoardPlanning(room, cloud.roomId))!, /some planned tasks have not been published/);
+    assert.equal(patches, 0, "matching titles never substitute for the persisted task ID mapping");
+    await markLocalTaskSynced({ roomId: room, taskId: task.id, cloudTaskId: "task_exact" });
+    cloud.canEdit = false;
+    assert.match((await publishLocalBoardPlanning(room, cloud.roomId))!, /room admin/);
+    assert.equal(patches, 0);
+    cloud.canEdit = true; cloud.revision = 2;
+    assert.match((await publishLocalBoardPlanning(room, cloud.roomId))!, /already has its own planning/);
+    assert.equal(patches, 0, "never overwrites existing destination planning");
+    cloud.revision = 0;
+    assert.match((await publishLocalBoardPlanning(room, cloud.roomId))!, /could not be published/);
+    assert.equal(patches, 1, "a revision-zero race is handled as a non-fatal note");
+  } finally { globalThis.fetch = previousFetch; }
+});
