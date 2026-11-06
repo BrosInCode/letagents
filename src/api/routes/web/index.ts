@@ -65,7 +65,9 @@ export function registerWebRoutes(app: Express): void {
   app.get("/docs", (_req, res) => {
     sendVueApp(res);
   });
-  app.get(["/messages", "/my-work", "/connectors"], (_req, res) => {
+  // Every top-level page of the web app: a direct load or reload of one of
+  // these URLs must serve the SPA, which then routes to the page itself.
+  app.get(["/inbox", "/messages", "/my-work", "/connectors"], (_req, res) => {
     sendVueApp(res);
   });
   // "Ask for an agent" links open the desktop app from this page.
