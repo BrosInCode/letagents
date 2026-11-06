@@ -1,6 +1,8 @@
 import { readLocalSupervisorPresence } from "../local-supervision-authority.js";
 import type {
   DesktopRoomLiveMetadata,
+  DesktopRoomLiveMetadataOptions,
+  DesktopRoomLiveMetadataSourceKey,
   DesktopSnapshotSourceState,
 } from "../../../ipc-types.js";
 import { localRoomIdentifierForStorage, cloudRoomIdentifierForStorage, resolveLocalAwareRoomStorageMode } from "../local-store.js";
@@ -48,9 +50,15 @@ export interface RoomLiveMetadataSources {
  *
  * Local rooms read the daemon's local agent observations. No cloud authority
  * is needed, and messages and tasks stay untouched by this metadata refresh.
+ *
+ * A caller that needs only some of the five can name them in `options.include`.
+ * The other sources are then not requested; their sections keep the empty values
+ * and ready states of `emptyRoomLiveMetadata`, so the result shape is the same.
+ * No option, or no known source name in it, fetches all five.
  */
 export async function fetchRoomLiveMetadata(
   roomIdentifier: string,
+  options?: DesktopRoomLiveMetadataOptions,
 ): Promise<DesktopRoomLiveMetadata> {
   if (isDesktopSmokeCheck()) {
     return emptyRoomLiveMetadata(roomIdentifier.trim() || null);
@@ -66,12 +74,14 @@ export async function fetchRoomLiveMetadata(
   }
 
   const apiRoomIdentifier = cloudRoomIdentifierForStorage(storage, trimmedRoomIdentifier);
+  const included = requestedLiveMetadataSources(options);
+  const wants = (source: DesktopRoomLiveMetadataSourceKey) => included.has(source);
   const [focusRooms, participants, presence, activityHistory, boardSettings] = await Promise.all([
-    loadFocusRooms(apiRoomIdentifier),
-    loadParticipants(apiRoomIdentifier),
-    loadPresence(apiRoomIdentifier),
-    loadActivityHistory(apiRoomIdentifier),
-    loadBoardSettings(apiRoomIdentifier),
+    wants("focusRooms") ? loadFocusRooms(apiRoomIdentifier) : undefined,
+    wants("participants") ? loadParticipants(apiRoomIdentifier) : undefined,
+    wants("presence") ? loadPresence(apiRoomIdentifier) : undefined,
+    wants("activityHistory") ? loadActivityHistory(apiRoomIdentifier) : undefined,
+    wants("boardSettings") ? loadBoardSettings(apiRoomIdentifier) : undefined,
   ]);
 
   return buildRoomLiveMetadata(apiRoomIdentifier, {
@@ -83,31 +93,52 @@ export async function fetchRoomLiveMetadata(
   });
 }
 
+const ALL_LIVE_METADATA_SOURCES: readonly DesktopRoomLiveMetadataSourceKey[] = [
+  "focusRooms",
+  "participants",
+  "presence",
+  "activityHistory",
+  "boardSettings",
+];
+
+/** The renderer sends this option over IPC, so read it as untrusted input. */
+function requestedLiveMetadataSources(
+  options: DesktopRoomLiveMetadataOptions | undefined,
+): ReadonlySet<DesktopRoomLiveMetadataSourceKey> {
+  const include = Array.isArray(options?.include) ? options.include : [];
+  const known = ALL_LIVE_METADATA_SOURCES.filter((source) => include.includes(source));
+  return new Set(known.length ? known : ALL_LIVE_METADATA_SOURCES);
+}
+
 /**
  * Pure assembly of the poll-only metadata from already-loaded sources. Reuses
  * the exact snapshot mappers so a section maps identically to a full snapshot
  * rebuild, and preserves each source's per-source `state` verbatim so one
  * degraded section (fallback data + "error" state) is reported honestly to the
- * renderer instead of being silently dropped.
+ * renderer instead of being silently dropped. A source that was not loaded
+ * keeps the empty section and ready state of `emptyRoomLiveMetadata`.
  */
 export function buildRoomLiveMetadata(
   roomIdentifier: string | null,
-  sources: RoomLiveMetadataSources,
+  sources: Partial<RoomLiveMetadataSources>,
 ): DesktopRoomLiveMetadata {
+  const empty = emptyRoomLiveMetadata(roomIdentifier);
   return {
     roomIdentifier,
-    focusRooms: mapFocusRooms(sources.focusRooms.data),
-    participants: mapParticipants(sources.participants.data),
-    participantHiddenCount: Number(sources.participants.data.hidden_count || 0),
-    presence: mapPresence(sources.presence.data),
-    recentActivity: mapRecentActivity(sources.activityHistory.data),
-    boardSettings: mapBoardSettings(sources.boardSettings.data),
+    focusRooms: sources.focusRooms ? mapFocusRooms(sources.focusRooms.data) : empty.focusRooms,
+    participants: sources.participants ? mapParticipants(sources.participants.data) : empty.participants,
+    participantHiddenCount: sources.participants
+      ? Number(sources.participants.data.hidden_count || 0)
+      : empty.participantHiddenCount,
+    presence: sources.presence ? mapPresence(sources.presence.data) : empty.presence,
+    recentActivity: sources.activityHistory ? mapRecentActivity(sources.activityHistory.data) : empty.recentActivity,
+    boardSettings: sources.boardSettings ? mapBoardSettings(sources.boardSettings.data) : empty.boardSettings,
     sourceStates: {
-      focusRooms: sources.focusRooms.state,
-      participants: sources.participants.state,
-      presence: sources.presence.state,
-      activityHistory: sources.activityHistory.state,
-      boardSettings: sources.boardSettings.state,
+      focusRooms: sources.focusRooms?.state ?? empty.sourceStates.focusRooms,
+      participants: sources.participants?.state ?? empty.sourceStates.participants,
+      presence: sources.presence?.state ?? empty.sourceStates.presence,
+      activityHistory: sources.activityHistory?.state ?? empty.sourceStates.activityHistory,
+      boardSettings: sources.boardSettings?.state ?? empty.sourceStates.boardSettings,
     },
   };
 }

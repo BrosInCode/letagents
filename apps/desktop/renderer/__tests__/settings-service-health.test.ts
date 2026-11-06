@@ -226,7 +226,10 @@ function liveMetadata(): DesktopRoomLiveMetadata {
     sourceStates: { participants: { status: "ready" }, presence: { status: "ready" } } } as unknown as DesktopRoomLiveMetadata;
 }
 
-async function mountAgents(supervisor: Partial<DesktopApi["supervisor"]>, readMetadata = async () => liveMetadata()) {
+async function mountAgents(
+  supervisor: Partial<DesktopApi["supervisor"]>,
+  readMetadata: (roomIdentifier: string, options?: unknown) => Promise<DesktopRoomLiveMetadata> = async () => liveMetadata(),
+) {
   const originalWindow = globalThis.window;
   const originalDocument = globalThis.document;
   const listeners = new Map<string, unknown>();
@@ -295,6 +298,7 @@ test("the Agents roster signs approval reads only for rooms hosting a local agen
   globalThis.setInterval = ((_callback: () => void, ms: number) => { intervalMs = ms; return 7; }) as any;
   globalThis.clearInterval = (() => {}) as any;
   const approvalReads: string[] = [];
+  const metadataReads: Array<{ roomIdentifier: string; options: unknown }> = [];
   let withLocalAgent = false;
   let mounted: Awaited<ReturnType<typeof mountAgents>> | undefined;
   try {
@@ -305,7 +309,7 @@ test("the Agents roster signs approval reads only for rooms hosting a local agen
         approvalReads.push(roomIdentifier);
         return { available: true, error: null, approvals: [] };
       },
-    });
+    }, async (roomIdentifier, options) => { metadataReads.push({ roomIdentifier, options }); return liveMetadata(); });
     await flush(); await flush();
     // An agent-free room must not cost a signed daemon read every round.
     assert.deepEqual(approvalReads, []);
@@ -314,5 +318,9 @@ test("the Agents roster signs approval reads only for rooms hosting a local agen
     assert.deepEqual(approvalReads, ["room-a"]);
     // The roster is the only clocked read left, and it is no longer 15s.
     assert.equal(intervalMs, 60_000);
+    // The roster uses only participants and presence, so it asks for only those.
+    assert.ok(metadataReads.length >= 2);
+    assert.ok(metadataReads.every(read => read.roomIdentifier === "room-a"));
+    assert.ok(metadataReads.every(read => JSON.stringify(read.options) === JSON.stringify({ include: ["participants", "presence"] })));
   } finally { mounted?.close(); globalThis.setInterval = set; globalThis.clearInterval = clear; }
 });
