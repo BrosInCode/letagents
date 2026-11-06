@@ -29,6 +29,7 @@ const expectedControlMethods = [
   "local_board.watch",
   "manifest.compare_and_set_desired_state",
   "manifest.control_turn",
+  "manifest.get_entry",
   "manifest.list",
   "manifest.put",
   "manifest.resolve_turn_control",

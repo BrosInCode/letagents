@@ -43,7 +43,7 @@ const { subscribeLocalTasks, requestDesktopBoardMutation } = await import("../ma
 
 // Any request to the supervisor during these tests is a failure.
 const daemonCalls: string[] = [];
-for (const method of ["ensureRunning", "connectIfRunning", "list", "listHostApprovals", "listHostToolRules",
+for (const method of ["ensureRunning", "connectIfRunning", "list", "getEntry", "listHostApprovals", "listHostToolRules",
   "getMaintenanceStatus", "getServiceSnapshot", "waitForStartup", "isMaintenanceHeld"] as const) {
   (supervisorDaemonClient as unknown as Record<string, unknown>)[method] = async () => {
     daemonCalls.push(method);
@@ -79,6 +79,7 @@ test("the daemon client never starts or connects to the supervisor on Windows", 
   await client.prepareForApplicationUpdate();
   // Any other read is refused before a socket is opened.
   await assert.rejects(client.list(null), capabilities.SupervisedAgentsUnsupportedError);
+  await assert.rejects(client.getEntry("agent_1"), capabilities.SupervisedAgentsUnsupportedError);
   await assert.rejects(client.isRuntimeEnvironmentCurrent(), capabilities.SupervisedAgentsUnsupportedError);
   assert.equal(spawns, 0);
 });

@@ -83,9 +83,22 @@ function entry(id = "supervised_launch_1234567"): DesktopSupervisorManifestEntry
   };
 }
 
+/**
+ * What a fake daemon's single-entry read answers: the entry its own list holds
+ * under this id, or null, as the real daemon's manifest.get_entry does.
+ */
+async function listedEntry(
+  daemon: { list(): Promise<DesktopSupervisorManifestEntry[]> },
+  entryId: string,
+): Promise<DesktopSupervisorManifestEntry | null> {
+  return (await daemon.list()).find((candidate) => candidate.id === entryId) ?? null;
+}
+
 function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) {
   const events: string[] = [];
   const bootstrapMessages: Array<string | undefined> = [];
+  /** Every call the base fake's list received: which room, and whether it asked for the activity summary. */
+  const listCalls: Array<{ roomId: string | null | undefined; options: { activity?: "full" | "summary" } | undefined }> = [];
   const createOptions: Array<{ desiredState?: "running" | "paused" } | undefined> = [];
   const grants = new Map<string, { metadata: ReturnType<typeof metadata>; authority?: typeof authority | null; token: string; entryId: string; lastInstalledDaemonGeneration: number | null }>();
   const daemon = {
@@ -93,7 +106,9 @@ function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) 
     async ensureRunning() { events.push("ensure"); return { generation: 7 }; },
     async create(input: { roomIdentifier: string; charter?: string }, options?: { desiredState?: "running" | "paused" }) { events.push(`create:${input.roomIdentifier}`); createOptions.push(options); return { ...entry(), roomId: input.roomIdentifier, charter: input.charter ?? entry().charter, desiredState: options?.desiredState ?? "running" as const }; },
     async setDesiredState(id: string, desiredState: "running" | "paused" | "stopped") { events.push(`set-desired:${id}:${desiredState}`); return { ...entry(id), desiredState }; },
-    async list() { events.push("list"); return [entry()]; },
+    async list(roomId?: string | null, options?: { activity?: "full" | "summary" }) { events.push("list"); listCalls.push({ roomId, options }); return [entry()]; },
+    // A fake built with `{ ...h.daemon, async list() {...} }` inherits this and reads its own list.
+    async getEntry(this: { list(): Promise<DesktopSupervisorManifestEntry[]> }, entryId: string) { return listedEntry(this, entryId); },
     async installHostGrant(input: { supervisorGrant: string; daemonGeneration: number }) {
       events.push(`install:${input.daemonGeneration}`);
       assert.equal(input.supervisorGrant.includes("secret"), true);
@@ -135,7 +150,7 @@ function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) 
     ...overrides,
   };
   const request = (async () => { throw new Error("unexpected request"); }) as never;
-  return { events, bootstrapMessages, createOptions, grants, daemon, operations, coordinator: new SupervisorGrantCoordinator(daemon as never, request, () => "host_1", operations, async () => "room_1") };
+  return { events, bootstrapMessages, listCalls, createOptions, grants, daemon, operations, coordinator: new SupervisorGrantCoordinator(daemon as never, request, () => "host_1", operations, async () => "room_1") };
 }
 
 test("fresh Codex launch provisions first, saves a running entry, then installs the grant", async () => {
@@ -150,6 +165,8 @@ test("fresh Codex launch provisions first, saves a running entry, then installs 
     "ensure", "list", "identity:supervised_launch_1234567", "provision:supervised_launch_1234567:false", "create:room_1", "ensure", "install:7", "bootstrap:supervised_launch_1234567:7", "replace:7",
   ]);
   assert.deepEqual(h.bootstrapMessages, ["help"], "fresh creation queues the saved text as its one-time initial message");
+  assert.deepEqual(h.listCalls, [{ roomId: "room_1", options: { activity: "summary" } }],
+    "the name lookup reads the room's names, so it skips the activity history");
   assert.equal(JSON.stringify(result).includes("secret_provisioned"), false, "no bearer is in the public coordinator result");
 });
 
@@ -796,10 +813,12 @@ test("reconciliation repairs an existing generic Open Model identity without rep
   });
   const renamedEntries: DesktopSupervisorManifestEntry[] = [];
   let serverDisplayName: string | null = null;
+  const listArguments: Array<[string | null | undefined, { activity?: "full" | "summary" } | undefined]> = [];
   const daemon = {
     ...h.daemon,
-    async list() {
+    async list(roomId?: string | null, options?: { activity?: "full" | "summary" }) {
       h.events.push("list");
+      listArguments.push([roomId, options]);
       return [renamedEntries.at(-1) ?? original];
     },
     async setDisplayName(id: string, displayName: string) {
@@ -835,6 +854,11 @@ test("reconciliation repairs an existing generic Open Model identity without rep
 
   await coordinator.reconcileDesiredRunning();
 
+  // The sweep and the room-scoped name check both skip the activity history.
+  assert.deepEqual(listArguments, [
+    [null, { activity: "summary" }],
+    [original.roomId, { activity: "summary" }],
+  ]);
   const renamed = renamedEntries[0];
   assert.ok(renamed);
   assert.equal(renamed.id, original.id);
@@ -871,6 +895,8 @@ test("app restart same daemon generation reinstalls idempotently without a hando
   const h = harness();
   h.grants.set("owner/supervised_launch_1234567", { metadata: metadata("owner/supervised_launch_1234567"), token: "secret_same", entryId: "supervised_launch_1234567", lastInstalledDaemonGeneration: 7 });
   await h.coordinator.reconcileDesiredRunning();
+  // The sweep reads no activity: it asks for the summary projection, once, for the whole manifest.
+  assert.deepEqual(h.listCalls, [{ roomId: null, options: { activity: "summary" } }]);
   assert.equal(h.events.some((event) => event === "install:7"), true);
   assert.equal(h.events.some((event) => event === "bootstrap:supervised_launch_1234567:7"), true, "a cursorless pre-upgrade running entry is admitted without provider recovery");
   assert.equal(h.events.some((event) => event.includes("provision")), false);
@@ -1297,6 +1323,7 @@ test("exact retirement remains idempotent when restart reconciliation later obse
     const daemon = {
       async isMaintenanceHeld() { return false; },
       async list() { return [entry(entryId)]; },
+      async getEntry(this: { list(): Promise<DesktopSupervisorManifestEntry[]> }, id: string) { return listedEntry(this, id); },
       async retireAgent(_id: string, _generation: number, sessionId: string | null = null, grantOnly = false) {
         daemonCalls.push(sessionId ?? (grantOnly ? "grant" : "prepare"));
         if (!exactRetired) {
@@ -2341,6 +2368,7 @@ test("generation reconciliation recovers a pending move before ordinary grant sc
         return { generation: 8, capabilities: { agentRoomMove: true } };
       },
       async list() { return [moved]; },
+      async getEntry(this: { list(): Promise<DesktopSupervisorManifestEntry[]> }, id: string) { return listedEntry(this, id); },
       async getCurrentRoomMove() { return movePhase === "active" ? null : rotatingMove(); },
       async acknowledgeRoomMoveSourceRevocation(input: { sourceAgentSessionId: string }) {
         assert.equal(input.sourceAgentSessionId, "session_1");
@@ -2498,6 +2526,7 @@ test("destination-save followed by acknowledgement failure rolls back through gr
       async isMaintenanceHeld() { return false; },
       async ensureRunning() { return { generation: 7 }; },
       async list() { return [manifestEntry]; },
+      async getEntry(this: { list(): Promise<DesktopSupervisorManifestEntry[]> }, id: string) { return listedEntry(this, id); },
       async acknowledgeRoomMoveSourceRevocation() {
         acknowledgements += 1;
         throw new Error("daemon acknowledgement unavailable before commit");
@@ -2649,6 +2678,7 @@ test("v4 destination grants remain revocation-unknown and cannot ACK a move acro
       async isMaintenanceHeld() { return false; },
       async ensureRunning() { return { generation: 7 }; },
       async list() { return [moved]; },
+      async getEntry(this: { list(): Promise<DesktopSupervisorManifestEntry[]> }, id: string) { return listedEntry(this, id); },
       async acknowledgeRoomMoveSourceRevocation() { acknowledgements += 1; return {}; },
     };
     const move = {

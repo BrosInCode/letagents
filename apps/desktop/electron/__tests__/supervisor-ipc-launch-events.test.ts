@@ -233,7 +233,7 @@ test("set-desired-state running on a saved supervised entry records a durable re
   const started = savedEntry(run.entryId, { desiredState: "running" });
   refreshMcpAuth = async () => { run.timeline.push("mcp.refresh-auth"); };
   t.after(() => { refreshMcpAuth = async () => {}; });
-  patch(t, supervisorDaemonClient, "list", async () => [saved]);
+  patch(t, supervisorDaemonClient, "getEntry", async () => saved);
   patch(t, supervisorDaemonClient, "setDesiredState", async (id: string, state: string) => {
     run.timeline.push(`daemon.set-desired:${id}:${state}`);
     return started;
@@ -270,7 +270,7 @@ for (const kind of ["unexpected", "blocked"] as const) {
     const error = kind === "blocked"
       ? new LaunchBlockedError("LetAgents could not reach background agent management.", "reconnect")
       : new Error("daemon rejected the grant");
-    patch(t, supervisorDaemonClient, "list", async () => [savedEntry(run.entryId, { desiredState: "stopped" })]);
+    patch(t, supervisorDaemonClient, "getEntry", async () => savedEntry(run.entryId, { desiredState: "stopped" }));
     patch(t, supervisorDaemonClient, "setDesiredState", async () => { throw new Error("must not start the entry"); });
     patch(t, supervisorGrantCoordinator, "activateEntry", async () => { throw error; });
 
@@ -297,7 +297,7 @@ test("set-desired-state running records a failed MCP auth refresh as the attempt
   let activations = 0;
   refreshMcpAuth = async () => { throw refreshError; };
   t.after(() => { refreshMcpAuth = async () => {}; });
-  patch(t, supervisorDaemonClient, "list", async () => [savedEntry(run.entryId, { desiredState: "stopped" })]);
+  patch(t, supervisorDaemonClient, "getEntry", async () => savedEntry(run.entryId, { desiredState: "stopped" }));
   patch(t, supervisorGrantCoordinator, "activateEntry", async () => { activations += 1; return savedEntry(run.entryId); });
 
   await assert.rejects(
@@ -315,7 +315,7 @@ test("set-desired-state running on an entry that is not a supervised launch acti
   const legacy = savedEntry("agent_manual_0001", { desiredState: "stopped" });
   const started = savedEntry("agent_manual_0001");
   const activated: string[] = [];
-  patch(t, supervisorDaemonClient, "list", async () => [legacy]);
+  patch(t, supervisorDaemonClient, "getEntry", async () => legacy);
   patch(t, supervisorDaemonClient, "setDesiredState", async () => started);
   patch(t, supervisorGrantCoordinator, "activateEntry", async (
     entry: DesktopSupervisorManifestEntry,
@@ -335,7 +335,7 @@ test("set-desired-state running on an entry that is not a supervised launch acti
 test("set-desired-state running on an entry that is not a supervised launch emits nothing even when activation fails", async (t) => {
   const all = recordAllLaunchEvents(t);
   const error = new Error("daemon rejected the grant");
-  patch(t, supervisorDaemonClient, "list", async () => [savedEntry("agent_manual_0002", { desiredState: "stopped" })]);
+  patch(t, supervisorDaemonClient, "getEntry", async () => savedEntry("agent_manual_0002", { desiredState: "stopped" }));
   patch(t, supervisorGrantCoordinator, "activateEntry", async () => { throw error; });
 
   await assert.rejects(
@@ -348,7 +348,7 @@ test("set-desired-state running on an entry that is not a supervised launch emit
 
 test("set-desired-state running on an unknown entry fails before it writes any launch fact", async (t) => {
   const all = recordAllLaunchEvents(t);
-  patch(t, supervisorDaemonClient, "list", async () => []);
+  patch(t, supervisorDaemonClient, "getEntry", async () => null);
 
   await assert.rejects(
     invoke("desktop:supervisor:set-desired-state", "supervised_launch_missing_0001", "running"),

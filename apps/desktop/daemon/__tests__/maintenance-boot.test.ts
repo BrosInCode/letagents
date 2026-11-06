@@ -58,6 +58,15 @@ test("maintenance cold boot preserves all durable rows and refuses work until ex
       seenGenerations.push(status.result.generation);
       const list = await request(paths.socketPath, "manifest.list"); assert.equal(list.ok, true);
       assert.equal(list.result[0].id, entry.id); assert.equal(list.result[0].desired_state, "running");
+      // The single-entry read is answered under the hold, as the list is.
+      const one = await request(paths.socketPath, "manifest.get_entry", { entry_id: entry.id });
+      assert.equal(one.ok, true, one.error); assert.deepEqual(one.result, list.result[0]);
+      const none = await request(paths.socketPath, "manifest.get_entry", { entry_id: "no_such_agent" });
+      assert.equal(none.ok, true, none.error); assert.equal(none.result, null);
+      for (const params of [undefined, {}, { entry_id: "" }, { entry_id: " agent" }, { entry_id: 7 }]) {
+        const invalid = await request(paths.socketPath, "manifest.get_entry", params);
+        assert.equal(invalid.ok, false); assert.match(invalid.error!, /requires an exact non-empty entry_id/);
+      }
       for (const method of ["manifest.put", "manifest.resume", "supervisor.install_host_grant", "agent.runtime_recovery", "manifest.watch_state", "agent.stream", "host_approvals.enroll"]) {
         const rejected = await request(paths.socketPath, method, { entry });
         assert.equal(rejected.ok, false, method); assert.match(rejected.error!, /maintenance/, method);

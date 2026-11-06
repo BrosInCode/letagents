@@ -211,9 +211,11 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       installHostGrant: (input) => this.userAction(input.credential_only ? input.entry_id : null, () => this.executionDelegations.installHostGrant(input)),
       installOpenModelCredential: this.workerAuthority.installOpenModelCredential.bind(this.workerAuthority),
       installWorkerCredential: this.workerAuthority.installWorkerCredential.bind(this.workerAuthority),
-      listManifest: async (roomId) => this.entriesWithDerivedLiveness(roomId
-        ? await this.store.listRoomEntries(roomId)
-        : (await this.store.load()).entries),
+      getManifestEntry: async (entryId) => this.store.getEntry(entryId, "full")
+        .then((entry) => entry ? this.entryWithDerivedLiveness(entry) : null),
+      listManifest: async (roomId, activity) => this.entriesWithDerivedLiveness(roomId
+        ? await this.store.listRoomEntries(roomId, activity)
+        : (await this.store.load(activity)).entries),
       prepareBoundedEffect: this.boundedEffects.prepare.bind(this.boundedEffects),
       prepareHandoff: () => this.handoff.prepare(),
       prepareInspectorRoomMove: (input) => this.roomMoves.prepareInspector(input),
