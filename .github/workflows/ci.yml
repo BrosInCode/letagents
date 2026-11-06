@@ -754,6 +754,10 @@ jobs:
         if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-members-routes.test.ts src/api/__tests__/room-members-db.test.ts src/api/__tests__/room-members-enforcement-db.test.ts
 
+      - name: Test live demos (hub, sockets, saved marks)
+        if: matrix.group == 2
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/live-demo-hub.test.ts src/api/__tests__/live-demo-sockets.test.ts src/api/__tests__/live-demo-marks-routes.test.ts src/api/__tests__/live-demos-db.test.ts
+
       - name: Test My work
         if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/my-work-routes.test.ts src/api/__tests__/my-work-db.test.ts src/api/__tests__/board-planning-db.test.ts

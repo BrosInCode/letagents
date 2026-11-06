@@ -10,6 +10,7 @@ import { startLiveActivityCleanup, stopLiveActivityCleanup } from "./server/live
 import { startDesktopPushWorker } from "./notifications/worker.js";
 import { startWakeRuleScheduler } from "./wake-rules/scheduler.js";
 import { startTrackerSyncWorker } from "./connectors/sync.js";
+import { startLiveDemoSockets } from "./live-demos/service.js";
 import { githubRoomEvents, taskEvents, wakeRuleEvents } from "./server/events.js";
 import { assertMessageThreadProjectionReady } from "./db/messages/projection-readiness.js";
 import { closeApiRouteEventBroker } from "./server/routes.js";
@@ -62,6 +63,9 @@ const server = HOST
   ? app.listen(PORT, HOST, onListen)
   : app.listen(PORT, onListen);
 
+// Live demo cursors and presence: WebSocket upgrades on `/rooms/<room>/live`.
+const stopLiveDemoSockets = startLiveDemoSockets(server);
+
 const stopIntake = () => closeHttpServerIntake(server);
 
 const shutdown = createGracefulShutdownController({
@@ -73,7 +77,8 @@ const shutdown = createGracefulShutdownController({
   closeBroker: async () => {
     closeApiRouteEventBroker();
     releaseAgentProcessConnectionsForShutdown();
-    await closeConversationChanges();
+    // Open live sockets would keep Server.close() waiting.
+    await Promise.all([closeConversationChanges(), stopLiveDemoSockets()]);
   },
   drainConnections: async () => {
     await waitForSseCleanupDrain();

@@ -36,6 +36,7 @@ import {
   unregisterDesktopNotificationAccount,
 } from "../notifications.js";
 import { clearJoinedRoomInfoCache } from "../rooms.js";
+import { reconnectLiveDemos } from "../rooms/live-demo.js";
 import {
   getDesktopSupervisorGrantMetadata,
   getDesktopSupervisorGrantStorageStatus,
@@ -50,6 +51,7 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
   setAuthAuthorizedHandler(() => {
     clearJoinedRoomInfoCache();
     clearInlineHtmlDemoCache();
+    reconnectLiveDemos();
     if (supervisedAgentsSupported()) supervisorGrantCoordinator.scheduleCredentialRecovery();
     void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
     void refreshDesktopNotificationRegistration().catch(() => {});
@@ -57,6 +59,7 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
   setAuthInvalidatedHandler(() => {
     clearJoinedRoomInfoCache();
     clearInlineHtmlDemoCache();
+    reconnectLiveDemos();
     void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
     void unregisterDesktopNotificationAccount().catch(() => {});
   });
@@ -93,6 +96,8 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
       clearInlineHtmlDemoCache();
       await unregisterDesktopNotificationAccount().catch(() => {});
       await signOutDesktopAuth();
+      // Live sockets were opened with the old sign-in.
+      reconnectLiveDemos();
       await refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
       return getDesktopAuthStatus();
     },

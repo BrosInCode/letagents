@@ -31,6 +31,10 @@
         :href="attachmentHref(attachment)"
         :file-name="attachmentName(attachment)"
         :sender-label="senderLabel"
+        :room-identifier="roomIdentifier"
+        :message-id="messageId"
+        :attachment-id="attachment.id"
+        :thread-root-id="threadRootId"
       />
       <button
         v-else-if="isHtmlDemoAttachment(attachment)"
@@ -96,6 +100,9 @@ const props = defineProps<{
   messageId: string;
   attachments: DesktopRoomMessageAttachment[];
   senderLabel?: string | null;
+  roomIdentifier?: string | null;
+  /** The thread a demo's picture is sent to: the thread this message belongs to, or its own. */
+  threadRootId?: string | null;
 }>();
 
 defineEmits<{

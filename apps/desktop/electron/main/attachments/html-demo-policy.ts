@@ -1,5 +1,6 @@
 import type { WebPreferences } from "electron";
 
+import { LIVE_DEMO } from "../../../../../shared/live-demo.mjs";
 import { attachmentProtocolScheme, htmlDemoProtocolScheme } from "../paths.js";
 
 /**
@@ -243,12 +244,102 @@ export function inlineHtmlDemoFocusAllowed(input: {
 
 /**
  * A guest's preferred height in the app's CSS pixels: Electron reports it in
- * screen points, which the app's zoom scales.
+ * screen points, which the app's zoom scales. A live demo's guest zoom scales
+ * the points too, so the same division gives its frame height (measured in
+ * Electron 42: 1500 CSS px at guest zoom 0.625 and app zoom 1.25 report 937,
+ * a 750 px frame). A live demo may be as tall as LIVE_DEMO.maxHeight demo px.
  */
-export function inlineHtmlDemoHeight(preferredHeight: unknown, zoomFactor: unknown = 1): number {
+export function inlineHtmlDemoHeight(preferredHeight: unknown, zoomFactor: unknown = 1, max = MAX_INLINE_HTML_DEMO_HEIGHT): number {
   if (typeof preferredHeight !== "number" || Number.isNaN(preferredHeight)) return 0;
-  const zoom = typeof zoomFactor === "number" && Number.isFinite(zoomFactor) && zoomFactor > 0 ? zoomFactor : 1;
-  return Math.min(MAX_INLINE_HTML_DEMO_HEIGHT, Math.max(0, Math.ceil(preferredHeight / zoom)));
+  const zoom = positiveZoom(zoomFactor);
+  return Math.min(max, Math.max(0, Math.ceil(preferredHeight / zoom)));
+}
+
+/** Chromium's page zoom limits; a live demo in a very narrow or very wide frame stops scaling at these. */
+export const INLINE_HTML_DEMO_MIN_ZOOM = 0.25;
+export const INLINE_HTML_DEMO_MAX_ZOOM = 5;
+
+/**
+ * The guest zoom that lays a live demo out at LIVE_DEMO.width CSS px across a
+ * frame `frameWidth` app CSS px wide, and the scale the chat draws with (frame
+ * px per demo px). The frame is frameWidth × appZoom screen points wide, and
+ * the guest zoom divides those into its CSS px. Null for a width that is not
+ * a positive number.
+ */
+export function inlineHtmlDemoLiveZoom(frameWidth: unknown, appZoom: unknown = 1): { zoom: number; scale: number } | null {
+  if (typeof frameWidth !== "number" || !Number.isFinite(frameWidth) || frameWidth <= 0) return null;
+  const app = positiveZoom(appZoom);
+  const zoom = Math.min(INLINE_HTML_DEMO_MAX_ZOOM, Math.max(INLINE_HTML_DEMO_MIN_ZOOM, (frameWidth * app) / LIVE_DEMO.width));
+  return { zoom, scale: zoom / app };
+}
+
+/**
+ * In the live layout the chat scrolls, never the demo's own page. A user
+ * stylesheet's !important outranks every rule of the page, its !important and
+ * inline styles included (measured in Electron 42: it holds after the page adds
+ * its own !important rules, rewrites its document or swaps its root element).
+ * Elements inside the page may still scroll.
+ */
+export const INLINE_HTML_DEMO_LIVE_ROOT_CSS = "html, body { overflow: hidden !important; }";
+/** Read in main's own world, where the page cannot change it: the layout width in CSS px, pinch zoom left out. */
+export const INLINE_HTML_DEMO_LIVE_WIDTH_SCRIPT = "visualViewport.width * visualViewport.scale";
+/** A measured layout width this far from the expected one means the page does not run at the live zoom yet. */
+export const INLINE_HTML_DEMO_LIVE_ZOOM_TOLERANCE = 0.02;
+/** Smaller differences from LIVE_DEMO.width are left alone. */
+export const INLINE_HTML_DEMO_LIVE_WIDTH_SLACK = 0.25;
+
+/**
+ * Judge a live demo's layout width, measured after its zoom was set.
+ * "pending": the page still lays out at another zoom (Electron 42 reports the
+ * new zoom at once, but the page may send one more size at the old one).
+ * "correct": the frame's whole screen points hold a fraction more or less
+ * than `expected` CSS px (607.6 px measured as 607 gave 761.25); multiply the
+ * zoom by `factor`. "ready": the page lays out at `expected` CSS px.
+ */
+export function inlineHtmlDemoLiveLayoutCheck(
+  measuredWidth: unknown,
+  expected: number,
+): { state: "pending" } | { state: "ready" } | { state: "correct"; factor: number } {
+  if (typeof measuredWidth !== "number" || !Number.isFinite(measuredWidth) || measuredWidth <= 0) return { state: "pending" };
+  const ratio = measuredWidth / expected;
+  if (Math.abs(ratio - 1) > INLINE_HTML_DEMO_LIVE_ZOOM_TOLERANCE) return { state: "pending" };
+  return Math.abs(measuredWidth - expected) >= INLINE_HTML_DEMO_LIVE_WIDTH_SLACK ? { state: "correct", factor: ratio } : { state: "ready" };
+}
+
+/**
+ * A live demo's frame height in app CSS px. Chromium rounds the preferred
+ * height to whole points, so one more point keeps the frame from being a
+ * fraction shorter than the page: in Electron 42 that fraction (2223.66 CSS px
+ * of viewport for a 2224 px page) took every wheel turn over the demo.
+ */
+export function inlineHtmlDemoLiveHeight(preferredHeight: unknown, appZoom: unknown, scale: number): number {
+  if (typeof preferredHeight !== "number" || Number.isNaN(preferredHeight)) return 0;
+  return inlineHtmlDemoHeight(preferredHeight + 1, appZoom, Math.ceil(LIVE_DEMO.maxHeight * scale) + 1);
+}
+
+/**
+ * The person's pointer in demo space, from a guest's `input-event`. Electron 42
+ * reports x and y in screen points from the webview's top-left corner, and the
+ * guest's own zoom (which already holds the app's zoom) turns points into its
+ * CSS px: at app zoom 1.25 and guest zoom 0.625, x 168.75 is the page's 270.
+ * Null for a point outside the demo, as a drag held from inside it reports.
+ */
+export function inlineHtmlDemoPointer(
+  x: unknown,
+  y: unknown,
+  guestZoom: unknown,
+  demoHeight: number = LIVE_DEMO.maxHeight,
+): { x: number; y: number } | null {
+  if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const zoom = positiveZoom(guestZoom);
+  const demoX = Math.round((x / zoom) * 10) / 10;
+  const demoY = Math.round((y / zoom) * 10) / 10;
+  const bottom = Math.min(LIVE_DEMO.maxHeight, Math.max(0, demoHeight));
+  return demoX >= 0 && demoX <= LIVE_DEMO.width && demoY >= 0 && demoY <= bottom ? { x: demoX, y: demoY } : null;
+}
+
+function positiveZoom(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 1;
 }
 
 export function htmlDemoWindowTitle(fileName: unknown, senderLabel: unknown): string {
