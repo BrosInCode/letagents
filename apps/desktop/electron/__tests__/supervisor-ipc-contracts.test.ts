@@ -20,12 +20,15 @@ function handlerSource(channel: string, nextChannel: string): string {
   return ipcSource.slice(start, end);
 }
 
-test("supervisor list projects canonical agent keys for renderer mention routing", () => {
+test("supervisor lists, service snapshots and pushes retain the same canonical agent keys", () => {
   const listHandler = ipcSource.slice(
     ipcSource.indexOf('"desktop:supervisor:list-agents"'),
     ipcSource.indexOf('"desktop:supervisor:create-agent"'),
   );
   assert.match(listHandler, /projectDesktopSupervisorAgentKeys\(entries\)/);
+  const serviceHandler = handlerSource("desktop:supervisor:get-service-snapshot", "desktop:supervisor:list-agents");
+  assert.match(serviceHandler, /if \(!snapshot\.state\) return snapshot/);
+  assert.match(serviceHandler, /projectDesktopSupervisorAgentKeys\(snapshot\.state\.entries\)/);
   const pushBridge = ipcSource.slice(ipcSource.indexOf('if (!supervisorStateBridgeRegistered)'));
   assert.match(pushBridge, /projectDesktopSupervisorAgentKeys\(snapshot.entries\)/);
 });

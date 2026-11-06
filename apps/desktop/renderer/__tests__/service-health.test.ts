@@ -121,21 +121,24 @@ test("Agents settings merges exact identities, filters joined rooms and preserve
   const participants = [
     { participantKey: "local", kind: "agent", displayName: "Shared name", actorLabel: "local actor", agentKey: "owner/local", ideLabel: "Codex", hiddenAt: null },
     { participantKey: "external", kind: "agent", displayName: "Shared name", actorLabel: "remote actor", agentKey: "other/remote", ideLabel: "Cursor", hiddenAt: null, activityState: "active" },
+    { participantKey: "retired-echo", kind: "agent", displayName: "Retired agent", actorLabel: "retired actor", agentKey: "owner/retired", ideLabel: "Codex", hiddenAt: null, activityState: "offline" },
+    { participantKey: "paused-echo", kind: "agent", displayName: "Paused agent", actorLabel: "paused actor", agentKey: "owner/paused", ideLabel: "Codex", hiddenAt: null, activityState: "offline" },
     { participantKey: "human", kind: "human", displayName: "Human" },
     { participantKey: "hidden", kind: "agent", displayName: "Hidden", hiddenAt: "2026-11-03" },
   ];
   const input = { rooms, entries: [
     entry("local", { displayName: "Shared name", agentKey: "owner/local", charter: "Polish navigation" }),
     entry("paused", { roomId: "room_b", desiredState: "paused", observedState: "paused" }),
-    entry("retired", { desiredState: "stopped", observedState: "stopped" }),
+    entry("retired", { agentKey: "owner/retired", desiredState: "stopped", observedState: "stopped" }),
+    entry("paused-local", { agentKey: "owner/paused", desiredState: "paused", observedState: "paused" }),
     entry("outside", { roomId: "not-joined" }),
   ], supervisorFresh: true, metadata: new Map([["room_a", { participants, presence: [] } as unknown as DesktopRoomLiveMetadata]]), staleRooms: new Set<string>(), approvals: [] };
   const rows = settingsAgentRows(input);
-  assert.equal(rows.length, 4, "canonical identity deduplicates local echoes; identical names do not merge external agents");
+  assert.equal(rows.length, 5, "canonical identity deduplicates paused/retired echoes without presence; identical names do not merge external agents");
   assert.deepEqual(filterSettingsAgents(rows, "all", "room_b", "").map(row => row.id), ["paused"]);
   assert.deepEqual(filterSettingsAgents(rows, "all", "", "NAVIGATION").map(row => row.id), ["local"]);
   assert.deepEqual(filterSettingsAgents(rows, "retired", "", "").map(row => row.id), ["retired"]);
-  assert.equal(filterSettingsAgents(rows, "all", "", "").length, 3);
+  assert.equal(filterSettingsAgents(rows, "all", "", "").length, 4);
   const external = filterSettingsAgents(rows, "external", "", "Cursor")[0]!;
   assert.equal(external.request.kind, "participant");
   assert.equal(external.request.target.agentKey, "other/remote");
