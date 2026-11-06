@@ -1,3 +1,4 @@
+import { publishLocalBoardPlanning } from "./board-planning.js";
 import type { RoomGif, RoomExpressionsSetting } from "../../../../../shared/room-expressions.mjs";
 import type {
   DesktopLocalChatSyncResult,
@@ -863,6 +864,7 @@ export async function syncDesktopLocalChatRoom(
     skippedCount,
     syncedTaskCount: taskResult.syncedTaskCount,
     skippedTaskCount: taskResult.skippedTaskCount,
+    planningNote: await publishLocalBoardPlanning(localRoomIdentifier, cloudRoomIdentifier),
   };
 }
 

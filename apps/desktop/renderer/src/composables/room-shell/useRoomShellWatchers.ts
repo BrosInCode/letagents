@@ -108,7 +108,7 @@ export function useRoomShellRoomWatchers(context: unknown) {
 export function useRoomShellAttention(context: unknown) {
   const {
     activeTab, agentInspectorInitialTab, agentInspectorWorkSourceMessageId, boardGovernanceSection,
-    emit, eventsPage, loadAgentInspectorWorkDetail, openAgentDetailRequest, openBoardTask,
+    emit, eventsPage, loadAgentInspectorWorkDetail, openAgentDetailRequest, openAddAgentModal, openBoardTask,
     openEventById, openReasoningInspector, props, revealRoomMessage, roomChatView,
     selectedAgentDetailTarget, supervisorEntries, supervisorEntriesHaveLoaded,
     supervisorEntriesState,
@@ -133,6 +133,8 @@ export function useRoomShellAttention(context: unknown) {
       openAgentDetailRequest(supervisedAgentInspectorRequest(entry, { ownerAttribution: ownerAttributionLabel(entry.createdBy) }));
       agentInspectorInitialTab.value = "diagnostics";
     },
+    openAgentInspector: openAgentDetailRequest,
+    openAddAgent: openAddAgentModal,
     opened: () => emit("attention-opened"),
   });
 

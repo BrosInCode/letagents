@@ -101,6 +101,8 @@ export interface TrackerUser {
 }
 
 export interface ListItemsOptions {
+  /** Room sync may read optional sprint/estimate metadata, without changing write paths. */
+  includePlanning?: boolean;
   assigneeMe?: boolean;
   updatedSince?: string;
   /** Only tickets updated at or before this time (inclusive; Jira rounds out to the minute). */
@@ -140,7 +142,7 @@ export interface WorkItemProvider {
   readonly name: TrackerProvider;
   whoAmI(conn: ProviderConnection): Promise<TrackerUser>;
   listItems(conn: ProviderConnection, filter: string | null, opts: ListItemsOptions): Promise<ExternalItem[]>;
-  getItem(conn: ProviderConnection, key: string): Promise<ExternalItem | null>;
+  getItem(conn: ProviderConnection, key: string, opts?: { includePlanning?: boolean }): Promise<ExternalItem | null>;
   listTransitions(conn: ProviderConnection, key: string): Promise<{ id: string; toStatus: string }[]>;
   /** Move the ticket to the status named `toStatus`, resolved at run time. */
   transition(conn: ProviderConnection, key: string, toStatus: string, correlationKey: string): Promise<TrackerWriteResult>;

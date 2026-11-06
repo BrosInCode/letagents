@@ -9,6 +9,7 @@
             <button v-if="canManageLeases && saveContent && !editing" type="button" class="task-dialog-edit" :disabled="busy" @click="startEditing">Edit task</button>
           </div>
           <h2 :id="titleId">{{ task.title }}</h2>
+          <a v-if="primaryPr" class="task-dialog-pr" :href="primaryPr.url" target="_blank" rel="noopener noreferrer">{{ primaryPr.label }} <span aria-hidden="true">↗</span></a>
         </div>
         <button type="button" class="task-dialog-close" title="Close task" aria-label="Close task" :disabled="busy" autofocus @click="requestClose">
           <CloseIcon :size="18" aria-hidden="true" />
@@ -28,6 +29,7 @@
         <section class="task-dialog-description">
           <h3>Description</h3>
           <div class="task-markdown-preview" v-html="renderMessageContent(task.description || 'No description yet.')"></div>
+          <slot name="planning" />
         </section>
         <dl class="task-dialog-properties">
           <div><dt>Owner</dt><dd>{{ formatActorName(task.assignee) || 'Unassigned' }}</dd></div>
@@ -37,6 +39,9 @@
         </dl>
 
         <div class="task-dialog-sections">
+          <details v-if="shouldShowAuthority(task) || shouldShowReviewAuthority(task) || secondaryLeases.length || task.active_locks?.length" class="task-agent-details">
+            <summary>Agent details <span aria-hidden="true">⌄</span></summary>
+            <div class="task-agent-details-content">
           <TaskLeaseAuthority
             v-if="shouldShowAuthority(task)" :task="task" :presence="presence"
             :canManageLeases="canManageLeases" :updating="busy"
@@ -52,10 +57,12 @@
             <p v-for="lease in secondaryLeases" :key="lease.id">{{ lease.kind }}: {{ formatActorName(lease.actor_label) }}</p>
             <p v-for="lock in task.active_locks" :key="lock.id">{{ lock.scope }} lock: {{ lock.reason || 'Locked' }}<template v-if="lock.message">. {{ lock.message }}</template></p>
           </section>
-          <section v-if="workflowRefs.length" class="task-dialog-section">
+            </div>
+          </details>
+          <section v-if="secondaryWorkflowRefs.length" class="task-dialog-section">
             <h3>Linked work</h3>
             <div class="task-dialog-links">
-              <a v-for="ref in workflowRefs" :key="ref.url" :href="ref.url" target="_blank" rel="noopener noreferrer">{{ ref.label }}</a>
+              <a v-for="ref in secondaryWorkflowRefs" :key="ref.url" :href="ref.url" target="_blank" rel="noopener noreferrer">{{ ref.label }}</a>
             </div>
           </section>
           <TaskMergeReadiness v-if="githubStatus" :status="githubStatus" :task="task" />
@@ -151,6 +158,13 @@ const primaryAction = computed(() => taskActions.value.find(action => action.cls
 const secondaryActions = computed(() => taskActions.value.filter(action => action !== primaryAction.value))
 const secondaryLeases = computed(() => getSecondaryLeases(props.task))
 const workflowRefs = computed(() => getTaskWorkflowRefs(props.task))
+const primaryPr = computed(() => {
+  const url = props.task.pr_url || props.githubStatus?.pr_url || props.task.workflow_artifacts?.find(item => item.kind === 'pull_request')?.url
+  if (!url || !/^https?:\/\//i.test(url)) return null
+  const number = /\/pull\/(\d+)(?:[/?#]|$)/.exec(url)?.[1]
+  return { url, label: number ? `#${number}` : 'Open pull request' }
+})
+const secondaryWorkflowRefs = computed(() => workflowRefs.value.filter(ref => ref.url !== primaryPr.value?.url))
 let previousBodyOverflow = ''
 onMounted(() => {
   previousBodyOverflow = document.body.style.overflow
@@ -189,67 +203,53 @@ function onBackdropClick(event: MouseEvent) {
 </script>
 
 <style scoped>
-.task-dialog {
-  width: min(800px, calc(100vw - 32px));
-  max-height: calc(100dvh - 48px);
-  margin: auto;
-  padding: 0;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-md);
-  background: var(--bg);
-  color: var(--text);
-  box-shadow: 0 24px 80px rgb(0 0 0 / 30%);
-  overflow: auto;
-}
-.task-dialog::backdrop { background: rgb(0 0 0 / 60%); }
-.task-dialog-error { padding: 12px; border: 1px solid var(--red-text); border-radius: 6px; color: var(--red-text); background: var(--red-dim); }
-.task-dialog-content { padding: 28px; display: grid; gap: 28px; }
-.task-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.task-dialog { position: fixed; inset: 12px 12px 12px auto; width: min(760px, calc(100vw - 24px)); height: calc(100dvh - 24px); max-width: none; max-height: none; margin: 0; padding: 0; border: 1px solid var(--border-strong); border-radius: 16px; background: var(--bg); color: var(--text); box-shadow: 0 24px 72px rgb(0 0 0 / 24%); overflow: hidden; animation: board-inspector-in 240ms cubic-bezier(.22,1,.36,1); }
+.task-dialog::backdrop { background: rgb(0 0 0 / 36%); }
+.task-dialog-content { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.task-dialog-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; flex: 0 0 auto; padding: 32px 36px 24px; }
 .task-dialog-heading { min-width: 0; flex: 1; }
-.task-dialog .task-dialog-edit { flex: 0 0 auto; min-height: 28px; padding: 0 8px; background: transparent; color: var(--text-secondary); font-size: 12px; }
-.task-dialog-edit-form { display: grid; gap: 20px; min-width: 0; }
-.task-title-field { display: grid; gap: 8px; color: var(--text-secondary); font-size: 12px; }
-.task-title-field input { width: 100%; min-height: 40px; padding: 8px 12px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-subtle); color: var(--text); font: inherit; font-size: 14px; }
-.task-dialog-discard { display: grid; gap: 12px; padding: 14px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-subtle); }
-.task-dialog-discard > div { display: flex; flex-wrap: wrap; gap: 8px; }
-.task-dialog-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 12px; color: var(--text-secondary); font-size: 0.75rem; }
-.task-dialog-id { font-family: var(--font-mono); overflow-wrap: anywhere; }
-.task-dialog h2 { margin: 0; font-size: 1.125rem; line-height: 1.5; font-weight: 600; letter-spacing: 0; overflow-wrap: anywhere; }
-.task-dialog button { min-height: 36px; padding: 0 12px; background: var(--bg-subtle); color: var(--text); border: 1px solid var(--border); border-radius: 6px; font: inherit; font-size: 0.8125rem; cursor: pointer; }
-.task-dialog button:disabled { opacity: 0.45; cursor: default; }
-.task-dialog .task-dialog-close { display: grid; place-items: center; flex: 0 0 36px; width: 36px; padding: 0; }
-.task-dialog-body { display: grid; grid-template-columns: minmax(0, 1fr) 200px; gap: 28px; min-width: 0; }
-.task-dialog h3 { margin: 0 0 12px; color: var(--text-secondary); font-size: 0.75rem; font-weight: 550; letter-spacing: 0; }
-.task-dialog p { margin: 0; font-size: 0.875rem; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
+.task-dialog-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 14px; color: var(--text-secondary); font-size: 12px; }
+.task-dialog-id { font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.task-dialog h2 { margin: 0; font-size: 28px; line-height: 1.3; font-weight: 600; letter-spacing: -.65px; overflow-wrap: anywhere; }
+.task-dialog-pr { display: inline-flex; gap: 8px; margin-top: 16px; color: var(--blue); font-size: 14px; font-weight: 550; text-decoration: none; }
+.task-dialog button { min-height: 36px; padding: 0 12px; background: var(--bg-subtle); color: var(--text); border: 1px solid var(--border); border-radius: 7px; font: inherit; font-size: 13px; cursor: pointer; }
+.task-dialog button:disabled { opacity: .45; cursor: default; }
+.task-dialog .task-dialog-edit { min-height: 28px; padding: 0 8px; background: transparent; color: var(--text-secondary); font-size: 12px; }
+.task-dialog .task-dialog-close { display: grid; place-items: center; flex: 0 0 36px; width: 36px; padding: 0; border: 0; background: transparent; color: var(--text-secondary); }
+.task-dialog-body, .task-dialog-edit-form { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 36px 32px; }
+.task-dialog-body { display: grid; align-content: start; gap: 28px; min-width: 0; }
+.task-dialog h3 { margin: 0 0 12px; color: var(--text); font-size: 14px; font-weight: 550; line-height: 1.5; }
+.task-dialog p { margin: 0; font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; white-space: pre-wrap; }
 .task-dialog-description { min-width: 0; }
-.task-dialog-properties { display: grid; align-content: start; gap: 18px; margin: 0; border-left: 1px solid var(--border); padding-left: 24px; }
-.task-dialog dt { color: var(--text-secondary); font-size: 0.75rem; margin-bottom: 6px; }
-.task-dialog dd { margin: 0; font-size: 0.8125rem; overflow-wrap: anywhere; }
-.task-dialog-sections { grid-column: 1 / -1; display: grid; gap: 24px; min-width: 0; }
+.task-dialog-description .task-markdown-preview { color: var(--text); font-size: 15px; line-height: 1.75; }
+.task-dialog-description :deep(.board-plan-fields) { margin-top: 28px; }
+.task-dialog-properties { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 28px; margin: 0; }
+.task-dialog dt { color: var(--text-secondary); font-size: 12px; margin-bottom: 6px; }
+.task-dialog dd { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
+.task-dialog-sections, .task-agent-details-content { display: grid; gap: 24px; min-width: 0; }
 .task-dialog-sections:empty { display: none; }
-.task-dialog-section, .task-dialog-sections :deep(.lease-authority), .task-dialog-sections :deep(.review-authority), .task-dialog-sections :deep(.task-merge-readiness) { padding: 24px 0 0; border: 0; border-top: 1px solid var(--border); border-radius: 0; background: transparent; min-width: 0; }
+.task-agent-details > summary { display: flex; align-items: center; justify-content: space-between; min-height: 40px; color: var(--text-secondary); font-size: 14px; list-style: none; cursor: pointer; }
+.task-agent-details > summary::-webkit-details-marker { display: none; }
+.task-agent-details > summary span { transition: transform 180ms ease; }
+.task-agent-details[open] > summary span { transform: rotate(180deg); }
+.task-agent-details-content { padding-top: 14px; }
+.task-dialog-section, .task-dialog-sections :deep(.lease-authority), .task-dialog-sections :deep(.review-authority), .task-dialog-sections :deep(.task-merge-readiness) { padding: 0; border: 0; border-radius: 0; background: transparent; min-width: 0; }
 .task-dialog-sections :deep(.lease-authority__tile), .task-dialog-sections :deep(.review-authority__tile), .task-dialog-sections :deep(.merge-readiness-signal) { padding: 0; border: 0; border-radius: 0; background: transparent; }
-.task-dialog-links { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
-.task-dialog-links a { padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; color: var(--blue); font-size: 0.8125rem; overflow-wrap: anywhere; }
-.task-dialog-footer { display: flex; align-items: center; justify-content: space-between; gap: 24px; border-top: 1px solid var(--border); padding-top: 20px; }
-.task-dialog-secondary { display: flex; align-items: center; gap: 24px; min-width: 0; }
-.task-dialog-secondary button { padding-inline: 0; border-color: transparent; background: transparent; color: var(--text-secondary); }
+.task-dialog-links { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.task-dialog-links a { color: var(--blue); font-size: 13px; overflow-wrap: anywhere; }
+.task-dialog-footer { display: flex; align-items: center; justify-content: space-between; flex: 0 0 auto; gap: 16px; padding: 20px 36px; border-top: 1px solid var(--border); background: var(--bg); }
+.task-dialog-secondary { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; min-width: 0; }
 .task-dialog-secondary button.cancel { color: var(--red-text); }
-.task-dialog .task-dialog-primary { flex: 0 0 auto; min-width: 104px; color: var(--blue); background: var(--blue-dim); border-color: color-mix(in srgb, var(--blue) 35%, var(--border)); font-weight: 600; }
-.task-dialog :is(button, a, input, select, textarea):focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
-@media (hover: hover) and (pointer: fine) { .task-dialog button:hover:not(:disabled) { background: var(--accent-hover); } }
-@media (max-width: 600px) {
-  .task-dialog { width: calc(100vw - 24px); max-height: calc(100dvh - 24px); }
-  .task-dialog-content { padding: 16px; padding-bottom: max(16px, env(safe-area-inset-bottom)); gap: 24px; }
-  .task-title-field input { min-height: 44px; font-size: 16px; }
-  .task-dialog-header { gap: 16px; }
-  .task-dialog-body { grid-template-columns: minmax(0, 1fr); gap: 24px; }
-  .task-dialog-properties { grid-template-columns: repeat(2, minmax(0, 1fr)); border-left: 0; padding: 20px 0 0; border-top: 1px solid var(--border); }
-  .task-dialog button, .task-dialog-links a { min-height: 44px; }
-  .task-dialog .task-dialog-close { flex-basis: 44px; width: 44px; }
-  .task-dialog-footer { flex-direction: column; align-items: stretch; gap: 12px; padding-top: 16px; }
-  .task-dialog-secondary { justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
-  .task-dialog-secondary button { min-width: 0; text-align: left; }
-  .task-dialog-secondary button.cancel { text-align: right; }
-}
+.task-dialog .task-dialog-primary { flex: 0 0 auto; min-width: 104px; color: var(--bg); background: var(--text); border-color: transparent; font-weight: 550; }
+.task-dialog-error { margin: 0 36px 18px; color: var(--red-text); font-size: 13px; }
+.task-dialog-edit-form { display: grid; align-content: start; gap: 24px; min-width: 0; }
+.task-title-field { display: grid; gap: 10px; color: var(--text-secondary); font-size: 13px; }
+.task-title-field input { width: 100%; min-height: 48px; padding: 12px 14px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-subtle); color: var(--text); font: inherit; font-size: 16px; }
+.task-dialog-discard { display: grid; gap: 12px; margin: 0 36px 20px; padding: 14px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--bg-subtle); }
+.task-dialog-discard > div { display: flex; flex-wrap: wrap; gap: 8px; }
+.task-dialog :is(button, a, input, select, textarea, summary):focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+@keyframes board-inspector-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: translateX(0); } }
+@media (hover: hover) and (pointer: fine) { .task-dialog button:hover:not(:disabled) { background: var(--accent-hover); } .task-dialog .task-dialog-primary:hover:not(:disabled) { background: var(--text); opacity: .9; } }
+@media (max-width: 600px) { .task-dialog { inset: 0; width: 100%; height: 100dvh; border: 0; border-radius: 0; } .task-dialog-header { padding: 24px 20px; gap: 12px; } .task-dialog h2 { font-size: 24px; } .task-dialog-body, .task-dialog-edit-form { padding: 0 20px 24px; gap: 24px; } .task-dialog button { min-height: 44px; } .task-dialog .task-dialog-close { flex-basis: 44px; width: 44px; } .task-dialog-footer { padding: 16px 20px max(16px, env(safe-area-inset-bottom)); flex-wrap: wrap; gap: 12px; } .task-dialog-properties { gap: 20px; } .task-dialog-error, .task-dialog-discard { margin-inline: 20px; } }
+@media (prefers-reduced-motion: reduce) { .task-dialog { animation: none; } .task-agent-details > summary span { transition: none; } }
 </style>

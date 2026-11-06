@@ -4,6 +4,7 @@ import { mapTicketState } from "../status-map.js";
 import { asRecord, asString, trackerRequest } from "./http.js";
 import { freshCredentials, type TokenRefresher } from "./oauth-refresh.js";
 import { parseLinearWebhook, verifyLinearWebhook } from "./webhooks.js";
+import { linearPlanning } from "./planning.js";
 import {
   type ExternalItem,
   type LinearCredentials,
@@ -23,9 +24,11 @@ const TRANSITION_SKEW_MS = 60_000;
 const ISSUE_FIELDS = `
   id identifier title url updatedAt
   state { id name type }
-  assignee { id name displayName }
+  assignee { id name displayName avatarUrl }
   team { key }
   project { id }
+  estimate
+  cycle { id number name description startsAt endsAt completedAt }
 `;
 
 export interface LinearProviderOptions {
@@ -131,6 +134,7 @@ export function createLinearProvider(options: LinearProviderOptions = {}): WorkI
         state_type: asString(state.type),
         team_key: asString(asRecord(record.team).key),
         project_id: asString(asRecord(record.project).id),
+        planning: linearPlanning(record, now()),
       },
     };
   }

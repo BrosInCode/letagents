@@ -3,6 +3,8 @@ import test from "node:test";
 import type { DesktopSupervisorManifestEntry, DesktopSupervisorServiceSnapshot } from "../../electron/ipc-types";
 import type { DesktopHostApproval } from "../../shared/host-approvals";
 import { projectServiceHealth, SERVICE_HEALTH_EVENT_LIMIT, updateServiceEvents } from "../src/domain/service-health";
+import { filterSettingsAgents, settingsAgentRows, settingsAgentRooms } from "../src/domain/settings-agents";
+import type { DesktopAccountRoomEntry, DesktopRoomLiveMetadata } from "../../electron/ipc-types";
 
 function entry(id: string, overrides: Partial<DesktopSupervisorManifestEntry> = {}): DesktopSupervisorManifestEntry {
   return { id, roomId: "room_a", displayName: id, provider: "codex", model: null, charter: "",
@@ -106,4 +108,54 @@ test("service events report starts and observed connection changes, stay bounded
   assert.equal(events[0]?.summary, "Connected to the background service.");
   const many = Array.from({ length: 40 }, (_, index) => ({ id: String(index), observedAt: first.observedAt, summary: "Observed event" }));
   assert.equal(updateServiceEvents(first, first, many).length, SERVICE_HEALTH_EVENT_LIMIT);
+});
+
+test("Agents settings merges exact identities, filters joined rooms and preserves retired agents", () => {
+  const rooms = settingsAgentRooms([
+    { roomIdentifier: "room_a", name: "Main", displayName: "Main", archived: false, focusRooms: [
+      { roomIdentifier: "room_b", name: "Design", displayName: "Design" },
+    ] },
+    { roomIdentifier: "archived", name: "Archived", displayName: "Archived", archived: true, focusRooms: [] },
+  ] as DesktopAccountRoomEntry[]);
+  assert.deepEqual(rooms.map(room => room.id), ["room_a", "room_b"]);
+  const participants = [
+    { participantKey: "local", kind: "agent", displayName: "Shared name", actorLabel: "local actor", agentKey: "owner/local", ideLabel: "Codex", hiddenAt: null },
+    { participantKey: "external", kind: "agent", displayName: "Shared name", actorLabel: "remote actor", agentKey: "other/remote", ideLabel: "Cursor", hiddenAt: null, activityState: "active" },
+    { participantKey: "retired-echo", kind: "agent", displayName: "Retired agent", actorLabel: "retired actor", agentKey: "owner/retired", ideLabel: "Codex", hiddenAt: null, activityState: "offline" },
+    { participantKey: "paused-echo", kind: "agent", displayName: "Paused agent", actorLabel: "paused actor", agentKey: "owner/paused", ideLabel: "Codex", hiddenAt: null, activityState: "offline" },
+    { participantKey: "human", kind: "human", displayName: "Human" },
+    { participantKey: "hidden", kind: "agent", displayName: "Hidden", hiddenAt: "2026-11-03" },
+  ];
+  const input = { rooms, entries: [
+    entry("local", { displayName: "Shared name", agentKey: "owner/local", charter: "Polish navigation" }),
+    entry("paused", { roomId: "room_b", desiredState: "paused", observedState: "paused" }),
+    entry("retired", { agentKey: "owner/retired", desiredState: "stopped", observedState: "stopped" }),
+    entry("paused-local", { agentKey: "owner/paused", desiredState: "paused", observedState: "paused" }),
+    entry("outside", { roomId: "not-joined" }),
+  ], supervisorFresh: true, metadata: new Map([["room_a", { participants, presence: [] } as unknown as DesktopRoomLiveMetadata]]), staleRooms: new Set<string>(), approvals: [] };
+  const rows = settingsAgentRows(input);
+  assert.equal(rows.length, 5, "canonical identity deduplicates paused/retired echoes without presence; identical names do not merge external agents");
+  assert.deepEqual(filterSettingsAgents(rows, "all", "room_b", "").map(row => row.id), ["paused"]);
+  assert.deepEqual(filterSettingsAgents(rows, "all", "", "NAVIGATION").map(row => row.id), ["local"]);
+  assert.deepEqual(filterSettingsAgents(rows, "retired", "", "").map(row => row.id), ["retired"]);
+  assert.equal(filterSettingsAgents(rows, "all", "", "").length, 4);
+  const external = filterSettingsAgents(rows, "external", "", "Cursor")[0]!;
+  assert.equal(external.request.kind, "participant");
+  assert.equal(external.request.target.agentKey, "other/remote");
+  assert.equal(rows.find(row => row.id === "local")!.request.kind, "supervised");
+  const stale = settingsAgentRows({ ...input, supervisorFresh: false, staleRooms: new Set(["room_a"]) });
+  assert.equal(stale.find(row => row.id === "local")!.status, "Status unavailable");
+  assert.equal(filterSettingsAgents(stale, "external", "", "").length, 0, "a service failure must not reclassify unknown agents as external");
+});
+
+test("Agents settings surfaces approval and recovery needs without exposing approval payloads", () => {
+  const approval: DesktopHostApproval = { id: "approval", requestKey: "request", status: "pending", detail: null, dismissKey: null, retryDecision: null,
+    presentation: { agentId: "waiting", displayName: "Waiting", provider: "codex", title: "Run", details: "private command", denyScope: "request" } };
+  const rows = settingsAgentRows({ rooms: [{ id: "room_a", name: "Main" }], entries: [entry("idle"), entry("waiting"), entry("failed", { observedState: "failed" })],
+    supervisorFresh: true, metadata: new Map(), staleRooms: new Set(), approvals: [approval, { ...approval, id: "echo" }] });
+  assert.equal(rows.find(row => row.id === "waiting")!.approvals, 1);
+  assert.equal(rows.find(row => row.id === "waiting")!.status, "Approval needed");
+  assert.deepEqual(new Set(filterSettingsAgents(rows, "attention", "", "").map(row => row.id)), new Set(["failed", "waiting"]));
+  assert.equal(rows.at(-1)!.id, "idle");
+  assert.doesNotMatch(JSON.stringify(rows), /private command/);
 });

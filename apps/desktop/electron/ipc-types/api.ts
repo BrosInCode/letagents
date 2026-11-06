@@ -335,6 +335,9 @@ export interface DesktopApi {
       taskId: string,
       input: DesktopTaskReviewWorkerActionInput
     ) => Promise<DesktopTaskMutationResult>;
+    /** Native board planning; optional for a renderer talking to an older desktop bridge. */
+    getBoardPlanning?: (roomIdentifier: string) => Promise<import("../../../../shared/board-planning.mjs").BoardPlanningSnapshot>;
+    updateBoardPlanning?: (roomIdentifier: string, input: import("../../../../shared/board-planning.mjs").BoardPlanningUpdate) => Promise<import("../../../../shared/board-planning.mjs").BoardPlanningSnapshot>;
     getBoardGovernance: (roomIdentifier: string) => Promise<DesktopBoardGovernanceSnapshot>;
     assignBoardManager: (
       roomIdentifier: string,

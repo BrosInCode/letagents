@@ -6,6 +6,7 @@ import { withRegisteredWorkerStateFence } from "../../../../../shared/local-work
 import { localChatDatabasePath } from "../chat-storage/settings.js";
 import * as store from "./local-store.js";
 import { revokeLocalSupervisorEntry, endLocalSupervisorSession } from "./local-supervision-authority.js";
+import { getLocalBoardPlanning, updateLocalBoardPlanning } from "./local-board-planning.js";
 
 const desktopMutations = {
   addLocalTask: store.addLocalTask,
@@ -17,6 +18,8 @@ const desktopMutations = {
   importLocalTasks: store.importLocalTasks,
   revokeLocalSupervisorEntry,
   endLocalSupervisorSession,
+  getLocalBoardPlanning,
+  updateLocalBoardPlanning,
 };
 const mcpMutations = new Set(["addLocalTask", "updateLocalTask", "changeLocalTaskWorkLease", "claimLocalTaskReviewLease", "releaseLocalTaskReviewLease"]);
 const object = (value: unknown): Record<string, unknown> => {

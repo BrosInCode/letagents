@@ -154,7 +154,7 @@
       <RoomMemoryView v-if="activeTab === 'memory'" :key="`memory:${messageNamespace}`" :room-identifier="room.identifier" @open-message="(id) => { activeTab = 'chat'; revealRoomMessage(id); }" />
       <RoomBoardView
         v-else-if="activeTab === 'board'"
-        key="board"
+        :key="`board:${room.identifier}`"
         :room-identifier="room.identifier"
         :tasks="tasks"
         :board-settings="boardSettings"
