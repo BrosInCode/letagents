@@ -294,7 +294,7 @@ test("zero-wait reads and expired long polls bypass a pending production window"
   assert.equal(clock.timers.size, 0);
 });
 
-test("a long-poll timeout refreshes time-derived liveness without a state mutation", async () => {
+test("a long-poll timeout refreshes time-derived liveness without a state mutation, and gives that change a sequence of its own", async () => {
   const clock = fakeClock();
   let stale = false;
   let builds = 0;
@@ -311,7 +311,8 @@ test("a long-poll timeout refreshes time-derived liveness without a state mutati
   stale = true;
   clock.fire(25_000);
   const refreshed = await pending;
-  assert.equal(refreshed.sequence, initial.sequence);
+  // The clock alone changed the view: the sequence moves, so a changes-only subscriber at the old one is told.
+  assert.equal(refreshed.sequence, initial.sequence + 1);
   assert.equal(refreshed.entries[0]!.native_liveness?.state, "stale");
   assert.equal(builds, 2, "completed results are never cached by sequence");
 });
@@ -447,5 +448,45 @@ test("a subscriber that asks for changes gets only the entries whose view change
   watch.notify();
   assert.deepEqual(await watch.watch({ afterDaemonGeneration: 6, afterSequence: 3, waitMs: 0, changedOnly: true }), {
     daemon_generation: 6, sequence: 4, complete: false, entries: [view("c", 2)], removed_entry_ids: [], entry_order: ["c"],
+  });
+});
+
+test("a view that changes by the clock alone, in a snapshot at the subscriber's own sequence, gets a sequence of its own and wakes waiting polls", async () => {
+  let liveness = "active";
+  const timers: Array<() => void> = [];
+  const watch = new DaemonStateWatch({
+    currentGeneration: () => 2,
+    isHandoffScheduled: () => false,
+    assertCurrent: async () => undefined,
+    entries: async () => [{ id: "a", room_id: "room_1", native_liveness: { state: liveness } } as unknown as DaemonManifestEntryView],
+    setTimeout: ((callback: () => void) => { timers.push(callback); return { fake: true } as unknown as ReturnType<typeof setTimeout>; }) as typeof setTimeout,
+    clearTimeout: (() => undefined) as typeof clearTimeout,
+  });
+  const view = (state: string) => ({ id: "a", room_id: "room_1", native_liveness: { state } });
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 0, afterSequence: 0, waitMs: 0, changedOnly: true }),
+    { daemon_generation: 2, sequence: 1, entries: [view("active")] });
+
+  // Two subscribers hold sequence 1 and long-poll. No notify comes, but the clock turns the agent stale.
+  const first = watch.watch({ afterDaemonGeneration: 2, afterSequence: 1, waitMs: 25_000, changedOnly: true });
+  const second = watch.watch({ afterDaemonGeneration: 2, afterSequence: 1, waitMs: 25_000, changedOnly: true });
+  await Promise.resolve();
+  assert.equal(timers.length, 2);
+  liveness = "stale";
+  timers[0]!(); // the first poll times out and reads a snapshot at sequence 1 that differs
+  assert.deepEqual(await first, {
+    daemon_generation: 2, sequence: 2, complete: false, entries: [view("stale")], removed_entry_ids: [], entry_order: ["a"],
+  });
+  // The second poll is woken by that change without its own timer firing, and reads the same change.
+  assert.deepEqual(await second, {
+    daemon_generation: 2, sequence: 2, complete: false, entries: [view("stale")], removed_entry_ids: [], entry_order: ["a"],
+  });
+  // A whole read at the current sequence with nothing changed keeps the sequence.
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 2, afterSequence: 0, waitMs: 0 }),
+    { daemon_generation: 2, sequence: 2, entries: [view("stale")] });
+  // A whole read by another reader that finds a clock change moves the sequence, and the changes-only subscriber sees it.
+  liveness = "active";
+  assert.equal((await watch.watch({ afterDaemonGeneration: 2, afterSequence: 0, waitMs: 0 })).sequence, 3);
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 2, afterSequence: 2, waitMs: 0, changedOnly: true }), {
+    daemon_generation: 2, sequence: 3, complete: false, entries: [view("active")], removed_entry_ids: [], entry_order: ["a"],
   });
 });

@@ -35,6 +35,12 @@ export const entryReads = storeMethods({
   async loadForStateWatch(): Promise<DaemonManifest> {
     const database = await this.getDatabase();
     const generation = Number((this.reads.get(database, "generation").get() as Row).generation);
+    const project = (row: Row): DaemonManifestEntry => deepFreeze(composeDaemonManifestEntry(this.projectionFromRow(database, row, "summary")));
+    // Rows of a transaction still open on this connection may yet roll back,
+    // and their versions with them: project them, but keep nothing.
+    if (database.isTransaction) {
+      return { generation, entries: (this.reads.get(database, "allEntries").all() as Row[]).map(project) };
+    }
     const kept = this.stateWatchEntries?.database === database
       ? this.stateWatchEntries.byAgent : new Map<string, { version: number; entry: DaemonManifestEntry }>();
     // Versions before rows: an entry kept under a version was projected after it was read.
@@ -42,7 +48,6 @@ export const entryReads = storeMethods({
     for (const row of this.reads.get(database, "agentManifestVersions").all() as Row[]) versions.set(String(row.agent_id), Number(row.manifest_version));
     const keep = new Map<string, { version: number; entry: DaemonManifestEntry }>();
     const entries: DaemonManifestEntry[] = [];
-    const project = (row: Row): DaemonManifestEntry => deepFreeze(composeDaemonManifestEntry(this.projectionFromRow(database, row, "summary")));
     if (kept.size === 0) {
       for (const row of this.reads.get(database, "allEntries").all() as Row[]) {
         const entry = project(row);

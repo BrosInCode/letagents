@@ -2,6 +2,7 @@ import { RoomLatencyTrace } from "../room-latency-trace.js";
 import { PreparedReadStatements } from "../prepared-reads.js";
 import { DatabaseSync } from "node:sqlite";
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "../daemon-state-database.js";
+import { applyAgentStateVersionSchema } from "../daemon-state-database/shared.js";
 import { pruneSupervisedAgentHistory, settleSupervisedTerminalItem } from "../supervised-agent-history-retention.js";
 import type { SupervisedInboxItem, SupervisedInboxEvent, Row } from "./types.js";
 import { run, INBOX_READS } from "./sql.js";
@@ -45,28 +46,6 @@ export abstract class InboxStoreBase {
   }
 
   /**
-   * A token that is equal on two reads only if neither the rows nor the schema
-   * of this database file changed between them, by any connection. Another
-   * connection's commit changes `PRAGMA data_version` here; a row change made
-   * on this connection (committed or not) changes `total_changes()`; a schema
-   * change made on this connection (which changes neither of those) changes
-   * `PRAGMA schema_version`. Null while this connection has a transaction
-   * open, because its reads then see rows that may still be rolled back. Its
-   * parts are SQLite's own counters, so a writer that forgets to report a
-   * change cannot leave it unchanged.
-   */
-  async committedStateVersion(): Promise<string | null> {
-    return this.read((database) => {
-      if (database.isTransaction) return null;
-      const identity = connectionIdentity(database);
-      const dataVersion = (this.reads.get(database, "dataVersion").get() as Row).data_version;
-      const totalChanges = (this.reads.get(database, "totalChanges").get() as Row).value;
-      const schemaVersion = (this.reads.get(database, "schemaVersion").get() as Row).schema_version;
-      return `${identity}:${String(dataVersion)}:${String(totalChanges)}:${String(schemaVersion)}`;
-    });
-  }
-
-  /**
    * The inbox version of every agent, as the database itself counts it: the
    * `agent_state_versions` triggers (daemon-state-database/shared.ts) move an
    * agent's `inbox_version` on every row change, by any connection or process,
@@ -74,7 +53,7 @@ export abstract class InboxStoreBase {
    * version 0. The scope tells one connection and schema from the next, so a
    * version read on a replaced connection or after a schema change never
    * equals an older one. Null while this connection has a transaction open,
-   * as committedStateVersion() is.
+   * because its reads then see rows that may still be rolled back.
    */
   async inboxStateVersions(): Promise<InboxStateVersions | null> {
     return this.read((database) => {
@@ -136,7 +115,11 @@ export abstract class InboxStoreBase {
     if (!this.initializing) this.initializing = (this.schemaPrepared
       ? openPreparedDaemonStateDatabase(this.databasePath)
       : openDaemonStateDatabase(this.databasePath, (database) => new DaemonStateSchema().createSchema(database)))
-      .then((database) => { this.database = database; return database; });
+      .then((database) => {
+        // A repair on another connection may have rebuilt a table and lost the version triggers this store reads by.
+        applyAgentStateVersionSchema(database);
+        this.database = database; return database;
+      });
     return this.initializing;
   }
   protected require(value: string, field: string): void { if (!value?.trim()) throw new Error(`Supervised inbox ${field} is required.`); }

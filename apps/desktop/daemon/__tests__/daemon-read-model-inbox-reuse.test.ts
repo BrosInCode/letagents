@@ -77,39 +77,45 @@ async function fixture() {
   };
 }
 
-test("the inbox version changes for every committed write, by this connection or another, and is withheld inside a transaction", async () => {
+test("the inbox versions move per agent for every committed write, by this connection or another, and are withheld inside a transaction", async () => {
   const env = await fixture();
   const other = new DatabaseSync(env.path);
+  const version = (versions: Awaited<ReturnType<typeof env.store.inboxStateVersions>>, agentId: string) => versions?.byAgent.get(agentId) ?? 0;
   try {
     await env.ingest("1");
-    const first = await env.store.committedStateVersion();
+    const first = await env.store.inboxStateVersions();
     assert.ok(first);
-    assert.equal(await env.store.committedStateVersion(), first, "reads alone leave it unchanged");
+    assert.deepEqual(await env.store.inboxStateVersions(), first, "reads alone leave it unchanged");
     await env.store.receiptProjection(entry.id);
-    assert.equal(await env.store.committedStateVersion(), first);
+    assert.deepEqual(await env.store.inboxStateVersions(), first);
 
     await env.ingest("2");
-    const afterOwnWrite = await env.store.committedStateVersion();
-    assert.notEqual(afterOwnWrite, first);
+    const afterOwnWrite = await env.store.inboxStateVersions();
+    assert.ok(version(afterOwnWrite, entry.id) > version(first, entry.id));
+    assert.equal(afterOwnWrite!.scope, first.scope);
 
     // A writer that never tells the inbox store, on its own connection.
     other.prepare("UPDATE supervised_agent_inbox SET last_error='changed elsewhere' WHERE source_message_id='1'").run();
-    const afterOtherWrite = await env.store.committedStateVersion();
-    assert.notEqual(afterOtherWrite, afterOwnWrite);
+    const afterOtherWrite = await env.store.inboxStateVersions();
+    assert.ok(version(afterOtherWrite, entry.id) > version(afterOwnWrite, entry.id));
 
-    // A schema change on the store's own connection moves neither data_version nor total_changes().
+    // Another agent's write leaves this agent's version where it is.
+    await env.store.ingestPoll({ agent_id: "agent_2", room_id: entry.room_id, last_observed_message_id: "9",
+      messages: [{ source_message_id: "9", source_message: { id: "9", text: "hello" }, activation: { for_current_agent: true } }] });
+    const afterSecondAgent = await env.store.inboxStateVersions();
+    assert.equal(version(afterSecondAgent, entry.id), version(afterOtherWrite, entry.id));
+    assert.ok(version(afterSecondAgent, "agent_2") > 0);
+    assert.equal(version(first, "agent_3"), 0, "an agent without a row is at version 0");
+
+    // A schema change on the store's own connection moves the scope, so nothing kept under the old one is reused.
     const database = (env.store as unknown as { database: DatabaseSync }).database;
     database.exec("CREATE TABLE reuse_probe(value INTEGER)");
-    const afterCreate = await env.store.committedStateVersion();
-    assert.notEqual(afterCreate, afterOtherWrite);
-    database.exec("ALTER TABLE reuse_probe ADD COLUMN extra TEXT");
-    const afterAlter = await env.store.committedStateVersion();
-    assert.notEqual(afterAlter, afterCreate);
+    const afterCreate = await env.store.inboxStateVersions();
+    assert.notEqual(afterCreate!.scope, afterSecondAgent!.scope);
     database.exec("DROP TABLE reuse_probe");
-    assert.notEqual(await env.store.committedStateVersion(), afterAlter);
 
     database.exec("BEGIN IMMEDIATE");
-    try { assert.equal(await env.store.committedStateVersion(), null); }
+    try { assert.equal(await env.store.inboxStateVersions(), null); }
     finally { database.exec("ROLLBACK"); }
   } finally {
     other.close();

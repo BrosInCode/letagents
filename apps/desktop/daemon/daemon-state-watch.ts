@@ -78,6 +78,8 @@ export type DaemonStateWatchResult = DaemonStateWatchSnapshot | DaemonStateWatch
  */
 type TrackedViews = {
   generation: number;
+  /** The sequence of the last tracked snapshot. */
+  sequence: number;
   since: number;
   views: Map<string, DaemonManifestEntryView>;
   changedAt: Map<string, number>;
@@ -216,23 +218,36 @@ export class DaemonStateWatch {
    * field is, so a liveness threshold crossing counts as a change too.
    * Snapshots are built one at a time in sequence order, so the sequence of
    * a change is the sequence of the first snapshot that showed it.
+   *
+   * A snapshot can carry the sequence of the last one: a long poll timed out,
+   * or another subscriber read the whole state, and no notify came between.
+   * Its views can still differ, because a view also depends on the clock. Such
+   * a change gets a sequence of its own, or a subscriber that holds the last
+   * sequence would never be told of it; waiting long polls wake for it.
    */
   private track(snapshot: DaemonStateWatchSnapshot): void {
     const previous = this.tracked?.generation === snapshot.daemon_generation ? this.tracked : null;
     const views = new Map<string, DaemonManifestEntryView>();
-    const changedAt = new Map<string, number>();
-    const removedAt = new Map<string, number>(previous?.removedAt ?? []);
+    const changed = new Set<string>();
     for (const entry of snapshot.entries) {
       views.set(entry.id, entry);
       const before = previous?.views.get(entry.id);
-      changedAt.set(entry.id, before && isDeepStrictEqual(before, entry)
-        ? previous!.changedAt.get(entry.id) ?? snapshot.sequence
-        : snapshot.sequence);
-      removedAt.delete(entry.id);
+      if (!before || !isDeepStrictEqual(before, entry)) changed.add(entry.id);
     }
-    if (previous) {
-      for (const id of previous.views.keys()) if (!views.has(id)) removedAt.set(id, snapshot.sequence);
+    const removed: string[] = [];
+    if (previous) for (const id of previous.views.keys()) if (!views.has(id)) removed.push(id);
+    if (previous && snapshot.sequence <= previous.sequence && (changed.size > 0 || removed.length > 0)) {
+      this.sequence += 1;
+      snapshot.sequence = this.sequence;
+      this.releaseWaiters();
     }
+    const changedAt = new Map<string, number>();
+    for (const entry of snapshot.entries) {
+      changedAt.set(entry.id, changed.has(entry.id) ? snapshot.sequence : previous!.changedAt.get(entry.id) ?? snapshot.sequence);
+    }
+    const removedAt = new Map<string, number>(previous?.removedAt ?? []);
+    for (const id of removed) removedAt.set(id, snapshot.sequence);
+    for (const id of views.keys()) removedAt.delete(id);
     let since = previous?.since ?? snapshot.sequence;
     while (removedAt.size > STATE_WATCH_REMEMBERED_REMOVALS) {
       // Maps iterate in insertion order and a removal is re-inserted when it
@@ -242,7 +257,7 @@ export class DaemonStateWatch {
       removedAt.delete(id);
       since = Math.max(since, sequence);
     }
-    this.tracked = { generation: snapshot.daemon_generation, since, views, changedAt, removedAt };
+    this.tracked = { generation: snapshot.daemon_generation, sequence: snapshot.sequence, since, views, changedAt, removedAt };
   }
 
   private async snapshot(coalesce: boolean): Promise<DaemonStateWatchSnapshot> {

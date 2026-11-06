@@ -98,9 +98,15 @@ export function validateAgentLiveSharingColumn(database: DatabaseSync): void {
  * with the tables one manifest entry is projected from (manifest-store
  * MANIFEST_ENTRY_SELECT and projectionFromRow). A reader compares a counter to
  * the one it read before and reads the agent's rows again only when it moved.
- * An agent without a row is at version 0. Applied additively on every open,
- * like the read indexes; the triggers never fail a write, because every key
- * column is NOT NULL and a missing inbox parent inserts nothing.
+ * An agent without a row is at version 0.
+ *
+ * Applied additively, like the read indexes: at the end of createSchema and
+ * when a store opens its connection, because a table rebuilt by a repair loses
+ * its triggers. The triggers never fail a write: every key column is NOT NULL,
+ * and a missing inbox parent inserts nothing. A migration that renames or
+ * rebuilds a source table drops them first (dropAgentStateVersionTriggers): the
+ * triggers on the tables keyed by inbox item name supervised_agent_inbox in
+ * their bodies, and a dropped table they name fails every later write.
  */
 export const AGENT_STATE_VERSIONS_TABLE = "agent_state_versions";
 export const agentStateVersionsTableSql = `CREATE TABLE agent_state_versions (
@@ -108,48 +114,60 @@ export const agentStateVersionsTableSql = `CREATE TABLE agent_state_versions (
   inbox_version INTEGER NOT NULL,
   manifest_version INTEGER NOT NULL
 ) STRICT`;
-export type AgentStateVersionScope = "inbox" | "manifest";
+export type AgentStateVersionScope = "inbox" | "manifest" | "both";
 export type AgentStateVersionSource = {
   table: string;
-  /** The column that holds the agent, or the inbox item the agent is found through. */
+  /** The column that holds the agent, or the inbox item the agent is found through (supervised_agent_inbox). */
   key: "agent_id" | "inbox_item_id";
-  scopes: readonly AgentStateVersionScope[];
+  scope: AgentStateVersionScope;
+  /** When set, an UPDATE counts only when one of these columns changes; INSERT and DELETE always count. */
+  updateOf?: readonly string[];
 };
 export const agentStateVersionSources: readonly AgentStateVersionSource[] = [
   // Inbox inputs of an entry's view: receipts and their timelines, the
-  // blocked-head skip and its refusal, the latest continuation repair, ingress health.
-  { table: "supervised_agent_inbox", key: "agent_id", scopes: ["inbox"] },
-  { table: "supervised_agent_inbox_events", key: "inbox_item_id", scopes: ["inbox"] },
-  { table: "supervised_agent_publications", key: "inbox_item_id", scopes: ["inbox"] },
-  { table: "supervised_agent_provider_turn_bindings", key: "agent_id", scopes: ["inbox"] },
-  { table: "supervised_agent_terminal_results", key: "agent_id", scopes: ["inbox"] },
-  { table: "provider_continuation_repairs", key: "agent_id", scopes: ["inbox"] },
-  { table: "supervised_agent_ingress_health", key: "agent_id", scopes: ["inbox"] },
-  // Read for both: the turn-control journal joins the entry and tells a
-  // blocked head's turn; the runtime deployment is the entry's runtime and
-  // tells whether a blocked turn can still be running.
-  { table: "turn_control_journals", key: "agent_id", scopes: ["inbox", "manifest"] },
-  { table: "runtime_deployments", key: "agent_id", scopes: ["inbox", "manifest"] },
+  // blocked-head skip and its refusal, the uncertain-effect facts of a
+  // follow-up, the latest continuation repair, ingress health.
+  { table: "supervised_agent_inbox", key: "agent_id", scope: "inbox" },
+  { table: "supervised_agent_inbox_events", key: "inbox_item_id", scope: "inbox" },
+  { table: "supervised_agent_publications", key: "inbox_item_id", scope: "inbox" },
+  { table: "supervised_agent_provider_turn_bindings", key: "agent_id", scope: "inbox" },
+  { table: "supervised_agent_effects", key: "agent_id", scope: "inbox" },
+  { table: "supervised_agent_effect_tombstones", key: "agent_id", scope: "inbox" },
+  { table: "provider_continuation_repairs", key: "agent_id", scope: "inbox" },
+  { table: "supervised_agent_ingress_health", key: "agent_id", scope: "inbox" },
+  // supervised_agent_terminal_results is read for a blocked head's refusal,
+  // but it is only written in the transaction that also updates the item's
+  // inbox row (supervised-agent-inbox-store/delivery.ts), whose trigger counts
+  // for both, and the previous daemon refuses a database with a trigger on it.
+  // The turn-control journal joins the entry and tells a blocked head's turn.
+  { table: "turn_control_journals", key: "agent_id", scope: "both" },
+  // The runtime deployment is the entry's runtime (every column), and tells a
+  // blocked head's refusal whether its turn can still be running (the work
+  // attempt and conversation only): the liveness it records on every activity
+  // batch must not cost the inbox inputs a read.
+  { table: "runtime_deployments", key: "agent_id", scope: "manifest" },
+  { table: "runtime_deployments", key: "agent_id", scope: "inbox",
+    updateOf: ["work_attempt_id_present", "work_attempt_id", "provider_ref_present", "provider_continuation_id"] },
   // One manifest entry.
-  { table: "agent_identities", key: "agent_id", scopes: ["manifest"] },
-  { table: "agent_profiles", key: "agent_id", scopes: ["manifest"] },
-  { table: "agent_room_memberships", key: "agent_id", scopes: ["manifest"] },
-  { table: "agent_configurations", key: "agent_id", scopes: ["manifest"] },
-  { table: "agent_launch_intents", key: "agent_id", scopes: ["manifest"] },
-  { table: "agent_lifecycle_states", key: "agent_id", scopes: ["manifest"] },
-  { table: "agent_readiness", key: "agent_id", scopes: ["manifest"] },
-  { table: "turn_control_sequence_watermarks", key: "agent_id", scopes: ["manifest"] },
-  { table: "retained_worker_bindings", key: "agent_id", scopes: ["manifest"] },
-  { table: "reconciliation_records", key: "agent_id", scopes: ["manifest"] },
-  { table: "activity_events", key: "agent_id", scopes: ["manifest"] },
-  { table: "turn_control_stages", key: "agent_id", scopes: ["manifest"] },
-  { table: "reconciliation_completed_actions", key: "agent_id", scopes: ["manifest"] },
-  { table: "reconciliation_exit_timestamps", key: "agent_id", scopes: ["manifest"] },
-  { table: "reconciliation_notices", key: "agent_id", scopes: ["manifest"] },
+  { table: "agent_identities", key: "agent_id", scope: "manifest" },
+  { table: "agent_profiles", key: "agent_id", scope: "manifest" },
+  { table: "agent_room_memberships", key: "agent_id", scope: "manifest" },
+  { table: "agent_configurations", key: "agent_id", scope: "manifest" },
+  { table: "agent_launch_intents", key: "agent_id", scope: "manifest" },
+  { table: "agent_lifecycle_states", key: "agent_id", scope: "manifest" },
+  { table: "agent_readiness", key: "agent_id", scope: "manifest" },
+  { table: "turn_control_sequence_watermarks", key: "agent_id", scope: "manifest" },
+  { table: "retained_worker_bindings", key: "agent_id", scope: "manifest" },
+  { table: "reconciliation_records", key: "agent_id", scope: "manifest" },
+  { table: "activity_events", key: "agent_id", scope: "manifest" },
+  { table: "turn_control_stages", key: "agent_id", scope: "manifest" },
+  { table: "reconciliation_completed_actions", key: "agent_id", scope: "manifest" },
+  { table: "reconciliation_exit_timestamps", key: "agent_id", scope: "manifest" },
+  { table: "reconciliation_notices", key: "agent_id", scope: "manifest" },
 ];
 function agentStateVersionBump(source: AgentStateVersionSource, row: "NEW" | "OLD", onlyWhenMoved = false): string {
-  const inbox = source.scopes.includes("inbox") ? 1 : 0;
-  const manifest = source.scopes.includes("manifest") ? 1 : 0;
+  const inbox = source.scope === "inbox" || source.scope === "both" ? 1 : 0;
+  const manifest = source.scope === "manifest" || source.scope === "both" ? 1 : 0;
   const upsert = `ON CONFLICT(agent_id) DO UPDATE SET inbox_version = inbox_version + ${inbox}, manifest_version = manifest_version + ${manifest}`;
   // An UPDATE that moves a row to another agent also counts for the agent it left.
   const moved = onlyWhenMoved ? ` AND OLD.${source.key} IS NOT NEW.${source.key}` : "";
@@ -157,18 +175,22 @@ function agentStateVersionBump(source: AgentStateVersionSource, row: "NEW" | "OL
     ? `INSERT INTO agent_state_versions(agent_id, inbox_version, manifest_version) SELECT ${row}.agent_id, ${inbox}, ${manifest} WHERE 1${moved} ${upsert};`
     : `INSERT INTO agent_state_versions(agent_id, inbox_version, manifest_version) SELECT agent_id, ${inbox}, ${manifest} FROM supervised_agent_inbox WHERE inbox_item_id = ${row}.inbox_item_id${moved} ${upsert};`;
 }
-/** The triggers of one source table, by name. */
+/** The triggers of one source, by name. */
 export function agentStateVersionTriggers(source: AgentStateVersionSource): Record<string, string> {
-  const name = `agent_state_versions_${source.table}`;
+  const name = `agent_state_versions_${source.table}_${source.scope}`;
+  const updateOf = source.updateOf ? ` OF ${source.updateOf.join(", ")}` : "";
   return {
     [`${name}_insert`]: `CREATE TRIGGER ${name}_insert AFTER INSERT ON ${source.table} BEGIN ${agentStateVersionBump(source, "NEW")} END`,
-    [`${name}_update`]: `CREATE TRIGGER ${name}_update AFTER UPDATE ON ${source.table} BEGIN ${agentStateVersionBump(source, "NEW")} ${agentStateVersionBump(source, "OLD", true)} END`,
+    [`${name}_update`]: `CREATE TRIGGER ${name}_update AFTER UPDATE${updateOf} ON ${source.table} BEGIN ${agentStateVersionBump(source, "NEW")} ${agentStateVersionBump(source, "OLD", true)} END`,
     [`${name}_delete`]: `CREATE TRIGGER ${name}_delete AFTER DELETE ON ${source.table} BEGIN ${agentStateVersionBump(source, "OLD")} END`,
   };
 }
 const normalizeSchemaSql = (value: string) => value.replace(/\s+/g, " ").trim();
 function tableExists(database: DatabaseSync, table: string): boolean {
   return Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table));
+}
+function columnExists(database: DatabaseSync, table: string, column: string): boolean {
+  return Boolean(database.prepare("SELECT 1 FROM pragma_table_info(?) WHERE name=?").get(table, column));
 }
 export function validateAgentStateVersionSchema(database: DatabaseSync): void {
   const table = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(AGENT_STATE_VERSIONS_TABLE) as Row | undefined;
@@ -177,8 +199,8 @@ export function validateAgentStateVersionSchema(database: DatabaseSync): void {
   }
   for (const source of agentStateVersionSources) {
     if (!tableExists(database, source.table)) continue;
-    if (!database.prepare(`SELECT 1 FROM pragma_table_info(?) WHERE name=?`).get(source.table, source.key)) {
-      throw new Error(`Agent state versions cannot follow ${source.table}: it has no ${source.key} column.`);
+    for (const column of [source.key, ...(source.updateOf ?? [])]) {
+      if (!columnExists(database, source.table, column)) throw new Error(`Agent state versions cannot follow ${source.table}: it has no ${column} column.`);
     }
     for (const [name, sql] of Object.entries(agentStateVersionTriggers(source))) {
       const actual = database.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?").get(name) as Row | undefined;
@@ -188,24 +210,36 @@ export function validateAgentStateVersionSchema(database: DatabaseSync): void {
     }
   }
 }
+/** Create the table and every missing or outdated trigger of a source table that exists; then validate. Idempotent. */
 export function applyAgentStateVersionSchema(database: DatabaseSync): void {
   if (!tableExists(database, AGENT_STATE_VERSIONS_TABLE)) database.exec(agentStateVersionsTableSql);
+  const expected = new Set<string>();
   for (const source of agentStateVersionSources) {
     if (!tableExists(database, source.table)) continue;
     for (const [name, sql] of Object.entries(agentStateVersionTriggers(source))) {
+      expected.add(name);
       const actual = database.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?").get(name) as Row | undefined;
       if (actual && normalizeSchemaSql(String(actual.sql)) === normalizeSchemaSql(sql)) continue;
       // A trigger of an older definition is replaced, so the definition here is the whole truth.
-      if (actual) database.exec(`DROP TRIGGER ${name}`);
+      if (actual) database.exec(`DROP TRIGGER ${quoteIdentifier(name)}`);
       database.exec(sql);
     }
   }
+  // A trigger of a source that no longer exists here (a table dropped from the list) goes too.
+  for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name GLOB 'agent_state_versions_*'").all() as Row[]) {
+    if (!expected.has(String(row.name))) database.exec(`DROP TRIGGER ${quoteIdentifier(String(row.name))}`);
+  }
   validateAgentStateVersionSchema(database);
+}
+/** For a migration that renames or rebuilds a source table: drop every version trigger first; the next open re-applies them. */
+export function dropAgentStateVersionTriggers(database: DatabaseSync): void {
+  for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name GLOB 'agent_state_versions_*'").all() as Row[]) {
+    database.exec(`DROP TRIGGER ${quoteIdentifier(String(row.name))}`);
+  }
 }
 
 export function applyDaemonEfficiencyMigration(database: DatabaseSync): void {
   applyDaemonReadIndexes(database);
-  applyAgentStateVersionSchema(database);
   for (const row of database.prepare("SELECT DISTINCT agent_id FROM supervised_agent_inbox").all()) {
     compactSupervisedTerminalHistory(database, String(row.agent_id));
   }
@@ -296,8 +330,7 @@ export function validateTerminalResults(database: DatabaseSync, requiredVersion?
   const indexes = database.prepare("PRAGMA index_list(supervised_agent_terminal_results)").all() as Row[];
   if (!index || normalizedTerminalSql(String(index.sql)) !== normalizedTerminalSql(TERMINAL_RESULTS_INDEX)
     || indexes.length !== 2 || indexes.filter((entry) => entry.origin === "pk" && Number(entry.unique) === 1).length !== 1
-    // The agent state version triggers only count changes (agent_state_versions above); no other trigger may touch this authority.
-    || database.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name=? AND name NOT GLOB 'agent_state_versions_*'").get(TERMINAL_RESULTS_TABLE)) {
+    || database.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name=?").get(TERMINAL_RESULTS_TABLE)) {
     throw new Error("Daemon terminal-result authority has invalid indexes or triggers.");
   }
   for (const { name } of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Row[]) {
