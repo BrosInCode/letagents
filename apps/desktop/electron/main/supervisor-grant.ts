@@ -399,7 +399,13 @@ function registryFrom(value: unknown): StoredGrantRegistry | null {
  * the shared copy half changed. Pure readers use the shared copy and must not
  * change it. A positive grant is never kept past a changed file.
  */
-let registrySnapshot: { path: string; fingerprint: string | null; registry: StoredGrantRegistry | null } | null = null;
+let registrySnapshot: {
+  path: string;
+  fingerprint: string | null;
+  registry: StoredGrantRegistry | null;
+  /** The file exists but could not be read or parsed; `registry` is null only because of that. */
+  readFailed?: boolean;
+} | null = null;
 
 async function readRegistryFingerprint(path: string): Promise<string | null> {
   try {
@@ -416,9 +422,23 @@ async function readRegistryShared(): Promise<Readonly<StoredGrantRegistry> | nul
   const cached = registrySnapshot;
   if (cached && cached.path === path && cached.fingerprint === fingerprint) return cached.registry;
   let registry: StoredGrantRegistry | null;
-  try { registry = registryFrom(JSON.parse(await readFile(path, "utf8"))); } catch { registry = null; }
-  registrySnapshot = { path, fingerprint, registry };
+  let readFailed = false;
+  try { registry = registryFrom(JSON.parse(await readFile(path, "utf8"))); } catch { registry = null; readFailed = fingerprint !== null; }
+  registrySnapshot = { path, fingerprint, registry, ...(readFailed ? { readFailed } : {}) };
   return registry;
+}
+
+/**
+ * The identity projection must tell a missing registry (no grants, an honest
+ * empty answer) from a registry that exists but could not be read (an unknown
+ * answer). The shared reader reports both as null, so this one throws for the
+ * second case and drops the failed snapshot so the next call reads again.
+ */
+async function readRegistrySharedForProjection(): Promise<Readonly<StoredGrantRegistry> | null> {
+  const registry = await readRegistryShared();
+  if (registry || !registrySnapshot?.readFailed) return registry;
+  registrySnapshot = null;
+  throw new Error("The supervisor grant registry exists but could not be read.");
 }
 
 async function readRegistry(): Promise<StoredGrantRegistry | null> {
@@ -428,6 +448,8 @@ async function readRegistry(): Promise<StoredGrantRegistry | null> {
 
 export function clearDesktopSupervisorGrantRegistryCacheForTest(): void {
   registrySnapshot = null;
+  lastGoodAgentKeys = null;
+  agentKeyReadFailureLogged = false;
 }
 
 async function writeRegistry(registry: StoredGrantRegistry): Promise<void> {
@@ -1037,7 +1059,7 @@ export async function readDesktopSupervisorGrantAgentKeyForEntry(entryId: string
 export async function readDesktopSupervisorGrantAgentKeysForEntries(
   entryIds: readonly string[],
 ): Promise<Map<string, string>> {
-  const registry = await readRegistryShared();
+  const registry = await readRegistrySharedForProjection();
   const result = new Map<string, string>();
   if (!registry) return result;
   const retiredEntryIds: string[] = [];
@@ -1046,7 +1068,7 @@ export async function readDesktopSupervisorGrantAgentKeysForEntries(
     if (!entryId) continue;
     const agentKey = registry.entryAgentKeys[entryId];
     if (agentKey?.trim()) result.set(entryId, canonicalSupervisorGrantAgentKey(agentKey));
-    else if (registry.purgeRevocationReceipts[entryId]?.agentKey.trim()) retiredEntryIds.push(entryId);
+    else if (registry.purgeRevocationReceipts[entryId]?.agentKey?.trim()) retiredEntryIds.push(entryId);
   }
   if (!retiredEntryIds.length) return result;
   /**
@@ -1074,12 +1096,44 @@ export async function readDesktopSupervisorGrantAgentKeysForEntries(
   return result;
 }
 
+/**
+ * The agent keys of the last successful projection read, merged across calls.
+ * Null until one read succeeds. A later read that fails keeps serving these, so
+ * a transient registry fault cannot relabel every supervised agent as External.
+ */
+let lastGoodAgentKeys: Map<string, string> | null = null;
+let agentKeyReadFailureLogged = false;
+
 /** Both list reads and live snapshots need the same durable renderer identity. */
 export async function projectDesktopSupervisorAgentKeys<T extends { id: string; agentKey?: string | null; localRoomId?: string }>(
   entries: readonly T[],
 ): Promise<Array<T & { agentKey: string | null }>> {
-  const agentKeys = await readDesktopSupervisorGrantAgentKeysForEntries(entries.filter(entry => !entry.localRoomId).map(entry => entry.id))
-    .catch(() => new Map<string, string>());
+  const askedEntryIds = entries.filter(entry => !entry.localRoomId).map(entry => entry.id);
+  let agentKeys: ReadonlyMap<string, string>;
+  try {
+    const fresh = await readDesktopSupervisorGrantAgentKeysForEntries(askedEntryIds);
+    // Merge rather than replace: this call may have asked about a subset. An id
+    // it did ask about, and the registry no longer has, loses its remembered key.
+    const remembered = lastGoodAgentKeys ?? new Map<string, string>();
+    for (const rawEntryId of askedEntryIds) {
+      const entryId = rawEntryId.trim();
+      if (!entryId) continue;
+      const agentKey = fresh.get(entryId);
+      if (agentKey) remembered.set(entryId, agentKey);
+      else remembered.delete(entryId);
+    }
+    lastGoodAgentKeys = remembered;
+    agentKeyReadFailureLogged = false;
+    agentKeys = fresh;
+  } catch (error) {
+    // With nothing remembered, an answer would be a guess: fail the caller.
+    if (!lastGoodAgentKeys) throw error;
+    if (!agentKeyReadFailureLogged) {
+      agentKeyReadFailureLogged = true;
+      console.warn(`[supervisor grants] Using the last known agent keys; the registry read failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    agentKeys = lastGoodAgentKeys;
+  }
   return entries.map(entry => ({ ...entry, agentKey: entry.localRoomId ? `local/supervised/${entry.id}` : entry.agentKey ?? agentKeys.get(entry.id) ?? null }));
 }
 

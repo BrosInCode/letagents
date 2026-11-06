@@ -7,7 +7,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   canonicalSupervisorGrantAgentKey,
+  clearDesktopSupervisorGrantRegistryCacheForTest,
   projectDesktopSupervisorAgentKeys,
+  readDesktopSupervisorGrantAgentKeysForEntries,
   decryptSupervisorGrantFromStorage,
   desktopSupervisorGrantInstallationId,
   encryptSupervisorGrantForStorage,
@@ -1245,6 +1247,79 @@ test("only the newest retirement claims a key that two purge receipts both recor
     }));
     const projected = await projectDesktopSupervisorAgentKeys([{ id: "older", agentKey: null }, { id: "newer", agentKey: null }]);
     assert.deepEqual(projected.map(entry => entry.agentKey), [null, "owner/agent"]);
+  });
+});
+
+const registryWithKeys = (entryAgentKeys: Record<string, string>) => JSON.stringify({
+  version: 7, grants: {}, entryAgentKeys, credentialRevocations: {}, purgeRevocationReceipts: {},
+});
+
+/** Run a body with console.warn captured, so a test can count the warnings. */
+async function withCapturedWarnings(body: (warnings: string[]) => Promise<void>): Promise<void> {
+  const original = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...values: unknown[]) => { warnings.push(values.map(String).join(" ")); };
+  try { await body(warnings); }
+  finally { console.warn = original; }
+}
+
+test("a registry read that fails after a good one keeps the last known agent keys and warns once per failure streak", async () => {
+  await withRegistry(async path => {
+    clearDesktopSupervisorGrantRegistryCacheForTest();
+    await withCapturedWarnings(async warnings => {
+      const input = [{ id: "copper", agentKey: null }, { id: "maple", agentKey: null }, { id: "external", agentKey: null }];
+      await writeFile(path, registryWithKeys({ copper: "EmmyMay/copper", maple: "EmmyMay/maple" }));
+      assert.deepEqual((await projectDesktopSupervisorAgentKeys(input)).map(entry => entry.agentKey), ["EmmyMay/copper", "EmmyMay/maple", null]);
+      // A later success that asked about a subset must not forget the others.
+      await projectDesktopSupervisorAgentKeys([input[0]!]);
+
+      // The file exists but cannot be parsed: an unknown answer, not "no keys".
+      await writeFile(path, "{ this is not json, and it is longer than the good file ");
+      assert.deepEqual((await projectDesktopSupervisorAgentKeys(input)).map(entry => entry.agentKey), ["EmmyMay/copper", "EmmyMay/maple", null]);
+      assert.deepEqual((await projectDesktopSupervisorAgentKeys([input[1]!])).map(entry => entry.agentKey), ["EmmyMay/maple"]);
+      assert.equal(warnings.length, 1, "one warning for the whole failure streak");
+
+      // A success asked about maple and the registry no longer has it: forget it.
+      await writeFile(path, registryWithKeys({ copper: "EmmyMay/copper" }));
+      assert.deepEqual((await projectDesktopSupervisorAgentKeys(input)).map(entry => entry.agentKey), ["EmmyMay/copper", null, null]);
+
+      // The next failure is a new streak: it warns again and maple stays forgotten.
+      await writeFile(path, "{ broken again, and longer than the registry before it, to change the file size ");
+      assert.deepEqual((await projectDesktopSupervisorAgentKeys(input)).map(entry => entry.agentKey), ["EmmyMay/copper", null, null]);
+      assert.equal(warnings.length, 2);
+    });
+  });
+});
+
+test("a registry read that fails before any good read rejects instead of mislabelling every agent", async () => {
+  await withRegistry(async path => {
+    clearDesktopSupervisorGrantRegistryCacheForTest();
+    await writeFile(path, "{ this is not json ");
+    await assert.rejects(projectDesktopSupervisorAgentKeys([{ id: "copper", agentKey: null }]), /could not be read/);
+    // The failure is not cached: the same call succeeds as soon as the file is good.
+    await writeFile(path, registryWithKeys({ copper: "EmmyMay/copper" }));
+    assert.equal((await projectDesktopSupervisorAgentKeys([{ id: "copper", agentKey: null }]))[0]!.agentKey, "EmmyMay/copper");
+  });
+});
+
+test("a registry file that does not exist is an honest empty answer, not a read failure", async () => {
+  await withRegistry(async () => {
+    clearDesktopSupervisorGrantRegistryCacheForTest();
+    const projected = await projectDesktopSupervisorAgentKeys([{ id: "copper", agentKey: null }]);
+    assert.equal(projected[0]!.agentKey, null);
+  });
+});
+
+test("a purge receipt that lacks an agent key neither throws nor claims a key", async () => {
+  await withRegistry(async path => {
+    clearDesktopSupervisorGrantRegistryCacheForTest();
+    const { agentKey: _agentKey, ...receiptWithoutKey } = retirementReceipt("owner/agent", "2026-11-06T00:00:00.000Z");
+    await writeFile(path, JSON.stringify({
+      version: 7, grants: {}, entryAgentKeys: { live: "owner/live" }, credentialRevocations: {},
+      purgeRevocationReceipts: { retired: receiptWithoutKey, ok: retirementReceipt("owner/ok", "2026-11-06T00:00:00.000Z") },
+    }));
+    const keys = await readDesktopSupervisorGrantAgentKeysForEntries(["live", "retired", "ok"]);
+    assert.deepEqual([...keys.entries()].sort(), [["live", "owner/live"], ["ok", "owner/ok"]]);
   });
 });
 

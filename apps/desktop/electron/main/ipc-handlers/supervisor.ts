@@ -489,6 +489,9 @@ function registerSupervisorEventBridges(): void {
     onSupervisorState((snapshot) => {
       void projectDesktopSupervisorAgentKeys(snapshot.entries).then((entries) => {
         emitToMainWindow("desktop:supervisor:state", { ...snapshot, entries });
+      }).catch((error: unknown) => {
+        // No agent keys means no honest push: the renderer keeps its last snapshot.
+        console.warn(`[supervisor] Skipped a state push; agent keys could not be read: ${error instanceof Error ? error.message : String(error)}`);
       });
     });
   }
