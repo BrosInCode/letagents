@@ -4,6 +4,7 @@ export * from "./rooms/artifacts/fetch.js";
 export * from "./rooms/diagnostics.js";
 export * from "./rooms/events.js";
 export * from "./rooms/focus-rooms.js";
+export * from "./rooms/participants.js";
 export * from "./rooms/invite-room.js";
 export * from "./rooms/local-rooms.js";
 export * from "./rooms/messages.js";

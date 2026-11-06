@@ -93,6 +93,7 @@ const expectedDirectChannels = [
   "desktop:room:add-demo-mark",
   "desktop:room:add-task",
   "desktop:room:add-wake-webhook-rule",
+  "desktop:room:archive-agents",
   "desktop:room:archive-focus-room",
   "desktop:room:assign-board-manager",
   "desktop:room:cancel-wake-rule",

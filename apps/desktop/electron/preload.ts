@@ -300,6 +300,8 @@ const api: DesktopApi = {
       ),
     archiveFocusRoom: (roomIdentifier: string, focusKey: string) =>
       ipcRenderer.invoke("desktop:room:archive-focus-room", roomIdentifier, focusKey),
+    archiveAgents: (roomIdentifier: string, participantKeys: string[]) =>
+      ipcRenderer.invoke("desktop:room:archive-agents", roomIdentifier, participantKeys),
     rename: (roomIdentifier: string, displayName: string) =>
       ipcRenderer.invoke("desktop:room:rename", roomIdentifier, displayName),
     createInviteRoom: () => ipcRenderer.invoke("desktop:room:create-invite-room"),

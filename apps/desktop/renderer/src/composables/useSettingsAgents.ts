@@ -27,6 +27,9 @@ export function useSettingsAgents(accountRooms: () => readonly DesktopAccountRoo
   const busy = ref(false);
   const loaded = ref(false);
   const errors = ref<string[]>([]);
+  const archiveBusy = ref(false);
+  const archiveFeedback = ref<string | null>(null);
+  const archiveError = ref<string | null>(null);
   let mounted = false;
   let disposed = false;
   let pending = false;
@@ -162,5 +165,49 @@ export function useSettingsAgents(accountRooms: () => readonly DesktopAccountRoo
   });
   const rows = computed(() => settingsAgentRows({ rooms: rooms.value, entries: state.value?.entries ?? [],
     supervisorFresh: supervisorFresh.value, metadata: metadata.value, staleRooms: staleRooms.value, approvals: approvals.value }));
-  return { rooms, rows, providers, busy, loaded, errors, refresh };
+
+  async function archiveAgents(ids: readonly string[]): Promise<void> {
+    if (archiveBusy.value || disposed) return;
+    archiveFeedback.value = null;
+    archiveError.value = null;
+    const archive = desktopIpc.room.archiveAgents;
+    if (!archive) { archiveError.value = "Restart LetAgents Desktop to archive agents."; return; }
+    const requested = new Set(ids);
+    const targets = rows.value.filter(row => requested.has(row.id) && row.archiveParticipantKey);
+    const groups = new Map<string, typeof targets>();
+    for (const target of targets) groups.set(target.roomId, [...(groups.get(target.roomId) ?? []), target]);
+    let archived = 0;
+    let skipped = requested.size - targets.length;
+    const failedRooms: string[] = [];
+    archiveBusy.value = true;
+    // A read begun before this mutation must not restore archived rows.
+    roomEpoch++;
+    try {
+      for (const [identifier, agents] of groups) {
+        for (let offset = 0; offset < agents.length; offset += 500) {
+          const batch = agents.slice(offset, offset + 500);
+          try {
+            const result = await archive(identifier, batch.map(agent => agent.archiveParticipantKey!));
+            const keys = new Set(result.archivedParticipantKeys);
+            archived += keys.size;
+            skipped += batch.length - keys.size;
+            if (disposed) return;
+            roomEpoch++;
+            const next = new Map(metadata.value);
+            const room = next.get(identifier);
+            if (room) next.set(identifier, { ...room, participants: room.participants.filter(participant => !keys.has(participant.participantKey)) });
+            metadata.value = next;
+          } catch { failedRooms.push(batch[0]!.roomName); }
+        }
+      }
+      if (disposed) return;
+      archiveFeedback.value = `${archived} ${archived === 1 ? "agent" : "agents"} archived. Messages, history, and workspace files are preserved.`
+        + (skipped ? ` ${skipped} ${skipped === 1 ? "agent was" : "agents were"} skipped because availability changed.` : "");
+      if (failedRooms.length) archiveError.value = `Could not archive agents in ${[...new Set(failedRooms)].join(", ")}. Check room-admin access and your connection, then retry.`;
+    } finally {
+      archiveBusy.value = false;
+      if (!disposed) void refresh();
+    }
+  }
+  return { rooms, rows, providers, busy, loaded, errors, refresh, archiveAgents, archiveBusy, archiveFeedback, archiveError };
 }

@@ -22,15 +22,27 @@
         <DesktopSelectField v-model="roomId" :options="roomOptions" label="Room" label-hidden test-id="agents-room-filter" />
       </div>
       <DesktopSegmentedControl :model-value="filter" :options="filters" label="Filter agents" class="agents-filters" @update:model-value="filter = $event as SettingsAgentFilter" />
-      <p class="agents-count" role="status">{{ !loaded && busy ? 'Loading room agents…' : `${visibleRows.length} ${visibleRows.length === 1 ? 'agent' : 'agents'}` }}</p>
+      <div class="agents-selection-toolbar">
+        <p class="agents-count" role="status">{{ !loaded && busy ? 'Loading room agents…' : `${visibleRows.length} ${visibleRows.length === 1 ? 'agent' : 'agents'}` }}</p>
+        <template v-if="archivableRows.length">
+          <label class="agents-selection"><input type="checkbox" :checked="selectedIds.length === archivableRows.length" :indeterminate="selectedIds.length > 0 && selectedIds.length < archivableRows.length" :disabled="archiveBusy || busy" @change="selectVisible(($event.target as HTMLInputElement).checked)" /> Select offline agents</label>
+          <button type="button" class="ghost-button" data-testid="agents-archive-selected" :disabled="!selectedIds.length || archiveBusy || busy" @click="archiveTargets = archivableRows.filter(agent => selectedIds.includes(agent.id))">Archive selected<template v-if="selectedIds.length"> ({{ selectedIds.length }})</template></button>
+        </template>
+      </div>
+      <p v-if="archiveFeedback" class="settings-feedback" role="status">{{ archiveFeedback }}</p>
+      <p v-if="archiveError" class="settings-feedback" data-state="error" role="alert">{{ archiveError }}</p>
       <TransitionGroup name="agent-row" tag="ul" class="agents-list" aria-label="Room agents">
         <li v-for="agent in visibleRows" :key="agent.id" :data-testid="`settings-agent-${agent.id}`">
+          <div class="agents-row-main">
+          <input v-if="agent.archiveParticipantKey" class="agents-row-select" type="checkbox" :aria-label="`Select ${agent.name} in ${agent.roomName}`" :checked="selectedIds.includes(agent.id)" :disabled="archiveBusy || busy" @change="selectAgent(agent.id, ($event.target as HTMLInputElement).checked)" />
           <button type="button" class="agents-row" @click="emit('open-agent', { roomIdentifier: agent.roomId, agentInspector: agent.request })">
             <span class="agents-provider-mark"><ProviderBadge :label="agent.provider" :agent-key="agent.request.target.agentKey" /></span>
             <span class="agents-row-copy"><strong>{{ agent.name }}</strong><span>{{ agent.provider }} · {{ agent.roomName }}<template v-if="agent.external"> · External</template></span><span class="agents-row-summary">{{ agent.summary }}</span></span>
             <span class="agents-state" :data-attention="agent.attention" :data-stale="agent.stale"><span class="agents-state-dot" />{{ agent.status }}</span>
             <ChevronRight :size="16" aria-hidden="true" />
           </button>
+          <button v-if="agent.archiveParticipantKey" type="button" class="ghost-button agents-archive" :aria-label="`Archive ${agent.name} in ${agent.roomName}`" :disabled="archiveBusy || busy" @click="archiveTargets = [agent]"><Archive :size="15" aria-hidden="true" /> Archive</button>
+          </div>
           <button v-if="agent.approvals" type="button" class="ghost-button agents-approval" @click="emit('open-agent', { roomIdentifier: agent.roomId, approvals: true })">Review {{ agent.approvals }} {{ agent.approvals === 1 ? 'approval' : 'approvals' }}</button>
         </li>
       </TransitionGroup>
@@ -41,6 +53,7 @@
         <button v-if="rows.length" type="button" class="ghost-button" @click="query = ''; roomId = ''; filter = 'all'">Clear filters</button>
       </div>
       <p class="settings-muted-note agents-inspector-note">Open an agent for its room inspector, context window, usage limits, and available controls.</p>
+      <p class="settings-muted-note">Room admins can archive offline agents from the shared roster. Messages, history, and workspace files stay available. Agents reappear if they reconnect.</p>
     </section>
     <section v-show="tab === 'providers'" id="agents-panel-providers" role="tabpanel" aria-labelledby="agents-tab-providers" class="agents-providers">
       <p class="settings-muted-note">Manage agents on this computer through their room inspector. External agents are controlled by their own host. Availability and sign-in are checked in agent setup.</p>
@@ -85,14 +98,26 @@
     </p>
 
     </div>
+    <Teleport v-if="archiveTargets" to="body">
+      <DesktopDialogShell :open="true" aria-labelledby="agents-archive-title" :close-disabled="archiveBusy" test-id="agents-archive-dialog" @close="archiveTargets = null">
+        <h2 id="agents-archive-title">Archive {{ archiveTargets.length === 1 ? archiveTargets[0]!.name : `${archiveTargets.length} agents` }}?</h2>
+        <p>This removes these offline agents from the roster for everyone in their rooms. Messages, history, and workspace files are preserved. Agents reappear if they reconnect.</p>
+        <ul class="agents-archive-targets" aria-label="Agents to archive"><li v-for="agent in archiveTargets" :key="agent.id">{{ agent.name }} · {{ agent.roomName }}</li></ul>
+        <div class="agents-archive-actions">
+          <button type="button" class="ghost-button" :disabled="archiveBusy" @click="archiveTargets = null">Cancel</button>
+          <button type="button" class="primary-button" data-testid="agents-archive-confirm" :disabled="archiveBusy" @click="confirmArchive">{{ archiveBusy ? 'Archiving…' : 'Archive' }}</button>
+        </div>
+      </DesktopDialogShell>
+    </Teleport>
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from "vue";
-import { ArrowUpRight, Bot, ChevronRight, Plus, Search } from "@lucide/vue";
+import { Archive, ArrowUpRight, Bot, ChevronRight, Plus, Search } from "@lucide/vue";
 import { useSettingsAgents } from "../../../../composables/useSettingsAgents";
-import { filterSettingsAgents, type SettingsAgentFilter } from "../../../../domain/settings-agents";
+import { filterSettingsAgents, type SettingsAgentFilter, type SettingsAgentRow } from "../../../../domain/settings-agents";
+import DesktopDialogShell from "../../content/DesktopDialogShell.vue";
 import type { AttentionNavigationIntent } from "../../content/room-shell/types";
 import DesktopSelectField from "../../controls/DesktopSelectField.vue";
 import DesktopSegmentedControl from "../../controls/DesktopSegmentedControl.vue";
@@ -114,7 +139,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{ "open-agent": [intent: AttentionNavigationIntent]; "open-connectors": [] }>();
-const { rooms: agentRooms, rows, providers, busy, loaded, errors, refresh } = useSettingsAgents(() => props.rooms ?? []);
+const { rooms: agentRooms, rows, providers, busy, loaded, errors, refresh, archiveAgents, archiveBusy, archiveFeedback, archiveError } = useSettingsAgents(() => props.rooms ?? []);
 const tab = ref("roster");
 const query = ref("");
 const roomId = ref("");
@@ -130,6 +155,21 @@ const filters = computed(() => [
   { id: "external", label: "External" }, { id: "retired", label: "Retired" },
 ]);
 const visibleRows = computed(() => filterSettingsAgents(rows.value, filter.value, roomId.value, query.value));
+const archivableRows = computed(() => visibleRows.value.filter(agent => agent.archiveParticipantKey));
+const selectedIds = ref<string[]>([]);
+const archiveTargets = ref<SettingsAgentRow[] | null>(null);
+watch([archivableRows, tab], ([agents, activeTab]) => {
+  selectedIds.value = activeTab === "roster" ? selectedIds.value.filter(id => agents.some(agent => agent.id === id)) : [];
+});
+function selectVisible(checked: boolean): void { selectedIds.value = checked ? archivableRows.value.map(agent => agent.id) : []; }
+function selectAgent(id: string, checked: boolean): void {
+  selectedIds.value = checked ? [...new Set([...selectedIds.value, id])] : selectedIds.value.filter(selected => selected !== id);
+}
+async function confirmArchive(): Promise<void> {
+  if (!archiveTargets.value || archiveBusy.value) return;
+  await archiveAgents(archiveTargets.value.map(agent => agent.id));
+  archiveTargets.value = null;
+}
 watch(agentRooms, rooms => {
   if (!rooms.some(room => room.id === roomId.value)) roomId.value = "";
   if (!rooms.some(room => room.id === addRoomId.value)) addRoomId.value = "";
@@ -204,6 +244,16 @@ async function toggleCommitIdentity(): Promise<void> {
 .agents-filters { width: fit-content; max-width: 100%; overflow-x: auto; }
 .agents-filters :deep(button) { white-space: nowrap; }
 .agents-count { margin: 22px 0 10px; color: var(--text-tertiary); font-size: .78rem; }
+.agents-selection-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 18px 0 10px; }
+.agents-selection-toolbar .agents-count { margin: 0 auto 0 0; }
+.agents-selection { display: flex; align-items: center; gap: 8px; color: var(--text-secondary); font-size: .78rem; }
+.agents-selection input, .agents-row-select { accent-color: var(--blue); width: 16px; height: 16px; cursor: pointer; }
+.agents-row-main { display: flex; align-items: center; min-width: 0; }
+.agents-row-main .agents-row { flex: 1; min-width: 0; }
+.agents-row-select { flex-shrink: 0; margin-left: 16px; }
+.agents-archive { flex-shrink: 0; margin-right: 16px; }
+.agents-archive-targets { max-height: 200px; overflow: auto; padding-left: 20px; color: var(--text-secondary); }
+.agents-archive-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
 .agents-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
 .agents-list:empty { display: none; }
 .agents-list li + li { border-top: 1px solid var(--border); }
@@ -237,6 +287,9 @@ async function toggleCommitIdentity(): Promise<void> {
 .agent-row-enter-from, .agents-reveal-enter-from { opacity: 0; transform: translateY(4px); }
 .agent-row-move { transition: transform 180ms ease-out; }
 @media (max-width: 700px) {
+  .agents-row-main { flex-wrap: wrap; }
+  .agents-row-main .agents-row { flex-basis: calc(100% - 40px); }
+  .agents-archive { margin: 0 16px 12px auto; }
   .agents-toolbar { grid-template-columns: minmax(0, 1fr); }
   .agents-row { grid-template-columns: 32px minmax(0, 1fr) 16px; gap: 12px; padding: 16px; }
   .agents-provider-mark { width: 32px; height: 32px; }
