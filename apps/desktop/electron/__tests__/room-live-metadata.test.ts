@@ -287,6 +287,68 @@ test("fetchRoomLiveMetadata hits only the five poll-only endpoints and degrades 
   }
 });
 
+test("fetchRoomLiveMetadata requests only the sources named in include and keeps the full result shape", async () => {
+  const recorder = installFetchRecorder({
+    participants: {
+      participants: [
+        {
+          participant_key: "human:emmy",
+          kind: "human",
+          display_name: "EmmyMay",
+          actor_label: null,
+          activity_state: "active",
+          last_seen_at: "2026-07-01T00:00:00.000Z",
+        },
+      ],
+      hidden_count: 4,
+    },
+    presence: { presence: [] },
+    // The skipped endpoints would fail loudly if they were called.
+    failPaths: ["/focus-rooms", "/activity-history", "/board-settings"],
+  });
+
+  try {
+    const metadata = await fetchRoomLiveMetadata("room_roster", { include: ["participants", "presence"] });
+
+    const paths = recorder.calls.map((call) => new URL(call.url).pathname);
+    assert.equal(paths.length, 2, `only two requests are expected, saw ${paths.join(", ")}`);
+    assert.ok(paths.some((path) => path.endsWith("/participants")));
+    assert.ok(paths.some((path) => path.endsWith("/presence")));
+
+    // Requested sections carry data; the rest are the empty, ready sections.
+    assert.deepEqual(metadata.participants.map((participant) => participant.participantKey), ["human:emmy"]);
+    assert.equal(metadata.participantHiddenCount, 4);
+    const empty = emptyRoomLiveMetadata("room_roster");
+    assert.deepEqual(metadata.focusRooms, empty.focusRooms);
+    assert.deepEqual(metadata.recentActivity, empty.recentActivity);
+    assert.deepEqual(metadata.boardSettings, empty.boardSettings);
+    assert.deepEqual(Object.keys(metadata).sort(), Object.keys(empty).sort());
+    assert.deepEqual(Object.keys(metadata.sourceStates).sort(), Object.keys(empty.sourceStates).sort());
+    assert.deepEqual(
+      Object.values(metadata.sourceStates).map((state) => state.status),
+      ["ready", "ready", "ready", "ready", "ready"],
+    );
+  } finally {
+    recorder.restore();
+  }
+});
+
+test("fetchRoomLiveMetadata fetches all five sources without an include option or with an unusable one", async () => {
+  for (const options of [undefined, {}, { include: [] }, { include: ["nonsense"] }] as const) {
+    const recorder = installFetchRecorder({});
+    try {
+      await fetchRoomLiveMetadata("room_all", options as never);
+      const paths = recorder.calls.map((call) => new URL(call.url).pathname);
+      for (const endpoint of ["/focus-rooms", "/participants", "/presence", "/activity-history", "/board-settings"]) {
+        assert.ok(paths.some((path) => path.endsWith(endpoint)), `${JSON.stringify(options)} must request ${endpoint}`);
+      }
+      assert.equal(paths.length, 5);
+    } finally {
+      recorder.restore();
+    }
+  }
+});
+
 test("emptyRoomLiveMetadata returns all-ready empty poll-only sections", () => {
   const metadata = emptyRoomLiveMetadata("room_local");
   assert.equal(metadata.roomIdentifier, "room_local");

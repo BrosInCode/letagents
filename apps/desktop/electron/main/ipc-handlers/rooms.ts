@@ -59,6 +59,7 @@ import type {
   DesktopRoomInfo,
   DesktopRoomLatestMessage,
   DesktopRoomLiveMetadata,
+  DesktopRoomLiveMetadataOptions,
   DesktopRoomAgentWorkPollResult,
   DesktopRoomDeliveryRepair,
   DesktopRoomMessage,
@@ -213,7 +214,8 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     async (
       _event,
       roomIdentifier: string,
-    ): Promise<DesktopRoomLiveMetadata> => fetchRoomLiveMetadata(roomIdentifier),
+      options?: DesktopRoomLiveMetadataOptions | null,
+    ): Promise<DesktopRoomLiveMetadata> => fetchRoomLiveMetadata(roomIdentifier, options ?? undefined),
   );
   targetIpcMain.handle(
     "desktop:room:poll-agent-work",
