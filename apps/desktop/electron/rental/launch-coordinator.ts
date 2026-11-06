@@ -510,13 +510,26 @@ export class RentalLaunchCoordinator {
       void this.grants.reconcileDesiredRunning().catch(() => undefined);
       grants = this.grants.getReconciliationObservation();
     }
-    const entries = await this.daemon.list(null).catch(() => null);
-    await Promise.allSettled(launches.map(async (saved) => {
-      if (!["accepting", "active", "launching", "stopping"].includes(saved.state)) return;
-      let entry = entries?.find((candidate) => candidate.id === saved.entryId);
+    // Only a launch in a live state needs the daemon, and only its own entry:
+    // this runs every RECONCILE_MS, and the whole manifest is tens of megabytes.
+    // With no live launch there is nothing to read.
+    const live = launches.filter((saved) => ["accepting", "active", "launching", "stopping"].includes(saved.state));
+    await Promise.allSettled(live.map(async (saved) => {
+      // A failed daemon read is not absence: `daemonRead` false means the daemon
+      // could not be asked, while an entry it does not have reads as undefined.
+      // An accepting launch has no entry yet and is accepted without the daemon.
+      let daemonRead = true;
+      let entry: DesktopSupervisorManifestEntry | undefined;
+      if (saved.state !== "accepting") {
+        try {
+          entry = await this.daemon.getEntry(saved.entryId) ?? undefined;
+        } catch {
+          daemonRead = false;
+        }
+      }
       const unsafe = entry && !isRentalSafePermissionProfile(entry.provider, entry.permissionProfileId);
       let session: DesktopRentalSession | null = null;
-      if (entries && (entry || saved.state === "stopping") && !unsafe && saved.state !== "accepting") {
+      if (daemonRead && (entry || saved.state === "stopping") && !unsafe && saved.state !== "accepting") {
         const result = await this.api.getSession(saved.sessionId).catch(() => null);
         if (result?.ok) session = mappedSession(result.body);
       }
@@ -537,7 +550,7 @@ export class RentalLaunchCoordinator {
           else if (initial) await this.record({ ...launch, state: "failed" });
           return;
         }
-        if (!entries) return; // A failed daemon read is not absence.
+        if (!daemonRead) return; // A failed daemon read is not absence.
         if (TERMINAL_SESSION_STATUSES.has(session?.status ?? "")) {
           if (entry) await this.teardownOnce(launch.sessionId);
           else await this.record({ ...launch, state: "stopped" });
