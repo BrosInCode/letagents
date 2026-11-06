@@ -154,6 +154,18 @@ test('removing a populated column moves its cards and state coverage without cha
   assert.doesNotThrow(() => validateBoardPlanningUpdate({ expectedRevision: 0, document: vm.draft.value }));
 });
 
+test('removing a column respects the visible fallback after a task lifecycle change', async t => {
+  const state = snapshot();
+  state.taskFacts = [{ id: 'task_1', title: 'Task', status: 'accepted', assignee: null, assigneeAgentKey: null, provider: null, prUrl: null, externalRef: null, ticketUrl: null, updatedAt: '' }];
+  state.document.tasks.task_1 = { columnId: 'progress', estimate: 3 };
+  state.document.columns.push({ id: 'another-todo', name: 'Other accepted', statuses: ['accepted'] }, { id: 'destination', name: 'Destination', statuses: ['in_progress'] });
+  const vm = component(t, Settings, reactive({ open: true, snapshot: state, save: async () => true }));
+  await settle(); vm.removing.value = 'todo'; vm.destination.value = 'destination'; vm.removeColumn();
+  assert.equal(boardTaskColumn(vm.draft.value, state.taskFacts[0]), 'destination');
+  assert.equal(state.taskFacts[0].status, 'accepted');
+  assert.equal(vm.draft.value.tasks.task_1.estimate, 3);
+});
+
 test('editing only priority preserves imported planning so a later tracker estimate still updates', async t => {
   const state = snapshot();
   state.imported.tasks.task_1 = { sprintId: 'imported:one', estimate: 3 };

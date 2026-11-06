@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test, { before, after } from 'node:test'
 import { fileURLToPath } from 'node:url'
-import { createSSRApp, h, ref } from 'vue'
+import { createSSRApp, h, ref, nextTick } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { createServer, type ViteDevServer } from 'vite'
 
@@ -165,6 +165,8 @@ let vite: ViteDevServer
 let TaskBoardCard: object
 let TaskBoardTaskDialog: object
 let TaskBoard: object
+let BoardCreateTaskDialog: object
+let TaskMarkdownEditor: object
 before(async () => {
   vite = await createServer({
     root: fileURLToPath(new URL('..', import.meta.url)),
@@ -173,6 +175,8 @@ before(async () => {
   TaskBoardCard = (await vite.ssrLoadModule('/src/components/room/task-board/TaskBoardCard.vue')).default
   TaskBoardTaskDialog = (await vite.ssrLoadModule('/src/components/room/task-board/TaskBoardTaskDialog.vue')).default
   TaskBoard = (await vite.ssrLoadModule('/src/components/room/TaskBoard.vue')).default
+  BoardCreateTaskDialog = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/board/BoardCreateTaskDialog.vue', import.meta.url)))).default
+  TaskMarkdownEditor = (await vite.ssrLoadModule('/src/components/room/task-board/TaskMarkdownEditor.vue')).default
 })
 after(async () => { await vite?.close() })
 
@@ -258,4 +262,31 @@ test('creation forwards Markdown and returns the created ID only on success', as
   await handlers.handleAddTask(input)
   assert.deepEqual(results, [[false, undefined], [true, 'task_created']])
   assert.deepEqual(created, [{ title: input.title, description: input.description }, { title: input.title, description: input.description }])
+})
+
+
+test('the shared create form renders the web Markdown editor without desktop runtime imports', async () => {
+  // The shared dialog focuses on opening; SSR has no real browser focus target.
+  const originalDocument = globalThis.document
+  const originalElement = globalThis.HTMLElement
+  globalThis.document = { activeElement: null } as unknown as Document
+  globalThis.HTMLElement = class {} as typeof HTMLElement
+  let html: string
+  try {
+    html = await renderToString(createSSRApp({
+      render: () => h(BoardCreateTaskDialog, {
+        open: true, busyAction: null, error: null, markdownEditor: TaskMarkdownEditor,
+      }),
+    }))
+    await nextTick()
+  } finally {
+    globalThis.document = originalDocument
+    globalThis.HTMLElement = originalElement
+  }
+  assert.match(html, /Create a task/)
+  assert.match(html, /aria-label="Markdown formatting"/)
+  assert.match(html, /aria-label="Heading"/)
+  assert.match(html, /aria-label="Checklist"/)
+  assert.match(html, /id="desktop-create-task-description"/)
+  assert.match(html, /Preview/)
 })

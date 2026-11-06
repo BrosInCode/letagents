@@ -29,7 +29,7 @@
         <p class="board-settings-hint">Each sprint can use its own target. Missing estimates remain visible in the assignee overview.</p>
         <section v-for="sprint in allSprints" :key="sprint.id" class="board-sprint-settings">
           <header><strong>{{ sprint.name }}</strong><span>{{ sprint.source?.provider || 'LetAgents' }}</span></header>
-          <p>{{ sprintDates(sprint) }} · {{ sprint.state === 'future' ? 'Upcoming' : sprint.state === 'active' ? 'Active' : 'Completed' }}</p>
+          <p>{{ sprintDates(sprint) }} · {{ sprint.source?.stale ? 'Status unavailable' : sprint.state === 'future' ? 'Upcoming' : sprint.state === 'active' ? 'Active' : 'Completed' }}</p>
           <label>Target per person<input :value="draft.sprintTargets[sprint.id] ?? draft.defaultTargetPoints" type="number" min="1" max="1000" step="1" :disabled="saving || !snapshot.canEdit || sprint.state === 'closed'" @input="setTarget(sprint.id, $event)" /><span>SP</span></label>
           <button v-if="!sprint.source && snapshot.canEdit" class="board-text-button" type="button" :disabled="saving" @click="editSprint(sprint)">Edit sprint</button>
         </section>
@@ -49,7 +49,7 @@
 </template>
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
-import { BOARD_TASK_STATUSES, validateBoardPlanningUpdate, type BoardPlanningDocument, type BoardPlanningSnapshot, type BoardSprint, type BoardTaskStatus } from '../../board-planning.mjs';
+import { BOARD_TASK_STATUSES, boardTaskColumn, validateBoardPlanningUpdate, type BoardPlanningDocument, type BoardPlanningSnapshot, type BoardSprint, type BoardTaskStatus } from '../../board-planning.mjs';
 import FilterDropdown from '../FilterDropdown.vue';
 import BoardIcon from './BoardIcon.vue';
 import { columnTone, sprintDates, statusLabel } from './model';
@@ -78,8 +78,7 @@ function removeColumn() {
   // Retain state coverage and cards in the destination without changing any task's lifecycle.
   for (const task of props.snapshot.taskFacts) {
     const meta = draft.value.tasks[task.id];
-    const firstColumn = draft.value.columns.find(c => (c.statuses as readonly string[]).includes(task.status));
-    if (meta?.columnId === source.id || (!meta?.columnId && firstColumn?.id === source.id)) draft.value.tasks[task.id] = { ...meta, columnId: target.id };
+    if (boardTaskColumn(draft.value, task) === source.id) draft.value.tasks[task.id] = { ...meta, columnId: target.id };
   }
   target.statuses = [...new Set([...target.statuses, ...source.statuses])];
   for (const meta of Object.values(draft.value.tasks)) if (meta.columnId === source.id) meta.columnId = target.id;

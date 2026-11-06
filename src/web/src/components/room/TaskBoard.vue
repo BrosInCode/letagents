@@ -11,7 +11,7 @@
       @create="openCreateTask"
       @refresh="emit('refresh')"
     />
-    <RoomBoardCreateTaskDialog :open="createOpen" :planning-snapshot="workspace?.snapshot" :selected-sprint-id="workspace?.selectedSprintId" :busy-action="creatingTask ? 'add' : null" :error="createError" @close="createOpen = false" @create="submitCreateTask" />
+    <BoardCreateTaskDialog :markdown-editor="TaskMarkdownEditor" :open="createOpen" :planning-snapshot="workspace?.snapshot" :selected-sprint-id="workspace?.selectedSprintId" :busy-action="creatingTask ? 'add' : null" :error="createError" @close="createOpen = false" @create="submitCreateTask" />
     <TaskBoardTaskDialog
       v-if="modalTask" :key="modalTask.id" :task="modalTask" :presence="presence"
       :can-manage-leases="canManageLeases" :github-status="taskGithubStatus[modalTask.id] ?? null"
@@ -36,7 +36,8 @@ import type { BoardServices } from '../../../../../shared/ui/board/types'
 import BoardWorkspace from '../../../../../shared/ui/board/BoardWorkspace.vue'
 import BoardTaskPlanning from '../../../../../shared/ui/board/BoardTaskPlanning.vue'
 import type { BoardPlanningDocument, BoardPlanningSnapshot, BoardTaskPlanning as BoardTaskPlanningFields } from '../../../../../shared/board-planning.mjs'
-import RoomBoardCreateTaskDialog from '../../../../../apps/desktop/renderer/src/components/desktop/content/room-board/RoomBoardCreateTaskDialog.vue'
+import BoardCreateTaskDialog from '../../../../../shared/ui/board/BoardCreateTaskDialog.vue'
+import TaskMarkdownEditor from './task-board/TaskMarkdownEditor.vue'
 import { type RoomAgentPresence, type RoomTask, type TaskGitHubArtifactStatus } from '@/composables/useRoom'
 import { fetchBoardPlanning, saveBoardPlanning } from '@/composables/room/boardPlanning'
 import TaskBoardTaskDialog from './task-board/TaskBoardTaskDialog.vue'

@@ -10,6 +10,7 @@ if (databaseUrl) process.env.DB_URL = databaseUrl;
 const client = databaseUrl ? await import("../db/client.js") : null;
 const planning = databaseUrl ? await import("../db/board-planning.js") : null;
 const api = databaseUrl ? await import("../db.js") : null;
+const schema = databaseUrl ? await import("../db/schema.js") : null;
 const options = { skip: !databaseUrl && "set TEST_DB_URL to run PostgreSQL planning tests" };
 
 test.before(async () => {
@@ -81,7 +82,7 @@ test("planning migration schedules a tracker read-backfill without taking any po
     await connection.query(`CREATE TEMP TABLE room_tracker_filters(provider text,last_synced_at timestamptz,sync_claimed_at timestamptz)`);
     await connection.query(`INSERT INTO room_tracker_filters VALUES
       ('jira','2026-11-01','2026-11-06'),('linear','2026-11-01','2026-11-06'),('github','2026-11-01','2026-11-06')`);
-    const sql = await readFile(path.resolve("drizzle/0140_board_planning.sql"), "utf8");
+    const sql = await readFile(path.resolve("drizzle/0141_board_planning.sql"), "utf8");
     await connection.query(sql.split("--> statement-breakpoint")[1]);
     const rows = (await connection.query("SELECT provider,last_synced_at IS NULL AS reset,sync_claimed_at IS NOT NULL AS claimed FROM room_tracker_filters ORDER BY provider")).rows;
     assert.deepEqual(rows, [
@@ -90,4 +91,55 @@ test("planning migration schedules a tracker read-backfill without taking any po
       { provider: "linear", reset: true, claimed: true },
     ]);
   } finally { await connection.query("DROP TABLE IF EXISTS pg_temp.room_tracker_filters"); connection.release(); }
+});
+
+async function importedSprint(roomId: string) {
+  const suffix = crypto.randomUUID(), now = new Date().toISOString();
+  const ownerId = `planning-owner-${suffix}`, connectionId = `tcon_${suffix}`, itemId = `ext_${suffix}`;
+  await client!.db.insert(schema!.accounts).values({ id: ownerId, provider: "github", provider_user_id: ownerId, login: ownerId, display_name: "Owner", created_at: now, updated_at: now });
+  await client!.db.insert(schema!.tracker_connections).values({ id: connectionId, account_id: ownerId, provider: "jira", display_name: "Planning test", site_key: suffix, site_url: "https://example.atlassian.net", auth_kind: "api_token", credentials_ciphertext: "test", credentials_iv: "test", credentials_version: 1, status_map: {} });
+  const payload = { planning: { estimate: 3, iterations: [{ id: "24", name: "Source sprint", state: "active", startDate: "2026-11-02", endDate: "2026-11-13", goal: null }] } };
+  await client!.db.insert(schema!.external_items).values({ id: itemId, connection_id: connectionId, provider: "jira", key: "APP-1", title: "Imported task", ticket_state: "in_progress", raw_status: "In Progress", url: "https://example.atlassian.net/browse/APP-1", payload, synced_at: now });
+  await client!.pool.query("UPDATE tasks SET external_item_id=$2 WHERE room_id=$1 AND number=1", [roomId, itemId]);
+  return { id: `imported:jira:${connectionId}:24`, itemId, payload };
+}
+
+test("retired imported sprint references recover without accepting new or cross-room references", options, async () => {
+  const roomId = await room("planning-retired-source"), source = await importedSprint(roomId);
+  const foreign = await importedSprint(await room("planning-other-source"));
+  const document = defaultBoardPlanning();
+  document.sprintTargets[source.id] = 24;
+  document.tasks.task_1 = { sprintId: source.id, estimate: 5, priority: "high", columnId: "todo" };
+  await planning!.updateBoardPlanning(roomId, "person", { expectedRevision: 0, document });
+  const beforeRemoval = await planning!.getBoardPlanning(roomId, true);
+  await client!.pool.query("UPDATE external_items SET payload=$2 WHERE id=$1", [source.itemId, { planning: { estimate: 3, iterations: [] } }]);
+
+  // An already-open draft must refresh, rather than silently keeping stale IDs.
+  beforeRemoval.document.columns[0].name = "Ready";
+  await assert.rejects(planning!.updateBoardPlanning(roomId, "person", { expectedRevision: 1, document: beforeRemoval.document }), /missing sprint.*Refresh the board/);
+  const refreshed = await planning!.getBoardPlanning(roomId, true);
+  assert.equal(refreshed.revision, 1);
+  assert.deepEqual(refreshed.document.sprintTargets, {});
+  assert.deepEqual(refreshed.document.tasks.task_1, { sprintId: null, estimate: 5, priority: "high", columnId: "todo" });
+  const raw = (await client!.pool.query("SELECT document FROM room_board_planning WHERE room_id=$1", [roomId])).rows[0].document;
+  assert.equal(raw.tasks.task_1.sprintId, source.id, "GET reconciliation must not write stored planning");
+  refreshed.document.columns[0].name = "Ready";
+  await planning!.updateBoardPlanning(roomId, "person", { expectedRevision: 1, document: refreshed.document });
+
+  // Reappearance after a save must not restore an override the user no longer sees.
+  await client!.pool.query("UPDATE external_items SET payload=$2 WHERE id=$1", [source.itemId, source.payload]);
+  const saved = await planning!.getBoardPlanning(roomId, true);
+  assert.equal(saved.document.columns[0].name, "Ready");
+  assert.equal(saved.document.tasks.task_1.sprintId, null);
+  assert.deepEqual(saved.document.sprintTargets, {});
+  assert.equal(saved.revision, 2);
+  for (const invalidId of ["imported:jira:unknown:24", foreign.id]) {
+    const invalid = structuredClone(saved.document);
+    invalid.sprintTargets[invalidId] = 16;
+    await assert.rejects(planning!.updateBoardPlanning(roomId, "person", { expectedRevision: 2, document: invalid }), /missing sprint/);
+    delete invalid.sprintTargets[invalidId];
+    invalid.tasks.task_1.sprintId = invalidId;
+    await assert.rejects(planning!.updateBoardPlanning(roomId, "person", { expectedRevision: 2, document: invalid }), /missing sprint/);
+  }
+  assert.equal((await planning!.getBoardPlanning(roomId, true)).revision, 2);
 });

@@ -42,7 +42,8 @@
       </template>
     </RoomBoardTaskDialog>
 
-    <RoomBoardCreateTaskDialog
+    <BoardCreateTaskDialog
+      :markdown-editor="TaskMarkdownEditor"
       :open="isCreateTaskDialogOpen"
       :planning-snapshot="workspace?.snapshot"
       :selected-sprint-id="workspace?.selectedSprintId"
@@ -96,7 +97,8 @@ import type {
 } from "../../../../../electron/ipc-types";
 import { activeBoardManagerAgents } from "./room-board/governance-presentation";
 import { boardMayShowTicketSettings, roomShowsTicketSettings } from "./room-board/ticket-settings";
-import RoomBoardCreateTaskDialog from "./room-board/RoomBoardCreateTaskDialog.vue";
+import BoardCreateTaskDialog from "../../../../../../../shared/ui/board/BoardCreateTaskDialog.vue";
+import TaskMarkdownEditor from "./room-board/TaskMarkdownEditor.vue";
 import RoomBoardGovernancePanel from "./room-board/RoomBoardGovernancePanel.vue";
 import RoomBoardTaskDialog from "./room-board/RoomBoardTaskDialog.vue";
 import type { TaskAction } from "./room-board/types";

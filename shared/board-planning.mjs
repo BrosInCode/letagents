@@ -134,10 +134,10 @@ export function validateBoardPlanningReferences(document, taskIds, importedSprin
         if (!taskIds.has(taskId))
             throw new BoardPlanningInputError("A planned task no longer exists in this room. Refresh the board.");
         if (planning.sprintId && !sprintIds.has(planning.sprintId))
-            throw new BoardPlanningInputError("A planned task references a missing sprint.");
+            throw new BoardPlanningInputError("A planned task references a missing sprint. Refresh the board and try again.");
     }
     for (const sprintId of Object.keys(document.sprintTargets)) {
         if (!sprintIds.has(sprintId))
-            throw new BoardPlanningInputError("A target references a missing sprint.");
+            throw new BoardPlanningInputError("A target references a missing sprint. Refresh the board and try again.");
     }
 }

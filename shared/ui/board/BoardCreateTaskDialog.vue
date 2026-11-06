@@ -29,7 +29,7 @@
           :disabled="busyAction !== null"
         />
       </label>
-      <TaskMarkdownEditor id="desktop-create-task-description" v-model="description" label="Description (optional)" :disabled="busyAction !== null" />
+      <component :is="markdownEditor" id="desktop-create-task-description" v-model="description" label="Description (optional)" :disabled="busyAction !== null" />
       <div v-if="planningSnapshot?.canEdit" class="board-create-planning">
         <div class="board-create-field"><span>Sprint</span><FilterDropdown :disabled="busyAction !== null" v-model="sprintId" label="Sprint" :options="sprintOptions" searchable search-placeholder="Find a sprint…"><template #option="{ option }"><span class="work-option-label">{{ option.label }}</span></template></FilterDropdown></div>
         <label class="board-create-field"><span>Story points</span><input v-model="estimate" type="number" min="0" max="1000" step="any" placeholder="Unestimated" :disabled="busyAction !== null" /></label>
@@ -61,15 +61,15 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import DesktopDialogShell from "../DesktopDialogShell.vue";
-import TaskMarkdownEditor from "./TaskMarkdownEditor.vue";
-import FilterDropdown from "../../../../../../../../shared/ui/FilterDropdown.vue";
-import BoardIcon from "../../../../../../../../shared/ui/board/BoardIcon.vue";
-import type { BoardPlanningSnapshot, BoardTaskPlanning } from "../../../../../../../../shared/board-planning.mjs";
+import { computed, ref, watch, type Component } from "vue";
+import DesktopDialogShell from "../../../apps/desktop/renderer/src/components/desktop/content/DesktopDialogShell.vue";
+import FilterDropdown from "../FilterDropdown.vue";
+import BoardIcon from "./BoardIcon.vue";
+import type { BoardPlanningSnapshot, BoardTaskPlanning } from "../../board-planning.mjs";
 
 const props = defineProps<{
   open: boolean;
+  markdownEditor: Component;
   busyAction: string | null;
   error: string | null;
   planningSnapshot?: BoardPlanningSnapshot | null;

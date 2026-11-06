@@ -97,7 +97,7 @@ export function assigneeStories(all: readonly BoardTask[], visible: readonly Boa
 }
 
 export function statusLabel(value: string): string {
-  return ({ proposed: 'Proposed', accepted: 'Accepted', assigned: 'Assigned', in_progress: 'In progress', blocked: 'Blocked', in_review: 'In review', merged: 'Merged', done: 'Done', cancelled: 'Cancelled' } as Record<string, string>)[value] || value;
+  return ({ todo: 'To do', unknown: 'Unknown', proposed: 'Proposed', accepted: 'Accepted', assigned: 'Assigned', in_progress: 'In progress', blocked: 'Blocked', in_review: 'In review', merged: 'Merged', done: 'Done', cancelled: 'Cancelled' } as Record<string, string>)[value] || value;
 }
 
 export function columnTone(statuses: readonly string[]): string {

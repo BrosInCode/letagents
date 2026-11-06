@@ -1,7 +1,7 @@
 import { and, eq, sql } from "drizzle-orm";
 import {
   BoardPlanningConflictError, defaultBoardPlanning, validateBoardPlanningReferences,
-  type BoardPlanningSnapshot, type BoardPlanningUpdate, type BoardTaskFact,
+  type BoardPlanningDocument, type BoardPlanningSnapshot, type BoardPlanningUpdate, type BoardTaskFact,
 } from "../../../shared/board-planning.mjs";
 import { getImportedBoardPlanning } from "../connectors/board-planning.js";
 import { readTaskAgents } from "../connectors/my-work.js";
@@ -28,12 +28,31 @@ export async function readBoardTaskFacts(roomId: string): Promise<BoardTaskFact[
   }));
 }
 
+/**
+ * Tracker membership can disappear without a planning edit. Present a usable
+ * draft, without writing on GET: retired imported targets are omitted and an
+ * explicit override to a retired sprint becomes no sprint. The next ordinary
+ * save persists that choice, so a later reimport cannot resurrect it.
+ */
+function reconcileImportedReferences(document: BoardPlanningDocument, importedIds: ReadonlySet<string>): BoardPlanningDocument {
+  const reconciled = structuredClone(document);
+  const isOrphaned = (id: string) => id.startsWith("imported:") && !importedIds.has(id);
+  for (const id of Object.keys(reconciled.sprintTargets)) {
+    if (isOrphaned(id)) delete reconciled.sprintTargets[id];
+  }
+  for (const task of Object.values(reconciled.tasks)) {
+    if (task.sprintId && isOrphaned(task.sprintId)) task.sprintId = null;
+  }
+  return reconciled;
+}
+
 export async function getBoardPlanning(roomId: string, canEdit: boolean): Promise<BoardPlanningSnapshot> {
   const [rows, taskFacts, imported] = await Promise.all([
     db.select().from(room_board_planning).where(eq(room_board_planning.room_id, roomId)).limit(1),
     readBoardTaskFacts(roomId), getImportedBoardPlanning(roomId),
   ]);
-  return { roomId, revision: rows[0]?.revision ?? 0, document: rows[0]?.document ?? defaultBoardPlanning(), imported, taskFacts, canEdit };
+  const document = reconcileImportedReferences(rows[0]?.document ?? defaultBoardPlanning(), new Set(imported.sprints.map(sprint => sprint.id)));
+  return { roomId, revision: rows[0]?.revision ?? 0, document, imported, taskFacts, canEdit };
 }
 
 /** Client revisions prevent silently overwriting another person's sprint or column changes. */
