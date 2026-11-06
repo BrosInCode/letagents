@@ -1,67 +1,22 @@
 <template>
-  <section
-    class="room-tab-page desktop-board-panel"
-    :data-empty="visibleTaskCount === 0"
-    :data-filter="activeFilter"
-    data-testid="room-board-view"
-  >
-    <RoomBoardToolbar
-      :search-query="searchQuery"
-      :active-filter="activeFilter"
-      :filter-options="filterOptions"
-      :owner-filter="ownerFilter"
-      :owner-options="ownerOptions"
-      :status-filter="statusFilter"
-      :status-options="statusOptions"
-      :show-source-filter="showSourceFilter"
-      :source-filter="sourceFilter"
-      :sort="sort"
+  <section class="room-tab-page desktop-board-workspace-host" data-testid="room-board-view">
+    <BoardWorkspace
+      ref="workspace"
+      :room-id="roomIdentifier"
+      :tasks="workspaceTasks"
+      :services="workspaceServices"
       :busy="busyAction !== null"
-      :manager-mode="boardManagerMode"
-      :manager-title="boardManagerTitle"
-      :pending-intent-count="pendingIntentCount"
-      :governance-open="governanceOpen"
-      @update:search-query="searchQuery = $event"
-      @update:active-filter="setActiveFilter"
-      @update:owner-filter="ownerFilter = $event"
-      @update:status-filter="setStatusFilter"
-      @update:source-filter="setSourceFilter"
-      @update:sort="setSort"
-      @clear-filters="clearFilters"
-      @open-governance="openGovernance"
-      @add-task="openCreateTaskDialog"
-    />
-
-    <div class="desktop-board-workspace">
-      <p
-        v-if="errorMessage && !modalTask && !isCreateTaskDialogOpen"
-        class="desktop-board-error"
-        role="alert"
-      >
-        {{ errorMessage }}
-      </p>
-
-      <RoomBoardEmptyState
-        v-if="visibleTaskCount === 0"
-        :state="emptyState"
-        :busy="busyAction !== null"
-        @action="handleEmptyStateAction"
-      />
-
-      <RoomBoardKanban
-        v-else
-        :groups="visibleGroups"
-        :active-filter="activeFilter"
-        :selected-task-id="localSelectedTaskId"
-        :busy-action="busyAction"
-        :collapsed-groups="collapsedGroups"
-        :actions-for="actionsFor"
-        @select="handleSelectTask"
-        @drag-start="clearTaskSelection"
-        @run-action="handleRunTaskAction"
-        @toggle-group="toggleGroup"
-      />
-    </div>
+      :error="!modalTask && !isCreateTaskDialogOpen ? errorMessage : null"
+      @select="handleSelectTask"
+      @create="openCreateTaskDialog"
+      @refresh="emit('refresh-room')"
+    >
+      <template #actions>
+        <button type="button" class="board-host-manager" :title="boardManagerTitle" :aria-expanded="governanceOpen" @click="openGovernance">
+          Manager<span v-if="pendingIntentCount" class="board-host-count">{{ pendingIntentCount }}</span>
+        </button>
+      </template>
+    </BoardWorkspace>
 
     <RoomBoardTaskDialog
       :task="modalTask"
@@ -81,10 +36,16 @@
       @view-events="emit('view-events', $event)"
       @view-artifacts="emit('view-artifacts', $event)"
       @open-thread="emit('open-thread', $event)"
-    />
+    >
+      <template #planning>
+        <BoardTaskPlanning v-if="modalTask && workspace?.snapshot" :task-id="modalTask.id" :snapshot="workspace.snapshot" :save="workspace.savePlanning" />
+      </template>
+    </RoomBoardTaskDialog>
 
     <RoomBoardCreateTaskDialog
       :open="isCreateTaskDialogOpen"
+      :planning-snapshot="workspace?.snapshot"
+      :selected-sprint-id="workspace?.selectedSprintId"
       :busy-action="busyAction"
       :error="errorMessage"
       @close="closeCreateTaskDialog"
@@ -118,7 +79,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
+import BoardWorkspace from "../../../../../../../shared/ui/board/BoardWorkspace.vue";
+import BoardTaskPlanning from "../../../../../../../shared/ui/board/BoardTaskPlanning.vue";
+import type { BoardPlanningDocument, BoardPlanningSnapshot, BoardTaskPlanning as BoardTaskPlanningFields } from "../../../../../../../shared/board-planning.mjs";
+import type { BoardServices } from "../../../../../../../shared/ui/board/types";
+import { desktopBridgeUpgradeMessage, desktopIpc } from "../../../ipc/index";
+import { desktopBoardTask } from "./room-board/board-workspace-tasks";
 import type { TaskEditPatch } from './room-board/ticket-ref';
 import type {
   DesktopAgentPresence,
@@ -127,21 +94,14 @@ import type {
   DesktopTaskSummary,
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
-import {
-  type BoardEmptyStateAction,
-} from "./room-board/board-presentation";
 import { activeBoardManagerAgents } from "./room-board/governance-presentation";
 import { boardMayShowTicketSettings, roomShowsTicketSettings } from "./room-board/ticket-settings";
 import RoomBoardCreateTaskDialog from "./room-board/RoomBoardCreateTaskDialog.vue";
-import RoomBoardEmptyState from "./room-board/RoomBoardEmptyState.vue";
 import RoomBoardGovernancePanel from "./room-board/RoomBoardGovernancePanel.vue";
-import RoomBoardKanban from "./room-board/RoomBoardKanban.vue";
 import RoomBoardTaskDialog from "./room-board/RoomBoardTaskDialog.vue";
-import RoomBoardToolbar from "./room-board/RoomBoardToolbar.vue";
 import type { TaskAction } from "./room-board/types";
 import { useBoardGovernance } from "./room-board/useBoardGovernance";
 import { useRoomBoardController } from "./room-board/useRoomBoardController";
-import { useRoomBoardPresentation } from "./room-board/useRoomBoardPresentation";
 
 const props = defineProps<{
   /** Cloud rooms only: local rooms cannot store ticket keys. */
@@ -183,35 +143,40 @@ const {
   setSelectedReviewer,
 } = useRoomBoardController(props, emit);
 
-const {
-  activeFilter,
-  clearFilters,
-  clearTaskSelection,
-  collapsedGroups,
-  emptyState,
-  filterOptions,
-  localSelectedTaskId,
-  modalTask,
-  ownerFilter,
-  ownerOptions,
-  runEmptyStateAction,
-  searchQuery,
-  selectTask,
-  setActiveFilter,
-  setSort,
-  setSourceFilter,
-  setStatusFilter,
-  showSourceFilter,
-  sort,
-  sourceFilter,
-  statusFilter,
-  statusOptions,
-  toggleGroup,
-  visibleGroups,
-  visibleTaskCount,
-} = useRoomBoardPresentation(props, emit, {
-  dropTargets: (task) => actionsFor(task).flatMap((action) => action.targetStatus ? [action.targetStatus] : []),
-});
+const workspace = ref<{ snapshot: BoardPlanningSnapshot | null; selectedSprintId: string; applyCreatedPlanning: (id: string, planning: BoardTaskPlanningFields) => Promise<boolean>; savePlanning: (document: BoardPlanningDocument) => Promise<boolean>; revealTask?: (taskId: string) => Promise<void> } | null>(null);
+const localSelectedTaskId = ref<string | null>(props.selectedTaskId || null);
+const modalTask = computed(() => props.tasks.find(task => task.id === localSelectedTaskId.value) || null);
+watch(() => props.selectedTaskId, value => { localSelectedTaskId.value = value || null; });
+watch(() => props.roomIdentifier, () => { localSelectedTaskId.value = null; isCreateTaskDialogOpen.value = false; });
+function selectTask(taskId: string): void {
+  localSelectedTaskId.value = taskId;
+  emit("update:selected-task-id", taskId);
+}
+function clearTaskSelection(): void {
+  const taskId = localSelectedTaskId.value;
+  localSelectedTaskId.value = null;
+  emit("update:selected-task-id", null);
+  if (taskId) void workspace.value?.revealTask?.(taskId);
+}
+const workspaceTasks = computed(() => props.tasks.map(task => desktopBoardTask(task, props.presence, actionsFor(task))));
+const workspaceServices: BoardServices = {
+  loadPlanning: () => {
+    const read = desktopIpc.room?.getBoardPlanning;
+    if (!read) return Promise.reject(new Error(desktopBridgeUpgradeMessage()));
+    return read(props.roomIdentifier);
+  },
+  savePlanning: (expectedRevision, document) => {
+    const save = desktopIpc.room?.updateBoardPlanning;
+    if (!save) return Promise.reject(new Error(desktopBridgeUpgradeMessage()));
+    return save(props.roomIdentifier, { expectedRevision, document });
+  },
+  moveTask: async (taskId, transitionId) => {
+    const task = props.tasks.find(candidate => candidate.id === taskId);
+    const action = task && actionsFor(task).find(candidate => candidate.id === transitionId && candidate.targetStatus);
+    return Boolean(task && action && await runTaskAction(task, action));
+  },
+  openExternal: url => desktopIpc.app.openExternalUrl(url),
+};
 
 const isCreateTaskDialogOpen = ref(false);
 const modalTaskActions = computed(() => modalTask.value ? actionsFor(modalTask.value) : []);
@@ -299,16 +264,19 @@ function closeCreateTaskDialog(): void {
   if (busyAction.value === null) isCreateTaskDialogOpen.value = false;
 }
 
-async function submitCreateTask(input: DesktopTaskCreateInput): Promise<void> {
-  if (await addTask(input)) isCreateTaskDialogOpen.value = false;
-}
-
-function handleEmptyStateAction(action: BoardEmptyStateAction): void {
-  if (runEmptyStateAction(action) === "add-task") openCreateTaskDialog();
-}
-
-function handleRunTaskAction(task: DesktopTaskSummary, action: TaskAction): void {
-  void runTaskAction(task, action);
+async function submitCreateTask(input: DesktopTaskCreateInput & { planning?: BoardTaskPlanningFields }): Promise<void> {
+  const room = props.roomIdentifier;
+  const taskId = await addTask(input);
+  if (!taskId || props.roomIdentifier !== room) return;
+  isCreateTaskDialogOpen.value = false;
+  await nextTick();
+  selectTask(taskId);
+  await nextTick();
+  if (input.planning && !await workspace.value?.applyCreatedPlanning(taskId, input.planning)) {
+    if (props.roomIdentifier !== room) return;
+    errorMessage.value = "Task created, but its planning was not saved. Set it in this panel.";
+  }
+  if (props.roomIdentifier === room) await workspace.value?.revealTask?.(taskId);
 }
 
 function handleSelectTask(taskId: string): void {
@@ -353,3 +321,10 @@ async function handleDenyIntent(intentId: string, reason: string | null): Promis
   if (await decideIntent(intentId, "deny", reason)) emit("refresh-room");
 }
 </script>
+
+<style scoped>
+.desktop-board-workspace-host { display: flex; min-height: 0; min-width: 0; overflow: hidden; padding: 0; }
+.board-host-manager { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text); font: inherit; font-size: 13px; cursor: pointer; }
+.board-host-manager:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.board-host-count { min-width: 18px; padding: 1px 5px; border-radius: 5px; background: var(--bg-elevated); font-size: 11px; }
+</style>

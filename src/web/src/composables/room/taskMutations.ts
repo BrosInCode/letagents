@@ -20,22 +20,23 @@ interface RoomTaskMutationDeps {
 }
 
 export function createRoomTaskMutations(deps: RoomTaskMutationDeps) {
-  async function addTask(title: string): Promise<boolean> {
+  async function addTask(input: string | { title: string; description?: string | null }, onCreated?: (taskId: string) => void): Promise<boolean> {
     if (!room.value) return false
     const roomIdentifier = room.value.identifier
     try {
-      const task = await createRoomTask(roomIdentifier, title)
-      if (room.value?.identifier !== roomIdentifier) return false
-      if (task) tasks.value = mergeCreatedTask(tasks.value, task)
+      const task = await createRoomTask(roomIdentifier, input)
+      if (!task || room.value?.identifier !== roomIdentifier) return false
+      tasks.value = mergeCreatedTask(tasks.value, task)
 
       await deps.refreshRoomBoard()
       if (
-        task &&
         room.value?.identifier === roomIdentifier &&
         !tasks.value.some((item) => item.id === task.id)
       ) {
         tasks.value = mergeCreatedTask(tasks.value, task)
       }
+      if (room.value?.identifier !== roomIdentifier) return false
+      onCreated?.(task.id)
       return true
     } catch {
       return false

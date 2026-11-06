@@ -323,6 +323,75 @@ test("Jira rejects keys that are not issue keys before any request", async () =>
   assert.equal(calls.length, 0);
 });
 
+test("Jira planning discovers site-specific fields and preserves zero and unknown estimates", async () => {
+  const sprint = { id: 24, name: "Iteration 24", state: "active", startDate: "2026-11-02T09:00:00+0100", endDate: "2026-11-13T17:00:00+0100", goal: "Room polish" };
+  const issue = (key: string, estimate: unknown) => ({ key, fields: {
+    summary: key, status: { name: "In Progress" }, customfield_11777: [sprint], customfield_19243: estimate,
+    assignee: { avatarUrls: { "48x48": "https://avatar.example/emmy.png" } },
+  } });
+  const { impl, calls } = fakeFetch([
+    at("GET", /\/field$/, [
+      { id: "customfield_11777", name: "Sprint", schema: { custom: "com.pyxis.greenhopper.jira:gh-sprint", type: "array" } },
+      { id: "customfield_19243", name: "Story Points", schema: { type: "number" } },
+      { id: "customfield_10016", name: "Budget", schema: { type: "number" } },
+    ]),
+    at("POST", /\/search\/jql$/, { issues: [issue("APP-1", 0), issue("APP-2", null)], isLast: true }),
+    at("GET", /\/issue\/APP-1\?/, issue("APP-1", 8)),
+  ]);
+  const jira = createJiraProvider({ fetchImpl: impl, env: {} });
+  const conn = jiraConnection();
+  const items = await jira.listItems(conn, "project = APP", { includePlanning: true });
+  const planning = items.map(item => item.payload.planning as Record<string, unknown>);
+  assert.equal(planning[0].estimate, 0);
+  assert.equal(planning[1].estimate, null);
+  assert.equal(planning[0].estimateAvailable, true);
+  assert.equal(planning[0].assigneeAvatarUrl, "https://avatar.example/emmy.png");
+  assert.deepEqual(planning[0].iterations, [{ id: "24", name: "Iteration 24", state: "active", startDate: "2026-11-02", endDate: "2026-11-13", goal: "Room polish" }]);
+  const fields = (calls.find(call => call.method === "POST")!.body as { fields: string[] }).fields;
+  assert.ok(fields.includes("customfield_19243"));
+  assert.ok(!fields.includes("customfield_10016"), "a familiar-looking ID is not an estimate mapping");
+  assert.ok((await jira.getItem(conn, "APP-1", { includePlanning: true }))?.payload.planning);
+  assert.equal(calls.filter(call => call.url.endsWith("/field")).length, 1, "metadata is reused for one connection");
+  assert.ok(calls.every(call => call.method === "GET" || call.url.endsWith("/search/jql")), "enrichment makes no tracker write");
+});
+
+test("Jira planning does not guess between numeric fields and survives unavailable metadata", async () => {
+  const issue = { key: "APP-1", fields: { summary: "Ticket", status: { name: "Done" }, customfield_1: 5, customfield_2: 8 } };
+  for (const metadata of [
+    { json: [{ id: "customfield_1", name: "Story Points", schema: { type: "number" } }, { id: "customfield_2", name: "Story point estimate", schema: { type: "number" } }] },
+    { status: 403, json: { errorMessages: ["Forbidden"] } },
+  ]) {
+    const { impl, calls } = fakeFetch([
+      call => call.url.endsWith("/field") ? metadata : undefined,
+      at("GET", /\/issue\/APP-1\?/, issue),
+    ]);
+    const jira = createJiraProvider({ fetchImpl: impl, env: {} });
+    const item = await jira.getItem(jiraConnection(), "APP-1", { includePlanning: true });
+    assert.equal(item?.title, "Ticket");
+    assert.equal(item?.ticket_state, "done");
+    assert.deepEqual(item?.payload.planning, { estimate: null, assigneeAvatarUrl: null, estimateAvailable: false, iterationsAvailable: false, iterations: [] });
+    assert.equal(calls.length, 2);
+  }
+});
+
+test("Jira planning ignores malformed sprint/estimate records instead of inventing progress", async () => {
+  const { impl } = fakeFetch([
+    at("GET", /\/field$/, [
+      { id: "customfield_9", name: "Sprint", schema: { custom: "com.pyxis.greenhopper.jira:gh-sprint" } },
+      { id: "customfield_8", name: "Story Points", schema: { type: "number" } },
+    ]),
+    at("GET", /\/issue\/APP-1\?/, { key: "APP-1", fields: {
+      customfield_9: ["com.atlassian.greenhopper.service.sprint.Sprint@deadbeef[id=24]", { id: "../../secret", name: "Invalid", state: "active" }],
+      customfield_8: "8",
+      assignee: { avatarUrls: { "48x48": "javascript:alert(1)" } },
+    } }),
+  ]);
+  const item = await createJiraProvider({ fetchImpl: impl, env: {} }).getItem(jiraConnection(), "APP-1", { includePlanning: true });
+  assert.equal((item?.payload.planning as Record<string, unknown>).estimate, null);
+  assert.deepEqual((item?.payload.planning as Record<string, unknown>).iterations, []);
+  assert.equal((item?.payload.planning as Record<string, unknown>).assigneeAvatarUrl, null);
+});
+
 test("Linear lists assigned issues and maps by state name, then state type", async () => {
   const { impl, calls } = fakeFetch([at("POST", /api\.linear\.app\/graphql$/, fixture("linear-issues-assigned"))]);
   const linear = createLinearProvider({ fetchImpl: impl });
@@ -337,6 +406,29 @@ test("Linear lists assigned issues and maps by state name, then state type", asy
   assert.equal(variables.first, 5);
   assert.equal(calls[0].headers.Authorization, "lin_api_abcdefghijklmnopqrstuvwxyz");
   assert.throws(() => parseLinearFilter("team:BIL state:\"x\""), TrackerProviderError);
+});
+
+test("Linear maps cycle dates and estimates without substituting a default for unestimated work", async () => {
+  const cycles = [
+    { id: "active-cycle", number: 24, name: "Sprint 24", startsAt: "2026-11-02T00:00:00Z", endsAt: "2026-11-14T00:00:00Z" },
+    { id: "next-cycle", number: 25, startsAt: "2026-11-16T00:00:00Z", endsAt: "2026-11-28T00:00:00Z" },
+    { id: "past-cycle", number: 23, startsAt: "2026-10-19T00:00:00Z", endsAt: "2026-10-31T00:00:00Z", completedAt: "2026-10-31T00:00:00Z" },
+    null,
+  ];
+  const { impl, calls } = fakeFetch([at("POST", /graphql$/, { data: { issues: {
+    nodes: cycles.map((cycle, index) => ({ id: `id-${index}`, identifier: `APP-${index + 1}`, cycle, estimate: [5, 0, null, -1][index],
+      assignee: { avatarUrl: index === 0 ? "https://avatar.example/emmy.png" : null },
+    })),
+    pageInfo: { hasNextPage: false },
+  } } })]);
+  const items = await createLinearProvider({ fetchImpl: impl, now: () => new Date("2026-11-06T00:00:00Z") })
+    .listItems(linearConnection(), "team:APP", { includePlanning: true });
+  const planning = items.map(item => item.payload.planning as { estimate: number | null; iterations: Array<{ state: string; name: string }>; assigneeAvatarUrl: string | null });
+  assert.deepEqual(planning.map(value => value.estimate), [5, 0, null, null]);
+  assert.deepEqual(planning.map(value => value.iterations[0]?.state ?? null), ["active", "future", "closed", null]);
+  assert.equal(planning[1].iterations[0].name, "Cycle 25");
+  assert.equal(planning[0].assigneeAvatarUrl, "https://avatar.example/emmy.png");
+  assert.match((calls[0].body as { query: string }).query, /estimate\s+cycle/);
 });
 
 test("Linear whoAmI reports the workspace as the connection's site", async () => {

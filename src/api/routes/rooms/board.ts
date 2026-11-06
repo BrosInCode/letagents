@@ -41,6 +41,7 @@ import {
 import { resolveGitRoomProjectRole } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 import { registerJevLinkRoutes, respondToJevLinkIntentDecision, type JevLinkDecisions } from "./jev-links.js";
+import { registerBoardPlanningRoutes } from "./board-planning.js";
 
 export interface RoomBoardRouteDeps {
   taskEvents?: EventEmitter;
@@ -346,6 +347,7 @@ export function registerRoomBoardRoutes(
   const getActiveBoardManagerForRoom = deps.getActiveBoardManagerForRoom ?? getActiveBoardManager;
   const getRoomBoardSettingsForRoom = deps.getRoomBoardSettingsForRoom ?? getRoomBoardSettings;
   registerJevLinkRoutes(app, deps);
+  registerBoardPlanningRoutes(app, deps);
 
   app.get(/^\/rooms\/(.+)\/board-governance$/, async (req: AuthenticatedRequest, res) => {
     const rawId = decodeURIComponent((req.params as Record<string, string>)[0] ?? "");

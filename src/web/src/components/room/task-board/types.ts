@@ -6,3 +6,9 @@ export type TaskUpdatePayload = {
   onSettled?: (updated: boolean) => void
 } & ({ status: string } | TaskContentPatch)
 import type { TaskContentPatch } from '../../../../../../shared/task-markdown-editing.mjs'
+
+export interface TaskCreatePayload {
+  title: string
+  description?: string | null
+  onSettled?: (created: boolean, taskId?: string) => void
+}

@@ -7,6 +7,11 @@ const { authorizeBoardDecision, emitBoardIntentDecisionNotification, emitBoardIn
 import type { BoardManagerAssignment, Project } from "../db.js";
 import type { BoardIntent } from "../db.js";
 import type { ResolvedRequestAgentIdentity } from "../request/agent-identity.js";
+import {
+  BoardPlanningConflictError, boardTaskColumn, boardTaskPlanning, defaultBoardPlanning,
+  validateBoardPlanningReferences, validateBoardPlanningUpdate,
+} from "../../../shared/board-planning.mjs";
+const { registerBoardPlanningRoutes } = await import("../routes/rooms/board-planning.js");
 
 type Handler = (req: Record<string, unknown>, res: ReturnType<typeof createResponseRecorder>) => Promise<void>;
 
@@ -409,3 +414,106 @@ for (const [routeName, routePath] of [
     assert.equal(requireAdminCalled, false);
   });
 }
+
+test("board planning accepts unknown versus zero estimates and cannot introduce lifecycle states", () => {
+  const document = defaultBoardPlanning();
+  document.tasks = { task_1: { estimate: null }, task_2: { estimate: 0 } };
+  document.sprints = [{ id: "native-1", name: "Sprint one", state: "future", startDate: "2026-11-06", endDate: "2026-11-20", goal: "Ship the board.\nKeep the workflow intact." }];
+  const input = validateBoardPlanningUpdate({ expectedRevision: 0, document });
+  assert.equal(input.document.tasks.task_1.estimate, null);
+  assert.equal(input.document.tasks.task_2.estimate, 0);
+  assert.equal(input.document.sprints[0].goal, document.sprints[0].goal);
+  assert.throws(() => validateBoardPlanningUpdate({ expectedRevision: 0, document: { ...document,
+    columns: [{ id: "custom", name: "Custom", statuses: ["custom"] }] } }), /existing task states/);
+  assert.throws(() => validateBoardPlanningUpdate({ expectedRevision: 0, document: { ...document,
+    columns: document.columns.slice(1) } }), /Every task state/);
+  assert.throws(() => validateBoardPlanningUpdate({ expectedRevision: 0, document: { ...document, defaultTargetPoints: 0 } }), /1 to 1,000/);
+});
+
+test("board placements cannot conceal an authoritative task transition", () => {
+  const document = defaultBoardPlanning();
+  document.columns.push({ id: "testing", name: "Testing", statuses: ["in_review"] });
+  document.tasks.task_1 = { columnId: "testing" };
+  assert.equal(boardTaskColumn(document, { id: "task_1", status: "in_review" }), "testing");
+  assert.equal(boardTaskColumn(document, { id: "task_1", status: "done" }), "done");
+  assert.equal(boardTaskColumn(document, { id: "task_1", status: "proposed" }), null);
+});
+
+test("native planning overlays imports deliberately, including explicit no-sprint and unknown estimate", () => {
+  const document = defaultBoardPlanning();
+  const imported = { sprints: [], tasks: { task_1: { sprintId: "imported:jira:one:24", estimate: 8 } } };
+  assert.deepEqual(boardTaskPlanning({ document, imported }, "task_1"), imported.tasks.task_1);
+  document.tasks.task_1 = { sprintId: null, estimate: null };
+  assert.deepEqual(boardTaskPlanning({ document, imported }, "task_1"), { sprintId: null, estimate: null });
+  document.tasks.task_2 = { estimate: 3 };
+  assert.throws(() => validateBoardPlanningReferences(document, new Set(["task_1"]), new Set()), /no longer exists in this room/);
+  document.tasks = { task_1: { sprintId: "missing" } };
+  assert.throws(() => validateBoardPlanningReferences(document, new Set(["task_1"]), new Set()), /missing sprint/);
+});
+
+function planningRoutes(options: { participant?: boolean; admin?: boolean; conflict?: boolean } = {}) {
+  const { app, handlers } = createRouteApp();
+  const writes: unknown[] = [], reads: string[] = [];
+  registerBoardPlanningRoutes(app as never, {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "canonical-room",
+    resolveRoomOrReply: async roomId => ({ ...project(), id: roomId }),
+    requireParticipant: async (_req, res) => { if (options.participant === false) { res.status(403).json({ error: "Forbidden" }); return false; } return true; },
+    requireAdmin: async (_req, res) => { if (!options.admin) { res.status(403).json({ error: "Admin required" }); return false; } return true; },
+  }, {
+    read: async (roomId, canEdit) => { reads.push(roomId); return { roomId, canEdit, revision: 2,
+      document: defaultBoardPlanning(), imported: { sprints: [], tasks: {} }, taskFacts: [] }; },
+    update: async (...args) => { if (options.conflict) throw new BoardPlanningConflictError(); writes.push(args); },
+    canEdit: async () => Boolean(options.admin),
+  });
+  const key = /^\/rooms\/(.+)\/board-planning$/.toString();
+  return { reads, writes, read: handlers.get.get(key)!, write: handlers.patch.get(key)! };
+}
+const planningRequest = () => ({ params: { 0: "alias" }, method: "PATCH", headers: { authorization: "Bearer human-session" },
+  authKind: "session", sessionAccount: { account_id: "account", login: "person" },
+  body: { expectedRevision: 1, document: defaultBoardPlanning() } });
+
+test("board planning reads use canonical room membership and advertise readonly users", async () => {
+  const denied = planningRoutes({ participant: false });
+  const res = createResponseRecorder();
+  await denied.read(planningRequest(), res);
+  assert.equal(res.statusCode, 403);
+  assert.equal(denied.reads.length, 0);
+  const allowed = planningRoutes();
+  const result = createResponseRecorder();
+  await allowed.read(planningRequest(), result);
+  assert.deepEqual(allowed.reads, ["canonical-room"]);
+  assert.equal((result.body as { canEdit: boolean }).canEdit, false);
+});
+
+test("board planning writes require an interactive admin session and same-origin cookies", async () => {
+  for (const authKind of ["agent_session", "owner_token"]) {
+    const route = planningRoutes({ admin: true });
+    const res = createResponseRecorder();
+    await route.write({ ...planningRequest(), authKind }, res);
+    assert.equal(res.statusCode, 403);
+    assert.equal(route.writes.length, 0);
+  }
+  const nonAdmin = planningRoutes();
+  const denied = createResponseRecorder();
+  await nonAdmin.write(planningRequest(), denied);
+  assert.equal(denied.statusCode, 403);
+  const csrf = planningRoutes({ admin: true });
+  const csrfResult = createResponseRecorder();
+  await csrf.write({ ...planningRequest(), headers: {} }, csrfResult);
+  assert.equal(csrfResult.statusCode, 403);
+  const allowed = planningRoutes({ admin: true });
+  const success = createResponseRecorder();
+  await allowed.write(planningRequest(), success);
+  assert.equal(success.statusCode, 200);
+  assert.equal((allowed.writes[0] as unknown[])[0], "canonical-room");
+});
+
+test("a stale board planning revision returns a conflict rather than success", async () => {
+  const route = planningRoutes({ admin: true, conflict: true });
+  const res = createResponseRecorder();
+  await route.write(planningRequest(), res);
+  assert.equal(res.statusCode, 409);
+  assert.match((res.body as { error: string }).error, /board changed/);
+  assert.equal(route.reads.length, 0);
+});
