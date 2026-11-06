@@ -31,6 +31,8 @@ test("supervisor lists, service snapshots and pushes retain the same canonical a
   assert.match(serviceHandler, /projectDesktopSupervisorAgentKeys\(snapshot\.state\.entries\)/);
   const pushBridge = ipcSource.slice(ipcSource.indexOf('if (!supervisorStateBridgeRegistered)'));
   assert.match(pushBridge, /projectDesktopSupervisorAgentKeys\(snapshot.entries\)/);
+  // A failed key read skips the push (the renderer keeps its snapshot) instead of an unhandled rejection.
+  assert.match(pushBridge, /projectDesktopSupervisorAgentKeys\(snapshot\.entries\)\.then\([\s\S]*?\)\.catch\(/);
 });
 
 test("supervisor creation admits supervised profiles before the daemon saves the entry", () => {

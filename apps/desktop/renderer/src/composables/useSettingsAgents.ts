@@ -12,6 +12,8 @@ import { settingsAgentRooms, settingsAgentRows } from "../domain/settings-agents
  * apart rather than every 15 s.
  */
 const ROSTER_REFRESH_MS = 60_000;
+/** The roster reads only these two sources; the other three would be wasted requests. */
+const ROSTER_METADATA = { include: ["participants", "presence"] } as const;
 
 /** Settings reads joined rooms without starting/stopping the active room's stream. */
 export function useSettingsAgents(accountRooms: () => readonly DesktopAccountRoomEntry[]) {
@@ -92,7 +94,7 @@ export function useSettingsAgents(accountRooms: () => readonly DesktopAccountRoo
             await Promise.all([
               (async () => {
                 try {
-                  const next = await (desktopIpc.room.getLiveMetadata?.(selectedRoom.id) ?? desktopIpc.room.getSnapshot(selectedRoom.id));
+                  const next = await (desktopIpc.room.getLiveMetadata?.(selectedRoom.id, ROSTER_METADATA) ?? desktopIpc.room.getSnapshot(selectedRoom.id));
                   if (!current()) return;
                   // A failed source must not turn a known roster into a false empty state.
                   const old = nextMetadata.get(selectedRoom.id);

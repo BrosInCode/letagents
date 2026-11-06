@@ -599,6 +599,15 @@ export type DesktopRoomLiveMetadataSourceKey = Extract<
   "focusRooms" | "participants" | "presence" | "activityHistory" | "boardSettings"
 >;
 
+/**
+ * Which poll-only sources a live-metadata read should fetch. Absent means all
+ * five. A source left out is not requested; its section stays empty and ready,
+ * so the result keeps its full shape.
+ */
+export interface DesktopRoomLiveMetadataOptions {
+  include?: readonly DesktopRoomLiveMetadataSourceKey[];
+}
+
 export type DesktopRoomLiveMetadataSourceStates = Record<
   DesktopRoomLiveMetadataSourceKey,
   DesktopSnapshotSourceState
