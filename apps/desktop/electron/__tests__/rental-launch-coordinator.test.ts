@@ -7,6 +7,11 @@ import test, { type TestContext } from "node:test";
 import { RentalLaunchCoordinator } from "../rental/launch-coordinator.js";
 import { listRentalLaunches, pruneRentalLaunches, readRentalLaunch, writeRentalLaunch } from "../rental/launch-journal.js";
 
+/** What a fake daemon's single-entry read answers: the entry with this id, or null, as manifest.get_entry does. */
+function entryById<T extends { id: string }>(entries: readonly T[], entryId: string): T | null {
+  return entries.find((candidate) => candidate.id === entryId) ?? null;
+}
+
 const restoredGrants = {
   getReconciliationObservation() {
     return { attempt: restoredGrantAttempt, status: "succeeded", current: true, error: undefined };
@@ -26,17 +31,19 @@ async function recoveryFixture(t: TestContext) {
     desiredState: "running", observedState: "recovering", condition: "auth_blocked", agentSessionId: "same_worker",
     agentSessionBindingState: "historical", readyReachedAt: "2026-09-27T00:00:00.000Z" };
   let observation = { attempt: new Promise<void>(() => {}), status: "pending", current: true, error: undefined as unknown };
-  const calls = { grants: 0, complete: 0, stop: 0, purge: 0, refresh: 0, ack: 0, list: 0 };
+  const calls = { grants: 0, complete: 0, stop: 0, purge: 0, refresh: 0, ack: 0, list: 0, getEntry: 0, ensure: 0 };
   const api = {
     async getSession() { calls.refresh++; return { ok: true as const, status: 200, body: session({ id: launch.sessionId, status: "active" }) }; },
     async completeSession() { calls.complete++; return { ok: true as const, status: 200, body: session({ status: "completed" }) }; },
     async acknowledgeLaunch() { calls.ack++; return { ok: true as const, status: 200, body: session({ status: "active" }) }; },
   };
   const daemon = {
+    // The coordinator reads one launch's entry, never the whole manifest.
     async list() { calls.list++; return [entry]; },
+    async getEntry(id: string) { calls.getEntry++; return entryById([entry], id); },
     async setDesiredState() { calls.stop++; entry.desiredState = "stopped"; entry.observedState = "stopped"; },
     async isMaintenanceHeld() { return false; },
-    async ensureRunning() { return { generation: 1 }; },
+    async ensureRunning() { calls.ensure++; return { generation: 1 }; },
     async purgeAgent() { calls.purge++; return { outcome: "purged" }; },
   };
   const grants = {
@@ -106,7 +113,7 @@ for (const fact of ["terminal", "missing", "unsafe", "stopped"] as const) {
   test(`grant recovery does not defer independent ${fact} evidence behind a never-settling grant`, async (t) => {
     const h = await recoveryFixture(t);
     if (fact === "terminal") h.api.getSession = async () => ({ ok: true, status: 200, body: session({ status: "cancelled" }) });
-    if (fact === "missing") h.daemon.list = async () => [];
+    if (fact === "missing") h.daemon.getEntry = async () => null;
     if (fact === "unsafe") h.entry.permissionProfileId = "full_access";
     if (fact === "stopped") { h.entry.desiredState = "stopped"; h.entry.observedState = "stopped"; }
     await h.coordinator.recover();
@@ -154,7 +161,8 @@ test("grant recovery coalesces slow reads but does not lock out explicit teardow
   const recovering = h.coordinator.recover();
   await started;
   const ticks = [h.tick(), h.tick(), h.tick()];
-  assert.equal(h.calls.list, 1);
+  assert.equal(h.calls.getEntry, 1);
+  assert.equal(h.calls.list, 0);
   await h.coordinator.teardown(h.launch.sessionId);
   assert.equal((await readRentalLaunch(h.launch.sessionId))?.state, "stopped");
   release();
@@ -190,7 +198,7 @@ test("grant recovery registers only the first missing owner attempt and existing
 test("grant recovery retries a stopping obligation even after the manifest entry is absent", async (t) => {
   const h = await recoveryFixture(t);
   await writeRentalLaunch({ ...h.launch, state: "stopping" });
-  h.daemon.list = async () => [];
+  h.daemon.getEntry = async () => null;
   await h.coordinator.recover();
   assert.equal(h.calls.complete, 1);
   assert.equal(h.calls.stop, 0);
@@ -200,9 +208,61 @@ test("grant recovery retries a stopping obligation even after the manifest entry
 test("grant recovery treats a failed manifest read as unknown rather than an absent worker", async (t) => {
   const h = await recoveryFixture(t);
   h.observe("succeeded");
-  h.daemon.list = async () => { throw new Error("transport unavailable"); };
+  h.daemon.getEntry = async () => { throw new Error("transport unavailable"); };
   await h.coordinator.recover();
   assert.equal(h.calls.complete + h.calls.stop + h.calls.ack, 0);
+  assert.equal(h.calls.refresh, 0, "an unreadable daemon is not a reason to read the session either");
+  assert.deepEqual(await readRentalLaunch(h.launch.sessionId), h.launch);
+});
+
+test("a periodic pass with no live launch reads nothing from the daemon", async (t) => {
+  const h = await recoveryFixture(t);
+  await writeRentalLaunch({ ...h.launch, state: "stopped" });
+  await writeRentalLaunch({ ...h.launch, sessionId: "rsess_failed", entryId: "entry_failed", state: "failed" });
+  await h.tick();
+  assert.equal(h.calls.list, 0, "the whole manifest is never read");
+  assert.equal(h.calls.getEntry, 0, "no finished launch has an entry to look up");
+  assert.equal(h.calls.ensure, 1, "the pass still runs the daemon restart check once");
+  for (let i = 0; i < 2; i++) await h.tick();
+  assert.equal(h.calls.list + h.calls.getEntry, 0);
+  assert.equal(h.calls.ensure, 3, "once per pass");
+  assert.equal(h.calls.refresh + h.calls.complete + h.calls.stop + h.calls.purge + h.calls.ack, 0);
+  assert.equal((await readRentalLaunch(h.launch.sessionId))?.state, "stopped");
+  assert.equal((await readRentalLaunch("rsess_failed"))?.state, "failed");
+  // An empty journal is the same.
+  await writeFile(h.path, JSON.stringify({ version: 1, entries: {} }));
+  await h.tick();
+  assert.equal(h.calls.list + h.calls.getEntry, 0);
+  assert.equal(h.calls.ensure, 4, "an empty journal is still a pass");
+});
+
+test("a failed daemon restart check leaves a live launch untouched and reads nothing else", async (t) => {
+  const h = await recoveryFixture(t);
+  h.observe("succeeded");
+  h.daemon.ensureRunning = async () => { h.calls.ensure++; throw new Error("daemon will not start"); };
+  await h.tick();
+  assert.equal(h.calls.ensure, 1);
+  assert.equal(h.calls.getEntry + h.calls.list, 0, "an unreachable daemon is not asked for the entry");
+  assert.equal(h.calls.refresh + h.calls.complete + h.calls.stop + h.calls.purge + h.calls.ack, 0, "unknown is not absent");
+  assert.deepEqual(await readRentalLaunch(h.launch.sessionId), h.launch);
+  // The next pass tries again, and reads the entry once the daemon is back.
+  h.daemon.ensureRunning = async () => { h.calls.ensure++; return { generation: 2 }; };
+  await h.tick();
+  assert.ok(h.calls.getEntry >= 1, "the entry is read once the daemon is back");
+  assert.equal(h.calls.list, 0);
+  assert.equal(h.calls.complete, 1, "the pass then acts on what it reads, as the grant recovery tests above show");
+});
+
+test("a periodic pass reads only the entry of each live launch and never the whole manifest", async (t) => {
+  const h = await recoveryFixture(t);
+  await writeRentalLaunch({ ...h.launch, sessionId: "rsess_done", entryId: "entry_done", state: "stopped" });
+  const reads: string[] = [];
+  const read = h.daemon.getEntry;
+  h.daemon.getEntry = async (id: string) => { reads.push(id); return read(id); };
+  await h.tick();
+  assert.deepEqual(reads, [h.launch.entryId], "one read, for the one live launch");
+  assert.equal(h.calls.list, 0);
+  assert.equal(h.calls.refresh, 1, "the session of the readable entry is still refreshed");
   assert.deepEqual(await readRentalLaunch(h.launch.sessionId), h.launch);
 });
 
@@ -295,7 +355,7 @@ for (const [name, input] of [
   let daemonCalls = 0;
   const coordinator = new RentalLaunchCoordinator({} as never, {
     async isMaintenanceHeld() { return false; },
-    async list() { daemonCalls++; return []; },
+    async getEntry() { daemonCalls++; return null; },
   } as never, {} as never);
   try {
     for (const operation of [
@@ -398,7 +458,7 @@ test("manual acceptance installs exact rental authority, activates at room tail,
     async isMaintenanceHeld() { return false; },
     async ensureRunning() { return { generation: 99 }; },
     async compareAndSetDesiredState() { return entry; },
-    async list() { return [entry]; },
+    async getEntry(id: string) { return entryById([entry], id); },
   };
   const grants = {
     async createRentalPausedAndInstall(input: Record<string, unknown>) {
@@ -527,7 +587,7 @@ test("recovery completes an active server rental when its daemon worker is absen
       async getSession() { refreshed += 1; return { ok: true as const, status: 200, body: session({ status: "active" }) }; },
       async completeSession() { completed += 1; return { ok: true as const, status: 200, body: session({ status: "completed" }) }; },
     } as never,
-    { async isMaintenanceHeld() { return false; }, async list() { return []; } } as never,
+    { async isMaintenanceHeld() { return false; }, async ensureRunning() { return { generation: 1 }; }, async getEntry() { return null; } } as never,
     restoredGrants as never,
   );
   try {
@@ -576,7 +636,7 @@ test("recovery fences a historical worker binding instead of treating it as live
       },
     } as never,
     {
-      async list() { return [entry]; },
+      async getEntry(id: string) { return entryById([entry], id); },
       async setDesiredState() {
         entry.desiredState = "stopped";
         entry.observedState = "stopped";
@@ -636,7 +696,7 @@ test("one malformed recovered launch does not stop reconciliation of the others"
         return { ok: true as const, status: 200, body: session({ id, status: "active" }) };
       },
     } as never,
-    { async isMaintenanceHeld() { return false; }, async list() { return [bad, good]; } } as never,
+    { async isMaintenanceHeld() { return false; }, async ensureRunning() { return { generation: 1 }; }, async getEntry(id: string) { return entryById([bad, good], id); } } as never,
     restoredGrants as never,
   );
   try {
@@ -697,7 +757,7 @@ test("a lost active acknowledgement response is recovered without purging the wo
       async isMaintenanceHeld() { return false; },
       async ensureRunning() { return { generation: 1 }; },
       async compareAndSetDesiredState() { return entry; },
-      async list() { return [entry]; },
+      async getEntry(id: string) { return entryById([entry], id); },
       async purgeAgent() { purged += 1; return { outcome: "purged" }; },
     } as never,
     {
@@ -727,6 +787,7 @@ test("recovery resumes a durable pre-accept intent instead of stranding capacity
   const previous = process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH;
   process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH = join(directory, "launches.json");
   let accepted = 0;
+  let daemonReads = 0;
   await writeRentalLaunch({
     sessionId: "rsess_accepting",
     launchAttempt: 0,
@@ -743,7 +804,8 @@ test("recovery resumes a durable pre-accept intent instead of stranding capacity
         return { ok: false as const, status: 400, error: "request_expired", body: null };
       },
     } as never,
-    { async isMaintenanceHeld() { return false; }, async list() { return []; } } as never,
+    // An accepting launch has no entry yet, so recovery must not ask the daemon about it.
+    { async isMaintenanceHeld() { return false; }, async ensureRunning() { return { generation: 1 }; }, async getEntry() { daemonReads += 1; return null; } } as never,
     restoredGrants as never,
     () => "host",
     async () => "agent_rental",
@@ -752,6 +814,7 @@ test("recovery resumes a durable pre-accept intent instead of stranding capacity
   try {
     await coordinator.recover();
     assert.equal(accepted, 1);
+    assert.equal(daemonReads, 0, "the accepting launch is resumed without a daemon read");
     assert.equal((await readRentalLaunch("rsess_accepting"))?.state, "failed");
   } finally {
     if (previous === undefined) delete process.env.LETAGENTS_RENTAL_LAUNCH_JOURNAL_PATH;
@@ -769,7 +832,7 @@ test("recovery arms a persisted hard deadline before daemon or API connectivity"
     observedState: "stopped",
     condition: "none",
   };
-  let listCalls = 0;
+  let readCalls = 0;
   let completions = 0;
   let stops = 0;
   await writeRentalLaunch({
@@ -790,10 +853,10 @@ test("recovery arms a persisted hard deadline before daemon or API connectivity"
       },
     } as never,
     {
-      async list() {
-        listCalls += 1;
-        if (listCalls === 1) throw new Error("daemon temporarily unavailable");
-        return [entry];
+      async getEntry(id: string) {
+        readCalls += 1;
+        if (readCalls === 1) throw new Error("daemon temporarily unavailable");
+        return entryById([entry], id);
       },
       async setDesiredState() { stops += 1; return entry; },
       async isMaintenanceHeld() { return false; },
@@ -828,7 +891,7 @@ test("maintenance blocks rental admission and reclassification while durable dea
   await assert.rejects(h.coordinator.acceptAndLaunch("new", { providerId: "cursor", permissionProfileId: "sandboxed_write" }), /maintenance/);
   await h.coordinator.recover(); await h.tick();
   assert.deepEqual(await readRentalLaunch(h.launch.sessionId), h.launch);
-  assert.deepEqual(h.calls, { grants: 0, complete: 0, stop: 0, purge: 0, refresh: 0, ack: 0, list: 0 });
+  assert.deepEqual(h.calls, { grants: 0, complete: 0, stop: 0, purge: 0, refresh: 0, ack: 0, list: 0, getEntry: 0, ensure: 0 });
   await writeRentalLaunch({ ...h.launch, deadlineAt: new Date(Date.now() - 1).toISOString() });
   const deadline = t.mock.method(h.coordinator as unknown as { completeAtDeadline(id: string): Promise<void> }, "completeAtDeadline");
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });

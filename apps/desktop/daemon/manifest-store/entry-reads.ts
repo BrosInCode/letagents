@@ -94,10 +94,10 @@ export const entryReads = storeMethods({
     } };
   },
 
-  async listRoomEntries(roomId: string): Promise<DaemonManifestEntry[]> {
+  async listRoomEntries(roomId: string, activityMode: "full" | "summary" = "full"): Promise<DaemonManifestEntry[]> {
     const database = await this.getDatabase();
     return (this.reads.get(database, "roomEntries").all(roomId) as Row[])
-      .map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row)));
+      .map((row) => composeDaemonManifestEntry(this.projectionFromRow(database, row, activityMode)));
   },
 
   /**

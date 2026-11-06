@@ -285,7 +285,8 @@ export class SupervisorGrantCoordinator {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        this.daemon.list(roomId),
+        // Only names are read: skip each saved agent's activity history.
+        this.daemon.list(roomId, { activity: "summary" }),
         new Promise<null>((resolve) => {
           timer = setTimeout(resolve, this.nameLookupTimeoutMs, null);
         }),
@@ -584,7 +585,11 @@ export class SupervisorGrantCoordinator {
     await this.assertSupervisionAvailable();
     const status = await this.daemon.ensureRunning();
     this.requestedDaemonGeneration = status.generation;
-    const entries = await this.daemon.list(null);
+    // The sweep reads only the fields that decide grants (delivery mode, desired
+    // and observed state, worker session binding, room, provider and ids), never
+    // an entry's activity, so it asks for the summary projection instead of the
+    // whole history.
+    const entries = await this.daemon.list(null, { activity: "summary" });
     // Every agent is attempted: a failed pass is not retried on the same
     // generation, so one agent's failure must not leave the rest without
     // their grants. Only a newer daemon generation ends the pass early
@@ -648,8 +653,8 @@ export class SupervisorGrantCoordinator {
    */
   async retireEntry(entryId: string, daemonGeneration: number): Promise<void> {
     await this.paced(entryId, GRANT_RECONCILE_PRIORITY.user, () => this.serialize(entryId, async () => {
-      const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === entryId);
-      await this.retireEntryWithinEntryTail(entryId, daemonGeneration, entry);
+      const entry = await this.daemon.getEntry(entryId);
+      await this.retireEntryWithinEntryTail(entryId, daemonGeneration, entry ?? undefined);
     }));
   }
 
@@ -658,7 +663,7 @@ export class SupervisorGrantCoordinator {
     await this.serialize(entry.id, async () => {
       const attestation = entry.localRoomId ? null : await this.operations.readRevocationAttestation(entry.id);
       if (attestation !== null && desktopRetirementDurablyCompleted(entry, true)) return;
-      const current = (await this.daemon.list(null)).find((candidate) => candidate.id === entry.id);
+      const current = await this.daemon.getEntry(entry.id);
       if (!current || current.desiredState !== "stopped") return;
       await this.retireEntryWithinEntryTail(entry.id, daemonGeneration, current);
     });
@@ -736,7 +741,7 @@ export class SupervisorGrantCoordinator {
   /** Complete the external half of the daemon's durable purge journal. */
   async revokeEntryForPurge(entryId: string, agentSessionId: string): Promise<void> {
     await this.serialize(entryId, async () => {
-      const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === entryId);
+      const entry = await this.daemon.getEntry(entryId);
       if (entry?.localRoomId) return revokeLocalSupervisorEntry(entryId, agentSessionId);
       return revokeDesktopSupervisorGrantForEntry(entryId, agentSessionId, { apiFetch: this.request });
     });
@@ -745,7 +750,7 @@ export class SupervisorGrantCoordinator {
   /** Revoke only the parent grant after the daemon durably proves no worker session was minted. */
   async revokeEntryForPurgeWithoutWorkerSession(entryId: string): Promise<void> {
     await this.serialize(entryId, async () => {
-      const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === entryId);
+      const entry = await this.daemon.getEntry(entryId);
       if (entry?.localRoomId) return revokeLocalSupervisorEntry(entryId);
       return revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, { apiFetch: this.request });
     });
@@ -861,7 +866,7 @@ export class SupervisorGrantCoordinator {
     if (!hasGenericSupervisedDisplayName(entry.displayName, entry.provider)) return entry;
     return this.serializeDisplayNameMutation(entry.roomId, async () => {
       // Another reconciliation may have completed while this call waited.
-      const currentEntries = await this.daemon.list(entry.roomId);
+      const currentEntries = await this.daemon.list(entry.roomId, { activity: "summary" });
       const current = currentEntries.find((candidate) => candidate.id === entry.id) ?? entry;
       if (!hasGenericSupervisedDisplayName(current.displayName, current.provider)) return current;
       const displayName = suggestLetAgentsCodename(
@@ -932,7 +937,7 @@ export class SupervisorGrantCoordinator {
     const status = await this.daemon.ensureRunning();
     if (status.generation !== move.daemonGeneration) throw new Error("Background agent management changed generation during room-move credential rotation.");
     const destination = move.remoteRoomId ?? move.destinationRoomId;
-    const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === move.entryId);
+    const entry = await this.daemon.getEntry(move.entryId);
     if (!entry || entry.roomId !== destination || entry.workAttemptId !== move.workAttemptId
       || entry.executionGenerationId !== move.executionGenerationId) {
       throw new Error("Room-move destination no longer matches the exact live provider generation.");
@@ -965,7 +970,7 @@ export class SupervisorGrantCoordinator {
     if (move.phase !== "rollback_required") throw new Error("Room move is not awaiting source-room rollback.");
     const status = await this.daemon.ensureRunning();
     if (status.generation !== move.daemonGeneration) throw new Error("Background agent management changed generation during room-move rollback.");
-    const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === move.entryId);
+    const entry = await this.daemon.getEntry(move.entryId);
     if (!entry || entry.roomId !== move.sourceRoomId || entry.workAttemptId !== move.workAttemptId
       || entry.executionGenerationId !== move.executionGenerationId) {
       throw new Error("Room-move rollback no longer matches the exact source provider generation.");
@@ -1011,7 +1016,7 @@ export class SupervisorGrantCoordinator {
     stored: Awaited<ReturnType<SupervisorGrantCoordinatorOperations["readGrant"]>>,
     why: string,
   ): Promise<void> {
-    const current = (await this.daemon.list(null)).find((candidate) => candidate.id === entry.id) ?? entry;
+    const current = (await this.daemon.getEntry(entry.id)) ?? entry;
     const retired = current.desiredState === "stopped" && current.agentSessionBindingState === "none";
     const daemonReportsNoAccess = current.condition === "auth_blocked" || retired;
     const installedIntoAnEarlierDaemon = stored?.entryId === entry.id && stored.lastInstalledDaemonGeneration !== daemonGeneration;

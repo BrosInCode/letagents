@@ -45,23 +45,50 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     return { status, state, observedAt: this.now().toISOString() };
   }
 
-  async list(roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> {
+  async list(
+    roomIdentifier?: string | null,
+    options: { activity?: "full" | "summary" } = {},
+  ): Promise<DesktopSupervisorManifestEntry[]> {
     await this.ensureRunning();
     // Rich manifest projections open several durable stores and can be slower
     // on their first read. This must not share the tight timeout used by small
     // control requests or a healthy cold daemon is misreported as unavailable.
-    // manifest.list stays the full-history read: it backs first load, the
-    // stale-subscription repair, and the Inspector's payload detail. It is also
-    // the expensive one, so ask the daemon to project and serialize only the
-    // room this caller will keep. The client-side filter stays as well: a
-    // daemon that ignored the scope still yields a correct answer.
+    // manifest.list stays the full-history read unless the caller asks for the
+    // summary: it backs first load, the stale-subscription repair, and the
+    // Inspector's payload detail. It is also the expensive one, so ask the
+    // daemon to project and serialize only the room this caller will keep. The
+    // client-side filter stays as well: a daemon that ignored the scope still
+    // yields a correct answer. A caller that reads no activity history passes
+    // `activity: "summary"`; the field is sent only then, so every other
+    // request is the one an older daemon already understands.
+    const params = {
+      ...(roomIdentifier ? { room_id: roomIdentifier } : {}),
+      ...(options.activity === "summary" ? { activity: "summary" } : {}),
+    };
     const entries = await this.request<WireEntry[]>(
       "manifest.list",
-      roomIdentifier ? { room_id: roomIdentifier } : undefined,
+      Object.keys(params).length > 0 ? params : undefined,
       SUPERVISOR_DAEMON_PROTOCOL_VERSION,
       MANIFEST_LIST_REQUEST_TIMEOUT_MS,
     );
     return entries.map((entry) => mapEntry(entry)).filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier);
+  }
+
+  /**
+   * One entry with its full activity history, or null when the daemon has no
+   * entry with this id. Reads one agent instead of the whole manifest. There is
+   * no fallback to `list`: ensureRunning guarantees the daemon implementation
+   * version matches this desktop, so the daemon knows the method.
+   */
+  async getEntry(entryId: string): Promise<DesktopSupervisorManifestEntry | null> {
+    await this.ensureRunning();
+    const entry = await this.request<WireEntry | null>(
+      "manifest.get_entry",
+      { entry_id: entryId },
+      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      MANIFEST_LIST_REQUEST_TIMEOUT_MS,
+    );
+    return entry ? mapEntry(entry) : null;
   }
 
   async watchState(input: {

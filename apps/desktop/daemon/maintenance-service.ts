@@ -17,6 +17,7 @@ export class DaemonMaintenanceService {
     assertCurrent(): Promise<void>;
     status(): unknown;
     list(): Promise<unknown>;
+    getEntry(entryId: string): Promise<unknown>;
     close(): Promise<void>;
   }) { void this.completion.catch(() => undefined); }
 
@@ -32,6 +33,14 @@ export class DaemonMaintenanceService {
       return { accepted: true };
     }
     if (!this.retiring && request.method === "manifest.list") return this.operations.list();
+    if (!this.retiring && request.method === "manifest.get_entry") {
+      // The same exact-id rule the control router applies to this read.
+      const entryId = (request.params as { entry_id?: unknown } | null | undefined)?.entry_id;
+      if (typeof entryId !== "string" || !entryId.trim() || entryId !== entryId.trim()) {
+        throw new Error("manifest.get_entry requires an exact non-empty entry_id.");
+      }
+      return this.operations.getEntry(entryId);
+    }
     throw new Error(DAEMON_MAINTENANCE_MESSAGE);
   }
 }
@@ -39,7 +48,7 @@ export class DaemonMaintenanceService {
 /** Compose held-service resources without acquiring provider custody. */
 export async function openDaemonMaintenance(ports: {
   singleton: DaemonSingleton;
-  store: Pick<ManifestStore, "load" | "close">;
+  store: Pick<ManifestStore, "load" | "getEntry" | "close">;
   socket: { stop(): Promise<void> };
   stores: { close(): Promise<void> }[];
   status(): unknown;
@@ -50,6 +59,7 @@ export async function openDaemonMaintenance(ports: {
   return new DaemonMaintenanceService(hold, {
     assertCurrent: () => ports.singleton.assertCurrent(), status: ports.status,
     list: async () => (await ports.store.load()).entries,
+    getEntry: async (entryId) => (await ports.store.getEntry(entryId)) ?? null,
     close: async () => {
       ports.retire();
       const results = await Promise.allSettled([ports.socket.stop(), ports.store.close(),

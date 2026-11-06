@@ -20,8 +20,14 @@ export interface DaemonControlOperations {
   cancelDeliveryDrain(input: DeliveryDrainIdentity): unknown;
   status(): unknown;
   prepareHandoff(): unknown;
-  /** Null lists every entry; a room identifier scopes the read to that room. */
-  listManifest(roomId: string | null): unknown;
+  /**
+   * Null lists every entry; a room identifier scopes the read to that room.
+   * `"full"` keeps each entry's whole activity history; `"summary"` keeps the
+   * newest events without payloads, as the state watch publishes them.
+   */
+  listManifest(roomId: string | null, activity: ManifestActivityMode): unknown;
+  /** One entry as listManifest reads it in full mode, or null when no such entry exists. */
+  getManifestEntry(entryId: string): unknown;
   watchState(input: { afterDaemonGeneration: number; afterSequence: number; waitMs: number; changedOnly?: boolean }): unknown;
   watchAgentStream(input: { entryId: string; afterSequence: number; waitMs: number }): unknown;
   retryRoomDelivery(input: RoomDeliveryControl): unknown;
@@ -114,11 +120,13 @@ export interface DaemonControlContext {
   requestBarrier?: (request: DaemonRequest) => Promise<void>;
 }
 
+export type ManifestActivityMode = "full" | "summary";
+
 // During the reversible drain, current-turn tools, approvals and observations
 // retain authority. New owner lifecycle actions wait until the update is deferred.
 const HANDOFF_DRAIN_METHODS = new Set<string>([
   "daemon.negotiate", "daemon.status", "daemon.prepare_handoff",
-  "manifest.list", "manifest.watch_state", "manifest.update_workplace_liveness",
+  "manifest.list", "manifest.get_entry", "manifest.watch_state", "manifest.update_workplace_liveness",
   "local_board.watch", "attempt.read", "supervisor.watch_agent_stream", "supervisor.get_agent_inspector_detail",
   "supervisor.get_agent_configuration", "supervisor.get_room_move", "supervisor.get_current_room_move",
   "supervisor.get_delivery_drain", "supervisor.get_polling_activation",
@@ -176,6 +184,19 @@ function optionalRoomScopeParam(value: unknown, error: string): string | null {
   return roomId;
 }
 
+/**
+ * An absent or null `activity` keeps the full-history read every existing
+ * caller depends on. `"summary"` asks for the bounded projection. Anything else
+ * is refused instead of silently reading the expensive way.
+ */
+function optionalActivityModeParam(value: unknown, error: string): ManifestActivityMode {
+  if (value === undefined || value === null) return "full";
+  const activity = paramsRecord(value).activity;
+  if (activity === undefined || activity === null || activity === "full") return "full";
+  if (activity === "summary") return "summary";
+  throw new Error(error);
+}
+
 function paramsEntry(value: unknown): DaemonManifestEntry {
   const params = paramsRecord(value);
   const entry = params.entry;
@@ -217,9 +238,16 @@ export function createDaemonControlRequestHandler(
       return { accepted: true, generation: context.currentGeneration() };
     }
     if (request.method === "manifest.list") {
-      return operations.listManifest(optionalRoomScopeParam(
-        request.params,
-        "manifest.list room_id must be an exact non-empty room identifier.",
+      return operations.listManifest(
+        optionalRoomScopeParam(request.params, "manifest.list room_id must be an exact non-empty room identifier."),
+        optionalActivityModeParam(request.params, 'manifest.list activity must be "full" or "summary".'),
+      );
+    }
+    if (request.method === "manifest.get_entry") {
+      return operations.getManifestEntry(requiredStringParam(
+        paramsRecord(request.params),
+        "entry_id",
+        "manifest.get_entry requires an exact non-empty entry_id.",
       ));
     }
     if (request.method === "local_board.mutate") return operations.mutateLocalBoard(request.params);
