@@ -1,6 +1,6 @@
 import type { RoomGif, RoomExpressionsSetting } from "../../../shared/room-expressions.mjs";
 import { contextBridge, ipcRenderer } from "electron";
-import type { DesktopApi } from "./ipc-types.js";
+import type { DesktopApi, DesktopRoomLiveMetadataOptions } from "./ipc-types.js";
 
 const api: DesktopApi = {
   conversations: {
@@ -109,8 +109,8 @@ const api: DesktopApi = {
     deleteAccountRoom: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:delete-account-room", roomIdentifier),
     getSnapshot: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null),
-    getLiveMetadata: (roomIdentifier: string) =>
-      ipcRenderer.invoke("desktop:room:get-live-metadata", roomIdentifier),
+    getLiveMetadata: (roomIdentifier: string, options?: DesktopRoomLiveMetadataOptions) =>
+      ipcRenderer.invoke("desktop:room:get-live-metadata", roomIdentifier, options ?? null),
     pollAgentWork: (roomIdentifier: string, afterCursor?: string | null) =>
       ipcRenderer.invoke("desktop:room:poll-agent-work", roomIdentifier, afterCursor ?? null),
     getLatestMessages: (roomIdentifiers: string[]) =>

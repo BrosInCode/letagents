@@ -110,6 +110,7 @@ import type {
   DesktopRoomThreadPage,
   DesktopRoomThreadReadResult,
   DesktopRoomLiveMetadata,
+  DesktopRoomLiveMetadataOptions,
   DesktopRoomAgentWorkPollResult,
   DesktopRoomDeliveryRepair,
   DesktopRoomSharedArtifact,
@@ -231,7 +232,10 @@ export interface DesktopApi {
      * Optional: absent on a stale live bridge (renderer updated before the
      * preload was reloaded). Callers must skip gracefully when missing.
      */
-    getLiveMetadata?: (roomIdentifier: string) => Promise<DesktopRoomLiveMetadata>;
+    getLiveMetadata?: (
+      roomIdentifier: string,
+      options?: DesktopRoomLiveMetadataOptions,
+    ) => Promise<DesktopRoomLiveMetadata>;
     /** Optional until the preload carrying retained room-work history reloads. */
     pollAgentWork?: (
       roomIdentifier: string,
