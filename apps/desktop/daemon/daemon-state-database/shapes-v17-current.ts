@@ -22,7 +22,7 @@ import { validateRoomWorkPublicationSchema } from "../room-work-publication-stor
 import { validateExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
 import { validateLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { validateRuntimeRecoverySchema } from "../runtime-recovery-journal.js";
-import { SCHEMA_VERSION, validateWorkerExecutionBindings, validateDaemonReadIndexes, applyDaemonReadIndexes, validateAgentImageInputColumn, validateAgentLiveSharingColumn, INBOX_STATES_V17, INBOX_STATE_CONSTRAINT, type Row, quoteIdentifier, validatePollingContract, validateCustodialLaunchSession, validateTerminalResults, schemaMethods } from "./shared.js";
+import { SCHEMA_VERSION, validateWorkerExecutionBindings, validateDaemonReadIndexes, applyDaemonReadIndexes, validateAgentStateVersionSchema, validateAgentImageInputColumn, validateAgentLiveSharingColumn, INBOX_STATES_V17, INBOX_STATE_CONSTRAINT, type Row, quoteIdentifier, validatePollingContract, validateCustodialLaunchSession, validateTerminalResults, schemaMethods } from "./shared.js";
 import { assertDaemonStateVersionSupported } from "./version-gate.js";
 
 export const shapesV17ToCurrent = schemaMethods({
@@ -413,6 +413,7 @@ validateCurrentShape(database: DatabaseSync): void {
   }
   this.validateLocalRoomMembershipShape(database);
   validateDaemonReadIndexes(database);
+  validateAgentStateVersionSchema(database);
   validateAgentImageInputColumn(database);
   validateAgentLiveSharingColumn(database);
   validatePreparedRoomContextSchema(database);

@@ -79,6 +79,12 @@ test("Needs you forgets agent state once the daemon stops or its watch fails", a
     if (failNext) throw new Error("socket closed");
     return { daemonGeneration: 1, sequence: watches + 1, entries: [entry("running", "running"), entry("retired", "stopped")] };
   }) as unknown as typeof supervisorDaemonClient.watchState;
+  // Once it holds a state, the watch asks for changes only; the same failure applies.
+  supervisorDaemonClient.watchStateChanges = (async () => {
+    watches += 1;
+    if (failNext) throw new Error("socket closed");
+    return { complete: false, daemonGeneration: 1, sequence: watches + 1, changedEntries: [], removedEntryIds: [], entryOrder: ["running", "retired"] };
+  }) as unknown as typeof supervisorDaemonClient.watchStateChanges;
   const settle = async (done: () => boolean) => { for (let i = 0; i < 200 && !done(); i += 1) await new Promise(resolve => setImmediate(resolve)); };
 
   const snapshots: unknown[] = [];
@@ -147,4 +153,56 @@ test("Needs you marks each focus room with the room it is listed under, and says
   assert.deepEqual(parentsOf(withoutUpdates), parentsOf(withUpdates));
   assert.ok(withoutUpdates.rooms.every((room) => room.updates === undefined));
   assert.equal(updatesRead.length, 4);
+});
+
+test("Needs you merges changes-only answers, reads the whole state again when they do not fit, and starts over on a new daemon generation", async () => {
+  const entry = (id: string, desiredState: "running" | "paused" | "stopped") => ({ id, desiredState, activity: [] });
+  const status = { implementationVersion: SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION, generation: 1, capabilities: { agentStateSubscription: true } };
+  let running = true;
+  const wholeReads: Array<{ afterDaemonGeneration: number; afterSequence: number }> = [];
+  const changeReads: Array<{ afterDaemonGeneration: number; afterSequence: number }> = [];
+  const wholeAnswers = [
+    { daemonGeneration: 1, sequence: 1, entries: [entry("a", "running"), entry("b", "stopped")] },
+    // After the refused merge: the whole state at the daemon's sequence.
+    { daemonGeneration: 1, sequence: 3, entries: [entry("a", "paused"), entry("b", "stopped"), entry("c", "running")] },
+    // After the daemon restarted.
+    { daemonGeneration: 2, sequence: 1, entries: [entry("a", "running")] },
+  ];
+  const changeAnswers = [
+    { complete: false, daemonGeneration: 1, sequence: 2, changedEntries: [entry("a", "paused")], removedEntryIds: [], entryOrder: ["a", "b"] },
+    // Names an entry neither side has: does not fit the state held.
+    { complete: false, daemonGeneration: 1, sequence: 3, changedEntries: [], removedEntryIds: [], entryOrder: ["a", "b", "c"] },
+  ];
+  supervisorDaemonClient.connectIfRunning = (async () => (running ? status : null)) as typeof supervisorDaemonClient.connectIfRunning;
+  supervisorDaemonClient.watchState = (async (input: { afterDaemonGeneration: number; afterSequence: number }) => {
+    wholeReads.push({ afterDaemonGeneration: input.afterDaemonGeneration, afterSequence: input.afterSequence });
+    const answer = wholeAnswers.shift();
+    if (!answer) { running = false; throw new Error("script exhausted"); }
+    if (wholeAnswers.length === 1) status.generation = 2; // the daemon restarts after this answer is used
+    if (wholeAnswers.length === 0) running = false;
+    return answer;
+  }) as unknown as typeof supervisorDaemonClient.watchState;
+  supervisorDaemonClient.watchStateChanges = (async (input: { afterDaemonGeneration: number; afterSequence: number }) => {
+    changeReads.push({ afterDaemonGeneration: input.afterDaemonGeneration, afterSequence: input.afterSequence });
+    const answer = changeAnswers.shift();
+    if (!answer) { running = false; throw new Error("script exhausted"); }
+    return answer;
+  }) as unknown as typeof supervisorDaemonClient.watchStateChanges;
+  const settle = async (done: () => boolean) => { for (let i = 0; i < 400 && !done(); i += 1) await new Promise(resolve => setTimeout(resolve, 10)); };
+
+  const snapshots: Array<{ daemonGeneration: number; sequence: number; entries: Array<{ id: string; desiredState: string }> }> = [];
+  const stop = onSupervisorState((snapshot) => { snapshots.push(snapshot as unknown as (typeof snapshots)[number]); });
+  await settle(() => snapshots.length === 4);
+  await settle(() => liveSupervisorStateEntries() === null);
+  stop();
+  assert.deepEqual(snapshots.map((snapshot) => [snapshot.daemonGeneration, snapshot.sequence, snapshot.entries.map((item) => `${item.id}:${item.desiredState}`)]), [
+    [1, 1, ["a:running", "b:stopped"]],
+    [1, 2, ["a:paused", "b:stopped"]],
+    [1, 3, ["a:paused", "b:stopped", "c:running"]],
+    [2, 1, ["a:running"]],
+  ]);
+  assert.deepEqual(changeReads.map((read) => read.afterSequence), [1, 2], "changes are asked for from the sequence held");
+  assert.equal(wholeReads.length, 3);
+  assert.equal(wholeReads[1]!.afterSequence, 0, "a refused merge reads the whole state again");
+  assert.deepEqual(wholeReads[2], { afterDaemonGeneration: 0, afterSequence: 0 }, "a new daemon generation starts over");
 });

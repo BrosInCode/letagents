@@ -1157,6 +1157,58 @@ function fakeChild(): ChildProcess {
   return child as unknown as ChildProcess;
 }
 
+test("a changes-only state watch maps the daemon's changed entries, removals and order, and a whole-state answer as a snapshot", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const client = new SupervisorDaemonClient({ stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath, daemonScriptPath,
+    spawnDaemon: () => { assert.fail("A state watch must not start the daemon"); },
+    now: () => new Date("2026-10-09T12:00:00.000Z") });
+  try {
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+    wire.entries.push(wireEntryWithCausalProjection());
+    try {
+      assert.ok(await client.connectIfRunning());
+      // Without a state held, the whole state is asked for and comes back as one.
+      const whole = await client.watchStateChanges({ afterDaemonGeneration: 19, afterSequence: 0, waitMs: 0 });
+      assert.equal(whole.complete, true);
+      assert.deepEqual(whole.complete && whole.entries.map((entry) => entry.id), ["agent_1"]);
+      assert.equal(wire.requests.at(-1)?.params?.changed_only, true);
+
+      // A daemon that remembers the sequence answers with changes only.
+      wire.stateChanges.value = {
+        entries: [{ ...wireEntryWithCausalProjection(), id: "agent_2", display_name: "Second" }],
+        removed_entry_ids: ["agent_1"],
+        entry_order: ["agent_2"],
+      };
+      const changes = await client.watchStateChanges({ afterDaemonGeneration: 19, afterSequence: 7, waitMs: 0 });
+      assert.equal(changes.complete, false);
+      if (changes.complete) assert.fail("expected changes");
+      assert.equal(changes.daemonGeneration, 19);
+      assert.equal(changes.sequence, 8);
+      assert.deepEqual(changes.changedEntries.map((entry) => [entry.id, entry.displayName]), [["agent_2", "Second"]]);
+      assert.deepEqual(changes.removedEntryIds, ["agent_1"]);
+      assert.deepEqual(changes.entryOrder, ["agent_2"]);
+
+      // Malformed changes are refused rather than merged.
+      wire.stateChanges.value = { entries: [], removed_entry_ids: [1 as unknown as string], entry_order: ["agent_2"] };
+      await assert.rejects(client.watchStateChanges({ afterDaemonGeneration: 19, afterSequence: 7, waitMs: 0 }), /invalid state changes/);
+
+      // The whole-state read never accepts changes.
+      wire.stateChanges.value = { entries: [], removed_entry_ids: [], entry_order: [] };
+      const snapshot = await client.watchState({ afterDaemonGeneration: 19, afterSequence: 7, waitMs: 0 });
+      assert.deepEqual(snapshot.entries.map((entry) => entry.id), ["agent_1"]);
+      assert.equal(wire.requests.at(-1)?.params?.changed_only, undefined);
+    } finally {
+      await closeServer(wire.server, env.socketPath);
+    }
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("service health snapshot never starts a daemon and reads only matching bounded state", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -1614,6 +1666,8 @@ async function startWireDaemon(
   const runtimeRecoveryCapability = { v2: true };
   const maintenance = { unresponsive: false, id: null as string | null };
   const negotiation = { delayMs: 0, error: null as string | null };
+  // What a changes-only state watch is answered with once it holds a state; null answers with the whole state.
+  const stateChanges: { value: null | { entries: Array<Record<string, any>>; removed_entry_ids: string[]; entry_order: string[] } } = { value: null };
   const hostApprovals = { challenge: (): unknown => null, request: (_params: unknown): unknown => { throw new Error("unsupported"); } };
   // Extra wire fields a test wants the configuration replies to carry, such as an agent app that asks for image input.
   const configurationExtras: { value: Record<string, unknown> } = { value: {} };
@@ -1661,7 +1715,9 @@ async function startWireDaemon(
         result = entries;
         responseDelayMs = manifestListDelayMs;
       } else if (request.method === "manifest.watch_state") {
-        result = { daemon_generation: generation, sequence: 7, entries };
+        result = request.params?.changed_only === true && Number(request.params.after_sequence) > 0 && stateChanges.value
+          ? { daemon_generation: generation, sequence: 8, complete: false, ...stateChanges.value }
+          : { daemon_generation: generation, sequence: 7, entries };
       } else if (request.method === "manifest.put") {
         const next = { ...request.params!.entry, workplace_liveness: { state: "unknown", observed_at: null, detail: null }, native_liveness: { state: "unknown", observed_at: null, detail: null }, activity: [] };
         const existing = entries.find((candidate) => candidate.id === next.id);
@@ -1751,7 +1807,7 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests, hostApprovals, configurationExtras, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance, negotiation };
+  return { server, entries, requests, hostApprovals, configurationExtras, handoff, statusRecoveryDiagnostics, runtimeRecoveryCapability, compatibilityFingerprint, maintenance, negotiation, stateChanges };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -3565,7 +3621,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.278");
+    assert.equal(status.implementationVersion, "2.0.279");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
