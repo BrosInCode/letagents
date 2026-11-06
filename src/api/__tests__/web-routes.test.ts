@@ -86,3 +86,35 @@ test("Inbox, My Work and Connectors direct navigation and sign-in return load th
   assert.notEqual(inbox.status, 404);
   assert.equal(await inbox.text(), await messages.text());
 });
+
+test("every static page of the web router is served by the API on a direct load", async (t) => {
+  // The web router and the server's page list are kept by hand. /inbox was
+  // added to the router alone (#1838), so a reload of it returned 404. Read
+  // the router source and load each static page through the real handlers.
+  const { readFile } = await import("node:fs/promises");
+  const router = await readFile(new URL("../../web/src/router.ts", import.meta.url), "utf8");
+  const pages = [...router.matchAll(/path:\s*(['"])(\/[^'"]*)\1/g)].map(match => match[2])
+    .filter(page => !page.includes(":"));
+  assert.ok(pages.includes("/inbox"), `router pages: ${pages.join(", ")}`);
+  const { default: express } = await import("express");
+  const app = express();
+  app.use((_req, res, next) => {
+    res.sendFile = ((_path: string) => res.status(200).send("Vue SPA")) as typeof res.sendFile;
+    next();
+  });
+  registerWebRoutes(app);
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  t.after(() => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())));
+  const { port } = server.address() as { port: number };
+  // Without a Vue build the handler answers 503 for every page, so compare
+  // each page with the root rather than with a fixed status.
+  const root = await fetch(`http://127.0.0.1:${port}/`);
+  const expected = await root.text();
+  for (const page of pages) {
+    const response = await fetch(`http://127.0.0.1:${port}${page}`);
+    assert.notEqual(response.status, 404, `${page} must serve the web app on a direct load`);
+    assert.equal(response.status, root.status, page);
+    assert.equal(await response.text(), expected, page);
+  }
+});
