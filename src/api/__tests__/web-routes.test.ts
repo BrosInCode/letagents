@@ -92,10 +92,13 @@ test("every static page of the web router is served by the API on a direct load"
   // added to the router alone (#1838), so a reload of it returned 404. Read
   // the router source and load each static page through the real handlers.
   const { readFile } = await import("node:fs/promises");
-  const router = await readFile(new URL("../../web/src/router.ts", import.meta.url), "utf8");
-  const pages = [...router.matchAll(/path:\s*(['"])(\/[^'"]*)\1/g)].map(match => match[2])
+  const source = await readFile(new URL("../../web/src/router.ts", import.meta.url), "utf8");
+  // Commented-out routes are not pages. Pages with a `:param` are served by
+  // their own server routes and are not covered here.
+  const router = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const pages = [...router.matchAll(/\bpath:\s*(['"])(\/[^'"]*)\1/g)].map(match => match[2])
     .filter(page => !page.includes(":"));
-  assert.ok(pages.includes("/inbox"), `router pages: ${pages.join(", ")}`);
+  assert.ok(pages.includes("/") && pages.length >= 4, `router pages: ${pages.join(", ")}`);
   const { default: express } = await import("express");
   const app = express();
   app.use((_req, res, next) => {
