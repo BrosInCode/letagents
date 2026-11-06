@@ -66,7 +66,6 @@ export const INBOX_READS = {
   ingressHealth: "SELECT room_id,state,detail,execution_generation_id FROM supervised_agent_ingress_health WHERE agent_id=?",
   ingressCursor: "SELECT room_id,last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?",
   latestRepair: "SELECT * FROM provider_continuation_repairs WHERE agent_id=? ORDER BY created_at DESC,rowid DESC LIMIT 1",
-  dataVersion: "PRAGMA data_version",
+  agentStateVersions: "SELECT agent_id,inbox_version FROM agent_state_versions",
   schemaVersion: "PRAGMA schema_version",
-  totalChanges: "SELECT total_changes() AS value",
 } as const;

@@ -5,6 +5,7 @@
  * (see the module list in store.ts); shared row helpers and types go in shared.ts.
  * A method name may be defined in only one module; store.ts throws on a duplicate.
  */
+import { applyAgentStateVersionSchema } from "../daemon-state-database/shared.js";
 import type { DatabaseSync } from "node:sqlite";
 import { readFile, rename } from "node:fs/promises";
 import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "../daemon-state-database.js";
@@ -99,6 +100,8 @@ export const persistence = storeMethods({
           this.createSchema(opened);
         });
       await this.importLegacyManifest(database);
+      // A repair on another connection may have rebuilt a table and lost the version triggers loadForStateWatch reads by.
+      applyAgentStateVersionSchema(database);
       this.database = database;
       return database;
     } catch (error) {

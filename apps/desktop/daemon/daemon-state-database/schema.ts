@@ -12,7 +12,7 @@
  * call into those v6/v7 shapes, so the two names overlap at v6 and v7.
  */
 import type { DatabaseSync } from "node:sqlite";
-import { SCHEMA_VERSION, applyAgentImageInputColumn, applyAgentLiveSharingColumn, applyDaemonEfficiencyMigration, retireDesktopEventsDelivery, type Row } from "./shared.js";
+import { SCHEMA_VERSION, applyAgentImageInputColumn, applyAgentLiveSharingColumn, applyAgentStateVersionSchema, applyDaemonEfficiencyMigration, retireDesktopEventsDelivery, type Row } from "./shared.js";
 import { assertDaemonStateVersionSupported } from "./version-gate.js";
 import { migrationsV1ToV12 } from "./migrations-v1-v12.js";
 import { migrationsV13ToV24 } from "./migrations-v13-v24.js";
@@ -49,6 +49,12 @@ export class DaemonStateSchema {
   ) {}
 
 createSchema(database: DatabaseSync): void {
+  this.createSchemaForVersion(database);
+  // Last, whatever path ran: a repair above may have rebuilt a source table and lost its triggers.
+  applyAgentStateVersionSchema(database);
+}
+
+createSchemaForVersion(database: DatabaseSync): void {
   const existingVersion = assertDaemonStateVersionSupported(database);
   if (existingVersion !== 0) retireDesktopEventsDelivery(database);
   if (existingVersion === 1) {
