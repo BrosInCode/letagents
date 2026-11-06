@@ -386,7 +386,7 @@ export class RentalLaunchCoordinator {
   ): Promise<DesktopSupervisorManifestEntry> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-      const entry = (await this.daemon.list(null)).find((candidate) => candidate.id === entryId);
+      const entry = await this.daemon.getEntry(entryId);
       if (entry && predicate(entry)) return entry;
       if (entry?.observedState === "failed" || entry?.condition === "quarantined") {
         throw new RentalLaunchError("launch_failed", entry.lastError || "The supervised rental runtime failed.");

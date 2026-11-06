@@ -1714,6 +1714,9 @@ async function startWireDaemon(
       } else if (request.method === "manifest.list") {
         result = entries;
         responseDelayMs = manifestListDelayMs;
+      } else if (request.method === "manifest.get_entry") {
+        result = entries.find((candidate) => candidate.id === request.params?.entry_id) ?? null;
+        responseDelayMs = manifestListDelayMs;
       } else if (request.method === "manifest.watch_state") {
         result = request.params?.changed_only === true && Number(request.params.after_sequence) > 0 && stateChanges.value
           ? { daemon_generation: generation, sequence: 8, complete: false, ...stateChanges.value }
@@ -3087,6 +3090,71 @@ test("a room-scoped list asks the daemon to scope and still filters what it gets
 
     await client.list(null);
     assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: undefined });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("list asks for the activity summary only when the caller says so", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+  wire.entries.push(
+    { ...wireEntryWithCausalProjection(), id: "agent_here", room_id: "room_1" },
+    { ...wireEntryWithCausalProjection(), id: "agent_elsewhere", room_id: "room_2" },
+  );
+  try {
+    const client = new SupervisorDaemonClient({ stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath, daemonScriptPath });
+
+    const summary = await client.list(null, { activity: "summary" });
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: { activity: "summary" } });
+    assert.deepEqual(summary.map((entry) => entry.id).sort(), ["agent_elsewhere", "agent_here"]);
+
+    const scoped = await client.list("room_1", { activity: "summary" });
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: { room_id: "room_1", activity: "summary" } });
+    assert.deepEqual(scoped.map((entry) => entry.id), ["agent_here"]);
+
+    // Without the option, or with the full mode, an older daemon sees today's request.
+    await client.list(null);
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: undefined });
+    await client.list("room_1");
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: { room_id: "room_1" } });
+    await client.list(null, {});
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: undefined });
+    await client.list(null, { activity: "full" });
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.list", params: undefined });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("getEntry reads one entry by id, maps it like list does, and answers null for an unknown id", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 19);
+  wire.entries.push(
+    { ...wireEntryWithCausalProjection(), id: "agent_here", room_id: "room_1" },
+    { ...wireEntryWithCausalProjection(), id: "agent_elsewhere", room_id: "room_2" },
+  );
+  try {
+    const client = new SupervisorDaemonClient({ stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath, daemonScriptPath });
+
+    const found = await client.getEntry("agent_elsewhere");
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.get_entry", params: { entry_id: "agent_elsewhere" } });
+    assert.equal(found?.id, "agent_elsewhere");
+    assert.equal(found?.roomId, "room_2");
+    assert.deepEqual(found, (await client.list()).find((entry) => entry.id === "agent_elsewhere"));
+
+    assert.equal(await client.getEntry("no_such_agent"), null);
+    assert.deepEqual(wire.requests.at(-1), { method: "manifest.get_entry", params: { entry_id: "no_such_agent" } });
   } finally {
     await closeServer(wire.server, env.socketPath);
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;

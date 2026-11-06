@@ -213,7 +213,7 @@ export function registerDesktopSupervisorIpcHandlers(ipcMain: IpcMain): void {
     async (_event, id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> => {
       assertDesktopUpdateMutationAllowed();
       if (desiredState === "running") {
-        const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === id);
+        const entry = await supervisorDaemonClient.getEntry(id);
         if (!entry) throw new Error(`Unknown supervised agent: ${id}`);
         // Starting a saved supervised entry is a launch attempt of its own:
         // the Add Agent card's Retry lands here. A fresh `launch.requested`
@@ -297,10 +297,10 @@ export function registerDesktopSupervisorIpcHandlers(ipcMain: IpcMain): void {
     async (_event, input: import("../../ipc-types.js").DesktopSupervisorReconnectInput): Promise<DesktopSupervisorManifestEntry> => {
       assertDesktopUpdateMutationAllowed();
       if (isDesktopSmokeCheck()) throw new Error("Agent reconnection is unavailable in the desktop smoke environment.");
-      const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId);
+      const entry = await supervisorDaemonClient.getEntry(input.entryId);
       if (!entry) throw new Error(`Unknown supervised agent: ${input.entryId}`);
       await supervisorGrantCoordinator.reconnectEntry(entry);
-      return (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId) || entry;
+      return (await supervisorDaemonClient.getEntry(input.entryId)) || entry;
     },
   );
   targetIpcMain.handle(
@@ -308,7 +308,7 @@ export function registerDesktopSupervisorIpcHandlers(ipcMain: IpcMain): void {
     async (_event, input: import("../../ipc-types.js").DesktopSupervisorRuntimeRecoveryInput): Promise<DesktopSupervisorManifestEntry> => {
       assertDesktopUpdateMutationAllowed();
       if (isDesktopSmokeCheck()) throw new Error("Agent runtime recovery is unavailable in the desktop smoke environment.");
-      const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId);
+      const entry = await supervisorDaemonClient.getEntry(input.entryId);
       if (!entry) throw new Error(`Unknown supervised agent: ${input.entryId}`);
       // Electron restores secret custody first. The daemon then proves the
       // saved provider absent, retires the exact old worker session, and only
@@ -428,7 +428,7 @@ export function registerDesktopSupervisorIpcHandlers(ipcMain: IpcMain): void {
     if (status.generation !== input.daemonGeneration) {
       throw new Error("Background agent management changed generation during retirement.");
     }
-    const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId);
+    const entry = await supervisorDaemonClient.getEntry(input.entryId);
     if (!entry) throw new Error("The saved agent no longer exists.");
     const revocationAttestation = entry.deliveryMode === "daemon_inbox"
       ? await readDesktopSupervisorGrantRevocationAttestationForEntry(input.entryId)

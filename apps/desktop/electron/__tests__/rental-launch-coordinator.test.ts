@@ -7,6 +7,14 @@ import test, { type TestContext } from "node:test";
 import { RentalLaunchCoordinator } from "../rental/launch-coordinator.js";
 import { listRentalLaunches, pruneRentalLaunches, readRentalLaunch, writeRentalLaunch } from "../rental/launch-journal.js";
 
+/**
+ * What a fake daemon's single-entry read answers: the entry its own list holds
+ * under this id, or null, as the real daemon's manifest.get_entry does.
+ */
+async function listedEntry(daemon: { list(): Promise<Array<{ id: string }>> }, entryId: string) {
+  return (await daemon.list()).find((candidate) => candidate.id === entryId) ?? null;
+}
+
 const restoredGrants = {
   getReconciliationObservation() {
     return { attempt: restoredGrantAttempt, status: "succeeded", current: true, error: undefined };
@@ -34,6 +42,7 @@ async function recoveryFixture(t: TestContext) {
   };
   const daemon = {
     async list() { calls.list++; return [entry]; },
+    async getEntry(id: string) { return listedEntry(this, id); },
     async setDesiredState() { calls.stop++; entry.desiredState = "stopped"; entry.observedState = "stopped"; },
     async isMaintenanceHeld() { return false; },
     async ensureRunning() { return { generation: 1 }; },
@@ -296,6 +305,7 @@ for (const [name, input] of [
   const coordinator = new RentalLaunchCoordinator({} as never, {
     async isMaintenanceHeld() { return false; },
     async list() { daemonCalls++; return []; },
+    async getEntry(id: string) { return listedEntry(this, id); },
   } as never, {} as never);
   try {
     for (const operation of [
@@ -399,6 +409,7 @@ test("manual acceptance installs exact rental authority, activates at room tail,
     async ensureRunning() { return { generation: 99 }; },
     async compareAndSetDesiredState() { return entry; },
     async list() { return [entry]; },
+    async getEntry(id: string) { return listedEntry(this, id); },
   };
   const grants = {
     async createRentalPausedAndInstall(input: Record<string, unknown>) {
@@ -527,7 +538,7 @@ test("recovery completes an active server rental when its daemon worker is absen
       async getSession() { refreshed += 1; return { ok: true as const, status: 200, body: session({ status: "active" }) }; },
       async completeSession() { completed += 1; return { ok: true as const, status: 200, body: session({ status: "completed" }) }; },
     } as never,
-    { async isMaintenanceHeld() { return false; }, async list() { return []; } } as never,
+    { async isMaintenanceHeld() { return false; }, async list() { return []; }, async getEntry(id: string) { return listedEntry(this, id); } } as never,
     restoredGrants as never,
   );
   try {
@@ -577,6 +588,7 @@ test("recovery fences a historical worker binding instead of treating it as live
     } as never,
     {
       async list() { return [entry]; },
+      async getEntry(id: string) { return listedEntry(this, id); },
       async setDesiredState() {
         entry.desiredState = "stopped";
         entry.observedState = "stopped";
@@ -636,7 +648,7 @@ test("one malformed recovered launch does not stop reconciliation of the others"
         return { ok: true as const, status: 200, body: session({ id, status: "active" }) };
       },
     } as never,
-    { async isMaintenanceHeld() { return false; }, async list() { return [bad, good]; } } as never,
+    { async isMaintenanceHeld() { return false; }, async list() { return [bad, good]; }, async getEntry(id: string) { return listedEntry(this, id); } } as never,
     restoredGrants as never,
   );
   try {
@@ -698,6 +710,7 @@ test("a lost active acknowledgement response is recovered without purging the wo
       async ensureRunning() { return { generation: 1 }; },
       async compareAndSetDesiredState() { return entry; },
       async list() { return [entry]; },
+      async getEntry(id: string) { return listedEntry(this, id); },
       async purgeAgent() { purged += 1; return { outcome: "purged" }; },
     } as never,
     {
@@ -743,7 +756,7 @@ test("recovery resumes a durable pre-accept intent instead of stranding capacity
         return { ok: false as const, status: 400, error: "request_expired", body: null };
       },
     } as never,
-    { async isMaintenanceHeld() { return false; }, async list() { return []; } } as never,
+    { async isMaintenanceHeld() { return false; }, async list() { return []; }, async getEntry(id: string) { return listedEntry(this, id); } } as never,
     restoredGrants as never,
     () => "host",
     async () => "agent_rental",
@@ -795,6 +808,7 @@ test("recovery arms a persisted hard deadline before daemon or API connectivity"
         if (listCalls === 1) throw new Error("daemon temporarily unavailable");
         return [entry];
       },
+      async getEntry(id: string) { return listedEntry(this, id); },
       async setDesiredState() { stops += 1; return entry; },
       async isMaintenanceHeld() { return false; },
       async ensureRunning() { return { generation: 1 }; },

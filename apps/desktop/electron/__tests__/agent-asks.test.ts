@@ -78,6 +78,10 @@ function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; rea
     ensureRunning: async () => ({ generation: 1 }),
     compareAndSetDesiredState: async (_id: string, from: string, to: string) => { states.push(`${from}->${to}`); return true; },
     list: async () => [overrides.readyFails || stopped ? { ...entry, observedState: stopped ? "stopped" : "failed", lastError: overrides.lastError ?? null } : entry],
+    // The single-entry read answers what the fake's own list holds under that id.
+    getEntry: async function (this: { list(): Promise<Array<{ id: string }>> }, entryId: string) {
+      return (await this.list()).find((candidate) => candidate.id === entryId) ?? null;
+    },
     getAgentInspectorDetail: async () => ({ usage: { account: { state: "available", windows: [{ id: "seven_day", label: "Weekly", usedPercent: overrides.usedPercent ?? 10 },
       ...(overrides.shortUsedPercent === undefined ? [] : [{ id: "five_hour", label: "5 hours", usedPercent: overrides.shortUsedPercent }])] } } }),
     setDesiredState: async () => { stopped = true; calls.push("stop"); },

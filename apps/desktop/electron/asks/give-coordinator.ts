@@ -438,9 +438,9 @@ export class AskGiveCoordinator {
 
   private async waitUntilReady(entryId: string): Promise<DesktopSupervisorManifestEntry> {
     const deadline = Date.now() + READY_TIMEOUT_MS;
-    let last: DesktopSupervisorManifestEntry | undefined;
+    let last: DesktopSupervisorManifestEntry | null = null;
     while (Date.now() < deadline) {
-      const entry = last = (await this.daemon.list(null)).find(candidate => candidate.id === entryId);
+      const entry = last = await this.daemon.getEntry(entryId);
       if (entry?.observedState === "failed" || entry?.condition === "quarantined") break;
       if (entry && entry.desiredState === "running" && entry.agentSessionId && entry.agentSessionBindingState === "active" && entry.readyReachedAt) return entry;
       await new Promise<void>(resolve => setTimeout(resolve, READY_POLL_MS));
@@ -460,7 +460,7 @@ export class AskGiveCoordinator {
   private async stopAndPurge(entryId: string): Promise<void> {
     await this.daemon.setDesiredState(entryId, "stopped").catch(() => undefined);
     for (const deadline = Date.now() + 15_000; Date.now() < deadline;) {
-      const entry = (await this.daemon.list(null)).find(candidate => candidate.id === entryId);
+      const entry = await this.daemon.getEntry(entryId);
       if (!entry || ["stopped", "absent", "failed"].includes(String(entry.observedState))) break;
       await new Promise<void>(resolve => setTimeout(resolve, READY_POLL_MS));
     }
