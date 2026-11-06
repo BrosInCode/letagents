@@ -1031,19 +1031,46 @@ export async function readDesktopSupervisorGrantAgentKeyForEntry(entryId: string
 /**
  * Read the renderer-safe identity projection. It reads only registry metadata:
  * no Keychain decrypt, and no file read while the registry file is unchanged.
+ * A retired entry has no live mapping left, so its purge receipt supplies the
+ * key instead, but only while no other entry still claims that same key.
  */
 export async function readDesktopSupervisorGrantAgentKeysForEntries(
   entryIds: readonly string[],
 ): Promise<Map<string, string>> {
   const registry = await readRegistryShared();
   const result = new Map<string, string>();
+  if (!registry) return result;
+  const retiredEntryIds: string[] = [];
   for (const rawEntryId of entryIds) {
     const entryId = rawEntryId.trim();
-    const agentKey = registry?.entryAgentKeys[entryId];
-    if (entryId && agentKey?.trim()) {
-      result.set(entryId, canonicalSupervisorGrantAgentKey(agentKey));
-    }
+    if (!entryId) continue;
+    const agentKey = registry.entryAgentKeys[entryId];
+    if (agentKey?.trim()) result.set(entryId, canonicalSupervisorGrantAgentKey(agentKey));
+    else if (registry.purgeRevocationReceipts[entryId]?.agentKey.trim()) retiredEntryIds.push(entryId);
   }
+  if (!retiredEntryIds.length) return result;
+  /**
+   * A retirement deletes the entry's live mapping, so its purge receipt holds
+   * the only durable identity left. Hand that key to at most one entry: the
+   * renderer treats two entries sharing one key as ambiguous and would then
+   * relabel a still-supervised agent as an External row, which is the exact
+   * duplicate-row bug this fallback exists to prevent.
+   */
+  const liveAgentKeys = new Set(Object.values(registry.entryAgentKeys)
+    .filter(agentKey => agentKey?.trim())
+    .map(agentKey => canonicalSupervisorGrantAgentKey(agentKey)));
+  const acknowledgedAt = (entryId: string) => registry.purgeRevocationReceipts[entryId]?.acknowledgedAt ?? "";
+  const claimantByAgentKey = new Map<string, string>();
+  for (const entryId of retiredEntryIds) {
+    const agentKey = canonicalSupervisorGrantAgentKey(registry.purgeRevocationReceipts[entryId]!.agentKey);
+    if (liveAgentKeys.has(agentKey)) continue;
+    const claimant = claimantByAgentKey.get(agentKey);
+    // The newest acknowledged retirement owns the key; the id breaks exact ties.
+    if (claimant && (acknowledgedAt(entryId) < acknowledgedAt(claimant)
+      || (acknowledgedAt(entryId) === acknowledgedAt(claimant) && entryId >= claimant))) continue;
+    claimantByAgentKey.set(agentKey, entryId);
+  }
+  for (const [agentKey, entryId] of claimantByAgentKey) result.set(entryId, agentKey);
   return result;
 }
 
@@ -1304,12 +1331,15 @@ export async function revokeDesktopSupervisorGrant(options: GrantStorageOptions 
       delete current.grants[agentKey];
       for (const [entryId, mappedAgentKey] of Object.entries(current.entryAgentKeys)) {
         if (mappedAgentKey !== agentKey) continue;
-        delete current.entryAgentKeys[entryId];
         const revocation = current.credentialRevocations[stored.grantId];
+        // Dropping the mapping without writing a receipt destroys the entry's
+        // only durable identity, so keep them atomic: an unattested bulk purge
+        // leaves the mapping, which still reads as unproven to the attestation.
         if (!revocation?.sessionEndedAt || !revocation.grantRevokedAt
           || revocation.entryId !== entryId || revocation.agentKey !== agentKey
           || revocation.grantId !== stored.grantId
           || revocation.sessionOwnerGrantId !== stored.grantId) continue;
+        delete current.entryAgentKeys[entryId];
         current.purgeRevocationReceipts[entryId] = {
           agentKey, grantId: stored.grantId, workerSessionAttestation: "exact",
           agentSessionId: revocation.agentSessionId,

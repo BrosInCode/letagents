@@ -1201,3 +1201,72 @@ test("live and listed supervisor entries retain canonical identity for contribut
     assert.equal((await projectDesktopSupervisorAgentKeys(input))[0]!.agentKey, null);
   });
 });
+
+const retirementReceipt = (agentKey: string, acknowledgedAt: string) => ({
+  agentKey, grantId: `grant_${agentKey}`, workerSessionAttestation: "exact" as const,
+  agentSessionId: "agent_session_1", sessionEndedAt: acknowledgedAt, acknowledgedAt,
+});
+
+test("a retired entry keeps its canonical identity from the purge receipt the retirement left behind", async () => {
+  await withRegistry(async path => {
+    // A real retirement deletes the live mapping and writes the receipt, so the
+    // receipt is the only durable identity the renderer can still match on.
+    await writeFile(path, JSON.stringify({
+      version: 7, grants: {}, entryAgentKeys: {}, credentialRevocations: {},
+      purgeRevocationReceipts: { retired: retirementReceipt("EmmyMay/Desktop-Codex-Copper", "2026-11-06T00:00:00.000Z") },
+    }));
+    const projected = await projectDesktopSupervisorAgentKeys([{ id: "retired", agentKey: null }]);
+    assert.equal(projected[0]!.agentKey, canonicalSupervisorGrantAgentKey("EmmyMay/Desktop-Codex-Copper"));
+  });
+});
+
+test("a receipt never lends its key to a retired entry while a live entry still claims that key", async () => {
+  await withRegistry(async path => {
+    // Re-granting supervision for the same agent key must not leave two
+    // entries projecting it: the renderer reads that as ambiguous and falls
+    // back to an External row for the agent it is actively supervising.
+    await writeFile(path, JSON.stringify({
+      version: 7, grants: {}, entryAgentKeys: { live: "owner/agent" }, credentialRevocations: {},
+      purgeRevocationReceipts: { retired: retirementReceipt("owner/agent", "2026-11-06T00:00:00.000Z") },
+    }));
+    const projected = await projectDesktopSupervisorAgentKeys([{ id: "live", agentKey: null }, { id: "retired", agentKey: null }]);
+    assert.deepEqual(projected.map(entry => entry.agentKey), ["owner/agent", null]);
+  });
+});
+
+test("only the newest retirement claims a key that two purge receipts both record", async () => {
+  await withRegistry(async path => {
+    await writeFile(path, JSON.stringify({
+      version: 7, grants: {}, entryAgentKeys: {}, credentialRevocations: {},
+      purgeRevocationReceipts: {
+        older: retirementReceipt("owner/agent", "2026-11-05T00:00:00.000Z"),
+        newer: retirementReceipt("owner/agent", "2026-11-06T00:00:00.000Z"),
+      },
+    }));
+    const projected = await projectDesktopSupervisorAgentKeys([{ id: "older", agentKey: null }, { id: "newer", agentKey: null }]);
+    assert.deepEqual(projected.map(entry => entry.agentKey), [null, "owner/agent"]);
+  });
+});
+
+test("an unattested global revoke keeps the entry mapping it cannot write a purge receipt for", async () => {
+  await withRegistry(async path => {
+    // Deleting the mapping without a receipt would strip the entry's only
+    // durable identity, so the two stay atomic: no receipt, no delete.
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey: "owner/agent", metadata: metadata("owner/agent", "grant"),
+      token: "lashg_token", entryId: "entry-1",
+    }, { storage: keychain });
+    await revokeDesktopSupervisorGrant({ apiFetch: (async <T>() => ({}) as T) as never });
+    const registry = JSON.parse(await readFile(path, "utf8")) as {
+      grants: Record<string, unknown>;
+      entryAgentKeys: Record<string, string>;
+      purgeRevocationReceipts: Record<string, unknown>;
+    };
+    assert.deepEqual(registry.grants, {});
+    assert.equal(registry.entryAgentKeys["entry-1"], "owner/agent");
+    assert.equal(registry.purgeRevocationReceipts["entry-1"], undefined);
+    // The identity survives, so the retired row still resolves to its agent.
+    const projected = await projectDesktopSupervisorAgentKeys([{ id: "entry-1", agentKey: null }]);
+    assert.equal(projected[0]!.agentKey, "owner/agent");
+  });
+});
