@@ -1,106 +1,133 @@
 /*
- * A request to join sits at the top of the room as a quiet card: it is easy to
- * see, it never covers the chat, and it leaves when the admin answers or
- * closes it. Motion is one short slide, and none when the person asks for less.
+ * A request to join is a line in the room's chrome, not a card over it: a slim
+ * strip under the header, in the room's own greys, with the person's name as
+ * the only emphasis. Several people become overlapping faces and one count.
+ * The strip arrives with one short fade and leaves faster than it came.
  */
 .join-request-banner {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  display: flex;
   align-items: center;
   gap: 12px;
-  margin: 8px 12px 0;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--blue) 35%, var(--border-strong));
-  border-radius: var(--radius-md, 10px);
-  background: color-mix(in srgb, var(--blue) 9%, var(--bg-elevated));
+  box-sizing: border-box;
+  min-height: 44px;
+  padding: 6px max(24px, env(safe-area-inset-right, 0px)) 6px max(24px, env(safe-area-inset-left, 0px));
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-subtle, var(--bg));
   color: var(--text);
-  box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.08));
+  font-family: var(--font-sans, inherit);
 }
-.join-request-banner-count {
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--blue) 18%, var(--bg-elevated));
-  color: var(--text);
-  font-size: 0.85rem;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
+
+/* Faces: 24 px, overlapping when there are several, the first in front. */
+.join-request-banner-faces {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: row-reverse;
+  align-items: center;
 }
+.join-request-banner-faces .chat-avatar {
+  width: 24px;
+  height: 24px;
+  flex-basis: 24px;
+  align-self: center;
+  font-size: 8px;
+  letter-spacing: -0.02em;
+  box-shadow: 0 0 0 2px var(--bg-subtle, var(--bg));
+}
+.join-request-banner-faces .chat-avatar + .chat-avatar {
+  margin-right: -6px;
+}
+
 .join-request-banner-copy {
-  display: grid;
+  display: flex;
+  flex: 1 1 auto;
+  align-items: baseline;
+  gap: 8px;
   min-width: 0;
-  gap: 2px;
-}
-.join-request-banner-copy strong {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.9rem;
-  font-weight: 650;
-}
-.join-request-banner-copy small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.4;
   color: var(--text-secondary);
+}
+.join-request-banner-copy > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.join-request-banner-copy b {
+  color: var(--text);
+  font-weight: 600;
+}
+.join-request-banner-meta {
+  flex: 0 1 auto;
+  color: var(--text-tertiary, var(--text-secondary));
   font-size: 0.76rem;
 }
-.join-request-banner-copy .join-request-banner-error {
+.join-request-banner-error {
   color: var(--red-text, #ef4444);
-  white-space: normal;
 }
+
 .join-request-banner-actions {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   gap: 6px;
 }
+
+/* Quiet pills: Approve is the one filled control, in the text colour, not a brand colour. */
 .join-request-banner-button {
-  min-height: 32px;
-  padding: 4px 12px;
-  border: 1px solid var(--border-strong);
-  border-radius: 8px;
-  background: var(--bg-elevated);
+  min-height: 28px;
+  padding: 0 11px;
+  border: 1px solid var(--border-strong, var(--border));
+  border-radius: 999px;
+  background: transparent;
   color: var(--text);
   cursor: pointer;
   font: inherit;
-  font-size: 0.8rem;
-  font-weight: 600;
+  font-size: 0.78rem;
+  font-weight: 550;
+  line-height: 1;
   /* The press answers on pointer-down; only transform and colour move. */
   transition:
     transform 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
-    background-color 150ms ease;
+    background-color 150ms ease,
+    color 150ms ease;
 }
 .join-request-banner-button[data-variant="primary"] {
-  border-color: color-mix(in srgb, var(--blue) 55%, var(--border-strong));
-  background: color-mix(in srgb, var(--blue) 16%, var(--bg-elevated));
+  border-color: var(--text);
+  background: var(--text);
+  color: var(--bg, #09090b);
 }
 .join-request-banner-button:active:not(:disabled) {
   transform: scale(0.97);
 }
 .join-request-banner-button:disabled {
   cursor: wait;
-  opacity: 0.55;
+  opacity: 0.5;
 }
 .join-request-banner-close {
   display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   margin-left: 2px;
+  padding: 0;
   border: 0;
-  border-radius: 8px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-secondary);
   cursor: pointer;
-  font: inherit;
-  font-size: 1.1rem;
-  line-height: 1;
   transition:
     transform 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
     background-color 150ms ease,
     color 150ms ease;
+}
+.join-request-banner-close svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
 }
 .join-request-banner-close:active {
   transform: scale(0.94);
@@ -108,7 +135,10 @@
 /* Hover states only where a pointer can hover: a tap on a phone must not stick. */
 @media (hover: hover) and (pointer: fine) {
   .join-request-banner-button:hover:not(:disabled) {
-    background: var(--accent-hover, color-mix(in srgb, var(--text) 8%, var(--bg-elevated)));
+    background: var(--accent-hover, color-mix(in srgb, var(--text) 8%, transparent));
+  }
+  .join-request-banner-button[data-variant="primary"]:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--text) 86%, var(--bg));
   }
   .join-request-banner-close:hover {
     background: var(--accent-hover, color-mix(in srgb, var(--text) 8%, transparent));
@@ -121,16 +151,24 @@
   outline-offset: 2px;
 }
 @media (pointer: coarse) {
-  .join-request-banner-button { min-height: 40px; }
-  .join-request-banner-close { width: 40px; height: 40px; }
+  .join-request-banner-button { min-height: 36px; }
+  .join-request-banner-close { width: 36px; height: 36px; }
 }
-@media (max-width: 560px) {
-  .join-request-banner { grid-template-columns: auto minmax(0, 1fr); }
-  .join-request-banner-actions { grid-column: 1 / -1; justify-content: flex-end; }
+@media (max-width: 640px) {
+  .join-request-banner { padding-inline: max(12px, env(safe-area-inset-left, 0px)) max(12px, env(safe-area-inset-right, 0px)); }
+  .join-request-banner-meta { display: none; }
+}
+@media (max-width: 420px) {
+  .join-request-banner { flex-wrap: wrap; row-gap: 4px; }
+  .join-request-banner-actions { flex-basis: 100%; justify-content: flex-end; }
+}
+@media (prefers-contrast: more) {
+  .join-request-banner { border-bottom-color: var(--text); }
+  .join-request-banner-button { border-color: var(--text); }
 }
 
 /*
- * The card arrives from its seat under the header and leaves the same way
+ * The strip arrives from its seat under the header and leaves the same way
  * (one short slide, a strong ease-out), and it leaves faster than it arrives:
  * the arrival is news, the departure is the system answering.
  */
@@ -147,9 +185,9 @@
 .join-request-banner-enter-from,
 .join-request-banner-leave-to {
   opacity: 0;
-  transform: translateY(-6px);
+  transform: translateY(-4px);
 }
-/* Less motion means a cross-fade, not nothing: the card still arrives gently. */
+/* Less motion means a cross-fade, not nothing: the strip still arrives gently. */
 @media (prefers-reduced-motion: reduce) {
   .join-request-banner-enter-active,
   .join-request-banner-leave-active {

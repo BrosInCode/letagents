@@ -213,13 +213,13 @@ async function render(props: Record<string, unknown>): Promise<string> {
 
 test("the shared banner renders one request with its actions, and several as a count that opens the list", async () => {
   const one = await render({ requests: [request("rjr_1", "ada", { display_name: "Ada Lovelace" })], now: NOW });
-  assert.match(one, /Ada Lovelace wants to join this room/);
-  assert.match(one, /asked 5 min ago/);
+  assert.match(one, /<b>Ada Lovelace<\/b> wants to join/);
+  assert.match(one, /@ada · 5 min ago/);
   assert.match(one, /data-testid="join-request-banner-approve"/);
   assert.match(one, /data-testid="join-request-banner-decline"/);
   assert.match(one, /data-testid="join-request-banner-close"/);
   const two = await render({ requests: [request("rjr_1", "ada"), request("rjr_2", "bob")], now: NOW });
-  assert.match(two, /2 people want to join this room/);
+  assert.match(two, /<b>ada<\/b> and <b>bob<\/b> want to join/);
   assert.match(two, /data-testid="join-request-banner-review"/);
   assert.doesNotMatch(two, /join-request-banner-approve/);
 });

@@ -74,10 +74,11 @@ export function joinRequesterLabel(request) {
   return name || request.login;
 }
 
-/** "Ada wants to join this room", or "2 people want to join this room". */
+/** "Ada wants to join", "Ada and Bob want to join", or "3 people want to join": the strip's words, as plain text. */
 export function joinRequestBannerText(requests) {
-  if (requests.length === 1) return `${joinRequesterLabel(requests[0])} wants to join this room`;
-  return `${requests.length} people want to join this room`;
+  if (requests.length === 1) return `${joinRequesterLabel(requests[0])} wants to join`;
+  if (requests.length === 2) return `${joinRequesterLabel(requests[0])} and ${joinRequesterLabel(requests[1])} want to join`;
+  return `${requests.length} people want to join`;
 }
 
 /** The desktop notification for one request: a title and a body. */

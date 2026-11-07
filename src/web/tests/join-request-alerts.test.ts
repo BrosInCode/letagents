@@ -57,8 +57,9 @@ test('the shared event parser accepts the server frame and refuses anything else
 })
 
 test('the banner text and the notification text name the person, or count the people', () => {
-  assert.equal(joinRequestBannerText([request('r1', 'ada', { display_name: 'Ada Lovelace' })]), 'Ada Lovelace wants to join this room')
-  assert.equal(joinRequestBannerText([request('r1', 'ada'), request('r2', 'bob')]), '2 people want to join this room')
+  assert.equal(joinRequestBannerText([request('r1', 'ada', { display_name: 'Ada Lovelace' })]), 'Ada Lovelace wants to join')
+  assert.equal(joinRequestBannerText([request('r1', 'ada'), request('r2', 'bob')]), 'ada and bob want to join')
+  assert.equal(joinRequestBannerText([request('r1', 'ada'), request('r2', 'bob'), request('r3', 'cy')]), '3 people want to join')
   assert.deepEqual(joinRequestNotificationText(request('r1', 'ada', { display_name: ' ' })), { title: 'Join request in Design lounge', body: 'ada wants to join' })
   assert.deepEqual(joinRequestNotificationText(request('r1', 'ada', { room_display_name: '' }), 'Named room'), { title: 'Join request in Named room', body: 'ada wants to join' })
 })
@@ -178,21 +179,25 @@ async function render(props: Record<string, unknown>): Promise<string> {
   return renderToString(createSSRApp({ render: () => h(JoinRequestBanner, props) }))
 }
 
-test('one request shows the name with Approve and Decline in place; several stack with a count', async () => {
+test('one request shows the name with Approve and Decline in place; several stack as faces and a count', async () => {
   const one = await render({ requests: [request('rjr_1', 'ada', { display_name: 'Ada Lovelace' })], now: NOW })
-  assert.match(one, /Ada Lovelace wants to join this room/)
-  assert.match(one, /@ada · asked 5 min ago/)
+  assert.match(one, /<b>Ada Lovelace<\/b> wants to join/)
+  assert.match(one, /@ada · 5 min ago/)
   assert.match(one, /aria-label="Approve Ada Lovelace"[^>]*>Approve</)
   assert.match(one, /aria-label="Decline Ada Lovelace"[^>]*>Decline</)
   assert.match(one, /aria-label="Close"/)
   assert.match(one, /role="status"/, 'a live region, not a dialog')
-  assert.doesNotMatch(one, /Review requests/)
+  assert.doesNotMatch(one, />Review</)
 
   const two = await render({ requests: [request('rjr_1', 'ada'), request('rjr_2', 'bob', { display_name: 'Bob' })], busy: null })
-  assert.match(two, /2 people want to join this room/)
-  assert.match(two, /ada, Bob/)
-  assert.match(two, /Review requests/)
+  assert.match(two, /<b>ada<\/b> and <b>Bob<\/b> want to join/)
+  assert.equal((two.match(/class="chat-avatar/g) ?? []).length, 2, 'two faces')
+  assert.match(two, />Review</)
   assert.doesNotMatch(two, />Approve</)
+
+  const four = await render({ requests: ['ada', 'bob', 'cy', 'dee'].map((login, index) => request(`rjr_${index}`, login)) })
+  assert.match(four, /<b>4 people<\/b> want to join/)
+  assert.equal((four.match(/class="chat-avatar/g) ?? []).length, 3, 'at most three faces')
 
   const busy = await render({ requests: [request('rjr_1', 'ada')], busy: 'approve:rjr_1', error: 'Admin privileges required' })
   assert.match(busy, /Approving…/)
@@ -206,7 +211,7 @@ test('the room page shows the banner to admins only, and the style honours reduc
   assert.match(banner, /v-if="showJoinRequestBanner"/)
   assert.match(page, /const showJoinRequestBanner = computed\(\(\) => isConnected\.value && room\.value\?\.role === 'admin' && joinRequestBanner\.value\.length > 0\)/)
   assert.match(page, /\.room-shell\[data-join-request-banner="true"\] \{ grid-template-rows: auto auto minmax\(0, 1fr\) auto auto; \}/, 'the banner gets its own grid row; the chat keeps the flexible one')
-  assert.match(banner, /@open-requests="drawerOpen = true"/, 'several requests open the drawer with the Requests list')
+  assert.match(banner, /@open-requests="drawerOpen = true"/, 'Review opens the drawer with the Requests list')
   const css = await readFile(fileURLToPath(new URL('../../../shared/ui/join-request-banner.css', import.meta.url)), 'utf8')
   const reduced = /@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? ''
   assert.match(reduced, /transition: opacity 150ms ease/, 'less motion keeps a cross-fade')
