@@ -1,5 +1,7 @@
 import { mergeActivityEvents } from '../../../../shared/ui/activity/model'
-import { readonly } from 'vue'
+import { readonly, watch } from 'vue'
+import { activityUnread } from '../../../../shared/ui/activity/unread'
+import { useAuth } from './useAuth'
 import {
   discardAttachmentUpload,
   stageAttachmentUpload,
@@ -81,6 +83,9 @@ export {
 } from './room/identity'
 export { mergeCreatedTask, taskFromCreateTaskResponse } from './room/taskActions'
 
+const activityViewer = useAuth().user
+watch(() => activityViewer.value?.id ?? null, id => activityUnread.setScope(id), { immediate: true, flush: 'sync' })
+
 const {
   refreshPresence,
   refreshParticipants,
@@ -142,6 +147,7 @@ function scheduleGitHubRoomUpdates(roomIdentifier?: string | null, repairEvents 
   }
 }
 
+let activeActivityScope: string | null = null
 const roomStream = createRoomStream({
   setConnectionState: (state) => {
     connectionState.value = state
@@ -154,6 +160,9 @@ const roomStream = createRoomStream({
   },
   onGitHubMessage: () => {
     scheduleGitHubRoomUpdates()
+  },
+  onGitHubEventReceived: (roomIdentifier, event) => {
+    if (activeActivityScope === activityUnread.scope && room.value?.identifier === roomIdentifier) activityUnread.receive(roomIdentifier, [event.id])
   },
   onGitHubEvent: (roomIdentifier, event) => {
     if (!room.value || (roomIdentifier && roomIdentifier !== room.value.identifier && roomIdentifier !== room.value.projectId)) return
@@ -214,6 +223,7 @@ const roomStream = createRoomStream({
 })
 
 function startStreaming(roomIdentifier: string, bootstrap = false) {
+  activeActivityScope = activityUnread.scope
   return roomStream.start(roomIdentifier, bootstrap)
 }
 

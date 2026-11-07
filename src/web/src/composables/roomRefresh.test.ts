@@ -413,3 +413,52 @@ test('Activity snapshot repair preserves incoming stream events and fences room 
   release(); await retired
   assert.deepEqual(githubEvents.value.map(event=>event.id),['other-room'])
 })
+
+test('Activity catchup and pagination keep unread identities and reject retired account/session responses', async (t) => {
+  const { activityUnread } = await import('../../../../shared/ui/activity/unread')
+  resetRoomState({ activityHistoryLoading: false, githubEventsLoading: false, connectionState: 'idle' })
+  const identifier = 'github.com/owner/repo'
+  const setRoom = () => { room.value = { identifier, name: identifier, projectId: 'repo', kind: 'main' } as never }
+  setRoom()
+  activityUnread.setScope('viewer-a')
+  const controller = createRoomRefreshController({ refreshParticipants: async () => {}, refreshPresence: async () => {} })
+  const originalFetch = globalThis.fetch
+  let release!: () => void
+  let gate = Promise.resolve()
+  let ids = ['history']
+  globalThis.fetch = (async () => {
+    const responseIds = [...ids]
+    await gate
+    return new Response(JSON.stringify({ events: responseIds.map(id => ({ id, created_at: '2026-10-01T00:00:00Z' })), has_more: true }), { status: 200, headers: { 'Content-Type': 'application/json' } })
+  }) as typeof fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+    activityUnread.setScope(null)
+    resetRoomState({ activityHistoryLoading: false, githubEventsLoading: false, connectionState: 'idle' })
+  })
+  gate = new Promise<void>(resolve => { release = resolve })
+  const initial = controller.refreshRoomGitHubEvents()
+  activityUnread.receive(identifier, ['during-load'])
+  release(); await initial
+  assert.equal(activityUnread.count(identifier), 1)
+  ids = ['history', 'during-load', 'catchup-a', 'catchup-b']
+  await controller.refreshRoomGitHubEvents()
+  assert.equal(activityUnread.count(identifier), 3)
+  ids = ['older-a', 'older-b']
+  await controller.loadOlderGitHubEvents()
+  assert.equal(activityUnread.count(identifier), 3, 'historical pagination is never new activity')
+  gate = new Promise<void>(resolve => { release = resolve })
+  ids = ['retired-account']
+  const retired = controller.refreshRoomGitHubEvents()
+  activityUnread.setScope('viewer-b')
+  githubEvents.value = []
+  release(); await retired
+  assert.deepEqual(githubEvents.value, [])
+  assert.equal(activityUnread.count(identifier), 0)
+  resetRoomState({ activityHistoryLoading: false, githubEventsLoading: false, connectionState: 'idle' }); setRoom()
+  gate = new Promise<void>(resolve => { release = resolve })
+  const oldSession = controller.refreshRoomGitHubEvents()
+  resetRoomState({ activityHistoryLoading: false, githubEventsLoading: false, connectionState: 'idle' }); setRoom()
+  release(); await oldSession
+  assert.deepEqual(githubEvents.value, [], 'leaving and returning to the same room does not accept retired responses')
+})

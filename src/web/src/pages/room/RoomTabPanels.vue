@@ -60,6 +60,8 @@ const roomScrollPositions = new Map<string, ChatScrollPosition>()
         key="events"
         class="room-tab-panel"
         :events="githubEvents"
+        :readable="activityReadable"
+        @presented="emit('activityPresented', $event)"
         :roomIdentifier="room?.identifier || ''"
         @refresh="emit('refreshGitHubEvents')"
         @loadOlder="emit('loadOlderGitHubEvents')"
@@ -223,6 +225,7 @@ const props = defineProps<{
   githubEventsError: RoomGitHubEventsError | null
   githubEventsSupported: boolean
   githubEventsLoading: boolean
+  activityReadable?: boolean
   activityLoading: boolean
   room: RoomInfo | null
   searchQuery: string
@@ -250,6 +253,7 @@ const props = defineProps<{
 }>()
 
 const emit = defineEmits<{
+  activityPresented: [ids: readonly string[]]
   refreshGitHubEvents: []
   refreshBoard: []
   loadOlderGitHubEvents: []

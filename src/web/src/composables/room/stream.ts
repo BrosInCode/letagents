@@ -33,6 +33,7 @@ interface RoomStreamHandlers {
   setStreaming: (streaming: boolean) => void
   appendMessage: (message: RoomMessage) => boolean
   onGitHubMessage: () => void
+  onGitHubEventReceived?: (roomIdentifier: string, event: RoomGitHubEvent) => void
   onGitHubEvent: (roomIdentifier?: string | null, event?: RoomGitHubEvent) => void
   onTaskLifecycleMessage: () => void
   onArtifactUpdate: (roomIdentifier?: string | null) => void
@@ -558,13 +559,16 @@ export function createRoomStream(
       if (!isCurrentSource()) return
       try {
         const payload = JSON.parse(event.data)
+        const githubEvent = typeof payload?.id === 'string' && typeof payload?.event_type === 'string'
+          && typeof payload?.action === 'string' && typeof payload?.created_at === 'string'
+          ? payload as RoomGitHubEvent : undefined
+        // Delivery is observed before the bootstrap/gap buffer is replayed.
+        if (githubEvent) handlers.onGitHubEventReceived?.(roomIdentifier, githubEvent)
         rememberEventCursor(roomIdentifier, event)
         bufferOrApplyRoomEvent(roomIdentifier, () => {
           handlers.onGitHubEvent(
             typeof payload?.room_id === 'string' ? payload.room_id : roomIdentifier,
-            typeof payload?.id === 'string' && typeof payload?.event_type === 'string'
-              && typeof payload?.action === 'string' && typeof payload?.created_at === 'string'
-              ? payload as RoomGitHubEvent : undefined,
+            githubEvent,
           )
           publishMessageLinkPreviewInvalidation(roomIdentifier)
         }, streamEventBytes(event))

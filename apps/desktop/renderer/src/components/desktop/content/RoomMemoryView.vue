@@ -1,18 +1,17 @@
 <template>
-  <section class="room-tab-page knowledge-page memory-page" aria-labelledby="room-memory-title" data-testid="room-memory-view" :data-motion="motionEnabled" @pointerdown.capture="motionEnabled = true" @keydown.capture="motionEnabled = false">
+  <section class="room-tab-page knowledge-page memory-page" aria-label="Room memory" data-testid="room-memory-view" :data-motion="motionEnabled" @pointerdown.capture="motionEnabled = true" @keydown.capture="motionEnabled = false">
     <div class="memory-brief" :inert="Boolean(editor)">
-      <header class="knowledge-header">
-        <div class="knowledge-title"><div><h2 id="room-memory-title">Room memory</h2><p>Shared context for everyone in this room<span v-if="activeCount"> · {{ activeCount }} {{ activeCount === 1 ? 'memory' : 'memories' }}</span></p></div></div>
-        <div class="knowledge-header-actions">
-          <button class="knowledge-icon-button" :disabled="loading" aria-label="Refresh memory" title="Refresh memory" @click="refresh"><RefreshCw :size="16" :class="{ 'knowledge-spin': loading }" aria-hidden="true" /></button>
-          <button ref="addMemoryButton" class="knowledge-button knowledge-primary" :disabled="saving" @click="startNew()"><Plus :size="15" aria-hidden="true" />Add memory</button>
-        </div>
-      </header>
+      <header class="knowledge-header memory-actions" aria-label="Memory actions">
       <div v-if="page.records.length" class="memory-toolbar" role="search" aria-label="Room memory">
         <label class="knowledge-search"><Search :size="16" aria-hidden="true" /><input ref="searchInput" v-model="search" type="search" aria-label="Search memories" placeholder="Search memories" /><button v-if="search" class="knowledge-icon-button" aria-label="Clear search" @click="clearSearch"><X :size="14" aria-hidden="true" /></button></label>
         <span class="memory-select memory-filter"><select v-model="category" aria-label="Memory category"><option value="">All categories</option><option v-for="kind in MEMORY_CATEGORIES" :key="kind" :value="kind">{{ labels[kind] }}</option></select><ChevronDown :size="15" aria-hidden="true" /></span>
         <button class="knowledge-button memory-archive-toggle" :aria-pressed="showArchived" @click="showArchived = !showArchived"><Archive :size="15" aria-hidden="true" />{{ showArchived ? 'Back to active' : 'Archived' }}</button>
       </div>
+        <div class="knowledge-header-actions">
+          <button class="knowledge-icon-button" :disabled="loading" aria-label="Refresh memory" title="Refresh memory" @click="refresh"><RefreshCw :size="16" :class="{ 'knowledge-spin': loading }" aria-hidden="true" /></button>
+          <button ref="addMemoryButton" class="knowledge-button knowledge-primary" :disabled="saving" @click="startNew()"><Plus :size="15" aria-hidden="true" />Add memory</button>
+        </div>
+      </header>
       <p v-if="error" class="knowledge-notice" role="alert">{{ error }} <button @click="refresh">Retry</button></p>
       <p v-if="page.truncated" class="knowledge-notice">Showing the 200 most recently updated entries, with active entries first. Search applies to these entries.</p>
       <p v-if="notice" class="knowledge-success" role="status"><CircleCheck :size="15" aria-hidden="true" />{{ notice }}</p>
@@ -93,7 +92,6 @@ const starters: { kind: MemoryCategory; title: string; description: string }[] =
   { kind: 'decision', title: 'Record a decision', description: 'What did we choose, and why?' },
   { kind: 'constraint', title: 'Add a constraint', description: 'What should every agent respect?' },
 ];
-const activeCount = computed(() => page.value.records.filter(record => !record.archived).length);
 const groups = computed(() => MEMORY_CATEGORIES.map(kind => ({ kind, records: filtered.value.filter(record => record.category === kind) })).filter(group => group.records.length));
 function clearSearch() { search.value = ''; void nextTick(() => searchInput.value?.focus()); }
 function clearFilters() { category.value = ''; showArchived.value = false; clearSearch(); }

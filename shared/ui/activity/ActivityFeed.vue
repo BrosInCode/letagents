@@ -1,11 +1,10 @@
 <template>
   <section class="room-activity" aria-label="Activity">
-    <header class="activity-heading"><h2>Activity</h2><button type="button" class="activity-quiet" :disabled="loading" @click="emit('refresh')">Refresh</button></header>
     <div class="activity-toolbar">
       <div class="activity-filters" role="group" aria-label="Filter activity">
         <button v-for="option in filters" :key="option.id" type="button" :aria-pressed="filter === option.id" @click="filter = option.id">{{ option.label }}</button>
       </div>
-      <label class="activity-search"><span class="activity-sr">Find in activity</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input v-model="query" type="search" placeholder="Find in activity…" /></label>
+      <div class="activity-toolbar-actions"><label class="activity-search"><span class="activity-sr">Find in activity</span><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input v-model="query" type="search" placeholder="Find in activity…" /></label><button type="button" class="activity-quiet activity-refresh" :disabled="loading" aria-label="Refresh activity" title="Refresh activity" @click="emit('refresh')"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5M5.1 7a8 8 0 0 1 13.2-2L20 8M4 16l1.7 3A8 8 0 0 0 19 17"/></svg></button></div>
     </div>
     <slot name="notice" />
     <div class="activity-feed-heading"><span>Latest changes</span><button v-if="pending.length" type="button" @click="showUpdates">Show {{ pending.length }} update{{ pending.length === 1 ? '' : 's' }} ↑</button></div>
@@ -54,9 +53,10 @@
 </template>
 <script setup lang="ts">
 import { computed, ref, useId, watch } from 'vue';
+import { useActivityPresentation } from './useActivityPresentation';
 import { activityKey, activityTime, eventTime, groupActivity, matchesActivity, type ActivityEvent, type ActivityFilter, type ActivityGroup } from './model';
-const props = withDefaults(defineProps<{ events: readonly ActivityEvent[]; roomIdentifier?: string; loading?: boolean; loadingOlder?: boolean; available?: boolean; error?: string | null; hasMore?: boolean; selectedEventId?: string | null }>(), { available: true });
-const emit = defineEmits<{ refresh: []; loadOlder: []; openTask: [id: string]; closeSelectedEvent: [] }>();
+const props = withDefaults(defineProps<{ events: readonly ActivityEvent[]; roomIdentifier?: string; loading?: boolean; loadingOlder?: boolean; available?: boolean; error?: string | null; hasMore?: boolean; selectedEventId?: string | null; readable?: boolean }>(), { available: true });
+const emit = defineEmits<{ refresh: []; loadOlder: []; openTask: [id: string]; closeSelectedEvent: []; presented: [ids: readonly string[]] }>();
 const filters: { id: ActivityFilter; label: string }[] = [{id:'all',label:'All activity'},{id:'review',label:'In Review'},{id:'attention',label:'Needs attention'},{id:'merged',label:'Merged'}];
 const filter = ref<ActivityFilter>('all'); const query = ref(''); const instant = ref(false);
 const opened = ref(new Set<string>()); const visited = ref(new Set<string>()); const order = ref<string[]>([]);
@@ -66,6 +66,11 @@ const groups = computed(() => groupActivity(props.events));
 const byId = computed(() => new Map(groups.value.map(group => [group.id, group])));
 const pending = computed(() => groups.value.filter(group => !order.value.includes(group.id)));
 const visible = computed(() => order.value.map(id => byId.value.get(id)).filter((group): group is ActivityGroup => Boolean(group && (held.value.has(group.id) || matchesActivity(group, filter.value, query.value)))));
+useActivityPresentation(
+  computed(() => visible.value.flatMap(group => group.events.map(event => event.id))),
+  computed(() => props.readable === true && props.available && !props.loading && !props.loadingOlder && !props.error),
+  ids => emit('presented', ids),
+);
 const prefix = useId(); const detailId = (id: string) => `activity-${prefix}-${encodeURIComponent(id)}`;
 watch(() => props.roomIdentifier, () => { detailOrder.clear(); order.value = []; opened.value = new Set(); visited.value = new Set(); held.value = new Set(); selections.value = {}; filter.value = 'all'; query.value = ''; }, {flush:'sync'});
 watch(groups, next => {

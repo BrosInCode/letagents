@@ -1,79 +1,21 @@
 <template>
   <header class="desktop-room-header" data-testid="desktop-room-header">
-    <div class="desktop-room-header-main">
-      <button
-        v-if="sidebarMode === 'hidden'"
-        class="ghost-button sidebar-reveal-button desktop-room-sidebar-reveal"
-        type="button"
-        aria-label="Show sidebar"
-        data-testid="room-sidebar-reveal-button"
-        @click="emit('cycleSidebar')"
-      >
-        <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
-          <path d="M4.5 3.5h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1Z" />
-          <path d="M12.5 3.5v13" />
-          <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
-        </svg>
+    <template v-if="sidebarMode === 'hidden'">
+      <button class="ghost-button sidebar-reveal-button desktop-room-sidebar-reveal" type="button" aria-label="Show sidebar" data-testid="room-sidebar-reveal-button" @click="emit('cycleSidebar')">
+        <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M4.5 3.5h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1ZM12.5 3.5v13m-5-9 2.5 2.5-2.5 2.5" /></svg>
       </button>
-      <div class="desktop-room-heading">
-        <h3 class="desktop-room-title" :title="room.displayName">
-          <span class="desktop-room-mark" aria-hidden="true">#</span>
-          <span class="desktop-room-title-text">{{ headerDisplayName }}</span>
-        </h3>
-        <p v-if="room.gitRoom" class="desktop-room-repository" :title="room.gitRoom.repository.fullName">
-          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 13H3V3h5l2 2h3v3M9 9v4m0-2h3m0 0V9m0 2v2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" /></svg>
-          <span>{{ room.gitRoom.repository.fullName }}</span>
-        </p>
-        <div v-if="room.code || storage.effectiveMode === 'local'" class="desktop-room-badges">
-          <span
-            v-if="storage.effectiveMode === 'local'"
-            class="desktop-room-badge"
-            data-testid="desktop-room-local-badge"
-          >
-            Local
-          </span>
-          <span v-if="room.code" class="desktop-room-badge" data-testid="desktop-room-code">{{ room.code }}</span>
-        </div>
-      </div>
-      <div class="desktop-room-context-actions">
-        <button
-          v-if="attentionCount"
-          class="desktop-room-needs-you"
-          :data-pulse="attention?.pulse"
-          type="button"
-          :aria-label="`Open Inbox for ${room.displayName}, ${attentionCount} ${attentionCount === 1 ? 'request needs' : 'requests need'} you`"
-          data-testid="room-inbox-shortcut"
-          @click="emit('openInbox')"
-        >
-          <span class="desktop-room-needs-you-wave" aria-hidden="true" />
-          <span class="desktop-room-needs-you-wave" aria-hidden="true" />
-          <BellRing :size="17" :stroke-width="1.8" aria-hidden="true" />
-          <span>Needs you</span>
-          <span class="desktop-room-needs-you-count">{{ attentionCount }}</span>
-          <ArrowUpRight :size="16" :stroke-width="1.8" aria-hidden="true" />
-        </button>
-        <button
-          v-if="projectConnectionNeeded"
-          class="desktop-room-project-connect"
-          type="button"
-          data-testid="desktop-room-connect-project"
-          @click="emit('connectProject')"
-        >
-          Connect project
-        </button>
-      </div>
-    </div>
-
-    <div class="desktop-room-header-actions">
-      <nav ref="tabsElement" class="desktop-room-tabs" aria-label="Room navigation" data-testid="desktop-room-tabs">
+      <h3 class="desktop-room-toolbar-title" :title="room.gitRoom ? `${room.displayName} · ${room.gitRoom.repository.fullName}` : room.displayName">{{ headerDisplayName }}</h3>
+    </template>
+      <nav ref="tabsElement" class="desktop-room-tabs room-view-tabs" aria-label="Room navigation" data-testid="desktop-room-tabs">
         <button
           v-for="tab in tabs"
           :key="tab.id"
-          class="desktop-room-tab"
+          class="desktop-room-tab room-view-tab"
           :data-active="activeTab === tab.id"
           :data-testid="`desktop-room-tab-${tab.id}`"
           :aria-current="activeTab === tab.id ? 'page' : undefined"
           :aria-label="tabAriaLabel(tab)"
+          :title="tab.label"
           type="button"
           @click="prepareTabChange($event, tab.id); emit('selectTab', tab.id)"
         >
@@ -126,39 +68,32 @@
               stroke-linejoin="round"
             />
           </svg>
-          <span>{{ tab.label }}</span>
-          <small v-if="tab.count !== null">{{ tab.count }}</small>
-          <DesktopStatusIndicator
-            v-if="tab.indicator"
-            class="desktop-room-tab-indicator"
-            :label="tab.indicator.label"
-            :count="tab.indicator.count ?? null"
-            :tone="tab.indicator.tone ?? 'info'"
-            :pulse="tab.indicator.pulse ?? false"
-            :mode="tab.indicator.mode ?? 'dot'"
-          />
+          <span class="room-view-label" aria-hidden="true"><span>{{ tab.label }}</span></span>
+          <RoomViewCount v-if="tab.id === 'events'" :count="tab.indicator?.count ?? 0" notification />
+          <RoomViewCount v-else-if="tab.count !== null" :count="tab.count" />
         </button>
-        <span ref="indicatorElement" class="desktop-room-tab-underline" style="visibility: hidden" aria-hidden="true" />
+        <span ref="indicatorElement" class="desktop-room-tab-underline room-view-underline" style="visibility: hidden" aria-hidden="true" />
       </nav>
       <div class="desktop-room-tools" data-testid="desktop-room-tools">
-        <button class="desktop-room-find" type="button" aria-label="Find in room" aria-keyshortcuts="Meta+f Control+f" :aria-expanded="searchOpen" :data-active="searchOpen" data-testid="desktop-room-search-toggle" @click="emit('toggleSearch')">
+        <RoomAttentionButton v-if="attentionCount" :count="attentionCount" :pulse="attention?.pulse" :aria-label="`Open Inbox for ${room.displayName}, ${attentionCount} ${attentionCount === 1 ? 'request needs' : 'requests need'} you`" data-testid="room-inbox-shortcut" @click="emit('openInbox')" />
+        <span v-if="storage.effectiveMode === 'local'" class="desktop-room-local-label" data-testid="desktop-room-local-badge">Local</span>
+        <button v-if="projectConnectionNeeded" class="desktop-room-project-connect" type="button" data-testid="desktop-room-connect-project" @click="emit('connectProject')">Connect project</button>
+        <button class="desktop-room-find" type="button" aria-label="Find in room" :title="`Find in room (${findShortcut})`" aria-keyshortcuts="Meta+f Control+f" :aria-expanded="searchOpen" :data-active="searchOpen" data-testid="desktop-room-search-toggle" @click="emit('toggleSearch')">
           <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m11 11 3 3M7 12a5 5 0 1 1 0-10 5 5 0 0 1 0 10Z" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
-          <span>Find</span><kbd aria-hidden="true">{{ findShortcut }}</kbd>
         </button>
-        <span class="desktop-room-tool-divider" aria-hidden="true" />
         <button class="desktop-room-settings-button" type="button" aria-label="Room settings" title="Room settings" aria-haspopup="dialog" :aria-expanded="actionPanelOpen" :data-active="actionPanelOpen" data-testid="desktop-room-actions-toggle" @click="emit('toggleActionPanel')">
-          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M2 4h12M2 8h12M2 12h12M5 2.5v3M11 6.5v3M6 10.5v3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" /></svg>
+          <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="3" cy="8" r="1" fill="currentColor"/><circle cx="8" cy="8" r="1" fill="currentColor"/><circle cx="13" cy="8" r="1" fill="currentColor"/></svg>
         </button>
       </div>
-    </div>
   </header>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { ArrowUpRight, BellRing } from "@lucide/vue";
 import type { DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
-import DesktopStatusIndicator from "../../controls/DesktopStatusIndicator.vue";
+import RoomViewCount from "../../../../../../../../shared/ui/RoomViewCount.vue";
+import RoomAttentionButton from "../../../../../../../../shared/ui/RoomAttentionButton.vue";
+import "../../../../../../../../shared/ui/room-navigation.css";
 import type { SidebarMode } from "../../types";
 import type { RoomTab, RoomTabId } from "./types";
 import { useSlidingTabIndicator } from "../../../../../../../../shared/ui/useSlidingTabIndicator";

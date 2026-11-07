@@ -1,3 +1,4 @@
+import { activityUnread } from '../../../../../shared/ui/activity/unread'
 import { roomAccessRefusal } from '../../../../../shared/room-membership.mjs'
 import { apiFetch, onRoomAccessRefused, roomPath, type RoomApiFailure } from './api'
 import { mergeMessages } from './data'
@@ -86,6 +87,7 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       },
     })
     const sessionVersion = roomSessionVersion
+    const activityScope = activityUnread.scope
 
     try {
       const joinedRoom = await joinRoomSession(roomIdentifier)
@@ -109,7 +111,7 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       )
       // The room was closed or replaced while it loaded, for example by a
       // refusal: whoever closed it owns the screen now.
-      if (roomSessionVersion !== sessionVersion) return false
+      if (roomSessionVersion !== sessionVersion || activityUnread.scope !== activityScope) return false
       replaceRoomMessages(mergeMessages([], bootstrap.messagePage.messages))
       messagesHasOlder.value = bootstrap.messagePage.hasOlder
       messagesLoaded.value = true
@@ -134,6 +136,9 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
           : 'Could not load room activity history.'
       }
       taskGithubStatus.value = bootstrap.taskGithubStatus
+      if (bootstrap.githubEvents.available && !bootstrap.githubEvents.error) {
+        activityUnread.observeLatest(canonicalIdentifier, bootstrap.githubEvents.events.map(event => event.id))
+      }
       githubEvents.value = bootstrap.githubEvents.events
       githubEventsAvailable.value = bootstrap.githubEvents.available
       githubEventsHasMore.value = bootstrap.githubEvents.hasMore
@@ -149,7 +154,7 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       return true
     } catch (err) {
       // A newer join or a refusal owns the room state now; this failure is old news.
-      if (roomSessionVersion !== sessionVersion) return false
+      if (roomSessionVersion !== sessionVersion || activityUnread.scope !== activityScope) return false
       if (bootstrapStreamStarted) {
         deps.finishStreamingBootstrap(streamingRoomIdentifier, false)
       }

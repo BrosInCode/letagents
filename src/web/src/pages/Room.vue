@@ -32,8 +32,13 @@
       :canRename="room?.role === 'admin'"
       :showEventsTab="githubEventsSupported"
       :gitRoom="room?.gitRoom || null"
+      :roomCount="focusRooms.length"
+      :activityUnreadCount="activityUnreadCount"
+      :needsYouCount="roomAttention.count.value"
+      :attentionPulse="roomAttention.pulse.value"
       :accessLocked="Boolean(accessRefusal)"
       :waitingForGitHub="accessCheckUnavailable && !isConnected"
+      @openInbox="openRoomInbox"
       @toggleDrawer="drawerOpen = !drawerOpen"
       @update:activeTab="handleActiveTabChange"
       @update:searchQuery="searchQuery = $event"
@@ -115,6 +120,8 @@
       :loadActivityHistory="loadActivityHistory"
       :clearDisconnectedParticipants="clearDisconnectedParticipants"
       @loadOlder="loadOlderMessages"
+      :activityReadable="activityReadable"
+      @activityPresented="acknowledgeActivity"
       @refreshGitHubEvents="refreshRoomGitHubEvents()"
       @loadOlderGitHubEvents="loadOlderGitHubEvents"
       @reply="selectedReply = $event"
@@ -208,12 +215,15 @@
       v-show="!keyboardOpen"
       :activeTab="activeTab"
       :showEventsTab="githubEventsSupported"
+      :roomCount="focusRooms.length"
+      :activityUnreadCount="activityUnreadCount"
       @update:activeTab="handleActiveTabChange"
     />
   </div>
 </template>
 
 <script setup lang="ts">
+import { activityUnread } from '../../../../shared/ui/activity/unread'
 import { provideRoomMessageMotion } from "../../../../shared/ui/useRoomMessageMotion";
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -246,6 +256,7 @@ import { useRoomPresentation } from './room/useRoomPresentation'
 import { useRepoAccessRetry } from './room/useRepoAccessRetry'
 import { formatJoinRequestTime } from '@/composables/room/joinRequestView'
 import { useRoomTabs } from './room/useRoomTabs'
+import { useRoomAttention } from './room/useRoomAttention'
 import { useRoomViewport } from './room/useRoomViewport'
 import { useRoomTaskHandlers } from './room/useRoomTaskHandlers'
 import { useToast } from '@/composables/useToast'
@@ -318,6 +329,13 @@ const {
   loadOlderGitHubEvents,
 } = useRoom()
 const auth = useAuth()
+const roomAttention = useRoomAttention(
+  computed(() => isConnected.value && room.value && (!route.params.roomId || route.params.roomId === room.value.requestedIdentifier || route.params.roomId === room.value.identifier) ? room.value.identifier : null),
+  computed(() => auth.isSignedIn.value ? auth.user.value?.id || null : null),
+)
+function openRoomInbox() {
+  if (room.value) void router.push({ name: 'inbox', query: { room: room.value.identifier } })
+}
 const personWorkHost = ref<InstanceType<typeof PersonWorkHost> | null>(null)
 providePersonWork((person, event) => personWorkHost.value?.open(person, event), () => Boolean(isConnected.value && auth.isSignedIn.value && room.value))
 watch(() => route.params.roomId, () => personWorkHost.value?.close(true), { flush: 'sync' })
@@ -404,6 +422,18 @@ const {
   showNextImage,
   showPreviousImage,
 } = useRoomImages(imageMessages)
+
+const activityUnreadRevision = ref(0)
+const stopActivityUnread = activityUnread.subscribe(() => { activityUnreadRevision.value += 1 })
+onUnmounted(stopActivityUnread)
+const activityUnreadCount = computed(() => { void activityUnreadRevision.value; return activityUnread.count(room.value?.identifier || '') })
+const activityReadable = computed(() => activeTab.value === 'events' && isConnected.value
+  && auth.isSignedIn.value && roomAccessState.value === 'authorized'
+  && !drawerOpen.value && !rulesBoardOpen.value && !askAgentOpen.value && !activeImageId.value
+  && !personWorkHost.value?.isOpen)
+function acknowledgeActivity(ids: readonly string[]) {
+  if (activityReadable.value && room.value) activityUnread.acknowledge(room.value.identifier, ids)
+}
 
 const matchCount = computed(() => roomTabPanelsRef.value?.matchCount ?? 0)
 
@@ -710,7 +740,7 @@ watch(
 }
 
 .room-shell[data-compact-viewport="true"] :deep(.chat-header) { min-height: 44px; padding-block: 0; }
-.room-shell[data-compact-viewport="true"] :deep(.chat-title p) { display: none; }
+.room-shell[data-compact-viewport="true"] :deep(.room-toolbar) { height: 44px; }
 .room-shell[data-compact-viewport="true"] :deep(.mobile-bottom-nav) { height: calc(48px + env(safe-area-inset-bottom, 0px)); }
 
 /* A landscape software keyboard can leave only 98px for the draft and send row. */

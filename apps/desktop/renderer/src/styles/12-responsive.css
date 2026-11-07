@@ -188,7 +188,6 @@
     flex: 1 1 100%;
   }
 
-  .desktop-room-header,
   .app-topbar,
   .surface-row {
     flex-direction: column;

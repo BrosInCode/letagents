@@ -19,6 +19,7 @@
         aria-label="Search agents"
         placeholder="Find an agent…"
       />
+      <slot name="toolbar-actions" />
     </div>
     <div class="agents-columns" aria-hidden="true">
       <span>Agent</span><span>Owner</span><span>Now</span><span />

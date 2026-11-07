@@ -1,16 +1,32 @@
 <template>
   <section class="rooms-directory" aria-label="Rooms">
-    <header class="rooms-heading">
-      <div>
-        <p class="rooms-parent">
-          <span aria-hidden="true">⌂</span> {{ parentLabel }}
-        </p>
-        <h2>Rooms</h2>
-        <p class="rooms-intro">
-          Give a task or topic its own conversation. Bring the outcome back
-          here.
-        </p>
+    <div class="rooms-toolbar">
+      <div class="rooms-filters" aria-label="Room status">
+        <button
+          type="button"
+          :aria-pressed="!showClosed"
+          @click="showClosed = false"
+        >
+          Open <span>{{ rooms.filter((room) => !room.closed).length }}</span>
+        </button>
+        <button
+          type="button"
+          :aria-pressed="showClosed"
+          @click="showClosed = true"
+        >
+          Closed <span>{{ rooms.filter((room) => room.closed).length }}</span>
+        </button>
       </div>
+      <label class="rooms-search"
+        ><svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="10.5" cy="10.5" r="6.5" />
+          <path d="m16 16 4 4" /></svg
+        ><input
+          v-model="query"
+          type="search"
+          aria-label="Search rooms"
+          placeholder="Search rooms…"
+      /></label>
       <div class="rooms-heading-actions">
         <button
           v-if="canRefresh"
@@ -36,7 +52,7 @@
           <span aria-hidden="true">+</span> New room
         </button>
       </div>
-    </header>
+    </div>
 
     <Transition name="rooms-reveal">
       <section
@@ -196,34 +212,6 @@
       </button>
     </div>
 
-    <div class="rooms-toolbar">
-      <div class="rooms-filters" aria-label="Room status">
-        <button
-          type="button"
-          :aria-pressed="!showClosed"
-          @click="showClosed = false"
-        >
-          Open <span>{{ rooms.filter((room) => !room.closed).length }}</span>
-        </button>
-        <button
-          type="button"
-          :aria-pressed="showClosed"
-          @click="showClosed = true"
-        >
-          Closed <span>{{ rooms.filter((room) => room.closed).length }}</span>
-        </button>
-      </div>
-      <label class="rooms-search"
-        ><svg viewBox="0 0 24 24" aria-hidden="true">
-          <circle cx="10.5" cy="10.5" r="6.5" />
-          <path d="m16 16 4 4" /></svg
-        ><input
-          v-model="query"
-          type="search"
-          aria-label="Search rooms"
-          placeholder="Search rooms…"
-      /></label>
-    </div>
     <div class="rooms-list-caption">
       <span>{{
         showClosed

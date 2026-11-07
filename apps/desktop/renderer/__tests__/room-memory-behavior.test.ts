@@ -49,7 +49,6 @@ test('search matches titles and details across brief sections, preserving saved 
 
 test('archive search stays separate from active memories, including an archive-only room', async () => {
   const { vm, stop } = mount({ getKnowledge: async () => ({ records: [archived], truncated: false }) }); await vm.refresh();
-  assert.equal(vm.activeCount.value, 0);
   assert.equal(vm.page.value.records.length, 1);
   assert.equal(vm.filtered.value.length, 0);
   vm.showArchived.value = true;

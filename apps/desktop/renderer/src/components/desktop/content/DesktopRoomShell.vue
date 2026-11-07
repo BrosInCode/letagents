@@ -209,6 +209,8 @@
         :linked-task-id="eventsTaskFilterId"
         :selected-event-id="eventsSelectedEventId"
         :loaded-older-without-matches="eventsLoadedOlderWithoutMatches"
+        :readable="activeTab === 'events' && !roomLoading && sourceStates?.githubEvents?.status !== 'error' && !actionPanelOpen && !rulesOpen && !addAgentModalOpen && !selectedAgentDetailTarget && !selectedReasoningSessionId && !personActions?.isOpen"
+        @presented="acknowledgeEvents"
         @refresh="refreshGitHubEvents"
         @load-older="loadOlderGitHubEvents"
         @install-github="installGitHubIntegration"
@@ -470,7 +472,7 @@ const {
   githubLoading, githubBusy, githubError, renameRoom, refreshGitHubIntegration,
   installGitHubIntegration, eventsPage, eventsLoading, eventsLoadingOlder, eventsError,
   eventsTaskFilterId, eventsSelectedEventId, eventsLoadedOlderWithoutMatches,
-  composerGitHubEventPreviews, githubRepository, openEventsTab, refreshGitHubEvents,
+  composerGitHubEventPreviews, acknowledgeEvents, githubRepository, openEventsTab, refreshGitHubEvents,
   loadOlderGitHubEvents, openEventsForTask, clearEventsTaskFilter, closeSelectedGitHubEvent,
   openGitHubEventFromChat, openGitHubUrlExternally, dismissComposerGitHubEventPreview,
 } = Object.assign(app, useRoomShellIntegrations(app));

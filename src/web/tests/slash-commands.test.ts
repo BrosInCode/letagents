@@ -7,13 +7,14 @@ import { createRenderer, createSSRApp, h, nextTick, reactive, ssrContextKey } fr
 import { renderToString } from '@vue/server-renderer';
 import { createServer, type ViteDevServer } from 'vite';
 
-let vite: ViteDevServer, Composer: any, Header: any, Panel: any, toasts: any;
+let vite: ViteDevServer, Composer: any, Header: any, MobileNav: any, Panel: any, toasts: any;
 const originals = { window: globalThis.window, document: globalThis.document, localStorage: globalThis.localStorage };
 before(async () => {
   Object.assign(globalThis, { window: new EventTarget(), document: new EventTarget(), localStorage: { getItem: () => null, setItem() {}, removeItem() {} } });
   vite = await createServer({ root: fileURLToPath(new URL('..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
   Composer = (await vite.ssrLoadModule('/src/components/room/Composer.vue')).default;
   Header = (await vite.ssrLoadModule('/src/components/room/RoomHeader.vue')).default;
+  MobileNav = (await vite.ssrLoadModule('/src/pages/room/RoomMobileNav.vue')).default;
   Panel = (await vite.ssrLoadModule('/src/components/room/composer/MentionPanel.vue')).default;
   toasts = (await vite.ssrLoadModule('/src/composables/useToast.ts')).useToast();
 });
@@ -289,57 +290,126 @@ test('room header exposes Find and Settings while keeping room navigation and re
   assert.doesNotMatch(html, /role="tab"|in this room|Open menu/);
 });
 
-test('room underline redirects from its visible position and skips keyboard and reduced motion', async t => {
+test('compact room header keeps readable navigation, neutral room totals, and an actionable Needs you count', async () => {
+  const props = { title: 'sky-lake', subtitle: 'Room: sky-lake', activeTab: 'events', connectionState: 'live',
+    searchQuery: '', matchCount: 0, showEventsTab: true, activityUnreadCount: 3, roomCount: 12, needsYouCount: 2, attentionPulse: true }
+  const html = await renderToString(createSSRApp({ render: () => h(Header, props) }))
+  assert.match(html, /<h2[^>]*>sky-lake<\/h2>/)
+  assert.match(html, /aria-label="Activity, 3 unread"/)
+  assert.match(html, /aria-label="Rooms, 12"/)
+  assert.match(html, /class="room-view-label" aria-hidden="true"[^>]*><span[^>]*>Activity<\/span>/)
+  assert.match(html, /Needs you/)
+  const clear = await renderToString(createSSRApp({ render: () => h(Header, { ...props, needsYouCount: 0 }) }))
+  assert.doesNotMatch(clear, /Needs you/)
+  const mobile = await renderToString(createSSRApp({ render: () => h(MobileNav, props) }))
+  assert.match(mobile, /aria-label="Activity, 3 unread"/)
+  assert.match(mobile, /aria-label="Rooms, 12"/)
+  assert.match(mobile, /aria-current="page"/)
+})
+
+test('room underline retargets its transition and snaps for keyboard and reduced motion', async t => {
+  const priorMatchMedia = window.matchMedia;
+  const motion = Object.assign(new EventTarget(), { matches: false });
+  window.matchMedia = (() => motion) as any;
+  t.after(() => { window.matchMedia = priorMatchMedia; });
   const { header, headerProps } = mount(t);
-  const calls: Array<{ frames: any[]; cancelled: boolean }> = [];
-  const visible = { left: 180, top: 62, width: 80 };
   const positions: Record<string, number> = { chat: 0, board: 160, rooms: 320 };
-  const indicator = {
-    style: {} as Record<string, string>,
-    getBoundingClientRect: () => visible,
-    animate(frames: any[]) {
-      const call = { frames, cancelled: false }; calls.push(call);
-      return { cancel() { call.cancelled = true; } };
-    },
-  };
+  const widths: Record<string, number> = { chat: 96, board: 80, rooms: 88 };
+  const indicator = { style: {} as Record<string, string> };
   header.indicatorElement.value = indicator;
-  header.tabsElement.value = {
-    scrollLeft: 0, scrollTop: 0,
-    getBoundingClientRect: () => ({ left: 20, top: 20 }),
-    querySelector: () => ({ offsetLeft: positions[headerProps.activeTab], offsetTop: 0, offsetWidth: 80, offsetHeight: 44 }),
-  };
+  header.tabsElement.value = Object.assign(new EventTarget(), {
+    querySelector: () => ({ offsetLeft: positions[headerProps.activeTab], offsetTop: 0, offsetWidth: widths[headerProps.activeTab], offsetHeight: 44 }),
+    querySelectorAll: () => [],
+  });
   headerProps.activeTab = 'board'; await nextTick();
   assert.equal(indicator.style.transform, 'translate(160px, 42px)');
-  assert.equal(calls.length, 0, 'initial placement is immediate');
+  assert.equal(indicator.style.width, '80px');
+  assert.equal(indicator.style.transition, 'none', 'initial placement is immediate');
+
   header.prepareTabChange({ detail: 1 }, 'rooms');
   headerProps.activeTab = 'rooms'; await nextTick();
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].frames[0].transform, 'translate(160px, 42px) scaleX(1)');
-  visible.left = 237; visible.width = 90;
+  assert.equal(indicator.style.transform, 'translate(320px, 42px)');
+  assert.equal(indicator.style.width, '88px');
+  const transition = indicator.style.transition;
+  assert.match(transition, /transform \d+ms/);
+  assert.match(transition, /width \d+ms/);
   header.prepareTabChange({ detail: 1 }, 'chat');
   headerProps.activeTab = 'chat'; await nextTick();
-  assert.equal(calls[0].cancelled, true);
-  assert.equal(calls[1].frames[0].transform, 'translate(217px, 42px) scaleX(1.125)', 'redirect from the rendered underline, not the last tab target');
+  assert.equal(indicator.style.transform, 'translate(0px, 42px)');
+  assert.equal(indicator.style.width, '96px');
+  assert.equal(indicator.style.transition, transition, 'rapid pointer changes retarget the existing CSS transition');
+
   header.prepareTabChange({ detail: 0 }, 'board');
   headerProps.activeTab = 'board'; await nextTick();
-  assert.equal(calls[1].cancelled, true);
-  assert.equal(calls.length, 2, 'keyboard changes snap');
+  assert.equal(indicator.style.transform, 'translate(160px, 42px)');
+  assert.equal(indicator.style.transition, 'none', 'keyboard changes snap');
+  header.prepareTabChange({ detail: 1 }, 'rooms');
+  headerProps.activeTab = 'rooms'; await nextTick();
+  assert.equal(indicator.style.transition, transition, 'pointer navigation restores motion');
 
-  const priorMatchMedia = window.matchMedia;
-  window.matchMedia = (() => ({ matches: true, addEventListener() {}, removeEventListener() {} })) as any;
-  t.after(() => { window.matchMedia = priorMatchMedia; });
-  const reduced = mount(t);
-  reduced.header.indicatorElement.value = indicator;
-  reduced.header.tabsElement.value = {
-    scrollLeft: 0, scrollTop: 0,
-    getBoundingClientRect: () => ({ left: 20, top: 20 }),
-    querySelector: () => ({ offsetLeft: positions[reduced.headerProps.activeTab], offsetTop: 0, offsetWidth: 80, offsetHeight: 44 }),
+  motion.matches = true; motion.dispatchEvent(new Event('change'));
+  assert.equal(indicator.style.transition, 'none', 'enabling reduced motion stops an in-flight transition');
+  header.prepareTabChange({ detail: 1 }, 'chat');
+  headerProps.activeTab = 'chat'; await nextTick();
+  assert.equal(indicator.style.transition, 'none', 'reduced motion remains immediate for pointer changes');
+  assert.equal(indicator.style.transform, 'translate(0px, 42px)');
+  assert.equal(indicator.style.width, '96px');
+});
+
+test('room navigation reveals selection, expanding labels, and resize without following inactive hover', async t => {
+  const originalObserver = globalThis.ResizeObserver, originalMatchMedia = window.matchMedia;
+  let resize!: (entries: Array<{ target: object }>) => void;
+  const observed = new Set<object>();
+  globalThis.ResizeObserver = class {
+    constructor(callback: typeof resize) { resize = callback; }
+    observe(element: object) { observed.add(element); }
+    unobserve(element: object) { observed.delete(element); }
+    disconnect() { observed.clear(); }
+  } as any;
+  const motion = Object.assign(new EventTarget(), { matches: false });
+  window.matchMedia = (() => motion) as any;
+  t.after(() => { globalThis.ResizeObserver = originalObserver; window.matchMedia = originalMatchMedia; });
+  const props = reactive({ title: 'Room', subtitle: '', activeTab: 'chat', connectionState: 'live', searchQuery: '', matchCount: 0 });
+  const buttons: Record<string, any> = {
+    chat: { offsetLeft: 0, offsetWidth: 60, offsetTop: 0, offsetHeight: 44 },
+    board: { offsetLeft: 140, offsetWidth: 44, offsetTop: 0, offsetHeight: 44 },
+    rooms: { offsetLeft: 300, offsetWidth: 100, offsetTop: 0, offsetHeight: 44 },
   };
-  reduced.headerProps.activeTab = 'board'; await nextTick();
-  reduced.header.prepareTabChange({ detail: 1 }, 'rooms');
-  reduced.headerProps.activeTab = 'rooms'; await nextTick();
-  assert.equal(calls.length, 2, 'reduced motion does not animate');
-  assert.equal(indicator.style.transform, 'translate(320px, 42px)');
+  const tabs = Object.assign(new EventTarget(), {
+    scrollLeft: 0, clientWidth: 180,
+    querySelector: () => buttons[props.activeTab],
+    querySelectorAll: () => Object.values(buttons),
+    scrollIntoView() { assert.fail('Room navigation must not scroll its ancestors'); },
+  });
+  const indicator = { style: {} as Record<string, string> };
+  let header: any;
+  const app = renderer.createApp({ setup() {
+    header = Header.setup(props, { expose() {}, emit() {} });
+    header.tabsElement.value = tabs;
+    header.indicatorElement.value = indicator;
+    return () => h('div');
+  } });
+  app.provide(ssrContextKey, { modules: new Set() });
+  app.mount({}); t.after(() => app.unmount());
+  assert.equal(tabs.scrollLeft, 0);
+  assert.ok(observed.has(tabs) && observed.has(buttons.board));
+
+  header.prepareTabChange({ detail: 1 }, 'board'); props.activeTab = 'board'; await nextTick();
+  assert.equal(tabs.scrollLeft, 4, 'a newly selected tab is revealed by the smallest necessary distance');
+  buttons.board.offsetWidth = 104; resize([{ target: buttons.board }]);
+  assert.equal(tabs.scrollLeft, 64, 'the active label stays visible as it expands');
+  buttons.board.offsetLeft = 192; resize([{ target: buttons.chat }]);
+  assert.equal(tabs.scrollLeft, 64, 'hovering an inactive preceding tab does not move the navigation');
+  tabs.clientWidth = 120; resize([{ target: tabs }]);
+  assert.equal(tabs.scrollLeft, 176, 'shrinking the navigation viewport reveals the active label');
+
+  header.prepareTabChange({ detail: 0 }, 'chat'); props.activeTab = 'chat'; await nextTick();
+  assert.equal(tabs.scrollLeft, 0, 'keyboard selection reveals the left edge immediately');
+  assert.equal(indicator.style.transition, 'none');
+  motion.matches = true; motion.dispatchEvent(new Event('change'));
+  header.prepareTabChange({ detail: 1 }, 'rooms'); props.activeTab = 'rooms'; await nextTick();
+  assert.equal(tabs.scrollLeft, 280, 'reduced motion still keeps the selected label visible');
+  assert.equal(indicator.style.transition, 'none');
 });
 
 test('composer plus menu supports arrows, Home/End and Escape without losing the draft', async t => {

@@ -1,5 +1,16 @@
-import { boardTaskPlanning, type BoardPlanningSnapshot, type BoardSprint } from '../../board-planning.mjs';
+import { boardTaskColumn, boardTaskPlanning, type BoardColumn, type BoardPlanningDocument, type BoardPlanningSnapshot, type BoardSprint } from '../../board-planning.mjs';
 import type { BoardTask } from './types';
+
+/** Column order is presentation only: retain existing cards when fallback mappings overlap. */
+export function replaceBoardColumns(document: BoardPlanningDocument, columns: BoardColumn[], tasks: readonly { id: string; status: string }[]): void {
+  const placements = tasks.map(task => ({ task, columnId: boardTaskColumn(document, task) }));
+  document.columns = columns;
+  for (const { task, columnId } of placements) {
+    if (columnId && columns.some(column => column.id === columnId) && boardTaskColumn(document, task) !== columnId) {
+      document.tasks[task.id] = { ...document.tasks[task.id], columnId };
+    }
+  }
+}
 
 export function sprintDates(sprint: BoardSprint): string {
   if (!sprint.startDate || !sprint.endDate) return 'Dates not set';
