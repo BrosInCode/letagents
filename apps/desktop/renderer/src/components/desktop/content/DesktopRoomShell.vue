@@ -2,6 +2,7 @@
   <section
     class="desktop-room-shell"
     :data-agent-inspector-open="Boolean(selectedAgentDetailTarget && !agentInspectorCompact)"
+    :data-join-request-banner="joinRequestBanner.length ? 'true' : undefined"
     data-testid="desktop-room-shell"
   >
     <DesktopRoomHeader
@@ -65,6 +66,19 @@
       @close-search="closeSearch"
       @close-action-panel="closeActionPanel"
     />
+
+    <!-- Requests to join, for room admins: in place above the chat, never over it. -->
+    <div v-if="joinRequestBanner.length" class="desktop-join-request-banner" data-testid="desktop-join-request-banner">
+      <JoinRequestBanner
+        :requests="joinRequestBanner"
+        :busy="joinRequestBusy"
+        :error="joinRequestError"
+        @approve="decideJoinRequest($event, 'approve')"
+        @decline="decideJoinRequest($event, 'decline')"
+        @dismiss="dismissJoinRequests"
+        @open-requests="openJoinRequests"
+      />
+    </div>
 
     <div
       v-if="showEnvironmentPanelWidget"
@@ -351,6 +365,7 @@ import RoomMemoryView from "./RoomMemoryView.vue";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
 import GitRoomEnvironmentPanel from "./room-shell/GitRoomEnvironmentPanel.vue";
+import JoinRequestBanner from "../../../../../../../shared/ui/JoinRequestBanner.vue";
 import type { DesktopRoomShellEmits, DesktopRoomShellProps } from "../../../composables/room-shell/props";
 import type { RoomShellContext } from "../../../composables/room-shell/context";
 import { useRoomShellState } from "../../../composables/room-shell/useRoomShellState";
@@ -364,6 +379,7 @@ import { useRoomShellConversation, useRoomShellIntegrations, useRoomShellNotific
 import { useRoomShellParticipants } from "../../../composables/room-shell/useRoomShellParticipants";
 import { useRoomShellRoomWatchers, useRoomShellAttention } from "../../../composables/room-shell/useRoomShellWatchers";
 import { useRoomShellLifecycle } from "../../../composables/room-shell/useRoomShellLifecycle";
+import { useRoomShellJoinRequests } from "../../../composables/room-shell/useRoomShellJoinRequests";
 const props = defineProps<DesktopRoomShellProps>();
 const emit = defineEmits<DesktopRoomShellEmits>();
 
@@ -463,6 +479,10 @@ const {
 Object.assign(app, useRoomShellRoomWatchers(app));
 
 Object.assign(app, useRoomShellAttention(app));
+
+const {
+  joinRequestBanner, joinRequestBusy, joinRequestError, decideJoinRequest, dismissJoinRequests, openJoinRequests,
+} = Object.assign(app, useRoomShellJoinRequests(app));
 
 Object.assign(app, useRoomShellLifecycle(app));
 

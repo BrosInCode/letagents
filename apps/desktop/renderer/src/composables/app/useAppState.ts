@@ -93,6 +93,8 @@ export function useAppState() {
   const openAddAgentAfterRepoPick = ref(false);
   const notificationRevealMessageId = ref<string | null>(null);
   const notificationRevealNonce = ref(0);
+  /** A join-request notification click: open this room's settings at one section once it loads. */
+  const roomSettingsSectionRequest = ref<{ roomIdentifier: string; section: string; nonce: number } | null>(null);
   const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
   const chatStorageAvailable = ref(true);
   const chatStorageBusy = ref(false);
@@ -152,7 +154,7 @@ export function useAppState() {
     settingsAccountRooms, sidebarMetadataRefresh, rentalRequestCount, inboxRentals,
     inboxRentalError, messagesUnread, openConversationId, openConversationNonce, inboxSection,
     attentionIntent, rentMarketplaceRole, openAddAgentAfterRepoPick, notificationRevealMessageId,
-    notificationRevealNonce, chatStorageSettings, chatStorageAvailable, chatStorageBusy,
+    notificationRevealNonce, roomSettingsSectionRequest, chatStorageSettings, chatStorageAvailable, chatStorageBusy,
     chatStorageFeedback, appAgentSettingsStatus, appAgentActions, appAgentBusy, appAgentResult,
     appAgentFeedback, diagnostics, mcpInstallState, selectedMcpTargetIds, mcpInstallBusy,
     mcpInstallFeedback, setupLoadError, mcpWizardStep, firstRunStage,

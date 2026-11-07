@@ -15,6 +15,7 @@ import {
   type RoomMember,
   type RoomMemberList,
 } from '../../../composables/room/membership'
+import { publishJoinRequestDecided } from '../../../composables/roomJoinRequestDecided'
 
 /**
  * Members and pending requests of the room shown in the drawer. The lists load
@@ -135,6 +136,8 @@ export function useRoomMembers(room: Readonly<Ref<RoomInfo | null>>, viewerAccou
     if (busyKey.value) return false
     const done = await act(`${decision}:${request.id}`, id => decideRoomJoinRequest(id, request.id, decision).then(() => undefined),
       decision === 'approve' ? 'Could not approve the request.' : 'Could not decline the request.')
+    // The banner at the top of the room drops the request too.
+    if (done) publishJoinRequestDecided(request.id)
     // Reload after a failure too: another admin may have answered the request first.
     await load()
     return done

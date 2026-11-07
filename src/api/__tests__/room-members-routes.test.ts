@@ -10,6 +10,8 @@ import {
 } from '../../../shared/room-membership.mjs';
 process.env.DB_URL ??= 'postgresql://test:test@127.0.0.1:1/test';
 const { registerRoomMemberRoutes } = await import('../routes/rooms/members.js');
+const { ROOM_JOIN_REQUEST_CHANGED, roomJoinRequestEvents } = await import('../rooms/join-request-events.js');
+const { ROOM_MEMBER_ROLE_CHANGED, roomMemberRoleEvents } = await import('../rooms/membership-events.js');
 
 type Auth = 'session' | 'owner_token' | 'agent_session' | 'supervisor_grant' | null;
 
@@ -85,6 +87,11 @@ function harness(options: { roles?: Record<string, RoomMemberRole>; participantD
       listRoomJoinRequests: async () => [],
       listPendingJoinRequestsForAdmin: async () => [],
       cancelRoomJoinRequest: async () => ({ kind: 'not_found' }),
+      getRoomJoinRequest: async (roomId: string, requestId: string) => ({
+        id: requestId, room_id: roomId, account_id: 'asker', login: 'asker', display_name: 'Asker Person', avatar_url: null,
+        state: 'pending', created_at: 'now', decided_at: null, retry_after: null, decided_by_login: null,
+      }),
+      listFocusRoomIds: async (roomId: string) => (roomId === 'ops-lounge' ? ['focus_7'] : []),
     } as any,
   });
 
@@ -249,4 +256,45 @@ test('join requests have a per-account rate limit', async () => {
   }
   assert.equal(last, 429);
   assert.equal((await request('post', '/rooms/ops-lounge/join-requests', { account: 'calm' })).status, 201);
+});
+
+test('a new request and a decision are announced to the room and its focus rooms, with the requester', async () => {
+  const { request } = harness({ roles: { admin: 'admin' } });
+  const announced: any[] = [];
+  const listener = (payload: unknown) => announced.push(payload);
+  roomJoinRequestEvents.on(ROOM_JOIN_REQUEST_CHANGED, listener);
+  try {
+    const created = await request('post', '/rooms/ops-lounge/join-requests', { account: 'asker' });
+    assert.equal(created.status, 201);
+    assert.deepEqual(announced.map((event) => event.projectId), ['ops-lounge', 'focus_7'], 'one event per room under the access room');
+    assert.equal(announced[0].accessRoomId, 'ops-lounge');
+    assert.equal(announced[0].roomDisplayName, 'Team room');
+    assert.equal(announced[0].request.login, 'asker');
+    assert.equal(announced[0].request.display_name, 'Asker Person');
+    assert.equal(announced[0].request.state, 'pending');
+    announced.length = 0;
+    const approved = await request('post', '/rooms/ops-lounge/join-requests/rjr_1/approve');
+    assert.equal(approved.status, 200);
+    assert.equal(announced.length, 2, 'the decision is announced the same way');
+    assert.equal(announced[0].request.id, 'rjr_1');
+  } finally {
+    roomJoinRequestEvents.off(ROOM_JOIN_REQUEST_CHANGED, listener);
+  }
+});
+
+test('a role change is announced so an open stream learns what it may now show', async () => {
+  const { request } = harness({ roles: { admin: 'admin', member: 'member' } });
+  const announced: any[] = [];
+  const listener = (payload: unknown) => announced.push(payload);
+  roomMemberRoleEvents.on(ROOM_MEMBER_ROLE_CHANGED, listener);
+  try {
+    const refused = await request('put', '/rooms/ops-lounge/members/other/role', { account: 'member', body: { role: 'admin' } });
+    assert.equal(refused.status, 403);
+    assert.equal(announced.length, 0, 'a refused change announces nothing');
+    const promoted = await request('put', '/rooms/focus_7/members/member/role', { body: { role: 'admin' } });
+    assert.equal(promoted.status, 200);
+    assert.deepEqual(announced, [{ roomId: 'ops-lounge', accountId: 'member', role: 'admin' }], 'the access room, not the focus room');
+  } finally {
+    roomMemberRoleEvents.off(ROOM_MEMBER_ROLE_CHANGED, listener);
+  }
 });

@@ -19,9 +19,13 @@ export function isRoomEventVisibleToSubscriber(input: {
     agent_session_id?: string | null;
   } | null;
   messageOnly?: boolean;
+  /** Whether this subscriber is an admin of the room right now; absent means never. */
+  roomAdmin?: () => boolean;
 }): boolean {
   const { event } = input;
   if (input.messageOnly && event.kind !== "message_created" && event.kind !== "message_routed") return false;
+  // A join request names the person who asked: for the room's admins only.
+  if (event.kind === "join_request_changed") return Boolean(input.roomAdmin?.());
   if (event.kind === "message_routed") {
     if (isPromptOnlyAgentMessage(event.message.text, event.message.agent_prompt_kind)) return false;
     // A reply-turn wake concerns only the released agents' workers. Nobody

@@ -831,6 +831,16 @@ export type DesktopRoomStreamEvent =
       resource: "agent_work" | "wake_rules" | "message_reactions" | "message_pins";
     }
   | {
+      /**
+       * Someone asked to join a members-only room this account administers, or
+       * the request was answered. From the room stream of an open room, or from
+       * the account activity stream for any of the account's rooms.
+       */
+      type: "join_request";
+      roomIdentifier: string;
+      event: import("../../../../shared/room-join-requests.mjs").RoomJoinRequestEvent;
+    }
+  | {
       type: "rental_activity";
       roomIdentifier: string;
       activity: DesktopRentalActivityEvent;

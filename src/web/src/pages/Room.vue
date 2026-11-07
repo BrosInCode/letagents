@@ -39,6 +39,18 @@
       @rename="handleRename"
     />
 
+    <!-- Requests to join, for room admins: in place, never over the chat. -->
+    <JoinRequestBanner
+      v-if="isConnected && room?.role === 'admin' && joinRequestBanner.length"
+      :requests="joinRequestBanner"
+      :busy="joinRequestAlerts.busy.value"
+      :error="joinRequestAlerts.error.value"
+      @approve="joinRequestAlerts.decide($event, 'approve')"
+      @decline="joinRequestAlerts.decide($event, 'decline')"
+      @dismiss="joinRequestAlerts.dismiss()"
+      @open-requests="drawerOpen = true"
+    />
+
     <RoomRulesBoard
       v-if="rulesBoardAvailable"
       :open="rulesBoardOpen"
@@ -207,6 +219,8 @@ import { provideRoomMessageLinkPreviews, useRoomMessageLinkPreviews } from '@/co
 import { provideRoomMessagePins, useRoomMessagePins } from '@/composables/roomMessagePins'
 import { provideRoomMessageReactions, useRoomMessageReactions } from '@/composables/roomMessageReactions'
 import RoomHeader from '@/components/room/RoomHeader.vue'
+import JoinRequestBanner from '../../../../shared/ui/JoinRequestBanner.vue'
+import { joinRequestAlerts } from '@/composables/roomJoinRequestAlerts'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
 import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
@@ -320,6 +334,16 @@ const roomAccessState = computed(() => resolveRoomAccessState({
 }))
 
 const drawerOpen = ref(false)
+// The banner follows the open room; an admin's page reads the requests already waiting.
+const joinRequestBanner = joinRequestAlerts.visible
+watch(
+  () => [isConnected.value ? room.value?.identifier || null : null, room.value?.role === 'admin'] as const,
+  ([roomIdentifier, admin]) => {
+    joinRequestAlerts.setRoom(roomIdentifier)
+    if (roomIdentifier && admin) void joinRequestAlerts.load()
+  },
+  { immediate: true },
+)
 const rulesBoardOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const { roomViewportStyle, compactViewport, keyboardOpen, compactComposer, hideMainComposer, syncRoomViewport, resetComposerFocus } = useRoomViewport()

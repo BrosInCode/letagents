@@ -1,6 +1,7 @@
 import { onBeforeUnmount, onMounted } from "vue";
 import { ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS } from "../../domain/account-activity";
 import { desktopIpc } from "../../ipc/index.js";
+import { roomJoinRequests } from "../useRoomJoinRequests";
 import type { AppContextOf } from "./context";
 
 /** Mount and unmount: IPC subscriptions, intervals, window listeners, and initial loads. */
@@ -53,8 +54,10 @@ export function useAppLifecycle(context: unknown) {
     unsubscribeUpdateStatus = desktopIpc.updates?.onStatusChanged?.((status) => {
       updateStatus.value = status;
     }) || null;
-    unsubscribeNotificationReceived = desktopIpc.notifications?.onReceived?.(() => {
+    unsubscribeNotificationReceived = desktopIpc.notifications?.onReceived?.((target) => {
       void refreshSidebarRoomMetadata();
+      // A request to join arrived as a native alert: the Inbox and the banners read the list again.
+      if (target.joinRequestId) void roomJoinRequests.refresh();
     }) || null;
     unsubscribeNotificationActivation = desktopIpc.notifications?.onActivated?.((target) => {
       void handleNotificationActivation(target);

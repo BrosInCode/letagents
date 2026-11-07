@@ -26,6 +26,7 @@ export function useAppSessionActions(context: unknown) {
     | "useAppAuthFlow"
     | "useAppInboxActions"
     | "useAppInboxState"
+    | "useAppJoinRequestAlerts"
     | "useAppNavigation"
     | "useAppProjectRepo"
     | "useAppRentalActions"
@@ -160,6 +161,11 @@ export function useAppSessionActions(context: unknown) {
       return;
     }
     if (["open", "github_event", "artifact_update"].includes(event.type)) invalidateRoomMessageLinkPreviews(event.roomIdentifier);
+    if (event.type === "join_request") {
+      // A request to join a room this account administers: the banner, the Inbox and the alerts read the store.
+      roomJoinRequests.receive(event.event);
+      return;
+    }
     if (event.type === "resource_invalidation") {
       if (event.resource === "wake_rules") invalidateRoomWakeRules(event.roomIdentifier);
       else if (event.resource === "message_pins") invalidateRoomMessagePins(event.roomIdentifier);
@@ -220,6 +226,11 @@ export function useAppSessionActions(context: unknown) {
     try {
       if (target.conversationId) { app.openMessages(target.conversationId); return; }
       if (!target.roomIdentifier) return;
+      if (target.joinRequestId !== undefined) {
+        // A request to join: the room's settings open at Members, where Approve and Decline are.
+        await app.openJoinRequestSettings(target.roomIdentifier);
+        return;
+      }
       await app.openRoomFromAppAgent(target.roomIdentifier);
       notificationRevealMessageId.value = target.messageId;
       notificationRevealNonce.value += 1;

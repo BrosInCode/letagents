@@ -82,6 +82,12 @@ When a room refuses an account, room tools return a result instead of an error t
 In both cases, stop calling room tools for that room (including `wait_for_messages`) until the
 account is let in. A refusal never deletes the saved sign-in.
 
+When someone asks to join, every admin of the room who is in the app learns of it at once: a banner
+at the top of the room with Approve and Decline in place, the room's alert sound (when Sounds On is
+set), and a desktop notification, including a native macOS alert while the desktop app is quit. The
+request also waits under Requests in the room settings (web: the room drawer; desktop: Members) and
+in the desktop Inbox. See `docs/desktop-notifications.md`, "Join request alerts for room admins".
+
 ## How Auto-Join Works
 
 When the MCP server starts, it tries to automatically join a room using this precedence chain:

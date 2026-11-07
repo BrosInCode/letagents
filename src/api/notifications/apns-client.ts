@@ -7,6 +7,8 @@ export type ApnsEnvironment = "production" | "sandbox";
 export interface ApnsNotificationInput {
   notificationId: string;
   reminder?: boolean;
+  /** Set for a request to join a room: the alert names the room and the person who asked. */
+  joinRequestId?: string | null;
   deviceToken: string;
   environment: ApnsEnvironment;
   roomId: string | null;
@@ -74,6 +76,24 @@ function truncateUtf8(value: string, maxBytes: number): string {
 }
 
 export function buildApnsPayload(input: ApnsNotificationInput): Record<string, unknown> {
+  if (input.joinRequestId) {
+    const requester = truncateUtf8(input.sender, 200) || "Someone";
+    return {
+      aps: {
+        alert: {
+          title: `Join request in ${truncateUtf8(input.roomDisplayName, 120) || "a room"}`,
+          body: `${requester} wants to join`,
+        },
+        sound: "default",
+        "thread-id": input.roomId,
+      },
+      letagents: {
+        notification_id: input.notificationId,
+        room_id: input.roomId,
+        join_request_id: input.joinRequestId,
+      },
+    };
+  }
   const sender = input.sender.split("|")[0]?.trim() || "LetAgents";
   return {
     aps: {

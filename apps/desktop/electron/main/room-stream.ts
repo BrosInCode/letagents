@@ -1,4 +1,5 @@
 import { ROOM_TYPING, parseTypingSignal } from "../../../../shared/room-typing.mjs";
+import { ROOM_JOIN_REQUEST_EVENT, parseRoomJoinRequestEvent } from "../../../../shared/room-join-requests.mjs";
 import { roomAccessRefusal } from "../../../../shared/room-membership.mjs";
 import type {
   DesktopRentalActivityEvent,
@@ -700,6 +701,21 @@ function handleRoomStreamFrame(
         console.warn(`Execution delegation invalidation failed: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
+    return;
+  }
+
+  if (eventName === ROOM_JOIN_REQUEST_EVENT) {
+    // The server sends this to room admins only; it carries the request itself.
+    const parsed = parseRoomJoinRequestEvent(payload);
+    const canonical = activeRoomStream?.roomIdentifier === roomIdentifier
+      ? activeRoomStream.canonicalRoomIdentifier ?? roomIdentifier
+      : roomIdentifier;
+    if (!parsed || parsed.room_id !== canonical) {
+      repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+      return;
+    }
+    stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
+    emitRoomStreamEvent({ type: "join_request", roomIdentifier: eventRoomIdentifier, event: parsed });
     return;
   }
 

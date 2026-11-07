@@ -15,6 +15,7 @@ import type { useRoomShellConversation, useRoomShellIntegrations, useRoomShellNo
 import type { useRoomShellParticipants } from "./useRoomShellParticipants";
 import type { useRoomShellRoomWatchers, useRoomShellAttention } from "./useRoomShellWatchers";
 import type { useRoomShellLifecycle } from "./useRoomShellLifecycle";
+import type { useRoomShellJoinRequests } from "./useRoomShellJoinRequests";
 
 /** What each part of the context holds, by composable name. */
 interface RoomShellContextParts {
@@ -39,6 +40,7 @@ interface RoomShellContextParts {
   useRoomShellNotifications: ReturnType<typeof useRoomShellNotifications>;
   useRoomShellInspectorWatchers: ReturnType<typeof useRoomShellInspectorWatchers>;
   useRoomShellInspectorObservations: ReturnType<typeof useRoomShellInspectorObservations>;
+  useRoomShellJoinRequests: ReturnType<typeof useRoomShellJoinRequests>;
 }
 
 type UnionToIntersection<U> = (U extends unknown ? (part: U) => void : never) extends (part: infer I) => void ? I : never;

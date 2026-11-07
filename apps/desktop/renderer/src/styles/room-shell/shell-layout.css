@@ -36,6 +36,22 @@
   min-height: 0;
 }
 
+/* A request to join takes one row of its own above the content, never a layer over it. */
+.desktop-room-shell[data-join-request-banner="true"] {
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+}
+
+.desktop-room-shell > .desktop-join-request-banner {
+  grid-column: 1;
+  grid-row: 3;
+  min-width: 0;
+}
+
+.desktop-room-shell[data-join-request-banner="true"] > .room-tab-page,
+.desktop-room-shell[data-join-request-banner="true"] > .desktop-room-environment-popover {
+  grid-row: 4;
+}
+
 .desktop-room-header {
   position: relative;
   z-index: 30;

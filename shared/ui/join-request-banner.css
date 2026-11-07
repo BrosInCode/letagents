@@ -1,0 +1,129 @@
+/*
+ * A request to join sits at the top of the room as a quiet card: it is easy to
+ * see, it never covers the chat, and it leaves when the admin answers or
+ * closes it. Motion is one short slide, and none when the person asks for less.
+ */
+.join-request-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 12px 0;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--blue) 35%, var(--border-strong));
+  border-radius: var(--radius-md, 10px);
+  background: color-mix(in srgb, var(--blue) 9%, var(--bg-elevated));
+  color: var(--text);
+  box-shadow: var(--shadow-sm, 0 1px 2px rgba(0, 0, 0, 0.08));
+}
+.join-request-banner-count {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--blue) 18%, var(--bg-elevated));
+  color: var(--text);
+  font-size: 0.85rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.join-request-banner-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+.join-request-banner-copy strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+.join-request-banner-copy small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+}
+.join-request-banner-copy .join-request-banner-error {
+  color: var(--red-text, #ef4444);
+  white-space: normal;
+}
+.join-request-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.join-request-banner-button {
+  min-height: 32px;
+  padding: 4px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.join-request-banner-button[data-variant="primary"] {
+  border-color: color-mix(in srgb, var(--blue) 55%, var(--border-strong));
+  background: color-mix(in srgb, var(--blue) 16%, var(--bg-elevated));
+}
+.join-request-banner-button:hover:not(:disabled) {
+  background: var(--accent-hover, color-mix(in srgb, var(--text) 8%, var(--bg-elevated)));
+}
+.join-request-banner-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+.join-request-banner-close {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  margin-left: 2px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 1.1rem;
+  line-height: 1;
+}
+.join-request-banner-close:hover {
+  background: var(--accent-hover, color-mix(in srgb, var(--text) 8%, transparent));
+  color: var(--text);
+}
+.join-request-banner-button:focus-visible,
+.join-request-banner-close:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+@media (pointer: coarse) {
+  .join-request-banner-button { min-height: 40px; }
+  .join-request-banner-close { width: 40px; height: 40px; }
+}
+@media (max-width: 560px) {
+  .join-request-banner { grid-template-columns: auto minmax(0, 1fr); }
+  .join-request-banner-actions { grid-column: 1 / -1; justify-content: flex-end; }
+}
+
+.join-request-banner-enter-active,
+.join-request-banner-leave-active {
+  transition: opacity 180ms var(--ease-out, ease-out), transform 180ms var(--ease-out, ease-out);
+}
+.join-request-banner-enter-from,
+.join-request-banner-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+@media (prefers-reduced-motion: reduce) {
+  .join-request-banner-enter-active,
+  .join-request-banner-leave-active {
+    transition: none;
+  }
+}

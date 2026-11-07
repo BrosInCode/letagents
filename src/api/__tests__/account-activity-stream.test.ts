@@ -12,10 +12,12 @@ import type { WorkingPresence } from '../account-activity/hub.js';
 type Auth = 'session' | 'owner_token' | 'agent_session' | null;
 
 /** A real HTTP server with the stream route, a fake account, and rooms it is a member of. */
-async function server(options: { auth?: Auth; roomsFail?: boolean } = {}) {
+async function server(options: { auth?: Auth; roomsFail?: boolean; admin?: boolean } = {}) {
   const working = new Map<string, string[]>();
   const presence = new EventEmitter();
   const messages = new EventEmitter();
+  const joinRequestEvents = new EventEmitter();
+  const adminChecks: string[] = [];
   const hub = new AccountActivityHub({
     async loadWorking(roomIds) {
       const result = new Map<string, WorkingPresence>();
@@ -37,6 +39,8 @@ async function server(options: { auth?: Auth; roomsFail?: boolean } = {}) {
   });
   registerAccountActivityStreamRoute(app, {
     hub,
+    joinRequestEvents,
+    isRoomAdmin: async (accountId, roomId) => { adminChecks.push(`${accountId}:${roomId}`); return options.admin ?? false; },
     getAccountRoomsForAccount: (async (accountId: string) => {
       listedFor.push(accountId);
       if (options.roomsFail) throw new Error('database unavailable');
@@ -50,9 +54,17 @@ async function server(options: { auth?: Auth; roomsFail?: boolean } = {}) {
   await new Promise(resolve => http.once('listening', resolve));
   const base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
   return {
-    base, hub, presence, working, listedFor,
+    base, hub, presence, working, listedFor, joinRequestEvents, adminChecks,
     async close() { hub.close(); await new Promise(resolve => http.close(resolve)); },
   };
+}
+
+const joinRequest = {
+  id: 'rjr_1', room_id: 'invite-room', account_id: 'acct-ask', login: 'asker', display_name: 'Asker', avatar_url: null,
+  state: 'pending', created_at: '2026-11-07T00:00:00.000Z', decided_at: null, retry_after: null, decided_by_login: null,
+};
+function emitJoinRequest(s: Awaited<ReturnType<typeof server>>, projectId = 'invite-room', accessRoomId = 'invite-room') {
+  s.joinRequestEvents.emit('join_request:changed', { projectId, accessRoomId, roomDisplayName: 'Invite room', request: joinRequest });
 }
 
 /** Reads server-sent events until `count` have arrived. */
@@ -157,4 +169,43 @@ test('closing the stream stops watching its rooms', async () => {
     for (let i = 0; i < 20 && s.hub.watches('invite-room'); i++) await new Promise(resolve => setTimeout(resolve, 25));
     assert.equal(s.hub.watches('invite-room'), false);
   } finally { await s.close(); }
+});
+
+test('a request to join one of the rooms reaches an admin, with the requester and the room name', async () => {
+  const s = await server({ admin: true });
+  try {
+    const response = await fetch(`${s.base}/account/activity/stream`);
+    const reading = readEvents(response, 2);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    // Published on the access room and on its focus room: the account stream sends it once.
+    emitJoinRequest(s, 'focus_9', 'invite-room');
+    emitJoinRequest(s);
+    const [, frame] = await reading;
+    assert.equal(frame.event, 'join_request');
+    assert.deepEqual(frame.data, {
+      room_id: 'invite-room', access_room_id: 'invite-room',
+      request: { ...joinRequest, room_display_name: 'Invite room' },
+    });
+    assert.deepEqual(s.adminChecks, ['acct-1:invite-room'], 'the role is checked once per request, for the access room');
+  } finally { await s.close(); }
+});
+
+test('a member who is not an admin, an owner token, and a room the account is not in get no join request', async () => {
+  for (const [options, label] of [[{ admin: false }, 'member'], [{ admin: true, auth: 'owner_token' as const }, 'owner token']] as const) {
+    const s = await server(options);
+    try {
+      const response = await fetch(`${s.base}/account/activity/stream`);
+      const reading = readEvents(response, 2);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      emitJoinRequest(s);
+      emitJoinRequest(s, 'someone-elses-room', 'someone-elses-room');
+      await new Promise(resolve => setTimeout(resolve, 100));
+      s.working.set('invite-room', ['CedarRidge']);
+      s.presence.emit(PRESENCE_CHANGED, 'invite-room');
+      const events = await reading;
+      assert.deepEqual(events.map(e => e.event), ['snapshot', 'room'], `${label}: no join_request frame`);
+      if (label === 'owner token') assert.deepEqual(s.adminChecks, [], 'an owner token is never even checked');
+      else assert.deepEqual(s.adminChecks, ['acct-1:invite-room'], 'a room the account is not in is never checked');
+    } finally { await s.close(); }
+  }
 });

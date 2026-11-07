@@ -10,6 +10,11 @@ import {
   type RoomMemberRole,
   type RoomMemberSource,
 } from '../../../shared/room-membership.mjs';
+import {
+  enqueueJoinRequestPushes,
+  retireJoinRequestPushes,
+  retireJoinRequestPushesForAccount,
+} from '../notifications/join-request-pushes.js';
 import { pool } from './client.js';
 
 // Every function takes the ACCESS room: the room itself, or the parent of a
@@ -216,6 +221,19 @@ async function countRoomAdmins(client: Queryable, roomId: string): Promise<numbe
 // parent's, so an admin who stepped down or left keeps no admin anywhere below.
 const FOCUS_ROOMS_OF = `SELECT id FROM rooms WHERE parent_room_id = $1 AND kind = 'focus'`;
 
+/** The focus rooms under a top-level room; a join-request event is published on each of them too. */
+export async function listFocusRoomIds(roomId: string): Promise<string[]> {
+  const result = await pool.query<{ id: string }>(`${FOCUS_ROOMS_OF} ORDER BY id LIMIT 500`, [roomId]);
+  return result.rows.map((row) => row.id);
+}
+
+/** The admins of a top-level room: the people a join request is for. */
+export async function listRoomAdminAccountIds(roomId: string): Promise<string[]> {
+  const result = await pool.query<{ account_id: string }>(
+    'SELECT account_id FROM project_admins WHERE project_id = $1 ORDER BY assigned_at, account_id LIMIT 1000', [roomId]);
+  return result.rows.map((row) => row.account_id);
+}
+
 export type RoomMemberChange =
   | { kind: 'changed' }
   | { kind: 'forbidden' }
@@ -291,6 +309,7 @@ export async function removeRoomMember(roomId: string, accountId: string, actorA
     [roomId, accountId, actorAccountId]);
     await client.query(`UPDATE room_join_requests SET state = 'cancelled', decided_at = now()
       WHERE room_id = $1 AND account_id = $2 AND state = 'pending'`, [roomId, accountId]);
+    await retireJoinRequestPushesForAccount(client, roomId, accountId);
     // The person's ticket filters stop bringing their tracker's tickets into
     // the room as cards. They stay, switched off, for an admin to see.
     await client.query(`UPDATE room_tracker_filters SET enabled = false
@@ -360,6 +379,8 @@ export async function createRoomJoinRequest(roomId: string, accountId: string): 
     const id = `rjr_${crypto.randomUUID().replace(/-/g, '')}`;
     const inserted = await client.query<StoredJoinRequest>(`INSERT INTO room_join_requests (id, room_id, account_id)
       VALUES ($1, $2, $3) RETURNING ${JOIN_REQUEST_COLUMNS}`, [id, roomId, accountId]);
+    // The admins' desktops learn of it even while the app is quit.
+    await enqueueJoinRequestPushes(client, { roomId, requestId: id, requesterAccountId: accountId });
     return { kind: 'created', join_request: toJoinRequestSummary(inserted.rows[0]!) };
   });
 }
@@ -429,6 +450,7 @@ export async function decideRoomJoinRequest(input: {
     if (row.state !== 'pending') return row.state === input.decision ? 'decided' as const : 'not_pending' as const;
     await client.query(`UPDATE room_join_requests SET state = $3, decided_by = $4, decided_at = now()
       WHERE room_id = $1 AND id = $2`, [input.roomId, input.requestId, input.decision, input.deciderAccountId]);
+    await retireJoinRequestPushes(client, input.requestId, `Join request ${input.decision}`);
     if (input.decision === 'approved') {
       await addRoomMember({
         roomId: input.roomId,
@@ -462,6 +484,7 @@ export async function cancelRoomJoinRequest(roomId: string, requestId: string, a
     if (row.state !== 'pending') return { kind: 'not_pending', join_request: toJoinRequestSummary(row) };
     const updated = await client.query<StoredJoinRequest>(`UPDATE room_join_requests SET state = 'cancelled', decided_at = now()
       WHERE room_id = $1 AND id = $2 RETURNING ${JOIN_REQUEST_COLUMNS}`, [roomId, requestId]);
+    await retireJoinRequestPushes(client, requestId, 'Join request cancelled');
     return { kind: 'cancelled', join_request: toJoinRequestSummary(updated.rows[0]!) };
   });
 }

@@ -222,6 +222,7 @@ import {
   setRoomEventBridgeInterestPredicate,
 } from "./event-bridge.js";
 import { messageInfoEvents } from "./message-info-events.js";
+import { roomJoinRequestEvents } from "../rooms/join-request-events.js";
 import { createRoomEventBroker, type RoomEventBroker } from "./room-event-broker.js";
 import {
   createRoomMessageOverlayBatcher,
@@ -265,6 +266,7 @@ function getRoomEventBroker(): RoomEventBroker {
     wakeRuleEvents,
     messageReactionEvents,
     messagePinEvents,
+    joinRequestEvents: roomJoinRequestEvents,
     rentalActivityEvents,
     messageInfoEvents,
     bridgeLossEvents: roomEventBridgeLossEvents,

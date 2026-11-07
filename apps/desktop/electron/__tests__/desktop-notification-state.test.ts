@@ -14,7 +14,8 @@ import {
 } from "../main/notification-state.js";
 import { assertOwnerPrivateFile } from "./harness.js";
 
-function target(index: number): DesktopNotificationTarget {
+/** A message target; a join-request target has no messageId to replace. */
+function target(index: number): Extract<DesktopNotificationTarget, { messageId: string; roomIdentifier: string }> {
   return {
     notificationId: `notification-${index}`,
     roomIdentifier: "git-room:example",

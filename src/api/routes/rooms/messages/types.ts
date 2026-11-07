@@ -25,6 +25,11 @@ export interface RoomMessageRouteDeps {
     req: AuthenticatedRequest,
     project: Project,
   ): Promise<boolean>;
+  /** Whether the stream's account is an admin of the room (join requests are for admins only). */
+  resolveRoomStreamAdmin?(
+    req: AuthenticatedRequest,
+    project: Project,
+  ): Promise<boolean>;
   getMessageStreamCheckpoint?(
     roomId: string,
     options: {

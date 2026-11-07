@@ -57,6 +57,8 @@ export interface DesktopRoomShellProps {
   openAddAgentRequested?: boolean;
   notificationRevealMessageId?: string | null;
   notificationRevealNonce?: number;
+  /** Open the room settings at this section once the room has loaded (a join-request notification click). */
+  settingsSectionRequest?: { roomIdentifier: string; section: string; nonce: number } | null;
   attentionIntent?: AttentionNavigationIntent | null;
   attention?: { count: number; pulse: boolean };
   initialChatScrollPosition?: ChatScrollPosition | null;
