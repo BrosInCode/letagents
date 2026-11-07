@@ -1,3 +1,4 @@
+import { activityUnread } from '../../../../../shared/ui/activity/unread';
 import { computed, getCurrentScope, onScopeDispose, ref, toRaw, watch, type ComputedRef, type Ref } from "vue";
 import type {
   DesktopAccountRoomEntry,
@@ -98,6 +99,13 @@ interface PendingDeliveryRepairState {
 }
 
 export function useDesktopAppData(options: DesktopAppDataOptions) {
+  watch([
+    () => options.authStatus.value?.authenticated ? options.authStatus.value.account?.id : null,
+    () => options.authStatus.value?.apiUrl,
+    () => options.sessionGeneration.value,
+  ], ([account, apiUrl, generation]) => {
+    activityUnread.setScope(account ? JSON.stringify([apiUrl, account, generation]) : null);
+  }, { immediate: true, flush: "sync" });
   let selectedSnapshotRequestId = 0;
   const selectedSnapshotLoading = ref(false);
   const cachedSelectedSnapshots = new Map<string, DesktopRoomSnapshot>();
@@ -106,6 +114,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   let streamReconcileGeneration = 0;
   let streamReconcileRoom: string | null = null;
   let activeStreamRoom: string | null = null;
+  let activeActivityScope: string | null = null;
   let activeStreamToken = 0;
   let bufferedStreamEvents: DesktopRoomStreamEvent[] = [];
   let bufferedStreamEventBytes = 0;
@@ -480,7 +489,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
     if (options.activeEntry.value.type !== "room") {
       if (requestId === selectedSnapshotRequestId) {
-        setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot));
+        setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot), { activitySnapshot: true });
         selectedSnapshotLoading.value = false;
       }
       return;
@@ -506,7 +515,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
           ? preserveRoomRepoStatistics(options.repoStatus.value, nextRepoStatus)
           : nextRepoStatus;
         options.rootRoomSnapshot.value = nextRootSnapshot;
-        setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextRootSnapshot), { cache: false });
+        setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextRootSnapshot), { cache: false, activitySnapshot: true });
         options.selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
         options.rememberRootRoomSnapshot(nextRootSnapshot, {
           aliasIdentifiers: [roomIdentifier, openedContext.openedRoom?.roomIdentifier],
@@ -522,7 +531,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
     if (!roomIdentifier || roomIdentifier === baseRootSnapshot.roomIdentifier) {
       if (requestId === selectedSnapshotRequestId) {
-        setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot));
+        setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot), { activitySnapshot: true });
         selectedSnapshotLoading.value = false;
       }
       return;
@@ -547,7 +556,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         roomKey ? pendingDeliveryRepairs.get(roomKey)?.token ?? null : null,
       );
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
-      setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextSnapshot), { cacheAlias: roomIdentifier });
+      setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextSnapshot), { cacheAlias: roomIdentifier, activitySnapshot: true });
       finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
     } finally {
       if (streamReconcileRoom === roomIdentifier) finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
@@ -569,6 +578,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
     const token = ++streamReconcileGeneration;
     activeStreamRoom = roomIdentifier;
+    activeActivityScope = activityUnread.scope;
     if (!preserveDegradedStream) activeStreamToken = token;
     streamReconcileRoom = roomIdentifier;
     resetBufferedStreamEvents();
@@ -598,6 +608,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     if (normalizeRoomIdentifier(activeStreamRoom) !== roomKey) {
       const token = ++streamReconcileGeneration;
       activeStreamRoom = roomIdentifier;
+      activeActivityScope = activityUnread.scope;
       activeStreamToken = token;
       streamReconcileRoom = null;
       resetBufferedStreamEvents();
@@ -676,6 +687,15 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   }
 
   function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
+    // Count canonical deliveries before buffering: a bootstrap snapshot may already
+    // contain this event by the time the buffer is replayed.
+    if (event.type === "github_event" && activeActivityScope === activityUnread.scope
+      && normalizeRoomIdentifier(activeStreamRoom) === normalizeRoomIdentifier(event.roomIdentifier)) {
+      const snapshot = options.selectedSnapshot.value;
+      const identifier = snapshotMatchesRoom(snapshot, event.roomIdentifier)
+        ? snapshot?.room?.identifier || snapshot?.roomIdentifier : activeStreamRoom;
+      activityUnread.receive(normalizeRoomIdentifier(identifier) || "", [event.event.id]);
+    }
     if (streamReconcileRoom && event.type !== "open") {
       if (normalizeRoomIdentifier(streamReconcileRoom) === normalizeRoomIdentifier(event.roomIdentifier)) {
         bufferStreamEvent(event);
@@ -834,7 +854,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         generation !== streamReconcileGeneration
         || normalizeRoomIdentifier(activeStreamRoom) !== roomKey
       ) return;
-      setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, snapshot));
+      setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, snapshot), { activitySnapshot: true });
       const pending = streamBufferOverflow ? [] : bufferedStreamEvents;
       const overflowed = streamBufferOverflow;
       resetBufferedStreamEvents();
@@ -882,7 +902,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   function handleRefreshRoom(snapshot?: DesktopRoomSnapshot): void {
     if (snapshot) {
       options.rootRoomSnapshot.value = snapshot;
-      setSelectedSnapshot(snapshot);
+      setSelectedSnapshot(snapshot, { activitySnapshot: true });
       options.selectedRootRoomIdentifier.value = snapshot.roomIdentifier;
       options.rememberRootRoomSnapshot(snapshot);
       options.reconcileActiveEntry();
@@ -963,8 +983,11 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
   function setSelectedSnapshot(
     snapshot: DesktopRoomSnapshot | null,
-    input: { cache?: boolean; cacheAlias?: string | null } = {},
+    input: { cache?: boolean; cacheAlias?: string | null; activitySnapshot?: boolean } = {},
   ): void {
+    if (input.activitySnapshot && snapshot?.roomIdentifier && snapshot.githubEvents && snapshot.sourceStates?.githubEvents?.status !== "error") {
+      activityUnread.observeLatest(normalizeRoomIdentifier(snapshot.room?.identifier || snapshot.roomIdentifier) || "", snapshot.githubEvents.events.map(event => event.id));
+    }
     const previousSnapshot = options.selectedSnapshot.value;
     if (input.cache === false) {
       skipNextSelectedSnapshotCache = true;

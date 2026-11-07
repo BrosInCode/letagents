@@ -56,7 +56,7 @@ function openTask(id: string) {
 }
 watch(scopeKey, () => close(true), { flush: 'sync' })
 onDeactivated(() => close(true))
-defineExpose({ open, close })
+defineExpose({ open, close, isOpen: computed(() => target.value !== null) })
 </script>
 
 <style scoped>

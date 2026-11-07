@@ -1,19 +1,21 @@
 <template>
   <div class="room-tab-page desktop-activity-panel" data-testid="room-events-view">
-    <ActivityFeed :events="events" :room-identifier="roomIdentifier" :loading="loading" :loading-older="loadingOlder" :has-more="eventsPage?.hasMore" :error="error" :available="githubConnected || githubLoading || Boolean(repository)" :selected-event-id="selectedEventId" @refresh="emit('refresh')" @load-older="emit('loadOlder')" @open-task="emit('openTask', $event)" @close-selected-event="emit('closeSelectedEvent')">
+    <ActivityFeed :readable="readable && !diffOpen" @presented="emit('presented', $event)" :events="events" :room-identifier="roomIdentifier" :loading="loading" :loading-older="loadingOlder" :has-more="eventsPage?.hasMore" :error="error" :available="githubConnected || githubLoading || Boolean(repository)" :selected-event-id="selectedEventId" @refresh="emit('refresh')" @load-older="emit('loadOlder')" @open-task="emit('openTask', $event)" @close-selected-event="emit('closeSelectedEvent')">
       <template #notice><div v-if="linkedTaskId" class="activity-notice" data-testid="room-events-task-filter">Linked to {{ linkedTaskId }} <button type="button" @click="emit('clearTaskFilter')">Clear</button></div></template>
       <template #setup><button type="button" :disabled="githubBusy || githubLoading" @click="emit('installGithub')">{{ githubBusy ? 'Opening…' : 'Set up GitHub' }}</button><p v-if="githubError">{{ githubError }}</p></template>
-      <template #actions="{ group }"><PullRequestChangesButton v-if="group.kind === 'pr'" :url="group.url" /></template>
+      <template #actions="{ group }"><PullRequestChangesButton v-if="group.kind === 'pr'" :url="group.url" @open-change="diffOpen = $event" /></template>
     </ActivityFeed>
   </div>
 </template>
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import type { DesktopGitHubEventsPage } from '../../../../../electron/ipc-types';
 import ActivityFeed from '../../../../../../../shared/ui/activity/ActivityFeed.vue';
 import PullRequestChangesButton from './room-events/PullRequestChangesButton.vue';
+const diffOpen = ref(false);
 const props = defineProps<{
   roomIdentifier: string;
+  readable?: boolean;
   eventsPage: DesktopGitHubEventsPage | null;
   repository: string | null;
   currentBranch: string | null;
@@ -30,6 +32,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  presented: [ids: readonly string[]];
   refresh: [];
   loadOlder: [];
   installGithub: [];

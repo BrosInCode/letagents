@@ -172,3 +172,83 @@ test('answering a middle request advances to its displayed successor and the las
     }
   }
 })
+
+test('room Needs you counts only pending requests and clears when they are answered', async t => {
+  const { useRoomAttention } = await import('../src/pages/room/useRoomAttention')
+  const scope = effectScope(), room = ref<string | null>(item.roomId), account = ref<string | null>('owner')
+  const paths: string[] = []
+  const answered = reviseKnowledgeRecord(record, { expected_version: record.version, response: 'Go ahead.' }, { id: 'owner', label: 'Owner', kind: 'human' })
+  let records = [record, record, { ...answered, id: 'answered-request' }, { ...record, id: 'archived-request', archived: true }]
+  const state = scope.run(() => useRoomAttention(room, account, async path => { paths.push(path); return { records } }))!
+  t.after(() => scope.stop())
+  await settle()
+  assert.equal(state.count.value, 1)
+  assert.equal(state.pulse.value, true)
+  assert.deepEqual(paths, ['/rooms/github.com%2Fo%2Fr/attention'])
+  records = [answered]
+  await state.refresh()
+  assert.equal(state.count.value, 0)
+  assert.equal(state.pulse.value, false)
+})
+
+test('room Needs you ignores stale room and account responses and hides unknown counts', async t => {
+  const { useRoomAttention } = await import('../src/pages/room/useRoomAttention')
+  const scope = effectScope(), room = ref<string | null>('old-room'), account = ref<string | null>('owner')
+  const pending: Array<ReturnType<typeof deferred<{ records: typeof record[] }>>> = []
+  const signals: AbortSignal[] = []
+  const state = scope.run(() => useRoomAttention(room, account, async (_path, init) => {
+    signals.push(init!.signal as AbortSignal)
+    const next = deferred<{ records: typeof record[] }>(); pending.push(next); return next.promise
+  }))!
+  t.after(() => scope.stop())
+  room.value = 'new-room'
+  assert.equal(signals[0].aborted, true)
+  pending[0].resolve({ records: [record] }); await settle()
+  assert.equal(state.count.value, 0)
+  pending[1].resolve({ records: [record] }); await settle()
+  assert.equal(state.count.value, 1)
+  const staleRefresh = state.refresh()
+  account.value = null
+  assert.equal(state.count.value, 0)
+  pending[2].resolve({ records: [record] }); await staleRefresh
+  assert.equal(state.count.value, 0)
+  assert.equal(state.pulse.value, false)
+
+  const failingScope = effectScope()
+  const failing = failingScope.run(() => useRoomAttention(ref('room'), ref('owner'), async () => { throw new Error('Offline') }))!
+  t.after(() => failingScope.stop())
+  await settle(); assert.equal(failing.count.value, 0); assert.equal(failing.pulse.value, false)
+})
+
+test('room Needs you suspends refresh and the pulse while the document is hidden', async t => {
+  const originalDocument = globalThis.document
+  const document = Object.assign(new EventTarget(), { visibilityState: 'visible' })
+  Object.defineProperty(globalThis, 'document', { value: document, configurable: true, writable: true })
+  t.after(() => { Object.defineProperty(globalThis, 'document', { value: originalDocument, configurable: true, writable: true }) })
+  const { useRoomAttention } = await import('../src/pages/room/useRoomAttention')
+  let calls = 0
+  const scope = effectScope()
+  const state = scope.run(() => useRoomAttention(ref('room'), ref('owner'), async () => { calls++; return { records: [record] } }))!
+  t.after(() => scope.stop())
+  await settle(); assert.equal(calls, 1); assert.equal(state.pulse.value, true)
+  document.visibilityState = 'hidden'; document.dispatchEvent(new Event('visibilitychange'))
+  await state.refresh(); assert.equal(calls, 1); assert.equal(state.pulse.value, false)
+  document.visibilityState = 'visible'; document.dispatchEvent(new Event('visibilitychange'))
+  await settle(); assert.equal(calls, 2); assert.equal(state.pulse.value, true)
+  scope.stop(); document.dispatchEvent(new Event('visibilitychange')); await settle(); assert.equal(calls, 2)
+})
+
+
+test('room Needs you retains known requests without a pulse on refresh failure and never counts task updates', async t => {
+  const { useRoomAttention } = await import('../src/pages/room/useRoomAttention')
+  let fail = false, answered = false
+  const scope = effectScope()
+  const state = scope.run(() => useRoomAttention(ref('room'), ref('owner'), async () => {
+    if (fail) throw new Error('Temporary network problem')
+    return { records: answered ? [] : [record], tasks: [{ id: 'task_1', status: 'blocked' }, { id: 'task_2', status: 'in_review' }] }
+  }))!
+  t.after(() => scope.stop())
+  await settle(); assert.equal(state.count.value, 1)
+  fail = true; await state.refresh(); assert.equal(state.count.value, 1); assert.equal(state.pulse.value, false)
+  fail = false; answered = true; await state.refresh(); assert.equal(state.count.value, 0); assert.equal(state.pulse.value, false)
+})

@@ -8,7 +8,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { usePullRequestDiffContext } from "../../../../composables/usePullRequestDiffContext";
 import { pullRequestReference } from "../../../../domain/pull-request-diff";
 import PullRequestChangesDialog from "./PullRequestChangesDialog.vue";
@@ -18,6 +18,9 @@ const context = usePullRequestDiffContext();
 const room = computed(() => context?.room.value ?? "");
 const reference = computed(() => pullRequestReference(props.url, context?.repository.value ?? null));
 const open = ref(false);
+const emit = defineEmits<{ openChange: [open: boolean] }>();
+watch(open, value => emit("openChange", value), { flush: "sync" });
+onBeforeUnmount(() => { if (open.value) emit("openChange", false); });
 watch([room, () => reference.value?.url], () => { open.value = false; }, { flush: "sync" });
 </script>
 

@@ -10,6 +10,7 @@
 <script setup lang="ts">
 defineProps<{ name: string }>();
 const paths: Record<string, string> = {
+  more: 'M5 12h.01M12 12h.01M19 12h.01', up: 'm6 15 6-6 6 6', undo: 'M3 10h7M3 10V3m0 7 4-4a8 8 0 1 1-1 11',
   plus: 'M12 5v14M5 12h14', close: 'm6 6 12 12M18 6 6 18', down: 'm6 9 6 6 6-6',
   search: 'm21 21-4.4-4.4M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
   board: 'M3 4h18v16H3zM9 4v16M15 4v16', list: 'M9 6h12M9 12h12M9 18h12M3 6h1M3 12h1M3 18h1',

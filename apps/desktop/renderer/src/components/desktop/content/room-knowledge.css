@@ -47,7 +47,8 @@
 .knowledge-search input { width: 100%; padding: 8px 0; border: 0; background: none; }
 /* Room memory reads as a shared brief, with search in one stable toolbar. */
 .memory-brief { container: memory-brief / inline-size; width: 100%; max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 24px; }
-.memory-page .knowledge-header { flex-wrap: wrap; }
+.memory-page .knowledge-header { flex-wrap: wrap; justify-content: flex-end; }
+.memory-actions .memory-toolbar { flex: 1; }
 .memory-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .memory-toolbar .knowledge-search { flex: 1 1 280px; min-height: 40px; border-color: var(--border-strong); }
 .memory-toolbar .knowledge-search input { min-height: 38px; }

@@ -39,8 +39,8 @@
   </div>
 </template>
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import WorkspaceNav from '../components/layout/WorkspaceNav.vue'
 import InboxLayout from '../../../../shared/ui/inbox/InboxLayout.vue'
 import InboxResponse from '../../../../shared/ui/inbox/InboxResponse.vue'
@@ -54,6 +54,10 @@ const { snapshot, loading, error, actionError, outcome, section, rooms, query, s
 const layout = ref<InstanceType<typeof InboxLayout> | null>(null)
 const requestHeading = ref<HTMLElement | null>(null)
 const router = useRouter()
+const route = useRoute()
+watch([accountId, () => route.query.room], () => {
+  rooms.value = accountId.value && typeof route.query.room === 'string' && route.query.room ? [route.query.room] : []
+}, { immediate: true })
 function focusSelection() {
   if (requestHeading.value?.getClientRects().length) requestHeading.value.focus({ preventScroll: true })
   else layout.value?.focusHeading()

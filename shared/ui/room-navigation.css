@@ -1,0 +1,26 @@
+.room-view-tabs { position: relative; display: flex; align-self: stretch; align-items: stretch; gap: 6px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.room-view-tabs::-webkit-scrollbar { display: none; }
+.room-view-tab { position: relative; display: flex; align-items: center; gap: 0; flex-shrink: 0; min-width: 44px; min-height: 44px; padding: 0 13px; border: 0; border-radius: 0; background: transparent; color: var(--text-secondary); font: inherit; font-size: 13px; font-weight: 500; white-space: nowrap; cursor: pointer; transition: color 120ms ease; }
+.room-view-tab > svg { width: 18px; height: 18px; flex-shrink: 0; transition: transform 130ms cubic-bezier(.22,1,.36,1); }
+.room-view-tab:active > svg { transform: scale(.92); }
+.room-view-tab[aria-current="page"] { color: var(--text); }
+.room-view-tab:focus-visible { outline: 2px solid var(--text-secondary); outline-offset: -3px; border-radius: 5px; color: var(--text); }
+.room-view-label { display: grid; grid-template-columns: 0fr; overflow: hidden; transition: grid-template-columns 150ms cubic-bezier(.22,1,.36,1); }
+.room-view-label > span { min-width: 0; overflow: hidden; white-space: nowrap; opacity: 0; transform: translateX(-5px); transition: opacity 100ms ease, transform 150ms cubic-bezier(.22,1,.36,1); }
+.room-view-label > span::before { content: ''; display: inline-block; width: 8px; }
+.room-view-tab[aria-current="page"] .room-view-label { grid-template-columns: 1fr; }
+.room-view-tab[aria-current="page"] .room-view-label > span { opacity: 1; transform: translateX(0); }
+.room-view-underline { position: absolute; top: 0; left: 0; height: 2px; border-radius: 3px; background: var(--text); transform-origin: left center; pointer-events: none; }
+@media (hover: hover) and (pointer: fine) {
+  .room-view-tab:hover { color: var(--text); }
+  .room-view-tab:hover .room-view-label { grid-template-columns: 1fr; transition-duration: 200ms; }
+  .room-view-tab:hover .room-view-label > span { opacity: 1; transform: translateX(0); transition-duration: 160ms, 200ms; }
+}
+.room-view-tab:focus-visible .room-view-label { grid-template-columns: 1fr; }
+.room-view-tab:focus-visible .room-view-label > span { opacity: 1; transform: none; }
+.room-view-tabs:has(.room-view-tab:focus-visible) .room-view-label,
+.room-view-tabs:has(.room-view-tab:focus-visible) .room-view-label > span { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .room-view-tab, .room-view-tab > svg, .room-view-label, .room-view-label > span { transition: none; }
+  .room-view-tab:active > svg { transform: none; }
+}
