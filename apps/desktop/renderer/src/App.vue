@@ -160,7 +160,7 @@
         @refresh="refresh"
       />
 
-      <PrivateMessages v-if="authStatus?.authenticated && authStatus.account" v-show="!showCompanyHome && activeEntry.type === 'messages'" :key="authStatus.account.id" :api="desktopIpc.conversations" :account-id="authStatus.account.id" :active="activeEntry.type === 'messages'" :open-conversation-id="openConversationId" :open-conversation-nonce="openConversationNonce" @unread="messagesUnread = $event">
+      <PrivateMessages v-if="authStatus?.authenticated && authStatus.account" v-show="!showCompanyHome && activeEntry.type === 'messages'" :key="authStatus.account.id" :api="desktopIpc.conversations" :account-id="authStatus.account.id" :active="!showCompanyHome && activeEntry.type === 'messages'" :open-conversation-id="openConversationId" :open-conversation-nonce="openConversationNonce" @unread="messagesUnread = $event">
         <template v-if="activeEntry.type === 'messages' && sidebarMode === 'hidden'" #navigation>
           <button class="ghost-button sidebar-reveal-button" type="button" aria-label="Show sidebar" title="Show sidebar" data-testid="sidebar-reveal-button" @click="cycleSidebar">
             <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">

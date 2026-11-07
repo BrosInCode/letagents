@@ -6,7 +6,7 @@ import { useDesktopNavigationState } from "../useDesktopNavigationState";
 import { rememberStoredString } from "../../domain/desktop-storage";
 import { normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
 import { gitRoomsShareRepo } from "../../domain/app-room-aliases";
-import { companyProjectGroups, mergeCompanyRooms } from "../../domain/company-navigation";
+import { companyListsEntry, mergeCompanyRooms } from "../../domain/company-navigation";
 import type { AppContextOf } from "./context";
 
 /** Sidebar navigation state: the active entry, projects, and the selected room. */
@@ -33,7 +33,7 @@ export function useAppNavigation(context: unknown) {
     resolveSelectedRoomIdentifier,
     roomsCollapsed,
     returnFromSettings,
-    selectSidebarEntry,
+    selectSidebarEntry: selectNavigationSidebarEntry,
     selectedAccess,
     selectedFocusRooms,
     selectedNeedsAccess,
@@ -54,16 +54,22 @@ export function useAppNavigation(context: unknown) {
     selectedRootRoomIdentifier,
     selectedSnapshot,
   });
+  // An explicitly opened room must stay reachable when the selected company's
+  // connected repositories do not list it: an ad-hoc room, a personal repo
+  // opened from the Inbox or My Work, or a closed focus room. Such an open
+  // switches to Personal & shared.
+  function leaveCompanyUnlessListed(): void {
+    const { company } = app;
+    if (activeEntry.value.type !== "room") return;
+    if (!companyListsEntry(projectEntries.value, company.selectedId.value, company.rooms.value, activeEntry.value.id)) void company.choose(null);
+  }
   function openRoomSnapshot(...args: Parameters<typeof openNavigationRoomSnapshot>): void {
     openNavigationRoomSnapshot(...args);
-    // An explicit room open must remain reachable even when it is outside the
-    // selected company's connected repositories (including ad-hoc rooms).
-    const { company } = app;
-    if (company.selectedId.value && !companyProjectGroups(projectEntries.value, company.selectedId.value, company.rooms.value).some((project) =>
-      [project.parent, ...project.branchRooms, ...project.focusRooms].some((entry) => entry.id === activeEntry.value.id)
-    )) {
-      void company.choose(null);
-    }
+    leaveCompanyUnlessListed();
+  }
+  function selectSidebarEntry(...args: Parameters<typeof selectNavigationSidebarEntry>): void {
+    selectNavigationSidebarEntry(...args);
+    leaveCompanyUnlessListed();
   }
   Object.assign(app, { activeEntry, collapsedProjects, currentParentRoom, toggleSidebarMode, openRoomSnapshot, projectEntries, rememberRootRoomSnapshot, selectSidebarEntry, selectedRoomIdentifier, selectedRoomInfo, sidebarMode });
   return {

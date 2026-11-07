@@ -40,3 +40,35 @@ export function companyProjectGroups(
   // company repos. Company setup must never hide an unconnected/shared repo.
   return projects;
 }
+
+function projectEntryIds(project: ProjectGroup, withIdentifierOnly: boolean): string[] {
+  return [project.parent, ...project.branchRooms, ...project.focusRooms]
+    .filter((entry) => !withIdentifierOnly || Boolean(entry.roomIdentifier))
+    .map((entry) => entry.id);
+}
+
+/** Whether the selected company's room groups list this sidebar entry (always true without a company). */
+export function companyListsEntry(
+  projects: ProjectGroup[], selectedId: string | null,
+  rooms: DesktopOrganizationRoom[], entryId: string,
+): boolean {
+  if (!selectedId) return true;
+  return companyProjectGroups(projects, selectedId, rooms).some((project) => projectEntryIds(project, false).includes(entryId));
+}
+
+/**
+ * The company home replaces the main view while an invitation is open, or while
+ * a selected company does not list the active room. Without a company the
+ * sidebar is the existing account view, so an unlisted room (a closed focus
+ * room) opens as it always did.
+ */
+export function showsCompanyHome(input: {
+  pendingInvite: string | null;
+  activeEntry: { id: string; type: string };
+  selectedId: string | null;
+  sidebarProjects: ProjectGroup[];
+}): boolean {
+  if (input.pendingInvite) return true;
+  if (input.activeEntry.type !== "room" || !input.selectedId) return false;
+  return !input.sidebarProjects.some((project) => projectEntryIds(project, true).includes(input.activeEntry.id));
+}

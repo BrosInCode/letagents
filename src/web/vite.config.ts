@@ -23,7 +23,6 @@ export default defineConfig({
       '/account': 'http://localhost:3001',
       '/conversations': 'http://localhost:3001',
       '/auth': 'http://localhost:3001',
-      '/account': 'http://localhost:3001',
       '/organizations': 'http://localhost:3001',
       '/downloads': 'http://localhost:3001',
       '/rooms': 'http://localhost:3001',

@@ -1,5 +1,6 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import { desktopIpc } from "../../ipc/index.js";
+import { showsCompanyHome } from "../../domain/company-navigation";
 import { useDesktopOrganizations } from "../useDesktopOrganizations";
 import type { AppContextOf } from "./context";
 
@@ -67,9 +68,12 @@ export function useAppCompanyNavigation(context: unknown) {
   const app = context as AppContextOf<"useAppCompany" | "useAppNavigation" | "useAppSidebarEntries" | "useAppSidebarSelection">;
   const { activeEntry, company, pendingCompanyInvite, sidebarProjectEntries } = app;
 
-  const showCompanyHome = computed(() => Boolean(pendingCompanyInvite.value) || activeEntry.value.type === "room" && !sidebarProjectEntries.value.some((project) =>
-    [project.parent, ...project.branchRooms, ...project.focusRooms].some((entry) => entry.id === activeEntry.value.id && entry.roomIdentifier)
-  ));
+  const showCompanyHome = computed(() => showsCompanyHome({
+    pendingInvite: pendingCompanyInvite.value,
+    activeEntry: activeEntry.value,
+    selectedId: company.selectedId.value,
+    sidebarProjects: sidebarProjectEntries.value,
+  }));
 
   async function chooseSidebarCompany(id: string | null): Promise<void> {
     const invite = pendingCompanyInvite.value;
