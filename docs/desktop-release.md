@@ -52,6 +52,17 @@ Verify a downloaded DMG or updater ZIP against GitHub's signed provenance record
 gh attestation verify /path/to/LetAgents-<version>-darwin-<arch>.<dmg-or-zip> --repo BrosInCode/letagents
 ```
 
+## Links the app opens
+
+The packaged app owns the `letagents://` scheme (macOS: `CFBundleURLTypes`, set at packaging; Windows: the installer). Dev and smoke runs never claim it. Two link forms exist:
+
+- `letagents://ask/<token>`, the same as `https://letagents.chat/ask/<token>`: the giving screen of an agent ask.
+- `letagents://in/<room>`, the same path as `https://letagents.chat/in/<room>`, with an optional `?message=msg_N`: the app opens that room and reveals the message. Not signed in, or not a member: the room's own gate shows. `shared/room-app-links.mjs` builds and reads these links for both apps.
+
+A link to a running app opens at once; a link that starts the app is held until the window has loaded (`apps/desktop/electron/main/ask-link-inbox.ts`). On Windows and Linux the link arrives as a launch argument of a second instance, which hands it to the first.
+
+On the web, a room page on a Mac or Windows browser offers "Open this room in LetAgents Desktop" once per room per tab session, above the composer: Open hands the room to the app, Always does so on every later load, × closes the offer for the session. While the app opens, the pill offers to open again or to download the app, because a missing app makes the link do nothing.
+
 ## Windows (unsigned beta)
 
 The Windows build is one per-user NSIS installer, `LetAgents-<version>-win32-x64-setup.exe`, with its `.blockmap`, `latest-win32-x64.yml`, `desktop-release-win32-x64.json` and SHA-256 files beside the macOS files in the same versioned folder.
