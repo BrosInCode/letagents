@@ -452,6 +452,11 @@ export interface DesktopApi {
     syncLocalRoom: (roomIdentifier: string) => Promise<DesktopLocalChatSyncResult>;
   };
   rental?: DesktopRentalApi;
+  /** `letagents://in/<room>` links: the app opens that room (see shared/room-app-links.mjs). Absent on an older bridge. */
+  links?: {
+    takePendingRoom: () => Promise<import("../../../../shared/room-app-links.mjs").DesktopRoomLink | null>;
+    onOpenRoom: (callback: (target: import("../../../../shared/room-app-links.mjs").DesktopRoomLink) => void) => () => void;
+  };
   asks?: {
     listModels: () => Promise<DesktopAskResult<DesktopAgentAskModel[]>>;
     create: (input: DesktopCreateAgentAskInput) => Promise<DesktopAskResult<{ ask: DesktopAgentAsk; link: string }>>;

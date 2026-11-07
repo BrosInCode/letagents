@@ -25,7 +25,7 @@ export function useAppLifecycle(context: unknown) {
   const {
     SIDEBAR_METADATA_REFRESH_INTERVAL_MS, accountActivity, clearAuthPollTimer,
     clearLiveMetadataRefreshInterval, clearLiveMetadataRefreshTimer, handleDesktopRoomStreamEvent,
-    handleNotificationActivation, handleRepoStatusChanged, handleVisibilityChange,
+    handleNotificationActivation, handleRepoStatusChanged, handleRoomLink, handleVisibilityChange,
     handleWindowBlur, handleWindowFocus, initializeProjectBindings,
     leaveArchivedSelectedRoomFromSettingsList, loadAppAgentActions, loadAppAgentSettingsStatus,
     loadChatStorageSettings, loadFirstRunSetup, openSettingsSurface, openUpdatesSurface,
@@ -41,6 +41,7 @@ export function useAppLifecycle(context: unknown) {
   let unsubscribeUpdateStatus: (() => void) | null = null;
   let unsubscribeNotificationReceived: (() => void) | null = null;
   let unsubscribeNotificationActivation: (() => void) | null = null;
+  let unsubscribeRoomLink: (() => void) | null = null;
   let unsubscribeRepoStatusChanged: (() => void) | null = null;
   let accountRoomsRefreshInterval: number | null = null;
 
@@ -65,6 +66,11 @@ export function useAppLifecycle(context: unknown) {
     void desktopIpc.notifications?.takePendingActivation?.().then((target) => {
       if (target) void handleNotificationActivation(target);
     });
+    // A room link that started the app, then any that arrives while it runs.
+    void desktopIpc.links?.takePendingRoom?.().then((target) => {
+      if (target) void handleRoomLink(target);
+    }).catch(() => undefined);
+    unsubscribeRoomLink = desktopIpc.links?.onOpenRoom?.((target) => { void handleRoomLink(target); }) || null;
     unsubscribeRepoStatusChanged = desktopIpc.repos?.onStatusChanged?.(handleRepoStatusChanged) || null;
     // Keep the fallback room-list refresh alive while hidden for badges.
     // A connected account activity stream still avoids routine room-list polling.
@@ -117,6 +123,8 @@ export function useAppLifecycle(context: unknown) {
     unsubscribeUpdateStatus = null;
     unsubscribeNotificationReceived?.();
     unsubscribeNotificationReceived = null;
+    unsubscribeRoomLink?.();
+    unsubscribeRoomLink = null;
     unsubscribeNotificationActivation?.();
     unsubscribeNotificationActivation = null;
     unsubscribeRepoStatusChanged?.();

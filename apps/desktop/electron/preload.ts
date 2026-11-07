@@ -332,6 +332,14 @@ const api: DesktopApi = {
     syncLocalRoom: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:chat-storage:sync-local-room", roomIdentifier),
   },
+  links: {
+    takePendingRoom: () => ipcRenderer.invoke("desktop:links:take-pending-room"),
+    onOpenRoom: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, target: Parameters<typeof callback>[0]) => callback(target);
+      ipcRenderer.on("desktop:links:open-room", listener);
+      return () => ipcRenderer.off("desktop:links:open-room", listener);
+    },
+  },
   asks: {
     listModels: () => ipcRenderer.invoke("desktop:asks:list-models"),
     create: (input) => ipcRenderer.invoke("desktop:asks:create", input),
