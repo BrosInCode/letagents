@@ -60,7 +60,7 @@ function deliver(target: DesktopLinkTarget): void {
     emitToMainWindow("desktop:asks:open-link", target.token);
     clearHeldAskLink();
   } else {
-    emitToMainWindow("desktop:links:open-room", target.room);
+    emitToMainWindow("desktop:room:open-link", target.room);
     clearHeldRoomLink();
   }
 }

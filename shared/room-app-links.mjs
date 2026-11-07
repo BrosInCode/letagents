@@ -7,6 +7,7 @@ import {
   LETAGENTS_ROOM_ORIGIN,
   decodeRoomPath,
   encodeRoomPathIdentifier,
+  isLocalRoomIdentifier,
   isValidMessageId,
   parseLetAgentsMessageUrl,
 } from './room-message-urls.mjs';
@@ -15,13 +16,18 @@ export const DESKTOP_LINK_SCHEME = 'letagents';
 
 const MAX_ROOM_IDENTIFIER = 512;
 
-/** A room identifier the link may carry: trimmed, bounded, no control characters. */
+/**
+ * A room identifier the link may carry: trimmed, bounded, no control
+ * characters, and never a local room. A local room lives in one app's own
+ * store, so a link to one could only make an empty copy somewhere else.
+ */
 export function isValidRoomLinkIdentifier(value) {
   return typeof value === 'string'
     && value.length > 0
     && value.length <= MAX_ROOM_IDENTIFIER
     && value.trim() === value
-    && !/[\u0000-\u001f\u007f]/.test(value);
+    && !/[\u0000-\u001f\u007f]/.test(value)
+    && !isLocalRoomIdentifier(value);
 }
 
 /** `letagents://in/<room>` with an optional `?message=msg_N`; '' for a room that cannot be linked. */

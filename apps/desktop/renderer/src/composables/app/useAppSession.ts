@@ -242,12 +242,12 @@ export function useAppSessionActions(context: unknown) {
   /** A `letagents://in/<room>` link, from the web's "Open in LetAgents Desktop" or anywhere else. */
   async function handleRoomLink(target: DesktopRoomLink): Promise<void> {
     try {
-      // Not signed in, or not a member: the room's own gate shows, as for a notification.
-      await app.openRoomFromAppAgent(target.roomIdentifier);
-      if (target.messageId) {
-        notificationRevealMessageId.value = target.messageId;
-        notificationRevealNonce.value += 1;
-      }
+      // Not signed in, or not a member: the room's own gate shows, as for a
+      // notification. A link never creates a room: an unknown room is "unavailable".
+      await app.openRoomFromAppAgent(target.roomIdentifier, { create: false });
+      // Set either way, so a link without a message clears the last one revealed.
+      notificationRevealMessageId.value = target.messageId ?? null;
+      notificationRevealNonce.value += 1;
     } catch (error) {
       console.warn("Could not open the room for this link.", error);
     }

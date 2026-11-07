@@ -212,6 +212,23 @@ export function createApiErrorRoomSnapshot(
   };
 }
 
+/** A no-create open (a room link) named a room that does not exist here. */
+export function createRoomNotFoundSnapshot(roomIdentifier: string): DesktopRoomSnapshot {
+  return {
+    roomIdentifier,
+    access: createRoomAccess({
+      status: "unavailable",
+      title: "Room unavailable",
+      message: "Room not found",
+      roomIdentifier,
+      httpStatus: 404,
+    }),
+    room: null,
+    storage: cloudStorageState(roomIdentifier),
+    ...emptySnapshotCollections,
+  };
+}
+
 export function createUnavailableRoomSnapshot(
   roomIdentifier: string,
   error: unknown,

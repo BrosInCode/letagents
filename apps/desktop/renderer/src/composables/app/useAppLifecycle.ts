@@ -66,10 +66,7 @@ export function useAppLifecycle(context: unknown) {
     void desktopIpc.notifications?.takePendingActivation?.().then((target) => {
       if (target) void handleNotificationActivation(target);
     });
-    // A room link that started the app, then any that arrives while it runs.
-    void desktopIpc.links?.takePendingRoom?.().then((target) => {
-      if (target) void handleRoomLink(target);
-    }).catch(() => undefined);
+    // A room link that arrives while the app runs. One that started the app is taken below, after startup.
     unsubscribeRoomLink = desktopIpc.links?.onOpenRoom?.((target) => { void handleRoomLink(target); }) || null;
     unsubscribeRepoStatusChanged = desktopIpc.repos?.onStatusChanged?.(handleRepoStatusChanged) || null;
     // Keep the fallback room-list refresh alive while hidden for badges.
@@ -96,7 +93,11 @@ export function useAppLifecycle(context: unknown) {
     void loadChatStorageSettings();
     void loadAppAgentSettingsStatus();
     void loadAppAgentActions();
-    void loadFirstRunSetup(initializeProjectBindings());
+    // The startup room first, then the room link that started the app, so the link's room is the one left open.
+    void loadFirstRunSetup(initializeProjectBindings())
+      .then(() => desktopIpc.links?.takePendingRoom?.())
+      .then((target) => { if (target) void handleRoomLink(target); })
+      .catch(() => undefined);
     void refreshRentalRequestCount();
     void refreshDesktopUpdateStatus();
   });

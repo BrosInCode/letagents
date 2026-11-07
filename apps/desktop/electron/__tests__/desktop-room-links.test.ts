@@ -26,6 +26,8 @@ test("a room link mirrors the web path, with an optional message to reveal", () 
   assert.equal(buildDesktopRoomLink("a\u0000b"), "", "control characters never make a link");
   assert.equal(buildDesktopRoomLink("x".repeat(513)), "");
   assert.equal(buildDesktopRoomLink("room with space"), "letagents://in/room%20with%20space");
+  assert.equal(buildDesktopRoomLink("local_42"), "", "a local room lives in one app's store: no link");
+  assert.equal(buildDesktopRoomLink("git-room:local:acme/app"), "");
 });
 
 test("the app reads its own scheme and the web form, and refuses the rest", () => {
@@ -37,6 +39,7 @@ test("the app reads its own scheme and the web form, and refuses the rest", () =
     "letagents://in/", "letagents://in", "letagents://room/x", "letagents://ask/abcdefghijklmnopqrstuvwxyz012345",
     "https://evil.example/in/alerts-demo", "http://letagents.chat/in/x", "letagents://user:pw@in/x", "letagents://in:99/x",
     `letagents://in/${"x".repeat(513)}`, "letagents://in/a%00b", "nope", 42, null,
+    "letagents://in/local_42", "letagents://in/Local-7", "letagents://in/git-room:local:acme/app", "https://letagents.chat/in/local_42",
   ]) {
     assert.equal(parseDesktopRoomLink(url as string), null, String(url));
   }
@@ -59,7 +62,7 @@ test("a room link reaches a loaded window at once, and waits for a window that i
   inbox.takePendingRoomLink();
   emitted.length = 0;
   openUrl({ preventDefault() {} }, "letagents://in/alerts-demo?message=msg_9");
-  assert.deepEqual(emitted, [["desktop:links:open-room", { roomIdentifier: "alerts-demo", messageId: "msg_9" }]]);
+  assert.deepEqual(emitted, [["desktop:room:open-link", { roomIdentifier: "alerts-demo", messageId: "msg_9" }]]);
   assert.equal(inbox.takePendingRoomLink(), null, "delivered links are not held");
 
   // The window is new: its renderer takes the link once it loads, and only that kind of link.

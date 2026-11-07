@@ -111,6 +111,7 @@ import type {
   DesktopRoomThreadReadResult,
   DesktopRoomLiveMetadata,
   DesktopRoomLiveMetadataOptions,
+  DesktopRoomSnapshotOptions,
   DesktopRoomAgentWorkPollResult,
   DesktopRoomDeliveryRepair,
   DesktopRoomSharedArtifact,
@@ -227,7 +228,7 @@ export interface DesktopApi {
     ) => Promise<DesktopAccountRoomActionResult>;
     leaveAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
     deleteAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
-    getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
+    getSnapshot: (roomIdentifier?: string | null, options?: DesktopRoomSnapshotOptions) => Promise<DesktopRoomSnapshot>;
     /**
      * Optional: absent on a stale live bridge (renderer updated before the
      * preload was reloaded). Callers must skip gracefully when missing.

@@ -51,14 +51,19 @@ export interface DesktopDownloadLink {
   href: string
 }
 
-/** Reads what the browser says. Only ever orders the links, so a wrong guess costs one extra click. */
+/**
+ * Reads what the browser says. It orders the download links and gates the
+ * room page's "Open in LetAgents Desktop" offer, so a wrong guess costs one
+ * extra click or one needless offer.
+ */
 export function detectDesktopVisitorPlatform(
-  browser: { platform?: string; userAgent?: string; userAgentData?: { platform?: string } } | undefined,
+  browser: { platform?: string; userAgent?: string; userAgentData?: { platform?: string }; maxTouchPoints?: number } | undefined,
 ): DesktopVisitorPlatform {
   const reported = `${browser?.userAgentData?.platform ?? ''} ${browser?.platform ?? ''} ${browser?.userAgent ?? ''}`
   if (/iphone|ipad|android/i.test(reported)) return 'other'
   if (/\bwin(dows|32|64)\b/i.test(reported)) return 'windows'
-  if (/mac/i.test(reported)) return 'mac'
+  // iPadOS Safari calls itself a Mac; its touch screen gives it away. A Mac reports no touch points.
+  if (/mac/i.test(reported)) return (browser?.maxTouchPoints ?? 0) > 1 ? 'other' : 'mac'
   return 'other'
 }
 
