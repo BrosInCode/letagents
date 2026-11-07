@@ -122,3 +122,17 @@ auth redirect tests, packaging contract tests, and the Electron journey passed.
 Live GitHub consent/SSO and installed-app OS protocol dispatch still need a real
 account and packaged-app check. No production database was changed. Migration
 0093 only adds organization and membership tables; no reset is required.
+
+## Independent review follow-up
+
+Separate reviewers checked backend slices 1–3, desktop slices 4–5, and links
+in slice 6. Backend review found no actionable issue. Three UI/entry findings
+were fixed and rechecked: direct HTTP company links now serve the Vue app;
+explicitly opening a room outside a selected company switches to Personal &
+shared; an incoming invitation hides Marketplace while it is being handled.
+The HTTP entry regression and extended isolated desktop walkthrough cover these
+paths. Existing CI now runs organization migration/storage/access tests.
+
+The reviewed stack remains unmerged. Independent agent review is not a GitHub
+approval from a separate human account. Live GitHub/SSO and installed-app protocol
+dispatch remain the documented verification limits.
