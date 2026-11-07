@@ -208,5 +208,11 @@ test('the room page shows the banner to admins only, and the style honours reduc
   assert.match(page, /\.room-shell\[data-join-request-banner="true"\] \{ grid-template-rows: auto auto minmax\(0, 1fr\) auto auto; \}/, 'the banner gets its own grid row; the chat keeps the flexible one')
   assert.match(banner, /@open-requests="drawerOpen = true"/, 'several requests open the drawer with the Requests list')
   const css = await readFile(fileURLToPath(new URL('../../../shared/ui/join-request-banner.css', import.meta.url)), 'utf8')
-  assert.match(css, /prefers-reduced-motion: reduce[\s\S]*transition: none/)
+  const reduced = /@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? ''
+  assert.match(reduced, /transition: opacity 150ms ease/, 'less motion keeps a cross-fade')
+  assert.match(reduced, /transform: none/, 'and drops the slide and the press scale')
+  assert.doesNotMatch(css, /transition: all/, 'only named properties move')
+  assert.match(css, /@media \(hover: hover\) and \(pointer: fine\)/, 'hover states are gated for touch')
+  assert.match(css, /\.join-request-banner-button:active:not\(:disabled\) \{\s*transform: scale\(0\.97\)/, 'a press answers at once')
+  assert.match(css, /leave-active \{\s*transition:\s*opacity 120ms/, 'the card leaves faster than it arrives')
 })

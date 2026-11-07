@@ -67,13 +67,17 @@
   font: inherit;
   font-size: 0.8rem;
   font-weight: 600;
+  /* The press answers on pointer-down; only transform and colour move. */
+  transition:
+    transform 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
+    background-color 150ms ease;
 }
 .join-request-banner-button[data-variant="primary"] {
   border-color: color-mix(in srgb, var(--blue) 55%, var(--border-strong));
   background: color-mix(in srgb, var(--blue) 16%, var(--bg-elevated));
 }
-.join-request-banner-button:hover:not(:disabled) {
-  background: var(--accent-hover, color-mix(in srgb, var(--text) 8%, var(--bg-elevated)));
+.join-request-banner-button:active:not(:disabled) {
+  transform: scale(0.97);
 }
 .join-request-banner-button:disabled {
   cursor: wait;
@@ -93,10 +97,23 @@
   font: inherit;
   font-size: 1.1rem;
   line-height: 1;
+  transition:
+    transform 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
+    background-color 150ms ease,
+    color 150ms ease;
 }
-.join-request-banner-close:hover {
-  background: var(--accent-hover, color-mix(in srgb, var(--text) 8%, transparent));
-  color: var(--text);
+.join-request-banner-close:active {
+  transform: scale(0.94);
+}
+/* Hover states only where a pointer can hover: a tap on a phone must not stick. */
+@media (hover: hover) and (pointer: fine) {
+  .join-request-banner-button:hover:not(:disabled) {
+    background: var(--accent-hover, color-mix(in srgb, var(--text) 8%, var(--bg-elevated)));
+  }
+  .join-request-banner-close:hover {
+    background: var(--accent-hover, color-mix(in srgb, var(--text) 8%, transparent));
+    color: var(--text);
+  }
 }
 .join-request-banner-button:focus-visible,
 .join-request-banner-close:focus-visible {
@@ -112,18 +129,42 @@
   .join-request-banner-actions { grid-column: 1 / -1; justify-content: flex-end; }
 }
 
-.join-request-banner-enter-active,
+/*
+ * The card arrives from its seat under the header and leaves the same way
+ * (one short slide, a strong ease-out), and it leaves faster than it arrives:
+ * the arrival is news, the departure is the system answering.
+ */
+.join-request-banner-enter-active {
+  transition:
+    opacity 180ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
+    transform 180ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+}
 .join-request-banner-leave-active {
-  transition: opacity 180ms var(--ease-out, ease-out), transform 180ms var(--ease-out, ease-out);
+  transition:
+    opacity 120ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
+    transform 120ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
 }
 .join-request-banner-enter-from,
 .join-request-banner-leave-to {
   opacity: 0;
   transform: translateY(-6px);
 }
+/* Less motion means a cross-fade, not nothing: the card still arrives gently. */
 @media (prefers-reduced-motion: reduce) {
   .join-request-banner-enter-active,
   .join-request-banner-leave-active {
-    transition: none;
+    transition: opacity 150ms ease;
+  }
+  .join-request-banner-enter-from,
+  .join-request-banner-leave-to {
+    transform: none;
+  }
+  .join-request-banner-button,
+  .join-request-banner-close {
+    transition: background-color 150ms ease, color 150ms ease;
+  }
+  .join-request-banner-button:active:not(:disabled),
+  .join-request-banner-close:active {
+    transform: none;
   }
 }
