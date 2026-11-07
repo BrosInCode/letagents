@@ -89,6 +89,8 @@
       </template>
     </div>
 
+    <CompanySwitcher :organizations="companyOrganizations || []" :selected-id="companySelectedId || null"
+      :busy="companyBusy || false" :error="companyError || null" @choose="$emit('choose-company', $event)" @refresh="$emit('refresh-companies')" />
     <section
       v-if="searchOpen"
       id="sidebar-room-search"
@@ -711,12 +713,18 @@ import SidebarRoomSwitcher from "./SidebarRoomSwitcher.vue";
 import SidebarChildRoom from "./SidebarChildRoom.vue";
 import SidebarRoomActivity from "./SidebarRoomActivity.vue";
 import { describeSidebarUnreadTotal, sidebarGroupActivity, sidebarGroupUnread, sidebarProjectDetails, sidebarRoomTitle, sidebarUnreadTotal, type SidebarUnreadTotal } from "../../../domain/sidebar-room-display";
+import CompanySwitcher from "./CompanySwitcher.vue";
+import type { DesktopOrganization } from "../../../../../electron/ipc-types/organizations.js";
 import SidebarAccountMenu from "./SidebarAccountMenu.vue";
 import type { ProjectGroup, SidebarEntry, SystemEntry, RoomEntry } from "../types";
 import { desktopIpc } from "../../../ipc/index.js";
 import type { DesktopAuthStatus, DesktopUpdateStatus } from "../../../../../electron/ipc-types";
 
 const props = defineProps<{
+  companyOrganizations?: DesktopOrganization[];
+  companySelectedId?: string | null;
+  companyBusy?: boolean;
+  companyError?: string | null;
   activeEntry: SidebarEntry;
   primaryRoom: RoomEntry;
   projectEntries: ProjectGroup[];
@@ -737,6 +745,8 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  "choose-company": [id: string | null];
+  "refresh-companies": [];
   "cycle-sidebar": [];
   "new-room": [];
   "open-rent": [];

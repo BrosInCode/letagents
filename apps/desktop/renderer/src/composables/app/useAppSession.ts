@@ -23,6 +23,7 @@ import type { AppContextOf } from "./context";
 export function useAppSessionActions(context: unknown) {
   const app = context as AppContextOf<
       "useAppArchivedRooms"
+    | "useAppCompany"
     | "useAppAuthFlow"
     | "useAppInboxActions"
     | "useAppInboxState"
@@ -139,6 +140,7 @@ export function useAppSessionActions(context: unknown) {
   }
 
   function handleWindowFocus(): void {
+    if (authStatus.value?.authenticated && !app.company.busy.value) void app.company.refresh();
     windowFocused.value = true;
     windowHidden.value = document.hidden;
     app.markActiveRoomRead();

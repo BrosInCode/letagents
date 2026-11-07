@@ -27,13 +27,13 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
     const request = ++generation;
     busy.value = true;
     error.value = null;
-    rooms.value = [];
     try {
       const next = await desktopIpc.organizations.list();
       if (request !== generation) return;
       organizations.value = next;
       if (selectedId.value && !next.some((org) => org.github_org_id === selectedId.value && org.joined)) {
         selectedId.value = null;
+        rooms.value = [];
         persist();
       }
       if (selectedId.value) {
@@ -42,7 +42,10 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
         rooms.value = nextRooms;
       }
     } catch {
-      if (request === generation) error.value = "Couldn’t verify your companies with GitHub. Retry, reconnect GitHub, or continue with personal rooms.";
+      if (request === generation) {
+        rooms.value = [];
+        error.value = "Couldn’t verify your companies with GitHub. Retry, reconnect GitHub, or continue with personal rooms.";
+      }
     } finally {
       if (request === generation) busy.value = false;
     }

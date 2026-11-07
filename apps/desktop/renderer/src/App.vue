@@ -78,6 +78,12 @@
         :inert="isSettingsSurface || sidebarMode === 'hidden'"
       >
         <DesktopSidebar
+          :company-organizations="company.organizations.value"
+          :company-selected-id="company.selectedId.value"
+          :company-busy="company.busy.value"
+          :company-error="company.error.value"
+          @choose-company="chooseSidebarCompany"
+          @refresh-companies="company.refresh"
           :active-entry="activeEntry"
           :primary-room="currentParentRoom"
           :project-entries="sidebarProjectEntries"
@@ -163,8 +169,17 @@
           </button>
         </template>
       </PrivateMessages>
+      <section v-if="showCompanyHome" class="company-home surface-page" data-testid="company-home">
+        <h1>{{ company.selected.value?.login || 'Personal & shared rooms' }}</h1>
+        <p v-if="company.busy.value" role="status">Loading your repo rooms…</p>
+        <p v-else-if="company.error.value" role="alert">{{ company.error.value }}</p>
+        <p v-else>{{ sidebarProjectEntries.length ? 'Choose a repo room from the sidebar to work with your agents.' : 'No rooms here yet. Open a repository to get started.' }}</p>
+        <button class="ghost-button" @click="company.refresh" :disabled="company.busy.value">Refresh rooms</button>
+        <button class="primary-button" @click="selectNewRoomEntry">Open a repository</button>
+        <button class="ghost-button" @click="cycleSidebar">Show or hide sidebar</button>
+      </section>
       <AuthOnboardingView
-        v-if="activeEntry.type === 'room' && selectedNeedsAccess"
+        v-if="!showCompanyHome && activeEntry.type === 'room' && selectedNeedsAccess"
         :sidebar-mode="sidebarMode"
         :access="selectedAccess"
         :auth-status="authStatus"
@@ -184,7 +199,7 @@
         <DesktopRoomShell
           :viewer-login="authStatus?.authenticated ? authStatus.account?.login : null"
           :api-url="appInfo?.apiUrl ?? null"
-          v-if="activeEntry.type === 'room' && !selectedNeedsAccess"
+          v-if="!showCompanyHome && activeEntry.type === 'room' && !selectedNeedsAccess"
           :key="selectedRoomRenderKey"
           :sidebar-mode="sidebarMode"
           :room-loading="selectedSnapshotLoading"
@@ -478,7 +493,7 @@ import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./
 import { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./composables/app/useAppRoomData";
 import { useAppLifecycle } from "./composables/app/useAppLifecycle";
 import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAlerts";
-import { useAppCompany } from "./composables/app/useAppCompany";
+import { useAppCompany, useAppCompanyNavigation } from "./composables/app/useAppCompany";
 import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
 
 const RentMarketplaceView = defineAsyncComponent(
@@ -591,6 +606,10 @@ Object.assign(app, useAppReadMarkers(app));
 const {
   sidebarProjectEntries, selectedRoomRenderKey, selectedRoomStorage,
 } = Object.assign(app, useAppSidebarEntries(app));
+
+const {
+  showCompanyHome, chooseSidebarCompany,
+} = Object.assign(app, useAppCompanyNavigation(app));
 
 Object.assign(app, useAppRentalEvents(app));
 

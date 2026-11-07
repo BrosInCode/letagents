@@ -87,3 +87,13 @@ Owners can set up a company, members can join an existing one, and personal room
 remain available even when GitHub organization verification fails. Connected
 company repo rooms can be selected during first run. Selection is stored per
 account and API origin; account changes invalidate in-flight company requests.
+
+## Sidebar company scope (slice 5)
+
+The workspace selector wraps the existing repo-room groups. Company discovery
+adds unopened rooms to navigation while preserving known rooms' pins, child
+rooms, and unread state. Search and Zen Mode use the scoped groups. Personal &
+shared retains the existing account room view, including directly opened company
+repos, so unconnected repositories and external collaboration remain reachable.
+Company verification failures clear the company list rather than falling back
+to cached private room groups. Returning to the app rechecks company membership.
