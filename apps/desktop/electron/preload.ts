@@ -13,6 +13,11 @@ const api: DesktopApi = {
     block: (id, blocked) => ipcRenderer.invoke("desktop:conversations:block", id, blocked),
     changes: after => ipcRenderer.invoke("desktop:conversations:changes", after),
   },
+  organizations: {
+    list: () => ipcRenderer.invoke("desktop:organizations:list"),
+    join: (id, setup) => ipcRenderer.invoke("desktop:organizations:join", id, setup),
+    rooms: (id) => ipcRenderer.invoke("desktop:organizations:rooms", id),
+  },
   ui: {
     onOpenSettings: (callback) => {
       const listener = () => callback();

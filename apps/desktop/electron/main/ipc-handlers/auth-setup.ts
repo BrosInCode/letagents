@@ -46,8 +46,10 @@ import {
 import { supervisorGrantCoordinator } from "../supervisor-grant-coordinator.js";
 import { gateSupervisedAgentIpc } from "./supervised-agent-gate.js";
 import { supervisedAgentsSupported } from "../platform-capabilities.js";
+import { registerOrganizationIpcHandlers } from "../organizations.js";
 
 export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): void {
+  registerOrganizationIpcHandlers(targetIpcMain);
   setAuthAuthorizedHandler(() => {
     clearJoinedRoomInfoCache();
     clearInlineHtmlDemoCache();

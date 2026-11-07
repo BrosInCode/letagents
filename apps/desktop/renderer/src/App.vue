@@ -4,6 +4,13 @@
   <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" data-testid="desktop-first-run-onboarding">
     <FirstRunOnboardingView
       :stage="firstRunStage"
+      :organizations="company.organizations.value"
+      :organization-busy="company.busy.value"
+      :organization-error="company.error.value"
+      :company-name="company.selected.value?.login"
+      :company-rooms="company.rooms.value"
+      @choose-organization="chooseOnboardingCompany"
+      @retry-organizations="company.refresh"
       :mcp-state="visibleMcpInstallState"
       :selected-mcp-target-ids="selectedMcpTargetIds"
       :mcp-wizard-step="mcpWizardStep"
@@ -30,7 +37,7 @@
       @poll-auth="pollAuthFlow"
       @cancel-auth="cancelAuthFlow"
       @sign-out="signOut"
-      @continue-to-room="continueToRoomConfirmation"
+      @continue-to-room="firstRunStage = 'organization'"
       @connect-room-auth="startFirstRunRoomAuth"
       @pick-repo="pickRepoRoom"
       @create-room="createFirstRunInviteRoom"
@@ -471,6 +478,7 @@ import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./
 import { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./composables/app/useAppRoomData";
 import { useAppLifecycle } from "./composables/app/useAppLifecycle";
 import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAlerts";
+import { useAppCompany } from "./composables/app/useAppCompany";
 import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
 
 const RentMarketplaceView = defineAsyncComponent(
@@ -497,6 +505,9 @@ const {
   sidebarBatchActionBusy, sidebarBatchDialogAction, sidebarBatchDialogTargets,
   sidebarBatchDialogError,
 } = Object.assign(app, useAppState());
+const {
+  company, chooseOnboardingCompany,
+} = Object.assign(app, useAppCompany(app));
 const {
   openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshInbox,
   openMyWork, openMyWorkCard, openMyWorkThread,

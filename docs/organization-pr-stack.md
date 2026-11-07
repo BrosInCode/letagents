@@ -79,3 +79,11 @@ Provider list operations each have a 15-second deadline and a 10-page cap (100
 entries/page). Exceeding the cap returns a verification error, never a silently
 truncated list. Live GitHub consent/SSO and desktop UI are not validated by these
 backend slices.
+
+## Desktop onboarding (slice 4)
+
+The desktop signs in as an individual, then offers an optional company step.
+Owners can set up a company, members can join an existing one, and personal rooms
+remain available even when GitHub organization verification fails. Connected
+company repo rooms can be selected during first run. Selection is stored per
+account and API origin; account changes invalidate in-flight company requests.
