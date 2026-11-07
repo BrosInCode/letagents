@@ -366,3 +366,18 @@ test("desktop alerts wait for mute preferences and discard arrivals from an old 
     assert.equal(notifications.length, announced, "late settings cannot announce another account's request");
   } finally { preferenceOnServer = null; scope.stop(); preferenceStore.setViewer(null); }
 });
+
+test("a native arrival fetched before SSE is announced once while other baseline requests stay silent", async () => {
+  const { roomJoinRequests } = joinRequests;
+  roomJoinRequests.reset();
+  const arrivals: string[] = [];
+  const stop = roomJoinRequests.onArrival(({ request: item }) => arrivals.push(item.id));
+  try {
+    pendingOnServer = [request("already-waiting", "ada"), request("native-first", "bob")];
+    await roomJoinRequests.refresh("native-first");
+    assert.deepEqual(arrivals, ["native-first"]);
+    roomJoinRequests.receive(event(request("native-first", "bob")));
+    await roomJoinRequests.refresh("native-first");
+    assert.deepEqual(arrivals, ["native-first"], "SSE and repeated native delivery cannot double the knock");
+  } finally { stop(); pendingOnServer = []; roomJoinRequests.reset(); }
+});

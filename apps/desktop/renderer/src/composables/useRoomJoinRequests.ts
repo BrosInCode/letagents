@@ -39,7 +39,7 @@ function createRoomJoinRequests() {
   let sessionVersion = 0;
   const terminalIds = new Set<string>();
 
-  async function refresh(): Promise<void> {
+  async function refresh(arrivalRequestId?: string): Promise<void> {
     const request = ++latest;
     const idsAtStart = new Set(items.value.map(item => item.id));
     let result: DesktopRoomMembershipResult<{ joinRequests: DesktopAccountRoomJoinRequest[] }> | undefined;
@@ -51,11 +51,14 @@ function createRoomJoinRequests() {
     }
     if (request !== latest || !result) return;
     if (result.ok) {
-      // Requests that were already waiting are a baseline, not an alert.
-      for (const item of result.joinRequests) gate.remember(item.id);
       const pending = result.joinRequests.filter(item => !terminalIds.has(item.id));
+      // A native push can arrive before SSE. Only its newly fetched request
+      // is news; all other requests in the read remain a silent baseline.
+      const arrival = pending.find(item => item.id === arrivalRequestId && !items.value.some(current => current.id === item.id));
+      for (const item of pending) if (item !== arrival) gate.remember(item.id);
       const pendingIds = new Set(pending.map(item => item.id));
       items.value = [...pending, ...items.value.filter(item => !idsAtStart.has(item.id) && !pendingIds.has(item.id))];
+      if (arrival) announce(arrival);
       error.value = "";
     } else if (result.status === 401) {
       items.value = [];
@@ -77,6 +80,10 @@ function createRoomJoinRequests() {
     }
     if (terminalIds.has(request.id) || items.value.some((item) => item.id === request.id)) return;
     items.value = [...items.value, request];
+    announce(request);
+  }
+
+  function announce(request: DesktopAccountRoomJoinRequest): void {
     const hidden = typeof document !== "undefined" && document.hidden;
     const arrival: JoinRequestArrival = { request, playSound: gate.shouldPlay(request.id, hidden) };
     for (const listener of arrivalListeners) {

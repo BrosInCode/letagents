@@ -57,7 +57,7 @@ export function useAppLifecycle(context: unknown) {
     unsubscribeNotificationReceived = desktopIpc.notifications?.onReceived?.((target) => {
       void refreshSidebarRoomMetadata();
       // A request to join arrived as a native alert: the Inbox and the banners read the list again.
-      if (target.joinRequestId) void roomJoinRequests.refresh();
+      if (target.joinRequestId) void roomJoinRequests.refresh(target.joinRequestId);
     }) || null;
     unsubscribeNotificationActivation = desktopIpc.notifications?.onActivated?.((target) => {
       void handleNotificationActivation(target);
