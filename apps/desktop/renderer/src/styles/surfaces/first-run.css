@@ -277,10 +277,18 @@
   }
 }
 
+/* The steps fill the window: the header and the action buttons stay in view,
+   and only the middle row scrolls when a step is taller than the space. */
+.first-run-wizard:not([data-stage="welcome"]) {
+  grid-template-rows: minmax(0, 1fr);
+  align-self: stretch;
+  min-height: 0;
+}
+
 .first-run-card {
   grid-area: 1 / 1;
-  min-height: min(660px, calc(100vh - 56px));
-  align-content: start;
+  min-height: 0;
+  align-content: stretch;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   gap: clamp(16px, 2vw, 22px);
   padding: clamp(4px, 1.8vw, 20px) 0 0;
@@ -298,9 +306,12 @@
   min-width: 0;
 }
 
-.first-run-heading-viewport,
-.first-run-stage-viewport {
+.first-run-heading-viewport {
   overflow: hidden;
+}
+
+.first-run-stage-viewport {
+  overflow: hidden auto;
 }
 
 .first-run-heading-motion,
@@ -1926,5 +1937,33 @@
   .first-run-room-invite button {
     transform: none;
     transition-property: border-color, background-color, color;
+  }
+}
+
+/* Windows at 125–150% scaling leaves about 600–700px of height. */
+@media (max-height: 800px) {
+  .first-run-card {
+    gap: 12px;
+    padding-top: 0;
+  }
+
+  .first-run-header {
+    gap: 8px;
+  }
+
+  .first-run-card .mcp-wizard-header h1 {
+    font-size: clamp(2rem, 7vh, 3rem);
+  }
+
+  .first-run-heading-motion {
+    gap: 6px;
+  }
+
+  .first-run-card .mcp-install-step {
+    min-height: 0;
+  }
+
+  .first-run-card .mcp-choice-card {
+    min-height: 132px;
   }
 }
