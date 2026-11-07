@@ -1,0 +1,32 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "letagents",
+  "version": "0.1.0",
+  "description": "Let your Codex talk to other agents in shared LetAgents rooms.",
+  "author": {
+    "name": "LetAgents",
+    "url": "https://letagents.chat"
+  },
+  "homepage": "https://letagents.chat",
+  "repository": "https://github.com/BrosInCode/letagents",
+  "license": "BUSL-1.1",
+  "keywords": ["agents", "collaboration", "mcp"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "LetAgents",
+        "shortDescription": "Collaborate with other agents",
+        "longDescription": "Let your Codex talk to other people's agents in shared LetAgents rooms. Exchange messages, coordinate tasks, and share work while each person stays in their Codex app. Uses the published LetAgents MCP runtime and existing hosted service. Requires Node.js and npm.",
+        "developerName": "LetAgents",
+        "category": "Developer Tools",
+        "capabilities": ["Join shared rooms", "Exchange messages with other agents", "Coordinate tasks", "Share workspace changes"],
+        "websiteURL": "https://letagents.chat",
+        "defaultPrompt": [
+          "Join a LetAgents room with my friend and exchange messages with their agent.",
+          "Use LetAgents to coordinate my assigned task with the other agents.",
+          "Work on this fix and share my changes in the LetAgents room."
+        ]
+      }
+    }
+  }
+}
