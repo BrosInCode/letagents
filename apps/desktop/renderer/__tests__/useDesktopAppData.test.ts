@@ -1,3 +1,4 @@
+import { activityUnread } from '../../../../shared/ui/activity/unread';
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { computed, effectScope, ref, type Ref } from "vue";
@@ -982,6 +983,36 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
     assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_1"]);
     assert.deepEqual(harness.metadataRefreshCalls, []);
     assert.deepEqual(harness.getSnapshotRequests, []);
+  });
+
+  it("counts every canonical delivery through bootstrap, replay, catchup and account changes", async () => {
+    const harness = createHarness();
+    harness.authStatus.value = { authenticated: true, account: { id: "viewer-a" }, apiUrl: "https://example.test" } as DesktopAuthStatus;
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const initial = deferred<DesktopRoomSnapshot>();
+      harness.nextSelectedSnapshot = initial.promise;
+      const loading = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      for (const [id, eventType] of [["run", "workflow_run"], ["review", "pull_request_review_comment"], ["thread", "pull_request_review_thread"]] as const) {
+        harness.state.handleRoomStreamEvent({ type: "github_event", roomIdentifier: "focus_a", event: { ...githubRoomEvent(id), eventType } });
+      }
+      assert.equal(activityUnread.count("focus_a"), 3);
+      const snapshot = focusSnapshot();
+      snapshot.githubEvents = { roomIdentifier: "focus_a", githubRoomIdentifier: null, hasMore: false,
+        events: [githubRoomEvent("historic"), githubRoomEvent("run")] };
+      initial.resolve(snapshot);
+      await loading;
+      assert.equal(activityUnread.count("focus_a"), 3, "buffer replay and initial history do not lose or duplicate arrivals");
+      harness.state.handleRoomStreamEvent({ type: "github_event", roomIdentifier: "focus_a", event: githubRoomEvent("run") });
+      assert.equal(activityUnread.count("focus_a"), 3);
+      activityUnread.acknowledge("focus_a", ["review"]);
+      assert.equal(activityUnread.count("focus_a"), 2);
+      harness.state.handleRefreshRoom({ ...snapshot, githubEvents: { ...snapshot.githubEvents!, events: [githubRoomEvent("historic"), githubRoomEvent("run"), githubRoomEvent("catchup")] } });
+      assert.equal(activityUnread.count("focus_a"), 3, "new IDs in a successful latest-page repair count even when old by wall clock");
+      harness.authStatus.value = { authenticated: true, account: { id: "viewer-b" }, apiUrl: "https://example.test" } as DesktopAuthStatus;
+      harness.state.handleRoomStreamEvent({ type: "github_event", roomIdentifier: "focus_a", event: githubRoomEvent("old-stream") });
+      assert.equal(activityUnread.count("focus_a"), 0, "old account stream cannot populate the new account's badge");
+    });
   });
 
   it("applies a github_event to the snapshot without scheduling a full refresh", () => {

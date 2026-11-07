@@ -1,3 +1,4 @@
+import { createActivityUnread } from '../../../../shared/ui/activity/unread'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
@@ -624,6 +625,8 @@ test('room stream retries a gap until both repair lanes recover', async () => {
 })
 
 test('room stream subscribes before bootstrap and replays every typed resource over the snapshot', async () => {
+  const unread = createActivityUnread()
+  unread.setScope('viewer')
   const previousInvalidation = lastMessageInfoInvalidation.value
   const previousApprovalInvalidation = lastAgentApprovalInvalidation.value
   const applied: string[] = []
@@ -632,6 +635,7 @@ test('room stream subscribes before bootstrap and replays every typed resource o
     setStreaming: () => {},
     appendMessage: () => { applied.push('message'); return true },
     onGitHubMessage: () => {},
+    onGitHubEventReceived: (room, event) => unread.receive(room, [event.id]),
     onGitHubEvent: () => { applied.push('github') },
     onTaskLifecycleMessage: () => {},
     onArtifactUpdate: () => { applied.push('artifact') },
@@ -650,12 +654,15 @@ test('room stream subscribes before bootstrap and replays every typed resource o
   source.dispatch('task_update', { id: 'task-live' }, 'broker_1')
   source.dispatch('artifact_update', { room_id: 'room_bootstrap' }, 'broker_2')
   source.dispatch('reasoning_update', { session: { id: 'reason-live' } }, 'broker_3')
-  source.dispatch('github_event', { room_id: 'room_bootstrap' }, 'broker_4')
+  source.dispatch('github_event', { room_id: 'room_bootstrap', id: 'workflow-1', event_type: 'workflow_run', action: 'completed', created_at: '2026-10-01T00:00:00Z' }, 'broker_4')
   source.dispatch('message', { id: 'msg_live', source: 'agent', sender: 'agent' }, 'broker_5')
   source.dispatch('message_info_updated', { room_id: 'room_bootstrap', message_ids: null }, 'broker_6')
   source.dispatch(ROOM_RESOURCE_INVALIDATION_CAPABILITY, {
     room_id: 'room_bootstrap', resource: 'agent_approval',
   }, 'broker_7')
+  assert.equal(unread.count('room_bootstrap'), 1, 'canonical Activity deliveries are observed before bootstrap replay')
+  unread.observeLatest('room_bootstrap', ['historic', 'workflow-1'])
+  assert.equal(unread.count('room_bootstrap'), 1, 'initial history never swallows an event received during loading')
   assert.deepEqual(applied, [], 'typed resources remain behind the startup snapshot boundary')
   assert.equal(lastMessageInfoInvalidation.value, previousInvalidation, 'info refresh also waits for the installed snapshot')
   assert.equal(lastAgentApprovalInvalidation.value, previousApprovalInvalidation, 'approval refresh also waits for the installed snapshot')
@@ -672,10 +679,13 @@ test('room stream subscribes before bootstrap and replays every typed resource o
     'task', 'artifact', 'artifact', 'reasoning', 'github', 'message', 'presence',
   ])
 
+  assert.equal(unread.count('room_bootstrap'), 1, 'buffer replay does not count the same ID twice')
   stream.stop()
   stream.start('room_bootstrap')
   const resumed = FakeEventSource.instances[FakeEventSource.instances.length - 1]
   assertStreamUrl(resumed, 'room_bootstrap', 'broker_7')
+  source.dispatch('github_event', { id: 'retired', event_type: 'workflow_job', action: 'completed', created_at: '2026-10-01T00:00:00Z' })
+  assert.equal(unread.count('room_bootstrap'), 1, 'retired sources cannot add Activity notifications')
   stream.stop()
   lastMessageInfoInvalidation.value = null
   lastAgentApprovalInvalidation.value = null

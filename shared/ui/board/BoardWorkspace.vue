@@ -1,23 +1,27 @@
 <template>
   <section ref="surface" class="board-workspace" :data-instant="keyboard" aria-label="Board" data-testid="board-workspace" @keydown="keyboard = true" @pointerdown="keyboard = false">
-    <header class="board-workspace-heading"><h1>Board</h1><div class="board-heading-actions"><slot name="actions" /><button type="button" class="board-button board-primary" :disabled="busy || saving" @click="emit('create')"><BoardIcon name="plus" />New task</button></div></header>
-    <nav ref="tabsElement" class="board-view-tabs" aria-label="Board view">
-      <button v-for="item in views" :key="item.id" type="button" :aria-current="view === item.id ? 'page' : undefined" @click="changeView(item.id, $event)"><BoardIcon :name="item.icon" />{{ item.label }}</button>
-      <span ref="indicatorElement" class="board-view-indicator" aria-hidden="true" />
-      <div class="board-heading-actions"><button class="board-icon-button" type="button" aria-label="Refresh board" :disabled="loading || saving" @click="refresh"><BoardIcon name="refresh" /></button><button class="board-icon-button" type="button" aria-label="Board settings" :disabled="!snapshot || loading || saving" @click="openSettings('Columns')"><BoardIcon name="settings" /></button></div>
-    </nav>
-    <div class="board-sprint-context">
-      <FilterDropdown v-model="sprintId" label="Sprint" :options="sprintOptions" :disabled="!snapshot" searchable search-placeholder="Find a sprint…"><template #icon><BoardIcon name="calendar" /></template><template #option="{ option }"><span class="work-option-label">{{ option.label }}</span></template></FilterDropdown>
-      <span v-if="selectedSprint" class="board-sprint-state">{{ selectedSprint.source?.stale ? 'Status unavailable' : selectedSprint.state === 'future' ? 'Upcoming' : selectedSprint.state === 'active' ? 'Active' : 'Completed' }}</span>
-      <span v-if="selectedSprint" class="board-sprint-dates">{{ sprintDates(selectedSprint) }}</span>
-      <p v-if="selectedSprint?.goal" class="board-sprint-goal">{{ selectedSprint.goal }}</p>
+    <div class="board-view-row">
+      <nav class="board-view-tabs" aria-label="Board view">
+        <button v-for="item in views" :key="item.id" type="button" :aria-current="view === item.id ? 'page' : undefined" @click="changeView(item.id)">{{ item.label }}</button>
+      </nav>
+      <div class="board-heading-actions">
+        <FilterDropdown v-model="sprintId" class="board-sprint-picker" label="Sprint" :options="sprintOptions" :disabled="!snapshot || loading" searchable search-placeholder="Find a sprint…"><template #icon><BoardIcon name="calendar" /></template><template #option="{ option }"><span class="work-option-label">{{ option.label }}<small v-if="sprints.find(sprint => sprint.id === option.id)">{{ sprintState(sprints.find(sprint => sprint.id === option.id)!) }}</small></span></template></FilterDropdown>
+        <BoardOptionsMenu label="Board options" icon="settings"><template #default="{ close }">
+          <button type="button" :disabled="!snapshot || loading || saving" @click="close(); openSettings('Columns')"><BoardIcon name="settings" />Board settings</button>
+          <button type="button" :disabled="loading || saving" @click="close(); refresh()"><BoardIcon name="refresh" />Refresh board</button>
+          <div v-if="$slots.actions" class="board-secondary-actions" @click="close(false)"><slot name="actions" /></div>
+        </template></BoardOptionsMenu>
+        <button type="button" class="board-button board-primary" :disabled="busy || saving" @click="emit('create')"><BoardIcon name="plus" />New task</button>
+      </div>
     </div>
     <div class="board-workspace-toolbar">
-      <label class="board-search"><BoardIcon name="search" /><input v-model="query" type="search" placeholder="Search tasks…" aria-label="Search tasks" /></label>
+      <label class="board-search"><BoardIcon name="search" /><input v-model="query" type="search" placeholder="Search tasks or PRs…" aria-label="Search tasks" /></label>
       <FilterDropdown v-model="ownerFilter" label="Assignee" :options="ownerOptions" searchable search-placeholder="Find an assignee…"><template #icon><BoardIcon name="user" /></template><template #option="{ option }"><ChatAvatar v-if="owners.get(option.id)?.key" :name="owners.get(option.id)!.name" :provider="owners.get(option.id)!.provider" :agent="owners.get(option.id)!.agent" :agent-key="option.id" :avatar-url="owners.get(option.id)!.avatarUrl" /><span class="work-option-label">{{ option.label }}</span></template></FilterDropdown>
       <FilterDropdown v-model="typeFilter" label="Task type" :options="typeOptions"><template #option="{ option }"><BoardIcon v-if="option.id" :name="option.id" /><span class="work-option-label">{{ option.label }}</span></template></FilterDropdown>
       <button type="button" class="board-filter-chip" :aria-pressed="blockedOnly" @click="blockedOnly = !blockedOnly"><span class="board-lane-dot" data-tone="amber" />Blocked</button>
       <button v-if="filtersActive" type="button" class="board-text-button" @click="clearFilters">Clear</button>
+      <button v-if="selectedSprint" type="button" class="board-sprint-details board-text-button" :aria-label="`Sprint details: ${selectedSprint.name}`" @click="sprintDetails?.showModal()"><span>{{ sprintState(selectedSprint) }}</span><span>{{ sprintDates(selectedSprint) }}</span><BoardIcon name="right" /></button>
+      <button v-if="view === 'board' && snapshot?.canEdit" type="button" class="board-column-add-button board-text-button" :disabled="locked" @click="openSettings('Columns', true)"><BoardIcon name="plus" />Column</button>
     </div>
     <p class="board-sr-only" role="status" aria-live="polite">{{ announcement || (loading ? 'Loading board…' : '') }}</p>
     <div v-if="error || actionError || props.error" class="board-error" role="alert">{{ actionError || error || props.error }} <button v-if="error" type="button" class="board-text-button" :disabled="saving || loading" @click="load">Try again</button></div>
@@ -42,14 +46,17 @@
             </div>
           </div>
         </section>
-        <button v-if="snapshot.canEdit" class="board-add-column" type="button" :disabled="locked" @click="openSettings('Columns')"><BoardIcon name="plus" />Add column</button>
       </div>
       <BoardAssignees v-else-if="view === 'assignees'" :tasks="sprintTasks" :visible="visibleTasks" :snapshot="snapshot" :sprint="selectedSprint" @select="emit('select', $event)" @external="openExternal" @target="openSettings('Sprints')" />
       <div v-else class="board-backlog">
         <p v-if="!backlogTasks.length" class="board-empty">{{ view === 'cancelled' ? 'No matching cancelled tasks.' : 'No proposed tasks.' }}</p>
         <div v-for="task in backlogTasks" :key="task.id" class="board-backlog-row"><BoardIcon :name="planning(task.id).type || 'task'" /><button class="board-backlog-title" type="button" @click="emit('select', task.id)"><strong>{{ task.title }}</strong><small>{{ task.ticket?.key || task.id.replace(/^task_/, 'T') }}</small></button><a v-if="safeWorkUrl(task.pr?.url || null)" class="board-pr" :href="task.pr!.url" @click.prevent="openExternal(task.pr!.url)"><BoardIcon name="pr" />{{ task.pr!.number ? '#' + task.pr!.number : 'PR' }}</a><button class="board-button" type="button" @click="openPlan(task.id, $event)">Plan</button><button v-if="task.allowedTransitions.some(a => a.targetStatus === 'accepted')" class="board-button" type="button" :disabled="locked" @click="runTransition(task, task.allowedTransitions.find(a => a.targetStatus === 'accepted')!.id, $event)">Accept</button></div>
       </div>
-      <BoardSettings :open="settingsOpen" :initial-tab="settingsTab" :snapshot="snapshot" :save="save" @close="settingsOpen = false" />
+      <BoardSettings :open="settingsOpen" :initial-tab="settingsTab" :start-adding="settingsAdd" :snapshot="snapshot" :save="save" @close="settingsOpen = false" />
+      <dialog ref="sprintDetails" class="board-dialog board-sprint-detail-dialog" aria-labelledby="board-sprint-detail-title" @click="sprintBackdrop" @cancel="sprintDetails?.close()">
+        <header class="board-dialog-header"><h2 id="board-sprint-detail-title">{{ selectedSprint?.name }}</h2><button class="board-icon-button" type="button" aria-label="Close sprint details" @click="sprintDetails?.close()"><BoardIcon name="close" /></button></header>
+        <div v-if="selectedSprint" class="board-dialog-body board-sprint-detail-body"><span class="board-sprint-state">{{ sprintState(selectedSprint) }}</span><p>{{ sprintDates(selectedSprint) }}</p><p v-if="selectedSprint.goal">{{ selectedSprint.goal }}</p><p v-if="selectedSprint.source" class="board-settings-hint">{{ selectedSprint.source.provider === 'jira' ? 'Jira' : 'Linear' }} · imported tasks in this room</p><button class="board-button" type="button" @click="sprintDetails?.close(); openSettings('Sprints')">Sprint settings</button></div>
+      </dialog>
       <dialog ref="planDialog" class="board-dialog board-task-plan-dialog" aria-labelledby="board-plan-title" @close="planTaskId = null">
         <header class="board-dialog-header"><h2 id="board-plan-title">Sprint &amp; estimate</h2><button class="board-icon-button" type="button" aria-label="Close task planning" @click="planDialog?.close()"><BoardIcon name="close" /></button></header>
         <div class="board-dialog-body"><h3>{{ allTasks.find(t => t.id === planTaskId)?.title }}</h3><BoardTaskPlanning v-if="planTaskId" :key="planTaskId" :task-id="planTaskId" :snapshot="snapshot" :save="save" /></div>
@@ -61,17 +68,17 @@
 </template>
 <script setup lang="ts">
 import { computed, nextTick, ref, useId, watch } from 'vue';
-import { boardTaskColumn, type BoardColumn, type BoardTaskPlanning as BoardTaskPlanningFields } from '../../board-planning.mjs';
+import { boardTaskColumn, type BoardSprint, type BoardColumn, type BoardTaskPlanning as BoardTaskPlanningFields } from '../../board-planning.mjs';
 import FilterDropdown from '../FilterDropdown.vue';
 import ChatAvatar from '../ChatAvatar.vue';
-import { useSlidingTabIndicator } from '../useSlidingTabIndicator';
 import { safeWorkUrl } from '../my-work/model';
 import BoardCard from './BoardCard.vue';
 import BoardIcon from './BoardIcon.vue';
 import BoardAssignees from './BoardAssignees.vue';
 import BoardSettings from './BoardSettings.vue';
+import BoardOptionsMenu from './BoardOptionsMenu.vue';
 import BoardTaskPlanning from './BoardTaskPlanning.vue';
-import { columnTone, matchesSprint, sprintDates, taskOwner, taskIsBlocked } from './model';
+import { columnTone, matchesSprint, replaceBoardColumns, sprintDates, taskOwner, taskIsBlocked } from './model';
 import { useBoardWorkspace } from './useBoardWorkspace';
 import type { BoardServices, BoardTask } from './types';
 import './board.css';
@@ -80,13 +87,13 @@ const props = defineProps<{ roomId: string; tasks: readonly BoardTask[]; service
 const emit = defineEmits<{ select: [id: string]; create: []; refresh: [] }>();
 const { snapshot, loading, saving, error, load, save, allTasks, sprints, planning, copyDocument } = useBoardWorkspace(props);
 const surface = ref<HTMLElement>(), view = ref('board'), sprintId = ref('all'), query = ref(''), ownerFilter = ref(''), typeFilter = ref(''), blockedOnly = ref(false), keyboard = ref(false);
+const settingsAdd = ref(false), sprintDetails = ref<HTMLDialogElement>();
 const settingsOpen = ref(false), settingsTab = ref('Columns'), actionError = ref(''), announcement = ref(''), moving = ref(false);
 const planTaskId = ref<string | null>(null), planDialog = ref<HTMLDialogElement>();
 const collapsed = ref(new Set<string>()), draggedTask = ref<string | null>(null), draggedColumn = ref<string | null>(null), dragOver = ref<string | null>(null);
 const prefix = `board-${useId()}`;
 const views = computed(() => [{ id: 'board', label: 'Board', icon: 'board' }, { id: 'assignees', label: 'By assignee', icon: 'people' }, { id: 'backlog', label: 'Backlog', icon: 'list' }, ...(allTasks.value.some(t => t.status === 'cancelled') ? [{ id: 'cancelled', label: 'Cancelled', icon: 'list' }] : [])]);
 const typeOptions = [{ id: '', label: 'All types' }, { id: 'task', label: 'Task' }, { id: 'bug', label: 'Bug' }, { id: 'feature', label: 'Feature' }];
-const { tabsElement, indicatorElement, prepareTabChange } = useSlidingTabIndicator(() => view.value);
 const locked = computed(() => Boolean(props.busy || saving.value || loading.value || moving.value));
 const selectedSprint = computed(() => sprints.value.find(sprint => sprint.id === sprintId.value));
 defineExpose({ snapshot, savePlanning: save, refresh: load, revealTask, selectedSprintId: sprintId, applyCreatedPlanning });
@@ -105,13 +112,13 @@ const visibleTasks = computed(() => sprintTasks.value.filter(matchesFilters));
 const backlogTasks = computed(() => view.value === 'cancelled'
   ? allTasks.value.filter(task => task.status === 'cancelled' && snapshot.value && matchesSprint(task, snapshot.value, sprintId.value) && matchesFilters(task))
   : visibleTasks.value.filter(task => task.status === 'proposed'));
-const columnTracks = computed(() => [...(snapshot.value?.document.columns.map(column => collapsed.value.has(column.id) ? '52px' : 'minmax(var(--board-column-min), 1fr)') || []), ...(snapshot.value?.canEdit ? ['40px'] : [])].join(' '));
+const columnTracks = computed(() => (snapshot.value?.document.columns.map(column => collapsed.value.has(column.id) ? '52px' : 'minmax(var(--board-column-min), 1fr)') || []).join(' '));
 function byColumn(id: string) { return snapshot.value ? visibleTasks.value.filter(task => boardTaskColumn(snapshot.value!.document, task) === id) : []; }
 function clearFilters() { query.value = ''; ownerFilter.value = ''; typeFilter.value = ''; blockedOnly.value = false; }
 function preferences() { try { localStorage.setItem(`letagents-board-view:${props.roomId}`, JSON.stringify({ view: view.value, collapsed: [...collapsed.value] })); } catch { /* View preferences must never prevent board use. */ } }
-function changeView(id: string, event: MouseEvent) { prepareTabChange(event, id); view.value = id; preferences(); }
+function changeView(id: string) { view.value = id; preferences(); }
 watch(() => props.roomId, () => {
-  view.value = 'board'; collapsed.value = new Set(); sprintId.value = 'all'; clearFilters(); settingsOpen.value = false; planDialog.value?.close(); planTaskId.value = null; moving.value = false; actionError.value = ''; endDrag();
+  view.value = 'board'; collapsed.value = new Set(); sprintId.value = 'all'; clearFilters(); settingsOpen.value = false; sprintDetails.value?.close(); planDialog.value?.close(); planTaskId.value = null; moving.value = false; actionError.value = ''; endDrag();
   try { const saved = JSON.parse(localStorage.getItem(`letagents-board-view:${props.roomId}`) || 'null'); if (views.value.some(v => v.id === saved?.view)) view.value = saved.view; if (Array.isArray(saved?.collapsed)) collapsed.value = new Set(saved.collapsed.filter((id: unknown) => typeof id === 'string')); } catch { /* Ignore stale preferences. */ }
 }, { immediate: true });
 watch(snapshot, (value, previous) => { if (value && !previous) sprintId.value = sprints.value.find(sprint => sprint.state === 'active' && !sprint.source?.stale)?.id || 'all'; });
@@ -134,7 +141,9 @@ async function applyCreatedPlanning(id: string, fields: BoardTaskPlanningFields)
   const document = copyDocument(); document.tasks[id] = { ...document.tasks[id], ...fields };
   return save(document);
 }
-function openSettings(tab: string) { settingsTab.value = tab; settingsOpen.value = true; }
+function openSettings(tab: string, add = false) { settingsTab.value = tab; settingsAdd.value = add; settingsOpen.value = true; }
+function sprintState(sprint: BoardSprint) { return sprint.source?.stale ? 'Status unavailable' : sprint.state === 'future' ? 'Upcoming' : sprint.state === 'active' ? 'Active' : 'Completed'; }
+function sprintBackdrop(event: MouseEvent) { if (event.target === sprintDetails.value) { const rect = sprintDetails.value.getBoundingClientRect(); if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) sprintDetails.value.close(); } }
 async function refresh() { emit('refresh'); await load(); }
 async function openExternal(url: string) { const safe = safeWorkUrl(url); if (!safe) return; try { await props.services.openExternal(safe); } catch { actionError.value = 'The link could not be opened.'; } }
 function closeOtherActions(event: Event) { const detail = event.currentTarget as HTMLDetailsElement; if (detail.open) surface.value?.querySelectorAll<HTMLDetailsElement>('.board-card-actions[open]').forEach(other => { if (other !== detail) other.open = false; }); }
@@ -157,7 +166,7 @@ function dragOverColumn(event: DragEvent, column: BoardColumn) { if (!canDrop(co
 async function dropColumn(column: BoardColumn) {
   if (!canDrop(column) || !snapshot.value) { endDrag(); return; }
   const sourceColumn = draggedColumn.value, task = allTasks.value.find(t => t.id === draggedTask.value); endDrag();
-  if (sourceColumn) { const document = copyDocument(); const from = document.columns.findIndex(c => c.id === sourceColumn), to = document.columns.findIndex(c => c.id === column.id); const [source] = document.columns.splice(from, 1); document.columns.splice(to, 0, source); if (await save(document)) announcement.value = `${source.name} moved.`; return; }
+  if (sourceColumn) { const document = copyDocument(); const from = document.columns.findIndex(c => c.id === sourceColumn), to = document.columns.findIndex(c => c.id === column.id); const columns = [...document.columns]; const [source] = columns.splice(from, 1); columns.splice(to, 0, source); replaceBoardColumns(document, columns, allTasks.value); if (await save(document)) announcement.value = `${source.name} moved.`; return; }
   if (!task) return;
   const room = props.roomId;
   if (!(column.statuses as readonly string[]).includes(task.status)) { const transition = dropTransition(task, column); if (!transition || !await runTransition(task, transition.id)) return; }
@@ -175,7 +184,7 @@ async function runTransition(task: BoardTask, id: string, event?: Event) {
 async function columnKey(event: KeyboardEvent, index: number) {
   if (!event.altKey || !['ArrowLeft', 'ArrowRight'].includes(event.key) || !snapshot.value?.canEdit || locked.value) return;
   event.preventDefault(); const to = index + (event.key === 'ArrowLeft' ? -1 : 1); const document = copyDocument(); if (to < 0 || to >= document.columns.length) return;
-  const [column] = document.columns.splice(index, 1); document.columns.splice(to, 0, column);
+  const columns = [...document.columns]; const [column] = columns.splice(index, 1); columns.splice(to, 0, column); replaceBoardColumns(document, columns, allTasks.value);
   if (await save(document)) { await nextTick(); surface.value?.querySelector<HTMLElement>(`[data-column="${column.id}"] ${collapsed.value.has(column.id) ? '.board-column-rail' : '.board-column-collapse'}`)?.focus({ preventScroll: true }); announcement.value = `${column.name} moved.`; }
 }
 </script>

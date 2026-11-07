@@ -123,5 +123,6 @@ onDeactivated(() => {
   close();
 });
 
-defineExpose({ open, close });
+const isOpen = computed(() => Boolean(personMenu.value || personWorkTarget.value));
+defineExpose({ open, close, isOpen });
 </script>

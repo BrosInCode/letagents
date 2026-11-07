@@ -142,6 +142,7 @@ export function useRoomShellIntegrations(context: unknown) {
     eventsSelectedEventId,
     eventsLoadedOlderWithoutMatches,
     composerGitHubEventPreviews,
+    acknowledgeEvents,
     eventsUnseenCount,
     eventsUnseenTone,
     githubRepository,
@@ -172,7 +173,7 @@ export function useRoomShellIntegrations(context: unknown) {
     githubLoading, githubBusy, githubError, renameRoom, refreshGitHubIntegration,
     installGitHubIntegration, eventsPage, eventsLoading, eventsLoadingOlder, eventsError,
     eventsTaskFilterId, eventsSelectedEventId, eventsLoadedOlderWithoutMatches,
-    composerGitHubEventPreviews, eventsUnseenCount, eventsUnseenTone, githubRepository,
+    composerGitHubEventPreviews, acknowledgeEvents, eventsUnseenCount, eventsUnseenTone, githubRepository,
     showEventsTab, openEventsTab, refreshGitHubEvents, loadOlderGitHubEvents, openEventsForTask,
     openEventById, clearEventsTaskFilter, closeSelectedGitHubEvent, openGitHubEventFromChat,
     openGitHubUrlExternally, dismissComposerGitHubEventPreview,
@@ -208,12 +209,12 @@ export function useRoomShellNotifications(context: unknown) {
         id: "events",
         label: "Activity",
         count: null,
-        indicator: eventsUnseenCount.value > 0 && activeTab.value !== "events"
+        indicator: eventsUnseenCount.value > 0
           ? {
               label: eventsUnseenCount.value === 1 ? "New event" : "New events",
               count: eventsUnseenCount.value,
               tone: eventsUnseenTone.value,
-              pulse: true,
+              pulse: false,
               mode: "count",
             }
           : null,

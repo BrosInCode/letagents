@@ -1,3 +1,5 @@
+import { normalizeRoomIdentifier } from '../../../../domain/sidebar-rooms';
+import { activityUnread } from '../../../../../../../../shared/ui/activity/unread';
 import { provideRoomMessageLinkPreviews, useRoomMessageLinkPreviews } from "../../../../composables/useRoomMessageLinkPreviews";
 import {
   computed,
@@ -44,7 +46,9 @@ export function useDesktopRoomGitHubEvents(options: {
   const eventsSelectedEventId = ref<string | null>(null);
   const eventsLoadedOlderWithoutMatches = ref(false);
   const composerGitHubEventPreviews = ref<ComposerEventPreview[]>([]);
-  const eventsUnseenCount = ref(0);
+  const unreadRevision = ref(0);
+  const stopUnread = activityUnread.subscribe(() => { unreadRevision.value += 1; });
+  const eventsUnseenCount = computed(() => { void unreadRevision.value; return activityUnread.count(normalizeRoomIdentifier(options.room.value.identifier) || ""); });
   const eventsUnseenTone = ref<RoomTabIndicatorTone>("info");
   const composerGitHubEventTimers = new Map<string, number>();
 
@@ -90,14 +94,12 @@ export function useDesktopRoomGitHubEvents(options: {
     eventsLoadingOlder.value = false;
     eventsLoadedOlderWithoutMatches.value = false;
     clearComposerGitHubEventPreviews();
-    resetEventsIndicator();
   });
 
   watch(options.activeTab, (tab) => {
     if (tab === "events" && showEventsTab.value && !eventsPage.value && !eventsLoading.value) {
       void refreshGitHubEvents().catch(() => undefined);
     }
-    if (tab === "events") resetEventsIndicator();
   }, { flush: "sync" });
 
   watch(() => options.messages.value.at(-1)?.id || null, () => {
@@ -110,6 +112,7 @@ export function useDesktopRoomGitHubEvents(options: {
   });
 
   onBeforeUnmount(() => {
+    stopUnread();
     clearComposerGitHubEventPreviews();
   });
 
@@ -123,17 +126,19 @@ export function useDesktopRoomGitHubEvents(options: {
   async function refreshGitHubEvents(): Promise<void> {
     if (!showEventsTab.value || !desktopIpc.room?.getGitHubEvents) return;
     const identifier = options.room.value.identifier;
+    const scope = activityUnread.scope;
     eventsLoading.value = true;
     eventsError.value = null;
     try {
       const nextPage = await desktopIpc.room.getGitHubEvents(identifier, { limit: 100 });
-      if (options.room.value.identifier !== identifier) return;
+      if (options.room.value.identifier !== identifier || activityUnread.scope !== scope) return;
+      activityUnread.observeLatest(normalizeRoomIdentifier(identifier) || "", nextPage.events.map(event => event.id));
       eventsPage.value = mergeDesktopGitHubEventsPage(eventsPage.value, nextPage);
     } catch (error) {
-      if (options.room.value.identifier !== identifier) return;
+      if (options.room.value.identifier !== identifier || activityUnread.scope !== scope) return;
       eventsError.value = error instanceof Error ? error.message : "GitHub events could not be loaded.";
     } finally {
-      if (options.room.value.identifier === identifier) eventsLoading.value = false;
+      if (options.room.value.identifier === identifier && activityUnread.scope === scope) eventsLoading.value = false;
     }
   }
 
@@ -142,22 +147,24 @@ export function useDesktopRoomGitHubEvents(options: {
     const after = eventsPage.value?.events.at(-1)?.id || null;
     if (!after) return;
     const identifier = options.room.value.identifier;
+    const scope = activityUnread.scope;
     eventsLoadingOlder.value = true;
     eventsError.value = null;
     eventsLoadedOlderWithoutMatches.value = false;
     const beforeCount = eventsPage.value?.events.length || 0;
     try {
       const nextPage = await desktopIpc.room.getGitHubEvents(identifier, { limit: 100, after });
-      if (options.room.value.identifier !== identifier) return;
+      if (options.room.value.identifier !== identifier || activityUnread.scope !== scope) return;
+      activityUnread.observeHistory(normalizeRoomIdentifier(identifier) || "", nextPage.events.map(event => event.id));
       eventsPage.value = mergeDesktopGitHubEventsPage(eventsPage.value, nextPage);
       eventsLoadedOlderWithoutMatches.value = Boolean(
         nextPage.events.length && (eventsPage.value?.events.length || 0) === beforeCount,
       );
     } catch (error) {
-      if (options.room.value.identifier !== identifier) return;
+      if (options.room.value.identifier !== identifier || activityUnread.scope !== scope) return;
       eventsError.value = error instanceof Error ? error.message : "Older GitHub events could not be loaded.";
     } finally {
-      if (options.room.value.identifier === identifier) eventsLoadingOlder.value = false;
+      if (options.room.value.identifier === identifier && activityUnread.scope === scope) eventsLoadingOlder.value = false;
     }
   }
 
@@ -207,8 +214,6 @@ export function useDesktopRoomGitHubEvents(options: {
     if (options.activeTab.value === "events" || isLowSignalGitHubCheckMessage(message)) return;
     const event = parseGitHubEvent(message);
     if (!event) return;
-    eventsUnseenCount.value = Math.min(99, eventsUnseenCount.value + 1);
-    eventsUnseenTone.value = eventTabIndicatorTone(event.tone);
     addComposerGitHubEventPreview(message.id, event);
   }
 
@@ -250,9 +255,8 @@ export function useDesktopRoomGitHubEvents(options: {
     composerGitHubEventPreviews.value = [];
   }
 
-  function resetEventsIndicator(): void {
-    eventsUnseenCount.value = 0;
-    eventsUnseenTone.value = "info";
+  function acknowledgeEvents(ids: readonly string[]): void {
+    activityUnread.acknowledge(normalizeRoomIdentifier(options.room.value.identifier) || "", ids);
   }
 
   function findEventByUrl(url: string): NonNullable<DesktopGitHubEventsPage["events"][number]> | null {
@@ -275,6 +279,7 @@ export function useDesktopRoomGitHubEvents(options: {
     eventsSelectedEventId: readonly(eventsSelectedEventId),
     eventsLoadedOlderWithoutMatches,
     composerGitHubEventPreviews,
+    acknowledgeEvents,
     eventsUnseenCount,
     eventsUnseenTone,
     githubRepository,
@@ -313,11 +318,4 @@ export function normalizeExactGitHubUrl(url: string | null | undefined): string 
 
 export function normalizeGitHubObjectUrl(url: string | null | undefined): string | null {
   return normalizeExactGitHubUrl(url)?.replace(/[#?].*$/, "") ?? null;
-}
-
-function eventTabIndicatorTone(tone: GitHubEventPresentation["tone"]): RoomTabIndicatorTone {
-  if (tone === "emerald") return "success";
-  if (tone === "rose") return "danger";
-  if (tone === "amber") return "warning";
-  return "info";
 }

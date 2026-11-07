@@ -13,11 +13,12 @@
       v-if="showEventsTab"
       :aria-current="activeTab === 'events' ? 'page' : undefined"
       :class="{ active: activeTab === 'events' }"
+      :aria-label="activityUnreadCount ? `Activity, ${activityUnreadCount} unread` : 'Activity'"
       type="button"
       @click="selectTab('events')"
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-      <span>Activity</span>
+      <span class="mobile-nav-label">Activity <RoomViewCount :count="activityUnreadCount || 0" notification /></span>
     </button>
     <button
       :aria-current="activeTab === 'board' ? 'page' : undefined"
@@ -40,21 +41,25 @@
     <button
       :aria-current="activeTab === 'rooms' ? 'page' : undefined"
       :class="{ active: activeTab === 'rooms' }"
+      :aria-label="roomCount ? `Rooms, ${roomCount}` : 'Rooms'"
       type="button"
       @click="selectTab('rooms')"
     >
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="8" height="7"/><rect x="13" y="4" width="8" height="7"/><rect x="8" y="13" width="8" height="7"/></svg>
-      <span>Rooms</span>
+      <span class="mobile-nav-label">Rooms <RoomViewCount :count="roomCount || 0" /></span>
     </button>
   </nav>
 </template>
 
 <script setup lang="ts">
 import type { RoomTab } from './types'
+import RoomViewCount from '../../../../../shared/ui/RoomViewCount.vue'
 
 defineProps<{
   activeTab: RoomTab
   showEventsTab: boolean
+  activityUnreadCount?: number
+  roomCount?: number
 }>()
 
 const emit = defineEmits<{
@@ -86,6 +91,7 @@ function selectTab(tab: RoomTab) {
   }
 
   .mobile-bottom-nav button {
+    position: relative;
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -108,7 +114,10 @@ function selectTab(tab: RoomTab) {
     height: 19px;
   }
 
-  .mobile-bottom-nav button span {
+  .mobile-nav-label { display: inline-flex; align-items: center; }
+  .mobile-nav-label :deep(.room-view-count) { position: absolute; top: 2px; left: calc(50% + 8px); width: 18px; height: 18px; margin-left: 0; font-size: 9px; }
+
+  .mobile-bottom-nav button > span {
     font-size: 0.7rem;
     font-weight: 600;
   }

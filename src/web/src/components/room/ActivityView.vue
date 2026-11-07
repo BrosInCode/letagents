@@ -6,7 +6,6 @@
     </div>
 
     <div ref="surface" class="agents-ui">
-    <header v-if="activeView === 'live'" class="agents-heading"><h2>Agents</h2></header>
     <ActivityApprovalEvidence
       v-if="activeView === 'live'"
       :entries="approvalEntries"
@@ -140,6 +139,6 @@ const { navigate, pastButton } = useAgentsNavigation(activeView, surface);
 <style src="./activity/styles/responsive.css"></style>
 
 <style scoped>
-.activity-panel { padding: 28px 32px; }
-@media(max-width:640px) { .activity-panel { padding: 22px 16px; } }
+.activity-panel { padding: 18px 30px 28px; }
+@media(max-width:640px) { .activity-panel { padding: 16px; } }
 </style>

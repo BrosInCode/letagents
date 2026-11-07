@@ -32,7 +32,7 @@ function mount<T>(t: any, setup: () => T): T {
 function component(t: any, definition: any, props: any) {
   return mount<any>(t, () => {
     const vm = definition.setup(props, { expose() {}, emit() {} });
-    if (vm.dialog) vm.dialog.value = markRaw({ showModal() {}, close() {} });
+    if (vm.dialog) vm.dialog.value = markRaw({ showModal() {}, close() {}, querySelector() { return null; }, querySelectorAll() { return []; } });
     return vm;
   });
 }
@@ -164,6 +164,142 @@ test('removing a column respects the visible fallback after a task lifecycle cha
   assert.equal(boardTaskColumn(vm.draft.value, state.taskFacts[0]), 'destination');
   assert.equal(state.taskFacts[0].status, 'accepted');
   assert.equal(vm.draft.value.tasks.task_1.estimate, 3);
+});
+
+test('settings add a column from its name without changing task states or requiring a new mapping', async t => {
+  const state = snapshot();
+  const vm = component(t, Settings, reactive({ open: true, snapshot: state, save: async () => true }));
+  await settle(); vm.startAdd(); vm.columnName.value = ' Ready for testing '; vm.addColumn();
+  const added = vm.draft.value.columns.at(-1);
+  assert.equal(added.name, 'Ready for testing');
+  assert.deepEqual(added.statuses, ['in_progress']);
+  assert.equal(vm.adding.value, false);
+  assert.equal(vm.dirty.value, true);
+  assert.doesNotThrow(() => validateBoardPlanningUpdate({ expectedRevision: 0, document: vm.draft.value }));
+  vm.columnName.value = 'ready FOR testing'; vm.addColumn();
+  assert.equal(vm.draft.value.columns.length, state.document.columns.length + 1);
+  assert.match(vm.error.value, /already exists/);
+  await settle();
+});
+
+test('settings rename restores an empty or cancelled name and keyboard reorder preserves column mappings', async t => {
+  const state = snapshot();
+  const vm = component(t, Settings, reactive({ open: true, snapshot: state, save: async () => true }));
+  await settle();
+  const column = vm.draft.value.columns[0], original = column.name, statuses = [...column.statuses];
+  vm.startRename(column); column.name = ''; vm.finishRename(column);
+  assert.equal(column.name, original);
+  vm.startRename(column); column.name = 'Not saved'; vm.cancelRename(column);
+  assert.equal(column.name, original);
+  vm.shift(0, -1, true);
+  assert.equal(vm.draft.value.columns[0].id, column.id);
+  vm.shift(0, 1, true);
+  assert.equal(vm.draft.value.columns[1].id, column.id);
+  assert.deepEqual(vm.draft.value.columns[1].statuses, statuses);
+  assert.equal(vm.keyboard.value, true);
+  assert.match(vm.announcement.value, /position 2/);
+  await settle();
+});
+
+test('column pointer drag commits the draft order only after a drag and can be cancelled', async t => {
+  const vm = component(t, Settings, reactive({ open: true, snapshot: snapshot(), save: async () => true }));
+  await settle();
+  const before = vm.draft.value.columns.map((column: any) => column.id);
+  let captured = false;
+  const target = { setPointerCapture() { captured = true; }, hasPointerCapture() { return captured; }, releasePointerCapture() { captured = false; } };
+  vm.beginDrag({ button: 0, isPrimary: true, pointerId: 1, clientX: 0, clientY: 0, currentTarget: target }, before[0]);
+  vm.moveDrag({ pointerId: 1, clientX: 0, clientY: 3 });
+  vm.endDrag({ pointerId: 1 });
+  assert.deepEqual(vm.draft.value.columns.map((column: any) => column.id), before);
+  vm.beginDrag({ button: 0, isPrimary: true, pointerId: 1, clientX: 0, clientY: 0, currentTarget: target }, before[0]);
+  vm.moveDrag({ pointerId: 1, clientX: 0, clientY: 100 });
+  vm.cancelDrag();
+  assert.deepEqual(vm.draft.value.columns.map((column: any) => column.id), before);
+  vm.beginDrag({ button: 0, isPrimary: true, pointerId: 1, clientX: 0, clientY: 0, currentTarget: target }, before[0]);
+  vm.moveDrag({ pointerId: 1, clientX: 0, clientY: 100 });
+  vm.endDrag({ pointerId: 1 });
+  assert.deepEqual(vm.draft.value.columns.map((column: any) => column.id), [...before.slice(1), before[0]]);
+  assert.equal(captured, false);
+  await settle();
+});
+
+test('reordering a name-only column preserves implicit cards and explicit placements', async t => {
+  const state = snapshot();
+  state.taskFacts = ['in_progress', 'in_progress', 'blocked', 'proposed'].map((status, i) => ({ id: `task_${i + 1}`, title: `Task ${i}`, status, assignee: null, assigneeAgentKey: null, provider: null, prUrl: null, externalRef: null, ticketUrl: null, updatedAt: '' }));
+  const vm = component(t, Settings, reactive({ open: true, snapshot: state, save: async () => true }));
+  await settle(); vm.columnName.value = 'Verification'; vm.addColumn();
+  const added = vm.draft.value.columns.at(-1);
+  vm.draft.value.tasks.task_2 = { columnId: added.id, estimate: 5 };
+  vm.draft.value.tasks.task_1 = { estimate: 3 };
+  const before = state.taskFacts.map(task => boardTaskColumn(vm.draft.value, task));
+  // Keyboard path moves the new lane ahead of the original In progress lane.
+  vm.shift(4, -1, true); vm.shift(3, -1, true); vm.shift(2, -1, true);
+  assert.deepEqual(state.taskFacts.map(task => boardTaskColumn(vm.draft.value, task)), before);
+  assert.deepEqual(vm.draft.value.tasks.task_1, { estimate: 3, columnId: 'progress' });
+  assert.deepEqual(vm.draft.value.tasks.task_2, { estimate: 5, columnId: added.id });
+  assert.equal(vm.draft.value.tasks.task_3, undefined, 'unaffected work does not need an override');
+  assert.equal(vm.draft.value.tasks.task_4, undefined, 'proposed work stays outside columns');
+  // Board header and pointer paths use the same placement-preserving replacement.
+  model.replaceBoardColumns(vm.draft.value, [...vm.draft.value.columns].reverse(), state.taskFacts);
+  assert.deepEqual(state.taskFacts.map(task => boardTaskColumn(vm.draft.value, task)), before);
+  assert.deepEqual(state.taskFacts.map(task => task.status), ['in_progress', 'in_progress', 'blocked', 'proposed']);
+  assert.doesNotThrow(() => validateBoardPlanningUpdate({ expectedRevision: 0, document: vm.draft.value }));
+  await settle();
+});
+
+test('removing an overlapping empty column does not pull unrelated cards into its destination', async t => {
+  const state = snapshot();
+  state.document.columns.push({ id: 'verification', name: 'Verification', statuses: ['in_progress'] });
+  state.taskFacts = [{ id: 'task_1', title: 'Task', status: 'in_progress', assignee: null, assigneeAgentKey: null, provider: null, prUrl: null, externalRef: null, ticketUrl: null, updatedAt: '' }];
+  const vm = component(t, Settings, reactive({ open: true, snapshot: state, save: async () => true }));
+  await settle(); vm.removing.value = 'verification'; vm.destination.value = 'todo'; vm.removeColumn();
+  assert.equal(boardTaskColumn(vm.draft.value, state.taskFacts[0]), 'progress');
+  assert.equal(state.taskFacts[0].status, 'in_progress');
+  assert.doesNotThrow(() => validateBoardPlanningUpdate({ expectedRevision: 0, document: vm.draft.value }));
+  await settle();
+});
+
+test('removing a populated overlapping column honors the chosen destination without relocating other cards', async t => {
+  const state = snapshot();
+  state.document.columns.push({ id: 'qa', name: 'QA', statuses: ['in_progress'] });
+  state.taskFacts = ['in_progress', 'in_progress', 'accepted', 'proposed'].map((status, i) => ({ id: `task_${i + 1}`, title: `Task ${i}`, status, assignee: null, assigneeAgentKey: null, provider: null, prUrl: null, externalRef: null, ticketUrl: null, updatedAt: '' }));
+  state.document.tasks = { task_1: { columnId: 'qa', estimate: 5 }, task_3: { columnId: 'qa' }, task_4: { columnId: 'qa' } };
+  const before = structuredClone(state.taskFacts);
+  const vm = component(t, Settings, reactive({ open: true, snapshot: state, save: async () => true }));
+  await settle(); vm.removing.value = 'qa'; vm.destination.value = 'todo'; vm.removeColumn();
+  assert.equal(boardTaskColumn(vm.draft.value, state.taskFacts[0]), 'todo', 'the QA card goes to the chosen destination');
+  assert.equal(boardTaskColumn(vm.draft.value, state.taskFacts[1]), 'progress', 'unrelated work stays in Progress');
+  assert.equal(boardTaskColumn(vm.draft.value, state.taskFacts[2]), 'todo', 'stale QA metadata does not move accepted work');
+  assert.equal(boardTaskColumn(vm.draft.value, state.taskFacts[3]), null, 'proposed work remains outside the columns');
+  assert.deepEqual(vm.draft.value.tasks.task_1, { columnId: 'todo', estimate: 5 });
+  assert.deepEqual(state.taskFacts, before);
+  assert.doesNotThrow(() => validateBoardPlanningUpdate({ expectedRevision: 0, document: vm.draft.value }));
+  await settle();
+});
+
+test('the add-column transition focuses its newly mounted control, and never focuses a closed dialog', async t => {
+  const props = reactive({ open: true, snapshot: snapshot(), save: async () => true });
+  const vm = component(t, Settings, props);
+  await settle(); let focused = '';
+  vm.dialog.value = markRaw({ showModal() {}, close() {}, querySelector(selector: string) { return { focus() { focused = selector; } }; } });
+  vm.adding.value = true; vm.focusAddControl(); await settle();
+  assert.match(focused, /-new-column/);
+  vm.adding.value = false; vm.focusAddControl(); await settle();
+  assert.match(focused, /-add-column/);
+  focused = ''; props.open = false; vm.focusAddControl(); await settle();
+  assert.equal(focused, '');
+});
+
+test('read-only settings refuse draft mutations and persistence', async t => {
+  let writes = 0;
+  const state = snapshot(); state.canEdit = false;
+  const vm = component(t, Settings, reactive({ open: true, snapshot: state, save: async () => { writes++; return true; } }));
+  await settle(); const before = structuredClone(state.document);
+  vm.columnName.value = 'Testing'; vm.addColumn(); vm.shift(0, 1); vm.startRename(vm.draft.value.columns[0]);
+  vm.removing.value = before.columns[0].id; vm.destination.value = before.columns[1].id; vm.removeColumn();
+  vm.overrideTarget('sprint-one'); await vm.submit();
+  assert.deepEqual(vm.draft.value, before); assert.equal(vm.editing.value, ''); assert.equal(writes, 0);
+  await settle();
 });
 
 test('editing only priority preserves imported planning so a later tracker estimate still updates', async t => {

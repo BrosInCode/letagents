@@ -122,7 +122,12 @@ test('Needs you presents a human decision with context and escapes agent content
     const headerProps = { sidebarMode: 'expanded', room: { displayName: 'Product launch' }, storage: { effectiveMode: 'cloud' }, tabs: [], activeTab: 'chat', searchOpen: false, actionPanelOpen: false };
     const alertHtml = await renderToString(createSSRApp(header, { ...headerProps, attention: { count: 1, pulse: true } }));
     assert.match(alertHtml, /data-pulse="true"/); assert.match(alertHtml, /Open Inbox for Product launch, 1 request needs you/);
-    assert.equal((alertHtml.match(/class="desktop-room-needs-you-wave"/g) ?? []).length, 2);
+    assert.match(alertHtml, /room-attention-button/);
+    assert.doesNotMatch(alertHtml, /desktop-room-needs-you-wave/, 'attention uses the quiet shared signal');
+    assert.doesNotMatch(alertHtml, /desktop-room-toolbar-title/, 'sidebar already supplies the room identity');
+    const hiddenSidebarHtml = await renderToString(createSSRApp(header, { ...headerProps, sidebarMode: 'hidden' }));
+    assert.match(hiddenSidebarHtml, /desktop-room-toolbar-title/);
+    assert.match(hiddenSidebarHtml, /Show sidebar/);
     const acknowledgedHtml = await renderToString(createSSRApp(header, { ...headerProps, attention: { count: 1, pulse: false } }));
     assert.match(acknowledgedHtml, /data-pulse="false"/); assert.match(acknowledgedHtml, /room-inbox-shortcut/);
     const resolvedHtml = await renderToString(createSSRApp(header, { ...headerProps, attention: { count: 0, pulse: false } }));
