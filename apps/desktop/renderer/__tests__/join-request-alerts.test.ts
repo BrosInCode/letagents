@@ -41,6 +41,7 @@ let documentHasFocus = true;
 let knockStarts = 0;
 let decideOnServer: ((...args: unknown[]) => Promise<unknown>) | null = null;
 let listOnServer: (() => Promise<unknown>) | null = null;
+let preferenceOnServer: (() => Promise<unknown>) | null = null;
 
 before(async () => {
   Object.assign(globalThis, {
@@ -64,7 +65,7 @@ before(async () => {
           onStatusChanged: () => () => undefined,
         },
         room: {
-          getNotificationPreference: async (id: string) => ({ room_id: id, level: id === "quiet-room" ? "muted" : "all", snoozed_until: null }),
+          getNotificationPreference: async (id: string) => preferenceOnServer ? preferenceOnServer() : ({ room_id: id, level: id === "quiet-room" ? "muted" : "all", snoozed_until: null }),
           listNotificationPreferences: async () => ({ preferences: [], truncated: false }),
         },
       },
@@ -153,6 +154,7 @@ test("an arrival plays the room sound and raises one notification, except for th
     activeEntry, selectedRoomInfo, roomSettingsSectionRequest,
     openRoomFromAppAgent: async (roomIdentifier: string) => { opened.push(roomIdentifier); },
   };
+  preferences.roomNotificationPreferences.setViewer({ id: "acct_me", login: "me" });
   storage.set("letagents-desktop:sound", "on");
   storage.set("letagents-desktop:notifications", "on");
   const scope = effectScope();
@@ -161,7 +163,7 @@ test("an arrival plays the room sound and raises one notification, except for th
   try {
     notifications.length = 0;
     // Another room is open: a notification, and a click opens the room's settings at Members.
-    api.alertForArrival({ request: request("rjr_1", "ada", { display_name: "Ada" }), playSound: true });
+    await api.alertForArrival({ request: request("rjr_1", "ada", { display_name: "Ada" }), playSound: true });
     assert.equal(knockStarts, 2, "the actual sound entry point plays two taps");
     assert.equal(notifications.length, 1);
     assert.equal(notifications[0]!.title, "Join request in Design lounge");
@@ -174,16 +176,16 @@ test("an arrival plays the room sound and raises one notification, except for th
 
     // The room itself is in front: the banner is enough.
     activeEntry.value = { type: "room" };
-    api.alertForArrival({ request: request("rjr_2", "bob"), playSound: false });
+    await api.alertForArrival({ request: request("rjr_2", "bob"), playSound: false });
     assert.equal(notifications.length, 1, "no notification over the banner");
     documentHasFocus = false;
-    api.alertForArrival({ request: request("rjr_3", "cy"), playSound: false });
+    await api.alertForArrival({ request: request("rjr_3", "cy"), playSound: false });
     assert.equal(notifications.length, 2, "the window lost focus: the notification shows");
     documentHasFocus = true;
 
     // A focus room of the same access room counts as the room in front.
     selectedRoomInfo.value = { identifier: "focus_9", kind: "focus", parentRoomId: "Design-Lounge" };
-    api.alertForArrival({ request: request("rjr_4", "dee"), playSound: false });
+    await api.alertForArrival({ request: request("rjr_4", "dee"), playSound: false });
     assert.equal(notifications.length, 2);
 
     // A muted room (its setting is in the personal cache, read on sign-in and focus): no notification.
@@ -192,12 +194,12 @@ test("an arrival plays the room sound and raises one notification, except for th
     await preferences.roomNotificationPreferences.refresh("quiet-room");
     await flush();
     assert.equal(preferences.roomNotificationsMuted("quiet-room"), true);
-    api.alertForArrival({ request: request("rjr_5", "eve", { room_id: "quiet-room" }), playSound: true });
+    await api.alertForArrival({ request: request("rjr_5", "eve", { room_id: "quiet-room" }), playSound: true });
     assert.equal(notifications.length, 2, "a muted room raises nothing");
     assert.equal(knockStarts, 2, "room mute also suppresses the knock");
     storage.set("letagents-desktop:sound", "off");
     activeEntry.value = { type: "room" };
-    api.alertForArrival({ request: request("rjr_sound_off", "eve"), playSound: true });
+    await api.alertForArrival({ request: request("rjr_sound_off", "eve"), playSound: true });
     assert.equal(knockStarts, 2, "global sound preference suppresses the knock");
     storage.set("letagents-desktop:sound", "on");
 
@@ -206,20 +208,24 @@ test("an arrival plays the room sound and raises one notification, except for th
     const nativeScope = effectScope();
     const nativeApi = nativeScope.run(() => alerts.useAppJoinRequestAlerts(context))!;
     await flush();
-    nativeApi.alertForArrival({ request: request("rjr_6", "fay"), playSound: false });
+    await nativeApi.alertForArrival({ request: request("rjr_6", "fay"), playSound: false });
     assert.equal(notifications.length, 2, "macOS shows the native alert instead");
+    (document as unknown as { visibilityState: string }).visibilityState = "hidden";
+    await nativeApi.alertForArrival({ request: request("native-background", "fay"), playSound: true });
+    assert.equal(knockStarts, 2, "native background delivery owns the sound");
+    (document as unknown as { visibilityState: string }).visibilityState = "visible";
     nativeScope.stop();
     notificationStatus = { enabled: true, nativeSupported: false, nativeRegistered: false, lastError: null };
 
     // Permission withdrawn: nothing, and no error.
     notificationPermission = "denied";
-    api.alertForArrival({ request: request("rjr_7", "gus"), playSound: false });
+    await api.alertForArrival({ request: request("rjr_7", "gus"), playSound: false });
     assert.equal(notifications.length, 2);
     notificationPermission = "granted";
 
     // Signed out: nothing.
     context.authStatus.value = { authenticated: false, account: null as never };
-    api.alertForArrival({ request: request("rjr_8", "hal"), playSound: true });
+    await api.alertForArrival({ request: request("rjr_8", "hal"), playSound: true });
     assert.equal(notifications.length, 2);
     assert.equal(knockStarts, 2, "sign-out suppresses sound");
   } finally {
@@ -327,4 +333,36 @@ test("an initial read preserves older requests and live arrivals without resurre
     await pending;
     assert.deepEqual(roomJoinRequests.items.value.map(item => item.id), ["old", "new-live"]);
   } finally { listOnServer = null; roomJoinRequests.reset(); }
+});
+
+test("desktop alerts wait for mute preferences and discard arrivals from an old account", async () => {
+  const preferenceStore = preferences.roomNotificationPreferences;
+  preferenceStore.setViewer({ id: "account-a", login: "a" });
+  const authStatus = ref({ authenticated: true, account: { id: "account-a", login: "a" } });
+  const scope = effectScope();
+  const api = scope.run(() => alerts.useAppJoinRequestAlerts({ authStatus, activeEntry: ref({ type: "inbox" }), selectedRoomInfo: ref({ identifier: "elsewhere", kind: "main", parentRoomId: null }), roomSettingsSectionRequest: ref(null), openRoomFromAppAgent: async () => {} }))!;
+  let finish!: (value: unknown) => void;
+  preferenceOnServer = () => new Promise(resolve => { finish = resolve; });
+  const started = knockStarts;
+  const announced = notifications.length;
+  try {
+    const read = preferenceStore.refresh("quiet-room");
+    const pending = api.alertForArrival({ request: request("loading-muted", "ada", { room_id: "quiet-room" }), playSound: true });
+    await flush();
+    assert.equal(knockStarts, started, "nothing sounds while the preference is unknown");
+    finish({ room_id: "quiet-room", level: "muted", snoozed_until: null });
+    await read; await pending;
+    assert.equal(knockStarts, started);
+    assert.equal(notifications.length, announced);
+    const oldRead = preferenceStore.refresh("design-lounge");
+    const oldArrival = api.alertForArrival({ request: request("old-sound", "bob"), playSound: true });
+    await flush();
+    authStatus.value = { authenticated: true, account: { id: "account-b", login: "b" } };
+    preferenceStore.setViewer({ id: "account-b", login: "b" });
+    preferenceOnServer = null;
+    finish({ room_id: "design-lounge", level: "all", snoozed_until: null });
+    await oldRead; await oldArrival;
+    assert.equal(knockStarts, started);
+    assert.equal(notifications.length, announced, "late settings cannot announce another account's request");
+  } finally { preferenceOnServer = null; scope.stop(); preferenceStore.setViewer(null); }
 });
