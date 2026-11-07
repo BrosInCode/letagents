@@ -86,6 +86,7 @@ import { presenceChangeEvents } from "./presence-change-events.js";
 import { registerAppLoginRoutes } from "../routes/auth/app-login.js";
 import { registerConversationRoutes } from "../routes/conversations.js";
 import { registerAccountOrganizationRoutes } from "../routes/account/organizations.js";
+import { registerOrganizationRoomRoutes } from "../routes/account/organization-rooms.js";
 import {
   registerAuthRoutes,
   registerGitHubAppCallbackRoute,
@@ -567,6 +568,7 @@ export function registerApiRoutes(app: Express): void {
   registerTrackerRuleRoutes(app);
   registerJevMetricsRoute(app);
   registerAccountOrganizationRoutes(app);
+  registerOrganizationRoomRoutes(app);
   registerDesktopPushRoutes(app);
 
   registerGitHubIntegrationRoutes(app, githubIntegrationRouteDeps);

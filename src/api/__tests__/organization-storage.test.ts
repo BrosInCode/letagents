@@ -13,6 +13,7 @@ test("verified joins are atomic, idempotent, and keyed by immutable organization
   process.env.DB_URL = url.toString();
   const { pool } = await import("../db/client.js");
   const store = await import("../db/organizations.js");
+  const { getConnectedOrganizationRooms } = await import("../db/organization-rooms.js");
   try {
     await admin.query(`CREATE SCHEMA ${schema}`);
     await pool.query("CREATE TABLE accounts (id text PRIMARY KEY); INSERT INTO accounts VALUES ('alice'), ('bob')");
@@ -31,6 +32,38 @@ test("verified joins are atomic, idempotent, and keyed by immutable organization
     assert.equal((await store.getOrganizationsForGitHubIds(["42"]))[0].login, "renamed");
     await store.saveVerifiedOrganizationMembership({ accountId: "bob", membership, create: false });
     assert.deepEqual(await store.getJoinedOrganizationIds("bob"), ["42"]);
+    await pool.query(`
+      CREATE TABLE rooms (id text PRIMARY KEY, display_name text, kind text);
+      CREATE TABLE github_app_installations (
+        installation_id text PRIMARY KEY, target_github_id text, target_type text,
+        suspended_at timestamptz, uninstalled_at timestamptz
+      );
+      CREATE TABLE github_app_repositories (
+        github_repo_id text PRIMARY KEY, installation_id text, removed_at timestamptz
+      );
+      CREATE TABLE github_repositories (github_repo_id text PRIMARY KEY, room_id text, full_name text);
+      INSERT INTO github_app_installations VALUES
+        ('active', '42', 'Organization', NULL, NULL),
+        ('suspended', '42', 'Organization', now(), NULL),
+        ('uninstalled', '42', 'Organization', NULL, now()),
+        ('other', '99', 'Organization', NULL, NULL),
+        ('personal', '42', 'User', NULL, NULL);
+    `);
+    for (const [id, installation, kind, removed] of [
+      ["100", "active", "main", false],
+      ["101", "suspended", "main", false],
+      ["102", "uninstalled", "main", false],
+      ["103", "other", "main", false],
+      ["104", "personal", "main", false],
+      ["105", "active", "main", true],
+      ["106", "active", "focus", false],
+    ]) {
+      await pool.query("INSERT INTO rooms VALUES ($1, $2, $3)", [`repo-${id}`, `repo-${id}`, kind]);
+      await pool.query("INSERT INTO github_repositories VALUES ($1, $2, $3)", [id, `repo-${id}`, `acme/repo-${id}`]);
+      await pool.query("INSERT INTO github_app_repositories VALUES ($1, $2, $3)", [id, installation, removed ? new Date() : null]);
+    }
+    assert.deepEqual((await getConnectedOrganizationRooms("42")).map((room) => room.github_repo_id), ["100"]);
+    assert.deepEqual((await getConnectedOrganizationRooms("99")).map((room) => room.github_repo_id), ["103"]);
     await assert.rejects(store.saveVerifiedOrganizationMembership({ accountId: "missing", membership: { ...membership, github_org_id: "43" }, create: true }));
     assert.deepEqual(await store.getOrganizationsForGitHubIds(["43"]), []);
     await store.removeOrganizationMembership("alice", "42");
