@@ -4,6 +4,7 @@
   <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" data-testid="desktop-first-run-onboarding">
     <FirstRunOnboardingView
       :stage="firstRunStage"
+      :invited-company-id="pendingCompanyInvite"
       :organizations="company.organizations.value"
       :organization-busy="company.busy.value"
       :organization-error="company.error.value"
@@ -84,6 +85,7 @@
           :company-error="company.error.value"
           @choose-company="chooseSidebarCompany"
           @refresh-companies="company.refresh"
+          @copy-company-link="copyCompanyLink"
           :active-entry="activeEntry"
           :primary-room="currentParentRoom"
           :project-entries="sidebarProjectEntries"
@@ -158,7 +160,7 @@
         @refresh="refresh"
       />
 
-      <PrivateMessages v-if="authStatus?.authenticated && authStatus.account" v-show="activeEntry.type === 'messages'" :key="authStatus.account.id" :api="desktopIpc.conversations" :account-id="authStatus.account.id" :active="activeEntry.type === 'messages'" :open-conversation-id="openConversationId" :open-conversation-nonce="openConversationNonce" @unread="messagesUnread = $event">
+      <PrivateMessages v-if="authStatus?.authenticated && authStatus.account" v-show="!showCompanyHome && activeEntry.type === 'messages'" :key="authStatus.account.id" :api="desktopIpc.conversations" :account-id="authStatus.account.id" :active="activeEntry.type === 'messages'" :open-conversation-id="openConversationId" :open-conversation-nonce="openConversationNonce" @unread="messagesUnread = $event">
         <template v-if="activeEntry.type === 'messages' && sidebarMode === 'hidden'" #navigation>
           <button class="ghost-button sidebar-reveal-button" type="button" aria-label="Show sidebar" title="Show sidebar" data-testid="sidebar-reveal-button" @click="cycleSidebar">
             <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
@@ -170,6 +172,9 @@
         </template>
       </PrivateMessages>
       <section v-if="showCompanyHome" class="company-home surface-page" data-testid="company-home">
+        <FirstRunOrganizationStep v-if="pendingCompanyInvite" :invited-id="pendingCompanyInvite"
+          :organizations="company.organizations.value" :busy="company.busy.value" :error="company.error.value"
+          @choose="chooseSidebarCompany" @retry="company.refresh" />
         <h1>{{ company.selected.value?.login || 'Personal & shared rooms' }}</h1>
         <p v-if="company.busy.value" role="status">Loading your repo rooms…</p>
         <p v-else-if="company.error.value" role="alert">{{ company.error.value }}</p>
@@ -256,7 +261,7 @@
       </KeepAlive>
 
       <SettingsView
-        v-if="activeEntry.type === 'system'"
+        v-if="!showCompanyHome && activeEntry.type === 'system'"
         :account-rooms="settingsAccountRooms"
         :app-info="appInfo"
         :app-agent-actions="appAgentActions"
@@ -306,10 +311,10 @@
         @start-auth="openAccountAuthFlow"
       />
 
-      <InboxView v-else-if="activeEntry.type === 'inbox'" :key="authStatus?.account?.id ?? 'local'" :rooms="inboxRooms" @update:rooms="chooseInboxRooms" v-model:section="inboxSection" :storage-key="inboxStorageKey" :data="needsYouData" :attention="agentAttentionItems" :loading="needsYouLoading" :error="needsYouError" :rentals="inboxRentals" :rental-error="inboxRentalError" :join-requests="inboxJoinRequests" @refresh="refreshInbox" @open-room="openNeedsYouRoom" @open-rental="openRentalRequestInbox" @threads-loaded="mergeInboxThreads" />
+      <InboxView v-else-if="!showCompanyHome && activeEntry.type === 'inbox'" :key="authStatus?.account?.id ?? 'local'" :rooms="inboxRooms" @update:rooms="chooseInboxRooms" v-model:section="inboxSection" :storage-key="inboxStorageKey" :data="needsYouData" :attention="agentAttentionItems" :loading="needsYouLoading" :error="needsYouError" :rentals="inboxRentals" :rental-error="inboxRentalError" :join-requests="inboxJoinRequests" @refresh="refreshInbox" @open-room="openNeedsYouRoom" @open-rental="openRentalRequestInbox" @threads-loaded="mergeInboxThreads" />
 
       <MyWorkView
-        v-else-if="activeEntry.type === 'my-work'"
+        v-else-if="!showCompanyHome && activeEntry.type === 'my-work'"
         :key="authStatus?.account?.id ?? 'local'"
         :tasks-changed-at="accountActivity.tasksChangedAt.value"
         :connected="accountActivity.connected.value"
@@ -324,7 +329,7 @@
       </MyWorkView>
 
       <RentMarketplaceView
-        v-else-if="activeEntry.type === 'marketplace'"
+        v-else-if="!showCompanyHome && activeEntry.type === 'marketplace'"
         :rooms="settingsAccountRooms"
         :initial-role="rentMarketplaceRole"
       />
@@ -470,6 +475,7 @@ import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue"
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
 import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
+import FirstRunOrganizationStep from "./components/desktop/setup/FirstRunOrganizationStep.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { settingsEntry } from "./domain/desktop-navigation";
@@ -521,7 +527,7 @@ const {
   sidebarBatchDialogError,
 } = Object.assign(app, useAppState());
 const {
-  company, chooseOnboardingCompany,
+  company, pendingCompanyInvite, chooseOnboardingCompany, copyCompanyLink,
 } = Object.assign(app, useAppCompany(app));
 const {
   openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshInbox,

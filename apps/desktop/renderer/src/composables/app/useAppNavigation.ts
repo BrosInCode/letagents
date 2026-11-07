@@ -6,7 +6,7 @@ import { useDesktopNavigationState } from "../useDesktopNavigationState";
 import { rememberStoredString } from "../../domain/desktop-storage";
 import { normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
 import { gitRoomsShareRepo } from "../../domain/app-room-aliases";
-import { mergeCompanyRooms } from "../../domain/company-navigation";
+import { companyProjectGroups, mergeCompanyRooms } from "../../domain/company-navigation";
 import type { AppContextOf } from "./context";
 
 /** Sidebar navigation state: the active entry, projects, and the selected room. */
@@ -23,7 +23,7 @@ export function useAppNavigation(context: unknown) {
     cycleSidebar: toggleSidebarMode,
     focusRooms,
     getAuthRoomIdentifier,
-    openRoomSnapshot,
+    openRoomSnapshot: openNavigationRoomSnapshot,
     pinnedCollapsed,
     pinnedRoom,
     projectEntries,
@@ -54,6 +54,17 @@ export function useAppNavigation(context: unknown) {
     selectedRootRoomIdentifier,
     selectedSnapshot,
   });
+  function openRoomSnapshot(...args: Parameters<typeof openNavigationRoomSnapshot>): void {
+    openNavigationRoomSnapshot(...args);
+    // An explicit room open must remain reachable even when it is outside the
+    // selected company's connected repositories (including ad-hoc rooms).
+    const { company } = app;
+    if (company.selectedId.value && !companyProjectGroups(projectEntries.value, company.selectedId.value, company.rooms.value).some((project) =>
+      [project.parent, ...project.branchRooms, ...project.focusRooms].some((entry) => entry.id === activeEntry.value.id)
+    )) {
+      void company.choose(null);
+    }
+  }
   Object.assign(app, { activeEntry, collapsedProjects, currentParentRoom, toggleSidebarMode, openRoomSnapshot, projectEntries, rememberRootRoomSnapshot, selectSidebarEntry, selectedRoomIdentifier, selectedRoomInfo, sidebarMode });
   return {
     activeEntry, collapsedProjects, currentParentRoom, toggleSidebarMode, focusRooms,

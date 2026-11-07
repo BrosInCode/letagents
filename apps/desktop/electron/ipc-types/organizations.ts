@@ -17,6 +17,9 @@ export interface DesktopOrganizationRoom {
 }
 
 export interface DesktopOrganizationApi {
+  pendingInvite: () => Promise<string | null>;
+  acknowledgeInvite: (id: string) => Promise<void>;
+  onInvited: (callback: (id: string) => void) => () => void;
   list: () => Promise<DesktopOrganization[]>;
   join: (id: string, setup: boolean) => Promise<void>;
   rooms: (id: string) => Promise<DesktopOrganizationRoom[]>;

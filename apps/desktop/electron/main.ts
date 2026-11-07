@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { claimDesktopInstance, registerAskLinks } from "./main/ask-links.js";
 import { handleAttachmentProtocolRequest } from "./main/attachments.js";
 import { registerDesktopIpcHandlers } from "./main/ipc.js";
+import { prepareCompanyLinks } from "./main/company-links.js";
 import { configureApplicationMenu } from "./main/menu.js";
 import { startDesktopShellEnvironmentHydration } from "./main/desktop-shell-environment.js";
 import {
@@ -40,6 +41,7 @@ function startDesktopApp(): void {
   applyWindowsAppUserModelId(app);
   prepareDesktopNotifications();
   registerAskLinks();
+  prepareCompanyLinks();
 
   protocol.registerSchemesAsPrivileged([
     {

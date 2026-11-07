@@ -1,6 +1,7 @@
 import type { IpcMain } from "electron";
 import type { DesktopOrganization, DesktopOrganizationRoom } from "../ipc-types/organizations.js";
 import { apiFetch } from "./auth.js";
+import { acknowledgeCompanyLink, getPendingCompanyLink } from "./company-links.js";
 
 function organizationId(value: unknown): string {
   if (typeof value !== "string" || !/^[1-9][0-9]*$/.test(value)) throw new Error("Choose a valid GitHub organization.");
@@ -8,6 +9,8 @@ function organizationId(value: unknown): string {
 }
 
 export function registerOrganizationIpcHandlers(ipc: IpcMain): void {
+  ipc.handle("desktop:organizations:pending", () => getPendingCompanyLink());
+  ipc.handle("desktop:organizations:acknowledge", (_event, id: unknown) => acknowledgeCompanyLink(id));
   ipc.handle("desktop:organizations:list", async () => {
     const response = await apiFetch<{ organizations: DesktopOrganization[] }>("/account/organizations", undefined, { timeoutMs: 40_000 });
     return response.organizations;

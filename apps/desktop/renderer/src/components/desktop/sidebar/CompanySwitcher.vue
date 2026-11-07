@@ -13,24 +13,25 @@
     </div>
     <p v-if="busy" role="status">Checking GitHub…</p>
     <p v-else-if="error" role="alert">{{ error }}</p>
+    <button v-if="selectedId" class="company-personal" type="button" @click="$emit('copy-link')">Copy company link</button>
     <button v-if="selectedId" type="button" class="company-personal" @click="$emit('choose', null)">Personal &amp; shared rooms</button>
   </div>
 </template>
 <script setup lang="ts">
 import type { DesktopOrganization } from "../../../../../electron/ipc-types/organizations.js";
 defineProps<{ organizations: DesktopOrganization[]; selectedId: string | null; busy: boolean; error: string | null }>();
-const emit = defineEmits<{ choose: [id: string | null]; refresh: [] }>();
+const emit = defineEmits<{ choose: [id: string | null]; refresh: []; "copy-link": [] }>();
 function choose(event: Event) { emit("choose", (event.target as HTMLSelectElement).value || null); }
 </script>
 <style scoped>
-.company-switcher { padding: 4px 14px 14px; font-size: 12px; }
+.company-switcher { padding: 10px 4px 12px; font-size: 12px; }
 .company-switcher label { display: block; margin-bottom: 6px; opacity: .65; }
 .company-switcher-row { display: flex; gap: 4px; }
 .company-switcher select { flex: 1; min-width: 0; }
-.company-switcher select, .company-switcher button { color: inherit; background: transparent; border: 1px solid var(--border-subtle, #ddd); border-radius: 7px; padding: 7px; font: inherit; }
+.company-switcher select, .company-switcher button { color: inherit; background: transparent; border: 1px solid var(--border); border-radius: 7px; padding: 7px; font: inherit; }
 .company-switcher button { cursor: pointer; }
 .company-switcher :disabled { opacity: .5; }
 .company-switcher :focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .company-switcher p { margin: 8px 0 0; }
-.company-switcher .company-personal { border: 0; padding: 8px 0 0; }
+.company-switcher .company-personal { display: block; border: 0; padding: 8px 0 0; }
 </style>

@@ -38,6 +38,11 @@
   align-content: stretch;
 }
 
+.sidebar-header {
+  grid-row: 1;
+  min-width: 0;
+}
+
 .sidebar-topbar {
   display: flex;
   grid-row: 1;
