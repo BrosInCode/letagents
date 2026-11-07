@@ -227,13 +227,6 @@ export async function listFocusRoomIds(roomId: string): Promise<string[]> {
   return result.rows.map((row) => row.id);
 }
 
-/** The admins of a top-level room: the people a join request is for. */
-export async function listRoomAdminAccountIds(roomId: string): Promise<string[]> {
-  const result = await pool.query<{ account_id: string }>(
-    'SELECT account_id FROM project_admins WHERE project_id = $1 ORDER BY assigned_at, account_id LIMIT 1000', [roomId]);
-  return result.rows.map((row) => row.account_id);
-}
-
 export type RoomMemberChange =
   | { kind: 'changed' }
   | { kind: 'forbidden' }

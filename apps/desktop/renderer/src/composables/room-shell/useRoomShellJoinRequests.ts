@@ -7,7 +7,7 @@ import type { RoomShellContextOf } from "./context";
 
 /** The requests to join this room, shown to its admins at the top of the room. */
 export function useRoomShellJoinRequests(context: unknown) {
-  const { isLocalRoom, openActionPanelAt, props } = context as RoomShellContextOf<
+  const { emit, isLocalRoom, openActionPanelAt, props } = context as RoomShellContextOf<
       "inputs"
     | "useRoomShellConversation"
     | "useRoomShellToolActions"
@@ -49,11 +49,14 @@ export function useRoomShellJoinRequests(context: unknown) {
     if (admin) void roomJoinRequests.refresh();
   }, { immediate: true });
 
-  // A desktop notification click, or the Inbox, asks for the room's settings at one section.
+  // A desktop notification click asks for the room's settings at one section,
+  // once: the app clears the request as soon as it is acted on, so a later
+  // visit to the room (a new shell) does not open the panel again.
   watch(() => [props.settingsSectionRequest?.section ?? null, props.settingsSectionRequest?.nonce ?? 0, props.roomLoading] as const,
     ([section, , roomLoading]) => {
       if (!section || roomLoading) return;
       openActionPanelAt(section);
+      emit("settings-section-opened");
     }, { immediate: true });
 
   return { joinRequestBanner, joinRequestBusy, joinRequestError, decideJoinRequest, dismissJoinRequests, openJoinRequests };

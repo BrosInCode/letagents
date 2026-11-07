@@ -123,9 +123,27 @@ export function registerMessageStreamRoute(
     )(req, project);
     // Join requests are for the room's admins only. The role is read once here
     // and updated live when an admin changes it; a failed read means "not admin".
+    // The listener is installed before the read, so a change that lands while
+    // the read is in flight wins over the read.
     let roomAdmin = false;
+    let roleFromEvent: boolean | null = null;
+    let stopRoleUpdates = () => {};
+    if (isAppSession(req) && req.sessionAccount && !isRepoBackedProject(project)) {
+      const accessRoomId = getProjectAccessRoomId(project).trim().toLowerCase();
+      const accountId = req.sessionAccount.account_id;
+      const onRoleChanged = (payload: unknown) => {
+        const change = readRoomMemberRoleChanged(payload);
+        if (change && change.roomId === accessRoomId && change.accountId === accountId) {
+          roleFromEvent = change.role === "admin";
+          roomAdmin = roleFromEvent;
+        }
+      };
+      roomMemberRoleEvents.on(ROOM_MEMBER_ROLE_CHANGED, onRoleChanged);
+      stopRoleUpdates = () => { roomMemberRoleEvents.off(ROOM_MEMBER_ROLE_CHANGED, onRoleChanged); };
+    }
     try {
-      roomAdmin = await (deps.resolveRoomStreamAdmin ?? resolveRoomStreamAdmin)(req, project);
+      const fromRead = await (deps.resolveRoomStreamAdmin ?? resolveRoomStreamAdmin)(req, project);
+      roomAdmin = roleFromEvent ?? fromRead;
     } catch (error) {
       console.warn(`[room messages stream] admin check failed for ${projectId}`, error);
     }
@@ -149,22 +167,28 @@ export function registerMessageStreamRoute(
         beginDelivery: deps.beginRoomAgentDelivery,
       });
     } catch (error) {
+        stopRoleUpdates();
         if (error instanceof InvalidRoomAgentDeliverySessionError) {
           res.status(401).json({ error: error.message });
           return;
         }
         throw error;
     }
-    if (!live) return;
+    if (!live) {
+      stopRoleUpdates();
+      return;
+    }
     const liveController = live;
     liveController.activate();
     if (streamClosed) {
+      stopRoleUpdates();
       await liveController.close();
       if (!res.headersSent) res.status(401).json({ error: "Agent delivery session is no longer active." });
       return;
     }
 
     connection = openSseConnection(req, res, `room messages stream ${projectId}`);
+    connection.addCleanup(stopRoleUpdates);
     const writeEvent = connection.write;
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
     const messageOverlayTarget = resolveLiveMessageOverlayTarget(
@@ -187,16 +211,6 @@ export function registerMessageStreamRoute(
       streamClosed = true;
       subscription.close();
     });
-    if (isAppSession(req) && req.sessionAccount && !isRepoBackedProject(project)) {
-      const accessRoomId = getProjectAccessRoomId(project).trim().toLowerCase();
-      const accountId = req.sessionAccount.account_id;
-      const onRoleChanged = (payload: unknown) => {
-        const change = readRoomMemberRoleChanged(payload);
-        if (change && change.roomId === accessRoomId && change.accountId === accountId) roomAdmin = change.role === "admin";
-      };
-      roomMemberRoleEvents.on(ROOM_MEMBER_ROLE_CHANGED, onRoleChanged);
-      connection.addCleanup(() => { roomMemberRoleEvents.off(ROOM_MEMBER_ROLE_CHANGED, onRoleChanged); });
-    }
     connection.addCleanup(() => liveController.close());
     if (!(await liveController.check())) {
       connection.close();

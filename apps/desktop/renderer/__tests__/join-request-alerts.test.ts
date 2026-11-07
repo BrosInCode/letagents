@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { renderToString } from "@vue/server-renderer";
-import { createSSRApp, effectScope, h, nextTick, ref, type Component } from "vue";
+import { createSSRApp, effectScope, h, nextTick, reactive, ref, type Component } from "vue";
 import { createServer, type ViteDevServer } from "vite";
 import type { DesktopAccountRoomJoinRequest } from "../../electron/ipc-types";
 import type { RoomJoinRequestEvent } from "../../../../shared/room-join-requests.mjs";
@@ -29,6 +29,7 @@ let JoinRequestBanner: Component;
 let joinRequests: typeof import("../src/composables/useRoomJoinRequests");
 let roomFilter: typeof import("../src/components/desktop/content/room-shell/join-requests");
 let alerts: typeof import("../src/composables/app/useAppJoinRequestAlerts");
+let shellJoinRequests: typeof import("../src/composables/room-shell/useRoomShellJoinRequests");
 let preferences: typeof import("../src/composables/useRoomNotificationPreferences");
 const bridgeCalls: unknown[][] = [];
 let pendingOnServer: DesktopAccountRoomJoinRequest[] = [];
@@ -71,6 +72,7 @@ before(async () => {
   roomFilter = await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-shell/join-requests.ts") as typeof roomFilter;
   alerts = await vite.ssrLoadModule("/renderer/src/composables/app/useAppJoinRequestAlerts.ts") as typeof alerts;
   preferences = await vite.ssrLoadModule("/renderer/src/composables/useRoomNotificationPreferences.ts") as typeof preferences;
+  shellJoinRequests = await vite.ssrLoadModule("/renderer/src/composables/room-shell/useRoomShellJoinRequests.ts") as typeof shellJoinRequests;
 });
 after(async () => { await vite?.close(); });
 
@@ -220,4 +222,42 @@ test("the shared banner renders one request with its actions, and several as a c
   assert.match(two, /2 people want to join this room/);
   assert.match(two, /data-testid="join-request-banner-review"/);
   assert.doesNotMatch(two, /join-request-banner-approve/);
+});
+
+test("a notification click opens the room settings at Members once; the app clears the request so a later visit does not", async () => {
+  const { roomJoinRequests } = joinRequests;
+  const opened: string[] = [];
+  const emitted: string[] = [];
+  const props = reactive({
+    room: { identifier: "design-lounge", kind: "main", parentRoomId: null, role: "admin" },
+    roomLoading: true,
+    settingsSectionRequest: { roomIdentifier: "design-lounge", section: "members", nonce: 1 } as { roomIdentifier: string; section: string; nonce: number } | null,
+  });
+  const context = { props, emit: (name: string) => emitted.push(name), isLocalRoom: ref(false), openActionPanelAt: (section: string) => opened.push(section) };
+  const scope = effectScope();
+  const shell = scope.run(() => shellJoinRequests.useRoomShellJoinRequests(context))!;
+  try {
+    await flush();
+    assert.deepEqual(opened, [], "nothing opens while the room still loads");
+    props.roomLoading = false;
+    await flush();
+    assert.deepEqual(opened, ["members"]);
+    assert.deepEqual(emitted, ["settings-section-opened"], "the shell tells the app, and the app clears the request");
+    props.settingsSectionRequest = null;
+    props.roomLoading = true;
+    props.roomLoading = false;
+    await flush();
+    assert.deepEqual(opened, ["members"], "a reload of the room without a request opens nothing");
+    props.settingsSectionRequest = { roomIdentifier: "design-lounge", section: "members", nonce: 2 };
+    await flush();
+    assert.deepEqual(opened, ["members", "members"], "a second click opens it again");
+    roomJoinRequests.receive(event(request("rjr_shell", "sam")));
+    await flush();
+    assert.deepEqual(shell.joinRequestBanner.value.map((item) => item.id), ["rjr_shell"]);
+    shell.openJoinRequests();
+    assert.deepEqual(opened.at(-1), "members", "Review requests opens the Members section");
+  } finally {
+    scope.stop();
+    roomJoinRequests.reset();
+  }
 });

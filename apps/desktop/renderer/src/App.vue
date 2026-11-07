@@ -208,6 +208,7 @@
           :notification-reveal-message-id="notificationRevealMessageId"
           :notification-reveal-nonce="notificationRevealNonce"
           :settings-section-request="roomSettingsSectionRequestFor(selectedRoomInfo.identifier)"
+          @settings-section-opened="roomSettingsSectionRequest = null"
           :attention-intent="attentionIntent"
           @attention-opened="attentionIntent = null"
           :initial-chat-scroll-position="chatScrollPositionForRoom(selectedRoomInfo.identifier)"
