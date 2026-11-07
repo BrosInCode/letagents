@@ -133,7 +133,8 @@ function clearSettled(): void {
 // the host's confirmed result may say it was approved here.
 watch(() => props.decision, (decision) => {
   clearSettled();
-  if (!decision) return;
+  // A new person waiting takes priority over acknowledgement of the last one.
+  if (!decision || props.requests.length) return;
   settled.value = decision;
   settledTimer = setTimeout(clearSettled, props.settledMs);
 });
