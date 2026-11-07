@@ -203,7 +203,9 @@ test('one request shows the name with Approve and Decline in place; several stac
 test('the room page shows the banner to admins only, and the style honours reduced motion', async () => {
   const page = await readFile(fileURLToPath(new URL('../src/pages/Room.vue', import.meta.url)), 'utf8')
   const banner = /<JoinRequestBanner[\s\S]*?\/>/.exec(page)?.[0] ?? ''
-  assert.match(banner, /v-if="isConnected && room\?\.role === 'admin' && joinRequestBanner\.length"/)
+  assert.match(banner, /v-if="showJoinRequestBanner"/)
+  assert.match(page, /const showJoinRequestBanner = computed\(\(\) => isConnected\.value && room\.value\?\.role === 'admin' && joinRequestBanner\.value\.length > 0\)/)
+  assert.match(page, /\.room-shell\[data-join-request-banner="true"\] \{ grid-template-rows: auto auto minmax\(0, 1fr\) auto auto; \}/, 'the banner gets its own grid row; the chat keeps the flexible one')
   assert.match(banner, /@open-requests="drawerOpen = true"/, 'several requests open the drawer with the Requests list')
   const css = await readFile(fileURLToPath(new URL('../../../shared/ui/join-request-banner.css', import.meta.url)), 'utf8')
   assert.match(css, /prefers-reduced-motion: reduce[\s\S]*transition: none/)

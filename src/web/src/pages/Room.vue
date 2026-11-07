@@ -6,7 +6,7 @@
     @signIn="handleSignIn"
   />
 
-  <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :data-keyboard-open="keyboardOpen" :data-compact-composer="compactComposer" :style="roomViewportStyle" @focusin="syncRoomViewport">
+  <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :data-keyboard-open="keyboardOpen" :data-compact-composer="compactComposer" :data-join-request-banner="showJoinRequestBanner ? 'true' : undefined" :style="roomViewportStyle" @focusin="syncRoomViewport">
     <!-- Drawer -->
     <RoomDrawer
       :open="drawerOpen"
@@ -41,7 +41,7 @@
 
     <!-- Requests to join, for room admins: in place, never over the chat. -->
     <JoinRequestBanner
-      v-if="isConnected && room?.role === 'admin' && joinRequestBanner.length"
+      v-if="showJoinRequestBanner"
       :requests="joinRequestBanner"
       :busy="joinRequestAlerts.busy.value"
       :error="joinRequestAlerts.error.value"
@@ -336,6 +336,8 @@ const roomAccessState = computed(() => resolveRoomAccessState({
 const drawerOpen = ref(false)
 // The banner follows the open room; an admin's page reads the requests already waiting.
 const joinRequestBanner = joinRequestAlerts.visible
+// Admins only: the server sends the requests to admins only, and the page shows them to admins only.
+const showJoinRequestBanner = computed(() => isConnected.value && room.value?.role === 'admin' && joinRequestBanner.value.length > 0)
 watch(
   () => [isConnected.value ? room.value?.identifier || null : null, room.value?.role === 'admin'] as const,
   ([roomIdentifier, admin]) => {
@@ -700,7 +702,10 @@ watch(
 .room-shell[data-compact-viewport="true"] :deep(.mobile-bottom-nav) { height: calc(48px + env(safe-area-inset-bottom, 0px)); }
 
 /* A landscape software keyboard can leave only 98px for the draft and send row. */
+/* A request to join takes one row of its own under the header; the chat keeps the flexible row. */
+.room-shell[data-join-request-banner="true"] { grid-template-rows: auto auto minmax(0, 1fr) auto auto; }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] { grid-template-rows: 0 minmax(0, 1fr) auto; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"][data-join-request-banner="true"] { grid-template-rows: 0 auto minmax(0, 1fr) auto; }
 /* Keep search focusable: /search or Find restores the header through focusin. */
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.chat-header) { height: 0; min-height: 0; padding: 0; border: 0; overflow: hidden; }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.room-live-strip),
