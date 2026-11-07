@@ -1,5 +1,6 @@
 export * from "./schema/enums.js";
 export * from "./schema/core.js";
+export * from "./schema/organizations.js";
 export * from "./schema/rentals.js";
 export * from "./schema/git.js";
 export * from "./schema/artifacts.js";
