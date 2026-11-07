@@ -40,9 +40,9 @@ test("a room the selected company does not list is left for Personal & shared on
   const projects = buildSidebarProjectGroups({ currentParentRoom: parent, focusRooms: [], accountRooms: mergeCompanyRooms([], [room]) });
   const companyParent = projects.find((project) => project.parent.gitRoom?.repository.id === "100")!.parent;
   // An Inbox or My Work item for a personal repo, with Acme selected.
-  assert.equal(companyListsEntry(projects, "42", [room], parent.id), false);
-  assert.equal(companyListsEntry(projects, "42", [room], companyParent.id), true);
-  assert.equal(companyListsEntry(projects, null, [], parent.id), true);
+  assert.equal(companyListsEntry(projects, "42", [room], parent), false);
+  assert.equal(companyListsEntry(projects, "42", [room], companyParent), true);
+  assert.equal(companyListsEntry(projects, null, [], parent), true);
   // Every explicit open goes through the same check: snapshots and sidebar entries.
   for (const name of ["openRoomSnapshot", "selectSidebarEntry"]) {
     assert.match(appFunction(name), /leaveCompanyUnlessListed\(\)/, `${name} leaves a company that does not list the room`);
@@ -57,5 +57,19 @@ test("the company home replaces a room only for an invitation or a selected comp
   assert.equal(showsCompanyHome({ pendingInvite: null, activeEntry: { id: parent.id, type: "room" }, selectedId: null, sidebarProjects: projects }), false);
   assert.equal(showsCompanyHome({ pendingInvite: "42", activeEntry: { id: "inbox", type: "inbox" }, selectedId: null, sidebarProjects: projects }), true);
   assert.equal(showsCompanyHome({ pendingInvite: null, activeEntry: { id: "inbox", type: "inbox" }, selectedId: "42", sidebarProjects: [] }), false);
+});
+
+test("a new or closed focus room of a company repo stays in the company until the sidebar lists it", () => {
+  const projects = buildSidebarProjectGroups({ currentParentRoom: parent, focusRooms: [], accountRooms: mergeCompanyRooms([], [room]) });
+  const companyProjects = companyProjectGroups(projects, "42", [room]);
+  // The fallback entry Room details opens for a focus room the sidebar does not list.
+  const focusOfCompanyRepo = { id: "room:focus:focus_7", type: "room", kind: "focus", parentRoomIdentifier: "GitHub.com/acme/app" };
+  const focusOfPersonalRepo = { ...focusOfCompanyRepo, parentRoomIdentifier: parent.roomIdentifier };
+  assert.equal(companyListsEntry(projects, "42", [room], focusOfCompanyRepo), true);
+  assert.equal(showsCompanyHome({ pendingInvite: null, activeEntry: focusOfCompanyRepo, selectedId: "42", sidebarProjects: companyProjects }), false);
+  assert.equal(companyListsEntry(projects, "42", [room], focusOfPersonalRepo), false);
+  assert.equal(showsCompanyHome({ pendingInvite: null, activeEntry: focusOfPersonalRepo, selectedId: "42", sidebarProjects: companyProjects }), true);
+  // Only focus rooms inherit their parent's place.
+  assert.equal(companyListsEntry(projects, "42", [room], { ...focusOfCompanyRepo, kind: "branch" }), false);
 });
 

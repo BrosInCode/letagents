@@ -83,6 +83,8 @@ export function useAppSidebarSelection(context: unknown) {
       id: `room:focus:${normalizedIdentifier}`,
       type: "room",
       kind: "focus",
+      // Opened from the current room: its focus room belongs there until the sidebar lists it.
+      parentRoomIdentifier: app.currentParentRoom.value.roomIdentifier ?? null,
       roomIdentifier,
       title: roomIdentifier,
       meta: "Focus room",

@@ -41,19 +41,33 @@ export function companyProjectGroups(
   return projects;
 }
 
-function projectEntryIds(project: ProjectGroup, withIdentifierOnly: boolean): string[] {
-  return [project.parent, ...project.branchRooms, ...project.focusRooms]
-    .filter((entry) => !withIdentifierOnly || Boolean(entry.roomIdentifier))
-    .map((entry) => entry.id);
+/** The parts of a sidebar entry that decide whether a room list includes it. */
+export interface CompanyListedEntry {
+  id: string;
+  type: string;
+  kind?: string;
+  parentRoomIdentifier?: string | null;
+}
+
+/**
+ * Whether these room groups list the entry: as one of their rooms, or as a
+ * focus room of a listed repo room. A new focus room is not in the groups until
+ * the next refresh, and a closed one never is, but both belong to their parent.
+ */
+function projectsListEntry(projects: ProjectGroup[], entry: CompanyListedEntry): boolean {
+  const parent = entry.kind === "focus" ? entry.parentRoomIdentifier?.toLowerCase() : null;
+  return projects.some((project) =>
+    [project.parent, ...project.branchRooms, ...project.focusRooms].some((room) => room.id === entry.id && room.roomIdentifier)
+    || Boolean(parent && project.parent.roomIdentifier?.toLowerCase() === parent));
 }
 
 /** Whether the selected company's room groups list this sidebar entry (always true without a company). */
 export function companyListsEntry(
   projects: ProjectGroup[], selectedId: string | null,
-  rooms: DesktopOrganizationRoom[], entryId: string,
+  rooms: DesktopOrganizationRoom[], entry: CompanyListedEntry,
 ): boolean {
   if (!selectedId) return true;
-  return companyProjectGroups(projects, selectedId, rooms).some((project) => projectEntryIds(project, false).includes(entryId));
+  return projectsListEntry(companyProjectGroups(projects, selectedId, rooms), entry);
 }
 
 /**
@@ -64,11 +78,11 @@ export function companyListsEntry(
  */
 export function showsCompanyHome(input: {
   pendingInvite: string | null;
-  activeEntry: { id: string; type: string };
+  activeEntry: CompanyListedEntry;
   selectedId: string | null;
   sidebarProjects: ProjectGroup[];
 }): boolean {
   if (input.pendingInvite) return true;
   if (input.activeEntry.type !== "room" || !input.selectedId) return false;
-  return !input.sidebarProjects.some((project) => projectEntryIds(project, true).includes(input.activeEntry.id));
+  return !projectsListEntry(input.sidebarProjects, input.activeEntry);
 }
