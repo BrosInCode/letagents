@@ -121,7 +121,7 @@ Combined branch validation: root/web and desktop builds, desktop typechecks,
 auth redirect tests, packaging contract tests, and the Electron journey passed.
 Live GitHub consent/SSO and installed-app OS protocol dispatch still need a real
 account and packaged-app check. No production database was changed. Migration
-0093 only adds organization and membership tables; no reset is required.
+0143 only adds organization and membership tables; no reset is required.
 
 ## Independent review follow-up
 
@@ -136,3 +136,32 @@ paths. Existing CI now runs organization migration/storage/access tests.
 The reviewed stack remains unmerged. Independent agent review is not a GitHub
 approval from a separate human account. Live GitHub/SSO and installed-app protocol
 dispatch remain the documented verification limits.
+
+## Rebuilt on staging (2026-11-07)
+
+The original PRs (#1172–#1178) were closed unmerged on 2026-09-18 with their
+branches deleted, and staging's history was rewritten afterwards. The same
+eight commits were cherry-picked onto staging `bc107382b`. What changed:
+
+- The migration is `drizzle/0143_organizations.sql` (0093 is taken on staging).
+- `App.vue` is now a set of composables. The company code lives in
+  `composables/app/useAppCompany.ts` (`useAppCompany` after the state,
+  `useAppCompanyNavigation` after the sidebar entries). The account rooms for
+  navigation, the company filter on sidebar projects, the window-focus refresh
+  and the explicit-open fallback moved into `useAppNavigation`,
+  `useAppSidebarEntries` and `useAppSessionActions`.
+- Staging already owns `letagents://` (ask links): the single-instance lock,
+  the protocol registration and the macOS `CFBundleURLTypes` entry. Company
+  links now only add their own `open-url` and `second-instance` listeners next
+  to the ask links, so there is no second lock or scheme registration.
+- An invitation also hides Messages, Inbox and My Work, which did not exist in
+  September, in the same way it hides Settings and Marketplace.
+- CI runs the organization tests in `integration-db-tests` group 4;
+  `web-routes.test.ts` already runs in `build-checks`.
+- The Electron smoke follows staging's New room tabs and answers the Messages
+  panel's `conversations` calls.
+
+Validation on the rebuilt stack: root and desktop type-checks, Vue lint, web
+build, 2541 renderer tests, 598 web tests, packaging tests, link and IPC
+registration tests, organization DB tests on a private Postgres, and the
+Electron organization smoke (all 11 checks, no console errors).

@@ -60,6 +60,8 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
     case 'room.listAccountRooms': return [];
     case 'room.getSourceStates': return {};
     case 'room.getLatestMessages': return [];
+    case 'conversations.list': return { conversations: [], version: '0' };
+    case 'conversations.changes': return { version: '0' };
     case 'repos.getStatus': return { available: false, rootPath: null, roomIdentifier: null, branch: null, worktrees: [] };
     default:
       if (method.includes('list') || method.includes('Bindings') || method.includes('Actions')) return [];
@@ -69,7 +71,7 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
 app.whenReady().then(async () => {
 const window = new BrowserWindow({ width: 1280, height: 900, show: true, webPreferences: { contextIsolation: false, nodeIntegration: false, sandbox: false, preload: join(root, 'electron/scripts/fixtures/organization-preload.cjs') } });
 const errors = [];
-window.webContents.on('console-message', (event) => { if (event.level === 'error') errors.push(event.message); });
+window.webContents.on('console-message', (event) => { if (event.level === 'error') errors.push(`${event.message} (${event.sourceId}:${event.lineNumber})`); });
 const js = (source) => window.webContents.executeJavaScript(source, true);
 async function waitFor(expression) {
   const until = Date.now() + 15000;
@@ -123,7 +125,7 @@ try {
   await waitFor(`!document.body.innerText.includes('following a company invitation')`);
   assert.equal(links.getPendingCompanyLink(), null);
   await click('[data-testid="sidebar-new-room"]');
-  await click('[data-testid="new-room-intent-join"]');
+  await click('[data-testid="new-room-modal"] [role="tab"][id$="-tab-join"]');
   await js(`const input = document.querySelector('[data-testid="new-room-join-input"]'); input.value = 'github.com/alex/personal'; input.dispatchEvent(new Event('input', { bubbles: true }));`);
   await click('[data-testid="new-room-join-submit"]');
   await waitFor(`document.querySelector('#company-scope')?.value === '' && !document.querySelector('[data-testid="company-home"]')`);
