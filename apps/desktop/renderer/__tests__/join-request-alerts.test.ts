@@ -38,17 +38,26 @@ const notifications: Array<{ title: string; options: Record<string, unknown>; on
 let notificationPermission = "granted";
 let notificationStatus = { enabled: true, nativeSupported: false, nativeRegistered: false, lastError: null };
 let documentHasFocus = true;
+let knockStarts = 0;
+let decideOnServer: ((...args: unknown[]) => Promise<unknown>) | null = null;
+let listOnServer: (() => Promise<unknown>) | null = null;
 
 before(async () => {
   Object.assign(globalThis, {
+    AudioContext: class {
+      state = "running"; currentTime = 0; destination = {};
+      createOscillator() { return { frequency: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {}, disconnect() {}, start() { knockStarts++; }, stop() {} }; }
+      createGain() { return { gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} }, connect() {}, disconnect() {} }; }
+      async close() {}
+    },
     document: { addEventListener: () => undefined, removeEventListener: () => undefined, hidden: false, visibilityState: "visible", hasFocus: () => documentHasFocus },
     window: {
       matchMedia: () => ({ matches: false }),
       localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
       letagentsDesktop: {
         roomMembers: {
-          listAccountJoinRequests: async () => { bridgeCalls.push(["listAccountJoinRequests"]); return { ok: true, joinRequests: pendingOnServer }; },
-          decideJoinRequest: async (...args: unknown[]) => { bridgeCalls.push(["decideJoinRequest", ...args]); return { ok: true, joinRequest: { id: args[1], state: args[2] === "approve" ? "approved" : "declined" } }; },
+          listAccountJoinRequests: async () => { bridgeCalls.push(["listAccountJoinRequests"]); if (listOnServer) return listOnServer(); return { ok: true, joinRequests: pendingOnServer }; },
+          decideJoinRequest: async (...args: unknown[]) => { bridgeCalls.push(["decideJoinRequest", ...args]); if (decideOnServer) return decideOnServer(...args); return { ok: true, joinRequest: { id: args[1], state: args[2] === "approve" ? "approved" : "declined" } }; },
         },
         notifications: {
           getStatus: async () => notificationStatus,
@@ -113,6 +122,10 @@ test("a streamed request joins the Inbox list once and is announced; a baseline 
 
     roomJoinRequests.receive(event(request("rjr_old", "olga", { state: "declined" })));
     assert.equal(roomJoinRequests.items.value.some((item) => item.id === "rjr_old"), false, "another admin's answer drops it");
+    roomJoinRequests.receive(event(request("rjr_old", "olga")));
+    assert.equal(roomJoinRequests.items.value.some((item) => item.id === "rjr_old"), false, "a delayed pending event cannot undo a decision");
+    await roomJoinRequests.refresh();
+    assert.equal(roomJoinRequests.items.value.some((item) => item.id === "rjr_old"), false, "an outdated read cannot undo a decision either");
 
     bridgeCalls.length = 0;
     pendingOnServer = [];
@@ -149,6 +162,7 @@ test("an arrival plays the room sound and raises one notification, except for th
     notifications.length = 0;
     // Another room is open: a notification, and a click opens the room's settings at Members.
     api.alertForArrival({ request: request("rjr_1", "ada", { display_name: "Ada" }), playSound: true });
+    assert.equal(knockStarts, 2, "the actual sound entry point plays two taps");
     assert.equal(notifications.length, 1);
     assert.equal(notifications[0]!.title, "Join request in Design lounge");
     assert.equal(notifications[0]!.options.body, "Ada wants to join");
@@ -180,6 +194,12 @@ test("an arrival plays the room sound and raises one notification, except for th
     assert.equal(preferences.roomNotificationsMuted("quiet-room"), true);
     api.alertForArrival({ request: request("rjr_5", "eve", { room_id: "quiet-room" }), playSound: true });
     assert.equal(notifications.length, 2, "a muted room raises nothing");
+    assert.equal(knockStarts, 2, "room mute also suppresses the knock");
+    storage.set("letagents-desktop:sound", "off");
+    activeEntry.value = { type: "room" };
+    api.alertForArrival({ request: request("rjr_sound_off", "eve"), playSound: true });
+    assert.equal(knockStarts, 2, "global sound preference suppresses the knock");
+    storage.set("letagents-desktop:sound", "on");
 
     // The native APNs alert covers it.
     notificationStatus = { enabled: true, nativeSupported: true, nativeRegistered: true, lastError: null };
@@ -201,6 +221,7 @@ test("an arrival plays the room sound and raises one notification, except for th
     context.authStatus.value = { authenticated: false, account: null as never };
     api.alertForArrival({ request: request("rjr_8", "hal"), playSound: true });
     assert.equal(notifications.length, 2);
+    assert.equal(knockStarts, 2, "sign-out suppresses sound");
   } finally {
     scope.stop();
     roomJoinRequests.reset();
@@ -260,4 +281,50 @@ test("a notification click opens the room settings at Members once; the app clea
     scope.stop();
     roomJoinRequests.reset();
   }
+});
+
+test("only confirmed decisions settle the banner, and late room results cannot change its next room", async () => {
+  const { roomJoinRequests } = joinRequests;
+  roomJoinRequests.reset();
+  pendingOnServer = [];
+  const props = reactive({ room: { identifier: "design-lounge", kind: "main", parentRoomId: null, role: "admin" }, roomLoading: false, settingsSectionRequest: null });
+  const scope = effectScope();
+  const shell = scope.run(() => shellJoinRequests.useRoomShellJoinRequests({ props, emit() {}, isLocalRoom: ref(false), openActionPanelAt() {} }))!;
+  try {
+    await flush();
+    const item = request("confirmed", "ada");
+    await shell.decideJoinRequest(item, "approve");
+    assert.equal(shell.joinRequestDecision.value?.outcome, "approve");
+    decideOnServer = async () => ({ ok: false, code: "ROOM_JOIN_REQUEST_NOT_PENDING", status: 409 });
+    await shell.decideJoinRequest(request("conflict", "bob"), "approve");
+    assert.equal(shell.joinRequestDecision.value, null, "a conflict never claims the person was admitted");
+    let finish!: (result: unknown) => void;
+    decideOnServer = () => new Promise(resolve => { finish = resolve; });
+    const pending = shell.decideJoinRequest(request("late", "cy"), "decline");
+    props.room.identifier = "other-room";
+    finish({ ok: false, status: 500, message: "Old room error" });
+    await pending;
+    assert.equal(shell.joinRequestError.value, null);
+    assert.equal(shell.joinRequestBusy.value, null);
+    assert.equal(shell.joinRequestDecision.value, null);
+    const oldSession = roomJoinRequests.decide(request("old-account", "dee"), "approve");
+    roomJoinRequests.reset();
+    finish({ ok: true, joinRequest: { id: "old-account", state: "approved" } });
+    assert.equal((await oldSession).ok, false, "an old session cannot confirm in a new account");
+  } finally { decideOnServer = null; scope.stop(); roomJoinRequests.reset(); }
+});
+
+test("an initial read preserves older requests and live arrivals without resurrecting terminal requests", async () => {
+  const { roomJoinRequests } = joinRequests;
+  roomJoinRequests.reset();
+  let finish!: (result: unknown) => void;
+  listOnServer = () => new Promise(resolve => { finish = resolve; });
+  try {
+    const pending = roomJoinRequests.refresh();
+    roomJoinRequests.receive(event(request("new-live", "new")));
+    roomJoinRequests.receive(event(request("already-decided", "gone", { state: "declined" })));
+    finish({ ok: true, joinRequests: [request("old", "old"), request("already-decided", "gone")] });
+    await pending;
+    assert.deepEqual(roomJoinRequests.items.value.map(item => item.id), ["old", "new-live"]);
+  } finally { listOnServer = null; roomJoinRequests.reset(); }
 });

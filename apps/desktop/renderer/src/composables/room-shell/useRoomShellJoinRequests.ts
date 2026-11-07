@@ -1,4 +1,4 @@
-import { computed, ref, watch } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
 import type { DesktopAccountRoomJoinRequest } from "../../../../electron/ipc-types";
 import { roomJoinRequests } from "../useRoomJoinRequests";
 import { joinRequestsForRoom } from "../../components/desktop/content/room-shell/join-requests";
@@ -20,19 +20,27 @@ export function useRoomShellJoinRequests(context: unknown) {
   }));
   const joinRequestBusy = ref<string | null>(null);
   const joinRequestError = ref<string | null>(null);
+  const joinRequestDecision = ref<{ outcome: "approve" | "decline"; request: DesktopAccountRoomJoinRequest } | null>(null);
+  let scopeVersion = 0;
+  onScopeDispose(() => { scopeVersion += 1; });
 
   async function decideJoinRequest(request: DesktopAccountRoomJoinRequest, decision: "approve" | "decline"): Promise<void> {
     if (joinRequestBusy.value) return;
+    const version = scopeVersion;
     joinRequestBusy.value = `${decision}:${request.id}`;
     joinRequestError.value = null;
+    joinRequestDecision.value = null;
     try {
       const result = await roomJoinRequests.decide(request, decision);
+      if (version !== scopeVersion) return;
+      if (result.ok) joinRequestDecision.value = { outcome: decision, request };
       // A request another admin answered first is gone from the banner already.
       if (!result.ok && result.code !== "ROOM_JOIN_REQUEST_NOT_PENDING") joinRequestError.value = roomMembershipErrorMessage(result);
     } catch (cause) {
+      if (version !== scopeVersion) return;
       joinRequestError.value = cause instanceof Error && cause.message ? cause.message : "The request could not be decided.";
     } finally {
-      joinRequestBusy.value = null;
+      if (version === scopeVersion) joinRequestBusy.value = null;
     }
   }
 
@@ -47,9 +55,12 @@ export function useRoomShellJoinRequests(context: unknown) {
 
   // An admin who opens a room sees the requests already waiting there.
   watch(() => [props.room.identifier, props.room.role === "admin" && !isLocalRoom.value] as const, ([, admin]) => {
+    scopeVersion += 1;
+    joinRequestBusy.value = null;
+    joinRequestDecision.value = null;
     joinRequestError.value = null;
     if (admin) void roomJoinRequests.refresh();
-  }, { immediate: true });
+  }, { immediate: true, flush: "sync" });
 
   // A desktop notification click asks for the room's settings at one section,
   // once: the app clears the request as soon as it is acted on, so a later
@@ -61,5 +72,5 @@ export function useRoomShellJoinRequests(context: unknown) {
       emit("settings-section-opened");
     }, { immediate: true });
 
-  return { joinRequestBannerAvailable, joinRequestBanner, joinRequestBusy, joinRequestError, decideJoinRequest, dismissJoinRequests, openJoinRequests };
+  return { joinRequestBannerAvailable, joinRequestBanner, joinRequestBusy, joinRequestError, joinRequestDecision, decideJoinRequest, dismissJoinRequests, openJoinRequests };
 }

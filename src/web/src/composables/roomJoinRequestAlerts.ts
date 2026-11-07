@@ -10,15 +10,19 @@ import {
   fetchPendingRoomJoinRequests,
 } from './room/membership'
 import { onJoinRequestDecided } from './roomJoinRequestDecided'
-import { playNotificationSound } from './room/sound'
+import { playJoinRequestSound } from './room/sound'
+import { roomNotificationPreferences } from './room/notificationPreferences'
+import { roomNotificationsSuppressed } from '../../../../shared/room-notification-preferences.mjs'
 
 const DISMISSED_STORAGE_KEY = 'lac-join-request-dismissed'
 const MAX_DISMISSED = 200
+const MAX_TERMINAL = 200
 
 export interface JoinRequestAlertDeps {
   fetchPending(room: string): Promise<RoomJoinRequestAlert[]>
   decide(room: string, requestId: string, decision: 'approve' | 'decline'): Promise<unknown>
   playSound(): void
+  soundAllowed?(accessRoom: string): Promise<boolean>
   hidden(): boolean
   now?(): number
 }
@@ -57,8 +61,11 @@ export function createJoinRequestAlerts(deps: JoinRequestAlertDeps) {
   const dismissed = ref(readDismissed())
   const busy = ref<string | null>(null)
   const error = ref('')
+  const lastDecision = ref<{ outcome: 'approve' | 'decline'; request: RoomJoinRequestAlert } | null>(null)
   const gate = createJoinRequestSoundGate(deps.now ? { now: deps.now } : {})
+  const terminal = new Set<string>()
   let loadVersion = 0
+  let sessionVersion = 0
 
   const visible = computed(() => requests.value.filter(request => !dismissed.value.has(request.id)))
 
@@ -66,10 +73,12 @@ export function createJoinRequestAlerts(deps: JoinRequestAlertDeps) {
   function setRoom(id: string | null) {
     if (roomId.value === id) return
     loadVersion += 1
+    sessionVersion += 1
     roomId.value = id
     requests.value = []
     busy.value = null
     error.value = ''
+    lastDecision.value = null
   }
 
   /** Reads the requests already waiting. Only an admin's page calls this; the route refuses others. */
@@ -78,8 +87,9 @@ export function createJoinRequestAlerts(deps: JoinRequestAlertDeps) {
     if (!id) return
     const version = ++loadVersion
     try {
-      const pending = await deps.fetchPending(id)
+      const result = await deps.fetchPending(id)
       if (version !== loadVersion) return
+      const pending = result.filter(request => !terminal.has(request.id))
       // Requests that were waiting before the page opened are not news: no sound.
       for (const request of pending) gate.remember(request.id)
       const live = new Map(requests.value.map(request => [request.id, request]))
@@ -100,14 +110,25 @@ export function createJoinRequestAlerts(deps: JoinRequestAlertDeps) {
       forget(request.id)
       return
     }
-    if (requests.value.some(item => item.id === request.id)) return
+    if (terminal.has(request.id) || requests.value.some(item => item.id === request.id)) return
     requests.value = [...requests.value, request]
-    if (gate.shouldPlay(request.id, deps.hidden())) deps.playSound()
+    if (!gate.shouldPlay(request.id, deps.hidden())) return
+    if (!deps.soundAllowed) {
+      deps.playSound()
+      return
+    }
+    const version = sessionVersion
+    void deps.soundAllowed(event.access_room_id).then(allowed => {
+      if (allowed && version === sessionVersion && !terminal.has(request.id)
+        && !dismissed.value.has(request.id) && requests.value.some(item => item.id === request.id)) deps.playSound()
+    }).catch(() => undefined)
   }
 
   /** Drops a request that was answered here or somewhere else (the drawer, another admin). */
   function forget(requestId: string): void {
-    if (!requests.value.some(item => item.id === requestId)) return
+    // A terminal frame can beat both the pending frame and the initial GET.
+    terminal.add(requestId)
+    if (terminal.size > MAX_TERMINAL) terminal.delete(terminal.values().next().value!)
     requests.value = requests.value.filter(item => item.id !== requestId)
   }
 
@@ -121,13 +142,18 @@ export function createJoinRequestAlerts(deps: JoinRequestAlertDeps) {
   async function decide(request: RoomJoinRequestAlert, decision: 'approve' | 'decline'): Promise<boolean> {
     const id = roomId.value
     if (!id || busy.value) return false
+    const version = sessionVersion
     busy.value = `${decision}:${request.id}`
     error.value = ''
+    lastDecision.value = null
     try {
       await deps.decide(id, request.id, decision)
+      if (version !== sessionVersion) return false
       forget(request.id)
+      lastDecision.value = { outcome: decision, request }
       return true
     } catch (cause) {
+      if (version !== sessionVersion) return false
       const failure = asRoomApiError(cause)
       // Another admin answered first: the request is gone either way.
       if ((failure.payload as { code?: string } | undefined)?.code === 'ROOM_JOIN_REQUEST_NOT_PENDING') {
@@ -137,12 +163,15 @@ export function createJoinRequestAlerts(deps: JoinRequestAlertDeps) {
       error.value = failure.message || (decision === 'approve' ? 'Could not approve the request.' : 'Could not decline the request.')
       return false
     } finally {
-      busy.value = null
+      if (version === sessionVersion) busy.value = null
     }
   }
 
   function reset(): void {
     setRoom(null)
+    sessionVersion += 1
+    lastDecision.value = null
+    terminal.clear()
     gate.reset()
   }
 
@@ -152,6 +181,7 @@ export function createJoinRequestAlerts(deps: JoinRequestAlertDeps) {
     visible,
     busy: readonly(busy),
     error: readonly(error),
+    lastDecision: readonly(lastDecision),
     setRoom,
     load,
     receive,
@@ -166,7 +196,15 @@ export const joinRequestAlerts = createJoinRequestAlerts({
   // The room route lists requests without the room's name; the banner names the room itself.
   fetchPending: room => fetchPendingRoomJoinRequests(room).then(list => list.map(request => ({ room_display_name: '', ...request }))),
   decide: decideRoomJoinRequest,
-  playSound: playNotificationSound,
+  playSound: playJoinRequestSound,
+  soundAllowed: async accessRoom => {
+    if (!roomNotificationPreferences.signedIn()) return false
+    // Wait for the page's preference read, or load the parent for a focus room.
+    await roomNotificationPreferences.allowsAfterRead(accessRoom, '')
+    if (!roomNotificationPreferences.state(accessRoom).ready) await roomNotificationPreferences.refresh(accessRoom)
+    return roomNotificationPreferences.signedIn()
+      && !roomNotificationsSuppressed(roomNotificationPreferences.state(accessRoom).preference)
+  },
   hidden: () => typeof document !== 'undefined' && document.hidden,
 })
 

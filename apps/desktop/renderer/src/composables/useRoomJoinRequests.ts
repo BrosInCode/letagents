@@ -34,11 +34,14 @@ function createRoomJoinRequests() {
   const dismissed = shallowRef<ReadonlySet<string>>(new Set());
   const gate = createJoinRequestSoundGate();
   const arrivalListeners = new Set<(arrival: JoinRequestArrival) => void>();
-  // Only the newest read may land; a decision made here discards older reads.
+  // Only the newest read may land; live arrivals and decisions are reconciled below.
   let latest = 0;
+  let sessionVersion = 0;
+  const terminalIds = new Set<string>();
 
   async function refresh(): Promise<void> {
     const request = ++latest;
+    const idsAtStart = new Set(items.value.map(item => item.id));
     let result: DesktopRoomMembershipResult<{ joinRequests: DesktopAccountRoomJoinRequest[] }> | undefined;
     try {
       result = await desktopIpc.roomMembers?.listAccountJoinRequests();
@@ -50,7 +53,9 @@ function createRoomJoinRequests() {
     if (result.ok) {
       // Requests that were already waiting are a baseline, not an alert.
       for (const item of result.joinRequests) gate.remember(item.id);
-      items.value = result.joinRequests;
+      const pending = result.joinRequests.filter(item => !terminalIds.has(item.id));
+      const pendingIds = new Set(pending.map(item => item.id));
+      items.value = [...pending, ...items.value.filter(item => !idsAtStart.has(item.id) && !pendingIds.has(item.id))];
       error.value = "";
     } else if (result.status === 401) {
       items.value = [];
@@ -70,8 +75,7 @@ function createRoomJoinRequests() {
       forget(request.id);
       return;
     }
-    if (items.value.some((item) => item.id === request.id)) return;
-    latest += 1;
+    if (terminalIds.has(request.id) || items.value.some((item) => item.id === request.id)) return;
     items.value = [...items.value, request];
     const hidden = typeof document !== "undefined" && document.hidden;
     const arrival: JoinRequestArrival = { request, playSound: gate.shouldPlay(request.id, hidden) };
@@ -90,7 +94,9 @@ function createRoomJoinRequests() {
     joinRequest: Pick<DesktopAccountRoomJoinRequest, "id" | "room_id">,
     decision: Exclude<DesktopRoomJoinRequestDecision, "cancel">,
   ): Promise<DesktopRoomMembershipResult<{ joinRequest: RoomJoinRequestSummary }>> {
+    const session = sessionVersion;
     const result = await desktopIpc.roomMembers.decideJoinRequest(joinRequest.room_id, joinRequest.id, decision);
+    if (session !== sessionVersion) return { ok: false, status: 401, code: "AUTH_REQUIRED", message: "Your account changed. Please try again.", joinRequest: null };
     // A request another admin decided first is no longer waiting either.
     if (result.ok || result.code === "ROOM_JOIN_REQUEST_NOT_PENDING") forget(joinRequest.id);
     void refresh();
@@ -99,7 +105,8 @@ function createRoomJoinRequests() {
 
   /** Drops a request decided somewhere else in the app, such as room settings. */
   function forget(requestId: string): void {
-    latest += 1;
+    terminalIds.add(requestId);
+    if (terminalIds.size > 200) terminalIds.delete(terminalIds.values().next().value!);
     items.value = items.value.filter((item) => item.id !== requestId);
   }
 
@@ -112,6 +119,8 @@ function createRoomJoinRequests() {
 
   function reset(): void {
     latest += 1;
+    sessionVersion += 1;
+    terminalIds.clear();
     items.value = [];
     error.value = "";
     dismissed.value = new Set();

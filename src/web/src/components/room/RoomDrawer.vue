@@ -20,7 +20,9 @@
 
       <InviteBotPanel v-if="room && room.authenticated" :room="room" />
 
-      <RoomMembersPanel v-if="room" :open="open" :room="room" @left="emit('left', $event)" />
+      <div v-if="room" ref="requestsSection" tabindex="-1" aria-label="Requests and members">
+        <RoomMembersPanel :open="open" :room="room" @left="emit('left', $event)" />
+      </div>
 
       <WakeWebhookPanel v-if="room && room.authenticated" :open="open" :room="room" />
 
@@ -93,6 +95,12 @@ const props = defineProps<{
 
 const emit = defineEmits<{ close: [], themeChange: [theme: string], openRules: [], left: [roomName: string] }>()
 const drawerElement = ref<HTMLDialogElement | null>(null)
+const requestsSection = ref<HTMLElement | null>(null)
+function focusRequests() {
+  requestsSection.value?.scrollIntoView({ block: 'start' })
+  requestsSection.value?.focus({ preventScroll: true })
+}
+defineExpose({ focusRequests })
 
 function handleBackdropClick(event: MouseEvent) {
   const dialog = drawerElement.value

@@ -1,12 +1,10 @@
 /*
- * A request to join is one of the room's asks of you, so it looks like the
- * other asks above the composer: a bordered pill in the room's own greys,
- * 13 px text with the person's name as the only emphasis, small outlined
- * buttons on the right. Several people become overlapping faces and one count.
+ * Shared desktop and web request notice, using the room surface and typography.
+ * Identity and time occupy two short lines; decisions stay together on the right.
  *
  * Motion, all of it with a purpose: the row unfolds so the composer glides
- * instead of jumping; the content follows a beat later; the face gets one
- * soft ring, a knock at the door; a decision answers in place before the row
+ * instead of jumping; the content follows a beat later; a decision answers
+ * in place before the row
  * folds away, faster than it came.
  */
 .join-request-reveal {
@@ -14,206 +12,136 @@
   grid-template-rows: 1fr;
   min-width: 0;
 }
-.join-request-reveal > .join-request-banner {
+.join-request-reveal > .join-request-reveal-clip {
   min-height: 0;
+  overflow: hidden;
 }
-
+/* A readable request, with the person first and decisions grouped together. */
 .join-request-banner {
+  --join-request-accent: #d6ad72;
   display: flex;
   align-items: center;
   gap: 12px;
   box-sizing: border-box;
-  padding: 6px 6px 6px 10px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg-subtle, var(--bg));
+  padding: 14px 12px 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--join-request-accent) 42%, var(--border-strong, var(--border)));
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--join-request-accent) 6%, var(--bg-subtle, var(--bg)));
   color: var(--text);
   font-family: var(--font-sans, inherit);
-  font-size: 13px;
+  font-size: 14px;
 }
-
-/* Faces: 22 px, overlapping when there are several, the first in front. */
 .join-request-banner-faces {
+  position: relative;
   display: flex;
   flex: 0 0 auto;
   flex-direction: row-reverse;
   align-items: center;
+  animation: join-request-knock 600ms ease-out 120ms both;
 }
-.join-request-banner-face {
-  position: relative;
-  display: flex;
-  flex: 0 0 auto;
-}
-.join-request-banner-face .chat-avatar {
-  width: 22px;
-  height: 22px;
-  flex-basis: 22px;
-  align-self: center;
-  font-size: 8px;
-  letter-spacing: -0.02em;
-  box-shadow: 0 0 0 2px var(--bg-subtle, var(--bg));
-}
-.join-request-banner-face + .join-request-banner-face {
-  margin-right: -6px;
-}
-/* The knock: one ring grows out of the newest face and fades. Once, on arrival. */
-.join-request-banner-face:first-child::after {
+.join-request-banner-faces::after {
   content: "";
   position: absolute;
-  inset: 0;
+  right: -2px;
+  bottom: -2px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--bg-subtle, var(--bg));
   border-radius: 50%;
-  border: 1.5px solid var(--text);
-  opacity: 0;
-  pointer-events: none;
-  animation: join-request-knock 700ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) 160ms 1;
+  background: var(--join-request-accent);
 }
+/* Two brief taps on the identity; decision buttons stay still and usable. */
 @keyframes join-request-knock {
-  0% { opacity: 0.45; transform: scale(1); }
-  100% { opacity: 0; transform: scale(1.75); }
+  0%, 32%, 72%, 100% { transform: translateY(0) scale(1); }
+  14% { transform: translateY(-3px) scale(1.06); }
+  50% { transform: translateY(-2px) scale(1.04); }
 }
-
+.join-request-banner[data-settled] {
+  border-color: var(--border-strong, var(--border));
+  background: var(--bg-subtle, var(--bg));
+}
+.join-request-banner[data-settled] .join-request-banner-faces { animation: none; }
+.join-request-banner[data-settled] .join-request-banner-faces::after { display: none; }
+.join-request-banner-face { display: flex; flex: 0 0 auto; }
+.join-request-banner-face .chat-avatar {
+  width: 36px;
+  height: 36px;
+  flex-basis: 36px;
+  align-self: center;
+  font-size: 12px;
+  box-shadow: 0 0 0 3px var(--bg-subtle, var(--bg));
+}
+.join-request-banner-face + .join-request-banner-face { margin-right: -10px; }
 .join-request-banner-copy {
   display: flex;
   flex: 1 1 auto;
-  align-items: baseline;
-  gap: 8px;
+  flex-direction: column;
+  gap: 3px;
   min-width: 0;
   margin: 0;
-  line-height: 1.4;
+  line-height: 1.45;
   color: var(--text-secondary);
 }
-.join-request-banner-copy > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.join-request-banner-copy b {
-  color: var(--text);
-  font-weight: 600;
-  letter-spacing: -0.01em;
-}
-.join-request-banner-meta {
-  flex: 0 1 auto;
-  color: var(--text-tertiary, var(--text-secondary));
-  font-size: 12px;
-}
-.join-request-banner-error {
-  color: var(--red-text, #ef4444);
-}
-
-.join-request-banner-actions {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-}
-
-/* The same small outlined buttons as the other asks; Approve comes first. */
+.join-request-banner-copy > span { overflow-wrap: anywhere; }
+.join-request-banner-copy b { color: var(--text); font-weight: 600; letter-spacing: -.01em; }
+.join-request-banner-meta { color: var(--text-secondary); font-size: 12px; }
+.join-request-banner-error { color: var(--red-text, #d76666); font-size: 12px; }
+.join-request-banner-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
 .join-request-banner-button {
-  min-height: 26px;
-  padding: 3px 8px;
+  min-height: 34px;
+  padding: 6px 12px;
   border: 1px solid var(--border-strong, var(--border));
-  border-radius: 6px;
+  border-radius: 8px;
   background: transparent;
   color: var(--text);
   cursor: pointer;
   font: inherit;
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 500;
   line-height: 1.3;
-  /* The press answers on pointer-down; only transform and colour move. */
-  transition:
-    transform 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
-    background-color 150ms ease,
-    color 150ms ease;
+  white-space: nowrap;
+  transition: transform 140ms var(--ease-out, cubic-bezier(.16,1,.3,1)), background-color 150ms ease, color 150ms ease;
 }
 .join-request-banner-button[data-variant="primary"] {
-  border-color: color-mix(in srgb, var(--text) 45%, var(--border-strong, var(--border)));
+  background: var(--text);
+  color: var(--bg);
+  border-color: transparent;
 }
-.join-request-banner-button:active:not(:disabled) {
-  transform: scale(0.97);
-}
-.join-request-banner-button:disabled {
-  cursor: wait;
-  opacity: 0.5;
-}
+.join-request-banner-button:active:not(:disabled) { transform: scale(0.97); }
+.join-request-banner-button:disabled { cursor: wait; opacity: .5; }
 .join-request-banner-close {
-  display: grid;
-  place-items: center;
-  width: 26px;
-  height: 26px;
-  margin-left: 2px;
-  padding: 0;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  transition:
-    transform 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
-    background-color 150ms ease,
-    color 150ms ease;
+  display: grid; place-items: center;
+  width: 30px; height: 34px; margin-left: 2px; padding: 0;
+  border: 0; border-radius: 7px; background: transparent;
+  color: var(--text-secondary); cursor: pointer;
+  transition: background-color 150ms ease, color 150ms ease;
 }
-.join-request-banner-close svg,
-.join-request-banner-mark {
-  width: 14px;
-  height: 14px;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 1.6;
-  stroke-linecap: round;
-  stroke-linejoin: round;
+.join-request-banner-close svg,.join-request-banner-mark {
+  width: 14px; height: 14px; fill: none; stroke: currentColor;
+  stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round;
 }
-.join-request-banner-close:active {
-  transform: scale(0.94);
-}
-/* The answer: a check draws itself; a decline is a quiet cross. */
-.join-request-banner-mark {
-  width: 18px;
-  height: 18px;
-  margin-right: 6px;
-  color: var(--green-text, var(--text));
-  stroke-width: 1.8;
-}
-.join-request-banner-mark[data-outcome="decline"] {
-  color: var(--text-secondary);
-}
-.join-request-banner-mark path {
-  stroke-dasharray: 24;
-  stroke-dashoffset: 24;
-  animation: join-request-draw 320ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) 60ms forwards;
-}
-@keyframes join-request-draw {
-  to { stroke-dashoffset: 0; }
-}
-/* Hover states only where a pointer can hover: a tap on a phone must not stick. */
+.join-request-banner-mark { width: 22px; height: 22px; margin-right: 10px; color: var(--green-text, var(--text)); stroke-width: 1.8; }
+.join-request-banner-mark[data-outcome="decline"] { color: var(--text-secondary); }
+.join-request-banner-mark path { stroke-dasharray: 24; stroke-dashoffset: 24; animation: join-request-draw 240ms var(--ease-out, cubic-bezier(.16,1,.3,1)) 40ms forwards; }
+@keyframes join-request-draw { to { stroke-dashoffset: 0; } }
 @media (hover: hover) and (pointer: fine) {
-  .join-request-banner-button:hover:not(:disabled) {
-    background: var(--accent-hover, color-mix(in srgb, var(--text) 8%, transparent));
-  }
-  .join-request-banner-close:hover {
-    background: var(--accent-hover, color-mix(in srgb, var(--text) 8%, transparent));
-    color: var(--text);
-  }
+  .join-request-banner-button:hover:not(:disabled) { background: var(--accent-hover, color-mix(in srgb,var(--text) 8%,transparent)); }
+  .join-request-banner-button[data-variant="primary"]:hover:not(:disabled) { background: color-mix(in srgb,var(--text) 90%,var(--bg)); }
+  .join-request-banner-close:hover { background: var(--accent-hover, color-mix(in srgb,var(--text) 8%,transparent)); color: var(--text); }
 }
-.join-request-banner-button:focus-visible,
-.join-request-banner-close:focus-visible {
-  outline: 2px solid var(--blue);
-  outline-offset: -2px;
-}
+.join-request-banner-button:focus-visible,.join-request-banner-close:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }
 @media (pointer: coarse) {
-  .join-request-banner-button { min-height: 36px; }
-  .join-request-banner-close { width: 36px; height: 36px; }
+  .join-request-banner-button { min-height: 42px; }
+  .join-request-banner-close { width: 42px; height: 42px; }
 }
-@media (max-width: 640px) {
-  .join-request-banner-meta { display: none; }
-}
-@media (max-width: 420px) {
-  .join-request-banner { flex-wrap: wrap; row-gap: 4px; }
+@media (max-width: 540px) {
+  .join-request-banner { flex-wrap: wrap; padding: 14px; gap: 10px; }
+  .join-request-banner-copy { flex-basis: calc(100% - 100px); }
   .join-request-banner-actions { flex-basis: 100%; justify-content: flex-end; }
+  .join-request-banner-button { min-height: 38px; }
 }
 @media (prefers-contrast: more) {
-  .join-request-banner { border-color: var(--text); }
-  .join-request-banner-button { border-color: var(--text); }
+  .join-request-banner,.join-request-banner-button { border-color: var(--text); }
 }
 
 /*
@@ -227,16 +155,16 @@
 .join-request-reveal-leave-active {
   transition: grid-template-rows 180ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
 }
-.join-request-reveal-enter-active > .join-request-banner,
-.join-request-reveal-leave-active > .join-request-banner {
+.join-request-reveal-enter-active > .join-request-reveal-clip,
+.join-request-reveal-leave-active > .join-request-reveal-clip {
   overflow: hidden;
 }
-.join-request-reveal-enter-active > .join-request-banner {
+.join-request-reveal-enter-active > .join-request-reveal-clip {
   transition:
     opacity 200ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) 60ms,
     transform 240ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) 40ms;
 }
-.join-request-reveal-leave-active > .join-request-banner {
+.join-request-reveal-leave-active > .join-request-reveal-clip {
   transition:
     opacity 120ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
     transform 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
@@ -245,30 +173,30 @@
 .join-request-reveal-leave-to {
   grid-template-rows: 0fr;
 }
-.join-request-reveal-enter-from > .join-request-banner,
-.join-request-reveal-leave-to > .join-request-banner {
+.join-request-reveal-enter-from > .join-request-reveal-clip,
+.join-request-reveal-leave-to > .join-request-reveal-clip {
   opacity: 0;
   transform: translateY(6px);
 }
 /* Less motion means a cross-fade, not nothing: the strip still arrives gently. */
 @media (prefers-reduced-motion: reduce) {
+  .join-request-banner-faces { animation: none; }
   .join-request-reveal-enter-active,
   .join-request-reveal-leave-active {
     transition: none;
   }
-  .join-request-reveal-enter-active > .join-request-banner,
-  .join-request-reveal-leave-active > .join-request-banner {
+  .join-request-reveal-enter-active > .join-request-reveal-clip,
+  .join-request-reveal-leave-active > .join-request-reveal-clip {
     transition: opacity 150ms ease;
   }
   .join-request-reveal-enter-from,
   .join-request-reveal-leave-to {
     grid-template-rows: 1fr;
   }
-  .join-request-reveal-enter-from > .join-request-banner,
-  .join-request-reveal-leave-to > .join-request-banner {
+  .join-request-reveal-enter-from > .join-request-reveal-clip,
+  .join-request-reveal-leave-to > .join-request-reveal-clip {
     transform: none;
   }
-  .join-request-banner-face:first-child::after,
   .join-request-banner-mark path {
     animation: none;
     stroke-dashoffset: 0;

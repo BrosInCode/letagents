@@ -34,6 +34,7 @@ Object.assign(globalThis, {
 })
 const { createJoinRequestAlerts, joinRequestAlerts } = await import('../src/composables/roomJoinRequestAlerts')
 const { createRoomStream } = await import('../src/composables/room/stream')
+const { roomNotificationPreferences } = await import('../src/composables/room/notificationPreferences')
 
 const NOW = Date.parse('2026-11-07T12:00:00Z')
 function request(id: string, login: string, extra: Partial<RoomJoinRequestAlert> = {}): RoomJoinRequestAlert {
@@ -44,6 +45,13 @@ function request(id: string, login: string, extra: Partial<RoomJoinRequestAlert>
   }
 }
 const event = (req: RoomJoinRequestAlert, roomId = 'design-lounge') => ({ room_id: roomId, access_room_id: 'design-lounge', request: req })
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+const flush = () => new Promise(resolve => setImmediate(resolve))
 
 test('the shared event parser accepts the server frame and refuses anything else', () => {
   const parsed = parseRoomJoinRequestEvent(event(request('rjr_1', 'ada', { display_name: 'Ada' })))
@@ -120,6 +128,8 @@ test('the store adds a streamed request with one sound, drops answered ones, and
   assert.equal(await alerts.decide(alerts.visible.value[0]!, 'approve'), true)
   assert.deepEqual(decided, ['design-lounge:rjr_new:approve'])
   assert.equal(alerts.visible.value.some(r => r.id === 'rjr_new'), false)
+  assert.equal(alerts.lastDecision.value?.outcome, 'approve')
+  assert.equal(alerts.lastDecision.value?.request.id, 'rjr_new')
 
   decideFails = Object.assign(new Error('Admin privileges required'), { payload: { error: 'x' } })
   assert.equal(await alerts.decide(alerts.visible.value[0]!, 'decline'), false)
@@ -128,6 +138,7 @@ test('the store adds a streamed request with one sound, drops answered ones, and
   decideFails = Object.assign(new Error('already approved'), { payload: { code: 'ROOM_JOIN_REQUEST_NOT_PENDING' } })
   assert.equal(await alerts.decide(alerts.visible.value[0]!, 'decline'), false)
   assert.equal(alerts.visible.value.length, 1, 'a request another admin answered first is gone')
+  assert.equal(alerts.lastDecision.value, null, 'a conflict cannot claim this admin approved or declined')
 
   alerts.dismiss()
   assert.deepEqual(alerts.visible.value, [], 'closing hides what is waiting')
@@ -138,6 +149,110 @@ test('the store adds a streamed request with one sound, drops answered ones, and
   alerts.setRoom('elsewhere')
   assert.deepEqual(alerts.visible.value, [], 'changing room clears the list')
   pending = []
+})
+
+test('terminal requests stay gone when a pending snapshot or frame arrives late', async () => {
+  const pending = deferred<RoomJoinRequestAlert[]>()
+  let sounds = 0
+  const alerts = createJoinRequestAlerts({ fetchPending: () => pending.promise, decide: async () => {}, playSound: () => sounds++, hidden: () => false })
+  alerts.setRoom('design-lounge')
+  const loading = alerts.load()
+  alerts.receive('design-lounge', event(request('answered', 'ada', { state: 'declined' })))
+  alerts.receive('design-lounge', event(request('answered', 'ada')))
+  pending.resolve([request('answered', 'ada'), request('still-pending', 'bob')])
+  await loading
+  assert.deepEqual(alerts.visible.value.map(item => item.id), ['still-pending'])
+  assert.equal(sounds, 0, 'neither a terminal request nor the old snapshot is news')
+  alerts.setRoom('another-room')
+  alerts.setRoom('design-lounge')
+  alerts.receive('design-lounge', event(request('answered', 'ada')))
+  assert.equal(alerts.visible.value.length, 0, 'a room revisit does not forget a decision')
+  alerts.reset()
+  alerts.setRoom('design-lounge')
+  alerts.receive('design-lounge', event(request('answered', 'ada')))
+  assert.equal(alerts.visible.value.length, 1, 'a new account session has its own terminal history')
+})
+
+test('late decisions cannot change the next room, including a leave-and-return to the same room', async () => {
+  const first = deferred<void>()
+  const second = deferred<void>()
+  let calls = 0
+  const alerts = createJoinRequestAlerts({ fetchPending: async () => [], decide: () => (++calls === 1 ? first : second).promise, playSound() {}, hidden: () => false })
+  alerts.setRoom('design-lounge')
+  const oldDecision = alerts.decide(request('first', 'ada'), 'approve')
+  alerts.setRoom('elsewhere')
+  alerts.setRoom('design-lounge')
+  const newDecision = alerts.decide(request('second', 'bob'), 'decline')
+  first.reject(new Error('Old permission failure'))
+  assert.equal(await oldDecision, false)
+  assert.equal(alerts.error.value, '')
+  assert.equal(alerts.busy.value, 'decline:second', 'old finally must not clear the new decision')
+  assert.equal(alerts.lastDecision.value, null)
+  second.resolve()
+  assert.equal(await newDecision, true)
+  assert.equal(alerts.lastDecision.value?.request.id, 'second')
+  alerts.reset()
+  assert.equal(alerts.lastDecision.value, null)
+})
+
+test('a knock waits for access-room preferences and drops stale or resolved arrivals', async () => {
+  const reads: Array<ReturnType<typeof deferred<boolean>>> = []
+  const accessRooms: string[] = []
+  let sounds = 0
+  const alerts = createJoinRequestAlerts({
+    fetchPending: async () => [], decide: async () => {}, playSound: () => sounds++, hidden: () => false,
+    soundAllowed: accessRoom => { accessRooms.push(accessRoom); const read = deferred<boolean>(); reads.push(read); return read.promise },
+  })
+  alerts.setRoom('focus-room')
+  alerts.receive('focus-room', event(request('muted', 'ada'), 'focus-room'))
+  alerts.receive('focus-room', event(request('muted', 'ada'), 'focus-room'))
+  assert.deepEqual(accessRooms, ['design-lounge'], 'focus rooms use the parent access room, once per request')
+  reads[0]!.resolve(false)
+  await flush()
+  assert.equal(sounds, 0)
+  alerts.receive('focus-room', event(request('resolved', 'bob'), 'focus-room'))
+  alerts.forget('resolved')
+  reads[1]!.resolve(true)
+  await flush()
+  assert.equal(sounds, 0, 'a decision made while preferences load cancels the knock')
+  alerts.receive('focus-room', event(request('old-room', 'cy'), 'focus-room'))
+  alerts.setRoom('elsewhere')
+  alerts.setRoom('focus-room')
+  reads[2]!.resolve(true)
+  await flush()
+  assert.equal(sounds, 0, 'leave-and-return cannot play a stale knock')
+  alerts.receive('focus-room', event(request('fresh', 'dee'), 'focus-room'))
+  reads[3]!.resolve(true)
+  await flush()
+  assert.equal(sounds, 1)
+})
+
+test('the production web knock respects parent-room mute and snooze, with mentions still allowing admin requests', async () => {
+  const original = globalThis.AudioContext
+  let contexts = 0
+  Object.assign(globalThis, { AudioContext: class { constructor() { contexts++ } state = 'suspended'; async resume() {} } })
+  roomNotificationPreferences.setViewer({ id: 'admin', login: 'admin' })
+  const parent = roomNotificationPreferences.state('design-lounge')
+  parent.ready = true
+  try {
+    joinRequestAlerts.setRoom('focus-room')
+    parent.preference = { level: 'muted', snoozed_until: null }
+    joinRequestAlerts.receive('focus-room', event(request('muted-production', 'ada'), 'focus-room'))
+    await flush()
+    assert.equal(contexts, 0)
+    parent.preference = { level: 'all', snoozed_until: new Date(Date.now() + 60_000).toISOString() }
+    joinRequestAlerts.receive('focus-room', event(request('snoozed-production', 'bob'), 'focus-room'))
+    await flush()
+    assert.equal(contexts, 0)
+    parent.preference = { level: 'mentions', snoozed_until: null }
+    joinRequestAlerts.receive('focus-room', event(request('allowed-production', 'cy'), 'focus-room'))
+    await flush()
+    assert.equal(contexts, 1, 'a join request is directed at the admin, not an unmentioned chat message')
+  } finally {
+    joinRequestAlerts.reset()
+    roomNotificationPreferences.setViewer(null)
+    Object.assign(globalThis, { AudioContext: original })
+  }
 })
 
 test('the room stream hands join_request frames to the store and repairs malformed ones', async () => {
@@ -214,15 +329,16 @@ test('the room page shows the banner to admins only, and the style honours reduc
   const slotAt = page.indexOf('<div class="room-join-request-slot"')
   const composerAt = page.indexOf('<Composer\n      v-if="activeTab === \'chat\' && isConnected"')
   assert.ok(slotAt > 0 && composerAt > slotAt, 'the slot sits right above the composer and is always in the grid, so the pill can fold open and closed')
-  assert.match(banner, /@open-requests="drawerOpen = true"/, 'Review opens the drawer with the Requests list')
+  assert.match(banner, /@open-requests="openJoinRequests"/, 'Review opens the drawer with the Requests list')
+  assert.match(page, /async function openJoinRequests\(\) \{\s*drawerOpen\.value = true\s*await nextTick\(\)\s*roomDrawer\.value\?\.focusRequests\(\)/, 'Review reveals the Requests section after opening the drawer')
   const css = await readFile(fileURLToPath(new URL('../../../shared/ui/join-request-banner.css', import.meta.url)), 'utf8')
   const reduced = /@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? ''
   assert.match(reduced, /transition: opacity 150ms ease/, 'less motion keeps a cross-fade')
   assert.match(reduced, /transform: none/, 'and drops the slide and the press scale')
-  assert.match(reduced, /animation: none/, 'and the knock ring and the drawn check')
+  assert.match(reduced, /animation: none/, 'and the drawn check')
   assert.match(css, /reveal-enter-from,\s*\.join-request-reveal-leave-to \{\s*grid-template-rows: 0fr;/, 'the row unfolds instead of jumping')
   assert.doesNotMatch(css, /transition: all/, 'only named properties move')
   assert.match(css, /@media \(hover: hover\) and \(pointer: fine\)/, 'hover states are gated for touch')
   assert.match(css, /\.join-request-banner-button:active:not\(:disabled\) \{\s*transform: scale\(0\.97\)/, 'a press answers at once')
-  assert.match(css, /reveal-leave-active > \.join-request-banner \{\s*transition:\s*opacity 120ms/, 'the strip leaves faster than it arrives')
+  assert.match(css, /reveal-leave-active > \.join-request-reveal-clip \{\s*transition:\s*opacity 120ms/, 'the strip leaves faster than it arrives')
 })

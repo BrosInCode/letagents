@@ -9,6 +9,7 @@
   <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :data-keyboard-open="keyboardOpen" :data-compact-composer="compactComposer" :style="roomViewportStyle" @focusin="syncRoomViewport">
     <!-- Drawer -->
     <RoomDrawer
+      ref="roomDrawer"
       :open="drawerOpen"
       :room="room"
       :messages="messages"
@@ -152,13 +153,15 @@
     <div class="room-join-request-slot" v-show="activeTab === 'chat' && !hideMainComposer">
       <JoinRequestBanner
         v-if="joinRequestBannerAvailable"
+        :key="joinRequestAlerts.roomId.value ?? ''"
         :requests="joinRequestBanner"
         :busy="joinRequestAlerts.busy.value"
         :error="joinRequestAlerts.error.value"
+        :decision="joinRequestAlerts.lastDecision.value"
         @approve="joinRequestAlerts.decide($event, 'approve')"
         @decline="joinRequestAlerts.decide($event, 'decline')"
         @dismiss="joinRequestAlerts.dismiss()"
-        @open-requests="drawerOpen = true"
+        @open-requests="openJoinRequests"
       />
     </div>
 
@@ -212,7 +215,7 @@
 
 <script setup lang="ts">
 import { provideRoomMessageMotion } from "../../../../shared/ui/useRoomMessageMotion";
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
@@ -336,17 +339,24 @@ const roomAccessState = computed(() => resolveRoomAccessState({
 }))
 
 const drawerOpen = ref(false)
+const roomDrawer = ref<InstanceType<typeof RoomDrawer> | null>(null)
+async function openJoinRequests() {
+  drawerOpen.value = true
+  await nextTick()
+  roomDrawer.value?.focusRequests()
+}
 // The banner follows the open room; an admin's page reads the requests already waiting.
 const joinRequestBanner = joinRequestAlerts.visible
 // Admins only: the server sends the requests to admins only, and the page mounts the strip for admins only.
 const joinRequestBannerAvailable = computed(() => isConnected.value && room.value?.role === 'admin')
 watch(
-  () => [isConnected.value ? room.value?.identifier || null : null, room.value?.role === 'admin'] as const,
-  ([roomIdentifier, admin]) => {
-    joinRequestAlerts.setRoom(roomIdentifier)
+  () => [isConnected.value ? room.value?.identifier || null : null, room.value?.role === 'admin', auth.user.value?.id] as const,
+  ([roomIdentifier, admin, accountId], previous) => {
+    if (!previous || accountId !== previous[2] || admin !== previous[1]) joinRequestAlerts.reset()
+    joinRequestAlerts.setRoom(admin ? roomIdentifier : null)
     if (roomIdentifier && admin) void joinRequestAlerts.load()
   },
-  { immediate: true },
+  { immediate: true, flush: 'sync' },
 )
 const rulesBoardOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')

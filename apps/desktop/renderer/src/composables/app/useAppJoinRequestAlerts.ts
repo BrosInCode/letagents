@@ -1,7 +1,7 @@
 import { onScopeDispose, ref } from "vue";
 import type { DesktopNotificationStatus } from "../../../../electron/ipc-types";
 import { joinRequestNotificationText } from "../../../../../../shared/room-join-requests.mjs";
-import { playRoomInteractionSound } from "../../components/desktop/content/room-shell/roomSounds";
+import { createJoinRequestKnock } from "../../../../../../shared/ui/join-request-sound";
 import { readNotificationsEnabled, readSoundEnabled } from "../../components/desktop/content/room-shell/preferences";
 import { normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
 import { desktopIpc } from "../../ipc/index.js";
@@ -21,6 +21,7 @@ export function useAppJoinRequestAlerts(context: unknown) {
   const { activeEntry, authStatus, selectedRoomInfo, roomSettingsSectionRequest } = app;
   const nativeNotificationsActive = ref(false);
   const notificationsEnabled = ref(readNotificationsEnabled());
+  const knock = createJoinRequestKnock();
 
   function applyNotificationStatus(status: DesktopNotificationStatus): void {
     notificationsEnabled.value = status.enabled;
@@ -50,7 +51,7 @@ export function useAppJoinRequestAlerts(context: unknown) {
   function alertForArrival({ request, playSound }: JoinRequestArrival): void {
     if (!authStatus.value?.authenticated) return;
     if (playSound && readSoundEnabled() && !roomNotificationsMuted(request.room_id)) {
-      try { playRoomInteractionSound("notification"); } catch { /* Audio can be unavailable before a gesture. */ }
+      knock.play();
     }
     // The signed app's APNs alert already shows this on macOS, even while the app is in front.
     if (nativeNotificationsActive.value) return;
@@ -63,6 +64,7 @@ export function useAppJoinRequestAlerts(context: unknown) {
 
   const unsubscribeArrivals = roomJoinRequests.onArrival(alertForArrival);
   onScopeDispose(() => {
+    knock.dispose();
     unsubscribeStatus?.();
     unsubscribeArrivals();
   });
