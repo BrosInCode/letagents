@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createJoinRequestKnock } from "../../../../shared/ui/join-request-sound";
 
 import {
   playRoomInteractionSound,
@@ -64,5 +65,54 @@ test("Needs you plays the approved two-note chime and releases interrupted audio
     blocked.dispose();
     Object.assign(globalThis, { AudioContext: undefined });
     assert.doesNotThrow(() => { const unavailable = createNeedsYouChime(); unavailable.play(); unavailable.dispose(); });
+  } finally { Object.assign(globalThis, { AudioContext: original }); }
+});
+
+test("join requests knock twice, replace rapid arrivals, and never queue blocked audio", async () => {
+  const original = globalThis.AudioContext;
+  const voices: Array<{ starts: number[]; stops: number[]; disconnected: boolean }> = [];
+  let state = 'running';
+  let resumes = 0;
+  let closes = 0;
+  const param = () => ({ setValueAtTime() {}, exponentialRampToValueAtTime() {} });
+  class AudioEngine {
+    state = state;
+    currentTime = 1;
+    destination = {};
+    createOscillator() {
+      const voice = { starts: [] as number[], stops: [] as number[], disconnected: false };
+      voices.push(voice);
+      return { frequency: param(), connect() {}, disconnect() { voice.disconnected = true; },
+        start(at: number) { voice.starts.push(at); }, stop(at = 0) { voice.stops.push(at); } };
+    }
+    createGain() { return { gain: param(), connect() {}, disconnect() {} }; }
+    async resume() { resumes++; this.state = 'running'; }
+    async close() { closes++; }
+  }
+  Object.assign(globalThis, { AudioContext: AudioEngine });
+  try {
+    const knock = createJoinRequestKnock();
+    knock.play();
+    assert.equal(voices.length, 2, 'one arrival is one two-tap knock');
+    assert.ok(Math.abs(voices[1].starts[0] - voices[0].starts[0] - .21) < .0001);
+    assert.ok(voices.every(voice => voice.stops[0] > voice.starts[0]));
+    knock.play();
+    assert.equal(voices.length, 4);
+    assert.ok(voices.slice(0, 2).every(voice => voice.disconnected), 'new arrivals replace earlier voices');
+    knock.stop();
+    assert.ok(voices.every(voice => voice.disconnected), 'muting silences even scheduled taps');
+    knock.dispose();
+    assert.equal(closes, 1);
+    state = 'suspended';
+    const blocked = createJoinRequestKnock();
+    blocked.play();
+    await Promise.resolve();
+    assert.equal(resumes, 1);
+    assert.equal(voices.length, 4, 'resuming does not play an old arrival');
+    blocked.play();
+    assert.equal(voices.length, 6, 'the next arrival can play');
+    blocked.dispose();
+    Object.assign(globalThis, { AudioContext: undefined });
+    assert.doesNotThrow(() => { const absent = createJoinRequestKnock(); absent.play(); absent.dispose(); });
   } finally { Object.assign(globalThis, { AudioContext: original }); }
 });

@@ -148,7 +148,25 @@
       @open-task="openBoardTask"
       @dismiss-event-preview="dismissComposerGitHubEventPreview"
       @scroll-position="rememberChatScrollPosition"
-    />
+    >
+      <!-- Requests to join, for room admins: a pill above the composer, where the room asks things of you. -->
+      <template #above-composer>
+        <div class="desktop-join-request-banner" data-testid="desktop-join-request-banner">
+          <JoinRequestBanner
+            v-if="joinRequestBannerAvailable"
+            :key="props.room.identifier"
+            :requests="joinRequestBanner"
+            :busy="joinRequestBusy"
+            :error="joinRequestError"
+            :decision="joinRequestDecision"
+            @approve="decideJoinRequest($event, 'approve')"
+            @decline="decideJoinRequest($event, 'decline')"
+            @dismiss="dismissJoinRequests"
+            @open-requests="openJoinRequests"
+          />
+        </div>
+      </template>
+    </RoomChatView>
 
     <Transition name="room-panel" mode="out-in">
       <RoomMemoryView v-if="activeTab === 'memory'" :key="`memory:${messageNamespace}`" :room-identifier="room.identifier" @open-message="(id) => { activeTab = 'chat'; revealRoomMessage(id); }" />
@@ -353,6 +371,7 @@ import RoomMemoryView from "./RoomMemoryView.vue";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
 import GitRoomEnvironmentPanel from "./room-shell/GitRoomEnvironmentPanel.vue";
+import JoinRequestBanner from "../../../../../../../shared/ui/JoinRequestBanner.vue";
 import type { DesktopRoomShellEmits, DesktopRoomShellProps } from "../../../composables/room-shell/props";
 import type { RoomShellContext } from "../../../composables/room-shell/context";
 import { useRoomShellState } from "../../../composables/room-shell/useRoomShellState";
@@ -366,6 +385,7 @@ import { useRoomShellConversation, useRoomShellIntegrations, useRoomShellNotific
 import { useRoomShellParticipants } from "../../../composables/room-shell/useRoomShellParticipants";
 import { useRoomShellRoomWatchers, useRoomShellAttention } from "../../../composables/room-shell/useRoomShellWatchers";
 import { useRoomShellLifecycle } from "../../../composables/room-shell/useRoomShellLifecycle";
+import { useRoomShellJoinRequests } from "../../../composables/room-shell/useRoomShellJoinRequests";
 const props = defineProps<DesktopRoomShellProps>();
 const emit = defineEmits<DesktopRoomShellEmits>();
 
@@ -465,6 +485,10 @@ const {
 Object.assign(app, useRoomShellRoomWatchers(app));
 
 Object.assign(app, useRoomShellAttention(app));
+
+const {
+  joinRequestBannerAvailable, joinRequestBanner, joinRequestBusy, joinRequestError, joinRequestDecision, decideJoinRequest, dismissJoinRequests, openJoinRequests,
+} = Object.assign(app, useRoomShellJoinRequests(app));
 
 Object.assign(app, useRoomShellLifecycle(app));
 

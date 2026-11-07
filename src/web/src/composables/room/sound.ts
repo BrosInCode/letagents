@@ -1,10 +1,17 @@
 import { ref } from 'vue'
+import { createJoinRequestKnock } from '../../../../../shared/ui/join-request-sound'
 
 export const soundEnabled = ref(localStorage.getItem('lac-sound') !== 'off')
 let audioCtx: AudioContext | null = null
+const joinRequestKnock = createJoinRequestKnock()
+
+export function playJoinRequestSound() {
+  if (soundEnabled.value) joinRequestKnock.play()
+}
 
 export function toggleSound() {
   soundEnabled.value = !soundEnabled.value
+  if (!soundEnabled.value) joinRequestKnock.stop()
   localStorage.setItem('lac-sound', soundEnabled.value ? 'on' : 'off')
 }
 

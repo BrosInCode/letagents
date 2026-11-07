@@ -57,3 +57,19 @@ test("private-message notifications open a conversation and reject ambiguous roo
   });
   assert.equal(parseDesktopNotificationTarget({ ...input, room_id: "room_1" }), null);
 });
+
+test("parses a join-request target, which opens the room's settings instead of a message", () => {
+  assert.deepEqual(parseDesktopNotificationTarget({
+    notification_id: "lj_device_1a2b",
+    room_id: "design-lounge",
+    join_request_id: "rjr_42",
+  }), { notificationId: "lj_device_1a2b", roomIdentifier: "design-lounge", joinRequestId: "rjr_42" });
+  assert.deepEqual(parseDesktopNotificationLaunchInfo({
+    identifier: "lj_device_1a2b",
+    userInfo: { letagents: { notification_id: "lj_device_1a2b", room_id: "design-lounge", join_request_id: "rjr_42" } },
+  }), { notificationId: "lj_device_1a2b", roomIdentifier: "design-lounge", joinRequestId: "rjr_42" });
+  // A join request belongs to a room, never to a private conversation or a message.
+  assert.equal(parseDesktopNotificationTarget({ notification_id: "x", conversation_id: "c", join_request_id: "rjr_1" }), null);
+  assert.equal(parseDesktopNotificationTarget({ notification_id: "x", room_id: "r", message_id: "msg_1", join_request_id: "rjr_1" }), null);
+  assert.equal(parseDesktopNotificationTarget({ notification_id: "x", join_request_id: "rjr_1" }), null);
+});

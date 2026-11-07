@@ -1,15 +1,33 @@
+import type { EventEmitter } from "node:events";
+
 import type { Express } from "express";
 
+import { ROOM_JOIN_REQUEST_EVENT } from "../../../../shared/room-join-requests.mjs";
 import type { AccountActivityHub, AccountRoomActivity } from "../../account-activity/hub.js";
 import type { getAccountRoomsForAccount } from "../../account-room-membership/list.js";
+import { getRoomMemberRole } from "../../db/room-members.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { openSseConnection } from "../../http/sse.js";
+import {
+  ROOM_JOIN_REQUEST_CHANGED,
+  readRoomJoinRequestChangedEvent,
+  roomJoinRequestEvents,
+  roomJoinRequestStreamPayload,
+} from "../../rooms/join-request-events.js";
 import { roomMembershipInvalidationEvents } from "../../rooms/membership-events.js";
 import { roomEventBridgeLossEvents } from "../../server/bridged-emitter.js";
 
 export interface AccountActivityStreamDeps {
   hub: AccountActivityHub;
   getAccountRoomsForAccount: typeof getAccountRoomsForAccount;
+  /** Someone asked to join a room, or the request was answered. Defaults to the server's emitter. */
+  joinRequestEvents?: EventEmitter;
+  /** Whether the account is an admin of the room right now. Defaults to the members store. */
+  isRoomAdmin?(accountId: string, roomId: string): Promise<boolean>;
+}
+
+async function isRoomAdminInStore(accountId: string, roomId: string): Promise<boolean> {
+  return (await getRoomMemberRole(roomId, accountId)) === "admin";
 }
 
 /** The room list is capped at this many rooms, and so is the stream. */
@@ -65,6 +83,27 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
     const send = (activity: AccountRoomActivity) => {
       void connection.write(frame("room", activity));
     };
+    // A request to join one of this person's rooms reaches them here even when
+    // that room is not open, so the desktop can alert them at once. It names
+    // the person who asked, so the role is checked for every event, and only
+    // a signed-in app (never an owner token) receives it.
+    if (req.authKind === "session") {
+      const accountId = req.sessionAccount.account_id;
+      const joinRequestEvents = deps.joinRequestEvents ?? roomJoinRequestEvents;
+      const isRoomAdmin = deps.isRoomAdmin ?? isRoomAdminInStore;
+      const onJoinRequest = (payload: unknown) => {
+        const event = readRoomJoinRequestChangedEvent(payload);
+        // The event is published once per room under the access room; one frame is enough here.
+        if (!event || event.projectId !== event.accessRoomId || !watchedRoomIds.has(event.accessRoomId.toLowerCase())) return;
+        void isRoomAdmin(accountId, event.accessRoomId).then((admin) => {
+          if (admin && !connection.closed) void connection.write(frame(ROOM_JOIN_REQUEST_EVENT, roomJoinRequestStreamPayload(event.accessRoomId, event)));
+        }).catch((error) => {
+          console.warn("[account activity] join request role check failed", error);
+        });
+      };
+      joinRequestEvents.on(ROOM_JOIN_REQUEST_CHANGED, onJoinRequest);
+      connection.addCleanup(() => { joinRequestEvents.off(ROOM_JOIN_REQUEST_CHANGED, onJoinRequest); });
+    }
     try {
       const watch = await deps.hub.watch(roomIds, send);
       connection.addCleanup(() => watch.close());

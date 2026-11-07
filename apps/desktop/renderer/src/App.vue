@@ -207,6 +207,8 @@
           :open-add-agent-requested="openAddAgentAfterRepoPick"
           :notification-reveal-message-id="notificationRevealMessageId"
           :notification-reveal-nonce="notificationRevealNonce"
+          :settings-section-request="roomSettingsSectionRequestFor(selectedRoomInfo.identifier)"
+          @settings-section-opened="roomSettingsSectionRequest = null"
           :attention-intent="attentionIntent"
           @attention-opened="attentionIntent = null"
           :initial-chat-scroll-position="chatScrollPositionForRoom(selectedRoomInfo.identifier)"
@@ -468,6 +470,8 @@ import { useAppRoomShellActions, useAppChatScrollWatchers } from "./composables/
 import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./composables/app/useAppNavigation";
 import { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./composables/app/useAppRoomData";
 import { useAppLifecycle } from "./composables/app/useAppLifecycle";
+import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAlerts";
+import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
 
 const RentMarketplaceView = defineAsyncComponent(
   () => import("./components/desktop/content/RentMarketplaceView.vue"),
@@ -484,7 +488,7 @@ const {
   newRoomRecentProjectFolders, sidebarWidth, sidebarRevealRequest, isSidebarResizing,
   settingsAccountRooms, rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread,
   openConversationId, openConversationNonce, inboxSection, attentionIntent, rentMarketplaceRole,
-  openAddAgentAfterRepoPick, notificationRevealMessageId, notificationRevealNonce,
+  openAddAgentAfterRepoPick, notificationRevealMessageId, notificationRevealNonce, roomSettingsSectionRequest,
   chatStorageSettings, chatStorageAvailable, chatStorageBusy, chatStorageFeedback,
   appAgentSettingsStatus, appAgentActions, appAgentBusy, appAgentResult, appAgentFeedback,
   selectedMcpTargetIds, mcpInstallBusy, mcpInstallFeedback, mcpWizardStep, firstRunStage,
@@ -558,6 +562,13 @@ const {
 const {
   roomAttention,
 } = Object.assign(app, useAppRoomAttention(app));
+
+Object.assign(app, useAppJoinRequestAlerts(app));
+// The settings-section request belongs to one room; another room ignores it.
+function roomSettingsSectionRequestFor(roomIdentifier: string) {
+  const request = roomSettingsSectionRequest.value;
+  return request && normalizeRoomIdentifier(request.roomIdentifier) === normalizeRoomIdentifier(roomIdentifier) ? request : null;
+}
 
 const {
   actionToasts, dismissActionToast, selectedRoomWithProjectContext,

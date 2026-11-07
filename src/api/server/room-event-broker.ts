@@ -21,6 +21,11 @@ import {
   type RoomResourceInvalidationResource,
 } from "../../../shared/room-resource-invalidation.mjs";
 import type { ActivityEvent } from "../rental/activity-emitter.js";
+import {
+  ROOM_JOIN_REQUEST_CHANGED,
+  readRoomJoinRequestChangedEvent,
+  type RoomJoinRequestChangedEvent,
+} from "../rooms/join-request-events.js";
 import type { MessageInfoUpdatedEvent } from "./message-info-events.js";
 import type { RoomMessageOverlayTarget } from "./room-message-overlays.js";
 
@@ -59,7 +64,13 @@ export type RoomEvent =
   | { kind: "rental_activity_created"; roomId: string; activity: ActivityEvent }
   | { kind: "message_info_updated"; roomId: string; messageIds: string[] | null }
   /** Pointer-only: consumers re-read the resource through its own authorized route. */
-  | { kind: "resource_invalidated"; roomId: string; resource: RoomResourceInvalidationResource };
+  | { kind: "resource_invalidated"; roomId: string; resource: RoomResourceInvalidationResource }
+  /**
+   * Someone asked to join a members-only room, or the request was answered.
+   * It names the person who asked, so only a room admin's subscription may
+   * accept it (the stream route checks the role).
+   */
+  | { kind: "join_request_changed"; roomId: string; accessRoomId: string; roomDisplayName: string; request: RoomJoinRequestChangedEvent["request"] };
 
 export type RoomEventKind = RoomEvent["kind"];
 export const MESSAGE_CREATED_EVENT_KINDS: ReadonlySet<RoomEventKind> = new Set(["message_created", "message_routed"]);
@@ -137,6 +148,7 @@ interface EventSourceDeps {
   wakeRuleEvents?: EventEmitter;
   messageReactionEvents?: EventEmitter;
   messagePinEvents?: EventEmitter;
+  joinRequestEvents?: EventEmitter;
   bridgeLossEvents?: EventEmitter;
 }
 
@@ -320,6 +332,19 @@ export class RoomEventBroker {
       this.addSource(emitter, eventName, (payload) => {
         const event = payload as { projectId: string };
         return { kind: "resource_invalidated", roomId: event.projectId, resource };
+      });
+    }
+    if (deps.joinRequestEvents) {
+      this.addSource(deps.joinRequestEvents, ROOM_JOIN_REQUEST_CHANGED, (payload) => {
+        const event = readRoomJoinRequestChangedEvent(payload);
+        if (!event) throw new Error("malformed join request event");
+        return {
+          kind: "join_request_changed",
+          roomId: event.projectId,
+          accessRoomId: event.accessRoomId,
+          roomDisplayName: event.roomDisplayName,
+          request: event.request,
+        };
       });
     }
     if (deps.bridgeLossEvents) {

@@ -80,3 +80,29 @@ test("private message alerts identify only the conversation, with a generic prev
   assert.deepEqual(payload.letagents, { notification_id: "dm-1", conversation_id: "chat_123", message_id: "msg_9", thread_root_id: null });
   assert.equal((payload.aps as Record<string,unknown>)["thread-id"], "chat_123");
 });
+
+test("a join request alert names the room and the person who asked, and routes to the request", () => {
+  const payload = buildApnsPayload({
+    notificationId: "lj_device_1a2b",
+    joinRequestId: "rjr_42",
+    deviceToken: "a".repeat(64),
+    environment: "production",
+    roomId: "design-lounge",
+    roomDisplayName: "Design lounge",
+    messageId: "",
+    threadRootId: null,
+    sender: "Ada | Person",
+    body: "",
+  });
+  assert.deepEqual(payload.aps, {
+    alert: { title: "Join request in Design lounge", body: "Ada | Person wants to join" },
+    sound: "default",
+    "thread-id": "design-lounge",
+  });
+  assert.deepEqual(payload.letagents, {
+    notification_id: "lj_device_1a2b",
+    room_id: "design-lounge",
+    join_request_id: "rjr_42",
+  });
+  assert.equal(Buffer.byteLength(JSON.stringify(payload)) < 4_096, true);
+});

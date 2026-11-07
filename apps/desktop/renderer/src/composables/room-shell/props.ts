@@ -57,6 +57,8 @@ export interface DesktopRoomShellProps {
   openAddAgentRequested?: boolean;
   notificationRevealMessageId?: string | null;
   notificationRevealNonce?: number;
+  /** Open the room settings at this section once the room has loaded (a join-request notification click). */
+  settingsSectionRequest?: { roomIdentifier: string; section: string; nonce: number } | null;
   attentionIntent?: AttentionNavigationIntent | null;
   attention?: { count: number; pulse: boolean };
   initialChatScrollPosition?: ChatScrollPosition | null;
@@ -66,6 +68,8 @@ export interface DesktopRoomShellProps {
 /** DesktopRoomShell.vue's events, as passed to defineEmits. */
 export type DesktopRoomShellEmits = {
   "attention-opened": [];
+  /** The settings-section request was acted on; the app clears it so a later visit does not repeat it. */
+  "settings-section-opened": [];
   "open-ask-agent": [];
   "cycle-sidebar": [];
   "message-sent": [message: DesktopRoomMessage];

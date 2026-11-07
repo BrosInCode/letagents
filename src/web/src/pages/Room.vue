@@ -9,6 +9,7 @@
   <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :data-keyboard-open="keyboardOpen" :data-compact-composer="compactComposer" :style="roomViewportStyle" @focusin="syncRoomViewport">
     <!-- Drawer -->
     <RoomDrawer
+      ref="roomDrawer"
       :open="drawerOpen"
       :room="room"
       :messages="messages"
@@ -155,6 +156,22 @@
       </template>
     </RoomTabPanels>
 
+    <!-- Requests to join, for room admins: a pill above the composer, where the room asks things of you. -->
+    <div class="room-join-request-slot" v-show="activeTab === 'chat' && !hideMainComposer">
+      <JoinRequestBanner
+        v-if="joinRequestBannerAvailable"
+        :key="joinRequestAlerts.roomId.value ?? ''"
+        :requests="joinRequestBanner"
+        :busy="joinRequestAlerts.busy.value"
+        :error="joinRequestAlerts.error.value"
+        :decision="joinRequestAlerts.lastDecision.value"
+        @approve="joinRequestAlerts.decide($event, 'approve')"
+        @decline="joinRequestAlerts.decide($event, 'decline')"
+        @dismiss="joinRequestAlerts.dismiss()"
+        @open-requests="openJoinRequests"
+      />
+    </div>
+
     <Composer
       v-if="activeTab === 'chat' && isConnected"
       v-show="!hideMainComposer"
@@ -208,7 +225,7 @@
 <script setup lang="ts">
 import { activityUnread } from '../../../../shared/ui/activity/unread'
 import { provideRoomMessageMotion } from "../../../../shared/ui/useRoomMessageMotion";
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useRoom } from '@/composables/useRoom'
 import { useAuth } from '@/composables/useAuth'
@@ -217,6 +234,8 @@ import { provideRoomMessageLinkPreviews, useRoomMessageLinkPreviews } from '@/co
 import { provideRoomMessagePins, useRoomMessagePins } from '@/composables/roomMessagePins'
 import { provideRoomMessageReactions, useRoomMessageReactions } from '@/composables/roomMessageReactions'
 import RoomHeader from '@/components/room/RoomHeader.vue'
+import JoinRequestBanner from '../../../../shared/ui/JoinRequestBanner.vue'
+import { joinRequestAlerts } from '@/composables/roomJoinRequestAlerts'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
 import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
@@ -338,6 +357,25 @@ const roomAccessState = computed(() => resolveRoomAccessState({
 }))
 
 const drawerOpen = ref(false)
+const roomDrawer = ref<InstanceType<typeof RoomDrawer> | null>(null)
+async function openJoinRequests() {
+  drawerOpen.value = true
+  await nextTick()
+  roomDrawer.value?.focusRequests()
+}
+// The banner follows the open room; an admin's page reads the requests already waiting.
+const joinRequestBanner = joinRequestAlerts.visible
+// Admins only: the server sends the requests to admins only, and the page mounts the strip for admins only.
+const joinRequestBannerAvailable = computed(() => isConnected.value && room.value?.role === 'admin')
+watch(
+  () => [isConnected.value ? room.value?.identifier || null : null, room.value?.role === 'admin', auth.user.value?.id] as const,
+  ([roomIdentifier, admin, accountId], previous) => {
+    if (!previous || accountId !== previous[2] || admin !== previous[1]) joinRequestAlerts.reset()
+    joinRequestAlerts.setRoom(admin ? roomIdentifier : null)
+    if (roomIdentifier && admin) void joinRequestAlerts.load()
+  },
+  { immediate: true, flush: 'sync' },
+)
 const rulesBoardOpen = ref(false)
 const theme = ref(localStorage.getItem('lac-theme') || 'dark')
 const { roomViewportStyle, compactViewport, keyboardOpen, compactComposer, hideMainComposer, syncRoomViewport, resetComposerFocus } = useRoomViewport()
@@ -694,7 +732,7 @@ watch(
   inset-inline: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
   height: 100vh;
   height: var(--room-viewport-height, 100dvh);
   background: var(--bg-0, #09090b);
@@ -706,7 +744,11 @@ watch(
 .room-shell[data-compact-viewport="true"] :deep(.mobile-bottom-nav) { height: calc(48px + env(safe-area-inset-bottom, 0px)); }
 
 /* A landscape software keyboard can leave only 98px for the draft and send row. */
-.room-shell[data-keyboard-open="true"][data-compact-composer="true"] { grid-template-rows: 0 minmax(0, 1fr) auto; }
+/* The join-request slot sits above the composer, in its margins: 0 px until a request arrives. */
+.room-join-request-slot { min-width: 0; padding: 0 max(24px, env(safe-area-inset-right, 0px)) 0 max(24px, env(safe-area-inset-left, 0px)); }
+.room-join-request-slot .join-request-banner { margin-top: 8px; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] { grid-template-rows: 0 minmax(0, 1fr) auto auto; }
+@media (max-width: 768px) { .room-join-request-slot { padding-inline: 12px; } }
 /* Keep search focusable: /search or Find restores the header through focusin. */
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.chat-header) { height: 0; min-height: 0; padding: 0; border: 0; overflow: hidden; }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.room-live-strip),

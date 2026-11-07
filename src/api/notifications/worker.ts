@@ -18,6 +18,7 @@ import {
 import { classifyApnsResult, retryDelayMs, type ApnsDisposition } from "./delivery-policy.js";
 import { startWakeWebhookWorker } from "./wake-webhooks.js";
 import { getPushDeliveryAccount } from "./push-account.js";
+import { loadJoinRequestPushPreview } from "./join-request-pushes.js";
 
 const POLL_INTERVAL_MS = 2_000;
 const CLAIM_LIMIT = 50;
@@ -29,6 +30,8 @@ const CLEANUP_INTERVAL_MS = 60 * 60_000;
 export interface ClaimedNotification {
   id: string;
   reminder_id?: string | null;
+  /** Set for a request to join a room; message_number is 0 for such a row. */
+  join_request_id?: string | null;
   device_id: string;
   account_id: string;
   device_token: string;
@@ -44,15 +47,31 @@ export interface ClaimedNotification {
 }
 
 
-type DeliveryTable = "desktop_push_notifications" | "desktop_reminder_deliveries";
+type DeliveryTable = "desktop_push_notifications" | "desktop_reminder_deliveries" | "desktop_join_request_pushes";
+const DELIVERY_TABLES: readonly DeliveryTable[] = ["desktop_push_notifications", "desktop_reminder_deliveries", "desktop_join_request_pushes"];
 function deliveryTable(notification: ClaimedNotification): DeliveryTable {
+  if (notification.join_request_id) return "desktop_join_request_pushes";
   return notification.reminder_id ? "desktop_reminder_deliveries" : "desktop_push_notifications";
+}
+/** The columns that differ between the three outboxes, read into one ClaimedNotification shape. */
+function claimedColumns(table: DeliveryTable): string {
+  switch (table) {
+    case "desktop_reminder_deliveries":
+      return "claimed.reminder_id, NULL::text AS conversation_id, NULL::text AS join_request_id, claimed.message_number, claimed.thread_root_number";
+    case "desktop_join_request_pushes":
+      return "NULL::text AS reminder_id, NULL::text AS conversation_id, claimed.join_request_id, 0 AS message_number, NULL::integer AS thread_root_number";
+    default:
+      return "NULL::text AS reminder_id, claimed.conversation_id, NULL::text AS join_request_id, claimed.message_number, claimed.thread_root_number";
+  }
 }
 export function claimNotifications(workerId: string): Promise<ClaimedNotification[]> {
   return claimDeliveryTable(workerId, "desktop_push_notifications");
 }
 export function claimReminderDeliveries(workerId: string): Promise<ClaimedNotification[]> {
   return claimDeliveryTable(workerId, "desktop_reminder_deliveries");
+}
+export function claimJoinRequestPushes(workerId: string): Promise<ClaimedNotification[]> {
+  return claimDeliveryTable(workerId, "desktop_join_request_pushes");
 }
 async function claimDeliveryTable(workerId: string, table: DeliveryTable): Promise<ClaimedNotification[]> {
   const client = await pool.connect();
@@ -92,10 +111,8 @@ async function claimDeliveryTable(workerId: string, table: DeliveryTable): Promi
              device.device_token,
              device.environment,
              claimed.room_id,
-             ${table === "desktop_reminder_deliveries" ? "claimed.reminder_id, NULL::text AS conversation_id" : "NULL::text AS reminder_id, claimed.conversation_id"},
+             ${claimedColumns(table)},
              claimed.room_display_name,
-             claimed.message_number,
-             claimed.thread_root_number,
              claimed.sender,
              claimed.body,
              claimed.attempt_count
@@ -228,7 +245,7 @@ export async function recordResult(
             claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
         WHERE id = $1 AND claimed_by = $2
       `, [notification.id, workerId, result.status || null, error]);
-      for (const table of ["desktop_push_notifications", "desktop_reminder_deliveries"] as const) {
+      for (const table of DELIVERY_TABLES) {
         await client.query(`
           UPDATE ${table}
           SET state = 'dead', room_display_name = '', sender = '', body = '',
@@ -287,6 +304,20 @@ export async function deliverNotification(
     return;
   }
 
+  if (notification.join_request_id) {
+    // The request may have been answered while this row waited: then nothing is
+    // sent, and a row of a person who is no longer an admin is retired too.
+    try {
+      const preview = await loadJoinRequestPushPreview(notification.join_request_id, notification.account_id);
+      if (!preview || !preview.pending || !preview.admin) {
+        await recordJoinRequestRetired(notification, workerId, !preview
+          ? "Join request no longer exists"
+          : !preview.pending ? "Join request already decided" : "Account is no longer a room admin");
+        return;
+      }
+      notification = { ...notification, room_display_name: preview.roomDisplayName, sender: preview.requester, body: "" };
+    } catch (error) { await recordAuthorizationError(notification, workerId, error); return; }
+  }
   if (notification.reminder_id) {
     try {
       const message = await loadReminderMessage(notification.room_id!, notification.message_number);
@@ -305,6 +336,7 @@ export async function deliverNotification(
     result = await client.send({
       notificationId: notification.id,
       reminder: Boolean(notification.reminder_id),
+      joinRequestId: notification.join_request_id ?? null,
       deviceToken: notification.device_token,
       environment: notification.environment,
       roomId: notification.room_id,
@@ -321,6 +353,16 @@ export async function deliverNotification(
   await recordResult(notification, workerId, result);
 }
 
+async function recordJoinRequestRetired(notification: ClaimedNotification, workerId: string, reason: string): Promise<void> {
+  await pool.query(`
+    UPDATE desktop_join_request_pushes
+    SET state = 'dead', room_display_name = '', sender = '', body = '',
+        last_status = NULL, last_error = $3,
+        claimed_at = NULL, claimed_by = NULL, updated_at = NOW()
+    WHERE id = $1 AND claimed_by = $2
+  `, [notification.id, workerId, reason]);
+}
+
 export function authorizeReminderAccess(accountId: string, roomId: string): Promise<DesktopPushAuthorizationDecision> {
   return authorizeDesktopPushNotification({ accountId, roomId }, {
     getProject: getProjectById, getAccount: getPushDeliveryAccount, resolveAccess: resolveProjectRepoRoomAccessDecision,
@@ -329,7 +371,11 @@ export function authorizeReminderAccess(accountId: string, roomId: string): Prom
 }
 
 export async function processBatch(client: Pick<ApnsClient, "send">, workerId: string): Promise<void> {
-  const notifications = [...await claimNotifications(workerId), ...await claimReminderDeliveries(workerId)];
+  const notifications = [
+    ...await claimNotifications(workerId),
+    ...await claimReminderDeliveries(workerId),
+    ...await claimJoinRequestPushes(workerId),
+  ];
   const authorizationChecks = new Map<string, Promise<DesktopPushAuthorizationDecision>>();
   for (let index = 0; index < notifications.length; index += DELIVERY_CONCURRENCY) {
     await Promise.all(
@@ -362,7 +408,7 @@ export async function cleanupTerminalNotifications(): Promise<void> {
       LIMIT 5000
     )
   `);
-  for (const table of ["desktop_push_notifications", "desktop_reminder_deliveries"] as const) {
+  for (const table of DELIVERY_TABLES) {
     await pool.query(`
     DELETE FROM ${table}
     WHERE id IN (

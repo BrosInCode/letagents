@@ -17,8 +17,10 @@ const apiUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
 let token: string | null = "session-token";
 const published: Array<{ channel: string; payload: any }> = [];
+const roomEvents: unknown[] = [];
 mock.module("../main/auth.js", { namedExports: { readStoredAuth: async () => ({ token }) } });
 mock.module("../main/paths.js", { namedExports: { apiUrl } });
+mock.module("../main/room-stream.js", { namedExports: { emitRoomStreamEvent: (event: unknown) => roomEvents.push(event) } });
 mock.module("../main/window.js", {
   namedExports: { emitToMainWindow: (channel: string, payload: unknown) => published.push({ channel, payload }) },
 });
@@ -77,6 +79,26 @@ test("frames that are not activity are ignored, not trusted", async () => {
   await until(() => stream.getAccountActivityState().connected, "the snapshot");
   assert.deepEqual(Object.keys(stream.getAccountActivityState().rooms), ["room-a"]);
   assert.deepEqual(stream.getAccountActivityState().rooms["room-a"].working, [{ displayName: "Oak" }]);
+});
+
+test("valid join requests are forwarded to the room stream boundary; malformed frames are ignored", async () => {
+  let send!: (event: string, data: unknown) => void;
+  responders.push((res) => { send = sse(res); });
+  stream.restartAccountActivityStream();
+  await until(() => Boolean(send), "the stream to open");
+  roomEvents.length = 0;
+  const payload = {
+    room_id: "design-lounge", access_room_id: "design-lounge",
+    request: {
+      id: "rjr_1", room_id: "design-lounge", account_id: "acct_ada", login: "ada",
+      display_name: "Ada", avatar_url: null, state: "pending", created_at: "2026-11-07T12:00:00.000Z",
+      decided_at: null, retry_after: null, decided_by_login: null, room_display_name: "Design lounge",
+    },
+  };
+  send("join_request", { room_id: "design-lounge", request: { id: "broken" } });
+  send("join_request", payload);
+  await until(() => roomEvents.length > 0, "the forwarded join request");
+  assert.deepEqual(roomEvents, [{ type: "join_request", roomIdentifier: "design-lounge", event: payload }]);
 });
 
 test("a dropped stream is shown as disconnected and reconnects by itself", async () => {

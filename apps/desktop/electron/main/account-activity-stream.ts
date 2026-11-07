@@ -1,5 +1,7 @@
+import { ROOM_JOIN_REQUEST_EVENT, parseRoomJoinRequestEvent } from "../../../../shared/room-join-requests.mjs";
 import { readStoredAuth } from "./auth.js";
 import { apiUrl } from "./paths.js";
+import { emitRoomStreamEvent } from "./room-stream.js";
 import { emitToMainWindow } from "./window.js";
 import type { DesktopAccountActivityState, DesktopAccountRoomActivity } from "../ipc-types/account-activity.js";
 
@@ -159,6 +161,11 @@ function handleFrame(current: Stream, frame: string): void {
   } else if (event === "room") {
     const parsed = parseRoom(payload);
     if (parsed) publish({ connected: true, rooms: { ...state.rooms, [parsed.roomId]: parsed } });
+  } else if (event === ROOM_JOIN_REQUEST_EVENT) {
+    // A request to join one of this account's rooms, whichever room is open.
+    // The server sends it to the room's admins only.
+    const parsed = parseRoomJoinRequestEvent(payload);
+    if (parsed) emitRoomStreamEvent({ type: "join_request", roomIdentifier: parsed.room_id, event: parsed });
   }
 }
 

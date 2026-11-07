@@ -20,7 +20,8 @@ import { getProjectAccessRoomId, resolveProjectRepoAccessTarget } from '../../ro
 import { disconnectRoomAgentDeliverySession } from '../../rooms/agent-delivery.js';
 import { announceAgentSessionEnded } from '../../rooms/agent-process-connections.js';
 import { closeRequestsOfRetiredAgent } from '../../rooms/attention-answers.js';
-import { announceRoomMembershipEnded } from '../../rooms/membership-events.js';
+import { announceRoomJoinRequestChanged } from '../../rooms/join-request-events.js';
+import { announceRoomMemberRoleChanged, announceRoomMembershipEnded } from '../../rooms/membership-events.js';
 import { normalizeRoomId } from '../../rooms/routing.js';
 import { routeParam } from './messages/helpers.js';
 import type { RoomMessageRouteDeps } from './messages/types.js';
@@ -160,6 +161,29 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
   const endMemberAgentSession = deps.endMemberAgentSession ?? endAgentSessionAsRoomAdmin;
   const endMemberAgentAsk = deps.endMemberAgentAsk ?? endAgentAskOfRemovedMember;
 
+  /**
+   * Tells the room's admins, in the room and in its focus rooms, that a request
+   * arrived or was answered. The request itself stands whether or not this
+   * announcement can be made, so a failure here is logged, not returned.
+   */
+  async function announceJoinRequest(room: MemberRoom, requestId: string): Promise<void> {
+    try {
+      const [request, focusRoomIds] = await Promise.all([
+        store.getRoomJoinRequest(room.accessRoom.id, requestId),
+        store.listFocusRoomIds(room.accessRoom.id),
+      ]);
+      if (!request) return;
+      announceRoomJoinRequestChanged({
+        accessRoomId: room.accessRoom.id,
+        focusRoomIds,
+        roomDisplayName: room.accessRoom.display_name,
+        request,
+      });
+    } catch (error) {
+      console.error('[room members] join request announcement failed', requestId, error);
+    }
+  }
+
   async function memberRoom(req: AuthenticatedRequest, res: Response): Promise<MemberRoom | null> {
     const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(routeParam(req, 0)));
     const project = await deps.resolveRoomOrReply(roomId, res);
@@ -285,6 +309,8 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
         res.status(409).json({ error: 'A room needs at least one admin. Make another member an admin first.', code: 'ROOM_LAST_ADMIN' });
         return;
       }
+      // Their open room streams learn at once what they may now see (join requests are for admins).
+      announceRoomMemberRoleChanged(room.accessRoom.id, targetAccountId, role);
       res.json({ member: await store.getRoomMember(room.accessRoom.id, targetAccountId) });
     } catch (error) { fail(res, error); }
   });
@@ -387,6 +413,7 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
           res.json({ join_request: creation.join_request });
           return;
         case 'created':
+          await announceJoinRequest(room, creation.join_request.id);
           res.status(201).json({ join_request: creation.join_request });
           return;
       }
@@ -437,6 +464,8 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
         });
         return;
       }
+      // Every admin's banner drops the request, in the room and in its focus rooms.
+      await announceJoinRequest(room, outcome.join_request.id);
       res.json({
         join_request: outcome.join_request,
         ...(decision === 'approved'
@@ -469,6 +498,7 @@ export function registerRoomMemberRoutes(app: Express, deps: RoomMemberRouteDeps
         });
         return;
       }
+      await announceJoinRequest(room, outcome.join_request.id);
       res.json({ join_request: outcome.join_request });
     } catch (error) { fail(res, error); }
   });

@@ -21,6 +21,13 @@ export function parseDesktopNotificationTarget(value: unknown): DesktopNotificat
   const threadRootId = typeof input.thread_root_id === "string"
     ? input.thread_root_id
     : typeof input.threadRootId === "string" ? input.threadRootId : null;
+  const joinRequestId = typeof input.join_request_id === "string"
+    ? input.join_request_id
+    : typeof input.joinRequestId === "string" ? input.joinRequestId : "";
+  if (joinRequestId) {
+    if (!notificationId || !roomIdentifier || conversationId || messageId) return null;
+    return { notificationId, roomIdentifier, joinRequestId };
+  }
   if (!notificationId || !messageId || Boolean(roomIdentifier) === Boolean(conversationId)) return null;
   if (conversationId) return { notificationId, conversationId, messageId, threadRootId };
   return { notificationId, roomIdentifier, messageId, threadRootId };

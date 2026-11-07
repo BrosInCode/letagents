@@ -995,6 +995,13 @@
       "when": 1794900000000,
       "tag": "0141_board_planning",
       "breakpoints": true
+    },
+    {
+      "idx": 142,
+      "version": "7",
+      "when": 1794900100000,
+      "tag": "0142_desktop_join_request_pushes",
+      "breakpoints": true
     }
   ]
 }

@@ -8,7 +8,9 @@ import {
   ROOM_RESOURCE_WAKE_RULES,
   parseRoomResourceInvalidation,
 } from '../../../../../shared/room-resource-invalidation.mjs'
+import { ROOM_JOIN_REQUEST_EVENT, parseRoomJoinRequestEvent } from '../../../../../shared/room-join-requests.mjs'
 import { publishMessageInfoInvalidation } from '../../components/room/messageInfoInvalidation'
+import { receiveRoomJoinRequestEvent } from '../roomJoinRequestAlerts'
 import { publishAgentApprovalInvalidation } from '../roomAgentApprovalInvalidation'
 import { publishMessageLinkPreviewInvalidation } from '../roomMessageLinkPreviews'
 import { publishMessagePinInvalidation } from '../roomMessagePins'
@@ -630,6 +632,24 @@ export function createRoomStream(
         rememberEventCursor(roomIdentifier, event)
         bufferOrApplyRoomEvent(roomIdentifier, () => {
           handlers.removeReasoningSession(sessionId)
+        }, streamEventBytes(event))
+      } catch {
+        repairMalformedTypedEvent(roomIdentifier, event)
+      }
+    })
+
+    source.addEventListener(ROOM_JOIN_REQUEST_EVENT, (event) => {
+      if (!isCurrentSource()) return
+      try {
+        // The server sends this to room admins only. It carries the request itself.
+        const parsed = parseRoomJoinRequestEvent(JSON.parse(event.data))
+        if (!parsed || parsed.room_id !== roomIdentifier) {
+          repairMalformedTypedEvent(roomIdentifier, event)
+          return
+        }
+        rememberEventCursor(roomIdentifier, event)
+        bufferOrApplyRoomEvent(roomIdentifier, () => {
+          receiveRoomJoinRequestEvent(roomIdentifier, parsed)
         }, streamEventBytes(event))
       } catch {
         repairMalformedTypedEvent(roomIdentifier, event)

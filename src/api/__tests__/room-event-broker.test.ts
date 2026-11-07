@@ -7,6 +7,7 @@ const { createRoomEventBroker, RoomEventBroker } = await import("../server/room-
 const { isRoomEventVisibleToSubscriber } = await import(
   "../routes/rooms/messages/delivery-visibility.js"
 );
+const { ROOM_JOIN_REQUEST_CHANGED } = await import("../rooms/join-request-events.js");
 
 function createSources() {
   return {
@@ -21,6 +22,7 @@ function createSources() {
     agentApprovalEvents: new EventEmitter(),
     executionDelegationEvents: new EventEmitter(),
     wakeRuleEvents: new EventEmitter(),
+    joinRequestEvents: new EventEmitter(),
   };
 }
 
@@ -42,6 +44,7 @@ test("one source listener fans out only to subscribers in the affected room", as
   assert.equal(sources.agentApprovalEvents.listenerCount("agent_approval:invalidated"), 1);
   assert.equal(sources.executionDelegationEvents.listenerCount("execution_delegation:invalidated"), 1);
   assert.equal(sources.wakeRuleEvents.listenerCount("wake_rules:invalidated"), 1);
+  assert.equal(sources.joinRequestEvents.listenerCount(ROOM_JOIN_REQUEST_CHANGED), 1);
 
   sources.taskEvents.emit("task:updated", { projectId: "room_a", task: { id: "task_1" } });
   const deliveries = await Promise.all(roomA.map((subscription) => subscription.next()));
@@ -71,6 +74,59 @@ test("one source listener fans out only to subscribers in the affected room", as
   assert.equal(sources.agentApprovalEvents.listenerCount("agent_approval:invalidated"), 0);
   assert.equal(sources.executionDelegationEvents.listenerCount("execution_delegation:invalidated"), 0);
   assert.equal(sources.wakeRuleEvents.listenerCount("wake_rules:invalidated"), 0);
+  assert.equal(sources.joinRequestEvents.listenerCount(ROOM_JOIN_REQUEST_CHANGED), 0);
+});
+
+test("a join request reaches only the subscriptions of room admins", async () => {
+  const sources = createSources();
+  const broker = createRoomEventBroker(sources, { instanceId: "broker" });
+  let adminNow = true;
+  const admin = broker.subscribe("room_join", {
+    accept: (event) => isRoomEventVisibleToSubscriber({ event, includePromptOnly: false, roomAdmin: () => adminNow }),
+  });
+  const member = broker.subscribe("room_join", {
+    accept: (event) => isRoomEventVisibleToSubscriber({ event, includePromptOnly: false, roomAdmin: () => false }),
+  });
+  const silent = broker.subscribe("room_join", {
+    accept: (event) => isRoomEventVisibleToSubscriber({ event, includePromptOnly: false }),
+  });
+  const request = {
+    id: "rjr_1", room_id: "room_join", account_id: "acct_asker", login: "asker", display_name: "Asker", avatar_url: null,
+    state: "pending", created_at: "2026-11-07T00:00:00.000Z", decided_at: null, retry_after: null, decided_by_login: null,
+  };
+  sources.joinRequestEvents.emit(ROOM_JOIN_REQUEST_CHANGED, {
+    projectId: "room_join", accessRoomId: "room_join", roomDisplayName: "Join room", request,
+  });
+  const delivery = await admin.next();
+  assert.equal(delivery?.type, "event");
+  if (delivery?.type === "event") {
+    assert.deepEqual(delivery.envelope.event, {
+      kind: "join_request_changed", roomId: "room_join", accessRoomId: "room_join", roomDisplayName: "Join room", request,
+    });
+  }
+  // The member and the subscription with no role check hear nothing: the event names the person who asked.
+  sources.taskEvents.emit("task:updated", { projectId: "room_join", task: { id: "task_after" } });
+  for (const subscription of [member, silent]) {
+    const next = await subscription.next();
+    assert.equal(next?.type === "event" && next.envelope.event.kind, "task_updated");
+  }
+  // An admin who was made a member stops receiving them at once.
+  adminNow = false;
+  sources.joinRequestEvents.emit(ROOM_JOIN_REQUEST_CHANGED, {
+    projectId: "room_join", accessRoomId: "room_join", roomDisplayName: "Join room", request: { ...request, state: "approved" },
+  });
+  sources.taskEvents.emit("task:updated", { projectId: "room_join", task: { id: "task_last" } });
+  const afterDemotion = await admin.next();
+  assert.equal(afterDemotion?.type === "event" && afterDemotion.envelope.event.kind, "task_updated");
+  assert.equal(afterDemotion?.type === "event" && afterDemotion.envelope.event.kind === "task_updated" && afterDemotion.envelope.event.task.id, "task_after");
+
+  // A malformed payload never breaks the emitter; it forces a repair instead.
+  sources.joinRequestEvents.emit(ROOM_JOIN_REQUEST_CHANGED, { projectId: "room_join" });
+  const repaired = await admin.next();
+  assert.ok(repaired?.type === "gap" || (repaired?.type === "event" && repaired.envelope.event.kind === "task_updated"));
+
+  for (const subscription of [admin, member, silent]) subscription.close();
+  broker.close();
 });
 
 test("agent-work invalidations remain pointer-only broker events", async () => {

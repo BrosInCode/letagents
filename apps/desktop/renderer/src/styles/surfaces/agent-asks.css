@@ -6,6 +6,9 @@
 .agent-ask-chips button[aria-pressed="true"] { border-color: var(--blue); background: var(--blue-dim); color: var(--blue-text); }
 .agent-ask-ready-copy { margin: 0; color: var(--text-secondary); font-size: 13px; }
 .agent-ask-bar { display: flex; flex-direction: column; gap: 6px; padding: 0 0 8px; }
+/* A request to join sits in the same place as the asks, above the composer, in the composer's column. */
+.desktop-join-request-banner { width: min(calc(100% - 48px), 960px); margin: 0 auto; }
+.desktop-join-request-banner .join-request-banner { margin-bottom: 8px; }
 .agent-ask-pill { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 6px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-subtle); font-size: 13px; }
 .agent-ask-pill[data-state="on_hold"] { border-color: var(--amber); background: var(--amber-dim); }
 .agent-ask-pill[data-state="paused"] { color: var(--text-secondary); }

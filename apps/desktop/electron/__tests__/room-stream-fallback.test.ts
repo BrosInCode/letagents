@@ -1251,6 +1251,54 @@ for (const messageIds of [["msg_7"], null, []]) test(`message-info ${JSON.string
   }
 });
 
+test("a join request frame reaches the renderer with the request, and a malformed one repairs", async () => {
+  const router = installFetchRouter();
+  try {
+    const canonicalRoom = `${ROOM}_canonical`;
+    const initial = makeSse();
+    const reconnected = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
+    router.enqueueCatchUp([]);
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    initial.pushRaw(
+      `event: room_sync\ndata: ${JSON.stringify({ room_id: canonicalRoom, checkpoint: "msg_1", gap: false, event_cursor: "broker_before_join" })}\n\n`,
+    );
+    await starting;
+    const emittedCount = emitted.length;
+    const request = {
+      id: "rjr_1", room_id: canonicalRoom, account_id: "acct_ada", login: "ada", display_name: "Ada", avatar_url: null,
+      state: "pending", created_at: "2026-11-07T00:00:00.000Z", decided_at: null, retry_after: null, decided_by_login: null,
+      room_display_name: "Design lounge",
+    };
+    initial.pushRaw(
+      `id: broker_join\nevent: join_request\ndata: ${JSON.stringify({ room_id: canonicalRoom, access_room_id: canonicalRoom, request })}\n\n`,
+    );
+    await waitUntil(() => emitted.length > emittedCount);
+    assert.deepEqual(emitted.at(-1), {
+      type: "join_request",
+      roomIdentifier: canonicalRoom,
+      event: { room_id: canonicalRoom, access_room_id: canonicalRoom, request },
+    });
+
+    // A frame for another room, or without a request, is a gap to repair, never a banner.
+    const joinCount = emitted.filter((event) => event.type === "join_request").length;
+    initial.pushRaw(
+      `id: broker_join_bad\nevent: join_request\ndata: ${JSON.stringify({ room_id: "room_other", access_room_id: "room_other", request })}\n\n`,
+    );
+    await waitUntil(() => emitted.some(
+      (event) => event.type === "open" && event.gap === true && event.verified === true,
+    ));
+    assert.equal(emitted.filter((event) => event.type === "join_request").length, joinCount);
+    initial.close();
+    reconnected.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
 test("resource invalidations advance the broker cursor while only supported resources render", async () => {
   const router = installFetchRouter();
   const delegationRooms: string[] = [];

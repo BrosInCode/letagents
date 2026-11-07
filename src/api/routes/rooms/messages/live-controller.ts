@@ -145,6 +145,8 @@ export function subscribeVisibleRoomEvents(input: {
   eventCursor?: string | null;
   messageOnly?: boolean;
   messageOverlayTarget?: RoomMessageOverlayTarget;
+  /** Whether the subscriber is a room admin right now (join requests are for admins only). */
+  roomAdmin?: () => boolean;
 }): RoomEventSubscription {
   return input.broker.subscribe(input.roomId, {
     afterCursor: input.eventCursor,
@@ -155,6 +157,7 @@ export function subscribeVisibleRoomEvents(input: {
       includePromptOnly: input.includePromptOnly,
       recipientAgentIdentity: input.activationIdentity,
       messageOnly: input.messageOnly,
+      roomAdmin: input.roomAdmin,
     }),
   });
 }
