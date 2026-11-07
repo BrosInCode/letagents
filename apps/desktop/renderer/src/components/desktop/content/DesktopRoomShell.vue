@@ -2,7 +2,6 @@
   <section
     class="desktop-room-shell"
     :data-agent-inspector-open="Boolean(selectedAgentDetailTarget && !agentInspectorCompact)"
-    :data-join-request-banner="joinRequestBanner.length ? 'true' : undefined"
     data-testid="desktop-room-shell"
   >
     <DesktopRoomHeader
@@ -67,9 +66,10 @@
       @close-action-panel="closeActionPanel"
     />
 
-    <!-- Requests to join, for room admins: in place above the chat, never over it. -->
-    <div v-if="joinRequestBanner.length" class="desktop-join-request-banner" data-testid="desktop-join-request-banner">
+    <!-- Requests to join, for room admins: a row of the room's chrome that unfolds when one arrives. -->
+    <div class="desktop-join-request-banner" data-testid="desktop-join-request-banner">
       <JoinRequestBanner
+        v-if="joinRequestBannerAvailable"
         :requests="joinRequestBanner"
         :busy="joinRequestBusy"
         :error="joinRequestError"
@@ -481,7 +481,7 @@ Object.assign(app, useRoomShellRoomWatchers(app));
 Object.assign(app, useRoomShellAttention(app));
 
 const {
-  joinRequestBanner, joinRequestBusy, joinRequestError, decideJoinRequest, dismissJoinRequests, openJoinRequests,
+  joinRequestBannerAvailable, joinRequestBanner, joinRequestBusy, joinRequestError, decideJoinRequest, dismissJoinRequests, openJoinRequests,
 } = Object.assign(app, useRoomShellJoinRequests(app));
 
 Object.assign(app, useRoomShellLifecycle(app));

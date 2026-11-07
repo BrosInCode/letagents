@@ -2,17 +2,31 @@
  * A request to join is a line in the room's chrome, not a card over it: a slim
  * strip under the header, in the room's own greys, with the person's name as
  * the only emphasis. Several people become overlapping faces and one count.
- * The strip arrives with one short fade and leaves faster than it came.
+ *
+ * Motion, all of it with a purpose: the row unfolds so the chat glides down
+ * instead of jumping; the content follows a beat later; the face gets one soft
+ * ring, a knock at the door; a decision answers in place before the row folds
+ * away, faster than it came.
  */
+.join-request-reveal {
+  display: grid;
+  grid-template-rows: 1fr;
+  min-width: 0;
+}
+.join-request-reveal > .join-request-banner {
+  min-height: 0;
+}
+
 .join-request-banner {
   display: flex;
   align-items: center;
   gap: 12px;
   box-sizing: border-box;
-  min-height: 44px;
-  padding: 6px max(24px, env(safe-area-inset-right, 0px)) 6px max(24px, env(safe-area-inset-left, 0px));
+  padding: 8px max(24px, env(safe-area-inset-right, 0px)) 8px max(24px, env(safe-area-inset-left, 0px));
   border-bottom: 1px solid var(--border);
   background: var(--bg-subtle, var(--bg));
+  /* A hair of light along the top edge: the strip is a surface, not a stripe. */
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 5%, transparent);
   color: var(--text);
   font-family: var(--font-sans, inherit);
 }
@@ -24,7 +38,12 @@
   flex-direction: row-reverse;
   align-items: center;
 }
-.join-request-banner-faces .chat-avatar {
+.join-request-banner-face {
+  position: relative;
+  display: flex;
+  flex: 0 0 auto;
+}
+.join-request-banner-face .chat-avatar {
   width: 24px;
   height: 24px;
   flex-basis: 24px;
@@ -33,8 +52,23 @@
   letter-spacing: -0.02em;
   box-shadow: 0 0 0 2px var(--bg-subtle, var(--bg));
 }
-.join-request-banner-faces .chat-avatar + .chat-avatar {
+.join-request-banner-face + .join-request-banner-face {
   margin-right: -6px;
+}
+/* The knock: one ring grows out of the newest face and fades. Once, on arrival. */
+.join-request-banner-face:first-child::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 1.5px solid var(--text);
+  opacity: 0;
+  pointer-events: none;
+  animation: join-request-knock 700ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) 160ms 1;
+}
+@keyframes join-request-knock {
+  0% { opacity: 0.45; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.75); }
 }
 
 .join-request-banner-copy {
@@ -56,6 +90,7 @@
 .join-request-banner-copy b {
   color: var(--text);
   font-weight: 600;
+  letter-spacing: -0.01em;
 }
 .join-request-banner-meta {
   flex: 0 1 auto;
@@ -121,16 +156,37 @@
     background-color 150ms ease,
     color 150ms ease;
 }
-.join-request-banner-close svg {
+.join-request-banner-close svg,
+.join-request-banner-mark {
   width: 14px;
   height: 14px;
   fill: none;
   stroke: currentColor;
   stroke-width: 1.6;
   stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .join-request-banner-close:active {
   transform: scale(0.94);
+}
+/* The answer: a check draws itself; a decline is a quiet cross. */
+.join-request-banner-mark {
+  width: 18px;
+  height: 18px;
+  margin-right: 5px;
+  color: var(--green-text, var(--text));
+  stroke-width: 1.8;
+}
+.join-request-banner-mark[data-outcome="decline"] {
+  color: var(--text-secondary);
+}
+.join-request-banner-mark path {
+  stroke-dasharray: 24;
+  stroke-dashoffset: 24;
+  animation: join-request-draw 320ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) 60ms forwards;
+}
+@keyframes join-request-draw {
+  to { stroke-dashoffset: 0; }
 }
 /* Hover states only where a pointer can hover: a tap on a phone must not stick. */
 @media (hover: hover) and (pointer: fine) {
@@ -148,7 +204,7 @@
 .join-request-banner-button:focus-visible,
 .join-request-banner-close:focus-visible {
   outline: 2px solid var(--blue);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 @media (pointer: coarse) {
   .join-request-banner-button { min-height: 36px; }
@@ -168,34 +224,61 @@
 }
 
 /*
- * The strip arrives from its seat under the header and leaves the same way
- * (one short slide, a strong ease-out), and it leaves faster than it arrives:
+ * The reveal. The row unfolds (0fr to 1fr) so what sits below glides down,
+ * and the content fades in a beat behind it. Leaving is the reverse, faster:
  * the arrival is news, the departure is the system answering.
  */
-.join-request-banner-enter-active {
-  transition:
-    opacity 180ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
-    transform 180ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+.join-request-reveal-enter-active {
+  transition: grid-template-rows 240ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
 }
-.join-request-banner-leave-active {
+.join-request-reveal-leave-active {
+  transition: grid-template-rows 180ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+}
+.join-request-reveal-enter-active > .join-request-banner,
+.join-request-reveal-leave-active > .join-request-banner {
+  overflow: hidden;
+}
+.join-request-reveal-enter-active > .join-request-banner {
+  transition:
+    opacity 200ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) 60ms,
+    transform 240ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)) 40ms;
+}
+.join-request-reveal-leave-active > .join-request-banner {
   transition:
     opacity 120ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1)),
-    transform 120ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
+    transform 160ms var(--ease-out, cubic-bezier(0.16, 1, 0.3, 1));
 }
-.join-request-banner-enter-from,
-.join-request-banner-leave-to {
+.join-request-reveal-enter-from,
+.join-request-reveal-leave-to {
+  grid-template-rows: 0fr;
+}
+.join-request-reveal-enter-from > .join-request-banner,
+.join-request-reveal-leave-to > .join-request-banner {
   opacity: 0;
-  transform: translateY(-4px);
+  transform: translateY(-6px);
 }
 /* Less motion means a cross-fade, not nothing: the strip still arrives gently. */
 @media (prefers-reduced-motion: reduce) {
-  .join-request-banner-enter-active,
-  .join-request-banner-leave-active {
+  .join-request-reveal-enter-active,
+  .join-request-reveal-leave-active {
+    transition: none;
+  }
+  .join-request-reveal-enter-active > .join-request-banner,
+  .join-request-reveal-leave-active > .join-request-banner {
     transition: opacity 150ms ease;
   }
-  .join-request-banner-enter-from,
-  .join-request-banner-leave-to {
+  .join-request-reveal-enter-from,
+  .join-request-reveal-leave-to {
+    grid-template-rows: 1fr;
+  }
+  .join-request-reveal-enter-from > .join-request-banner,
+  .join-request-reveal-leave-to > .join-request-banner {
     transform: none;
+  }
+  .join-request-banner-face:first-child::after,
+  .join-request-banner-mark path {
+    animation: none;
+    stroke-dashoffset: 0;
   }
   .join-request-banner-button,
   .join-request-banner-close {

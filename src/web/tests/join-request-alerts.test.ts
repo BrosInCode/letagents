@@ -208,16 +208,19 @@ test('one request shows the name with Approve and Decline in place; several stac
 test('the room page shows the banner to admins only, and the style honours reduced motion', async () => {
   const page = await readFile(fileURLToPath(new URL('../src/pages/Room.vue', import.meta.url)), 'utf8')
   const banner = /<JoinRequestBanner[\s\S]*?\/>/.exec(page)?.[0] ?? ''
-  assert.match(banner, /v-if="showJoinRequestBanner"/)
-  assert.match(page, /const showJoinRequestBanner = computed\(\(\) => isConnected\.value && room\.value\?\.role === 'admin' && joinRequestBanner\.value\.length > 0\)/)
-  assert.match(page, /\.room-shell\[data-join-request-banner="true"\] \{ grid-template-rows: auto auto minmax\(0, 1fr\) auto auto; \}/, 'the banner gets its own grid row; the chat keeps the flexible one')
+  assert.match(banner, /v-if="joinRequestBannerAvailable"/)
+  assert.match(page, /const joinRequestBannerAvailable = computed\(\(\) => isConnected\.value && room\.value\?\.role === 'admin'\)/)
+  assert.match(page, /grid-template-rows: auto auto minmax\(0, 1fr\) auto auto;/, 'the slot has its own grid row; the chat keeps the flexible one')
+  assert.match(page, /<div class="room-join-request-slot">/, 'the slot is always in the grid, so the strip can fold open and closed')
   assert.match(banner, /@open-requests="drawerOpen = true"/, 'Review opens the drawer with the Requests list')
   const css = await readFile(fileURLToPath(new URL('../../../shared/ui/join-request-banner.css', import.meta.url)), 'utf8')
   const reduced = /@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? ''
   assert.match(reduced, /transition: opacity 150ms ease/, 'less motion keeps a cross-fade')
   assert.match(reduced, /transform: none/, 'and drops the slide and the press scale')
+  assert.match(reduced, /animation: none/, 'and the knock ring and the drawn check')
+  assert.match(css, /reveal-enter-from,\s*\.join-request-reveal-leave-to \{\s*grid-template-rows: 0fr;/, 'the row unfolds instead of jumping')
   assert.doesNotMatch(css, /transition: all/, 'only named properties move')
   assert.match(css, /@media \(hover: hover\) and \(pointer: fine\)/, 'hover states are gated for touch')
   assert.match(css, /\.join-request-banner-button:active:not\(:disabled\) \{\s*transform: scale\(0\.97\)/, 'a press answers at once')
-  assert.match(css, /leave-active \{\s*transition:\s*opacity 120ms/, 'the card leaves faster than it arrives')
+  assert.match(css, /reveal-leave-active > \.join-request-banner \{\s*transition:\s*opacity 120ms/, 'the strip leaves faster than it arrives')
 })

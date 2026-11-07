@@ -11,7 +11,8 @@
 
 .desktop-room-shell {
   position: relative;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  /* Header, control rail, the join-request slot (0 px until a request arrives), content. */
+  grid-template-rows: auto auto auto minmax(0, 1fr);
   align-content: start;
   gap: 0;
   height: 100%;
@@ -30,26 +31,16 @@
   grid-row: 2;
 }
 
-.desktop-room-shell > .room-tab-page {
-  grid-column: 1;
-  grid-row: 3;
-  min-height: 0;
-}
-
-/* A request to join takes one row of its own above the content, never a layer over it. */
-.desktop-room-shell[data-join-request-banner="true"] {
-  grid-template-rows: auto auto auto minmax(0, 1fr);
-}
-
 .desktop-room-shell > .desktop-join-request-banner {
   grid-column: 1;
   grid-row: 3;
   min-width: 0;
 }
 
-.desktop-room-shell[data-join-request-banner="true"] > .room-tab-page,
-.desktop-room-shell[data-join-request-banner="true"] > .desktop-room-environment-popover {
+.desktop-room-shell > .room-tab-page {
+  grid-column: 1;
   grid-row: 4;
+  min-height: 0;
 }
 
 .desktop-room-header {
@@ -191,7 +182,7 @@
 
 .desktop-room-environment-popover {
   position: absolute;
-  grid-row: 3;
+  grid-row: 4;
   grid-column: 1;
   top: 12px;
   right: 22px;

@@ -12,6 +12,8 @@ export function useRoomShellJoinRequests(context: unknown) {
     | "useRoomShellConversation"
     | "useRoomShellToolActions"
   >;
+  /** The strip is mounted for admins of a room on the server; it shows and hides itself as requests come and go. */
+  const joinRequestBannerAvailable = computed(() => props.room.role === "admin" && !isLocalRoom.value);
   const joinRequestBanner = computed(() => joinRequestsForRoom(roomJoinRequests.items.value, props.room, {
     localRoom: isLocalRoom.value,
     dismissed: roomJoinRequests.dismissed.value,
@@ -59,5 +61,5 @@ export function useRoomShellJoinRequests(context: unknown) {
       emit("settings-section-opened");
     }, { immediate: true });
 
-  return { joinRequestBanner, joinRequestBusy, joinRequestError, decideJoinRequest, dismissJoinRequests, openJoinRequests };
+  return { joinRequestBannerAvailable, joinRequestBanner, joinRequestBusy, joinRequestError, decideJoinRequest, dismissJoinRequests, openJoinRequests };
 }
