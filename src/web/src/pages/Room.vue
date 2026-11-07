@@ -39,20 +39,6 @@
       @rename="handleRename"
     />
 
-    <!-- Requests to join, for room admins: a row of the room's chrome that unfolds when one arrives. -->
-    <div class="room-join-request-slot">
-      <JoinRequestBanner
-        v-if="joinRequestBannerAvailable"
-        :requests="joinRequestBanner"
-        :busy="joinRequestAlerts.busy.value"
-        :error="joinRequestAlerts.error.value"
-        @approve="joinRequestAlerts.decide($event, 'approve')"
-        @decline="joinRequestAlerts.decide($event, 'decline')"
-        @dismiss="joinRequestAlerts.dismiss()"
-        @open-requests="drawerOpen = true"
-      />
-    </div>
-
     <RoomRulesBoard
       v-if="rulesBoardAvailable"
       :open="rulesBoardOpen"
@@ -161,6 +147,20 @@
           @clear-reply="clearQuote" @sign-in="handleSignIn" />
       </template>
     </RoomTabPanels>
+
+    <!-- Requests to join, for room admins: a pill above the composer, where the room asks things of you. -->
+    <div class="room-join-request-slot" v-show="activeTab === 'chat' && !hideMainComposer">
+      <JoinRequestBanner
+        v-if="joinRequestBannerAvailable"
+        :requests="joinRequestBanner"
+        :busy="joinRequestAlerts.busy.value"
+        :error="joinRequestAlerts.error.value"
+        @approve="joinRequestAlerts.decide($event, 'approve')"
+        @decline="joinRequestAlerts.decide($event, 'decline')"
+        @dismiss="joinRequestAlerts.dismiss()"
+        @open-requests="drawerOpen = true"
+      />
+    </div>
 
     <Composer
       v-if="activeTab === 'chat' && isConnected"
@@ -692,7 +692,7 @@ watch(
   inset-inline: 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto;
   height: 100vh;
   height: var(--room-viewport-height, 100dvh);
   background: var(--bg-0, #09090b);
@@ -704,9 +704,11 @@ watch(
 .room-shell[data-compact-viewport="true"] :deep(.mobile-bottom-nav) { height: calc(48px + env(safe-area-inset-bottom, 0px)); }
 
 /* A landscape software keyboard can leave only 98px for the draft and send row. */
-/* The second row is the join-request slot: empty it is 0 px, and it unfolds when a request arrives. */
-.room-join-request-slot { min-width: 0; }
-.room-shell[data-keyboard-open="true"][data-compact-composer="true"] { grid-template-rows: 0 auto minmax(0, 1fr) auto; }
+/* The join-request slot sits above the composer, in its margins: 0 px until a request arrives. */
+.room-join-request-slot { min-width: 0; padding: 0 max(24px, env(safe-area-inset-right, 0px)) 0 max(24px, env(safe-area-inset-left, 0px)); }
+.room-join-request-slot .join-request-banner { margin-top: 8px; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] { grid-template-rows: 0 minmax(0, 1fr) auto auto; }
+@media (max-width: 768px) { .room-join-request-slot { padding-inline: 12px; } }
 /* Keep search focusable: /search or Find restores the header through focusin. */
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.chat-header) { height: 0; min-height: 0; padding: 0; border: 0; overflow: hidden; }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.room-live-strip),

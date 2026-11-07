@@ -66,20 +66,6 @@
       @close-action-panel="closeActionPanel"
     />
 
-    <!-- Requests to join, for room admins: a row of the room's chrome that unfolds when one arrives. -->
-    <div class="desktop-join-request-banner" data-testid="desktop-join-request-banner">
-      <JoinRequestBanner
-        v-if="joinRequestBannerAvailable"
-        :requests="joinRequestBanner"
-        :busy="joinRequestBusy"
-        :error="joinRequestError"
-        @approve="decideJoinRequest($event, 'approve')"
-        @decline="decideJoinRequest($event, 'decline')"
-        @dismiss="dismissJoinRequests"
-        @open-requests="openJoinRequests"
-      />
-    </div>
-
     <div
       v-if="showEnvironmentPanelWidget"
       class="desktop-room-environment-popover"
@@ -162,7 +148,23 @@
       @open-task="openBoardTask"
       @dismiss-event-preview="dismissComposerGitHubEventPreview"
       @scroll-position="rememberChatScrollPosition"
-    />
+    >
+      <!-- Requests to join, for room admins: a pill above the composer, where the room asks things of you. -->
+      <template #above-composer>
+        <div class="desktop-join-request-banner" data-testid="desktop-join-request-banner">
+          <JoinRequestBanner
+            v-if="joinRequestBannerAvailable"
+            :requests="joinRequestBanner"
+            :busy="joinRequestBusy"
+            :error="joinRequestError"
+            @approve="decideJoinRequest($event, 'approve')"
+            @decline="decideJoinRequest($event, 'decline')"
+            @dismiss="dismissJoinRequests"
+            @open-requests="openJoinRequests"
+          />
+        </div>
+      </template>
+    </RoomChatView>
 
     <Transition name="room-panel" mode="out-in">
       <RoomMemoryView v-if="activeTab === 'memory'" :key="`memory:${messageNamespace}`" :room-identifier="room.identifier" @open-message="(id) => { activeTab = 'chat'; revealRoomMessage(id); }" />

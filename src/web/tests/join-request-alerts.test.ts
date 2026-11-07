@@ -210,8 +210,10 @@ test('the room page shows the banner to admins only, and the style honours reduc
   const banner = /<JoinRequestBanner[\s\S]*?\/>/.exec(page)?.[0] ?? ''
   assert.match(banner, /v-if="joinRequestBannerAvailable"/)
   assert.match(page, /const joinRequestBannerAvailable = computed\(\(\) => isConnected\.value && room\.value\?\.role === 'admin'\)/)
-  assert.match(page, /grid-template-rows: auto auto minmax\(0, 1fr\) auto auto;/, 'the slot has its own grid row; the chat keeps the flexible one')
-  assert.match(page, /<div class="room-join-request-slot">/, 'the slot is always in the grid, so the strip can fold open and closed')
+  assert.match(page, /grid-template-rows: auto minmax\(0, 1fr\) auto auto auto;/, 'the slot has its own grid row above the composer; the chat keeps the flexible one')
+  const slotAt = page.indexOf('<div class="room-join-request-slot"')
+  const composerAt = page.indexOf('<Composer\n      v-if="activeTab === \'chat\' && isConnected"')
+  assert.ok(slotAt > 0 && composerAt > slotAt, 'the slot sits right above the composer and is always in the grid, so the pill can fold open and closed')
   assert.match(banner, /@open-requests="drawerOpen = true"/, 'Review opens the drawer with the Requests list')
   const css = await readFile(fileURLToPath(new URL('../../../shared/ui/join-request-banner.css', import.meta.url)), 'utf8')
   const reduced = /@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n\}/.exec(css)?.[1] ?? ''

@@ -11,8 +11,7 @@
 
 .desktop-room-shell {
   position: relative;
-  /* Header, control rail, the join-request slot (0 px until a request arrives), content. */
-  grid-template-rows: auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   align-content: start;
   gap: 0;
   height: 100%;
@@ -31,15 +30,9 @@
   grid-row: 2;
 }
 
-.desktop-room-shell > .desktop-join-request-banner {
-  grid-column: 1;
-  grid-row: 3;
-  min-width: 0;
-}
-
 .desktop-room-shell > .room-tab-page {
   grid-column: 1;
-  grid-row: 4;
+  grid-row: 3;
   min-height: 0;
 }
 
@@ -182,7 +175,7 @@
 
 .desktop-room-environment-popover {
   position: absolute;
-  grid-row: 4;
+  grid-row: 3;
   grid-column: 1;
   top: 12px;
   right: 22px;

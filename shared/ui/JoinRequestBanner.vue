@@ -34,20 +34,20 @@
             <button
               type="button"
               class="join-request-banner-button"
-              data-testid="join-request-banner-decline"
-              :disabled="Boolean(busy)"
-              :aria-label="`Decline ${label(single)}`"
-              @click="decide('decline', single)"
-            >{{ busy === `decline:${single.id}` ? "Declining…" : "Decline" }}</button>
-            <button
-              type="button"
-              class="join-request-banner-button"
               data-variant="primary"
               data-testid="join-request-banner-approve"
               :disabled="Boolean(busy)"
               :aria-label="`Approve ${label(single)}`"
               @click="decide('approve', single)"
             >{{ busy === `approve:${single.id}` ? "Approving…" : "Approve" }}</button>
+            <button
+              type="button"
+              class="join-request-banner-button"
+              data-testid="join-request-banner-decline"
+              :disabled="Boolean(busy)"
+              :aria-label="`Decline ${label(single)}`"
+              @click="decide('decline', single)"
+            >{{ busy === `decline:${single.id}` ? "Declining…" : "Decline" }}</button>
           </template>
           <button
             v-else
@@ -84,11 +84,11 @@ import {
 import ChatAvatar from "./ChatAvatar.vue";
 
 /**
- * One quiet strip under the room header: who wants to join, and Approve and
- * Decline in place. Two people are named; more become a count, and one
- * Review button opens the Requests list. A decision made here answers in
- * place ("Ada is in") for a moment before the strip folds away. Shown to
- * room admins only: the host decides that, this strip only renders.
+ * One pill above the composer, where the room asks things of you: who wants
+ * to join, and Approve and Decline in place. Two people are named; more become
+ * a count, and one Review button opens the Requests list. A decision made here
+ * answers in place ("Ada is in") for a moment before the pill folds away.
+ * Shown to room admins only: the host decides that, this pill only renders.
  */
 const props = withDefaults(defineProps<{
   requests: readonly RoomJoinRequestAlert[];

@@ -134,6 +134,8 @@
           </template>
         </RoomMessageViewport>
 
+        <!-- The room's requests of you, above the composer: a join request, then the agent asks. -->
+        <slot name="above-composer" />
         <RoomAskBar v-if="!roomLoading" :room-identifier="roomIdentifier" />
 
         <div
