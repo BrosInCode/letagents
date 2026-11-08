@@ -1,5 +1,5 @@
 import { readLocalSupervisorPresence } from "./local-supervision-authority.js";
-import type { DesktopRoomSnapshot } from "../../ipc-types.js";
+import type { DesktopRoomSnapshot, DesktopRoomSnapshotOptions } from "../../ipc-types.js";
 import { basename } from "node:path";
 import { resolveWorkspaceRoom } from "../../repo-status.js";
 import { DesktopApiError } from "../auth.js";
@@ -20,12 +20,15 @@ import {
   createLocalReadyRoomSnapshot,
   createMissingRoomSnapshot,
   createReadyRoomSnapshot,
+  createRoomNotFoundSnapshot,
   createUnavailableRoomSnapshot,
 } from "./snapshot/snapshots.js";
 
 export async function fetchRoomSnapshot(
   requestedRoomIdentifier?: string | null,
+  options?: DesktopRoomSnapshotOptions,
 ): Promise<DesktopRoomSnapshot> {
+  const create = options?.create !== false;
   if (isDesktopSmokeCheck()) {
     return desktopSmokeRoomSnapshot();
   }
@@ -45,6 +48,9 @@ export async function fetchRoomSnapshot(
   try {
     const storage = await resolveLocalAwareRoomStorageMode(roomIdentifier);
     if (storage.effectiveMode === "local") {
+      if (!storage.localRoom && !create) {
+        return createRoomNotFoundSnapshot(roomIdentifier);
+      }
       const localRoom = storage.localRoom || await createLocalRoom({
         roomIdentifier,
         displayName: resolvedWorkspaceRoom?.repoRoot
@@ -76,7 +82,7 @@ export async function fetchRoomSnapshot(
     }
 
     const cloudRoomIdentifier = cloudRoomIdentifierForStorage(storage, roomIdentifier);
-    const joined = await getJoinedRoomInfo(cloudRoomIdentifier);
+    const joined = await getJoinedRoomInfo(cloudRoomIdentifier, { create });
     const canonicalRoomIdentifier = canonicalJoinedRoomIdentifier(cloudRoomIdentifier, joined);
     const snapshotData = await fetchRoomSnapshotData(canonicalRoomIdentifier);
     return createReadyRoomSnapshot(canonicalRoomIdentifier, joined, snapshotData, storage);

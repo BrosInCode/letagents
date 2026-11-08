@@ -113,6 +113,7 @@ import type {
   DesktopRoomThreadReadResult,
   DesktopRoomLiveMetadata,
   DesktopRoomLiveMetadataOptions,
+  DesktopRoomSnapshotOptions,
   DesktopRoomAgentWorkPollResult,
   DesktopRoomDeliveryRepair,
   DesktopRoomSharedArtifact,
@@ -230,7 +231,7 @@ export interface DesktopApi {
     ) => Promise<DesktopAccountRoomActionResult>;
     leaveAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
     deleteAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
-    getSnapshot: (roomIdentifier?: string | null) => Promise<DesktopRoomSnapshot>;
+    getSnapshot: (roomIdentifier?: string | null, options?: DesktopRoomSnapshotOptions) => Promise<DesktopRoomSnapshot>;
     /**
      * Optional: absent on a stale live bridge (renderer updated before the
      * preload was reloaded). Callers must skip gracefully when missing.
@@ -455,6 +456,11 @@ export interface DesktopApi {
     syncLocalRoom: (roomIdentifier: string) => Promise<DesktopLocalChatSyncResult>;
   };
   rental?: DesktopRentalApi;
+  /** `letagents://in/<room>` links: the app opens that room (see shared/room-app-links.mjs). Absent on an older bridge. */
+  links?: {
+    takePendingRoom: () => Promise<import("../../../../shared/room-app-links.mjs").DesktopRoomLink | null>;
+    onOpenRoom: (callback: (target: import("../../../../shared/room-app-links.mjs").DesktopRoomLink) => void) => () => void;
+  };
   asks?: {
     listModels: () => Promise<DesktopAskResult<DesktopAgentAskModel[]>>;
     create: (input: DesktopCreateAgentAskInput) => Promise<DesktopAskResult<{ ask: DesktopAgentAsk; link: string }>>;
