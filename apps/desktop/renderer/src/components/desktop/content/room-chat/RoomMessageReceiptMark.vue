@@ -6,6 +6,7 @@
     class="room-receipt-mark"
     :data-tone="summary!.tone"
     :data-receipt-mark="messageId"
+    :data-receipt-context="context"
     aria-haspopup="dialog"
     :aria-expanded="isOpen"
     :aria-label="`${summary!.title}. Show who this message woke`"
@@ -38,10 +39,16 @@ import { Bot, Check, CircleAlert, Minus } from "@lucide/vue";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 
 import { injectRoomMessageReceipts } from "../../../../composables/useRoomMessageReceipts";
-import { orderReceiptAgents, summarizeReceipt } from "../../../../domain/message-receipt-view";
+import { orderReceiptAgents, summarizeReceipt, visibleReceipt } from "../../../../domain/message-receipt-view";
 import { providerIconForLabel } from "./provider-icon";
 
-const props = defineProps<{ messageId: string }>();
+const props = defineProps<{
+  messageId: string;
+  /** Which rendering this is: a thread root shows in the timeline and in the thread panel. */
+  context: string;
+  /** The thread the message is in, or null in the main timeline. */
+  threadRootId: string | null;
+}>();
 
 const receipts = injectRoomMessageReceipts();
 const mark = ref<HTMLButtonElement | null>(null);
@@ -53,14 +60,7 @@ watch(() => props.messageId, (messageId) => {
 }, { immediate: true });
 onBeforeUnmount(() => untrack?.());
 
-/**
- * No agent and no stored reason means routing is still choosing, or a wake rule
- * took the message: nothing to show yet, never "Nobody woken".
- */
-const receipt = computed(() => {
-  const loaded = receipts?.receiptFor(props.messageId) ?? null;
-  return loaded && (loaded.agents.length > 0 || loaded.noWake) ? loaded : null;
-});
+const receipt = computed(() => visibleReceipt(receipts?.receiptFor(props.messageId)));
 const summary = computed(() => receipt.value ? summarizeReceipt(receipt.value) : null);
 const logoAgents = computed(() => orderReceiptAgents(receipt.value?.agents ?? []).slice(0, 3).map((agent) => ({
   agentKey: agent.agentKey,
@@ -71,7 +71,7 @@ const isOpen = computed(() => receipts?.opened.value?.messageId === props.messag
 function toggle(): void {
   if (!receipts || !mark.value) return;
   if (isOpen.value) receipts.close();
-  else receipts.open({ messageId: props.messageId, anchor: mark.value });
+  else receipts.open({ messageId: props.messageId, anchor: mark.value, context: props.context, threadRootId: props.threadRootId });
 }
 
 defineExpose({ open: () => { if (!isOpen.value) toggle(); } });

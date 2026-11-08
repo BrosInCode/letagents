@@ -18,8 +18,10 @@ const styles = source("../src/styles/message-content/message-receipts.css");
 test("receipts are for the sender only: the mark and Message info show on your own sent messages", () => {
   assert.match(chatMessage, /const showsReceipt = computed\(\(\) => senderRole\.value === "self"/);
   assert.match(chatMessage, /<time :datetime="message\.timestamp">\{\{ formattedTime \}\}<\/time>\s*<RoomMessageReceiptMark v-if="showsReceipt"/);
-  const menuItems = chatMessage.match(/<template v-if="showsReceipt">\s*<div class="room-message-context-menu-separator" role="separator" \/>\s*<button type="button" role="menuitem" @click="messageInfoFromContext">/g) ?? [];
+  const menuItems = chatMessage.match(/<template v-if="hasReceipt">\s*<div class="room-message-context-menu-separator" role="separator" \/>\s*<button type="button" role="menuitem" @click="messageInfoFromContext">/g) ?? [];
   assert.equal(menuItems.length, 2, "both context-menu variants gate Message info on the receipt");
+  // The item opens the mark, so it shows only once the mark has a receipt to show.
+  assert.match(chatMessage, /const hasReceipt = computed\(\(\) => showsReceipt\.value && visibleReceipt\(receiptContext\?\.receiptFor\(props\.message\.id\)\) !== null\);/);
   assert.match(chatMessage, /function messageInfoFromContext[\s\S]{0,160}?closeContextMenu\("action"\)[\s\S]{0,80}?receiptMark\.value\?\.open\(\)/);
 });
 
@@ -30,7 +32,9 @@ test("the old Message info surface is gone and the receipt popover replaces it",
 });
 
 test("Ask is a reply to your own message that mentions one agent", () => {
-  assert.match(chatView, /function askFromReceipt[\s\S]{0,500}?emit\("send-message", target\.mention, messageId, \[\], threadRootId,/);
+  assert.match(chatView, /function askFromReceipt\(messageId: string, threadRootId: string \| null,[\s\S]{0,300}?emit\("send-message", target\.mention, messageId, \[\], threadRootId,/);
+  // The mark carries its thread, so Ask on a thread reply stays in that thread.
+  assert.match(chatMessage, /:thread-root-id="message\.threadRootId && message\.threadRootId !== message\.id \? message\.threadRootId : null"/);
   assert.match(popover, /participant\.kind === "agent" && participant\.agentKey && !participant\.hiddenAt/);
 });
 
@@ -39,7 +43,6 @@ test("receipts load in batches, refresh on the live Message info event, and rese
   assert.match(store, /getMessageReceipts!\(room, ids\)/);
   assert.match(session, /event\.resource === "message_info"\) invalidateRoomMessageReceipts\(event\.roomIdentifier\)/);
   assert.match(session, /if \(event\.type === "open"\) \{[^}]*invalidateRoomMessageReceipts\(event\.roomIdentifier\)/);
-  assert.match(store, /watch\(\(\) => normalizeRoomIdentifier\(roomIdentifier\.value\), \(\) => \{\s*generation \+= 1;/);
 });
 
 test("the mark and the popover controls keep a 44px target while they look small", () => {
@@ -64,5 +67,13 @@ test("motion is short, only real changes animate, and reduced motion keeps a cro
 });
 
 test("no agent and no stored reason shows nothing, never Nobody woken", () => {
-  for (const file of [mark, popover]) assert.match(file, /loaded && \(loaded\.agents\.length > 0 \|\| loaded\.noWake\) \? loaded : null/);
+  for (const file of [mark, popover]) assert.match(file, /visibleReceipt\(receipts\?\.receiptFor\(/);
+});
+
+test("one read at a time, a reset per message namespace, and listeners only while open", () => {
+  assert.match(store, /if \(timer \|\| flushing \|\| pending\.size === 0\) return;/);
+  assert.match(store, /watch\(\(\) => \[normalizeRoomIdentifier\(roomIdentifier\.value\), namespace\.value\] as const/);
+  assert.match(chatView, /useRoomMessageReceipts\(computed\(\(\) => props\.roomIdentifier \?\? ""\), computed\(\(\) => props\.messageNamespace \?\? ""\)\)/);
+  assert.match(popover, /listen\(Boolean\(messageId\)\);/);
+  assert.match(popover, /\[data-receipt-context="\$\{CSS\.escape\(request\.context\)\}"\]/);
 });

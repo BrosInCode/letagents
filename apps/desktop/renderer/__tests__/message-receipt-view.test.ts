@@ -3,7 +3,7 @@ import test from "node:test";
 
 import type { DesktopMessageReceipt } from "../../electron/ipc-types";
 import {
-  formatDuration, noWakeSentence, orderReceiptAgents, readersLabel, receiptRowDetail, receiptRowKind, summarizeReceipt,
+  formatDuration, noWakeSentence, visibleReceipt, orderReceiptAgents, readersLabel, receiptRowDetail, receiptRowKind, summarizeReceipt,
 } from "../src/domain/message-receipt-view";
 
 type Agent = DesktopMessageReceipt["agents"][number];
@@ -86,4 +86,12 @@ test("your own agents come first, then everyone's in the order they were asked",
     agent({ agentKey: "e/l", displayName: "LivelyDelta", askedAt: "2026-11-08T10:00:01.000Z" }),
   ]);
   assert.deepEqual(ordered.map((entry) => entry.displayName), ["LivelyDelta", "QuartzPeak", "Juniper"]);
+});
+
+test("a receipt with no agent and no stored reason is not shown", () => {
+  const base = { messageId: "msg_1", sentAt: "2026-11-08T10:00:00.000Z", readers: [], notRead: null };
+  assert.equal(visibleReceipt({ ...base, agents: [], noWake: null }), null);
+  assert.equal(visibleReceipt(undefined), null);
+  assert.ok(visibleReceipt({ ...base, agents: [], noWake: { reason: "unknown" } }));
+  assert.ok(visibleReceipt({ ...base, agents: [agent({})], noWake: null }));
 });

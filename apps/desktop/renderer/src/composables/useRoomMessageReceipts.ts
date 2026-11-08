@@ -25,6 +25,10 @@ export interface RoomReceiptOpenRequest {
   messageId: string;
   /** The receipt mark the popover grows out of. */
   anchor: HTMLElement;
+  /** Which rendering opened it: a thread root shows in the timeline and in the thread panel. */
+  context: string;
+  /** The thread the message is in, so Ask replies in that thread; null in the main timeline. */
+  threadRootId: string | null;
 }
 
 export interface RoomMessageReceiptContext {
@@ -44,18 +48,24 @@ function messageNumber(id: string): number {
   return match ? Number(match[1]) : 0;
 }
 
-export function useRoomMessageReceipts(roomIdentifier: Ref<string>): RoomMessageReceiptContext {
+/**
+ * `namespace` is the room together with its storage mode: message ids change
+ * meaning when a room moves between this computer and the server, so the
+ * receipts reset with it.
+ */
+export function useRoomMessageReceipts(roomIdentifier: Ref<string>, namespace: Ref<string> = roomIdentifier): RoomMessageReceiptContext {
   const available = computed(() => Boolean(roomIdentifier.value) && typeof desktopIpc.room?.getMessageReceipts === "function");
   const tracked = new Map<string, number>();
   const receipts = shallowRef(new Map<string, DesktopMessageReceipt | null>());
   const opened = shallowRef<RoomReceiptOpenRequest | null>(null);
   let pending = new Set<string>();
   let timer: ReturnType<typeof setTimeout> | null = null;
+  let flushing = false;
   let generation = 0;
 
   function schedule(ids: Iterable<string>): void {
     for (const id of ids) pending.add(id);
-    if (timer || pending.size === 0) return;
+    if (timer || flushing || pending.size === 0) return;
     timer = setTimeout(() => { timer = null; void flush(); }, REFRESH_DELAY_MS);
   }
 
@@ -66,6 +76,8 @@ export function useRoomMessageReceipts(roomIdentifier: Ref<string>): RoomMessage
     pending = new Set([...pending].filter((id) => !ids.includes(id)));
     const room = roomIdentifier.value;
     const startedIn = generation;
+    // One read at a time, so an older answer can never land after a newer one.
+    flushing = true;
     try {
       const loaded = await desktopIpc.room.getMessageReceipts!(room, ids);
       if (startedIn !== generation || room !== roomIdentifier.value) return;
@@ -75,15 +87,19 @@ export function useRoomMessageReceipts(roomIdentifier: Ref<string>): RoomMessage
       receipts.value = next;
     } catch {
       // A failed background read keeps what is shown; the next change retries.
+    } finally {
+      flushing = false;
     }
     if (pending.size) schedule([]);
   }
 
-  watch(() => normalizeRoomIdentifier(roomIdentifier.value), () => {
+  watch(() => [normalizeRoomIdentifier(roomIdentifier.value), namespace.value] as const, () => {
     generation += 1;
     receipts.value = new Map();
     pending.clear();
     opened.value = null;
+    // Messages that stay on screen under the new namespace read their receipts again.
+    schedule(tracked.keys());
   });
   watch(
     () => revisions.get(normalizeRoomIdentifier(roomIdentifier.value) ?? "") ?? 0,

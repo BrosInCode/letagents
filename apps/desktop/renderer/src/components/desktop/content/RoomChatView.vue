@@ -316,7 +316,7 @@ const typingNames = useRoomTypingNames(computed(() => props.roomIdentifier ?? ""
 const messagePins = useRoomMessagePins(computed(() => props.roomIdentifier ?? ""),
   (message) => pushActionToast(message, "error", 6_000));
 provideRoomMessagePins(messagePins);
-const messageReceipts = useRoomMessageReceipts(computed(() => props.roomIdentifier ?? ""));
+const messageReceipts = useRoomMessageReceipts(computed(() => props.roomIdentifier ?? ""), computed(() => props.messageNamespace ?? ""));
 provideRoomMessageReceipts(messageReceipts);
 provideRoomMessageReactions(useRoomMessageReactions(
   computed(() => props.roomIdentifier ?? ""),
@@ -788,9 +788,7 @@ function receiptMessageLink(messageId: string): string | null {
 }
 
 /** Ask is a reply to your own message that mentions one agent: the agent reads your message as the reply's context. */
-function askFromReceipt(messageId: string, target: { mention: string }, done: (sent: boolean) => void): void {
-  const message = props.messages.find((candidate) => candidate.id === messageId);
-  const threadRootId = message?.threadRootId && message.threadRootId !== messageId ? message.threadRootId : null;
+function askFromReceipt(messageId: string, threadRootId: string | null, target: { mention: string }, done: (sent: boolean) => void): void {
   const namespace = props.messageNamespace;
   emit("send-message", target.mention, messageId, [], threadRootId, (sent) => {
     if (namespace !== props.messageNamespace) return;

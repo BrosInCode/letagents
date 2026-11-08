@@ -62,7 +62,7 @@ setTimeout(() => {
   invalidateRoomMessageReceipts(ROOM);
 }, 7000);
 
-function ask(messageId: string, target: { agentKey: string; displayName: string; mention: string }, done: (sent: boolean) => void): void {
+function ask(messageId: string, _threadRootId: string | null, target: { agentKey: string; displayName: string; mention: string }, done: (sent: boolean) => void): void {
   setTimeout(() => {
     const id = `msg_${200 + messages.value.length}`;
     messages.value = [...messages.value, { ...seed[0]!, id, text: target.mention, timestamp: new Date().toISOString(), threadRootId: id,

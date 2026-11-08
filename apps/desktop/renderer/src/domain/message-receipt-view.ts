@@ -2,6 +2,15 @@ import type { DesktopMessageNoWake, DesktopMessageReceipt } from "../../../elect
 
 type ReceiptAgent = DesktopMessageReceipt["agents"][number];
 
+/**
+ * A receipt shows once it says something: an agent, or a stored reason nobody
+ * woke. No agent and no reason means routing is still choosing, or a wake rule
+ * took the message, so nothing shows, never "Nobody woken".
+ */
+export function visibleReceipt(receipt: DesktopMessageReceipt | null | undefined): DesktopMessageReceipt | null {
+  return receipt && (receipt.agents.length > 0 || receipt.noWake) ? receipt : null;
+}
+
 /** What a row shows. Each kind has its own icon and word, never colour alone. */
 export type ReceiptRowKind = "replied" | "working" | "waiting" | "no_reply" | "attention" | "ended";
 

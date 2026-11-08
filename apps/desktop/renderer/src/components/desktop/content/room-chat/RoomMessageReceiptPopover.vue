@@ -116,7 +116,7 @@
 
 <script setup lang="ts">
 import { Bot, Check, ChevronRight, CircleAlert, Clock3, Minus } from "@lucide/vue";
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, shallowRef, watch } from "vue";
 
 import type { DesktopMessageReceipt, DesktopParticipantSummary, DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
 import { useMessageViewer } from "../../../../composables/useRoomMessageReactions";
@@ -124,7 +124,7 @@ import { injectRoomMessageReceipts } from "../../../../composables/useRoomMessag
 import { formatDate } from "../../../../domain/formatters";
 import { messageOutcomeTarget } from "../../../../domain/message-outcome";
 import {
-  noWakeSentence, orderReceiptAgents, readersLabel, receiptRowDetail, receiptRowKind, receiptRowLabel, summarizeReceipt,
+  noWakeSentence, orderReceiptAgents, readersLabel, receiptRowDetail, receiptRowKind, receiptRowLabel, summarizeReceipt, visibleReceipt,
 } from "../../../../domain/message-receipt-view";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import ChatPersonAvatar from "./RoomReceiptPersonAvatar.vue";
@@ -145,15 +145,12 @@ const props = defineProps<{
 const emit = defineEmits<{
   "scroll-to-message": [messageId: string];
   "inspect-agent": [target: AgentModalTarget];
-  ask: [messageId: string, target: ReceiptAskTarget, done: (sent: boolean) => void];
+  ask: [messageId: string, threadRootId: string | null, target: ReceiptAskTarget, done: (sent: boolean) => void];
 }>();
 
 const receipts = injectRoomMessageReceipts();
 const opened = computed(() => receipts?.opened.value ?? null);
-const receipt = computed(() => {
-  const loaded = opened.value ? receipts?.receiptFor(opened.value.messageId) ?? null : null;
-  return loaded && (loaded.agents.length > 0 || loaded.noWake) ? loaded : null;
-});
+const receipt = computed(() => opened.value ? visibleReceipt(receipts?.receiptFor(opened.value.messageId)) : null);
 const summary = computed(() => summarizeReceipt(receipt.value ?? { agents: [], noWake: null }));
 const agents = computed(() => orderReceiptAgents(receipt.value?.agents ?? []));
 
@@ -222,10 +219,10 @@ function activate(agent: ReceiptAgent): void {
 }
 
 function ask(agent: { agentKey: string; displayName: string }): void {
-  const messageId = opened.value?.messageId;
-  if (!messageId || asking.value) return;
+  const request = opened.value;
+  if (!request || asking.value) return;
   asking.value = agent.agentKey;
-  emit("ask", messageId, { agentKey: agent.agentKey, displayName: agent.displayName, mention: props.mentionFor(agent.agentKey, agent.displayName) }, (sent) => {
+  emit("ask", request.messageId, request.threadRootId, { agentKey: agent.agentKey, displayName: agent.displayName, mention: props.mentionFor(agent.agentKey, agent.displayName) }, (sent) => {
     asking.value = null;
     if (sent) close(false);
   });
@@ -248,8 +245,11 @@ function anchor(): HTMLElement | null {
   const request = opened.value;
   if (!request) return null;
   if (request.anchor.isConnected) return request.anchor;
-  // A re-rendered message replaces its mark; find the one for the same message.
-  return document.querySelector<HTMLElement>(`[data-receipt-mark="${CSS.escape(request.messageId)}"]`);
+  // A re-rendered message replaces its mark; find the one for the same message
+  // in the same rendering (a thread root has a mark in the timeline and in the thread panel).
+  const id = CSS.escape(request.messageId);
+  return document.querySelector<HTMLElement>(`[data-receipt-mark="${id}"][data-receipt-context="${CSS.escape(request.context)}"]`)
+    ?? document.querySelector<HTMLElement>(`[data-receipt-mark="${id}"]`);
 }
 
 /** Below the mark when it fits, above it when it does not; it grows out of the mark either way. */
@@ -271,13 +271,31 @@ function place(): void {
 }
 
 let placeFrame = 0;
+let settleTimer: ReturnType<typeof setTimeout> | null = null;
 function queuePlace(): void {
+  if (!opened.value) return;
   cancelAnimationFrame(placeFrame);
+  if (settleTimer) clearTimeout(settleTimer);
   placeFrame = requestAnimationFrame(() => {
     place();
     // A list that opens grows over 200 ms; place again once it has its height.
-    window.setTimeout(place, 220);
+    settleTimer = setTimeout(place, 220);
   });
+}
+
+/** Scroll and resize move the popover only while it is open. */
+function listen(on: boolean): void {
+  if (on) {
+    document.addEventListener("pointerdown", handlePointerDown, true);
+    window.addEventListener("resize", queuePlace);
+    document.addEventListener("scroll", queuePlace, { capture: true, passive: true });
+  } else {
+    document.removeEventListener("pointerdown", handlePointerDown, true);
+    window.removeEventListener("resize", queuePlace);
+    document.removeEventListener("scroll", queuePlace, { capture: true });
+    cancelAnimationFrame(placeFrame);
+    if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
+  }
 }
 
 function close(restoreFocus: boolean): void {
@@ -294,6 +312,7 @@ function handlePointerDown(event: PointerEvent): void {
 }
 
 watch(() => opened.value?.messageId, async (messageId, previous) => {
+  listen(Boolean(messageId));
   readersOpen.value = false;
   asking.value = null;
   if (!messageId) { shown.value = false; return; }
@@ -325,16 +344,8 @@ watch(() => agents.value.some((agent) => ["working", "waiting"].includes(receipt
   if (ticking) clockTimer = setInterval(() => { now.value = Date.now(); }, 1000);
 }, { immediate: true });
 
-onMounted(() => {
-  document.addEventListener("pointerdown", handlePointerDown, true);
-  window.addEventListener("resize", queuePlace);
-  document.addEventListener("scroll", queuePlace, { capture: true, passive: true });
-});
 onBeforeUnmount(() => {
-  document.removeEventListener("pointerdown", handlePointerDown, true);
-  window.removeEventListener("resize", queuePlace);
-  document.removeEventListener("scroll", queuePlace, { capture: true });
+  listen(false);
   if (clockTimer) clearInterval(clockTimer);
-  cancelAnimationFrame(placeFrame);
 });
 </script>
