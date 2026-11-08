@@ -17,7 +17,8 @@ export function useAppCompany(context: unknown) {
     invitations: company.invitations.value,
     ssoRequired: company.ssoRequired.value,
     error: company.error.value,
-    selectedId: company.selectedId.value,
+    // Only a company GitHub has confirmed counts as chosen.
+    selectedId: company.activeId.value,
     joiningId: company.joiningId.value,
   }));
 
@@ -60,7 +61,7 @@ export function useAppCompanyNavigation(context: unknown) {
   const { activeEntry, company, sidebarProjectEntries } = app;
 
   // Without a company the sidebar is the existing account view, so nothing replaces the room.
-  const showCompanyHome = computed(() => Boolean(company.selectedId.value) && activeEntry.value.type === "room"
+  const showCompanyHome = computed(() => Boolean(company.activeId.value) && activeEntry.value.type === "room"
     && !sidebarProjectEntries.value.some((project) =>
       [project.parent, ...project.branchRooms, ...project.focusRooms].some((entry) => entry.id === activeEntry.value.id && entry.roomIdentifier)
     ));

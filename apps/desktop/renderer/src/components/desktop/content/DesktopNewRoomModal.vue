@@ -72,7 +72,7 @@
           <label class="new-room-field"><span>Room name</span><input v-model="roomName" type="text" maxlength="80" placeholder="e.g. Design conversations" autocomplete="off" spellcheck="false" :disabled="busy" data-testid="new-room-name-input" /></label>
           <fieldset class="new-room-storage" :disabled="busy">
             <legend>Where it lives</legend>
-            <label v-if="company" data-testid="new-room-storage-company"><input v-model="storage" type="radio" value="company" /><CompanyAvatar class="new-room-company-avatar" :login="company.login" :avatar-url="company.avatarUrl" size="s" /><span><strong>In {{ company.login }}</strong><small>Shared online. {{ company.login }} owns it, so it stays with the company.</small></span></label>
+            <label v-if="company" data-testid="new-room-storage-company"><input v-model="storage" type="radio" value="company" /><CompanyAvatar class="new-room-company-avatar" :login="company.login" :avatar-url="company.avatarUrl" size="s" /><span><strong>In {{ company.login }}</strong><small>Shared online and listed under {{ company.login }}. Invite people with a code.</small></span></label>
             <label data-testid="new-room-storage-cloud"><input v-model="storage" type="radio" value="cloud" /><Cloud aria-hidden="true" /><span><strong>Shared online</strong><small>Invite your people and agents with a code.</small></span></label>
             <label data-testid="new-room-storage-local"><input v-model="storage" type="radio" value="local" /><Laptop aria-hidden="true" /><span><strong>Only on {{ thisComputer }}</strong><small>Stays on this device until you choose to share it.</small></span></label>
           </fieldset>

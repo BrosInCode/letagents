@@ -182,7 +182,13 @@ to cached private room groups. Returning to the app rechecks company membership.
   the active room is not one of its rooms. It shows one state at a time: no
   rooms yet, checking, GitHub did not answer, permission needed, or single
   sign-on, each with one main action.
-- The company owns work rooms. With a company selected, the New room dialog's
-  "Where it lives" offers "In <company>" first (and selects it). The room is
-  created with `organization_id` (slice 3) and is listed in the company at once.
+- Work rooms can belong to the company. With a company selected, the New room
+  dialog's "Where it lives" offers "In <company>" first (and selects it). The
+  room is created with `organization_id` (slice 3) and is listed in the company
+  at once. Company control over such rooms (admins, removal when someone leaves
+  the GitHub organization) is the next stack, so the dialog promises only the
+  listing.
+- The sidebar filter and the company home use the company only after GitHub
+  confirms it as joined (`activeId`). A saved choice alone, at launch or when
+  GitHub does not answer, shows All rooms.
 - The window-focus check moved to slice 4 and runs at most once a minute.
