@@ -54,6 +54,7 @@ import type {
   DesktopGitHubIntegrationStatus,
   DesktopInlineHtmlDemoLease,
   DesktopInviteRoomCreation,
+  DesktopInviteRoomOptions,
   DesktopLocalChatSyncResult,
   DesktopLocalRoomMutationResult,
   DesktopReasoningSessionDetail,
@@ -675,7 +676,7 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   );
   targetIpcMain.handle(
     "desktop:room:create-invite-room",
-    async (): Promise<DesktopInviteRoomCreation> => createDesktopInviteRoom(),
+    async (_event, options?: DesktopInviteRoomOptions): Promise<DesktopInviteRoomCreation> => createDesktopInviteRoom(options),
   );
   targetIpcMain.handle(
     "desktop:room:get-pull-request-diff",

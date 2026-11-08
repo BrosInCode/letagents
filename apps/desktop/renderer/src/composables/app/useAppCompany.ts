@@ -1,5 +1,7 @@
 import { computed, onBeforeUnmount, onMounted, watch } from "vue";
+import type { CompanyHomeState } from "../../components/desktop/company/types";
 import type { FirstRunCompanyStepState } from "../../components/desktop/setup/types";
+import { findSidebarRoomEntryByIdentifier, normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
 import { useDesktopOrganizations } from "../useDesktopOrganizations";
 import type { AppContextOf } from "./context";
 
@@ -16,7 +18,8 @@ export function useAppCompany(context: unknown) {
     invitations: company.invitations.value,
     ssoRequired: company.ssoRequired.value,
     error: company.error.value,
-    selectedId: company.selectedId.value,
+    // Only a company GitHub has confirmed counts as chosen.
+    selectedId: company.activeId.value,
     joiningId: company.joiningId.value,
   }));
 
@@ -51,4 +54,41 @@ export function useAppCompany(context: unknown) {
   onBeforeUnmount(() => window.removeEventListener("focus", refreshOnFocus));
 
   return { company, companyStep, chooseOnboardingCompany };
+}
+
+/** The company home shown when the active room is outside the chosen company, and the sidebar company switch. */
+export function useAppCompanyNavigation(context: unknown) {
+  const app = context as AppContextOf<"useAppCompany" | "useAppNavigation" | "useAppSidebarEntries" | "useAppSidebarSelection">;
+  const { activeEntry, company, sidebarProjectEntries } = app;
+
+  // Without a company the sidebar is the existing account view, so nothing replaces the room.
+  const showCompanyHome = computed(() => Boolean(company.activeId.value) && activeEntry.value.type === "room"
+    && !sidebarProjectEntries.value.some((project) =>
+      [project.parent, ...project.branchRooms, ...project.focusRooms].some((entry) => entry.id === activeEntry.value.id && entry.roomIdentifier)
+    ));
+
+  const companyHomeState = computed<CompanyHomeState>(() => {
+    if (company.status.value === "github_access_required" || company.roomsStatus.value === "github_access_required") {
+      return "github_access_required";
+    }
+    if (company.roomsStatus.value === "sso_required") return "sso_required";
+    if (company.joiningId.value || company.roomsStatus.value === "loading") return "loading";
+    if (company.roomsStatus.value === "unavailable" && !company.rooms.value.length) return "unavailable";
+    if (!company.rooms.value.length) return "empty";
+    return "choose";
+  });
+
+  async function chooseSidebarCompany(id: string | null): Promise<void> {
+    app.cancelSidebarRoomSelection();
+    await company.choose(id);
+  }
+
+  function openCompanyRoom(roomId: string): void {
+    const identifier = normalizeRoomIdentifier(roomId);
+    if (!identifier || !company.rooms.value.some((room) => normalizeRoomIdentifier(room.room_id) === identifier)) return;
+    const entry = findSidebarRoomEntryByIdentifier(sidebarProjectEntries.value, identifier);
+    if (entry) app.handleSidebarEntrySelected(entry);
+  }
+
+  return { showCompanyHome, companyHomeState, chooseSidebarCompany, openCompanyRoom };
 }
