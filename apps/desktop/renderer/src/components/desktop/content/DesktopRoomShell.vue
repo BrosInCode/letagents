@@ -386,6 +386,9 @@ import { useRoomShellParticipants } from "../../../composables/room-shell/useRoo
 import { useRoomShellRoomWatchers, useRoomShellAttention } from "../../../composables/room-shell/useRoomShellWatchers";
 import { useRoomShellLifecycle } from "../../../composables/room-shell/useRoomShellLifecycle";
 import { useRoomShellJoinRequests } from "../../../composables/room-shell/useRoomShellJoinRequests";
+import { provideBackgroundCommands } from "../../../composables/useBackgroundCommands";
+import { supervisedAgentInspectorRequest } from "../../../domain/agent-inspector-identity";
+import { ownerAttribution as backgroundCommandOwner } from "./room-activity/agentTarget";
 const props = defineProps<DesktopRoomShellProps>();
 const emit = defineEmits<DesktopRoomShellEmits>();
 
@@ -481,6 +484,16 @@ const {
   githubEventsAvailable, showEnvironmentPanelWidget, effectiveEnvironmentRepoStatus,
   managedAgentRepoStatus, managedAgentRepoRootPath, roomParticipants, localAgentWork,
 } = Object.assign(app, useRoomShellParticipants(app));
+
+// The room's own agents' background commands: the activity strip and the Live tab show them and stop them.
+provideBackgroundCommands({
+  entries: () => supervisorEntries.value,
+  roomId: () => props.room.identifier,
+  daemonGeneration: () => supervisorStatus.value?.generation ?? null,
+  openInspector: (entry) => openAgentDetailRequest(supervisedAgentInspectorRequest(entry, {
+    ownerAttribution: backgroundCommandOwner(entry.createdBy), initialTab: "live",
+  })),
+});
 
 Object.assign(app, useRoomShellRoomWatchers(app));
 

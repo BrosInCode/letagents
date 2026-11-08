@@ -19,8 +19,18 @@
           <span class="agent-live-background-state">
             <span v-if="command.status === 'running'" class="agent-live-background-pulse" aria-hidden="true"></span>{{ stateLabel(command) }}
           </span>
+          <button
+            v-if="command.status === 'running' && canStop"
+            type="button"
+            class="agent-live-background-stop"
+            :disabled="stopStates.get(command.id) === 'stopping'"
+            :aria-label="`Stop ${command.command}`"
+            data-testid="agent-live-background-stop"
+            @click.prevent.stop="stop(command.id)"
+          >{{ stopStates.get(command.id) === "stopping" ? "Stopping…" : "Stop" }}</button>
           <ChevronRight class="agent-live-chevron" :size="14" aria-hidden="true" />
         </summary>
+        <p v-if="stopStates.get(command.id) === 'failed'" class="agent-live-background-error" role="status">The command did not stop. Try again, or ask the agent to stop it.</p>
         <div class="agent-live-background-body">
           <pre
             :ref="(element) => rememberOutput(command.id, element)" class="agent-live-background-output" tabindex="0"
@@ -37,13 +47,50 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { ChevronRight, SquareTerminal } from "@lucide/vue";
 import { formatDate } from "../../../../domain/formatters";
 import { formatLiveWorkDuration, type LiveBackgroundCommand } from "../../../../domain/agent-inspector-live";
 import { useNow } from "../../../../composables/useNow";
+import { useBackgroundCommands } from "../../../../composables/useBackgroundCommands";
 
-const props = defineProps<{ commands: readonly LiveBackgroundCommand[] }>();
+const props = defineProps<{
+  commands: readonly LiveBackgroundCommand[];
+  /** The agent's supervisor entry: its owner can stop its commands from here. */
+  entryId?: string | null;
+}>();
+
+const backgroundCommands = useBackgroundCommands();
+const canStop = computed(() => Boolean(backgroundCommands && props.entryId));
+const stopStates = ref(new Map<string, "stopping" | "failed">());
+function setStopState(id: string, state: "stopping" | "failed" | null): void {
+  const next = new Map(stopStates.value);
+  if (state) next.set(id, state); else next.delete(id);
+  stopStates.value = next;
+}
+const stopWaits = new Map<string, ReturnType<typeof setTimeout>>();
+async function stop(id: string): Promise<void> {
+  if (!backgroundCommands || !props.entryId || stopStates.value.get(id) === "stopping") return;
+  setStopState(id, "stopping");
+  const outcome = await backgroundCommands.stop(props.entryId, id);
+  if (outcome === "not_running") { setStopState(id, null); return; }
+  if (outcome !== "stopping") { setStopState(id, "failed"); return; }
+  // The command's end arrives on the feed; one that still runs after this long did not stop.
+  clearTimeout(stopWaits.get(id));
+  stopWaits.set(id, setTimeout(() => {
+    stopWaits.delete(id);
+    if (stopStates.value.get(id) === "stopping") setStopState(id, "failed");
+  }, 15_000));
+}
+watch(() => props.commands.map((command) => `${command.id}:${command.status}`).join("|"), () => {
+  for (const command of props.commands) {
+    if (command.status !== "running" && stopStates.value.has(command.id)) {
+      clearTimeout(stopWaits.get(command.id));
+      stopWaits.delete(command.id);
+      setStopState(command.id, null);
+    }
+  }
+});
 
 const items = new Map<string, HTMLDetailsElement>();
 const outputs = new Map<string, HTMLPreElement>();

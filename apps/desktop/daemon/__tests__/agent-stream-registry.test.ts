@@ -288,6 +288,35 @@ test("reset and end cancel latest values that wait for their turn", async () => 
   assert.equal(batch.dropped_events, 0);
 });
 
+test("running background commands come from their newest values, and only a start or an end calls back", async () => {
+  const changes: string[] = [];
+  const registry = new AgentStreamRegistry({ latestIntervalMs: 0, onBackgroundCommandsChange: (entryId) => changes.push(entryId) });
+  const background = (status: string, output = "") => ({ ...activity(0), method: "item/backgroundCommand/updated",
+    payload: { taskId: "task-1", toolUseId: "toolu_1", command: "npm run dev", status, output, startedAt: "2026-11-08T22:00:00.000Z" } });
+  registry.pushLatest("agent", "background:task-1", background("running"), { sticky: true });
+  assert.deepEqual(registry.runningBackgroundCommands("agent"), [{ task_id: "task-1", tool_use_id: "toolu_1", command: "npm run dev", started_at: "2026-11-08T22:00:00.000Z" }]);
+  assert.deepEqual(changes, ["agent"], "a start calls back");
+  registry.pushLatest("agent", "background:task-1", background("running", "ready\n"), { sticky: true });
+  assert.deepEqual(changes, ["agent"], "new output is not a change of the agent's state");
+
+  const first = await registry.watchBackgroundCommands({ entryId: "agent", afterVersion: 0, waitMs: 0 });
+  assert.equal(first.commands.length, 1);
+  assert.equal((first.commands[0] as { output: string }).output, "ready\n");
+  const waiting = registry.watchBackgroundCommands({ entryId: "agent", afterVersion: first.version, waitMs: 1_000 });
+  registry.pushLatest("agent", "background:task-1", background("stopped"), { immediate: true });
+  const after = await waiting;
+  assert.ok(after.version > first.version, "a new value wakes the watch");
+  assert.equal((after.commands[0] as { status: string }).status, "stopped");
+  assert.deepEqual(registry.runningBackgroundCommands("agent"), []);
+  assert.deepEqual(changes, ["agent", "agent"], "an end calls back");
+
+  registry.pushLatest("agent", "background:task-2", { ...background("running"), payload: { ...background("running").payload, taskId: "task-2" } }, { sticky: true });
+  registry.end("agent");
+  assert.deepEqual(registry.runningBackgroundCommands("agent"), [], "a feed that ended runs nothing");
+  assert.deepEqual(changes, ["agent", "agent", "agent", "agent"]);
+  assert.equal((await registry.watchBackgroundCommands({ entryId: "agent", afterVersion: 0, waitMs: 0 })).ended, true);
+});
+
 function activity(index: number, summary = `event-${index}`): DaemonActivityEvent {
   return {
     observed_at: "2026-08-26T12:00:00.000Z",

@@ -4,6 +4,7 @@
  * control socket, after the layers it extends.
  */
 import { localRoomRuntime } from "../local-room-runtime.js";
+import { stopBackgroundCommand } from "../background-command-stop.js";
 import { BoundedEffectCoordinator } from "../bounded-effect-coordinator.js";
 import { productionSupervisedDeliveryHttp, productionSupervisorGrantHttp, type SupervisorGrantHttp } from "../cloud-http.js";
 import { DaemonControlSocket } from "../control-socket.js";
@@ -242,6 +243,10 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       updateWorkplaceLiveness: this.updateWorkplaceLiveness.bind(this),
       verifyWorkerSession: this.workerAuthority.verifyWorkerSession.bind(this.workerAuthority),
       watchAgentStream: this.watchAgentStream.bind(this),
+      watchBackgroundCommands: (input) => this.agentStreamRegistry.watchBackgroundCommands(input),
+      stopBackgroundCommand: (input) => stopBackgroundCommand(input, { currentDaemonGeneration: () => this.singleton.currentGeneration,
+        liveHandle: (id) => this.providerStreams.get(id), stop: this.providerPort?.stopBackgroundCommand?.bind(this.providerPort),
+        isRunning: (id, task) => this.agentStreamRegistry.runningBackgroundCommands(id).some((command) => command.task_id === task) }),
       watchState: this.watchState.bind(this),
       mutateLocalBoard: async input => {
         const runtime = await localRoomRuntime();

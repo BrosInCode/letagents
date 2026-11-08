@@ -30,6 +30,10 @@ export interface DaemonControlOperations {
   getManifestEntry(entryId: string): unknown;
   watchState(input: { afterDaemonGeneration: number; afterSequence: number; waitMs: number; changedOnly?: boolean }): unknown;
   watchAgentStream(input: { entryId: string; afterSequence: number; waitMs: number }): unknown;
+  /** The newest values of an agent's background commands (the room's activity strip reads these). */
+  watchBackgroundCommands(input: { entryId: string; afterVersion: number; waitMs: number }): unknown;
+  /** Only the desktop app's signed request reaches this. */
+  stopBackgroundCommand(input: { entryId: string; daemonGeneration: number; taskId: string }): unknown;
   retryRoomDelivery(input: RoomDeliveryControl): unknown;
   restoreAgentConversation(input: RoomDeliveryControl): unknown;
   skipRoomDelivery(input: RoomDeliveryControl): unknown;
@@ -127,7 +131,8 @@ export type ManifestActivityMode = "full" | "summary";
 const HANDOFF_DRAIN_METHODS = new Set<string>([
   "daemon.negotiate", "daemon.status", "daemon.prepare_handoff",
   "manifest.list", "manifest.get_entry", "manifest.watch_state", "manifest.update_workplace_liveness",
-  "local_board.watch", "attempt.read", "supervisor.watch_agent_stream", "supervisor.get_agent_inspector_detail",
+  "local_board.watch", "attempt.read", "supervisor.watch_agent_stream", "supervisor.watch_background_commands",
+  "supervisor.get_agent_inspector_detail",
   "supervisor.get_agent_configuration", "supervisor.get_room_move", "supervisor.get_current_room_move",
   "supervisor.get_delivery_drain", "supervisor.get_polling_activation",
   "supervisor.host_approval_challenge", "supervisor.host_approval_request",
@@ -314,6 +319,17 @@ export function createDaemonControlRequestHandler(
           enabled: input.enabled,
         });
       }
+      if (authenticated.operation === "stop_background_command") {
+        // The signature proves the desktop app sent this: no agent or other
+        // local caller of this socket can stop an agent's command.
+        const error = "Stopping a background command requires an exact agent, the current daemon generation and a command.";
+        if (!input || Object.keys(input).length !== 3) throw new Error(error);
+        return operations.stopBackgroundCommand({
+          entryId: requiredStringParam(input, "entryId", error),
+          daemonGeneration: positiveIntegerParam(input, "daemonGeneration", error),
+          taskId: requiredStringParam(input, "taskId", error),
+        });
+      }
       if (input?.actorId !== `host-${operations.hostApprovals.challenge()!.keyFingerprint}`) throw new Error("The approval actor is not the enrolled host.");
       return operations.hostApprovals.decide(input);
     }
@@ -372,6 +388,14 @@ export function createDaemonControlRequestHandler(
       return operations.watchAgentStream({
         entryId: String(params.entry_id ?? ""),
         afterSequence: Number(params.after_sequence ?? 0),
+        waitMs: Number(params.wait_ms ?? 25_000),
+      });
+    }
+    if (request.method === "supervisor.watch_background_commands") {
+      const params = paramsRecord(request.params);
+      return operations.watchBackgroundCommands({
+        entryId: String(params.entry_id ?? ""),
+        afterVersion: Number(params.after_version ?? 0),
         waitMs: Number(params.wait_ms ?? 25_000),
       });
     }

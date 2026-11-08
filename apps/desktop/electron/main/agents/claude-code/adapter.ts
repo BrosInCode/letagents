@@ -27,6 +27,11 @@ export class ClaudeCodeProviderAdapter extends ClaudeAdapterLaunch implements Pr
     return this.processCustody.state(workAttemptId, handle === providerHandle ? handle?.child : undefined);
   }
 
+  /** Stop a command that the agent runs in the background (see stopFollowedBackgroundCommand). */
+  async stopBackgroundCommand(providerHandle: ProviderHandle, taskId: string): Promise<"stopping" | "not_running" | "failed"> {
+    return this.stopFollowedBackgroundCommand(this.requireHandle(providerHandle), taskId);
+  }
+
   async readUsage(providerHandle: ProviderHandle): Promise<import("../../../../shared/provider-usage.js").ProviderUsage | null> {
     const handle = this.handles.get(providerHandle.workAttemptId);
     if (!handle || handle !== providerHandle) return null;

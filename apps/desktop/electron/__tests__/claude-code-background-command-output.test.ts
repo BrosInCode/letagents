@@ -181,3 +181,35 @@ test("a Claude agent's background command reaches the owner's live feed with its
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("the owner's Stop asks the CLI to stop exactly a followed background command, and reports what the CLI answered", async () => {
+  const agent = await claudeBackgroundHarness();
+  const { root, tasks } = await taskFolder(agent.sessionId);
+  const taskId = claudeCapturedTask("background_command");
+  try {
+    await writeFile(join(tasks, `${taskId}.output`), "Server listening\n");
+    const turn = await agent.start("background_command");
+    const lines = JSON.parse(JSON.stringify(realClaudeCapture(CLAUDE_REAL_CAPTURES.background_command!, agent.sessionId, turn.turnId).stream)
+      .replaceAll("/PATH", JSON.stringify(join(tasks, `${taskId}.output`)).slice(1, -1))) as Array<Record<string, unknown>>;
+    agent.emit(splitAtOwnResult(lines, turn.turnId).own);
+    await eventually(() => agent.stream.some((event) => event.method === LIVE_BACKGROUND_COMMAND_METHOD), "the command is followed");
+
+    assert.equal(await agent.adapter.stopBackgroundCommand(agent.handle, "not-a-task"), "not_running", "only a command this adapter follows");
+    const before = agent.child.written.length;
+    const stopping = agent.adapter.stopBackgroundCommand(agent.handle, taskId);
+    await eventually(() => agent.child.written.length > before, "the stop request is written");
+    const request = JSON.parse(agent.child.written.at(-1)!) as { type: string; request_id: string; request: { subtype: string; task_id: string } };
+    assert.deepEqual([request.type, request.request.subtype, request.request.task_id], ["control_request", "stop_task", taskId]);
+    agent.emit([{ type: "control_response", response: { subtype: "success", request_id: request.request_id, response: {} } }]);
+    assert.equal(await stopping, "stopping");
+
+    const refused = agent.adapter.stopBackgroundCommand(agent.handle, taskId);
+    await eventually(() => agent.child.written.length > before + 1, "a second request is written");
+    const second = JSON.parse(agent.child.written.at(-1)!) as { request_id: string };
+    agent.emit([{ type: "control_response", response: { subtype: "error", request_id: second.request_id, error: "no such task" } }]);
+    assert.equal(await refused, "failed", "a refused stop is reported");
+  } finally {
+    await agent.adapter.stop(agent.handle).catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});

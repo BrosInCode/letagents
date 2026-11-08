@@ -368,6 +368,8 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
   provider_progress?: { state: "compacting"; startedAt: string } | null;
   /** Live start-up progress of the latest launch in this daemon; memory only. */
   launch_progress?: import("./launch-progress.js").LaunchProgressView | null;
+  /** Commands the agent runs in the background now, from its live feed; memory only, changed only on a start or an end. */
+  background_commands?: import("./agent-stream-registry.js").RunningBackgroundCommand[];
   runtime_recovery?: {
     operationId: string; roomId: string; executionGenerationId: string; runtimeGenerationId: string;
     mode: "resume" | "fresh"; phase: "prepared" | "stopped";

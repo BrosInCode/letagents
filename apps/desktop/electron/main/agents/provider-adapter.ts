@@ -618,6 +618,12 @@ export interface ProviderRoomTurnOptions {
 
 export interface ProviderAdapter {
   readUsage?(handle: ProviderHandle): Promise<import("../../../shared/provider-usage.js").ProviderUsage | null>;
+  /**
+   * Stop a command that the agent runs in the background, at its owner's
+   * request. "stopping": the provider accepted it, and the command's own end
+   * follows on the live feed. Providers without background commands omit it.
+   */
+  stopBackgroundCommand?(handle: ProviderHandle, taskId: string): Promise<"stopping" | "not_running" | "failed">;
   compactionProgress?(workAttemptId: string): { state: "compacting"; startedAt: string } | null;
   readonly id: ProviderAdapterId;
 

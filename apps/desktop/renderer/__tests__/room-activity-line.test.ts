@@ -409,6 +409,45 @@ test("the line renders the Steer offer, notices, live work and typing as one pil
   } finally { await vite.close(); }
 });
 
+test("a command that still runs keeps a quiet pill, and live work counts the commands beside it", async () => {
+  const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomActivityLine.vue")).default;
+    const { provideBackgroundCommands } = await vite.ssrLoadModule("/renderer/src/composables/useBackgroundCommands.ts");
+    const { defineComponent, h } = await import("vue");
+    const entry = (id: string, displayName: string, commands: Array<{ taskId: string; command: string }>) => ({
+      id, roomId: "room", displayName, backgroundCommands: commands.map((command) => ({ ...command, toolUseId: null, startedAt: "2026-11-08T22:00:00.000Z" })),
+    });
+    const render = async (props: Record<string, unknown>, entries: unknown[]) => {
+      const host = defineComponent({
+        setup() {
+          provideBackgroundCommands({ entries: () => entries, roomId: () => "room", daemonGeneration: () => 1, openInspector: () => undefined });
+          return () => h(component, { notice: null, steer: null, work: [], typingNames: [], ...props });
+        },
+      });
+      return (await renderToString(createSSRApp(host))).replace(/ data-v-[a-f0-9]+/g, "").replace(/<!--[\s\S]*?-->/g, "");
+    };
+    const server = [entry("w1", "LivelyDelta", [{ taskId: "t1", command: "npm run dev" }])];
+
+    const quiet = await render({}, server);
+    assert.match(quiet, /data-kind="background" data-tone="muted" aria-expanded="false"/);
+    assert.match(quiet, /<strong>LivelyDelta<\/strong> <code>npm run dev<\/code> runs in the background/);
+    assert.doesNotMatch(quiet, /room-activity-list/, "closed until the owner opens it");
+
+    const two = await render({}, [entry("w1", "LivelyDelta", [{ taskId: "t1", command: "npm run dev" }, { taskId: "t2", command: "npm run watch" }])]);
+    assert.match(two, /<strong>LivelyDelta<\/strong> runs 2 commands in the background/);
+    const agents = await render({}, [...server, entry("w2", "Kestrel", [{ taskId: "t3", command: "make serve" }])]);
+    assert.match(agents, /<strong>2 commands<\/strong> run in the background/);
+
+    const work = [{ id: "w1", displayName: "LivelyDelta", summary: "Reading app.ts", startedAt: "2026-10-26T10:00:00.000Z", activity: "searching" }];
+    const live = await render({ work }, server);
+    assert.match(live, /data-testid="room-activity-live"/, "live work keeps its own pill");
+    assert.match(live, /data-testid="room-activity-live-background">· 1 in the background<\/span>/);
+    assert.match(await render({ typingNames: ["Emmy"] }, server), /<strong>Emmy<\/strong> is typing/, "a running server is the quietest thing in the line");
+    assert.equal((await render({}, [])).includes("room-activity-pill"), false);
+  } finally { await vite.close(); }
+});
+
 test("the orb component keeps the thinking-orbs MIT notice and is 20px with a 2x backing store", () => {
   const engine = readFileSync(fileURLToPath(new URL("../../../../shared/ui/activity-orb.ts", import.meta.url)), "utf8");
   assert.match(engine, /thinking-orbs/);

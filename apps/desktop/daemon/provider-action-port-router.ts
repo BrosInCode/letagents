@@ -43,6 +43,7 @@ type NativeHandle = {
 
 export type NativeProviderAdapter = {
   readUsage?(handle: NativeHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
+  stopBackgroundCommand?(handle: NativeHandle, taskId: string): Promise<"stopping" | "not_running" | "failed">;
   compactionProgress?(workAttemptId: string): { state: "compacting"; startedAt: string } | null;
   runtimeCustody?(workAttemptId: string, handle?: NativeHandle): "absent" | "owned" | "unknown";
   observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; connectionId?: string; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest | ClaudeNativePermissionRequest)[] } | Extract<ClaudePermissionObservation, { type: "request_closed" }> | { type: "request_closed"; request: CodexNativePermissionRequest } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
@@ -617,6 +618,11 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const adapter = await this.adapter(remembered.provider);
     if (!adapter.onExecution) throw new Error(`Provider '${remembered.provider}' does not expose native execution observations.`);
     return adapter.onExecution(remembered.handle, listener);
+  }
+
+  async stopBackgroundCommand(handle: ProviderActionHandle, taskId: string): Promise<"stopping" | "not_running" | "failed"> {
+    const remembered = this.required(handle);
+    return await remembered.adapter.stopBackgroundCommand?.(remembered.handle, taskId) ?? "not_running";
   }
 
   async readUsage(handle: ProviderActionHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null> {

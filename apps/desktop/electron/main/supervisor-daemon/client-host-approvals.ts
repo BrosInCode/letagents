@@ -270,6 +270,34 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
    * owner's-setup choice, so nothing else that reaches the daemon's socket,
    * an agent included, can share an agent's work with its room.
    */
+  /**
+   * Stop a command that an agent runs in the background. Signed like the
+   * live-sharing choice, so nothing else that reaches the daemon's socket, an
+   * agent included, can stop an agent's command.
+   */
+  async stopBackgroundCommand(
+    input: import("../../ipc-types/agents.js").DesktopStopBackgroundCommandInput,
+    assertCaller?: () => void,
+  ): Promise<import("../../ipc-types/agents.js").DesktopStopBackgroundCommandResult> {
+    const value = z.strictObject({
+      entryId: approvalId, daemonGeneration: z.number().int().positive().safe(), taskId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+    }).parse(input);
+    assertCaller?.();
+    await this.waitForStartup();
+    const rawChallenge = await this.request<unknown>("supervisor.host_approval_challenge");
+    if (rawChallenge === null) {
+      return { outcome: "invalid", error: "This app could not prove the request came from you. Unlock secure storage and restart the background service, then try again." };
+    }
+    const challenge = approvalChallenge.parse(rawChallenge);
+    const signer = await this.signerForApproval(challenge);
+    assertCaller?.();
+    const result = record(await this.request<unknown>("supervisor.host_approval_request", signer.sign(challenge, "stop_background_command", value),
+      undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, assertCaller)) ?? {};
+    if (result.outcome === "invalid") return { outcome: "invalid", error: typeof result.error === "string" && result.error.trim() ? result.error : "The command could not be stopped." };
+    if (result.outcome === "stopping" || result.outcome === "not_running" || result.outcome === "failed") return { outcome: result.outcome };
+    throw new Error("Supervisor returned an invalid stop result.");
+  }
+
   async setAgentLiveSharing(
     input: import("../../ipc-types/agents.js").DesktopSupervisorAgentLiveSharingInput,
     assertCaller?: () => void,
