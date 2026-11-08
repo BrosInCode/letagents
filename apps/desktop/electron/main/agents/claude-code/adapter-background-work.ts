@@ -71,14 +71,16 @@ export class ClaudeAdapterBackgroundWork extends ClaudeAdapterNativeExecution {
    * 3. The task's end (`task_notification`, or `task_updated` to an end state) gives the follower its last read.
    * Nothing here changes how the turn runs or ends; it only publishes display-only events.
    */
+  /** The CLI's answer to an owner's stop request. It names no session, and it is read in any state of the handle. */
+  protected answerBackgroundCommandStop(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
+    if (message.type !== "control_response") return;
+    const response = record(message.response);
+    const answer = typeof response?.request_id === "string" ? this.backgroundCommandStops.get(handle)?.get(response.request_id) : undefined;
+    answer?.(response?.subtype === "success");
+  }
+
   protected observeBackgroundCommandOutput(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
-    if (message.type === "control_response") {
-      // The CLI's answer to the owner's stop request: it names no session.
-      const response = record(message.response);
-      const answer = typeof response?.request_id === "string" ? this.backgroundCommandStops.get(handle)?.get(response.request_id) : undefined;
-      answer?.(response?.subtype === "success");
-      return;
-    }
+    if (message.type === "control_response") return;
     if (sessionIdOf(message) !== handle.providerContinuationId || message.parent_tool_use_id != null) return;
     const content = record(message.message)?.content;
     if (message.type === "assistant" && Array.isArray(content)) {

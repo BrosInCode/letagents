@@ -266,11 +266,6 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
   }
 
   /**
-   * Share one agent's live activity with its room, or stop. Signed like the
-   * owner's-setup choice, so nothing else that reaches the daemon's socket,
-   * an agent included, can share an agent's work with its room.
-   */
-  /**
    * Stop a command that an agent runs in the background. Signed like the
    * live-sharing choice, so nothing else that reaches the daemon's socket, an
    * agent included, can stop an agent's command.
@@ -298,6 +293,11 @@ export abstract class SupervisorDaemonHostApprovalClient extends SupervisorDaemo
     throw new Error("Supervisor returned an invalid stop result.");
   }
 
+  /**
+   * Share one agent's live activity with its room, or stop. Signed like the
+   * owner's-setup choice, so nothing else that reaches the daemon's socket,
+   * an agent included, can share an agent's work with its room.
+   */
   async setAgentLiveSharing(
     input: import("../../ipc-types/agents.js").DesktopSupervisorAgentLiveSharingInput,
     assertCaller?: () => void,

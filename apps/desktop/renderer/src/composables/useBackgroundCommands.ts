@@ -89,12 +89,15 @@ export function useBackgroundCommandOutput(entryIds: () => readonly string[]) {
   async function follow(entryId: string, loop: { stopped: boolean }): Promise<void> {
     let version = 0;
     let failures = 0;
-    while (!loop.stopped) {
+    // The loop leaves the running set in the same step that ends it, so a row opened again a moment later finds
+    // either this loop still going or no loop, never one that is about to end.
+    const end = () => { if (running.get(entryId) === loop) running.delete(entryId); };
+    for (;;) {
       const watchCommands = desktopIpc.supervisor?.watchBackgroundCommands;
-      if (!watchCommands) return;
+      if (loop.stopped || !watchCommands) { end(); return; }
       try {
         const batch = await watchCommands({ entryId, afterVersion: version });
-        if (loop.stopped) return;
+        if (loop.stopped) { end(); return; }
         failures = 0;
         version = batch.version;
         // The batch holds the payloads of the background command events; the shared fold reads them.
@@ -112,9 +115,8 @@ export function useBackgroundCommandOutput(entryIds: () => readonly string[]) {
   watch(() => [...entryIds()].sort().join("\n"), () => {
     const wanted = new Set(entryIds());
     for (const [entryId, loop] of running) {
-      if (wanted.has(entryId)) continue;
-      loop.stopped = true;
-      running.delete(entryId);
+      // A loop that is no longer wanted finishes its request and ends; wanted again before that, it goes on.
+      loop.stopped = !wanted.has(entryId);
     }
     for (const entryId of wanted) {
       if (running.has(entryId)) continue;

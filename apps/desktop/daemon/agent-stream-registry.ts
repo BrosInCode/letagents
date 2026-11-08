@@ -8,6 +8,8 @@ const MAX_WAIT_MS = 30_000;
 const DEFAULT_LATEST_INTERVAL_MS = 250;
 /** Latest values that the size limit keeps (background commands); more than this are evicted as usual. */
 const MAX_STICKY_LATEST = 16;
+/** Watches of one agent's background commands that may wait at once (one per open window, with room to spare). */
+const MAX_BACKGROUND_WAITERS = 8;
 /** The key prefix of a background command's values (see shared/live-command-output.mjs). */
 const BACKGROUND_KEY_PREFIX = "background:";
 
@@ -91,6 +93,8 @@ export class AgentStreamRegistry {
   private readonly waiters = new Map<string, Set<() => void>>();
   private readonly pendingLatest = new Map<string, Map<string, PendingLatest>>();
   private readonly backgroundVersions = new Map<string, number>();
+  /** Versions start at a random number: a restarted daemon never answers an old cursor with "nothing new". */
+  private readonly backgroundVersionBase = Math.floor(Math.random() * 1_000_000_000);
   private readonly backgroundWaiters = new Map<string, Set<() => void>>();
   private readonly onBackgroundCommandsChange: (entryId: string) => void;
   private readonly latestSentAt = new Map<string, Map<string, number>>();
@@ -225,9 +229,10 @@ export class AgentStreamRegistry {
     const waitMs = Number.isFinite(input.waitMs) ? Math.max(0, Math.min(MAX_WAIT_MS, Math.floor(input.waitMs))) : DEFAULT_WAIT_MS;
     const read = (): BackgroundCommandsWatchResult => {
       const buffer = this.streams.get(input.entryId);
+      // Only commands that run: the strip shows nothing else, and a busy server is never cut off by ended ones.
       return {
-        version: this.backgroundVersions.get(input.entryId) ?? 0,
-        commands: buffer ? this.backgroundValues(buffer) : [],
+        version: this.backgroundVersionBase + (this.backgroundVersions.get(input.entryId) ?? 0),
+        commands: buffer && !buffer.ended ? this.backgroundValues(buffer).filter((payload) => payload.status === "running").slice(0, MAX_STICKY_LATEST) : [],
         ended: buffer?.ended ?? false,
       };
     };
@@ -244,6 +249,8 @@ export class AgentStreamRegistry {
         };
         const timer = this.setTimer(finish, waitMs);
         const waiters = this.backgroundWaiters.get(input.entryId) ?? new Set<() => void>();
+        // A watch whose caller went away stays until its time is up; a few of them are bounded here.
+        if (waiters.size >= MAX_BACKGROUND_WAITERS) waiters.values().next().value?.();
         waiters.add(finish);
         this.backgroundWaiters.set(input.entryId, waiters);
       });

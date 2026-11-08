@@ -47,7 +47,7 @@
           :id="terminalId"
           ref="terminal"
           class="room-activity-terminal"
-          tabindex="0"
+          :tabindex="open ? 0 : -1"
           :aria-label="`Output of ${command.command}`"
           data-testid="room-activity-background-command-output"
         >{{ outputText }}</pre>
@@ -78,8 +78,8 @@ const emit = defineEmits<{ toggle: []; stop: []; open: [] }>();
 const terminalId = `room-activity-terminal-${useId()}`;
 const terminal = ref<HTMLPreElement | null>(null);
 
-const timeLabel = computed(() => props.stopState === "stopping" ? "Stopping…"
-  : props.command.startedAt ? elapsedLabel(props.command.startedAt, props.now) : "Running");
+// The time keeps its place while Stop runs: the button says "Stopping…", so the row does not change twice.
+const timeLabel = computed(() => props.command.startedAt ? elapsedLabel(props.command.startedAt, props.now) : "Running");
 const outputText = computed(() => {
   if (!props.output) return "Reading the output…";
   return props.output.output || "No output yet.";

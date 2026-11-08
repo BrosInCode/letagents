@@ -317,15 +317,20 @@ const expanded = ref(false);
 const backgroundCommands = useBackgroundCommands();
 const backgroundAgents = computed<readonly RoomBackgroundAgent[]>(() => backgroundCommands?.agents.value ?? []);
 const backgroundCount = computed(() => backgroundAgents.value.reduce((count, agent) => count + agent.commands.length, 0));
-/** One quiet line after the owner stopped a command, while nothing else is shown. */
+/** One quiet line after the owner stopped a command, when nothing else is shown and no other command runs. */
 const stoppedNotice = ref<{ command: string; agent: string; at: number } | null>(null);
 type LinePill = ReturnType<typeof pickActivityPill<ManagedAgentWorkIndicator>>
   | { kind: "background"; agents: readonly RoomBackgroundAgent[] }
   | { kind: "stopped"; command: string; agent: string; at: number };
-// Background commands rank last: a running server is the quietest thing an agent does.
-const pill = computed<LinePill>(() => pickActivityPill({ steer: props.steer, notice: props.notice, work: props.work, typing: props.typingNames })
-  ?? (stoppedNotice.value ? { kind: "stopped", ...stoppedNotice.value }
-    : backgroundAgents.value.length ? { kind: "background", agents: backgroundAgents.value } : null));
+// Background commands rank last: a running server is the quietest thing an agent does. The line says that a
+// command was stopped only when no other command is left to show.
+const pill = computed<LinePill>(() => {
+  const base = pickActivityPill({ steer: props.steer, notice: props.notice, work: props.work, typing: props.typingNames });
+  const background = backgroundAgents.value.length ? { kind: "background" as const, agents: backgroundAgents.value } : null;
+  // An open list of commands stays open while someone types: the owner may be reading a command's output.
+  if (background && expanded.value && (!base || base.kind === "typing")) return background;
+  return base ?? background ?? (stoppedNotice.value ? { kind: "stopped", ...stoppedNotice.value } : null);
+});
 const single = computed(() => pill.value?.kind === "live" && pill.value.work.length === 1 ? pill.value.work[0]! : null);
 const listOpen = computed(() => expanded.value && (pill.value?.kind === "live" || pill.value?.kind === "background"));
 const listWork = computed(() => listOpen.value && pill.value?.kind === "live" ? pill.value.work : []);

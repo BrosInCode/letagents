@@ -47,7 +47,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { ChevronRight, SquareTerminal } from "@lucide/vue";
 import { formatDate } from "../../../../domain/formatters";
 import { formatLiveWorkDuration, type LiveBackgroundCommand } from "../../../../domain/agent-inspector-live";
@@ -74,14 +74,21 @@ async function stop(id: string): Promise<void> {
   setStopState(id, "stopping");
   const outcome = await backgroundCommands.stop(props.entryId, id);
   if (outcome === "not_running") { setStopState(id, null); return; }
-  if (outcome !== "stopping") { setStopState(id, "failed"); return; }
+  if (outcome !== "stopping") { stopFailed(id); return; }
   // The command's end arrives on the feed; one that still runs after this long did not stop.
   clearTimeout(stopWaits.get(id));
   stopWaits.set(id, setTimeout(() => {
     stopWaits.delete(id);
-    if (stopStates.value.get(id) === "stopping") setStopState(id, "failed");
+    if (stopStates.value.get(id) === "stopping") stopFailed(id);
   }, 15_000));
 }
+/** A stop that failed says so under its row, which opens so the words are seen. */
+function stopFailed(id: string): void {
+  setStopState(id, "failed");
+  const item = items.get(id);
+  if (item) item.open = true;
+}
+onBeforeUnmount(() => { for (const timer of stopWaits.values()) clearTimeout(timer); });
 watch(() => props.commands.map((command) => `${command.id}:${command.status}`).join("|"), () => {
   for (const command of props.commands) {
     if (command.status !== "running" && stopStates.value.has(command.id)) {

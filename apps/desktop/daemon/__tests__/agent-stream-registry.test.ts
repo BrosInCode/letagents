@@ -306,7 +306,7 @@ test("running background commands come from their newest values, and only a star
   registry.pushLatest("agent", "background:task-1", background("stopped"), { immediate: true });
   const after = await waiting;
   assert.ok(after.version > first.version, "a new value wakes the watch");
-  assert.equal((after.commands[0] as { status: string }).status, "stopped");
+  assert.deepEqual(after.commands, [], "the strip reads only commands that run");
   assert.deepEqual(registry.runningBackgroundCommands("agent"), []);
   assert.deepEqual(changes, ["agent", "agent"], "an end calls back");
 
@@ -315,6 +315,29 @@ test("running background commands come from their newest values, and only a star
   assert.deepEqual(registry.runningBackgroundCommands("agent"), [], "a feed that ended runs nothing");
   assert.deepEqual(changes, ["agent", "agent", "agent", "agent"]);
   assert.equal((await registry.watchBackgroundCommands({ entryId: "agent", afterVersion: 0, waitMs: 0 })).ended, true);
+});
+
+test("the background watch returns a busy running command even after many commands ended, and bounds its waiters", async () => {
+  let pendingTimers = 0;
+  const registry = new AgentStreamRegistry({
+    latestIntervalMs: 0,
+    setTimeout: (() => { pendingTimers += 1; return pendingTimers as unknown as ReturnType<typeof setTimeout>; }) as typeof setTimeout,
+    clearTimeout: (() => { pendingTimers -= 1; }) as typeof clearTimeout,
+  });
+  const background = (taskId: string, status: string) => ({ ...activity(0), method: "item/backgroundCommand/updated",
+    payload: { taskId, command: `run ${taskId}`, status, output: "" } });
+  registry.pushLatest("agent", "background:server", background("server", "running"), { sticky: true });
+  for (let index = 0; index < 20; index += 1) registry.pushLatest("agent", `background:job-${index}`, background(`job-${index}`, "completed"), { immediate: true });
+  registry.pushLatest("agent", "background:server", background("server", "running"), { sticky: true, immediate: true });
+  const read = await registry.watchBackgroundCommands({ entryId: "agent", afterVersion: -1, waitMs: 0 });
+  assert.deepEqual(read.commands.map((command) => (command as { taskId: string }).taskId), ["server"]);
+
+  const waits = Array.from({ length: 10 }, () => registry.watchBackgroundCommands({ entryId: "agent", afterVersion: read.version, waitMs: 25_000 }));
+  // The two oldest of ten waiting watches were released to keep eight.
+  const released = await Promise.race([Promise.all(waits.slice(0, 2)), new Promise((resolve) => setImmediate(() => resolve("still waiting")))]);
+  assert.notEqual(released, "still waiting");
+  registry.delete("agent");
+  await Promise.all(waits);
 });
 
 function activity(index: number, summary = `event-${index}`): DaemonActivityEvent {
