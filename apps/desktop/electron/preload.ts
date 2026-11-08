@@ -1,6 +1,6 @@
 import type { RoomGif, RoomExpressionsSetting } from "../../../shared/room-expressions.mjs";
 import { contextBridge, ipcRenderer } from "electron";
-import type { DesktopApi, DesktopRoomLiveMetadataOptions } from "./ipc-types.js";
+import type { DesktopApi, DesktopRoomLiveMetadataOptions, DesktopRoomSnapshotOptions } from "./ipc-types.js";
 
 const api: DesktopApi = {
   conversations: {
@@ -108,7 +108,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:leave-account-room", roomIdentifier),
     deleteAccountRoom: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:delete-account-room", roomIdentifier),
-    getSnapshot: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null),
+    getSnapshot: (roomIdentifier?: string | null, options?: DesktopRoomSnapshotOptions) =>
+      ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null, options ?? null),
     getLiveMetadata: (roomIdentifier: string, options?: DesktopRoomLiveMetadataOptions) =>
       ipcRenderer.invoke("desktop:room:get-live-metadata", roomIdentifier, options ?? null),
     pollAgentWork: (roomIdentifier: string, afterCursor?: string | null) =>
@@ -331,6 +332,14 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:chat-storage:publish-local-room", roomIdentifier),
     syncLocalRoom: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:chat-storage:sync-local-room", roomIdentifier),
+  },
+  links: {
+    takePendingRoom: () => ipcRenderer.invoke("desktop:room:take-pending-link"),
+    onOpenRoom: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, target: Parameters<typeof callback>[0]) => callback(target);
+      ipcRenderer.on("desktop:room:open-link", listener);
+      return () => ipcRenderer.off("desktop:room:open-link", listener);
+    },
   },
   asks: {
     listModels: () => ipcRenderer.invoke("desktop:asks:list-models"),

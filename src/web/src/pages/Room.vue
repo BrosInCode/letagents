@@ -170,6 +170,17 @@
         @dismiss="joinRequestAlerts.dismiss()"
         @open-requests="openJoinRequests"
       />
+      <!-- On a Mac or Windows browser: continue this room in the desktop app, asked once per room per session. -->
+      <OpenInDesktopPill
+        v-if="isConnected && openInDesktop.visible.value"
+        :state="openInDesktop.state.value"
+        :always="openInDesktop.always.value"
+        :download-href="openInDesktop.downloadHref.value"
+        @open="openInDesktop.open()"
+        @always="openInDesktop.openAlways()"
+        @dismiss="openInDesktop.dismiss()"
+        @stop-always="openInDesktop.stopAlways()"
+      />
     </div>
 
     <Composer
@@ -235,6 +246,8 @@ import { provideRoomMessagePins, useRoomMessagePins } from '@/composables/roomMe
 import { provideRoomMessageReactions, useRoomMessageReactions } from '@/composables/roomMessageReactions'
 import RoomHeader from '@/components/room/RoomHeader.vue'
 import JoinRequestBanner from '../../../../shared/ui/JoinRequestBanner.vue'
+import OpenInDesktopPill from '@/components/room/OpenInDesktopPill.vue'
+import { openInDesktop } from '@/composables/openInDesktop'
 import { joinRequestAlerts } from '@/composables/roomJoinRequestAlerts'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
@@ -367,6 +380,8 @@ async function openJoinRequests() {
 const joinRequestBanner = joinRequestAlerts.visible
 // Admins only: the server sends the requests to admins only, and the page mounts the strip for admins only.
 const joinRequestBannerAvailable = computed(() => isConnected.value && room.value?.role === 'admin')
+// The desktop offer follows the open room; with Always on it opens the app as soon as the room connects.
+watch(() => (isConnected.value ? room.value?.identifier || null : null), (roomIdentifier) => openInDesktop.setRoom(roomIdentifier), { immediate: true })
 watch(
   () => [isConnected.value ? room.value?.identifier || null : null, room.value?.role === 'admin', auth.user.value?.id] as const,
   ([roomIdentifier, admin, accountId], previous) => {
