@@ -1,6 +1,7 @@
 import { computed, onBeforeUnmount, onMounted, watch } from "vue";
 import type { CompanyHomeState } from "../../components/desktop/company/types";
 import type { FirstRunCompanyStepState } from "../../components/desktop/setup/types";
+import { findSidebarRoomEntryByIdentifier, normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
 import { useDesktopOrganizations } from "../useDesktopOrganizations";
 import type { AppContextOf } from "./context";
 
@@ -83,9 +84,9 @@ export function useAppCompanyNavigation(context: unknown) {
   }
 
   function openCompanyRoom(roomId: string): void {
-    if (!company.rooms.value.some((room) => room.room_id === roomId)) return;
-    const entry = sidebarProjectEntries.value.flatMap((project) => [project.parent, ...project.branchRooms, ...project.focusRooms])
-      .find((item) => item.roomIdentifier === roomId);
+    const identifier = normalizeRoomIdentifier(roomId);
+    if (!identifier || !company.rooms.value.some((room) => normalizeRoomIdentifier(room.room_id) === identifier)) return;
+    const entry = findSidebarRoomEntryByIdentifier(sidebarProjectEntries.value, identifier);
     if (entry) app.handleSidebarEntrySelected(entry);
   }
 
