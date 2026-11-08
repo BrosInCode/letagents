@@ -60,7 +60,7 @@
           @click="choose(org.github_org_id)"
         >
           <CompanyAvatar :login="org.login" :avatar-url="org.avatar_url" size="m" />
-          <span>{{ org.login }}<small>{{ organizationDetail(org) }}</small></span>
+          <span>{{ org.login }}<b v-if="newCompanyIds.has(org.github_org_id)" class="company-scope-new">New</b><small>{{ organizationDetail(org) }}</small></span>
           <Check v-if="state.selectedId === org.github_org_id || org.joined || (!org.setup && org.role !== 'owner')" class="company-scope-tick" aria-hidden="true" />
           <span v-else class="company-scope-tag">{{ org.setup ? "Join" : "Set up" }}</span>
         </button>
@@ -149,9 +149,32 @@ const anchor = ref<{ top: number; left: number } | null>(null);
 
 const selected = computed(() => props.state.organizations.find((org) => org.github_org_id === props.state.selectedId) ?? null);
 const triggerLabel = computed(() => `Rooms: ${selected.value ? selected.value.login : "all rooms"}. Change company`);
-/** A dot on the trigger: something on GitHub waits for the person. */
+/** Companies the person has seen in this menu; a company they can join but have not seen yet gets the dot. */
+const SEEN_KEY = "letagents:company-menu-seen";
+const seenIds = ref<Set<string>>(readSeenIds());
+const newCompanies = computed(() => props.state.organizations
+  .filter((org) => org.setup && !org.joined && !seenIds.value.has(org.github_org_id)));
+/** A dot on the trigger: something on GitHub waits for the person, or a company they can now join. */
 const needsAttention = computed(() => props.state.status === "github_access_required"
-  || props.state.invitations.length > 0 || props.state.ssoRequired.length > 0);
+  || props.state.invitations.length > 0 || props.state.ssoRequired.length > 0 || newCompanies.value.length > 0);
+
+function readSeenIds(): Set<string> {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(SEEN_KEY) || "[]");
+    return new Set(Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function markCompaniesSeen(): void {
+  if (!newCompanies.value.length) return;
+  const next = new Set([...seenIds.value, ...newCompanies.value.map((org) => org.github_org_id)]);
+  seenIds.value = next;
+  try { window.localStorage.setItem(SEEN_KEY, JSON.stringify([...next].slice(-200))); } catch { /* The dot is a convenience. */ }
+}
+/** Companies that were new when the menu opened keep their "New" mark until it closes. */
+const newCompanyIds = ref<Set<string>>(new Set());
 const menuPosition = computed(() => anchor.value
   ? { top: `${anchor.value.top}px`, left: `${anchor.value.left}px` }
   : undefined);
@@ -197,7 +220,9 @@ function toggleMenu(): void {
     return;
   }
   placeMenu();
+  newCompanyIds.value = new Set(newCompanies.value.map((org) => org.github_org_id));
   open.value = true;
+  markCompaniesSeen();
   void nextTick(() => {
     const items = menuItems();
     (items.find((item) => item.getAttribute("aria-checked") === "true") ?? items[0])?.focus();
@@ -419,6 +444,13 @@ defineExpose({ close: closeMenu });
   border-radius: 999px;
   color: var(--text-secondary);
   font-size: 11.5px;
+}
+
+.company-scope-new {
+  margin-left: 7px;
+  color: var(--amber, #f59e0b);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .company-scope-action {
