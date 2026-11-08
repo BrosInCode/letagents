@@ -976,6 +976,11 @@ export interface DesktopProjectConnectionResult {
   error: string | null;
 }
 
+/** Options for a new shared room. A company ID creates the room inside that company. */
+export interface DesktopInviteRoomOptions {
+  organizationId?: string | null;
+}
+
 export interface DesktopInviteRoomCreation {
   roomIdentifier: string;
   code: string;

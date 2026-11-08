@@ -19,10 +19,13 @@ import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } fro
 import type { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./useAppRoomData";
 import type { useAppLifecycle } from "./useAppLifecycle";
 import type { useAppJoinRequestAlerts } from "./useAppJoinRequestAlerts";
+import type { useAppCompany, useAppCompanyNavigation } from "./useAppCompany";
 
 /** What each composable returns, by composable name. */
 interface AppContextParts {
   useAppState: ReturnType<typeof useAppState>;
+  useAppCompany: ReturnType<typeof useAppCompany>;
+  useAppCompanyNavigation: ReturnType<typeof useAppCompanyNavigation>;
   useAppInboxActions: ReturnType<typeof useAppInboxActions>;
   useAppRentalActions: ReturnType<typeof useAppRentalActions>;
   useAppSidebarLayout: ReturnType<typeof useAppSidebarLayout>;
