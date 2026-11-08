@@ -1002,6 +1002,13 @@
       "when": 1794900100000,
       "tag": "0142_desktop_join_request_pushes",
       "breakpoints": true
+    },
+    {
+      "idx": 143,
+      "version": "7",
+      "when": 1795000000000,
+      "tag": "0143_organizations",
+      "breakpoints": true
     }
   ]
 }
