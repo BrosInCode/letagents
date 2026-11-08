@@ -167,6 +167,7 @@
           :capturing="capturing"
           :highlight-mark-id="highlightedMarkId"
           :visible-height="clipState?.clipped ? clipState.visibleHeight : frameHeight"
+          :anchor-at="anchorAt"
           @exit="exitDraw"
           @cancel-pin="endPin"
           @pinned="endPin"
@@ -278,7 +279,7 @@ import {
   type NoteMark,
 } from "./live-demo/markup";
 import { markBody, type MarkBody } from "./live-demo/pending-marks";
-import { liveDemoKey, type DemoMark } from "./live-demo/protocol";
+import { liveDemoKey, type DemoMark, type LiveDemoAnchor, type LiveDemoPoint } from "./live-demo/protocol";
 import { liveDemoAvailable, useLiveDemo } from "./live-demo/session";
 import { createWidthSync, type WidthSync } from "./live-demo/width-sync";
 import LiveDemoFaces from "./live-demo/LiveDemoFaces.vue";
@@ -696,6 +697,13 @@ function giveFocusBack(): void {
 }
 
 watch(() => props.href, reload);
+
+/** The element under a point of this demo, for a pin; null when main cannot name one. */
+function anchorAt(at: LiveDemoPoint): Promise<LiveDemoAnchor | null> {
+  const url = lease.value?.url;
+  const find = desktopIpc.room?.inlineDemoAnchorAt;
+  return url && find ? find(url, at[0], at[1]).catch(() => null) : Promise.resolve(null);
+}
 
 /**
  * Tells main how wide the frame is, so it lays the page out at 760 px and scales

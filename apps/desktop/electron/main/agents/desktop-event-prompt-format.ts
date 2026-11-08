@@ -131,7 +131,7 @@ export function formatRoomTurnAttachments(attachments: readonly ProviderRoomTurn
       ? `${file.origin.messageId} by ${JSON.stringify(file.origin.sender)}${context ? ` (${context})` : ""}, attachment ${file.index}`
       : `Attachment ${file.index}`;
     const name = `${where}: ${JSON.stringify(file.fileName)}${facts ? ` (${facts})` : ""}.`;
-    if (file.category === "file") return `- ${name} ${fileNote(file)}`;
+    if (file.category === "file") return `- ${name} ${fileNote(file)}${demoNote(file)}`;
     // An image the adapter has nothing to give is described as unavailable, so the numbering matches what is sent.
     const status = file.status === "image" && !(file.image?.data || file.image?.path) ? "unavailable" : file.status;
     switch (status) {
@@ -141,7 +141,7 @@ export function formatRoomTurnAttachments(attachments: readonly ProviderRoomTurn
         return `- ${name} Included after this text as image ${image}.${gif}`;
       }
       case "not_image": return `- ${name} Not shown: its bytes are not a PNG, JPEG, GIF or WebP image.`;
-      case "unsupported_type": return `- ${name} Not given: only images, text files (such as .txt, .log, .md, .json, .csv, .yaml, .xml, .diff) and PDFs reach agents.`;
+      case "unsupported_type": return `- ${name} Not given: only images, text files (such as .txt, .log, .md, .json, .csv, .yaml, .xml, .diff, .html) and PDFs reach agents.`;
       case "too_large": return `- ${name} Not shown: it is larger than the 10 MB image limit.`;
       case "turn_limit": return file.origin
         ? `- ${name} Not shown: the images of this turn reached the 20 MB limit for one turn.`
@@ -161,6 +161,16 @@ export function formatRoomTurnAttachments(attachments: readonly ProviderRoomTurn
     ...(own.length ? [`Files attached to the source message, shared by its sender. ${framing}`, ...own.map(note)] : []),
     ...(recent.length ? [`Files on recent messages before the source message, shared by the people named. ${framing}`, ...recent.map(note)] : []),
   ];
+}
+
+/**
+ * An HTML file runs as a live demo in the desktop app, where people pin notes
+ * and draw on it. Those marks are not in the file: the agent reads them itself.
+ */
+function demoNote(file: ProviderRoomTurnAttachment): string {
+  if (!file.demo) return "";
+  return ` It is a live HTML demo: people may have pinned notes or drawn on it. Before you change it, read those marks with read_demo_marks`
+    + ` (message_id ${JSON.stringify(file.demo.messageId)}, attachment_id ${JSON.stringify(file.demo.attachmentId)}).`;
 }
 
 /** A text file or PDF is a path the agent opens itself; its bytes never enter the prompt. */
@@ -183,7 +193,7 @@ function fileNote(file: ProviderRoomTurnAttachment): string {
     }
     case "unsupported_type": return file.mimeType.startsWith("image/")
       ? "Not shown: only PNG, JPEG, GIF and WebP images reach agents."
-      : "Not given: only images, text files (such as .txt, .log, .md, .json, .csv, .yaml, .xml, .diff) and PDFs reach agents.";
+      : "Not given: only images, text files (such as .txt, .log, .md, .json, .csv, .yaml, .xml, .diff, .html) and PDFs reach agents.";
     case "binary": return "Not given: its bytes are not text or a PDF.";
     case "empty": return "Not given: the file is empty.";
     case "cannot_read_pdf": return "Not given: this agent cannot read PDFs. If its content matters, ask the sender to share it as text.";
