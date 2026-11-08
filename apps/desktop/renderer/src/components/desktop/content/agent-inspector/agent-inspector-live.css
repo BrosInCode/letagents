@@ -98,6 +98,7 @@
 .agent-live-background-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 6px; }
 .agent-live-background-heading h3 { margin: 0; font-size: 12px; font-weight: 600; color: var(--text); }
 .agent-live-background-heading > span { font-size: 11px; color: var(--live-muted); font-variant-numeric: tabular-nums; }
+.agent-live-background-list { max-height: min(55vh, 460px); overflow-y: auto; overscroll-behavior: contain; }
 .agent-live-background-item { border-radius: 9px; }
 .agent-live-background-item[open] { background: var(--accent-dim); }
 .agent-live-background-item > summary { display: flex; align-items: flex-start; gap: 11px; min-height: 48px; padding: 6px 4px 6px 0; border-radius: 9px; cursor: pointer; }
@@ -123,9 +124,10 @@
 .agent-live-empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 36px 16px; text-align: center; color: var(--live-muted); }
 .agent-live-empty p { max-width: 280px; margin: 0; color: var(--text); font-size: 13px; line-height: 1.6; }
 .agent-live-empty > span { max-width: 260px; font-size: 12px; line-height: 1.6; }
-/* The footer stays at the bottom of the panel: commands that run in the background, then the follow bar. */
+.agent-live-follow-bar { position: sticky; bottom: 0; z-index: 3; margin-top: auto; min-height: 48px; display: flex; justify-content: space-between; align-items: center; gap: 10px; background: var(--live-surface); border-top: 1px solid var(--border); color: var(--live-muted); font-size: 11px; }
+/* The owner's footer stays at the bottom of the panel: commands that run in the background, then the follow bar. */
 .agent-live-footer { position: sticky; bottom: 0; z-index: 3; margin-top: auto; background: var(--live-surface); border-top: 1px solid var(--border); }
-.agent-live-follow-bar { min-height: 48px; display: flex; justify-content: space-between; align-items: center; gap: 10px; color: var(--live-muted); font-size: 11px; }
+.agent-live-footer > .agent-live-follow-bar { position: static; margin-top: 0; border-top: 0; background: transparent; }
 .agent-live-follow-bar button { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 10px; border: 0; border-radius: 6px; color: var(--text-secondary); background: transparent; cursor: pointer; font: 500 11px var(--font-sans); }
 .agent-live-following { display: inline-flex; align-items: center; gap: 6px; }
 .agent-live-following > span { width: 5px; height: 5px; border-radius: 50%; background: var(--live-blue); }

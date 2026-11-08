@@ -107,9 +107,25 @@ export function appendAgentInspectorLiveBatch(
   const replaced = (event: DesktopAgentStreamEvent) => event.latestKey !== undefined
     && newestOfKey.has(event.latestKey) && newestOfKey.get(event.latestKey) !== event.sequence;
   const merged = [...priorEvents, ...batch.events].filter((event) => !replaced(event));
-  const localOverflow = Math.max(0, merged.length - limit);
+  // A background command that still runs keeps its one event, as the daemon keeps it: a quiet server's
+  // event is often the oldest in the list.
+  const kept = (event: DesktopAgentStreamEvent) => event.latestKey?.startsWith("background:") === true
+    && (event.payload as { status?: unknown } | null)?.status === "running";
+  let events = merged;
+  let localOverflow = 0;
+  if (merged.length > limit) {
+    let excess = merged.length - limit;
+    events = merged.filter((event) => {
+      if (excess > 0 && !kept(event)) {
+        excess -= 1;
+        localOverflow += 1;
+        return false;
+      }
+      return true;
+    });
+  }
   return {
-    events: localOverflow ? merged.slice(-limit) : merged,
+    events,
     ended: batch.ended,
     droppedEvents: (batch.reset ? 0 : feed.droppedEvents) + Math.max(0, batch.droppedEvents) + localOverflow,
   };

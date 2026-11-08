@@ -1990,6 +1990,19 @@ test("Codex live output shows the newest whole lines of a running command as the
     "the final event ends the paced output of its call");
 });
 
+test("Codex live output hides a private key until its END line arrives, then redaction takes the whole key", () => {
+  const display = new ProviderLiveDisplay("thread");
+  const project = (method: string, extra: Record<string, unknown> = {}) => display.project(displayEvent("codex", method, {
+    threadId: "thread", turnId: "turn", itemId: "shell", item: { id: "shell", type: "commandExecution", command: "cat key" }, ...extra,
+  }));
+  project("item/started");
+  const partial = project("item/commandExecution/outputDelta", { delta: "start\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAA\n" })[0]!;
+  assert.equal((partial.payload as any).output, "start\n[REDACTED PRIVATE KEY]\n");
+  const whole = project("item/commandExecution/outputDelta", { delta: "QUJDREVGR0g=\n-----END OPENSSH PRIVATE KEY-----\ndone\n" })[0]!;
+  assert.doesNotMatch(JSON.stringify(whole.payload), /b3BlbnNzaC1rZXktdjEAAAAA|QUJDREVGR0g=/);
+  assert.match((whole.payload as any).output, /^start\n.*REDACTED.*\ndone\n$/s);
+});
+
 test("Codex live output is hidden for the rest of a command after a chunk that redaction already changed", () => {
   const display = new ProviderLiveDisplay("thread");
   const project = (method: string, extra: Record<string, unknown> = {}) => display.project(displayEvent("codex", method, {
@@ -2057,6 +2070,12 @@ test("a display-only event reaches the owner's feed alone, as the newest value o
   assert.doesNotMatch(JSON.stringify(latest[0]![1].payload), /secret_canary/, "the daemon redacts it again");
   assert.deepEqual(pushed, [], "nothing is appended to the feed");
   assert.deepEqual(activity, [], "nothing becomes activity");
+  await harness.coordinator.enqueue("agent-1", handle, displayOnly(3, "item/toolCall/updated", {
+    callID: "call-1", tool: "bash", status: "completed", error: "forged end", output: "ok\n", outputProgress: true,
+  }));
+  assert.equal(latest.at(-1)![0], "output:call-1");
+  assert.deepEqual([(latest.at(-1)![1].payload as any).status, (latest.at(-1)![1].payload as any).error], ["running", null],
+    "live output cannot end or fail its call");
   await harness.coordinator.disposeAll();
 });
 

@@ -4,33 +4,35 @@
       <h3 id="agent-live-background-heading">In the background</h3>
       <span>{{ countLabel }}</span>
     </div>
-    <details
-      v-for="command in commands" :key="command.id" :ref="(element) => remember(command.id, element)"
-      class="agent-live-background-item" :data-status="command.status"
-      @toggle="onToggle(command.id, $event)"
-    >
-      <summary>
-        <span class="agent-live-background-icon" aria-hidden="true"><SquareTerminal :size="15" :stroke-width="1.6" /></span>
-        <span class="agent-live-background-copy">
-          <span class="agent-live-background-command" :title="command.command">{{ command.command }}</span>
-          <span class="agent-live-background-last">{{ lastLine(command) }}</span>
-        </span>
-        <span class="agent-live-background-state">
-          <span v-if="command.status === 'running'" class="agent-live-background-pulse" aria-hidden="true"></span>{{ stateLabel(command) }}
-        </span>
-        <ChevronRight class="agent-live-chevron" :size="14" aria-hidden="true" />
-      </summary>
-      <div class="agent-live-background-body">
-        <pre
-          :ref="(element) => rememberOutput(command.id, element)" class="agent-live-background-output" tabindex="0"
-          :aria-label="`Output of ${command.command}`"
-        >{{ command.output || 'No output yet.' }}</pre>
-        <div class="agent-live-background-foot">
-          <span>{{ startedLabel(command) }}</span>
-          <span>{{ linesLabel(command) }}</span>
+    <div class="agent-live-background-list">
+      <details
+        v-for="command in commands" :key="command.id" :ref="(element) => remember(command.id, element)"
+        class="agent-live-background-item" :data-status="command.status"
+        @toggle="onToggle(command.id, $event)"
+      >
+        <summary>
+          <span class="agent-live-background-icon" aria-hidden="true"><SquareTerminal :size="15" :stroke-width="1.6" /></span>
+          <span class="agent-live-background-copy">
+            <span class="agent-live-background-command" :title="command.command">{{ command.command }}</span>
+            <span class="agent-live-background-last">{{ lastLine(command) }}</span>
+          </span>
+          <span class="agent-live-background-state">
+            <span v-if="command.status === 'running'" class="agent-live-background-pulse" aria-hidden="true"></span>{{ stateLabel(command) }}
+          </span>
+          <ChevronRight class="agent-live-chevron" :size="14" aria-hidden="true" />
+        </summary>
+        <div class="agent-live-background-body">
+          <pre
+            :ref="(element) => rememberOutput(command.id, element)" class="agent-live-background-output" tabindex="0"
+            :aria-label="`Output of ${command.command}`"
+          >{{ command.output || 'No output yet.' }}</pre>
+          <div class="agent-live-background-foot">
+            <span>{{ startedLabel(command) }}</span>
+            <span>{{ linesLabel(command) }}</span>
+          </div>
         </div>
-      </div>
-    </details>
+      </details>
+    </div>
   </section>
 </template>
 

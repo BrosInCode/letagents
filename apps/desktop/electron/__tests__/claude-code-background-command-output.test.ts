@@ -39,6 +39,40 @@ test("the output file of a background command is accepted only in the CLI's own 
   assert.equal(claudeBackgroundOutputPath(text("session-1/tasks/b3esdnfv2.output"), "b3esdnfv2", "session-1"), null, "a relative path is refused");
   assert.equal(claudeBackgroundOutputPath(text(path), "../escape", "session-1"), null, "a task id is a plain name");
   assert.equal(claudeBackgroundOutputPath("Command finished.", "b3esdnfv2", "session-1"), null);
+  const spaced = "C:\\Users\\Ada Lovelace\\AppData\\Local\\Temp\\claude\\repo\\session-1\\tasks\\b3esdnfv2.output";
+  if (process.platform === "win32") {
+    assert.equal(claudeBackgroundOutputPath(text(spaced), "b3esdnfv2", "session-1"), spaced, "a user folder with a space is a path too");
+  }
+  const posixSpaced = "/Users/Ada Lovelace/tmp/claude-501/-repo/session-1/tasks/b3esdnfv2.output";
+  assert.equal(claudeBackgroundOutputPath(text(posixSpaced), "b3esdnfv2", "session-1"), posixSpaced);
+});
+
+test("a follower ends by itself at the CLI's exit line, frees its place, and never sends an event too large to arrive", async () => {
+  const { root, tasks } = await taskFolder("session-1");
+  const path = join(tasks, "task-1.output");
+  const published: LiveBackgroundCommandPayload[] = [];
+  let stopped = 0;
+  try {
+    await writeFile(path, "");
+    const follower = new BackgroundCommandOutput({
+      taskId: "task-1", toolUseId: null, command: `echo ${"y".repeat(10_000)}`, description: null, path,
+      startedAt: "2026-11-08T14:43:00.000Z", now: () => "2026-11-08T14:45:00.000Z",
+      publish: (payload) => published.push(payload), onStopped: () => { stopped += 1; },
+    });
+    follower.start();
+    assert.ok(published[0]!.command.length <= 2_000, "the command is bounded");
+    // Six thousand characters of a CJK script are three bytes each, and quotes double in JSON.
+    await appendFile(path, `${"\"雪\"".repeat(2_000)}\n\n[exited with code 0]\n`);
+    await eventually(() => published.at(-1)?.status === "completed", "the exit line ends the follower");
+    const last = published.at(-1)!;
+    assert.equal(last.exitCode, 0);
+    assert.ok(Buffer.byteLength(JSON.stringify(last), "utf8") <= 24 * 1024, "the final event fits the payload limit");
+    assert.equal(stopped, 1);
+    follower.finish("completed", 0);
+    assert.equal(published.at(-1), last, "a later notice changes nothing");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("a background command's end state comes from Claude Code's status and the command's exit code", () => {

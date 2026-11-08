@@ -22,10 +22,14 @@ export const LIVE_BACKGROUND_COMMAND_METHOD = "item/backgroundCommand/updated";
 // eslint-disable-next-line no-control-regex
 const TERMINAL_CONTROL = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/g;
 
+// Other control characters a terminal does not print; a tab and a line end stay.
+// eslint-disable-next-line no-control-regex
+const UNPRINTED_CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g;
+
 /**
  * Text as a terminal would show it: control sequences (colors, cursor moves)
  * are removed, and a line that a carriage return rewrote (a progress bar)
- * keeps only its last version.
+ * keeps only its last version. Other control characters are removed too.
  */
 export function plainTerminalText(text) {
   return String(text)
@@ -34,9 +38,38 @@ export function plainTerminalText(text) {
     .split("\n")
     .map((line) => {
       const start = line.lastIndexOf("\r");
-      return start >= 0 ? line.slice(start + 1) : line;
+      return (start >= 0 ? line.slice(start + 1) : line).replace(UNPRINTED_CONTROL, "");
     })
     .join("\n");
+}
+
+const PRIVATE_KEY_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g;
+const PRIVATE_KEY_END = /-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
+const PRIVATE_KEY_END_LINE = /-----END [A-Z0-9 ]*PRIVATE KEY-----/;
+const HIDDEN_PRIVATE_KEY = "[REDACTED PRIVATE KEY]";
+
+/**
+ * Redaction finds a private key only from its BEGIN line to its END line. A
+ * tail can hold a key without one of them: the END line has not arrived yet,
+ * or the cut left out the BEGIN line. Such a key is hidden here, from its
+ * BEGIN line to the end of the text, or from the start of the text to its
+ * END line. A whole key is left to the redaction that runs after this.
+ */
+export function hidePartialPrivateKeys(text) {
+  let shown = String(text);
+  const begins = [...shown.matchAll(PRIVATE_KEY_BEGIN)];
+  const ends = [...shown.matchAll(PRIVATE_KEY_END)];
+  const firstEnd = ends[0]?.index ?? -1;
+  if (firstEnd >= 0 && !begins.some((begin) => begin.index < firstEnd)) {
+    const lineEnd = shown.indexOf("\n", firstEnd);
+    shown = `${HIDDEN_PRIVATE_KEY}\n${lineEnd >= 0 ? shown.slice(lineEnd + 1) : ""}`;
+  }
+  const lastBegin = [...shown.matchAll(PRIVATE_KEY_BEGIN)].at(-1)?.index ?? -1;
+  if (lastBegin >= 0 && !PRIVATE_KEY_END_LINE.test(shown.slice(lastBegin))) {
+    const lineStart = shown.lastIndexOf("\n", lastBegin) + 1;
+    shown = `${shown.slice(0, lineStart)}${HIDDEN_PRIVATE_KEY}\n`;
+  }
+  return shown;
 }
 
 /**
@@ -47,6 +80,8 @@ export function plainTerminalText(text) {
  * 2. When anything before the tail is left out, the tail starts at the next
  *    line, for the same reason: a line that shows only its end could show
  *    only the end of a secret.
+ * 3. A private key without its BEGIN or its END line is hidden (see
+ *    hidePartialPrivateKeys).
  */
 export function liveOutputTail(text, options = {}) {
   const maxChars = options.maxChars ?? LIVE_OUTPUT_TAIL_CHARS;
@@ -64,7 +99,7 @@ export function liveOutputTail(text, options = {}) {
     const lineEnd = tail.indexOf("\n");
     tail = lineEnd >= 0 ? tail.slice(lineEnd + 1) : "";
   }
-  return { text: tail, cut };
+  return { text: hidePartialPrivateKeys(tail), cut };
 }
 
 /** The feed key of a live output event, or null for any other event. */

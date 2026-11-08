@@ -23,6 +23,14 @@ const OPEN_RETRY_MS = 500;
 const OPEN_ATTEMPTS = 20;
 /** Claude Code ends the file of a command with this line. */
 const EXIT_LINE = /\n?\[exited with code (-?\d+)\]\s*$/;
+/** The longest command and description an event carries. */
+const MAX_COMMAND_CHARS = 2_000;
+const MAX_DESCRIPTION_CHARS = 300;
+/**
+ * A final event must fit the stream's payload limit, or it never arrives and
+ * the command looks as if it still runs. Above this size it goes without output.
+ */
+const MAX_PAYLOAD_BYTES = 24 * 1024;
 
 /**
  * The file in which Claude Code writes the output of a command that it runs
@@ -33,9 +41,11 @@ const EXIT_LINE = /\n?\[exited with code (-?\d+)\]\s*$/;
  * `<session>/tasks/<task id>.output`, in the CLI's own folder for the session.
  */
 export function claudeBackgroundOutputPath(resultText: string, taskId: string, sessionId: string): string | null {
-  const match = /Output is being written to: (\S+)/.exec(resultText);
-  if (!match || !/^[A-Za-z0-9_-]{1,128}$/.test(taskId) || !sessionId) return null;
-  const path = match[1]!.replace(/[.,;]+$/, "");
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(taskId) || !sessionId) return null;
+  // The path ends with the task's file name; it can hold spaces (a Windows user folder).
+  const match = new RegExp(`Output is being written to: (.+?[\\\\/]${taskId}\\.output)(?=[\\s.,;]|$)`).exec(resultText);
+  if (!match) return null;
+  const path = match[1]!;
   if (!isAbsolute(path) || basename(path) !== `${taskId}.output`) return null;
   const tasks = dirname(path);
   if (basename(tasks) !== "tasks" || basename(dirname(tasks)) !== sessionId) return null;
@@ -58,6 +68,8 @@ export type BackgroundCommandOutputInput = {
   startedAt: string;
   now: () => string;
   publish: (payload: LiveBackgroundCommandPayload) => void;
+  /** The follower has stopped: it published its end, or it was closed. */
+  onStopped?: () => void;
 };
 
 /**
@@ -120,13 +132,15 @@ export class BackgroundCommandOutput {
     const file = this.file;
     this.file = null;
     void file?.close().catch(() => undefined);
+    this.input.onStopped?.();
   }
 
   private async openFile(attempt: number): Promise<void> {
     if (this.closed || this.ended) return;
     try {
       // O_NOFOLLOW: a symbolic link put in the file's place is never followed.
-      const file = await open(this.input.path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+      // O_NONBLOCK: a pipe put in its place cannot hold the open; it is no regular file and is closed below.
+      const file = await open(this.input.path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0));
       const info = await file.stat();
       const ownUser = typeof process.getuid !== "function" || info.uid === process.getuid();
       if (!info.isFile() || !ownUser || this.closed) {
@@ -161,7 +175,11 @@ export class BackgroundCommandOutput {
     this.readTimer = setTimeout(() => {
       this.readTimer = null;
       this.reading = this.reading.then(() => this.readNew()).catch(() => undefined).then(() => {
-        if (!this.closed && !this.ended) this.publish();
+        if (this.closed || this.ended) return;
+        // The CLI writes this line when the command ends: the end is known even if its notice never comes.
+        const exitCode = this.exitCodeFromOutput();
+        if (exitCode !== null) this.finish("completed", exitCode);
+        else this.publish();
       });
     }, delayMs);
     this.readTimer.unref?.();
@@ -207,8 +225,8 @@ export class BackgroundCommandOutput {
     const payload: LiveBackgroundCommandPayload = {
       taskId: this.input.taskId,
       toolUseId: this.input.toolUseId,
-      command: this.input.command,
-      description: this.input.description,
+      command: this.input.command.slice(0, MAX_COMMAND_CHARS),
+      description: this.input.description?.slice(0, MAX_DESCRIPTION_CHARS) ?? null,
       status: final && this.ended ? this.ended.status : "running",
       output: tail.text,
       outputTruncated: tail.cut,
@@ -216,6 +234,10 @@ export class BackgroundCommandOutput {
       startedAt: this.input.startedAt,
       endedAt: final ? this.ended?.endedAt ?? null : null,
     };
+    if (Buffer.byteLength(JSON.stringify(payload), "utf8") > MAX_PAYLOAD_BYTES) {
+      payload.output = "";
+      payload.outputTruncated = true;
+    }
     const key = JSON.stringify([payload.status, payload.output, payload.exitCode]);
     if (!final && key === this.lastPublished) return;
     this.lastPublished = key;

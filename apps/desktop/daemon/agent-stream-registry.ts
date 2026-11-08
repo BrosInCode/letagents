@@ -115,6 +115,8 @@ export class AgentStreamRegistry {
       entryPending.delete(key);
       if (entryPending.size === 0) this.pendingLatest.delete(entryId);
       this.sendLatest(entryId, key, event, sticky);
+      // A final value ends its key: no pace is kept for a command that has ended.
+      if (options.immediate) this.forgetSentAt(entryId, key);
       return;
     }
     if (waiting) {
@@ -137,12 +139,19 @@ export class AgentStreamRegistry {
 
   /** Forget a value of this key that waits for its turn: its command has ended, and its final event says so. */
   dropLatest(entryId: string, key: string): void {
+    this.forgetSentAt(entryId, key);
     const entryPending = this.pendingLatest.get(entryId);
     const waiting = entryPending?.get(key);
     if (!entryPending || !waiting) return;
     if (waiting.timer) this.clearTimer(waiting.timer);
     entryPending.delete(key);
     if (entryPending.size === 0) this.pendingLatest.delete(entryId);
+  }
+
+  private forgetSentAt(entryId: string, key: string): void {
+    const sent = this.latestSentAt.get(entryId);
+    sent?.delete(key);
+    if (sent?.size === 0) this.latestSentAt.delete(entryId);
   }
 
   private sendLatest(entryId: string, key: string, event: DaemonActivityEvent, sticky: boolean): void {
@@ -245,12 +254,15 @@ export class AgentStreamRegistry {
   /**
    * Every retained event after `afterSequence`, oldest first, without waiting
    * or advancing any watcher. `dropped` says the buffer no longer holds some
-   * of them.
+   * of them. Latest values (live command output, background commands) are
+   * left out: the room's version of the trace never shows them, and a kept
+   * background value is older than the events around it, so it would make a
+   * window look as if it started before the events that were evicted.
    */
   retainedAfter(entryId: string, afterSequence: number): { events: DaemonAgentStreamEvent[]; dropped: boolean } {
     const buffer = this.streams.get(entryId);
     if (!buffer) return { events: [], dropped: false };
-    const events = buffer.events.filter((event) => event.sequence > afterSequence);
+    const events = buffer.events.filter((event) => event.sequence > afterSequence && event.latest_key === undefined);
     return { events, dropped: buffer.evictedThrough > afterSequence };
   }
 

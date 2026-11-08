@@ -737,6 +737,25 @@ test("background commands come from the whole feed, keep their end, and end with
   assert.deepEqual(foldAgentStreamEvents([background(2, "running")]).items, [], "a background command is not a timeline item");
 });
 
+test("the renderer's bounded list keeps a running background command, as the daemon does", () => {
+  const server = event({ sequence: 1, kind: "tool_lifecycle", method: "item/backgroundCommand/updated", latestKey: "background:t1",
+    payload: { taskId: "t1", command: "npm run dev", status: "running", output: "" } });
+  let feed = { events: [server], ended: false, droppedEvents: 0 };
+  feed = appendAgentInspectorLiveBatch(feed, { entryId: "agent-a", events: [2, 3, 4].map(sequence => event({ sequence })), ended: false, droppedEvents: 0, reset: false }, 3);
+  assert.deepEqual(feed.events.map(item => item.sequence), [1, 3, 4]);
+  assert.equal(feed.droppedEvents, 1);
+  assert.equal(liveBackgroundCommands(feed)[0]!.status, "running");
+});
+
+test("live tails hide a private key without its BEGIN or END line, and drop unprinted control characters", async () => {
+  const { liveOutputTail, plainTerminalText } = await import("../../../../shared/live-command-output.mjs");
+  assert.equal(liveOutputTail("a\n-----BEGIN RSA PRIVATE KEY-----\nMIIE\n").text, "a\n[REDACTED PRIVATE KEY]\n");
+  assert.equal(liveOutputTail("MIIE\n-----END RSA PRIVATE KEY-----\nb\n").text, "[REDACTED PRIVATE KEY]\nb\n");
+  assert.equal(liveOutputTail(`${"x".repeat(50)}\n-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----\nz\n`, { maxChars: 40 }).text,
+    "[REDACTED PRIVATE KEY]\nz\n", "a cut that removes the BEGIN line leaves no key body");
+  assert.equal(plainTerminalText("a\u0001b\u0007\tc"), "ab\tc");
+});
+
 test("Live batches retain local eviction and upstream loss counts until reset", () => {
   const feed = { events: [event({ sequence: 1 }), event({ sequence: 2 })], ended: false, droppedEvents: 3 };
   const batch = { entryId: "agent-a", events: [event({ sequence: 3 })], ended: false, droppedEvents: 2, reset: false };

@@ -75,6 +75,8 @@ export class ClaudeAdapterBackgroundWork extends ClaudeAdapterNativeExecution {
         startedAt: this.deps.now(),
         now: () => this.deps.now(),
         publish: (payload) => this.publishLiveDisplay(handle, LIVE_BACKGROUND_COMMAND_METHOD, payload),
+        // A follower that ended by itself (its exit line) frees its place at once.
+        onStopped: () => { if (followers.get(taskId) === follower) followers.delete(taskId); },
       });
       followers.set(taskId, follower);
       this.backgroundCommandOutputs.set(handle, followers);

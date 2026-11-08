@@ -1352,7 +1352,11 @@ export class ProviderStreamCoordinator {
     });
     const placement = liveDisplayFeedPlacement(sanitized);
     if (placement.kind !== "latest") return;
-    this.options.streams.pushLatest(entryId, placement.key, sanitized, placement);
+    // Live output only says that a call runs: its status and error come from the call's own events.
+    const shown = placement.key.startsWith("output:")
+      ? { ...sanitized, payload: { ...(sanitized.payload as Record<string, unknown>), status: "running", error: null } }
+      : sanitized;
+    this.options.streams.pushLatest(entryId, placement.key, shown, placement);
   }
 
   private async handleInstalled(

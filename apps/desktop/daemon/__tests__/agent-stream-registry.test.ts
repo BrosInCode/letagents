@@ -258,6 +258,17 @@ test("the size limit keeps a sticky latest value and still reports what it evict
   assert.deepEqual(replaced.events.map((event) => event.sequence), [5, 6, 7]);
 });
 
+test("the room's read of the feed leaves out latest values, so a kept background value cannot hide an eviction", () => {
+  const registry = new AgentStreamRegistry({ bufferLimit: 3, latestIntervalMs: 0 });
+  registry.pushLatest("agent", "background:task-1", activity(1), { sticky: true });
+  registry.push("agent", activity(2));
+  registry.pushLatest("agent", "output:call-1", activity(3));
+  for (let index = 4; index <= 6; index += 1) registry.push("agent", activity(index));
+  const retained = registry.retainedAfter("agent", 0);
+  assert.deepEqual(retained.events.map((event) => event.sequence), [5, 6], "the room window starts after the evicted events");
+  assert.equal(retained.dropped, true);
+});
+
 test("reset and end cancel latest values that wait for their turn", async () => {
   const timers: Array<() => void> = [];
   const registry = new AgentStreamRegistry({
