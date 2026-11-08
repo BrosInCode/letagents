@@ -76,6 +76,7 @@ import type {
   DesktopAgentCommitIdentitySettings,
 } from "./agents.js";
 import type { DesktopRentalApi } from "./rental.js";
+import type { DesktopOrganizationApi } from "./organizations.js";
 import type {
   DesktopAccountRoomActionResult,
   DesktopAccountRoomEntry,
@@ -164,6 +165,7 @@ import type {
 
 export interface DesktopApi {
   conversations: ConversationApi;
+  organizations: DesktopOrganizationApi;
   ui: {
     onOpenSettings: (callback: () => void) => () => void;
     onOpenUpdates?: (callback: () => void) => () => void;
