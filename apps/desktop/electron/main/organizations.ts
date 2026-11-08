@@ -72,6 +72,7 @@ export async function joinOrganization(id: unknown, setup: unknown): Promise<Des
     if (code === "organization_membership_required") return { status: "membership_required" };
     if (code === "organization_owner_required") return { status: "owner_required" };
     if (code === "organization_setup_required") return { status: "setup_required" };
+    if (code === "organization_sso_required") return { status: "sso_required" };
     return { status: "unavailable" };
   }
 }

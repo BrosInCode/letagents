@@ -57,6 +57,7 @@ export type DesktopOrganizationJoinResult =
   | { status: "membership_required" }
   | { status: "owner_required" }
   | { status: "setup_required" }
+  | { status: "sso_required" }
   | { status: "unavailable" };
 
 /** GitHub pages the app may open for a company. The main process builds every URL. */
