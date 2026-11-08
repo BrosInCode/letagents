@@ -1,5 +1,5 @@
 <template>
-  <section class="first-run-wizard surface-page" :data-stage="stage" data-testid="first-run-wizard">
+  <section class="first-run-wizard surface-page" :data-stage="stage" :data-company-flow="stage === 'organization' || (stage === 'room' && Boolean(companyName))" data-testid="first-run-wizard">
     <Transition name="first-run-shell">
       <article v-if="stage === 'welcome'" key="welcome" class="first-run-welcome" data-testid="first-run-welcome">
         <div class="first-run-welcome-brand">
@@ -394,7 +394,7 @@ const actionKey = computed(() => {
 const headline = computed(() => {
   if (props.stage === "github") return "Repositories are rooms.";
   if (props.stage === "organization") return "Where will you work?";
-  if (props.stage === "room") return "Open your first room.";
+  if (props.stage === "room") return props.companyName ? "Pick your first room." : "Open your first room.";
   if (props.mcpWizardStep === "install") return "Connect your agents.";
   if (props.mcpWizardStep === "done") return "MCP installed.";
   return "Where do your agents live?";
@@ -402,7 +402,7 @@ const headline = computed(() => {
 
 const copy = computed(() => {
   if (props.stage === "organization") {
-    return "Pick a company to see the rooms it shares. You can change this any time from the Rooms list.";
+    return "Bring your company’s rooms together, or keep all your rooms in view.";
   }
   if (props.stage === "github") {
     return props.authStatus?.authenticated
@@ -411,8 +411,7 @@ const copy = computed(() => {
   }
   if (props.stage === "room") {
     if (props.companyName && props.companyRooms?.length) {
-      const count = props.companyRooms.length;
-      return `${props.companyName} shares ${count} ${count === 1 ? "room" : "rooms"} with you. Pick one, or start another way.`;
+      return `The ${props.companyName} rooms you can open.`;
     }
     return "Start now, or continue and choose one from the sidebar later.";
   }

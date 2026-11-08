@@ -11,9 +11,9 @@
       <div class="company-notice">
         <span class="company-notice-icon" aria-hidden="true"><GitHubMark /></span>
         <div>
-          <h2>{{ accessReason === "signin" ? "Reconnect GitHub" : "Let LetAgents see your organizations" }}</h2>
+          <h2>{{ accessReason === "signin" ? "Reconnect GitHub" : "Find your company on GitHub" }}</h2>
           <p v-if="accessReason === 'signin'">GitHub no longer accepts this sign-in. Connect again on GitHub, then return here.</p>
-          <p v-else>GitHub asks you once. You return here when you are done.</p>
+          <p v-else>Allow LetAgents to read your organization memberships and find the companies you can join.</p>
           <ul>
             <li><Eye aria-hidden="true" /><span>LetAgents reads which organizations you belong to and your role in each.</span></li>
             <li><ShieldCheck aria-hidden="true" /><span>It changes nothing on GitHub, and your repository access stays as it is.</span></li>
@@ -27,7 +27,7 @@
       <div class="company-notice" data-tone="error" role="alert">
         <span class="company-notice-icon" aria-hidden="true"><TriangleAlert /></span>
         <div>
-          <h2>GitHub didn’t answer</h2>
+          <h2>GitHub is taking a moment</h2>
           <p>LetAgents couldn’t check your organizations just now. Your rooms still work. Try again, or continue and pick a company later from the Rooms list.</p>
           <button class="company-inline-button" type="button" @click="$emit('retry')">Try again</button>
         </div>
@@ -61,7 +61,9 @@
         </div>
       </div>
 
-      <div v-if="githubSteps.length" class="company-rows company-github-steps" aria-label="Organizations that need a step on GitHub">
+      <details v-if="githubSteps.length" class="company-github-steps">
+        <summary>More from GitHub</summary>
+        <div class="company-rows">
         <div v-for="step in githubSteps" :key="step.key" class="company-row" data-kind="github-step">
           <CompanyAvatar :login="step.name" :avatar-url="step.avatarUrl" />
           <span class="company-row-copy">
@@ -71,22 +73,23 @@
           <button class="company-inline-button" type="button" @click="$emit('open-github', step.page)">{{ step.action }}</button>
           <span />
         </div>
-      </div>
+        </div>
+      </details>
 
       <p v-if="invitedId && !invitedOrganization" class="company-help" role="alert">
         This GitHub account isn’t a member of the company in your link. Use the GitHub account your company added, or continue with all rooms.
       </p>
       <p v-if="error" class="company-help" data-tone="error" role="alert">{{ error }}</p>
       <p class="company-help">
-        Don’t see your company? Its owners may limit which apps can read it.
-        <button class="company-link-button" type="button" @click="$emit('open-github', { kind: 'allow' })">Check access on GitHub</button>
+        You can change this later.
+        <button class="company-link-button" type="button" @click="$emit('open-github', { kind: 'allow' })">Company missing?</button>
       </p>
     </template>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, type ComponentPublicInstance } from "vue";
+import { computed, nextTick, type ComponentPublicInstance } from "vue";
 import { Eye, ShieldCheck, TriangleAlert } from "@lucide/vue";
 import type {
   DesktopGitHubAccessReason,
@@ -134,12 +137,12 @@ const invitedOrganization = computed(() => props.invitedId
 const rows = computed<CompanyRow[]>(() => {
   const listed = props.invitedId ? (invitedOrganization.value ? [invitedOrganization.value] : []) : props.organizations;
   return [
-    { key: "all", name: "All rooms", detail: "Every room you have. No company filter.", avatarUrl: null, tag: "", disabled: false },
+    { key: "all", name: "All rooms", detail: "Everything you can access. No company filter.", avatarUrl: null, tag: "", disabled: false },
     ...listed.map((org): CompanyRow => {
-      const role = org.role === "owner" ? "You’re an owner" : "You’re a member";
+      const role = org.role === "owner" ? "You’re an owner on GitHub" : "You’re a member on GitHub";
       if (org.joined) return { key: org.github_org_id, name: org.login, detail: `${role} · Joined`, avatarUrl: org.avatar_url, tag: "", disabled: false };
-      if (org.setup) return { key: org.github_org_id, name: org.login, detail: `${role} · Set up by an owner`, avatarUrl: org.avatar_url, tag: "Join", disabled: false };
-      if (org.role === "owner") return { key: org.github_org_id, name: org.login, detail: `${role} · Not set up in LetAgents yet`, avatarUrl: org.avatar_url, tag: "Set up", tone: "accent", disabled: false };
+      if (org.setup) return { key: org.github_org_id, name: org.login, detail: role, avatarUrl: org.avatar_url, tag: "Join", disabled: false };
+      if (org.role === "owner") return { key: org.github_org_id, name: org.login, detail: role, avatarUrl: org.avatar_url, tag: "Set up", tone: "accent", disabled: false };
       return { key: org.github_org_id, name: org.login, detail: "An owner needs to set this company up first", avatarUrl: org.avatar_url, tag: "Waiting", disabled: true };
     }),
   ];
@@ -195,14 +198,14 @@ function moveSelection(event: KeyboardEvent): void {
 .company-step {
   display: grid;
   gap: 14px;
-  width: min(560px, 100%);
+  width: 100%;
   margin: 0 auto;
   text-align: left;
 }
 
 .company-rows {
   display: grid;
-  gap: 8px;
+  gap: 10px;
 }
 
 .company-row {
@@ -210,9 +213,10 @@ function moveSelection(event: KeyboardEvent): void {
   grid-template-columns: auto minmax(0, 1fr) auto 18px;
   gap: 14px;
   align-items: center;
-  padding: 12px 16px 12px 12px;
+  min-height: 78px;
+  padding: 16px;
   border: 1px solid var(--setup-border);
-  border-radius: 14px;
+  border-radius: 12px;
   background: var(--setup-surface);
   color: var(--setup-text);
   cursor: pointer;
@@ -243,7 +247,7 @@ function moveSelection(event: KeyboardEvent): void {
 
 .company-row:focus-visible {
   outline: 2px solid var(--setup-accent);
-  outline-offset: 3px;
+  outline-offset: -2px;
 }
 
 .company-row-copy {
@@ -268,9 +272,8 @@ function moveSelection(event: KeyboardEvent): void {
 }
 
 .company-tag {
-  padding: 4px 9px;
-  border: 1px solid var(--setup-border);
-  border-radius: 999px;
+  padding: 0;
+  border: 0;
   color: var(--setup-muted-strong);
   font-size: 12px;
   font-weight: 600;
@@ -278,9 +281,7 @@ function moveSelection(event: KeyboardEvent): void {
 }
 
 .company-tag[data-tone="accent"] {
-  border-color: color-mix(in srgb, var(--setup-accent) 35%, transparent);
-  background: var(--setup-accent-soft);
-  color: var(--setup-accent);
+  color: var(--setup-muted-strong);
 }
 
 .company-radio {
@@ -464,5 +465,14 @@ function moveSelection(event: KeyboardEvent): void {
   .company-radio::after {
     transition: none;
   }
+}
+.company-github-steps summary { padding: 8px 0 12px; color: var(--setup-muted); cursor: pointer; font-size: 13px; }
+.company-help .company-link-button { margin-left: 12px; }
+@media (max-width: 480px) {
+  .company-row { padding: 12px; gap: 10px; grid-template-columns: auto minmax(0, 1fr) 18px; }
+  .company-row .company-tag, .company-row > span:empty { display: none; }
+  .company-github-steps .company-row { grid-template-columns: auto minmax(0, 1fr); }
+  .company-inline-button { grid-column: 2; justify-self: start; }
+  .company-row-copy small { overflow-wrap: anywhere; }
 }
 </style>
