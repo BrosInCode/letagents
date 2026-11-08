@@ -84,6 +84,7 @@
                 :invitations="companyStep.invitations"
                 :sso-required="companyStep.ssoRequired"
                 :error="companyStep.error"
+                :invited-id="invitedCompanyId ?? null"
                 @retry="$emit('retry-organizations')"
                 @open-github="$emit('open-company-github', $event)"
               />
@@ -251,6 +252,8 @@ import type { DesktopMcpWizardStep, FirstRunCompanyStepState, FirstRunWizardStag
 
 const props = defineProps<{
   companyStep?: FirstRunCompanyStepState | null;
+  /** The organization of a company link that is open during setup. */
+  invitedCompanyId?: string | null;
   companyName?: string | null;
   companyAvatarUrl?: string | null;
   companyRooms?: DesktopOrganizationRoom[];

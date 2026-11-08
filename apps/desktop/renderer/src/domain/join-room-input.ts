@@ -39,6 +39,34 @@ export function normalizeJoinRoomInput(
   return candidate;
 }
 
+/**
+ * The GitHub organization ID of a pasted company link, or null. The link is a
+ * LetAgents page (https://…/company/<id>) or the app link
+ * (letagents://company/<id>); either one only opens the company dialog, where
+ * GitHub decides access.
+ */
+export function companyLinkIdFromInput(raw: string, origin = LETAGENTS_ROOM_ORIGIN): string | null {
+  const trimmed = String(raw ?? "").trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    return null;
+  }
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) return null;
+  if (parsed.protocol === "letagents:") {
+    return parsed.hostname === "company" && !parsed.port ? /^\/([1-9][0-9]{0,19})$/.exec(parsed.pathname)?.[1] ?? null : null;
+  }
+  let expected: URL;
+  try {
+    expected = new URL(origin);
+  } catch {
+    return null;
+  }
+  if (parsed.origin !== expected.origin) return null;
+  return /^\/company\/([1-9][0-9]{0,19})\/?$/.exec(parsed.pathname)?.[1] ?? null;
+}
+
 export function validateJoinRoomInput(raw: string): {
   normalized: string | null;
   error: string | null;

@@ -53,3 +53,47 @@ export function companyProjectGroups(
   // company repos. Company setup must never hide an unconnected/shared repo.
   return projects;
 }
+
+/** The parts of a sidebar entry that decide whether a room list includes it. */
+export interface CompanyListedEntry {
+  id: string;
+  type: string;
+  kind?: string;
+  parentRoomIdentifier?: string | null;
+}
+
+/**
+ * Whether these room groups list the entry: as one of their rooms, or as a
+ * focus room of a listed repo room. A new focus room is not in the groups until
+ * the next refresh, and a closed one never is, but both belong to their parent.
+ */
+function projectsListEntry(projects: ProjectGroup[], entry: CompanyListedEntry): boolean {
+  const parent = entry.kind === "focus" ? entry.parentRoomIdentifier?.toLowerCase() : null;
+  return projects.some((project) =>
+    [project.parent, ...project.branchRooms, ...project.focusRooms].some((room) => room.id === entry.id && room.roomIdentifier)
+    || Boolean(parent && project.parent.roomIdentifier?.toLowerCase() === parent));
+}
+
+/** Whether the selected company's room groups list this sidebar entry (always true without a company). */
+export function companyListsEntry(
+  projects: ProjectGroup[], selectedId: string | null,
+  rooms: DesktopOrganizationRoom[], entry: CompanyListedEntry,
+): boolean {
+  if (!selectedId) return true;
+  return projectsListEntry(companyProjectGroups(projects, selectedId, rooms), entry);
+}
+
+/**
+ * The company home replaces the main view while a selected company does not
+ * list the active room. Without a company the sidebar is the existing account
+ * view, so an unlisted room (a closed focus room) opens as it always did. A
+ * company link opens a dialog instead, so it never replaces the room.
+ */
+export function showsCompanyHome(input: {
+  activeEntry: CompanyListedEntry;
+  selectedId: string | null;
+  sidebarProjects: ProjectGroup[];
+}): boolean {
+  if (input.activeEntry.type !== "room" || !input.selectedId) return false;
+  return !projectsListEntry(input.sidebarProjects, input.activeEntry);
+}
