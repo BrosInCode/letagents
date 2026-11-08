@@ -172,6 +172,8 @@
         :name="company.selected.value.login"
         :avatar-url="company.selected.value.avatar_url"
         :state="companyHomeState"
+        :rooms="company.rooms.value"
+        @open-room="openCompanyRoom"
         :access-reason="company.accessReason.value"
         @new-room="selectNewRoomEntry(); chooseStandaloneIntent()"
         @show-all="chooseSidebarCompany(null)"
@@ -610,7 +612,7 @@ const {
 } = Object.assign(app, useAppSidebarEntries(app));
 
 const {
-  showCompanyHome, companyHomeState, chooseSidebarCompany,
+  showCompanyHome, companyHomeState, chooseSidebarCompany, openCompanyRoom,
 } = Object.assign(app, useAppCompanyNavigation(app));
 
 Object.assign(app, useAppRentalEvents(app));

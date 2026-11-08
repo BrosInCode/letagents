@@ -506,7 +506,8 @@
 /* With a company to choose, the Rooms heading holds two controls: the company
    filter on the left and the collapse toggle (count and chevron) on the right. */
 .sidebar-company-header {
-  padding-left: 3px;
+  padding: 0;
+  min-height: 41px;
   cursor: default;
 }
 

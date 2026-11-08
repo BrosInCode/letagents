@@ -1,4 +1,4 @@
-import { computed, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, watch } from "vue";
 import type { CompanyHomeState } from "../../components/desktop/company/types";
 import type { FirstRunCompanyStepState } from "../../components/desktop/setup/types";
 import { useDesktopOrganizations } from "../useDesktopOrganizations";
@@ -79,12 +79,15 @@ export function useAppCompanyNavigation(context: unknown) {
 
   async function chooseSidebarCompany(id: string | null): Promise<void> {
     app.cancelSidebarRoomSelection();
-    if (await company.choose(id)) {
-      await nextTick();
-      const first = sidebarProjectEntries.value.find((project) => project.parent.roomIdentifier);
-      if (first) app.handleSidebarEntrySelected(first.parent);
-    }
+    await company.choose(id);
   }
 
-  return { showCompanyHome, companyHomeState, chooseSidebarCompany };
+  function openCompanyRoom(roomId: string): void {
+    if (!company.rooms.value.some((room) => room.room_id === roomId)) return;
+    const entry = sidebarProjectEntries.value.flatMap((project) => [project.parent, ...project.branchRooms, ...project.focusRooms])
+      .find((item) => item.roomIdentifier === roomId);
+    if (entry) app.handleSidebarEntrySelected(entry);
+  }
+
+  return { showCompanyHome, companyHomeState, chooseSidebarCompany, openCompanyRoom };
 }
