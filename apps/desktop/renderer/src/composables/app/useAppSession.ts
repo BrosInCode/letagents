@@ -6,6 +6,7 @@ import { receiveRoomTyping, setTypingAccount } from "../useRoomTyping";
 import { invalidateRoomMessageReactions, setMessageReactionViewer } from "../useRoomMessageReactions";
 import { computed, provide, watch } from "vue";
 import type { DesktopNotificationTarget, DesktopRoomStreamEvent } from "../../../../electron/ipc-types";
+import type { DesktopRoomLink } from "../../../../../../shared/room-app-links.mjs";
 import { clearDesktopMessageDrafts, setDesktopMessageDraftAccount } from "../../domain/desktop-message-drafts";
 import { clearDesktopMessageOutbox } from "../../domain/message-outbox";
 import { useDesktopAuthFlow } from "../useDesktopAuthFlow";
@@ -238,10 +239,23 @@ export function useAppSessionActions(context: unknown) {
       console.warn("Could not open the room for this notification.", error);
     }
   }
+  /** A `letagents://in/<room>` link, from the web's "Open in LetAgents Desktop" or anywhere else. */
+  async function handleRoomLink(target: DesktopRoomLink): Promise<void> {
+    try {
+      // Not signed in, or not a member: the room's own gate shows, as for a
+      // notification. A link never creates a room: an unknown room is "unavailable".
+      await app.openRoomFromAppAgent(target.roomIdentifier, { create: false });
+      // Set either way, so a link without a message clears the last one revealed.
+      notificationRevealMessageId.value = target.messageId ?? null;
+      notificationRevealNonce.value += 1;
+    } catch (error) {
+      console.warn("Could not open the room for this link.", error);
+    }
+  }
   return {
     refreshForegroundData, handleVisibilityChange, handleWindowFocus, handleWindowBlur,
     handleDesktopRoomStreamEvent, startSignedOutAuthFlow, clearDesktopSessionState,
-    openAccountAuthFlow, startFirstRunRoomAuth, handleNotificationActivation,
+    openAccountAuthFlow, startFirstRunRoomAuth, handleNotificationActivation, handleRoomLink,
   };
 }
 
