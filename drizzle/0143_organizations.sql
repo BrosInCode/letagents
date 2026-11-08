@@ -6,6 +6,10 @@ CREATE TABLE organizations (
   updated_at timestamptz NOT NULL
 );
 --> statement-breakpoint
+ALTER TABLE rooms ADD COLUMN organization_id text REFERENCES organizations(github_org_id) ON DELETE SET NULL;
+--> statement-breakpoint
+CREATE INDEX rooms_organization_id_idx ON rooms(organization_id) WHERE organization_id IS NOT NULL;
+--> statement-breakpoint
 CREATE TABLE organization_memberships (
   organization_id text NOT NULL REFERENCES organizations(github_org_id) ON DELETE CASCADE,
   account_id text NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
