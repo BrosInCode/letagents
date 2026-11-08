@@ -61,7 +61,7 @@ export function useAppNavigation(context: unknown) {
   function leaveCompanyUnlessListed(): void {
     const { company } = app;
     if (activeEntry.value.type !== "room") return;
-    if (!companyListsEntry(projectEntries.value, company.selectedId.value, company.rooms.value, activeEntry.value)) void company.choose(null);
+    if (!companyListsEntry(projectEntries.value, company.activeId.value, company.rooms.value, activeEntry.value)) void company.choose(null);
   }
   function openRoomSnapshot(...args: Parameters<typeof openNavigationRoomSnapshot>): void {
     openNavigationRoomSnapshot(...args);

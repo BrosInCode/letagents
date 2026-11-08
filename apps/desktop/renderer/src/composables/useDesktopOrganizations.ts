@@ -31,12 +31,21 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
   const joiningId = ref<string | null>(null);
   const error = ref<string | null>(null);
   const selected = computed(() => organizations.value.find((org) => org.github_org_id === selectedId.value) ?? null);
+  /**
+   * The company that filters the app: the saved choice, but only once GitHub
+   * has confirmed it as a joined company. A saved choice alone (at launch, or
+   * when GitHub does not answer) shows All rooms instead of an empty company.
+   */
+  const activeId = computed(() => selected.value?.joined ? selected.value.github_org_id : null);
   const busy = computed(() => status.value === "loading" || joiningId.value !== null);
   /** Whether the person has anything to choose or act on: a company, an invitation, or a blocked organization. */
   const hasChoices = computed(() => Boolean(organizations.value.length || invitations.value.length || ssoRequired.value.length));
   const accountKey = computed(() => auth.value?.authenticated && auth.value.account
     ? `letagents:company:${auth.value.apiUrl}:${auth.value.account.id}` : null);
-  let generation = 0;
+  // Two counters, so a company choice never throws away a list check and a
+  // list check never strands a running join. An account switch moves both.
+  let listGeneration = 0;
+  let selectionGeneration = 0;
   let lastRefreshAt = 0;
 
   function persist(): void {
@@ -60,10 +69,10 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
   }
 
   /** Load the rooms of the selected company. Rooms already shown stay while the check runs, so nothing flickers. */
-  async function loadRooms(id: string, request: number): Promise<boolean> {
+  async function loadRooms(id: string, selection: number): Promise<boolean> {
     if (!rooms.value.length) roomsStatus.value = "loading";
     const result = await desktopIpc.organizations.rooms(id);
-    if (request !== generation) return false;
+    if (selection !== selectionGeneration) return false;
     if (result.status === "ok") {
       rooms.value = result.rooms;
       roomsStatus.value = "ready";
@@ -83,13 +92,20 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
 
   async function refresh(): Promise<void> {
     if (!accountKey.value) return;
-    const request = ++generation;
+    const request = ++listGeneration;
+    const selection = selectionGeneration;
     lastRefreshAt = Date.now();
     if (status.value !== "ready") status.value = "loading";
     error.value = null;
     try {
       const result = await desktopIpc.organizations.list();
-      if (request !== generation) return;
+      if (request !== listGeneration) return;
+      if (selection !== selectionGeneration && result.status === "ok") {
+        // A company was chosen or joined while this list loaded, so the list
+        // may predate that join. Ask again rather than undo the choice.
+        void refresh();
+        return;
+      }
       if (result.status !== "ok") {
         if (result.status === "github_access_required") needGitHubAccess(result.reason);
         else status.value = "unavailable";
@@ -104,9 +120,9 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
         leaveCompany();
         return;
       }
-      if (selectedId.value) await loadRooms(selectedId.value, request);
+      if (selectedId.value) await loadRooms(selectedId.value, selection);
     } catch {
-      if (request === generation) status.value = "unavailable";
+      if (request === listGeneration) status.value = "unavailable";
     }
   }
 
@@ -122,7 +138,7 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
   async function choose(id: string | null): Promise<boolean> {
     if (!accountKey.value) return false;
     if (id === null) {
-      generation += 1;
+      selectionGeneration += 1;
       joiningId.value = null;
       error.value = null;
       leaveCompany();
@@ -134,13 +150,13 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
       error.value = "An owner needs to set this company up in LetAgents first.";
       return false;
     }
-    const request = ++generation;
+    const request = ++selectionGeneration;
     joiningId.value = id;
     error.value = null;
     try {
       if (!org.joined) {
         const joined = await desktopIpc.organizations.join(id, !org.setup);
-        if (request !== generation) return false;
+        if (request !== selectionGeneration) return false;
         if (joined.status !== "ok") {
           if (joined.status === "github_access_required") needGitHubAccess(joined.reason);
           else error.value = joinErrorText(joined.status, org.login);
@@ -153,12 +169,13 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
       selectedId.value = id;
       persist();
       await loadRooms(id, request);
-      return request === generation && selectedId.value === id;
+      return request === selectionGeneration && selectedId.value === id;
     } catch {
-      if (request === generation) error.value = "GitHub didn’t answer, so LetAgents couldn’t open this company. Try again.";
+      if (request === selectionGeneration) error.value = "GitHub didn’t answer, so LetAgents couldn’t open this company. Try again.";
       return false;
     } finally {
-      if (request === generation) joiningId.value = null;
+      // Clear the busy mark this call set, even when a later request took over.
+      if (joiningId.value === id) joiningId.value = null;
     }
   }
 
@@ -177,7 +194,8 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
   }
 
   watch(accountKey, () => {
-    generation += 1;
+    listGeneration += 1;
+    selectionGeneration += 1;
     organizations.value = [];
     invitations.value = [];
     ssoRequired.value = [];
@@ -197,12 +215,13 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
 
   return {
     organizations, invitations, ssoRequired, status, accessReason, rooms, roomsStatus,
-    selectedId, selected, joiningId, busy, error, hasChoices,
+    selectedId, selected, activeId, joiningId, busy, error, hasChoices,
     refresh, refreshIfStale, choose, openOnGitHub, rememberCreatedRoom,
   };
 }
 
-function joinErrorText(status: "membership_required" | "owner_required" | "setup_required" | "unavailable", login: string): string {
+function joinErrorText(status: "membership_required" | "owner_required" | "setup_required" | "sso_required" | "unavailable", login: string): string {
+  if (status === "sso_required") return `${login} uses single sign-on. Authorize LetAgents for it on GitHub, then try again.`;
   if (status === "membership_required") return `Your GitHub account isn’t a member of ${login}. Ask an owner to add you on GitHub.`;
   if (status === "owner_required" || status === "setup_required") return `An owner of ${login} needs to set it up in LetAgents first.`;
   return "GitHub didn’t answer, so LetAgents couldn’t open this company. Try again.";

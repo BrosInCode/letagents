@@ -28,7 +28,7 @@ function harness(overrides: Record<string, unknown> = {}) {
     saveMembership: async () => organization,
     removeMembership: async () => { calls.removals += 1; },
     getMemberRooms: async () => [],
-    filterRoomAccess: async (_room: string, ids: string[]) => ({ recents: ids }),
+    resolveRoomAccess: async () => "allow",
     getConnectedRooms: async () => { calls.candidates += 1; return [room]; },
     listAccessibleRepositories: async (input) => {
       calls.repositories += 1;
@@ -145,11 +145,11 @@ test("a public repo room needs a confirmed allow from the app's room access rule
       { github_repo_id: "101", full_name: "acme/public-a", visibility: "public" },
       { github_repo_id: "102", full_name: "acme/public-b", visibility: "public" },
     ],
-    // 101 = no role (deny), 102 = transient error (retry: notify only, no recents)
-    filterRoomAccess: async (roomId: string, ids: string[]) => {
+    // 101 and 102 = public repos where the person has no role (deny)
+    resolveRoomAccess: async ({ accountId, roomId }: { accountId: string; roomId: string }) => {
       checked.push(roomId);
-      assert.deepEqual(ids, ["acct_1"]);
-      return { recents: roomId === "github.com/acme/app" ? ids : [] };
+      assert.equal(accountId, "acct_1");
+      return roomId === "github.com/acme/app" ? "allow" : "deny";
     },
   });
   const res = await h.request();
@@ -164,12 +164,12 @@ test("room access checks run with a small concurrency limit", async () => {
   const h = harness({
     getConnectedRooms: async () => rooms,
     listAccessibleRepositories: async () => rooms.map((item) => ({ github_repo_id: item.github_repo_id, full_name: item.full_name, visibility: "public" })),
-    filterRoomAccess: async (_room: string, ids: string[]) => {
+    resolveRoomAccess: async () => {
       active += 1;
       peak = Math.max(peak, active);
       await new Promise((resolve) => setTimeout(resolve, 5));
       active -= 1;
-      return { recents: ids };
+      return "allow";
     },
   });
   assert.equal((await h.request()).body.rooms.length, 20);
@@ -294,6 +294,7 @@ test("POST /projects with organization_id enforces people-only, live membership,
     ["zero id", { body: { organization_id: "0" } }, {}, 400, "invalid_organization_id"],
     ["left the org", {}, { readOrganizationAccess: async () => ({ memberships: [], invitations: [], ssoRequiredOrgIds: [] }) }, 403, "organization_membership_required"],
     ["pending invitation only", {}, { readOrganizationAccess: async () => ({ memberships: [], invitations: [{ github_org_id: "42", login: "acme", avatar_url: null }], ssoRequiredOrgIds: [] }) }, 403, "organization_membership_required"],
+    ["hidden by single sign-on", {}, { readOrganizationAccess: async () => ({ memberships: [], invitations: [], ssoRequiredOrgIds: ["42"] }) }, 403, "organization_sso_required"],
     ["not joined", {}, { getJoinedOrganizationIds: async () => [] }, 403, "organization_join_required"],
     ["missing scope", {}, { readOrganizationAccess: async () => { throw new GitHubOrganizationScopeError(); } }, 403, "github_scope_required"],
     ["GitHub down", {}, { readOrganizationAccess: async () => { throw new Error("down"); } }, 503, "organization_verification_unavailable"],
@@ -305,4 +306,23 @@ test("POST /projects with organization_id enforces people-only, live membership,
     assert.deepEqual(h.created, [], name);
     assert.deepEqual(h.creators, [], name);
   }
+});
+
+test("a room access check that GitHub could not answer fails the list instead of dropping rooms", async () => {
+  for (const resolveRoomAccess of [async () => "retry", async () => { throw new Error("rate limited"); }]) {
+    const res = await harness({ resolveRoomAccess }).request();
+    assert.equal(res.statusCode, 503);
+    assert.deepEqual(res.body, { error: "organization_rooms_verification_unavailable" });
+  }
+});
+
+test("an organization hidden by single sign-on asks for SSO and keeps the stored join", async () => {
+  const removals: string[] = [];
+  const res = await harness({
+    readAccess: async () => ({ memberships: [], invitations: [], ssoRequiredOrgIds: ["42"] }),
+    removeMembership: async (_account: string, id: string) => { removals.push(id); },
+  }).request();
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, { error: "organization_sso_required" });
+  assert.deepEqual(removals, []);
 });

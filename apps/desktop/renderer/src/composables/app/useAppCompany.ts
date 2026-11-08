@@ -27,7 +27,8 @@ export function useAppCompany(context: unknown) {
     invitations: company.invitations.value,
     ssoRequired: company.ssoRequired.value,
     error: company.error.value,
-    selectedId: company.selectedId.value,
+    // Only a company GitHub has confirmed counts as chosen.
+    selectedId: company.activeId.value,
     joiningId: company.joiningId.value,
   }));
 
@@ -138,7 +139,7 @@ export function useAppCompanyNavigation(context: unknown) {
 
   const showCompanyHome = computed(() => showsCompanyHome({
     activeEntry: activeEntry.value,
-    selectedId: company.selectedId.value,
+    selectedId: company.activeId.value,
     sidebarProjects: sidebarProjectEntries.value,
   }));
 

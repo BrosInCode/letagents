@@ -305,7 +305,7 @@ export function useAppSidebarEntries(context: unknown) {
   Object.assign(app, { unreadRoomCounts, refreshUnreadCounts });
 
   const sidebarProjectEntries = computed(() =>
-    applySidebarRoomOrder(companyProjectGroups(projectEntries.value, app.company.selectedId.value, app.company.rooms.value).map((project) => ({
+    applySidebarRoomOrder(companyProjectGroups(projectEntries.value, app.company.activeId.value, app.company.rooms.value).map((project) => ({
       ...project,
       parent: withRoomUnreadState(project.parent),
       branchRooms: project.branchRooms.map(withRoomUnreadState),
