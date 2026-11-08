@@ -18,7 +18,7 @@
         <div class="sidebar-selection-summary" aria-live="polite">
           <ListChecks aria-hidden="true" />
           <strong>{{ selectedEntryIds.length }}</strong>
-          <span>{{ selectedEntryIds.length === 1 ? "room selected" : "rooms selected" }}</span>
+          <span>selected</span>
         </div>
         <button
           class="sidebar-topbar-action"
@@ -33,132 +33,26 @@
         </button>
       </template>
       <template v-else>
-      <button
-        class="sidebar-collapse-button"
-        type="button"
-        aria-label="Hide sidebar"
-        title="Hide sidebar"
-        data-testid="sidebar-cycle-button"
-        @click="$emit('cycle-sidebar')"
-      >
-        <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
-          <path d="M4.5 3.5h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1Z" />
-          <path d="M12.5 3.5v13" />
-          <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
-        </svg>
-      </button>
-      <div class="sidebar-topbar-actions">
-        <button
-          class="sidebar-zen-toggle"
-          type="button"
-          :aria-pressed="zenMode"
-          :disabled="!zenMode && !activeProject"
-          :title="zenMode ? 'Exit Zen Mode' : 'Turn on Zen Mode'"
-          data-testid="sidebar-zen-toggle"
-          @click="toggleZenMode"
-        >
-          <Focus aria-hidden="true" /><span>{{ zenMode ? 'Exit Zen' : 'Zen Mode' }}</span>
-        </button>
-        <button
-          class="sidebar-topbar-action"
-          type="button"
-          aria-label="Select rooms"
-          title="Select rooms"
-          data-testid="sidebar-select-rooms-button"
-          @click="startSelection()"
-        >
-          <ListChecks aria-hidden="true" />
-        </button>
-        <button
-          ref="searchButton"
-          class="sidebar-search-button"
-          type="button"
-          :data-active="searchOpen"
-          :aria-expanded="zenMode ? switcherOpen : searchOpen"
-          :aria-controls="zenMode ? undefined : 'sidebar-room-search'"
-          :aria-label="zenMode ? 'Switch rooms' : (searchOpen ? 'Close room search' : 'Search rooms')"
-          :title="zenMode ? `Switch rooms (${switchShortcutLabel})` : (searchOpen ? 'Close room search' : `Search rooms (${switchShortcutLabel} switches rooms)`)"
-          :aria-keyshortcuts="zenMode ? switchAriaKeyShortcuts : undefined"
-          data-testid="sidebar-search-button"
-          @click="zenMode ? openRoomSwitcher() : toggleSearch()"
-        >
-          <X v-if="searchOpen" aria-hidden="true" />
-          <Search v-else aria-hidden="true" />
-        </button>
-      </div>
+        <span class="sidebar-wordmark">letagents.</span>
+        <div class="sidebar-topbar-actions">
+          <button class="sidebar-search-button" type="button" aria-label="Find a room" aria-haspopup="dialog"
+            :aria-expanded="switcherOpen" :title="`Find a room (${switchShortcutLabel})`"
+            :aria-keyshortcuts="switchAriaKeyShortcuts" data-testid="sidebar-search-button" @click="openRoomSwitcher">
+            <Search aria-hidden="true" />
+          </button>
+          <button class="sidebar-topbar-action sidebar-inbox-button" type="button" data-testid="sidebar-inbox"
+            :data-active="activeEntry.type === 'inbox'" :aria-label="needsYouCount ? `Inbox, ${needsYouCount} items need you` : 'Inbox'"
+            title="Inbox" @click="$emit('open-needs-you')">
+            <Inbox aria-hidden="true" />
+            <span v-if="needsYouCount" class="sidebar-inbox-count">{{ needsYouCount > 99 ? '99+' : needsYouCount }}</span>
+          </button>
+          <button class="sidebar-collapse-button" type="button" aria-label="Hide sidebar" title="Hide sidebar"
+            data-testid="sidebar-cycle-button" @click="$emit('cycle-sidebar')"><PanelLeftClose aria-hidden="true" /></button>
+        </div>
       </template>
     </div>
 
-    <section
-      v-if="searchOpen"
-      id="sidebar-room-search"
-      class="sidebar-room-search"
-      data-testid="sidebar-room-search"
-    >
-        <label class="sidebar-search-field">
-          <Search aria-hidden="true" />
-          <input
-            ref="searchInput"
-            v-model="searchQuery"
-            type="search"
-            placeholder="Search rooms"
-            autocomplete="off"
-            spellcheck="false"
-            role="combobox"
-            aria-label="Search rooms"
-            aria-autocomplete="list"
-            :aria-controls="searchResults.length ? 'sidebar-room-search-results' : undefined"
-            :aria-expanded="Boolean(searchResults.length)"
-            :aria-activedescendant="activeSearchResultId"
-            data-testid="sidebar-room-search-input"
-            @keydown="handleSearchKeydown"
-          />
-        </label>
-
-        <div class="sidebar-search-summary" aria-live="polite">
-          <span>Rooms</span>
-          <span v-if="searchQuery.trim()">{{ searchResults.length }}</span>
-        </div>
-
-        <div
-          v-if="searchQuery.trim() && searchResults.length"
-          id="sidebar-room-search-results"
-          class="sidebar-search-results"
-          role="listbox"
-        >
-          <button
-            v-for="(result, index) in searchResults"
-            :id="searchResultId(result.entry.id)"
-            :key="result.entry.id"
-            class="sidebar-search-result"
-            type="button"
-            role="option"
-            tabindex="-1"
-            :aria-selected="index === activeSearchIndex"
-            :data-active="index === activeSearchIndex"
-            :data-testid="`sidebar-search-result-${result.entry.id}`"
-            @pointerenter="activeSearchIndex = index"
-            @click="selectSearchResult(result.entry)"
-          >
-            <span class="sidebar-search-result-icon" aria-hidden="true">
-              <GitBranch v-if="result.entry.kind === 'branch'" />
-              <MessageSquare v-else-if="result.entry.kind === 'focus'" />
-              <House v-else />
-            </span>
-            <span class="sidebar-search-result-copy">
-              <strong>{{ sidebarRoomTitle(result.entry) }}</strong>
-              <small>{{ result.context }}</small>
-            </span>
-            <RoomUnreadBadge :count="result.entry.unreadCount || 0" :marked-unread="result.entry.hasUnread" />
-          </button>
-        </div>
-        <p v-else-if="searchQuery.trim()" class="sidebar-search-empty">
-          No rooms match “{{ searchQuery.trim() }}”
-        </p>
-        <p v-else class="sidebar-search-empty">Search by room, branch, or task.</p>
-    </section>
-
-    <div v-else class="sidebar-navigation" @contextmenu.prevent="openBackgroundContextMenu">
+    <div class="sidebar-navigation" @contextmenu.prevent="openBackgroundContextMenu">
       <div class="sidebar-actions">
         <button
           v-if="selectionActive"
@@ -186,40 +80,11 @@
           </span>
           <span>New room</span>
         </button>
-        <button
-          v-if="!selectionActive && zenMode"
-          class="sidebar-cta sidebar-switch-cta"
-          type="button"
-          aria-haspopup="dialog"
-          data-testid="sidebar-switch-rooms"
-          @click="openRoomSwitcher"
-        >
-          <span class="cta-plus" aria-hidden="true"><ArrowLeftRight /></span>
-          <span>Switch rooms</span>
-          <kbd aria-hidden="true">{{ switchShortcutLabel }}</kbd>
-        </button>
-        <button
-          v-else-if="!selectionActive"
-          class="sidebar-cta sidebar-rent-cta"
-          type="button"
-          :data-active="activeEntry.type === 'marketplace'"
-          data-testid="sidebar-rent"
-          @click="$emit('open-rent')"
-        >
-          <span class="cta-plus sidebar-rent-icon" aria-hidden="true"><Handshake /></span>
-          <span>Rent</span>
-          <span v-if="rentalRequestCount" class="sidebar-rent-count" :aria-label="`${rentalRequestCount} rental requests`">
-            {{ rentalRequestCount > 99 ? '99+' : rentalRequestCount }}
-          </span>
-        </button>
-        <button v-if="!selectionActive" class="sidebar-cta sidebar-rent-cta" type="button" :data-active="activeEntry.type === 'my-work'" data-testid="sidebar-my-work" @click="$emit('open-my-work')">
+        <button v-if="!selectionActive" class="sidebar-cta sidebar-nav-link" type="button" :data-active="activeEntry.type === 'my-work'" data-testid="sidebar-my-work" @click="$emit('open-my-work')">
           <span class="cta-plus" aria-hidden="true"><ListTodo /></span><span>My work</span>
         </button>
-        <button v-if="!selectionActive" class="sidebar-cta sidebar-rent-cta" type="button" :data-active="activeEntry.type === 'messages'" data-testid="sidebar-messages" @click="$emit('open-messages')">
-          <span class="cta-plus" aria-hidden="true"><MessageSquare /></span><span>Messages</span><span v-if="messagesUnread" class="sidebar-rent-count" :aria-label="`${messagesUnread} unread messages`">{{ messagesUnread > 99 ? '99+' : messagesUnread }}</span>
-        </button>
-        <button v-if="!selectionActive" class="sidebar-cta sidebar-rent-cta" type="button" :data-active="activeEntry.type === 'inbox'" data-testid="sidebar-inbox" @click="$emit('open-needs-you')">
-          <span class="cta-plus" aria-hidden="true"><Inbox /></span><span>Inbox</span><span v-if="needsYouCount" class="sidebar-rent-count" :aria-label="`${needsYouCount} items need your attention`">{{ needsYouCount > 99 ? '99+' : needsYouCount }}</span>
+        <button v-if="!selectionActive" class="sidebar-cta sidebar-nav-link" type="button" :data-active="activeEntry.type === 'messages'" data-testid="sidebar-messages" @click="$emit('open-messages')">
+          <span class="cta-plus" aria-hidden="true"><MessageSquare /></span><span>Messages</span><span v-if="messagesUnread" class="sidebar-nav-count" :aria-label="`${messagesUnread} unread messages`">{{ messagesUnread > 99 ? '99+' : messagesUnread }}</span>
         </button>
       </div>
 
@@ -236,7 +101,6 @@
         >
           <span class="sidebar-heading">Pinned</span>
           <span class="sidebar-section-meta">
-            <span class="section-count">{{ pinnedProjectEntries.length }}</span>
             <span class="sidebar-section-arrow" :data-collapsed="pinnedCollapsed" aria-hidden="true">
               <ChevronRight />
             </span>
@@ -290,7 +154,7 @@
                   <Check v-if="isEntrySelected(project.parent)" />
                 </span>
                 <span v-else class="pin-mark" aria-hidden="true">
-                  <Pin />
+                  <Folder />
                 </span>
                 <span class="pinned-main">
                   <span class="room-title-line">
@@ -370,7 +234,7 @@
           :data-empty="!roomProjectEntries.length"
           data-testid="sidebar-section-rooms"
         >
-      <div v-if="zenMode" class="sidebar-zen-heading"><span>Your room</span><span><Focus aria-hidden="true" />Zen on</span></div>
+      <div v-if="zenMode" class="sidebar-zen-heading"><span>This project</span></div>
       <button
         v-else
         class="sidebar-section-header"
@@ -382,7 +246,6 @@
       >
         <span class="sidebar-heading">Rooms</span>
         <span class="sidebar-section-meta">
-          <span class="section-count">{{ totalRoomCount }}</span>
           <span class="sidebar-section-arrow" :data-collapsed="roomsCollapsed" aria-hidden="true">
             <ChevronRight />
           </span>
@@ -436,7 +299,7 @@
                     <Check v-if="isEntrySelected(project.parent)" />
                   </span>
                   <span v-else class="project-icon" aria-hidden="true">
-                    <House />
+                    <Folder />
                   </span>
                   <span class="project-copy">
                     <span class="room-title-line">
@@ -512,6 +375,9 @@
         </TransitionGroup>
       </Transition>
         </section>
+        <button v-if="!selectionActive" class="sidebar-browse" type="button" @click="openRoomSwitcher">
+          Browse all rooms <ChevronRight aria-hidden="true" />
+        </button>
       </div>
     </div>
 
@@ -565,6 +431,14 @@
       </div>
     </div>
     <div v-else class="sidebar-footer">
+      <div class="sidebar-footer-controls">
+        <button class="sidebar-zen-toggle" type="button" :aria-pressed="zenMode" :disabled="!zenMode && !activeProject"
+          data-testid="sidebar-zen-toggle" @click="toggleZenMode">
+          <Focus aria-hidden="true" /><span>Focus this project</span><span class="sidebar-focus-switch" aria-hidden="true" />
+        </button>
+        <button class="sidebar-topbar-action" type="button" aria-label="Select rooms" title="Select rooms"
+          data-testid="sidebar-select-rooms-button" @click="startSelection()"><ListChecks aria-hidden="true" /></button>
+      </div>
       <button
         v-if="updatePresentation.active"
         class="sidebar-row sidebar-settings-row sidebar-update-row"
@@ -637,8 +511,10 @@
 import RoomUnreadBadge from "./RoomUnreadBadge.vue";
 import {
   Archive,
-  ArrowLeftRight,
   Focus,
+  Folder,
+  GitBranch,
+  PanelLeftClose,
   Check,
   CheckCircle2,
   CircleCheck,
@@ -647,8 +523,6 @@ import {
   Dot,
   Download,
   ExternalLink,
-  GitBranch,
-  Handshake,
   Inbox,
   House,
   ListChecks,
@@ -672,7 +546,6 @@ import {
   SIDEBAR_PROJECT_ROOM_PREVIEW_LIMIT,
   previewSidebarProjectRooms,
 } from "../../../domain/sidebar-project-room-preview";
-import { searchSidebarRooms } from "../../../domain/sidebar-room-search";
 import {
   isSidebarRoomReorderEnabled,
   orderedSidebarChildRooms,
@@ -710,7 +583,7 @@ import {
 import SidebarRoomSwitcher from "./SidebarRoomSwitcher.vue";
 import SidebarChildRoom from "./SidebarChildRoom.vue";
 import SidebarRoomActivity from "./SidebarRoomActivity.vue";
-import { describeSidebarUnreadTotal, sidebarGroupActivity, sidebarGroupUnread, sidebarProjectDetails, sidebarRoomTitle, sidebarUnreadTotal, type SidebarUnreadTotal } from "../../../domain/sidebar-room-display";
+import { describeSidebarUnreadTotal, sidebarGroupActivity, sidebarGroupUnread, sidebarProjectDetails, sidebarUnreadTotal, type SidebarUnreadTotal } from "../../../domain/sidebar-room-display";
 import SidebarAccountMenu from "./SidebarAccountMenu.vue";
 import type { ProjectGroup, SidebarEntry, SystemEntry, RoomEntry } from "../types";
 import { desktopIpc } from "../../../ipc/index.js";
@@ -842,7 +715,6 @@ function toggleProject(projectId: string): void {
 function toggleZenMode(): void {
   if (props.batchActionBusy || props.selectionActive) return;
   if (!zenMode.value && !activeProject.value) return;
-  resetSearch();
   cancelSidebarDrag();
   closeRoomContextMenu();
   closeBackgroundContextMenu();
@@ -917,11 +789,6 @@ onBeforeUnmount(() => {
   cancelPendingSwitcherFocus?.();
 });
 
-const searchButton = ref<HTMLButtonElement | null>(null);
-const searchInput = ref<HTMLInputElement | null>(null);
-const searchOpen = ref(false);
-const searchQuery = ref("");
-const activeSearchIndex = ref(0);
 const expandedProjectRoomLists = ref<Record<string, boolean>>({});
 const lastSelectionAnchorId = ref<string | null>(null);
 const dragState = ref<SidebarDragState | null>(null);
@@ -941,11 +808,6 @@ const roomReorderEnabled = computed(() => isSidebarRoomReorderEnabled(
 const parentReorderEnabled = computed(() => roomReorderEnabled.value && !zenMode.value);
 const pinnedProjectEntries = computed(() => zenMode.value ? [] : props.projectEntries.filter((project) => project.parent.pinned));
 const roomProjectEntries = computed(() => zenMode.value ? displayedProjects.value : props.projectEntries.filter((project) => !project.parent.pinned));
-const searchResults = computed(() => searchSidebarRooms(props.projectEntries, searchQuery.value));
-const activeSearchResultId = computed(() => {
-  const entry = searchResults.value[activeSearchIndex.value]?.entry;
-  return entry ? searchResultId(entry.id) : undefined;
-});
 const selectedEntryIdSet = computed(() => new Set(props.selectedEntryIds));
 const selectedEntries = computed(() => displayedProjects.value
   .flatMap((project) => [project.parent, ...projectChildRooms(project)])
@@ -983,25 +845,12 @@ const pinResolution = computed(() => batchResolution("pin"));
 const concludeResolution = computed(() => batchResolution("conclude"));
 const hideResolution = computed(() => batchResolution("hide"));
 
-watch(searchResults, (results) => {
-  activeSearchIndex.value = Math.min(activeSearchIndex.value, Math.max(0, results.length - 1));
-});
-
-watch(searchQuery, () => {
-  activeSearchIndex.value = 0;
-});
-
 watch(() => props.selectionActive, (selectionActive) => {
   if (selectionActive) {
-    resetSearch();
     cancelSidebarDrag();
   }
   else lastSelectionAnchorId.value = null;
 });
-
-const totalRoomCount = computed(() =>
-  roomProjectEntries.value.reduce((total, project) => total + 1 + projectChildRooms(project).length, 0)
-);
 
 const roomMenuIcons: Record<SidebarRoomMenuActionId, Component> = {
   "open-room": House,
@@ -1498,7 +1347,6 @@ function batchActionLabel(label: string, targetCount: number): string {
 }
 
 function startSelection(entry?: RoomEntry): void {
-  resetSearch();
   if (entry && !isSidebarRoomSelectable(entry)) return;
   lastSelectionAnchorId.value = entry?.id || null;
   emit("start-selection", entry);
@@ -1564,60 +1412,6 @@ function handleSidebarEscape(): void {
   if (props.selectionActive && !props.batchActionBusy) emit("cancel-selection");
 }
 
-function toggleSearch(): void {
-  if (searchOpen.value) closeSearch();
-  else openSearch();
-}
-
-function openSearch(): void {
-  searchOpen.value = true;
-  activeSearchIndex.value = 0;
-  void nextTick(() => searchInput.value?.focus());
-}
-
-function closeSearch(): void {
-  resetSearch();
-  void nextTick(() => searchButton.value?.focus());
-}
-
-function resetSearch(): void {
-  searchOpen.value = false;
-  searchQuery.value = "";
-  activeSearchIndex.value = 0;
-}
-
-function handleSearchKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") {
-    event.preventDefault();
-    closeSearch();
-    return;
-  }
-  if (!searchResults.value.length) return;
-  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-    event.preventDefault();
-    const offset = event.key === "ArrowDown" ? 1 : -1;
-    activeSearchIndex.value = (
-      activeSearchIndex.value + offset + searchResults.value.length
-    ) % searchResults.value.length;
-    void nextTick(() => {
-      const resultId = activeSearchResultId.value;
-      if (resultId) document.getElementById(resultId)?.scrollIntoView({ block: "nearest" });
-    });
-    return;
-  }
-  if (event.key === "Enter") {
-    event.preventDefault();
-    const result = searchResults.value[activeSearchIndex.value];
-    if (result) selectSearchResult(result.entry);
-  }
-}
-
-function selectSearchResult(entry: RoomEntry): void {
-  revealSearchResult(entry);
-  emit("select-entry", entry);
-  closeSearch();
-}
-
 function revealSearchResult(entry: RoomEntry): void {
   const project = props.projectEntries.find((candidate) =>
     candidate.parent.id === entry.id
@@ -1649,7 +1443,7 @@ function requestActiveEntryReveal(entryId: string | null | undefined): void {
 }
 async function revealActiveEntry(): Promise<void> {
   const entryId = pendingActiveReveal;
-  if (!entryId || !sidebarElement.value || searchOpen.value) return;
+  if (!entryId || !sidebarElement.value) return;
   let row = sidebarRow(entryId);
   if (!row) {
     const entry = props.projectEntries.flatMap((project) => [project.parent, ...projectChildRooms(project)])
@@ -1667,9 +1461,8 @@ async function revealActiveEntry(): Promise<void> {
 }
 watch(() => props.activeEntry.id, (entryId) => requestActiveEntryReveal(entryId), { flush: "post" });
 watch(() => props.projectEntries, () => { if (pendingActiveReveal) void revealActiveEntry(); }, { flush: "post" });
-watch(searchOpen, (open) => { if (!open && pendingActiveReveal) void nextTick(revealActiveEntry); });
 
-// New room navigation also clears the search and promotes the project.
+// New room navigation reveals the promoted project.
 watch(() => props.revealRequest, async (request, _previous, onCleanup) => {
   if (!request) return;
   let cancelled = false;
@@ -1677,8 +1470,6 @@ watch(() => props.revealRequest, async (request, _previous, onCleanup) => {
   const entry = props.projectEntries.flatMap((project) => [project.parent, ...projectChildRooms(project)])
     .find((candidate) => candidate.id === request.entryId);
   if (!entry) return;
-  searchQuery.value = "";
-  searchOpen.value = false;
   revealSearchResult(entry);
   await nextTick();
   if (cancelled || props.activeEntry.id !== request.entryId) return;
@@ -1686,9 +1477,5 @@ watch(() => props.revealRequest, async (request, _previous, onCleanup) => {
     .find((element) => element.dataset.sidebarEntryId === request.entryId);
   row?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
 }, { flush: "post" });
-
-function searchResultId(entryId: string): string {
-  return `sidebar-room-search-result-${encodeURIComponent(entryId)}`;
-}
 
 </script>

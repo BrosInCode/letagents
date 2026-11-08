@@ -6,7 +6,10 @@
     @signIn="handleSignIn"
   />
 
-  <div v-else class="room-shell" :data-theme="theme" :data-compact-viewport="compactViewport" :data-keyboard-open="keyboardOpen" :data-compact-composer="compactComposer" :style="roomViewportStyle" @focusin="syncRoomViewport">
+  <div v-else class="web-room-layout" :data-sidebar-open="sidebarOpen">
+    <button v-if="sidebarOpen && sidebarCompact" class="web-sidebar-scrim" type="button" aria-label="Close sidebar" @click="closeSidebar" />
+    <RoomSidebar :open="sidebarOpen" :compact="sidebarCompact" :active-room-id="room?.identifier || String(route.params.roomId || '')" @close="closeSidebar" @settings="openSidebarSettings" @active-room-visible="sidebarHasActiveRoom = $event" />
+  <div class="room-shell" :inert="sidebarOpen && sidebarCompact" :data-theme="theme" :data-compact-viewport="compactViewport" :data-keyboard-open="keyboardOpen" :data-compact-composer="compactComposer" :style="roomViewportStyle" @focusin="syncRoomViewport">
     <!-- Drawer -->
     <RoomDrawer
       ref="roomDrawer"
@@ -23,6 +26,9 @@
 
     <RoomHeader
       ref="roomHeader"
+      :sidebar-visible="sidebarOpen && !sidebarCompact"
+      :hide-room-identity="sidebarOpen && !sidebarCompact && sidebarHasActiveRoom"
+      @toggleSidebar="sidebarOpen = !sidebarOpen"
       :title="roomTitle"
       :subtitle="roomSubtitle"
       :activeTab="activeTab"
@@ -231,6 +237,7 @@
       @update:activeTab="handleActiveTabChange"
     />
   </div>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -249,6 +256,7 @@ import JoinRequestBanner from '../../../../shared/ui/JoinRequestBanner.vue'
 import OpenInDesktopPill from '@/components/room/OpenInDesktopPill.vue'
 import { openInDesktop } from '@/composables/openInDesktop'
 import { joinRequestAlerts } from '@/composables/roomJoinRequestAlerts'
+import RoomSidebar from '@/components/room/RoomSidebar.vue'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
 import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
@@ -369,6 +377,18 @@ const roomAccessState = computed(() => resolveRoomAccessState({
   isSignedIn: auth.isSignedIn.value,
 }))
 
+const sidebarMedia = window.matchMedia('(max-width: 999px)')
+const sidebarCompact = ref(sidebarMedia.matches)
+const sidebarOpen = ref(!sidebarMedia.matches)
+const sidebarHasActiveRoom = ref(false)
+function sidebarViewportChanged() { sidebarCompact.value = sidebarMedia.matches; sidebarOpen.value = !sidebarMedia.matches }
+onMounted(() => sidebarMedia.addEventListener('change', sidebarViewportChanged))
+onUnmounted(() => sidebarMedia.removeEventListener('change', sidebarViewportChanged))
+function closeSidebar() {
+  sidebarOpen.value = false
+  void nextTick(() => document.querySelector<HTMLButtonElement>('[data-sidebar-reveal]')?.focus({ preventScroll: true }))
+}
+function openSidebarSettings() { drawerOpen.value = true; if (sidebarCompact.value) sidebarOpen.value = false }
 const drawerOpen = ref(false)
 const roomDrawer = ref<InstanceType<typeof RoomDrawer> | null>(null)
 async function openJoinRequests() {
@@ -741,6 +761,9 @@ watch(
 </script>
 
 <style scoped>
+.web-sidebar-scrim { position: fixed; z-index: 39; inset: 0; border: 0; background: rgba(0,0,0,.45); }
+@media (min-width: 1000px) { .web-room-layout[data-sidebar-open="true"] .room-shell { inset-inline-start: 272px; } }
+
 .room-shell {
   position: fixed;
   top: var(--room-viewport-top, 0px);
