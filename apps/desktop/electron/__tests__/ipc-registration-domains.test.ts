@@ -533,10 +533,14 @@ test("auth/setup IPC wakes grant recovery only from authorization and reports na
   let recoveryWakes = 0;
   let demoCacheClears = 0;
   let liveReconnects = 0;
+  let organizationRegistrations = 0;
   let storageAvailable = false;
   const storageObservations: boolean[] = [];
   const unexpected = () => { throw new Error("unexpected auth/setup operation"); };
   const mocks = [
+    mock.module("../main/organizations.js", { namedExports: {
+      registerOrganizationIpcHandlers: () => { organizationRegistrations += 1; },
+    } }),
     mock.module("../main/auth.js", { namedExports: {
       cancelDeviceAuthFlow: unexpected, getDesktopAuthStatus: unexpected, pollDeviceAuthFlow: unexpected,
       signOutDesktopAuth: unexpected, startDeviceAuthFlow: unexpected,
@@ -570,6 +574,7 @@ test("auth/setup IPC wakes grant recovery only from authorization and reports na
     const { registerDesktopAuthAndSetupIpcHandlers } = await import("../main/ipc-handlers/auth-setup.js");
     const handlers = new Map<string, () => Promise<unknown>>();
     registerDesktopAuthAndSetupIpcHandlers({ handle: (channel: string, handler: () => Promise<unknown>) => handlers.set(channel, handler) } as never);
+    assert.equal(organizationRegistrations, 1);
     assert.equal(recoveryWakes, 0, "registration is not an auth recovery event");
     assert.equal(demoCacheClears, 0);
     invalidated();

@@ -303,7 +303,7 @@ export function useAppAuthFlow(context: unknown) {
     getRoomIdentifier: () => getAuthRoomIdentifier(),
     isFirstRunGate: () => Boolean(mcpInstallState.value && !mcpInstallState.value.completed),
     onFirstRunAuthorized: async () => {
-      firstRunStage.value = "room";
+      firstRunStage.value = "organization";
     },
     onAuthorized: () => refresh(),
     onSigningOut: clearDesktopSessionState,
