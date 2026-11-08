@@ -190,6 +190,7 @@ export function useAppRoomManagement(context: unknown) {
       return selected?.joined ? { id: selected.github_org_id, login: selected.login, avatarUrl: selected.avatar_url } : null;
     },
     onCompanyRoomCreated: (room) => app.company.rememberCreatedRoom(room),
+    onCompanyLink: (organizationId) => app.receiveCompanyInvite(organizationId),
   });
   const {
     batchConcludeSidebarFocusRooms,
