@@ -13,63 +13,28 @@
       Drag rooms to reorder them. Press {{ reorderModifierLabel }} plus Up or Down Arrow to move the focused room.
     </p>
     <p class="sr-only" role="status" aria-live="polite">{{ reorderAnnouncement }}</p>
-    <div class="sidebar-topbar" :data-selection-active="selectionActive">
-      <template v-if="selectionActive">
-        <div class="sidebar-selection-summary" aria-live="polite">
-          <ListChecks aria-hidden="true" />
-          <strong>{{ selectedEntryIds.length }}</strong>
-          <span>selected</span>
-        </div>
-        <button
-          class="sidebar-topbar-action"
-          type="button"
-          aria-label="Finish selecting rooms"
-          title="Finish selecting rooms"
-          data-testid="sidebar-selection-close"
-          :disabled="Boolean(batchActionBusy)"
-          @click="$emit('cancel-selection')"
-        >
-          <X aria-hidden="true" />
+    <div class="sidebar-topbar">
+      <span class="sidebar-wordmark">letagents.</span>
+      <div class="sidebar-topbar-actions">
+        <button class="sidebar-search-button" type="button" aria-label="Find a room" aria-haspopup="dialog"
+          :aria-expanded="switcherOpen" :title="`Find a room (${switchShortcutLabel})`"
+          :aria-keyshortcuts="switchAriaKeyShortcuts" data-testid="sidebar-search-button" @click="openRoomSwitcher">
+          <Search aria-hidden="true" />
         </button>
-      </template>
-      <template v-else>
-        <span class="sidebar-wordmark">letagents.</span>
-        <div class="sidebar-topbar-actions">
-          <button class="sidebar-search-button" type="button" aria-label="Find a room" aria-haspopup="dialog"
-            :aria-expanded="switcherOpen" :title="`Find a room (${switchShortcutLabel})`"
-            :aria-keyshortcuts="switchAriaKeyShortcuts" data-testid="sidebar-search-button" @click="openRoomSwitcher">
-            <Search aria-hidden="true" />
-          </button>
-          <button class="sidebar-topbar-action sidebar-inbox-button" type="button" data-testid="sidebar-inbox"
-            :data-active="activeEntry.type === 'inbox'" :aria-label="needsYouCount ? `Inbox, ${needsYouCount} items need you` : 'Inbox'"
-            title="Inbox" @click="$emit('open-needs-you')">
-            <Inbox aria-hidden="true" />
-            <span v-if="needsYouCount" class="sidebar-inbox-count">{{ needsYouCount > 99 ? '99+' : needsYouCount }}</span>
-          </button>
-          <button class="sidebar-collapse-button" type="button" aria-label="Hide sidebar" title="Hide sidebar"
-            data-testid="sidebar-cycle-button" @click="$emit('cycle-sidebar')"><PanelLeftClose aria-hidden="true" /></button>
-        </div>
-      </template>
+        <button class="sidebar-topbar-action sidebar-inbox-button" type="button" data-testid="sidebar-inbox"
+          :data-active="activeEntry.type === 'inbox'" :aria-label="needsYouCount ? `Inbox, ${needsYouCount} items need you` : 'Inbox'"
+          title="Inbox" @click="$emit('open-needs-you')">
+          <Inbox aria-hidden="true" />
+          <span v-if="needsYouCount" class="sidebar-inbox-count">{{ needsYouCount > 99 ? '99+' : needsYouCount }}</span>
+        </button>
+        <button class="sidebar-collapse-button" type="button" aria-label="Hide sidebar" title="Hide sidebar"
+          data-testid="sidebar-cycle-button" @click="$emit('cycle-sidebar')"><PanelLeftClose aria-hidden="true" /></button>
+      </div>
     </div>
 
     <div class="sidebar-navigation" @contextmenu.prevent="openBackgroundContextMenu">
       <div class="sidebar-actions">
         <button
-          v-if="selectionActive"
-          class="sidebar-selection-scope"
-          type="button"
-          :disabled="!visibleSelectableEntries.length || Boolean(batchActionBusy)"
-          data-testid="sidebar-select-visible"
-          @click="toggleVisibleSelection"
-        >
-          <span class="sidebar-selection-scope-icon" :data-selected="allVisibleSelected" aria-hidden="true">
-            <Check v-if="allVisibleSelected" />
-          </span>
-          <span>{{ allVisibleSelected ? "Clear visible" : "Select visible" }}</span>
-          <small>{{ visibleSelectableEntries.length }}</small>
-        </button>
-        <button
-          v-else
           class="sidebar-cta"
           type="button"
           data-testid="sidebar-new-room"
@@ -80,10 +45,10 @@
           </span>
           <span>New room</span>
         </button>
-        <button v-if="!selectionActive" class="sidebar-cta sidebar-nav-link" type="button" :data-active="activeEntry.type === 'my-work'" data-testid="sidebar-my-work" @click="$emit('open-my-work')">
+        <button class="sidebar-cta sidebar-nav-link" type="button" :data-active="activeEntry.type === 'my-work'" data-testid="sidebar-my-work" @click="$emit('open-my-work')">
           <span class="cta-plus" aria-hidden="true"><ListTodo /></span><span>My work</span>
         </button>
-        <button v-if="!selectionActive" class="sidebar-cta sidebar-nav-link" type="button" :data-active="activeEntry.type === 'messages'" data-testid="sidebar-messages" @click="$emit('open-messages')">
+        <button class="sidebar-cta sidebar-nav-link" type="button" :data-active="activeEntry.type === 'messages'" data-testid="sidebar-messages" @click="$emit('open-messages')">
           <span class="cta-plus" aria-hidden="true"><MessageSquare /></span><span>Messages</span><span v-if="messagesUnread" class="sidebar-nav-count" :aria-label="`${messagesUnread} unread messages`">{{ messagesUnread > 99 ? '99+' : messagesUnread }}</span>
         </button>
       </div>
@@ -382,6 +347,37 @@
     </div>
 
     <div v-if="selectionActive" class="sidebar-footer sidebar-selection-footer">
+      <div class="sidebar-selection-heading">
+        <div class="sidebar-selection-summary" aria-live="polite">
+          <ListChecks aria-hidden="true" />
+          <strong>{{ selectedEntryIds.length }}</strong>
+          <span>selected</span>
+        </div>
+        <button
+          class="sidebar-topbar-action"
+          type="button"
+          aria-label="Finish selecting rooms"
+          title="Finish selecting rooms"
+          data-testid="sidebar-selection-close"
+          :disabled="Boolean(batchActionBusy)"
+          @click="$emit('cancel-selection')"
+        >
+          <X aria-hidden="true" />
+        </button>
+      </div>
+      <button
+        class="sidebar-selection-scope"
+        type="button"
+        :disabled="!visibleSelectableEntries.length || Boolean(batchActionBusy)"
+        data-testid="sidebar-select-visible"
+        @click="toggleVisibleSelection"
+      >
+        <span class="sidebar-selection-scope-icon" :data-selected="allVisibleSelected" aria-hidden="true">
+          <Check v-if="allVisibleSelected" />
+        </span>
+        <span>{{ allVisibleSelected ? "Clear visible" : "Select visible" }}</span>
+        <small>{{ visibleSelectableEntries.length }}</small>
+      </button>
       <div class="sidebar-selection-toolbar" role="toolbar" aria-label="Selected room actions">
         <button
           type="button"
@@ -727,7 +723,8 @@ function toggleZenMode(): void {
   }
 }
 function openRoomSwitcher(): void {
-  if (props.batchActionBusy || props.selectionActive) return;
+  if (props.batchActionBusy) return;
+  if (props.selectionActive) emit("cancel-selection");
   cancelPendingSwitcherFocus?.();
   cancelPendingSwitcherFocus = null;
   closeRoomContextMenu();

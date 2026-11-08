@@ -477,7 +477,16 @@
 }
 
 .sidebar-selection-footer {
+  display: grid;
+  gap: 8px;
   padding-top: 8px;
+}
+
+.sidebar-selection-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .sidebar-selection-toolbar {

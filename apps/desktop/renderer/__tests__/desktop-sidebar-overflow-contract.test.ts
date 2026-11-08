@@ -30,6 +30,19 @@ describe("desktop sidebar overflow contract", () => {
     );
   });
 
+  it("keeps selection controls together in the fixed footer", () => {
+    const footerStart = sidebarSource.indexOf('class="sidebar-footer sidebar-selection-footer"');
+    const navigation = sidebarSource.slice(0, footerStart);
+    const selectionFooter = sidebarSource.slice(footerStart, sidebarSource.indexOf('<div v-else class="sidebar-footer">', footerStart));
+    for (const control of ["sidebar-selection-summary", "sidebar-selection-close", "sidebar-select-visible", "sidebar-batch-mark-read"]) {
+      assert.ok(selectionFooter.includes(control), `${control} stays in the footer`);
+      assert.ok(!navigation.includes(control), `${control} does not replace navigation`);
+    }
+    assert.match(navigation, /class="sidebar-topbar"/);
+    assert.match(navigation, /data-testid="sidebar-new-room"/);
+    assert.doesNotMatch(navigation.slice(navigation.indexOf('class="sidebar-topbar"'), navigation.indexOf('class="sidebar-room-sections"')), /v-if="!?selectionActive"/);
+  });
+
   it("scrolls pinned rooms and rooms together, so neither is clipped in a box of its own", () => {
     const lists = /\.project-list,\s*\.pinned-list\s*\{([^}]*)\}/.exec(sidebarRoomStyles)?.[1] ?? "";
     assert.ok(lists, "the room lists have a rule");
