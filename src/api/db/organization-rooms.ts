@@ -1,7 +1,7 @@
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, exists, isNull, or } from "drizzle-orm";
 
 import { db } from "./client.js";
-import { github_app_installations, github_app_repositories, github_repositories, rooms } from "./schema.js";
+import { github_app_installations, github_app_repositories, github_repositories, project_admins, room_members, rooms } from "./schema.js";
 
 export async function getConnectedOrganizationRooms(organizationId: string) {
   // The installation target's immutable ID supplies the optional company
@@ -23,4 +23,22 @@ export async function getConnectedOrganizationRooms(organizationId: string) {
       isNull(github_app_repositories.removed_at),
       eq(rooms.kind, "main"),
     )).orderBy(asc(github_repositories.full_name));
+}
+
+// Company rooms with no repository: rooms made inside the company. Only rooms
+// the person already belongs to (member or admin) are listed.
+export async function getMemberOrganizationRooms(organizationId: string, accountId: string) {
+  return db.select({ room_id: rooms.id, display_name: rooms.display_name })
+    .from(rooms)
+    .where(and(
+      eq(rooms.organization_id, organizationId),
+      eq(rooms.kind, "main"),
+      or(
+        exists(db.select({ one: room_members.room_id }).from(room_members)
+          .where(and(eq(room_members.room_id, rooms.id), eq(room_members.account_id, accountId)))),
+        exists(db.select({ one: project_admins.project_id }).from(project_admins)
+          .where(and(eq(project_admins.project_id, rooms.id), eq(project_admins.account_id, accountId)))),
+      ),
+    ))
+    .orderBy(asc(rooms.display_name), asc(rooms.id));
 }

@@ -9,7 +9,7 @@ import { generateCode, getRoomScopedSequenceNames, isUniqueConstraintError, next
 import { toProject, toRoomAlias } from "./mappers.js";
 import type { Project, RoomAlias } from "./types.js";
 
-export async function createProject(): Promise<Project> {
+export async function createProject(options: { organizationId?: string | null } = {}): Promise<Project> {
   const created_at = new Date().toISOString();
 
   while (true) {
@@ -18,7 +18,12 @@ export async function createProject(): Promise<Project> {
 
     try {
       await db.transaction(async (tx) => {
-        await tx.insert(rooms).values({ id: roomId, display_name, created_at });
+        await tx.insert(rooms).values({
+          id: roomId,
+          display_name,
+          created_at,
+          ...(options.organizationId ? { organization_id: options.organizationId } : {}),
+        });
         await tx
           .delete(id_sequences)
           .where(inArray(id_sequences.name, getRoomScopedSequenceNames(roomId)));

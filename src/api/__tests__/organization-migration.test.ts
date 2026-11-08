@@ -12,8 +12,8 @@ test("organization migration preserves standalone rooms and enforces membership 
     await client.query("BEGIN");
     await client.query("CREATE SCHEMA organization_migration_test");
     await client.query("SET LOCAL search_path TO organization_migration_test");
-    await client.query("CREATE TABLE accounts (id text PRIMARY KEY); CREATE TABLE rooms (id text PRIMARY KEY)");
-    await client.query("INSERT INTO accounts VALUES ('alice'), ('bob'); INSERT INTO rooms VALUES ('github.com/alice/shared')");
+    await client.query("CREATE TABLE accounts (id text PRIMARY KEY); CREATE TABLE rooms (id text PRIMARY KEY, display_name text)");
+    await client.query("INSERT INTO accounts VALUES ('alice'), ('bob'); INSERT INTO rooms VALUES ('github.com/alice/shared', 'shared')");
     const migration = await readFile(new URL("../../../drizzle/0143_organizations.sql", import.meta.url), "utf8");
     await client.query(migration);
     await client.query("INSERT INTO organizations VALUES ('1', 'acme', NULL, now(), now()), ('2', 'other', NULL, now(), now())");
@@ -30,9 +30,23 @@ test("organization migration preserves standalone rooms and enforces membership 
       await assert.rejects(client.query(statement), { code });
       await client.query("ROLLBACK TO SAVEPOINT invalid_membership");
     }
+    // Rooms may belong to a company; deleting the company only detaches them.
+    await client.query("INSERT INTO rooms (id, display_name, organization_id) VALUES ('adhoc-1', 'Adhoc', '1'), ('adhoc-2', 'Plain', NULL)");
+    await client.query("SAVEPOINT bad_room_org");
+    await assert.rejects(
+      client.query("INSERT INTO rooms (id, display_name, organization_id) VALUES ('adhoc-3', 'Bad', '404')"),
+      { code: "23503" },
+    );
+    await client.query("ROLLBACK TO SAVEPOINT bad_room_org");
+    const partial = await client.query("SELECT indexdef FROM pg_indexes WHERE indexname = 'rooms_organization_id_idx' AND schemaname = 'organization_migration_test'");
+    assert.match(partial.rows[0].indexdef, /WHERE \(organization_id IS NOT NULL\)/);
     await client.query("DELETE FROM organizations WHERE github_org_id = '1'");
+    assert.equal((await client.query("SELECT organization_id FROM rooms WHERE id = 'adhoc-1'")).rows[0].organization_id, null);
     assert.equal((await client.query("SELECT * FROM organization_memberships")).rowCount, 1);
-    assert.deepEqual((await client.query("SELECT * FROM rooms")).rows, [{ id: "github.com/alice/shared" }]);
+    assert.deepEqual(
+      (await client.query("SELECT id, organization_id FROM rooms WHERE id = 'github.com/alice/shared'")).rows,
+      [{ id: "github.com/alice/shared", organization_id: null }],
+    );
     await client.query("DELETE FROM accounts WHERE id = 'alice'");
     assert.equal((await client.query("SELECT * FROM organization_memberships")).rowCount, 0);
   } finally {
