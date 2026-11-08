@@ -17,6 +17,7 @@ const api: DesktopApi = {
     list: () => ipcRenderer.invoke("desktop:organizations:list"),
     join: (id, setup) => ipcRenderer.invoke("desktop:organizations:join", id, setup),
     rooms: (id) => ipcRenderer.invoke("desktop:organizations:rooms", id),
+    openOnGitHub: (page) => ipcRenderer.invoke("desktop:organizations:open-github", page),
   },
   ui: {
     onOpenSettings: (callback) => {
