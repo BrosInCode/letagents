@@ -78,12 +78,10 @@
         :inert="isSettingsSurface || sidebarMode === 'hidden'"
       >
         <DesktopSidebar
-          :company-organizations="company.organizations.value"
-          :company-selected-id="company.selectedId.value"
-          :company-busy="company.busy.value"
-          :company-error="company.error.value"
+          :company="companyStep"
           @choose-company="chooseSidebarCompany"
           @refresh-companies="company.refresh"
+          @open-company-github="company.openOnGitHub"
           :active-entry="activeEntry"
           :primary-room="currentParentRoom"
           :project-entries="sidebarProjectEntries"
@@ -169,15 +167,17 @@
           </button>
         </template>
       </PrivateMessages>
-      <section v-if="showCompanyHome" class="company-home surface-page" data-testid="company-home">
-        <h1>{{ company.selected.value?.login || 'Personal & shared rooms' }}</h1>
-        <p v-if="company.busy.value" role="status">Loading your repo rooms…</p>
-        <p v-else-if="company.error.value" role="alert">{{ company.error.value }}</p>
-        <p v-else>{{ sidebarProjectEntries.length ? 'Choose a repo room from the sidebar to work with your agents.' : 'No rooms here yet. Open a repository to get started.' }}</p>
-        <button class="ghost-button" @click="company.refresh" :disabled="company.busy.value">Refresh rooms</button>
-        <button class="primary-button" @click="selectNewRoomEntry">Open a repository</button>
-        <button class="ghost-button" @click="cycleSidebar">Show or hide sidebar</button>
-      </section>
+      <CompanyHome
+        v-if="showCompanyHome && company.selected.value"
+        :name="company.selected.value.login"
+        :avatar-url="company.selected.value.avatar_url"
+        :state="companyHomeState"
+        :access-reason="company.accessReason.value"
+        @new-room="selectNewRoomEntry(); chooseStandaloneIntent()"
+        @show-all="chooseSidebarCompany(null)"
+        @retry="company.refresh"
+        @open-github="company.openOnGitHub"
+      />
       <AuthOnboardingView
         v-if="!showCompanyHome && activeEntry.type === 'room' && selectedNeedsAccess"
         :sidebar-mode="sidebarMode"
@@ -361,6 +361,7 @@
         v-model:join-code="newRoomJoinCode"
         v-model:room-name="newRoomName"
         v-model:storage="newRoomStorage"
+        :company="newRoomCompany"
         :step="newRoomStep"
         :busy="newRoomBusy"
         :can-dismiss="newRoomCanDismiss"
@@ -462,6 +463,7 @@ import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRo
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
+import CompanyHome from "./components/desktop/content/CompanyHome.vue";
 import AskAgentDialog from "./components/desktop/content/asks/AskAgentDialog.vue";
 import GiveAgentDialog from "./components/desktop/content/asks/GiveAgentDialog.vue";
 import { useAppAgentAsks } from "./composables/app/useAppAgentAsks";
@@ -608,7 +610,7 @@ const {
 } = Object.assign(app, useAppSidebarEntries(app));
 
 const {
-  showCompanyHome, chooseSidebarCompany,
+  showCompanyHome, companyHomeState, chooseSidebarCompany,
 } = Object.assign(app, useAppCompanyNavigation(app));
 
 Object.assign(app, useAppRentalEvents(app));
@@ -636,7 +638,7 @@ const {
   newRoomFeedbackState, newRoomJoinCode, newRoomJoinError, newRoomModalOpen, newRoomName,
   newRoomProjectPath, newRoomProjectName, newRoomProjectParent, newRoomProjectCreationError,
   newRoomProjectPathError, newRoomProjectSelection, newRoomStatusMessage, newRoomStep,
-  newRoomStorage, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
+  newRoomStorage, newRoomCompany, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
   pickNewProjectParent, openSuccessRoom, retryLastAction, selectNewRoomEntry,
   archiveSidebarFocusRoom, archiveSidebarRoom, deleteAccountRoom, leaveAccountRoom,
   openAccountRoomFromSettings, renameSidebarRoom, restoreAccountRoom, settingsFeedback,

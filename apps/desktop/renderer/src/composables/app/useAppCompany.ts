@@ -1,4 +1,5 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, watch } from "vue";
+import type { CompanyHomeState } from "../../components/desktop/company/types";
 import type { FirstRunCompanyStepState } from "../../components/desktop/setup/types";
 import { useDesktopOrganizations } from "../useDesktopOrganizations";
 import type { AppContextOf } from "./context";
@@ -58,9 +59,22 @@ export function useAppCompanyNavigation(context: unknown) {
   const app = context as AppContextOf<"useAppCompany" | "useAppNavigation" | "useAppSidebarEntries" | "useAppSidebarSelection">;
   const { activeEntry, company, sidebarProjectEntries } = app;
 
-  const showCompanyHome = computed(() => activeEntry.value.type === "room" && !sidebarProjectEntries.value.some((project) =>
-    [project.parent, ...project.branchRooms, ...project.focusRooms].some((entry) => entry.id === activeEntry.value.id && entry.roomIdentifier)
-  ));
+  // Without a company the sidebar is the existing account view, so nothing replaces the room.
+  const showCompanyHome = computed(() => Boolean(company.selectedId.value) && activeEntry.value.type === "room"
+    && !sidebarProjectEntries.value.some((project) =>
+      [project.parent, ...project.branchRooms, ...project.focusRooms].some((entry) => entry.id === activeEntry.value.id && entry.roomIdentifier)
+    ));
+
+  const companyHomeState = computed<CompanyHomeState>(() => {
+    if (company.status.value === "github_access_required" || company.roomsStatus.value === "github_access_required") {
+      return "github_access_required";
+    }
+    if (company.roomsStatus.value === "sso_required") return "sso_required";
+    if (company.joiningId.value || company.roomsStatus.value === "loading") return "loading";
+    if (company.roomsStatus.value === "unavailable" && !company.rooms.value.length) return "unavailable";
+    if (!company.rooms.value.length) return "empty";
+    return "choose";
+  });
 
   async function chooseSidebarCompany(id: string | null): Promise<void> {
     app.cancelSidebarRoomSelection();
@@ -71,5 +85,5 @@ export function useAppCompanyNavigation(context: unknown) {
     }
   }
 
-  return { showCompanyHome, chooseSidebarCompany };
+  return { showCompanyHome, companyHomeState, chooseSidebarCompany };
 }

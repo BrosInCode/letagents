@@ -162,6 +162,16 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
     }
   }
 
+  /** List a room just created in the selected company at once, before the next check with GitHub. */
+  function rememberCreatedRoom(room: { roomIdentifier: string; displayName: string; organizationId: string }): void {
+    if (room.organizationId !== selectedId.value) return;
+    if (rooms.value.some((entry) => entry.room_id.toLowerCase() === room.roomIdentifier.toLowerCase())) return;
+    rooms.value = [...rooms.value, {
+      kind: "room", room_id: room.roomIdentifier, display_name: room.displayName,
+      full_name: null, github_repo_id: null, organization_id: room.organizationId, visibility: null,
+    }];
+  }
+
   async function openOnGitHub(page: DesktopOrganizationGitHubPage): Promise<void> {
     await desktopIpc.organizations.openOnGitHub(page);
   }
@@ -188,7 +198,7 @@ export function useDesktopOrganizations(auth: Ref<DesktopAuthStatus | null>) {
   return {
     organizations, invitations, ssoRequired, status, accessReason, rooms, roomsStatus,
     selectedId, selected, joiningId, busy, error, hasChoices,
-    refresh, refreshIfStale, choose, openOnGitHub,
+    refresh, refreshIfStale, choose, openOnGitHub, rememberCreatedRoom,
   };
 }
 
