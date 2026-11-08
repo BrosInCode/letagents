@@ -1928,3 +1928,13 @@
     transition-property: border-color, background-color, color;
   }
 }
+
+/* Company setup uses the same quiet, readable column as the company preview. */
+.first-run-wizard[data-company-flow="true"] .first-run-card { width: min(600px, 100%); margin: 24px auto; min-height: 0; grid-template-rows: auto auto auto; gap: 28px; }
+.first-run-wizard[data-company-flow="true"] .first-run-header { justify-items: start; text-align: left; }
+.first-run-wizard[data-company-flow="true"] .hero-kicker { display: none; }
+.first-run-wizard[data-company-flow="true"] .mcp-wizard-header h1 { font-size: clamp(29px, 4vw, 34px); font-weight: 620; letter-spacing: -.035em; line-height: 1.2; }
+.first-run-wizard[data-company-flow="true"] .first-run-heading-motion > p { font-size: 15px; line-height: 1.6; }
+.first-run-wizard[data-company-flow="true"] .mcp-wizard-actions { justify-content: space-between; margin-top: 8px; }
+.first-run-wizard[data-company-flow="true"] .first-run-room-step { min-height: 0; }
+.first-run-wizard[data-company-flow="true"] .first-run-room-paths { width: 100%; }

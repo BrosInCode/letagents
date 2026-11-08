@@ -129,3 +129,29 @@ backend slices.
   `organization_join_required`, `github_scope_required` (403),
   `github_signin_required` (401), `organization_verification_unavailable` (503).
   The 201 reply then also carries `organization_id`.
+
+## Desktop onboarding (slice 4)
+
+The desktop signs in as an individual, then offers an optional company step.
+Owners can set up a company, members can join an existing one, and personal rooms
+remain available even when GitHub organization verification fails. Connected
+company repo rooms can be selected during first run. Selection is stored per
+account and API origin; account changes invalidate in-flight company requests.
+
+### Rework (2026-11-08)
+
+- The company step follows the approved mockup: one row per GitHub organization
+  in a radio group, with "All rooms" (no filter) first. The main button names what
+  happens: Continue, Set up <company>, or Join <company>.
+- People with no organizations, invitations or blocked organizations skip the
+  step; Back from the room step then returns to GitHub.
+- A sign-in without `read:org` shows "Allow on GitHub". The main process opens
+  `/auth/github/organizations` on the LetAgents server (slice 2), and the app
+  checks again when the window regains focus.
+- Pending GitHub invitations show "Accept on GitHub". Organizations that GitHub
+  hides behind single sign-on show "Authorize".
+- The IPC layer returns a status for every refusal instead of throwing, so the
+  renderer can show the right state. The main process builds every URL it opens.
+- A window-focus check runs at most once a minute while the list is ready.
+- The room step lists the company's rooms (repo rooms and rooms with no repo)
+  above the usual three ways to start.
