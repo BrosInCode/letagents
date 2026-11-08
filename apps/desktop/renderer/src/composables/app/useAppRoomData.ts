@@ -102,6 +102,7 @@ export function useAppRoomData(context: unknown) {
 export function useAppRoomManagement(context: unknown) {
   const app = context as AppContextOf<
       "useAppArchivedRooms"
+    | "useAppCompany"
     | "useAppNavigation"
     | "useAppRoomContext"
     | "useAppRoomData"
@@ -148,6 +149,7 @@ export function useAppRoomManagement(context: unknown) {
     newRoomStatusMessage,
     newRoomStep,
     newRoomStorage,
+    newRoomCompany,
     newRoomSuccess,
     openProjectRoomFromModal,
     openProjectRoomFromPath,
@@ -183,6 +185,11 @@ export function useAppRoomManagement(context: unknown) {
       chatStorageSettings.value?.defaultMode === "local" || chatStorageSettings.value?.mode === "local"
         ? "local"
         : "cloud",
+    getCompany: () => {
+      const selected = app.company.selected.value;
+      return selected?.joined ? { id: selected.github_org_id, login: selected.login, avatarUrl: selected.avatar_url } : null;
+    },
+    onCompanyRoomCreated: (room) => app.company.rememberCreatedRoom(room),
   });
   const {
     batchConcludeSidebarFocusRooms,
@@ -234,7 +241,7 @@ export function useAppRoomManagement(context: unknown) {
     newRoomFeedbackState, newRoomJoinCode, newRoomJoinError, newRoomModalOpen, newRoomName,
     newRoomProjectPath, newRoomProjectName, newRoomProjectParent, newRoomProjectCreationError,
     newRoomProjectPathError, newRoomProjectSelection, newRoomStatusMessage, newRoomStep,
-    newRoomStorage, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
+    newRoomStorage, newRoomCompany, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
     pickNewProjectParent, openSuccessRoom, retryLastAction, selectNewRoomEntry,
     batchConcludeSidebarFocusRooms, batchHideSidebarRooms, batchSetSidebarRoomsPinned,
     archiveSidebarFocusRoom, archiveSidebarRoom, concludeSidebarFocusRoom, deleteAccountRoom,

@@ -6,11 +6,12 @@ import { useDesktopNavigationState } from "../useDesktopNavigationState";
 import { rememberStoredString } from "../../domain/desktop-storage";
 import { normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
 import { gitRoomsShareRepo } from "../../domain/app-room-aliases";
+import { mergeCompanyRooms } from "../../domain/company-navigation";
 import type { AppContextOf } from "./context";
 
 /** Sidebar navigation state: the active entry, projects, and the selected room. */
 export function useAppNavigation(context: unknown) {
-  const app = context as AppContextOf<"useAppState">;
+  const app = context as AppContextOf<"useAppCompany" | "useAppState">;
   const {
     accountRooms, activeEntryStorageKey, appInfo, recentRootRooms, recentRootRoomsStorageKey,
     repoStatus, rootRoomSnapshot, selectedRootRoomIdentifier, selectedSnapshot,
@@ -43,7 +44,7 @@ export function useAppNavigation(context: unknown) {
     togglePinnedCollapsed,
     toggleRoomsCollapsed,
   } = useDesktopNavigationState({
-    accountRooms,
+    accountRooms: computed(() => mergeCompanyRooms(accountRooms.value, app.company.rooms.value)),
     activeEntryStorageKey,
     appInfo,
     recentRootRooms,

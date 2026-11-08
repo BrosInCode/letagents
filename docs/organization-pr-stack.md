@@ -129,3 +129,66 @@ backend slices.
   `organization_join_required`, `github_scope_required` (403),
   `github_signin_required` (401), `organization_verification_unavailable` (503).
   The 201 reply then also carries `organization_id`.
+
+## Desktop onboarding (slice 4)
+
+The desktop signs in as an individual, then offers an optional company step.
+Owners can set up a company, members can join an existing one, and personal rooms
+remain available even when GitHub organization verification fails. Connected
+company repo rooms can be selected during first run. Selection is stored per
+account and API origin; account changes invalidate in-flight company requests.
+
+### Rework (2026-11-08)
+
+- The company step follows the approved mockup: one row per GitHub organization
+  in a radio group, with "All rooms" (no filter) first. The main button names what
+  happens: Continue, Set up <company>, or Join <company>.
+- People with no organizations, invitations or blocked organizations skip the
+  step; Back from the room step then returns to GitHub.
+- A sign-in without `read:org` shows "Allow on GitHub". The main process opens
+  `/auth/github/organizations` on the LetAgents server (slice 2), and the app
+  checks again when the window regains focus.
+- Pending GitHub invitations show "Accept on GitHub". Organizations that GitHub
+  hides behind single sign-on show "Authorize".
+- The IPC layer returns a status for every refusal instead of throwing, so the
+  renderer can show the right state. The main process builds every URL it opens.
+- A window-focus check runs at most once a minute while the list is ready.
+- The room step lists the company's rooms (repo rooms and rooms with no repo)
+  above the usual three ways to start.
+
+## Sidebar company scope (slice 5)
+
+The workspace selector wraps the existing repo-room groups. Company discovery
+adds unopened rooms to navigation while preserving known rooms' pins, child
+rooms, and unread state. Search and Zen Mode use the scoped groups. Personal &
+shared retains the existing account room view, including directly opened company
+repos, so unconnected repositories and external collaboration remain reachable.
+Company verification failures clear the company list rather than falling back
+to cached private room groups. Returning to the app rechecks company membership.
+
+### Rework (2026-11-08)
+
+- The company filter now lives on the Rooms heading (the approved mockup), not
+  in a select above the sidebar. Clicking it opens a menu anchored to the
+  heading: "All rooms", each company, GitHub invitations, single sign-on
+  organizations, a permission prompt when `read:org` is missing, and "Refresh
+  from GitHub". The count and collapse chevron stay on the right of the heading.
+  People with nothing to choose keep the plain Rooms heading.
+- "Personal & shared" is now "All rooms".
+- Pinned rooms stay visible in every company, because pins are personal.
+- Rooms that a GitHub check cannot confirm are not shown; rooms already shown
+  stay while a check runs or when GitHub does not answer.
+- The company home replaces the main view only when a company is selected and
+  the active room is not one of its rooms. It shows one state at a time: no
+  rooms yet, checking, GitHub did not answer, permission needed, or single
+  sign-on, each with one main action.
+- Work rooms can belong to the company. With a company selected, the New room
+  dialog's "Where it lives" offers "In <company>" first (and selects it). The
+  room is created with `organization_id` (slice 3) and is listed in the company
+  at once. Company control over such rooms (admins, removal when someone leaves
+  the GitHub organization) is the next stack, so the dialog promises only the
+  listing.
+- The sidebar filter and the company home use the company only after GitHub
+  confirms it as joined (`activeId`). A saved choice alone, at launch or when
+  GitHub does not answer, shows All rooms.
+- The window-focus check moved to slice 4 and runs at most once a minute.

@@ -76,6 +76,7 @@ import type {
   DesktopAgentCommitIdentitySettings,
 } from "./agents.js";
 import type { DesktopRentalApi } from "./rental.js";
+import type { DesktopOrganizationApi } from "./organizations.js";
 import type {
   DesktopAccountRoomActionResult,
   DesktopAccountRoomEntry,
@@ -94,6 +95,7 @@ import type {
   DesktopRoomStorageOverrideMode,
   DesktopRoomStorageState,
   DesktopInviteRoomCreation,
+  DesktopInviteRoomOptions,
   DesktopLegacyProjectBindingCandidate,
   DesktopProjectBinding,
   DesktopProjectBindingContext,
@@ -164,6 +166,7 @@ import type {
 
 export interface DesktopApi {
   conversations: ConversationApi;
+  organizations: DesktopOrganizationApi;
   ui: {
     onOpenSettings: (callback: () => void) => () => void;
     onOpenUpdates?: (callback: () => void) => () => void;
@@ -429,7 +432,7 @@ export interface DesktopApi {
     ) => Promise<DesktopFocusRoomMutationResult>;
     archiveAgents?: (roomIdentifier: string, participantKeys: string[]) => Promise<{ archivedParticipantKeys: string[]; skippedParticipantKeys: string[] }>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
-    createInviteRoom: () => Promise<DesktopInviteRoomCreation>;
+    createInviteRoom: (options?: DesktopInviteRoomOptions) => Promise<DesktopInviteRoomCreation>;
     getPullRequestDiff?: (roomIdentifier: string, number: number) => Promise<import("./room.js").DesktopPullRequestDiffResult>;
     getGitHubEvents: (
       roomIdentifier: string,

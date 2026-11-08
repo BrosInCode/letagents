@@ -13,6 +13,12 @@ const api: DesktopApi = {
     block: (id, blocked) => ipcRenderer.invoke("desktop:conversations:block", id, blocked),
     changes: after => ipcRenderer.invoke("desktop:conversations:changes", after),
   },
+  organizations: {
+    list: () => ipcRenderer.invoke("desktop:organizations:list"),
+    join: (id, setup) => ipcRenderer.invoke("desktop:organizations:join", id, setup),
+    rooms: (id) => ipcRenderer.invoke("desktop:organizations:rooms", id),
+    openOnGitHub: (page) => ipcRenderer.invoke("desktop:organizations:open-github", page),
+  },
   ui: {
     onOpenSettings: (callback) => {
       const listener = () => callback();
@@ -305,7 +311,7 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:archive-agents", roomIdentifier, participantKeys),
     rename: (roomIdentifier: string, displayName: string) =>
       ipcRenderer.invoke("desktop:room:rename", roomIdentifier, displayName),
-    createInviteRoom: () => ipcRenderer.invoke("desktop:room:create-invite-room"),
+    createInviteRoom: (options) => ipcRenderer.invoke("desktop:room:create-invite-room", options),
     getPullRequestDiff: (roomIdentifier: string, number: number) =>
       ipcRenderer.invoke("desktop:room:get-pull-request-diff", roomIdentifier, number),
     getGitHubEvents: (roomIdentifier: string, query = {}) =>
