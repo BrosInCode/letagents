@@ -78,6 +78,10 @@
         :inert="isSettingsSurface || sidebarMode === 'hidden'"
       >
         <DesktopSidebar
+          :company="companyStep"
+          @choose-company="chooseSidebarCompany"
+          @refresh-companies="company.refresh"
+          @open-company-github="company.openOnGitHub"
           :active-entry="activeEntry"
           :primary-room="currentParentRoom"
           :project-entries="sidebarProjectEntries"
@@ -163,8 +167,21 @@
           </button>
         </template>
       </PrivateMessages>
+      <CompanyHome
+        v-if="showCompanyHome && company.selected.value"
+        :name="company.selected.value.login"
+        :avatar-url="company.selected.value.avatar_url"
+        :state="companyHomeState"
+        :rooms="company.rooms.value"
+        @open-room="openCompanyRoom"
+        :access-reason="company.accessReason.value"
+        @new-room="selectNewRoomEntry(); chooseStandaloneIntent()"
+        @show-all="chooseSidebarCompany(null)"
+        @retry="company.refresh"
+        @open-github="company.openOnGitHub"
+      />
       <AuthOnboardingView
-        v-if="activeEntry.type === 'room' && selectedNeedsAccess"
+        v-if="!showCompanyHome && activeEntry.type === 'room' && selectedNeedsAccess"
         :sidebar-mode="sidebarMode"
         :access="selectedAccess"
         :auth-status="authStatus"
@@ -184,7 +201,7 @@
         <DesktopRoomShell
           :viewer-login="authStatus?.authenticated ? authStatus.account?.login : null"
           :api-url="appInfo?.apiUrl ?? null"
-          v-if="activeEntry.type === 'room' && !selectedNeedsAccess"
+          v-if="!showCompanyHome && activeEntry.type === 'room' && !selectedNeedsAccess"
           :key="selectedRoomRenderKey"
           :sidebar-mode="sidebarMode"
           :room-loading="selectedSnapshotLoading"
@@ -346,6 +363,7 @@
         v-model:join-code="newRoomJoinCode"
         v-model:room-name="newRoomName"
         v-model:storage="newRoomStorage"
+        :company="newRoomCompany"
         :step="newRoomStep"
         :busy="newRoomBusy"
         :can-dismiss="newRoomCanDismiss"
@@ -447,6 +465,7 @@ import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRo
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
+import CompanyHome from "./components/desktop/content/CompanyHome.vue";
 import AskAgentDialog from "./components/desktop/content/asks/AskAgentDialog.vue";
 import GiveAgentDialog from "./components/desktop/content/asks/GiveAgentDialog.vue";
 import { useAppAgentAsks } from "./composables/app/useAppAgentAsks";
@@ -478,7 +497,7 @@ import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./
 import { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./composables/app/useAppRoomData";
 import { useAppLifecycle } from "./composables/app/useAppLifecycle";
 import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAlerts";
-import { useAppCompany } from "./composables/app/useAppCompany";
+import { useAppCompany, useAppCompanyNavigation } from "./composables/app/useAppCompany";
 import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
 
 const RentMarketplaceView = defineAsyncComponent(
@@ -592,6 +611,10 @@ const {
   sidebarProjectEntries, selectedRoomRenderKey, selectedRoomStorage,
 } = Object.assign(app, useAppSidebarEntries(app));
 
+const {
+  showCompanyHome, companyHomeState, chooseSidebarCompany, openCompanyRoom,
+} = Object.assign(app, useAppCompanyNavigation(app));
+
 Object.assign(app, useAppRentalEvents(app));
 
 Object.assign(app, useAppHistoryWatchers(app));
@@ -617,7 +640,7 @@ const {
   newRoomFeedbackState, newRoomJoinCode, newRoomJoinError, newRoomModalOpen, newRoomName,
   newRoomProjectPath, newRoomProjectName, newRoomProjectParent, newRoomProjectCreationError,
   newRoomProjectPathError, newRoomProjectSelection, newRoomStatusMessage, newRoomStep,
-  newRoomStorage, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
+  newRoomStorage, newRoomCompany, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
   pickNewProjectParent, openSuccessRoom, retryLastAction, selectNewRoomEntry,
   archiveSidebarFocusRoom, archiveSidebarRoom, deleteAccountRoom, leaveAccountRoom,
   openAccountRoomFromSettings, renameSidebarRoom, restoreAccountRoom, settingsFeedback,

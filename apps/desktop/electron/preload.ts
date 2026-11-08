@@ -311,7 +311,7 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:archive-agents", roomIdentifier, participantKeys),
     rename: (roomIdentifier: string, displayName: string) =>
       ipcRenderer.invoke("desktop:room:rename", roomIdentifier, displayName),
-    createInviteRoom: () => ipcRenderer.invoke("desktop:room:create-invite-room"),
+    createInviteRoom: (options) => ipcRenderer.invoke("desktop:room:create-invite-room", options),
     getPullRequestDiff: (roomIdentifier: string, number: number) =>
       ipcRenderer.invoke("desktop:room:get-pull-request-diff", roomIdentifier, number),
     getGitHubEvents: (roomIdentifier: string, query = {}) =>

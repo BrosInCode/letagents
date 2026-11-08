@@ -72,10 +72,11 @@
           <label class="new-room-field"><span>Room name</span><input v-model="roomName" type="text" maxlength="80" placeholder="e.g. Design conversations" autocomplete="off" spellcheck="false" :disabled="busy" data-testid="new-room-name-input" /></label>
           <fieldset class="new-room-storage" :disabled="busy">
             <legend>Where it lives</legend>
+            <label v-if="company" data-testid="new-room-storage-company"><input v-model="storage" type="radio" value="company" /><CompanyAvatar class="new-room-company-avatar" :login="company.login" :avatar-url="company.avatarUrl" size="s" /><span><strong>In {{ company.login }}</strong><small>Shared online and listed under {{ company.login }}. Invite people with a code.</small></span></label>
             <label data-testid="new-room-storage-cloud"><input v-model="storage" type="radio" value="cloud" /><Cloud aria-hidden="true" /><span><strong>Shared online</strong><small>Invite your people and agents with a code.</small></span></label>
             <label data-testid="new-room-storage-local"><input v-model="storage" type="radio" value="local" /><Laptop aria-hidden="true" /><span><strong>Only on {{ thisComputer }}</strong><small>Stays on this device until you choose to share it.</small></span></label>
           </fieldset>
-          <p class="new-room-hint desktop-new-room-context">{{ storage === 'cloud' ? 'You’ll get an invite code to share.' : `Your room will stay on ${thisComputer}.` }}</p>
+          <p class="new-room-hint desktop-new-room-context">{{ storage === 'local' ? `Your room will stay on ${thisComputer}.` : 'You’ll get an invite code to share.' }}</p>
         </form>
 
         <form v-else-if="step === 'join'" id="new-room-join-form" data-testid="new-room-join-step" @submit.prevent="emit('join')">
@@ -122,7 +123,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { FolderOpen, Hash, KeyRound, X, ChevronRight, Cloud, Laptop, Check, Copy } from '@lucide/vue';
 import NewRoomFrame from '../../../../../../../shared/ui/NewRoomFrame.vue';
-import type { NewRoomActiveAction, NewRoomRecentProjectFolder, NewRoomStep, NewRoomStorageChoice, NewRoomSuccessState, PendingProjectRoomSelection } from '../../../composables/useDesktopNewRoomModal';
+import type { NewRoomActiveAction, NewRoomCompany, NewRoomRecentProjectFolder, NewRoomStep, NewRoomStorageChoice, NewRoomSuccessState, PendingProjectRoomSelection } from '../../../composables/useDesktopNewRoomModal';
+import CompanyAvatar from '../company/CompanyAvatar.vue';
 import { currentFocusableElement, restoreFocus, trapFocusInDialog } from './modal-focus';
 import { joinLocalPath, localPathBasename, localPathExamples } from '../../../domain/local-path';
 import { thisComputerLabel } from '../../../domain/supervised-agents-support';
@@ -134,6 +136,8 @@ const props = defineProps<{
   projectCreationError: string | null; recentProjectFolders: readonly NewRoomRecentProjectFolder[];
   success: NewRoomSuccessState | null; statusMessage: string | null; joinError: string | null;
   canSubmitJoin: boolean; canSubmitStandalone: boolean;
+  /** The company selected in the sidebar, offered as the first place a shared room can live. */
+  company?: NewRoomCompany | null;
 }>();
 const joinCode = defineModel<string>('joinCode', { required: true });
 const roomName = defineModel<string>('roomName', { required: true });
