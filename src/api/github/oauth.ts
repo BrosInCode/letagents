@@ -24,7 +24,14 @@ export interface GitHubUser {
   avatar_url: string | null;
 }
 
-export function buildGitHubAuthorizeUrl(state: string): string {
+export interface GitHubAuthorizeOptions {
+  /** Scopes added to the configured scopes (deduplicated). */
+  extraScopes?: string[];
+  /** Pre-select this GitHub account on GitHub's sign-in page. */
+  login?: string;
+}
+
+export function buildGitHubAuthorizeUrl(state: string, options: GitHubAuthorizeOptions = {}): string {
   const config = getGitHubOAuthConfig();
   if (!config.clientId) {
     throw new Error("GITHUB_CLIENT_ID is not configured");
@@ -33,9 +40,12 @@ export function buildGitHubAuthorizeUrl(state: string): string {
   const params = new URLSearchParams({
     client_id: config.clientId,
     redirect_uri: config.callbackUrl,
-    scope: config.scopes,
+    scope: options.extraScopes?.length
+      ? [...new Set([...config.scopes.split(/[\s,]+/).filter(Boolean), ...options.extraScopes])].join(",")
+      : config.scopes,
     state,
   });
+  if (options.login) params.set("login", options.login);
 
   return `https://github.com/login/oauth/authorize?${params.toString()}`;
 }

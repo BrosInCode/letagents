@@ -1,6 +1,27 @@
 import { githubRequest } from "./app-client.js";
 import { GitHubOrganizationAccessError } from "./organization-memberships.js";
 
+/** GitHub hides this organization until the person authorizes the token for SAML SSO. */
+export class GitHubOrganizationSsoRequiredError extends GitHubOrganizationAccessError {
+  constructor(public readonly authorizeUrl: string | null) {
+    super(403);
+  }
+}
+
+// Only a plain https GitHub address may be handed to the person's browser.
+export function parseGitHubSsoAuthorizeUrl(header: string | null): string | null {
+  const match = header ? /^\s*required\s*;\s*url=(\S+?)\s*$/i.exec(header) : null;
+  if (!match) return null;
+  try {
+    const url = new URL(match[1]);
+    return url.protocol === "https:" && url.hostname === "github.com" && !url.username && !url.password && !url.port
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export interface AccessibleOrganizationRepository {
   github_repo_id: string;
   full_name: string;
@@ -27,7 +48,13 @@ export async function listAccessibleOrganizationRepositories(input: {
       signal,
       redirect: "error",
     });
-    if (!response.ok) throw new GitHubOrganizationAccessError(response.status);
+    if (!response.ok) {
+      const sso = response.headers.get("x-github-sso");
+      if (response.status === 403 && sso && /^\s*required\b/i.test(sso)) {
+        throw new GitHubOrganizationSsoRequiredError(parseGitHubSsoAuthorizeUrl(sso));
+      }
+      throw new GitHubOrganizationAccessError(response.status);
+    }
     const repositories: unknown = await response.json();
     if (!Array.isArray(repositories)) throw new GitHubOrganizationAccessError(502);
     for (const repo of repositories) {
