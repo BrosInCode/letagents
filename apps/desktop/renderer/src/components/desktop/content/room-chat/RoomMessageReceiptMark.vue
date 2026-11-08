@@ -53,7 +53,14 @@ watch(() => props.messageId, (messageId) => {
 }, { immediate: true });
 onBeforeUnmount(() => untrack?.());
 
-const receipt = computed(() => receipts?.receiptFor(props.messageId) ?? null);
+/**
+ * No agent and no stored reason means routing is still choosing, or a wake rule
+ * took the message: nothing to show yet, never "Nobody woken".
+ */
+const receipt = computed(() => {
+  const loaded = receipts?.receiptFor(props.messageId) ?? null;
+  return loaded && (loaded.agents.length > 0 || loaded.noWake) ? loaded : null;
+});
 const summary = computed(() => receipt.value ? summarizeReceipt(receipt.value) : null);
 const logoAgents = computed(() => orderReceiptAgents(receipt.value?.agents ?? []).slice(0, 3).map((agent) => ({
   agentKey: agent.agentKey,

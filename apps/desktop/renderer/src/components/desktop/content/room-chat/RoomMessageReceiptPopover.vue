@@ -150,7 +150,10 @@ const emit = defineEmits<{
 
 const receipts = injectRoomMessageReceipts();
 const opened = computed(() => receipts?.opened.value ?? null);
-const receipt = computed(() => opened.value ? receipts?.receiptFor(opened.value.messageId) ?? null : null);
+const receipt = computed(() => {
+  const loaded = opened.value ? receipts?.receiptFor(opened.value.messageId) ?? null : null;
+  return loaded && (loaded.agents.length > 0 || loaded.noWake) ? loaded : null;
+});
 const summary = computed(() => summarizeReceipt(receipt.value ?? { agents: [], noWake: null }));
 const agents = computed(() => orderReceiptAgents(receipt.value?.agents ?? []));
 

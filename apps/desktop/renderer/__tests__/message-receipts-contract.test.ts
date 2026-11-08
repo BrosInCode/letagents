@@ -62,3 +62,7 @@ test("motion is short, only real changes animate, and reduced motion keeps a cro
   assert.match(styles, /@media \(prefers-reduced-motion: reduce\) \{\s*\.room-receipt-popover \{ transform: none; transition: opacity 120ms ease; \}/);
   assert.doesNotMatch(styles, /transition: all/);
 });
+
+test("no agent and no stored reason shows nothing, never Nobody woken", () => {
+  for (const file of [mark, popover]) assert.match(file, /loaded && \(loaded\.agents\.length > 0 \|\| loaded\.noWake\) \? loaded : null/);
+});
