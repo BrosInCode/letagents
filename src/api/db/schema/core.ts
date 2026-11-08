@@ -6,6 +6,7 @@ import type {
   FocusGitHubEventRouting,
   FocusParentVisibility,
 } from "../../focus-rooms/settings.js";
+import { organizations } from "./organizations.js";
 
 export const id_sequences = pgTable("id_sequences", {
   name: text("name").primaryKey(),
@@ -34,9 +35,16 @@ export const rooms = pgTable(
     concluded_at: timestamp("concluded_at", { mode: "string", withTimezone: true }),
     conclusion_summary: text("conclusion_summary"),
     conclusion_details: jsonb("conclusion_details").$type<FocusRoomConclusionDetails>(),
+    // Optional owning company. Set null when the company row is removed.
+    organization_id: text("organization_id").references((): AnyPgColumn => organizations.github_org_id, {
+      onDelete: "set null",
+    }),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({
+    organization_idx: index("rooms_organization_id_idx")
+      .on(table.organization_id)
+      .where(sql`${table.organization_id} IS NOT NULL`),
     parent_idx: index("rooms_parent_room_id_idx").on(table.parent_room_id),
     parent_source_task_idx: index("rooms_parent_source_task_idx").on(
       table.parent_room_id,
