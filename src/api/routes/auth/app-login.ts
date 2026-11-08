@@ -17,7 +17,7 @@ const escape = (value: string) =>
         c
       ]!,
   );
-function page(res: Response, title: string, body: string) {
+export function page(res: Response, title: string, body: string) {
   res.set({
     "Cache-Control": "no-store",
     // Native form POSTs under no-referrer send Origin: null. Preserve our

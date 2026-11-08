@@ -40,7 +40,7 @@ function withEnv(
   }
 }
 
-test("getGitHubOAuthConfig preserves the existing OAuth defaults", () =>
+test("getGitHubOAuthConfig requests organization discovery alongside individual and repo access", () =>
   withEnv(
     {
       LETAGENTS_BASE_URL: "https://letagents.chat",
@@ -54,7 +54,7 @@ test("getGitHubOAuthConfig preserves the existing OAuth defaults", () =>
       assert.equal(config.clientId, "oauth-client");
       assert.equal(config.clientSecret, "oauth-secret");
       assert.equal(config.baseUrl, "https://letagents.chat");
-      assert.equal(config.scopes, "read:user,repo");
+      assert.equal(config.scopes, "read:user,repo,read:org");
       assert.equal(config.callbackUrl, "https://letagents.chat/auth/github/callback");
     }
   ));
