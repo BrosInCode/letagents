@@ -207,6 +207,7 @@
           @choose="$emit('choose-company', $event)"
           @refresh="$emit('refresh-companies')"
           @open-github="$emit('open-company-github', $event)"
+          @copy-link="$emit('copy-company-link')"
         />
         <button
           class="sidebar-company-collapse"
@@ -637,6 +638,7 @@ const emit = defineEmits<{
   "choose-company": [id: string | null];
   "refresh-companies": [];
   "open-company-github": [page: DesktopOrganizationGitHubPage];
+  "copy-company-link": [];
   "cycle-sidebar": [];
   "new-room": [];
   "open-rent": [];

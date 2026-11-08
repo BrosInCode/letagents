@@ -5,6 +5,7 @@
     <FirstRunOnboardingView
       :stage="firstRunStage"
       :company-step="companyStep"
+      :invited-company-id="pendingCompanyInvite"
       :company-name="company.selected.value?.login"
       :company-avatar-url="company.selected.value?.avatar_url"
       :company-rooms="company.rooms.value"
@@ -82,6 +83,7 @@
           @choose-company="chooseSidebarCompany"
           @refresh-companies="company.refresh"
           @open-company-github="company.openOnGitHub"
+          @copy-company-link="copyCompanyLink"
           :active-entry="activeEntry"
           :primary-room="currentParentRoom"
           :project-entries="sidebarProjectEntries"
@@ -156,7 +158,7 @@
         @refresh="refresh"
       />
 
-      <PrivateMessages v-if="authStatus?.authenticated && authStatus.account" v-show="activeEntry.type === 'messages'" :key="authStatus.account.id" :api="desktopIpc.conversations" :account-id="authStatus.account.id" :active="activeEntry.type === 'messages'" :open-conversation-id="openConversationId" :open-conversation-nonce="openConversationNonce" @unread="messagesUnread = $event">
+      <PrivateMessages v-if="authStatus?.authenticated && authStatus.account" v-show="!showCompanyHome && activeEntry.type === 'messages'" :key="authStatus.account.id" :api="desktopIpc.conversations" :account-id="authStatus.account.id" :active="!showCompanyHome && activeEntry.type === 'messages'" :open-conversation-id="openConversationId" :open-conversation-nonce="openConversationNonce" @unread="messagesUnread = $event">
         <template v-if="activeEntry.type === 'messages' && sidebarMode === 'hidden'" #navigation>
           <button class="ghost-button sidebar-reveal-button" type="button" aria-label="Show sidebar" title="Show sidebar" data-testid="sidebar-reveal-button" @click="cycleSidebar">
             <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
@@ -258,7 +260,7 @@
       </KeepAlive>
 
       <SettingsView
-        v-if="activeEntry.type === 'system'"
+        v-if="!showCompanyHome && activeEntry.type === 'system'"
         :account-rooms="settingsAccountRooms"
         :app-info="appInfo"
         :app-agent-actions="appAgentActions"
@@ -308,10 +310,10 @@
         @start-auth="openAccountAuthFlow"
       />
 
-      <InboxView v-else-if="activeEntry.type === 'inbox'" :key="authStatus?.account?.id ?? 'local'" :rooms="inboxRooms" @update:rooms="chooseInboxRooms" v-model:section="inboxSection" :storage-key="inboxStorageKey" :data="needsYouData" :attention="agentAttentionItems" :loading="needsYouLoading" :error="needsYouError" :rentals="inboxRentals" :rental-error="inboxRentalError" :join-requests="inboxJoinRequests" @refresh="refreshInbox" @open-room="openNeedsYouRoom" @open-rental="openRentalRequestInbox" @threads-loaded="mergeInboxThreads" />
+      <InboxView v-else-if="!showCompanyHome && activeEntry.type === 'inbox'" :key="authStatus?.account?.id ?? 'local'" :rooms="inboxRooms" @update:rooms="chooseInboxRooms" v-model:section="inboxSection" :storage-key="inboxStorageKey" :data="needsYouData" :attention="agentAttentionItems" :loading="needsYouLoading" :error="needsYouError" :rentals="inboxRentals" :rental-error="inboxRentalError" :join-requests="inboxJoinRequests" @refresh="refreshInbox" @open-room="openNeedsYouRoom" @open-rental="openRentalRequestInbox" @threads-loaded="mergeInboxThreads" />
 
       <MyWorkView
-        v-else-if="activeEntry.type === 'my-work'"
+        v-else-if="!showCompanyHome && activeEntry.type === 'my-work'"
         :key="authStatus?.account?.id ?? 'local'"
         :tasks-changed-at="accountActivity.tasksChangedAt.value"
         :connected="accountActivity.connected.value"
@@ -326,7 +328,7 @@
       </MyWorkView>
 
       <RentMarketplaceView
-        v-else-if="activeEntry.type === 'marketplace'"
+        v-else-if="!showCompanyHome && activeEntry.type === 'marketplace'"
         :rooms="settingsAccountRooms"
         :initial-role="rentMarketplaceRole"
       />
@@ -356,6 +358,14 @@
       @created="void app.refreshAccountRooms?.()"
     />
     <GiveAgentDialog :token="giveAgentToken" @close="giveAgentToken = null" />
+    <CompanyInviteDialog
+      :view="showFirstRunGate ? null : companyInvite"
+      :busy="Boolean(company.joiningId.value)"
+      :error="company.error.value"
+      :viewer-login="authStatus?.account?.login ?? null"
+      :viewer-avatar-url="authStatus?.account?.avatarUrl ?? null"
+      @action="runCompanyInviteAction"
+    />
 
     <Transition name="new-room-modal">
       <DesktopNewRoomModal
@@ -474,6 +484,7 @@ import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue"
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
 import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
+import CompanyInviteDialog from "./components/desktop/company/CompanyInviteDialog.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { settingsEntry } from "./domain/desktop-navigation";
@@ -525,7 +536,7 @@ const {
   sidebarBatchDialogError,
 } = Object.assign(app, useAppState());
 const {
-  company, companyStep, chooseOnboardingCompany,
+  company, companyStep, companyInvite, pendingCompanyInvite, chooseOnboardingCompany, copyCompanyLink,
 } = Object.assign(app, useAppCompany(app));
 const {
   openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshInbox,
@@ -612,7 +623,7 @@ const {
 } = Object.assign(app, useAppSidebarEntries(app));
 
 const {
-  showCompanyHome, companyHomeState, chooseSidebarCompany, openCompanyRoom,
+  showCompanyHome, companyHomeState, chooseSidebarCompany, openCompanyRoom, runCompanyInviteAction,
 } = Object.assign(app, useAppCompanyNavigation(app));
 
 Object.assign(app, useAppRentalEvents(app));

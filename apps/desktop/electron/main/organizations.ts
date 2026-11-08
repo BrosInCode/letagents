@@ -11,6 +11,7 @@ import type {
   DesktopOrganizationSsoBlock,
 } from "../ipc-types/organizations.js";
 import { apiFetch, DesktopApiError, readStoredAuth } from "./auth.js";
+import { acknowledgeCompanyLink, getPendingCompanyLink } from "./company-links.js";
 import { openAllowedExternalUrl, openExternalWebUrl } from "./external-url.js";
 import { apiUrl } from "./paths.js";
 
@@ -104,6 +105,8 @@ export async function organizationGitHubPageUrl(page: DesktopOrganizationGitHubP
 }
 
 export function registerOrganizationIpcHandlers(ipc: IpcMain): void {
+  ipc.handle("desktop:organizations:pending", () => getPendingCompanyLink());
+  ipc.handle("desktop:organizations:acknowledge", (_event, id: unknown) => acknowledgeCompanyLink(id));
   ipc.handle("desktop:organizations:list", () => listOrganizations());
   ipc.handle("desktop:organizations:join", (_event, id: unknown, setup: unknown) => joinOrganization(id, setup));
   ipc.handle("desktop:organizations:rooms", (_event, id: unknown) => listOrganizationRooms(id));

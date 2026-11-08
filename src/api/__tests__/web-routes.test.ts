@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import express from "express";
+import { once } from "node:events";
 
 process.env.LETAGENTS_WEB_MODE = "vue";
 const { normalizeWebMode, registerWebRoutes } = await import("../routes/web/index.js");
@@ -50,6 +52,7 @@ test("registerWebRoutes preserves route registration order", (t) => {
     { method: "get", path: "/docs" },
     { method: "get", path: ["/inbox", "/messages", "/my-work", "/connectors"] },
     { method: "get", path: /^\/ask\/[A-Za-z0-9_-]{20,64}$/ },
+    { method: "get", path: /^\/company\/[1-9][0-9]{0,19}$/ },
     { method: "get", path: "/app" },
   ]);
 });
@@ -119,5 +122,25 @@ test("every static page of the web router is served by the API on a direct load"
     assert.notEqual(response.status, 404, `${page} must serve the web app on a direct load`);
     assert.equal(response.status, root.status, page);
     assert.equal(await response.text(), expected, page);
+  }
+});
+
+test("direct company invitations serve the same application as the landing page", async () => {
+  const app = express();
+  registerWebRoutes(app);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address() as { port: number };
+  try {
+    const origin = `http://127.0.0.1:${address.port}`;
+    const landing = await fetch(origin);
+    const invitation = await fetch(`${origin}/company/42`);
+    // A missing local build returns the same explicit 503 as the landing page.
+    // Production builds must serve HTML, never the default Express 404.
+    assert.ok([200, 503].includes(invitation.status));
+    assert.equal(invitation.status, landing.status);
+    assert.equal(await invitation.text(), await landing.text());
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });

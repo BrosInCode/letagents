@@ -22,6 +22,13 @@ const api: DesktopApi = {
     changes: after => ipcRenderer.invoke("desktop:conversations:changes", after),
   },
   organizations: {
+    pendingInvite: () => ipcRenderer.invoke("desktop:organizations:pending"),
+    acknowledgeInvite: (id) => ipcRenderer.invoke("desktop:organizations:acknowledge", id),
+    onInvited: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, id: string) => callback(id);
+      ipcRenderer.on("desktop:organizations:invited", listener);
+      return () => ipcRenderer.off("desktop:organizations:invited", listener);
+    },
     list: () => ipcRenderer.invoke("desktop:organizations:list"),
     join: (id, setup) => ipcRenderer.invoke("desktop:organizations:join", id, setup),
     rooms: (id) => ipcRenderer.invoke("desktop:organizations:rooms", id),

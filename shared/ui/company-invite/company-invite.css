@@ -1,0 +1,41 @@
+.company-invite-panel {
+  --invite-bg: light-dark(#fff, #0a0a0a);
+  --invite-text: light-dark(#242427, #f2f2f3);
+  --invite-muted: light-dark(#65656d, #a1a1aa);
+  --invite-faint: light-dark(#767680, #85858e);
+  --invite-line: light-dark(#e4e4e7, #272727);
+  --invite-hover: light-dark(#f4f4f5, #202020);
+  position: relative; box-sizing: border-box; width: 100%; min-width: 0;
+  overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--invite-line);
+  border-radius: 20px; background: var(--invite-bg); color: var(--invite-text);
+  padding: 40px; font-family: inherit; text-align: left;
+}
+.company-invite-panel *, .company-invite-panel *::before { box-sizing: border-box; }
+.company-invite-panel svg { fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.company-invite-panel button, .company-invite-panel a { -webkit-tap-highlight-color: transparent; }
+.company-invite-panel button { font-family: inherit; cursor: pointer; }
+.company-invite-panel button:disabled { opacity: .5; cursor: default; }
+.company-invite-panel :is(button, a):focus-visible { outline: 2px solid var(--invite-muted); outline-offset: 3px; }
+.invite-close { position: absolute; right: 16px; top: 16px; }
+.invite-close svg { width: 19px; height: 19px; }
+.invite-head h2 { margin: 24px 0 0; font-size: clamp(26px, 4vw, 32px); line-height: 1.18; font-weight: 600; letter-spacing: -.035em; overflow-wrap: anywhere; }
+.invite-head h2:focus { outline: none; }
+.invite-avatar { display: grid; place-items: center; width: 58px; height: 58px; overflow: hidden; border-radius: 15px; border: 1px solid var(--invite-line); background: var(--invite-hover); font-size: 23px; font-weight: 600; color: var(--invite-muted); }
+.invite-avatar img, .invite-viewer-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.invite-avatar svg { width: 28px; height: 28px; }
+.invite-description { margin: 14px 0 0; font-size: 15px; line-height: 1.6; color: var(--invite-muted); }
+.invite-facts { display: grid; gap: 18px; padding: 0; margin: 30px 0 24px; list-style: none; font-size: 14px; color: var(--invite-muted); line-height: 1.55; }
+.invite-facts li { display: flex; align-items: flex-start; gap: 12px; }
+.invite-facts svg { width: 19px; height: 19px; margin-top: 2px; flex: none; }
+.invite-github { margin: 22px 0; font-size: 14px; color: var(--invite-muted); overflow-wrap: anywhere; }
+.invite-viewer { display: flex; align-items: center; gap: 12px; padding-top: 22px; margin-top: 26px; border-top: 1px solid var(--invite-line); font-size: 14px; color: var(--invite-muted); }
+.invite-viewer strong { font-weight: 550; }
+.invite-viewer-avatar { display: grid; place-items: center; flex: none; width: 30px; height: 30px; overflow: hidden; border-radius: 50%; background: var(--invite-hover); font-size: 12px; }
+.invite-error { margin: 18px 0 0; font-size: 14px; line-height: 1.5; color: light-dark(#a43b3b, #e5aaaa); }
+.invite-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; margin-top: 30px; }
+.invite-secondary, .invite-primary { display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 43px; padding: 11px 18px; border: 1px solid var(--invite-line); border-radius: 9px; background: transparent; color: var(--invite-text); font-size: 14px; font-weight: 550; text-decoration: none; transition: transform 140ms cubic-bezier(.23, 1, .32, 1), background-color 150ms ease, filter 150ms ease; }
+.invite-primary { background: var(--invite-text); color: var(--invite-bg); border-color: transparent; }
+.invite-secondary:active:not(:disabled), .invite-primary:active:not(:disabled) { transform: scale(.98); }
+@media (hover: hover) and (pointer: fine) { .invite-secondary:hover:not(:disabled) { background: var(--invite-hover); } .invite-primary:hover:not(:disabled) { filter: brightness(.92); } }
+@media (max-width: 480px) { .company-invite-panel { padding: 28px 22px; border-radius: 16px; } .invite-head h2 { font-size: 27px; } .invite-foot { gap: 8px; } }
+@media (prefers-reduced-motion: reduce) { .company-invite-panel *, .company-invite-panel *::before { animation: none !important; transition: none !important; } }

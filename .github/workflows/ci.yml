@@ -797,6 +797,15 @@ jobs:
         if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-typing.test.ts src/api/__tests__/room-message-routes.test.ts src/api/__tests__/sse.test.ts src/api/__tests__/event-bridge.test.ts src/api/__tests__/event-bridge-domains.test.ts src/api/__tests__/event-bridge-pg.test.ts
 
+      - name: Test organization identity, onboarding and repo-room discovery
+        if: matrix.group == 4
+        run: >-
+          node --import tsx --test --test-concurrency=1
+          src/api/__tests__/organization-migration.test.ts
+          src/api/__tests__/organization-storage.test.ts
+          src/api/__tests__/organization-onboarding.test.ts
+          src/api/__tests__/organization-rooms.test.ts
+
       - name: Run message attachment tests
         if: matrix.group == 2
         run: >-
