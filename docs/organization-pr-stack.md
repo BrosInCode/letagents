@@ -288,3 +288,26 @@ Validation on the rebuilt stack: root and desktop type-checks, Vue lint, web
 build, 2541 renderer tests, 598 web tests, packaging tests, link and IPC
 registration tests, organization DB tests on a private Postgres, and the
 Electron organization smoke (all 11 checks, no console errors).
+
+## Review of the rework (2026-11-08)
+
+An independent agent reviewed the whole stack against staging. It found no
+server-side access leak. Fixed, each in the slice that owns the code:
+
+- Slice 4: one request counter served the list check and the company choice,
+  so a list check during a join locked the company dialog, and choosing All
+  rooms while the list loaded left it "checking" for good. Two counters now.
+- Slices 4–6: the filters used the saved company ID; a failed first check then
+  showed a blank main view. They now use the confirmed company (`activeId`).
+- Slice 3: the room list dropped rooms whose access check GitHub could not
+  answer, and returned 200. It now answers 503.
+- Slices 2–3: an organization hidden by single sign-on was treated as "not a
+  member" and its stored join was deleted. It now answers
+  `organization_sso_required` and keeps the join.
+- Slice 5: the New room dialog promised company ownership that is not built
+  yet; it now promises only the listing.
+
+Known limits, not fixed here: an organization with more than 1,000 repos
+visible to the person returns 503 from the room list (10 pages of 100); and the
+OAuth `state` is not tied to the browser, the same login-CSRF exposure the
+existing GitHub login has.
