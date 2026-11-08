@@ -1,6 +1,7 @@
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { CompanyInviteAction, CompanyInviteView } from "../../../../../../shared/ui/company-invite/types";
 import { companyInviteView, isCompanyLinkId } from "../../../../../../shared/ui/company-invite/view";
+
 import type { CompanyHomeState } from "../../components/desktop/company/types";
 import type { FirstRunCompanyStepState } from "../../components/desktop/setup/types";
 import { showsCompanyHome } from "../../domain/company-navigation";
@@ -158,11 +159,14 @@ export function useAppCompanyNavigation(context: unknown) {
 
   async function chooseSidebarCompany(id: string | null): Promise<void> {
     app.cancelSidebarRoomSelection();
-    if (await company.choose(id)) {
-      await nextTick();
-      const first = sidebarProjectEntries.value.find((project) => project.parent.roomIdentifier && !project.parent.pinned);
-      if (first) app.handleSidebarEntrySelected(first.parent);
-    }
+    await company.choose(id);
+  }
+
+  function openCompanyRoom(roomId: string): void {
+    if (!company.rooms.value.some((room) => room.room_id === roomId)) return;
+    const entry = sidebarProjectEntries.value.flatMap((project) => [project.parent, ...project.branchRooms, ...project.focusRooms])
+      .find((item) => item.roomIdentifier === roomId);
+    if (entry) app.handleSidebarEntrySelected(entry);
   }
 
   /** Answer a button in the company link dialog. */
@@ -199,5 +203,6 @@ export function useAppCompanyNavigation(context: unknown) {
     }
   }
 
-  return { showCompanyHome, companyHomeState, chooseSidebarCompany, runCompanyInviteAction };
+  return { showCompanyHome, companyHomeState, chooseSidebarCompany, openCompanyRoom, runCompanyInviteAction };
+
 }

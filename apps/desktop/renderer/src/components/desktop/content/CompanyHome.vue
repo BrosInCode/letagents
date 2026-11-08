@@ -1,12 +1,19 @@
 <template>
   <section class="company-home surface-page" data-testid="company-home" :data-state="state">
     <header class="company-home-head">
-      <CompanyAvatar :login="name" :avatar-url="avatarUrl" size="m" />
-      <strong>{{ name }}</strong>
-      <small>Company</small>
+      <CompanyAvatar :login="name" :avatar-url="avatarUrl" size="xl" />
+      <div><h1>{{ name }}</h1><p>github.com/{{ name }}</p></div>
     </header>
-
-    <div class="company-home-body" :role="state === 'unavailable' ? 'alert' : 'status'">
+    <div v-if="state === 'choose'" class="company-home-rooms">
+      <div class="company-home-list-heading"><span>Choose a room</span><span>{{ rooms.length }} rooms</span></div>
+      <button v-for="room in rooms" :key="room.room_id" class="company-home-room" type="button" @click="$emit('open-room', room.room_id)">
+        <BookMarked v-if="room.kind === 'repo'" aria-hidden="true" /><Hash v-else aria-hidden="true" />
+        <span><strong>{{ room.full_name?.split('/')[1] || room.display_name }}</strong><small>{{ room.kind === 'repo' ? `${name} repository` : 'Shared room · By invitation' }}</small></span>
+        <small v-if="room.visibility" class="company-home-visibility">{{ room.visibility === 'private' ? 'Private' : 'Public' }}</small><ChevronRight aria-hidden="true" />
+      </button>
+      <button class="ghost-button company-home-new" type="button" @click="$emit('new-room')"><Plus aria-hidden="true" />New room</button>
+    </div>
+    <div v-else class="company-home-body" :role="state === 'unavailable' ? 'alert' : 'status'">
       <span class="company-home-badge">
         <span v-if="state === 'github_access_required'" class="company-home-github" aria-hidden="true"><GitHubMark /></span>
         <CompanyAvatar v-else :login="name" :avatar-url="avatarUrl" size="xl" />
@@ -41,8 +48,8 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import { TriangleAlert } from "@lucide/vue";
-import type { DesktopGitHubAccessReason, DesktopOrganizationGitHubPage } from "../../../../../electron/ipc-types/organizations.js";
+import { BookMarked, ChevronRight, Hash, Plus, TriangleAlert } from "@lucide/vue";
+import type { DesktopGitHubAccessReason, DesktopOrganizationGitHubPage, DesktopOrganizationRoom } from "../../../../../electron/ipc-types/organizations.js";
 import CompanyAvatar from "../company/CompanyAvatar.vue";
 import GitHubMark from "../company/GitHubMark.vue";
 import type { CompanyHomeState } from "../company/types";
@@ -51,11 +58,13 @@ const props = defineProps<{
   name: string;
   avatarUrl: string | null;
   state: CompanyHomeState;
+  rooms: DesktopOrganizationRoom[];
   accessReason: DesktopGitHubAccessReason | null;
 }>();
 
 defineEmits<{
   "new-room": [];
+  "open-room": [roomId: string];
   "show-all": [];
   retry: [];
   "open-github": [page: DesktopOrganizationGitHubPage];
@@ -70,7 +79,7 @@ const copy = computed(() => {
         text: `A repo appears here after a ${name} owner installs the LetAgents GitHub app on it, and you have a role on that repo. You can also start a ${name} room now.`,
       };
     case "loading":
-      return { title: `Checking ${name} with GitHub…`, text: "Your rooms appear in the sidebar when the check is done." };
+      return { title: `Checking ${name} with GitHub…`, text: "Checking which company rooms you can open." };
     case "unavailable":
       return {
         title: `Couldn’t check ${name} with GitHub`,
@@ -92,39 +101,24 @@ const copy = computed(() => {
 </script>
 
 <style scoped>
-.company-home {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  min-width: 0;
-  min-height: 0;
-}
-
-.company-home-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 54px;
-  padding: 0 22px;
-  border-bottom: 1px solid var(--border);
-}
-
-.company-home-head strong {
-  font-size: 17px;
-  letter-spacing: -0.02em;
-}
-
-.company-home-head small {
-  color: var(--text-tertiary);
-  font-size: 12px;
-}
-
-.company-home-body {
-  display: grid;
-  place-content: center;
-  justify-items: center;
-  padding: 40px;
-  text-align: center;
-}
+.company-home { display: block; min-width: 0; min-height: 0; overflow-y: auto; padding: clamp(24px, 5vw, 64px); background: var(--bg); }
+.company-home-head { display: flex; align-items: center; gap: 18px; max-width: 760px; margin: 0 auto 36px; }
+.company-home-head h1 { margin: 0; font-size: 30px; font-weight: 600; letter-spacing: -.035em; }
+.company-home-head p { margin: 6px 0 0; font-size: 14px; color: var(--text-secondary); }
+.company-home-rooms { max-width: 760px; margin: auto; }
+.company-home-list-heading { display: flex; justify-content: space-between; color: var(--text-tertiary); font-size: 13px; padding: 0 12px; margin-bottom: 14px; }
+.company-home-room { display: flex; align-items: center; gap: 14px; width: 100%; padding: 16px 12px; min-height: 76px; border: 0; border-radius: 10px; color: var(--text); background: transparent; text-align: left; font: inherit; cursor: pointer; transition: background-color 150ms ease; }
+.company-home-room > span { min-width: 0; flex: 1; }
+.company-home-room strong { display: block; font-size: 15px; font-weight: 550; overflow-wrap: anywhere; }
+.company-home-room small { display: block; margin-top: 4px; font-size: 13px; color: var(--text-secondary); }
+.company-home-room svg, .company-home-new svg { width: 18px; height: 18px; flex: none; color: var(--text-secondary); }
+.company-home-room:focus-visible { outline: 2px solid var(--text-secondary); outline-offset: -2px; }
+.company-home-new { margin-top: 20px; display: flex; align-items: center; gap: 8px; }
+.company-home-body { display: grid; justify-items: start; max-width: 760px; margin: auto; padding: 24px 12px; }
+.company-home-body .company-home-badge { display: none; }
+@media (hover: hover) { .company-home-room:hover { background: var(--accent-hover); } }
+@media (max-width: 480px) { .company-home-room .company-home-visibility { display: none; } }
+@media (prefers-reduced-motion: reduce) { .company-home-room { transition: none; } }
 
 .company-home-badge {
   position: relative;

@@ -11,7 +11,7 @@
     @click="toggleMenu"
   >
     <template v-if="selected">
-      <CompanyAvatar :login="selected.login" :avatar-url="selected.avatar_url" size="s" />
+      <CompanyAvatar :login="selected.login" :avatar-url="selected.avatar_url" size="m" />
       <strong>{{ selected.login }}</strong>
     </template>
     <span v-else class="sidebar-heading">Rooms</span>
@@ -33,9 +33,10 @@
         @keydown.esc.stop.prevent="closeMenu(true)"
         @keydown.down.prevent="moveFocus(1)"
         @keydown.up.prevent="moveFocus(-1)"
+        @keydown.home.prevent="menuItems()[0]?.focus()"
+        @keydown.end.prevent="menuItems().at(-1)?.focus()"
         @keydown.tab="closeMenu()"
       >
-        <div class="company-scope-label">Show rooms from</div>
         <button
           class="company-scope-item"
           type="button"
@@ -45,7 +46,7 @@
           @click="choose(null)"
         >
           <CompanyAvatar all size="m" />
-          <span>All rooms<small>No company filter</small></span>
+          <span>All rooms</span>
           <Check class="company-scope-tick" aria-hidden="true" />
         </button>
         <button
@@ -57,12 +58,15 @@
           :aria-checked="state.selectedId === org.github_org_id"
           :aria-disabled="!org.setup && org.role !== 'owner' ? 'true' : undefined"
           :data-testid="`company-menu-${org.github_org_id}`"
+          :title="organizationDetail(org)"
+          :aria-label="`${org.login}. ${organizationDetail(org)}`"
           @click="choose(org.github_org_id)"
         >
           <CompanyAvatar :login="org.login" :avatar-url="org.avatar_url" size="m" />
-          <span>{{ org.login }}<b v-if="newCompanyIds.has(org.github_org_id)" class="company-scope-new">New</b><small>{{ organizationDetail(org) }}</small></span>
-          <Check v-if="state.selectedId === org.github_org_id || org.joined || (!org.setup && org.role !== 'owner')" class="company-scope-tick" aria-hidden="true" />
-          <span v-else class="company-scope-tag">{{ org.setup ? "Join" : "Set up" }}</span>
+          <span>{{ org.login }}<b v-if="newCompanyIds.has(org.github_org_id)" class="company-scope-new">New</b></span>
+          <Check v-if="state.selectedId === org.github_org_id || org.joined" class="company-scope-tick" aria-hidden="true" />
+          <span v-else class="company-scope-tag">{{ org.setup ? "Join" : org.role === "owner" ? "Set up" : "Needs owner" }}</span>
+
         </button>
 
         <template v-if="githubSteps.length || state.status === 'github_access_required'">
@@ -145,7 +149,7 @@ const menuId = "sidebar-company-menu";
 const trigger = ref<HTMLButtonElement | null>(null);
 const menu = ref<HTMLElement | null>(null);
 const open = ref(false);
-const anchor = ref<{ top: number; left: number } | null>(null);
+const anchor = ref<{ top: number; left: number; maxHeight: number } | null>(null);
 
 const selected = computed(() => props.state.organizations.find((org) => org.github_org_id === props.state.selectedId) ?? null);
 const triggerLabel = computed(() => `Rooms: ${selected.value ? selected.value.login : "all rooms"}. Change company`);
@@ -176,7 +180,7 @@ function markCompaniesSeen(): void {
 /** Companies that were new when the menu opened keep their "New" mark until it closes. */
 const newCompanyIds = ref<Set<string>>(new Set());
 const menuPosition = computed(() => anchor.value
-  ? { top: `${anchor.value.top}px`, left: `${anchor.value.left}px` }
+  ? { top: `${anchor.value.top}px`, left: `${anchor.value.left}px`, maxHeight: `${anchor.value.maxHeight}px` }
   : undefined);
 
 const githubSteps = computed(() => [
@@ -210,8 +214,10 @@ function organizationDetail(org: DesktopOrganization): string {
 function placeMenu(): void {
   const bounds = trigger.value?.getBoundingClientRect();
   if (!bounds) return;
-  const width = Math.min(300, window.innerWidth - 16);
-  anchor.value = { top: Math.round(bounds.bottom + 4), left: Math.round(Math.max(8, Math.min(bounds.left, window.innerWidth - width - 8))) };
+  const width = Math.min(260, window.innerWidth - 16);
+  const height = Math.min(menu.value?.scrollHeight ?? 360, window.innerHeight - 16);
+  const top = Math.max(8, Math.min(bounds.bottom + 6, window.innerHeight - height - 8));
+  anchor.value = { top: Math.round(top), left: Math.round(Math.max(8, Math.min(bounds.left, window.innerWidth - width - 8))), maxHeight: window.innerHeight - top - 8 };
 }
 
 function toggleMenu(): void {
@@ -224,6 +230,7 @@ function toggleMenu(): void {
   open.value = true;
   markCompaniesSeen();
   void nextTick(() => {
+    placeMenu();
     const items = menuItems();
     (items.find((item) => item.getAttribute("aria-checked") === "true") ?? items[0])?.focus();
   });
@@ -295,21 +302,23 @@ defineExpose({ close: closeMenu });
   min-width: 0;
   align-items: center;
   gap: 7px;
-  height: 26px;
-  margin-left: -1px;
-  padding: 0 7px 0 5px;
+  flex: 1;
+  min-height: 41px;
+  padding: 8px 11px;
   border: 0;
-  border-radius: 7px;
+  border-radius: 10px;
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
-  font-size: 12.5px;
+  font-size: 14px;
   font-weight: 500;
   cursor: pointer;
   transition: background-color 150ms ease, color 150ms ease;
 }
 
 .company-scope-trigger strong {
+  flex: 1;
+  text-align: left;
   overflow: hidden;
   color: var(--text);
   font-weight: 600;
@@ -318,7 +327,8 @@ defineExpose({ close: closeMenu });
 }
 
 .company-scope-trigger .sidebar-heading {
-  flex: none;
+  flex: 1;
+  text-align: left;
 }
 
 .company-scope-trigger[aria-expanded="true"] {
@@ -354,7 +364,9 @@ defineExpose({ close: closeMenu });
 .company-scope-menu {
   position: fixed;
   z-index: 80;
-  width: min(300px, calc(100vw - 16px));
+  width: min(260px, calc(100vw - 16px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 6px;
   border: 1px solid var(--border-strong);
   border-radius: 12px;
@@ -404,6 +416,8 @@ defineExpose({ close: closeMenu });
   text-overflow: ellipsis;
 }
 
+.company-scope-item[aria-checked="true"] { background: var(--accent-hover); }
+
 .company-scope-item:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--text) 24%, transparent);
   outline-offset: -2px;
@@ -439,9 +453,7 @@ defineExpose({ close: closeMenu });
 }
 
 .company-scope-tag {
-  padding: 2px 8px;
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
+  padding: 0;
   color: var(--text-secondary);
   font-size: 11.5px;
 }
