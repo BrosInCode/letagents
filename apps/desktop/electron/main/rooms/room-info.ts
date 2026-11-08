@@ -122,8 +122,14 @@ export function canonicalJoinedRoomIdentifier(
   return payload.room_id?.trim() || requestedRoomIdentifier.trim();
 }
 
+export type JoinedRoomInfoOptions = {
+  /** false: join the room only if it exists; the server answers 404 instead of creating it. */
+  create?: boolean;
+};
+
 export async function getJoinedRoomInfo(
   roomIdentifier: string,
+  options?: JoinedRoomInfoOptions,
 ): Promise<RoomInfoPayload> {
   const cacheKey = roomInfoCacheKey(roomIdentifier);
   const cached = cacheKey ? joinedRoomInfoCache.get(cacheKey) : null;
@@ -138,7 +144,7 @@ export async function getJoinedRoomInfo(
   }
 
   const joined = await apiFetch<RoomInfoPayload>(
-    `/rooms/${encodeURIComponent(roomIdentifier)}/join`,
+    `/rooms/${encodeURIComponent(roomIdentifier)}/join${options?.create === false ? "?create=false" : ""}`,
     {
       method: "POST",
     },

@@ -1,5 +1,5 @@
 import { watch } from "vue";
-import type { DesktopAppAgentRunInput, DesktopAppAgentRunResult } from "../../../../electron/ipc-types";
+import type { DesktopAppAgentRunInput, DesktopAppAgentRunResult, DesktopRoomSnapshotOptions } from "../../../../electron/ipc-types";
 import { settingsEntry } from "../../domain/desktop-navigation";
 import { safeUserVisibleErrorDetail } from "../../domain/user-visible-error";
 import { normalizeRoomIdentifier, rememberRecentRootRooms } from "../../domain/sidebar-rooms";
@@ -148,14 +148,14 @@ export function useAppArchivedRooms(context: unknown) {
     rememberRecentRootRooms(recentRootRoomsStorageKey, nextRecentRooms);
   }
 
-  async function openRoomFromAppAgent(roomIdentifier: string): Promise<void> {
+  async function openRoomFromAppAgent(roomIdentifier: string, options?: DesktopRoomSnapshotOptions): Promise<void> {
     const normalizedIdentifier = normalizeRoomIdentifier(roomIdentifier);
     if (!normalizedIdentifier) return;
     const knownRoom = [...accountRooms.value, ...settingsAccountRooms.value]
       .find((room) => normalizeRoomIdentifier(room.roomIdentifier) === normalizedIdentifier);
     loading.value = true;
     try {
-      const snapshot = await desktopIpc.room.getSnapshot(normalizedIdentifier);
+      const snapshot = await desktopIpc.room.getSnapshot(normalizedIdentifier, options);
       app.openRoomSnapshot(snapshot, {
         kind: "room",
         rootPath: null,

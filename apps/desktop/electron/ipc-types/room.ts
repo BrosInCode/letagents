@@ -608,6 +608,17 @@ export interface DesktopRoomLiveMetadataOptions {
   include?: readonly DesktopRoomLiveMetadataSourceKey[];
 }
 
+/** How a room snapshot is fetched. */
+export interface DesktopRoomSnapshotOptions {
+  /**
+   * false: open the room only if it already exists. A room link
+   * (`letagents://in/<room>`) uses this, so a crafted link never creates a
+   * room with the person as its admin. Default: a missing room is created,
+   * as the workspace room is on first open.
+   */
+  create?: boolean;
+}
+
 export type DesktopRoomLiveMetadataSourceStates = Record<
   DesktopRoomLiveMetadataSourceKey,
   DesktopSnapshotSourceState

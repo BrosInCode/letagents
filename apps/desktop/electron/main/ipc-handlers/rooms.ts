@@ -24,6 +24,7 @@ import {
   setDesktopRoomMemberRole,
 } from "../rooms/members.js";
 import { getAccountActivityState, restartAccountActivityStream, stopAccountActivityStream } from "../account-activity-stream.js";
+import { takePendingRoomLink } from "../ask-link-inbox.js";
 import { getDesktopGitHubEventFilter, getDesktopRoomAgentGuidelines, setDesktopGitHubEventFilter, setDesktopRoomAgentGuidelines } from "../rooms/room-settings.js";
 import { getDesktopRoomNotificationPreference, listDesktopRoomNotificationPreferences, setDesktopRoomNotificationPreference } from "../rooms/notification-preferences.js";
 import type { RoomNotificationPreferenceChange } from "../../../../../shared/room-notification-preferences.mjs";
@@ -67,6 +68,7 @@ import type {
   DesktopRoomMessagesPage,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
+  DesktopRoomSnapshotOptions,
   DesktopRoomStorageOverrideMode,
   DesktopRoomStorageState,
   DesktopRoomThreadInboxFilter,
@@ -209,7 +211,12 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     async (
       _event,
       roomIdentifier?: string | null,
-    ): Promise<DesktopRoomSnapshot> => fetchRoomSnapshot(roomIdentifier),
+      options?: DesktopRoomSnapshotOptions | null,
+    ): Promise<DesktopRoomSnapshot> => fetchRoomSnapshot(
+      roomIdentifier,
+      // Only the one flag crosses the bridge; anything else a renderer sends is ignored.
+      options && typeof options === "object" && options.create === false ? { create: false } : undefined,
+    ),
   );
   targetIpcMain.handle(
     "desktop:room:get-live-metadata",
@@ -608,6 +615,8 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:room-members:decide-join-request", (_event, roomIdentifier: string, requestId: string, decision) =>
     decideDesktopRoomJoinRequest(roomIdentifier, requestId, decision));
   targetIpcMain.handle("desktop:room-members:list-account-join-requests", () => listDesktopAccountRoomJoinRequests());
+  // A `letagents://in/<room>` link that arrived before this window's renderer loaded.
+  targetIpcMain.handle("desktop:room:take-pending-link", () => takePendingRoomLink());
   targetIpcMain.handle("desktop:room:get-account-activity", () => getAccountActivityState());
   targetIpcMain.handle("desktop:room:restart-account-activity", () => restartAccountActivityStream());
   targetIpcMain.handle("desktop:room:stop-account-activity", () => stopAccountActivityStream());
