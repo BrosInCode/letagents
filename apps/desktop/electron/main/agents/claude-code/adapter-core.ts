@@ -193,6 +193,31 @@ export class ClaudeAdapterCore {
     for (const listener of handle.streamListeners) listener(event);
   }
 
+  /**
+   * An event for the owner's live feed only (see ProviderStreamEvent.liveDisplayOnly):
+   * the daemon keeps the newest of each command, and it is never activity.
+   */
+  protected publishLiveDisplay(handle: ClaudeProviderHandle, method: string, providerPayload: unknown): void {
+    const safe = safeStreamPayload(providerPayload);
+    const event: ProviderStreamEvent = {
+      workAttemptId: handle.workAttemptId,
+      providerContinuationId: handle.providerContinuationId,
+      observedAt: this.deps.now(),
+      sequence: ++handle.streamSequence,
+      provider: this.id,
+      kind: "tool_lifecycle",
+      method,
+      liveDisplayOnly: true,
+      ...safe,
+      durablePayloadRef: null,
+    };
+    this.streamSink?.(event);
+    for (const listener of handle.streamListeners) listener(event);
+  }
+
+  /** Resources of a handle whose process has ended. Subclasses release what they hold for it. */
+  protected releaseEndedHandle(_handle: ClaudeProviderHandle): void {}
+
   protected publishActivity(
     handle: ClaudeProviderHandle,
     input: {
@@ -227,6 +252,7 @@ export class ClaudeAdapterCore {
     handle.contextualInterruptTerminalTurnId = null;
     handle.permissionControlAvailable = false;
     handle.clearPermissions();
+    this.releaseEndedHandle(handle);
     // A turn that was held open ends like any turn the process ended under: its waiters are told below, and
     // the session is read for it. That gives the turn's own answer with the answers to the notices of its work
     // that the session holds, and one line when the session does not prove that reply complete.

@@ -23,14 +23,39 @@ export type LiveTranscriptItem =
       input: unknown;
       output: unknown;
       error: string | null;
+      /** When the feed first saw the call. */
+      startedAt?: string | null;
+      /** Live output of a running command leaves out earlier output. */
+      outputTruncated?: boolean;
+      /** Live output of a running command is hidden until it ends (a broken redaction boundary). */
+      outputHidden?: boolean;
     };
+
+/** A command that the agent started in the background, from its newest event. */
+export type LiveBackgroundCommand = {
+  /** The provider's task id. */
+  id: string;
+  toolUseId: string | null;
+  command: string;
+  description: string | null;
+  status: "running" | "completed" | "failed" | "stopped" | "lost";
+  output: string;
+  outputTruncated: boolean;
+  exitCode: number | null;
+  startedAt: string | null;
+  endedAt: string | null;
+};
 
 export interface AgentLiveTranscript {
   items: LiveTranscriptItem[];
+  background: LiveBackgroundCommand[];
   ended: boolean;
   startedAt: string | null;
   lastActivityAt: string | null;
 }
+
+/** A provider's own shell tool, by bare name. */
+export function isShellToolName(name: unknown): boolean;
 
 /** The text block one live event adds to, keyed as the fold keys it; null for other events. */
 export function liveStreamTextPart(event: Pick<AgentLiveStreamEventShape, "method" | "payload">): { kind: "reasoning" | "message"; id: string } | null;

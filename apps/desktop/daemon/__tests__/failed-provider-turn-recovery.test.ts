@@ -306,7 +306,7 @@ function heartbeatHarness(handle: ProviderActionHandle, rotationDue: boolean, ne
     appendNativeActivity: async () => {},
     publishNativeActivity: async () => { counts.liveness += 1; },
     handleTerminal: async () => {},
-    streams: { reset: () => {}, push: () => {}, end: () => {} },
+    streams: { reset: () => {}, push: () => {}, pushLatest: () => {}, dropLatest: () => {}, end: () => {} },
     delivery: { start: async () => {}, startCutover: async () => {} },
     heartbeat: {
       intervalMs: 15_000,

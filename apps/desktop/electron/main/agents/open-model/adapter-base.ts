@@ -10,6 +10,7 @@ import { messageCompleted, OpenCodeServerClient, record, type JsonRecord, type O
 import { CAPABILITIES, MAX_ASSISTANT_STEPS, type OpenModelProviderAdapterDependencies, type OpenModelProviderAdapterOptions, START_TIMEOUT_MS, TURN_CONTROL_TIMEOUT_MS, TURN_TIMEOUT_MS } from "./types.js";
 import { OPEN_MODEL_PROVIDER_RETRY_METHOD, type OpenCodeRetryStatus, openModelProviderRetrySummary } from "./errors.js";
 import { OpenModelHandle } from "./handle.js";
+import { liveOutputTail, plainTerminalText } from "../../../../../../shared/live-command-output.mjs";
 import { defaultDependencies, terminalFromExit } from "./runtime-launch.js";
 
 export abstract class OpenModelAdapterBase {
@@ -23,6 +24,8 @@ export abstract class OpenModelAdapterBase {
   protected readonly stopGraceMs: number;
   protected readonly runtimeRoot: string;
   protected readonly handles = new Map<string, OpenModelHandle>();
+  /** The live output last sent for each running shell call of a handle. */
+  protected readonly liveToolOutputs = new WeakMap<OpenModelHandle, Map<string, string>>();
   /** Work attempts whose tree may have outlived its closed job: no replacement starts beside it. */
   protected readonly survivingTrees = new Set<string>();
 
@@ -188,6 +191,43 @@ export abstract class OpenModelAdapterBase {
    * payload instead. Deduped by (callID, status) because the full part is
    * re-sent on every transition and re-observed on reconnect.
    */
+  /**
+   * OpenCode's shell tool keeps the output of a running command in the part's
+   * metadata. Each new version goes to the owner's live feed as display-only
+   * output: never activity, and the daemon keeps only the newest of a call.
+   */
+  protected emitLiveToolOutput(
+    handle: OpenModelHandle,
+    part: OpenCodePart,
+    callId: string,
+    state: Record<string, unknown> | null,
+  ): void {
+    const raw = record(state?.metadata)?.output;
+    if (typeof raw !== "string") return;
+    const seen = this.liveToolOutputs.get(handle) ?? new Map<string, string>();
+    if (seen.get(callId) === raw) return;
+    if (!seen.has(callId) && seen.size >= 64) seen.delete(seen.keys().next().value!);
+    seen.set(callId, raw);
+    this.liveToolOutputs.set(handle, seen);
+    const tail = liveOutputTail(plainTerminalText(raw));
+    this.emitStream(handle, {
+      kind: "tool_lifecycle",
+      method: "item/toolCall/updated",
+      summary: null,
+      liveDisplayOnly: true,
+      payload: {
+        partId: typeof part.id === "string" ? part.id : null,
+        callID: callId,
+        tool: "bash",
+        status: "running",
+        input: state?.input ?? null,
+        output: tail.text,
+        outputTruncated: tail.cut,
+        outputProgress: true,
+      },
+    });
+  }
+
   protected emitToolCall(
     handle: OpenModelHandle,
     part: OpenCodePart,
@@ -199,8 +239,10 @@ export abstract class OpenModelAdapterBase {
     const callId = typeof part.callID === "string" ? part.callID
       : typeof part.id === "string" ? part.id : tool;
     const status = typeof state?.status === "string" ? state.status : "pending";
+    if (tool === "bash" && status === "running") this.emitLiveToolOutput(handle, part, callId, state);
     if (toolStatuses.get(callId) === status) return;
     toolStatuses.set(callId, status);
+    if (status !== "running") this.liveToolOutputs.get(handle)?.delete(callId);
     if (turnId && (nativeExecutionId(part.callID) || nativeExecutionId(part.id)) && nativeExecutionId(callId) && nativeExecutionId(turnId)
       && nativeExecutionId(handle.providerContinuationId)
       && (part.sessionID === undefined || part.sessionID === handle.providerContinuationId)
@@ -287,7 +329,7 @@ export abstract class OpenModelAdapterBase {
   protected emitStream(
     handle: OpenModelHandle,
     input: Pick<ProviderStreamEvent, "kind" | "method"> & Partial<Pick<ProviderStreamEvent,
-      "nativeEventId" | "nativeLifecyclePhase" | "lifecycleProjectionOnly">> & {
+      "nativeEventId" | "nativeLifecyclePhase" | "lifecycleProjectionOnly" | "liveDisplayOnly">> & {
       summary: string | null;
       payload: unknown;
       /** The caller already redacted part of the payload. */
@@ -306,6 +348,7 @@ export abstract class OpenModelAdapterBase {
       ...(input.nativeEventId ? { nativeEventId: input.nativeEventId } : {}),
       ...(input.nativeLifecyclePhase ? { nativeLifecyclePhase: input.nativeLifecyclePhase } : {}),
       ...(input.lifecycleProjectionOnly ? { lifecycleProjectionOnly: true as const } : {}),
+      ...(input.liveDisplayOnly ? { liveDisplayOnly: true as const } : {}),
       summary: input.summary,
       payload: safe.payload,
       payloadTruncated: safe.payloadTruncated,

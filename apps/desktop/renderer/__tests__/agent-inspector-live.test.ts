@@ -15,6 +15,7 @@ import {
   describeLiveToolCall,
   foldAgentStreamEvents,
   formatLiveWorkDuration,
+  liveBackgroundCommands,
   scopeAgentStreamEventsToWork,
 } from "../src/domain/agent-inspector-live";
 import type { DesktopAgentStreamEvent } from "../../electron/ipc-types";
@@ -167,7 +168,9 @@ test("fold ignores provider-native tool evidence and preserves started metadata 
   assert.deepEqual(transcript.items, [{
     kind: "tool", id: "c1", tool: "readToolCall", status: "completed",
     input: { path: "README.md" }, output: { totalLines: 54 }, error: null,
+    startedAt: "2026-07-31T00:00:00.000Z", outputTruncated: false, outputHidden: false,
   }]);
+  assert.deepEqual(transcript.background, []);
 });
 
 test("fold preserves first-appearance order across interleaved kinds", () => {
@@ -679,6 +682,59 @@ test("Live layout remount retains the feed and subscription for the same agent/s
   live.stop();
   assert.equal(watches.at(-1), null, "closing still releases the native watch");
   scope.stop();
+});
+
+test("a live output value takes the place of the earlier one of its call, in a batch and across batches", () => {
+  const output = (sequence: number, text: string) => event({ sequence, kind: "tool_lifecycle", method: "item/toolCall/updated", latestKey: "output:c1",
+    payload: { callID: "c1", tool: "shellToolCall", status: "running", output: text, outputProgress: true } });
+  let feed = { events: [event({ sequence: 1 }), output(2, "a\n")], ended: false, droppedEvents: 0 };
+  feed = appendAgentInspectorLiveBatch(feed, { entryId: "agent-a", events: [output(3, "a\nb\n"), event({ sequence: 4 }), output(5, "a\nb\nc\n")], ended: false, droppedEvents: 0, reset: false }, 3);
+  assert.deepEqual(feed.events.map(item => item.sequence), [1, 4, 5], "only the newest value of the key is kept, in its own place");
+  assert.equal(feed.droppedEvents, 0, "a replaced value is not a loss");
+  feed = appendAgentInspectorLiveBatch(feed, { entryId: "agent-a", events: [event({ sequence: 6 })], ended: false, droppedEvents: 0, reset: false }, 3);
+  assert.deepEqual(feed.events.map(item => item.sequence), [1, 4, 5, 6].slice(-3));
+  assert.equal(feed.droppedEvents, 1);
+});
+
+test("fold keeps a running command's newest output, its start time, and clears the live flags when it ends", () => {
+  const transcript = (events: DesktopAgentStreamEvent[]) => foldAgentStreamEvents(events).items[0] as any;
+  const started = event({ sequence: 1, observedAt: "2026-07-31T00:00:01.000Z", kind: "tool_lifecycle", method: "item/toolCall/updated",
+    payload: { callID: "c1", tool: "shellToolCall", status: "running", input: { command: "npm test" } } });
+  const progress = event({ sequence: 2, observedAt: "2026-07-31T00:00:05.000Z", kind: "tool_lifecycle", method: "item/toolCall/updated",
+    payload: { callID: "c1", tool: "shellToolCall", status: "running", input: { command: "npm test" }, output: "tail\n", outputTruncated: true, outputProgress: true } });
+  const done = event({ sequence: 3, kind: "tool_lifecycle", method: "item/toolCall/updated",
+    payload: { callID: "c1", tool: "shellToolCall", status: "completed", output: "all output" } });
+  assert.deepEqual([transcript([started, progress]).output, transcript([started, progress]).outputTruncated, transcript([started, progress]).startedAt],
+    ["tail\n", true, "2026-07-31T00:00:01.000Z"]);
+  const ended = transcript([started, progress, done]);
+  assert.deepEqual([ended.status, ended.output, ended.outputTruncated, ended.startedAt], ["completed", "all output", false, "2026-07-31T00:00:01.000Z"]);
+  assert.equal(transcript([started, progress, done, progress]).status, "completed", "a late output value cannot reopen an ended call");
+});
+
+test("a shell call that starts a background command and OpenCode's shell tool read as shell commands", () => {
+  assert.equal(describeLiveToolCall("shellToolCall", { command: "npm run dev", run_in_background: true }, { status: "completed", output: null, error: null }).headline,
+    "Started a background command");
+  assert.equal(describeLiveToolCall("shellToolCall", { command: "npm run dev", run_in_background: true }, { status: "pending", output: null, error: null }).headline,
+    "Requested: Starting a background command");
+  const bash = describeLiveToolCall("bash", { command: "ls" }, { status: "running", output: null, error: null });
+  assert.deepEqual([bash.headline, bash.detail], ["Running a shell command", "ls"]);
+  assert.equal(describeLiveToolCall("bash", { command: "ls" }, { status: "error", output: null, error: "boom" }).headline, "Command failed");
+});
+
+test("background commands come from the whole feed, keep their end, and end with a feed that ended", () => {
+  const background = (sequence: number, status: string, extra: Record<string, unknown> = {}) => event({ sequence, kind: "tool_lifecycle",
+    method: "item/backgroundCommand/updated", latestKey: "background:task-1",
+    payload: { taskId: "task-1", toolUseId: "toolu_1", command: "npm run dev", description: null, status, output: "ready\n",
+      outputTruncated: false, exitCode: null, startedAt: "2026-07-31T00:00:00.000Z", endedAt: null, ...extra } });
+  const running = liveBackgroundCommands({ events: [event({ sequence: 1 }), background(2, "running")], ended: false });
+  assert.deepEqual(running, [{ id: "task-1", toolUseId: "toolu_1", command: "npm run dev", description: null, status: "running",
+    output: "ready\n", outputTruncated: false, exitCode: null, startedAt: "2026-07-31T00:00:00.000Z", endedAt: null }]);
+  assert.equal(liveBackgroundCommands({ events: [background(2, "running")], ended: true })[0]!.status, "lost");
+  const ended = liveBackgroundCommands({ events: [background(2, "completed", { exitCode: 0 }), background(3, "running")], ended: false });
+  assert.deepEqual([ended[0]!.status, ended[0]!.exitCode], ["completed", 0], "a late running value cannot reopen an ended command");
+  assert.deepEqual(liveBackgroundCommands({ events: [event({ sequence: 4, method: "item/backgroundCommand/updated", payload: { taskId: "x" } })], ended: false }), [],
+    "a shape the fold does not know is left out");
+  assert.deepEqual(foldAgentStreamEvents([background(2, "running")]).items, [], "a background command is not a timeline item");
 });
 
 test("Live batches retain local eviction and upstream loss counts until reset", () => {

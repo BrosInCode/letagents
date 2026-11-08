@@ -1,4 +1,4 @@
-import { ProviderLiveDisplay } from "./provider-live-display.js";
+import { ProviderLiveDisplay, liveDisplayFeedPlacement } from "./provider-live-display.js";
 import { publishWorkerNativeActivity } from "./cloud-http.js";
 import { liveActivitySummaryForEvent, type LiveActivitySummaryStatus } from "./live-activity-summary-relay.js";
 import { sanitizeDaemonActivityEvent } from "./credential-redaction.js";
@@ -258,6 +258,9 @@ export type ProviderStreamCoordinatorOptions = {
   streams: {
     reset(entryId: string): void;
     push(entryId: string, event: DaemonActivityEvent): void;
+    /** The newest value of one key: see AgentStreamRegistry.pushLatest. */
+    pushLatest(entryId: string, key: string, event: DaemonActivityEvent, options: { sticky?: boolean; immediate?: boolean }): void;
+    dropLatest(entryId: string, key: string): void;
     end(entryId: string): void;
   };
   delivery: {
@@ -1314,6 +1317,44 @@ export class ProviderStreamCoordinator {
     return this.isCurrentInstallation(installation) ? state : null;
   }
 
+  /** One live display event on the owner's feed: appended, or as the newest value of its command. */
+  private placeLiveDisplayEvent(entryId: string, event: DaemonActivityEvent): void {
+    const placement = liveDisplayFeedPlacement(event);
+    if (placement.kind === "latest") {
+      this.options.streams.pushLatest(entryId, placement.key, event, placement);
+      return;
+    }
+    // The final event of a call says how it ended; output that still waits for its turn would only repeat it.
+    if (placement.endsLatestKey) this.options.streams.dropLatest(entryId, placement.endsLatestKey);
+    this.options.streams.push(entryId, event);
+  }
+
+  /**
+   * A display-only event from an adapter: the live output of a running
+   * command, or the state of a background command. It reaches the owner's
+   * feed alone, as the newest value of its command. It is not activity, it
+   * proves no lifecycle and it changes no room state. Any other event that
+   * claims to be display-only is dropped.
+   */
+  private pushLiveDisplayOnly(entryId: string, event: ProviderActionStreamEvent): void {
+    const sanitized = sanitizeDaemonActivityEvent({
+      observed_at: event.observedAt,
+      sequence: event.sequence,
+      provider: event.provider,
+      kind: event.kind,
+      method: event.method,
+      summary: "",
+      status: "working",
+      payload: event.payload,
+      payload_truncated: event.payloadTruncated,
+      payload_redacted: event.payloadRedacted,
+      durable_payload_ref: null,
+    });
+    const placement = liveDisplayFeedPlacement(sanitized);
+    if (placement.kind !== "latest") return;
+    this.options.streams.pushLatest(entryId, placement.key, sanitized, placement);
+  }
+
   private async handleInstalled(
     sourceInstallation: ProviderInstallationToken,
     event: ProviderActionStreamEvent,
@@ -1329,6 +1370,10 @@ export class ProviderStreamCoordinator {
     if (!entry || !this.entryMatchesInstallation(entry, installation)
       || !this.isCurrentInstallation(installation)) {
       this.markLifecycleProjectionUnavailableForEvent(event);
+      return;
+    }
+    if (event.liveDisplayOnly) {
+      this.pushLiveDisplayOnly(entryId, event);
       return;
     }
     if (event.lifecycleProjectionOnly && !isOpenModelLifecycleProjectionFrame(event)) {
@@ -1394,7 +1439,7 @@ export class ProviderStreamCoordinator {
         this.liveDisplay.set(installation, display);
       }
       for (const projected of display.project(sanitizedEvent, event.nativeLifecyclePhase)) {
-        this.options.streams.push(entryId, projected);
+        this.placeLiveDisplayEvent(entryId, projected);
         turnStartLatency.observeOutput(entryId, projected.method, event.observedAt);
         launchProgress.observeOutput(entryId, projected.method);
       }

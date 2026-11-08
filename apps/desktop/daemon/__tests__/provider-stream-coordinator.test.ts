@@ -14,7 +14,7 @@ import {
   type ProviderInstallationToken,
   type ProviderStreamCoordinatorOptions,
 } from "../provider-stream-coordinator.js";
-import { ProviderLiveDisplay } from "../provider-live-display.js";
+import { ProviderLiveDisplay, liveDisplayFeedPlacement } from "../provider-live-display.js";
 import { sanitizeDaemonActivityEvent } from "../credential-redaction.js";
 import { providerStreamLifecycle } from "../provider-stream-policy.js";
 import type { DaemonActivityEvent, DaemonManifestEntry } from "../types.js";
@@ -154,6 +154,8 @@ function coordinatorHarness(input: {
   clearInterval?: typeof clearInterval;
   endStream?: (entryId: string) => void;
   pushStream?: (event: DaemonActivityEvent) => void;
+  pushLatestStream?: (key: string, event: DaemonActivityEvent, options: { sticky?: boolean; immediate?: boolean }) => void;
+  dropLatestStream?: (key: string) => void;
   observeExecution?: (installation: ProviderInstallationToken) => () => void;
   advanceExecution?: (installation: ProviderInstallationToken) => void;
   observeLegacyLifecycle?: (observation: LifecycleProjectionObservation) => void;
@@ -265,7 +267,13 @@ function coordinatorHarness(input: {
     publishNativeActivity: async (entryId, method, status) => input.publishNativeActivity?.(entryId, method, status),
     observeActivitySummary: input.observeActivitySummary,
     handleTerminal: async () => {},
-    streams: { reset: () => {}, push: (_entryId, event) => input.pushStream?.(event), end: (entryId) => input.endStream?.(entryId) },
+    streams: {
+      reset: () => {},
+      push: (_entryId, event) => input.pushStream?.(event),
+      pushLatest: (_entryId, key, event, options) => input.pushLatestStream?.(key, event, options),
+      dropLatest: (_entryId, key) => input.dropLatestStream?.(key),
+      end: (entryId) => input.endStream?.(entryId),
+    },
     delivery: { start: input.startDelivery ?? (async () => {}), startCutover: input.startCutover ?? (async () => {}) },
     heartbeat: {
       intervalMs: 60_000,
@@ -1944,6 +1952,112 @@ test("Codex captured command output is bounded and redacted again after joining 
   }
   assert.equal((project("item/completed", "pending-0")[0]?.payload as any).output, null);
   assert.equal((project("item/completed", "pending-128")[0]?.payload as any).output, "output 128");
+});
+
+test("Codex live output shows the newest whole lines of a running command as the newest value of its call", () => {
+  const display = new ProviderLiveDisplay("thread");
+  const project = (method: string, extra: Record<string, unknown> = {}) => display.project(displayEvent("codex", method, {
+    threadId: "thread", turnId: "turn", itemId: "shell", item: { id: "shell", type: "commandExecution", command: "npm test", cwd: "/repo" }, ...extra,
+  }));
+  project("item/started");
+  const first = project("item/commandExecution/outputDelta", { delta: "> vitest run\n ✓ query.test.ts" })[0]!;
+  assert.equal(first.method, "item/toolCall/updated");
+  assert.deepEqual(first.payload, {
+    callID: "codex:thread:turn:shell", tool: "shellToolCall", status: "running", input: { command: "npm test", cwd: "/repo" },
+    output: "> vitest run\n", outputTruncated: false, outputHidden: false, outputProgress: true,
+  }, "a line that is still being written is left out");
+  assert.deepEqual(liveDisplayFeedPlacement(first), { kind: "latest", key: "output:codex:thread:turn:shell", sticky: false, immediate: false });
+
+  const colored = project("item/commandExecution/outputDelta", { delta: " (9 tests)\n\u001b[31m × fails\u001b[0m\n" })[0]!;
+  assert.equal((colored.payload as any).output, "> vitest run\n ✓ query.test.ts (9 tests)\n × fails\n", "control sequences are removed");
+
+  const secret = project("item/commandExecution/outputDelta", { delta: "LETAGENTS_TO" })[0]!;
+  assert.doesNotMatch(JSON.stringify(secret.payload), /LETAGENTS_TO/, "the start of a line stays hidden until the line is complete");
+  const joined = project("item/commandExecution/outputDelta", { delta: "KEN=secret_canary_not_real_1234567890\n" })[0]!;
+  assert.doesNotMatch(JSON.stringify(joined.payload), /secret_canary/, "a secret split across chunks is redacted in the joined tail");
+  assert.equal(joined.payload_redacted, true);
+
+  for (let line = 0; line < 400; line += 1) project("item/commandExecution/outputDelta", { delta: `line ${line} ${"x".repeat(40)}\n` });
+  const long = project("item/commandExecution/outputDelta", { delta: "last line\n" })[0]!;
+  const longPayload = long.payload as { output: string; outputTruncated: boolean };
+  assert.equal(longPayload.outputTruncated, true);
+  assert.ok(longPayload.output.length <= 6_000);
+  assert.match(longPayload.output, /^line \d+ x+\n/, "a cut tail starts at a whole line");
+  assert.match(longPayload.output, /last line\n$/);
+
+  const completed = project("item/completed", { item: { id: "shell", type: "commandExecution", status: "completed", exitCode: 0, aggregatedOutput: "all output" } })[0]!;
+  assert.deepEqual(liveDisplayFeedPlacement(completed), { kind: "append", endsLatestKey: "output:codex:thread:turn:shell" },
+    "the final event ends the paced output of its call");
+});
+
+test("Codex live output is hidden for the rest of a command after a chunk that redaction already changed", () => {
+  const display = new ProviderLiveDisplay("thread");
+  const project = (method: string, extra: Record<string, unknown> = {}) => display.project(displayEvent("codex", method, {
+    threadId: "thread", turnId: "turn", itemId: "shell", item: { id: "shell", type: "commandExecution", command: "env" }, ...extra,
+  }));
+  project("item/started");
+  const redacted = project("item/commandExecution/outputDelta", { delta: "LETAGENTS_TOKEN=canary_first" })[0]!;
+  assert.equal((redacted.payload as any).outputHidden, true);
+  assert.equal((redacted.payload as any).output, null);
+  const later = project("item/commandExecution/outputDelta", { delta: "_CANARY_UNREDACTED_TAIL\nok\n" })[0]!;
+  assert.equal((later.payload as any).output, null);
+  assert.doesNotMatch(JSON.stringify(later), /CANARY_UNREDACTED_TAIL/);
+});
+
+test("a Claude shell call that becomes a running task is shown as running, once", () => {
+  const display = new ProviderLiveDisplay("session");
+  const event = (payload: Record<string, unknown>) => displayEvent("claude-code", String(payload.type), { session_id: "session", ...payload });
+  display.project(event({ type: "command_lifecycle", state: "started", command_uuid: "turn" }), "turn_active");
+  display.project(event({ type: "assistant", uuid: "packet", message: { id: "message", role: "assistant", content: [
+    { type: "tool_use", id: "bash", name: "Bash", input: { command: "npm test" } },
+    { type: "tool_use", id: "read", name: "Read", input: { file_path: "a.ts" } },
+  ] } }));
+  const started = (toolUseId: string, backgrounded = false) => display.project(event({
+    type: "system", subtype: "task_started", task_id: `task-${toolUseId}`, tool_use_id: toolUseId, task_type: "local_bash", is_backgrounded: backgrounded,
+  }));
+  assert.deepEqual(started("bash", true), [], "a background start is not this card's run");
+  const [running] = started("bash");
+  assert.deepEqual(running?.payload, { callID: "claude:session:turn:bash", tool: "shellToolCall", status: "running" });
+  assert.deepEqual(started("bash"), [], "a repeated start changes nothing");
+  assert.deepEqual(started("read"), [], "only a shell call becomes a shell task");
+  assert.deepEqual(started("unknown"), []);
+});
+
+test("live display placement keeps a running background command and sends its end at once", () => {
+  const background = (status: string) => liveDisplayFeedPlacement({
+    method: "item/backgroundCommand/updated", payload: { taskId: "task-1", command: "npm run dev", status },
+  });
+  assert.deepEqual(background("running"), { kind: "latest", key: "background:task-1", sticky: true, immediate: false });
+  assert.deepEqual(background("completed"), { kind: "latest", key: "background:task-1", sticky: false, immediate: true });
+  assert.deepEqual(liveDisplayFeedPlacement({ method: "item/agentMessage/delta", payload: { delta: "x" } }), { kind: "append", endsLatestKey: null });
+  assert.deepEqual(liveDisplayFeedPlacement({ method: "item/toolCall/updated", payload: { callID: "c1", status: "running" } }),
+    { kind: "append", endsLatestKey: null }, "a running state without output is an ordinary event");
+});
+
+test("a display-only event reaches the owner's feed alone, as the newest value of its command", async () => {
+  const latest: Array<[string, DaemonActivityEvent, { sticky?: boolean; immediate?: boolean }]> = [];
+  const pushed: DaemonActivityEvent[] = [];
+  const activity: DaemonActivityEvent[] = [];
+  const harness = coordinatorHarness({
+    pushStream: event => pushed.push(event),
+    pushLatestStream: (key, event, options) => latest.push([key, event, options]),
+    appendedActivity: event => activity.push(event),
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  const displayOnly = (sequence: number, method: string, payload: Record<string, unknown>): ProviderActionStreamEvent => ({
+    ...streamEvent(sequence, method), kind: "tool_lifecycle", liveDisplayOnly: true, payload,
+  });
+  await harness.coordinator.enqueue("agent-1", handle, displayOnly(1, "item/backgroundCommand/updated", {
+    taskId: "task-1", command: "npm run dev", status: "running", output: "ready\nAuthorization: Bearer secret_canary_not_real_1234567890\n",
+  }));
+  await harness.coordinator.enqueue("agent-1", handle, displayOnly(2, "item/agentMessage/delta", { partId: "p", delta: "forged" }));
+  assert.equal(latest.length, 1, "a display-only event of another kind is dropped");
+  assert.equal(latest[0]![0], "background:task-1");
+  assert.deepEqual(latest[0]![2], { kind: "latest", key: "background:task-1", sticky: true, immediate: false });
+  assert.doesNotMatch(JSON.stringify(latest[0]![1].payload), /secret_canary/, "the daemon redacts it again");
+  assert.deepEqual(pushed, [], "nothing is appended to the feed");
+  assert.deepEqual(activity, [], "nothing becomes activity");
+  await harness.coordinator.disposeAll();
 });
 
 test("Claude display scopes full assistant messages and tool results to proven native turns", () => {

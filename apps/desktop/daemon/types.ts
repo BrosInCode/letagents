@@ -60,6 +60,11 @@ export type DaemonAgentStreamEvent = {
   method: string;
   summary: string | null;
   payload: unknown;
+  /**
+   * Set on a latest value (the live output of a running command, or the state
+   * of a background command): a consumer keeps only the newest event of a key.
+   */
+  latest_key?: string;
 };
 
 /**
