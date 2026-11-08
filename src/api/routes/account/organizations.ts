@@ -65,6 +65,17 @@ export async function verifiedOrganizationAccess(
   }
 }
 
+/**
+ * GitHub leaves an organization out of the membership list until the token is
+ * authorized for its SAML single sign-on. That says nothing about membership,
+ * so answer `organization_sso_required` and keep any stored join.
+ */
+export function respondIfSsoHidden(access: GitHubOrganizationAccess, organizationId: string, res: Response): boolean {
+  if (!access.ssoRequiredOrgIds.includes(organizationId)) return false;
+  res.status(403).json({ error: "organization_sso_required" });
+  return true;
+}
+
 export async function verifiedOrganizationMemberships(
   req: AuthenticatedRequest,
   res: Response,
@@ -110,10 +121,11 @@ export function registerAccountOrganizationRoutes(
         res.status(403).json({ error: "cross_site_write_refused" });
         return;
       }
-      const memberships = await verifiedOrganizationMemberships(req, res, deps);
-      if (!memberships) return;
-      const membership = memberships.find((org) => org.github_org_id === organizationId);
+      const access = await verifiedOrganizationAccess(req, res, deps);
+      if (!access) return;
+      const membership = access.memberships.find((org) => org.github_org_id === organizationId);
       if (!membership) {
+        if (respondIfSsoHidden(access, organizationId, res)) return;
         await deps.removeMembership(req.sessionAccount!.account_id, organizationId);
         res.status(403).json({ error: "organization_membership_required" });
         return;

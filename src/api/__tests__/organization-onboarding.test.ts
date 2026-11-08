@@ -293,3 +293,12 @@ test("consent done page tells the person to return to LetAgents", async () => {
   assert.match(res.body, /<h1>GitHub access updated<\/h1>/);
   assert.match(res.body, /Return to LetAgents\. You can close this tab\./);
 });
+
+test("an organization hidden by single sign-on asks for SSO and keeps the stored join", async () => {
+  const api = harness({ readAccess: access([], { ssoRequiredOrgIds: ["42"] }) });
+  const response = await api.request("POST /organizations/:organizationId/join");
+  assert.equal(response.statusCode, 403);
+  assert.deepEqual(response.body, { error: "organization_sso_required" });
+  assert.deepEqual(api.removals, []);
+  assert.deepEqual(api.writes, []);
+});
