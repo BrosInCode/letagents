@@ -5,17 +5,17 @@ import {
   GitHubOrganizationSsoRequiredError,
   listAccessibleOrganizationRepositories,
 } from "../../github/organization-repositories.js";
-import { filterAccountIdsWithRoomAccess } from "../../server/events.js";
+import { resolveAccountRoomAccessForEmit, type AccountRoomAccessResolver } from "../../server/events.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
-import { organizationRouteDeps, verifiedOrganizationMemberships, type OrganizationRouteDeps } from "./organizations.js";
+import { organizationRouteDeps, respondIfSsoHidden, verifiedOrganizationAccess, type OrganizationRouteDeps } from "./organizations.js";
 
 export interface OrganizationRoomRouteDeps extends OrganizationRouteDeps {
   getConnectedRooms: typeof getConnectedOrganizationRooms;
   listAccessibleRepositories: typeof listAccessibleOrganizationRepositories;
   getMemberRooms: typeof getMemberOrganizationRooms;
-  // Same access rule as the rest of the app. Only a confirmed allow
-  // (`recents`) keeps a repo room in the list.
-  filterRoomAccess: (roomId: string, accountIds: readonly string[]) => Promise<{ recents: string[] }>;
+  // Same access rule as the rest of the app: allow keeps a repo room, deny
+  // drops it, and retry (GitHub could not answer) fails the whole list.
+  resolveRoomAccess: AccountRoomAccessResolver;
 }
 
 const ACCESS_CHECK_CONCURRENCY = 6;
@@ -38,7 +38,7 @@ export function registerOrganizationRoomRoutes(app: Express, deps: OrganizationR
   getConnectedRooms: getConnectedOrganizationRooms,
   listAccessibleRepositories: listAccessibleOrganizationRepositories,
   getMemberRooms: getMemberOrganizationRooms,
-  filterRoomAccess: filterAccountIdsWithRoomAccess,
+  resolveRoomAccess: resolveAccountRoomAccessForEmit,
 }): void {
   app.get("/organizations/:organizationId/rooms", async (req: AuthenticatedRequest, res) => {
     const organizationId = String(req.params.organizationId);
@@ -46,11 +46,12 @@ export function registerOrganizationRoomRoutes(app: Express, deps: OrganizationR
       res.status(400).json({ error: "invalid_organization_id" });
       return;
     }
-    const memberships = await verifiedOrganizationMemberships(req, res, deps);
-    if (!memberships) return;
-    const membership = memberships.find((item) => item.github_org_id === organizationId);
+    const access = await verifiedOrganizationAccess(req, res, deps);
+    if (!access) return;
+    const membership = access.memberships.find((item) => item.github_org_id === organizationId);
     const accountId = req.sessionAccount!.account_id;
     if (!membership) {
+      if (respondIfSsoHidden(access, organizationId, res)) return;
       await deps.removeMembership(accountId, organizationId);
       res.status(403).json({ error: "organization_membership_required" });
       return;
@@ -96,14 +97,21 @@ export function registerOrganizationRoomRoutes(app: Express, deps: OrganizationR
       });
       // GitHub also lists public repos to people with no role there, but the
       // app needs triage or higher for a public repo room. Ask the same rule.
-      let allowed: boolean[];
+      // A list with rooms missing because GitHub did not answer would look
+      // like a real answer, so "retry" or an error fails the whole list.
+      let decisions: string[];
       try {
-        allowed = await mapWithConcurrency(listed, ACCESS_CHECK_CONCURRENCY, async ({ candidate }) =>
-          (await deps.filterRoomAccess(candidate.room_id, [accountId])).recents.includes(accountId));
+        decisions = await mapWithConcurrency(listed, ACCESS_CHECK_CONCURRENCY, ({ candidate }) =>
+          deps.resolveRoomAccess({ accountId, roomId: candidate.room_id }));
       } catch {
         res.status(503).json({ error: "organization_rooms_verification_unavailable" });
         return;
       }
+      if (decisions.some((decision) => decision !== "allow" && decision !== "deny")) {
+        res.status(503).json({ error: "organization_rooms_verification_unavailable" });
+        return;
+      }
+      const allowed = decisions.map((decision) => decision === "allow");
       repoRooms = listed.flatMap(({ candidate, repo }, index) => allowed[index]
         ? [{
           kind: "repo",

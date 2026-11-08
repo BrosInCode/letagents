@@ -179,7 +179,8 @@ export function registerLegacyProjectRoutes(
         return;
       }
       if (!access.memberships.some((membership) => membership.github_org_id === id)) {
-        res.status(403).json({ error: "organization_membership_required" });
+        // Single sign-on hides an organization until the token is authorized; that is not "not a member".
+        res.status(403).json({ error: access.ssoRequiredOrgIds.includes(id) ? "organization_sso_required" : "organization_membership_required" });
         return;
       }
       if (!(await company.getJoinedOrganizationIds(account.account_id)).includes(id)) {

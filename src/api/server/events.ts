@@ -125,7 +125,7 @@ export type AccountRoomAccessResolver = (input: {
  * The production decision on the emit path. It uses the cached collaborator
  * check, not a fresh one. The push worker does the fresh check at delivery.
  */
-const resolveAccountRoomAccessForEmit: AccountRoomAccessResolver = (input) =>
+export const resolveAccountRoomAccessForEmit: AccountRoomAccessResolver = (input) =>
   authorizeDesktopPushNotification({ ...input, freshCollaboratorCheck: false }, {
     getProject: getProjectById,
     getAccount: getPushDeliveryAccount,
