@@ -324,9 +324,14 @@ button.room-activity-pill:focus-visible,
 
 /* A command that an agent runs in the background. Its row opens to its live
    output, here in the strip; Stop and Open stay on the row. */
+/* A list with commands updates while it is open (their output arrives), so it is opaque: a blur behind it would
+   be drawn again with each update. */
 .room-activity-list[data-commands] {
   width: min(560px, 100%);
   max-height: min(440px, 62vh);
+  background: var(--bg-elevated);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
 }
 
 .room-activity-text code,
@@ -415,23 +420,21 @@ button.room-activity-pill:focus-visible,
   font-size: 11.5px;
 }
 
+/* The output opens and closes with transform, opacity and clip-path only (room-activity-motion.ts): the layout
+   changes once, never frame by frame. */
 .room-activity-terminal-wrap {
-  display: grid;
-  grid-template-rows: 0fr;
-  transition: grid-template-rows 200ms var(--ease-out);
+  display: none;
 }
 
+/* flow-root: the output's margins stay inside, so its height is exactly what the list loses when it closes. */
 .room-activity-command[data-open] .room-activity-terminal-wrap {
-  grid-template-rows: 1fr;
+  display: flow-root;
 }
 
-.room-activity-terminal-wrap > div {
-  min-height: 0;
-  overflow: hidden;
-}
-
+/* A fixed height: arriving lines never move the list, and its own layout and paint stay inside it. */
 .room-activity-terminal {
-  max-height: 176px;
+  height: 176px;
+  contain: layout paint style;
   margin: 0 8px 8px 38px;
   overflow: auto;
   padding: 8px 10px;
@@ -497,7 +500,6 @@ button.room-activity-pill:focus-visible,
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .room-activity-terminal-wrap,
   .room-activity-command-chevron {
     transition: none;
   }

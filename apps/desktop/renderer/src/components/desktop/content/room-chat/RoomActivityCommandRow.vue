@@ -4,6 +4,7 @@
     class="room-activity-command"
     :data-open="open || undefined"
     :data-nested="nested || undefined"
+    :data-command-key="rowKey"
     role="group"
     :aria-label="`${command.command}, running in the background`"
     data-testid="room-activity-background-command"
@@ -65,6 +66,8 @@ import { elapsedLabel } from "./room-activity";
 
 const props = defineProps<{
   command: DesktopBackgroundCommand;
+  /** The row's key in the strip's list, which the list's motion finds it by. */
+  rowKey: string;
   /** Shown when the row is not under its agent's own row. */
   agentName: string | null;
   nested: boolean;

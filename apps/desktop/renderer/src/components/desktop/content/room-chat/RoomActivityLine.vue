@@ -15,6 +15,7 @@
     <span class="sr-only" role="status" aria-live="polite" aria-atomic="true">{{ announcement }}</span>
     <div
       v-if="listOpen"
+      ref="listElement"
       class="room-activity-list"
       :data-commands="listCommandCount > 0 || undefined"
       data-testid="room-activity-list"
@@ -61,7 +62,7 @@
       <RoomActivityCommandRow
         v-for="command in commandsOf(work.id)"
         :key="`${work.id}:${command.taskId}`"
-        :command="command" :agent-name="null" nested
+        :command="command" :agent-name="null" nested :row-key="commandKey(work.id, command.taskId)"
         :open="openCommands.has(commandKey(work.id, command.taskId))"
         :output="backgroundOutput.output(work.id, command.taskId)"
         :stop-state="stopStates.get(commandKey(work.id, command.taskId)) ?? 'idle'"
@@ -76,7 +77,7 @@
         <RoomActivityCommandRow
           v-for="command in agent.commands"
           :key="`${agent.entryId}:${command.taskId}`"
-          :command="command" :agent-name="agent.displayName" :nested="false"
+          :command="command" :agent-name="agent.displayName" :nested="false" :row-key="commandKey(agent.entryId, command.taskId)"
           :open="openCommands.has(commandKey(agent.entryId, command.taskId))"
           :output="backgroundOutput.output(agent.entryId, command.taskId)"
           :stop-state="stopStates.get(commandKey(agent.entryId, command.taskId)) ?? 'idle'"
@@ -286,6 +287,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Check, ChevronUp, GitBranch, GitPullRequest, MessageSquare, Paperclip, SquareTerminal } from "@lucide/vue";
 import type { DesktopBackgroundCommand } from "../../../../../../electron/ipc-types";
 import RoomActivityCommandRow from "./RoomActivityCommandRow.vue";
+import { closeCommandOutput, openCommandOutput } from "./room-activity-motion";
 import { useBackgroundCommandOutput, useBackgroundCommands, type RoomBackgroundAgent } from "../../../../composables/useBackgroundCommands";
 import { typingLabel, typingSentence } from "../../../../../../../../shared/room-typing.mjs";
 import type { ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
@@ -356,11 +358,21 @@ const commandKey = (entryId: string, taskId: string) => `${entryId}\n${taskId}`;
 const openCommands = ref(new Set<string>());
 const stopStates = ref(new Map<string, "stopping" | "failed">());
 
+const listElement = ref<HTMLElement | null>(null);
+
+/** Open or close a command's output, with the strip's motion (see room-activity-motion.ts). */
 function toggleCommand(entryId: string, taskId: string): void {
-  const next = new Set(openCommands.value);
   const key = commandKey(entryId, taskId);
-  if (next.has(key)) next.delete(key); else next.add(key);
-  openCommands.value = next;
+  const opening = !openCommands.value.has(key);
+  const apply = async () => {
+    const next = new Set(openCommands.value);
+    if (opening) next.add(key); else next.delete(key);
+    openCommands.value = next;
+    await nextTick();
+  };
+  const command = [...(listElement.value?.querySelectorAll<HTMLElement>("[data-command-key]") ?? [])]
+    .find((element) => element.dataset.commandKey === key) ?? null;
+  void (opening ? openCommandOutput : closeCommandOutput)(listElement.value, command, apply);
 }
 
 // Output is read only for the agents whose command rows are open, and only while the list is open.
