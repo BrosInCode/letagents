@@ -4,14 +4,14 @@
   <main v-else-if="showFirstRunGate" class="desktop-onboarding-shell" data-testid="desktop-first-run-onboarding">
     <FirstRunOnboardingView
       :stage="firstRunStage"
+      :company-step="companyStep"
       :invited-company-id="pendingCompanyInvite"
-      :organizations="company.organizations.value"
-      :organization-busy="company.busy.value"
-      :organization-error="company.error.value"
       :company-name="company.selected.value?.login"
+      :company-avatar-url="company.selected.value?.avatar_url"
       :company-rooms="company.rooms.value"
       @choose-organization="chooseOnboardingCompany"
       @retry-organizations="company.refresh"
+      @open-company-github="company.openOnGitHub"
       :mcp-state="visibleMcpInstallState"
       :selected-mcp-target-ids="selectedMcpTargetIds"
       :mcp-wizard-step="mcpWizardStep"
@@ -79,12 +79,10 @@
         :inert="isSettingsSurface || sidebarMode === 'hidden'"
       >
         <DesktopSidebar
-          :company-organizations="company.organizations.value"
-          :company-selected-id="company.selectedId.value"
-          :company-busy="company.busy.value"
-          :company-error="company.error.value"
+          :company="companyStep"
           @choose-company="chooseSidebarCompany"
           @refresh-companies="company.refresh"
+          @open-company-github="company.openOnGitHub"
           @copy-company-link="copyCompanyLink"
           :active-entry="activeEntry"
           :primary-room="currentParentRoom"
@@ -171,18 +169,17 @@
           </button>
         </template>
       </PrivateMessages>
-      <section v-if="showCompanyHome" class="company-home surface-page" data-testid="company-home">
-        <FirstRunOrganizationStep v-if="pendingCompanyInvite" :invited-id="pendingCompanyInvite"
-          :organizations="company.organizations.value" :busy="company.busy.value" :error="company.error.value"
-          @choose="chooseSidebarCompany" @retry="company.refresh" />
-        <h1>{{ company.selected.value?.login || 'Personal & shared rooms' }}</h1>
-        <p v-if="company.busy.value" role="status">Loading your repo rooms…</p>
-        <p v-else-if="company.error.value" role="alert">{{ company.error.value }}</p>
-        <p v-else>{{ sidebarProjectEntries.length ? 'Choose a repo room from the sidebar to work with your agents.' : 'No rooms here yet. Open a repository to get started.' }}</p>
-        <button class="ghost-button" @click="company.refresh" :disabled="company.busy.value">Refresh rooms</button>
-        <button class="primary-button" @click="selectNewRoomEntry">Open a repository</button>
-        <button class="ghost-button" @click="cycleSidebar">Show or hide sidebar</button>
-      </section>
+      <CompanyHome
+        v-if="showCompanyHome && company.selected.value"
+        :name="company.selected.value.login"
+        :avatar-url="company.selected.value.avatar_url"
+        :state="companyHomeState"
+        :access-reason="company.accessReason.value"
+        @new-room="selectNewRoomEntry(); chooseStandaloneIntent()"
+        @show-all="chooseSidebarCompany(null)"
+        @retry="company.refresh"
+        @open-github="company.openOnGitHub"
+      />
       <AuthOnboardingView
         v-if="!showCompanyHome && activeEntry.type === 'room' && selectedNeedsAccess"
         :sidebar-mode="sidebarMode"
@@ -359,6 +356,12 @@
       @created="void app.refreshAccountRooms?.()"
     />
     <GiveAgentDialog :token="giveAgentToken" @close="giveAgentToken = null" />
+    <CompanyInviteDialog
+      :view="showFirstRunGate ? null : companyInvite"
+      :busy="Boolean(company.joiningId.value)"
+      :error="company.error.value"
+      @action="runCompanyInviteAction"
+    />
 
     <Transition name="new-room-modal">
       <DesktopNewRoomModal
@@ -366,6 +369,7 @@
         v-model:join-code="newRoomJoinCode"
         v-model:room-name="newRoomName"
         v-model:storage="newRoomStorage"
+        :company="newRoomCompany"
         :step="newRoomStep"
         :busy="newRoomBusy"
         :can-dismiss="newRoomCanDismiss"
@@ -467,6 +471,7 @@ import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRo
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
+import CompanyHome from "./components/desktop/content/CompanyHome.vue";
 import AskAgentDialog from "./components/desktop/content/asks/AskAgentDialog.vue";
 import GiveAgentDialog from "./components/desktop/content/asks/GiveAgentDialog.vue";
 import { useAppAgentAsks } from "./composables/app/useAppAgentAsks";
@@ -475,7 +480,7 @@ import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue"
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
 import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
-import FirstRunOrganizationStep from "./components/desktop/setup/FirstRunOrganizationStep.vue";
+import CompanyInviteDialog from "./components/desktop/company/CompanyInviteDialog.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { settingsEntry } from "./domain/desktop-navigation";
@@ -527,7 +532,7 @@ const {
   sidebarBatchDialogError,
 } = Object.assign(app, useAppState());
 const {
-  company, pendingCompanyInvite, chooseOnboardingCompany, copyCompanyLink,
+  company, companyStep, companyInvite, pendingCompanyInvite, chooseOnboardingCompany, copyCompanyLink,
 } = Object.assign(app, useAppCompany(app));
 const {
   openMessages, openMessagesWithPerson, openNeedsYouRoom, openNeedsYou, refreshInbox,
@@ -614,7 +619,7 @@ const {
 } = Object.assign(app, useAppSidebarEntries(app));
 
 const {
-  showCompanyHome, chooseSidebarCompany,
+  showCompanyHome, companyHomeState, chooseSidebarCompany, runCompanyInviteAction,
 } = Object.assign(app, useAppCompanyNavigation(app));
 
 Object.assign(app, useAppRentalEvents(app));
@@ -642,7 +647,7 @@ const {
   newRoomFeedbackState, newRoomJoinCode, newRoomJoinError, newRoomModalOpen, newRoomName,
   newRoomProjectPath, newRoomProjectName, newRoomProjectParent, newRoomProjectCreationError,
   newRoomProjectPathError, newRoomProjectSelection, newRoomStatusMessage, newRoomStep,
-  newRoomStorage, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
+  newRoomStorage, newRoomCompany, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
   pickNewProjectParent, openSuccessRoom, retryLastAction, selectNewRoomEntry,
   archiveSidebarFocusRoom, archiveSidebarRoom, deleteAccountRoom, leaveAccountRoom,
   openAccountRoomFromSettings, renameSidebarRoom, restoreAccountRoom, settingsFeedback,

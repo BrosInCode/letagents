@@ -53,6 +53,34 @@ block company access without deleting joins; stored membership alone never
 authorizes access. This slice does not synchronize the entire staff directory
 or change repository permissions.
 
+## 2026-11-08 API rework (slices 1-2)
+
+Slice 1: `rooms.organization_id` (optional, `ON DELETE SET NULL`, partial index)
+is added in `0143_organizations.sql`. A company can own work rooms.
+
+Slice 2:
+
+- Company routes accept only an interactive app session. Owner tokens, remote
+  MCP tokens, and agent sessions get 403 `human_app_session_required`. POST
+  setup and join also need a same-origin write, else 403
+  `cross_site_write_refused`.
+- `readGitHubOrganizationAccess` makes one paged GitHub read (no state filter)
+  and returns `{ memberships, invitations, ssoRequiredOrgIds }`.
+  `listGitHubOrganizationMemberships` wraps it. A token whose `x-oauth-scopes`
+  lacks `read:org`, `write:org`, and `admin:org` raises
+  `GitHubOrganizationScopeError` (403 `github_scope_required`). A missing
+  header (GitHub App user tokens) is not judged. `x-github-sso:
+  partial-results; organizations=...` yields numeric IDs not already active.
+- `GET /account/organizations` now returns `organizations`, `invitations`
+  (`{ github_org_id, login, avatar_url }`), and `sso_required`
+  (`{ github_org_id, login | null }`).
+- `GET /auth/github/organizations[?login=]` (browser only) sends the person to
+  GitHub with `read:org` added to the configured scopes. The callback refreshes
+  the GitHub token on all sessions of the account, so the desktop picks it up.
+  `/auth/github/organizations/done` shows "GitHub access updated".
+- Default `GITHUB_OAUTH_SCOPES` is `read:user,repo,read:org`; the docs page was
+  corrected.
+
 ## Company room discovery contract (slice 3)
 
 `GET /organizations/:organizationId/rooms` requires both a stored LetAgents join
@@ -80,6 +108,28 @@ entries/page). Exceeding the cap returns a verification error, never a silently
 truncated list. Live GitHub consent/SSO and desktop UI are not validated by these
 backend slices.
 
+## 2026-11-08 API rework (slice 3)
+
+- `GET /organizations/:id/rooms` keeps a repo room only when the app's room
+  access rule (`filterAccountIdsWithRoomAccess`) confirms an allow for the
+  person (6 checks at a time). GitHub's repo list alone is not enough, because
+  it also lists public repos to people with no role.
+- A 403 from GitHub with `x-github-sso: required; url=...` returns 403
+  `organization_sso_required`; `authorize_url` is present only for an `https:`
+  `github.com` URL.
+- Ad-hoc rooms with `rooms.organization_id` set are listed when the person is a
+  room member or admin. Every entry has the shape
+  `{ kind: "repo" | "room", room_id, display_name, full_name, github_repo_id,
+  organization_id, visibility }`; ad-hoc rooms have `kind: "room"` and nulls.
+- `POST /projects` (the call behind the desktop "New room" dialog) accepts an
+  optional `organization_id` (digits). It needs an app session, a same-origin
+  write, a live active GitHub membership, and a joined company. Errors:
+  `invalid_organization_id` (400), `human_app_session_required`,
+  `cross_site_write_refused`, `organization_membership_required`,
+  `organization_join_required`, `github_scope_required` (403),
+  `github_signin_required` (401), `organization_verification_unavailable` (503).
+  The 201 reply then also carries `organization_id`.
+
 ## Desktop onboarding (slice 4)
 
 The desktop signs in as an individual, then offers an optional company step.
@@ -87,6 +137,24 @@ Owners can set up a company, members can join an existing one, and personal room
 remain available even when GitHub organization verification fails. Connected
 company repo rooms can be selected during first run. Selection is stored per
 account and API origin; account changes invalidate in-flight company requests.
+
+### Rework (2026-11-08)
+
+- The company step follows the approved mockup: one row per GitHub organization
+  in a radio group, with "All rooms" (no filter) first. The main button names what
+  happens: Continue, Set up <company>, or Join <company>.
+- People with no organizations, invitations or blocked organizations skip the
+  step; Back from the room step then returns to GitHub.
+- A sign-in without `read:org` shows "Allow on GitHub". The main process opens
+  `/auth/github/organizations` on the LetAgents server (slice 2), and the app
+  checks again when the window regains focus.
+- Pending GitHub invitations show "Accept on GitHub". Organizations that GitHub
+  hides behind single sign-on show "Authorize".
+- The IPC layer returns a status for every refusal instead of throwing, so the
+  renderer can show the right state. The main process builds every URL it opens.
+- A window-focus check runs at most once a minute while the list is ready.
+- The room step lists the company's rooms (repo rooms and rooms with no repo)
+  above the usual three ways to start.
 
 ## Sidebar company scope (slice 5)
 
@@ -98,10 +166,32 @@ repos, so unconnected repositories and external collaboration remain reachable.
 Company verification failures clear the company list rather than falling back
 to cached private room groups. Returning to the app rechecks company membership.
 
+### Rework (2026-11-08)
+
+- The company filter now lives on the Rooms heading (the approved mockup), not
+  in a select above the sidebar. Clicking it opens a menu anchored to the
+  heading: "All rooms", each company, GitHub invitations, single sign-on
+  organizations, a permission prompt when `read:org` is missing, and "Refresh
+  from GitHub". The count and collapse chevron stay on the right of the heading.
+  People with nothing to choose keep the plain Rooms heading.
+- "Personal & shared" is now "All rooms".
+- Pinned rooms stay visible in every company, because pins are personal.
+- Rooms that a GitHub check cannot confirm are not shown; rooms already shown
+  stay while a check runs or when GitHub does not answer.
+- The company home replaces the main view only when a company is selected and
+  the active room is not one of its rooms. It shows one state at a time: no
+  rooms yet, checking, GitHub did not answer, permission needed, or single
+  sign-on, each with one main action.
+- The company owns work rooms. With a company selected, the New room dialog's
+  "Where it lives" offers "In <company>" first (and selects it). The room is
+  created with `organization_id` (slice 3) and is listed in the company at once.
+- The window-focus check moved to slice 4 and runs at most once a minute.
+
 ## Company invitations and combined validation (slice 6)
 
-Company links use `/join/<GitHub organization ID>` in the browser and
-`letagents://join/<ID>` in desktop. Links select a destination; they grant no
+Company links use `/company/<GitHub organization ID>` in the browser and
+`letagents://company/<ID>` in desktop (renamed from `/join/` on 2026-11-08,
+because "join" already means joining a room). Links select a destination; they grant no
 access. Browser sign-in preserves the destination. Desktop persists the pending
 ID across restarts and clears it only after joining or choosing personal rooms.
 A newer invitation cannot be cleared by an older request. Packaged macOS apps
@@ -121,7 +211,34 @@ Combined branch validation: root/web and desktop builds, desktop typechecks,
 auth redirect tests, packaging contract tests, and the Electron journey passed.
 Live GitHub consent/SSO and installed-app OS protocol dispatch still need a real
 account and packaged-app check. No production database was changed. Migration
-0143 only adds organization and membership tables; no reset is required.
+0143 adds organization and membership tables and the optional
+`rooms.organization_id`; no reset is required.
+
+### Rework (2026-11-08)
+
+- A company link opens a dialog over any view instead of replacing the main
+  view. The desktop dialog and the web page share one panel
+  (`shared/ui/company-invite/`), styled like the Give-an-agent panel. One rule,
+  `companyInviteView`, decides what it shows: join, set up, waiting for an
+  owner, already joined, invited on GitHub (accept there first), single
+  sign-on, permission needed, GitHub did not answer, or not a member. A missing
+  permission or an outage never reads as "not a member".
+- The not-a-member text names the signed-in GitHub account, tells the person to
+  ask an owner or use the account they added, and tells outside collaborators
+  that their repo rooms still open from All rooms. The web page names the
+  signed-in account on every join.
+- The web page `/company/<id>` follows the Ask-for-an-agent link page: "Open in
+  LetAgents" first, with download links; joining in the browser is a second
+  path. GitHub pages open in a new tab, and the page checks again on focus.
+- The company menu copies `https://…/company/<id>`. The New room dialog's join
+  box also accepts a company link (`https://letagents.chat/company/<id>` or
+  `letagents://company/<id>`) and opens the company dialog.
+- The smoke journey now covers the radio-row company step, the Rooms-heading
+  menu, the empty and GitHub-outage company home, the link dialog over another
+  view, joining from a link, a new room inside the company, a pasted company
+  link, and the All rooms fallback (14 checks). Its window runs with
+  `backgroundThrottling: false`, because a hidden window runs no animation
+  frames and a dialog's leave transition then never ends.
 
 ## Independent review follow-up
 

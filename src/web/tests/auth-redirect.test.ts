@@ -92,6 +92,6 @@ test('resolveSignInRedirect keeps the current path, search, and hash otherwise',
 })
 
 test('company invitations preserve their destination through individual GitHub sign-in', () => {
-  assert.equal(resolveSignInRedirect(undefined, { pathname: '/join/42', search: '', hash: '' }), '/join/42')
-  assert.equal(resolveSignInRedirect('/join/42', { pathname: '/', search: '', hash: '' }), '/join/42')
+  assert.equal(resolveSignInRedirect(undefined, { pathname: '/company/42', search: '', hash: '' }), '/company/42')
+  assert.equal(resolveSignInRedirect('/company/42', { pathname: '/', search: '', hash: '' }), '/company/42')
 })

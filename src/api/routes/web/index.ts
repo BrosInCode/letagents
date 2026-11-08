@@ -75,7 +75,8 @@ export function registerWebRoutes(app: Express): void {
     sendVueApp(res);
   });
 
-  app.get("/join/:organizationId", (_req, res) => {
+  // A company link: numeric GitHub organization IDs only, like the app's letagents://company/<id>.
+  app.get(/^\/company\/[1-9][0-9]{0,19}$/, (_req, res) => {
     sendVueApp(res);
   });
 

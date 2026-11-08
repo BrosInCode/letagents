@@ -17,11 +17,15 @@ let authenticated = false;
 let completed = false;
 let failOrganizations = false;
 const organizations = [
-  { github_org_id: '42', login: 'Acme', avatar_url: null, role: 'owner', setup: false, joined: false },
+  { github_org_id: '42', login: 'Herotel', avatar_url: null, role: 'owner', setup: false, joined: false },
   { github_org_id: '43', login: 'Studio', avatar_url: null, role: 'member', setup: true, joined: false },
   { github_org_id: '44', login: 'WaitingCo', avatar_url: null, role: 'member', setup: false, joined: false },
+  { github_org_id: '46', login: 'Northwind', avatar_url: null, role: 'member', setup: true, joined: false },
 ];
-const companyRoom = { github_repo_id: '100', room_id: 'github.com/acme/app', display_name: 'app', full_name: 'acme/app', organization_id: '42', visibility: 'private' };
+const invitations = [{ github_org_id: '45', login: 'InvitedCo', avatar_url: null }];
+const companyRoom = { kind: 'repo', github_repo_id: '100', room_id: 'github.com/herotel/app', display_name: 'app', full_name: 'herotel/app', organization_id: '42', visibility: 'private' };
+const createdRooms = [];
+const openedGitHubPages = [];
 const account = { id: 'fixture-account', provider: 'github', providerUserId: '1', login: 'alex', displayName: 'Alex', avatarUrl: null };
 const auth = () => ({ authenticated, account: authenticated ? account : null, apiUrl: 'https://letagents.chat', pendingDeviceAuth: null, tokenStored: authenticated, error: null });
 const target = { id: 'codex', name: 'Codex', description: 'Connect your agents.', configPath: '/fixture/config.toml', configPaths: [], configIssue: null, status: 'installed', lastInstalledAt: null, restartHint: 'Restart your agent app.' };
@@ -45,13 +49,22 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
     case 'setup.getMcpInstallState': return setup();
     case 'setup.installMcpServer': return { success: true, target, installState: setup(), message: 'Installed' };
     case 'setup.completeMcpOnboarding': completed = true; return setup();
-    case 'organizations.list': if (failOrganizations) throw new Error('Fixture GitHub unavailable'); return organizations;
+    case 'organizations.list':
+      if (failOrganizations) return { status: 'unavailable' };
+      return { status: 'ok', organizations: structuredClone(organizations), invitations, ssoRequired: [] };
     case 'organizations.join': {
       const org = organizations.find((org) => org.github_org_id === args[0]);
       assert.ok(org && (org.setup || org.role === 'owner'));
-      org.setup = true; org.joined = true; return;
+      assert.equal(args[1], !org.setup, 'only an owner of a company nobody set up asks for setup');
+      org.setup = true; org.joined = true; return { status: 'ok' };
     }
-    case 'organizations.rooms': return args[0] === '42' ? [companyRoom] : [];
+    case 'organizations.rooms': return { status: 'ok', rooms: args[0] === '42' ? [companyRoom] : [] };
+    case 'organizations.openOnGitHub': openedGitHubPages.push(args[0]); return;
+    case 'room.createInviteRoom': {
+      createdRooms.push(args[0] ?? null);
+      return { roomIdentifier: 'room_q4', code: 'ROOM-Q4AB', snapshot: snapshot('room_q4') };
+    }
+    case 'room.rename': return { identifier: 'room_q4', name: 'room_q4', displayName: 'Q4 launch' };
     case 'organizations.pendingInvite': return links.getPendingCompanyLink();
     case 'organizations.acknowledgeInvite': links.acknowledgeCompanyLink(args[0]); return;
     case 'app.getInfo': return { appName: 'LetAgents', appVersion: 'test', platform: 'darwin', versions: process.versions, workspaceRoot: profile, homePath: profile, apiUrl: 'https://letagents.chat' };
@@ -69,7 +82,7 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
   }
 });
 app.whenReady().then(async () => {
-const window = new BrowserWindow({ width: 1280, height: 900, show: true, webPreferences: { contextIsolation: false, nodeIntegration: false, sandbox: false, preload: join(root, 'electron/scripts/fixtures/organization-preload.cjs') } });
+const window = new BrowserWindow({ width: 1280, height: 900, show: true, webPreferences: { backgroundThrottling: false, contextIsolation: false, nodeIntegration: false, sandbox: false, preload: join(root, 'electron/scripts/fixtures/organization-preload.cjs') } });
 const errors = [];
 window.webContents.on('console-message', (event) => { if (event.level === 'error') errors.push(`${event.message} (${event.sourceId}:${event.lineNumber})`); });
 const js = (source) => window.webContents.executeJavaScript(source, true);
@@ -88,50 +101,86 @@ try {
   await click('[data-testid="first-run-to-github"]');
   await click('[data-testid="first-run-auth-start"]');
   await click('[data-testid="first-run-auth-poll"]');
-  await waitFor(`document.querySelector('[data-stage="organization"]') && document.body.innerText.includes('Acme')`);
+  // Step 3 of setup: one row per GitHub organization, chosen like the other setup steps.
+  await waitFor(`document.querySelector('[data-stage="organization"]') && Boolean(document.querySelector('[data-testid="company-choice-42"]'))`);
+  assert.equal(await js(`document.querySelector('[data-testid="company-choice-44"]').getAttribute('aria-disabled')`), 'true', 'a member waits for an owner');
+  assert.ok((await js('document.body.innerText')).includes('Accept on GitHub'), 'a pending GitHub invitation shows its next step');
   await capture('01-company-choice.png');
-  assert.equal(await js(`Array.from(document.querySelectorAll('.company-choice')).find(e => e.textContent.includes('WaitingCo')).disabled`), true);
-  await js(`Array.from(document.querySelectorAll('.company-choice')).find(e => e.textContent.includes('Acme')).click()`);
-  await waitFor(`document.querySelector('[data-stage="room"]') && document.body.innerText.includes('acme/app')`);
+  await click('[data-testid="company-choice-42"]');
+  await waitFor(`(document.querySelector('[data-testid="first-run-company-continue"]')?.textContent || '').includes('Set up Herotel')`);
+  await click('[data-testid="first-run-company-continue"]');
+  await waitFor(`document.querySelector('[data-stage="room"]') && Boolean(document.querySelector('[data-testid="first-run-company-rooms"]')) && document.body.innerText.includes('herotel/app')`);
   await capture('02-company-repo-room.png');
-  await js(`Array.from(document.querySelectorAll('.company-room-list button')).find(e => e.textContent.includes('acme/app')).click()`);
-  await waitFor(`document.body.innerText.includes('Open room')`);
+  await click('[data-testid="first-run-company-room-github.com/herotel/app"]');
+  await waitFor(`(document.querySelector('[data-testid="first-run-open-room"]')?.textContent || '').includes('Open herotel/app')`);
   await click('[data-testid="first-run-open-room"]');
   await waitFor(`Boolean(document.querySelector('[data-testid="desktop-shell"]'))`);
+  // The company filter sits on the Rooms heading.
+  await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').includes('Herotel')`);
   await capture('03-company-sidebar.png');
-  await js(`const scope = document.querySelector('#company-scope'); scope.value = '43'; scope.dispatchEvent(new Event('change', {bubbles:true}));`);
-  await waitFor(`document.querySelector('#company-scope')?.value === '43' && document.body.innerText.includes('No rooms here yet')`);
-  await capture('04-empty-company.png');
+  await click('[data-testid="sidebar-company-scope"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="sidebar-company-menu"]'))`);
+  await capture('04-company-menu.png');
+  await click('[data-testid="company-menu-43"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="company-home"][data-state="empty"]'))`);
+  await capture('05-empty-company.png');
   failOrganizations = true;
-  await click('[aria-label="Refresh companies and rooms"]');
-  await waitFor(`document.body.innerText.includes('Couldn’t verify')`);
-  await capture('05-retry-state.png');
+  await click('[data-testid="sidebar-company-scope"]');
+  await click('[data-testid="company-menu-refresh"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="company-home"][data-state="unavailable"]'))`);
+  await capture('06-github-unavailable.png');
   failOrganizations = false;
-  await js(`document.querySelector('#company-scope').value = ''; document.querySelector('#company-scope').dispatchEvent(new Event('change', {bubbles:true}));`);
-  await waitFor(`document.querySelector('#company-scope')?.value === ''`);
+  await click('[data-testid="company-home-retry"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="company-home"][data-state="empty"]'))`);
+  await click('[data-testid="sidebar-company-scope"]');
+  await click('[data-testid="company-menu-all"]');
+  await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').trim().startsWith('Rooms') && !document.querySelector('[data-testid="company-home"]')`);
+  // A company link opens a dialog over any view, and survives a restart until it is answered.
   await click('[data-testid="sidebar-rent"]');
   await waitFor(`Boolean(document.querySelector('[data-testid="rent-marketplace-view"]'))`);
-  links.acceptCompanyLink('letagents://join/42');
-  assert.equal(links.getPendingCompanyLink(), '42');
+  links.acceptCompanyLink('letagents://company/46');
+  assert.equal(links.getPendingCompanyLink(), '46');
   const reloadedLinks = await import(`../../dist-electron/main/company-links.js?restart=${Date.now()}`);
-  assert.equal(reloadedLinks.getPendingCompanyLink(), '42');
+  assert.equal(reloadedLinks.getPendingCompanyLink(), '46');
   links.acknowledgeCompanyLink('43');
-  assert.equal(links.getPendingCompanyLink(), '42');
-  window.webContents.send('fixture:invite', '42');
-  await waitFor(`document.body.innerText.includes('following a company invitation') && !document.querySelector('.company-choice')?.disabled`);
-  assert.equal(await js(`Boolean(document.querySelector('[data-testid="rent-marketplace-view"]'))`), false);
-  await capture('06-company-invitation.png');
-  await click('.company-choice');
-  await waitFor(`!document.body.innerText.includes('following a company invitation')`);
+  assert.equal(links.getPendingCompanyLink(), '46');
+  window.webContents.send('fixture:invite', '46');
+  await waitFor(`Boolean(document.querySelector('[data-testid="company-invite-join"]'))`);
+  assert.ok((await js('document.body.innerText')).includes('Join Northwind'));
+  await capture('07-company-invitation.png');
+  await click('[data-testid="company-invite-join"]');
+  await waitFor(`document.body.innerText.includes('You’re in Northwind')`);
+  await capture('08-company-joined.png');
+  await click('[data-testid="company-invite-show_rooms"]');
+  await waitFor(`!document.querySelector('[data-testid="company-invite-dialog"]') && (document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').includes('Northwind')`);
   assert.equal(links.getPendingCompanyLink(), null);
+  // The company owns work rooms: a new blank room is created in the selected company.
+  await click('[data-testid="sidebar-new-room"]');
+  await click('[data-testid="new-room-modal"] [role="tab"][id$="-tab-standalone"]');
+  await waitFor(`document.querySelector('[data-testid="new-room-storage-company"] input')?.checked === true`);
+  await capture('09-new-company-room.png');
+  await click('[data-testid="new-room-create-standalone"]');
+  await waitFor(`Boolean(document.querySelector('[data-testid="new-room-success-step"]'))`);
+  assert.deepEqual(createdRooms, [{ organizationId: '46' }]);
+  await click('[data-testid="new-room-done"]');
+  await waitFor(`!document.querySelector('[data-testid="new-room-modal"]')`);
+  // A pasted company link opens the company dialog instead of joining a room.
   await click('[data-testid="sidebar-new-room"]');
   await click('[data-testid="new-room-modal"] [role="tab"][id$="-tab-join"]');
-  await js(`const input = document.querySelector('[data-testid="new-room-join-input"]'); input.value = 'github.com/alex/personal'; input.dispatchEvent(new Event('input', { bubbles: true }));`);
+  await js(`{ const input = document.querySelector('[data-testid="new-room-join-input"]'); input.value = 'https://letagents.chat/company/42'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
   await click('[data-testid="new-room-join-submit"]');
-  await waitFor(`document.querySelector('#company-scope')?.value === '' && !document.querySelector('[data-testid="company-home"]')`);
-  await capture('07-explicit-personal-room.png');
+  await waitFor(`Boolean(document.querySelector('[data-testid="company-invite-dialog"]')) && document.body.innerText.includes('Show Herotel rooms')`);
+  await click('[data-testid="company-invite-show_rooms"]');
+  await waitFor(`!document.querySelector('[data-testid="company-invite-dialog"]') && (document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').includes('Herotel')`);
+  // Opening a room outside the company switches back to All rooms, so the room never hides.
+  await click('[data-testid="sidebar-new-room"]');
+  await click('[data-testid="new-room-modal"] [role="tab"][id$="-tab-join"]');
+  await js(`{ const input = document.querySelector('[data-testid="new-room-join-input"]'); input.value = 'github.com/alex/personal'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
+  await click('[data-testid="new-room-join-submit"]');
+  await waitFor(`(document.querySelector('[data-testid="sidebar-company-scope"]')?.textContent || '').trim().startsWith('Rooms') && !document.querySelector('[data-testid="company-home"]')`);
+  await capture('10-explicit-personal-room.png');
   assert.deepEqual(errors, [], 'renderer must not report uncaught errors');
-  const report = { passed: true, checks: ['first-run owner setup', 'member waiting for owner', 'repo is room selection', 'company sidebar', 'multi-company empty state', 'provider failure and retry', 'personal fallback', 'native invite persistence and acknowledgement', 'signed-in invitation', 'invitation replaces marketplace', 'explicit outside-company room opens in personal scope'], consoleErrors: errors, calls: [...new Set(calls)] };
+  const report = { passed: true, checks: ['first-run owner setup', 'member waiting for owner', 'pending GitHub invitation', 'company repo room on the room step', 'company filter on the Rooms heading', 'empty company home', 'GitHub outage and retry', 'All rooms fallback', 'company link persistence and acknowledgement', 'company link dialog over any view', 'join from a company link', 'new room inside the company', 'pasted company link', 'explicit outside-company room opens in All rooms'], consoleErrors: errors, calls: [...new Set(calls)] };
   writeFileSync(join(output, 'report.json'), JSON.stringify(report, null, 2));
   console.log(JSON.stringify({ passed: true, output, consoleErrors: errors }, null, 2));
 } catch (error) {

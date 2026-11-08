@@ -1,0 +1,44 @@
+/* The company link panel. It follows the Give-an-agent panel: same surface, type and button shapes. */
+.company-invite-panel { --invite-bg: light-dark(#fff, #151517); --invite-inset: light-dark(#f5f3f3, #1c1b1f); --invite-hover: light-dark(#e9e5e6, #242328); --invite-line: light-dark(#e0dcde, #303035); --invite-text: light-dark(#29262e, #f0eef2); --invite-muted: light-dark(#706a76, #a09ca6); --invite-faint: light-dark(#827988, #918b99); --invite-accent: light-dark(#97736d, #c9ada7); --invite-green: light-dark(#52725b, #a6bdac); --invite-amber: light-dark(#92400e, #fbbf24); display: flex; flex-direction: column; width: 100%; min-height: 0; max-height: inherit; overflow: hidden; border: 1px solid var(--invite-line); border-radius: 17px; background: var(--invite-bg); color: var(--invite-text); font: 14px/1.5 var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif); }
+.company-invite-panel *, .company-invite-panel *::before { box-sizing: border-box; }
+.company-invite-panel h2, .company-invite-panel p, .company-invite-panel ul { margin: 0; }
+.company-invite-panel button { font: inherit; cursor: pointer; }
+.company-invite-panel button:disabled { opacity: .48; cursor: default; }
+.company-invite-panel button:focus-visible, .company-invite-panel a:focus-visible { outline: 2px solid var(--invite-accent); outline-offset: 3px; }
+.company-invite-panel svg { width: 18px; height: 18px; flex: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; fill: none; }
+.invite-head { flex: none; padding: 26px 30px 22px; border-bottom: 1px solid var(--invite-line); }
+.invite-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; }
+.invite-heading h2, .invite-done h2 { font-size: 26px; font-weight: 570; letter-spacing: -.8px; line-height: 1.3; }
+.invite-heading h2:focus, .invite-done h2:focus { outline: none; }
+.invite-org { display: flex; align-items: center; gap: 12px; margin-top: 18px; }
+.invite-org strong { display: block; font-size: 15px; font-weight: 550; overflow-wrap: anywhere; }
+.invite-org small { display: block; margin-top: 2px; color: var(--invite-muted); font-size: 12px; overflow-wrap: anywhere; }
+.invite-avatar { display: inline-grid; flex: none; place-items: center; overflow: hidden; width: 36px; height: 36px; border: 1px solid var(--invite-line); border-radius: 9px; background: var(--invite-inset); color: var(--invite-muted); font-weight: 700; }
+.invite-avatar[data-size="l"] { width: 52px; height: 52px; border-radius: 13px; font-size: 18px; }
+.invite-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.invite-body { display: grid; gap: 14px; min-height: 0; overflow-y: auto; padding: 20px 30px 8px; overscroll-behavior: contain; }
+.invite-state { color: var(--invite-muted); }
+.invite-alert { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; padding: 12px 14px; border: 1px solid var(--invite-line); border-radius: 10px; background: var(--invite-inset); color: var(--invite-muted); font-size: 13px; line-height: 1.55; }
+.invite-alert svg { margin-top: 1px; color: var(--invite-faint); }
+.invite-alert[data-tone="warn"] { border-color: color-mix(in srgb, var(--invite-amber) 35%, var(--invite-line)); }
+.invite-alert[data-tone="warn"] svg { color: var(--invite-amber); }
+.invite-alert b, .invite-facts b { color: var(--invite-text); font-weight: 600; }
+.invite-facts { display: grid; gap: 10px; padding: 0; list-style: none; }
+.invite-facts li { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 10px; color: var(--invite-muted); font-size: 13.5px; line-height: 1.55; }
+.invite-facts svg { margin-top: 2px; color: var(--invite-faint); }
+.invite-error { color: light-dark(#a64e4b, #dda6a3); font-size: 12.5px; }
+.invite-foot { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; padding: 18px 30px 24px; }
+.invite-note { margin-right: auto; color: var(--invite-faint); font-size: 12px; }
+.invite-secondary, .invite-primary { display: inline-flex; align-items: center; justify-content: center; gap: 10px; min-height: 41px; padding: 10px 15px; border: 1px solid var(--invite-line); border-radius: 7px; background: var(--invite-inset); color: var(--invite-text); font-size: 12.5px !important; font-weight: 550 !important; text-decoration: none; transition: transform 140ms cubic-bezier(.23, 1, .32, 1), filter 150ms ease, background-color 150ms ease; }
+.invite-primary { border-color: transparent; background: var(--invite-text); color: var(--invite-bg); }
+.invite-secondary:active:not(:disabled), .invite-primary:active:not(:disabled) { transform: scale(.97); }
+.invite-done { display: grid; justify-items: center; padding: 34px 30px 8px; text-align: center; }
+.invite-done-ring { position: relative; }
+.invite-done-ok { position: absolute; right: -7px; bottom: -6px; display: grid; place-items: center; width: 25px; height: 25px; border: 3px solid var(--invite-bg); border-radius: 50%; background: var(--invite-green); color: var(--invite-bg); }
+.invite-done-ok svg { width: 13px; height: 13px; stroke-width: 2.4; }
+.invite-done h2 { margin-top: 18px; font-size: 23px; letter-spacing: -.6px; }
+.invite-done p { max-width: 340px; margin-top: 8px; color: var(--invite-muted); font-size: 13.5px; line-height: 1.6; }
+.company-invite-panel.is-result .invite-foot { justify-content: center; padding-top: 22px; }
+@media (hover: hover) and (pointer: fine) { .invite-secondary:hover:not(:disabled) { border-color: var(--invite-faint); background: var(--invite-hover); } .invite-primary:hover:not(:disabled) { filter: brightness(.92); } }
+@media (max-width: 480px) { .company-invite-panel { border-radius: 13px; } .invite-head { padding: 20px 21px 18px; } .invite-heading h2 { font-size: 23px; } .invite-body { padding: 18px 21px 6px; } .invite-foot { padding: 16px 21px 20px; } .invite-note { width: 100%; } }
+@media (prefers-reduced-motion: reduce) { .company-invite-panel *, .company-invite-panel *::before { animation: none !important; transition: none !important; } }

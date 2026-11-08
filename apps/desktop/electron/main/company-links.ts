@@ -46,7 +46,7 @@ export function acceptCompanyLink(value: string): void {
 /**
  * Register before "ready", beside the ask links. Those own the letagents://
  * scheme and the single-instance lock (see ask-links.ts); this only adds
- * letagents://join/<organization id> to the same open-url and second-instance
+ * letagents://company/<organization id> to the same open-url and second-instance
  * events. Each parser ignores the other's links.
  */
 export function prepareCompanyLinks(): void {

@@ -4,7 +4,8 @@ import { companyListsEntry, companyProjectGroups, mergeCompanyRooms, showsCompan
 import { appFunction } from "./app-source";
 import { buildSidebarProjectGroups } from "../src/domain/sidebar-rooms.js";
 
-const room = { github_repo_id: "100", room_id: "github.com/acme/app", display_name: "app", full_name: "acme/app", organization_id: "42", visibility: "private" as const };
+const room = { kind: "repo" as const, github_repo_id: "100", room_id: "github.com/herotel/app", display_name: "app", full_name: "herotel/app", organization_id: "42", visibility: "private" as const };
+const companyRoom = { kind: "room" as const, github_repo_id: null, room_id: "room_q4", display_name: "Q4 launch", full_name: null, organization_id: "42", visibility: null };
 const parent = { id: "personal", type: "room" as const, kind: "parent" as const, roomIdentifier: "github.com/alice/personal", title: "personal", meta: "", sectionLabel: "", headline: "", description: "", latestMessageId: null, latestMessageAt: null, hasUnread: false, pinned: false, source: "account" as const };
 
 test("company discovery adds unopened repo rooms without duplicating known ones or losing pins", () => {
@@ -36,10 +37,10 @@ test("company filtering preserves existing child rooms and unread state", () => 
   assert.equal(group.parent.hasUnread, true);
 });
 
-test("a room the selected company does not list is left for Personal & shared on an explicit open", () => {
+test("a room the selected company does not list is left for All rooms on an explicit open", () => {
   const projects = buildSidebarProjectGroups({ currentParentRoom: parent, focusRooms: [], accountRooms: mergeCompanyRooms([], [room]) });
   const companyParent = projects.find((project) => project.parent.gitRoom?.repository.id === "100")!.parent;
-  // An Inbox or My Work item for a personal repo, with Acme selected.
+  // An Inbox or My Work item for a personal repo, with Herotel selected.
   assert.equal(companyListsEntry(projects, "42", [room], parent), false);
   assert.equal(companyListsEntry(projects, "42", [room], companyParent), true);
   assert.equal(companyListsEntry(projects, null, [], parent), true);
@@ -49,27 +50,42 @@ test("a room the selected company does not list is left for Personal & shared on
   }
 });
 
-test("the company home replaces a room only for an invitation or a selected company that does not list it", () => {
+test("the company home replaces a room only while a selected company does not list it", () => {
   const projects = buildSidebarProjectGroups({ currentParentRoom: parent, focusRooms: [], accountRooms: mergeCompanyRooms([], [room]) });
   const closedFocusRoom = { id: "room:focus:focus_9", type: "room" };
-  assert.equal(showsCompanyHome({ pendingInvite: null, activeEntry: closedFocusRoom, selectedId: null, sidebarProjects: projects }), false);
-  assert.equal(showsCompanyHome({ pendingInvite: null, activeEntry: closedFocusRoom, selectedId: "42", sidebarProjects: companyProjectGroups(projects, "42", [room]) }), true);
-  assert.equal(showsCompanyHome({ pendingInvite: null, activeEntry: { id: parent.id, type: "room" }, selectedId: null, sidebarProjects: projects }), false);
-  assert.equal(showsCompanyHome({ pendingInvite: "42", activeEntry: { id: "inbox", type: "inbox" }, selectedId: null, sidebarProjects: projects }), true);
-  assert.equal(showsCompanyHome({ pendingInvite: null, activeEntry: { id: "inbox", type: "inbox" }, selectedId: "42", sidebarProjects: [] }), false);
+  assert.equal(showsCompanyHome({ activeEntry: closedFocusRoom, selectedId: null, sidebarProjects: projects }), false);
+  assert.equal(showsCompanyHome({ activeEntry: closedFocusRoom, selectedId: "42", sidebarProjects: companyProjectGroups(projects, "42", [room]) }), true);
+  assert.equal(showsCompanyHome({ activeEntry: { id: parent.id, type: "room" }, selectedId: null, sidebarProjects: projects }), false);
+  assert.equal(showsCompanyHome({ activeEntry: { id: "inbox", type: "inbox" }, selectedId: "42", sidebarProjects: [] }), false);
 });
 
 test("a new or closed focus room of a company repo stays in the company until the sidebar lists it", () => {
   const projects = buildSidebarProjectGroups({ currentParentRoom: parent, focusRooms: [], accountRooms: mergeCompanyRooms([], [room]) });
   const companyProjects = companyProjectGroups(projects, "42", [room]);
   // The fallback entry Room details opens for a focus room the sidebar does not list.
-  const focusOfCompanyRepo = { id: "room:focus:focus_7", type: "room", kind: "focus", parentRoomIdentifier: "GitHub.com/acme/app" };
+  const focusOfCompanyRepo = { id: "room:focus:focus_7", type: "room", kind: "focus", parentRoomIdentifier: "GitHub.com/herotel/app" };
   const focusOfPersonalRepo = { ...focusOfCompanyRepo, parentRoomIdentifier: parent.roomIdentifier };
   assert.equal(companyListsEntry(projects, "42", [room], focusOfCompanyRepo), true);
-  assert.equal(showsCompanyHome({ pendingInvite: null, activeEntry: focusOfCompanyRepo, selectedId: "42", sidebarProjects: companyProjects }), false);
+  assert.equal(showsCompanyHome({ activeEntry: focusOfCompanyRepo, selectedId: "42", sidebarProjects: companyProjects }), false);
   assert.equal(companyListsEntry(projects, "42", [room], focusOfPersonalRepo), false);
-  assert.equal(showsCompanyHome({ pendingInvite: null, activeEntry: focusOfPersonalRepo, selectedId: "42", sidebarProjects: companyProjects }), true);
+  assert.equal(showsCompanyHome({ activeEntry: focusOfPersonalRepo, selectedId: "42", sidebarProjects: companyProjects }), true);
   // Only focus rooms inherit their parent's place.
   assert.equal(companyListsEntry(projects, "42", [room], { ...focusOfCompanyRepo, kind: "branch" }), false);
 });
 
+test("a pinned room stays in view in every company", () => {
+  const pinnedParent = { ...parent, pinned: true };
+  const projects = buildSidebarProjectGroups({ currentParentRoom: pinnedParent, focusRooms: [], accountRooms: mergeCompanyRooms([], [room]) });
+  const company = companyProjectGroups(projects, "42", [room]);
+  assert.equal(company.length, 2);
+  assert.ok(company.some((project) => project.parent.roomIdentifier === parent.roomIdentifier));
+});
+
+test("a company room with no repository joins the company list without a repo address", () => {
+  const discovered = mergeCompanyRooms([], [companyRoom]);
+  assert.equal(discovered[0].gitRoom, null);
+  assert.equal(discovered[0].displayName, "Q4 launch");
+  const projects = buildSidebarProjectGroups({ currentParentRoom: parent, focusRooms: [], accountRooms: discovered });
+  const company = companyProjectGroups(projects, "42", [companyRoom]);
+  assert.deepEqual(company.map((project) => project.parent.roomIdentifier), ["room_q4"]);
+});

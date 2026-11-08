@@ -6,9 +6,9 @@ const routes = [
   { path: "/my-work", name: "my-work", component: () => import("./pages/MyWork.vue") },
   { path: "/messages", name: "messages", component: () => import("./pages/Messages.vue") },
   {
-    path: '/join/:organizationId',
-    name: 'company-join',
-    component: () => import('./pages/CompanyJoin.vue'),
+    path: '/company/:organizationId(\\d+)',
+    name: 'company-link',
+    component: () => import('./pages/CompanyLink.vue'),
   },
   {
     path: '/',

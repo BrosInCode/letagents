@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import type { DesktopRepoRoomSelection, DesktopRoomSnapshot, RepoStatus } from "../../../electron/ipc-types";
 import { copyTextToClipboard } from "../domain/clipboard";
-import { normalizeJoinRoomInput, validateJoinRoomInput } from "../domain/join-room-input";
+import { companyLinkIdFromInput, normalizeJoinRoomInput, validateJoinRoomInput } from "../domain/join-room-input";
 import { projectRoomName } from "../domain/project-room-name";
 import { repoPickerErrorMessage } from "../domain/repo-picker-error";
 import { rootPathLabel, type RecentRootRoom, type RecentRootRoomKind } from "../domain/sidebar-rooms";
@@ -18,7 +18,15 @@ export type NewRoomStep =
   | "success"
   | "error";
 
-export type NewRoomStorageChoice = "cloud" | "local";
+/** Where a blank room lives: shared online, inside the selected company (shared online), or only on this device. */
+export type NewRoomStorageChoice = "cloud" | "company" | "local";
+
+/** The company a new shared room can be created in. */
+export interface NewRoomCompany {
+  id: string;
+  login: string;
+  avatarUrl: string | null;
+}
 export type NewRoomActiveAction =
   | "pick_project"
   | "pick_project_parent"
@@ -54,6 +62,12 @@ interface DesktopNewRoomModalOptions {
   openRoomSnapshot: (snapshot: DesktopRoomSnapshot, options?: OpenRoomOptions) => void;
   setRepoStatus: (status: RepoStatus | null) => void;
   getDefaultStorageMode?: () => NewRoomStorageChoice;
+  /** The company selected in the sidebar; a new shared room is created in it by default. */
+  getCompany?: () => NewRoomCompany | null;
+  /** A pasted company link opens the company dialog instead of joining a room. */
+  onCompanyLink?: (organizationId: string) => void;
+  /** Called before the new company room opens, so the company lists it at once. */
+  onCompanyRoomCreated?: (room: { roomIdentifier: string; displayName: string; organizationId: string }) => void;
 }
 
 export interface PendingProjectRoomSelection {
@@ -109,6 +123,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
   const newRoomJoinError = ref<string | null>(null);
   const newRoomName = ref("");
   const newRoomStorage = ref<NewRoomStorageChoice>("cloud");
+  const newRoomCompany = ref<NewRoomCompany | null>(null);
   const newRoomProjectSelection = ref<PendingProjectRoomSelection | null>(null);
   const newRoomProjectPath = ref("");
   const newRoomProjectPathError = ref<string | null>(null);
@@ -119,6 +134,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
   const newRoomStatusMessage = ref<string | null>(null);
 
   const canSubmitJoin = computed(() => {
+    if (options.onCompanyLink && companyLinkIdFromInput(newRoomJoinCode.value)) return true;
     const validation = validateJoinRoomInput(newRoomJoinCode.value);
     return Boolean(validation.normalized) && !validation.error;
   });
@@ -148,7 +164,10 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomJoinCode.value = "";
     newRoomJoinError.value = null;
     newRoomName.value = generateDefaultRoomName();
-    newRoomStorage.value = options.getDefaultStorageMode?.() === "local" ? "local" : "cloud";
+    newRoomCompany.value = options.getCompany?.() ?? null;
+    newRoomStorage.value = options.getDefaultStorageMode?.() === "local"
+      ? "local"
+      : newRoomCompany.value ? "company" : "cloud";
     newRoomProjectSelection.value = null;
     newRoomProjectPath.value = "";
     newRoomProjectName.value = "";
@@ -316,8 +335,10 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     newRoomActiveAction.value = "create_standalone";
     newRoomReturnStep.value = "standalone";
     newRoomStep.value = "working";
-    newRoomStatusMessage.value =
-      newRoomStorage.value === "local" ? "Creating local room..." : "Creating shared room...";
+    const company = newRoomStorage.value === "company" ? newRoomCompany.value : null;
+    newRoomStatusMessage.value = newRoomStorage.value === "local"
+      ? "Creating local room..."
+      : company ? `Creating ${company.login} room...` : "Creating shared room...";
     newRoomFeedback.value = null;
     newRoomFeedbackState.value = "info";
 
@@ -342,7 +363,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
           },
         };
       } else {
-        const result = await desktopIpc.room.createInviteRoom();
+        const result = await desktopIpc.room.createInviteRoom(company ? { organizationId: company.id } : undefined);
         let snapshot = result.snapshot;
         let roomName =
           snapshot.room?.displayName ||
@@ -377,10 +398,13 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
         } else if (displayName) {
           roomName = displayName;
         }
+        if (company) {
+          options.onCompanyRoomCreated?.({ roomIdentifier: result.roomIdentifier, displayName: roomName, organizationId: company.id });
+        }
         newRoomSuccess.value = {
           kind: "shared",
           roomName,
-          storageLabel: "Cloud / shared",
+          storageLabel: company ? `${company.login} · shared online` : "Cloud / shared",
           inviteCode: result.code,
           snapshot,
           openOptions: {
@@ -528,6 +552,14 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
 
   async function joinRoomCodeFromModal(): Promise<void> {
     if (newRoomBusy.value) return;
+    const companyId = options.onCompanyLink ? companyLinkIdFromInput(newRoomJoinCode.value) : null;
+    if (companyId) {
+      newRoomJoinCode.value = "";
+      newRoomJoinError.value = null;
+      closeNewRoomModal();
+      options.onCompanyLink?.(companyId);
+      return;
+    }
     const validation = validateJoinRoomInput(newRoomJoinCode.value);
     if (!validation.normalized) {
       newRoomJoinError.value = validation.error;
@@ -649,6 +681,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
     closeNewRoomModal,
     confirmProjectRoomFromModal,
     copyInviteCode,
+    newRoomCompany,
     createInviteRoom,
     createLocalRoomFromModal,
     createProjectRoomFromModal,

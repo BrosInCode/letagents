@@ -52,7 +52,7 @@ test("registerWebRoutes preserves route registration order", (t) => {
     { method: "get", path: "/docs" },
     { method: "get", path: ["/inbox", "/messages", "/my-work", "/connectors"] },
     { method: "get", path: /^\/ask\/[A-Za-z0-9_-]{20,64}$/ },
-    { method: "get", path: "/join/:organizationId" },
+    { method: "get", path: /^\/company\/[1-9][0-9]{0,19}$/ },
     { method: "get", path: "/app" },
   ]);
 });
@@ -134,7 +134,7 @@ test("direct company invitations serve the same application as the landing page"
   try {
     const origin = `http://127.0.0.1:${address.port}`;
     const landing = await fetch(origin);
-    const invitation = await fetch(`${origin}/join/42`);
+    const invitation = await fetch(`${origin}/company/42`);
     // A missing local build returns the same explicit 503 as the landing page.
     // Production builds must serve HTML, never the default Express 404.
     assert.ok([200, 503].includes(invitation.status));
