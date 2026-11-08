@@ -6,8 +6,9 @@
         <span>{{ companyName }} rooms</span>
         <small>{{ rooms.length }}</small>
       </div>
+      <label class="company-room-search"><Search aria-hidden="true" /><input v-model="query" type="search" placeholder="Find a room…" aria-label="Search company rooms"></label>
       <button
-        v-for="room in rooms"
+        v-for="room in filteredRooms"
         :key="room.room_id"
         class="company-rooms-row"
         type="button"
@@ -20,12 +21,13 @@
         <Hash v-else class="company-rooms-icon" aria-hidden="true" />
         <strong>
           {{ roomName(room) }}
-          <span v-if="room.full_name">· {{ room.full_name }}</span>
+          <span>{{ room.kind === "repo" ? `${companyName} repository` : "Shared room · By invitation" }}</span>
         </strong>
         <span v-if="room.visibility" class="company-rooms-visibility">{{ room.visibility === "private" ? "Private" : "Public" }}</span>
         <span v-else />
         <Check class="company-rooms-check" aria-hidden="true" />
       </button>
+      <p v-if="!filteredRooms.length" class="company-rooms-empty" role="status">No rooms match your search.</p>
     </div>
     <p v-else class="company-rooms-empty">
       No {{ companyName }} rooms yet. A repo appears here after a {{ companyName }} owner installs the LetAgents GitHub app on it, and you have a role on that repo.
@@ -35,7 +37,8 @@
 </template>
 
 <script setup lang="ts">
-import { BookMarked, Check, Hash } from "@lucide/vue";
+import { computed, ref } from "vue";
+import { BookMarked, Check, Hash, Search } from "@lucide/vue";
 import type { DesktopOrganizationRoom } from "../../../../../electron/ipc-types/organizations.js";
 import CompanyAvatar from "../company/CompanyAvatar.vue";
 
@@ -46,6 +49,9 @@ const props = defineProps<{
   selectedRoomIdentifier: string | null;
   busy: boolean;
 }>();
+
+const query = ref("");
+const filteredRooms = computed(() => props.rooms.filter(room => `${roomName(room)} ${room.full_name ?? ""}`.toLowerCase().includes(query.value.trim().toLowerCase())));
 
 defineEmits<{ "choose-room": [roomId: string] }>();
 
@@ -60,16 +66,15 @@ function roomName(room: DesktopOrganizationRoom): string {
 
 <style scoped>
 .company-rooms {
-  width: min(560px, 100%);
+  width: 100%;
   margin: 0 auto;
   text-align: left;
 }
 
 .company-rooms-group {
   overflow: hidden;
-  border: 1px solid var(--setup-border);
-  border-radius: 16px;
-  background: var(--setup-surface);
+  border: 0;
+  background: transparent;
 }
 
 .company-rooms-head {
@@ -77,7 +82,7 @@ function roomName(room: DesktopOrganizationRoom): string {
   gap: 9px;
   align-items: center;
   padding: 12px 14px;
-  border-bottom: 1px solid var(--setup-border);
+  margin-bottom: 10px;
   color: var(--setup-text);
   font-size: 13px;
   font-weight: 600;
@@ -95,9 +100,11 @@ function roomName(room: DesktopOrganizationRoom): string {
   gap: 12px;
   align-items: center;
   width: 100%;
-  padding: 11px 14px;
+  min-height: 72px;
+  padding: 12px;
+  border-radius: 10px;
   border: 0;
-  border-top: 1px solid var(--setup-border);
+  border-top: 0;
   background: transparent;
   color: var(--setup-text);
   font: inherit;
@@ -127,12 +134,15 @@ function roomName(room: DesktopOrganizationRoom): string {
 .company-rooms-row strong {
   overflow: hidden;
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 550;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .company-rooms-row strong span {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
   color: var(--setup-muted);
   font-weight: 500;
 }
@@ -144,9 +154,7 @@ function roomName(room: DesktopOrganizationRoom): string {
 }
 
 .company-rooms-visibility {
-  padding: 2px 8px;
-  border: 1px solid var(--setup-border);
-  border-radius: 999px;
+  padding: 0;
   color: var(--setup-muted);
   font-size: 11.5px;
 }
@@ -194,4 +202,9 @@ function roomName(room: DesktopOrganizationRoom): string {
     background: var(--setup-surface-muted);
   }
 }
+.company-room-search { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; padding: 10px 12px; border: 1px solid var(--setup-border); border-radius: 9px; color: var(--setup-muted); }
+.company-room-search svg { width: 17px; height: 17px; }
+.company-room-search input { min-width: 0; width: 100%; border: 0; background: transparent; color: var(--setup-text); font: inherit; font-size: 14px; }
+.company-room-search:focus-within { outline: 2px solid var(--setup-accent); outline-offset: 2px; }
+.company-room-search input:focus { outline: none; }
 </style>
