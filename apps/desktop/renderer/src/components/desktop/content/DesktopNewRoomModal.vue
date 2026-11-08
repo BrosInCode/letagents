@@ -1,6 +1,6 @@
 <template>
   <div class="desktop-modal-backdrop" data-testid="new-room-modal" @click.self="requestClose">
-    <section ref="dialogElement" class="desktop-new-room-modal desktop-new-room-flow" role="dialog" aria-modal="true"
+    <section ref="dialogElement" class="desktop-new-room-modal desktop-new-room-flow" :data-step="step" role="dialog" aria-modal="true"
       aria-labelledby="new-room-title" aria-describedby="new-room-title-description"
       :aria-busy="busy" tabindex="-1" @keydown.esc.prevent="requestClose" @keydown.tab="handleDialogTab">
       <NewRoomFrame :tab="activeTab" :tabs="tabs" :busy="busy" :show-tabs="showTabs"
@@ -70,13 +70,22 @@
 
         <form v-else-if="step === 'standalone'" id="new-room-blank-form" data-testid="new-room-standalone-step" @submit.prevent="emit('createStandalone')">
           <label class="new-room-field"><span>Room name</span><input v-model="roomName" type="text" maxlength="80" placeholder="e.g. Design conversations" autocomplete="off" spellcheck="false" :disabled="busy" data-testid="new-room-name-input" /></label>
-          <fieldset class="new-room-storage" :disabled="busy">
-            <legend>Where it lives</legend>
-            <label v-if="company" data-testid="new-room-storage-company"><input v-model="storage" type="radio" value="company" /><CompanyAvatar class="new-room-company-avatar" :login="company.login" :avatar-url="company.avatarUrl" size="s" /><span><strong>In {{ company.login }}</strong><small>Shared online and listed under {{ company.login }}. Invite people with a code.</small></span></label>
-            <label data-testid="new-room-storage-cloud"><input v-model="storage" type="radio" value="cloud" /><Cloud aria-hidden="true" /><span><strong>Shared online</strong><small>Invite your people and agents with a code.</small></span></label>
-            <label data-testid="new-room-storage-local"><input v-model="storage" type="radio" value="local" /><Laptop aria-hidden="true" /><span><strong>Only on {{ thisComputer }}</strong><small>Stays on this device until you choose to share it.</small></span></label>
-          </fieldset>
-          <p class="new-room-hint desktop-new-room-context">{{ storage === 'local' ? `Your room will stay on ${thisComputer}.` : 'You’ll get an invite code to share.' }}</p>
+          <div class="new-room-field desktop-new-room-storage" data-testid="new-room-storage">
+            <span>Where it lives</span>
+            <FilterDropdown :model-value="storage" label="Where it lives" :options="storageOptions" :disabled="busy" match-trigger-width @update:model-value="setStorage">
+              <template #trigger="{ option }">
+                <CompanyAvatar v-if="option?.id === 'company' && company" :login="company.login" :avatar-url="company.avatarUrl" size="s" />
+                <component :is="option?.id === 'local' ? Laptop : Cloud" v-else aria-hidden="true" />
+                <span class="desktop-new-room-storage-label">{{ option?.label }}</span>
+              </template>
+              <template #option="{ option }">
+                <CompanyAvatar v-if="option.id === 'company' && company" :login="company.login" :avatar-url="company.avatarUrl" size="s" />
+                <component :is="option.id === 'local' ? Laptop : Cloud" v-else aria-hidden="true" />
+                <span class="desktop-new-room-storage-option"><strong>{{ option.label }}</strong><small>{{ storageDescription(option.id) }}</small></span>
+              </template>
+            </FilterDropdown>
+          </div>
+          <p class="new-room-hint desktop-new-room-context" data-testid="new-room-storage-description">{{ storageDescription(storage) }}</p>
         </form>
 
         <form v-else-if="step === 'join'" id="new-room-join-form" data-testid="new-room-join-step" @submit.prevent="emit('join')">
@@ -123,6 +132,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { FolderOpen, Hash, KeyRound, X, ChevronRight, Cloud, Laptop, Check, Copy } from '@lucide/vue';
 import NewRoomFrame from '../../../../../../../shared/ui/NewRoomFrame.vue';
+import FilterDropdown from '../../../../../../../shared/ui/FilterDropdown.vue';
 import type { NewRoomActiveAction, NewRoomCompany, NewRoomRecentProjectFolder, NewRoomStep, NewRoomStorageChoice, NewRoomSuccessState, PendingProjectRoomSelection } from '../../../composables/useDesktopNewRoomModal';
 import CompanyAvatar from '../company/CompanyAvatar.vue';
 import { currentFocusableElement, restoreFocus, trapFocusInDialog } from './modal-focus';
@@ -161,6 +171,19 @@ const projectMode = ref<'project' | 'new_project'>(props.step === 'project' ? 'p
 const parentLabel = computed(() => localPathBasename(projectParent.value.trim()) || 'Choose a location');
 const pathExamples = localPathExamples();
 const thisComputer = thisComputerLabel();
+const storageOptions = computed(() => [
+  ...(props.company ? [{ id: 'company', label: props.company.login }] : []),
+  { id: 'cloud', label: 'Shared online' },
+  { id: 'local', label: `Only on ${thisComputer}` },
+]);
+function setStorage(value: string) {
+  if (!props.busy && storageOptions.value.some(option => option.id === value)) storage.value = value as NewRoomStorageChoice;
+}
+function storageDescription(value: string): string {
+  if (value === 'company' && props.company) return `Listed under ${props.company.login}. Invite people with a room code.`;
+  if (value === 'local') return 'This room stays on this device until you choose to share it.';
+  return 'A shared room outside a company. Invite people with a room code.';
+}
 const dialogElement = ref<HTMLElement | null>(null);
 const joinInputElement = ref<HTMLInputElement | null>(null);
 const projectPathInputElement = ref<HTMLInputElement | null>(null);

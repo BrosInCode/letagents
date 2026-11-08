@@ -5,8 +5,8 @@ import { companyInviteView, isCompanyLinkId } from "../../../../../../shared/ui/
 import type { CompanyHomeState } from "../../components/desktop/company/types";
 import type { FirstRunCompanyStepState } from "../../components/desktop/setup/types";
 import { showsCompanyHome } from "../../domain/company-navigation";
-import { desktopIpc } from "../../ipc/index.js";
 import { findSidebarRoomEntryByIdentifier, normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
+import { desktopIpc } from "../../ipc/index.js";
 import { useDesktopOrganizations } from "../useDesktopOrganizations";
 import type { AppContextOf } from "./context";
 
@@ -19,6 +19,11 @@ export function useAppCompany(context: unknown) {
   const pendingCompanyInvite = ref<string | null>(null);
   /** Set when the open link was just joined or set up, so the dialog shows its done view. */
   const inviteJustJoined = ref(false);
+  const companyInviteRevision = ref(0);
+  watch(() => `${authStatus.value?.apiUrl ?? ""}:${authStatus.value?.account?.id ?? ""}`, () => {
+    companyInviteRevision.value += 1;
+    inviteJustJoined.value = false;
+  }, { flush: "sync" });
   let unsubscribeCompanyInvite: (() => void) | null = null;
   let companyInviteEventVersion = 0;
 
@@ -52,8 +57,9 @@ export function useAppCompany(context: unknown) {
 
   async function completeCompanyInvite(id: string | null): Promise<void> {
     if (!id || pendingCompanyInvite.value !== id) return;
+    const revision = companyInviteRevision.value;
     await desktopIpc.organizations.acknowledgeInvite(id);
-    if (pendingCompanyInvite.value === id) {
+    if (revision === companyInviteRevision.value && pendingCompanyInvite.value === id) {
       pendingCompanyInvite.value = null;
       inviteJustJoined.value = false;
     }
@@ -61,6 +67,7 @@ export function useAppCompany(context: unknown) {
 
   function receiveCompanyInvite(id: string): void {
     if (!isCompanyLinkId(id)) return;
+    companyInviteRevision.value += 1;
     pendingCompanyInvite.value = id;
     inviteJustJoined.value = false;
     if (firstRunStage.value === "room") firstRunStage.value = "organization";
@@ -69,8 +76,11 @@ export function useAppCompany(context: unknown) {
 
   async function chooseOnboardingCompany(id: string | null): Promise<void> {
     const invite = pendingCompanyInvite.value;
+    const revision = companyInviteRevision.value;
     if (await company.choose(id)) {
+      if (revision !== companyInviteRevision.value) return;
       await completeCompanyInvite(invite);
+      if (revision !== companyInviteRevision.value) return;
       app.firstRunRoomSelected.value = false;
       app.continueToRoomConfirmation();
     }
@@ -129,7 +139,7 @@ export function useAppCompany(context: unknown) {
   });
 
   return {
-    company, companyStep, companyInvite, pendingCompanyInvite, inviteJustJoined,
+    company, companyStep, companyInvite, pendingCompanyInvite, inviteJustJoined, companyInviteRevision,
     completeCompanyInvite, receiveCompanyInvite, chooseOnboardingCompany, copyCompanyLink,
   };
 }
@@ -173,17 +183,18 @@ export function useAppCompanyNavigation(context: unknown) {
   /** Answer a button in the company link dialog. */
   async function runCompanyInviteAction(action: CompanyInviteAction): Promise<void> {
     const id = pendingCompanyInvite.value;
+    const revision = app.companyInviteRevision.value;
     const view = companyInvite.value;
     if (!id || !view) return;
     const login = "organization" in view && view.organization ? view.organization.login : null;
     switch (action) {
       case "join":
       case "setup":
-        if (await company.choose(id)) inviteJustJoined.value = true;
+        if (await company.choose(id) && revision === app.companyInviteRevision.value && pendingCompanyInvite.value === id) inviteJustJoined.value = true;
         return;
       case "show_rooms":
         await app.completeCompanyInvite(id);
-        await chooseSidebarCompany(id);
+        if (revision === app.companyInviteRevision.value) await chooseSidebarCompany(id);
         return;
       case "retry":
         await company.refresh();

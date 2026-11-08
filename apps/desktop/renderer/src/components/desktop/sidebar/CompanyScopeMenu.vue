@@ -97,6 +97,7 @@
         </template>
 
         <hr>
+        <div class="company-scope-footer">
         <button
           v-if="selected"
           class="company-scope-item company-scope-action"
@@ -106,19 +107,23 @@
           @click="copyLink"
         >
           <span class="company-scope-icon"><Link2 aria-hidden="true" /></span>
-          <span>Copy {{ selected.login }} link</span>
+          <span>Copy invite link</span>
         </button>
         <button
           class="company-scope-item company-scope-action"
+          :class="{ 'company-scope-refresh-icon': selected }"
           type="button"
           role="menuitem"
           :disabled="state.status === 'loading'"
+          :aria-label="state.status === 'loading' ? 'Checking GitHub…' : 'Refresh from GitHub'"
+          title="Refresh from GitHub"
           data-testid="company-menu-refresh"
           @click="refresh"
         >
           <span class="company-scope-icon"><RefreshCw aria-hidden="true" /></span>
-          <span>{{ state.status === "loading" ? "Checking GitHub…" : "Refresh from GitHub" }}</span>
+          <span v-if="!selected">{{ state.status === "loading" ? "Checking GitHub…" : "Refresh from GitHub" }}</span>
         </button>
+        </div>
       </div>
     </Transition>
   </Teleport>
@@ -381,6 +386,10 @@ defineExpose({ close: closeMenu });
   font-size: 11.5px;
   font-weight: 500;
 }
+
+.company-scope-footer { display: flex; align-items: center; gap: 4px; }
+.company-scope-footer .company-scope-action { min-width: 0; }
+.company-scope-footer .company-scope-refresh-icon { width: 38px; flex: 0 0 38px; display: grid; place-items: center; padding: 6px; }
 
 .company-scope-item {
   display: grid;

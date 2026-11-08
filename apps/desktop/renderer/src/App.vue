@@ -362,6 +362,8 @@
       :view="showFirstRunGate ? null : companyInvite"
       :busy="Boolean(company.joiningId.value)"
       :error="company.error.value"
+      :viewer-login="authStatus?.account?.login ?? null"
+      :viewer-avatar-url="authStatus?.account?.avatarUrl ?? null"
       @action="runCompanyInviteAction"
     />
 

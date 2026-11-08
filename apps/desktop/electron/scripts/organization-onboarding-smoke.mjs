@@ -104,12 +104,17 @@ try {
   // Step 3 of setup: one row per GitHub organization, chosen like the other setup steps.
   await waitFor(`document.querySelector('[data-stage="organization"]') && Boolean(document.querySelector('[data-testid="company-choice-42"]'))`);
   assert.equal(await js(`document.querySelector('[data-testid="company-choice-44"]').getAttribute('aria-disabled')`), 'true', 'a member waits for an owner');
+  await click('.company-github-steps summary');
   assert.ok((await js('document.body.innerText')).includes('Accept on GitHub'), 'a pending GitHub invitation shows its next step');
+  await click('.company-github-steps summary');
   await capture('01-company-choice.png');
   await click('[data-testid="company-choice-42"]');
   await waitFor(`(document.querySelector('[data-testid="first-run-company-continue"]')?.textContent || '').includes('Set up Herotel')`);
   await click('[data-testid="first-run-company-continue"]');
-  await waitFor(`document.querySelector('[data-stage="room"]') && Boolean(document.querySelector('[data-testid="first-run-company-rooms"]')) && document.body.innerText.includes('herotel/app')`);
+  await waitFor(`document.querySelector('[data-stage="room"]') && Boolean(document.querySelector('[data-testid="first-run-company-rooms"]'))`);
+  await js(`{ const input = document.querySelector('.company-room-search input'); input.value = 'missing'; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
+  await waitFor(`document.body.innerText.includes('No rooms match your search.')`);
+  await js(`{ const input = document.querySelector('.company-room-search input'); input.value = ''; input.dispatchEvent(new Event('input', { bubbles: true })); }`);
   await capture('02-company-repo-room.png');
   await click('[data-testid="first-run-company-room-github.com/herotel/app"]');
   await waitFor(`(document.querySelector('[data-testid="first-run-open-room"]')?.textContent || '').includes('Open herotel/app')`);
@@ -148,6 +153,12 @@ try {
   await waitFor(`Boolean(document.querySelector('[data-testid="company-invite-join"]'))`);
   assert.ok((await js('document.body.innerText')).includes('Join Northwind'));
   await capture('07-company-invitation.png');
+  window.setSize(600, 800);
+  await js(`document.documentElement.dataset.theme = 'light'; document.documentElement.style.colorScheme = 'light'`);
+  await capture('07-company-invitation-light-narrow.png');
+  assert.equal(await js(`document.documentElement.scrollWidth > innerWidth`), false);
+  window.setSize(1280, 900);
+  await js(`document.documentElement.dataset.theme = 'dark'; document.documentElement.style.colorScheme = 'dark'`);
   await click('[data-testid="company-invite-join"]');
   await waitFor(`document.body.innerText.includes('You’re in Northwind')`);
   await capture('08-company-joined.png');
@@ -157,8 +168,20 @@ try {
   // The company owns work rooms: a new blank room is created in the selected company.
   await click('[data-testid="sidebar-new-room"]');
   await click('[data-testid="new-room-modal"] [role="tab"][id$="-tab-standalone"]');
-  await waitFor(`document.querySelector('[data-testid="new-room-storage-company"] input')?.checked === true`);
+  await waitFor(`document.querySelector('[data-testid="new-room-storage"] button')?.getAttribute('aria-label') === 'Where it lives: Northwind'`);
+  await click('[data-testid="new-room-storage"] button');
+  await waitFor(`Boolean(document.querySelector('[popover]:popover-open [role="option"][aria-selected="true"]'))`);
+  await js(`document.querySelector('[popover]:popover-open [role="option"]:last-child').click()`);
+  await waitFor(`document.querySelector('[data-testid="new-room-storage-description"]')?.textContent.includes('stays on this device')`);
+  await click('[data-testid="new-room-storage"] button');
+  await js(`document.querySelector('[popover]:popover-open [role="option"]:first-child').click()`);
+  await waitFor(`document.querySelector('[data-testid="new-room-storage"] button')?.getAttribute('aria-label') === 'Where it lives: Northwind'`);
   await capture('09-new-company-room.png');
+  await click('[data-testid="new-room-storage"] button');
+  await waitFor(`Boolean(document.querySelector('[popover]:popover-open [role="option"][aria-selected="true"]'))`);
+  await capture('09-new-company-room-menu.png');
+  await js(`document.querySelector('[popover]:popover-open [role="option"][aria-selected="true"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  await waitFor(`!document.querySelector('[popover]:popover-open') && Boolean(document.querySelector('[data-testid="new-room-modal"]'))`);
   await click('[data-testid="new-room-create-standalone"]');
   await waitFor(`Boolean(document.querySelector('[data-testid="new-room-success-step"]'))`);
   assert.deepEqual(createdRooms, [{ organizationId: '46' }]);

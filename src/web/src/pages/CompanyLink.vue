@@ -1,6 +1,6 @@
 <template>
   <main class="company-link">
-    <CompanyInvitePanel :view="view" :busy="busy" :error="error" :viewer-login="viewerLogin" standalone @action="run">
+    <CompanyInvitePanel :view="view" :busy="busy" :error="error" :viewer-login="viewerLogin" :viewer-avatar-url="isSignedIn ? user?.avatar_url : null" standalone @action="run">
       <template #footer="{ actions }">
         <div v-if="opensInApp" class="company-link-app">
           <a class="invite-primary company-link-open" :href="appLink" data-testid="company-link-open-app">
@@ -11,7 +11,7 @@
             <button type="button" class="company-link-text" :disabled="isSigningIn" @click="run('sign_in')">Use LetAgents in the browser instead</button>
           </p>
           <p v-else-if="view.kind === 'join' || view.kind === 'setup'" class="company-link-note">
-            Or <button type="button" class="company-link-text" :disabled="busy" data-testid="company-link-join-here" @click="run(view.kind)">{{ view.kind === 'setup' ? 'set it up' : 'join' }} here in the browser</button>.
+            <button type="button" class="company-link-text" :disabled="busy" data-testid="company-link-join-here" @click="run(view.kind)">{{ view.kind === 'setup' ? 'Set up' : 'Join' }} in your browser</button>
           </p>
           <p v-else-if="view.kind === 'joined'" class="company-link-note">Your company rooms are in the Rooms list of the app.</p>
         </div>
@@ -61,6 +61,7 @@ const roomCount = ref<number | null>(null)
 const busy = ref(false)
 const error = ref<string | null>(null)
 let version = 0
+let identityVersion = 0
 
 const view = computed<CompanyInviteView>(() => {
   if (!isCompanyLinkId(organizationId.value)) return { kind: 'invalid' }
@@ -118,24 +119,44 @@ async function loadRoomCount(current: number): Promise<void> {
 
 async function join(setup: boolean): Promise<void> {
   if (busy.value) return
+  // A pre-join refresh must not restore access that this write just refused.
+  version += 1
+  const currentIdentity = identityVersion
+  const id = organizationId.value
   busy.value = true
   error.value = null
   try {
-    const response = await fetch(`/organizations/${organizationId.value}/${setup ? 'setup' : 'join'}`, {
+    const response = await fetch(`/organizations/${id}/${setup ? 'setup' : 'join'}`, {
       method: 'POST', credentials: 'include', headers: { Accept: 'application/json' },
     })
+    const body = await response.json().catch(() => null)
+    if (currentIdentity !== identityVersion) return
     if (!response.ok) {
-      error.value = setup
-        ? 'LetAgents couldn’t set up this company. GitHub must confirm you’re still an owner. Try again.'
-        : 'LetAgents couldn’t join this company. GitHub must confirm you’re still a member. Try again.'
+      const code = body?.error
+      if (code === 'github_scope_required' || code === 'github_signin_required') {
+        status.value = 'github_access_required'
+        accessReason.value = code === 'github_scope_required' ? 'scope' : 'signin'
+      } else if (code === 'organization_sso_required') {
+        const org = organizations.value.find(item => item.github_org_id === id)
+        ssoRequired.value = [{ github_org_id: id, login: org?.login ?? null }]
+        organizations.value = organizations.value.filter(item => item.github_org_id !== id)
+      } else if (code === 'organization_membership_required') {
+        organizations.value = organizations.value.filter(item => item.github_org_id !== id)
+        invitations.value = invitations.value.filter(item => item.github_org_id !== id)
+      } else if (code === 'organization_owner_required' || code === 'organization_setup_required') {
+        organizations.value = organizations.value.map(item => item.github_org_id === id
+          ? { ...item, setup: false, role: code === 'organization_owner_required' ? 'member' : item.role } : item)
+      } else {
+        error.value = 'Couldn’t complete this request. Try again in a moment.'
+      }
       return
     }
     justJoined.value = true
     await load()
   } catch {
-    error.value = 'Couldn’t reach LetAgents. Check your connection and try again.'
+    if (currentIdentity === identityVersion) error.value = 'Couldn’t reach LetAgents. Check your connection and try again.'
   } finally {
-    busy.value = false
+    if (currentIdentity === identityVersion) busy.value = false
   }
 }
 
@@ -165,10 +186,17 @@ function run(action: CompanyInviteAction): void {
 }
 
 function recheck(): void {
-  if (document.visibilityState === 'visible' && isSignedIn.value && status.value !== 'loading') void load()
+  if (document.visibilityState === 'visible' && isSignedIn.value && !busy.value && status.value !== 'loading') void load()
 }
 
-watch([organizationId, isSignedIn, () => user.value?.login], () => {
+watch([organizationId, isSignedIn, () => user.value?.id], () => {
+  identityVersion += 1
+  busy.value = false
+  organizations.value = []
+  invitations.value = []
+  ssoRequired.value = []
+  accessReason.value = null
+  status.value = 'idle'
   justJoined.value = false
   roomCount.value = null
   void load()
@@ -179,18 +207,19 @@ onMounted(async () => {
   if (status.value === 'idle') await load()
 })
 onBeforeUnmount(() => {
+  identityVersion += 1
   version += 1
   window.removeEventListener('focus', recheck)
 })
 </script>
 
 <style scoped>
-.company-link { display: grid; place-items: center; box-sizing: border-box; min-height: 100dvh; padding: 24px 16px; background: var(--bg, light-dark(#f7f6f5, #0c0c0e)); }
-.company-link > .company-invite-panel { width: min(560px, 100%); max-height: calc(100dvh - 48px); box-shadow: 0 24px 80px light-dark(#33252d14, #0006); }
+.company-link { display: grid; place-items: center; box-sizing: border-box; min-height: 100dvh; padding: 40px 16px; background: var(--bg, light-dark(#fafafa, #0a0a0a)); }
+.company-link > .company-invite-panel { width: min(560px, 100%); max-height: calc(100dvh - 80px); }
 .company-link-app { display: grid; width: 100%; }
 .company-link-open { width: 100%; min-height: 44px; }
 .company-link-open svg { width: 15px; height: 15px; }
-.company-link-note { margin-top: 14px !important; color: var(--invite-muted); font-size: 12px; line-height: 1.7; text-align: center; }
+.company-link-note { margin-top: 14px !important; color: var(--invite-muted); font-size: 14px; line-height: 1.7; text-align: center; }
 .company-link-note a, .company-link-text { color: var(--invite-text); text-decoration: underline; text-underline-offset: 3px; }
 .company-link-text { display: inline; padding: 0; border: 0; background: none; font: inherit; }
 .company-link-note > .company-link-text { display: block; margin: 8px auto 0; }
