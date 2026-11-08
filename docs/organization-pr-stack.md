@@ -52,3 +52,31 @@ user's memberships endpoint, including private memberships. Provider errors
 block company access without deleting joins; stored membership alone never
 authorizes access. This slice does not synchronize the entire staff directory
 or change repository permissions.
+
+## 2026-11-08 API rework (slices 1-2)
+
+Slice 1: `rooms.organization_id` (optional, `ON DELETE SET NULL`, partial index)
+is added in `0143_organizations.sql`. A company can own work rooms.
+
+Slice 2:
+
+- Company routes accept only an interactive app session. Owner tokens, remote
+  MCP tokens, and agent sessions get 403 `human_app_session_required`. POST
+  setup and join also need a same-origin write, else 403
+  `cross_site_write_refused`.
+- `readGitHubOrganizationAccess` makes one paged GitHub read (no state filter)
+  and returns `{ memberships, invitations, ssoRequiredOrgIds }`.
+  `listGitHubOrganizationMemberships` wraps it. A token whose `x-oauth-scopes`
+  lacks `read:org`, `write:org`, and `admin:org` raises
+  `GitHubOrganizationScopeError` (403 `github_scope_required`). A missing
+  header (GitHub App user tokens) is not judged. `x-github-sso:
+  partial-results; organizations=...` yields numeric IDs not already active.
+- `GET /account/organizations` now returns `organizations`, `invitations`
+  (`{ github_org_id, login, avatar_url }`), and `sso_required`
+  (`{ github_org_id, login | null }`).
+- `GET /auth/github/organizations[?login=]` (browser only) sends the person to
+  GitHub with `read:org` added to the configured scopes. The callback refreshes
+  the GitHub token on all sessions of the account, so the desktop picks it up.
+  `/auth/github/organizations/done` shows "GitHub access updated".
+- Default `GITHUB_OAUTH_SCOPES` is `read:user,repo,read:org`; the docs page was
+  corrected.

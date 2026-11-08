@@ -84,6 +84,7 @@ import { databaseAccountActivityLoaders } from "../account-activity/loaders.js";
 import { getAccountRoomsForAccount } from "../account-room-membership/list.js";
 import { presenceChangeEvents } from "./presence-change-events.js";
 import { registerAppLoginRoutes } from "../routes/auth/app-login.js";
+import { registerOrganizationConsentRoutes } from "../routes/auth/organization-consent.js";
 import { registerConversationRoutes } from "../routes/conversations.js";
 import { registerAccountOrganizationRoutes } from "../routes/account/organizations.js";
 import {
@@ -559,6 +560,7 @@ export function registerApiRoutes(app: Express): void {
 
   registerAuthRoutes(app);
   registerAppLoginRoutes(app);
+  registerOrganizationConsentRoutes(app);
   registerConversationRoutes(app);
   registerAccountRoomRoutes(app);
   registerAccountActivityStreamRoute(app, { hub: getAccountActivityHub(), getAccountRoomsForAccount });

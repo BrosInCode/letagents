@@ -15,7 +15,7 @@ test("verified joins are atomic, idempotent, and keyed by immutable organization
   const store = await import("../db/organizations.js");
   try {
     await admin.query(`CREATE SCHEMA ${schema}`);
-    await pool.query("CREATE TABLE accounts (id text PRIMARY KEY); INSERT INTO accounts VALUES ('alice'), ('bob')");
+    await pool.query("CREATE TABLE accounts (id text PRIMARY KEY); CREATE TABLE rooms (id text PRIMARY KEY); INSERT INTO accounts VALUES ('alice'), ('bob')");
     await pool.query(await readFile(new URL("../../../drizzle/0143_organizations.sql", import.meta.url), "utf8"));
     const membership = { github_org_id: "42", login: "acme", avatar_url: null, role: "owner" as const };
     assert.equal(await store.saveVerifiedOrganizationMembership({ accountId: "alice", membership, create: false }), null);
