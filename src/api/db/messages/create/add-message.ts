@@ -92,29 +92,6 @@ export async function addMessageWithCreateStatus(
       recipientAgentTargets = addressed;
     }
 
-    // A human's message that woke nobody keeps the reason for its sender.
-    // While deferred routing is pending the column stays empty; the routing
-    // job writes it if it elects nobody.
-    if (receiptCount === 0 && !jevPending && createdMessage.source === "browser"
-      && createdMessage.publisher_account_id && !createdMessage.publisher_agent_key
-      && !createdMessageIsPromptOnly) {
-      let noWake: MessageNoWake = routedNoWake ?? { reason: "unknown" };
-      if (activeSessions.length === 0) {
-        // Routing may load only candidate sessions; check the whole room.
-        const [registered] = await tx.select({ session_id: room_agent_sessions.session_id })
-          .from(room_agent_sessions)
-          .where(and(
-            eq(room_agent_sessions.room_id, roomId),
-            eq(room_agent_sessions.session_kind, "worker"),
-            sql`${room_agent_sessions.ended_at} IS NULL`,
-          ))
-          .limit(1);
-        if (!registered) noWake = { reason: "no_agents" };
-      }
-      await tx.update(messages).set({ no_wake: noWake })
-        .where(and(eq(messages.room_id, roomId), eq(messages.number, createdMessage.number)));
-    }
-
     // Notification fan-out and worker routing both stay synchronous and atomic
     // with the message. Account for their combined hot-path cost so rooms with
     // no live worker sessions do not hide a slow notification enqueue.
@@ -129,13 +106,40 @@ export async function addMessageWithCreateStatus(
     }
 
     // Hosted bots woken by webhook follow the same routing decision, committed with the message.
-    await enqueueWakeWebhooksForMessageTx(tx, createdMessage, {
+    const wakeRuleDeliveries = await enqueueWakeWebhooksForMessageTx(tx, createdMessage, {
       promptOnly: createdMessageIsPromptOnly,
       addressedAgentKey: addressedTo?.agent_key ?? null,
       recipientAgentKeys,
       activeSessions,
       routingMessage: routing.messageForRouting,
     });
+
+    // A human's message that woke nobody keeps the reason for its sender.
+    // While deferred routing is pending the column stays empty; the routing
+    // job writes it if it elects nobody.
+    if (receiptCount === 0 && !jevPending && createdMessage.source === "browser"
+      && createdMessage.publisher_account_id && !createdMessage.publisher_agent_key
+      && !createdMessageIsPromptOnly) {
+      let noWake: MessageNoWake = routedNoWake ?? { reason: "unknown" };
+      if (wakeRuleDeliveries > 0) {
+        // A wake rule (a hosted bot's webhook) woke an agent without a
+        // receipt. Recorded so the sender is not told that nobody woke.
+        noWake = { reason: "wake_rule" };
+      } else if (activeSessions.length === 0) {
+        // Routing may load only candidate sessions; check the whole room.
+        const [registered] = await tx.select({ session_id: room_agent_sessions.session_id })
+          .from(room_agent_sessions)
+          .where(and(
+            eq(room_agent_sessions.room_id, roomId),
+            eq(room_agent_sessions.session_kind, "worker"),
+            sql`${room_agent_sessions.ended_at} IS NULL`,
+          ))
+          .limit(1);
+        if (!registered) noWake = { reason: "no_agents" };
+      }
+      await tx.update(messages).set({ no_wake: noWake })
+        .where(and(eq(messages.room_id, roomId), eq(messages.number, createdMessage.number)));
+    }
 
     await markAnsweredReceiptsReplied(tx, roomId, createdMessage, clientMessageId, repliedReceiptTargets, releasedReplyTurns);
 

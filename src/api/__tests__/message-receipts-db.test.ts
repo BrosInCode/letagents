@@ -249,3 +249,46 @@ test("a repository room has no member list, so not_read is null", skip, async ()
     assert.equal(response.body.receipts[0].agents.length, 1);
   });
 });
+
+test("the route reports no reason for agent output, pending active routing, or a wake-rule wake", skip, async () => {
+  process.env.LETAGENTS_JEV_ROUTING = "active";
+  process.env.TYPESAFE_API_KEY = "fixture-key";
+  const a = await seed(3);
+  await client!.pool.query("UPDATE rooms SET jev_routing_enabled = true WHERE id = $1", [a.room.id]);
+  const pending = await a.send("Which agent knows the design?");
+  const agentOutput = await a.reply(0, pending.message.id);
+  const wakeRule = await a.send("@MissingAgent hello");
+  await client!.pool.query(`UPDATE messages SET no_wake = '{"reason":"wake_rule"}'::jsonb WHERE room_id=$1 AND number=$2`,
+    [a.room.id, Number(wakeRule.message.id.slice(4))]);
+  // A shadow-mode job does not hold back the reason written at send time.
+  const shadow = await a.send("Which agent knows the tests?");
+  await client!.pool.query(`UPDATE jev_routing_jobs SET plan = jsonb_set(plan, '{mode}', '"shadow"') WHERE room_id=$1 AND message_number=$2`,
+    [a.room.id, Number(shadow.message.id.slice(4))]);
+  await client!.pool.query(`UPDATE messages SET no_wake = '{"reason":"no_mention_large_room","agent_count":3}'::jsonb WHERE room_id=$1 AND number=$2`,
+    [a.room.id, Number(shadow.message.id.slice(4))]);
+  await withServer(async (get) => {
+    const ids = [pending.message.id, agentOutput.message.id, wakeRule.message.id, shadow.message.id].join(",");
+    const response = await get(a.ownerId, `/rooms/${encodeURIComponent(a.room.id)}/messages/receipts?ids=${ids}`);
+    const byId = new Map(response.body.receipts.map((receipt: any) => [receipt.message_id, receipt.no_wake]));
+    assert.equal(byId.size, 4, "the sender's own agents publish under the same account");
+    assert.equal(byId.get(pending.message.id), null);
+    assert.equal(byId.get(agentOutput.message.id), null);
+    assert.equal(byId.get(wakeRule.message.id), null);
+    assert.deepEqual(byId.get(shadow.message.id), { reason: "no_mention_large_room", agent_count: 3 });
+  });
+});
+
+test("a plan queued before agent_count existed records unknown when routing elects nobody", skip, async () => {
+  process.env.LETAGENTS_JEV_ROUTING = "active";
+  process.env.TYPESAFE_API_KEY = "fixture-key";
+  const a = await seed(3);
+  await client!.pool.query("UPDATE rooms SET jev_routing_enabled = true WHERE id = $1", [a.room.id]);
+  const sent = await a.send("Which agent knows the design?");
+  await client!.pool.query("UPDATE jev_routing_jobs SET plan = plan - 'agent_count' - 'no_wake' WHERE room_id=$1", [a.room.id]);
+  const [job] = await worker!.claimJevRoutingJobs();
+  await worker!.completeJevRoutingJob(job!, {
+    mode: "active", elected: [], electionReason: "none_chosen", needsResponse: 0.9, choice: "none",
+    probabilitiesByAgentKey: {}, confidence: 0.9, respondByAgentKey: {}, candidateAgentKeys: [], latencyMs: 1,
+  } as any);
+  assert.deepEqual(await a.noWake(sent.message.id), { reason: "unknown" });
+});

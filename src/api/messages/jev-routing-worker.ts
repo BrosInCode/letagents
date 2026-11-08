@@ -66,7 +66,10 @@ export async function completeJevRoutingJob(
       // woke nobody, unless a receipt exists after all.
       const noWake: MessageNoWake = !hint && plan.no_wake
         ? plan.no_wake
-        : { reason: "routing_chose_none", agent_count: plan.agent_count ?? 0 };
+        : plan.agent_count === undefined
+          // A plan queued before this field existed cannot say how many agents there were.
+          ? { reason: "unknown" }
+          : { reason: "routing_chose_none", agent_count: plan.agent_count };
       await tx.update(messages).set({ no_wake: noWake }).where(and(
         eq(messages.room_id, plan.roomId),
         eq(messages.number, plan.message.number),

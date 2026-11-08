@@ -54,7 +54,7 @@ export interface MessageReceipt {
   agents: MessageReceiptAgent[];
   readers: Array<MessageReceiptPerson & { read_at: string }>;
   not_read: MessageReceiptPerson[] | null;
-  no_wake: MessageNoWake | null;
+  no_wake: Exclude<MessageNoWake, { reason: "wake_rule" }> | null;
 }
 
 /** Parses `ids=msg_1,msg_2`; null when malformed, a number array otherwise. */
@@ -115,6 +115,7 @@ export function registerMessageReceiptsRoute(
           thread_root_number: messages.thread_root_number,
           timestamp: messages.timestamp,
           no_wake: messages.no_wake,
+          human: sql<boolean>`(${messages.source} = 'browser' AND ${messages.publisher_agent_key} IS NULL)`,
         })
         .from(messages)
         .where(and(
@@ -207,6 +208,8 @@ export function registerMessageReceiptsRoute(
             eq(jev_routing_jobs.room_id, project.id),
             inArray(jev_routing_jobs.message_number, numbers),
             sql`${jev_routing_jobs.state} <> 'completed'`,
+            // Shadow mode applied receipts (or the reason) at send time.
+            sql`${jev_routing_jobs.plan}->>'mode' = 'active'`,
           )),
         // A GitHub-managed room has no member list: the repository decides.
         resolveProjectRepoAccessTarget(project).then((target) => target ? null : listRoomMembers(accessRoomId)),
@@ -267,9 +270,13 @@ export function registerMessageReceiptsRoute(
           }
         }
         const agents = agentsByMessage.get(row.number) ?? [];
-        const noWake = agents.length > 0 || pending.has(row.number)
+        // Only a person's own message has a no-wake reason: the sender's
+        // agents publish under the same account but are not asking anyone.
+        const noWake = agents.length > 0 || pending.has(row.number) || !row.human
           ? null
-          : row.no_wake ?? { reason: "unknown" as const };
+          : row.no_wake?.reason === "wake_rule"
+            ? null
+            : row.no_wake ?? { reason: "unknown" as const };
         return {
           message_id: `msg_${row.number}`,
           sent_at: iso(row.timestamp),

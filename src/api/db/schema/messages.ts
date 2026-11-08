@@ -12,7 +12,10 @@ export type MessageNoWake =
   | { reason: "recent_agent_left"; agent_count: number; recent_agent: string }
   | { reason: "routing_chose_none"; agent_count: number }
   | { reason: "thread_no_agents" }
-  | { reason: "unknown" };
+  | { reason: "unknown" }
+  // Stored only: a wake rule woke an agent without a receipt. The receipts
+  // route reports it as "an agent woke" (no_wake null), never as a reason.
+  | { reason: "wake_rule" };
 
 export const messages = pgTable(
   "messages",
