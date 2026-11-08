@@ -187,6 +187,7 @@ const expectedDirectChannels = [
   "desktop:room:start-stream",
   "desktop:room:stop-account-activity",
   "desktop:room:stop-stream",
+  "desktop:room:take-pending-link",
   "desktop:room:test-wake-rule",
   "desktop:room:update-account-room",
   "desktop:room:update-board-planning",
