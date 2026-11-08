@@ -65,3 +65,45 @@ test("absent optional sections default to empty and zero counts", () => {
   assert.deepEqual(mapped.summaryCounts, { seenCount: 0, askedCount: 0, replyCount: 0, observedCount: 0 });
   assert.equal(mapped.message.threadRootId, "msg_9", "a top-level message is its own thread root");
 });
+
+test("receipt payloads map to the sender's projection and drop malformed rows", async () => {
+  const { mapDesktopMessageReceiptsPayload } = await import("../main/rooms/messages.js");
+  const mapped = mapDesktopMessageReceiptsPayload({
+    receipts: [
+      {
+        message_id: "msg_12", sent_at: "2026-11-08T10:00:00.000Z",
+        agents: [
+          { agent_key: "emmymay/desktop-codex-1", display_name: "LivelyDelta", provider: "Codex", owner_name: "EmmyMay", mine: true,
+            state: "replied", activation_reason: "explicit_mention", activation_reason_label: "Mentioned directly",
+            reply_message_id: "msg_13", asked_at: "2026-11-08T10:00:00.000Z", finished_at: "2026-11-08T10:00:09.000Z" },
+          { agent_key: "", state: "queued", asked_at: "2026-11-08T10:00:00.000Z" },
+        ],
+        readers: [{ name: "Shannon", avatar_url: null, read_at: "2026-11-08T10:00:03.000Z" }, { name: "", read_at: "x" }],
+        not_read: [{ name: "Tobi" }],
+        no_wake: null,
+      },
+      { message_id: "msg_14", sent_at: "2026-11-08T10:01:00.000Z", agents: [], readers: [], not_read: null,
+        no_wake: { reason: "recent_agent_left", agent_count: 3, recent_agent: "Mossbank" } },
+      { sent_at: "2026-11-08T10:02:00.000Z" },
+    ],
+  });
+  assert.equal(mapped.length, 2);
+  assert.deepEqual(mapped[0]!.agents, [{
+    agentKey: "emmymay/desktop-codex-1", displayName: "LivelyDelta", provider: "Codex", ownerName: "EmmyMay", mine: true,
+    state: "replied", activationReason: "explicit_mention", activationReasonLabel: "Mentioned directly",
+    replyMessageId: "msg_13", askedAt: "2026-11-08T10:00:00.000Z", finishedAt: "2026-11-08T10:00:09.000Z",
+  }]);
+  assert.deepEqual(mapped[0]!.readers, [{ name: "Shannon", avatarUrl: null, readAt: "2026-11-08T10:00:03.000Z" }]);
+  assert.deepEqual(mapped[0]!.notRead, [{ name: "Tobi", avatarUrl: null }]);
+  assert.equal(mapped[1]!.notRead, null);
+  assert.deepEqual(mapped[1]!.noWake, { reason: "recent_agent_left", agentCount: 3, recentAgent: "Mossbank" });
+});
+
+test("an unknown or malformed no-wake reason still says nobody was woken", async () => {
+  const { mapDesktopMessageNoWake } = await import("../main/rooms/messages.js");
+  assert.equal(mapDesktopMessageNoWake(null), null);
+  assert.deepEqual(mapDesktopMessageNoWake({ reason: "brand_new" }), { reason: "unknown" });
+  assert.deepEqual(mapDesktopMessageNoWake({ reason: "recent_agent_left", agent_count: 3 }), { reason: "no_mention_large_room", agentCount: 3 });
+  assert.deepEqual(mapDesktopMessageNoWake({ reason: "ambiguous_mention", handles: ["delta", 4, ""] }), { reason: "ambiguous_mention", handles: ["delta"] });
+  assert.deepEqual(mapDesktopMessageNoWake({ reason: "no_mention_large_room", agent_count: -2 }), { reason: "no_mention_large_room", agentCount: 0 });
+});

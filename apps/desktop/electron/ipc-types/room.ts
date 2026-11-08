@@ -359,6 +359,39 @@ export interface DesktopMessageInfo {
   summaryCounts: { seenCount: number; askedCount: number; replyCount: number; observedCount: number };
 }
 
+/** Why a message woke no agent. Mirrors `no_wake` on GET /rooms/:room/messages/receipts. */
+export type DesktopMessageNoWake =
+  | { reason: "no_agents" }
+  | { reason: "ambiguous_mention"; handles: string[] }
+  | { reason: "no_mention_large_room"; agentCount: number }
+  | { reason: "recent_agent_left"; agentCount: number; recentAgent: string }
+  | { reason: "routing_chose_none"; agentCount: number }
+  | { reason: "thread_no_agents" }
+  | { reason: "unknown" };
+
+/** The sender's own receipt for one message: who it woke, who read it, and why nobody woke. */
+export interface DesktopMessageReceipt {
+  messageId: string;
+  sentAt: string;
+  agents: Array<{
+    agentKey: string;
+    displayName: string;
+    provider: string | null;
+    ownerName: string | null;
+    mine: boolean;
+    state: string;
+    activationReason: string;
+    activationReasonLabel: string;
+    replyMessageId: string | null;
+    askedAt: string;
+    finishedAt: string | null;
+  }>;
+  readers: Array<{ name: string; avatarUrl: string | null; readAt: string }>;
+  /** Null when the room has no member list (a GitHub-managed room). */
+  notRead: Array<{ name: string; avatarUrl: string | null }> | null;
+  noWake: DesktopMessageNoWake | null;
+}
+
 export interface DesktopRoomMessage {
   gif?: RoomGif | null;
   senderProfile?: { login: string; avatarUrl: string | null } | null;
@@ -839,7 +872,7 @@ export type DesktopRoomStreamEvent =
   | {
       type: "resource_invalidation";
       roomIdentifier: string;
-      resource: "agent_work" | "wake_rules" | "message_reactions" | "message_pins";
+      resource: "agent_work" | "wake_rules" | "message_reactions" | "message_pins" | "message_info";
     }
   | {
       /**

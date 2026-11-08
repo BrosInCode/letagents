@@ -126,6 +126,7 @@ const expectedDirectChannels = [
   "desktop:room:get-message-link-previews",
   "desktop:room:get-message-pins",
   "desktop:room:get-message-reactions",
+  "desktop:room:get-message-receipts",
   "desktop:room:get-message-reminders",
   "desktop:room:get-messages-after",
   "desktop:room:get-messages-before",
