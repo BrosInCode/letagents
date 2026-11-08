@@ -2,10 +2,11 @@
  * Creates a room message: one transaction that validates, inserts, notifies
  * and routes it, then post-commit wakes.
  */
-import { sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { MESSAGE_SENDER_MAX_CODE_POINTS, MESSAGE_SENDER_MAX_UTF8_BYTES, isMessageSenderWithinBounds } from "../../../../../shared/message-contracts.mjs";
 import { RequestValidationError } from "../../../validation-error.js";
 import { db } from "../../client.js";
+import { messages, room_agent_sessions, type MessageNoWake } from "../../schema.js";
 import type { Message, MessageMentionNotice, MessageRecipientAgentTarget } from "../../types.js";
 import { queueReplyTurnWakes, releaseAgentReplyTurnHoldsTx, type ReleasedReplyTurn } from "../reply-turns.js";
 import type { AddMessageOptions, AddMessageResult } from "./types.js";
@@ -67,9 +68,14 @@ export async function addMessageWithCreateStatus(
     let recipientAgentKeys: readonly string[] = [];
     let recipientAgentTargets: readonly MessageRecipientAgentTarget[] = [];
     let mentionNotices: readonly MessageMentionNotice[] = [];
+    let routedNoWake: MessageNoWake | null = null;
+    let jevPending = false;
 
     if (activeSessions.length > 0) {
-      ({ receiptCount, recipientAgentKeys, recipientAgentTargets, mentionNotices } = await routeMessageToActiveSessions(
+      ({
+        receiptCount, recipientAgentKeys, recipientAgentTargets, mentionNotices,
+        noWake: routedNoWake, jevPending,
+      } = await routeMessageToActiveSessions(
         tx, roomId, createdMessage, createdMessageIsPromptOnly, routing, releasedReplyTurns,
       ));
     }
@@ -84,6 +90,29 @@ export async function addMessageWithCreateStatus(
       receiptCount = addressed.length;
       recipientAgentKeys = addressed.map((target) => target.agent_key);
       recipientAgentTargets = addressed;
+    }
+
+    // A human's message that woke nobody keeps the reason for its sender.
+    // While deferred routing is pending the column stays empty; the routing
+    // job writes it if it elects nobody.
+    if (receiptCount === 0 && !jevPending && createdMessage.source === "browser"
+      && createdMessage.publisher_account_id && !createdMessage.publisher_agent_key
+      && !createdMessageIsPromptOnly) {
+      let noWake: MessageNoWake = routedNoWake ?? { reason: "unknown" };
+      if (activeSessions.length === 0) {
+        // Routing may load only candidate sessions; check the whole room.
+        const [registered] = await tx.select({ session_id: room_agent_sessions.session_id })
+          .from(room_agent_sessions)
+          .where(and(
+            eq(room_agent_sessions.room_id, roomId),
+            eq(room_agent_sessions.session_kind, "worker"),
+            sql`${room_agent_sessions.ended_at} IS NULL`,
+          ))
+          .limit(1);
+        if (!registered) noWake = { reason: "no_agents" };
+      }
+      await tx.update(messages).set({ no_wake: noWake })
+        .where(and(eq(messages.room_id, roomId), eq(messages.number, createdMessage.number)));
     }
 
     // Notification fan-out and worker routing both stay synchronous and atomic

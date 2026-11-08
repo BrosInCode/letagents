@@ -3,14 +3,14 @@
  * Jev plans, receipts and reply-turn holds.
  */
 import { JEV_MAX_CANDIDATE_AGENTS } from "../../../messages/jev-conversation-routing.js";
-import { and, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import { randomUUID } from "node:crypto";
 import { isPromptOnlyAgentMessage } from "../../../../shared/room-agent-prompts.js";
 import { createGlobalAgentAddressResolver, humanConversationFallback, decideAgentMessageActivation, type ActivationIdentity } from "../../../../shared/activation-routing.js";
 import { RequestValidationError } from "../../../validation-error.js";
 import { chooseAnsweringSession, chooseSessionForReply } from "../../../rooms/answering-session.js";
 import { getReplyTurnReadySessions } from "../session-connections.js";
-import { rooms, room_settings, jev_routing_jobs, messages } from "../../schema.js";
+import { rooms, room_settings, jev_routing_jobs, messages, room_agent_sessions, type MessageNoWake } from "../../schema.js";
 import type { MessageMentionNotice, MessageRecipientAgentTarget, MessageRow } from "../../types.js";
 import { createAccountRoutingTargetBudget, getRecentHumanConversationRecipient, getHumanThreadRootRecipientOwners, MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES, MAX_ACCOUNT_ROUTING_TARGETS } from "../account-agent-routing.js";
 import { planJevRoutingMode, type DeferredJevRoutingPlan } from "../jev-routing-hint.js";
@@ -37,6 +37,10 @@ export async function routeMessageToActiveSessions(
   recipientAgentKeys: readonly string[];
   recipientAgentTargets: readonly MessageRecipientAgentTarget[];
   mentionNotices: readonly MessageMentionNotice[];
+  /** Why no agent was woken, when routing alone can tell; null otherwise. */
+  noWake: MessageNoWake | null;
+  /** Deferred conversation routing decides the recipients after commit. */
+  jevPending: boolean;
 }> {
   let receiptCount = 0;
   let recipientAgentKeys: readonly string[] = [];
@@ -173,6 +177,30 @@ export async function routeMessageToActiveSessions(
     recentAgentKey: recentRecipient && ownerScopeByAgentKey.get(recentRecipient.agentKey) === recentRecipient.ownerAccountId
       ? recentRecipient.agentKey : null,
   });
+  // The reason an untagged human message in a large room woke nobody. The
+  // recent partner may have left the room: its ended session still names it.
+  let largeRoomNoWake: MessageNoWake | null | undefined;
+  const resolveLargeRoomNoWake = async (): Promise<MessageNoWake | null> => {
+    if (largeRoomNoWake !== undefined) return largeRoomNoWake;
+    largeRoomNoWake = null;
+    if (!humanConversationEligible || sessionsByAgentKey.size <= 2 || heuristicFallback) return null;
+    const agentCount = sessionsByAgentKey.size;
+    if (recentRecipient && !sessionsByAgentKey.has(recentRecipient.agentKey)) {
+      const [named] = await tx.select({ display_name: room_agent_sessions.display_name, actor_label: room_agent_sessions.actor_label })
+        .from(room_agent_sessions)
+        .where(and(eq(room_agent_sessions.room_id, roomId), eq(room_agent_sessions.agent_key, recentRecipient.agentKey)))
+        .orderBy(desc(room_agent_sessions.created_at))
+        .limit(1);
+      largeRoomNoWake = {
+        reason: "recent_agent_left",
+        agent_count: agentCount,
+        recent_agent: named?.display_name || named?.actor_label || recentRecipient.agentKey,
+      };
+    } else {
+      largeRoomNoWake = { reason: "no_mention_large_room", agent_count: agentCount };
+    }
+    return largeRoomNoWake;
+  };
   // Jev only ever replaces the untagged fallback, and only in rooms of
   // three or more agents; mentions, replies to agents, threads, and task
   // ownership stay deterministic. Inference runs after commit: in active
@@ -201,6 +229,9 @@ export async function routeMessageToActiveSessions(
         publisher_agent_key: createdMessage.publisher_agent_key ?? null,
       },
       heuristic: heuristicFallback,
+      agent_count: sessionsByAgentKey.size,
+      // Recorded when Jev elects nobody but could not run (the heuristic applied).
+      no_wake: jevMode === "active" ? await resolveLargeRoomNoWake() : null,
     };
     await tx.insert(jev_routing_jobs).values({ room_id: roomId, message_number: createdMessage.number, plan });
   }
@@ -429,5 +460,15 @@ export async function routeMessageToActiveSessions(
         || taskOwnerThreadRecipients.has(receipt.agent_key)))
       .map((receipt) => receipt.agent_key),
   ));
-  return { receiptCount, recipientAgentKeys, recipientAgentTargets, mentionNotices };
+  let noWake: MessageNoWake | null = null;
+  if (receiptCount === 0 && !jevDecides) {
+    if (mentionNotices.length > 0) {
+      noWake = { reason: "ambiguous_mention", handles: [...new Set(mentionNotices.map((notice) => notice.handle))] };
+    } else if (createdMessage.thread_root_number !== null && !globalAddresses.broadcast && !globalAddresses.hasMention) {
+      noWake = { reason: "thread_no_agents" };
+    } else {
+      noWake = await resolveLargeRoomNoWake();
+    }
+  }
+  return { receiptCount, recipientAgentKeys, recipientAgentTargets, mentionNotices, noWake, jevPending: jevDecides };
 }

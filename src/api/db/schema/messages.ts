@@ -5,6 +5,15 @@ import type { RoomGif } from "../../../../shared/room-expressions.mjs";
 import { accounts, rooms } from "./core.js";
 import { rentalVisibilityEnum } from "./rentals.js";
 
+export type MessageNoWake =
+  | { reason: "no_agents" }
+  | { reason: "ambiguous_mention"; handles: string[] }
+  | { reason: "no_mention_large_room"; agent_count: number }
+  | { reason: "recent_agent_left"; agent_count: number; recent_agent: string }
+  | { reason: "routing_chose_none"; agent_count: number }
+  | { reason: "thread_no_agents" }
+  | { reason: "unknown" };
+
 export const messages = pgTable(
   "messages",
   {
@@ -31,6 +40,10 @@ export const messages = pgTable(
     visibility: rentalVisibilityEnum("visibility"),
     // Links message to a rental session when sent by/for a rental participant
     rental_session_id: text("rental_session_id"),
+    // Why a human's message woke no agent, written when it commits with zero
+    // receipts (or when deferred routing elects nobody). Shown only to the
+    // sender through the receipts route.
+    no_wake: jsonb("no_wake").$type<MessageNoWake>(),
     timestamp: timestamp("timestamp", { mode: "string", withTimezone: true }).notNull(),
   },
   (table) => ({

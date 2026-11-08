@@ -15,7 +15,7 @@ import {
   type JevRoutingMode,
 } from "../../messages/jev-conversation-routing.js";
 import { db } from "../client.js";
-import { id_sequences, message_agent_receipts, messages, room_agent_sessions, room_settings, rooms } from "../schema.js";
+import { id_sequences, message_agent_receipts, messages, room_agent_sessions, room_settings, rooms, type MessageNoWake } from "../schema.js";
 import type { MessageRecipientAgentTarget } from "../types.js";
 import { MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 import { chooseAnsweringSession } from "../../rooms/answering-session.js";
@@ -70,6 +70,10 @@ export interface DeferredJevRoutingPlan {
   };
   /** What the deterministic ladder did (shadow) or would have done (active). */
   heuristic: { reason: string; agentKeys: readonly string[] } | null;
+  /** Registered agents at send time (absent on plans queued before receipts). */
+  agent_count?: number;
+  /** The no-wake reason the heuristic would record if it applies and elects nobody. */
+  no_wake?: MessageNoWake | null;
 }
 
 export interface JevConversationRoutingHint {

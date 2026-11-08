@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
-import { jev_routing_jobs } from "../db/schema.js";
+import { jev_routing_jobs, message_agent_receipts, messages, type MessageNoWake } from "../db/schema.js";
 import { getMessageById } from "../db/messages/history.js";
 import {
   applyDeferredJevReceipts,
@@ -60,7 +60,23 @@ export async function completeJevRoutingJob(
     didComplete = true;
     const decision = plan.mode !== "active" ? null
       : hint ? { reason: "jev_routed", agentKeys: hint.elected } : plan.heuristic;
-    return decision ? applyDeferredJevReceipts(tx, plan, decision) : [];
+    const applied = decision ? await applyDeferredJevReceipts(tx, plan, decision) : [];
+    if (plan.mode === "active" && applied.length === 0) {
+      // The message waited with no receipts and no reason. Record why it
+      // woke nobody, unless a receipt exists after all.
+      const noWake: MessageNoWake = !hint && plan.no_wake
+        ? plan.no_wake
+        : { reason: "routing_chose_none", agent_count: plan.agent_count ?? 0 };
+      await tx.update(messages).set({ no_wake: noWake }).where(and(
+        eq(messages.room_id, plan.roomId),
+        eq(messages.number, plan.message.number),
+        sql`${messages.no_wake} IS NULL`,
+        sql`NOT EXISTS (SELECT 1 FROM ${message_agent_receipts}
+          WHERE ${message_agent_receipts.message_room_id} = ${plan.roomId}
+            AND ${message_agent_receipts.message_number} = ${plan.message.number})`,
+      ));
+    }
+    return applied;
   });
   if (!didComplete) return;
   if (hint) logJevConversationRouting(hint, {
