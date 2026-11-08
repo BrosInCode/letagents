@@ -95,6 +95,7 @@ import type {
   DesktopRoomStorageOverrideMode,
   DesktopRoomStorageState,
   DesktopInviteRoomCreation,
+  DesktopInviteRoomOptions,
   DesktopLegacyProjectBindingCandidate,
   DesktopProjectBinding,
   DesktopProjectBindingContext,
@@ -434,7 +435,7 @@ export interface DesktopApi {
     ) => Promise<DesktopFocusRoomMutationResult>;
     archiveAgents?: (roomIdentifier: string, participantKeys: string[]) => Promise<{ archivedParticipantKeys: string[]; skippedParticipantKeys: string[] }>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
-    createInviteRoom: () => Promise<DesktopInviteRoomCreation>;
+    createInviteRoom: (options?: DesktopInviteRoomOptions) => Promise<DesktopInviteRoomCreation>;
     getPullRequestDiff?: (roomIdentifier: string, number: number) => Promise<import("./room.js").DesktopPullRequestDiffResult>;
     getGitHubEvents: (
       roomIdentifier: string,

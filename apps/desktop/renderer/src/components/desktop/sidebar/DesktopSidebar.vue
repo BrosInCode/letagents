@@ -371,6 +371,29 @@
           data-testid="sidebar-section-rooms"
         >
       <div v-if="zenMode" class="sidebar-zen-heading"><span>Your room</span><span><Focus aria-hidden="true" />Zen on</span></div>
+      <div v-else-if="companyMenuShown && company" class="sidebar-section-header sidebar-company-header" data-testid="sidebar-rooms-heading">
+        <CompanyScopeMenu
+          :state="company"
+          :room-count="totalRoomCount"
+          @choose="$emit('choose-company', $event)"
+          @refresh="$emit('refresh-companies')"
+          @open-github="$emit('open-company-github', $event)"
+        />
+        <button
+          class="sidebar-company-collapse"
+          type="button"
+          :aria-expanded="!roomsCollapsed"
+          :aria-label="roomsCollapsed ? 'Show rooms' : 'Hide rooms'"
+          :data-collapsed="roomsCollapsed"
+          data-testid="sidebar-rooms-collapse"
+          @click="$emit('toggle-rooms-collapsed')"
+        >
+          <span class="section-count">{{ totalRoomCount }}</span>
+          <span class="sidebar-section-arrow" :data-collapsed="roomsCollapsed" aria-hidden="true">
+            <ChevronRight />
+          </span>
+        </button>
+      </div>
       <button
         v-else
         class="sidebar-section-header"
@@ -711,12 +734,17 @@ import SidebarRoomSwitcher from "./SidebarRoomSwitcher.vue";
 import SidebarChildRoom from "./SidebarChildRoom.vue";
 import SidebarRoomActivity from "./SidebarRoomActivity.vue";
 import { describeSidebarUnreadTotal, sidebarGroupActivity, sidebarGroupUnread, sidebarProjectDetails, sidebarRoomTitle, sidebarUnreadTotal, type SidebarUnreadTotal } from "../../../domain/sidebar-room-display";
+import CompanyScopeMenu from "./CompanyScopeMenu.vue";
+import type { DesktopOrganizationGitHubPage } from "../../../../../electron/ipc-types/organizations.js";
+import type { FirstRunCompanyStepState } from "../setup/types";
 import SidebarAccountMenu from "./SidebarAccountMenu.vue";
 import type { ProjectGroup, SidebarEntry, SystemEntry, RoomEntry } from "../types";
 import { desktopIpc } from "../../../ipc/index.js";
 import type { DesktopAuthStatus, DesktopUpdateStatus } from "../../../../../electron/ipc-types";
 
 const props = defineProps<{
+  /** The person's companies; the Rooms heading becomes a company filter when there is one to show. */
+  company?: FirstRunCompanyStepState | null;
   activeEntry: SidebarEntry;
   primaryRoom: RoomEntry;
   projectEntries: ProjectGroup[];
@@ -737,6 +765,9 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  "choose-company": [id: string | null];
+  "refresh-companies": [];
+  "open-company-github": [page: DesktopOrganizationGitHubPage];
   "cycle-sidebar": [];
   "new-room": [];
   "open-rent": [];
@@ -998,6 +1029,14 @@ watch(() => props.selectionActive, (selectionActive) => {
   }
   else lastSelectionAnchorId.value = null;
 });
+
+/** People with a company, an invitation, a blocked organization, or a missing GitHub permission get the company filter. */
+const companyMenuShown = computed(() => Boolean(props.company && (
+  props.company.organizations.length
+  || props.company.invitations.length
+  || props.company.ssoRequired.length
+  || props.company.status === "github_access_required"
+)));
 
 const totalRoomCount = computed(() =>
   roomProjectEntries.value.reduce((total, project) => total + 1 + projectChildRooms(project).length, 0)

@@ -503,6 +503,46 @@
   text-transform: none;
 }
 
+/* With a company to choose, the Rooms heading holds two controls: the company
+   filter on the left and the collapse toggle (count and chevron) on the right. */
+.sidebar-company-header {
+  padding: 0;
+  min-height: 41px;
+  cursor: default;
+}
+
+.sidebar-company-collapse {
+  display: inline-grid;
+  justify-items: end;
+  align-items: center;
+  flex: 0 0 auto;
+  min-width: 24px;
+  height: 24px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.sidebar-company-collapse > * {
+  grid-area: 1 / 1;
+}
+
+.sidebar-company-collapse:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text) 28%, transparent);
+  outline-offset: 1px;
+}
+
+.sidebar-company-collapse:focus-visible .section-count {
+  opacity: 0;
+}
+
+.sidebar-company-collapse:focus-visible .sidebar-section-arrow {
+  opacity: 1;
+}
+
 .sidebar-section-meta {
   /* The count and the chevron share one slot, so the count sits on the rows' right edge. */
   display: inline-grid;
@@ -821,6 +861,31 @@
   }
 
   .sidebar-section-header:hover .section-count {
+    opacity: 0;
+  }
+
+  .sidebar-company-header:hover {
+    background: transparent;
+  }
+
+  .sidebar-company-header:hover .sidebar-section-arrow {
+    opacity: 0;
+  }
+
+  .sidebar-company-header:hover .section-count {
+    opacity: 1;
+  }
+
+  .sidebar-company-collapse:hover {
+    background: var(--sidebar-hover);
+  }
+
+  .sidebar-company-header .sidebar-company-collapse:hover .sidebar-section-arrow {
+    opacity: 1;
+    color: var(--text-secondary);
+  }
+
+  .sidebar-company-header .sidebar-company-collapse:hover .section-count {
     opacity: 0;
   }
 }
