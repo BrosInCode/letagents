@@ -61,6 +61,8 @@
 
 .desktop-add-agent-model .desktop-add-agent-model-catalog {
   margin: 0;
+  /* A footer under both fields: its divider spans the section, unlike the status paragraphs. */
+  max-width: none;
   padding-top: 11px;
   border-top: 1px solid rgba(255, 255, 255, 0.065);
   color: var(--text-tertiary);
@@ -70,6 +72,16 @@
 
 .desktop-add-agent-model .desktop-add-agent-model-catalog[data-tone="error"] {
   color: #f2a1a1;
+}
+
+.desktop-add-agent-model .desktop-add-agent-model-catalog code {
+  padding: 1px 5px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  white-space: nowrap;
 }
 
 @media (hover: hover) and (pointer: fine) {

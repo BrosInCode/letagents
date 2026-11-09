@@ -513,3 +513,31 @@ test("Cursor access cards distinguish restricted profiles from Full access", asy
   for (const line of limits.slice(0, 2)) assert.match(line, /No network access: can(?:&#39;|')t push or open PRs\./);
   assert.match(limits[2], /can reach the network and files outside the project/);
 });
+
+test("the model field says which Claude models need a newer CLI, and how to get them", async () => {
+  const AddAgentModelSettings = (await vite.ssrLoadModule(
+    "/renderer/src/components/desktop/content/add-agent/AddAgentModelSettings.vue",
+  )).default;
+  const { modelCliUpdateNote } = await vite.ssrLoadModule(
+    "/renderer/src/components/desktop/content/add-agent/useAddAgentPresentation.ts",
+  );
+  assert.equal(modelCliUpdateNote(null, "Claude Code"), null);
+  assert.equal(modelCliUpdateNote({ modelLabels: [], installedVersion: "2.1.321", command: "claude update" }, "Claude Code"), null);
+  assert.deepEqual(modelCliUpdateNote({ modelLabels: ["Fable 5.2"], installedVersion: "2.1.311", command: "claude update" }, "Claude Code"),
+    { message: "Fable 5.2 needs a newer Claude Code (installed: 2.1.311).", command: "claude update" });
+  const older = modelCliUpdateNote({ modelLabels: ["Fable 5.2", "Opus 5.5", "Haiku 5.5"], installedVersion: null, command: "claude update" }, "Claude Code");
+  assert.equal(older?.message, "Fable 5.2, Opus 5.5 and Haiku 5.5 need a newer Claude Code.");
+
+  const props = {
+    loading: false, modelChoice: "default", modelOptions: [{ value: "default", label: "Use provider default" }],
+    custom: false, customModelId: "", modelDescription: "Use the model configured by the provider app.",
+    showEffort: false, effort: "", effortOptions: [], effortDescription: "",
+    catalogLabel: "1 provider model available.", catalogError: false, cliUpdate: older,
+  };
+  const html = await renderToString(createSSRApp({ render: () => h(AddAgentModelSettings, props) }));
+  assert.match(html, /data-tone="status" role="status" data-testid="desktop-add-agent-model-cli-update"[^>]*>Fable 5\.2, Opus 5\.5 and Haiku 5\.5 need a newer Claude Code\. Run <code[^>]*>claude update<\/code>, then refresh models\.<\/p>/);
+  // A catalog error is the one line shown there; the update note waits for a list that loads.
+  const failed = await renderToString(createSSRApp({ render: () => h(AddAgentModelSettings, { ...props, catalogError: true, catalogLabel: "Claude Code did not answer." }) }));
+  assert.match(failed, /role="alert"[^>]*>Claude Code did not answer\.<\/p>/);
+  assert.doesNotMatch(failed, /need a newer Claude Code/);
+});

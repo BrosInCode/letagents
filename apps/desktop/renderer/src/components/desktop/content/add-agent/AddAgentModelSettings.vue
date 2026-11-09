@@ -49,6 +49,13 @@
       :aria-live="catalogError ? 'assertive' : 'polite'"
       aria-atomic="true"
     >{{ catalogLabel }}</p>
+    <p
+      v-else-if="cliUpdate"
+      class="desktop-add-agent-model-catalog"
+      data-tone="status"
+      role="status"
+      data-testid="desktop-add-agent-model-cli-update"
+    >{{ cliUpdate.message }} Run <code>{{ cliUpdate.command }}</code>, then refresh models.</p>
   </section>
 </template>
 
@@ -71,6 +78,8 @@ defineProps<{
   effortDescription: string;
   catalogLabel: string;
   catalogError: boolean;
+  /** Models the installed CLI is too old to list, and the command that updates it. */
+  cliUpdate?: { message: string; command: string } | null;
 }>();
 const emit = defineEmits<{
   refresh: [];

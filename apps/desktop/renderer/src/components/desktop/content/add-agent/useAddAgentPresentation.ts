@@ -1,5 +1,6 @@
 import { computed, watch } from "vue";
 import type {
+  DesktopAgentProviderCliUpdate,
   DesktopAgentProviderId,
   DesktopAgentProviderModelOption,
   DesktopAgentProviderModelSource,
@@ -238,6 +239,10 @@ export function useAddAgentPresentation(
       : "Provider default and custom model ids are available.";
   });
   const providerModelCatalogIsError = computed(() => Boolean(providerModels.value?.error));
+  // Known models the installed CLI is too old to run: said once, under the model field.
+  const providerModelCliUpdate = computed(() => loadingProviderModels.value || providerModels.value?.error
+    ? null
+    : modelCliUpdateNote(providerModels.value?.cliUpdate, selectedProvider.value?.name || "Claude Code"));
   const modelSelectOptions = computed<DesktopSelectOption[]>(() => [
     { value: "default", label: "Use provider default" },
     ...providerModelOptions.value.map((option) => ({
@@ -382,6 +387,7 @@ export function useAddAgentPresentation(
     providerModelOptions,
     providerModelCatalogLabel,
     providerModelCatalogIsError,
+    providerModelCliUpdate,
     modelSelectOptions,
     effortSelectOptions,
     selectedProviderModel,
@@ -392,6 +398,18 @@ export function useAddAgentPresentation(
     effortSelectorDescription,
     selectedPermissionProfileWarning,
   };
+}
+
+/** "Fable 5.2 needs a newer Claude Code (installed: 2.1.311)." and the command that fixes it. */
+export function modelCliUpdateNote(
+  update: DesktopAgentProviderCliUpdate | null | undefined,
+  app: string,
+): { message: string; command: string } | null {
+  const labels = update?.modelLabels ?? [];
+  if (!update || !labels.length) return null;
+  const names = labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+  const installed = update.installedVersion ? ` (installed: ${update.installedVersion})` : "";
+  return { message: `${names} ${labels.length === 1 ? "needs" : "need"} a newer ${app}${installed}.`, command: update.command };
 }
 
 /**
