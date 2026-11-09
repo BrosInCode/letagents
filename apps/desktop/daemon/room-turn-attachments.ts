@@ -4,6 +4,7 @@ import { lstat, mkdtemp, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { createPrivateDir, isOwnedByCurrentUser, isOwnerPrivate, openNoFollow, ownerPrivatePlatform, privateEntryCreated, protectOwnerPrivate } from "../../../shared/owner-private-fs.mjs";
 import { renameWithRetryAsync } from "../../../shared/rename-retry.mjs";
+import { isHtmlDemoFile } from "../../../shared/live-demo.mjs";
 
 import type { ProviderRoomTurnAttachment, RoomTurnAttachmentOrigin, RoomTurnFileAccess, RoomTurnImageDelivery, RoomTurnImageMimeType } from "./provider-action-port.js";
 import type { RoomTurnFileOutcome } from "./prepared-room-context.js";
@@ -65,6 +66,9 @@ const IMAGE_EXTENSIONS: Record<RoomTurnImageMimeType, string> = {
   "image/png": "png", "image/jpeg": "jpg", "image/gif": "gif", "image/webp": "webp",
 };
 
+/** HTML is text an agent reads; an HTML demo's marks it reads with read_demo_marks. */
+const HTML_DEMO_EXTENSIONS = ["html", "htm", "xhtml"];
+const HTML_DEMO_TYPES = ["text/html", "application/xhtml+xml"];
 /**
  * Files that are not images reach an agent as a daemon-owned copy it opens
  * with its own tools, never as bytes in its prompt. Only text files and PDFs,
@@ -74,10 +78,11 @@ export const ROOM_TURN_FILE_MAX_BYTES = 10 * 1024 * 1024;
 export const ROOM_TURN_FILES_MAX_TOTAL_BYTES = 20 * 1024 * 1024;
 export const ROOM_TURN_RECENT_FILE_LIMIT = 4;
 export const ROOM_TURN_RECENT_FILES_MAX_BYTES = 10 * 1024 * 1024;
-const TEXT_FILE_EXTENSIONS = new Set(["txt", "log", "md", "markdown", "json", "jsonl", "ndjson", "csv", "tsv", "yaml", "yml", "xml", "diff", "patch"]);
+const TEXT_FILE_EXTENSIONS = new Set(["txt", "log", "md", "markdown", "json", "jsonl", "ndjson", "csv", "tsv", "yaml", "yml", "xml", "diff", "patch",
+  ...HTML_DEMO_EXTENSIONS]);
 const FILE_TYPES = new Set(["text/plain", "text/markdown", "text/x-markdown", "text/csv", "text/tab-separated-values", "application/json",
   "application/x-ndjson", "application/jsonl", "application/xml", "text/xml", "application/yaml", "application/x-yaml", "text/yaml",
-  "text/x-yaml", "text/x-diff", "text/x-patch", "application/pdf"]);
+  "text/x-yaml", "text/x-diff", "text/x-patch", "application/pdf", ...HTML_DEMO_TYPES]);
 /** A file kept for a recent message is reused this long after its last turn, so a thread's log is downloaded once. */
 export const FILE_CACHE_MAX_AGE_MS = 6 * 60 * 60_000;
 const FILE_CACHE_FOLDER = "file-cache";
@@ -147,6 +152,11 @@ function candidateKind(file: { fileName: string; mimeType: string }): "image" | 
   if (DECLARED_IMAGE_TYPES.has(file.mimeType)) return "image";
   const extension = extensionOf(file.fileName);
   return TEXT_FILE_EXTENSIONS.has(extension) || extension === "pdf" || FILE_TYPES.has(file.mimeType) ? "file" : "other";
+}
+
+/** An HTML demo by the desktop app's own rule (shared with read_demo_marks); people pin notes and draw on it. */
+function declaresHtmlDemo(file: { fileName: string; mimeType: string }): boolean {
+  return isHtmlDemoFile(file);
 }
 
 function declaresPdf(file: { fileName: string; mimeType: string }): boolean {
@@ -434,8 +444,11 @@ export class RoomTurnAttachmentStager {
         input.signal.throwIfAborted();
         const recent = Boolean(file.origin);
         const isFile = file.kind !== "image";
+        // Marks live on the LetAgents server: a demo in a local room has none.
+        const demo = isFile && file.id && !input.localRoom && declaresHtmlDemo(file)
+          ? { demo: { messageId: file.messageId, attachmentId: file.id } } : {};
         const base = { index: file.index, ...(file.origin ? { origin: file.origin } : {}), fileName: file.fileName,
-          mimeType: file.mimeType, sizeBytes: file.sizeBytes, ...(isFile ? { category: "file" as const } : {}) };
+          mimeType: file.mimeType, sizeBytes: file.sizeBytes, ...(isFile ? { category: "file" as const } : {}), ...demo };
         const status = (value: ProviderRoomTurnAttachment["status"]) => { results.push({ order: file.order, attachment: { ...base, status: value } }); };
         // Only a refusal at the full per-file limit, by the bytes, or by what this agent can open is final for this conversation.
         const final = (outcome: RoomTurnFileOutcome) => { if (file.id) outcomes.push({ messageId: file.messageId, attachmentId: file.id, outcome }); };

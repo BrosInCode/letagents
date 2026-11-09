@@ -124,6 +124,7 @@ import type {
   DesktopInlineHtmlDemoLease,
   DesktopDemoMark,
   DesktopDemoMarkInput,
+  DesktopLiveDemoAnchor,
   DesktopLiveDemoClientFrame,
   DesktopLiveDemoEvent,
   DesktopWindowRect,
@@ -286,6 +287,8 @@ export interface DesktopApi {
     removeDemoMark?: (roomIdentifier: string, markId: string) => Promise<void>;
     /** Lay a running inline demo out at LIVE_DEMO.width CSS px, scaled to `frameWidth`. Returns the scale. */
     setInlineDemoWidth?: (leaseUrl: string, frameWidth: number) => Promise<number>;
+    /** The element under a point of a running live demo (demo space), for a new pin; null when there is none to name. */
+    inlineDemoAnchorAt?: (leaseUrl: string, x: number, y: number) => Promise<DesktopLiveDemoAnchor | null>;
     /** Capture `rect` of the app window (demo and marks) and stage it as an image for a thread reply. */
     captureDemoMarkup?: (roomIdentifier: string, rect: DesktopWindowRect, fileName: string) => Promise<DesktopStagedAttachment>;
     discardAttachment: (roomIdentifier: string, uploadId: string) => Promise<void>;

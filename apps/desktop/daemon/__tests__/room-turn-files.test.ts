@@ -108,6 +108,32 @@ test("a text file and a PDF are saved for the agent to read; their bytes never r
   });
 });
 
+test("an HTML demo is saved as text and named as a demo, so the agent reads its marks; a local room's has none", async () => {
+  await withRoot(async (root) => {
+    const HTML = utf8("<!doctype html><button class=pay>Pay</button>\n");
+    const prepared = await new RoomTurnAttachmentStager(root).prepare(input({
+      sourceMessage: { id: "msg_7", text: "fix my pins", attachments: [file("att_1", "Checkout.html", "text/html")] },
+      recentMessages: [recentFrom("msg_5", [file("att_2", "old.htm", "application/octet-stream"), file("att_3", "notes.txt", "text/plain"),
+        file("att_4", "report.html", "text/plain")])],
+    }, [], (id) => id === "att_3" ? LOG : HTML));
+    assert.deepEqual(prepared.attachments.map(item => [item.fileName, item.status, item.file?.kind, item.demo]), [
+      ["Checkout.html", "file", "text", { messageId: "msg_7", attachmentId: "att_1" }],
+      ["old.htm", "file", "text", { messageId: "msg_5", attachmentId: "att_2" }],
+      ["notes.txt", "file", "text", undefined],
+      // Sent as plain text, the app shows it as text, not as a demo: it has no marks to read.
+      ["report.html", "file", "text", undefined],
+    ]);
+    assert.deepEqual(prepared.attachments.slice(0, 2).map(item => basename(item.file!.path)), ["1.html", "2.htm"]);
+    assert.deepEqual(await readFile(prepared.attachments[0]!.file!.path), Buffer.from(HTML));
+    await prepared.release();
+
+    const local = await new RoomTurnAttachmentStager(root).prepare(input({ localRoom: true,
+      sourceMessage: { id: "msg_7", text: "x", attachments: [file("local_att_1", "Checkout.html", "text/html")] } }, [], () => HTML));
+    assert.deepEqual(local.attachments.map(item => [item.status, item.demo]), [["file", undefined]], "marks live on the server only");
+    await local.release();
+  });
+});
+
 test("files that are not text or PDFs, empty, too large or unreadable by this agent get a note and are remembered for good", async () => {
   await withRoot(async (root) => {
     const downloads: Download[] = [];

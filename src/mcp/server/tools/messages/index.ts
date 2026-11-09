@@ -6,6 +6,7 @@ import { registerPostStatusTool } from "./status-tool.js";
 import { registerWaitForMessagesTool } from "./wait-tool.js";
 import { registerExpressionTools } from "./expressions-tool.js";
 import { registerHistorySummaryTools } from "./history-summary-tool.js";
+import { registerDemoMarksTool } from "./demo-marks-tool.js";
 
 export function registerStatusTools(server: McpServer): void {
   registerPostStatusTool(server);
@@ -20,5 +21,6 @@ export function registerMessageTools(
   registerSendMessageTool(server, { fileAttachments: options.fileAttachments === true });
   registerReadMessagesTool(server);
   registerHistorySummaryTools(server);
+  registerDemoMarksTool(server);
   if (options.includeDeliveryLoop !== false) registerWaitForMessagesTool(server);
 }

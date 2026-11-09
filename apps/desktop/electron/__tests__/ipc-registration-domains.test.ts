@@ -139,6 +139,7 @@ const expectedDirectChannels = [
   "desktop:room:get-thread",
   "desktop:room:get-threads",
   "desktop:room:get-wake-rules",
+  "desktop:room:inline-demo-anchor-at",
   "desktop:room:knowledge",
   "desktop:room:knowledge-create",
   "desktop:room:knowledge-revise",

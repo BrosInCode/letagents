@@ -783,6 +783,7 @@ export type DesktopLiveDemoServerFrame = import("../../../../shared/live-demo.mj
 export type DesktopLiveDemoClientFrame = import("../../../../shared/live-demo.mjs").LiveDemoClientFrame;
 export type DesktopDemoMark = import("../../../../shared/live-demo.mjs").DemoMark;
 export type DesktopDemoMarkInput = import("../../../../shared/live-demo.mjs").DemoMarkInput;
+export type DesktopLiveDemoAnchor = import("../../../../shared/live-demo.mjs").LiveDemoAnchor;
 
 /** The state of this app's live connection to one room. */
 export type DesktopLiveDemoStatus = "connecting" | "live" | "reconnecting" | "offline" | "refused";

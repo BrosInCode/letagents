@@ -100,7 +100,7 @@ import {
   stageDroppedDesktopAttachmentContents,
 } from "../attachments.js";
 import { captureDesktopDemoMarkup } from "../attachments/demo-markup.js";
-import { prepareInlineHtmlDemo, releaseInlineHtmlDemo, setInlineHtmlDemoWidth } from "../attachments/html-demo-inline.js";
+import { inlineHtmlDemoAnchorAt, prepareInlineHtmlDemo, releaseInlineHtmlDemo, setInlineHtmlDemoWidth } from "../attachments/html-demo-inline.js";
 import { openHtmlDemo } from "../attachments/html-demo-window.js";
 import { getMainWindow } from "../window.js";
 import {
@@ -376,6 +376,13 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     async (event, url: unknown, frameWidth: unknown): Promise<number> => {
       assertHtmlDemoSender(event);
       return setInlineHtmlDemoWidth(url, frameWidth);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:inline-demo-anchor-at",
+    async (event, url: unknown, x: unknown, y: unknown) => {
+      assertHtmlDemoSender(event);
+      return inlineHtmlDemoAnchorAt(url, x, y);
     },
   );
   targetIpcMain.handle(
