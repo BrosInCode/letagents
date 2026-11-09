@@ -47,7 +47,7 @@ test("the output file of a background command is accepted only in the CLI's own 
   assert.equal(claudeBackgroundOutputPath(text(posixSpaced), "b3esdnfv2", "session-1"), posixSpaced);
 });
 
-test("a follower ends by itself at the CLI's exit line, frees its place, and never sends an event too large to arrive", async () => {
+test("a follower shows the end at the CLI's exit line, frees its place at the CLI's notice, and never sends an event too large to arrive", async () => {
   const { root, tasks } = await taskFolder("session-1");
   const path = join(tasks, "task-1.output");
   const published: LiveBackgroundCommandPayload[] = [];
@@ -63,13 +63,14 @@ test("a follower ends by itself at the CLI's exit line, frees its place, and nev
     assert.ok(published[0]!.command.length <= 2_000, "the command is bounded");
     // Six thousand characters of a CJK script are three bytes each, and quotes double in JSON.
     await appendFile(path, `${"\"雪\"".repeat(2_000)}\n\n[exited with code 0]\n`);
-    await eventually(() => published.at(-1)?.status === "completed", "the exit line ends the follower");
+    await eventually(() => published.at(-1)?.status === "completed", "the exit line shows the end");
     const last = published.at(-1)!;
     assert.equal(last.exitCode, 0);
     assert.ok(Buffer.byteLength(JSON.stringify(last), "utf8") <= 24 * 1024, "the final event fits the payload limit");
-    assert.equal(stopped, 1);
+    assert.equal(stopped, 0, "the follower stays until Claude Code's own notice");
     follower.finish("completed", 0);
-    assert.equal(published.at(-1), last, "a later notice changes nothing");
+    await eventually(() => stopped === 1, "the notice frees its place");
+    assert.equal(published.at(-1), last, "a notice that agrees changes nothing");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -95,10 +96,15 @@ test("an exit line that the command prints itself does not end a command that go
     await eventually(() => published.at(-1)?.output.endsWith("VITE ready in 312 ms\n") === true, "later output is published");
     await new Promise((resolve) => setTimeout(resolve, 700));
     assert.ok(published.every((payload) => payload.status === "running"), "the command still runs");
-    // The CLI's own exit line at the end of a quiet file does end it.
+    // An exit line at the end of a quiet file shows the end.
     await appendFile(path, "\n[exited with code 0]\n");
-    await eventually(() => published.at(-1)?.status === "completed", "the real exit line ends the follower");
+    await eventually(() => published.at(-1)?.status === "completed", "a quiet exit line shows the end");
     assert.match(published.at(-1)!.output, /VITE ready in 312 ms/);
+    // The command printed that one too and goes on: new output takes it back to running.
+    await appendFile(path, "GET / 200\n");
+    await eventually(() => published.at(-1)?.status === "running" && published.at(-1)!.output.endsWith("GET / 200\n"), "it runs again");
+    follower.finish("killed", null);
+    await eventually(() => published.at(-1)?.status === "stopped", "Claude Code's notice ends it for good");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
