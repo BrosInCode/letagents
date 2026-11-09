@@ -106,7 +106,7 @@ export class CursorRecordedTurnInProgressError extends Error {
 export class CursorProviderHandle implements ProviderHandle {
   state: ProviderObservedState = "starting";
   /** The agent's background shells, for the owner's live view (see background-shells.ts); made at first use. */
-  backgroundShells: CursorBackgroundShells | null = null;
+  backgroundShells: CursorBackgroundShells<LiveTurn> | null = null;
   stopRequested = false;
   protocolError = false;
   terminal: ProviderTerminalPayload | null = null;

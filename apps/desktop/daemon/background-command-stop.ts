@@ -13,6 +13,8 @@ export type BackgroundCommandStopPorts = {
   stop?(handle: ProviderActionHandle, taskId: string): Promise<"stopping" | "not_running" | "failed">;
   /** The live feed reads the command's end as stopped while this is marked (some ends carry no sign of a stop). */
   markStopRequested?(entryId: string, taskId: string, requested: boolean): void;
+  /** The feed shows the command as running, but the provider no longer knows it: end it as lost. */
+  endLost?(entryId: string, taskId: string): void;
 };
 
 /**
@@ -27,6 +29,8 @@ export type BackgroundCommandStopPorts = {
  * 4. The live feed knows of the Stop before the provider is asked, because
  *    the end can arrive before the provider's answer. Without "stopping",
  *    the mark is taken back.
+ * 5. "not_running" from the provider for a command that the feed shows as
+ *    running means its end was lost: the feed ends it, so no row stays stuck.
  */
 export async function stopBackgroundCommand(
   input: { entryId: string; daemonGeneration: number; taskId: string },
@@ -46,5 +50,6 @@ export async function stopBackgroundCommand(
     outcome = "failed";
   }
   if (outcome !== "stopping") ports.markStopRequested?.(input.entryId, input.taskId, false);
+  if (outcome === "not_running") ports.endLost?.(input.entryId, input.taskId);
   return { outcome };
 }

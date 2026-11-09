@@ -2,6 +2,28 @@ import "./isolated-home.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { stopCodexBackgroundTerminal } from "../main/agents/codex/background-terminals.js";
+import { boundedCommandEnd } from "../main/agents/codex/adapter-events.js";
+import { MAX_STREAM_PAYLOAD_BYTES, safeStreamPayload } from "../main/agents/provider-evidence.js";
+
+test("a command's end with a large whole output keeps its ids: only the newest output is kept, and it says so", () => {
+  const lines = Array.from({ length: 2_000 }, (_, index) => `[dev-server] request ${index} served`).join("\n");
+  const end = { threadId: "thread-1", turnId: "turn-1", item: { type: "commandExecution", id: "exec-1", status: "failed", exitCode: 1,
+    command: "/bin/zsh -lc 'npm run dev'", aggregatedOutput: lines } };
+  assert.ok(Buffer.byteLength(JSON.stringify(end)) > MAX_STREAM_PAYLOAD_BYTES, "the whole end is over the stream's limit");
+  assert.ok("preview" in (safeStreamPayload(end).payload as object), "unbounded, it would reach the daemon without its ids");
+
+  const bounded = boundedCommandEnd("item/completed", end);
+  assert.equal(bounded.truncated, true);
+  const safe = safeStreamPayload(bounded.params);
+  const item = (safe.payload as { item: Record<string, unknown> }).item;
+  assert.deepEqual([(safe.payload as Record<string, unknown>).threadId, item.id, item.status, item.exitCode], ["thread-1", "exec-1", "failed", 1]);
+  assert.ok((item.aggregatedOutput as string).endsWith("[dev-server] request 1999 served"), "the newest output stays");
+  assert.ok((item.aggregatedOutput as string).startsWith("[dev-server] request "), "from a line start");
+
+  const small = { ...end, item: { ...end.item, aggregatedOutput: "ok\n" } };
+  assert.deepEqual(boundedCommandEnd("item/completed", small), { params: small, truncated: false });
+  assert.deepEqual(boundedCommandEnd("item/commandExecution/outputDelta", end), { params: end, truncated: false }, "only a command's end");
+});
 
 /** A Codex connection that answers the two background-terminal requests from a fixed list of sessions. */
 function codex(pages: Array<{ data: Array<{ itemId: string; processId: string }>; nextCursor: string | null }>, terminated = true) {

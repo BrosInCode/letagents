@@ -406,12 +406,12 @@ export class CursorProviderAdapter implements ProviderAdapter {
   }
 
   /** The agent's background shells, made at their first use. */
-  backgroundShellsOf(handle: CursorProviderHandle): CursorBackgroundShells {
-    handle.backgroundShells ??= new CursorBackgroundShells({
+  backgroundShellsOf(handle: CursorProviderHandle): CursorBackgroundShells<LiveTurn> {
+    handle.backgroundShells ??= new CursorBackgroundShells<LiveTurn>({
       now: () => this.deps.now(),
-      publish: (payload) => publishLiveDisplay(this, handle, LIVE_BACKGROUND_COMMAND_METHOD, payload),
+      // Each value names the CLI process of the shell's own turn, as the turn's other events do.
+      publish: (payload, turn) => publishLiveDisplay(this, handle, LIVE_BACKGROUND_COMMAND_METHOD, payload, turn),
       processIdentity: (pid) => this.deps.getProcessIdentity(pid),
-      processStatus: (pid, identity) => this.exactProcessStatus(pid, identity),
       signalExact: (pid, identity, signal) => this.signalExactProcess(pid, identity, signal),
     });
     return handle.backgroundShells;

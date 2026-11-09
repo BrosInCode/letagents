@@ -43,18 +43,18 @@ async function terminals(): Promise<{ root: string; folder: string }> {
   return { root, folder };
 }
 
-function port(overrides: Partial<CursorBackgroundShellPort> = {}) {
+function port(overrides: Partial<CursorBackgroundShellPort<string>> = {}) {
   const published: LiveBackgroundCommandPayload[] = [];
+  const turns: string[] = [];
   const signals: Array<[number, string, string]> = [];
-  const value: CursorBackgroundShellPort = {
+  const value: CursorBackgroundShellPort<string> = {
     now: () => "2026-11-09T10:36:36.000Z",
-    publish: (payload) => published.push(payload),
+    publish: (payload, turn) => { published.push(payload); turns.push(turn); },
     processIdentity: () => "Mon Nov  9 10:36:35 2026",
-    processStatus: () => "exact",
     signalExact: (pid, identity, signal) => { signals.push([pid, identity, signal]); return "signalled"; },
     ...overrides,
   };
-  return { value, published, signals };
+  return { value, published, turns, signals };
 }
 
 test("Cursor's file format: the header and footer are not output, and the footer holds the exit code", () => {
@@ -106,28 +106,60 @@ test("a Cursor background shell shows its output, ends at Cursor's notice, and S
   }
 });
 
-test("at the end of the turn a shell without its notice ended with the turn, unless it still runs on its own", async () => {
+test("when the turn's CLI process exits, each of its shells ends: by its footer, with the turn, or as stopped", async () => {
   const { root, folder } = await terminals();
-  let alive = true;
-  const shells = port({ processStatus: () => alive ? "exact" : "absent" });
+  const shells = port();
   try {
     const followed = new CursorBackgroundShells(shells.value, 200);
     await writeFile(join(folder, "1.txt"), `${header(5001, "sleep 40")}`);
     await writeFile(join(folder, "2.txt"), `${header(5002, "npm test")}ok\n${footer(0)}`);
+    await writeFile(join(folder, "3.txt"), `${header(5003, "npm run dev")}ready\n`);
+    await writeFile(join(folder, "4.txt"), `${header(5004, "npm run watch")}watching\n`);
     followed.follow(completedCall(folder, 1, 5001), "turn-1");
     followed.follow(completedCall(folder, 2, 5002), "turn-1");
+    followed.follow(completedCall(folder, 3, 5003), "turn-1");
+    followed.follow(completedCall(folder, 4, 5004), "turn-2");
+    await eventually(() => new Set(shells.published.map((payload) => payload.taskId)).size === 4, "all shells are shown");
+    assert.equal(followed.stop("3"), "stopping");
+
+    followed.turnEnded("turn-1");
+    const final = (taskId: string) => shells.published.filter((payload) => payload.taskId === taskId).at(-1)?.status;
+    // The quiet shell ends with the turn, the one with Cursor's footer by itself, the stopped one as stopped.
+    await eventually(() => ["1", "2", "3"].every((taskId) => final(taskId) !== "running"), "the turn's shells end").catch(() => undefined);
+    assert.deepEqual(["1", "2", "3"].map(final), ["lost", "completed", "stopped"]);
+    assert.equal(final("4"), "running", "a shell of another turn runs on");
+    assert.equal(followed.stop("1"), "not_running", "an ended shell is no longer followed");
+    // Each value names the turn whose CLI process started its shell.
+    assert.deepEqual([...new Set(shells.published.flatMap((payload, index) => payload.taskId === "4" ? [shells.turns[index]] : []))], ["turn-2"]);
+    followed.closeAll();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the owner's Stop wins: a stopped server that exits cleanly, or whose notice comes late, reads as stopped", async () => {
+  const { root, folder } = await terminals();
+  const shells = port();
+  try {
+    const followed = new CursorBackgroundShells(shells.value, 150);
+    await writeFile(join(folder, "5.txt"), `${header(5005, "npm run dev")}ready\n`);
+    await writeFile(join(folder, "6.txt"), `${header(5006, "npm run preview")}ready\n`);
+    followed.follow(completedCall(folder, 5, 5005), "turn-1");
+    followed.follow(completedCall(folder, 6, 5006), "turn-1");
     await eventually(() => shells.published.length >= 2, "both shells are shown");
 
-    // A shell that outlives the CLI is followed on.
-    followed.turnEnded("turn-1");
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.ok(shells.published.every((payload) => payload.status === "running" || payload.taskId === "2"));
+    // A server that handles SIGTERM and exits 0: Cursor says success.
+    assert.equal(followed.stop("5"), "stopping");
+    await appendFile(join(folder, "5.txt"), footer(0));
+    followed.noticeEnded({ type: "system", subtype: "task_notification", task_id: "5", status: "success" });
+    await eventually(() => shells.published.some((payload) => payload.taskId === "5" && payload.status === "stopped"), "a clean exit after Stop reads as stopped");
 
-    alive = false;
-    followed.turnEnded("turn-1");
-    await eventually(() => shells.published.some((payload) => payload.taskId === "1" && payload.status === "lost"), "the quiet shell ended with the turn");
-    await eventually(() => shells.published.some((payload) => payload.taskId === "2" && payload.status === "completed"),
-      "a shell with Cursor's footer ended by itself");
+    // The footer arrives, but the notice does not: the end the footer shows is stopped, not failed (143).
+    assert.equal(followed.stop("6"), "stopping");
+    await appendFile(join(folder, "6.txt"), footer(143));
+    await eventually(() => shells.published.some((payload) => payload.taskId === "6" && payload.status !== "running"), "the footer ends it");
+    assert.deepEqual(shells.published.filter((payload) => payload.taskId === "6" && payload.status !== "running").map((payload) => payload.status), ["stopped"]);
+    followed.closeAll();
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -361,12 +361,16 @@ export function publishSafeStream(
   for (const listener of handle.streamListeners) listener(event);
 }
 
-/** An event for the owner's live feed only: never activity, lifecycle evidence or room state. */
+/**
+ * An event for the owner's live feed only: never activity, lifecycle evidence or room state. Like the turn's other
+ * events it names the turn's CLI process, so the daemon places it with its own agent runtime.
+ */
 export function publishLiveDisplay(
   adapter: CursorProviderAdapter,
   handle: CursorProviderHandle,
   method: string,
   providerPayload: unknown,
+  turn: Pick<LiveTurn, "pid" | "processIdentity"> | null = handle.liveTurn,
 ): void {
   const event: ProviderStreamEvent = {
     workAttemptId: handle.workAttemptId,
@@ -376,6 +380,8 @@ export function publishLiveDisplay(
     provider: adapter.id,
     kind: "tool_lifecycle",
     method,
+    ...(turn?.processIdentity ? { nativeProcessIdentity: turn.processIdentity } : {}),
+    ...(turn?.pid ? { nativeProcessPid: turn.pid } : {}),
     liveDisplayOnly: true,
     ...safeStreamPayload(providerPayload),
     durablePayloadRef: null,

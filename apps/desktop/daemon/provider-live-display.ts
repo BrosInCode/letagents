@@ -23,6 +23,8 @@ const MAX_BACKGROUND_COMMAND_CHARS = 2_000;
 type CodexCommandOutput = {
   turn: string; text: string; truncated: boolean; redacted: boolean; unavailable: boolean;
   command: unknown; cwd: unknown; tail: string; tailCut: boolean; liveHidden: boolean; startedAt: string | null;
+  /** Its process started: Codex named the process, or output arrived. A call waiting for approval has not. */
+  started: boolean;
 };
 
 /** How the daemon puts a live display event on the feed: as one more event, or as the newest value of a key. */
@@ -150,18 +152,28 @@ export class ProviderLiveDisplay {
         output.truncated ||= combined.length > 6_000;
         output.unavailable ||= combined.length > 6_000;
         output.text = output.unavailable ? "" : combined;
+        output.started = true;
         appendLiveTail(output, payload.delta, broken);
         return [this.codexLiveOutput(event, turnId, payload.itemId as string, output)];
       }
       if (/^turn\/(completed|failed|interrupted|cancelled|stopped)$/.test(event.method)) {
-        // A command that still runs when its turn ends runs in the background: the agent no longer waits for it.
+        // A started command that still runs when its turn completes runs in the background: Codex keeps its exec
+        // session, and the agent no longer waits for it. A turn that ended otherwise leaves no command to follow.
+        const turnStatus = record(payload.turn)?.status;
+        const completed = event.method === "turn/completed" && (turnStatus === undefined || turnStatus === "completed");
         const background: DaemonActivityEvent[] = [];
         for (const [key, output] of this.commandOutputs) {
           if (output.turn !== turnId) continue;
           this.commandOutputs.delete(key);
-          const itemId = JSON.parse(key)[1] as string;
-          if (this.codexBackground.size >= MAX_CODEX_BACKGROUND) continue;
-          const command = { ...output, itemId };
+          if (!completed || !output.started) continue;
+          if (this.codexBackground.size >= MAX_CODEX_BACKGROUND) {
+            // The oldest gives its place to the newest: it is no longer followed, and says so.
+            const [oldestKey, oldest] = this.codexBackground.entries().next().value!;
+            this.codexBackground.delete(oldestKey);
+            this.codexStopRequested.delete(oldest.itemId);
+            background.push(this.codexBackgroundCommand(event, oldest, { status: "lost", exitCode: null, endedAt: event.observed_at ?? null }));
+          }
+          const command = { ...output, itemId: JSON.parse(key)[1] as string };
           this.codexBackground.set(key, command);
           background.push(this.codexBackgroundCommand(event, command));
         }
@@ -177,6 +189,8 @@ export class ProviderLiveDisplay {
             turn: turnId, text: "", truncated: false, redacted: false, unavailable: false,
             command: item.command, cwd: item.cwd, tail: "", tailCut: false, liveHidden: false,
             startedAt: event.observed_at ?? null,
+            // item/started can come before the approval: only a named process proves that the command started.
+            started: typeof item.processId === "string" || typeof item.processId === "number",
           });
         }
         const streamed = item.type === "commandExecution" ? this.commandOutputs.get(key) : undefined;

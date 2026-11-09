@@ -91,6 +91,8 @@ export class BackgroundCommandOutput {
   private readTimer: ReturnType<typeof setTimeout> | null = null;
   private exitTimer: ReturnType<typeof setTimeout> | null = null;
   private reading: Promise<void> = Promise.resolve();
+  /** The first attempt to open the file has settled: an end that comes at once still reads what the file holds. */
+  private opened: Promise<void> = Promise.resolve();
   private offset = 0;
   private raw = "";
   private cut = false;
@@ -100,6 +102,8 @@ export class BackgroundCommandOutput {
   private ended: { status: LiveBackgroundCommandStatus; exitCode: number | null; endedAt: string } | null = null;
   /** The end came from the exit line alone, at this file offset: new output there takes it back to running. */
   private provisionalAt: number | null = null;
+  /** The owner asked to stop the command: an end that the end mark alone shows reads as stopped. */
+  private stopRequested = false;
 
   constructor(private readonly input: BackgroundCommandOutputInput) {}
 
@@ -110,7 +114,7 @@ export class BackgroundCommandOutput {
   /** Publish the running state at once, then follow the file. */
   start(): void {
     this.publish();
-    void this.openFile(0);
+    this.opened = this.openFile(0);
   }
 
   /** The task ended: read what is left, publish the end, and stop. */
@@ -120,13 +124,19 @@ export class BackgroundCommandOutput {
     const endedAt = this.input.now();
     this.ended = { status: "running", exitCode: exitCodeHint, endedAt };
     this.stopWatching();
-    this.reading = this.reading.then(() => this.readNew()).catch(() => undefined).then(() => {
+    const reading = this.reading;
+    this.reading = this.opened.then(() => reading).then(() => this.readNew()).catch(() => undefined).then(() => {
       if (this.closed || !this.ended) return;
       const exitCode = this.exitCodeFromOutput() ?? exitCodeHint;
       this.ended = { status: backgroundEndStatus(status, exitCode), exitCode, endedAt };
       this.publish(true);
       this.close();
     });
+  }
+
+  /** The owner's Stop was sent (true), or did not reach the command (false). */
+  noteStopRequested(requested: boolean): void {
+    this.stopRequested = requested;
   }
 
   /** Stop following without a last event: the agent's runtime ended, and the feed with it. */
@@ -216,7 +226,7 @@ export class BackgroundCommandOutput {
    * new output takes the command back to running, and the agent's own notice still ends it for good.
    */
   private endProvisionally(exitCode: number): void {
-    this.ended = { status: backgroundEndStatus("completed", exitCode), exitCode, endedAt: this.input.now() };
+    this.ended = { status: backgroundEndStatus(this.stopRequested ? "stopped" : "completed", exitCode), exitCode, endedAt: this.input.now() };
     this.provisionalAt = this.offset;
     this.publish(true);
   }

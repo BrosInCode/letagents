@@ -15,6 +15,28 @@ import { CodexRoomTurnObservationDetachedError } from "./room-tools.js";
 import { type CodexThreadResult, codexFoundNotAtLevel } from "./thread-access.js";
 import { permissionFileChanges } from "./permission-requests.js";
 
+/** The newest part of a command's whole output that its end event keeps. */
+const MAX_COMMAND_END_OUTPUT_CHARS = 6_000;
+
+/**
+ * A command's end carries its whole output (`aggregatedOutput`). Above the stream's payload limit an event keeps
+ * only a preview, without its ids, so the end would never reach the command. The end keeps the newest output,
+ * from a line start, and says that it was cut.
+ */
+export function boundedCommandEnd(method: string, params: unknown): { params: unknown; truncated: boolean } {
+  const record = recordValue(params);
+  const item = recordValue(record?.item);
+  const output = item?.aggregatedOutput;
+  if (method !== "item/completed" || item?.type !== "commandExecution" || typeof output !== "string"
+    || output.length <= MAX_COMMAND_END_OUTPUT_CHARS) return { params, truncated: false };
+  const newest = output.slice(-MAX_COMMAND_END_OUTPUT_CHARS);
+  const lineStart = newest.indexOf("\n");
+  return {
+    params: { ...record, item: { ...item, aggregatedOutput: lineStart >= 0 && lineStart < 1_000 ? newest.slice(lineStart + 1) : newest } },
+    truncated: true,
+  };
+}
+
 export abstract class CodexAdapterEvents extends CodexAdapterBase {
   protected consumeNotification(
     handle: CodexProviderHandle,
@@ -62,9 +84,10 @@ export abstract class CodexAdapterEvents extends CodexAdapterBase {
     // textDelta content remains hidden by summarizeCodexRuntimeNotification.
     // An `error` line in the ordered stream names the provider's reason.
     const summary = summarizeCodexRuntimeNotification(notification);
-    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method),
+    const streamed = boundedCommandEnd(notification.method, notification.params);
+    this.publishStream(handle, notification.method, streamed.params, streamKind(notification.method),
       codexErrorActivitySummary(notification) ?? summary.summary,
-      nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
+      nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null, streamed.truncated);
     // Execution status belongs to the item, never to the reusable app-server.
     // Exact turn settlement above remains independent of this runtime state.
     const lifecycle = isCodexExecutionMethod(notification.method) ? null

@@ -55,3 +55,15 @@ test("the live feed knows of the Stop before the provider is asked, and the mark
     assert.deepEqual(marks, expected, answer);
   }
 });
+
+test("a command that the provider no longer knows, while the feed shows it running, ends as lost", async () => {
+  for (const [answer, expected] of [["not_running", ["task-1"]], ["stopping", []], ["failed", []]] as const) {
+    const lost: string[] = [];
+    await stopBackgroundCommand({ entryId: "agent", daemonGeneration: 7, taskId: "task-1" },
+      ports({ stop: async () => answer, endLost: (_entryId, taskId) => { lost.push(taskId); } }));
+    assert.deepEqual(lost, expected, answer);
+  }
+  const lost: string[] = [];
+  await stopBackgroundCommand({ entryId: "agent", daemonGeneration: 7, taskId: "sub-agent" }, ports({ endLost: (_entryId, taskId) => { lost.push(taskId); } }));
+  assert.deepEqual(lost, [], "a command the feed does not show as running is left alone");
+});
