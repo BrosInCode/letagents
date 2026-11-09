@@ -2,7 +2,6 @@ import { formatDate, syncTimeZone, timeZoneEpoch } from "../../../../domain/form
 import { contributionChanges } from "../../../../domain/room-contributions";
 import type { DesktopRoomAgentWork, DesktopRoomMessage, DesktopSupervisorManifestEntry } from "../../../../../../electron/ipc-types";
 import { defaultSupervisedCharter } from "../add-agent/useAddAgentConfiguration";
-import type { PresenceTimelineLine } from "./room-activity";
 
 const compactContinuationWindowMs = 5 * 60 * 1000;
 
@@ -11,8 +10,6 @@ export type MessageTimelineEntry =
   /** The first message an agent started on this Mac was given. Only its starter sees it. */
   | { type: "first-message"; id: string; agent: DesktopSupervisorManifestEntry }
   | { type: "agent-startup"; id: string; entryId: string }
-  /** A quiet "Juniper joined" or "Juniper left" line, seen in this window only. */
-  | { type: "presence"; id: string; line: PresenceTimelineLine }
   | {
       type: "date";
       id: string;
@@ -34,7 +31,6 @@ interface TimelineItem {
   work?: DesktopRoomAgentWork;
   agent?: DesktopSupervisorManifestEntry;
   startupEntryId?: string;
-  presence?: PresenceTimelineLine;
 }
 
 /** An agent start-up row: under the person's first message to it, or at the time it started. */
@@ -67,7 +63,6 @@ export function firstMessageAgents(
 export function buildMessageTimelineEntries(
   messages: readonly DesktopRoomMessage[],
   work: readonly DesktopRoomAgentWork[] = [],
-  presence: readonly PresenceTimelineLine[] = [],
   startups: readonly TimelineAgentStartup[] = [],
   firstMessages: readonly DesktopSupervisorManifestEntry[] = [],
 ): MessageTimelineEntry[] {
@@ -97,9 +92,6 @@ export function buildMessageTimelineEntries(
   // Before the start-up rows, so a first message comes first at the same time.
   for (const agent of firstMessages) {
     ordered.push({ timestamp: agent.createdAt, time: Date.parse(agent.createdAt), id: `first-message:${agent.id}`, agent });
-  }
-  for (const line of presence) {
-    ordered.push({ timestamp: line.timestamp, time: Date.parse(line.timestamp), id: line.id, presence: line });
   }
   const anchoredStartups: Array<{ item: TimelineItem; anchorId: string }> = [];
   if (startups.length) {
@@ -145,11 +137,6 @@ export function buildMessageTimelineEntries(
     }
     if (item.startupEntryId) {
       entries.push({ type: "agent-startup", id: item.id, entryId: item.startupEntryId });
-      previousMessage = null;
-      continue;
-    }
-    if (item.presence) {
-      entries.push({ type: "presence", id: item.id, line: item.presence });
       previousMessage = null;
       continue;
     }

@@ -38,7 +38,6 @@
           :activity-notice="roomActivity.notice.value"
           :steer-offer="steerOffer"
           :steer-disabled="sending"
-          :presence-lines="roomActivity.presenceLines.value"
           @activity-hold="(held) => held ? roomActivity.pause() : roomActivity.resume()"
           @activity-calm-action="runCalmAction"
           @steer="steerComposerDraft"
@@ -377,12 +376,10 @@ provideRoomMessageMotion(() => props.messageNamespace);
 
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
 const roomComposer = ref<InstanceType<typeof RoomComposer> | null>(null);
-// The line above the composer: joins and leaves, GitHub updates, live work,
+// The line above the composer: GitHub updates, live work,
 // typing, and the Steer offer for a draft that names an agent mid-turn.
 const roomActivity = useRoomActivity({
-  presence: () => props.presence,
   scope: () => props.roomIdentifier,
-  ready: () => !props.roomLoading,
   eventPreviews: () => props.composerEventPreviews,
   drafting: () => roomComposer.value?.drafting ?? false,
 });

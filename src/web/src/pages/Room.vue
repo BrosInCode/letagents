@@ -203,7 +203,6 @@
       :replyTo="selectedReply"
       :messages="messages"
       :presence="presence"
-      :presenceReady="presenceLoaded"
       :participants="participants"
       :refreshReachability="refreshRoomReachability"
       :isSignedIn="auth.isSignedIn.value"
@@ -300,7 +299,6 @@ const {
   tasks,
   focusRooms,
   presence,
-  presenceLoaded,
   boardHandoffPresence,
   participants,
   reasoningSessions,
@@ -791,8 +789,7 @@ watch(
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.chat-header) { height: 0; min-height: 0; padding: 0; border: 0; overflow: hidden; }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.room-live-strip),
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.room-history-search),
-.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.message-pin-rail),
-.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.presence-chips) { display: none; }
+.room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.message-pin-rail) { display: none; }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] :deep(.composer) { max-height: var(--room-viewport-height); }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] > :deep(.composer) { padding-block: 2px; }
 .room-shell[data-keyboard-open="true"][data-compact-composer="true"] > :deep(.composer .composer-card) { padding-block: 2px; }

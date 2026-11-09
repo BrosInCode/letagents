@@ -7,22 +7,17 @@ import { renderToString } from "@vue/server-renderer";
 import { createServer } from "vite";
 
 import {
-  ACTIVITY_JOIN_MERGE_MS,
   ACTIVITY_NOTICE_LIMIT,
   ACTIVITY_NOTICE_MS,
   ACTIVITY_RESUME_GRACE_MS,
   createActivityNoticeQueue,
   elapsedLabel,
-  joinedNames,
   pickActivityPill,
-  presenceTimelineText,
   type ActivityNotice,
 } from "../src/components/desktop/content/room-chat/room-activity";
 import { orbStateForActivity, orbStateForTurn, orbStateForWork } from "../src/domain/activity-orb-state";
 import { ACTIVITY_ORB_STILL_SECONDS, createActivityOrbClock, drawActivityOrb } from "../../../../shared/ui/activity-orb";
-import { buildMessageTimelineEntries } from "../src/components/desktop/content/room-chat/timeline";
 import { composerDrafting, type ComposerEventPreview } from "../src/components/desktop/content/room-chat/composer-event-preview";
-import type { PresenceChipAgent } from "../src/domain/presence-chips";
 
 /** A clock the test moves by hand. */
 function fakeTimers() {
@@ -47,33 +42,25 @@ function fakeTimers() {
   };
 }
 
-const agent = (name: string, ideLabel: string | null = "Claude Code"): PresenceChipAgent =>
-  ({ key: name.toLowerCase(), displayName: name, ideLabel, agentKey: null });
-const join = (name: string, id = `join:${name}`): ActivityNotice => ({ kind: "join", id, agents: [agent(name)] });
-const leave = (name: string): ActivityNotice => ({ kind: "leave", id: `leave:${name}`, agent: agent(name) });
 const preview = (id: string): ComposerEventPreview => ({
   id, kind: "pull-request", tone: "violet", kindLabel: "Pull request", statusLabel: "opened", headline: "PR #1744 opened by Kestrel",
   repositoryLabel: "letagents", refLabel: null, numberLabel: "#1744", stats: { additions: "120", deletions: "8" }, actionLabel: "View", url: null,
 });
 
+const github = (id: string): ActivityNotice => ({ kind: "github", id: `github:${id}`, preview: preview(id) });
+
 function queue() {
   const timers = fakeTimers();
   let changes = 0;
   const notices = createActivityNoticeQueue(timers, () => { changes += 1; });
-  const shown = () => {
-    const current = notices.current();
-    if (!current) return null;
-    if (current.kind === "join") return `${joinedNames(current.agents)} joined`;
-    if (current.kind === "leave") return `${current.agent.displayName} left`;
-    return current.id;
-  };
+  const shown = () => notices.current()?.id ?? null;
   return { timers, notices, shown, changes: () => changes };
 }
 
 test("the line shows one pill: Steer first, then a notice, then live work, then typing", () => {
   const work = [{ id: "a", displayName: "Juniper" }];
   const steer = { entryId: "a", displayName: "Juniper" };
-  const notice = join("Kestrel");
+  const notice = github("msg_2");
   assert.equal(pickActivityPill({ steer, notice, work, typing: ["Emmy"] })?.kind, "steer");
   assert.equal(pickActivityPill({ steer: null, notice, work, typing: ["Emmy"] })?.kind, "notice");
   assert.equal(pickActivityPill({ steer: null, notice: null, work, typing: ["Emmy"] })?.kind, "live");
@@ -83,72 +70,48 @@ test("the line shows one pill: Steer first, then a notice, then live work, then 
 
 test("a notice shows for its time, then the next one, then the line is free again", () => {
   const { timers, notices, shown } = queue();
-  notices.push(leave("Juniper"));
-  notices.push(leave("Kestrel"));
-  assert.equal(shown(), "Juniper left", "the first notice shows at once");
+  notices.push(github("msg_1"));
+  notices.push(github("msg_2"));
+  assert.equal(shown(), "github:msg_1", "the first notice shows at once");
   timers.advance(ACTIVITY_NOTICE_MS - 1);
-  assert.equal(shown(), "Juniper left");
+  assert.equal(shown(), "github:msg_1");
   timers.advance(1);
-  assert.equal(shown(), "Kestrel left", "one at a time, in order");
+  assert.equal(shown(), "github:msg_2", "one at a time, in order");
   timers.advance(ACTIVITY_NOTICE_MS);
   assert.equal(shown(), null);
 });
 
-test("joins close together become one line: queued joins merge, and a join soon after a shown join adds to it", () => {
-  const { timers, notices, shown } = queue();
-  notices.push(leave("Marlow"));
-  notices.push(join("Juniper"));
-  notices.push(join("Kestrel"));
-  timers.advance(ACTIVITY_NOTICE_MS);
-  assert.equal(shown(), "Juniper and Kestrel joined", "two waiting joins are one notice");
-
-  timers.advance(ACTIVITY_JOIN_MERGE_MS - 1);
-  notices.push(join("Sable"));
-  assert.equal(shown(), "Juniper and 2 others joined", "a join just after the line appeared joins it in place");
-  assert.equal(notices.waiting().length, 0);
-  timers.advance(ACTIVITY_NOTICE_MS - 1);
-  assert.equal(shown(), "Juniper and 2 others joined", "the longer line gets its own full time");
-
-  timers.advance(1);
-  notices.push(join("Wren"));
-  timers.advance(ACTIVITY_JOIN_MERGE_MS);
-  notices.push(join("Birch"));
-  assert.equal(shown(), "Wren joined", "a later join waits for its own line");
-  timers.advance(ACTIVITY_NOTICE_MS);
-  assert.equal(shown(), "Birch joined");
-});
-
-test("an agent has one waiting notice: a leave replaces its waiting join, and the queue keeps the newest", () => {
+test("waiting notices deduplicate by ID and keep only the newest entries", () => {
   const { notices } = queue();
-  notices.push(leave("Marlow"));
-  notices.push(join("Juniper"));
-  notices.push(leave("Juniper"));
-  assert.deepEqual(notices.waiting().map(item => item.id), ["leave:Juniper"]);
-  for (let index = 0; index < ACTIVITY_NOTICE_LIMIT + 3; index += 1) notices.push(leave(`Agent${index}`));
+  notices.push(github("shown"));
+  notices.push(github("duplicate"));
+  notices.push(github("duplicate"));
+  assert.deepEqual(notices.waiting().map(item => item.id), ["github:duplicate"]);
+  for (let index = 0; index < ACTIVITY_NOTICE_LIMIT + 3; index += 1) notices.push(github(`msg_${index}`));
   assert.equal(notices.waiting().length, ACTIVITY_NOTICE_LIMIT);
-  assert.equal(notices.waiting().at(-1)?.id, `leave:Agent${ACTIVITY_NOTICE_LIMIT + 2}`);
+  assert.equal(notices.waiting().at(-1)?.id, `github:msg_${ACTIVITY_NOTICE_LIMIT + 2}`);
 });
 
 test("hover holds a notice; its time left runs again when the hover ends, with a short grace if it had run out", () => {
   const { timers, notices, shown } = queue();
-  notices.push(leave("Juniper"));
-  notices.push(leave("Kestrel"));
+  notices.push(github("msg_1"));
+  notices.push(github("msg_2"));
   timers.advance(1_000);
   notices.pause();
   timers.advance(60_000);
-  assert.equal(shown(), "Juniper left", "a held notice does not leave");
+  assert.equal(shown(), "github:msg_1", "a held notice does not leave");
   notices.resume();
   timers.advance(ACTIVITY_NOTICE_MS - 1_001);
-  assert.equal(shown(), "Juniper left", "it keeps the 3 s it had left");
+  assert.equal(shown(), "github:msg_1", "it keeps the 3 s it had left");
   timers.advance(1);
-  assert.equal(shown(), "Kestrel left");
+  assert.equal(shown(), "github:msg_2");
 
   timers.advance(ACTIVITY_NOTICE_MS - 1);
   notices.pause();
   timers.advance(10_000);
   notices.resume();
   timers.advance(ACTIVITY_RESUME_GRACE_MS - 1);
-  assert.equal(shown(), "Kestrel left", "an almost-expired notice stays a moment after the pointer leaves");
+  assert.equal(shown(), "github:msg_2", "an almost-expired notice stays a moment after the pointer leaves");
   timers.advance(1);
   assert.equal(shown(), null);
 });
@@ -158,8 +121,8 @@ test("a GitHub update stays off the line while someone writes, and leaves when i
   notices.setEligible(item => item.kind !== "github");
   notices.push({ kind: "github", id: "github:msg_1", preview: preview("msg_1") });
   assert.equal(shown(), null, "hidden while drafting");
-  notices.push(leave("Juniper"));
-  assert.equal(shown(), "Juniper left", "other notices still show");
+  notices.push({ kind: "steered", id: "steered:1", displayName: "Juniper" });
+  assert.equal(shown(), "steered:1", "other notices still show");
   timers.advance(ACTIVITY_NOTICE_MS);
   assert.equal(shown(), null);
   notices.setEligible(() => true);
@@ -176,11 +139,11 @@ test("a GitHub update stays off the line while someone writes, and leaves when i
 
 test("a Steer confirmation shows before anything else, and the notice it covered shows again after it", () => {
   const { timers, notices, shown } = queue();
-  notices.push(leave("Marlow"));
+  notices.push(github("msg_3"));
   notices.pushFirst({ kind: "steered", id: "steered:1", displayName: "Juniper" });
   assert.equal(shown(), "steered:1");
   timers.advance(ACTIVITY_NOTICE_MS);
-  assert.equal(shown(), "Marlow left");
+  assert.equal(shown(), "github:msg_3");
 
   // Two Steers in a row: the older confirmation is not shown again.
   timers.advance(ACTIVITY_NOTICE_MS);
@@ -305,70 +268,43 @@ test("each orb state draws dots in the ink colour only, with one colour per fram
   assert.ok([...alphas].every((alpha) => alpha >= 0 && alpha <= 1));
 });
 
-test("joins and leaves leave a quiet line in the timeline, in time order", () => {
-  const messages = [
-    { id: "m1", timestamp: "2026-10-26T10:00:00.000Z", sender: "Emmy", text: "hi", attachments: [], source: "browser" },
-    { id: "m2", timestamp: "2026-10-26T10:02:00.000Z", sender: "Emmy", text: "again", attachments: [], source: "browser" },
-  ] as never[];
-  const lines = [{ id: "presence:j", timestamp: "2026-10-26T10:01:00.000Z", kind: "connected" as const, text: presenceTimelineText("connected", agent("Juniper")) }];
-  const entries = buildMessageTimelineEntries(messages, [], lines);
-  assert.deepEqual(entries.map(entry => entry.type), ["date", "message", "presence", "message"]);
-  const presence = entries[2]!;
-  assert.equal(presence.type === "presence" && presence.line.text, "Juniper joined · Claude Code");
-  assert.equal(presenceTimelineText("disconnected", agent("Juniper")), "Juniper left");
-  assert.equal(presenceTimelineText("connected", agent("Wren", null)), "Wren joined");
-});
-
-test("joinedNames and elapsedLabel read naturally", () => {
-  assert.equal(joinedNames([agent("A")]), "A");
-  assert.equal(joinedNames([agent("A"), agent("B")]), "A and B");
-  assert.equal(joinedNames([agent("A"), agent("B"), agent("C")]), "A and 2 others");
+test("elapsedLabel reads naturally", () => {
   const start = "2026-10-26T10:00:00.000Z";
   assert.equal(elapsedLabel(start, Date.parse(start) + 8_400), "8s");
   assert.equal(elapsedLabel(start, Date.parse(start) + 125_000), "2m");
   assert.equal(elapsedLabel("not a time", 0), "");
 });
 
-test("useRoomActivity: presence changes become notices and timeline lines; a room change starts over", async () => {
+test("useRoomActivity: GitHub notices respect drafting, confirmations take priority, and changing rooms clears them", async () => {
   const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
   try {
     const { useRoomActivity } = await vite.ssrLoadModule("/renderer/src/composables/useRoomActivity.ts");
-    const chips = await vite.ssrLoadModule("/renderer/src/domain/presence-chips.ts");
-    const presence = ref<unknown[]>([]);
     const scope = ref("room-a");
     const drafting = ref(false);
     const previews = ref<ComposerEventPreview[]>([]);
-    const realNow = Date.now;
-    let now = 10_000_000;
-    Date.now = () => now;
     const run = effectScope();
     try {
       const activity = run.run(() => useRoomActivity({
-        presence: () => presence.value, scope: () => scope.value, ready: () => true,
+        scope: () => scope.value,
         eventPreviews: () => previews.value, drafting: () => drafting.value,
       }))!;
-      const worker = (name: string) => ({ sessionKind: "worker", sourceFlags: ["delivery"], freshness: "active", displayName: name, actorLabel: name, ideLabel: "Codex", agentKey: null });
-      now += chips.PRESENCE_CHIP_SETTLE_MS + 1;
-      presence.value = [worker("Juniper"), worker("Kestrel")];
-      await nextTick();
-      assert.equal(activity.notice.value?.kind, "join");
-      assert.equal(joinedNames((activity.notice.value as { agents: PresenceChipAgent[] }).agents), "Juniper and Kestrel");
-      assert.deepEqual(activity.presenceLines.value.map((line: { text: string }) => line.text), ["Juniper joined · Codex", "Kestrel joined · Codex"]);
-
+      assert.equal(activity.notice.value, null);
       drafting.value = true;
       await nextTick();
       previews.value = [preview("msg_9")];
       await nextTick();
-      assert.equal(activity.notice.value?.kind, "join", "the update waits behind the shown join");
-
+      assert.equal(activity.notice.value, null, "GitHub updates wait while drafting");
+      drafting.value = false;
+      await nextTick();
+      assert.equal(activity.notice.value?.kind, "github");
+      activity.confirmSteer("Juniper");
+      assert.equal(activity.notice.value?.kind, "steered");
+      activity.calm({ icon: "check", lead: "Approved ", name: "Ada" });
+      assert.equal(activity.notice.value?.kind, "calm");
       scope.value = "room-b";
       await nextTick();
       assert.equal(activity.notice.value, null);
-      assert.deepEqual(activity.presenceLines.value, []);
-    } finally {
-      run.stop();
-      Date.now = realNow;
-    }
+    } finally { run.stop(); }
   } finally { await vite.close(); }
 });
 

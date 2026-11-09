@@ -34,12 +34,6 @@
             @setup="emit('open-add-agent')"
           />
         </template>
-        <p
-          v-else-if="entry.type === 'presence'"
-          class="room-presence-line"
-          :data-kind="entry.line.kind"
-          data-testid="room-presence-line"
-        ><span aria-hidden="true"></span>{{ entry.line.text }}</p>
         <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
         <component :is="entry.type === 'github-group' ? RoomGitHubUpdates : PlainTimelineRow" v-else lazy-history :row-limit="githubGroupRowLimit" :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : singleMessageList(entry.message)" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEvent" @layout-start="preserveScrollAnchorOnNextLayout(260)" @layout-settled="updateScrollState">
         <template #default="{ message, history }">
@@ -172,7 +166,7 @@ import { parseGitHubEvent } from "../desktop-chat-message/github-event";
 import { useRoomMessageMotion, useRoomWorkHandoff } from "../../../../../../../../shared/ui/useRoomMessageMotion";
 import { provide } from "vue";
 import RoomActivityLine from "./RoomActivityLine.vue";
-import type { ActivityNotice, ActivitySteerOffer, CalmNoticeActionKey, PresenceTimelineLine } from "./room-activity";
+import type { ActivityNotice, ActivitySteerOffer, CalmNoticeActionKey } from "./room-activity";
 import type { ComposerEventPreview } from "./composer-event-preview";
 import { roomUnread, unreadRevealKey } from "../../../../composables/roomUnread";
 import { unreadMenuKey, useUnreadTimeline } from "../../../../../../../../shared/room-unread-client";
@@ -260,13 +254,11 @@ const props = defineProps<{
   localAgentWork: ManagedAgentWorkIndicator[];
   /** People typing in this room now; the lowest-priority pill on the activity line. */
   typingNames?: readonly string[];
-  /** The short notice on the activity line now (a join, a leave, a GitHub update). */
+  /** A GitHub update or confirmation on the activity line. */
   activityNotice?: ActivityNotice | null;
   /** A draft that names an agent mid-turn: the line offers Steer. */
   steerOffer?: ActivitySteerOffer | null;
   steerDisabled?: boolean;
-  /** Quiet join and leave lines in the timeline. */
-  presenceLines?: readonly PresenceTimelineLine[];
   participants?: DesktopParticipantSummary[];
   presence?: DesktopAgentPresence[];
   supervisorEntries?: DesktopSupervisorManifestEntry[];
@@ -447,7 +439,7 @@ const firstMessages = computed<DesktopSupervisorManifestEntry[]>((previous) => {
   });
   return same ? previous! : next;
 });
-const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork, props.presenceLines, timelineStartups.value,
+const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimelineEntries(props.messages, props.roomAgentWork, timelineStartups.value,
   firstMessages.value),
   entry => entry.type === 'message' ? entry.message : null, message => message.source === 'github' ? parseGitHubEvent(message) : null, props.messageNamespace));
 // Bounded mount window (see message-window.ts): only a contiguous range of
@@ -747,11 +739,6 @@ const messageMotion = useRoomMessageMotion({
   scrollToLatest: () => scrollToBottom("auto"),
   messages: motionMessages,
   onInterrupt: () => workHandoff.clear(),
-});
-
-// A join or leave line is added at the bottom: a reader there stays with the latest.
-watch(() => props.presenceLines?.length ?? 0, (count, previous) => {
-  if (count > previous && isScrolledToBottom && !shouldRestoreInitialScroll) followLatestAfterLayout();
 });
 
 // A no-reply turn can add a contribution without adding a chat message.
