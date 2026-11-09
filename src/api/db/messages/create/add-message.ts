@@ -20,6 +20,7 @@ import { routeMessageToActiveSessions } from "./receipt-routing.js";
 import { routeAddressedMessage } from "./addressed.js";
 import { markAnsweredReceiptsReplied } from "./reply-receipts.js";
 import { enqueueWakeWebhooksForMessageTx } from "../../../wake-rules/webhook-enqueue.js";
+import { wakeJobQueue, type JobQueue } from "../../../server/job-queue-wakes.js";
 
 export async function addMessageWithCreateStatus(
   roomId: string,
@@ -37,6 +38,8 @@ export async function addMessageWithCreateStatus(
   const clientMessageId = normalizeClientMessageId(options?.client_message_id);
   const repliedReceiptTargets = new Set<number>();
   const releasedReplyTurns: ReleasedReplyTurn[] = [];
+  // Job queues this send wrote due rows to; their workers are woken after commit.
+  const queuesToWake = new Set<JobQueue>();
   // Conversation routing (Jev) never runs inside the send: the plan is
   // captured in the transaction and executed after commit, so the human's
   // send returns as fast as the deterministic ladder alone.
@@ -55,8 +58,9 @@ export async function addMessageWithCreateStatus(
     if ("replay" in inserted) return inserted.replay;
     const { createdMessage } = inserted;
     await attachMessageUploads(tx, roomId, createdMessage, attachmentRefs, options);
-    const { createdMessageIsPromptOnly, addressedTo, notificationEnqueueDurationMs } =
+    const { createdMessageIsPromptOnly, addressedTo, notificationEnqueueDurationMs, queuedPushCount } =
       await finishCreatedMessage(tx, roomId, sender, options, promptKind, createdMessage);
+    if (queuedPushCount > 0) queuesToWake.add("desktop_push");
 
     const routing = await resolveMessageRoutingContext(tx, roomId, createdMessage, addressedTo, replyToNumber);
     const {
@@ -70,11 +74,12 @@ export async function addMessageWithCreateStatus(
     let mentionNotices: readonly MessageMentionNotice[] = [];
     let routedNoWake: MessageNoWake | null = null;
     let jevPending = false;
+    let jevJobQueued = false;
 
     if (activeSessions.length > 0) {
       ({
         receiptCount, recipientAgentKeys, recipientAgentTargets, mentionNotices,
-        noWake: routedNoWake, jevPending,
+        noWake: routedNoWake, jevPending, jevJobQueued,
       } = await routeMessageToActiveSessions(
         tx, roomId, createdMessage, createdMessageIsPromptOnly, routing, releasedReplyTurns,
       ));
@@ -113,6 +118,8 @@ export async function addMessageWithCreateStatus(
       activeSessions,
       routingMessage: routing.messageForRouting,
     });
+    if (jevJobQueued) queuesToWake.add("jev_routing");
+    if (wakeRuleDeliveries > 0) queuesToWake.add("wake_delivery");
 
     // A human's message that woke nobody keeps the reason for its sender.
     // While deferred routing is pending the column stays empty; the routing
@@ -153,6 +160,7 @@ export async function addMessageWithCreateStatus(
   });
   // Only after commit, and only the released agents' workers.
   queueReplyTurnWakes(releasedReplyTurns);
+  wakeJobQueue(...queuesToWake);
   if (repliedReceiptTargets.size > 0) {
     // Dynamic import avoids a module cycle; room-level so the shared stream
     // never enumerates ids that may be concealed from some participants.
