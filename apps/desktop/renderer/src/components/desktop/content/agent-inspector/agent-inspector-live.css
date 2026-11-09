@@ -61,13 +61,18 @@
 .agent-live-action-detail { font-family: var(--font-mono); font-size: 10.5px; line-height: 1.6; color: var(--live-muted); overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .agent-live-action-status { flex-shrink: 0; padding-top: 4px; font-size: 10px; color: var(--live-muted); max-width: 76px; text-align: right; line-height: 1.5; }
 .agent-live-chevron { flex-shrink: 0; margin-top: 5px; color: var(--live-muted); }
-.agent-live-disclosure[open] > summary > .agent-live-chevron { transform: rotate(90deg); }
+.agent-live-disclosure[open] > summary > .agent-live-chevron,
+.agent-live-background-item[open] > summary > .agent-live-chevron { transform: rotate(90deg); }
 .agent-live-action[data-current="true"] > :is(.agent-live-disclosure, .agent-live-row) { border-radius: 10px; background: var(--blue-dim); outline: 1px solid color-mix(in srgb, var(--live-blue) 25%, transparent); }
 .agent-live-action[data-current="true"] :is(.agent-live-icon,.agent-live-action-status) { color: var(--live-blue); }
+/* A running command that shows its output: one card holds the row and the output. */
+.agent-live-action[data-current="true"]:has(> .agent-live-tail) { border-radius: 10px; background: var(--blue-dim); outline: 1px solid color-mix(in srgb, var(--live-blue) 25%, transparent); }
+.agent-live-action[data-current="true"]:has(> .agent-live-tail) > .agent-live-disclosure { background: transparent; outline-color: transparent; }
 .agent-live-action[data-status="error"] :is(.agent-live-icon,.agent-live-action-status),
 .agent-live-action[data-status="failed"] :is(.agent-live-icon,.agent-live-action-status) { color: var(--red-text); }
 .agent-live-action[data-status="interrupted"] :is(.agent-live-icon,.agent-live-action-status) { color: var(--amber-text); }
 .agent-live-action[data-result="true"] :is(.agent-live-icon,.agent-live-action-status) { color: var(--green-text); }
+.agent-live-action[data-status="background"] .agent-live-action-status { color: var(--live-blue); }
 .agent-live-error { margin: 3px 0 5px 33px; padding: 8px 10px; border-radius: 7px; background: var(--red-dim); color: var(--red-text); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 .agent-live-error p { margin: 0; white-space: pre-line; }
 .agent-live-error .agent-live-caption { margin-top: 8px; color: inherit; }
@@ -78,6 +83,39 @@
 .agent-live-action-body > .agent-live-caption + .agent-live-caption { margin-top: 8px; }
 .agent-live-action-body pre { margin: 5px 0 10px; font: 11px/1.6 var(--font-mono); color: var(--text-secondary); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow: auto; }
 .agent-live-action-body pre:last-child { margin-bottom: 0; }
+.agent-live-body-link { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; margin-top: 6px; padding: 0 10px; border: 1px solid var(--live-border); border-radius: 7px; background: transparent; color: var(--text); font: 560 11px var(--font-sans); cursor: pointer; }
+
+/* A running shell command shows its newest output lines under its row, while it runs. */
+.agent-live-tail { margin: -1px 3px 0 33px; }
+.agent-live-tail-screen { padding: 7px 10px 6px; overflow: hidden; border-radius: 7px; background: var(--bg); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--live-blue) 22%, var(--live-border)); font: 11px/1.6 var(--font-mono); color: var(--text-secondary); }
+.agent-live-tail-line { display: block; min-height: 1.6em; overflow: hidden; white-space: pre; text-overflow: ellipsis; }
+.agent-live-tail-note { margin: 0; padding: 2px 0; color: var(--live-muted); font-size: 11px; line-height: 1.6; }
+.agent-live-tail-meta { display: flex; align-items: center; gap: 8px; min-height: 30px; padding: 2px 0 3px; color: var(--live-muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+.agent-live-tail-meta button { margin-left: auto; min-height: 26px; padding: 0 7px; border: 0; border-radius: 5px; background: transparent; color: var(--text-secondary); font: 560 10.5px var(--font-sans); cursor: pointer; }
+
+/* Commands that the agent started in the background: their newest line, and their output when opened. */
+.agent-live-background { padding: 10px 0 4px; border-bottom: 1px solid var(--border); }
+.agent-live-background-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding-bottom: 6px; }
+.agent-live-background-heading h3 { margin: 0; font-size: 12px; font-weight: 600; color: var(--text); }
+.agent-live-background-heading > span { font-size: 11px; color: var(--live-muted); font-variant-numeric: tabular-nums; }
+.agent-live-background-list { max-height: min(55vh, 460px); overflow-y: auto; overscroll-behavior: contain; }
+.agent-live-background-item { border-radius: 9px; }
+.agent-live-background-item[open] { background: var(--accent-dim); }
+.agent-live-background-item > summary { display: flex; align-items: flex-start; gap: 11px; min-height: 48px; padding: 6px 4px 6px 0; border-radius: 9px; cursor: pointer; }
+.agent-live-background-icon { display: inline-flex; width: 21px; height: 24px; flex: 0 0 21px; align-items: center; justify-content: center; color: var(--live-muted); }
+.agent-live-background-item[data-status="running"] .agent-live-background-icon { color: var(--live-blue); }
+.agent-live-background-copy { display: flex; flex: 1; min-width: 0; flex-direction: column; gap: 2px; padding-top: 2px; }
+.agent-live-background-command { overflow: hidden; color: var(--text); font: 560 11.5px/1.55 var(--font-mono); white-space: nowrap; text-overflow: ellipsis; }
+.agent-live-background-last { overflow: hidden; color: var(--live-muted); font: 10.5px/1.6 var(--font-mono); white-space: nowrap; text-overflow: ellipsis; }
+.agent-live-background-item[open] .agent-live-background-last { visibility: hidden; }
+.agent-live-background-state { display: inline-flex; flex-shrink: 0; align-items: center; gap: 6px; padding-top: 4px; color: var(--live-muted); font-size: 10.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.agent-live-background-item[data-status="running"] .agent-live-background-state { color: var(--live-blue); }
+.agent-live-background-item[data-status="failed"] .agent-live-background-state { color: var(--red-text); }
+.agent-live-background-pulse { width: 6px; height: 6px; flex: 0 0 6px; border-radius: 50%; background: currentColor; }
+.agent-live-background-body { margin: 0 6px 8px 32px; }
+.agent-live-background-output { max-height: min(220px, 30vh); margin: 0; overflow: auto; padding: 9px 11px; border-radius: 7px; background: var(--bg); box-shadow: inset 0 0 0 1px var(--live-border); color: var(--text-secondary); font: 11px/1.6 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-live-background-foot { display: flex; justify-content: space-between; gap: 10px; padding: 7px 2px 2px; color: var(--live-muted); font-size: 10.5px; font-variant-numeric: tabular-nums; }
+
 .agent-live-group-items { list-style: none; margin: 0; padding: 0; }
 .agent-live-group-items li + li { border-top: 1px solid var(--border); }
 .agent-live-group-items summary { display: flex; gap: 8px; align-items: center; justify-content: space-between; min-height: 44px; cursor: pointer; font: 11px/1.6 var(--font-mono); overflow-wrap: anywhere; }
@@ -87,6 +125,9 @@
 .agent-live-empty p { max-width: 280px; margin: 0; color: var(--text); font-size: 13px; line-height: 1.6; }
 .agent-live-empty > span { max-width: 260px; font-size: 12px; line-height: 1.6; }
 .agent-live-follow-bar { position: sticky; bottom: 0; z-index: 3; margin-top: auto; min-height: 48px; display: flex; justify-content: space-between; align-items: center; gap: 10px; background: var(--live-surface); border-top: 1px solid var(--border); color: var(--live-muted); font-size: 11px; }
+/* The owner's footer stays at the bottom of the panel: commands that run in the background, then the follow bar. */
+.agent-live-footer { position: sticky; bottom: 0; z-index: 3; margin-top: auto; background: var(--live-surface); border-top: 1px solid var(--border); }
+.agent-live-footer > .agent-live-follow-bar { position: static; margin-top: 0; border-top: 0; background: transparent; }
 .agent-live-follow-bar button { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 10px; border: 0; border-radius: 6px; color: var(--text-secondary); background: transparent; cursor: pointer; font: 500 11px var(--font-sans); }
 .agent-live-following { display: inline-flex; align-items: center; gap: 6px; }
 .agent-live-following > span { width: 5px; height: 5px; border-radius: 50%; background: var(--live-blue); }
@@ -95,6 +136,8 @@
   .agent-live-disclosure > summary:hover, .agent-live-group-items summary:hover { background: var(--accent-dim); }
   .agent-inspector-live-trigger summary:hover, .agent-inspector-shared-live-request:hover { color: var(--text); }
   .agent-live-follow-bar button:hover { background: var(--accent-hover); color: var(--text); }
+  .agent-live-background-item > summary:hover { background: var(--accent-dim); }
+  :is(.agent-live-tail-meta button, .agent-live-body-link):hover { background: var(--accent-hover); color: var(--text); }
 }
 @media (max-width: 380px) {
   .agent-live-disclosure > summary, .agent-live-row { gap: 7px; }
@@ -108,6 +151,11 @@
 .agent-live-action :is(.agent-live-icon,.agent-live-action-status) { transition: color 160ms ease; }
 .agent-live-action > :is(.agent-live-disclosure, .agent-live-row) { transition: background-color 180ms ease, outline-color 180ms ease; }
 .agent-live-now[data-running="true"] .agent-live-state > span { animation: agent-live-breathe 1800ms ease-in-out infinite; }
+.agent-live-background-pulse { animation: agent-live-breathe 1800ms ease-in-out infinite; }
+.agent-live-tail { animation: agent-live-arrive 180ms var(--inspector-ease-out, ease-out); }
+.agent-live-footer .agent-live-background { animation: agent-live-arrive 200ms var(--inspector-ease-out, ease-out); }
+:is(.agent-live-tail-meta button, .agent-live-body-link) { transition: background-color 140ms ease, transform 120ms var(--inspector-ease-out, ease-out); }
+:is(.agent-live-tail-meta button, .agent-live-body-link):active { transform: scale(0.97); }
 .agent-live-follow-bar button { transition: background-color 140ms ease, transform 120ms var(--inspector-ease-out, ease-out); }
 .agent-live-follow-bar button:active { transform: translateY(1px); }
 @keyframes agent-live-arrive { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }

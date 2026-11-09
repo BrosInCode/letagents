@@ -172,7 +172,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       sequence: number;
       stream_generation: number;
       dropped_events: number;
-      events: Array<{ sequence: number; observed_at: string; kind: string; method: string; summary: string | null; payload: unknown }>;
+      events: Array<{ sequence: number; observed_at: string; kind: string; method: string; summary: string | null; payload: unknown; latest_key?: string }>;
       ended: boolean;
     }>("supervisor.watch_agent_stream", {
       entry_id: input.entryId,
@@ -191,6 +191,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
         method: String(event.method ?? ""),
         summary: typeof event.summary === "string" ? event.summary : null,
         payload: event.payload,
+        ...(typeof event.latest_key === "string" && event.latest_key ? { latestKey: event.latest_key } : {}),
       })),
     };
   }

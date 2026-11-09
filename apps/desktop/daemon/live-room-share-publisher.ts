@@ -425,9 +425,10 @@ export class LiveRoomSharePublisher {
     let feedShape: string;
     try {
       const feed = this.ports.feed.retainedAfter(entryId, turn.startSequence);
-      // Feed events are appended with new sequences and never changed, so the
-      // same turn, end, window and dropped flag give the same snapshot as the
-      // one already sent. Skip building it again.
+      // Feed events are appended with new sequences and never changed (latest
+      // values, which change, are not in this list), so the same turn, end,
+      // window and dropped flag give the same snapshot as the one already
+      // sent. Skip building it again.
       feedShape = [turn.inboxItemId, turn.endedAt ?? "", feed.dropped, feed.events.length,
         feed.events[0]?.sequence ?? "", feed.events.at(-1)?.sequence ?? ""].join("|");
       if (state.sentKey !== null && state.sentShape === feedShape

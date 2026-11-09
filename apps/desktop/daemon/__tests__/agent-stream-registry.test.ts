@@ -188,6 +188,106 @@ test("watch normalizes its timeout and suppresses polling during handoff", async
   });
 });
 
+test("a latest value takes the place of the one before it and carries its key", async () => {
+  let now = 1_000;
+  const registry = new AgentStreamRegistry({ now: () => now, latestIntervalMs: 0 });
+  registry.push("agent", activity(1));
+  registry.pushLatest("agent", "output:call-1", activity(2));
+  registry.push("agent", activity(3));
+  now += 1;
+  registry.pushLatest("agent", "output:call-1", activity(4));
+
+  const batch = await registry.watch({ entryId: "agent", afterSequence: 0, waitMs: 0 });
+  assert.deepEqual(batch.events.map((event) => [event.sequence, event.latest_key ?? null]), [[1, null], [3, null], [4, "output:call-1"]]);
+  assert.equal(batch.dropped_events, 0, "a replaced latest value is not a loss");
+  assert.equal(registry.retainedAfter("agent", 0).dropped, false);
+});
+
+test("latest values are paced per key and the last value of a burst is always sent", async () => {
+  let now = 0;
+  const timers: Array<{ callback: () => void; delay: number }> = [];
+  const registry = new AgentStreamRegistry({
+    now: () => now,
+    latestIntervalMs: 250,
+    setTimeout: ((callback: () => void, delay?: number) => {
+      timers.push({ callback, delay: delay ?? 0 });
+      return timers.length as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+    clearTimeout: (() => undefined) as typeof clearTimeout,
+  });
+  registry.pushLatest("agent", "output:a", activity(1));
+  now = 50;
+  registry.pushLatest("agent", "output:a", activity(2));
+  registry.pushLatest("agent", "output:a", activity(3));
+  registry.pushLatest("agent", "output:b", activity(10));
+
+  let batch = await registry.watch({ entryId: "agent", afterSequence: 0, waitMs: 0 });
+  assert.deepEqual(batch.events.map((event) => (event.payload as { index: number }).index), [1, 10], "the first value of a key goes at once");
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0]!.delay, 200, "the next value waits for the rest of the interval");
+
+  now = 250;
+  timers[0]!.callback();
+  batch = await registry.watch({ entryId: "agent", afterSequence: 0, waitMs: 0 });
+  assert.deepEqual(batch.events.map((event) => (event.payload as { index: number }).index), [10, 3], "only the last value of the burst replaces the first");
+
+  now = 300;
+  registry.pushLatest("agent", "output:a", activity(4));
+  registry.dropLatest("agent", "output:a");
+  timers.at(-1)!.callback();
+  batch = await registry.watch({ entryId: "agent", afterSequence: 0, waitMs: 0 });
+  assert.deepEqual(batch.events.map((event) => (event.payload as { index: number }).index), [10, 3], "a dropped value never arrives");
+
+  registry.pushLatest("agent", "output:a", activity(5), { immediate: true });
+  batch = await registry.watch({ entryId: "agent", afterSequence: 0, waitMs: 0 });
+  assert.deepEqual(batch.events.map((event) => (event.payload as { index: number }).index), [10, 5], "an immediate value skips the pace");
+});
+
+test("the size limit keeps a sticky latest value and still reports what it evicted", async () => {
+  const registry = new AgentStreamRegistry({ bufferLimit: 3, latestIntervalMs: 0 });
+  registry.pushLatest("agent", "background:task-1", activity(1), { sticky: true });
+  for (let index = 2; index <= 6; index += 1) registry.push("agent", activity(index));
+
+  const batch = await registry.watch({ entryId: "agent", afterSequence: 0, waitMs: 0 });
+  assert.deepEqual(batch.events.map((event) => event.sequence), [1, 5, 6]);
+  assert.equal(batch.dropped_events, 3, "events 2, 3 and 4 were evicted; the kept background value was not");
+  assert.equal(registry.retainedAfter("agent", 0).dropped, true);
+
+  registry.pushLatest("agent", "background:task-1", activity(7), { sticky: true, immediate: true });
+  const replaced = await registry.watch({ entryId: "agent", afterSequence: 0, waitMs: 0 });
+  assert.deepEqual(replaced.events.map((event) => event.sequence), [5, 6, 7]);
+});
+
+test("the room's read of the feed leaves out latest values, so a kept background value cannot hide an eviction", () => {
+  const registry = new AgentStreamRegistry({ bufferLimit: 3, latestIntervalMs: 0 });
+  registry.pushLatest("agent", "background:task-1", activity(1), { sticky: true });
+  registry.push("agent", activity(2));
+  registry.pushLatest("agent", "output:call-1", activity(3));
+  for (let index = 4; index <= 6; index += 1) registry.push("agent", activity(index));
+  const retained = registry.retainedAfter("agent", 0);
+  assert.deepEqual(retained.events.map((event) => event.sequence), [5, 6], "the room window starts after the evicted events");
+  assert.equal(retained.dropped, true);
+});
+
+test("reset and end cancel latest values that wait for their turn", async () => {
+  const timers: Array<() => void> = [];
+  const registry = new AgentStreamRegistry({
+    now: () => 0,
+    setTimeout: ((callback: () => void) => {
+      timers.push(callback);
+      return timers.length as unknown as ReturnType<typeof setTimeout>;
+    }) as typeof setTimeout,
+    clearTimeout: (() => undefined) as typeof clearTimeout,
+  });
+  registry.pushLatest("agent", "output:a", activity(1));
+  registry.pushLatest("agent", "output:a", activity(2));
+  registry.reset("agent");
+  timers.forEach((callback) => callback());
+  const batch = await registry.watch({ entryId: "agent", afterSequence: 0, waitMs: 0 });
+  assert.deepEqual(batch.events, [], "a value from before the reset never arrives");
+  assert.equal(batch.dropped_events, 0);
+});
+
 function activity(index: number, summary = `event-${index}`): DaemonActivityEvent {
   return {
     observed_at: "2026-08-26T12:00:00.000Z",

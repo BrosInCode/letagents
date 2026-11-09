@@ -22,7 +22,10 @@
 
     <ol v-if="entries.length" class="agent-live-timeline" aria-label="Agent work activity">
       <li v-for="entry in entries" :key="`${entry.kind}:${entry.id}`" class="agent-live-entry" :data-kind="entry.kind" @pointerdown="preserveInspectedGroup(entry)" @focusin="preserveInspectedGroup(entry)">
-        <AgentInspectorLiveActions v-if="entry.kind === 'actions'" :entry="entry" :current="isFollowing" />
+        <AgentInspectorLiveActions
+          v-if="entry.kind === 'actions'" :entry="entry" :current="isFollowing" :background="backgroundFor(entry)"
+          @show-background="showBackground"
+        />
         <template v-else>
           <span class="agent-live-icon" aria-hidden="true"><component :is="entry.kind === 'reasoning' ? NotebookPen : MessageSquare" :size="14" :stroke-width="1.6" /></span>
           <div class="agent-live-note">
@@ -38,10 +41,13 @@
       <span>Actions and agent updates will appear here as they arrive.</span>
     </div>
 
-    <div v-if="entries.length" class="agent-live-follow-bar">
-      <span v-if="lastUpdateLabel" :title="formatFullTimestamp(transcript.lastActivityAt!)">Last update: {{ lastUpdateLabel }}</span>
-      <button v-if="!followingLatest" type="button" @click="scrollFollower?.resume()"><ArrowDown :size="14" aria-hidden="true" />Follow latest</button>
-      <span v-else class="agent-live-following"><span v-if="isFollowing" aria-hidden="true"></span>{{ isFollowing ? 'Following live' : 'Latest activity' }}</span>
+    <div v-if="entries.length || background.length" class="agent-live-footer">
+      <AgentInspectorBackgroundCommands v-if="background.length" ref="backgroundDock" :commands="background" />
+      <div v-if="entries.length" class="agent-live-follow-bar">
+        <span v-if="lastUpdateLabel" :title="formatFullTimestamp(transcript.lastActivityAt!)">Last update: {{ lastUpdateLabel }}</span>
+        <button v-if="!followingLatest" type="button" @click="scrollFollower?.resume()"><ArrowDown :size="14" aria-hidden="true" />Follow latest</button>
+        <span v-else class="agent-live-following"><span v-if="isFollowing" aria-hidden="true"></span>{{ isFollowing ? 'Following live' : 'Latest activity' }}</span>
+      </div>
     </div>
   </div>
 </template>
@@ -52,6 +58,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useNow } from "../../../../composables/useNow";
 import { ArrowDown, MessageSquare, NotebookPen } from "@lucide/vue";
 import AgentInspectorLiveActions from "./AgentInspectorLiveActions.vue";
+import AgentInspectorBackgroundCommands from "./AgentInspectorBackgroundCommands.vue";
 import MarkdownBlock from "../formatting/MarkdownBlock.vue";
 import { followAgentLiveScroll } from "../../../../domain/agent-inspector-live-scroll";
 import { formatFullTimestamp } from "../../../../domain/time";
@@ -62,9 +69,10 @@ import {
   describeLiveToolCall,
   foldAgentStreamEvents,
   formatLiveWorkDuration,
+  liveBackgroundCommands,
   scopeAgentStreamEventsToWork,
 } from "../../../../domain/agent-inspector-live";
-import type { LiveToolPresentation, LiveTranscriptItem } from "../../../../domain/agent-inspector-live";
+import type { LiveBackgroundCommand, LiveToolPresentation, LiveTranscriptItem } from "../../../../domain/agent-inspector-live";
 import type { AgentInspectorLiveWorkProjection } from "../../../../domain/agent-inspector";
 import type { DesktopAgentStreamEvent } from "../../../../../../electron/ipc-types";
 
@@ -90,6 +98,20 @@ const canShowCurrent = computed(() => canPresentCurrentAgentStream({ ...props.wo
 const currentRequest = computed(() => currentAgentRequest(props.resource, props.activeSourceMessageId));
 const scopedEvents = computed(() => !props.work.active || canShowCurrent.value ? scopeAgentStreamEventsToWork(props.feed.events, props.work) : []);
 const transcript = computed(() => foldAgentStreamEvents(scopedEvents.value, props.feed.ended));
+// Commands that run in the background outlive the turn that started them: they come from the whole feed.
+const background = computed(() => liveBackgroundCommands(props.feed));
+const backgroundDock = ref<InstanceType<typeof AgentInspectorBackgroundCommands> | null>(null);
+
+/** The background command that one action row started: its call id ends with the provider's tool use id. */
+function backgroundFor(entry: LiveTraceEntry): LiveBackgroundCommand | null {
+  if (entry.kind !== "actions" || entry.actions.length !== 1) return null;
+  const callId = entry.actions[0]!.item.id;
+  return background.value.find((command) => command.toolUseId !== null && callId.endsWith(`:${command.toolUseId}`)) ?? null;
+}
+
+function showBackground(taskId: string): void {
+  backgroundDock.value?.open(taskId);
+}
 
 const isFollowing = computed(() => availability.value === "active" && canShowCurrent.value);
 const availability = computed(() => agentLiveAvailability(props.work, props.feed.ended));

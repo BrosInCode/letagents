@@ -55,6 +55,8 @@ export abstract class SupervisorDaemonProviderExecution extends SupervisorDaemon
       streams: {
         reset: (entryId) => this.resetAgentStream(entryId),
         push: (entryId, event) => this.pushAgentStreamEvent(entryId, event),
+        pushLatest: (entryId, key, event, options) => this.agentStreamRegistry.pushLatest(entryId, key, event, options),
+        dropLatest: (entryId, key) => this.agentStreamRegistry.dropLatest(entryId, key),
         end: (entryId) => this.endAgentStream(entryId),
       },
       delivery: {

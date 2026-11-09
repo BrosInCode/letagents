@@ -466,6 +466,8 @@ export interface DesktopAgentStreamEvent {
   method: string;
   summary: string | null;
   payload: unknown;
+  /** A latest value (live command output): keep only the newest event of this key. */
+  latestKey?: string;
 }
 
 /** A batch pushed for the focused agent, with `ended` once its runtime closes. */

@@ -1180,7 +1180,7 @@ test("Open Model surfaces tool calls as neutral tool_lifecycle stream events, de
   });
   assert.equal(result.outcome, "reply");
 
-  const toolEvents = stream.filter((event) => event.kind === "tool_lifecycle");
+  const toolEvents = stream.filter((event) => event.kind === "tool_lifecycle" && !event.liveDisplayOnly);
   assert.equal(toolEvents.length, 2, "one event per distinct (callID, status); the repeated running snapshot is deduped");
   for (const event of toolEvents) {
     // Neutral method + non-error kind so the daemon never misreads a tool as
@@ -1193,6 +1193,51 @@ test("Open Model surfaces tool calls as neutral tool_lifecycle stream events, de
   assert.deepEqual({ tool: running.tool, callID: running.callID, status: running.status }, { tool: "bash", callID: "call-1", status: "running" });
   assert.equal(completed.status, "completed");
   assert.equal(completed.output, "file-a\nfile-b");
+});
+
+test("Open Model sends the output of a running shell command to the live feed only, as whole lines, once per change", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const stream: ProviderStreamEvent[] = [];
+  adapter.onStream(handle, (event) => stream.push(event));
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([
+    (turnId) => [assistantWithTool(turnId, "assistant-tool", 10, { status: "running", input: { command: "npm test" } })],
+    (turnId) => [
+      assistantWithTool(turnId, "assistant-tool", 10, { status: "completed", input: { command: "npm test" }, output: "ok\nall passed\n" }),
+      assistantMessage(turnId, "assistant-final", 20, "Tests pass."),
+    ],
+  ]);
+  const running = (output: string) => ({ type: "message.part.updated", properties: { part: {
+    id: "assistant-tool-tool", messageID: "assistant-tool", type: "tool", tool: "bash", callID: "call-1",
+    state: { status: "running", input: { command: "npm test" }, metadata: { output, description: "Run tests" } },
+  } } });
+  harness.setStreamEvents([
+    running("\u001b[32mok\u001b[0m\nall pa"),
+    running("\u001b[32mok\u001b[0m\nall pa"),
+    running("\u001b[32mok\u001b[0m\nall passed\n"),
+    { type: "session.idle", properties: { sessionID: "session-open-model-1" } },
+  ]);
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-live-output",
+    sourceMessage: { text: "run the tests" },
+    activation: { decision: "activate" },
+    actionId: "live-output",
+  });
+  assert.equal(result.outcome, "reply");
+  const live = stream.filter((event) => event.liveDisplayOnly === true);
+  assert.deepEqual(live.map((event) => (event.payload as { output: string }).output), ["ok\n", "ok\nall passed\n"],
+    "control sequences are removed, a line that is still being written waits, and a repeated version is not sent again");
+  for (const event of live) {
+    assert.equal(event.method, "item/toolCall/updated");
+    assert.equal(event.summary, null, "a display-only event is never activity");
+    assert.deepEqual(
+      { callID: (event.payload as any).callID, status: (event.payload as any).status, outputProgress: (event.payload as any).outputProgress },
+      { callID: "call-1", status: "running", outputProgress: true },
+    );
+  }
+  const lifecycle = stream.filter((event) => event.kind === "tool_lifecycle" && !event.liveDisplayOnly);
+  assert.deepEqual(lifecycle.map((event) => (event.payload as { status: string }).status), ["running", "completed"], "the call's own states are unchanged");
 });
 
 test("Open Model announces each provider retry, without provider text or a changed outcome", async () => {
