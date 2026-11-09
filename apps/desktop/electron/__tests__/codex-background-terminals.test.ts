@@ -20,6 +20,25 @@ test("a command's end with a large whole output keeps its ids: only the newest o
   assert.ok((item.aggregatedOutput as string).endsWith("[dev-server] request 1999 served"), "the newest output stays");
   assert.ok((item.aggregatedOutput as string).startsWith("[dev-server] request "), "from a line start");
 
+  // A private key that crosses the cut loses its BEGIN line: its body never shows (live, the review's probe showed 44 lines).
+  const body = Array.from({ length: 50 }, (_, index) => `MIIEowIBAAKCAQEAx${String(index).padStart(2, "0")}Zk9mQb1vT8cR3nLp0sWqYdHjKfGtUeXiOzNaBmCvDlEyFrPuAgSo`).join("\n");
+  const keyOutput = [...Array.from({ length: 300 }, (_, index) => `log ${index}`), "-----BEGIN RSA PRIVATE KEY-----", body,
+    "-----END RSA PRIVATE KEY-----", ...Array.from({ length: 280 }, (_, index) => `after ${index}`)].join("\n");
+  const keyEnd = boundedCommandEnd("item/completed", { ...end, item: { ...end.item, aggregatedOutput: keyOutput } });
+  const shownKey = (keyEnd.params as { item: { aggregatedOutput: string } }).item.aggregatedOutput;
+  assert.equal(keyEnd.truncated, true);
+  assert.doesNotMatch(shownKey, /MIIEowIBAAKCAQEA/, "no line of the key body");
+  assert.match(shownKey, /after 279$/);
+
+  // A very long command (a heredoc) keeps the end under the limit: no output, the start of the command, its ids.
+  const longCommand = { ...end, item: { ...end.item, command: `cat <<'EOF'\n${"x".repeat(40_000)}\nEOF`, commandActions: [{ command: "x".repeat(40_000) }] } };
+  const longEnd = boundedCommandEnd("item/completed", longCommand);
+  const longItem = (longEnd.params as { item: Record<string, unknown> }).item;
+  assert.equal(longEnd.truncated, true);
+  assert.deepEqual([longItem.id, longItem.status, longItem.exitCode, longItem.aggregatedOutput, (longItem.command as string).length, "commandActions" in longItem],
+    ["exec-1", "failed", 1, "", 2_000, false]);
+  assert.ok(!("preview" in (safeStreamPayload(longEnd.params).payload as object)), "it reaches the daemon whole");
+
   const small = { ...end, item: { ...end.item, aggregatedOutput: "ok\n" } };
   assert.deepEqual(boundedCommandEnd("item/completed", small), { params: small, truncated: false });
   assert.deepEqual(boundedCommandEnd("item/commandExecution/outputDelta", end), { params: end, truncated: false }, "only a command's end");

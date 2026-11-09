@@ -182,7 +182,10 @@ export class ProviderLiveDisplay {
       const item = record(payload.item);
       if ((event.method === "item/started" || event.method === "item/completed") && item && id(item.id)) {
         const key = commandKey(item.id as string);
-        if (item.type === "commandExecution" && event.method === "item/started" && !this.commandOutputs.has(key)) {
+        // A later item/started can name the process that an approval let start.
+        const known = item.type === "commandExecution" && event.method === "item/started" ? this.commandOutputs.get(key) : undefined;
+        if (known && (typeof item.processId === "string" || typeof item.processId === "number")) known.started = true;
+        if (item.type === "commandExecution" && event.method === "item/started" && !known) {
           // Bound unfinished commands independently of the lifetime of the provider session.
           if (this.commandOutputs.size >= 128) this.commandOutputs.delete(this.commandOutputs.keys().next().value!);
           this.commandOutputs.set(key, {

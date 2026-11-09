@@ -1955,13 +1955,16 @@ test("only a started Codex command of a completed turn runs on in the background
   const background = (events: ReturnType<ProviderLiveDisplay["project"]>) => events
     .filter((event) => event.method === "item/backgroundCommand/updated").map((event) => event.payload as Record<string, any>);
 
-  // A call that waits for approval has no process yet; output proves a start as well as a named process.
+  // A call that waits for approval has no process yet; output proves a start as well as a named process, also when
+  // a later item/started names the process that the approval let start.
   started("turn-1", "waiting");
+  started("turn-1", "approved");
+  started("turn-1", "approved", { processId: "4" });
   started("turn-1", "named", { processId: "1" });
   started("turn-1", "printing");
   project("item/commandExecution/outputDelta", { turnId: "turn-1", itemId: "printing", delta: "ready\n" });
   assert.deepEqual(background(project("turn/completed", { turn: { id: "turn-1", status: "completed" } })).map((payload) => payload.taskId),
-    ["named", "printing"]);
+    ["approved", "named", "printing"]);
 
   // An interrupted or failed turn leaves no command to follow.
   started("turn-2", "cut", { processId: "2" });
