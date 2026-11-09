@@ -141,6 +141,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:get-message", roomIdentifier, messageId),
     getMessageInfo: (roomIdentifier: string, messageId: string) =>
       ipcRenderer.invoke("desktop:room:get-message-info", roomIdentifier, messageId),
+    getMessageReceipts: (roomIdentifier: string, messageIds: string[]) =>
+      ipcRenderer.invoke("desktop:room:get-message-receipts", roomIdentifier, messageIds),
     getMessagesAfter: (roomIdentifier, afterMessageId) => ipcRenderer.invoke("desktop:room:get-messages-after", roomIdentifier, afterMessageId),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),

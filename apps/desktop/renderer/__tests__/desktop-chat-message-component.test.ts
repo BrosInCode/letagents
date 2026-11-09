@@ -688,10 +688,11 @@ async function desktopMenuAudit(t: any, flags = 63, extra: Record<string, unknow
 test('integrated desktop menu renders ordered rows and reserves height across all 64 feature configurations', async t => {
   for (let flags = 0; flags < 64; flags++) await t.test(String(flags), async t => {
     const { vm, rows, invoker } = await desktopMenuAudit(t, flags);
-    const expected = flags & 1 ? ['Open link in browser', 'Copy link', 'Message info'] : [
+    // Message info is the sender's receipt; these audit messages are someone else's.
+    const expected = flags & 1 ? ['Open link in browser', 'Copy link'] : [
       'Copy message', ...(flags & 32 ? ['Copy link to message'] : []), 'Quote reply', 'Reply in thread',
       ...(flags & 8 && flags & 32 ? ['Remind me ›'] : []), ...(flags & 2 ? ['Pin message'] : []),
-      ...(flags & 4 ? ['Add reaction…'] : []), ...(flags & 16 ? ['Mark unread from here'] : []), 'Message info',
+      ...(flags & 4 ? ['Add reaction…'] : []), ...(flags & 16 ? ['Mark unread from here'] : []),
     ];
     assert.deepEqual(rows.map(row => row.label), expected);
     // Current CSS: 32px minimum rows, 12px border/padding, 9px separator.

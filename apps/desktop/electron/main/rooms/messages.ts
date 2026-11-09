@@ -3,6 +3,8 @@ import type { RoomGif, RoomExpressionsSetting } from "../../../../../shared/room
 import type {
   DesktopLocalChatSyncResult,
   DesktopMessageInfo,
+  DesktopMessageNoWake,
+  DesktopMessageReceipt,
   DesktopRoomMessage,
   DesktopTaskSummary,
   DesktopRoomLatestMessage,
@@ -1216,4 +1218,99 @@ export async function getDesktopRoomMessageInfo(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedMessageId)}/info`,
   );
   return mapDesktopMessageInfoPayload(payload);
+}
+
+type MessageReceiptsPayload = {
+  receipts?: Array<{
+    message_id?: string; sent_at?: string;
+    agents?: Array<{
+      agent_key?: string; display_name?: string; provider?: string | null; owner_name?: string | null; mine?: boolean;
+      state?: string; activation_reason?: string; activation_reason_label?: string; reply_message_id?: string | null;
+      asked_at?: string; finished_at?: string | null;
+    }>;
+    readers?: Array<{ name?: string; avatar_url?: string | null; read_at?: string }>;
+    not_read?: Array<{ name?: string; avatar_url?: string | null }> | null;
+    no_wake?: Record<string, unknown> | null;
+  }>;
+};
+
+/** At most this many ids go in one request; the server refuses more. */
+export const MESSAGE_RECEIPTS_BATCH_LIMIT = 100;
+
+function count(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+}
+
+/** An unknown or malformed reason still says that nobody was woken, without a reason. */
+export function mapDesktopMessageNoWake(value: Record<string, unknown> | null | undefined): DesktopMessageNoWake | null {
+  if (!value || typeof value !== "object") return null;
+  switch (value.reason) {
+    case "no_agents": return { reason: "no_agents" };
+    case "thread_no_agents": return { reason: "thread_no_agents" };
+    case "ambiguous_mention": return {
+      reason: "ambiguous_mention",
+      handles: Array.isArray(value.handles) ? value.handles.filter((handle): handle is string => typeof handle === "string" && !!handle) : [],
+    };
+    case "no_mention_large_room": return { reason: "no_mention_large_room", agentCount: count(value.agent_count) };
+    case "routing_chose_none": return { reason: "routing_chose_none", agentCount: count(value.agent_count) };
+    case "recent_agent_left":
+      return typeof value.recent_agent === "string" && value.recent_agent
+        ? { reason: "recent_agent_left", agentCount: count(value.agent_count), recentAgent: value.recent_agent }
+        : { reason: "no_mention_large_room", agentCount: count(value.agent_count) };
+    default: return { reason: "unknown" };
+  }
+}
+
+export function mapDesktopMessageReceiptsPayload(payload: MessageReceiptsPayload): DesktopMessageReceipt[] {
+  return (payload.receipts ?? []).flatMap((receipt) => {
+    if (!receipt.message_id || !receipt.sent_at) return [];
+    return [{
+      messageId: receipt.message_id,
+      sentAt: receipt.sent_at,
+      agents: (receipt.agents ?? []).flatMap((agent) => agent.agent_key && agent.state && agent.asked_at ? [{
+        agentKey: agent.agent_key,
+        displayName: agent.display_name || agent.agent_key,
+        provider: agent.provider || null,
+        ownerName: agent.owner_name || null,
+        mine: agent.mine === true,
+        state: agent.state,
+        activationReason: agent.activation_reason || "",
+        activationReasonLabel: agent.activation_reason_label || "",
+        replyMessageId: agent.reply_message_id ?? null,
+        askedAt: agent.asked_at,
+        finishedAt: agent.finished_at ?? null,
+      }] : []),
+      readers: (receipt.readers ?? []).flatMap((reader) => reader.name && reader.read_at
+        ? [{ name: reader.name, avatarUrl: reader.avatar_url ?? null, readAt: reader.read_at }] : []),
+      notRead: Array.isArray(receipt.not_read)
+        ? receipt.not_read.flatMap((person) => person.name ? [{ name: person.name, avatarUrl: person.avatar_url ?? null }] : [])
+        : null,
+      noWake: mapDesktopMessageNoWake(receipt.no_wake),
+    }];
+  });
+}
+
+/**
+ * The sender's own receipts are cloud truth. A room kept on this computer has
+ * none, and the server leaves out every message this account did not send.
+ */
+export async function getDesktopRoomMessageReceipts(
+  roomIdentifier: string,
+  messageIds: readonly unknown[],
+): Promise<DesktopMessageReceipt[]> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  const ids = [...new Set(messageIds.flatMap((id) =>
+    typeof id === "string" && parsePositivePgIntegerScopedId(id.trim(), "msg") ? [id.trim()] : []))]
+    .slice(0, MESSAGE_RECEIPTS_BATCH_LIMIT);
+  if (!trimmedRoomIdentifier || ids.length === 0) return [];
+  if (isDesktopSmokeCheck()) return [];
+
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") return [];
+
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(storage, trimmedRoomIdentifier);
+  const payload = await apiFetch<MessageReceiptsPayload>(
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/receipts?ids=${encodeURIComponent(ids.join(","))}`,
+  );
+  return mapDesktopMessageReceiptsPayload(payload);
 }
