@@ -57,7 +57,7 @@ test("a follower ends by itself at the CLI's exit line, frees its place, and nev
     const follower = new BackgroundCommandOutput({
       taskId: "task-1", toolUseId: null, command: `echo ${"y".repeat(10_000)}`, description: null, path,
       startedAt: "2026-11-08T14:43:00.000Z", now: () => "2026-11-08T14:45:00.000Z",
-      publish: (payload) => published.push(payload), onStopped: () => { stopped += 1; },
+      publish: (payload) => published.push(payload), onStopped: () => { stopped += 1; }, exitQuietMs: 200,
     });
     follower.start();
     assert.ok(published[0]!.command.length <= 2_000, "the command is bounded");
@@ -70,6 +70,35 @@ test("a follower ends by itself at the CLI's exit line, frees its place, and nev
     assert.equal(stopped, 1);
     follower.finish("completed", 0);
     assert.equal(published.at(-1), last, "a later notice changes nothing");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an exit line that the command prints itself does not end a command that goes on", async () => {
+  const { root, tasks } = await taskFolder("session-1");
+  const path = join(tasks, "task-2.output");
+  const published: LiveBackgroundCommandPayload[] = [];
+  try {
+    await writeFile(path, "");
+    const follower = new BackgroundCommandOutput({
+      taskId: "task-2", toolUseId: null, command: "sh -c 'echo \"[exited with code 0]\"; exec npm run dev'", description: null, path,
+      startedAt: "2026-11-09T08:00:00.000Z", now: () => "2026-11-09T08:01:00.000Z",
+      publish: (payload) => published.push(payload), exitQuietMs: 400,
+    });
+    follower.start();
+    await appendFile(path, "[exited with code 0]\n");
+    await eventually(() => published.some((payload) => payload.output.includes("[exited with code 0]")), "the printed line is shown");
+    // The command goes on before the file has been quiet for long enough.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    await appendFile(path, "VITE ready in 312 ms\n");
+    await eventually(() => published.at(-1)?.output.endsWith("VITE ready in 312 ms\n") === true, "later output is published");
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    assert.ok(published.every((payload) => payload.status === "running"), "the command still runs");
+    // The CLI's own exit line at the end of a quiet file does end it.
+    await appendFile(path, "\n[exited with code 0]\n");
+    await eventually(() => published.at(-1)?.status === "completed", "the real exit line ends the follower");
+    assert.match(published.at(-1)!.output, /VITE ready in 312 ms/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

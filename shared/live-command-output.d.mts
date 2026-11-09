@@ -22,6 +22,7 @@ export type LiveBackgroundCommandPayload = {
 
 export function plainTerminalText(text: string): string;
 export function hidePartialPrivateKeys(text: string): string;
+export function hideLeadingKeyBody(text: string): string;
 export function liveOutputTail(text: string, options?: { cut?: boolean; final?: boolean; maxChars?: number }): { text: string; cut: boolean };
 export function liveOutputLatestKey(event: { method: string; payload: unknown } | null | undefined): string | null;
 export function liveBackgroundLatestKey(event: { method: string; payload: unknown } | null | undefined): string | null;
