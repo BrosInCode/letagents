@@ -71,7 +71,7 @@ test("Cursor's file format: the header and footer are not output, and the footer
 test("a shell call is followed only when it runs in the background, in Cursor's own terminals folder", () => {
   const shell = cursorBackgroundShell(completedCall("/data/projects/ws/terminals"));
   assert.deepEqual(shell, { shellId: "22727", pid: 34308, command: "npm run dev", description: "Start the dev server",
-    path: "/data/projects/ws/terminals/22727.txt", callId: "call-eb0fc3b9-0\nfc_2695_0" });
+    path: join("/data/projects/ws/terminals", "22727.txt"), callId: "call-eb0fc3b9-0\nfc_2695_0" });
   const foreground = completedCall("/data/projects/ws/terminals");
   foreground.tool_call.shellToolCall.result.isBackground = false;
   assert.equal(cursorBackgroundShell(foreground), null);
