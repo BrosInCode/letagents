@@ -3,7 +3,7 @@ import { isShellToolName } from "../../../../../shared/agent-live-trace.mjs";
 import type { AgentInspectorWorkResource } from "./agent-inspector-work";
 
 // The owner's trace and the room's are presented by the same shared code.
-export { liveActionStatus, presentAgentTrace } from "../../../../../shared/agent-live-trace.mjs";
+export { BACKGROUND_SHELL_HEADLINES, liveActionStatus, presentAgentTrace } from "../../../../../shared/agent-live-trace.mjs";
 export type { LiveAction, LiveTraceEntry } from "../../../../../shared/agent-live-trace.mjs";
 
 export function currentAgentRequest(resource: AgentInspectorWorkResource, activeSourceMessageId: string | null) {

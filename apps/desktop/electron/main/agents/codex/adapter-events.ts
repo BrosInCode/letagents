@@ -14,6 +14,43 @@ import { CodexProviderHandle } from "./handle.js";
 import { CodexRoomTurnObservationDetachedError } from "./room-tools.js";
 import { type CodexThreadResult, codexFoundNotAtLevel } from "./thread-access.js";
 import { permissionFileChanges } from "./permission-requests.js";
+import { hidePartialPrivateKeys, liveOutputTail } from "../../../../../../shared/live-command-output.mjs";
+
+/** The newest part of a command's whole output that its end event keeps. */
+const MAX_COMMAND_END_OUTPUT_CHARS = 6_000;
+/** A bounded end stays this far under the stream's payload limit: redaction marks and the envelope grow it. */
+const MAX_COMMAND_END_BYTES = 24 * 1024;
+/** The start of a very long command that its end keeps. */
+const MAX_COMMAND_END_COMMAND_CHARS = 2_000;
+
+/**
+ * A command's end carries its whole output (`aggregatedOutput`). Above the stream's payload limit an event keeps
+ * only a preview, without its ids, so the end would never reach the command.
+ * 1. The end keeps the newest output, cut as the live tail is: from a line start, with a private key whose BEGIN
+ *    or END line was cut away hidden (the redaction after this step needs both lines to see a key).
+ * 2. An end that is still too large (a very long command) keeps no output and only the start of its command.
+ * Either way the event says that it was cut.
+ */
+export function boundedCommandEnd(method: string, params: unknown): { params: unknown; truncated: boolean } {
+  const record = recordValue(params);
+  const item = recordValue(record?.item);
+  if (method !== "item/completed" || item?.type !== "commandExecution") return { params, truncated: false };
+  const output = item.aggregatedOutput;
+  let bounded: Record<string, unknown> = item;
+  if (typeof output === "string" && output.length > MAX_COMMAND_END_OUTPUT_CHARS) {
+    bounded = { ...bounded, aggregatedOutput: liveOutputTail(output, { final: true, maxChars: MAX_COMMAND_END_OUTPUT_CHARS }).text };
+  }
+  if (Buffer.byteLength(JSON.stringify({ ...record, item: bounded }), "utf8") > MAX_COMMAND_END_BYTES) {
+    const { commandActions: _repeatsTheCommand, ...rest } = bounded;
+    bounded = {
+      ...rest,
+      ...(typeof output === "string" ? { aggregatedOutput: "" } : {}),
+      ...(typeof rest.command === "string"
+        ? { command: hidePartialPrivateKeys(rest.command.slice(0, MAX_COMMAND_END_COMMAND_CHARS)) } : {}),
+    };
+  }
+  return bounded === item ? { params, truncated: false } : { params: { ...record, item: bounded }, truncated: true };
+}
 
 export abstract class CodexAdapterEvents extends CodexAdapterBase {
   protected consumeNotification(
@@ -62,9 +99,10 @@ export abstract class CodexAdapterEvents extends CodexAdapterBase {
     // textDelta content remains hidden by summarizeCodexRuntimeNotification.
     // An `error` line in the ordered stream names the provider's reason.
     const summary = summarizeCodexRuntimeNotification(notification);
-    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method),
+    const streamed = boundedCommandEnd(notification.method, notification.params);
+    this.publishStream(handle, notification.method, streamed.params, streamKind(notification.method),
       codexErrorActivitySummary(notification) ?? summary.summary,
-      nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
+      nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null, streamed.truncated);
     // Execution status belongs to the item, never to the reusable app-server.
     // Exact turn settlement above remains independent of this runtime state.
     const lifecycle = isCodexExecutionMethod(notification.method) ? null

@@ -344,6 +344,8 @@ test("describeLiveToolCall degrades unknown tools to their bare name, never the 
   const native = describeLiveToolCall("shellToolCall", { command: "npm test" });
   assert.equal(native.headline, "Ran a shell command");
   assert.equal(native.detail, "npm test");
+  assert.equal(describeLiveToolCall("shellToolCall", { command: "/bin/zsh -lc 'echo '\"'\"'ready'\"'\"' && npm run dev'" }).detail,
+    "echo 'ready' && npm run dev", "Codex's login-shell wrapper is not part of the command");
   const opaque = describeLiveToolCall("somethingNew", { widget: 4 });
   assert.equal(opaque.headline, "somethingNew");
   assert.equal(opaque.detail, null);
@@ -641,6 +643,73 @@ test("Live failures show received errors and output excerpts outside disclosure 
   } finally { await vite.close(); }
 });
 
+test("a call whose command runs on in the background reads as started, not as an unfinished action", async () => {
+  const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLiveActions.vue")).default;
+    // A Codex call of a turn that has ended: Codex still reports the item as in progress.
+    const item = { kind: "tool" as const, id: "codex:thread:turn-1:exec-1", tool: "shellToolCall", status: "running",
+      input: { command: "/bin/zsh -lc 'npm run dev'", cwd: "/work" }, output: null, error: null };
+    const entry = presentAgentTrace([item], false)[0]!;
+    assert.ok(entry.kind === "actions");
+    const background = { id: "exec-1", toolUseId: "exec-1", command: "npm run dev", description: null, status: "running" as const,
+      output: "VITE ready\n", outputTruncated: false, exitCode: null, startedAt: "2026-11-09T14:30:11Z", endedAt: null };
+    const running = await renderToString(createSSRApp(component, { entry, current: false, background }));
+    const summary = running.split("</summary>")[0]!;
+    assert.match(summary, /Started a background command/);
+    assert.match(summary, /In background/);
+    assert.match(summary, /lucide-square-terminal/, "a terminal, not an hourglass");
+    assert.match(summary, /title="npm run dev"/);
+    assert.doesNotMatch(summary, /Unfinished action|\/bin\/zsh|hourglass/);
+    assert.match(running.split("</summary>")[1]!, /\/bin\/zsh -lc/, "the exact input stays behind disclosure");
+    // Without its background command, the same call of an ended turn is unfinished.
+    assert.match(await renderToString(createSSRApp(component, { entry, current: false })), /Unfinished action · shell/);
+  } finally { await vite.close(); }
+});
+
+test("a Codex command that still runs when its turn ends runs in the background until Codex reports its end", () => {
+  const display = new ProviderLiveDisplay("thread");
+  const codex = (method: string, payload: Record<string, unknown>, observedAt = "2026-11-09T10:35:16Z") => sanitizeDaemonActivityEvent({
+    provider: "codex", method, kind: "item_lifecycle", summary: "", observed_at: observedAt, sequence: 1, status: "working",
+    payload_redacted: false, payload_truncated: false, durable_payload_ref: null, payload: { threadId: "thread", ...payload } });
+  const item = (id: string, command: string, status: string, extra: Record<string, unknown> = {}) => ({
+    type: "commandExecution", id, command, cwd: "/work", processId: "60781", source: "unifiedExecStartup", status, ...extra });
+  const background = (events: ReturnType<ProviderLiveDisplay["project"]>) => events.filter((event) => event.method === "item/backgroundCommand/updated")
+    .map((event) => event.payload as Record<string, unknown>);
+  const server = "/bin/zsh -lc 'npm run dev'";
+
+  display.project(codex("item/started", { turnId: "turn-1", item: item("exec-1", server, "inProgress") }));
+  display.project(codex("item/commandExecution/outputDelta", { turnId: "turn-1", itemId: "exec-1", delta: "VITE ready\r\n" }));
+  const atTurnEnd = background(display.project(codex("turn/completed", { turnId: "turn-1", turn: { id: "turn-1", status: "completed" } }, "2026-11-09T10:35:21Z")));
+  assert.deepEqual(atTurnEnd.map(({ taskId, toolUseId, command, status, output, startedAt, endedAt }) => ({ taskId, toolUseId, command, status, output, startedAt, endedAt })),
+    [{ taskId: "exec-1", toolUseId: "exec-1", command: "npm run dev", status: "running", output: "VITE ready\n", startedAt: "2026-11-09T10:35:16Z", endedAt: null }],
+    "the command runs on after its turn: it is a background command, shown without the login-shell wrapper");
+
+  // Codex goes on reporting its output between turns, under the turn that started it.
+  assert.equal(background(display.project(codex("item/commandExecution/outputDelta", { turnId: "turn-1", itemId: "exec-1", delta: "GET / 200\r\n" })))[0]!.output,
+    "VITE ready\nGET / 200\n");
+
+  // A command of the next turn that ends within its turn stays an ordinary call.
+  display.project(codex("item/started", { turnId: "turn-2", item: item("exec-2", "/bin/zsh -lc 'ls'", "inProgress") }));
+  assert.equal(display.project(codex("item/commandExecution/outputDelta", { turnId: "turn-2", itemId: "exec-2", delta: "a\n" }))[0]!.method, "item/toolCall/updated");
+  display.project(codex("item/completed", { turnId: "turn-2", item: item("exec-2", "/bin/zsh -lc 'ls'", "completed", { exitCode: 0 }) }));
+  assert.deepEqual(background(display.project(codex("turn/completed", { turnId: "turn-2", turn: { id: "turn-2", status: "completed" } }))), []);
+
+  // The owner's Stop: Codex ends the terminated session with exit code -1.
+  const ended = display.project(codex("item/completed", { turnId: "turn-1", item: item("exec-1", server, "failed", { exitCode: -1 }) }, "2026-11-09T10:38:56Z"));
+  assert.deepEqual(background(ended).map(({ status, exitCode, endedAt, output }) => ({ status, exitCode, endedAt, output })),
+    [{ status: "stopped", exitCode: -1, endedAt: "2026-11-09T10:38:56Z", output: "VITE ready\nGET / 200\n" }]);
+  const row = ended.find((event) => event.method === "item/toolCall/updated")!.payload as Record<string, unknown>;
+  assert.deepEqual([row.callID, row.status, row.error], ["codex:thread:turn-1:exec-1", "interrupted", null], "its call reads as interrupted, not failed");
+  assert.deepEqual(display.project(codex("item/commandExecution/outputDelta", { turnId: "turn-1", itemId: "exec-1", delta: "late\n" })), [], "nothing after its end");
+
+  // A background command that exits on its own completes, or fails with its exit code.
+  display.project(codex("item/started", { turnId: "turn-3", item: item("exec-3", "/bin/zsh -lc 'npm test'", "inProgress") }));
+  display.project(codex("turn/completed", { turnId: "turn-3", turn: { id: "turn-3", status: "completed" } }));
+  assert.deepEqual(background(display.project(codex("item/completed", { turnId: "turn-3", item: item("exec-3", "/bin/zsh -lc 'npm test'", "failed", { exitCode: 2 }) })))
+    .map(({ status, exitCode }) => ({ status, exitCode })), [{ status: "failed", exitCode: 2 }]);
+});
+
 test("Live layout remount retains the feed and subscription for the same agent/session", async () => {
   const ts = (await import("typescript")).default;
   const { runInNewContext } = await import("node:vm");
@@ -719,6 +788,8 @@ test("a shell call that starts a background command and OpenCode's shell tool re
   const bash = describeLiveToolCall("bash", { command: "ls" }, { status: "running", output: null, error: null });
   assert.deepEqual([bash.headline, bash.detail], ["Running a shell command", "ls"]);
   assert.equal(describeLiveToolCall("bash", { command: "ls" }, { status: "error", output: null, error: "boom" }).headline, "Command failed");
+  assert.equal(describeLiveToolCall("shellToolCall", { command: "npm run dev", isBackground: true }, { status: "completed", output: null, error: null }).headline,
+    "Started a background command", "Cursor's background flag");
 });
 
 test("background commands come from the whole feed, keep their end, and end with a feed that ended", () => {
