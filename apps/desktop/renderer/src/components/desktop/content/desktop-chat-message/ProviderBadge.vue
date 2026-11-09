@@ -13,30 +13,10 @@ import codexIcon from "../../../../assets/harness-icons/codex.png";
 import cursorIcon from "../../../../assets/harness-icons/cursor.png";
 import openCodeIcon from "../../../../assets/harness-icons/opencode.svg";
 
+import { providerFromAgentKey, providerFromLabel, type ProviderLabelKey } from "../room-chat/provider-icon";
+
 const props = defineProps<{ label: string; agentKey?: string | null }>();
-type ProviderKey = "codex" | "claude" | "antigravity" | "cursor" | "open-model" | "other";
-
-function providerFromLabel(value: string): ProviderKey {
-  // Match a compact form: labels arrive as "Claude Code" or "claude-code",
-  // and OpenCode connected over MCP reports itself as "OpenCode".
-  const compact = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
-  if (compact === "codex") return "codex";
-  if (compact === "claude" || compact === "claudecode") return "claude";
-  if (compact === "antigravity") return "antigravity";
-  if (compact === "cursor") return "cursor";
-  if (compact === "openmodel" || compact === "opencode") return "open-model";
-  return "other";
-}
-
-function providerFromAgentKey(agentKey: string | null | undefined): ProviderKey | null {
-  const name = (agentKey?.split("/").at(-1) || "").toLowerCase();
-  if (name.startsWith("desktop-codex-")) return "codex";
-  if (name.startsWith("desktop-claude-code-") || name.startsWith("desktop-claude-")) return "claude";
-  if (name.startsWith("desktop-antigravity-")) return "antigravity";
-  if (name.startsWith("desktop-cursor-")) return "cursor";
-  if (name.startsWith("desktop-open-model-") || name.startsWith("desktop-open_model-")) return "open-model";
-  return null;
-}
+type ProviderKey = ProviderLabelKey;
 
 const inferredProvider = computed<ProviderKey | null>(() =>
   props.label.trim().toLowerCase() === "supervisor worker"

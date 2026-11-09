@@ -105,6 +105,7 @@ import type {
   DesktopRoomInfo,
   DesktopRoomLatestMessage,
   DesktopMessageInfo,
+  DesktopMessageReceipt,
   DesktopRoomMessage,
   DesktopRoomMessagesPage,
   DesktopRoomThreadInboxFilter,
@@ -249,6 +250,8 @@ export interface DesktopApi {
     getLatestMessages: (roomIdentifiers: string[]) => Promise<DesktopRoomLatestMessage[]>;
     getMessage: (roomIdentifier: string, messageId: string) => Promise<DesktopRoomMessage | null>;
     getMessageInfo: (roomIdentifier: string, messageId: string) => Promise<DesktopMessageInfo | null>;
+    /** Receipts for the signed-in person's own messages among `messageIds`; other messages are left out. */
+    getMessageReceipts?: (roomIdentifier: string, messageIds: string[]) => Promise<DesktopMessageReceipt[]>;
     getMessagesAfter?: (roomIdentifier: string, afterMessageId: string | null) => Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     getThreads: (roomIdentifier: string, filter?: DesktopRoomThreadInboxFilter, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadInboxPage>;

@@ -660,12 +660,12 @@ function handleRoomStreamFrame(
       repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
       return;
     }
-    // Desktop Message Info is fetched on demand and has no live invalidation
-    // surface yet. Null is the server's concealment-safe room invalidation;
-    // arrays retain their existing compatibility. Treat both as a valid no-op so
-    // it advances the broker cursor without turning every read receipt into a
-    // full room gap/snapshot repair. Malformed typed frames still fail closed.
+    // Null is the server's concealment-safe room invalidation; arrays keep
+    // their existing compatibility. Both advance the broker cursor and tell the
+    // renderer to re-read the receipts it shows, never a full room repair.
+    // Malformed typed frames still fail closed.
     stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
+    emitRoomStreamEvent({ type: "resource_invalidation", roomIdentifier: eventRoomIdentifier, resource: "message_info" });
     return;
   }
 

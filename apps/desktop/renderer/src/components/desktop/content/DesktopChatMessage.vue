@@ -119,6 +119,7 @@
           </span>
           <span v-if="pinned" class="message-pin-marker" role="img" aria-label="Pinned message" title="Pinned message"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 3 21 8M17 4 9 12 5 13 11 19 12 15 20 7M2 22 8 16" /></svg></span>
           <time :datetime="message.timestamp">{{ formattedTime }}</time>
+          <RoomMessageReceiptMark v-if="showsReceipt" ref="receiptMark" :message-id="message.id" :context="context" :thread-root-id="message.threadRootId && message.threadRootId !== message.id ? message.threadRootId : null" />
         </div>
       </div>
 
@@ -348,10 +349,12 @@
           <button type="button" role="menuitem" @click="copyLinkFromContext">
             <span>Copy link</span>
           </button>
-          <div class="room-message-context-menu-separator" role="separator" />
-          <button type="button" role="menuitem" @click="messageInfoFromContext">
-            <span>Message info</span>
-          </button>
+          <template v-if="hasReceipt">
+            <div class="room-message-context-menu-separator" role="separator" />
+            <button type="button" role="menuitem" @click="messageInfoFromContext">
+              <span>Message info</span>
+            </button>
+          </template>
         </template>
         <template v-else>
           <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
@@ -376,10 +379,12 @@
           <button v-if="canMarkUnread" type="button" role="menuitem" @click="markUnreadFromContext">
             <span>Mark unread from here</span>
           </button>
-          <div class="room-message-context-menu-separator" role="separator" />
-          <button type="button" role="menuitem" @click="messageInfoFromContext">
-            <span>Message info</span>
-          </button>
+          <template v-if="hasReceipt">
+            <div class="room-message-context-menu-separator" role="separator" />
+            <button type="button" role="menuitem" @click="messageInfoFromContext">
+              <span>Message info</span>
+            </button>
+          </template>
         </template>
       </div>
 
@@ -410,6 +415,9 @@
 <script setup lang="ts">
 import { inlineThreadKey } from "./desktop-chat-message/inline-thread";
 import RoomGif from "./room-chat/RoomGif.vue";
+import RoomMessageReceiptMark from "./room-chat/RoomMessageReceiptMark.vue";
+import { injectRoomMessageReceipts } from "../../../composables/useRoomMessageReceipts";
+import { visibleReceipt } from "../../../domain/message-receipt-view";
 import { unreadMenuKey } from "../../../../../../../shared/room-unread-client";
 import MessageReminderMenu from "./MessageReminderMenu.vue";
 import { reminderAccount } from "../../../composables/useMessageReminders";
@@ -539,7 +547,6 @@ const emit = defineEmits<{
   "retry-delivery": [agentId: string, sourceMessageId: string];
   "restore-conversation": [agentId: string, sourceMessageId: string];
   "skip-delivery": [agentId: string, sourceMessageId: string];
-  "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
 }>();
 
 /** Try now: ask the agent to start its automatic attempt at once. The request names the attempt, which is not this message. */
@@ -807,6 +814,17 @@ function participantInitials(value: string): string {
   return initials.toUpperCase();
 }
 
+const receiptContext = injectRoomMessageReceipts();
+const receiptMark = ref<InstanceType<typeof RoomMessageReceiptMark> | null>(null);
+/** Receipts are for the sender only: your own sent messages in a room on the server. */
+const showsReceipt = computed(() => senderRole.value === "self"
+  && Boolean(receiptContext?.available.value)
+  && !isLocalRoomIdentifier(props.roomIdentifier)
+  && !props.message.outgoing
+  && isValidMessageId(props.message.id));
+/** Message info opens the receipt, so it is offered only once there is one to show. */
+const hasReceipt = computed(() => showsReceipt.value && visibleReceipt(receiptContext?.receiptFor(props.message.id)) !== null);
+
 const canCopyMessageLink = computed(() =>
   !isLocalRoomIdentifier(props.roomIdentifier) &&
   !props.message.outgoing &&
@@ -835,8 +853,9 @@ function openContextMenu(event: MouseEvent): void {
   // Link variant: 3 rows + separator; message variant: 4 rows + separator,
   // plus a row for each available pin/reaction action. The estimate must
   // cover the tallest variant or the last row ("Message info") clips below
-  // the viewport near the bottom edge.
-  const menuHeight = linkHref ? 140 : 176 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0);
+  // the viewport near the bottom edge. Message info and its separator show
+  // only on your own messages, which carry a receipt.
+  const menuHeight = (linkHref ? 140 : 176 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0)) - (hasReceipt.value ? 0 : 41);
   const clampedMenuHeight = menuHeight + (!linkHref && remindable.value ? 32 : 0) + (!linkHref && canCopyMessageLink.value ? 32 : 0)
     + (!linkHref && canMarkUnread.value ? 32 : 0);
   contextMenuPosition.value = {
@@ -983,9 +1002,10 @@ function handleTertiaryAction(): void {
   emit("jump-to-thread-root", props.message.id);
 }
 
+/** Message info is the receipt: it opens from the mark after the time. */
 function messageInfoFromContext(): void {
   closeContextMenu("action");
-  emit("message-info", props.message.id, props.context);
+  void nextTick(() => receiptMark.value?.open());
 }
 
 async function copyFromContext(): Promise<void> {
