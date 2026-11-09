@@ -76,6 +76,7 @@ const expectedControlMethods = [
   "supervisor.update_agent_configuration",
   "supervisor.verify_worker_session",
   "supervisor.watch_agent_stream",
+  "supervisor.watch_background_commands",
 ].sort();
 
 test("the daemon entrypoint delegates control-protocol parsing to one router", () => {
@@ -202,7 +203,10 @@ test("daemon policy and projection domains remain extracted", () => {
   // its memo and its retry stay in letagents-mcp-runtime.ts behind the provider port.
   // 1907 -> 1909: the latest-value live feed ports; pacing and replacement stay in
   // agent-stream-registry.ts.
-  assert.ok(mainSource.split("\n").length < 1_909, "main.ts must remain a thin composition root");
+  // 1909 -> 1917: the background command ports (state view, watch, signed stop);
+  // the list and its watch stay in agent-stream-registry.ts, the stop rules in
+  // background-command-stop.ts.
+  assert.ok(mainSource.split("\n").length < 1_917, "main.ts must remain a thin composition root");
   for (const file of mainFiles) assert.ok(read(file).split("\n").length < 600, `${file} must stay under 600 lines`);
 });
 

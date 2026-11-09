@@ -8,6 +8,10 @@ const MAX_WAIT_MS = 30_000;
 const DEFAULT_LATEST_INTERVAL_MS = 250;
 /** Latest values that the size limit keeps (background commands); more than this are evicted as usual. */
 const MAX_STICKY_LATEST = 16;
+/** Watches of one agent's background commands that may wait at once (one per open window, with room to spare). */
+const MAX_BACKGROUND_WAITERS = 8;
+/** The key prefix of a background command's values (see shared/live-command-output.mjs). */
+const BACKGROUND_KEY_PREFIX = "background:";
 
 type AgentStreamBuffer = {
   sequence: number;
@@ -50,7 +54,24 @@ export type AgentStreamWatchResult = {
   ended: boolean;
 };
 
+/** One command that an agent runs in the background, as the agent's state shows it. */
+export type RunningBackgroundCommand = {
+  task_id: string;
+  tool_use_id: string | null;
+  command: string;
+  started_at: string | null;
+};
+
+/** The newest values of an agent's background commands, for a view that opens only them. */
+export type BackgroundCommandsWatchResult = {
+  version: number;
+  commands: unknown[];
+  ended: boolean;
+};
+
 export type AgentStreamRegistryOptions = {
+  /** An agent's set of running background commands changed: one started, ended, or its feed ended. */
+  onBackgroundCommandsChange?: (entryId: string) => void;
   isHandoffScheduled?: () => boolean;
   bufferLimit?: number;
   maxBatch?: number;
@@ -71,6 +92,11 @@ export class AgentStreamRegistry {
   private readonly streams = new Map<string, AgentStreamBuffer>();
   private readonly waiters = new Map<string, Set<() => void>>();
   private readonly pendingLatest = new Map<string, Map<string, PendingLatest>>();
+  private readonly backgroundVersions = new Map<string, number>();
+  /** Versions start at a random number: a restarted daemon never answers an old cursor with "nothing new". */
+  private readonly backgroundVersionBase = Math.floor(Math.random() * 1_000_000_000);
+  private readonly backgroundWaiters = new Map<string, Set<() => void>>();
+  private readonly onBackgroundCommandsChange: (entryId: string) => void;
   private readonly latestSentAt = new Map<string, Map<string, number>>();
   private readonly isHandoffScheduled: () => boolean;
   private readonly bufferLimit: number;
@@ -81,6 +107,7 @@ export class AgentStreamRegistry {
   private readonly clearTimer: typeof clearTimeout;
 
   constructor(options: AgentStreamRegistryOptions = {}) {
+    this.onBackgroundCommandsChange = options.onBackgroundCommandsChange ?? (() => undefined);
     this.isHandoffScheduled = options.isHandoffScheduled ?? (() => false);
     this.bufferLimit = options.bufferLimit ?? DEFAULT_BUFFER_LIMIT;
     this.maxBatch = options.maxBatch ?? DEFAULT_MAX_BATCH;
@@ -156,6 +183,8 @@ export class AgentStreamRegistry {
 
   private sendLatest(entryId: string, key: string, event: DaemonActivityEvent, sticky: boolean): void {
     const buffer = this.streams.get(entryId);
+    const background = key.startsWith(BACKGROUND_KEY_PREFIX);
+    const wasRunning = background && this.backgroundRunning(entryId, key);
     if (buffer && !buffer.ended) {
       const previous = buffer.latest.get(key);
       if (previous !== undefined) {
@@ -169,6 +198,92 @@ export class AgentStreamRegistry {
     const sent = this.latestSentAt.get(entryId) ?? new Map<string, number>();
     sent.set(key, this.now());
     this.latestSentAt.set(entryId, sent);
+    if (!background) return;
+    this.backgroundChanged(entryId);
+    if (wasRunning !== this.backgroundRunning(entryId, key)) this.onBackgroundCommandsChange(entryId);
+  }
+
+  /**
+   * The commands that an agent runs in the background now, for its state:
+   * what changes only when one starts or ends, never its output.
+   */
+  runningBackgroundCommands(entryId: string): RunningBackgroundCommand[] {
+    const buffer = this.streams.get(entryId);
+    if (!buffer || buffer.ended) return [];
+    return this.backgroundValues(buffer).flatMap((payload) => payload.status === "running" && typeof payload.taskId === "string"
+      && typeof payload.command === "string" ? [{
+        task_id: payload.taskId,
+        tool_use_id: typeof payload.toolUseId === "string" ? payload.toolUseId : null,
+        command: payload.command,
+        started_at: typeof payload.startedAt === "string" ? payload.startedAt : null,
+      }] : []);
+  }
+
+  /**
+   * The newest value of each background command of one agent, after a version
+   * the caller has seen; waits for a change when there is none. A view that
+   * shows only background commands (the room's activity strip) reads this
+   * instead of the whole feed, so it never takes the Live tab's watch.
+   */
+  async watchBackgroundCommands(input: { entryId: string; afterVersion: number; waitMs: number }): Promise<BackgroundCommandsWatchResult> {
+    const waitMs = Number.isFinite(input.waitMs) ? Math.max(0, Math.min(MAX_WAIT_MS, Math.floor(input.waitMs))) : DEFAULT_WAIT_MS;
+    const read = (): BackgroundCommandsWatchResult => {
+      const buffer = this.streams.get(input.entryId);
+      // Only commands that run: the strip shows nothing else, and a busy server is never cut off by ended ones.
+      return {
+        version: this.backgroundVersionBase + (this.backgroundVersions.get(input.entryId) ?? 0),
+        commands: buffer && !buffer.ended ? this.backgroundValues(buffer).filter((payload) => payload.status === "running").slice(0, MAX_STICKY_LATEST) : [],
+        ended: buffer?.ended ?? false,
+      };
+    };
+    let current = read();
+    if (current.version === input.afterVersion && waitMs > 0 && !this.isHandoffScheduled()) {
+      await new Promise<void>((resolve) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          this.clearTimer(timer);
+          this.backgroundWaiters.get(input.entryId)?.delete(finish);
+          resolve();
+        };
+        const timer = this.setTimer(finish, waitMs);
+        const waiters = this.backgroundWaiters.get(input.entryId) ?? new Set<() => void>();
+        // A watch whose caller went away stays until its time is up; a few of them are bounded here.
+        if (waiters.size >= MAX_BACKGROUND_WAITERS) waiters.values().next().value?.();
+        waiters.add(finish);
+        this.backgroundWaiters.set(input.entryId, waiters);
+      });
+      current = read();
+    }
+    return current;
+  }
+
+  private backgroundValues(buffer: AgentStreamBuffer): Array<Record<string, unknown>> {
+    const values: Array<Record<string, unknown>> = [];
+    for (const [key, sequence] of buffer.latest) {
+      if (!key.startsWith(BACKGROUND_KEY_PREFIX)) continue;
+      const payload = buffer.events.find((event) => event.sequence === sequence)?.payload;
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) values.push(payload as Record<string, unknown>);
+    }
+    return values;
+  }
+
+  private backgroundRunning(entryId: string, key: string): boolean {
+    const buffer = this.streams.get(entryId);
+    const sequence = buffer?.latest.get(key);
+    if (!buffer || buffer.ended || sequence === undefined) return false;
+    const payload = buffer.events.find((event) => event.sequence === sequence)?.payload as { status?: unknown } | undefined;
+    return payload?.status === "running";
+  }
+
+  /** A background value changed: a view of background commands reads again. */
+  private backgroundChanged(entryId: string): void {
+    this.backgroundVersions.set(entryId, (this.backgroundVersions.get(entryId) ?? 0) + 1);
+    const waiters = this.backgroundWaiters.get(entryId);
+    if (!waiters) return;
+    for (const resolve of waiters) resolve();
+    waiters.clear();
   }
 
   private append(entryId: string, event: DaemonActivityEvent, latestKey: string | null, sticky: boolean): DaemonAgentStreamEvent | null {
@@ -209,6 +324,7 @@ export class AgentStreamRegistry {
   /** Start one bounded display generation without replaying an older turn. */
   reset(entryId: string): void {
     const buffer = this.streams.get(entryId) ?? newBuffer(0);
+    const hadRunning = this.runningBackgroundCommands(entryId).length > 0;
     this.forgetLatest(entryId);
     buffer.generation += 1;
     buffer.generationStartSequence = buffer.sequence + 1;
@@ -219,23 +335,33 @@ export class AgentStreamRegistry {
     buffer.ended = false;
     this.streams.set(entryId, buffer);
     this.notifyWaiters(entryId);
+    this.backgroundChanged(entryId);
+    if (hadRunning) this.onBackgroundCommandsChange(entryId);
   }
 
   /** Mark an agent's live feed closed and wake its watchers. */
   end(entryId: string): void {
     const buffer = this.streams.get(entryId);
     if (!buffer || buffer.ended) return;
+    const hadRunning = this.runningBackgroundCommands(entryId).length > 0;
     this.forgetLatest(entryId);
     buffer.ended = true;
     this.notifyWaiters(entryId);
+    this.backgroundChanged(entryId);
+    if (hadRunning) this.onBackgroundCommandsChange(entryId);
   }
 
   /** Wake outstanding watches, then forget all ephemeral state for an entry. */
   delete(entryId: string): void {
+    const hadRunning = this.runningBackgroundCommands(entryId).length > 0;
     this.notifyWaiters(entryId);
     this.forgetLatest(entryId);
     this.streams.delete(entryId);
     this.waiters.delete(entryId);
+    this.backgroundChanged(entryId);
+    this.backgroundVersions.delete(entryId);
+    this.backgroundWaiters.delete(entryId);
+    if (hadRunning) this.onBackgroundCommandsChange(entryId);
   }
 
   private forgetLatest(entryId: string): void {

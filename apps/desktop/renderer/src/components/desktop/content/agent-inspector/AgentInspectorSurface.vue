@@ -95,6 +95,7 @@
         :supports-reasoning="liveSupportsReasoning"
         :resource="workResource"
         :active-source-message-id="projection.liveWork.active ? projection.entry.roomAgentState?.turn.sourceMessageId ?? null : null"
+        :entry-id="projection.entryId"
       />
       <AgentInspectorWork
         v-else-if="selectedTab === 'work'" id="agent-inspector-work-panel" role="tabpanel" aria-labelledby="agent-inspector-work-tab"

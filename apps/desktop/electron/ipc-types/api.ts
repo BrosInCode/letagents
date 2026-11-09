@@ -616,6 +616,10 @@ export interface DesktopApi {
     updateAgentConfiguration: (input: DesktopSupervisorAgentConfigurationUpdateInput) => Promise<DesktopSupervisorAgentConfigurationUpdateResult>;
     setAgentHomeHarness?: (input: import("./agents.js").DesktopSupervisorAgentHomeHarnessInput) => Promise<import("./agents.js").DesktopSupervisorAgentHomeHarnessResult>;
     setAgentLiveSharing?: (input: import("./agents.js").DesktopSupervisorAgentLiveSharingInput) => Promise<import("./agents.js").DesktopSupervisorAgentConfigurationUpdateResult>;
+    /** Stop a command that an agent runs in the background (signed by the app). */
+    stopBackgroundCommand?: (input: import("./agents.js").DesktopStopBackgroundCommandInput) => Promise<import("./agents.js").DesktopStopBackgroundCommandResult>;
+    /** The newest values of one agent's background commands after a version; waits for a change. */
+    watchBackgroundCommands?: (input: { entryId: string; afterVersion: number }) => Promise<import("./agents.js").DesktopBackgroundCommandsBatch>;
     applyAgentConfiguration: (input: DesktopSupervisorAgentConfigurationApplyInput) => Promise<DesktopSupervisorAgentConfigurationApplyResult>;
     prepareRoomMove: (input: DesktopSupervisorRoomMovePrepareInput) => Promise<DesktopSupervisorRoomMove>;
     commitRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;

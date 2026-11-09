@@ -11,6 +11,7 @@ export type WireResponse = { version: number; id?: string; ok: boolean; result?:
 export type WireEntry = {
   provider_progress?: DesktopSupervisorManifestEntry["providerProgress"];
   launch_progress?: unknown;
+  background_commands?: unknown;
   runtime_recovery?: DesktopSupervisorManifestEntry["runtimeRecovery"];
   local_room_id?: string;
   runtime_generation_id?: string | null;

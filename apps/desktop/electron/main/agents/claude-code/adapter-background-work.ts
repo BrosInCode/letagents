@@ -7,6 +7,13 @@ import { claudeStreamKind, sessionIdOf, shownTaskDescription, streamMethod } fro
 import type { ClaudeHeldRoomTurn, ClaudeRoomTurnTerminal, ClaudeStreamMessage } from "./types.js";
 import { BackgroundCommandOutput, claudeBackgroundOutputPath } from "./background-command-output.js";
 import { LIVE_BACKGROUND_COMMAND_METHOD } from "../../../../../../shared/live-command-output.mjs";
+import { randomUUID } from "node:crypto";
+
+/** How long the owner's Stop waits for the CLI to accept it. */
+const STOP_BACKGROUND_COMMAND_TIMEOUT_MS = 10_000;
+
+/** What happened to the owner's request to stop a background command. */
+export type BackgroundCommandStopOutcome = "stopping" | "not_running" | "failed";
 
 /** Background commands whose output one agent's Live tab follows at a time. */
 const MAX_FOLLOWED_BACKGROUND_COMMANDS = 8;
@@ -30,6 +37,40 @@ export class ClaudeAdapterBackgroundWork extends ClaudeAdapterNativeExecution {
   private readonly backgroundCommandRequests = new WeakMap<ClaudeProviderHandle, Map<string, { command: string; description: string | null }>>();
   /** The output followers of the background commands that run, by task id. */
   private readonly backgroundCommandOutputs = new WeakMap<ClaudeProviderHandle, Map<string, BackgroundCommandOutput>>();
+  /** The owner's stop requests that wait for the CLI's answer, by request id. */
+  private readonly backgroundCommandStops = new WeakMap<ClaudeProviderHandle, Map<string, (accepted: boolean) => void>>();
+
+  /**
+   * Stop a command that the agent runs in the background, at its owner's request.
+   * 1. Only a command that this adapter follows can be stopped: a shell command of the agent itself, still running.
+   * 2. The CLI is asked with its own `stop_task` control request, and its answer is awaited for a short time.
+   * 3. The CLI then reports the task as stopped, and the follower publishes that end like any other.
+   */
+  protected async stopFollowedBackgroundCommand(handle: ClaudeProviderHandle, taskId: string): Promise<BackgroundCommandStopOutcome> {
+    if (!this.backgroundCommandOutputs.get(handle)?.has(taskId) || handle.terminal || handle.state === "failed") return "not_running";
+    const requestId = randomUUID();
+    const waiting = this.backgroundCommandStops.get(handle) ?? new Map<string, (accepted: boolean) => void>();
+    this.backgroundCommandStops.set(handle, waiting);
+    const accepted = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => { waiting.delete(requestId); resolve(false); }, STOP_BACKGROUND_COMMAND_TIMEOUT_MS);
+      timer.unref?.();
+      waiting.set(requestId, (value) => { clearTimeout(timer); waiting.delete(requestId); resolve(value); });
+      try {
+        handle.child.writeLine(JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype: "stop_task", task_id: taskId } }));
+      } catch {
+        waiting.get(requestId)?.(false);
+      }
+    });
+    return accepted ? "stopping" : "failed";
+  }
+
+  /** The CLI's answer to an owner's stop request. It names no session, and it is read in any state of the handle. */
+  protected answerBackgroundCommandStop(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
+    if (message.type !== "control_response") return;
+    const response = record(message.response);
+    const answer = typeof response?.request_id === "string" ? this.backgroundCommandStops.get(handle)?.get(response.request_id) : undefined;
+    answer?.(response?.subtype === "success");
+  }
 
   /**
    * Follow the output of shell commands that the agent runs in the background, for the owner's Live tab.
@@ -39,6 +80,7 @@ export class ClaudeAdapterBackgroundWork extends ClaudeAdapterNativeExecution {
    * Nothing here changes how the turn runs or ends; it only publishes display-only events.
    */
   protected observeBackgroundCommandOutput(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
+    if (message.type === "control_response") return;
     if (sessionIdOf(message) !== handle.providerContinuationId || message.parent_tool_use_id != null) return;
     const content = record(message.message)?.content;
     if (message.type === "assistant" && Array.isArray(content)) {
@@ -97,6 +139,8 @@ export class ClaudeAdapterBackgroundWork extends ClaudeAdapterNativeExecution {
 
   protected override releaseEndedHandle(handle: ClaudeProviderHandle): void {
     super.releaseEndedHandle(handle);
+    for (const answer of [...this.backgroundCommandStops.get(handle)?.values() ?? []]) answer(false);
+    this.backgroundCommandStops.delete(handle);
     for (const follower of this.backgroundCommandOutputs.get(handle)?.values() ?? []) follower.close();
     this.backgroundCommandOutputs.delete(handle);
     this.backgroundCommandRequests.delete(handle);

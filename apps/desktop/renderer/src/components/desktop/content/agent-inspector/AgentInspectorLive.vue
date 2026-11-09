@@ -42,7 +42,7 @@
     </div>
 
     <div v-if="entries.length || background.length" class="agent-live-footer">
-      <AgentInspectorBackgroundCommands v-if="background.length" ref="backgroundDock" :commands="background" />
+      <AgentInspectorBackgroundCommands v-if="background.length" ref="backgroundDock" :commands="background" :entry-id="entryId ?? null" />
       <div v-if="entries.length" class="agent-live-follow-bar">
         <span v-if="lastUpdateLabel" :title="formatFullTimestamp(transcript.lastActivityAt!)">Last update: {{ lastUpdateLabel }}</span>
         <button v-if="!followingLatest" type="button" @click="scrollFollower?.resume()"><ArrowDown :size="14" aria-hidden="true" />Follow latest</button>
@@ -54,11 +54,12 @@
 
 <script setup lang="ts">
 import { formatDate } from "../../../../domain/formatters";
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { useNow } from "../../../../composables/useNow";
 import { ArrowDown, MessageSquare, NotebookPen } from "@lucide/vue";
 import AgentInspectorLiveActions from "./AgentInspectorLiveActions.vue";
 import AgentInspectorBackgroundCommands from "./AgentInspectorBackgroundCommands.vue";
+import { useBackgroundCommands } from "../../../../composables/useBackgroundCommands";
 import MarkdownBlock from "../formatting/MarkdownBlock.vue";
 import { followAgentLiveScroll } from "../../../../domain/agent-inspector-live-scroll";
 import { formatFullTimestamp } from "../../../../domain/time";
@@ -82,6 +83,8 @@ const props = defineProps<{
   supportsReasoning: boolean | null;
   resource: AgentInspectorWorkResource;
   activeSourceMessageId: string | null;
+  /** The agent's supervisor entry, for its owner's actions on background commands. */
+  entryId?: string | null;
 }>();
 
 const liveElement = ref<HTMLElement | null>(null);
@@ -112,6 +115,15 @@ function backgroundFor(entry: LiveTraceEntry): LiveBackgroundCommand | null {
 function showBackground(taskId: string): void {
   backgroundDock.value?.open(taskId);
 }
+
+// The strip's Open asks for one command: it opens as soon as the feed has it.
+const backgroundCommandActions = useBackgroundCommands();
+watch(() => [backgroundCommandActions?.reveal.value, background.value.length] as const, async ([request]) => {
+  if (!request || request.entryId !== props.entryId || !background.value.some((command) => command.id === request.taskId)) return;
+  backgroundCommandActions!.reveal.value = null;
+  await nextTick();
+  showBackground(request.taskId);
+}, { immediate: true });
 
 const isFollowing = computed(() => availability.value === "active" && canShowCurrent.value);
 const availability = computed(() => agentLiveAvailability(props.work, props.feed.ended));

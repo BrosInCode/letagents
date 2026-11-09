@@ -322,6 +322,153 @@ button.room-activity-pill:focus-visible,
   border-radius: 7px;
 }
 
+/* A command that an agent runs in the background. Its row opens to its live
+   output, here in the strip; Stop and Open stay on the row. */
+/* A list with commands updates while it is open (their output arrives), so it is opaque: a blur behind it would
+   be drawn again with each update. */
+.room-activity-list[data-commands] {
+  width: min(560px, 100%);
+  max-height: min(440px, 62vh);
+  background: var(--bg-elevated);
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
+.room-activity-text code,
+.room-activity-row-copy code {
+  color: var(--text);
+  font: 11.5px var(--font-mono);
+}
+
+.room-activity-row-copy code {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A long command gives way, not the short agent name after it; a long name still ends in an ellipsis. */
+.room-activity-row-copy code + span {
+  flex: 0 0 auto;
+  max-width: 45%;
+}
+
+.room-activity-command {
+  border-radius: 9px;
+}
+
+.room-activity-command[data-open] {
+  background: var(--accent-dim);
+}
+
+.room-activity-command[data-nested] {
+  margin-left: 22px;
+}
+
+.room-activity-command-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  padding-right: 6px;
+}
+
+.room-activity-command-toggle {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto 13px;
+  align-items: center;
+  gap: 9px;
+  min-height: 36px;
+  padding: 0 4px 0 9px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.room-activity-command-toggle:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+.room-activity-command-icon {
+  color: var(--blue-text);
+}
+
+.room-activity-command-chevron {
+  color: var(--text-tertiary);
+  transition: transform 160ms var(--ease-out);
+}
+
+.room-activity-command[data-open] .room-activity-command-chevron {
+  transform: rotate(90deg);
+}
+
+/* Times change every second: a fixed width keeps the row from moving. */
+.room-activity-command .room-activity-row-time {
+  min-width: 4.5ch;
+  text-align: right;
+}
+
+.room-activity-row-button[data-tone="stop"]:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.room-activity-command-error {
+  margin: 0 8px 6px 38px;
+  color: var(--red-text);
+  font-size: 11.5px;
+}
+
+/* The output opens and closes with transform, opacity and clip-path only (room-activity-motion.ts): the layout
+   changes once, never frame by frame. */
+.room-activity-terminal-wrap {
+  display: none;
+}
+
+/* flow-root: the output's margins stay inside, so its height is exactly what the list loses when it closes. */
+.room-activity-command[data-open] .room-activity-terminal-wrap {
+  display: flow-root;
+}
+
+/* A fixed height: arriving lines never move the list, and its own layout and paint stay inside it. */
+.room-activity-terminal {
+  height: 176px;
+  contain: layout paint style;
+  margin: 0 8px 8px 38px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--bg);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  color: var(--text-secondary);
+  font: 11px/1.6 var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  scrollbar-width: thin;
+}
+
+.room-activity-pill[data-kind="background"] .room-activity-text {
+  color: var(--text-secondary);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .room-activity-command-toggle:hover {
+    background: var(--accent-hover);
+  }
+
+  .room-activity-row-button[data-tone="stop"]:hover:not(:disabled) {
+    background: var(--red-dim);
+    color: var(--red-text);
+  }
+}
+
 @keyframes room-activity-list-in {
   from { opacity: 0; transform: translateY(4px) scale(0.98); }
 }
@@ -359,6 +506,10 @@ button.room-activity-pill:focus-visible,
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .room-activity-command-chevron {
+    transition: none;
+  }
+
   .room-activity-pill,
   .room-activity-list,
   .room-activity-typing-dots i,
