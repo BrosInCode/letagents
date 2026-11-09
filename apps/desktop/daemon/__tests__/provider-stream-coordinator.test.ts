@@ -1925,6 +1925,28 @@ test("Codex command output deltas survive a completion without aggregated output
   assert.equal((ended[1]!.payload as any).output, null);
 });
 
+test("a Codex terminal session that the owner stopped reads as stopped, though its shell exits with code 1", () => {
+  const display = new ProviderLiveDisplay("thread");
+  const lifecycle = (method: string, itemId: string, overrides = {}) => display.project(displayEvent("codex", method, {
+    threadId: "thread", turnId: "turn", item: { id: itemId, type: "commandExecution", command: "/bin/zsh -lc 'npm run dev'", ...overrides },
+  }));
+  lifecycle("item/started", "server");
+  lifecycle("item/started", "watcher");
+  display.project(displayEvent("codex", "turn/completed", { threadId: "thread", turn: { id: "turn" } }));
+  display.noteStopRequested("unknown", true);
+  display.noteStopRequested("server", true);
+  // Codex reports the end of a terminated `tty: true` session with the shell's own exit code (live, 2026-11-09).
+  const stopped = lifecycle("item/completed", "server", { status: "failed", exitCode: 1 });
+  assert.deepEqual([(stopped[0]!.payload as any).status, (stopped[1]!.payload as any).status, (stopped[1]!.payload as any).error],
+    ["stopped", "interrupted", null]);
+
+  // A Stop that Codex did not carry out is taken back: the command's own failure still reads as failed.
+  display.noteStopRequested("watcher", true);
+  display.noteStopRequested("watcher", false);
+  const failed = lifecycle("item/completed", "watcher", { status: "failed", exitCode: 1 });
+  assert.equal((failed[0]!.payload as any).status, "failed");
+});
+
 test("Codex captured command output is bounded and redacted again after joining chunks", () => {
   const display = new ProviderLiveDisplay("thread");
   const project = (method: string, itemId: string, extra = {}) => display.project(displayEvent("codex", method, {

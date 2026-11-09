@@ -338,6 +338,12 @@ export class ProviderStreamCoordinator {
     return installation && this.isCurrentInstallation(installation) ? installation : undefined;
   }
 
+  /** The owner's Stop for one of the agent's background commands (see ProviderLiveDisplay.noteStopRequested). */
+  noteBackgroundStopRequested(entryId: string, taskId: string, requested: boolean): void {
+    const installation = this.currentInstallation(entryId);
+    if (installation) this.liveDisplay.get(installation)?.noteStopRequested(taskId, requested);
+  }
+
   /** Settle the exact typed Cursor child before its reusable lane drops that birth. */
   async settleCursorLifecycleBeforeIdle(
     agent: { agentId: string; handle: ProviderActionHandle | null; executionGenerationId: string },

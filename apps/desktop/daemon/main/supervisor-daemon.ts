@@ -246,6 +246,7 @@ export class SupervisorDaemon extends SupervisorDaemonDelivery {
       watchBackgroundCommands: (input) => this.agentStreamRegistry.watchBackgroundCommands(input),
       stopBackgroundCommand: (input) => stopBackgroundCommand(input, { currentDaemonGeneration: () => this.singleton.currentGeneration,
         liveHandle: (id) => this.providerStreams.get(id), stop: this.providerPort?.stopBackgroundCommand?.bind(this.providerPort),
+        markStopRequested: (id, task, requested) => this.providerStreams.noteBackgroundStopRequested(id, task, requested),
         isRunning: (id, task) => this.agentStreamRegistry.runningBackgroundCommands(id).some((command) => command.task_id === task) }),
       watchState: this.watchState.bind(this),
       mutateLocalBoard: async input => {

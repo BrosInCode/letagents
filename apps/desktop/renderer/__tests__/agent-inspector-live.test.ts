@@ -344,6 +344,8 @@ test("describeLiveToolCall degrades unknown tools to their bare name, never the 
   const native = describeLiveToolCall("shellToolCall", { command: "npm test" });
   assert.equal(native.headline, "Ran a shell command");
   assert.equal(native.detail, "npm test");
+  assert.equal(describeLiveToolCall("shellToolCall", { command: "/bin/zsh -lc 'echo '\"'\"'ready'\"'\"' && npm run dev'" }).detail,
+    "echo 'ready' && npm run dev", "Codex's login-shell wrapper is not part of the command");
   const opaque = describeLiveToolCall("somethingNew", { widget: 4 });
   assert.equal(opaque.headline, "somethingNew");
   assert.equal(opaque.detail, null);
@@ -638,6 +640,30 @@ test("Live failures show received errors and output excerpts outside disclosure 
     const success = await render({ status: "completed", error: null, output: "done" });
     assert.equal(success.failure, null);
     assert.doesNotMatch(success.html, /class="agent-live-error"/);
+  } finally { await vite.close(); }
+});
+
+test("a call whose command runs on in the background reads as started, not as an unfinished action", async () => {
+  const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLiveActions.vue")).default;
+    // A Codex call of a turn that has ended: Codex still reports the item as in progress.
+    const item = { kind: "tool" as const, id: "codex:thread:turn-1:exec-1", tool: "shellToolCall", status: "running",
+      input: { command: "/bin/zsh -lc 'npm run dev'", cwd: "/work" }, output: null, error: null };
+    const entry = presentAgentTrace([item], false)[0]!;
+    assert.ok(entry.kind === "actions");
+    const background = { id: "exec-1", toolUseId: "exec-1", command: "npm run dev", description: null, status: "running" as const,
+      output: "VITE ready\n", outputTruncated: false, exitCode: null, startedAt: "2026-11-09T14:30:11Z", endedAt: null };
+    const running = await renderToString(createSSRApp(component, { entry, current: false, background }));
+    const summary = running.split("</summary>")[0]!;
+    assert.match(summary, /Started a background command/);
+    assert.match(summary, /In background/);
+    assert.match(summary, /lucide-square-terminal/, "a terminal, not an hourglass");
+    assert.match(summary, /title="npm run dev"/);
+    assert.doesNotMatch(summary, /Unfinished action|\/bin\/zsh|hourglass/);
+    assert.match(running.split("</summary>")[1]!, /\/bin\/zsh -lc/, "the exact input stays behind disclosure");
+    // Without its background command, the same call of an ended turn is unfinished.
+    assert.match(await renderToString(createSSRApp(component, { entry, current: false })), /Unfinished action · shell/);
   } finally { await vite.close(); }
 });
 

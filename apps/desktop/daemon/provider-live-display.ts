@@ -82,8 +82,9 @@ function appendLiveTail(output: { tail: string; tailCut: boolean; liveHidden: bo
 }
 
 /**
- * How a Codex background command ended. Codex ends a session that was terminated (the owner's Stop, or the
- * agent's own clean-up) with exit code -1 and no exit status of its own.
+ * How a Codex background command ended. Codex ends a terminated session (the owner's Stop, or the agent's own
+ * clean-up) with exit code -1 when it has no terminal; a terminal session (`tty`) gives its shell's own code,
+ * often 1, so the owner's Stop is known from the request itself (see ProviderLiveDisplay.noteStopRequested).
  */
 function codexBackgroundEnd(status: unknown, exitCode: number | null): LiveBackgroundCommandStatus {
   if (status === "interrupted" || status === "cancelled" || exitCode === -1) return "stopped";
@@ -102,10 +103,24 @@ export class ProviderLiveDisplay {
    * on reporting their output and their end between turns, under the turn that started them.
    */
   private readonly codexBackground = new Map<string, CodexCommandOutput & { itemId: string }>();
+  /** Codex background commands (by item id) that the owner asked to stop: their end reads as stopped. */
+  private readonly codexStopRequested = new Set<string>();
 
   private readonly finishedTurns = new Set<string>();
 
   constructor(private readonly continuation: string) {}
+
+  /**
+   * The owner's Stop for a background command, marked before the provider is asked (its end can arrive before
+   * the answer) and cleared when the provider does not stop it.
+   */
+  noteStopRequested(taskId: string, requested: boolean): void {
+    if (!requested) {
+      this.codexStopRequested.delete(taskId);
+      return;
+    }
+    if ([...this.codexBackground.values()].some((command) => command.itemId === taskId)) this.codexStopRequested.add(taskId);
+  }
 
   project(event: DaemonActivityEvent, nativePhase?: "turn_active" | "turn_terminal" | null): DaemonActivityEvent[] {
     const payload = record(event.payload);
@@ -170,7 +185,7 @@ export class ProviderLiveDisplay {
         if (background) {
           this.codexBackground.delete(key);
           const exitCode = Number.isInteger(item.exitCode) ? Number(item.exitCode) : null;
-          const end = codexBackgroundEnd(item.status, exitCode);
+          const end = this.codexStopRequested.delete(item.id as string) ? "stopped" : codexBackgroundEnd(item.status, exitCode);
           // The call's own row ends too: a command that the owner stopped reads as interrupted, not failed.
           return [
             this.codexBackgroundCommand(event, background, { status: end, exitCode, endedAt: event.observed_at ?? null }),
