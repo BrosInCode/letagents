@@ -74,14 +74,36 @@ async function listClaudeCodeModels(
   if (!input.refreshModels && cached && cached.expiresAt > Date.now()) {
     return cloneModelResult(cached.result);
   }
-  const version = await execFileWithTimeout(command, ["--version"], { env: runtimeEnv });
-  const versionLine = version.ok ? firstNonEmptyLine(version.stdout) ?? firstNonEmptyLine(version.stderr) ?? "" : "";
-  const models = CLAUDE_CODE_KNOWN_MODELS
-    .filter((model) => !model.minimumCliVersion || claudeCodeVersionAtLeast(versionLine, model.minimumCliVersion))
-    .map(({ minimumCliVersion: _minimum, ...model }) => model);
+  const models = claudeCodeModelsFor(await claudeCodeVersionLine(command, runtimeEnv));
   const next = modelResult("claude-code", "ready", models, null, null);
   modelListCache.set(cacheKey, { expiresAt: Date.now() + MODEL_LIST_CACHE_MS, result: next });
   return cloneModelResult(next);
+}
+
+async function claudeCodeVersionLine(command: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const version = await execFileWithTimeout(command, ["--version"], { env });
+  return version.ok ? firstNonEmptyLine(version.stdout) ?? firstNonEmptyLine(version.stderr) ?? "" : "";
+}
+
+/** The known models this CLI version takes; an unreadable version gets only those every CLI takes. */
+function claudeCodeModelsFor(versionLine: string): DesktopAgentProviderModelOption[] {
+  return CLAUDE_CODE_KNOWN_MODELS
+    .filter((model) => !model.minimumCliVersion || claudeCodeVersionAtLeast(versionLine, model.minimumCliVersion))
+    .map(({ minimumCliVersion: _minimum, ...model }) => model);
+}
+
+/**
+ * The full model ids this Claude Code takes, read from its version now.
+ * Null when the version can't be read: the short list an unreadable version
+ * gets cannot show that a newer model is missing.
+ */
+export async function claudeCodeModelIds(): Promise<ReadonlySet<string> | null> {
+  await desktopShellEnvironmentReady();
+  const runtimeEnv = desktopRuntimeEnvironment();
+  const versionLine = await claudeCodeVersionLine(resolveClaudeCodeExecutable(runtimeEnv), runtimeEnv);
+  // Every real version is at least 0.0.0, so this is false only for a version that doesn't parse.
+  if (!claudeCodeVersionAtLeast(versionLine, "0.0.0")) return null;
+  return new Set(claudeCodeModelsFor(versionLine).map((model) => model.id));
 }
 
 export function normalizeManagedAgentModel(value: string | null | undefined): string | null {
@@ -450,14 +472,21 @@ export function parseCursorModelsOutput(output: string): DesktopAgentProviderMod
  * Every model id this Codex takes, hidden ones too (a thread may start with
  * any of them), from its account catalog only. The bundled catalog can be
  * older than the CLI's account catalog, so it cannot show that a model is
- * missing. Null when the catalog can't be read.
+ * missing. When Codex can't read the account catalog it prints the bundled
+ * one and still exits 0 (codex-cli 0.162.1), so an answer equal to the
+ * bundled catalog proves nothing either. Null when nothing is known.
  */
 export async function codexCatalogModelIds(): Promise<ReadonlySet<string> | null> {
   await desktopShellEnvironmentReady();
   const runtimeEnv = desktopRuntimeEnvironment();
-  const result = await execFileWithTimeout(resolveCodexExecutable({ env: runtimeEnv }), ["debug", "models"], { env: runtimeEnv });
-  const ids = parseCodexModelsOutput(result.stdout, { includeHidden: true }).map((model) => model.id);
-  return result.ok && ids.length ? new Set(ids) : null;
+  const command = resolveCodexExecutable({ env: runtimeEnv });
+  const [account, bundled] = await Promise.all([
+    execFileWithTimeout(command, ["debug", "models"], { env: runtimeEnv }),
+    execFileWithTimeout(command, ["debug", "models", "--bundled"], { env: runtimeEnv }),
+  ]);
+  if (!account.ok || (bundled.ok && bundled.stdout.trim() === account.stdout.trim())) return null;
+  const ids = parseCodexModelsOutput(account.stdout, { includeHidden: true }).map((model) => model.id);
+  return ids.length ? new Set(ids) : null;
 }
 
 export function parseCodexModelsOutput(

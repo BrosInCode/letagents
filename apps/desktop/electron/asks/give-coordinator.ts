@@ -10,7 +10,7 @@ import type { ProviderUsage } from "../../shared/provider-usage.js";
 import { getOrCreateDesktopHostId } from "../main/agents/state.js";
 import { DesktopApiError } from "../main/auth.js";
 import { listGuestSafePermissionProfiles } from "../main/agents/rental-permission-profiles.js";
-import { codexCatalogModelIds, listDesktopAgentProviderModels } from "../main/agents/managed-agent-models.js";
+import { claudeCodeModelIds, codexCatalogModelIds, listDesktopAgentProviderModels } from "../main/agents/managed-agent-models.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
 import { getOrCreateDesktopSupervisorAgentIdentity } from "../main/supervisor-grant.js";
 import { supervisorDaemonClient, type SupervisorDaemonClient } from "../main/supervisor-daemon.js";
@@ -37,6 +37,7 @@ const MODEL_LIST_APPS: Readonly<Record<string, string>> = { "claude-code": "Clau
  * lists for this account. Codex: its whole account catalog, hidden models too.
  */
 export async function offeredModelIds(providerId: string): Promise<ReadonlySet<string> | null> {
+  if (providerId === "claude-code") return claudeCodeModelIds();
   if (providerId === "codex") return codexCatalogModelIds();
   const listed = await listDesktopAgentProviderModels(providerId as DesktopAgentProviderId);
   return listed.status === "ready" ? new Set(listed.models.map(model => model.id)) : null;
