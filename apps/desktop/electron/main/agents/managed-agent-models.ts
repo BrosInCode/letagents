@@ -77,23 +77,25 @@ async function listClaudeCodeModels(
   }
   const versionLine = await claudeCodeVersionLine(command, runtimeEnv);
   const models = claudeCodeModelsFor(versionLine);
-  const next = modelResult("claude-code", "ready", models, null, null, claudeCodeCliUpdate(versionLine, models));
+  const next = modelResult("claude-code", "ready", models, null, null, claudeCodeCliUpdate(versionLine, models, command));
   modelListCache.set(cacheKey, { expiresAt: Date.now() + MODEL_LIST_CACHE_MS, result: next });
   return cloneModelResult(next);
 }
 
-/** The known models this CLI leaves out because it is too old, if any. */
+/**
+ * The known models this CLI leaves out because it is too old, if any. A CLI
+ * that is missing, or whose version can't be read, gets nothing here: the
+ * setup check already says how to install or repair it, and "update" would fail.
+ */
 function claudeCodeCliUpdate(
   versionLine: string,
   listed: DesktopAgentProviderModelOption[],
+  command: string,
 ): DesktopAgentProviderCliUpdate | null {
+  const installedVersion = inspectClaudeCodeVersion(versionLine).version;
   const missing = CLAUDE_CODE_KNOWN_MODELS.filter((model) => !listed.some((option) => option.id === model.id));
-  return missing.length
-    ? {
-      modelLabels: missing.map((model) => model.label),
-      installedVersion: inspectClaudeCodeVersion(versionLine).version,
-      command: "claude update",
-    }
+  return installedVersion && missing.length
+    ? { modelLabels: missing.map((model) => model.label), installedVersion, command: `${command} update` }
     : null;
 }
 

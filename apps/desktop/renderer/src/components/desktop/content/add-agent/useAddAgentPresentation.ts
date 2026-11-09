@@ -240,7 +240,8 @@ export function useAddAgentPresentation(
   });
   const providerModelCatalogIsError = computed(() => Boolean(providerModels.value?.error));
   // Known models the installed CLI is too old to run: said once, under the model field.
-  const providerModelCliUpdate = computed(() => loadingProviderModels.value || providerModels.value?.error
+  // It stays while a refresh loads, so the footer does not jump; a catalog error replaces it.
+  const providerModelCliUpdate = computed(() => providerModels.value?.error
     ? null
     : modelCliUpdateNote(providerModels.value?.cliUpdate, selectedProvider.value?.name || "Claude Code"));
   const modelSelectOptions = computed<DesktopSelectOption[]>(() => [
@@ -408,8 +409,10 @@ export function modelCliUpdateNote(
   const labels = update?.modelLabels ?? [];
   if (!update || !labels.length) return null;
   const names = labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
-  const installed = update.installedVersion ? ` (installed: ${update.installedVersion})` : "";
-  return { message: `${names} ${labels.length === 1 ? "needs" : "need"} a newer ${app}${installed}.`, command: update.command };
+  return {
+    message: `${names} ${labels.length === 1 ? "needs" : "need"} a newer ${app} (installed: ${update.installedVersion}).`,
+    command: update.command,
+  };
 }
 
 /**

@@ -147,9 +147,9 @@ export type DesktopAgentProviderModelsStatus =
 export interface DesktopAgentProviderCliUpdate {
   /** Labels of the models a newer CLI would list, in list order. */
   modelLabels: string[];
-  /** The installed CLI version, or null when it could not be read. */
-  installedVersion: string | null;
-  /** The command that updates the CLI. */
+  /** The installed CLI version. */
+  installedVersion: string;
+  /** The command that updates the CLI this app runs. */
   command: string;
 }
 

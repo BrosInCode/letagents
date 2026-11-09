@@ -74,6 +74,35 @@
   color: #f2a1a1;
 }
 
+/* The same inline text action as "Check again" in the setup status. */
+.desktop-add-agent-model-refresh-link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.desktop-add-agent-model-refresh-link:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.desktop-add-agent-model-refresh-link:focus-visible {
+  outline: 2px solid var(--text-secondary);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-add-agent-model-refresh-link:hover:not(:disabled) {
+    color: var(--text);
+  }
+}
+
 .desktop-add-agent-model .desktop-add-agent-model-catalog code {
   padding: 1px 5px;
   border: 1px solid rgba(255, 255, 255, 0.09);

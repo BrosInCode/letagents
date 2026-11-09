@@ -143,8 +143,8 @@ test("Claude models are full ids with real names, and newer ones only from the C
   assert.deepEqual(older.cliUpdate, {
     modelLabels: ["Fable 5.2", "Opus 5.5", "Sonnet 5.5", "Haiku 5.5"],
     installedVersion: "2.1.278",
-    command: "claude update",
-  }, "the models an older CLI leaves out are named, so the dialog can say how to get them");
+    command: `${process.env.LETAGENTS_CLAUDE_CODE_BIN} update`,
+  }, "the models an older CLI leaves out are named, with the update command for the CLI this app runs");
   assert.deepEqual((await listDesktopAgentProviderModels("claude-code")).cliUpdate, older.cliUpdate, "a cached answer keeps them");
 
   fakeClaude("2.1.280");
@@ -168,7 +168,7 @@ test("Claude models are full ids with real names, and newer ones only from the C
   const missing = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
   assert.equal(missing.status, "ready", "an unreadable version still lists the models every CLI takes");
   assert.equal(missing.models.some((model) => model.id === "claude-sonnet-5-5"), false);
-  assert.equal(missing.cliUpdate?.installedVersion, null);
+  assert.equal("cliUpdate" in missing, false, "a missing or unreadable CLI gets the setup check's advice, not an update note");
   delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
 });
 

@@ -12,7 +12,7 @@
           :options="modelOptions"
           label="Model"
           id="desktop-add-agent-model-select"
-          described-by="desktop-add-agent-model-description"
+          :described-by="cliUpdate ? 'desktop-add-agent-model-description desktop-add-agent-model-cli-update' : 'desktop-add-agent-model-description'"
           test-id="desktop-add-agent-model-select"
           @update:model-value="emit('update:modelChoice', $event)"
         />
@@ -51,11 +51,12 @@
     >{{ catalogLabel }}</p>
     <p
       v-else-if="cliUpdate"
+      id="desktop-add-agent-model-cli-update"
       class="desktop-add-agent-model-catalog"
       data-tone="status"
-      role="status"
       data-testid="desktop-add-agent-model-cli-update"
-    >{{ cliUpdate.message }} Run <code>{{ cliUpdate.command }}</code>, then refresh models.</p>
+    >{{ cliUpdate.message }} Run <code>{{ cliUpdate.command }}</code>, then
+      <button type="button" class="desktop-add-agent-model-refresh-link" :disabled="loading" @click="emit('refresh')">{{ loading ? "refreshing…" : "refresh models" }}</button>.</p>
   </section>
 </template>
 
