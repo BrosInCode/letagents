@@ -11,7 +11,9 @@ export interface GitHubAppInstallationSyncInput {
   target_type: string;
   target_login: string;
   target_github_id: string;
-  repository_selection: string;
+  /** Left out when the webhook does not carry the installation (a repository event): the stored value stays. */
+  repository_selection?: string;
+  /** Left out (undefined) to keep the stored permissions; null clears them. */
   permissions?: Record<string, string> | null;
   suspended_at?: string | null;
   uninstalled_at?: string | null;
@@ -75,13 +77,25 @@ export function createGitHubAppSync(deps: GitHubAppSyncDeps) {
       return installationId;
     }
 
+    // Installation events carry the whole installation. Repository events
+    // (push, pull request, issues, ...) carry only its ID, and the target comes
+    // from the payload's organization. Such an event must not overwrite the
+    // selection or the permissions it does not know.
+    const fromInstallation = Boolean(payload.installation?.account?.login);
     await deps.upsertGitHubAppInstallation({
       installation_id: installationId,
-      target_type: payload.installation?.target_type ?? target.type ?? "Account",
+      target_type: fromInstallation
+        ? payload.installation?.target_type ?? target.type ?? "Account"
+        : "Organization",
       target_login: target.login,
       target_github_id: toGitHubWebhookId(target.id) ?? installationId,
-      repository_selection: payload.installation?.repository_selection ?? "selected",
-      permissions: payload.installation?.permissions,
+      ...(fromInstallation
+        ? {
+          // Missing: keep the stored value (a new row defaults to "selected").
+          repository_selection: payload.installation?.repository_selection,
+          permissions: payload.installation?.permissions,
+        }
+        : {}),
       suspended_at: options?.suspended_at,
       uninstalled_at: options?.uninstalled_at,
     });

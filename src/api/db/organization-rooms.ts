@@ -1,4 +1,4 @@
-import { and, asc, eq, exists, isNull, or } from "drizzle-orm";
+import { and, asc, eq, exists, isNull, ne, or } from "drizzle-orm";
 
 import { db } from "./client.js";
 import { github_app_installations, github_app_repositories, github_repositories, project_admins, room_members, rooms } from "./schema.js";
@@ -17,7 +17,11 @@ export async function getConnectedOrganizationRooms(organizationId: string) {
     .innerJoin(rooms, eq(rooms.id, github_repositories.room_id))
     .where(and(
       eq(github_app_installations.target_github_id, organizationId),
-      eq(github_app_installations.target_type, "Organization"),
+      // GitHub IDs are unique across users and organizations, so the target ID
+      // names the company. Do not require target_type "Organization": repository
+      // webhooks used to overwrite it with "Account", and those rows stay until
+      // the next webhook for that installation.
+      ne(github_app_installations.target_type, "User"),
       isNull(github_app_installations.suspended_at),
       isNull(github_app_installations.uninstalled_at),
       isNull(github_app_repositories.removed_at),
