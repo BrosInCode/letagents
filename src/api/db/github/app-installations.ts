@@ -11,13 +11,28 @@ export async function upsertGitHubAppInstallation(input: {
   target_type: string;
   target_login: string;
   target_github_id: string;
-  repository_selection: string;
+  /** Undefined keeps the stored value on update (a webhook that does not carry it). */
+  repository_selection?: string;
+  /** Undefined keeps the stored permissions on update; null clears them. */
   permissions?: Record<string, string> | null;
+  /** Undefined keeps the stored value on update; null clears it. */
   suspended_at?: string | null;
+  /** Undefined keeps the stored value on update; null clears it. */
   uninstalled_at?: string | null;
 }): Promise<GitHubAppInstallation> {
   const now = new Date().toISOString();
   const permissions_json = serializeGitHubPermissions(input.permissions);
+  const update: Partial<typeof github_app_installations.$inferInsert> = {
+    target_type: input.target_type,
+    target_login: input.target_login,
+    target_github_id: input.target_github_id,
+    last_synced_at: now,
+    updated_at: now,
+  };
+  if (input.repository_selection !== undefined) update.repository_selection = input.repository_selection;
+  if (input.permissions !== undefined) update.permissions_json = permissions_json;
+  if (input.suspended_at !== undefined) update.suspended_at = input.suspended_at;
+  if (input.uninstalled_at !== undefined) update.uninstalled_at = input.uninstalled_at;
 
   const [installation] = await db
     .insert(github_app_installations)
@@ -26,7 +41,7 @@ export async function upsertGitHubAppInstallation(input: {
       target_type: input.target_type,
       target_login: input.target_login,
       target_github_id: input.target_github_id,
-      repository_selection: input.repository_selection,
+      repository_selection: input.repository_selection ?? "selected",
       permissions_json,
       suspended_at: input.suspended_at ?? null,
       uninstalled_at: input.uninstalled_at ?? null,
@@ -36,17 +51,7 @@ export async function upsertGitHubAppInstallation(input: {
     })
     .onConflictDoUpdate({
       target: github_app_installations.installation_id,
-      set: {
-        target_type: input.target_type,
-        target_login: input.target_login,
-        target_github_id: input.target_github_id,
-        repository_selection: input.repository_selection,
-        permissions_json,
-        suspended_at: input.suspended_at ?? null,
-        uninstalled_at: input.uninstalled_at ?? null,
-        last_synced_at: now,
-        updated_at: now,
-      },
+      set: update,
     })
     .returning();
 

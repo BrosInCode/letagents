@@ -89,6 +89,28 @@ test("syncGitHubAppInstallationFromPayload upserts installation target details",
   ]);
 });
 
+test("a repository webhook records an organization install without overwriting selection or permissions", async () => {
+  const { installations, sync } = createHarness();
+  // A push or pull request event: the installation has only its ID, and the
+  // target comes from the payload's organization (which has no `type`).
+  const payload: GitHubWebhookPayload = {
+    installation: { id: 121985484 },
+    organization: { id: 269600601, login: "BrosInCode" },
+  };
+
+  assert.equal(await sync.syncGitHubAppInstallationFromPayload(payload), "121985484");
+  assert.deepEqual(installations, [
+    {
+      installation_id: "121985484",
+      target_type: "Organization",
+      target_login: "BrosInCode",
+      target_github_id: "269600601",
+      suspended_at: undefined,
+      uninstalled_at: undefined,
+    },
+  ]);
+});
+
 test("syncGitHubAppInstallationFromPayload returns installation id without target upsert", async () => {
   const { installations, sync } = createHarness();
 
