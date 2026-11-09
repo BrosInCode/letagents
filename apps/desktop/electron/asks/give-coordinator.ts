@@ -10,7 +10,7 @@ import type { ProviderUsage } from "../../shared/provider-usage.js";
 import { getOrCreateDesktopHostId } from "../main/agents/state.js";
 import { DesktopApiError } from "../main/auth.js";
 import { listGuestSafePermissionProfiles } from "../main/agents/rental-permission-profiles.js";
-import { listDesktopAgentProviderModels } from "../main/agents/managed-agent-models.js";
+import { codexCatalogModelIds, listDesktopAgentProviderModels } from "../main/agents/managed-agent-models.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
 import { getOrCreateDesktopSupervisorAgentIdentity } from "../main/supervisor-grant.js";
 import { supervisorDaemonClient, type SupervisorDaemonClient } from "../main/supervisor-daemon.js";
@@ -30,6 +30,17 @@ const STILL_OPEN = "The request is still open for others.";
 const CAUSE_MAX_CHARS = 200;
 /** Apps whose CLI lists the models it takes, so an asked model is checked before the agent starts. */
 const MODEL_LIST_APPS: Readonly<Record<string, string>> = { "claude-code": "Claude Code", codex: "Codex", cursor: "Cursor" };
+
+/**
+ * The model ids this computer's app takes, or null when it can't tell.
+ * Claude Code: the ids its CLI version knows. Cursor: what `cursor-agent models`
+ * lists for this account. Codex: its whole account catalog, hidden models too.
+ */
+export async function offeredModelIds(providerId: string): Promise<ReadonlySet<string> | null> {
+  if (providerId === "codex") return codexCatalogModelIds();
+  const listed = await listDesktopAgentProviderModels(providerId as DesktopAgentProviderId);
+  return listed.status === "ready" ? new Set(listed.models.map(model => model.id)) : null;
+}
 
 /** The steps of a gift after the claim, in order. A failure is logged with the step it happened in. */
 export type GiveStep = "daemon" | "identity" | "authority" | "create" | "start" | "ready" | "usage" | "joined";
@@ -209,21 +220,26 @@ export class AskGiveCoordinator {
     private readonly hostId: () => string = getOrCreateDesktopHostId,
     private readonly resolveIdentity: typeof getOrCreateDesktopSupervisorAgentIdentity = getOrCreateDesktopSupervisorAgentIdentity,
     private readonly preflight: typeof runDesktopAgentProviderPreflight = runDesktopAgentProviderPreflight,
-    private readonly listModels: typeof listDesktopAgentProviderModels = listDesktopAgentProviderModels,
+    private readonly offeredModels: typeof offeredModelIds = offeredModelIds,
   ) {}
 
   /**
    * The agent starts with exactly the model asked for, so this computer's app
    * must offer it: an older CLI or another plan would fail only after starting.
-   * "Latest model" (no id) runs whatever the app has.
+   * "Latest model" (no id) runs whatever the app has. When the app can't say
+   * which models it has, the agent starts with the asked model as before.
    */
   private async assertModelOffered(input: DesktopGiveAgentInput): Promise<void> {
     const app = MODEL_LIST_APPS[input.providerId];
     if (!input.model || !app) return;
-    const offered = await this.listModels(input.providerId as DesktopAgentProviderId).catch(() => null);
-    if (offered?.status !== "ready") throw new AskGiveError(`Couldn't check which models your ${app} offers. Try again, or choose another model.`);
-    if (!offered.models.some(option => option.id === input.model)) {
-      throw new AskGiveError(`Your ${app} doesn't offer ${input.modelLabel || input.model}. Update ${app}, or choose another model.`);
+    const offered = await this.offeredModels(input.providerId).catch(() => null);
+    if (!offered) {
+      console.warn("[agent gifts] couldn't list the models of", input.providerId, "; starting with", input.model);
+      return;
+    }
+    if (!offered.has(input.model)) {
+      const fix = input.providerId === "claude-code" ? "Update Claude Code" : `Update ${app} or check your ${app} plan`;
+      throw new AskGiveError(`Your ${app} doesn't offer ${input.modelLabel || input.model}. ${fix}, or choose another model.`);
     }
   }
 

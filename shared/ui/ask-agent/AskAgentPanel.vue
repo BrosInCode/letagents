@@ -43,7 +43,7 @@
 
       <section>
         <div class="give-section-label"><h3>Agent</h3></div>
-        <FilterDropdown v-model="modelChoice" class="give-picker ask-model-picker" label="Agent" :options="modelOptions" :disabled="busy || loading || !models.length" searchable search-placeholder="Find a model…" match-trigger-width data-testid="agent-ask-model">
+        <FilterDropdown v-model="modelChoice" class="give-picker" label="Agent" :options="modelOptions" :disabled="busy || loading || !models.length" searchable search-placeholder="Find a model…" match-trigger-width data-testid="agent-ask-model">
           <template #trigger>
             <ChatAvatar v-if="selectedModel" :name="selectedModel.label" :provider="selectedModel.providerId" agent />
             <span class="give-picker-label"><strong>{{ loading ? 'Loading agents…' : selectedModel?.label || 'No agents available' }}</strong><small v-if="selectedModel && !loading">{{ providerLabel(selectedModel.providerId) }}</small></span>

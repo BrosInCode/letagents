@@ -446,7 +446,24 @@ export function parseCursorModelsOutput(output: string): DesktopAgentProviderMod
   return models;
 }
 
-export function parseCodexModelsOutput(output: string): DesktopAgentProviderModelOption[] {
+/**
+ * Every model id this Codex takes, hidden ones too (a thread may start with
+ * any of them), from its account catalog only. The bundled catalog can be
+ * older than the CLI's account catalog, so it cannot show that a model is
+ * missing. Null when the catalog can't be read.
+ */
+export async function codexCatalogModelIds(): Promise<ReadonlySet<string> | null> {
+  await desktopShellEnvironmentReady();
+  const runtimeEnv = desktopRuntimeEnvironment();
+  const result = await execFileWithTimeout(resolveCodexExecutable({ env: runtimeEnv }), ["debug", "models"], { env: runtimeEnv });
+  const ids = parseCodexModelsOutput(result.stdout, { includeHidden: true }).map((model) => model.id);
+  return result.ok && ids.length ? new Set(ids) : null;
+}
+
+export function parseCodexModelsOutput(
+  output: string,
+  { includeHidden = false }: { includeHidden?: boolean } = {},
+): DesktopAgentProviderModelOption[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(output);
@@ -460,9 +477,8 @@ export function parseCodexModelsOutput(output: string): DesktopAgentProviderMode
   for (const entry of modelEntries) {
     if (!entry || typeof entry !== "object") continue;
     const record = entry as Record<string, unknown>;
-    if (record.hidden === true) continue;
     const visibility = typeof record.visibility === "string" ? record.visibility.toLowerCase() : null;
-    if (visibility && visibility !== "list") continue;
+    if (!includeHidden && (record.hidden === true || (visibility && visibility !== "list"))) continue;
 
     const id = firstStringField(record, ["slug", "id", "model"]);
     if (!id || seen.has(id)) continue;

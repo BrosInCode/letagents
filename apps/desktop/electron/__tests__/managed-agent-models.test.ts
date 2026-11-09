@@ -20,6 +20,7 @@ const { tempDir } = createElectronTestEnv({
 });
 
 const {
+  codexCatalogModelIds,
   listDesktopAgentProviderModels,
   normalizeManagedAgentEffort,
   normalizeManagedAgentModel,
@@ -221,6 +222,17 @@ test("Codex model discovery reads debug model catalog output", async () => {
     model: "gpt-5.4-mini",
     modelSource: "provider",
   }), { model: "gpt-5.4-mini", error: null });
+
+  // A gift checks the whole account catalog: a hidden model still starts a thread.
+  assert.deepEqual([...await codexCatalogModelIds() ?? []], ["gpt-5.5", "codex-auto-review", "gpt-5.4-mini"]);
+  // Only the bundled catalog answers: it can be older than the account's, so nothing is known.
+  process.env.LETAGENTS_CODEX_BIN = writeFakeProvider(join(tempDir, "codex-bundled-only"), [
+    "if (process.argv[4] !== '--bundled') { console.error('offline'); process.exit(1); }",
+    "console.log(JSON.stringify({ models: [{ slug: 'gpt-5.5', visibility: 'list' }] }));",
+    "",
+  ].join("\n"));
+  assert.equal(await codexCatalogModelIds(), null);
+  delete process.env.LETAGENTS_CODEX_BIN;
 });
 
 test("Codex stale ready model cache is extended after failed rediscovery", async (t) => {

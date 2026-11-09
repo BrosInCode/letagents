@@ -60,7 +60,7 @@ test("the gift counts against the longest limit and survives a window reset", ()
   assert.equal(gift.consumedPercent, 9);
 });
 
-function fakes(overrides: { offered?: { status: string; models: Array<{ id: string }> } | null; shortUsedPercent?: number; joinedState?: string; readyFails?: boolean; lastError?: string; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean; purgeAnswers?: Array<Record<string, unknown>>; authorityFails?: unknown; installFails?: unknown } = {}) {
+function fakes(overrides: { offered?: string[] | null; shortUsedPercent?: number; joinedState?: string; readyFails?: boolean; lastError?: string; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean; purgeAnswers?: Array<Record<string, unknown>>; authorityFails?: unknown; installFails?: unknown } = {}) {
   const calls: string[] = [];
   const requestIds: string[] = [];
   const api = {
@@ -68,7 +68,8 @@ function fakes(overrides: { offered?: { status: string; models: Array<{ id: stri
     release: async (_token: string, cantHelp: boolean) => { calls.push(`release:${cantHelp}`); return overrides.release ?? { ok: true }; },
     launchAuthority: async () => { calls.push("authority"); if (overrides.authorityFails) throw overrides.authorityFails; return { room_id: "room", grant: { supervisor_grant: "t", grant_id: "g", expires_at: "2099-01-01T00:00:00Z" } }; },
     joined: async () => { calls.push("joined"); return { id: "ask_1", state: overrides.joinedState ?? "active" }; },
-    models: async () => [{ providerId: "cursor", model: null, label: "Cursor" }, { providerId: "claude-code", model: "claude-opus-5-5", label: "Claude Opus 5.5" }],
+    models: async () => [{ providerId: "cursor", model: null, label: "Cursor" }, { providerId: "claude-code", model: "claude-opus-5-5", label: "Claude Opus 5.5" },
+      { providerId: "cursor", model: "claude-opus-5-5-medium", label: "Claude Opus 5.5 (Cursor)" }],
     preview: async () => ({ ask: { state: "active", is_giver: true, ...overrides.preview }, unavailable: null }), end: async () => ({}),
   };
   const entry = { id: giftEntryId("ask_1", "try_1"), desiredState: "running", agentSessionId: "s", agentSessionBindingState: "active", readyReachedAt: "now", observedState: "running" };
@@ -94,10 +95,10 @@ function fakes(overrides: { offered?: { status: string; models: Array<{ id: stri
     return { entry, agentKey: "john/helper" };
   } };
   const listed: string[] = [];
-  const offered = overrides.offered === undefined ? { status: "ready", models: [{ id: "claude-opus-5-5" }] } : overrides.offered;
+  const offered = overrides.offered === undefined ? ["claude-opus-5-5"] : overrides.offered;
   const coordinator = new AskGiveCoordinator(api as any, daemon as any, grants as any, () => "host",
     async () => "john/helper", async () => ({ canStart: true }) as any,
-    async (providerId: string) => { listed.push(providerId); if (!offered) throw new Error("no CLI"); return { providerId, defaultModel: null, error: null, ...offered } as any; });
+    async (providerId: string) => { listed.push(providerId); return offered && new Set(offered); });
   return { coordinator, calls, states, requestIds, listed };
 }
 
@@ -119,14 +120,19 @@ test("an asked model starts only when this computer's app offers it, before the 
   assert.deepEqual(ok.listed, ["claude-code"]);
   assert.deepEqual(ok.calls, ["claim", "authority", "install", "joined"]);
 
-  const older = fakes({ offered: { status: "ready", models: [{ id: "claude-sonnet-5" }] } });
+  const older = fakes({ offered: ["claude-sonnet-5"] });
   await assert.rejects(older.coordinator.give(opus), /^AskGiveError: Your Claude Code doesn't offer Claude Opus 5\.5\. Update Claude Code, or choose another model\.$/);
-  for (const offered of [{ status: "error", models: [] }, null]) {
-    const unknown = fakes({ offered });
-    await assert.rejects(unknown.coordinator.give(opus), /Couldn't check which models your Claude Code offers/);
-    assert.deepEqual(unknown.calls, [], "nothing is claimed");
-  }
   assert.deepEqual(older.calls, [], "nothing is claimed");
+  const plan = fakes({ offered: ["auto"] });
+  await assert.rejects(plan.coordinator.give({ ...opus, providerId: "cursor", model: "claude-opus-5-5-medium", modelLabel: "Claude Opus 5.5 (Cursor)" }),
+    /^AskGiveError: Your Cursor doesn't offer Claude Opus 5\.5 \(Cursor\)\. Update Cursor or check your Cursor plan, or choose another model\.$/);
+
+  // An app that can't say which models it has starts the asked model, as before the check.
+  const unknown = fakes({ offered: null });
+  const warn = mock.method(console, "warn", () => undefined);
+  try { await unknown.coordinator.give(opus); } finally { warn.mock.restore(); }
+  unknown.coordinator.stopWatching();
+  assert.deepEqual(unknown.calls, ["claim", "authority", "install", "joined"]);
 
   // "Latest model" runs whatever the app has, so there is nothing to check.
   const latest = fakes({ offered: null });

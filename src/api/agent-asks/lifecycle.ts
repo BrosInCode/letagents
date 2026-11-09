@@ -51,6 +51,7 @@ export function canTransition(from: AgentAskState, to: AgentAskState): boolean {
  *   model once per reasoning effort; the id is the one Cursor names without an
  *   effort (its own default), or the medium one when it has no such id.
  * The giver's app checks that its CLI offers the id before the agent starts.
+ * Room messages show only the label, so a model two apps offer names its app.
  */
 export interface AskableModel { providerId: string; model: string | null; label: string }
 export const ASKABLE_MODELS: readonly AskableModel[] = Object.freeze([
@@ -67,9 +68,9 @@ export const ASKABLE_MODELS: readonly AskableModel[] = Object.freeze([
   { providerId: "codex", model: "gpt-6-luna", label: "GPT-6-Luna" },
   { providerId: "cursor", model: null, label: "Cursor (latest model)" },
   { providerId: "cursor", model: "composer-2.5", label: "Composer 2.5" },
-  { providerId: "cursor", model: "claude-fable-5-2-high", label: "Claude Fable 5.2" },
-  { providerId: "cursor", model: "claude-opus-5-5-medium", label: "Claude Opus 5.5" },
-  { providerId: "cursor", model: "claude-sonnet-5-5-medium", label: "Claude Sonnet 5.5" },
+  { providerId: "cursor", model: "claude-fable-5-2-high", label: "Claude Fable 5.2 (Cursor)" },
+  { providerId: "cursor", model: "claude-opus-5-5-medium", label: "Claude Opus 5.5 (Cursor)" },
+  { providerId: "cursor", model: "claude-sonnet-5-5-medium", label: "Claude Sonnet 5.5 (Cursor)" },
   { providerId: "cursor", model: "gpt-5.6-sol-medium", label: "GPT-5.6 Sol" },
   { providerId: "cursor", model: "gpt-5.6-terra-medium", label: "GPT-5.6 Terra" },
   { providerId: "cursor", model: "gpt-5.6-luna-medium", label: "GPT-5.6 Luna" },
