@@ -26,6 +26,15 @@ const COLORS = Object.freeze(['#e5484d', '#f76b15', '#ffc53d', '#46a758', '#12a5
 
 export const LIVE_DEMO_COLORS = COLORS;
 
+// The palette's colours by name, in LIVE_DEMO_COLORS order, so a reader of text can match the ink.
+const COLOR_NAMES = Object.freeze(['red', 'orange', 'yellow', 'green', 'teal', 'blue', 'purple', 'pink']);
+
+/** A palette colour's plain name; "grey" for any other colour. */
+export function liveDemoColorName(color) {
+  const index = COLORS.indexOf(String(color).toLowerCase());
+  return index >= 0 ? COLOR_NAMES[index] : 'grey';
+}
+
 /**
  * A mark's id: `dmk_` and 16 random bytes in base64url. The app picks it for a
  * new mark, so a save it sends again (its answer was lost) names the same mark,
@@ -112,6 +121,37 @@ function isAnchor(value) {
     && typeof value.dy === 'number' && Number.isFinite(value.dy));
 }
 
+/** The most steps a pin's element path has, from the element under it up. */
+export const LIVE_DEMO_ANCHOR_DEPTH = 32;
+// One step of a pin's element path: a tag (or *), then a unique id, or up to two classes and a place among its kind.
+const ANCHOR_STEP = /^(?:\*|[A-Za-z][A-Za-z0-9-]{0,63})(?:#[A-Za-z_][A-Za-z0-9_-]{0,63}|(?:\.[A-Za-z_][A-Za-z0-9_-]{0,63}){0,2}(?::nth-of-type\([1-9]\d{0,4}\))?)$/;
+
+export function isLiveDemoAnchorStep(step) {
+  return typeof step === 'string' && ANCHOR_STEP.test(step);
+}
+
+/**
+ * A pin's element path as the desktop app makes it: steps joined by " > ",
+ * each a plain CSS step. Nothing else is saved, so the path an agent reads
+ * cannot carry other text.
+ */
+export function isLiveDemoAnchorPath(path) {
+  if (typeof path !== 'string' || path.length === 0 || path.length > LIVE_DEMO.anchorPath) return false;
+  const steps = path.split(' > ');
+  return steps.length <= LIVE_DEMO_ANCHOR_DEPTH && steps.every(isLiveDemoAnchorStep);
+}
+
+/**
+ * An HTML file that runs as a live demo in the desktop app: declared as HTML,
+ * or, from an agent that attached it before HTML had a type, sent untyped
+ * with an .html or .htm name.
+ */
+export function isHtmlDemoFile(file) {
+  const type = String(file?.mimeType ?? '').toLowerCase().split(';')[0].trim();
+  return type === 'text/html' || type === 'application/xhtml+xml'
+    || ((type === '' || type === 'application/octet-stream') && /\.html?$/i.test(String(file?.fileName ?? '')));
+}
+
 /** A frame from a desktop app, or null. The server drops anything else. */
 export function parseLiveClientFrame(value) {
   if (!isRecord(value) || !isLiveDemoKey(value.demo)) return null;
@@ -153,6 +193,8 @@ export function parseDemoMark(value) {
 /** A new mark from a desktop app (REST body), or null. `id` is optional: the server picks one without it. */
 export function parseDemoMarkInput(value) {
   if (!isRecord(value) || !isLiveDemoKey(value.demo) || !isAnchor(value.anchor ?? null)) return null;
+  // A new mark's element path must be one the app makes; marks saved before keep what they have.
+  if (value.anchor && !isLiveDemoAnchorPath(value.anchor.path)) return null;
   if (value.id !== undefined && !(typeof value.id === 'string' && DEMO_MARK_ID.test(value.id))) return null;
   const id = value.id === undefined ? {} : { id: value.id };
   if (value.kind === 'stroke') {
@@ -194,4 +236,61 @@ export function parseLiveServerFrame(value) {
     default:
       return null;
   }
+}
+
+/** At most this many pins and drawings reach an agent at once; the rest are counted. */
+export const DEMO_MARKS_FOR_AGENT = Object.freeze({ pins: 200, drawings: 100 });
+
+const tenth = (value) => Math.round(value * 10) / 10;
+
+function byAge(a, b) {
+  return a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
+/**
+ * The saved marks of one demo as an agent reads them. Pins are numbered as
+ * people see them on the demo (oldest first) and carry their note and, when
+ * the app recorded it, the element under the pin. A drawing is the box its
+ * stroke covers. Positions are in demo space: CSS px of the page laid out
+ * LIVE_DEMO.width wide, from its top-left corner.
+ */
+export function demoMarksForAgent(marks, options = {}) {
+  const firstPin = Number.isSafeInteger(options.firstPin) && options.firstPin > 1 ? options.firstPin : 1;
+  const pins = [];
+  const drawings = [];
+  let pinCount = 0;
+  let drawingCount = 0;
+  for (const mark of [...marks].sort(byAge)) {
+    const base = { author: mark.author.name, created_at: mark.createdAt };
+    if (mark.kind === 'pin') {
+      pinCount += 1;
+      if (pinCount < firstPin || pins.length >= DEMO_MARKS_FOR_AGENT.pins) continue;
+      // An element path in another shape (saved by something other than the app) is left out, never the pin.
+      const element = mark.anchor && isLiveDemoAnchorPath(mark.anchor.path) ? mark.anchor : null;
+      pins.push({
+        number: pinCount, ...base, note: mark.text, x: mark.at[0], y: mark.at[1],
+        ...(element ? { element: element.path, offset_in_element: { x: tenth(element.dx), y: tenth(element.dy) } } : {}),
+      });
+    } else {
+      drawingCount += 1;
+      // Drawings come with the first page of pins only, so a later page does not repeat them.
+      if (firstPin > 1) continue;
+      const xs = mark.points.map(([x]) => x);
+      const ys = mark.points.map(([, y]) => y);
+      const left = Math.min(...xs);
+      const top = Math.min(...ys);
+      drawings.push({
+        ...base, color: liveDemoColorName(mark.author.color),
+        left: tenth(left), top: tenth(top), width: tenth(Math.max(...xs) - left), height: tenth(Math.max(...ys) - top),
+      });
+    }
+  }
+  // The newest drawings are kept when there are too many: they are the likeliest to be about now.
+  const listedDrawings = drawings.slice(-DEMO_MARKS_FOR_AGENT.drawings);
+  const pinsAfter = Math.max(0, pinCount - (firstPin - 1) - pins.length);
+  return {
+    pins, drawings: listedDrawings, pin_count: pinCount,
+    ...(pinsAfter ? { pins_not_listed: pinsAfter, next_first_pin: firstPin + pins.length } : {}),
+    ...(firstPin === 1 && drawingCount > listedDrawings.length ? { drawings_not_listed: drawingCount - listedDrawings.length } : {}),
+  };
 }

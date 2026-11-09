@@ -187,6 +187,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:remove-demo-mark", roomIdentifier, markId),
     setInlineDemoWidth: (leaseUrl: string, frameWidth: number) =>
       ipcRenderer.invoke("desktop:room:set-inline-demo-width", leaseUrl, frameWidth),
+    inlineDemoAnchorAt: (leaseUrl: string, x: number, y: number) =>
+      ipcRenderer.invoke("desktop:room:inline-demo-anchor-at", leaseUrl, x, y),
     captureDemoMarkup: (roomIdentifier, rect, fileName) =>
       ipcRenderer.invoke("desktop:room:capture-demo-markup", roomIdentifier, rect, fileName),
     discardAttachment: (roomIdentifier: string, uploadId: string) =>

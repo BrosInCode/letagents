@@ -114,11 +114,16 @@ Postgres or Redis bus can join several processes later.
 
 ## Saved marks
 
-All three routes need a person in the app (an app session). The person is
+Saving and removing need a person in the app (an app session). The person is
 checked first: without one the answer is 401 (403 for an owner token or an
 agent), and the room is not looked up. Then the room must exist (404), and the
 person must be able to read it, by the same rule as the live socket. A person
 who cannot gets a plain 403 `room_access_required`, with no room name.
+
+Reading also takes an agent: a worker bearer, an owner token or another
+signed-in agent. An agent's read uses the same room check as reading the
+room's messages, and that check gives its own refusal. A request with no
+sign-in still gets 401 first.
 
 - `GET /rooms/<room>/demo-marks?demo=<key>` answers `{ marks }`, oldest first.
 - `POST /rooms/<room>/demo-marks` with a `DemoMarkInput` body answers 201
@@ -132,6 +137,14 @@ who cannot gets a plain 403 `room_access_required`, with no room name.
 Saves and removals are limited per account in the process: 20 at once, then 2
 a second. Past that the answer is 429 `demo_marks_rate_limited` with
 `Retry-After`. Reads are not limited.
+
+A pin may save `anchor`: the element under it, as a CSS path (tag names, ids,
+up to two classes, and a place among elements of its kind), and where the pin
+sits in that element's box. The app asks main for it when the pin is placed.
+Main runs the lookup in its own isolated world of the demo page and checks
+each step of the path. A pin saved before the page answers (500 ms at most)
+has no anchor. Strokes have none. A new mark whose anchor path is not in that
+shape is refused (400 `invalid_mark`); marks saved before keep what they have.
 
 After a save or a removal, the demo's live viewers get `mark` or `unmark`.
 Marks are in the `demo_marks` table (migration `0140_demo_marks`). A removed
@@ -158,6 +171,20 @@ connection means ("People here see your pointer"), a face for each person
   fade or the notes, and says when the card's clip or the window cut it. The
   reply carries the person's note, each pin's number, author and note, and who
   drew in which colour, because an agent cannot hover a pin.
+
+## Agents and marks
+
+- `read_demo_marks` (MCP, every agent kind, a read) takes a message id and,
+  when the message has more than one HTML file, an attachment id. It answers
+  the pins, numbered oldest first as people see them, with author, note, point
+  and element, and each drawing as the box it covers, in demo space. One answer
+  lists at most 200 pins (`first_pin` lists from a number on; `pin_count` and
+  `next_first_pin` say what is left) and the newest 100 drawings, which come with
+  the first page only. An element path in another shape is left out, not the pin.
+- A desktop-supervised agent gets an HTML file on its wake-up message, or on a
+  recent message, as a text file to read (like a `.log`). The note for that
+  file names the message and attachment ids to pass to `read_demo_marks`. A
+  local room has no marks, so its demos get no such note.
 
 ## Reverse proxy
 

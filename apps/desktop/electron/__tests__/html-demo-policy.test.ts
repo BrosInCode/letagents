@@ -440,3 +440,64 @@ describe("HTML demo policy", () => {
     assert.equal(inlineHtmlDemoFocusAllowed({ ...base, hadLastInputAtWindowBlur: false, windowBlurredAt: 40_000, windowFocusedAt: 99_990 }), false);
   });
 });
+
+describe("the element under a pin", async () => {
+  const { INLINE_HTML_DEMO_ANCHOR_DEPTH, inlineHtmlDemoAnchor, inlineHtmlDemoAnchorScript } = await import("../main/attachments/html-demo-policy.js");
+
+  /** A tiny DOM: enough of Element and Document for the script main runs in the demo's world. */
+  type Node = { localName: string; id: string; classList: string[]; parentElement: Node | null; children: Node[];
+    getBoundingClientRect(): { left: number; top: number } };
+  function el(localName: string, options: { id?: string; classes?: string[]; box?: [number, number] } = {}, ...children: Node[]): Node {
+    const node: Node = { localName, id: options.id ?? "", classList: options.classes ?? [], parentElement: null, children,
+      getBoundingClientRect: () => ({ left: options.box?.[0] ?? 0, top: options.box?.[1] ?? 0 }) };
+    for (const child of children) child.parentElement = node;
+    return node;
+  }
+  function run(root: Node, hit: Node | null, x: number, y: number): unknown {
+    const all = (node: Node): Node[] => [node, ...node.children.flatMap(all)];
+    const document = {
+      documentElement: root,
+      elementFromPoint: (atX: number, atY: number) => (atX === x && atY === y ? hit : null),
+      querySelectorAll: (selector: string) => all(root).filter((node) => `#${node.id}` === selector),
+    };
+    const CSS = { escape: (value: string) => value };
+    return new Function("document", "CSS", `return ${inlineHtmlDemoAnchorScript(x, y)};`)(document, CSS);
+  }
+
+  it("names the element by tag, classes and place among its kind, up to a unique id", () => {
+    const pay = el("button", { classes: ["btn", "primary", "large"], box: [100, 30] });
+    const root = el("html", {}, el("body", {},
+      el("main", { id: "app" }, el("form", {}, el("button", { classes: ["btn"] }), pay))));
+    const answer = run(root, pay, 112.34, 34.06);
+    assert.deepEqual(answer, { parts: ["main#app", "form", "button.btn.primary:nth-of-type(2)"], dx: 12.340000000000003, dy: 4.060000000000002 });
+    assert.deepEqual(inlineHtmlDemoAnchor(answer), { path: "main#app > form > button.btn.primary:nth-of-type(2)", dx: 12.3, dy: 4.1 });
+  });
+
+  it("leaves out ids and classes it cannot write safely, and an id used twice", () => {
+    const target = el("span", { id: "a b", classes: ["ok", "has space", "x:y"] });
+    const twin = el("div", { id: "dup" }, target);
+    const root = el("html", {}, el("body", {}, twin, el("div", { id: "dup" })));
+    assert.deepEqual(inlineHtmlDemoAnchor(run(root, target, 5, 5)), { path: "body > div:nth-of-type(1) > span.ok", dx: 5, dy: 5 });
+  });
+
+  it("names nothing when there is no element, or only the page's root, under the point", () => {
+    const root = el("html", {}, el("body"));
+    assert.equal(run(root, null, 1, 1), null);
+    assert.equal(run(root, root, 1, 1), null);
+    assert.deepEqual(inlineHtmlDemoAnchor(run(root, root.children[0]!, 1, 1)), { path: "body", dx: 1, dy: 1 });
+  });
+
+  it("refuses an answer it did not make and keeps the end of a long path", () => {
+    for (const bad of [null, "body", [], { parts: [], dx: 0, dy: 0 }, { parts: ["body"], dx: Infinity, dy: 0 },
+      { parts: ["body > div"], dx: 0, dy: 0 }, { parts: ["div[onclick]"], dx: 0, dy: 0 }, { parts: ["#x"], dx: 0, dy: 0 },
+      { parts: ["div#a.b"], dx: 0, dy: 0 }, { parts: ["div:nth-of-type(0)"], dx: 0, dy: 0 },
+      { parts: Array.from({ length: INLINE_HTML_DEMO_ANCHOR_DEPTH + 1 }, () => "div"), dx: 0, dy: 0 }]) {
+      assert.equal(inlineHtmlDemoAnchor(bad), null, JSON.stringify(bad));
+    }
+    const long = Array.from({ length: INLINE_HTML_DEMO_ANCHOR_DEPTH }, (_, index) => `div.${"c".repeat(20)}${index}`);
+    const anchor = inlineHtmlDemoAnchor({ parts: long, dx: 0, dy: 0 });
+    assert.ok(anchor && anchor.path.length <= 512);
+    assert.ok(anchor.path.endsWith(`div.${"c".repeat(20)}${INLINE_HTML_DEMO_ANCHOR_DEPTH - 1}`), "the element itself stays");
+    assert.ok(!anchor.path.startsWith("div.cccccccccccccccccccc0 "), "the top steps go first");
+  });
+});

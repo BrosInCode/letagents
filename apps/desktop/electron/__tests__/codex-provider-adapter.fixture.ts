@@ -750,6 +750,7 @@ export function assertStoppedNotAtLevel(answer: unknown, scene: Awaited<ReturnTy
 export const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused"> = {
   // Reads of what the room says: one request to the room's own server, nothing written anywhere.
   read_messages: "approved",          // the room's recent messages
+  read_demo_marks: "approved",        // pins and drawings people left on a demo in the room
   get_room_history_summary: "approved",    // a summary of the room's whole history
   expand_room_history_summary: "approved", // one summary line opened, down to a message
   get_current_room: "approved",       // which room the agent is in, and as whom

@@ -11,6 +11,7 @@ import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
 import { registerWakeRuleRoutes } from "../routes/rooms/wake-rules.js";
 import { registerRoomMemberRoutes } from "../routes/rooms/members.js";
 import { registerDemoMarkRoutes } from "../routes/rooms/demo-marks.js";
+import { resolveParticipantRoom } from "../routes/rooms/messages/helpers.js";
 import { liveDemoHub } from "../live-demos/service.js";
 import { claimRoomAsCreator } from "../db/room-members.js";
 import { registerWakeRuleLinkRoutes } from "../routes/wake-rule-links.js";
@@ -583,7 +584,11 @@ export function registerApiRoutes(app: Express): void {
 
   registerRoomJoinRoutes(app, roomJoinRouteDeps);
   registerRoomMessageRoutes(app, roomMessageRouteDeps);
-  registerDemoMarkRoutes(app, { resolveProjectRole, liveDemoHub });
+  registerDemoMarkRoutes(app, {
+    resolveProjectRole,
+    liveDemoHub,
+    participantRoom: (req, res) => resolveParticipantRoom(req, res, roomMessageRouteDeps),
+  });
   registerRoomKnowledgeRoutes(app, roomMessageRouteDeps);
   registerWakeRuleRoutes(app, roomMessageRouteDeps);
   registerWakeRuleLinkRoutes(app);

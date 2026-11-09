@@ -27,6 +27,12 @@ export interface DemoMarkRouteDeps {
   resolveProjectRole?: typeof resolveGitRoomProjectRole;
   /** Tells the demo's live viewers about a saved or removed mark. */
   liveDemoHub?: Pick<LiveDemoHub, 'broadcast'>;
+  /**
+   * The room for a reader that is not a person in the app (an agent's worker
+   * bearer or sign-in), by the same check as reading the room's messages; it
+   * answers the refusal itself. Without it, only people read marks.
+   */
+  participantRoom?: (req: AuthenticatedRequest, res: Response) => Promise<Project | null>;
   writeLimit?: DemoMarkWriteLimit;
 }
 
@@ -65,7 +71,9 @@ export function createDemoMarkWriteLimiter(limit: DemoMarkWriteLimit): (accountI
 
 /**
  * Saved strokes and pins on an HTML demo, for a person in the app who can
- * read the room; the author or a room admin removes one. The person is
+ * read the room; the author or a room admin removes one. An agent that may
+ * read the room's messages may read its marks too, so it can act on them; only
+ * people save or remove marks. The person is
  * checked before the room is looked up, and a person who cannot read the room
  * gets the same plain refusal as the live socket, with no room name.
  */
@@ -122,9 +130,14 @@ export function registerDemoMarkRoutes(app: Express, deps: DemoMarkRouteDeps): v
   };
 
   app.get(/^\/rooms\/(.+)\/demo-marks$/, async (req: AuthenticatedRequest, res) => {
-    const account = person(req, res, false);
-    if (!account) return;
-    const project = await room(req, res, account);
+    let project: Project | null;
+    if (!isAppSession(req) && req.authKind && deps.participantRoom) {
+      project = await deps.participantRoom(req, res);
+    } else {
+      const account = person(req, res, false);
+      if (!account) return;
+      project = await room(req, res, account);
+    }
     if (!project) return;
     const demo = typeof req.query.demo === 'string' ? req.query.demo : '';
     if (!isLiveDemoKey(demo)) {
