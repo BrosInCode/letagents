@@ -1009,6 +1009,13 @@
       "when": 1795000000000,
       "tag": "0143_organizations",
       "breakpoints": true
+    },
+    {
+      "idx": 144,
+      "version": "7",
+      "when": 1795000100000,
+      "tag": "0144_message_no_wake",
+      "breakpoints": true
     }
   ]
 }

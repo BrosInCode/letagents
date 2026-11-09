@@ -143,7 +143,10 @@ export function registerMessageInfoRoute(
         });
       }
     }
-    const seenByPeople = Array.from(humanReadersMap.values());
+    // Who read a message is for its sender alone, as in a phone chat.
+    const requesterIsPublisher = Boolean(targetMessage.publisher_account_id)
+      && targetMessage.publisher_account_id === (req.sessionAccount?.account_id ?? null);
+    const seenByPeople = requesterIsPublisher ? Array.from(humanReadersMap.values()) : [];
 
     // 2. Fetch routed agent receipts
     const receipts = await db
