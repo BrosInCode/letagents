@@ -1,4 +1,4 @@
-.give-agent-panel { --give-bg: light-dark(#fff, #151517); --give-inset: light-dark(#f5f3f3, #1c1b1f); --give-hover: light-dark(#e9e5e6, #242328); --give-line: light-dark(#e0dcde, #303035); --give-text: light-dark(#29262e, #f0eef2); --give-muted: light-dark(#706a76, #a09ca6); --give-faint: light-dark(#827988, #918b99); --give-accent: light-dark(#97736d, #c9ada7); --give-green: light-dark(#52725b, #a6bdac); --give-red: light-dark(#a64e4b, #dda6a3); display: flex; flex-direction: column; min-height: 0; width: 100%; max-height: inherit; overflow: hidden; border: 1px solid var(--give-line); border-radius: 17px; background: var(--give-bg); color: var(--give-text); font: 14px/1.5 var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif); }
+.give-agent-panel { --give-bg: light-dark(#fff, #0a0a0a); --give-inset: light-dark(#f5f3f3, #141414); --give-hover: light-dark(#e9e5e6, #202020); --give-line: light-dark(#e0dcde, #272727); --give-text: light-dark(#29262e, #f2f2f3); --give-muted: light-dark(#706a76, #a1a1aa); --give-faint: light-dark(#827988, #85858e); --give-accent: light-dark(#97736d, #c9ada7); --give-green: light-dark(#52725b, #a6bdac); --give-red: light-dark(#a64e4b, #dda6a3); display: flex; flex-direction: column; min-height: 0; width: 100%; max-height: inherit; overflow: hidden; border: 1px solid var(--give-line); border-radius: 17px; background: var(--give-bg); color: var(--give-text); font: 14px/1.5 var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif); }
 .give-agent-panel *, .give-agent-panel *::before { box-sizing: border-box; }
 .give-agent-panel h2,.give-agent-panel h3,.give-agent-panel p { margin: 0; }
 .give-agent-panel button, .give-agent-panel input { font: inherit; }
@@ -87,3 +87,6 @@
 @media (prefers-reduced-motion:reduce) { .give-agent-panel *, .give-agent-panel *::before { animation: none !important; transition: none !important; } }
 /* A long model list scrolls under the search, which stays in reach. */
 .give-picker .work-menu-search { position: sticky; top: -7px; z-index: 1; background: var(--give-bg); }
+/* The dropdown's own row and search shades are tinted; in this panel they follow its palette. */
+.give-agent-panel .give-picker .work-menu-option:is(:hover, :focus-visible, [aria-selected="true"]) { background: var(--give-hover); }
+.give-agent-panel .give-picker .work-menu-search:focus-within { background: var(--give-inset); }
