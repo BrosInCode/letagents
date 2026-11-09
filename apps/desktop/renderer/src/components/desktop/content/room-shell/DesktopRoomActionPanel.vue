@@ -475,7 +475,6 @@ const replyOrderSummary = ref<string | null>(null);
 const guidelinesSummary = ref<string | null>(null);
 // Null while the Ticket filters block shows nothing (no filter and no tracker connection).
 const ticketsSummary = ref<string | null>(null);
-// Null while the webhook wake-up block shows nothing (the person owns no agent in this room).
 // Null while the Members block shows nothing (a server without members, or not a member).
 const membersSummary = ref<string | null>(null);
 const contentElement = ref<HTMLElement | null>(null);

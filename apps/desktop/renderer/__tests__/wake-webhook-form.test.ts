@@ -426,10 +426,10 @@ test("the room settings panel shows wake-ups as a row of the Bot section, only w
   // A row like the others: title and description on the left, a house button that never repeats the title.
   assert.match(row, /<SmoothHeight v-if="agents\.length">\s*<div class="room-settings-row" data-inline="true" data-testid="room-wake-webhooks">/);
   assert.match(row, /<p class="room-settings-row-title">Wake a bot by webhook<\/p>\s*<p class="room-settings-row-description">\{\{ WAKE_WEBHOOK_INTRO \}\}<\/p>/);
-  // The row's one button follows the form: Add, then Cancel while the form is open, then Done once the secret shows.
-  assert.match(row, /v-if="form\.revealedSecret\.value"\s+class="room-settings-button"\s+type="button"\s+data-testid="room-wake-webhooks-done"\s+@click="form\.dismissSecret\(\)"\s*>Done<\/button>/);
-  assert.match(row, /v-else-if="form\.open\.value"\s+class="room-settings-button"\s+type="button"\s+data-testid="room-wake-webhooks-cancel"\s+:disabled="form\.saving\.value"\s+@click="form\.hide\(\)"\s*>Cancel<\/button>/);
-  assert.match(row, /v-else\s+class="room-settings-button"\s+type="button"\s+data-testid="room-wake-webhooks-add"\s+@click="form\.show\(\)"\s*>Add wake-up<\/button>/);
+  // One button, so focus stays on it: Add, then Cancel while the form is open, then Done once the secret shows.
+  assert.match(row, /<button\s+class="room-settings-button"\s+type="button"\s+data-testid="room-wake-webhooks-toggle"\s+:aria-expanded="expanded"\s+:aria-disabled="form\.saving\.value"\s+@click="toggle"\s*>\{\{ toggleLabel \}\}<\/button>/);
+  assert.match(row, /toggleLabel = computed\(\(\) => \(form\.revealedSecret\.value \? "Done" : form\.open\.value \? "Cancel" : "Add wake-up"\)\)/);
+  assert.match(row, /if \(form\.saving\.value\) return;\s*if \(form\.revealedSecret\.value\) form\.dismissSecret\(\);\s*else if \(form\.open\.value\) form\.hide\(\);\s*else form\.show\(\);/);
   assert.match(row, /<WakeWebhookSection\s+class="room-wake-webhooks-body"\s+:controller="form"/);
   assert.match(row, /useWakeWebhookForm\(\{ roomId: roomIdentifier, agents, api, onChanged: refresh \}\)/);
   assert.match(row, /\.room-wake-webhooks-body \{\s*grid-column: 1 \/ -1;\s*\}/);
@@ -448,6 +448,15 @@ test("a host that passes its own form shows the opening line and the Add, Cancel
   assert.match(open, /data-testid="wake-webhook-form"/);
   assert.match(open, />\s*Save\s*</);
   assert.doesNotMatch(open, />\s*Cancel\s*</, "the host's row button cancels");
+  // After a save the secret shows with Copy; Done is the host's.
+  controller.draft.agentKey = "ada/grokbot";
+  controller.draft.url = "https://hooks.example/grok/abc";
+  assert.equal(await controller.submit(), true);
+  const saved = await render({ controller });
+  assert.match(saved, /data-testid="wake-webhook-secret-value">[^<]+<\/code>/);
+  assert.match(saved, />\s*Copy\s*</);
+  assert.doesNotMatch(saved, />\s*Done\s*</, "the host's row button dismisses the secret");
+  assert.doesNotMatch(saved, /data-testid="wake-webhook-form"/);
   const alone = await render({});
   assert.match(alone, /class="wake-webhook-intro">LetAgents sends a signed POST/, "the section alone keeps its opening line");
   assert.match(alone, /data-testid="wake-webhook-add"/);

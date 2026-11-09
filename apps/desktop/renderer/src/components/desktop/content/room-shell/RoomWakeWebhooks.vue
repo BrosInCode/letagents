@@ -7,27 +7,13 @@
       </div>
       <div class="room-settings-row-action">
         <button
-          v-if="form.revealedSecret.value"
           class="room-settings-button"
           type="button"
-          data-testid="room-wake-webhooks-done"
-          @click="form.dismissSecret()"
-        >Done</button>
-        <button
-          v-else-if="form.open.value"
-          class="room-settings-button"
-          type="button"
-          data-testid="room-wake-webhooks-cancel"
-          :disabled="form.saving.value"
-          @click="form.hide()"
-        >Cancel</button>
-        <button
-          v-else
-          class="room-settings-button"
-          type="button"
-          data-testid="room-wake-webhooks-add"
-          @click="form.show()"
-        >Add wake-up</button>
+          data-testid="room-wake-webhooks-toggle"
+          :aria-expanded="expanded"
+          :aria-disabled="form.saving.value"
+          @click="toggle"
+        >{{ toggleLabel }}</button>
       </div>
       <WakeWebhookSection
         class="room-wake-webhooks-body"
@@ -99,8 +85,17 @@ const api: WakeWebhookApi = {
     return rule;
   },
 };
-// The row's own button opens the form under it.
+// The row's one button opens the form under it, cancels it, and dismisses
+// the secret after a save. It stays the same element, so focus stays on it.
 const form = useWakeWebhookForm({ roomId: roomIdentifier, agents, api, onChanged: refresh });
+const expanded = computed(() => form.open.value || form.revealedSecret.value !== null);
+const toggleLabel = computed(() => (form.revealedSecret.value ? "Done" : form.open.value ? "Cancel" : "Add wake-up"));
+function toggle(): void {
+  if (form.saving.value) return;
+  if (form.revealedSecret.value) form.dismissSecret();
+  else if (form.open.value) form.hide();
+  else form.show();
+}
 
 async function loadAgents(): Promise<void> {
   const version = ++generation;
