@@ -111,6 +111,16 @@ test("a repository webhook records an organization install without overwriting s
   ]);
 });
 
+test("an installation payload without a selection keeps the stored one", async () => {
+  const { installations, sync } = createHarness();
+  await sync.syncGitHubAppInstallationFromPayload({
+    installation: { id: 123, account: { id: 456, login: "BrosInCode", type: "Organization" }, target_type: "Organization" },
+  }, { suspended_at: null, uninstalled_at: null });
+  assert.equal(installations.length, 1);
+  assert.equal(installations[0].repository_selection, undefined);
+  assert.equal(installations[0].target_type, "Organization");
+});
+
 test("syncGitHubAppInstallationFromPayload returns installation id without target upsert", async () => {
   const { installations, sync } = createHarness();
 

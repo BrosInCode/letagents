@@ -91,7 +91,8 @@ export function createGitHubAppSync(deps: GitHubAppSyncDeps) {
       target_github_id: toGitHubWebhookId(target.id) ?? installationId,
       ...(fromInstallation
         ? {
-          repository_selection: payload.installation?.repository_selection ?? "selected",
+          // Missing: keep the stored value (a new row defaults to "selected").
+          repository_selection: payload.installation?.repository_selection,
           permissions: payload.installation?.permissions,
         }
         : {}),
