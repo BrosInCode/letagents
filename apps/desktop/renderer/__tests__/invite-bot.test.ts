@@ -205,13 +205,13 @@ test("a host that passes its own state shows the open and close buttons itself",
   assert.match(await render({ initialPlatform: "claude" }), />\s*Done\s*</, "the section alone keeps its own Done");
 });
 
-test("the desktop room settings panel shows the row in General for cloud rooms, built from the room and the server this app talks to", () => {
+test("the desktop room settings panel shows the row in its own Bot section for cloud rooms, built from the room and the server this app talks to", () => {
   const panel = source("../src/components/desktop/content/room-shell/DesktopRoomActionPanel.vue");
   assert.match(panel, /import InviteBotSection from "(\.\.\/)+shared\/ui\/InviteBotSection\.vue";/);
   // A row like the others: title and description on the left, one house
   // button on the right that never repeats the title, and the invite opening
   // under the row.
-  assert.match(panel, /<SmoothHeight v-if="cloudRoom">\s*<div class="room-settings-row" data-inline="true" data-testid="desktop-room-invite-bot">[\s\S]*?<p class="room-settings-row-title">Invite a bot<\/p>[\s\S]*?<div class="room-settings-row-action">\s*<button\s+class="room-settings-button"\s+type="button"\s+data-testid="desktop-room-invite-bot-toggle"\s+:aria-expanded="inviteBot\.open\.value"[\s\S]*?>\{\{ inviteBot\.open\.value \? "Close" : "Create invite" \}\}<\/button>\s*<\/div>\s*<InviteBotSection\s+v-if="inviteBot\.open\.value"\s+class="room-invite-bot-body"\s+:controller="inviteBot"\s+:room="inviteBotRoom"\s+:admin="room\.role === 'admin'"\s*\/>/);
+  assert.match(panel, /<section v-if="cloudRoom" class="room-settings-section" data-section="bot" aria-labelledby="room-settings-heading-bot">\s*<h3 id="room-settings-heading-bot">Bot<\/h3>\s*<div class="room-settings-list">\s*<SmoothHeight>\s*<div class="room-settings-row" data-inline="true" data-testid="desktop-room-invite-bot">[\s\S]*?<p class="room-settings-row-title">Invite a bot<\/p>[\s\S]*?<div class="room-settings-row-action">\s*<button\s+class="room-settings-button"\s+type="button"\s+data-testid="desktop-room-invite-bot-toggle"\s+:aria-expanded="inviteBot\.open\.value"[\s\S]*?>\{\{ inviteBot\.open\.value \? "Close" : "Create invite" \}\}<\/button>\s*<\/div>\s*<InviteBotSection\s+v-if="inviteBot\.open\.value"\s+class="room-invite-bot-body"\s+:controller="inviteBot"\s+:room="inviteBotRoom"\s+:admin="room\.role === 'admin'"\s*\/>/);
   assert.match(panel, /const inviteBot = useInviteBot\(\{ room: inviteBotRoom \}\);/);
   // The connector is the API this app talks to, not the room link's public origin.
   assert.match(panel, /import \{ remoteConnectorUrl \} from "\.\.\/\.\.\/settings\/connectors";/);
@@ -222,9 +222,12 @@ test("the desktop room settings panel shows the row in General for cloud rooms, 
   // The open invite spans both columns of the row's grid; the row keeps the house layout.
   assert.match(panel, /\.room-invite-bot-body \{\s*grid-column: 1 \/ -1;\s*\}/);
   assert.doesNotMatch(panel, /room-invite-bot-row/);
-  // The row comes right after the room link, inside the General section.
+  // Bot is its own section after Members, and the rail lists it in the same place.
   const general = panel.slice(panel.indexOf('data-section="general"'), panel.indexOf('<RoomMembers v-if="cloudRoom"'));
-  assert.ok(general.indexOf('data-testid="desktop-room-share-card"') < general.indexOf('data-testid="desktop-room-invite-bot"'));
+  assert.equal(general.indexOf('data-testid="desktop-room-invite-bot"'), -1, "no longer in General");
+  assert.ok(panel.indexOf('<RoomMembers v-if="cloudRoom"') < panel.indexOf('data-section="bot"'));
+  assert.ok(panel.indexOf('data-section="bot"') < panel.indexOf('data-section="conversation"'));
+  assert.match(panel, /\{ id: "members"[\s\S]*?cloudRoom\.value \? \{ id: "bot", title: "Bot", icon: Bot, summary: null \} : null,\s*cloudRoom\.value\s*\? \{\s*id: "conversation"/);
   // apiUrl travels from the app's info through the shell and the rail to the panel.
   assert.match(source("../src/App.vue"), /<DesktopRoomShell\s+[^>]*:api-url="appInfo\?\.apiUrl \?\? null"/);
   assert.match(source("../src/components/desktop/content/DesktopRoomShell.vue"), /<DesktopRoomControlRail[\s\S]*?:api-url="apiUrl"/);

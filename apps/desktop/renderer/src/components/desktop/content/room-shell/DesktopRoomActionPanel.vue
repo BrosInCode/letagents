@@ -104,8 +104,15 @@
               </button>
             </div>
           </div>
+        </div>
+      </section>
 
-          <SmoothHeight v-if="cloudRoom">
+      <RoomMembers v-if="cloudRoom" :room-identifier="room.identifier" @summary="membersSummary = $event" />
+
+      <section v-if="cloudRoom" class="room-settings-section" data-section="bot" aria-labelledby="room-settings-heading-bot">
+        <h3 id="room-settings-heading-bot">Bot</h3>
+        <div class="room-settings-list">
+          <SmoothHeight>
             <div class="room-settings-row" data-inline="true" data-testid="desktop-room-invite-bot">
               <div class="room-settings-row-copy">
                 <p class="room-settings-row-title">Invite a bot</p>
@@ -131,8 +138,6 @@
           </SmoothHeight>
         </div>
       </section>
-
-      <RoomMembers v-if="cloudRoom" :room-identifier="room.identifier" @summary="membersSummary = $event" />
 
       <section
         v-if="cloudRoom"
@@ -393,7 +398,7 @@
 
 <script setup lang="ts">
 import RoomNotificationSettings from "./RoomNotificationSettings.vue";
-import { Bell, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, Ticket, Users, Webhook, X } from "@lucide/vue";
+import { Bell, Bot, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, Ticket, Users, Webhook, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
 import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";
 import RoomConversationRouting from "./RoomConversationRouting.vue";
@@ -477,7 +482,7 @@ const wakeSummary = ref<string | null>(null);
 const membersSummary = ref<string | null>(null);
 const contentElement = ref<HTMLElement | null>(null);
 
-type SectionId = "general" | "members" | "conversation" | "tickets" | "wake" | "guidelines" | "data" | "alerts" | "github";
+type SectionId = "general" | "members" | "bot" | "conversation" | "tickets" | "wake" | "guidelines" | "data" | "alerts" | "github";
 type StorageChoice = "inherit" | "cloud" | "local";
 interface SectionLink {
   id: SectionId;
@@ -701,6 +706,7 @@ const sections = computed<SectionLink[]>(() => {
     cloudRoom.value && membersSummary.value
       ? { id: "members", title: "Members", icon: Users, summary: membersSummary.value }
       : null,
+    cloudRoom.value ? { id: "bot", title: "Bot", icon: Bot, summary: null } : null,
     cloudRoom.value
       ? {
           id: "conversation",
