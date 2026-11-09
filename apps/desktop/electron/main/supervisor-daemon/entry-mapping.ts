@@ -48,6 +48,7 @@ export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSuper
       && Number.isFinite(Date.parse(entry.provider_progress.startedAt))
       ? { state: "compacting", startedAt: entry.provider_progress.startedAt } : null,
     launchProgress: projectLaunchProgress(entry.launch_progress),
+    backgroundCommands: projectBackgroundCommands(entry.background_commands),
     workplaceLiveness: {
       state: entry.workplace_liveness?.state ?? "unknown",
       observedAt: entry.workplace_liveness?.observed_at ?? null,
@@ -330,4 +331,19 @@ function sanitizeDesktopActivityEvent(event: DesktopSupervisorActivityEvent): De
     payloadRedacted: event.payloadRedacted || payload.payloadRedacted || provider.redacted || kind.redacted || method.redacted || summary.redacted || durableRef?.redacted === true,
     durablePayloadRef: durableValue,
   };
+}
+
+/** The commands an agent runs in the background now; a malformed item is left out. */
+export function projectBackgroundCommands(value: unknown): NonNullable<DesktopSupervisorManifestEntry["backgroundCommands"]> {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 16).flatMap((item) => {
+    const command = item && typeof item === "object" && !Array.isArray(item) ? item as Record<string, unknown> : null;
+    if (typeof command?.task_id !== "string" || !command.task_id || typeof command.command !== "string") return [];
+    return [{
+      taskId: command.task_id,
+      toolUseId: typeof command.tool_use_id === "string" ? command.tool_use_id : null,
+      command: command.command.slice(0, 2_000),
+      startedAt: typeof command.started_at === "string" && Number.isFinite(Date.parse(command.started_at)) ? command.started_at : null,
+    }];
+  });
 }

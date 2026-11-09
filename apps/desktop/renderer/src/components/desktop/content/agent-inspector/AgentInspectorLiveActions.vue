@@ -1,13 +1,13 @@
 <template>
-  <div class="agent-live-action" :data-status="status" :data-current="current && ongoing" :data-result="single?.tool.kind === 'reply'">
-    <details class="agent-live-disclosure">
+  <div class="agent-live-action" :data-status="rowStatus" :data-current="current && ongoing" :data-result="single?.tool.kind === 'reply'">
+    <details ref="disclosure" class="agent-live-disclosure">
       <summary>
         <span class="agent-live-icon" aria-hidden="true"><component :is="icon" :size="15" :stroke-width="1.6" /></span>
         <span class="agent-live-action-copy">
           <span class="agent-live-action-title">{{ headline }}</span>
           <span v-if="detail" class="agent-live-action-detail" :title="detail">{{ detail }}</span>
         </span>
-        <span class="agent-live-action-status">{{ liveActionStatus(status, current) }}</span>
+        <span class="agent-live-action-status">{{ statusLabel }}</span>
         <ChevronRight class="agent-live-chevron" :size="14" aria-hidden="true" />
       </summary>
       <div class="agent-live-action-body">
@@ -18,8 +18,14 @@
             <pre>{{ formatLiveValue(single.item.input) }}</pre>
           </template>
           <template v-if="formatLiveValue(single.item.output)">
-            <span class="agent-live-caption">Output</span>
-            <pre>{{ formatLiveValue(single.item.output) }}</pre>
+            <span class="agent-live-caption">{{ single.item.outputTruncated ? 'Output (newest lines)' : 'Output' }}</span>
+            <pre ref="outputElement">{{ formatLiveValue(single.item.output) }}</pre>
+          </template>
+          <template v-if="background">
+            <span class="agent-live-caption">The command's live output is under In the background.</span>
+            <button type="button" class="agent-live-body-link" @click="emit('show-background', background.id)">
+              <SquareTerminal :size="13" :stroke-width="1.6" aria-hidden="true" />Show live output
+            </button>
           </template>
           <template v-if="single.item.error && failure?.message !== single.item.error">
             <span class="agent-live-caption">Full error</span>
@@ -40,6 +46,20 @@
         </ol>
       </div>
     </details>
+    <div v-if="tail" class="agent-live-tail">
+      <div class="agent-live-tail-body">
+        <div v-if="tail.lines.length" class="agent-live-tail-screen">
+          <div class="agent-live-tail-lines">
+            <span v-for="(line, index) in tail.lines" :key="index" class="agent-live-tail-line">{{ line }}</span>
+          </div>
+        </div>
+        <p v-else-if="tail.hidden" class="agent-live-tail-note">The output appears when the command ends.</p>
+        <div class="agent-live-tail-meta">
+          <span>{{ tail.meta }}</span>
+          <button v-if="tail.lines.length" type="button" @click="showAllOutput">Show all output</button>
+        </div>
+      </div>
+    </div>
     <div v-if="failure" class="agent-live-error">
       <p>{{ failure.message }}</p>
       <template v-if="failure.outputPreview">
@@ -53,16 +73,68 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { Check, ChevronRight, CircleAlert, FilePenLine, FileText, Hourglass, Search, SquareTerminal, Wrench } from "@lucide/vue";
 import { formatLiveValue, liveActionFailure, liveActionStatus, type LiveTraceEntry } from "../../../../domain/agent-inspector-live-trace";
+import { formatLiveWorkDuration, isShellToolName, type LiveBackgroundCommand } from "../../../../domain/agent-inspector-live";
+import { useNow } from "../../../../composables/useNow";
 import MarkdownBlock from "../formatting/MarkdownBlock.vue";
 
-const props = defineProps<{ entry: Extract<LiveTraceEntry, { kind: "actions" }>; current: boolean }>();
+/** Lines of a running command's output that its row shows without opening it. */
+const TAIL_LINES = 5;
+
+const props = defineProps<{
+  entry: Extract<LiveTraceEntry, { kind: "actions" }>;
+  current: boolean;
+  /** The background command that this call started, while the Live tab knows it. */
+  background?: LiveBackgroundCommand | null;
+}>();
+const emit = defineEmits<{ "show-background": [taskId: string] }>();
+const disclosure = ref<HTMLDetailsElement | null>(null);
+const outputElement = ref<HTMLPreElement | null>(null);
 const single = computed(() => props.entry.actions.length === 1 ? props.entry.actions[0]! : null);
 const failure = computed(() => single.value ? liveActionFailure(single.value) : null);
 const status = computed(() => single.value?.item.error ? "error" : single.value?.item.status ?? "completed");
 const ongoing = computed(() => ["pending", "running"].includes(status.value));
+const backgroundRunning = computed(() => props.background?.status === "running");
+const rowStatus = computed(() => backgroundRunning.value ? "background" : status.value);
+const statusLabel = computed(() => backgroundRunning.value ? "In background" : liveActionStatus(status.value, props.current));
+
+/**
+ * The newest lines of a shell command while it runs, under its row: the
+ * output arrives while the command runs, so nobody has to open the row.
+ */
+const tailVisible = computed(() => Boolean(single.value && props.current && ongoing.value
+  && isShellToolName(single.value.item.tool)
+  && (typeof single.value.item.output === "string" || single.value.item.outputHidden)));
+const now = useNow(1_000, () => tailVisible.value);
+const tail = computed(() => {
+  const action = single.value;
+  if (!tailVisible.value || !action) return null;
+  const output = typeof action.item.output === "string" ? action.item.output : "";
+  const lines = output.split("\n").filter((line) => line.trim().length > 0);
+  const elapsed = formatLiveWorkDuration(action.item.startedAt ?? null, null, now.value);
+  const count = `${lines.length} ${lines.length === 1 ? "line" : "lines"}${action.item.outputTruncated ? " shown" : ""}`;
+  return {
+    lines: lines.slice(-TAIL_LINES),
+    hidden: action.item.outputHidden === true,
+    meta: [elapsed ? `Running for ${elapsed}` : "Running", lines.length ? count : null].filter(Boolean).join(" · "),
+  };
+});
+
+function showAllOutput(): void {
+  if (disclosure.value) disclosure.value.open = true;
+  void nextTick(() => outputElement.value?.scrollTo({ top: outputElement.value.scrollHeight }));
+}
+
+// An open output that shows its end keeps showing its end as new lines arrive.
+watch(() => single.value?.item.output, async () => {
+  const element = outputElement.value;
+  if (!element || !disclosure.value?.open) return;
+  const atEnd = element.scrollHeight - element.scrollTop - element.clientHeight < 16;
+  await nextTick();
+  if (atEnd) element.scrollTop = element.scrollHeight;
+}, { flush: "pre" });
 const headline = computed(() => {
   if (single.value) {
     if (ongoing.value && !props.current) return `Unfinished action · ${single.value.tool.toolName.replace(/ToolCall$/, "")}`;
@@ -79,7 +151,7 @@ const icon = computed(() => {
   const name = props.entry.actions[0]?.tool.toolName ?? "";
   if (/readToolCall/.test(name)) return FileText;
   if (/grep|glob|search/i.test(name)) return Search;
-  if (/shell|terminal/i.test(name)) return SquareTerminal;
+  if (isShellToolName(name)) return SquareTerminal;
   if (/edit|write/i.test(name)) return FilePenLine;
   return Wrench;
 });

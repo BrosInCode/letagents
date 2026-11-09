@@ -404,6 +404,12 @@ export interface ProviderStreamEvent {
   nativeLifecyclePhase?: "turn_active" | "turn_terminal";
   /** Shadow-comparison evidence only; consumers must not derive operational state from this frame. */
   lifecycleProjectionOnly?: true;
+  /**
+   * For the owner's live feed only: the live output of a running command, or
+   * the state of a background command. Never activity, lifecycle evidence or
+   * room state. The daemon keeps only the newest event of each command.
+   */
+  liveDisplayOnly?: true;
   /** Provider-approved, human-readable progress. Raw private reasoning is never placed here. */
   summary?: string | null;
   payload: unknown;
@@ -614,6 +620,12 @@ export interface ProviderRoomTurnOptions {
 
 export interface ProviderAdapter {
   readUsage?(handle: ProviderHandle): Promise<import("../../../shared/provider-usage.js").ProviderUsage | null>;
+  /**
+   * Stop a command that the agent runs in the background, at its owner's
+   * request. "stopping": the provider accepted it, and the command's own end
+   * follows on the live feed. Providers without background commands omit it.
+   */
+  stopBackgroundCommand?(handle: ProviderHandle, taskId: string): Promise<"stopping" | "not_running" | "failed">;
   compactionProgress?(workAttemptId: string): { state: "compacting"; startedAt: string } | null;
   readonly id: ProviderAdapterId;
 

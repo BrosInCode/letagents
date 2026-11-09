@@ -1,4 +1,5 @@
 import type { LiveAction } from "../../../../../shared/agent-live-trace.mjs";
+import { isShellToolName } from "../../../../../shared/agent-live-trace.mjs";
 import type { AgentInspectorWorkResource } from "./agent-inspector-work";
 
 // The owner's trace and the room's are presented by the same shared code.
@@ -25,7 +26,7 @@ export function liveActionFailure(action: LiveAction) {
   const { item, tool } = action;
   if (!["error", "failed"].includes(item.status) && !item.error) return null;
   const message = item.error?.trim() || "The tool failed without providing an error message.";
-  const shell = tool.toolName === "shellToolCall";
+  const shell = isShellToolName(tool.toolName);
   const output = typeof item.output === "string" ? item.output.trim() : "";
   const outputPreview = shell && output ? output.split("\n").slice(-4).join("\n").slice(-600) : null;
   return {

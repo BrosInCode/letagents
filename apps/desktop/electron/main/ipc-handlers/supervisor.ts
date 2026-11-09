@@ -368,6 +368,15 @@ export function registerDesktopSupervisorIpcHandlers(ipcMain: IpcMain): void {
       assertDesktopUpdateMutationAllowed();
     });
   });
+  // Signed like the live-sharing choice: only the app's own window stops an agent's command.
+  targetIpcMain.handle("desktop:supervisor:stop-background-command", async (event, input: import("../../ipc-types.js").DesktopStopBackgroundCommandInput) => {
+    assertHostApprovalSender(event);
+    return supervisorDaemonClient.stopBackgroundCommand(input, () => assertHostApprovalSender(event));
+  });
+  targetIpcMain.handle("desktop:supervisor:watch-background-commands", async (_event, input: { entryId: string; afterVersion: number }) => {
+    if (!input || typeof input.entryId !== "string" || !Number.isSafeInteger(input.afterVersion)) throw new Error("Invalid background command watch.");
+    return supervisorDaemonClient.watchBackgroundCommands({ entryId: input.entryId, afterVersion: input.afterVersion });
+  });
   targetIpcMain.handle("desktop:supervisor:apply-agent-configuration", async (_event, input: import("../../ipc-types.js").DesktopSupervisorAgentConfigurationApplyInput) => {
     assertDesktopUpdateMutationAllowed();
     return supervisorDaemonClient.applyAgentConfiguration(input);

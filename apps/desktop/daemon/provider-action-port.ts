@@ -138,6 +138,12 @@ export type ProviderActionStreamEvent = {
   nativeLifecyclePhase?: "turn_active" | "turn_terminal";
   /** Shadow-comparison evidence only; consumers must not derive operational state from this frame. */
   lifecycleProjectionOnly?: true;
+  /**
+   * For the owner's live feed only: the live output of a running command, or
+   * the state of a background command. Never activity, lifecycle evidence or
+   * room state. The daemon keeps only the newest event of each command.
+   */
+  liveDisplayOnly?: true;
   /** Provider-approved, human-readable progress. Raw private reasoning is never placed here. */
   summary?: string | null;
   payload: unknown;
@@ -324,6 +330,8 @@ export type ProviderRuntimeCustody = { state: "absent" } | { state: "owned" | "r
 
 export interface ProviderActionPort {
   readUsage?(handle: ProviderActionHandle): Promise<import("../shared/provider-usage.js").ProviderUsage | null>;
+  /** Stop a command that the agent runs in the background (see ProviderAdapter.stopBackgroundCommand). */
+  stopBackgroundCommand?(handle: ProviderActionHandle, taskId: string): Promise<"stopping" | "not_running" | "failed">;
   compactionProgress?(workAttemptId: string, provider: string): { state: "compacting"; startedAt: string } | null;
   runtimeCustody?(workAttemptId: string, provider: string): ProviderRuntimeCustody;
   onExecution?(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription>;

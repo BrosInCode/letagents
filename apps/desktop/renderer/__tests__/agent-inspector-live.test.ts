@@ -15,6 +15,7 @@ import {
   describeLiveToolCall,
   foldAgentStreamEvents,
   formatLiveWorkDuration,
+  liveBackgroundCommands,
   scopeAgentStreamEventsToWork,
 } from "../src/domain/agent-inspector-live";
 import type { DesktopAgentStreamEvent } from "../../electron/ipc-types";
@@ -167,7 +168,9 @@ test("fold ignores provider-native tool evidence and preserves started metadata 
   assert.deepEqual(transcript.items, [{
     kind: "tool", id: "c1", tool: "readToolCall", status: "completed",
     input: { path: "README.md" }, output: { totalLines: 54 }, error: null,
+    startedAt: "2026-07-31T00:00:00.000Z", outputTruncated: false, outputHidden: false,
   }]);
+  assert.deepEqual(transcript.background, []);
 });
 
 test("fold preserves first-appearance order across interleaved kinds", () => {
@@ -679,6 +682,98 @@ test("Live layout remount retains the feed and subscription for the same agent/s
   live.stop();
   assert.equal(watches.at(-1), null, "closing still releases the native watch");
   scope.stop();
+});
+
+test("a live output value takes the place of the earlier one of its call, in a batch and across batches", () => {
+  const output = (sequence: number, text: string) => event({ sequence, kind: "tool_lifecycle", method: "item/toolCall/updated", latestKey: "output:c1",
+    payload: { callID: "c1", tool: "shellToolCall", status: "running", output: text, outputProgress: true } });
+  let feed = { events: [event({ sequence: 1 }), output(2, "a\n")], ended: false, droppedEvents: 0 };
+  feed = appendAgentInspectorLiveBatch(feed, { entryId: "agent-a", events: [output(3, "a\nb\n"), event({ sequence: 4 }), output(5, "a\nb\nc\n")], ended: false, droppedEvents: 0, reset: false }, 3);
+  assert.deepEqual(feed.events.map(item => item.sequence), [1, 4, 5], "only the newest value of the key is kept, in its own place");
+  assert.equal(feed.droppedEvents, 0, "a replaced value is not a loss");
+  feed = appendAgentInspectorLiveBatch(feed, { entryId: "agent-a", events: [event({ sequence: 6 })], ended: false, droppedEvents: 0, reset: false }, 3);
+  assert.deepEqual(feed.events.map(item => item.sequence), [1, 4, 5, 6].slice(-3));
+  assert.equal(feed.droppedEvents, 1);
+});
+
+test("fold keeps a running command's newest output, its start time, and clears the live flags when it ends", () => {
+  const transcript = (events: DesktopAgentStreamEvent[]) => foldAgentStreamEvents(events).items[0] as any;
+  const started = event({ sequence: 1, observedAt: "2026-07-31T00:00:01.000Z", kind: "tool_lifecycle", method: "item/toolCall/updated",
+    payload: { callID: "c1", tool: "shellToolCall", status: "running", input: { command: "npm test" } } });
+  const progress = event({ sequence: 2, observedAt: "2026-07-31T00:00:05.000Z", kind: "tool_lifecycle", method: "item/toolCall/updated",
+    payload: { callID: "c1", tool: "shellToolCall", status: "running", input: { command: "npm test" }, output: "tail\n", outputTruncated: true, outputProgress: true } });
+  const done = event({ sequence: 3, kind: "tool_lifecycle", method: "item/toolCall/updated",
+    payload: { callID: "c1", tool: "shellToolCall", status: "completed", output: "all output" } });
+  assert.deepEqual([transcript([started, progress]).output, transcript([started, progress]).outputTruncated, transcript([started, progress]).startedAt],
+    ["tail\n", true, "2026-07-31T00:00:01.000Z"]);
+  const ended = transcript([started, progress, done]);
+  assert.deepEqual([ended.status, ended.output, ended.outputTruncated, ended.startedAt], ["completed", "all output", false, "2026-07-31T00:00:01.000Z"]);
+  assert.equal(transcript([started, progress, done, progress]).status, "completed", "a late output value cannot reopen an ended call");
+});
+
+test("a shell call that starts a background command and OpenCode's shell tool read as shell commands", () => {
+  assert.equal(describeLiveToolCall("shellToolCall", { command: "npm run dev", run_in_background: true }, { status: "completed", output: null, error: null }).headline,
+    "Started a background command");
+  assert.equal(describeLiveToolCall("shellToolCall", { command: "npm run dev", run_in_background: true }, { status: "pending", output: null, error: null }).headline,
+    "Requested: Starting a background command");
+  const bash = describeLiveToolCall("bash", { command: "ls" }, { status: "running", output: null, error: null });
+  assert.deepEqual([bash.headline, bash.detail], ["Running a shell command", "ls"]);
+  assert.equal(describeLiveToolCall("bash", { command: "ls" }, { status: "error", output: null, error: "boom" }).headline, "Command failed");
+});
+
+test("background commands come from the whole feed, keep their end, and end with a feed that ended", () => {
+  const background = (sequence: number, status: string, extra: Record<string, unknown> = {}) => event({ sequence, kind: "tool_lifecycle",
+    method: "item/backgroundCommand/updated", latestKey: "background:task-1",
+    payload: { taskId: "task-1", toolUseId: "toolu_1", command: "npm run dev", description: null, status, output: "ready\n",
+      outputTruncated: false, exitCode: null, startedAt: "2026-07-31T00:00:00.000Z", endedAt: null, ...extra } });
+  const running = liveBackgroundCommands({ events: [event({ sequence: 1 }), background(2, "running")], ended: false });
+  assert.deepEqual(running, [{ id: "task-1", toolUseId: "toolu_1", command: "npm run dev", description: null, status: "running",
+    output: "ready\n", outputTruncated: false, exitCode: null, startedAt: "2026-07-31T00:00:00.000Z", endedAt: null }]);
+  assert.equal(liveBackgroundCommands({ events: [background(2, "running")], ended: true })[0]!.status, "lost");
+  const ended = liveBackgroundCommands({ events: [background(2, "running"), background(3, "completed", { exitCode: 0 })], ended: false });
+  assert.deepEqual([ended[0]!.status, ended[0]!.exitCode], ["completed", 0], "the end is kept");
+  const again = liveBackgroundCommands({ events: [background(2, "completed", { exitCode: 0 }), background(3, "running")], ended: false });
+  assert.equal(again[0]!.status, "running", "a newer running value wins: the command printed the exit line itself");
+  assert.deepEqual(liveBackgroundCommands({ events: [event({ sequence: 4, method: "item/backgroundCommand/updated", payload: { taskId: "x" } })], ended: false }), [],
+    "a shape the fold does not know is left out");
+  assert.deepEqual(foldAgentStreamEvents([background(2, "running")]).items, [], "a background command is not a timeline item");
+});
+
+test("the renderer's bounded list keeps a running background command, as the daemon does", () => {
+  const server = event({ sequence: 1, kind: "tool_lifecycle", method: "item/backgroundCommand/updated", latestKey: "background:t1",
+    payload: { taskId: "t1", command: "npm run dev", status: "running", output: "" } });
+  let feed = { events: [server], ended: false, droppedEvents: 0 };
+  feed = appendAgentInspectorLiveBatch(feed, { entryId: "agent-a", events: [2, 3, 4].map(sequence => event({ sequence })), ended: false, droppedEvents: 0, reset: false }, 3);
+  assert.deepEqual(feed.events.map(item => item.sequence), [1, 3, 4]);
+  assert.equal(feed.droppedEvents, 1);
+  assert.equal(liveBackgroundCommands(feed)[0]!.status, "running");
+});
+
+test("live tails hide a private key without its BEGIN or END line, and drop unprinted control characters", async () => {
+  const { liveOutputTail, plainTerminalText } = await import("../../../../shared/live-command-output.mjs");
+  assert.equal(liveOutputTail("a\n-----BEGIN RSA PRIVATE KEY-----\nMIIE\n").text, "a\n[REDACTED PRIVATE KEY]\n");
+  assert.equal(liveOutputTail("MIIE\n-----END RSA PRIVATE KEY-----\nb\n").text, "[REDACTED PRIVATE KEY]\nb\n");
+  assert.equal(liveOutputTail(`${"x".repeat(50)}\n-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----\nz\n`, { maxChars: 40 }).text,
+    "[REDACTED PRIVATE KEY]\nz\n", "a cut that removes the BEGIN line leaves no key body");
+  assert.equal(plainTerminalText("a\u0001b\u0007\tc"), "ab\tc");
+});
+
+test("a cut tail hides a key body longer than the tail, and armored PGP keys, but keeps hash lists", async () => {
+  const { liveOutputTail } = await import("../../../../shared/live-command-output.mjs");
+  // A key longer than the tail: only body lines are left, the BEGIN line is cut off and the END line has not come.
+  const body = Array.from({ length: 120 }, (_, index) => `MIIJKAIBAAKCAgEAu${index % 10}x+Hq3vZpQeR/7kLmNoPqRsTuVwXyZaBcDeFgHiJkLmNoPq`.slice(0, 64)).join("\n");
+  const longKey = liveOutputTail(`-----BEGIN RSA PRIVATE KEY-----\n${body}\n`);
+  assert.equal(longKey.cut, true);
+  assert.equal(longKey.text, "[REDACTED PRIVATE KEY]\n", "no body line is shown");
+  assert.equal(liveOutputTail("x\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n").text, "x\n[REDACTED PRIVATE KEY]\n");
+  // The same key indented in a YAML file.
+  const yaml = liveOutputTail(`key: |\n  -----BEGIN RSA PRIVATE KEY-----\n${body.split("\n").map((line) => `  ${line}`).join("\n")}\n`);
+  assert.equal(yaml.text, "[REDACTED PRIVATE KEY]\n", "no indented body line is shown");
+  // A cut list of commit hashes is not a key: lowercase hex has no mixed case.
+  const hashes = Array.from({ length: 200 }, (_, index) => `${index.toString(16).padStart(4, "0")}${"a1b2c3d4e5".repeat(4)}`).join("\n");
+  const hashTail = liveOutputTail(`${hashes}\n`);
+  assert.equal(hashTail.cut, true);
+  assert.doesNotMatch(hashTail.text, /REDACTED/);
 });
 
 test("Live batches retain local eviction and upstream loss counts until reset", () => {

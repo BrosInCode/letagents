@@ -6,12 +6,27 @@ import type { AgentInspectorOverallState } from "./agent-inspector";
 export {
   describeLiveToolCall,
   foldAgentStreamEvents,
+  isShellToolName,
 } from "../../../../../shared/agent-live-trace.mjs";
 export type {
   AgentLiveTranscript,
+  LiveBackgroundCommand,
   LiveToolPresentation,
   LiveTranscriptItem,
 } from "../../../../../shared/agent-live-trace.mjs";
+import { foldAgentStreamEvents } from "../../../../../shared/agent-live-trace.mjs";
+import type { LiveBackgroundCommand } from "../../../../../shared/agent-live-trace.mjs";
+import { LIVE_BACKGROUND_COMMAND_METHOD } from "../../../../../shared/live-command-output.mjs";
+
+/**
+ * The commands that the agent started in the background, from the whole
+ * feed: a server that a turn started still runs while later turns work, so
+ * the background list is never scoped to the current turn.
+ */
+export function liveBackgroundCommands(feed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean }): LiveBackgroundCommand[] {
+  const events = feed.events.filter((event) => event.method === LIVE_BACKGROUND_COMMAND_METHOD);
+  return events.length ? foldAgentStreamEvents(events, feed.ended).background : [];
+}
 
 /** Select only evidence owned by the durable room turn. An open provider
  * stream can span many idle periods and turns, so its replay is not itself a
@@ -74,16 +89,43 @@ export function formatLiveWorkDuration(
   return `${hours}h ${minutes % 60}m`;
 }
 
-/** Append a bounded native batch, retaining loss accounting across updates. */
+/**
+ * Append a bounded native batch, retaining loss accounting across updates. A
+ * latest value (live command output) takes the place of the earlier event
+ * with its key, so output that keeps arriving never pushes the agent's other
+ * events out of the bounded list.
+ */
 export function appendAgentInspectorLiveBatch(
   feed: { events: DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number },
   batch: DesktopAgentStreamBatch,
   limit = 400,
 ): typeof feed {
   const priorEvents = batch.reset ? [] : feed.events;
-  const localOverflow = Math.max(0, priorEvents.length + batch.events.length - limit);
+  if (!batch.events.length) return { events: priorEvents, ended: batch.ended, droppedEvents: (batch.reset ? 0 : feed.droppedEvents) + Math.max(0, batch.droppedEvents) };
+  const newestOfKey = new Map<string, number>();
+  for (const event of batch.events) if (event.latestKey) newestOfKey.set(event.latestKey, event.sequence);
+  const replaced = (event: DesktopAgentStreamEvent) => event.latestKey !== undefined
+    && newestOfKey.has(event.latestKey) && newestOfKey.get(event.latestKey) !== event.sequence;
+  const merged = [...priorEvents, ...batch.events].filter((event) => !replaced(event));
+  // A background command that still runs keeps its one event, as the daemon keeps it: a quiet server's
+  // event is often the oldest in the list.
+  const kept = (event: DesktopAgentStreamEvent) => event.latestKey?.startsWith("background:") === true
+    && (event.payload as { status?: unknown } | null)?.status === "running";
+  let events = merged;
+  let localOverflow = 0;
+  if (merged.length > limit) {
+    let excess = merged.length - limit;
+    events = merged.filter((event) => {
+      if (excess > 0 && !kept(event)) {
+        excess -= 1;
+        localOverflow += 1;
+        return false;
+      }
+      return true;
+    });
+  }
   return {
-    events: batch.events.length ? [...priorEvents, ...batch.events].slice(-limit) : priorEvents,
+    events,
     ended: batch.ended,
     droppedEvents: (batch.reset ? 0 : feed.droppedEvents) + Math.max(0, batch.droppedEvents) + localOverflow,
   };

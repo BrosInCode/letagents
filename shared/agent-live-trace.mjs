@@ -6,8 +6,35 @@
  * every snapshot it stores against normalizeRoomLiveSnapshot.
  */
 
+import { LIVE_BACKGROUND_COMMAND_METHOD } from "./live-command-output.mjs";
+
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+/** A provider's own shell tool, by bare name: Codex and Cursor, Claude Code (mapped by the daemon), OpenCode. */
+export function isShellToolName(name) {
+  return typeof name === "string" && (/shell|terminal/.test(name) || name === "bash");
+}
+
+const BACKGROUND_STATUSES = new Set(["running", "completed", "failed", "stopped", "lost"]);
+
+/** One background command's state from its newest event, or null for a shape the fold does not know. */
+function backgroundCommand(payload, observedAt) {
+  if (!payload || typeof payload.taskId !== "string" || !payload.taskId || typeof payload.command !== "string"
+    || !BACKGROUND_STATUSES.has(payload.status)) return null;
+  return {
+    id: payload.taskId,
+    toolUseId: typeof payload.toolUseId === "string" ? payload.toolUseId : null,
+    command: payload.command,
+    description: typeof payload.description === "string" ? payload.description : null,
+    status: payload.status,
+    output: typeof payload.output === "string" ? payload.output : "",
+    outputTruncated: payload.outputTruncated === true,
+    exitCode: Number.isSafeInteger(payload.exitCode) ? payload.exitCode : null,
+    startedAt: typeof payload.startedAt === "string" ? payload.startedAt : observedAt ?? null,
+    endedAt: typeof payload.endedAt === "string" ? payload.endedAt : null,
+  };
 }
 
 function deltaText(payload, fallback) {
@@ -54,6 +81,7 @@ export function liveStreamTextPart(event) {
 export function foldAgentStreamEvents(events, ended = false) {
   const items = [];
   const indexById = new Map();
+  const background = new Map();
 
   const upsertText = (kind, partId, text) => {
     if (!text) return;
@@ -89,6 +117,8 @@ export function foldAgentStreamEvents(events, ended = false) {
       const nextStatus = typeof payload.status === "string" ? payload.status : "running";
       const priorIsTerminal = priorTool ? TERMINAL_TOOL_STATUSES.includes(priorTool.status) : false;
       if (priorIsTerminal && (nextStatus === "running" || nextStatus === "pending")) continue;
+      // Live output of a running command: the newest tail takes the place of the one before it.
+      const progress = payload.outputProgress === true;
       const next = {
         kind: "tool",
         id: callId,
@@ -97,6 +127,9 @@ export function foldAgentStreamEvents(events, ended = false) {
         input: payload.input ?? priorTool?.input ?? null,
         output: payload.output ?? priorTool?.output ?? null,
         error: typeof payload.error === "string" ? payload.error : priorTool?.error ?? null,
+        startedAt: priorTool?.startedAt ?? event.observedAt ?? null,
+        outputTruncated: progress ? payload.outputTruncated === true : TERMINAL_TOOL_STATUSES.includes(nextStatus) ? false : priorTool?.outputTruncated ?? false,
+        outputHidden: progress ? payload.outputHidden === true : TERMINAL_TOOL_STATUSES.includes(nextStatus) ? false : priorTool?.outputHidden ?? false,
       };
       if (existing === undefined) {
         indexById.set(key, items.length);
@@ -104,6 +137,12 @@ export function foldAgentStreamEvents(events, ended = false) {
       } else {
         items[existing] = next;
       }
+    } else if (event.method === LIVE_BACKGROUND_COMMAND_METHOD) {
+      const command = backgroundCommand(payload, event.observedAt);
+      if (!command) continue;
+      // The newest value of a command wins. An end shown from Claude Code's exit line alone goes back to running
+      // when the command writes more: it printed that line itself.
+      background.set(command.id, command);
     }
   }
 
@@ -111,10 +150,15 @@ export function foldAgentStreamEvents(events, ended = false) {
     for (const item of items) {
       if (item.kind === "tool" && ["pending", "running"].includes(item.status)) item.status = "interrupted";
     }
+    // The agent's runtime ended: a command that it ran in the background did not report its end.
+    for (const command of background.values()) {
+      if (command.status === "running") command.status = "lost";
+    }
   }
 
   return {
     items,
+    background: [...background.values()],
     ended,
     startedAt: events.find((event) => Boolean(event.observedAt))?.observedAt ?? null,
     lastActivityAt: [...events].reverse().find((event) => Boolean(event.observedAt))?.observedAt ?? null,
@@ -217,6 +261,7 @@ function action(headline, args, toolName) {
 const NATIVE_TOOL_HEADLINES = {
   shellToolCall: { running: "Running a shell command", complete: "Ran a shell command" },
   terminalToolCall: { running: "Running a shell command", complete: "Ran a shell command" },
+  bash: { running: "Running a shell command", complete: "Ran a shell command" },
   editToolCall: { running: "Editing a file", complete: "Edited a file" },
   writeToolCall: { running: "Writing a file", complete: "Wrote a file" },
   readToolCall: { running: "Reading a file", complete: "Read a file" },
@@ -224,6 +269,9 @@ const NATIVE_TOOL_HEADLINES = {
   grepToolCall: { running: "Searching the workspace", complete: "Searched the workspace" },
   globToolCall: { running: "Listing matching files", complete: "Listed matching files" },
 };
+
+/** A shell call that starts its command in the background (Claude Code's `run_in_background`). */
+const BACKGROUND_SHELL_HEADLINES = { running: "Starting a background command", complete: "Started a background command" };
 
 /** The bare name of a live tool, without the MCP wrapper or the per-turn server alias. */
 function bareLiveToolName(tool, inputRecord) {
@@ -250,12 +298,13 @@ export function describeLiveToolCall(tool, input, outcome) {
   const bareTool = bareLiveToolName(tool, inputRecord);
   const known = describeLetAgentsTool(bareTool, inputRecord, outcome);
   if (known) return known;
-  const nativeHeadlines = ownEntry(NATIVE_TOOL_HEADLINES, bareTool);
+  const nativeHeadlines = isShellToolName(bareTool) && inputRecord?.run_in_background === true
+    ? BACKGROUND_SHELL_HEADLINES : ownEntry(NATIVE_TOOL_HEADLINES, bareTool);
   if (nativeHeadlines) {
     const headline = outcome?.status === "pending" ? `Requested: ${nativeHeadlines.running}`
       : outcome?.status === "running" ? nativeHeadlines.running : nativeHeadlines.complete;
     const status = outcome?.status;
-    const operation = /shell|terminal/.test(bareTool) ? "Command"
+    const operation = isShellToolName(bareTool) ? "Command"
       : /read/.test(bareTool) ? "File read" : /edit|write/.test(bareTool) ? "File change" : "Search";
     const title = status === "error" || status === "failed" || outcome?.error ? `${operation} failed`
       : status === "interrupted" ? `${operation} interrupted` : headline;
@@ -358,7 +407,7 @@ export function describeRoomLiveToolCall(item) {
   const known = describeLetAgentsTool(bareTool, inputRecord && item.tool === "mcpToolCall" ? record(inputRecord.args) : inputRecord, outcome);
   if (known) return { headline: known.headline, status, tool: known.kind === "reply" ? "reply" : "room" };
   if (ownEntry(NATIVE_TOOL_HEADLINES, bareTool)) {
-    const tool = /shell|terminal/.test(bareTool) ? "shell" : /read/.test(bareTool) ? "read"
+    const tool = isShellToolName(bareTool) ? "shell" : /read/.test(bareTool) ? "read"
       : /edit|write/.test(bareTool) ? "edit" : "search";
     return { headline: describeLiveToolCall(item.tool, item.input, outcome).headline, status, tool };
   }

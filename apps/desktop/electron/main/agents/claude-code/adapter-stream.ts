@@ -91,7 +91,9 @@ export class ClaudeAdapterStream extends ClaudeAdapterBackgroundWork {
       : this.contextualInterruptReplayTurnId(handle, message);
     if (contextualInterruptTurnId) handle.contextualInterruptResults.add(message);
     let backgroundWork: "same" | "changed" | "tell" = "same";
+    this.answerBackgroundCommandStop(handle, message);
     if (handle.state !== "failed") {
+      this.observeBackgroundCommandOutput(handle, message);
       backgroundWork = this.observeBackgroundWork(handle, message);
       if (isClaudeTaskNoticeResult(message, handle.providerContinuationId)) {
         // The answer that ends here, or goes on, was given the notice that was first in line.

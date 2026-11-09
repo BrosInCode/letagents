@@ -172,7 +172,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       sequence: number;
       stream_generation: number;
       dropped_events: number;
-      events: Array<{ sequence: number; observed_at: string; kind: string; method: string; summary: string | null; payload: unknown }>;
+      events: Array<{ sequence: number; observed_at: string; kind: string; method: string; summary: string | null; payload: unknown; latest_key?: string }>;
       ended: boolean;
     }>("supervisor.watch_agent_stream", {
       entry_id: input.entryId,
@@ -191,7 +191,28 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
         method: String(event.method ?? ""),
         summary: typeof event.summary === "string" ? event.summary : null,
         payload: event.payload,
+        ...(typeof event.latest_key === "string" && event.latest_key ? { latestKey: event.latest_key } : {}),
       })),
+    };
+  }
+
+  /** The newest values of one agent's background commands, after a version; waits for a change. */
+  async watchBackgroundCommands(input: {
+    entryId: string;
+    afterVersion: number;
+    waitMs?: number;
+    signal?: AbortSignal;
+  }): Promise<import("../../ipc-types/agents.js").DesktopBackgroundCommandsBatch> {
+    const waitMs = Math.max(0, Math.min(30_000, input.waitMs ?? 25_000));
+    const value = await this.request<{ version?: unknown; commands?: unknown; ended?: unknown }>("supervisor.watch_background_commands", {
+      entry_id: input.entryId,
+      after_version: input.afterVersion,
+      wait_ms: waitMs,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, waitMs + this.requestTimeoutMs, true, input.signal);
+    return {
+      version: Number.isSafeInteger(value.version) ? value.version as number : input.afterVersion,
+      commands: Array.isArray(value.commands) ? value.commands.slice(0, 16) : [],
+      ended: value.ended === true,
     };
   }
 

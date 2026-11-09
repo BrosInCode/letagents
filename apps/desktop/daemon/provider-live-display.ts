@@ -1,6 +1,41 @@
 import type { DaemonActivityEvent } from "./types.js";
 import { isAgentInspectorLiveDisplayEvent } from "./provider-stream-policy.js";
 import { redactCredentialText } from "./credential-redaction.js";
+import {
+  LIVE_OUTPUT_TAIL_CHARS,
+  liveBackgroundLatestKey,
+  liveOutputLatestKey,
+  liveOutputTail,
+  plainTerminalText,
+} from "../../../shared/live-command-output.mjs";
+
+/** Raw output kept per running command for its live tail: more than one tail, so a cut lands on a line start. */
+const LIVE_OUTPUT_RAW_CHARS = LIVE_OUTPUT_TAIL_CHARS * 2;
+const TERMINAL_TOOL_STATUSES = new Set(["completed", "error", "failed", "interrupted"]);
+
+/** How the daemon puts a live display event on the feed: as one more event, or as the newest value of a key. */
+export type LiveDisplayFeedPlacement =
+  | { kind: "append"; endsLatestKey: string | null }
+  | { kind: "latest"; key: string; sticky: boolean; immediate: boolean };
+
+/**
+ * A live output event is the newest value of its command's key. A background
+ * command's state is too, and the size limit keeps it while the command runs.
+ * The final event of a tool call ends the paced output of the same call.
+ */
+export function liveDisplayFeedPlacement(event: Pick<DaemonActivityEvent, "method" | "payload">): LiveDisplayFeedPlacement {
+  const outputKey = liveOutputLatestKey(event);
+  if (outputKey) return { kind: "latest", key: outputKey, sticky: false, immediate: false };
+  const backgroundKey = liveBackgroundLatestKey(event);
+  if (backgroundKey) {
+    const running = record(event.payload)?.status === "running";
+    return { kind: "latest", key: backgroundKey, sticky: running, immediate: !running };
+  }
+  const payload = record(event.payload);
+  const callId = event.method === "item/toolCall/updated" && typeof payload?.callID === "string" ? payload.callID : null;
+  const terminal = callId !== null && typeof payload?.status === "string" && TERMINAL_TOOL_STATUSES.has(payload.status);
+  return { kind: "append", endsLatestKey: terminal ? `output:${callId}` : null };
+}
 
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
@@ -28,8 +63,11 @@ function toolResultError(value: unknown): string | null {
 export class ProviderLiveDisplay {
   private claudeTurn: string | null = null;
   private readonly texts = new Map<string, string>();
-  private readonly tools = new Map<string, { name: string; completed: boolean }>();
-  private readonly commandOutputs = new Map<string, { turn: string; text: string; truncated: boolean; redacted: boolean; unavailable: boolean }>();
+  private readonly tools = new Map<string, { name: string; completed: boolean; running?: boolean }>();
+  private readonly commandOutputs = new Map<string, {
+    turn: string; text: string; truncated: boolean; redacted: boolean; unavailable: boolean;
+    command: unknown; cwd: unknown; tail: string; tailCut: boolean; liveHidden: boolean;
+  }>();
 
   private readonly finishedTurns = new Set<string>();
 
@@ -47,18 +85,25 @@ export class ProviderLiveDisplay {
       const commandKey = (itemId: string) => JSON.stringify([turnId, itemId]);
       if (event.method === "item/commandExecution/outputDelta" && id(payload.itemId) && typeof payload.delta === "string") {
         const output = this.commandOutputs.get(commandKey(payload.itemId as string));
-        if (output) {
-          // Redaction or upstream truncation breaks the original text boundary.
-          // Joining later fragments could reveal a suffix of an already-masked secret.
-          output.unavailable ||= event.payload_redacted || event.payload_truncated;
-          output.redacted ||= event.payload_redacted;
-          output.truncated ||= event.payload_truncated;
-          const combined = output.unavailable ? "" : output.text + payload.delta;
-          output.truncated ||= combined.length > 6_000;
-          output.unavailable ||= combined.length > 6_000;
-          output.text = output.unavailable ? "" : combined;
+        if (!output) return [];
+        // Redaction or upstream truncation breaks the original text boundary.
+        // Joining later fragments could reveal a suffix of an already-masked secret.
+        const broken = event.payload_redacted || event.payload_truncated;
+        output.unavailable ||= broken;
+        output.redacted ||= event.payload_redacted;
+        output.truncated ||= event.payload_truncated;
+        const combined = output.unavailable ? "" : output.text + payload.delta;
+        output.truncated ||= combined.length > 6_000;
+        output.unavailable ||= combined.length > 6_000;
+        output.text = output.unavailable ? "" : combined;
+        // The live tail keeps the newest output, and hides it for good after a broken boundary.
+        output.liveHidden ||= broken;
+        output.tail = output.liveHidden ? "" : output.tail + payload.delta;
+        if (output.tail.length > LIVE_OUTPUT_RAW_CHARS) {
+          output.tail = output.tail.slice(-LIVE_OUTPUT_RAW_CHARS);
+          output.tailCut = true;
         }
-        return [];
+        return [this.codexLiveOutput(event, turnId, payload.itemId as string, output)];
       }
       if (/^turn\/(completed|failed|interrupted|cancelled|stopped)$/.test(event.method)) {
         for (const [key, output] of this.commandOutputs) if (output.turn === turnId) this.commandOutputs.delete(key);
@@ -69,7 +114,10 @@ export class ProviderLiveDisplay {
         if (item.type === "commandExecution" && event.method === "item/started" && !this.commandOutputs.has(key)) {
           // Bound unfinished commands independently of the lifetime of the provider session.
           if (this.commandOutputs.size >= 128) this.commandOutputs.delete(this.commandOutputs.keys().next().value!);
-          this.commandOutputs.set(key, { turn: turnId, text: "", truncated: false, redacted: false, unavailable: false });
+          this.commandOutputs.set(key, {
+            turn: turnId, text: "", truncated: false, redacted: false, unavailable: false,
+            command: item.command, cwd: item.cwd, tail: "", tailCut: false, liveHidden: false,
+          });
         }
         const streamed = item.type === "commandExecution" ? this.commandOutputs.get(key) : undefined;
         if (event.method === "item/completed") this.commandOutputs.delete(key);
@@ -114,6 +162,17 @@ export class ProviderLiveDisplay {
       return [];
     }
     const turn = this.claudeTurn;
+    if (payload.type === "system" && payload.subtype === "task_started" && payload.task_type === "local_bash"
+      && payload.is_backgrounded === false && turn && id(payload.tool_use_id)) {
+      // Claude Code reports no start for a tool call, but a shell command that runs for a while
+      // becomes a task. Its call has started: the card says it runs, not that it was requested.
+      const tool = this.tools.get(payload.tool_use_id as string);
+      if (!tool || tool.completed || tool.running || tool.name !== "shellToolCall") return [];
+      tool.running = true;
+      return [emit("item/toolCall/updated", "tool_lifecycle", {
+        callID: `claude:${this.continuation}:${turn}:${payload.tool_use_id}`, tool: tool.name, status: "running",
+      })];
+    }
     if (payload.type === "result") {
       const terminalTurn = id(payload.user_message_uuid);
       if (!terminalTurn || (turn && terminalTurn !== turn) || (!turn && nativePhase !== "turn_terminal")) return [];
@@ -168,5 +227,34 @@ export class ProviderLiveDisplay {
       }
     }
     return result;
+  }
+
+  /** The newest output of a running Codex command, as one live value of its call. */
+  private codexLiveOutput(
+    event: DaemonActivityEvent,
+    turnId: string,
+    itemId: string,
+    output: { command: unknown; cwd: unknown; tail: string; tailCut: boolean; liveHidden: boolean },
+  ): DaemonActivityEvent {
+    const tail = liveOutputTail(plainTerminalText(output.tail), { cut: output.tailCut });
+    const shown = output.liveHidden ? null : redactCredentialText(tail.text, LIVE_OUTPUT_TAIL_CHARS);
+    return {
+      ...event,
+      method: "item/toolCall/updated",
+      kind: "tool_lifecycle",
+      summary: "",
+      payload: {
+        callID: `codex:${this.continuation}:${turnId}:${itemId}`,
+        tool: "shellToolCall",
+        status: "running",
+        input: { command: output.command, cwd: output.cwd },
+        output: shown?.value ?? null,
+        outputTruncated: tail.cut,
+        outputHidden: output.liveHidden,
+        outputProgress: true,
+      },
+      payload_truncated: tail.cut || Boolean(shown?.truncated),
+      payload_redacted: Boolean(shown?.redacted),
+    };
   }
 }

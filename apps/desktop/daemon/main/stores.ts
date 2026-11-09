@@ -166,6 +166,8 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
     });
     this.agentStreamRegistry = new AgentStreamRegistry({
       isHandoffScheduled: () => this.handoffScheduled,
+      // The room's activity strip shows each agent's running background commands from its state.
+      onBackgroundCommandsChange: () => this.notifyStateChanged(false),
     });
     // The room's view of each agent's turn, published only while its owner shares it.
     this.liveRoomShare = new LiveRoomSharePublisher({

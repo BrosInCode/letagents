@@ -466,7 +466,35 @@ export interface DesktopAgentStreamEvent {
   method: string;
   summary: string | null;
   payload: unknown;
+  /** A latest value (live command output): keep only the newest event of this key. */
+  latestKey?: string;
 }
+
+/** One command that an agent runs in the background. */
+export interface DesktopBackgroundCommand {
+  taskId: string;
+  toolUseId: string | null;
+  command: string;
+  startedAt: string | null;
+}
+
+/** The newest values of one agent's background commands, for the room's activity strip. */
+export interface DesktopBackgroundCommandsBatch {
+  version: number;
+  /** Background command payloads (shared/live-command-output.d.mts LiveBackgroundCommandPayload), as the feed holds them. */
+  commands: unknown[];
+  ended: boolean;
+}
+
+export interface DesktopStopBackgroundCommandInput {
+  entryId: string;
+  daemonGeneration: number;
+  taskId: string;
+}
+
+export type DesktopStopBackgroundCommandResult =
+  | { outcome: "stopping" | "not_running" | "failed" }
+  | { outcome: "invalid"; error: string };
 
 /** A batch pushed for the focused agent, with `ended` once its runtime closes. */
 export interface DesktopAgentStreamBatch {
@@ -702,6 +730,8 @@ export interface DesktopSupervisorManifestEntry {
   providerProgress?: { state: "compacting"; startedAt: string } | null;
   /** Live start-up progress of the latest launch; null when the daemon has none. */
   launchProgress?: DesktopSupervisorLaunchProgress | null;
+  /** Commands the agent runs in the background now (from its live feed; changes only on a start or an end). */
+  backgroundCommands?: DesktopBackgroundCommand[];
   /** First time this entry reached ready (bound + reachable + running +
    * unblocked); set once, never cleared. Null/absent if it never reached ready. */
   readyReachedAt?: string | null;

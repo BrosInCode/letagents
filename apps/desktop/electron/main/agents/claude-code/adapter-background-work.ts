@@ -5,9 +5,147 @@ import { CLAUDE_BACKGROUND_WORK_ANSWER_METHOD, CLAUDE_BACKGROUND_WORK_FINISHED_M
 import { ClaudeProviderHandle } from "./provider-handle.js";
 import { claudeStreamKind, sessionIdOf, shownTaskDescription, streamMethod } from "./stream-messages.js";
 import type { ClaudeHeldRoomTurn, ClaudeRoomTurnTerminal, ClaudeStreamMessage } from "./types.js";
+import { BackgroundCommandOutput, claudeBackgroundOutputPath } from "./background-command-output.js";
+import { LIVE_BACKGROUND_COMMAND_METHOD } from "../../../../../../shared/live-command-output.mjs";
+import { randomUUID } from "node:crypto";
+
+/** How long the owner's Stop waits for the CLI to accept it. */
+const STOP_BACKGROUND_COMMAND_TIMEOUT_MS = 10_000;
+
+/** What happened to the owner's request to stop a background command. */
+export type BackgroundCommandStopOutcome = "stopping" | "not_running" | "failed";
+
+/** Background commands whose output one agent's Live tab follows at a time. */
+const MAX_FOLLOWED_BACKGROUND_COMMANDS = 8;
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function toolResultText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.flatMap((part) => {
+    const value = record(part);
+    return value?.type === "text" && typeof value.text === "string" ? [value.text] : [];
+  }).join("\n");
+}
 
 /** Room turns that stay open for background work they started. */
 export class ClaudeAdapterBackgroundWork extends ClaudeAdapterNativeExecution {
+  /** Shell calls that asked to run in the background, by tool use id, until their result names the task. */
+  private readonly backgroundCommandRequests = new WeakMap<ClaudeProviderHandle, Map<string, { command: string; description: string | null }>>();
+  /** The output followers of the background commands that run, by task id. */
+  private readonly backgroundCommandOutputs = new WeakMap<ClaudeProviderHandle, Map<string, BackgroundCommandOutput>>();
+  /** The owner's stop requests that wait for the CLI's answer, by request id. */
+  private readonly backgroundCommandStops = new WeakMap<ClaudeProviderHandle, Map<string, (accepted: boolean) => void>>();
+
+  /**
+   * Stop a command that the agent runs in the background, at its owner's request.
+   * 1. Only a command that this adapter follows can be stopped: a shell command of the agent itself, still running.
+   * 2. The CLI is asked with its own `stop_task` control request, and its answer is awaited for a short time.
+   * 3. The CLI then reports the task as stopped, and the follower publishes that end like any other.
+   */
+  protected async stopFollowedBackgroundCommand(handle: ClaudeProviderHandle, taskId: string): Promise<BackgroundCommandStopOutcome> {
+    if (!this.backgroundCommandOutputs.get(handle)?.has(taskId) || handle.terminal || handle.state === "failed") return "not_running";
+    const requestId = randomUUID();
+    const waiting = this.backgroundCommandStops.get(handle) ?? new Map<string, (accepted: boolean) => void>();
+    this.backgroundCommandStops.set(handle, waiting);
+    const accepted = await new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => { waiting.delete(requestId); resolve(false); }, STOP_BACKGROUND_COMMAND_TIMEOUT_MS);
+      timer.unref?.();
+      waiting.set(requestId, (value) => { clearTimeout(timer); waiting.delete(requestId); resolve(value); });
+      try {
+        handle.child.writeLine(JSON.stringify({ type: "control_request", request_id: requestId, request: { subtype: "stop_task", task_id: taskId } }));
+      } catch {
+        waiting.get(requestId)?.(false);
+      }
+    });
+    return accepted ? "stopping" : "failed";
+  }
+
+  /** The CLI's answer to an owner's stop request. It names no session, and it is read in any state of the handle. */
+  protected answerBackgroundCommandStop(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
+    if (message.type !== "control_response") return;
+    const response = record(message.response);
+    const answer = typeof response?.request_id === "string" ? this.backgroundCommandStops.get(handle)?.get(response.request_id) : undefined;
+    answer?.(response?.subtype === "success");
+  }
+
+  /**
+   * Follow the output of shell commands that the agent runs in the background, for the owner's Live tab.
+   * 1. A Bash call of the agent itself (no sub-agent) with `run_in_background` is noted with its command.
+   * 2. Its result names the task in a structured field and the output file in its text: a follower starts.
+   * 3. The task's end (`task_notification`, or `task_updated` to an end state) gives the follower its last read.
+   * Nothing here changes how the turn runs or ends; it only publishes display-only events.
+   */
+  protected observeBackgroundCommandOutput(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
+    if (message.type === "control_response") return;
+    if (sessionIdOf(message) !== handle.providerContinuationId || message.parent_tool_use_id != null) return;
+    const content = record(message.message)?.content;
+    if (message.type === "assistant" && Array.isArray(content)) {
+      for (const value of content) {
+        const block = record(value);
+        const input = record(block?.input);
+        if (block?.type !== "tool_use" || block.name !== "Bash" || typeof block.id !== "string" || !block.id
+          || input?.run_in_background !== true || typeof input.command !== "string") continue;
+        const requests = this.backgroundCommandRequests.get(handle) ?? new Map<string, { command: string; description: string | null }>();
+        if (requests.size >= 64) requests.delete(requests.keys().next().value!);
+        requests.set(block.id, { command: input.command, description: typeof input.description === "string" ? input.description : null });
+        this.backgroundCommandRequests.set(handle, requests);
+      }
+      return;
+    }
+    if (message.type === "user" && Array.isArray(content)) {
+      const taskId = record(message.tool_use_result)?.backgroundTaskId;
+      const results = content.map(record).filter((block) => block?.type === "tool_result");
+      // The structured task id belongs to the message's one result; with several results it names none of them.
+      if (typeof taskId !== "string" || results.length !== 1 || typeof results[0]!.tool_use_id !== "string") return;
+      const toolUseId = results[0]!.tool_use_id as string;
+      const request = this.backgroundCommandRequests.get(handle)?.get(toolUseId);
+      if (!request) return;
+      this.backgroundCommandRequests.get(handle)!.delete(toolUseId);
+      const path = claudeBackgroundOutputPath(toolResultText(results[0]!.content), taskId, handle.providerContinuationId ?? "");
+      const followers = this.backgroundCommandOutputs.get(handle) ?? new Map<string, BackgroundCommandOutput>();
+      if (!path || followers.has(taskId) || followers.size >= MAX_FOLLOWED_BACKGROUND_COMMANDS) return;
+      const follower = new BackgroundCommandOutput({
+        taskId,
+        toolUseId,
+        command: request.command,
+        description: request.description,
+        path,
+        startedAt: this.deps.now(),
+        now: () => this.deps.now(),
+        publish: (payload) => this.publishLiveDisplay(handle, LIVE_BACKGROUND_COMMAND_METHOD, payload),
+        // A follower that ended by itself (its exit line) frees its place at once.
+        onStopped: () => { if (followers.get(taskId) === follower) followers.delete(taskId); },
+      });
+      followers.set(taskId, follower);
+      this.backgroundCommandOutputs.set(handle, followers);
+      follower.start();
+      return;
+    }
+    if (message.type !== "system" || typeof message.task_id !== "string") return;
+    const endStatus = message.subtype === "task_notification" ? message.status
+      : message.subtype === "task_updated" ? record(message.patch)?.status : undefined;
+    if (endStatus === undefined || endStatus === "running" || endStatus === "pending") return;
+    const followers = this.backgroundCommandOutputs.get(handle);
+    const follower = followers?.get(message.task_id);
+    if (!follower) return;
+    followers!.delete(message.task_id);
+    const summaryExit = typeof message.summary === "string" ? /exit code (-?\d+)/.exec(message.summary) : null;
+    follower.finish(endStatus, summaryExit ? Number(summaryExit[1]) : null);
+  }
+
+  protected override releaseEndedHandle(handle: ClaudeProviderHandle): void {
+    super.releaseEndedHandle(handle);
+    for (const answer of [...this.backgroundCommandStops.get(handle)?.values() ?? []]) answer(false);
+    this.backgroundCommandStops.delete(handle);
+    for (const follower of this.backgroundCommandOutputs.get(handle)?.values() ?? []) follower.close();
+    this.backgroundCommandOutputs.delete(handle);
+    this.backgroundCommandRequests.delete(handle);
+  }
+
   /**
    * Follow the background work of the CLI: what started, what ended, and what the model has been told. Says
    * whether this changed what a turn that is held open waits for, and whether its owner is to be told again.

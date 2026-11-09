@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { projectLaunchProgress } from "../main/supervisor-daemon/entry-mapping.js";
+import { projectBackgroundCommands, projectLaunchProgress } from "../main/supervisor-daemon/entry-mapping.js";
 
 const wire = {
   started_at: "2026-10-26T10:00:00.000Z",
@@ -54,4 +54,18 @@ test("malformed launch progress is shown as none, never partly", () => {
     { ...wire, failure: { phase: "prepare", action: "reboot" } },
     { ...wire, failure: { phase: "prepare", action: "retry", reason: "secret" }, ended_at: 5 },
   ]) assert.equal(projectLaunchProgress(bad), null, JSON.stringify(bad));
+});
+
+test("an agent's running background commands map to the renderer's shape, and a malformed one is left out", () => {
+  assert.deepEqual(projectBackgroundCommands([
+    { task_id: "task-1", tool_use_id: "toolu_1", command: "npm run dev", started_at: "2026-11-08T22:00:00.000Z" },
+    { task_id: "task-2", tool_use_id: null, command: "npm run watch", started_at: "not a time" },
+    { task_id: "", command: "x" },
+    { task_id: "task-3" },
+    null,
+  ]), [
+    { taskId: "task-1", toolUseId: "toolu_1", command: "npm run dev", startedAt: "2026-11-08T22:00:00.000Z" },
+    { taskId: "task-2", toolUseId: null, command: "npm run watch", startedAt: null },
+  ]);
+  assert.deepEqual(projectBackgroundCommands(undefined), []);
 });
