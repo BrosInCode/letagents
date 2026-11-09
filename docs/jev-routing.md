@@ -1,9 +1,11 @@
 # Smart conversation routing (Beta)
 
 Desktop 0.1.54 adds **Room settings → Smart conversation routing · Beta**,
-powered by Jev. Every room starts with it off, including existing rooms and
-new focus rooms. An authenticated room admin can enable or disable it. Agent
-credentials cannot change it. Local-only rooms do not expose this cloud feature.
+powered by Jev. Rooms made since migration 0145 (desktop 0.1.137), focus
+rooms included, start with it on. Older rooms keep the value they had, which
+was off unless an admin turned it on. An authenticated room admin can enable
+or disable it. Agent credentials cannot change it. Local-only rooms do not
+expose this cloud feature.
 
 The first beta selects responders for untagged human messages in rooms with
 3–40 agents. Explicit mentions, broadcasts, replies to agents, threads, and

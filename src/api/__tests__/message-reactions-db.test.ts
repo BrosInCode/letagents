@@ -39,12 +39,14 @@ async function roomWithMessage(text = 'Shall we ship it?') {
 // Twenty distinct emoji plus spares, to reach the per-message limit.
 const DISTINCT = [...MESSAGE_REACTION_QUICK_EMOJI, '🧪', '🧹'];
 
-test('agent reactions are opt-in, stable across sessions, and separate from the owner', options, async () => {
+test('agent reactions are on in a new room, can be turned off, stable across sessions, and separate from the owner', options, async () => {
   const settings = await import('../db/room-settings.js');
   const { room, number } = await roomWithMessage();
   const owner = await person('expression-owner', 'Owner');
   const target = { roomId: room.id, messageNumber: number, accountId: owner.id, emoji: '👍' };
   const agent = { key: `${owner.login}/worker-one`, name: 'Ada' };
+  assert.equal(await settings.getRoomExpressionsEnabled(room.id), true, 'rooms made since migration 0145 start on');
+  await settings.setRoomExpressionsEnabled(room.id, false);
   assert.equal(await store!.addMessageReaction({ ...target, agent }), 'disabled');
   assert.equal(await store!.addMessageReaction(target), 'added', 'human reactions keep working when off');
   await settings.setRoomExpressionsEnabled(room.id, true);
@@ -70,6 +72,7 @@ test('GIF history and acknowledged retries survive Off, while new GIFs are rejec
   const owner = await person('gif-owner');
   const gif = { provider: 'giphy' as const, id: 'abc123', title: 'Small win' };
   const input = { source: 'browser', account_id: owner.id, client_message_id: `desktop-send:${randomUUID()}`, gif };
+  await settings.setRoomExpressionsEnabled(room.id, false);
   await assert.rejects(rooms!.addMessage(room.id, 'Owner', '', input), /expressions_disabled/);
   await settings.setRoomExpressionsEnabled(room.id, true);
   const message = await rooms!.addMessage(room.id, 'Owner', '', input);

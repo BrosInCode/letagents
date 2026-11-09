@@ -105,13 +105,30 @@
             </div>
           </div>
 
-          <div v-if="cloudRoom" class="room-settings-row room-invite-bot-row" data-testid="desktop-room-invite-bot">
-            <div class="room-settings-row-copy">
-              <p class="room-settings-row-title">Invite a bot</p>
-              <p class="room-settings-row-description">One message for the bot's owner. Their bot connects, joins this room and is guided from there.</p>
+          <SmoothHeight v-if="cloudRoom">
+            <div class="room-settings-row" data-inline="true" data-testid="desktop-room-invite-bot">
+              <div class="room-settings-row-copy">
+                <p class="room-settings-row-title">Invite a bot</p>
+                <p class="room-settings-row-description">One message for the bot's owner. Their bot connects, joins this room and is guided from there.</p>
+              </div>
+              <div class="room-settings-row-action">
+                <button
+                  class="room-settings-button"
+                  type="button"
+                  data-testid="desktop-room-invite-bot-toggle"
+                  :aria-expanded="inviteBot.open.value"
+                  @click="inviteBot.open.value ? inviteBot.close() : inviteBot.show()"
+                >{{ inviteBot.open.value ? "Close" : "Create invite" }}</button>
+              </div>
+              <InviteBotSection
+                v-if="inviteBot.open.value"
+                class="room-invite-bot-body"
+                :controller="inviteBot"
+                :room="inviteBotRoom"
+                :admin="room.role === 'admin'"
+              />
             </div>
-            <InviteBotSection :room="inviteBotRoom" :admin="room.role === 'admin'" />
-          </div>
+          </SmoothHeight>
         </div>
       </section>
 
@@ -391,7 +408,7 @@ import SmoothHeight from "./SmoothHeight.vue";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import { usePinnedMessageVisibility } from "../../../../../../../../shared/ui/usePinnedMessageVisibility";
 import InviteBotSection from "../../../../../../../../shared/ui/InviteBotSection.vue";
-import type { InviteBotRoom } from "../../../../../../../../shared/ui/invite-bot";
+import { useInviteBot, type InviteBotRoom } from "../../../../../../../../shared/ui/invite-bot";
 import { remoteConnectorUrl } from "../../settings/connectors";
 import { useSectionScrollSpy } from "./useSectionScrollSpy";
 import type {
@@ -484,6 +501,8 @@ const inviteBotRoom = computed<InviteBotRoom>(() => ({
   gitRoom: props.room.gitRoom !== null,
   connectorUrl: remoteConnectorUrl(props.apiUrl),
 }));
+// The row's own button opens and closes the invite under it.
+const inviteBot = useInviteBot({ room: inviteBotRoom });
 
 const shortRoomUrl = computed(() => {
   try {
@@ -824,8 +843,8 @@ function discardRenameOnEscape(event: KeyboardEvent): void {
 </script>
 
 <style>
-/* The row's own class alone ties with .room-settings-row's grid; the pair wins. */
-.room-settings-row.room-invite-bot-row {
-  display: block;
+/* The open invite sits under the row's title and button, across both columns. */
+.room-invite-bot-body {
+  grid-column: 1 / -1;
 }
 </style>

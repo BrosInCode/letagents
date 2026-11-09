@@ -45,7 +45,7 @@ function harness(options: { role?: Role; denied?: boolean; inherited?: string[];
     resolveProjectRole: async () => role,
     resolveInheritedRoomIds: async () => options.inherited ?? [],
     store: {
-      getRoomExpressionsEnabled: async id => expressions.get(id) ?? false,
+      getRoomExpressionsEnabled: async id => expressions.get(id) ?? true,
       setRoomExpressionsEnabled: async (id, enabled) => { writes++; expressions.set(id, enabled); },
       resolveGitHubRoomChatEventKinds: async ids => {
         for (const id of ids) { const kinds = kindsByRoom.get(id); if (kinds) return { enabled_kinds: kinds, source_room_id: id }; }
@@ -299,23 +299,23 @@ test('a failed announcement does not fail the save', async () => {
   assert.equal(saved.body.guidelines, 'Keep pull requests small.');
 });
 
-test('reply order: a room that has not chosen answers in parallel', async () => {
+test('reply order: a room that has not chosen answers in turns', async () => {
   const res = await harness().request('get', `/rooms/${room}/agent-reply-order`);
   assert.equal(res.code, 200);
-  assert.deepEqual(res.body, { room_id: room, order: 'parallel', chosen: false, can_manage: true });
+  assert.deepEqual(res.body, { room_id: room, order: 'sequential', chosen: false, can_manage: true });
 });
 
-test('reply order: an admin turns sequential on, can choose parallel, and resets to the default with null', async () => {
+test('reply order: an admin turns turns off with parallel, can choose sequential, and resets to the default with null', async () => {
   const h = harness();
-  const saved = await h.request('put', `/rooms/${room}/agent-reply-order`, { order: 'sequential' });
-  assert.equal(saved.code, 200);
-  assert.deepEqual(saved.body, { room_id: room, order: 'sequential', chosen: true, can_manage: true });
-  assert.equal((await h.request('get', `/rooms/${room}/agent-reply-order`)).body.order, 'sequential');
   const parallel = await h.request('put', `/rooms/${room}/agent-reply-order`, { order: 'parallel' });
+  assert.equal(parallel.code, 200);
   assert.deepEqual(parallel.body, { room_id: room, order: 'parallel', chosen: true, can_manage: true });
+  assert.equal((await h.request('get', `/rooms/${room}/agent-reply-order`)).body.order, 'parallel');
+  const saved = await h.request('put', `/rooms/${room}/agent-reply-order`, { order: 'sequential' });
+  assert.deepEqual(saved.body, { room_id: room, order: 'sequential', chosen: true, can_manage: true });
   const reset = await h.request('put', `/rooms/${room}/agent-reply-order`, { order: null });
   assert.equal(reset.code, 200);
-  assert.deepEqual(reset.body, { room_id: room, order: 'parallel', chosen: false, can_manage: true });
+  assert.deepEqual(reset.body, { room_id: room, order: 'sequential', chosen: false, can_manage: true });
 });
 
 test('reply order: invalid values, non-admins, agents and denied rooms cannot write', async () => {
@@ -336,14 +336,14 @@ test('reply order: invalid values, non-admins, agents and denied rooms cannot wr
   assert.equal(requiredAgentSessionRouteCapability('PUT', `/rooms/${room}/agent-reply-order`), null);
 });
 
-test('expressions default off, require a human admin, and do not wake agents', async () => {
+test('expressions default on, require a human admin, and do not wake agents', async () => {
   const api = harness();
-  assert.equal((await api.request('get', `/rooms/${room}/expressions`)).body.enabled, false);
-  assert.equal((await api.request('put', `/rooms/${room}/expressions`, { enabled: true }, 'agent_session')).code, 403);
-  assert.equal((await harness({role:'participant'}).request('put', `/rooms/${room}/expressions`, {enabled:true})).code, 403);
-  assert.equal((await api.request('put', `/rooms/${room}/expressions`, {enabled:'true'})).code, 400);
-  assert.equal((await api.request('put', `/rooms/${room}/expressions`, {enabled:true})).body.enabled, true);
+  assert.equal((await api.request('get', `/rooms/${room}/expressions`)).body.enabled, true);
+  assert.equal((await api.request('put', `/rooms/${room}/expressions`, { enabled: false }, 'agent_session')).code, 403);
+  assert.equal((await harness({role:'participant'}).request('put', `/rooms/${room}/expressions`, {enabled:false})).code, 403);
+  assert.equal((await api.request('put', `/rooms/${room}/expressions`, {enabled:'false'})).code, 400);
   assert.equal((await api.request('put', `/rooms/${room}/expressions`, {enabled:false})).body.enabled, false);
+  assert.equal((await api.request('put', `/rooms/${room}/expressions`, {enabled:true})).body.enabled, true);
   assert.deepEqual(api.published, []);
   assert.equal((await harness({denied:true}).request('get', `/rooms/${room}/gif-client-config`)).code, 403);
 });

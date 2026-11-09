@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import { GITHUB_ROOM_CHAT_EVENT_KINDS, ROOM_AGENT_GUIDELINES_MAX_BYTES, normalizeRoomAgentGuidelines } from '../../../shared/room-settings.mjs';
@@ -32,6 +33,37 @@ async function post(project: any, roomEvent: RepoRoomEvent, eventProject: any = 
 }
 const githubMessages = async (roomId: string) =>
   (await rooms!.getMessages(roomId)).messages.filter(message => message.source === 'github').map(message => message.text);
+
+test('every room has a settings row with the conversation defaults on, and the 0145 backfill keeps stored choices', options, async () => {
+  const row = async (id: string) => (await client!.pool.query(
+    'SELECT expressions_enabled, history_summary_enabled, agent_reply_order FROM room_settings WHERE room_id = $1', [id])).rows[0];
+  const routing = async (id: string) => (await client!.pool.query('SELECT jev_routing_enabled FROM rooms WHERE id = $1', [id])).rows[0].jev_routing_enabled;
+  const fresh = await rooms!.createProjectWithName(unique('defaults-fresh'));
+  assert.deepEqual(await row(fresh.id), { expressions_enabled: true, history_summary_enabled: true, agent_reply_order: null },
+    'the trigger adds a row that has chosen nothing');
+  assert.equal(await routing(fresh.id), true);
+  assert.equal(await store!.getRoomExpressionsEnabled(fresh.id), true);
+  assert.equal(await store!.getRoomAgentReplyOrder(fresh.id), null, 'not chosen, so the sequential default applies');
+  assert.equal(await store!.getRoomHistorySummaryEnabled(fresh.id), true);
+
+  // Rooms as they were before 0145: one with no row, one whose admin chose.
+  const bare = await rooms!.createProjectWithName(unique('defaults-bare'));
+  await client!.pool.query('DELETE FROM room_settings WHERE room_id = $1', [bare.id]);
+  assert.equal(await store!.getRoomExpressionsEnabled(bare.id), true, 'a room with no row reads as on');
+  const chosen = await rooms!.createProjectWithName(unique('defaults-chosen'));
+  await client!.pool.query('UPDATE rooms SET jev_routing_enabled = false WHERE id = $1', [chosen.id]);
+  await store!.setRoomExpressionsEnabled(chosen.id, false);
+  await store!.setRoomAgentReplyOrder(chosen.id, 'parallel');
+  await store!.setRoomHistorySummaryEnabled(chosen.id, false);
+  const migration = await readFile(resolve('drizzle/0145_conversation_defaults_on.sql'), 'utf8');
+  const backfill = migration.split('--> statement-breakpoint').find(statement => statement.includes('INSERT INTO room_settings'));
+  assert.ok(backfill);
+  await client!.pool.query(backfill);
+  assert.deepEqual(await row(bare.id), { expressions_enabled: true, history_summary_enabled: true, agent_reply_order: null });
+  assert.deepEqual(await row(chosen.id), { expressions_enabled: false, history_summary_enabled: false, agent_reply_order: 'parallel' },
+    'a stored choice stays');
+  assert.equal(await routing(chosen.id), false);
+});
 
 test('a room with no choice posts every kind; a choice is stored and replaced', options, async () => {
   const room = await rooms!.createProjectWithName(unique('settings-kinds'));
