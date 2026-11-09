@@ -725,6 +725,10 @@ jobs:
         if: matrix.group == 1
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/jev-room-routing-db.test.ts
 
+      - name: Test message receipts and no-wake reasons
+        if: matrix.group == 1
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-receipts-db.test.ts
+
       - name: Test sequential reply turns
         if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/sequential-reply-turns.test.ts src/api/__tests__/sequential-reply-turns-db.test.ts
