@@ -14,6 +14,7 @@ export interface SidebarRoomActivity {
  * prefix it was created with only repeats what the row already shows.
  */
 export function sidebarRoomTitle(entry: Pick<RoomEntry, "kind" | "title">): string {
+  if (entry.kind === "branch") return entry.title.replace(/^branch:\s*/i, "") || entry.title;
   if (entry.kind !== "focus") return entry.title;
   const stripped = entry.title.replace(/^focus:\s*/i, "");
   return stripped || entry.title;

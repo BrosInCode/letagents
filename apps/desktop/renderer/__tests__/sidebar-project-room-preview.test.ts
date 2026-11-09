@@ -32,7 +32,7 @@ describe("sidebar project room preview", () => {
   it("caps a large project at a scannable first set", () => {
     const preview = previewSidebarProjectRooms({ rooms, activeEntryId: "room:1", expanded: false });
     assert.equal(preview.length, SIDEBAR_PROJECT_ROOM_PREVIEW_LIMIT);
-    assert.deepEqual(preview.map((entry) => entry.id), rooms.slice(0, 8).map((entry) => entry.id));
+    assert.deepEqual(preview.map((entry) => entry.id), rooms.slice(0, 3).map((entry) => entry.id));
   });
 
   it("keeps an active room visible even when it falls outside the first set", () => {
