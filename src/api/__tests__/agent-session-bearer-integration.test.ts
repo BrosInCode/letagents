@@ -114,6 +114,8 @@ test("worker bearer route registry is default-deny and semantic", () => {
     ["PATCH", "/rooms/room_1/reasoning-sessions/session_1", "coordination.self_write"],
     ["POST", "/rooms/room_1/agent-sessions/agent_session_1/disconnect", "coordination.self_write"],
     ["POST", "/rooms/room_1/agent-sessions/agent_session_1/native-activity", "coordination.self_write"],
+    // An agent reads the pins on a demo to act on them; saving and removing marks stay with people.
+    ["GET", "/rooms/room_1/demo-marks", "messages.read"],
   ];
   allowed.push(
     ["POST", "/rooms/github.com/org/repo/board-intents", "coordination.propose"],
@@ -129,6 +131,8 @@ test("worker bearer route registry is default-deny and semantic", () => {
     ["GET", "/rental/provider/requests"], ["POST", "/rental/sessions/rental_1/complete"],
     ["DELETE", "/rooms/room_1/messages/msg_4/attachments/att_2"], ["GET", "/rooms/room_1/messages/msg_4/attachments/att_2/extra"],
     ["GET", "/rooms/room_1/messages/msg_4/attachments/upl_2"],
+    ["POST", "/rooms/room_1/demo-marks"], ["DELETE", "/rooms/room_1/demo-marks/dmk_aaaaaaaaaaaaaaaaaaaaaa"],
+    ["GET", "/rooms/room_1/demo-marks/dmk_aaaaaaaaaaaaaaaaaaaaaa"],
   ]) assert.equal(requiredAgentSessionRouteCapability(method, route), null, `${method} ${route} must remain default-deny`);
 });
 
@@ -151,6 +155,7 @@ test("worker bearer routes authorize multi-segment room ids exactly like the roo
     ["POST", `/rooms/${gitRoom}/agent-sessions/agent_session_9/native-activity`, "coordination.self_write"],
     ["PUT", `/rooms/${gitRoom}/agents/self/observation`, "coordination.self_write"],
     ["POST", `/rooms/${gitRoom}/tasks`, "coordination.propose"],
+    ["GET", `/rooms/${gitRoom}/demo-marks`, "messages.read"],
   ];
   for (const [method, route, capability] of allowed) {
     assert.equal(requiredAgentSessionRouteCapability(method, route), capability, `${method} ${route}`);
@@ -168,7 +173,8 @@ test("HTTP middleware denies unknown routes and missing semantic capabilities", 
   const principal = { bearer_id: "agent_bearer_1", bearer_generation: 1, capabilities: ["messages.read"], room_id: "room_1", agent_session_id: "agent_session_1", actor_label: "Worker", agent_key: "owner/worker", agent_instance_id: null, session_kind: "worker" as const, runtime: "codex", display_name: "Worker", owner_label: "Owner", ide_label: "Agent", repo_branch: null, expires_at: new Date(Date.now() + 60_000).toISOString() };
   registerHttpMiddleware(app as never, { resolveRequestAuth: async () => ({ account: null, authKind: "agent_session" as const, agentSession: principal }) });
   const authHandler = handlers[1]!;
-  for (const [method, path, expected] of [["GET", "/rooms/room_1/messages", 200], ["POST", "/rooms/room_1/messages", 403], ["POST", "/rooms/room_1/tasks/task_1/stale-prompt-mute", 403]] as const) {
+  for (const [method, path, expected] of [["GET", "/rooms/room_1/messages", 200], ["POST", "/rooms/room_1/messages", 403], ["POST", "/rooms/room_1/tasks/task_1/stale-prompt-mute", 403],
+    ["GET", "/rooms/room_1/demo-marks", 200], ["POST", "/rooms/room_1/demo-marks", 403], ["DELETE", "/rooms/room_1/demo-marks/dmk_aaaaaaaaaaaaaaaaaaaaaa", 403]] as const) {
     const res = responseRecorder(); let nexted = false;
     await authHandler({ method, path, headers: {} }, res, () => { nexted = true; });
     assert.equal(res.statusCode, expected);

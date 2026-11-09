@@ -3,6 +3,7 @@ import type {
   DesktopRoomMessageAttachment,
 } from "../../../../../../electron/ipc-types";
 import { formatBytes } from "../attachments/formatting";
+import { isHtmlDemoFile } from "./live-demo/protocol";
 
 export function formatDisplayBytes(bytes: number): string {
   return bytes > 0 ? formatBytes(bytes) : "";
@@ -51,10 +52,8 @@ export function isImageAttachment(attachment: DesktopRoomMessageAttachment): boo
 export function isHtmlDemoAttachment(attachment: DesktopRoomMessageAttachment): boolean {
   const href = attachmentHref(attachment);
   if (!href.startsWith("letagents-attachment://")) return false;
-  const mimeType = attachmentMimeType(attachment).toLowerCase();
-  return mimeType === "text/html"
-    || mimeType === "application/xhtml+xml"
-    || (mimeType === "application/octet-stream" && /\.html?$/i.test(attachmentName(attachment)));
+  // One rule with the daemon and the agents' read_demo_marks tool.
+  return isHtmlDemoFile({ fileName: attachmentName(attachment), mimeType: attachmentMimeType(attachment) });
 }
 
 /** Main's reason for a failure, without Electron's IPC wrapper; `fallback` when it gave none. */

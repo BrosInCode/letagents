@@ -176,3 +176,22 @@
   width: min(1380px, calc(100vw - 72px));
   margin: 0 auto;
 }
+
+/* The macOS traffic lights occupy the sidebar's top row. Keep the rest of the
+   window edge-to-edge, including when the sidebar is hidden or during setup. */
+html[data-window-chrome="mac"] body::before {
+  content: ""; position: fixed; z-index: 1000; inset: 0 0 auto; height: 12px;
+  -webkit-app-region: drag;
+}
+html[data-window-chrome="mac"] .sidebar-topbar {
+  min-height: 40px; padding-left: 80px; -webkit-app-region: drag;
+}
+html[data-window-chrome="mac"] .sidebar-wordmark { display: none; }
+html[data-window-chrome="mac"] .sidebar-topbar-actions { margin-left: auto; }
+html[data-window-chrome="mac"] .sidebar-topbar button { -webkit-app-region: no-drag; }
+html[data-window-chrome="mac"] .desktop-shell[data-sidebar-mode="hidden"] .app-main { padding-top: 36px; }
+html[data-window-chrome="mac"] .desktop-shell[data-sidebar-mode="hidden"]::before {
+  content: ""; position: absolute; inset: 0 0 auto; height: 36px; z-index: 80;
+  background: var(--bg); -webkit-app-region: drag;
+}
+html[data-window-chrome="mac"] .desktop-onboarding-shell { padding-top: 52px; }

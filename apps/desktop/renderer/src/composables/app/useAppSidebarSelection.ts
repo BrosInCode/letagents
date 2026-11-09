@@ -1,4 +1,5 @@
 import { computed, watch } from "vue";
+import { companyProjectGroups } from "../../domain/company-navigation";
 import type { DesktopRoomStorageState } from "../../../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../../components/desktop/types";
 import type { SidebarRoomBatchMutationResult } from "../useDesktopAccountRoomSettings";
@@ -82,6 +83,8 @@ export function useAppSidebarSelection(context: unknown) {
       id: `room:focus:${normalizedIdentifier}`,
       type: "room",
       kind: "focus",
+      // Opened from the current room: its focus room belongs there until the sidebar lists it.
+      parentRoomIdentifier: app.currentParentRoom.value.roomIdentifier ?? null,
       roomIdentifier,
       title: roomIdentifier,
       meta: "Focus room",
@@ -277,7 +280,7 @@ export function useAppSidebarSelection(context: unknown) {
 
 /** Unread counts, the ordered sidebar projects, and the selected room's render key and storage. */
 export function useAppSidebarEntries(context: unknown) {
-  const app = context as AppContextOf<"useAppNavigation" | "useAppSidebarMessages" | "useAppState">;
+  const app = context as AppContextOf<"useAppCompany" | "useAppNavigation" | "useAppSidebarMessages" | "useAppState">;
   const {
     activeEntry, authStatus, chatStorageSettings, latestMessageAtForEntry, latestMessageIdForEntry,
     projectEntries, readRoomMessageIds, roomHistoryMode, selectedRoomIdentifier, selectedRoomInfo,
@@ -302,7 +305,7 @@ export function useAppSidebarEntries(context: unknown) {
   Object.assign(app, { unreadRoomCounts, refreshUnreadCounts });
 
   const sidebarProjectEntries = computed(() =>
-    applySidebarRoomOrder(projectEntries.value.map((project) => ({
+    applySidebarRoomOrder(companyProjectGroups(projectEntries.value, app.company.activeId.value, app.company.rooms.value).map((project) => ({
       ...project,
       parent: withRoomUnreadState(project.parent),
       branchRooms: project.branchRooms.map(withRoomUnreadState),

@@ -206,6 +206,8 @@ export type ProviderRoomTurnAttachment = {
   image?: { mimeType: RoomTurnImageMimeType; data?: Uint8Array; path?: string };
   /** A file that is not an image: its notes say "file", not "image". */
   category?: "file";
+  /** An HTML demo on the LetAgents server: people may have pinned notes or drawn on it, which read_demo_marks reads. */
+  demo?: { messageId: string; attachmentId: string };
   /** Only for status "file": the daemon-owned copy this turn's agent reads with its own tools. Never its bytes. */
   file?: {
     path: string;

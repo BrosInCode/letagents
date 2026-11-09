@@ -69,7 +69,6 @@
           @open-thread="toggleThread"
           @reveal-thread="revealThread"
           @quote-reply="quoteReply"
-          @message-info="openMessageInfo"
           @quote-selection="quoteSelectedText"
           @open-github-event="emit('open-github-event', $event)"
           @open-task="emit('open-task', $event)"
@@ -82,7 +81,6 @@
             <RoomThreadPanel
               v-bind="{ roomAgentWork, roomAgentWorkStatus }"
               v-if="activeThreadPanelParent"
-              @message-info="openMessageInfo"
               :parent="activeThreadPanelParent"
               :active="active"
               @read-message="(id) => markThreadRead(activeThreadPanelParent!.id, id)"
@@ -196,16 +194,15 @@
 
     </div>
 
-    <RoomMessageInfoSurface
-      :open="messageInfoTargetId !== null"
+    <RoomMessageReceiptPopover
       :room-identifier="roomIdentifier ?? ''"
-      :message-id="messageInfoTargetId ?? ''"
-      :invoker-context="messageInfoInvokerContext"
+      :participants="participants"
       :supervisor-entries="roomSupervisorEntries"
-      :room-agent-work="roomAgentWorkStatus === 'ready' ? roomAgentWork : []"
-      @close="messageInfoTargetId = null"
+      :mention-for="receiptMentionFor"
+      :message-link="receiptMessageLink"
       @scroll-to-message="revealMessageFromInfo"
       @inspect-agent="emit('open-agent-detail', $event)"
+      @ask="askFromReceipt"
     />
   </section>
 </template>
@@ -222,6 +219,8 @@ import { useStableIdSet } from "../../../composables/useStableIdSet";
 import PinnedMessages from "../../../../../../../shared/ui/PinnedMessages.vue";
 import { provideRoomMessagePins, useRoomMessagePins } from "../../../composables/useRoomMessagePins";
 import { provideRoomMessageReactions, useRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
+import { provideRoomMessageReceipts, useRoomMessageReceipts } from "../../../composables/useRoomMessageReceipts";
+import { buildLetAgentsMessageUrl, isLocalRoomIdentifier } from "../../../domain/room-urls";
 import type {
   DesktopAgentPresence,
   DesktopParticipantSummary,
@@ -252,7 +251,7 @@ import RoomAskBar from "./asks/RoomAskBar.vue";
 import type { ComposerEventPreview } from "./room-chat/composer-event-preview";
 import { stableSteerOffer, type ActivitySteerOffer } from "./room-chat/room-activity";
 import { supervisorEntriesIgnoringActivity } from "../../../domain/supervisor-entries-resource";
-import RoomMessageInfoSurface from "./room-chat/RoomMessageInfoSurface.vue";
+import RoomMessageReceiptPopover from "./room-chat/RoomMessageReceiptPopover.vue";
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
 import RoomThreadPanel from "./room-chat/RoomThreadPanel.vue";
 import {
@@ -317,6 +316,8 @@ const typingNames = useRoomTypingNames(computed(() => props.roomIdentifier ?? ""
 const messagePins = useRoomMessagePins(computed(() => props.roomIdentifier ?? ""),
   (message) => pushActionToast(message, "error", 6_000));
 provideRoomMessagePins(messagePins);
+const messageReceipts = useRoomMessageReceipts(computed(() => props.roomIdentifier ?? ""), computed(() => props.messageNamespace ?? ""));
+provideRoomMessageReceipts(messageReceipts);
 provideRoomMessageReactions(useRoomMessageReactions(
   computed(() => props.roomIdentifier ?? ""),
   (message) => pushActionToast(message, "error", 6_000),
@@ -410,7 +411,8 @@ provide(attentionResponseAgentNamesKey, computed(() =>
   attentionResponseAgentNames([...props.participants, ...props.presence])
 ));
 // @mentions in messages open the participant they name.
-provide(roomMentionDirectoryKey, computed(() => buildRoomMentionDirectory(props.participants, props.presence)));
+const mentionDirectory = computed(() => buildRoomMentionDirectory(props.participants, props.presence));
+provide(roomMentionDirectoryKey, mentionDirectory);
 // A demo's "Send to thread" posts through the thread composer's own path.
 provide(roomThreadReplyKey, (threadRootId, text, attachments) =>
   new Promise<boolean>((resolve) => sendThreadMessage(text, threadRootId, null, attachments, resolve)));
@@ -763,23 +765,39 @@ function requestMessageReveal(messageId: string): void {
   emit("reveal-message", messageId);
 }
 
-const messageInfoTargetId = ref<string | null>(null);
-const messageInfoInvokerContext = ref<"timeline" | "thread-root" | "thread-reply" | null>(null);
-
-// Message info is scoped to the full message-identity namespace, not just
-// the room id: a namespace change re-keys message ids even within one room,
-// so the open card (or an in-flight fetch target) must never outlive either.
+// Receipts are scoped to the full message-identity namespace, not just the
+// room id: a namespace change re-keys message ids even within one room, so an
+// open receipt must never outlive either.
 watch(() => [props.roomIdentifier, props.messageNamespace] as const, () => {
-  messageInfoTargetId.value = null;
+  messageReceipts.close();
 });
 
-function openMessageInfo(messageId: string, context: "timeline" | "thread-root" | "thread-reply"): void {
-  messageInfoTargetId.value = messageId;
-  messageInfoInvokerContext.value = context;
+/** The exact mention that reaches one agent: its name when only it has that name, else its key. */
+function receiptMentionFor(agentKey: string, displayName: string): string {
+  const byName = mentionDirectory.value.resolve(displayName);
+  const handle = displayName.replace(/\s+/g, "");
+  return byName?.kind === "agent" && byName.key === `agent:${agentKey.toLowerCase()}` && /^[\w.-]+$/.test(handle)
+    ? `@${handle}`
+    : `@agent:${agentKey}`;
+}
+
+function receiptMessageLink(messageId: string): string | null {
+  return props.roomIdentifier && !isLocalRoomIdentifier(props.roomIdentifier)
+    ? buildLetAgentsMessageUrl(props.roomIdentifier, messageId)
+    : null;
+}
+
+/** Ask is a reply to your own message that mentions one agent: the agent reads your message as the reply's context. */
+function askFromReceipt(messageId: string, threadRootId: string | null, target: { mention: string }, done: (sent: boolean) => void): void {
+  const namespace = props.messageNamespace;
+  emit("send-message", target.mention, messageId, [], threadRootId, (sent) => {
+    if (namespace !== props.messageNamespace) return;
+    done(sent);
+  });
 }
 
 function revealMessageFromInfo(messageId: string): void {
-  messageInfoTargetId.value = null;
+  messageReceipts.close();
   jumpToMessage(messageId);
   emit("reveal-message", messageId);
 }

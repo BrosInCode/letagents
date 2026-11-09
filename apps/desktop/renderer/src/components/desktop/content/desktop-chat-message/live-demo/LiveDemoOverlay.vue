@@ -108,7 +108,7 @@ import { planMarkPaint } from "./marks";
 import { createLatestThrottle, createInkBatcher, CURSOR_INTERVAL_MS, type InkBatcher } from "./throttle";
 import { canvasBacking, demoToFrame, frameToDemo } from "./geometry";
 import { readableTextColor } from "./people";
-import { LIVE_DEMO, type DemoMark, type LiveDemoPoint } from "./protocol";
+import { LIVE_DEMO, type DemoMark, type LiveDemoAnchor, type LiveDemoPoint } from "./protocol";
 import type { LiveDemoSession } from "./session";
 import { simplifyStroke } from "./stroke-simplify";
 import { newStrokeId } from "./stroke-id";
@@ -128,6 +128,8 @@ const props = defineProps<{
   highlightMarkId: string | null;
   /** The part of the frame the card shows (a tall demo is clipped), so notes open where they can be seen. */
   visibleHeight: number;
+  /** Names the element under a point of the demo, saved with a pin so an agent knows what it is about. */
+  anchorAt?: (at: LiveDemoPoint) => Promise<LiveDemoAnchor | null>;
 }>();
 
 const emit = defineEmits<{
@@ -161,6 +163,8 @@ type PinMark = Extract<DemoMark, { kind: "pin" }>;
 
 interface PinDraft {
   at: LiveDemoPoint;
+  /** The element under the pin, once the demo has named it. */
+  anchor: LiveDemoAnchor | null;
   left: number;
   top: number;
   editorLeft: number;
@@ -508,7 +512,13 @@ function openPinEditor(at: LiveDemoPoint): void {
   const bottom = Math.min(props.height, props.visibleHeight);
   const editorTop = below + EDITOR_HEIGHT > bottom ? Math.max(4, top - EDITOR_HEIGHT - 14) : below;
   // A second click moves the pin; what was typed stays.
-  pinDraft.value = { at, left, top, editorLeft, editorTop, text: pinDraft.value?.text ?? "" };
+  pinDraft.value = { at, anchor: null, left, top, editorLeft, editorTop, text: pinDraft.value?.text ?? "" };
+  // The demo names the element while the note is typed; a pin saved before it answers goes without.
+  // (The draft is reactive, so its point is a copy: compare the numbers. A pin moved since asks again.)
+  void props.anchorAt?.(at).then((anchor) => {
+    const draft = pinDraft.value;
+    if (draft && draft.at[0] === at[0] && draft.at[1] === at[1]) draft.anchor = anchor;
+  }, () => undefined);
   void nextTick(() => pinInput.value?.focus({ preventScroll: true }));
 }
 
@@ -516,7 +526,7 @@ function savePin(): void {
   const draft = pinDraft.value;
   const text = draft?.text.trim() ?? "";
   if (!draft || !text) return;
-  props.session.queueMark({ kind: "pin", at: draft.at, text });
+  props.session.queueMark({ kind: "pin", at: draft.at, text, anchor: draft.anchor });
   pinDraft.value = null;
   emit("pinned");
 }

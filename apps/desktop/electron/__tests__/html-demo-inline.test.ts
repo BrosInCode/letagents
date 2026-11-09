@@ -39,6 +39,7 @@ mock.module("../main/attachments/html-demo-session.js", { namedExports: {
 const {
   clearInlineHtmlDemoCache,
   INLINE_HTML_DEMO_EVENT_CHANNEL,
+  inlineHtmlDemoAnchorAt,
   installInlineHtmlDemoHost,
   prepareInlineHtmlDemo,
   releaseInlineHtmlDemo,
@@ -62,11 +63,18 @@ class FakeGuest extends EventEmitter {
   framePoints = 380;
   renderedZoom: number | null = null;
   layoutChecks: Array<{ worldId: number; code: string }> = [];
+  /** What the page's own world answers for the element under a pin; "never" hangs like a busy page. */
+  anchorAnswer: unknown = null;
+  anchorScripts: string[] = [];
   executeJavaScriptInIsolatedWorld(worldId: number, scripts: Array<{ code: string }>) {
     const code = scripts.map((script) => script.code).join(";");
     if (code === INLINE_HTML_DEMO_LIVE_WIDTH_SCRIPT) {
       this.layoutChecks.push({ worldId, code });
       return Promise.resolve(this.framePoints / (this.renderedZoom ?? this.zoom));
+    }
+    if (code.includes("document.elementFromPoint")) {
+      this.anchorScripts.push(code);
+      return this.anchorAnswer === "never" ? new Promise<unknown>(() => {}) : Promise.resolve(this.anchorAnswer);
     }
     return new Promise<unknown>((resolve) => {
       const check = { worldId, code, answer: () => resolve(1) };
@@ -1007,6 +1015,45 @@ test("going live drops a plain-layout height that has not gone out yet", async (
     t.mock.timers.tick(100);
     await flushImmediates();
     assert.deepEqual(embedder.sent, []);
+  } finally {
+    releaseAll([lease.url]);
+  }
+});
+
+test("main names the element under a pin of a live demo, in demo space, or nothing", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+  const lease = await prepareInlineHtmlDemo("letagents-attachment://download/YW5jaG9y");
+  try {
+    const { guest } = attach(lease.url)!;
+    guest.anchorAnswer = { parts: ["main", "button.pay"], dx: 3.04, dy: 2 };
+    assert.equal(await inlineHtmlDemoAnchorAt(lease.url, 200, 100), null, "no demo space before the live layout");
+    assert.deepEqual(guest.anchorScripts, []);
+
+    setInlineHtmlDemoWidth(lease.url, 380);
+    guest.emit("preferred-size-changed", {}, { width: 380, height: 750 });
+    await flushImmediates();
+    assert.deepEqual(await inlineHtmlDemoAnchorAt(lease.url, 200, 100), { path: "main > button.pay", dx: 3, dy: 2 });
+    assert.match(guest.anchorScripts[0]!, /const x = 200, y = 100;/, "demo space is the page's own CSS px");
+
+    for (const [x, y] of [[-1, 10], [761, 10], [10, 1501], [Number.NaN, 1], ["10", 1]] as const) {
+      assert.equal(await inlineHtmlDemoAnchorAt(lease.url, x, y), null, `${x}, ${y} is not on the demo`);
+    }
+    assert.equal(guest.anchorScripts.length, 1, "a point off the demo asks the page nothing");
+    assert.equal(await inlineHtmlDemoAnchorAt("letagents-demo://00000000000000000000000000000000/", 1, 1), null);
+
+    guest.anchorAnswer = { parts: ["div[onclick=x]"], dx: 0, dy: 0 };
+    assert.equal(await inlineHtmlDemoAnchorAt(lease.url, 1, 1), null, "an answer main did not ask for is dropped");
+
+    guest.anchorAnswer = "never";
+    const waiting = inlineHtmlDemoAnchorAt(lease.url, 1, 1);
+    await flushImmediates();
+    t.mock.timers.tick(500);
+    assert.equal(await waiting, null, "a busy page does not hold the pin");
+
+    guest.anchorAnswer = { parts: ["body"], dx: 1, dy: 1 };
+    const released = inlineHtmlDemoAnchorAt(lease.url, 1, 1);
+    releaseInlineHtmlDemo(lease.url);
+    assert.equal(await released, null, "a demo released while it answered names nothing");
   } finally {
     releaseAll([lease.url]);
   }

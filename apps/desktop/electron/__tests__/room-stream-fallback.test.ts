@@ -1207,7 +1207,7 @@ test("malformed or oversized unknown frames cannot advance the broker cursor", a
   }
 });
 
-for (const messageIds of [["msg_7"], null, []]) test(`message-info ${JSON.stringify(messageIds)} advances without repair while malformed payloads gap`, async () => {
+for (const messageIds of [["msg_7"], null, []]) test(`message-info ${JSON.stringify(messageIds)} asks the renderer to re-read receipts, without repair, while malformed payloads gap`, async () => {
   const router = installFetchRouter();
   try {
     const initial = makeSse();
@@ -1231,7 +1231,9 @@ for (const messageIds of [["msg_7"], null, []]) test(`message-info ${JSON.string
       })}\n\n`,
     );
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(emitted.length, emittedCount, "Message Info remains fetched on demand, without new renderer events");
+    assert.deepEqual(emitted.slice(emittedCount), [
+      { type: "resource_invalidation", roomIdentifier: ROOM, resource: "message_info" },
+    ], "one receipt invalidation, never a room repair");
     assert.equal(emitted.filter(
       (event) => event.type === "open" && event.gap === true && event.verified === true,
     ).length, gapCount);

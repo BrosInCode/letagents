@@ -1,7 +1,10 @@
 <template>
   <header class="chat-header">
     <div class="room-toolbar">
-      <div class="room-identity" :title="repositoryTitle || subtitle">
+      <button v-if="!sidebarVisible" class="action-btn" data-sidebar-reveal type="button" aria-label="Show sidebar" title="Show sidebar" @click="$emit('toggleSidebar')">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 2.5h11v11h-11zM6 2.5v11" /></svg>
+      </button>
+      <div v-if="!hideRoomIdentity" class="room-identity" :title="repositoryTitle || subtitle">
         <h2 :title="title">{{ title }}</h2>
         <span v-if="gitRoom && !gitRoom.ref.is_default" class="repository-ref">{{ gitRoomRefLabel(gitRoom) }}</span>
         <button v-if="canRename" class="title-rename-btn" @click="$emit('rename')" type="button" aria-label="Rename room" title="Rename room">
@@ -27,6 +30,9 @@
         <span ref="indicatorElement" class="room-view-underline" style="visibility: hidden" aria-hidden="true" />
       </nav>
       <div class="header-actions">
+        <button v-if="hideRoomIdentity && canRename" class="action-btn" @click="$emit('rename')" type="button" aria-label="Rename room" title="Rename room">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" /></svg>
+        </button>
         <span v-if="connectionState !== 'live'" class="presence" :data-state="accessLocked || waitingForGitHub ? 'idle' : connectionState" role="status">{{ presenceLabel }}</span>
         <RoomAttentionButton v-if="needsYouCount" :count="needsYouCount" :pulse="attentionPulse" :aria-label="`Open Inbox for ${title}, ${needsYouCount} ${needsYouCount === 1 ? 'request needs' : 'requests need'} you`" @click="$emit('openInbox')" />
         <button ref="searchToggleEl" class="action-btn find-button" @click="toggleSearch" type="button" aria-label="Find in room" aria-keyshortcuts="Meta+f Control+f" :aria-expanded="searchActive && canSearch" :disabled="!canSearch" :title="canSearch ? `Find in room (${findShortcut})` : 'Open Chat to find messages'">
@@ -72,6 +78,8 @@ const props = defineProps<{
   connectionState: 'idle' | 'connecting' | 'live' | 'error'
   searchQuery: string
   matchCount: number
+  sidebarVisible?: boolean
+  hideRoomIdentity?: boolean
   canRename?: boolean
   showEventsTab?: boolean
   gitRoom?: GitRoomInfo | null
@@ -86,6 +94,7 @@ const props = defineProps<{
 }>()
 
 defineEmits<{
+  toggleSidebar: []
   toggleDrawer: []
   openInbox: []
   'update:activeTab': [tab: RoomTab]

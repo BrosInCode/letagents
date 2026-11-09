@@ -564,7 +564,7 @@ test("a Read-only Codex agent's room tools are an exact named list, and every ot
     "expand_room_history_summary", "get_board", "get_board_settings", "get_current_room", "get_human_requests", "get_room_artifacts",
     "get_room_events", "get_room_guidelines", "get_room_history_summary", "get_room_memory", "list_board_intents", "list_wake_rules",
     "post_reasoning", "post_status",
-    "react_to_message", "read_messages", "request_human_input", "search_gifs", "send_message", "send_thread_message", "set_reply_gif", "set_reply_thread",
+    "react_to_message", "read_demo_marks", "read_messages", "request_human_input", "search_gifs", "send_message", "send_thread_message", "set_reply_gif", "set_reply_thread",
   ]);
   // An approved tool that is not chat or status is one the room server itself classes as a read,
   // and none of the three that touch this Mac's repository or another service is approved.

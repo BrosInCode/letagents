@@ -37,7 +37,7 @@ export function getGitHubOAuthConfig(): GitHubOAuthConfig {
   const baseUrl = resolveBaseUrl();
   const clientId = process.env.GITHUB_CLIENT_ID;
   const clientSecret = process.env.GITHUB_CLIENT_SECRET;
-  const scopes = process.env.GITHUB_OAUTH_SCOPES || "read:user,repo";
+  const scopes = process.env.GITHUB_OAUTH_SCOPES || "read:user,repo,read:org";
 
   return {
     clientId,

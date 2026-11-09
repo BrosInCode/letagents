@@ -5,6 +5,7 @@ export const LIVE_DEMO: Readonly<{
   marksPerDemo: number; pinText: number; name: number; anchorPath: number;
 }>;
 export const LIVE_DEMO_COLORS: readonly string[];
+export function liveDemoColorName(color: string): string;
 export const DEMO_MARK_ID: RegExp;
 export function newDemoMarkId(): string;
 export const DEMO_MARK_RATE_LIMITED_TEXT: string;
@@ -52,3 +53,36 @@ export function parseLiveClientFrame(value: unknown): LiveDemoClientFrame | null
 export function parseLiveServerFrame(value: unknown): LiveDemoServerFrame | null;
 export function parseDemoMark(value: unknown): DemoMark | null;
 export function parseDemoMarkInput(value: unknown): DemoMarkInput | null;
+
+export const DEMO_MARKS_FOR_AGENT: Readonly<{ pins: number; drawings: number }>;
+export interface AgentDemoPin {
+  number: number;
+  author: string;
+  created_at: string;
+  note: string;
+  x: number;
+  y: number;
+  element?: string;
+  offset_in_element?: { x: number; y: number };
+}
+export interface AgentDemoDrawing {
+  author: string;
+  created_at: string;
+  color: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+export function demoMarksForAgent(marks: readonly DemoMark[], options?: { firstPin?: number }): {
+  pins: AgentDemoPin[];
+  drawings: AgentDemoDrawing[];
+  pin_count: number;
+  pins_not_listed?: number;
+  next_first_pin?: number;
+  drawings_not_listed?: number;
+};
+export const LIVE_DEMO_ANCHOR_DEPTH: number;
+export function isLiveDemoAnchorStep(step: unknown): boolean;
+export function isLiveDemoAnchorPath(path: unknown): boolean;
+export function isHtmlDemoFile(file: { fileName?: string | null; mimeType?: string | null } | null | undefined): boolean;

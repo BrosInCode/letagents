@@ -22,10 +22,11 @@ const switcherSource = readFileSync(fileURLToPath(new URL(
 )), "utf8");
 
 describe("desktop sidebar search contract", () => {
-  it("keeps focus on the combobox and only exposes a rendered popup", () => {
-    assert.match(sidebarSource, /:aria-controls="searchResults\.length \? 'sidebar-room-search-results' : undefined"/);
-    assert.match(sidebarSource, /:aria-expanded="Boolean\(searchResults\.length\)"/);
-    assert.match(sidebarSource, /role="option"\s+tabindex="-1"/);
+  it("opens the switcher from the search icon in every sidebar mode", () => {
+    assert.match(sidebarSource, /aria-label="Find a room" aria-haspopup="dialog"/);
+    assert.match(sidebarSource, /data-testid="sidebar-search-button" @click="openRoomSwitcher"/);
+    assert.match(switcherSource, /:aria-controls="options.length \? 'sidebar-switcher-results' : undefined"/);
+    assert.doesNotMatch(sidebarSource, /sidebar-room-search-input/);
   });
 
   it("keeps switcher options out of the dialog shell's button focus trap", () => {
@@ -35,9 +36,8 @@ describe("desktop sidebar search contract", () => {
     assert.match(switcherSource, /<DesktopDialogShell[\s\S]*?initial-focus="#sidebar-switcher-query"/);
   });
 
-  it("swaps search and navigation immediately in the same grid row", () => {
-    assert.match(sidebarSource, /v-else class="sidebar-navigation"/);
-    assert.match(sidebarStyles, /\.sidebar-room-search\s*\{[\s\S]*?grid-row: 2;/);
+  it("keeps navigation in place while the switcher is open", () => {
+    assert.match(sidebarSource, /class="sidebar-navigation"/);
     assert.match(sidebarStyles, /\.sidebar-navigation\s*\{[\s\S]*?grid-row: 2;/);
     assert.match(sidebarStyles, /\.sidebar-footer\s*\{[\s\S]*?grid-row: 3;/);
     assert.doesNotMatch(sidebarSource, /<Transition name="sidebar-navigation-swap"/);
@@ -51,8 +51,8 @@ describe("desktop sidebar search contract", () => {
     assert.match(switcherSource, /<\/DesktopDialogShell>\s*<\/Teleport>\s*<\/template>/);
   });
 
-  it("renders the Zen Mode stays on caption only when zenMode is active", () => {
-    assert.match(switcherSource, /<span v-if="zenMode"><Focus aria-hidden="true" \/>Zen Mode stays on<\/span>/);
+  it("renders the Project focus stays on caption only when zenMode is active", () => {
+    assert.match(switcherSource, /<span v-if="zenMode"><Focus aria-hidden="true" \/>Project focus stays on<\/span>/);
     assert.match(sidebarSource, /<SidebarRoomSwitcher[\s\S]*?:zen-mode="zenMode"/);
     assert.match(sidebarSource, /:active-project-id="zenMode \? zenProject\?\.id \|\| null : null"/);
   });
@@ -65,9 +65,9 @@ describe("desktop sidebar search contract", () => {
     assert.doesNotMatch(switcherSource, /transition:\s*none\s*!important/);
   });
 
-  it("makes shortcut discoverable on sidebar search control with correct mode-aware titles and ARIA keyshortcuts", () => {
-    assert.match(sidebarSource, /:title="zenMode \? `Switch rooms \(\$\{switchShortcutLabel\}\)` : \(searchOpen \? 'Close room search' : `Search rooms \(\$\{switchShortcutLabel\} switches rooms\)`\)"/);
-    assert.match(sidebarSource, /:aria-keyshortcuts="zenMode \? switchAriaKeyShortcuts : undefined"/);
+  it("makes the switcher shortcut discoverable in every sidebar mode", () => {
+    assert.match(sidebarSource, /:title="`Find a room \(\$\{switchShortcutLabel\}\)`"/);
+    assert.match(sidebarSource, /:aria-keyshortcuts="switchAriaKeyShortcuts"/);
   });
 
   it("delegates shortcut handling to canOpenRoomSwitcher predicate with lazy modal evaluation", () => {

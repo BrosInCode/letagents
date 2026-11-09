@@ -1,6 +1,6 @@
 import type { RoomEntry } from "../components/desktop/types";
 
-export const SIDEBAR_PROJECT_ROOM_PREVIEW_LIMIT = 8;
+export const SIDEBAR_PROJECT_ROOM_PREVIEW_LIMIT = 3;
 
 type SidebarProjectRoomPreviewOptions = {
   rooms: RoomEntry[];

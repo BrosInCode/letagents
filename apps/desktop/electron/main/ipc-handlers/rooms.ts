@@ -54,6 +54,7 @@ import type {
   DesktopGitHubIntegrationStatus,
   DesktopInlineHtmlDemoLease,
   DesktopInviteRoomCreation,
+  DesktopInviteRoomOptions,
   DesktopLocalChatSyncResult,
   DesktopLocalRoomMutationResult,
   DesktopReasoningSessionDetail,
@@ -99,7 +100,7 @@ import {
   stageDroppedDesktopAttachmentContents,
 } from "../attachments.js";
 import { captureDesktopDemoMarkup } from "../attachments/demo-markup.js";
-import { prepareInlineHtmlDemo, releaseInlineHtmlDemo, setInlineHtmlDemoWidth } from "../attachments/html-demo-inline.js";
+import { inlineHtmlDemoAnchorAt, prepareInlineHtmlDemo, releaseInlineHtmlDemo, setInlineHtmlDemoWidth } from "../attachments/html-demo-inline.js";
 import { openHtmlDemo } from "../attachments/html-demo-window.js";
 import { getMainWindow } from "../window.js";
 import {
@@ -131,6 +132,7 @@ import {
   getDesktopRoomLatestMessages,
   getDesktopRoomMessage,
   getDesktopRoomMessageInfo,
+  getDesktopRoomMessageReceipts,
   getDesktopRoomMessagesBefore,
   getDesktopRoomMessagesAfter,
   getDesktopRoomStorage,
@@ -257,6 +259,15 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       getDesktopRoomMessageInfo(roomIdentifier, messageId),
   );
   targetIpcMain.handle(
+    "desktop:room:get-message-receipts",
+    async (
+      _event,
+      roomIdentifier: string,
+      messageIds: unknown,
+    ): Promise<import("../../ipc-types.js").DesktopMessageReceipt[]> =>
+      getDesktopRoomMessageReceipts(roomIdentifier, Array.isArray(messageIds) ? messageIds : []),
+  );
+  targetIpcMain.handle(
     "desktop:room:get-message",
     async (
       _event,
@@ -365,6 +376,13 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
     async (event, url: unknown, frameWidth: unknown): Promise<number> => {
       assertHtmlDemoSender(event);
       return setInlineHtmlDemoWidth(url, frameWidth);
+    },
+  );
+  targetIpcMain.handle(
+    "desktop:room:inline-demo-anchor-at",
+    async (event, url: unknown, x: unknown, y: unknown) => {
+      assertHtmlDemoSender(event);
+      return inlineHtmlDemoAnchorAt(url, x, y);
     },
   );
   targetIpcMain.handle(
@@ -675,7 +693,7 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   );
   targetIpcMain.handle(
     "desktop:room:create-invite-room",
-    async (): Promise<DesktopInviteRoomCreation> => createDesktopInviteRoom(),
+    async (_event, options?: DesktopInviteRoomOptions): Promise<DesktopInviteRoomCreation> => createDesktopInviteRoom(options),
   );
   targetIpcMain.handle(
     "desktop:room:get-pull-request-diff",

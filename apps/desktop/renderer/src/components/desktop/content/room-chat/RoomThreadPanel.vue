@@ -57,7 +57,6 @@
           :room-delivery-skip-keys="roomDeliverySkipKeys"
           :provider-label="resolveProviderLabel(reply)"
           @quote-reply="quoteInThread(reply)"
-          @message-info="(messageId, context) => $emit('message-info', messageId, context)"
           @quote-selection="(_messageId, text) => quoteSelectionInThread(reply, text)"
           @jump-to-thread-root="$emit('jump-message', parent.id)"
           @scroll-to-message="navigateThreadMessageReference"
@@ -251,7 +250,6 @@ const props = defineProps<{
 
 const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
 const emit = defineEmits<{
-  "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
   close: [];
   "read-message": [messageId: string];
   "reading-latest": [reading: boolean];
