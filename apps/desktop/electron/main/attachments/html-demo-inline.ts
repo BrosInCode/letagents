@@ -2,7 +2,7 @@ import electron from "electron";
 import type { BrowserWindow as ElectronBrowserWindow, Event, InputEvent, WebContents } from "electron";
 import { randomUUID } from "node:crypto";
 
-import { LIVE_DEMO } from "../../../../../shared/live-demo.mjs";
+import { LIVE_DEMO, type LiveDemoAnchor } from "../../../../../shared/live-demo.mjs";
 import type { DesktopInlineHtmlDemoEvent, DesktopInlineHtmlDemoLease } from "../../ipc-types.js";
 import {
   assertHtmlDemoAttachmentHref,
@@ -11,12 +11,15 @@ import {
   INLINE_HTML_DEMO_CACHE_ENTRIES,
   INLINE_HTML_DEMO_CACHE_MS,
   INLINE_HTML_DEMO_DOWNLOAD_MS,
+  INLINE_HTML_DEMO_ANCHOR_TIMEOUT_MS,
   INLINE_HTML_DEMO_HEIGHT_INTERVAL_MS,
   INLINE_HTML_DEMO_LEASE_MS,
   INLINE_HTML_DEMO_LIVENESS_INTERVAL_MS,
   INLINE_HTML_DEMO_LIVENESS_LATE_MS,
   INLINE_HTML_DEMO_LIVENESS_TIMEOUT_MS,
   INLINE_HTML_DEMO_LIVENESS_WORLD_ID,
+  inlineHtmlDemoAnchor,
+  inlineHtmlDemoAnchorScript,
   inlineHtmlDemoAttachLease,
   INLINE_HTML_DEMO_EVENT_BURST,
   INLINE_HTML_DEMO_EVENTS_PER_SECOND,
@@ -424,6 +427,31 @@ export function watchInlineHtmlDemoPointer(
   if (!lease) return null;
   lease.pointerWatchers.add(listener);
   return () => { lease.pointerWatchers.delete(listener); };
+}
+
+/**
+ * The element under a point of a live demo, for a new pin: a CSS path the
+ * page's author wrote (tag names, ids, classes), so an agent that reads the
+ * pin finds what it is about. Main asks in its own world of the page, where
+ * the page's scripts cannot change the lookup. Null when the demo is not laid
+ * out live, the point is outside it, there is no element, or the page did not
+ * answer in time (a pin saves without it).
+ */
+export async function inlineHtmlDemoAnchorAt(rawUrl: unknown, x: unknown, y: unknown): Promise<LiveDemoAnchor | null> {
+  const lease = leaseFor(rawUrl);
+  const guest = lease?.guest;
+  if (!lease || !guest || guest.isDestroyed() || lease.frameWidth === null) return null;
+  if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y)) return null;
+  if (x < 0 || x > LIVE_DEMO.width || y < 0 || y > Math.min(LIVE_DEMO.maxHeight, lease.demoHeight ?? LIVE_DEMO.maxHeight)) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const answer = await Promise.race([
+    guest.executeJavaScriptInIsolatedWorld(INLINE_HTML_DEMO_LIVENESS_WORLD_ID, [{ code: inlineHtmlDemoAnchorScript(x, y) }])
+      .catch(() => null),
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), INLINE_HTML_DEMO_ANCHOR_TIMEOUT_MS); }),
+  ]);
+  clearTimeout(timer);
+  // The demo was released, replaced or left the live layout while it answered: its answer no longer names this point.
+  return leaseFor(rawUrl) === lease && lease.guest === guest && lease.frameWidth !== null ? inlineHtmlDemoAnchor(answer) : null;
 }
 
 function leaseFor(rawUrl: unknown): InlineHtmlDemoLease | undefined {

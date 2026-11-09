@@ -16,7 +16,7 @@ export function messageWorkOutcome(work: readonly DesktopRoomAgentWork[], source
 }
 
 /** A receipt's durable key can select only one agent in this room, never a matching display name. */
-export function messageOutcomeTarget(agent: DesktopMessageInfo["agentsAsked"][number], messageId: string,
+export function messageOutcomeTarget(agent: Pick<DesktopMessageInfo["agentsAsked"][number], "agentKey" | "actorLabel">, messageId: string,
   roomId: string, entries: readonly DesktopSupervisorManifestEntry[]): AgentModalTarget | null {
   if (!messageId.trim() || !/[/:]/.test(agent.agentKey)) return null;
   const matches = entries.filter(entry => entry.roomId === roomId && entry.agentKey === agent.agentKey);

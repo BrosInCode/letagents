@@ -93,7 +93,8 @@ export function createWindow(): void {
     minWidth: 1180,
     minHeight: 760,
     title: "LetAgents Desktop",
-    backgroundColor: "#0a0d14",
+    backgroundColor: "#0a0a0a",
+    ...(process.platform === "darwin" ? { titleBarStyle: "hiddenInset" as const } : {}),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,

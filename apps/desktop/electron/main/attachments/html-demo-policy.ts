@@ -1,6 +1,6 @@
 import type { WebPreferences } from "electron";
 
-import { LIVE_DEMO } from "../../../../../shared/live-demo.mjs";
+import { LIVE_DEMO, LIVE_DEMO_ANCHOR_DEPTH, isLiveDemoAnchorPath, isLiveDemoAnchorStep, type LiveDemoAnchor } from "../../../../../shared/live-demo.mjs";
 import { attachmentProtocolScheme, htmlDemoProtocolScheme } from "../paths.js";
 
 /**
@@ -340,6 +340,64 @@ export function inlineHtmlDemoPointer(
 
 function positiveZoom(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+/** How long main waits for a live demo to name the element under a new pin. */
+export const INLINE_HTML_DEMO_ANCHOR_TIMEOUT_MS = 500;
+/** The most elements a pin's path names, from the element under it up (the server keeps no longer path). */
+export const INLINE_HTML_DEMO_ANCHOR_DEPTH = LIVE_DEMO_ANCHOR_DEPTH;
+
+/**
+ * Run in main's own world of a live demo, where the page's scripts cannot see
+ * or change it: the element under (x, y) in demo space (the page's CSS px from
+ * its top-left corner, as main reports the pointer), as the steps of a CSS
+ * path from the top down, and where the point sits in the element's box. An
+ * id that is unique ends the path early. The steps come from the page, so
+ * main checks them (`inlineHtmlDemoAnchor`).
+ */
+export function inlineHtmlDemoAnchorScript(x: number, y: number): string {
+  return `(() => {
+  const x = ${JSON.stringify(x)}, y = ${JSON.stringify(y)};
+  const target = document.elementFromPoint(x, y);
+  if (!target || target === document.documentElement) return null;
+  const NAME = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/;
+  const TAG = /^[A-Za-z][A-Za-z0-9-]{0,63}$/;
+  const parts = [];
+  for (let node = target; node && node !== document.documentElement && parts.length < ${INLINE_HTML_DEMO_ANCHOR_DEPTH}; node = node.parentElement) {
+    const tag = TAG.test(node.localName) ? node.localName : '*';
+    if (node.id && NAME.test(node.id) && document.querySelectorAll('#' + CSS.escape(node.id)).length === 1) {
+      parts.unshift(tag + '#' + node.id);
+      break;
+    }
+    let part = tag + Array.from(node.classList).filter((name) => NAME.test(name)).slice(0, 2).map((name) => '.' + name).join('');
+    const parent = node.parentElement;
+    if (parent && tag !== '*') {
+      const same = Array.from(parent.children).filter((child) => child.localName === node.localName);
+      if (same.length > 1) part += ':nth-of-type(' + (same.indexOf(node) + 1) + ')';
+    }
+    parts.unshift(part);
+  }
+  const box = target.getBoundingClientRect();
+  return { parts, dx: x - box.left, dy: y - box.top };
+})()`;
+}
+
+/**
+ * The anchor a pin saves from what `inlineHtmlDemoAnchorScript` answered, or
+ * null. Each step must look like one the script makes; a path longer than
+ * LIVE_DEMO.anchorPath loses its top steps, since the end names the element.
+ */
+export function inlineHtmlDemoAnchor(answer: unknown): LiveDemoAnchor | null {
+  if (!answer || typeof answer !== "object" || Array.isArray(answer)) return null;
+  const { parts, dx, dy } = answer as Record<string, unknown>;
+  if (!Array.isArray(parts) || parts.length === 0 || parts.length > INLINE_HTML_DEMO_ANCHOR_DEPTH) return null;
+  if (!parts.every((part): part is string => isLiveDemoAnchorStep(part))) return null;
+  if (typeof dx !== "number" || typeof dy !== "number" || !Number.isFinite(dx) || !Number.isFinite(dy)) return null;
+  const kept = [...parts];
+  while (kept.length > 1 && kept.join(" > ").length > LIVE_DEMO.anchorPath) kept.shift();
+  const path = kept.join(" > ");
+  if (!isLiveDemoAnchorPath(path)) return null;
+  return { path, dx: Math.round(dx * 10) / 10, dy: Math.round(dy * 10) / 10 };
 }
 
 export function htmlDemoWindowTitle(fileName: unknown, senderLabel: unknown): string {

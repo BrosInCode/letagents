@@ -76,6 +76,7 @@ import type {
   DesktopAgentCommitIdentitySettings,
 } from "./agents.js";
 import type { DesktopRentalApi } from "./rental.js";
+import type { DesktopOrganizationApi } from "./organizations.js";
 import type {
   DesktopAccountRoomActionResult,
   DesktopAccountRoomEntry,
@@ -94,6 +95,7 @@ import type {
   DesktopRoomStorageOverrideMode,
   DesktopRoomStorageState,
   DesktopInviteRoomCreation,
+  DesktopInviteRoomOptions,
   DesktopLegacyProjectBindingCandidate,
   DesktopProjectBinding,
   DesktopProjectBindingContext,
@@ -103,6 +105,7 @@ import type {
   DesktopRoomInfo,
   DesktopRoomLatestMessage,
   DesktopMessageInfo,
+  DesktopMessageReceipt,
   DesktopRoomMessage,
   DesktopRoomMessagesPage,
   DesktopRoomThreadInboxFilter,
@@ -121,6 +124,7 @@ import type {
   DesktopInlineHtmlDemoLease,
   DesktopDemoMark,
   DesktopDemoMarkInput,
+  DesktopLiveDemoAnchor,
   DesktopLiveDemoClientFrame,
   DesktopLiveDemoEvent,
   DesktopWindowRect,
@@ -164,6 +168,7 @@ import type {
 
 export interface DesktopApi {
   conversations: ConversationApi;
+  organizations: DesktopOrganizationApi;
   ui: {
     onOpenSettings: (callback: () => void) => () => void;
     onOpenUpdates?: (callback: () => void) => () => void;
@@ -245,6 +250,8 @@ export interface DesktopApi {
     getLatestMessages: (roomIdentifiers: string[]) => Promise<DesktopRoomLatestMessage[]>;
     getMessage: (roomIdentifier: string, messageId: string) => Promise<DesktopRoomMessage | null>;
     getMessageInfo: (roomIdentifier: string, messageId: string) => Promise<DesktopMessageInfo | null>;
+    /** Receipts for the signed-in person's own messages among `messageIds`; other messages are left out. */
+    getMessageReceipts?: (roomIdentifier: string, messageIds: string[]) => Promise<DesktopMessageReceipt[]>;
     getMessagesAfter?: (roomIdentifier: string, afterMessageId: string | null) => Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     getThreads: (roomIdentifier: string, filter?: DesktopRoomThreadInboxFilter, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadInboxPage>;
@@ -280,6 +287,8 @@ export interface DesktopApi {
     removeDemoMark?: (roomIdentifier: string, markId: string) => Promise<void>;
     /** Lay a running inline demo out at LIVE_DEMO.width CSS px, scaled to `frameWidth`. Returns the scale. */
     setInlineDemoWidth?: (leaseUrl: string, frameWidth: number) => Promise<number>;
+    /** The element under a point of a running live demo (demo space), for a new pin; null when there is none to name. */
+    inlineDemoAnchorAt?: (leaseUrl: string, x: number, y: number) => Promise<DesktopLiveDemoAnchor | null>;
     /** Capture `rect` of the app window (demo and marks) and stage it as an image for a thread reply. */
     captureDemoMarkup?: (roomIdentifier: string, rect: DesktopWindowRect, fileName: string) => Promise<DesktopStagedAttachment>;
     discardAttachment: (roomIdentifier: string, uploadId: string) => Promise<void>;
@@ -429,7 +438,7 @@ export interface DesktopApi {
     ) => Promise<DesktopFocusRoomMutationResult>;
     archiveAgents?: (roomIdentifier: string, participantKeys: string[]) => Promise<{ archivedParticipantKeys: string[]; skippedParticipantKeys: string[] }>;
     rename: (roomIdentifier: string, displayName: string) => Promise<DesktopRoomInfo>;
-    createInviteRoom: () => Promise<DesktopInviteRoomCreation>;
+    createInviteRoom: (options?: DesktopInviteRoomOptions) => Promise<DesktopInviteRoomCreation>;
     getPullRequestDiff?: (roomIdentifier: string, number: number) => Promise<import("./room.js").DesktopPullRequestDiffResult>;
     getGitHubEvents: (
       roomIdentifier: string,

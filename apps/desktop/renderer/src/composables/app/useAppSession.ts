@@ -4,6 +4,7 @@ import { invalidateRoomMessageLinkPreviews, setMessageLinkPreviewViewer } from "
 import { invalidateRoomMessagePins, setMessagePinViewer } from "../useRoomMessagePins";
 import { receiveRoomTyping, setTypingAccount } from "../useRoomTyping";
 import { invalidateRoomMessageReactions, setMessageReactionViewer } from "../useRoomMessageReactions";
+import { invalidateRoomMessageReceipts } from "../useRoomMessageReceipts";
 import { computed, provide, watch } from "vue";
 import type { DesktopNotificationTarget, DesktopRoomStreamEvent } from "../../../../electron/ipc-types";
 import type { DesktopRoomLink } from "../../../../../../shared/room-app-links.mjs";
@@ -171,11 +172,12 @@ export function useAppSessionActions(context: unknown) {
       if (event.resource === "wake_rules") invalidateRoomWakeRules(event.roomIdentifier);
       else if (event.resource === "message_pins") invalidateRoomMessagePins(event.roomIdentifier);
       else if (event.resource === "message_reactions") invalidateRoomMessageReactions(event.roomIdentifier);
+      else if (event.resource === "message_info") invalidateRoomMessageReceipts(event.roomIdentifier);
       else app.invalidateSelectedRoomAgentWork(event.roomIdentifier);
       return;
     }
     // A stream that just (re)connected may have missed a reaction or pin change.
-    if (event.type === "open") { invalidateRoomMessageReactions(event.roomIdentifier); invalidateRoomMessagePins(event.roomIdentifier); }
+    if (event.type === "open") { invalidateRoomMessageReactions(event.roomIdentifier); invalidateRoomMessagePins(event.roomIdentifier); invalidateRoomMessageReceipts(event.roomIdentifier); }
     app.handleRoomStreamEvent(event);
   }
 
@@ -301,7 +303,7 @@ export function useAppAuthFlow(context: unknown) {
     getRoomIdentifier: () => getAuthRoomIdentifier(),
     isFirstRunGate: () => Boolean(mcpInstallState.value && !mcpInstallState.value.completed),
     onFirstRunAuthorized: async () => {
-      firstRunStage.value = "room";
+      firstRunStage.value = "organization";
     },
     onAuthorized: () => refresh(),
     onSigningOut: clearDesktopSessionState,

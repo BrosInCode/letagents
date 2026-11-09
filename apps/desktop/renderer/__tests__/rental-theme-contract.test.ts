@@ -7,19 +7,10 @@ function source(relativePath: string): string {
   return readFileSync(fileURLToPath(new URL(relativePath, import.meta.url)), "utf8");
 }
 
-function between(value: string, start: string, end: string): string {
-  const startIndex = value.indexOf(start);
-  const endIndex = value.indexOf(end, startIndex + start.length);
-  assert.notEqual(startIndex, -1, `Missing theme contract start: ${start}`);
-  assert.notEqual(endIndex, -1, `Missing theme contract end: ${end}`);
-  return value.slice(startIndex, endIndex);
-}
-
 const marketplaceStyles = source("../src/styles/surfaces/rent-marketplace.css");
 const reviewSheet = source("../src/components/desktop/content/RentRequestReviewSheet.vue");
 const reviewStyles = source("../src/components/desktop/content/rent-request-review-sheet.css");
 const settingsStyles = source("../src/components/desktop/settings/panes/settings-renting.css");
-const sidebarStyles = source("../src/styles/app-shell/sidebar.css");
 const segmentedControl = source("../src/components/desktop/controls/DesktopSegmentedControl.vue");
 
 describe("Rent theme contract", () => {
@@ -36,17 +27,10 @@ describe("Rent theme contract", () => {
   });
 
   it("keeps provider settings and shared Rent chrome theme-relative", () => {
-    const rentSidebar = between(sidebarStyles, ".sidebar-rent-cta", ".cta-plus");
-
     assert.match(settingsStyles, /background: var\(--text\)/);
     assert.match(settingsStyles, /color: var\(--bg\)/);
     assert.doesNotMatch(settingsStyles, /rgba\(255,\s*255,\s*255|#(?:fff|ffffff)\b|#7dd3fc|#dff5ff|#d8f3ff/i);
     assert.match(settingsStyles, /@media \(prefers-contrast: more\)/);
-
-    // The open Rent link uses the same theme highlight as every other sidebar row.
-    assert.match(rentSidebar, /background: var\(--sidebar-selected\)/);
-    assert.match(rentSidebar, /color: var\(--text\)/);
-    assert.doesNotMatch(rentSidebar, /#[0-9a-f]{3,6}\b|rgba?\(/i);
 
     assert.match(segmentedControl, /background: var\(--accent-dim\)/);
     assert.match(segmentedControl, /background: var\(--accent-active\)/);

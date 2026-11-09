@@ -1,0 +1,202 @@
+/*
+ * Message receipts: a mark after the time on your own messages, and the
+ * popover that grows out of it. Theme tokens only, so both themes follow.
+ */
+
+/* ── Mark ─────────────────────────────────────────────────────────── */
+.room-receipt-mark {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 7px 0 4px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  font-size: 0.7rem;
+  font-weight: 620;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) ease, color var(--duration-fast) ease, transform 120ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+/* The time is moved first in the header; the mark follows it, before the hover actions. */
+.room-message-meta .room-receipt-mark { order: -1; margin-left: -4px; }
+/* The mark stays small; its target is 44px tall. */
+.room-receipt-mark::before { content: ""; position: absolute; inset: -11px -3px; }
+.room-receipt-mark[aria-expanded="true"] { background: var(--accent-active); color: var(--text); }
+.room-receipt-mark:active { transform: scale(0.96); }
+.room-receipt-mark:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) {
+  .room-receipt-mark:hover { background: var(--accent-hover); color: var(--text-secondary); }
+  .room-receipt-mark[data-tone="nobody"]:hover { background: var(--amber-dim); color: var(--amber-text); }
+}
+.room-receipt-mark[data-tone="nobody"] { color: var(--amber-text); }
+.room-receipt-mark-logos { display: inline-flex; align-items: center; }
+.room-receipt-mark-logos > * { width: 16px; height: 16px; flex: none; object-fit: contain; color: var(--text-tertiary); }
+.room-receipt-mark-logos > * + * { margin-left: -6px; }
+.room-receipt-mark-logos img { filter: drop-shadow(0 0 1px var(--bg)); }
+.room-receipt-mark-glyph { display: inline-grid; place-items: center; width: 12px; height: 12px; }
+.room-receipt-mark[data-tone="positive"] .room-receipt-mark-glyph { color: var(--green-text); }
+.room-receipt-mark[data-tone="active"] .room-receipt-mark-glyph { color: var(--blue-text); }
+.room-receipt-mark[data-tone="attention"] .room-receipt-mark-glyph { color: var(--red-text); }
+
+.room-receipt-dots { display: inline-flex; align-items: center; gap: 2px; }
+.room-receipt-dots i { width: 3px; height: 3px; border-radius: 999px; background: currentColor; animation: room-receipt-dot 1.05s ease-in-out infinite; }
+.room-receipt-dots i:nth-child(2) { animation-delay: 110ms; }
+.room-receipt-dots i:nth-child(3) { animation-delay: 220ms; }
+@keyframes room-receipt-dot { 0%, 100% { opacity: 0.3; } 45% { opacity: 1; } }
+
+/* ── Popover ──────────────────────────────────────────────────────── */
+.room-receipt-popover {
+  position: fixed;
+  z-index: 70;
+  width: min(352px, calc(100vw - 24px));
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--bg-elevated);
+  color: var(--text);
+  box-shadow: inset 0 1px 0 light-dark(rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.04)), 0 2px 4px rgba(0, 0, 0, 0.18), 0 18px 48px light-dark(rgba(0, 0, 0, 0.14), rgba(0, 0, 0, 0.5));
+  opacity: 0;
+  transform: scale(0.96);
+  transition: opacity 180ms cubic-bezier(0.23, 1, 0.32, 1), transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.room-receipt-popover.is-shown { opacity: 1; transform: none; }
+.room-receipt-popover:focus { outline: none; }
+
+.room-receipt-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: baseline; gap: 8px; padding: 16px 16px 0; }
+.room-receipt-title { display: flex; align-items: center; gap: 8px; min-width: 0; margin: 0; font-size: 0.875rem; font-weight: 640; letter-spacing: -0.006em; }
+.room-receipt-title svg { flex: none; color: var(--amber-text); }
+.room-receipt-title.is-changed { animation: room-receipt-swap 200ms cubic-bezier(0.23, 1, 0.32, 1); }
+@keyframes room-receipt-swap { from { opacity: 0.4; filter: blur(2px); } to { opacity: 1; filter: none; } }
+.room-receipt-sent { color: var(--text-tertiary); font-size: 0.75rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* One segment per agent, in the order and colour of the rows below. */
+.room-receipt-meter { display: flex; gap: 3px; margin: 12px 16px 8px; }
+.room-receipt-meter i { flex: 1; height: 4px; border-radius: 2px; background: var(--text-muted); opacity: 0.55; transition: background-color 240ms ease, opacity 240ms ease; }
+.room-receipt-meter i[data-kind="replied"] { background: var(--green-text); opacity: 1; }
+.room-receipt-meter i[data-kind="attention"] { background: var(--red-text); opacity: 1; }
+.room-receipt-meter i[data-kind="waiting"] { background: var(--amber-text); opacity: 0.7; }
+.room-receipt-meter i[data-kind="working"] {
+  opacity: 1;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--blue-text) 35%, transparent) 0%, var(--blue-text) 50%, color-mix(in srgb, var(--blue-text) 35%, transparent) 100%);
+  background-size: 200% 100%;
+  animation: room-receipt-sweep 1.6s linear infinite;
+}
+@keyframes room-receipt-sweep { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+
+.room-receipt-list { margin: 0; padding: 0 8px 8px; list-style: none; }
+.room-receipt-row { position: relative; display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 12px; min-height: 52px; padding: 8px; border-radius: 10px; }
+.room-receipt-row > :not(.room-receipt-hit):not(.room-receipt-ask) { position: relative; pointer-events: none; }
+.room-receipt-hit { position: absolute; inset: 0; border: 0; border-radius: inherit; background: transparent; cursor: pointer; transition: background-color var(--duration-fast) ease; }
+.room-receipt-hit:active { background: var(--accent-active); }
+.room-receipt-hit:focus-visible { outline: 2px solid var(--blue-text); outline-offset: -2px; }
+@media (hover: hover) and (pointer: fine) { .room-receipt-hit:hover { background: var(--accent-hover); } }
+.room-receipt-tile { display: grid; place-items: center; width: 32px; height: 32px; color: var(--text-tertiary); }
+.room-receipt-tile img { width: 100%; height: 100%; object-fit: contain; transform: scale(1.14); }
+.room-receipt-who { min-width: 0; }
+.room-receipt-who > strong { display: block; overflow: hidden; font-size: 0.8125rem; font-weight: 620; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.room-receipt-who > span { display: block; overflow: hidden; color: var(--text-tertiary); font-size: 0.75rem; line-height: 1.35; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.room-receipt-state { display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; font-weight: 620; white-space: nowrap; color: var(--text-tertiary); }
+.room-receipt-state[data-kind="replied"] { color: var(--green-text); }
+.room-receipt-state[data-kind="working"] { color: var(--blue-text); }
+.room-receipt-state[data-kind="waiting"] { color: var(--amber-text); }
+.room-receipt-state[data-kind="attention"] { color: var(--red-text); }
+.room-receipt-go { margin-left: 2px; color: var(--text-muted); transition: transform var(--duration-fast) cubic-bezier(0.23, 1, 0.32, 1), color var(--duration-fast) ease; }
+@media (hover: hover) and (pointer: fine) { .room-receipt-row:hover .room-receipt-go { transform: translateX(2px); color: var(--text-secondary); } }
+
+.room-receipt-why { margin: 10px 16px 12px; color: var(--text-secondary); font-size: 0.78rem; line-height: 1.5; }
+.room-receipt-eyebrow { margin: 0 16px 4px; color: var(--text-tertiary); font-size: 0.6875rem; font-weight: 620; letter-spacing: 0.02em; }
+.room-receipt-ask {
+  position: relative;
+  height: 28px;
+  padding: 0 12px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent-hover);
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 620;
+  cursor: pointer;
+  transition: transform 120ms cubic-bezier(0.23, 1, 0.32, 1), background-color var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+.room-receipt-ask::before { content: ""; position: absolute; inset: -8px -4px; }
+.room-receipt-ask:active { transform: scale(0.96); }
+.room-receipt-ask:disabled { cursor: default; opacity: 0.55; }
+.room-receipt-ask:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
+@media (hover: hover) and (pointer: fine) { .room-receipt-ask:not(:disabled):hover { background: var(--text); color: var(--bg); box-shadow: none; } }
+
+.room-receipt-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 44px; padding: 0 8px; border-top: 1px solid var(--border); }
+.room-receipt-readers, .room-receipt-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 520;
+  cursor: pointer;
+  transition: background-color var(--duration-fast) ease, color var(--duration-fast) ease;
+}
+.room-receipt-copy { flex: none; color: var(--text-tertiary); white-space: nowrap; }
+.room-receipt-readers:disabled { color: var(--text-tertiary); cursor: default; }
+.room-receipt-readers:focus-visible, .room-receipt-copy:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 1px; }
+@media (hover: hover) and (pointer: fine) {
+  .room-receipt-readers:not(:disabled):hover, .room-receipt-copy:hover { background: var(--accent-hover); color: var(--text); }
+}
+.room-receipt-readers-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-receipt-chevron { flex: none; color: var(--text-muted); transition: transform 200ms cubic-bezier(0.23, 1, 0.32, 1); }
+.room-receipt-readers[aria-expanded="true"] .room-receipt-chevron { transform: rotate(90deg); }
+.room-receipt-people { display: inline-flex; }
+.room-receipt-people > * { box-shadow: 0 0 0 1.5px var(--bg-elevated); }
+.room-receipt-people > * + * { margin-left: -4px; }
+.room-receipt-avatar, .room-receipt-more {
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  overflow: hidden;
+  border-radius: 50%;
+  background: var(--avatar-tint, var(--text-muted));
+  color: #0a0a0a;
+  font-size: 0.5625rem;
+  font-style: normal;
+  font-weight: 650;
+}
+.room-receipt-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.room-receipt-more { background: var(--accent-active); color: var(--text); }
+
+.room-receipt-readers-list { display: grid; grid-template-rows: 0fr; transition: grid-template-rows 200ms cubic-bezier(0.23, 1, 0.32, 1); }
+.room-receipt-readers-list.is-open { grid-template-rows: 1fr; }
+.room-receipt-readers-list > div { overflow: hidden; }
+.room-receipt-readers-list ul { max-height: 220px; margin: 0; padding: 4px 8px; overflow-y: auto; list-style: none; }
+.room-receipt-readers-list li { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; gap: 10px; min-height: 34px; padding: 0 8px; font-size: 0.78rem; }
+.room-receipt-readers-list li .room-receipt-avatar { width: 22px; height: 22px; font-size: 0.625rem; }
+.room-receipt-readers-list li span:not(.room-receipt-avatar) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-receipt-readers-list time { color: var(--text-tertiary); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+.room-receipt-unread { margin: 0; padding: 6px 16px 14px; color: var(--text-muted); font-size: 0.75rem; line-height: 1.45; }
+
+@media (prefers-reduced-motion: reduce) {
+  .room-receipt-popover { transform: none; transition: opacity 120ms ease; }
+  .room-receipt-meter i[data-kind="working"] { animation: none; background: var(--blue-text); }
+  .room-receipt-dots i { animation: none; opacity: 0.8; }
+  .room-receipt-title.is-changed { animation: none; }
+  .room-receipt-readers-list, .room-receipt-chevron, .room-receipt-go { transition: none; }
+  .room-receipt-mark:active, .room-receipt-ask:active { transform: none; }
+}

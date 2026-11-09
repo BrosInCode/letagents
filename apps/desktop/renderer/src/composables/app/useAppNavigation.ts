@@ -6,11 +6,12 @@ import { useDesktopNavigationState } from "../useDesktopNavigationState";
 import { rememberStoredString } from "../../domain/desktop-storage";
 import { normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
 import { gitRoomsShareRepo } from "../../domain/app-room-aliases";
+import { companyListsEntry, mergeCompanyRooms } from "../../domain/company-navigation";
 import type { AppContextOf } from "./context";
 
 /** Sidebar navigation state: the active entry, projects, and the selected room. */
 export function useAppNavigation(context: unknown) {
-  const app = context as AppContextOf<"useAppState">;
+  const app = context as AppContextOf<"useAppCompany" | "useAppState">;
   const {
     accountRooms, activeEntryStorageKey, appInfo, recentRootRooms, recentRootRoomsStorageKey,
     repoStatus, rootRoomSnapshot, selectedRootRoomIdentifier, selectedSnapshot,
@@ -22,7 +23,7 @@ export function useAppNavigation(context: unknown) {
     cycleSidebar: toggleSidebarMode,
     focusRooms,
     getAuthRoomIdentifier,
-    openRoomSnapshot,
+    openRoomSnapshot: openNavigationRoomSnapshot,
     pinnedCollapsed,
     pinnedRoom,
     projectEntries,
@@ -32,7 +33,7 @@ export function useAppNavigation(context: unknown) {
     resolveSelectedRoomIdentifier,
     roomsCollapsed,
     returnFromSettings,
-    selectSidebarEntry,
+    selectSidebarEntry: selectNavigationSidebarEntry,
     selectedAccess,
     selectedFocusRooms,
     selectedNeedsAccess,
@@ -43,7 +44,7 @@ export function useAppNavigation(context: unknown) {
     togglePinnedCollapsed,
     toggleRoomsCollapsed,
   } = useDesktopNavigationState({
-    accountRooms,
+    accountRooms: computed(() => mergeCompanyRooms(accountRooms.value, app.company.rooms.value)),
     activeEntryStorageKey,
     appInfo,
     recentRootRooms,
@@ -53,6 +54,23 @@ export function useAppNavigation(context: unknown) {
     selectedRootRoomIdentifier,
     selectedSnapshot,
   });
+  // An explicitly opened room must stay reachable when the selected company's
+  // connected repositories do not list it: an ad-hoc room, a personal repo
+  // opened from the Inbox or My Work, or a closed focus room. Such an open
+  // switches to Personal & shared.
+  function leaveCompanyUnlessListed(): void {
+    const { company } = app;
+    if (activeEntry.value.type !== "room") return;
+    if (!companyListsEntry(projectEntries.value, company.activeId.value, company.rooms.value, activeEntry.value)) void company.choose(null);
+  }
+  function openRoomSnapshot(...args: Parameters<typeof openNavigationRoomSnapshot>): void {
+    openNavigationRoomSnapshot(...args);
+    leaveCompanyUnlessListed();
+  }
+  function selectSidebarEntry(...args: Parameters<typeof selectNavigationSidebarEntry>): void {
+    selectNavigationSidebarEntry(...args);
+    leaveCompanyUnlessListed();
+  }
   Object.assign(app, { activeEntry, collapsedProjects, currentParentRoom, toggleSidebarMode, openRoomSnapshot, projectEntries, rememberRootRoomSnapshot, selectSidebarEntry, selectedRoomIdentifier, selectedRoomInfo, sidebarMode });
   return {
     activeEntry, collapsedProjects, currentParentRoom, toggleSidebarMode, focusRooms,

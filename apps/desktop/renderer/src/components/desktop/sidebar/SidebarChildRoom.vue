@@ -22,6 +22,7 @@
     >
       <Check v-if="selected" />
     </span>
+    <span class="sidebar-child-icon" aria-hidden="true"><GitBranch v-if="entry.kind === 'branch'" /><MessageSquare v-else /></span>
     <span class="room-title-line">
       <span class="room-title">{{ sidebarRoomTitle(entry) }}</span>
       <RoomMutedIcon :room-identifier="entry.roomIdentifier" />
@@ -33,7 +34,7 @@
 
 <script setup lang="ts">
 import RoomUnreadBadge from "./RoomUnreadBadge.vue";
-import { Check } from "@lucide/vue";
+import { Check, GitBranch, MessageSquare } from "@lucide/vue";
 import { sidebarRoomTitle } from "../../../domain/sidebar-room-display";
 import SidebarRoomActivity from "./SidebarRoomActivity.vue";
 import RoomMutedIcon from "./RoomMutedIcon.vue";

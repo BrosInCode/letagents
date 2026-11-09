@@ -1689,10 +1689,21 @@ describe("marks that wait for the link", () => {
   it("can put a deleted mark back from what it is, under a new id", () => {
     const pin: DemoMark = { id: "mark_aaaaaa", demo: KEY, kind: "pin", at: [3, 4], text: "Hi", author: OWN, anchor: null, createdAt: "x" };
     const stroke: DemoMark = { id: "mark_bbbbbb", demo: KEY, kind: "stroke", points: STROKE, author: OWN, anchor: null, createdAt: "x" };
-    assert.deepEqual(markBody(pin), { kind: "pin", at: [3, 4], text: "Hi" });
+    assert.deepEqual(markBody(pin), { kind: "pin", at: [3, 4], text: "Hi", anchor: null });
     const id = newDemoMarkId();
     assert.deepEqual(parseDemoMarkInput(markInput(KEY, markBody(stroke), id)), { id, demo: KEY, kind: "stroke", points: STROKE, anchor: null });
     assert.deepEqual(parseDemoMarkInput(markInput(KEY, markBody(pin))), { demo: KEY, kind: "pin", at: [3, 4], text: "Hi", anchor: null });
+    // The element under a pin goes back with it, so Undo keeps what an agent reads.
+    const anchor = { path: "main > button.pay", dx: 4, dy: 2.5 };
+    const anchored: DemoMark = { ...pin, anchor };
+    assert.deepEqual(markBody(anchored), { kind: "pin", at: [3, 4], text: "Hi", anchor });
+    assert.notEqual((markBody(anchored) as { anchor: unknown }).anchor, anchor, "a copy, not the saved mark's object");
+    assert.deepEqual(parseDemoMarkInput(markInput(KEY, markBody(anchored))), { demo: KEY, kind: "pin", at: [3, 4], text: "Hi", anchor });
+    assert.equal(markInput(KEY, { kind: "pin", at: [1, 1], text: "No anchor yet" }).anchor, null, "a pin saved before the demo answered has none");
+    // A path saved some other way, which the server now refuses, goes back without it: Undo still works.
+    const odd: DemoMark = { ...pin, anchor: { path: "button\n\nnot a path", dx: 1, dy: 1 } };
+    assert.equal((markBody(odd) as { anchor: unknown }).anchor, null);
+    assert.ok(parseDemoMarkInput(markInput(KEY, markBody(odd))));
     assert.notEqual(newDemoMarkId(), newDemoMarkId());
   });
 
@@ -1807,6 +1818,18 @@ describe("marks that wait for the link", () => {
     assert.deepEqual(t.session.marks.value.map((mark) => mark.id), [id]);
     assert.deepEqual(t.added.map((input) => input.id), [id]);
     assert.deepEqual(t.notices, []);
+  });
+
+  it("saves a pin with the element under it, as the demo named it", async () => {
+    const t = setup();
+    t.session.start("lease://one");
+    t.status("live");
+    await settle();
+    const anchor = { path: "form#checkout > button:nth-of-type(2)", dx: 10, dy: 3.5 };
+    t.session.queueMark({ kind: "pin", at: [5, 6], text: "Too small", anchor });
+    t.session.queueMark({ kind: "stroke", points: STROKE });
+    await settle();
+    assert.deepEqual(t.added.map((input) => (input as { anchor: unknown }).anchor), [anchor, null], "a stroke has no element");
   });
 
   it("keeps a mark through a bad link, dashed, and saves it when the link is back", async () => {

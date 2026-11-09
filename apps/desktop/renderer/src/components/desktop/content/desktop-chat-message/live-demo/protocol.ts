@@ -4,7 +4,10 @@ export {
   DEMO_MARK_RATE_LIMITED_TEXT,
   LIVE_DEMO,
   LIVE_DEMO_COLORS,
+  isHtmlDemoFile,
+  isLiveDemoAnchorPath,
   liveDemoColor,
+  liveDemoColorName,
   liveDemoKey,
   newDemoMarkId,
 } from "../../../../../../../../../shared/live-demo.mjs";

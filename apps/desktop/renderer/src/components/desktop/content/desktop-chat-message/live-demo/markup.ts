@@ -1,5 +1,5 @@
 import type { DesktopWindowRect } from "../../../../../../../electron/ipc-types";
-import { LIVE_DEMO_COLORS, type DemoMark } from "./protocol";
+import { liveDemoColorName, type DemoMark } from "./protocol";
 
 /** The picture's file name: the demo's name without its extension, then " marked up.png". */
 export function markupFileName(demoFileName: string): string {
@@ -7,12 +7,9 @@ export function markupFileName(demoFileName: string): string {
   return `${base || "Demo"} marked up.png`;
 }
 
-// The palette's colours by name, in LIVE_DEMO_COLORS order, so a reader of the text can match the ink.
-const COLOR_NAMES = ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"] as const;
-
+/** The ink colour's plain name, so a reader of the text can match the ink. */
 export function inkColorName(color: string): string {
-  const index = LIVE_DEMO_COLORS.indexOf(color.toLowerCase());
-  return index >= 0 ? COLOR_NAMES[index] ?? "grey" : "grey";
+  return liveDemoColorName(color);
 }
 
 // The reply stays short enough to read; a long note is cut, and many pins are counted.

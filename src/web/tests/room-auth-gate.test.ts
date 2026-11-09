@@ -112,6 +112,6 @@ test('the room shell mounts only inside the authorized branch', () => {
   const source = readFileSync(roomPath, 'utf8')
 
   assert.match(source, /<RoomAuthGate[\s\S]*v-if="roomAccessState !== 'authorized'"/)
-  assert.match(source, /<div v-else class="room-shell"/)
+  assert.match(source, /<div v-else class="web-room-layout"[\s\S]*<RoomSidebar[\s\S]*<div class="room-shell"/)
   assert.match(source, /hasCheckedSession: roomSessionValidated\.value && auth\.hasCheckedSession\.value/)
 })

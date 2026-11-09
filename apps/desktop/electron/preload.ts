@@ -2,6 +2,14 @@ import type { RoomGif, RoomExpressionsSetting } from "../../../shared/room-expre
 import { contextBridge, ipcRenderer } from "electron";
 import type { DesktopApi, DesktopRoomLiveMetadataOptions, DesktopRoomSnapshotOptions } from "./ipc-types.js";
 
+// Only the macOS main window uses a hidden native title bar. Apply its safe
+// area before Vue mounts; Windows and Linux keep their native window chrome.
+if (process.platform === "darwin") {
+  window.addEventListener("DOMContentLoaded", () => {
+    document.documentElement.dataset.windowChrome = "mac";
+  }, { once: true });
+}
+
 const api: DesktopApi = {
   conversations: {
     list: () => ipcRenderer.invoke("desktop:conversations:list"),
@@ -12,6 +20,19 @@ const api: DesktopApi = {
     update: (id, changes) => ipcRenderer.invoke("desktop:conversations:update", id, changes),
     block: (id, blocked) => ipcRenderer.invoke("desktop:conversations:block", id, blocked),
     changes: after => ipcRenderer.invoke("desktop:conversations:changes", after),
+  },
+  organizations: {
+    pendingInvite: () => ipcRenderer.invoke("desktop:organizations:pending"),
+    acknowledgeInvite: (id) => ipcRenderer.invoke("desktop:organizations:acknowledge", id),
+    onInvited: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, id: string) => callback(id);
+      ipcRenderer.on("desktop:organizations:invited", listener);
+      return () => ipcRenderer.off("desktop:organizations:invited", listener);
+    },
+    list: () => ipcRenderer.invoke("desktop:organizations:list"),
+    join: (id, setup) => ipcRenderer.invoke("desktop:organizations:join", id, setup),
+    rooms: (id) => ipcRenderer.invoke("desktop:organizations:rooms", id),
+    openOnGitHub: (page) => ipcRenderer.invoke("desktop:organizations:open-github", page),
   },
   ui: {
     onOpenSettings: (callback) => {
@@ -120,6 +141,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:get-message", roomIdentifier, messageId),
     getMessageInfo: (roomIdentifier: string, messageId: string) =>
       ipcRenderer.invoke("desktop:room:get-message-info", roomIdentifier, messageId),
+    getMessageReceipts: (roomIdentifier: string, messageIds: string[]) =>
+      ipcRenderer.invoke("desktop:room:get-message-receipts", roomIdentifier, messageIds),
     getMessagesAfter: (roomIdentifier, afterMessageId) => ipcRenderer.invoke("desktop:room:get-messages-after", roomIdentifier, afterMessageId),
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) =>
       ipcRenderer.invoke("desktop:room:get-messages-before", roomIdentifier, beforeMessageId, limit ?? 150),
@@ -166,6 +189,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:remove-demo-mark", roomIdentifier, markId),
     setInlineDemoWidth: (leaseUrl: string, frameWidth: number) =>
       ipcRenderer.invoke("desktop:room:set-inline-demo-width", leaseUrl, frameWidth),
+    inlineDemoAnchorAt: (leaseUrl: string, x: number, y: number) =>
+      ipcRenderer.invoke("desktop:room:inline-demo-anchor-at", leaseUrl, x, y),
     captureDemoMarkup: (roomIdentifier, rect, fileName) =>
       ipcRenderer.invoke("desktop:room:capture-demo-markup", roomIdentifier, rect, fileName),
     discardAttachment: (roomIdentifier: string, uploadId: string) =>
@@ -305,7 +330,7 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:archive-agents", roomIdentifier, participantKeys),
     rename: (roomIdentifier: string, displayName: string) =>
       ipcRenderer.invoke("desktop:room:rename", roomIdentifier, displayName),
-    createInviteRoom: () => ipcRenderer.invoke("desktop:room:create-invite-room"),
+    createInviteRoom: (options) => ipcRenderer.invoke("desktop:room:create-invite-room", options),
     getPullRequestDiff: (roomIdentifier: string, number: number) =>
       ipcRenderer.invoke("desktop:room:get-pull-request-diff", roomIdentifier, number),
     getGitHubEvents: (roomIdentifier: string, query = {}) =>

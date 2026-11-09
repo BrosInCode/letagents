@@ -33,7 +33,7 @@ export const REMOTE_ALLOWED_TOOLS: readonly string[] = [
   "get_current_room", "get_human_requests", "get_room_artifacts", "get_room_events", "get_room_guidelines",
   "get_room_history_summary", "get_room_memory", "handoff_task_lease", "join_code", "join_project",
   "join_room", "list_board_intents", "list_wake_rules", "post_reasoning", "post_status",
-  "publish_room_artifact", "react_to_message", "read_messages", "register_agent_session",
+  "publish_room_artifact", "react_to_message", "read_demo_marks", "read_messages", "register_agent_session",
   "register_board_intent", "register_task_claim_intent", "register_task_close_intent",
   "register_task_create_intent", "register_task_lease_action_intent", "release_board_manager",
   "release_task_lease", "release_task_review", "remember_room_fact", "request_human_input",

@@ -153,7 +153,7 @@ async function assembleMacBundle() {
   ]) {
     await removePlistKey(infoPlist, key);
   }
-  // "Ask for an agent" links (letagents://ask/<token>) open the app.
+  // letagents:// links open the app: "Ask for an agent" (ask/<token>) and company invitations (join/<organization id>).
   await removePlistKey(infoPlist, "CFBundleURLTypes");
   await execFileAsync("plutil", ["-insert", "CFBundleURLTypes", "-json",
     JSON.stringify([{ CFBundleURLName: "LetAgents links", CFBundleURLSchemes: ["letagents"] }]), infoPlist]);

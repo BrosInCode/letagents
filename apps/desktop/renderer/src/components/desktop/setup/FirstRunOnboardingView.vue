@@ -1,5 +1,5 @@
 <template>
-  <section class="first-run-wizard surface-page" :data-stage="stage" data-testid="first-run-wizard">
+  <section class="first-run-wizard surface-page" :data-stage="stage" :data-company-flow="stage === 'organization' || (stage === 'room' && Boolean(companyName))" data-testid="first-run-wizard">
     <Transition name="first-run-shell">
       <article v-if="stage === 'welcome'" key="welcome" class="first-run-welcome" data-testid="first-run-welcome">
         <div class="first-run-welcome-brand">
@@ -75,10 +75,33 @@
                 @sign-out="$emit('sign-out')"
               />
 
+              <FirstRunOrganizationStep
+                v-else-if="stage === 'organization' && companyStep"
+                v-model:pick="companyPick"
+                :status="companyStep.status"
+                :access-reason="companyStep.accessReason"
+                :organizations="companyStep.organizations"
+                :invitations="companyStep.invitations"
+                :sso-required="companyStep.ssoRequired"
+                :error="companyStep.error"
+                :invited-id="invitedCompanyId ?? null"
+                @retry="$emit('retry-organizations')"
+                @open-github="$emit('open-company-github', $event)"
+              />
+
+              <div v-else class="first-run-room-stage">
+                <FirstRunCompanyRooms
+                  v-if="companyName"
+                  :company-name="companyName"
+                  :avatar-url="companyAvatarUrl ?? null"
+                  :rooms="companyRooms || []"
+                  :selected-room-identifier="selectedRoomIdentifier"
+                  :busy="busy"
+                  @choose-room="$emit('join-room-code', $event)"
+                />
               <FirstRunRoomStep
-                v-else
                 :selected-room-name="selectedRoomName"
-                :selected-room-identifier="selectedRoomIdentifier"
+                :selected-room-identifier="selectedCompanyRoom ? null : selectedRoomIdentifier"
                 :selected-room-access-status="selectedRoomAccessStatus"
                 :room-needs-github-access="roomNeedsGithubAccess"
                 :created-invite-code="createdInviteCode"
@@ -88,6 +111,7 @@
                 @create-room="$emit('create-room')"
                 @join-room-code="$emit('join-room-code', $event)"
               />
+              </div>
             </div>
           </Transition>
         </div>
@@ -161,6 +185,27 @@
                 Continue
               </button>
 
+              <template v-else-if="stage === 'organization' && companyStep">
+                <button
+                  v-if="companyStep.status === 'github_access_required'"
+                  class="ghost-button"
+                  type="button"
+                  data-testid="first-run-company-skip"
+                  @click="$emit('choose-organization', null)"
+                >
+                  Skip for now
+                </button>
+                <button
+                  class="primary-button"
+                  type="button"
+                  :disabled="companyAction.disabled"
+                  data-testid="first-run-company-continue"
+                  @click="runCompanyAction"
+                >
+                  {{ companyAction.label }}
+                </button>
+              </template>
+
               <button
                 v-else-if="stage === 'room'"
                 class="primary-button"
@@ -191,15 +236,27 @@ import type {
   DesktopMcpInstallTargetId,
   DesktopRoomAccess,
 } from "../../../../../electron/ipc-types";
+import FirstRunCompanyRooms from "./FirstRunCompanyRooms.vue";
+import FirstRunOrganizationStep from "./FirstRunOrganizationStep.vue";
+import type {
+  DesktopOrganizationGitHubPage,
+  DesktopOrganizationRoom,
+} from "../../../../../electron/ipc-types/organizations.js";
 import FirstRunGithubStep from "./FirstRunGithubStep.vue";
 import FirstRunRoomStep from "./FirstRunRoomStep.vue";
 import LetAgentsLogoMark from "../brand/LetAgentsLogoMark.vue";
 import McpHarnessChoiceStep from "./McpHarnessChoiceStep.vue";
 import McpInstallConfirmStep from "./McpInstallConfirmStep.vue";
 import SetupWizardProgress from "./SetupWizardProgress.vue";
-import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./types";
+import type { DesktopMcpWizardStep, FirstRunCompanyStepState, FirstRunWizardStage } from "./types";
 
 const props = defineProps<{
+  companyStep?: FirstRunCompanyStepState | null;
+  /** The organization of a company link that is open during setup. */
+  invitedCompanyId?: string | null;
+  companyName?: string | null;
+  companyAvatarUrl?: string | null;
+  companyRooms?: DesktopOrganizationRoom[];
   stage: FirstRunWizardStage;
   mcpState: DesktopMcpInstallState;
   selectedMcpTargetIds: DesktopMcpInstallTargetId[];
@@ -217,7 +274,7 @@ const props = defineProps<{
   roomNeedsGithubAccess: boolean;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   "select-target": [targetId: DesktopMcpInstallTargetId];
   "select-all-targets": [];
   "clear-target-selection": [];
@@ -231,6 +288,9 @@ defineEmits<{
   "poll-auth": [];
   "sign-out": [];
   "continue-to-room": [];
+  "choose-organization": [id: string | null];
+  "retry-organizations": [];
+  "open-company-github": [page: DesktopOrganizationGitHubPage];
   "connect-room-auth": [];
   "pick-repo": [];
   "create-room": [];
@@ -251,11 +311,57 @@ const installButtonLabel = computed(() => {
   return "Install MCP";
 });
 
+/** The company room that is selected on the room step, if the selected room is one. */
+const selectedCompanyRoom = computed(() => {
+  const selected = props.selectedRoomIdentifier?.toLowerCase();
+  if (!selected) return null;
+  return props.companyRooms?.find((room) => room.room_id.toLowerCase() === selected) ?? null;
+});
+
 const roomActionLabel = computed(() => {
   if (!props.roomSelected) return "Continue";
   if (props.roomNeedsGithubAccess) return "Connect GitHub";
+  if (selectedCompanyRoom.value) return `Open ${selectedCompanyRoom.value.full_name ?? selectedCompanyRoom.value.display_name}`;
   return "Open room";
 });
+
+/** The chosen company row: "all", or a GitHub organization ID. */
+const companyPick = ref("all");
+watch(
+  () => props.stage === "organization",
+  (onCompanyStep) => {
+    if (onCompanyStep) companyPick.value = props.companyStep?.selectedId ?? "all";
+  },
+  { immediate: true },
+);
+
+/** The main button of the company step names what will happen. */
+const companyAction = computed<{ label: string; disabled: boolean }>(() => {
+  const step = props.companyStep;
+  if (!step || step.status === "idle" || step.status === "loading") return { label: "Continue", disabled: true };
+  if (step.status === "github_access_required") {
+    return { label: step.accessReason === "signin" ? "Reconnect on GitHub" : "Allow on GitHub", disabled: false };
+  }
+  if (step.status === "unavailable") return { label: "Continue with all rooms", disabled: false };
+  const org = step.organizations.find((item) => item.github_org_id === companyPick.value);
+  if (step.joiningId) {
+    const joining = step.organizations.find((item) => item.github_org_id === step.joiningId);
+    return { label: joining && !joining.setup ? "Setting up…" : "Joining…", disabled: true };
+  }
+  if (!org || org.joined) return { label: "Continue", disabled: false };
+  if (org.setup) return { label: `Join ${org.login}`, disabled: false };
+  if (org.role === "owner") return { label: `Set up ${org.login}`, disabled: false };
+  return { label: "Continue", disabled: true };
+});
+
+function runCompanyAction(): void {
+  const status = props.companyStep?.status;
+  if (status === "github_access_required") {
+    emit("open-company-github", { kind: "allow" });
+    return;
+  }
+  emit("choose-organization", status === "ready" && companyPick.value !== "all" ? companyPick.value : null);
+}
 
 const navigationKey = computed(() => {
   if (props.stage !== "mcp") return props.stage;
@@ -284,24 +390,32 @@ const actionKey = computed(() => {
   if (props.stage === "room") {
     return props.roomSelected ? "room-selected" : "room-empty";
   }
+  if (props.stage === "organization") return `organization-${props.companyStep?.status ?? "idle"}`;
   return navigationKey.value;
 });
 
 const headline = computed(() => {
   if (props.stage === "github") return "Repositories are rooms.";
-  if (props.stage === "room") return "Open your first room.";
+  if (props.stage === "organization") return "Where will you work?";
+  if (props.stage === "room") return props.companyName ? "Pick your first room." : "Open your first room.";
   if (props.mcpWizardStep === "install") return "Connect your agents.";
   if (props.mcpWizardStep === "done") return "MCP installed.";
   return "Where do your agents live?";
 });
 
 const copy = computed(() => {
+  if (props.stage === "organization") {
+    return "Bring your company’s rooms together, or keep all your rooms in view.";
+  }
   if (props.stage === "github") {
     return props.authStatus?.authenticated
-      ? "GitHub connected. Continue to open your first room."
+      ? "GitHub connected. Choose where you’ll work next."
       : "Sign in with GitHub to open your repositories as rooms.";
   }
   if (props.stage === "room") {
+    if (props.companyName && props.companyRooms?.length) {
+      return `The ${props.companyName} rooms you can open.`;
+    }
     return "Start now, or continue and choose one from the sidebar later.";
   }
   if (props.mcpWizardStep === "install") {
@@ -323,8 +437,9 @@ const showFeedback = computed(() => {
 
 const progressSteps = computed<Array<{ id: FirstRunWizardStage; step: string; label: string; complete: boolean }>>(() => [
   { id: "mcp", step: "1", label: "MCP", complete: props.stage !== "mcp" },
-  { id: "github", step: "2", label: "GitHub", complete: props.stage === "room" },
-  { id: "room", step: "3", label: "Room", complete: false },
+  { id: "github", step: "2", label: "GitHub", complete: props.stage === "organization" || props.stage === "room" },
+  { id: "organization", step: "3", label: "Company", complete: props.stage === "room" },
+  { id: "room", step: "4", label: "Room", complete: false },
 ]);
 
 const showBack = computed(() => {
@@ -339,7 +454,8 @@ function navigationRank(key: string): number {
     "mcp-install": 2,
     "mcp-done": 3,
     github: 4,
-    room: 5,
+    organization: 5,
+    room: 6,
   };
   return ranks[key] ?? 0;
 }

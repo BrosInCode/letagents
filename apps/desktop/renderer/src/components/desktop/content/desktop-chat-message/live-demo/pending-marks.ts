@@ -1,9 +1,10 @@
-import { DEMO_MARK_RATE_LIMITED_TEXT, type DemoMark, type DemoMarkInput, type LiveDemoPoint } from "./protocol";
+import { DEMO_MARK_RATE_LIMITED_TEXT, isLiveDemoAnchorPath, type DemoMark, type DemoMarkInput, type LiveDemoAnchor, type LiveDemoPoint } from "./protocol";
 
 /** What a mark is, without where it is saved or who made it. Undo puts a deleted mark back from this. */
 export type MarkBody =
   | { kind: "stroke"; points: LiveDemoPoint[] }
-  | { kind: "pin"; at: LiveDemoPoint; text: string };
+  /** `anchor`: the element under the pin, as the demo named it, for an agent that reads the pin. */
+  | { kind: "pin"; at: LiveDemoPoint; text: string; anchor?: LiveDemoAnchor | null };
 
 /**
  * A mark of yours that the server does not have yet. It is drawn dashed while it
@@ -44,12 +45,14 @@ export function pendingRetryDelay(attempts: number): number {
 export function markBody(mark: DemoMark): MarkBody {
   return mark.kind === "stroke"
     ? { kind: "stroke", points: mark.points.map(([x, y]) => [x, y]) }
-    : { kind: "pin", at: [mark.at[0], mark.at[1]], text: mark.text };
+    // An element path the server would now refuse (saved some other way) goes back without it, not refused.
+    : { kind: "pin", at: [mark.at[0], mark.at[1]], text: mark.text,
+      anchor: mark.anchor && isLiveDemoAnchorPath(mark.anchor.path) ? { ...mark.anchor } : null };
 }
 
 export function markInput(demo: string, body: MarkBody, id?: string): DemoMarkInput {
   const named = id === undefined ? {} : { id };
   return body.kind === "stroke"
     ? { ...named, demo, kind: "stroke", points: body.points, anchor: null }
-    : { ...named, demo, kind: "pin", at: body.at, text: body.text, anchor: null };
+    : { ...named, demo, kind: "pin", at: body.at, text: body.text, anchor: body.anchor ?? null };
 }

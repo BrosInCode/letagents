@@ -16,7 +16,14 @@ import {
   type AuthenticatedRequest,
   type ResolvedRequestAuth,
 } from "../../http/helpers.js";
+import { getJoinedOrganizationIds } from "../../db/organizations.js";
 import { listMemberRooms } from "../../db/room-members.js";
+import {
+  GitHubOrganizationAccessError,
+  GitHubOrganizationScopeError,
+  readGitHubOrganizationAccess,
+} from "../../github/organization-memberships.js";
+import { isAppSession, isSameOriginCookieWrite } from "../../request/app-session.js";
 import type {
   ProjectRepoAccessDecision,
   RepoRoomAccessDecision,
@@ -30,7 +37,23 @@ import {
 import { isReservedMainRoomCreationId, normalizeRoomId } from "../../rooms/routing.js";
 import { isMessageSenderWithinBounds } from "../../../../shared/message-contracts.mjs";
 
+/** Dependencies for creating a room inside a company; tests may stub them. */
+export interface CompanyRoomCreationDeps {
+  readOrganizationAccess: typeof readGitHubOrganizationAccess;
+  getJoinedOrganizationIds: typeof getJoinedOrganizationIds;
+  createProject: typeof createProject;
+  recordRoomCreator: typeof recordRoomCreator;
+}
+
+const companyRoomCreationDeps: CompanyRoomCreationDeps = {
+  readOrganizationAccess: readGitHubOrganizationAccess,
+  getJoinedOrganizationIds,
+  createProject,
+  recordRoomCreator,
+};
+
 export interface LegacyProjectRouteDeps {
+  companyRoomCreation?: CompanyRoomCreationDeps;
   resolveRequestAuth(req: AuthenticatedRequest): Promise<ResolvedRequestAuth>;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   isRepoBackedRoomId(roomId: string): boolean;
@@ -118,15 +141,65 @@ export function registerLegacyProjectRoutes(
   app.post("/projects", async (req: AuthenticatedRequest, res) => {
     const account = requireSignIn(req, res);
     if (!account) return;
-    const project = await createProject();
-    await recordRoomCreator(project.id, account.account_id);
+    const company = deps.companyRoomCreation ?? companyRoomCreationDeps;
+    // Without `organization_id` nothing about room creation changes.
+    const requestedOrganization = req.body?.organization_id;
+    let organizationId: string | null = null;
+    if (requestedOrganization !== undefined && requestedOrganization !== null) {
+      const id = typeof requestedOrganization === "number" && Number.isSafeInteger(requestedOrganization)
+        ? String(requestedOrganization)
+        : requestedOrganization;
+      if (typeof id !== "string" || !/^[1-9][0-9]*$/.test(id)) {
+        res.status(400).json({ error: "invalid_organization_id" });
+        return;
+      }
+      if (!isAppSession(req)) {
+        res.status(403).json({ error: "human_app_session_required" });
+        return;
+      }
+      if (!isSameOriginCookieWrite(req)) {
+        res.status(403).json({ error: "cross_site_write_refused" });
+        return;
+      }
+      if (account.provider !== "github" || !account.provider_access_token) {
+        res.status(401).json({ error: "github_signin_required" });
+        return;
+      }
+      let access;
+      try {
+        access = await company.readOrganizationAccess(account.provider_access_token);
+      } catch (error) {
+        if (error instanceof GitHubOrganizationScopeError) {
+          res.status(403).json({ error: "github_scope_required" });
+        } else if (error instanceof GitHubOrganizationAccessError && error.status === 401) {
+          res.status(401).json({ error: "github_signin_required" });
+        } else {
+          res.status(503).json({ error: "organization_verification_unavailable" });
+        }
+        return;
+      }
+      if (!access.memberships.some((membership) => membership.github_org_id === id)) {
+        // Single sign-on hides an organization until the token is authorized; that is not "not a member".
+        res.status(403).json({ error: access.ssoRequiredOrgIds.includes(id) ? "organization_sso_required" : "organization_membership_required" });
+        return;
+      }
+      if (!(await company.getJoinedOrganizationIds(account.account_id)).includes(id)) {
+        res.status(403).json({ error: "organization_join_required" });
+        return;
+      }
+      organizationId = id;
+    }
+    const project = organizationId
+      ? await company.createProject({ organizationId })
+      : await company.createProject();
+    await company.recordRoomCreator(project.id, account.account_id);
     await deps.rememberAccountRoom({
       accountId: account.account_id,
       roomId: project.id,
       displayName: project.display_name,
       source: "create_invite",
     });
-    res.status(201).json(project);
+    res.status(201).json(organizationId ? { ...project, organization_id: organizationId } : project);
   });
 
   app.get("/projects/join/:code", async (req: AuthenticatedRequest, res) => {

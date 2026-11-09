@@ -11,6 +11,7 @@ import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
 import { registerWakeRuleRoutes } from "../routes/rooms/wake-rules.js";
 import { registerRoomMemberRoutes } from "../routes/rooms/members.js";
 import { registerDemoMarkRoutes } from "../routes/rooms/demo-marks.js";
+import { resolveParticipantRoom } from "../routes/rooms/messages/helpers.js";
 import { liveDemoHub } from "../live-demos/service.js";
 import { claimRoomAsCreator } from "../db/room-members.js";
 import { registerWakeRuleLinkRoutes } from "../routes/wake-rule-links.js";
@@ -84,7 +85,10 @@ import { databaseAccountActivityLoaders } from "../account-activity/loaders.js";
 import { getAccountRoomsForAccount } from "../account-room-membership/list.js";
 import { presenceChangeEvents } from "./presence-change-events.js";
 import { registerAppLoginRoutes } from "../routes/auth/app-login.js";
+import { registerOrganizationConsentRoutes } from "../routes/auth/organization-consent.js";
 import { registerConversationRoutes } from "../routes/conversations.js";
+import { registerAccountOrganizationRoutes } from "../routes/account/organizations.js";
+import { registerOrganizationRoomRoutes } from "../routes/account/organization-rooms.js";
 import {
   registerAuthRoutes,
   registerGitHubAppCallbackRoute,
@@ -558,6 +562,7 @@ export function registerApiRoutes(app: Express): void {
 
   registerAuthRoutes(app);
   registerAppLoginRoutes(app);
+  registerOrganizationConsentRoutes(app);
   registerConversationRoutes(app);
   registerAccountRoomRoutes(app);
   registerAccountActivityStreamRoute(app, { hub: getAccountActivityHub(), getAccountRoomsForAccount });
@@ -565,6 +570,8 @@ export function registerApiRoutes(app: Express): void {
   registerConnectorRoutes(app);
   registerTrackerRuleRoutes(app);
   registerJevMetricsRoute(app);
+  registerAccountOrganizationRoutes(app);
+  registerOrganizationRoomRoutes(app);
   registerDesktopPushRoutes(app);
 
   registerGitHubIntegrationRoutes(app, githubIntegrationRouteDeps);
@@ -577,7 +584,11 @@ export function registerApiRoutes(app: Express): void {
 
   registerRoomJoinRoutes(app, roomJoinRouteDeps);
   registerRoomMessageRoutes(app, roomMessageRouteDeps);
-  registerDemoMarkRoutes(app, { resolveProjectRole, liveDemoHub });
+  registerDemoMarkRoutes(app, {
+    resolveProjectRole,
+    liveDemoHub,
+    participantRoom: (req, res) => resolveParticipantRoom(req, res, roomMessageRouteDeps),
+  });
   registerRoomKnowledgeRoutes(app, roomMessageRouteDeps);
   registerWakeRuleRoutes(app, roomMessageRouteDeps);
   registerWakeRuleLinkRoutes(app);

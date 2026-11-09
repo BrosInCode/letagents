@@ -11,6 +11,8 @@ const ROUTES: ReadonlyArray<{ method: string; path: RegExp; capability: AgentSes
   { method: "GET", path: /^\/rooms\/.+\/(?:expressions|gif-client-config)$/, capability: "coordination.read" },
   // The room history summary is a view of messages: an agent that may read messages may read it.
   { method: "GET", path: /^\/rooms\/.+\/history-summary(?:\/setting|\/nodes\/\d{1,2}:\d{1,9})?$/, capability: "messages.read" },
+  // Pins and drawings people left on a demo in a message: an agent that may read messages may read them (never save or remove).
+  { method: "GET", path: /^\/rooms\/.+\/demo-marks$/, capability: "messages.read" },
   { method: "PUT", path: /^\/rooms\/.+\/messages\/msg_\d+\/reactions\/[^/]+$/, capability: "messages.write" },
   { method: "DELETE", path: /^\/rooms\/.+\/messages\/msg_\d+\/reactions\/[^/]+$/, capability: "messages.write" },
   { method: "GET", path: /^\/rooms\/.+\/agent-guidelines$/, capability: "coordination.read" },

@@ -546,7 +546,7 @@ test("a text file or PDF is named with its path, never its bytes, and every refu
     '- Attachment 2: "ps.log" (text/plain, 100 bytes). Saved as a text file for you to read with your file tools, for this turn only (1 line): "/t/2.log". It was converted from UTF-16 to UTF-8.',
     '- Attachment 3: "latin.csv" (text/csv, 100 bytes). Saved as a text file for you to read with your file tools, for this turn only (2 lines): "/t/3.csv". It is not valid UTF-8, so some characters may show wrongly. Its longest line has 80,000 characters: search it or read it in parts. You were also given it in an earlier turn.',
     '- Attachment 4: "spec.pdf" (application/pdf, 100 bytes). Saved as a PDF for you to read with your file tools, for this turn only: "/t/4.pdf".',
-    '- Attachment 5: "a.zip" (application/zip, 100 bytes). Not given: only images, text files (such as .txt, .log, .md, .json, .csv, .yaml, .xml, .diff) and PDFs reach agents.',
+    '- Attachment 5: "a.zip" (application/zip, 100 bytes). Not given: only images, text files (such as .txt, .log, .md, .json, .csv, .yaml, .xml, .diff, .html) and PDFs reach agents.',
     '- Attachment 6: "b.log" (text/plain, 100 bytes). Not given: its bytes are not text or a PDF.',
     '- Attachment 7: "c.txt" (text/plain, 100 bytes). Not given: the file is empty.',
     '- Attachment 8: "d.log" (text/plain, 100 bytes). Not given: this agent cannot open files on this machine. If its content matters, ask the sender to paste it.',
@@ -556,6 +556,23 @@ test("a text file or PDF is named with its path, never its bytes, and every refu
     '- Attachment 12: "h.pdf" (application/pdf, 100 bytes). Not given: this agent cannot open files on this machine. If its content matters, ask the sender to paste it.',
   ]);
 
+});
+
+test("an HTML demo's note tells the agent to read its marks, by its message and attachment ids, whatever its status", () => {
+  const demo = (fields: Partial<ProviderRoomTurnAttachment> & Pick<ProviderRoomTurnAttachment, "index" | "fileName" | "status">) =>
+    attachment({ mimeType: "text/html", category: "file", ...fields });
+  const lines = formatRoomTurnContext({ sourceMessage: { id: "msg_9", text: "fix the pins" }, activation: {}, attachments: [
+    demo({ index: 1, fileName: "Checkout.html", status: "file", demo: { messageId: "msg_9", attachmentId: "att_1" },
+      file: { path: "/t/1.html", kind: "text", encoding: "utf-8", lines: 40, longestLine: 90 } }),
+    demo({ index: 2, fileName: "Big.html", status: "too_large", demo: { messageId: "msg_9", attachmentId: "att_2" } }),
+    demo({ index: 3, fileName: "local.html", status: "file", file: { path: "/t/3.html", kind: "text", encoding: "utf-8", lines: 1, longestLine: 9 } }),
+  ] });
+  assert.deepEqual(lines.slice(3), [
+    ATTACHMENT_HEADER,
+    '- Attachment 1: "Checkout.html" (text/html, 100 bytes). Saved as a text file for you to read with your file tools, for this turn only (40 lines): "/t/1.html". It is a live HTML demo: people may have pinned notes or drawn on it. Before you change it, read those marks with read_demo_marks (message_id "msg_9", attachment_id "att_1").',
+    '- Attachment 2: "Big.html" (text/html, 100 bytes). Not given: it is larger than the 10 MB file limit. Ask the sender for the part that matters. It is a live HTML demo: people may have pinned notes or drawn on it. Before you change it, read those marks with read_demo_marks (message_id "msg_9", attachment_id "att_2").',
+    '- Attachment 3: "local.html" (text/html, 100 bytes). Saved as a text file for you to read with your file tools, for this turn only (1 line): "/t/3.html".',
+  ]);
 });
 
 test("a Cursor turn with only files may read that turn's folder", () => {

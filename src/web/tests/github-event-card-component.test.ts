@@ -68,11 +68,13 @@ test('history rows show the original event and its time inline, with secondary a
 })
 
 const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove() {}, createElement: () => ({}), createText: () => ({}), createComment: () => ({}), setText() {}, setElementText() {}, parentNode: () => null, nextSibling: () => null })
-test('whole-group collapse retains individual history state; revealing a hidden original opens both levels', async () => {
+test('groups start collapsed, retain history state on toggle, and reveal a targeted original', async () => {
   const messages = [{ id: 'msg_1', timestamp: '2026-10-12T02:41:15Z' }]
-  const props = { grouped: true, messages, parseEvent: () => historyEvent }
+  const props = reactive({ grouped: true, messages, parseEvent: () => historyEvent })
   const html = await renderToString(createSSRApp({ render: () => h(Group, props) }))
-  assert.match(html, /<button[^>]*class="[^"]*github-updates-heading[^"]*"[^>]*aria-expanded="true"[^>]*aria-controls=/)
+  const trigger = html.match(/<button[^>]*class="[^"]*github-updates-heading[^"]*"[^>]*aria-expanded="false"[^>]*aria-controls="([^"]+)"/)
+  assert.ok(trigger, 'the group starts closed in both apps')
+  assert.match(html, new RegExp(`id="${trigger[1]}"[^>]*inert[^>]*aria-hidden="true"[^>]*display:none`))
   let vm: any
   const events: string[] = []
   const app = renderer.createApp({ setup() {
@@ -83,6 +85,12 @@ test('whole-group collapse retains individual history state; revealing a hidden 
   app.mount({})
   try {
     const key = vm.rows.value[0].key
+    assert.equal(vm.collapsed.value, true)
+    props.messages.push({ id: 'msg_2', timestamp: '2026-10-12T02:42:15Z' })
+    await nextTick(); await nextTick()
+    assert.equal(vm.collapsed.value, true, 'incoming updates do not open the group')
+    await vm.toggleGroup({ detail: 0 })
+    assert.equal(vm.collapsed.value, false)
     await vm.toggle(key, { detail: 0 })
     assert.equal(vm.open.value.has(key), true)
     await vm.toggleGroup({ detail: 0 })
@@ -96,7 +104,7 @@ test('whole-group collapse retains individual history state; revealing a hidden 
     assert.equal(vm.collapsed.value, false)
     assert.equal(vm.open.value.has(key), true)
     assert.equal(ready, true)
-    assert.equal(events.filter(name => name === 'layoutStart').length, 2)
+    assert.equal(events.filter(name => name === 'layoutStart').length, 3)
   } finally { app.unmount() }
 })
 
@@ -108,6 +116,7 @@ for (const atBottom of [false, true]) {
     app.provide(ssrContextKey, { modules: new Set() }); app.mount({})
     try {
       const key = vm.rows.value[0].key
+      await vm.toggleGroup({ detail: 0 })
       let top = atBottom ? 400 : 120, height = 500
       const el: any = { get scrollTop() { return top }, set scrollTop(value) { top = Math.min(value, height - 100) },
         get clientHeight() { return vm.collapsed.value ? 0 : 100 }, get scrollHeight() { return vm.collapsed.value ? 0 : height },
