@@ -2,7 +2,7 @@
   <Teleport to="body">
     <DesktopDialogShell
       :open="open"
-      aria-label="Switch rooms"
+      aria-label="Find a room"
       backdrop-class="sidebar-switcher-backdrop"
       panel-class="sidebar-switcher"
       :show-close="false"
@@ -17,7 +17,7 @@
           id="sidebar-switcher-query"
           v-model="query"
           type="search"
-          placeholder="Switch to a room…"
+          placeholder="Search rooms, projects or branches…"
           aria-label="Search all rooms"
           role="combobox"
           aria-autocomplete="list"
@@ -32,7 +32,7 @@
         />
         <button type="button" aria-label="Close room switcher" @click="$emit('close')"><X aria-hidden="true" /></button>
       </div>
-      <div class="sidebar-switcher-caption"><span>{{ query.trim() ? 'Matching rooms' : 'Your rooms' }}</span><span v-if="zenMode"><Focus aria-hidden="true" />Zen Mode stays on</span></div>
+      <div class="sidebar-switcher-caption"><span>{{ query.trim() ? 'Matching rooms' : 'Your rooms' }}</span><span v-if="zenMode"><Focus aria-hidden="true" />Project focus stays on</span></div>
       <div v-if="options.length" id="sidebar-switcher-results" class="sidebar-switcher-results" role="listbox" aria-label="Rooms">
         <div
           v-for="(option, index) in options"
@@ -45,8 +45,9 @@
           @pointerenter="activeIndex = index"
           @click="chooseOption(option.entry)"
         >
-          <span class="sidebar-switcher-icon" aria-hidden="true"><GitBranch v-if="option.entry.kind === 'branch'" /><MessageSquare v-else-if="option.entry.kind === 'focus'" /><House v-else /></span>
+          <span class="sidebar-switcher-icon" aria-hidden="true"><GitBranch v-if="option.entry.kind === 'branch'" /><MessageSquare v-else-if="option.entry.kind === 'focus'" /><Folder v-else /></span>
           <span class="sidebar-switcher-copy"><strong>{{ option.title }}</strong><small>{{ option.detail }}</small></span>
+          <RoomUnreadBadge :count="option.entry.unreadCount || 0" :marked-unread="option.entry.hasUnread" />
           <span v-if="option.entry.id === activeEntryId || (option.entry.kind === 'parent' && option.projectId === activeProjectId)" class="sidebar-switcher-current">Current<Check aria-hidden="true" /></span>
           <ChevronRight v-else class="sidebar-switcher-arrow" aria-hidden="true" />
         </div>
@@ -59,7 +60,8 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
-import { Check, ChevronRight, Focus, GitBranch, House, MessageSquare, Search, X } from '@lucide/vue';
+import { Check, ChevronRight, Focus, GitBranch, Folder, MessageSquare, Search, X } from '@lucide/vue';
+import RoomUnreadBadge from './RoomUnreadBadge.vue';
 import DesktopDialogShell from '../content/DesktopDialogShell.vue';
 import type { ProjectGroup, RoomEntry } from '../types';
 import { sidebarRoomSwitchOptions } from '../../../domain/sidebar-zen-mode';

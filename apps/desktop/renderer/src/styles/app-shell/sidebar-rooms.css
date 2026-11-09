@@ -60,7 +60,7 @@
   position: relative;
   display: block;
   min-width: 0;
-  min-height: 32px;
+  min-height: 36px;
   padding: 0 8px;
   border: 0;
   border-radius: 7px;
@@ -72,7 +72,7 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-  min-height: 32px;
+  min-height: 36px;
 }
 
 .sidebar-selection-indicator {
@@ -164,15 +164,15 @@
   display: grid;
   gap: 1px;
   margin: 0 0 4px;
-  padding-left: 18px;
+  padding-left: 26px;
 }
 
 .project-room-list::before {
   content: "";
   position: absolute;
   top: 2px;
-  bottom: 2px;
-  left: 15.5px;
+  bottom: 17px;
+  left: 17px;
   width: 1px;
   background: var(--border-strong);
 }
@@ -285,7 +285,7 @@
   align-items: center;
   gap: 10px;
   min-width: 0;
-  min-height: 32px;
+  min-height: 36px;
   padding: 0 8px;
   border: 0;
   border-radius: 7px;
@@ -319,11 +319,12 @@
 
 .room-row {
   position: relative;
-  grid-template-columns: minmax(0, 1fr);
+  grid-template-columns: 14px minmax(0, 1fr);
+  gap: 7px;
   align-items: center;
   min-width: 0;
-  min-height: 28px;
-  padding: 0 8px 0 12px;
+  min-height: 32px;
+  padding: 0 8px;
   border: 0;
   border-radius: 7px;
   background: transparent;
@@ -446,3 +447,13 @@
     transition: none;
   }
 }
+
+/* Rounded branches connect each child to the parent's trunk without competing with its label. */
+.project-room-list > :is(.room-row, .project-room-overflow-toggle)::before {
+  content: ""; position: absolute; top: 0; left: -9px; width: 9px; height: 17px;
+  border-left: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong);
+  border-bottom-left-radius: 7px; pointer-events: none;
+}
+.project-room-overflow-toggle { position: relative; }
+.sidebar-child-icon { display: inline-flex; color: var(--text-tertiary); }
+.sidebar-child-icon svg { width: 14px; height: 14px; stroke-width: 1.65; }
