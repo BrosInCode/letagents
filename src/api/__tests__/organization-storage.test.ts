@@ -46,7 +46,8 @@ test("verified joins are atomic, idempotent, and keyed by immutable organization
         ('suspended', '42', 'Organization', now(), NULL),
         ('uninstalled', '42', 'Organization', NULL, now()),
         ('other', '99', 'Organization', NULL, NULL),
-        ('personal', '42', 'User', NULL, NULL);
+        ('personal', '42', 'User', NULL, NULL),
+        ('account-typed', '77', 'Account', NULL, NULL);
     `);
     for (const [id, installation, kind, removed] of [
       ["100", "active", "main", false],
@@ -56,6 +57,7 @@ test("verified joins are atomic, idempotent, and keyed by immutable organization
       ["104", "personal", "main", false],
       ["105", "active", "main", true],
       ["106", "active", "focus", false],
+      ["107", "account-typed", "main", false],
     ]) {
       await pool.query("INSERT INTO rooms (id, display_name, kind) VALUES ($1, $2, $3)", [`repo-${id}`, `repo-${id}`, kind]);
       await pool.query("INSERT INTO github_repositories VALUES ($1, $2, $3)", [id, `repo-${id}`, `acme/repo-${id}`]);
@@ -63,6 +65,8 @@ test("verified joins are atomic, idempotent, and keyed by immutable organization
     }
     assert.deepEqual((await getConnectedOrganizationRooms("42")).map((room) => room.github_repo_id), ["100"]);
     assert.deepEqual((await getConnectedOrganizationRooms("99")).map((room) => room.github_repo_id), ["103"]);
+    // Repository webhooks used to store an organization install as "Account".
+    assert.deepEqual((await getConnectedOrganizationRooms("77")).map((room) => room.github_repo_id), ["107"]);
     await assert.rejects(store.saveVerifiedOrganizationMembership({ accountId: "missing", membership: { ...membership, github_org_id: "43" }, create: true }));
     assert.deepEqual(await store.getOrganizationsForGitHubIds(["43"]), []);
     await pool.query(`
