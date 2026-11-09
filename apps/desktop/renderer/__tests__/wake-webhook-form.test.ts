@@ -390,7 +390,7 @@ test("the section wires the button to the cancelled list: closed at first, the s
   assert.match(section, /<button\s+v-if="cancelledRules\.length"\s+type="button"\s+class="wake-webhook-link"[\s\S]*?:aria-expanded="cancelledShown"\s+@click="toggleCancelled"\s*>\{\{ cancelledToggleLabel \}\}<\/button>/);
   assert.match(section, /<WakeWebhookRuleList\s+v-if="cancelledShown"\s+:rules="cancelledRules"/);
   // The host's `open` (true unless a host passes it) resets the list.
-  assert.match(section, /open\?: boolean;[\s\S]*?\}>\(\), \{ loading: false, error: null, open: true \}\);/);
+  assert.match(section, /open\?: boolean;[\s\S]*?\}>\(\), \{ loading: false, error: null, open: true, controller: null \}\);/);
   assert.match(section, /useCancelledWakeWebhookRules\(ownRules, toRef\(props, "open"\)\)/);
   // Local state only: nothing here reads or writes storage.
   assert.doesNotMatch(section, /localStorage|sessionStorage/);
@@ -416,13 +416,39 @@ test("the form's help text and the secret notice are the agreed sentences, and t
   assert.doesNotMatch(section, /rule\.(url|secret|bearer)|delivery\.(url|secret|bearer)/);
 });
 
-test("the room settings panel shows the section for cloud rooms and lists it in the rail only while it has agents", () => {
+test("the room settings panel shows wake-ups as a row of the Bot section, only while the person has agents there", () => {
   const panel = source("../src/components/desktop/content/room-shell/DesktopRoomActionPanel.vue");
-  assert.match(panel, /<RoomWakeWebhooks v-if="cloudRoom" :room-identifier="room\.identifier" @summary="wakeSummary = \$event" \/>/);
-  assert.match(panel, /cloudRoom\.value && wakeSummary\.value\s*\?\s*\{ id: "wake", title: "Wake-ups", icon: Webhook, summary: wakeSummary\.value \}/);
-  const section = source("../src/components/desktop/content/room-shell/RoomWakeWebhooks.vue");
-  assert.match(section, /<section\s+v-if="agents\.length"[\s\S]*?data-section="wake"/);
-  assert.match(section, /<h3 id="room-settings-heading-wake">Wake a bot by webhook<\/h3>/);
-  assert.match(section, /useRoomWakeRules\(roomIdentifier, computed\(\(\) => agents\.value\.length > 0\)\)/);
-  assert.match(section, /emit\("summary", null\)/);
+  const bot = panel.slice(panel.indexOf('data-section="bot"'), panel.indexOf('data-section="conversation"'));
+  assert.match(bot, /data-testid="desktop-room-invite-bot"[\s\S]*?<\/SmoothHeight>\s*<RoomWakeWebhooks :room-identifier="room\.identifier" \/>\s*<\/div>\s*<\/section>/,
+    "after Invite a bot, in the Bot section's list");
+  assert.doesNotMatch(panel, /id: "wake"|wakeSummary/, "no rail item of its own");
+  const row = source("../src/components/desktop/content/room-shell/RoomWakeWebhooks.vue");
+  // A row like the others: title and description on the left, a house button that never repeats the title.
+  assert.match(row, /<SmoothHeight v-if="agents\.length">\s*<div class="room-settings-row" data-inline="true" data-testid="room-wake-webhooks">/);
+  assert.match(row, /<p class="room-settings-row-title">Wake a bot by webhook<\/p>\s*<p class="room-settings-row-description">\{\{ WAKE_WEBHOOK_INTRO \}\}<\/p>/);
+  // The row's one button follows the form: Add, then Cancel while the form is open, then Done once the secret shows.
+  assert.match(row, /v-if="form\.revealedSecret\.value"\s+class="room-settings-button"\s+type="button"\s+data-testid="room-wake-webhooks-done"\s+@click="form\.dismissSecret\(\)"\s*>Done<\/button>/);
+  assert.match(row, /v-else-if="form\.open\.value"\s+class="room-settings-button"\s+type="button"\s+data-testid="room-wake-webhooks-cancel"\s+:disabled="form\.saving\.value"\s+@click="form\.hide\(\)"\s*>Cancel<\/button>/);
+  assert.match(row, /v-else\s+class="room-settings-button"\s+type="button"\s+data-testid="room-wake-webhooks-add"\s+@click="form\.show\(\)"\s*>Add wake-up<\/button>/);
+  assert.match(row, /<WakeWebhookSection\s+class="room-wake-webhooks-body"\s+:controller="form"/);
+  assert.match(row, /useWakeWebhookForm\(\{ roomId: roomIdentifier, agents, api, onChanged: refresh \}\)/);
+  assert.match(row, /\.room-wake-webhooks-body \{\s*grid-column: 1 \/ -1;\s*\}/);
+  assert.match(row, /useRoomWakeRules\(roomIdentifier, computed\(\(\) => agents\.value\.length > 0\)\)/);
+});
+
+test("a host that passes its own form shows the opening line and the Add, Cancel and Done buttons itself", async () => {
+  const controller = useWakeWebhookForm({ roomId: ref("sky-owl"), agents: ref(agents), api: api() });
+  const closed = await render({ controller, rules: [rule()] });
+  assert.doesNotMatch(closed, /wake-webhook-intro/, "the host's row describes it");
+  assert.doesNotMatch(closed, /data-testid="wake-webhook-add"/, "the host's row button opens the form");
+  assert.match(closed, /data-rule-id="wake_1"/, "the list of wake-ups stays");
+  assert.match(await render({ controller, rules: [] }), /class="wake-webhook-empty"/, "so does the empty line");
+  controller.show();
+  const open = await render({ controller });
+  assert.match(open, /data-testid="wake-webhook-form"/);
+  assert.match(open, />\s*Save\s*</);
+  assert.doesNotMatch(open, />\s*Cancel\s*</, "the host's row button cancels");
+  const alone = await render({});
+  assert.match(alone, /class="wake-webhook-intro">LetAgents sends a signed POST/, "the section alone keeps its opening line");
+  assert.match(alone, /data-testid="wake-webhook-add"/);
 });

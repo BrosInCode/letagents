@@ -136,6 +136,7 @@
               />
             </div>
           </SmoothHeight>
+          <RoomWakeWebhooks :room-identifier="room.identifier" />
         </div>
       </section>
 
@@ -155,8 +156,6 @@
       </section>
 
       <RoomTrackerFilters v-if="cloudRoom" :room-identifier="room.identifier" @summary="ticketsSummary = $event" />
-
-      <RoomWakeWebhooks v-if="cloudRoom" :room-identifier="room.identifier" @summary="wakeSummary = $event" />
 
       <section class="room-settings-section" data-section="guidelines" aria-labelledby="room-settings-heading-guidelines">
         <h3 id="room-settings-heading-guidelines">Guidelines</h3>
@@ -398,7 +397,7 @@
 
 <script setup lang="ts">
 import RoomNotificationSettings from "./RoomNotificationSettings.vue";
-import { Bell, Bot, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, Ticket, Users, Webhook, X } from "@lucide/vue";
+import { Bell, Bot, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, Ticket, Users, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
 import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";
 import RoomConversationRouting from "./RoomConversationRouting.vue";
@@ -477,12 +476,11 @@ const guidelinesSummary = ref<string | null>(null);
 // Null while the Ticket filters block shows nothing (no filter and no tracker connection).
 const ticketsSummary = ref<string | null>(null);
 // Null while the webhook wake-up block shows nothing (the person owns no agent in this room).
-const wakeSummary = ref<string | null>(null);
 // Null while the Members block shows nothing (a server without members, or not a member).
 const membersSummary = ref<string | null>(null);
 const contentElement = ref<HTMLElement | null>(null);
 
-type SectionId = "general" | "members" | "bot" | "conversation" | "tickets" | "wake" | "guidelines" | "data" | "alerts" | "github";
+type SectionId = "general" | "members" | "bot" | "conversation" | "tickets" | "guidelines" | "data" | "alerts" | "github";
 type StorageChoice = "inherit" | "cloud" | "local";
 interface SectionLink {
   id: SectionId;
@@ -717,9 +715,6 @@ const sections = computed<SectionLink[]>(() => {
       : null,
     cloudRoom.value && ticketsSummary.value
       ? { id: "tickets", title: "Tickets", icon: Ticket, summary: ticketsSummary.value }
-      : null,
-    cloudRoom.value && wakeSummary.value
-      ? { id: "wake", title: "Wake-ups", icon: Webhook, summary: wakeSummary.value }
       : null,
     { id: "guidelines", title: "Guidelines", icon: FileText, summary: cloudRoom.value ? guidelinesSummary.value : null },
     {
