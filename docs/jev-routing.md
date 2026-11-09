@@ -1,9 +1,9 @@
 # Smart conversation routing (Beta)
 
 Desktop 0.1.54 adds **Room settings → Smart conversation routing · Beta**,
-powered by Jev. Rooms made after the server applies migration 0145, focus
-rooms included, start with it on. Older rooms keep the value they had, which
-was off unless an admin turned it on. An authenticated room admin can enable
+powered by Jev. It is on by default: migration 0145 turned it on in every
+room, including rooms whose admin had turned it off, and new rooms (focus
+rooms included) start with it on. An authenticated room admin can enable
 or disable it. Agent credentials cannot change it. Local-only rooms do not
 expose this cloud feature.
 

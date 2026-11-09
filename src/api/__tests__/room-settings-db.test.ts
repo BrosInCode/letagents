@@ -34,7 +34,7 @@ async function post(project: any, roomEvent: RepoRoomEvent, eventProject: any = 
 const githubMessages = async (roomId: string) =>
   (await rooms!.getMessages(roomId)).messages.filter(message => message.source === 'github').map(message => message.text);
 
-test('every room has a settings row with the conversation defaults on, and the 0145 backfill keeps stored choices', options, async () => {
+test('every room has a settings row with the conversation defaults on; 0145 turns routing and expressions on everywhere and keeps other choices', options, async () => {
   const row = async (id: string) => (await client!.pool.query(
     'SELECT expressions_enabled, history_summary_enabled, agent_reply_order FROM room_settings WHERE room_id = $1', [id])).rows[0];
   const routing = async (id: string) => (await client!.pool.query('SELECT jev_routing_enabled FROM rooms WHERE id = $1', [id])).rows[0].jev_routing_enabled;
@@ -55,14 +55,15 @@ test('every room has a settings row with the conversation defaults on, and the 0
   await store!.setRoomExpressionsEnabled(chosen.id, false);
   await store!.setRoomAgentReplyOrder(chosen.id, 'parallel');
   await store!.setRoomHistorySummaryEnabled(chosen.id, false);
+  // The data statements of 0145, run again over these rooms.
   const migration = await readFile(resolve('drizzle/0145_conversation_defaults_on.sql'), 'utf8');
-  const backfill = migration.split('--> statement-breakpoint').find(statement => statement.includes('INSERT INTO room_settings'));
-  assert.ok(backfill);
-  await client!.pool.query(backfill);
+  const data = migration.split('--> statement-breakpoint').filter(statement => /^\s*(--[^\n]*\n\s*)*(INSERT INTO|UPDATE) /.test(statement));
+  assert.equal(data.length, 3, 'the backfill and the two updates');
+  for (const statement of data) await client!.pool.query(statement);
   assert.deepEqual(await row(bare.id), { expressions_enabled: true, history_summary_enabled: true, agent_reply_order: null });
-  assert.deepEqual(await row(chosen.id), { expressions_enabled: false, history_summary_enabled: false, agent_reply_order: 'parallel' },
-    'a stored choice stays');
-  assert.equal(await routing(chosen.id), false);
+  assert.deepEqual(await row(chosen.id), { expressions_enabled: true, history_summary_enabled: false, agent_reply_order: 'parallel' },
+    'expressions turn on everywhere; the other choices stay');
+  assert.equal(await routing(chosen.id), true, 'routing turns on everywhere');
 });
 
 test('a room with no choice posts every kind; a choice is stored and replaced', options, async () => {

@@ -18,7 +18,7 @@ export const rooms = pgTable(
   {
     id: text("id").primaryKey(),
     display_name: text("display_name").notNull(),
-    // On for rooms made since migration 0145. Older rooms keep the value they had.
+    // On by default. Migration 0145 also turned it on in every existing room.
     jev_routing_enabled: boolean("jev_routing_enabled").notNull().default(true),
     kind: text("kind").notNull().default("main"),
     parent_room_id: text("parent_room_id").references((): AnyPgColumn => rooms.id, {

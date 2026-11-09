@@ -1,6 +1,7 @@
--- Smart conversation routing and GIFs and agent reactions start on in rooms
--- made from now on. Rooms that already exist keep the value they hold: it
--- cannot tell a room that never chose from one whose admin turned it off.
+-- Smart conversation routing and GIFs and agent reactions are on in every
+-- room: rooms made from now on start on, and every existing room is turned
+-- on, including a room whose admin had turned one off (the owner's choice,
+-- 2026-11-09). A stored value cannot tell "never chose" from "turned off".
 
 -- rooms is read on almost every request. Give up rather than queue all of
 -- them behind a long transaction.
@@ -16,6 +17,10 @@ ALTER TABLE room_settings ALTER COLUMN expressions_enabled SET DEFAULT true;
 -- a first "off" pass a message that is still being sent. A room that had no
 -- row had chosen nothing, so its new row holds only the defaults.
 INSERT INTO room_settings (room_id) SELECT id FROM rooms ON CONFLICT (room_id) DO NOTHING;
+--> statement-breakpoint
+UPDATE rooms SET jev_routing_enabled = true WHERE NOT jev_routing_enabled;
+--> statement-breakpoint
+UPDATE room_settings SET expressions_enabled = true WHERE NOT expressions_enabled;
 --> statement-breakpoint
 CREATE OR REPLACE FUNCTION create_room_settings_row() RETURNS trigger
 LANGUAGE plpgsql AS $$

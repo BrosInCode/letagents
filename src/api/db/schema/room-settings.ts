@@ -21,7 +21,7 @@ export const room_settings = pgTable("room_settings", {
   // one after another (sequential, the default). 'parallel' is a room admin
   // turning that off.
   agent_reply_order: text("agent_reply_order").$type<RoomAgentReplyOrder>(),
-  // On for rooms made since migration 0145. Older rows keep the value they had.
+  // On by default. Migration 0145 also turned it on in every existing room.
   expressions_enabled: boolean("expressions_enabled").notNull().default(true),
   // On unless an admin turns it off; a room with no row has it on too.
   history_summary_enabled: boolean("history_summary_enabled").notNull().default(true),
