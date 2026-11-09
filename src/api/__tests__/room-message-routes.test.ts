@@ -2286,6 +2286,54 @@ test("worker stream routing barrier retains frames, coalesces readers and releas
   assert.equal(await waitForMessageRouting({ roomId: "routing-stream", messageId: "msg_4", includePromptOnly: false, closed: () => closed, load }), false);
 });
 
+test("worker stream routing barrier wakes on a routed event, not on a timer", async () => {
+  const { waitForMessageRouting } = await import("../routes/rooms/messages/wait-for-routing.js");
+  const { messageEvents } = await import("../server/events.js");
+  let ready = false;
+  let calls = 0;
+  const load = async () => {
+    calls++;
+    await new Promise((resolve) => setImmediate(resolve));
+    return { checkpoint: ready ? "msg_5" : "msg_1", cursorExists: true };
+  };
+  const started = Date.now();
+  const frame = waitForMessageRouting({
+    roomId: "routing-event-room", messageId: "msg_5", includePromptOnly: false, closed: () => false, load,
+    fallbackMs: 60_000,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(calls, 1, "a blocked frame does not read again on a short timer");
+  messageEvents.emit("message:routed", { projectId: "another-room", message: { id: "msg_9" }, recipientAgentTargets: [] });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(calls, 1, "another room's event does not wake it");
+  ready = true; // The routing job committed; its event follows.
+  messageEvents.emit("message:routed", { projectId: "routing-event-room", message: { id: "msg_5" }, recipientAgentTargets: [] });
+  assert.equal(await frame, true);
+  assert.equal(calls, 2);
+  assert.ok(Date.now() - started < 5_000);
+});
+
+test("worker stream routing barrier reads again when the event lands during a read", async () => {
+  const { waitForMessageRouting } = await import("../routes/rooms/messages/wait-for-routing.js");
+  const { messageEvents } = await import("../server/events.js");
+  let calls = 0;
+  const load = async () => {
+    calls++;
+    // The job commits and its event fires while the first read is in flight,
+    // after that read took its snapshot.
+    if (calls === 1) {
+      messageEvents.emit("message:routed", { projectId: "routing-race-room", message: { id: "msg_2" }, recipientAgentTargets: [] });
+      return { checkpoint: "msg_1", cursorExists: true };
+    }
+    return { checkpoint: "msg_2", cursorExists: true };
+  };
+  assert.equal(await waitForMessageRouting({
+    roomId: "routing-race-room", messageId: "msg_2", includePromptOnly: false, closed: () => false, load,
+    fallbackMs: 60_000,
+  }), true);
+  assert.equal(calls, 2);
+});
+
 test('typing reaches only opted-in other people; agent SSE/poll stay parked and reconnect has no replay', async () => {
   const { roomTyping } = await import('../server/room-typing.js');
   const handlers = new Map<string, Function>();
