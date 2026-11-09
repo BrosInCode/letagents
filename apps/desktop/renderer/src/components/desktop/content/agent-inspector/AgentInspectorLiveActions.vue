@@ -104,7 +104,7 @@ const statusLabel = computed(() => backgroundRunning.value ? "In background" : l
  * The newest lines of a shell command while it runs, under its row: the
  * output arrives while the command runs, so nobody has to open the row.
  */
-const tailVisible = computed(() => Boolean(single.value && props.current && ongoing.value
+const tailVisible = computed(() => Boolean(single.value && props.current && ongoing.value && !backgroundRunning.value
   && isShellToolName(single.value.item.tool)
   && (typeof single.value.item.output === "string" || single.value.item.outputHidden)));
 const now = useNow(1_000, () => tailVisible.value);

@@ -1916,8 +1916,13 @@ test("Codex command output deltas survive a completion without aggregated output
   assert.equal((lifecycle("item/completed", "next", { aggregatedOutput: "authoritative complete output", exitCode: 0 })[0]?.payload as any).output, "authoritative complete output");
   lifecycle("item/started", "unfinished");
   delta("abandoned", "unfinished");
+  // A command that still runs when its turn ends runs in the background; its end says so, and its call's row
+  // keeps no output of its own.
   display.project(displayEvent("codex", "turn/completed", { threadId: "thread", turn: { id: "unfinished" } }));
-  assert.equal((lifecycle("item/completed", "unfinished", { exitCode: 1 })[0]?.payload as any).output, null);
+  const ended = lifecycle("item/completed", "unfinished", { exitCode: 1 });
+  assert.deepEqual(ended.map((event) => event.method), ["item/backgroundCommand/updated", "item/toolCall/updated"]);
+  assert.deepEqual([(ended[0]!.payload as any).status, (ended[0]!.payload as any).exitCode], ["failed", 1]);
+  assert.equal((ended[1]!.payload as any).output, null);
 });
 
 test("Codex captured command output is bounded and redacted again after joining chunks", () => {
