@@ -140,9 +140,8 @@ export function foldAgentStreamEvents(events, ended = false) {
     } else if (event.method === LIVE_BACKGROUND_COMMAND_METHOD) {
       const command = backgroundCommand(payload, event.observedAt);
       if (!command) continue;
-      // A command that ended stays ended: a late running value cannot reopen it.
-      const prior = background.get(command.id);
-      if (prior && prior.status !== "running" && command.status === "running") continue;
+      // The newest value of a command wins. An end shown from Claude Code's exit line alone goes back to running
+      // when the command writes more: it printed that line itself.
       background.set(command.id, command);
     }
   }
