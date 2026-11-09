@@ -2,6 +2,14 @@ import type { RoomGif, RoomExpressionsSetting } from "../../../shared/room-expre
 import { contextBridge, ipcRenderer } from "electron";
 import type { DesktopApi, DesktopRoomLiveMetadataOptions, DesktopRoomSnapshotOptions } from "./ipc-types.js";
 
+// Only the macOS main window uses a hidden native title bar. Apply its safe
+// area before Vue mounts; Windows and Linux keep their native window chrome.
+if (process.platform === "darwin") {
+  window.addEventListener("DOMContentLoaded", () => {
+    document.documentElement.dataset.windowChrome = "mac";
+  }, { once: true });
+}
+
 const api: DesktopApi = {
   conversations: {
     list: () => ipcRenderer.invoke("desktop:conversations:list"),

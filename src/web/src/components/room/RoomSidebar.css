@@ -1,0 +1,59 @@
+.web-room-sidebar { position: fixed; z-index: 40; inset: 0 auto 0 0; width: 272px; display: flex; flex-direction: column; gap: 20px; padding: 14px 12px 10px; border-right: 1px solid var(--border); background: var(--bg); color: var(--text); }
+.web-room-sidebar svg, .web-room-switcher svg { width: 17px; height: 17px; flex: 0 0 auto; stroke-width: 1.65; }
+.web-room-sidebar button, .web-room-sidebar a, .web-room-switcher button { border: 0; background: transparent; color: var(--text-secondary); font: inherit; text-decoration: none; cursor: pointer; }
+.web-sidebar-top { display: flex; align-items: center; height: 36px; gap: 2px; flex-shrink: 0; }
+.web-sidebar-brand { margin-right: auto; color: var(--text); font-size: 16px; font-weight: 650; letter-spacing: -0.6px; }
+.web-sidebar-top :is(a, button) { display: grid; place-items: center; width: 30px; height: 32px; border-radius: 8px; }
+.web-sidebar-nav { display: grid; gap: 2px; }
+.web-sidebar-nav a { display: flex; align-items: center; gap: 10px; min-height: 36px; padding: 0 10px; border-radius: 8px; color: var(--text); font-size: 13px; }
+.web-sidebar-nav svg { color: var(--text-tertiary); }
+.web-sidebar-rooms { min-height: 0; overflow: auto; flex: 1; }
+.web-sidebar-rooms section + section { margin-top: 22px; }
+.web-sidebar-rooms h3 { margin: 0; padding: 8px 10px; font-size: 11px; font-weight: 500; color: var(--text-tertiary); }
+.web-sidebar-project { margin-bottom: 2px; }
+.web-sidebar-parent { display: flex; align-items: center; border-radius: 8px; min-height: 36px; }
+.web-sidebar-parent > a { display: flex; align-items: center; gap: 10px; min-width: 0; flex: 1; padding: 9px 10px; font-size: 13px; color: var(--text); }
+.web-sidebar-parent > button { display: grid; place-items: center; width: 28px; height: 32px; flex: 0 0 auto; }
+.web-sidebar-parent svg { color: var(--text-tertiary); }
+.web-sidebar-parent .expanded { transform: rotate(90deg); }
+.web-sidebar-parent button svg { width: 14px; transition: transform 160ms ease-out; }
+.web-sidebar-parent a > span, .web-sidebar-children :is(a, button) > span { white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.web-sidebar-children { position: relative; padding-left: 26px; margin-bottom: 6px; }
+.web-sidebar-children::before { content: ''; position: absolute; left: 17px; top: 0; bottom: 16px; width: 1px; background: var(--border-strong); }
+.web-sidebar-children > :is(a, button) { position: relative; display: flex; align-items: center; gap: 7px; min-height: 32px; width: 100%; padding: 6px 8px; border-radius: 8px; font-size: 12px; text-align: left; }
+.web-sidebar-children > :is(a, button)::before { content: ''; position: absolute; left: -9px; top: 0; width: 9px; height: 17px; border-left: 1px solid var(--border-strong); border-bottom: 1px solid var(--border-strong); border-bottom-left-radius: 7px; }
+.web-sidebar-children svg { width: 14px; height: 14px; color: var(--text-tertiary); }
+.web-sidebar-parent[data-active="true"], .web-sidebar-children a[aria-current="page"] { background: var(--accent-active); color: var(--text); }
+.web-sidebar-note { margin: 0; padding: 12px 10px; color: var(--text-secondary); font-size: 12px; line-height: 1.5; }
+.web-sidebar-note button { text-decoration: underline; }
+.web-room-sidebar .web-sidebar-browse { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 34px; margin-top: 12px; padding: 0 10px; border-radius: 8px; font-size: 12px; }
+.web-sidebar-footer { border-top: 1px solid var(--border); padding-top: 10px; }
+.web-sidebar-focus { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 32px; padding: 0 8px; border-radius: 8px; font-size: 11px !important; }
+.web-sidebar-focus:disabled { opacity: .5; cursor: default; }
+.web-sidebar-switch { position: relative; margin-left: auto; width: 24px; height: 14px; border-radius: 999px; background: var(--border-strong); }
+.web-sidebar-switch::after { content: ''; position: absolute; width: 10px; height: 10px; left: 2px; top: 2px; border-radius: 50%; background: var(--text-secondary); transition: transform 160ms ease-out; }
+.web-sidebar-focus[aria-pressed="true"] .web-sidebar-switch { background: var(--blue); }
+.web-sidebar-focus[aria-pressed="true"] .web-sidebar-switch::after { background: white; transform: translateX(10px); }
+.web-sidebar-account { display: flex; align-items: center; gap: 9px; width: 100%; padding: 12px 8px; border-radius: 8px; text-align: left; }
+.web-sidebar-account img, .web-sidebar-initials { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; object-fit: cover; background: var(--accent-hover); }
+.web-sidebar-account > span:not(.web-sidebar-initials) { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--text); }
+.web-sidebar-account small { display: block; margin-top: 2px; color: var(--text-tertiary); font-size: 10px; }
+.web-room-switcher { width: min(560px, calc(100vw - 32px)); max-height: min(650px, calc(100dvh - 48px)); margin: max(24px, 10vh) auto auto; padding: 0; border: 1px solid var(--border-strong); border-radius: 18px; background: var(--bg); color: var(--text); box-shadow: var(--shadow-xl); overflow: hidden; }
+.web-room-switcher[open] { display: flex; flex-direction: column; }
+.web-room-switcher::backdrop { background: rgba(0,0,0,.5); }
+.web-room-switcher header { display: flex; align-items: center; justify-content: space-between; padding: 24px 24px 18px; }
+.web-room-switcher h2 { margin: 0; font-size: 20px; font-weight: 600; }
+.web-room-switcher header button { display: grid; place-items: center; width: 28px; height: 28px; }
+.web-room-switcher-search { display: flex; align-items: center; gap: 10px; margin: 0 24px 16px; padding: 12px; border: 1px solid var(--border-strong); border-radius: 9px; color: var(--text-secondary); }
+.web-room-switcher-search:focus-within { outline: 2px solid var(--blue); outline-offset: 2px; }
+.web-room-switcher-search input { min-width: 0; flex: 1; border: 0; outline: 0; background: transparent; color: var(--text); font: inherit; font-size: 13px; }
+.web-room-options { padding: 0 12px 12px; overflow: auto; min-height: 0; }
+.web-room-options > div { display: flex; gap: 12px; align-items: center; padding: 14px 12px; border-radius: 9px; cursor: pointer; font-size: 13px; }
+.web-room-options > div[aria-selected="true"] { background: var(--accent-hover); }
+.web-room-options > div > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.web-room-options small { display: block; margin-top: 3px; color: var(--text-tertiary); font-size: 11px; }
+.web-room-switcher footer { display: flex; flex-wrap: wrap; gap: 10px; justify-content: space-between; padding: 12px 24px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-tertiary); }
+.web-room-sidebar :is(a,button):focus-visible, .web-room-switcher button:focus-visible { outline: 2px solid var(--blue); outline-offset: -2px; }
+@media (hover:hover) { .web-sidebar-top :is(a,button):hover, .web-sidebar-nav a:hover, .web-sidebar-parent:hover, .web-sidebar-children > :is(a,button):hover, .web-sidebar-browse:hover, .web-sidebar-account:hover, .web-sidebar-focus:not(:disabled):hover { background: var(--accent-hover); color: var(--text); } }
+@media (max-width:999px) { .web-room-sidebar { box-shadow: 16px 0 40px rgba(0,0,0,.3); } }
+@media (prefers-reduced-motion:reduce) { .web-sidebar-parent button svg, .web-sidebar-switch::after { transition: none; } }

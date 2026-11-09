@@ -27,6 +27,7 @@ describe("desktop sidebar unread badge contract", () => {
   });
 
   it("single rooms keep their own count in child rows and search results", () => {
-    assert.match(sidebarSource, /<RoomUnreadBadge :count="result\.entry\.unreadCount \|\| 0" :marked-unread="result\.entry\.hasUnread" \/>/);
+    const switcher = readFileSync(new URL("../src/components/desktop/sidebar/SidebarRoomSwitcher.vue", import.meta.url), "utf8");
+    assert.match(switcher, /<RoomUnreadBadge :count="option\.entry\.unreadCount \|\| 0" :marked-unread="option\.entry\.hasUnread" \/>/);
   });
 });
