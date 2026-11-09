@@ -348,6 +348,11 @@ button.room-activity-pill:focus-visible,
   white-space: nowrap;
 }
 
+/* A long command gives way, not the short agent name after it. */
+.room-activity-row-copy code + span {
+  flex: 0 0 auto;
+}
+
 .room-activity-command {
   border-radius: 9px;
 }

@@ -324,6 +324,19 @@ test("direct Activity selections require the exact entry id and resource room", 
   assert.equal(missing.kind === "unavailable" ? missing.unavailableReason : null, "missing");
 });
 
+test("a direct request keeps the section its caller names, and only then", () => {
+  const garden = entry();
+  // The activity strip's Open on a background command asks for the Live section.
+  const live = supervisedAgentInspectorRequest(garden, { ownerAttribution: "EmmyMay's agent", initialTab: "live" });
+  assert.equal(live.target.initialTab, "live");
+  assert.equal(inspectorInitialTab(live.target), "live");
+  const selection = resolveAgentInspectorSelection(resource("ready", [garden]), live, "room_a");
+  assert.equal(selection.kind === "supervised" ? inspectorInitialTab(selection) : null, "live");
+  const plain = supervisedAgentInspectorRequest(garden, { ownerAttribution: "EmmyMay's agent" });
+  assert.equal("initialTab" in plain.target, false);
+  assert.equal(inspectorInitialTab(plain.target), "overview");
+});
+
 test("a retained direct request follows resource loss and recovery without identity inference", () => {
   const garden = entry();
   const request = supervisedAgentInspectorRequest(garden);

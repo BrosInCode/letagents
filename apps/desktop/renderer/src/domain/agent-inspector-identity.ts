@@ -146,6 +146,8 @@ export function supervisedAgentInspectorSelection(
     sender: presentation.sender?.trim() || displayName,
     agentKey: entry.agentKey ?? null,
     agentSessionId: entry.agentSessionId,
+    // A caller that names the section to open (the activity strip's Open goes to Live) keeps it.
+    ...(presentation.initialTab ? { initialTab: presentation.initialTab } : {}),
   };
 }
 
