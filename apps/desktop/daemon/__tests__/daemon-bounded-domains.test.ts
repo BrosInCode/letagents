@@ -206,7 +206,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // 1909 -> 1917: the background command ports (state view, watch, signed stop);
   // the list and its watch stay in agent-stream-registry.ts, the stop rules in
   // background-command-stop.ts.
-  assert.ok(mainSource.split("\n").length < 1_917, "main.ts must remain a thin composition root");
+  // 1917 -> 1919: the Stop mark and lost-end ports; the mark stays in provider-live-display.ts,
+  // the lost end in agent-stream-registry.ts.
+  assert.ok(mainSource.split("\n").length < 1_919, "main.ts must remain a thin composition root");
   for (const file of mainFiles) assert.ok(read(file).split("\n").length < 600, `${file} must stay under 600 lines`);
 });
 

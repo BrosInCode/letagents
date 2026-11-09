@@ -317,6 +317,28 @@ test("running background commands come from their newest values, and only a star
   assert.equal((await registry.watchBackgroundCommands({ entryId: "agent", afterVersion: 0, waitMs: 0 })).ended, true);
 });
 
+test("a running command whose end was lost ends as lost, and a real end that comes later still takes its place", async () => {
+  const changes: string[] = [];
+  const registry = new AgentStreamRegistry({ latestIntervalMs: 0, onBackgroundCommandsChange: (entryId) => changes.push(entryId) });
+  const background = (status: string) => ({ ...activity(0), method: "item/backgroundCommand/updated",
+    payload: { taskId: "task-1", toolUseId: "toolu_1", command: "npm run dev", status, output: "ready\n", exitCode: null,
+      startedAt: "2026-11-08T22:00:00.000Z", endedAt: null } });
+  registry.pushLatest("agent", "background:task-1", background("running"), { sticky: true });
+  assert.equal(registry.endLostBackgroundCommand("agent", "unknown", "2026-11-09T16:00:00.000Z"), false, "only a command the feed shows");
+
+  assert.equal(registry.endLostBackgroundCommand("agent", "task-1", "2026-11-09T16:00:00.000Z"), true);
+  assert.deepEqual(registry.runningBackgroundCommands("agent"), [], "the row leaves the strip");
+  assert.deepEqual(changes, ["agent", "agent"], "the agent's state no longer lists it");
+  const feed = async () => (await registry.watch({ entryId: "agent", afterSequence: 0, waitMs: 0 })).events.filter((event) => event.latest_key === "background:task-1");
+  const ended = await feed();
+  assert.deepEqual(ended.map((event) => event.payload), [{ taskId: "task-1", toolUseId: "toolu_1", command: "npm run dev", status: "lost",
+    output: "ready\n", exitCode: null, startedAt: "2026-11-08T22:00:00.000Z", endedAt: "2026-11-09T16:00:00.000Z" }]);
+  assert.equal(registry.endLostBackgroundCommand("agent", "task-1", "2026-11-09T16:00:01.000Z"), false, "an ended command is not ended again");
+
+  registry.pushLatest("agent", "background:task-1", background("stopped"), { immediate: true });
+  assert.deepEqual((await feed()).map((event) => (event.payload as { status: string }).status), ["stopped"]);
+});
+
 test("the background watch returns a busy running command even after many commands ended, and bounds its waiters", async () => {
   let pendingTimers = 0;
   const registry = new AgentStreamRegistry({

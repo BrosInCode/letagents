@@ -3,10 +3,18 @@ import { readCodexUsageTail } from "../provider-usage.js";
 import type { ProviderUsage } from "../../../../shared/provider-usage.js";
 import { sameProviderConnectionIdentity, type ProviderAdapter, type ProviderAttachTerminal, type ProviderContinuationRef, type ProviderHandle, type ProviderSpawnRequest } from "../provider-adapter.js";
 import { CodexAdapterLifecycle } from "./adapter-lifecycle.js";
+import { stopCodexBackgroundTerminal } from "./background-terminals.js";
 import { CodexProviderHandle } from "./handle.js";
 import { boundedCodexTools, boundedLaunchContract, codexTurnPolicy } from "./launch-contract.js";
 
 export class CodexProviderAdapter extends CodexAdapterLifecycle implements ProviderAdapter {
+  /** The owner's Stop for a command that the agent left running: Codex terminates its exec session. */
+  async stopBackgroundCommand(providerHandle: ProviderHandle, taskId: string): Promise<"stopping" | "not_running" | "failed"> {
+    const handle = this.requireHandle(providerHandle);
+    if (this.handles.get(handle.workAttemptId) !== handle || !handle.client.currentConnectionId()) return "failed";
+    return stopCodexBackgroundTerminal(handle.client, handle.providerContinuationId, taskId);
+  }
+
   async readUsage(providerHandle: ProviderHandle): Promise<ProviderUsage | null> {
     const handle = this.requireHandle(providerHandle);
     const continuation = handle.providerContinuationId;

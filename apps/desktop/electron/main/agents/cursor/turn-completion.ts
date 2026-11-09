@@ -222,6 +222,8 @@ export function commitAttemptTerminal(
   if (handle.terminal) return handle.terminal;
   handle.terminal = terminal;
   handle.liveTurn = null;
+  // The agent's runtime ended, and its live feed with it.
+  handle.backgroundShells?.closeAll();
   handle.state = terminal.terminalCause === "exited" || terminal.terminalCause === "stopped"
     ? "stopped"
     : "failed";

@@ -204,6 +204,27 @@ export class AgentStreamRegistry {
   }
 
   /**
+   * A background command that the feed shows as running, but that the agent's
+   * provider no longer knows: its end never reached the feed. Its newest value
+   * ends as lost ("Ended with the agent"), so the row leaves the strip. A real
+   * end that arrives later still takes its place.
+   */
+  endLostBackgroundCommand(entryId: string, taskId: string, endedAt: string): boolean {
+    const key = `${BACKGROUND_KEY_PREFIX}${taskId}`;
+    const buffer = this.streams.get(entryId);
+    const sequence = buffer?.latest.get(key);
+    const stored = sequence === undefined ? undefined : buffer?.events.find((event) => event.sequence === sequence);
+    if (!stored || !this.backgroundRunning(entryId, key)) return false;
+    this.dropLatest(entryId, key);
+    this.pushLatest(entryId, key, {
+      observed_at: endedAt, sequence: 0, provider: "letagents", kind: stored.kind, method: stored.method, summary: "",
+      status: "idle", payload: { ...(stored.payload as Record<string, unknown>), status: "lost", exitCode: null, endedAt },
+      payload_truncated: false, payload_redacted: false, durable_payload_ref: null,
+    }, { immediate: true });
+    return true;
+  }
+
+  /**
    * The commands that an agent runs in the background now, for its state:
    * what changes only when one starts or ends, never its output.
    */

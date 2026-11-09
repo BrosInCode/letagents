@@ -1916,8 +1916,71 @@ test("Codex command output deltas survive a completion without aggregated output
   assert.equal((lifecycle("item/completed", "next", { aggregatedOutput: "authoritative complete output", exitCode: 0 })[0]?.payload as any).output, "authoritative complete output");
   lifecycle("item/started", "unfinished");
   delta("abandoned", "unfinished");
+  // A command that still runs when its turn ends runs in the background; its end says so, and its call's row
+  // keeps no output of its own.
   display.project(displayEvent("codex", "turn/completed", { threadId: "thread", turn: { id: "unfinished" } }));
-  assert.equal((lifecycle("item/completed", "unfinished", { exitCode: 1 })[0]?.payload as any).output, null);
+  const ended = lifecycle("item/completed", "unfinished", { exitCode: 1 });
+  assert.deepEqual(ended.map((event) => event.method), ["item/backgroundCommand/updated", "item/toolCall/updated"]);
+  assert.deepEqual([(ended[0]!.payload as any).status, (ended[0]!.payload as any).exitCode], ["failed", 1]);
+  assert.equal((ended[1]!.payload as any).output, null);
+});
+
+test("a Codex terminal session that the owner stopped reads as stopped, though its shell exits with code 1", () => {
+  const display = new ProviderLiveDisplay("thread");
+  const lifecycle = (method: string, itemId: string, overrides = {}) => display.project(displayEvent("codex", method, {
+    threadId: "thread", turnId: "turn", item: { id: itemId, type: "commandExecution", command: "/bin/zsh -lc 'npm run dev'", ...overrides },
+  }));
+  lifecycle("item/started", "server", { processId: "60781" });
+  lifecycle("item/started", "watcher", { processId: "60782" });
+  display.project(displayEvent("codex", "turn/completed", { threadId: "thread", turn: { id: "turn" } }));
+  display.noteStopRequested("unknown", true);
+  display.noteStopRequested("server", true);
+  // Codex reports the end of a terminated `tty: true` session with the shell's own exit code (live, 2026-11-09).
+  const stopped = lifecycle("item/completed", "server", { status: "failed", exitCode: 1 });
+  assert.deepEqual([(stopped[0]!.payload as any).status, (stopped[1]!.payload as any).status, (stopped[1]!.payload as any).error],
+    ["stopped", "interrupted", null]);
+
+  // A Stop that Codex did not carry out is taken back: the command's own failure still reads as failed.
+  display.noteStopRequested("watcher", true);
+  display.noteStopRequested("watcher", false);
+  const failed = lifecycle("item/completed", "watcher", { status: "failed", exitCode: 1 });
+  assert.equal((failed[0]!.payload as any).status, "failed");
+});
+
+test("only a started Codex command of a completed turn runs on in the background, and the newest take the oldest's place", () => {
+  const display = new ProviderLiveDisplay("thread");
+  const project = (method: string, payload: Record<string, unknown>) => display.project(displayEvent("codex", method, { threadId: "thread", ...payload }));
+  const started = (turnId: string, itemId: string, extra: Record<string, unknown> = {}) => project("item/started", {
+    turnId, item: { id: itemId, type: "commandExecution", command: `/bin/zsh -lc 'run ${itemId}'`, ...extra } });
+  const background = (events: ReturnType<ProviderLiveDisplay["project"]>) => events
+    .filter((event) => event.method === "item/backgroundCommand/updated").map((event) => event.payload as Record<string, any>);
+
+  // A call that waits for approval has no process yet; output proves a start as well as a named process, also when
+  // a later item/started names the process that the approval let start.
+  started("turn-1", "waiting");
+  started("turn-1", "approved");
+  started("turn-1", "approved", { processId: "4" });
+  started("turn-1", "named", { processId: "1" });
+  started("turn-1", "printing");
+  project("item/commandExecution/outputDelta", { turnId: "turn-1", itemId: "printing", delta: "ready\n" });
+  assert.deepEqual(background(project("turn/completed", { turn: { id: "turn-1", status: "completed" } })).map((payload) => payload.taskId),
+    ["approved", "named", "printing"]);
+
+  // An interrupted or failed turn leaves no command to follow.
+  started("turn-2", "cut", { processId: "2" });
+  assert.deepEqual(background(project("turn/completed", { turn: { id: "turn-2", status: "interrupted" } })), []);
+  started("turn-3", "broken", { processId: "3" });
+  assert.deepEqual(background(project("turn/failed", { turnId: "turn-3" })), []);
+  assert.equal(project("item/commandExecution/outputDelta", { turnId: "turn-2", itemId: "cut", delta: "late\n" }).length, 0);
+
+  // At 16, the oldest is no longer followed and ends as lost; the newest is shown.
+  for (let index = 0; index < 14; index += 1) {
+    started(`turn-fill-${index}`, `fill-${index}`, { processId: String(100 + index) });
+    project("turn/completed", { turn: { id: `turn-fill-${index}`, status: "completed" } });
+  }
+  started("turn-new", "newest", { processId: "200" });
+  const placed = background(project("turn/completed", { turn: { id: "turn-new", status: "completed" } }));
+  assert.deepEqual(placed.map((payload) => [payload.taskId, payload.status]), [["named", "lost"], ["newest", "running"]]);
 });
 
 test("Codex captured command output is bounded and redacted again after joining chunks", () => {

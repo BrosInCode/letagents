@@ -12,6 +12,7 @@ import {
 import { safeStreamPayload, type ProviderProcessExit } from "../provider-evidence.js";
 import { CursorProviderHandle, type CursorStreamMessage, type LiveTurn } from "./lane-state.js";
 import { CURSOR_PENDING_CONTINUATION_PREFIX } from "./launch-arguments.js";
+import { cursorBackgroundShell } from "./background-shells.js";
 import type { CursorProviderAdapter } from "./provider-adapter.js";
 
 function cursorStreamKind(message: CursorStreamMessage): ProviderStreamEventKind {
@@ -119,6 +120,10 @@ export function consumeLine(adapter: CursorProviderAdapter, handle: CursorProvid
         turn.sawInit = true;
       }
     }
+    // A background shell of this session ended.
+    if (message.subtype === "task_notification" && turn.sawInit && sessionId && sessionId === handle.providerContinuationId) {
+      handle.backgroundShells?.noticeEnded(message as Record<string, unknown>);
+    }
     return;
   }
   // Display projections require the exact session established by init.
@@ -148,6 +153,8 @@ export function consumeLine(adapter: CursorProviderAdapter, handle: CursorProvid
       }
       adapter.publishStream(handle, projection.method, projection.payload, projection.kind);
     }
+    // A shell call that left its command running in the background: follow the command's output.
+    if (cursorBackgroundShell(message as Record<string, unknown>)) adapter.backgroundShellsOf(handle).follow(message as Record<string, unknown>, turn);
   }
   if (type === "result") {
     adapter.interruptLiveDisplayTools(handle, turn);
@@ -348,6 +355,35 @@ export function publishSafeStream(
     ...(nativeEventId ? { nativeEventId } : {}),
     ...(nativeLifecyclePhase ? { nativeLifecyclePhase } : {}),
     ...safe,
+    durablePayloadRef: null,
+  };
+  adapter.streamSink?.(event);
+  for (const listener of handle.streamListeners) listener(event);
+}
+
+/**
+ * An event for the owner's live feed only: never activity, lifecycle evidence or room state. Like the turn's other
+ * events it names the turn's CLI process, so the daemon places it with its own agent runtime.
+ */
+export function publishLiveDisplay(
+  adapter: CursorProviderAdapter,
+  handle: CursorProviderHandle,
+  method: string,
+  providerPayload: unknown,
+  turn: Pick<LiveTurn, "pid" | "processIdentity"> | null = handle.liveTurn,
+): void {
+  const event: ProviderStreamEvent = {
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId,
+    observedAt: adapter.deps.now(),
+    sequence: ++handle.streamSequence,
+    provider: adapter.id,
+    kind: "tool_lifecycle",
+    method,
+    ...(turn?.processIdentity ? { nativeProcessIdentity: turn.processIdentity } : {}),
+    ...(turn?.pid ? { nativeProcessPid: turn.pid } : {}),
+    liveDisplayOnly: true,
+    ...safeStreamPayload(providerPayload),
     durablePayloadRef: null,
   };
   adapter.streamSink?.(event);
