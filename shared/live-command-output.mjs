@@ -43,9 +43,12 @@ export function plainTerminalText(text) {
     .join("\n");
 }
 
-const PRIVATE_KEY_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/g;
-const PRIVATE_KEY_END = /-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
-const PRIVATE_KEY_END_LINE = /-----END [A-Z0-9 ]*PRIVATE KEY-----/;
+// PEM keys ("-----BEGIN RSA PRIVATE KEY-----") and armored PGP keys ("-----BEGIN PGP PRIVATE KEY BLOCK-----").
+const PRIVATE_KEY_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
+const PRIVATE_KEY_END = /-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
+const PRIVATE_KEY_END_LINE = /-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/;
+/** A line of a key's body: base64 characters only. */
+const KEY_BODY_LINE = /^[A-Za-z0-9+/]+={0,2}$/;
 const HIDDEN_PRIVATE_KEY = "[REDACTED PRIVATE KEY]";
 
 /**
@@ -73,6 +76,22 @@ export function hidePartialPrivateKeys(text) {
 }
 
 /**
+ * A tail whose start was cut off can begin inside a key that is longer than
+ * the tail: only body lines, without the BEGIN line and before the END line.
+ * Such a run of body lines at the top of the tail is hidden. It counts as a
+ * key body only with at least one long line of mixed-case base64, so a list
+ * of hex hashes or short words stays.
+ */
+export function hideLeadingKeyBody(text) {
+  const lines = String(text).split("\n");
+  let run = 0;
+  while (run < lines.length && KEY_BODY_LINE.test(lines[run])) run += 1;
+  const looksLikeKey = lines.slice(0, run).some((line) => line.length >= 40 && /[A-Z]/.test(line) && /[a-z]/.test(line));
+  if (!looksLikeKey) return String(text);
+  return [HIDDEN_PRIVATE_KEY, ...lines.slice(run)].join("\n");
+}
+
+/**
  * The newest part of a command's output, as whole lines.
  * 1. While the command runs (`final` false), a line that is still being
  *    written is left out: it could hold the start of a secret that no
@@ -81,7 +100,8 @@ export function hidePartialPrivateKeys(text) {
  *    line, for the same reason: a line that shows only its end could show
  *    only the end of a secret.
  * 3. A private key without its BEGIN or its END line is hidden (see
- *    hidePartialPrivateKeys).
+ *    hidePartialPrivateKeys), and so is a run of key body lines at the top
+ *    of a cut tail (see hideLeadingKeyBody).
  */
 export function liveOutputTail(text, options = {}) {
   const maxChars = options.maxChars ?? LIVE_OUTPUT_TAIL_CHARS;
@@ -99,7 +119,7 @@ export function liveOutputTail(text, options = {}) {
     const lineEnd = tail.indexOf("\n");
     tail = lineEnd >= 0 ? tail.slice(lineEnd + 1) : "";
   }
-  return { text: hidePartialPrivateKeys(tail), cut };
+  return { text: hidePartialPrivateKeys(cut ? hideLeadingKeyBody(tail) : tail), cut };
 }
 
 /** The feed key of a live output event, or null for any other event. */

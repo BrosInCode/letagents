@@ -23,6 +23,11 @@ const OPEN_RETRY_MS = 500;
 const OPEN_ATTEMPTS = 20;
 /** Claude Code ends the file of a command with this line. */
 const EXIT_LINE = /\n?\[exited with code (-?\d+)\]\s*$/;
+/**
+ * A command can print the exit line itself and go on. The line ends the
+ * command only when the file then stays the same for this long.
+ */
+const EXIT_QUIET_MS = 3_000;
 /** The longest command and description an event carries. */
 const MAX_COMMAND_CHARS = 2_000;
 const MAX_DESCRIPTION_CHARS = 300;
@@ -70,6 +75,8 @@ export type BackgroundCommandOutputInput = {
   publish: (payload: LiveBackgroundCommandPayload) => void;
   /** The follower has stopped: it published its end, or it was closed. */
   onStopped?: () => void;
+  /** How long the file must stay the same after the exit line (EXIT_QUIET_MS; shorter in tests). */
+  exitQuietMs?: number;
 };
 
 /**
@@ -82,12 +89,15 @@ export type BackgroundCommandOutputInput = {
  * 3. Each read publishes the newest whole lines (see liveOutputTail).
  * 4. When Claude Code reports that the task ended, a last read publishes the
  *    final output, the exit code and the end state, and the follower stops.
+ * 5. If that report never comes, the exit line that the CLI writes at the end
+ *    of the file ends the follower, once the file stays the same for a moment.
  */
 export class BackgroundCommandOutput {
   private file: FileHandle | null = null;
   private watcher: FSWatcher | null = null;
   private safety: ReturnType<typeof setInterval> | null = null;
   private readTimer: ReturnType<typeof setTimeout> | null = null;
+  private exitTimer: ReturnType<typeof setTimeout> | null = null;
   private reading: Promise<void> = Promise.resolve();
   private offset = 0;
   private raw = "";
@@ -176,13 +186,28 @@ export class BackgroundCommandOutput {
       this.readTimer = null;
       this.reading = this.reading.then(() => this.readNew()).catch(() => undefined).then(() => {
         if (this.closed || this.ended) return;
+        this.publish();
         // The CLI writes this line when the command ends: the end is known even if its notice never comes.
-        const exitCode = this.exitCodeFromOutput();
-        if (exitCode !== null) this.finish("completed", exitCode);
-        else this.publish();
+        if (this.exitCodeFromOutput() !== null) this.confirmExit();
       });
     }, delayMs);
     this.readTimer.unref?.();
+  }
+
+  /** The output ends with the exit line: the command ended if nothing more arrives before EXIT_QUIET_MS. */
+  private confirmExit(): void {
+    if (this.closed || this.ended || this.exitTimer) return;
+    const offset = this.offset;
+    this.exitTimer = setTimeout(() => {
+      this.exitTimer = null;
+      this.reading = this.reading.then(() => this.readNew()).catch(() => undefined).then(() => {
+        if (this.closed || this.ended) return;
+        const exitCode = this.exitCodeFromOutput();
+        if (this.offset === offset && exitCode !== null) this.finish("completed", exitCode);
+        else if (exitCode !== null) this.confirmExit();
+      });
+    }, this.input.exitQuietMs ?? EXIT_QUIET_MS);
+    this.exitTimer.unref?.();
   }
 
   private async readNew(): Promise<void> {
@@ -247,6 +272,8 @@ export class BackgroundCommandOutput {
   private stopWatching(): void {
     if (this.readTimer) clearTimeout(this.readTimer);
     this.readTimer = null;
+    if (this.exitTimer) clearTimeout(this.exitTimer);
+    this.exitTimer = null;
     if (this.safety) clearInterval(this.safety);
     this.safety = null;
     this.watcher?.close();

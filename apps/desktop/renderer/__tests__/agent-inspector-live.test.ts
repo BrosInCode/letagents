@@ -756,6 +756,21 @@ test("live tails hide a private key without its BEGIN or END line, and drop unpr
   assert.equal(plainTerminalText("a\u0001b\u0007\tc"), "ab\tc");
 });
 
+test("a cut tail hides a key body longer than the tail, and armored PGP keys, but keeps hash lists", async () => {
+  const { liveOutputTail } = await import("../../../../shared/live-command-output.mjs");
+  // A key longer than the tail: only body lines are left, the BEGIN line is cut off and the END line has not come.
+  const body = Array.from({ length: 120 }, (_, index) => `MIIJKAIBAAKCAgEAu${index % 10}x+Hq3vZpQeR/7kLmNoPqRsTuVwXyZaBcDeFgHiJkLmNoPq`.slice(0, 64)).join("\n");
+  const longKey = liveOutputTail(`-----BEGIN RSA PRIVATE KEY-----\n${body}\n`);
+  assert.equal(longKey.cut, true);
+  assert.equal(longKey.text, "[REDACTED PRIVATE KEY]\n", "no body line is shown");
+  assert.equal(liveOutputTail("x\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n").text, "x\n[REDACTED PRIVATE KEY]\n");
+  // A cut list of commit hashes is not a key: lowercase hex has no mixed case.
+  const hashes = Array.from({ length: 200 }, (_, index) => `${index.toString(16).padStart(4, "0")}${"a1b2c3d4e5".repeat(4)}`).join("\n");
+  const hashTail = liveOutputTail(`${hashes}\n`);
+  assert.equal(hashTail.cut, true);
+  assert.doesNotMatch(hashTail.text, /REDACTED/);
+});
+
 test("Live batches retain local eviction and upstream loss counts until reset", () => {
   const feed = { events: [event({ sequence: 1 }), event({ sequence: 2 })], ended: false, droppedEvents: 3 };
   const batch = { entryId: "agent-a", events: [event({ sequence: 3 })], ended: false, droppedEvents: 2, reset: false };
