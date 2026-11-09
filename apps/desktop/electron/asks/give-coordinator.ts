@@ -10,6 +10,7 @@ import type { ProviderUsage } from "../../shared/provider-usage.js";
 import { getOrCreateDesktopHostId } from "../main/agents/state.js";
 import { DesktopApiError } from "../main/auth.js";
 import { listGuestSafePermissionProfiles } from "../main/agents/rental-permission-profiles.js";
+import { listDesktopAgentProviderModels } from "../main/agents/managed-agent-models.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
 import { getOrCreateDesktopSupervisorAgentIdentity } from "../main/supervisor-grant.js";
 import { supervisorDaemonClient, type SupervisorDaemonClient } from "../main/supervisor-daemon.js";
@@ -27,6 +28,8 @@ const FINISHED = new Set(["ended", "expired", "cancelled", "open"]);
 export const GIVE_UP_PURGE_TRIES = 40;
 const STILL_OPEN = "The request is still open for others.";
 const CAUSE_MAX_CHARS = 200;
+/** Apps whose CLI lists the models it takes, so an asked model is checked before the agent starts. */
+const MODEL_LIST_APPS: Readonly<Record<string, string>> = { "claude-code": "Claude Code", codex: "Codex", cursor: "Cursor" };
 
 /** The steps of a gift after the claim, in order. A failure is logged with the step it happened in. */
 export type GiveStep = "daemon" | "identity" | "authority" | "create" | "start" | "ready" | "usage" | "joined";
@@ -206,7 +209,23 @@ export class AskGiveCoordinator {
     private readonly hostId: () => string = getOrCreateDesktopHostId,
     private readonly resolveIdentity: typeof getOrCreateDesktopSupervisorAgentIdentity = getOrCreateDesktopSupervisorAgentIdentity,
     private readonly preflight: typeof runDesktopAgentProviderPreflight = runDesktopAgentProviderPreflight,
+    private readonly listModels: typeof listDesktopAgentProviderModels = listDesktopAgentProviderModels,
   ) {}
+
+  /**
+   * The agent starts with exactly the model asked for, so this computer's app
+   * must offer it: an older CLI or another plan would fail only after starting.
+   * "Latest model" (no id) runs whatever the app has.
+   */
+  private async assertModelOffered(input: DesktopGiveAgentInput): Promise<void> {
+    const app = MODEL_LIST_APPS[input.providerId];
+    if (!input.model || !app) return;
+    const offered = await this.listModels(input.providerId as DesktopAgentProviderId).catch(() => null);
+    if (offered?.status !== "ready") throw new AskGiveError(`Couldn't check which models your ${app} offers. Try again, or choose another model.`);
+    if (!offered.models.some(option => option.id === input.model)) {
+      throw new AskGiveError(`Your ${app} doesn't offer ${input.modelLabel || input.model}. Update ${app}, or choose another model.`);
+    }
+  }
 
   /** One tap on "Add": start a guest agent in the asker's room. Any failure gives the link back. */
   async give(input: DesktopGiveAgentInput): Promise<DesktopAgentAsk> {
@@ -225,6 +244,7 @@ export class AskGiveCoordinator {
       repoRootPath: process.cwd(), model: input.model, permissionProfileId: profile,
     }).catch(() => null);
     if (!readiness?.canStart) throw new AskGiveError(readiness?.detail || readiness?.message || "Set up this app first, then try again.");
+    await this.assertModelOffered(input);
 
     const claimed = await this.api.claim(input.token);
     const entryId = giftEntryId(claimed.id, randomUUID());

@@ -144,6 +144,15 @@ test("Claude models are full ids with real names, and newer ones only from the C
   assert.equal(cached.models.some((model) => model.id === "claude-opus-5-5"), true, "a different CLI path is its own cache entry");
   const newer = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
   assert.deepEqual(newer.models.filter((model) => model.id.endsWith("-5-5")).map((model) => model.label), ["Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]);
+  assert.equal(newer.models.some((model) => model.id === "claude-fable-5-2"), false, "Fable 5.2 needs 2.1.321");
+
+  fakeClaude("2.1.321");
+  const newest = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
+  assert.deepEqual(newest.models.slice(0, 3).map((model) => [model.id, model.label]), [
+    ["best", "Best available"],
+    ["claude-fable-5-2", "Fable 5.2"],
+    ["claude-fable-5-1", "Fable 5.1"],
+  ]);
 
   process.env.LETAGENTS_CLAUDE_CODE_BIN = join(tempDir, "no-such-claude");
   const missing = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });

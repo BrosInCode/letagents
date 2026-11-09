@@ -43,14 +43,14 @@
 
       <section>
         <div class="give-section-label"><h3>Agent</h3></div>
-        <FilterDropdown v-model="modelChoice" class="give-picker" label="Agent" :options="modelOptions" :disabled="busy || loading || !models.length" match-trigger-width data-testid="agent-ask-model">
+        <FilterDropdown v-model="modelChoice" class="give-picker ask-model-picker" label="Agent" :options="modelOptions" :disabled="busy || loading || !models.length" searchable search-placeholder="Find a model…" match-trigger-width data-testid="agent-ask-model">
           <template #trigger>
             <ChatAvatar v-if="selectedModel" :name="selectedModel.label" :provider="selectedModel.providerId" agent />
             <span class="give-picker-label"><strong>{{ loading ? 'Loading agents…' : selectedModel?.label || 'No agents available' }}</strong><small v-if="selectedModel && !loading">{{ providerLabel(selectedModel.providerId) }}</small></span>
           </template>
           <template #option="{ option }">
             <ChatAvatar :name="option.label" :provider="models[Number(option.id)]?.providerId" agent />
-            <span class="give-picker-label">{{ option.label }}</span>
+            <span class="give-picker-label">{{ option.label }}<small>{{ providerLabel(models[Number(option.id)]?.providerId ?? '') }}</small></span>
           </template>
         </FilterDropdown>
         <p v-if="loading" class="ask-loading" role="status">Loading available agents…</p>
@@ -126,7 +126,7 @@ watch([() => props.rooms, () => props.loading], () => {
   if (!props.loading && !roomOptions.value.some(room => room.id === roomChoice.value)) roomChoice.value = props.rooms[0]?.id ?? '__new__';
 }, { immediate: true });
 const modelChoice = ref('');
-const modelOptions = computed(() => props.models.map((model, index) => ({ id: String(index), label: model.label })));
+const modelOptions = computed(() => props.models.map((model, index) => ({ id: String(index), label: model.label, keywords: `${providerLabel(model.providerId)} ${model.model ?? ''}` })));
 const selectedModel = computed(() => modelChoice.value === '' ? undefined : props.models[Number(modelChoice.value)]);
 const newRoomName = ref(''), note = ref(''), customText = ref('');
 const amount = ref<number | null>(null), custom = ref(false);

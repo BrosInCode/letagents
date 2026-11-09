@@ -46,10 +46,12 @@ const modelListCache = new Map<string, ModelListCacheEntry>();
 // version, so its name cannot be shown. A CLI refuses a full id its own model
 // catalog does not describe, so a newer model is listed only from the CLI
 // version that names it. Each id was run on Claude Code 2.1.278; that CLI
-// asks for 2.1.280 for the 5.5 models.
+// asks for 2.1.280 for the 5.5 models. Fable 5.2 is in the catalog from
+// 2.1.321 (Claude Code changelog; 2.1.278 does not name it).
 const CLAUDE_CODE_KNOWN_MODELS: Array<DesktopAgentProviderModelOption & { minimumCliVersion?: string }> = [
   // "best" is the one alias kept: it means the best model the CLI has.
   { id: "best", label: "Best available", source: "known" },
+  { id: "claude-fable-5-2", label: "Fable 5.2", source: "known", minimumCliVersion: "2.1.321" },
   { id: "claude-fable-5-1", label: "Fable 5.1", source: "known" },
   { id: "claude-fable-5", label: "Fable 5", source: "known" },
   { id: "claude-opus-5-5", label: "Opus 5.5", source: "known", minimumCliVersion: "2.1.280" },

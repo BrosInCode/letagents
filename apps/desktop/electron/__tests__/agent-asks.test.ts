@@ -60,7 +60,7 @@ test("the gift counts against the longest limit and survives a window reset", ()
   assert.equal(gift.consumedPercent, 9);
 });
 
-function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; readyFails?: boolean; lastError?: string; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean; purgeAnswers?: Array<Record<string, unknown>>; authorityFails?: unknown; installFails?: unknown } = {}) {
+function fakes(overrides: { offered?: { status: string; models: Array<{ id: string }> } | null; shortUsedPercent?: number; joinedState?: string; readyFails?: boolean; lastError?: string; usedPercent?: number; preview?: Record<string, unknown>; release?: Record<string, unknown>; claimFails?: boolean; purgeAnswers?: Array<Record<string, unknown>>; authorityFails?: unknown; installFails?: unknown } = {}) {
   const calls: string[] = [];
   const requestIds: string[] = [];
   const api = {
@@ -93,9 +93,12 @@ function fakes(overrides: { shortUsedPercent?: number; joinedState?: string; rea
     entry.id = `supervised_${input.creationRequestId}`;
     return { entry, agentKey: "john/helper" };
   } };
+  const listed: string[] = [];
+  const offered = overrides.offered === undefined ? { status: "ready", models: [{ id: "claude-opus-5-5" }] } : overrides.offered;
   const coordinator = new AskGiveCoordinator(api as any, daemon as any, grants as any, () => "host",
-    async () => "john/helper", async () => ({ canStart: true }) as any);
-  return { coordinator, calls, states, requestIds };
+    async () => "john/helper", async () => ({ canStart: true }) as any,
+    async (providerId: string) => { listed.push(providerId); if (!offered) throw new Error("no CLI"); return { providerId, defaultModel: null, error: null, ...offered } as any; });
+  return { coordinator, calls, states, requestIds, listed };
 }
 
 const give = { token: TOKEN, providerId: "cursor", model: null, modelLabel: "Cursor", amountPercent: 10 };
@@ -106,6 +109,30 @@ test("one tap gives the agent and records the gift", async () => {
   coordinator.stopWatching();
   assert.equal(joined.state, "active");
   assert.deepEqual(calls, ["claim", "authority", "install", "joined"]);
+});
+
+test("an asked model starts only when this computer's app offers it, before the link is claimed", async () => {
+  const opus = { ...give, providerId: "claude-code", model: "claude-opus-5-5", modelLabel: "Claude Opus 5.5" };
+  const ok = fakes();
+  await ok.coordinator.give(opus);
+  ok.coordinator.stopWatching();
+  assert.deepEqual(ok.listed, ["claude-code"]);
+  assert.deepEqual(ok.calls, ["claim", "authority", "install", "joined"]);
+
+  const older = fakes({ offered: { status: "ready", models: [{ id: "claude-sonnet-5" }] } });
+  await assert.rejects(older.coordinator.give(opus), /^AskGiveError: Your Claude Code doesn't offer Claude Opus 5\.5\. Update Claude Code, or choose another model\.$/);
+  for (const offered of [{ status: "error", models: [] }, null]) {
+    const unknown = fakes({ offered });
+    await assert.rejects(unknown.coordinator.give(opus), /Couldn't check which models your Claude Code offers/);
+    assert.deepEqual(unknown.calls, [], "nothing is claimed");
+  }
+  assert.deepEqual(older.calls, [], "nothing is claimed");
+
+  // "Latest model" runs whatever the app has, so there is nothing to check.
+  const latest = fakes({ offered: null });
+  await latest.coordinator.give(give);
+  latest.coordinator.stopWatching();
+  assert.deepEqual(latest.listed, []);
 });
 
 test("any failure before joining stops the agent and gives the link back", async () => {

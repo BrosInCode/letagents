@@ -82,6 +82,8 @@ const props = withDefaults(
       mark?: string;
       count?: number;
       disabled?: boolean;
+      /** More words the search matches, such as a model's provider. */
+      keywords?: string;
     }[];
     disabled?: boolean;
     matchTriggerWidth?: boolean;
@@ -101,13 +103,14 @@ const focusIndex = ref(0);
 const selected = computed(() =>
   props.options.find((option) => option.id === props.modelValue),
 );
-const visible = computed(() =>
-  props.options.filter((option) =>
-    option.label
-      .toLocaleLowerCase()
-      .includes(query.value.trim().toLocaleLowerCase()),
-  ),
-);
+// Every word typed must appear in the label or the keywords, in any order.
+const visible = computed(() => {
+  const terms = query.value.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+  return props.options.filter((option) => {
+    const text = `${option.label} ${option.keywords ?? ""}`.toLocaleLowerCase();
+    return terms.every((term) => text.includes(term));
+  });
+});
 function position() {
   if (!opened.value || !menu.value || !trigger.value) return;
   const box = trigger.value.getBoundingClientRect(),
