@@ -67,6 +67,12 @@ export type DesktopOrganizationGitHubPage =
   | { kind: "sso"; login: string };
 
 export interface DesktopOrganizationApi {
+  /** The organization ID of a company link saved at launch, if any. */
+  pendingInvite: () => Promise<string | null>;
+  /** Forget a company link once the person has answered it. */
+  acknowledgeInvite: (id: string) => Promise<void>;
+  /** A company link that arrives while the app runs. */
+  onInvited: (callback: (id: string) => void) => () => void;
   list: () => Promise<DesktopOrganizationList>;
   join: (id: string, setup: boolean) => Promise<DesktopOrganizationJoinResult>;
   rooms: (id: string) => Promise<DesktopOrganizationRooms>;
