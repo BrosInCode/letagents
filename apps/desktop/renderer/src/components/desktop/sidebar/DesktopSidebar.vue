@@ -200,7 +200,21 @@
           data-testid="sidebar-section-rooms"
         >
       <div v-if="zenMode" class="sidebar-zen-heading"><span>This project</span></div>
-      <div v-else-if="companyMenuShown && company" class="sidebar-section-header sidebar-company-header" data-testid="sidebar-rooms-heading">
+      <div v-else-if="companyMenuShown && company" class="sidebar-company-header" data-testid="sidebar-rooms-heading">
+        <button
+          class="sidebar-company-collapse"
+          type="button"
+          :aria-expanded="!roomsCollapsed"
+          :aria-label="roomsCollapsed ? 'Show rooms' : 'Hide rooms'"
+          :title="roomsCollapsed ? 'Show rooms' : 'Hide rooms'"
+          :data-collapsed="roomsCollapsed"
+          data-testid="sidebar-rooms-collapse"
+          @click="$emit('toggle-rooms-collapsed')"
+        >
+          <span class="sidebar-section-arrow" :data-collapsed="roomsCollapsed" aria-hidden="true">
+            <ChevronRight />
+          </span>
+        </button>
         <CompanyScopeMenu
           :state="company"
           :room-count="totalRoomCount"
@@ -209,20 +223,6 @@
           @open-github="$emit('open-company-github', $event)"
           @copy-link="$emit('copy-company-link')"
         />
-        <button
-          class="sidebar-company-collapse"
-          type="button"
-          :aria-expanded="!roomsCollapsed"
-          :aria-label="roomsCollapsed ? 'Show rooms' : 'Hide rooms'"
-          :data-collapsed="roomsCollapsed"
-          data-testid="sidebar-rooms-collapse"
-          @click="$emit('toggle-rooms-collapsed')"
-        >
-          <span class="section-count">{{ totalRoomCount }}</span>
-          <span class="sidebar-section-arrow" :data-collapsed="roomsCollapsed" aria-hidden="true">
-            <ChevronRight />
-          </span>
-        </button>
       </div>
       <button
         v-else
