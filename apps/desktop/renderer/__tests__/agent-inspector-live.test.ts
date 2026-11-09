@@ -730,8 +730,10 @@ test("background commands come from the whole feed, keep their end, and end with
   assert.deepEqual(running, [{ id: "task-1", toolUseId: "toolu_1", command: "npm run dev", description: null, status: "running",
     output: "ready\n", outputTruncated: false, exitCode: null, startedAt: "2026-07-31T00:00:00.000Z", endedAt: null }]);
   assert.equal(liveBackgroundCommands({ events: [background(2, "running")], ended: true })[0]!.status, "lost");
-  const ended = liveBackgroundCommands({ events: [background(2, "completed", { exitCode: 0 }), background(3, "running")], ended: false });
-  assert.deepEqual([ended[0]!.status, ended[0]!.exitCode], ["completed", 0], "a late running value cannot reopen an ended command");
+  const ended = liveBackgroundCommands({ events: [background(2, "running"), background(3, "completed", { exitCode: 0 })], ended: false });
+  assert.deepEqual([ended[0]!.status, ended[0]!.exitCode], ["completed", 0], "the end is kept");
+  const again = liveBackgroundCommands({ events: [background(2, "completed", { exitCode: 0 }), background(3, "running")], ended: false });
+  assert.equal(again[0]!.status, "running", "a newer running value wins: the command printed the exit line itself");
   assert.deepEqual(liveBackgroundCommands({ events: [event({ sequence: 4, method: "item/backgroundCommand/updated", payload: { taskId: "x" } })], ended: false }), [],
     "a shape the fold does not know is left out");
   assert.deepEqual(foldAgentStreamEvents([background(2, "running")]).items, [], "a background command is not a timeline item");
