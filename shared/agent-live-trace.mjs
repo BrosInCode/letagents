@@ -298,7 +298,9 @@ export function describeLiveToolCall(tool, input, outcome) {
   const bareTool = bareLiveToolName(tool, inputRecord);
   const known = describeLetAgentsTool(bareTool, inputRecord, outcome);
   if (known) return known;
-  const nativeHeadlines = isShellToolName(bareTool) && inputRecord?.run_in_background === true
+  // Claude Code's shell input says `run_in_background`, Cursor's says `isBackground`.
+  const background = inputRecord?.run_in_background === true || inputRecord?.isBackground === true;
+  const nativeHeadlines = isShellToolName(bareTool) && background
     ? BACKGROUND_SHELL_HEADLINES : ownEntry(NATIVE_TOOL_HEADLINES, bareTool);
   if (nativeHeadlines) {
     const headline = outcome?.status === "pending" ? `Requested: ${nativeHeadlines.running}`

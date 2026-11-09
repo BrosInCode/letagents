@@ -48,6 +48,8 @@ import {
   type LiveTurn,
 } from "./lane-state.js";
 import { BASE_CURSOR_CAPABILITIES } from "./launch-arguments.js";
+import { CursorBackgroundShells } from "./background-shells.js";
+import { LIVE_BACKGROUND_COMMAND_METHOD } from "../../../../../../shared/live-command-output.mjs";
 import {
   awaitDeferredRoomTurnSettlement,
   awaitRoomTurnTerminal,
@@ -59,6 +61,7 @@ import {
 import {
   consumeLine,
   interruptLiveDisplayTools,
+  publishLiveDisplay,
   observeNativeExecution,
   observeNativeExit,
   observeNativeRuntimeExit,
@@ -400,6 +403,23 @@ export class CursorProviderAdapter implements ProviderAdapter {
 
   consumeLine(handle: CursorProviderHandle, turn: LiveTurn, line: string): void {
     return consumeLine(this, handle, turn, line);
+  }
+
+  /** The agent's background shells, made at their first use. */
+  backgroundShellsOf(handle: CursorProviderHandle): CursorBackgroundShells {
+    handle.backgroundShells ??= new CursorBackgroundShells({
+      now: () => this.deps.now(),
+      publish: (payload) => publishLiveDisplay(this, handle, LIVE_BACKGROUND_COMMAND_METHOD, payload),
+      processIdentity: (pid) => this.deps.getProcessIdentity(pid),
+      processStatus: (pid, identity) => this.exactProcessStatus(pid, identity),
+      signalExact: (pid, identity, signal) => this.signalExactProcess(pid, identity, signal),
+    });
+    return handle.backgroundShells;
+  }
+
+  /** The owner's Stop for a shell that the agent runs in the background during its turn. */
+  async stopBackgroundCommand(providerHandle: ProviderHandle, taskId: string): Promise<"stopping" | "not_running" | "failed"> {
+    return this.requireHandle(providerHandle).backgroundShells?.stop(taskId) ?? "not_running";
   }
 
   interruptLiveDisplayTools(handle: CursorProviderHandle, turn: LiveTurn): void {

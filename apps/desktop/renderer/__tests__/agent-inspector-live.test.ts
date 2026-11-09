@@ -762,6 +762,8 @@ test("a shell call that starts a background command and OpenCode's shell tool re
   const bash = describeLiveToolCall("bash", { command: "ls" }, { status: "running", output: null, error: null });
   assert.deepEqual([bash.headline, bash.detail], ["Running a shell command", "ls"]);
   assert.equal(describeLiveToolCall("bash", { command: "ls" }, { status: "error", output: null, error: "boom" }).headline, "Command failed");
+  assert.equal(describeLiveToolCall("shellToolCall", { command: "npm run dev", isBackground: true }, { status: "completed", output: null, error: null }).headline,
+    "Started a background command", "Cursor's background flag");
 });
 
 test("background commands come from the whole feed, keep their end, and end with a feed that ended", () => {

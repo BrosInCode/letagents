@@ -453,6 +453,8 @@ export async function beginTurn(
     void child.exited.then(async (exit) => {
       // As in completeTurn, drain final stdout before deciding what was lost.
       await new Promise<void>((resolveDrain) => setImmediate(resolveDrain));
+      // The CLI kills its background shells when it is stopped: one that ended without its notice ended with the turn.
+      handle.backgroundShells?.turnEnded(turn);
       if (!turn.lifecycleSettlementDeferred) adapter.observeNativeExit(handle, turn, exit);
     });
     handle.liveTurn = turn;
