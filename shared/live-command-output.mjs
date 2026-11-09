@@ -47,8 +47,8 @@ export function plainTerminalText(text) {
 const PRIVATE_KEY_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
 const PRIVATE_KEY_END = /-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/g;
 const PRIVATE_KEY_END_LINE = /-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----/;
-/** A line of a key's body: base64 characters only. */
-const KEY_BODY_LINE = /^[A-Za-z0-9+/]+={0,2}$/;
+/** A line of a key's body: base64 characters only, perhaps indented (a key in a YAML or JSON file). */
+const KEY_BODY_LINE = /^\s*[A-Za-z0-9+/]+={0,2}$/;
 const HIDDEN_PRIVATE_KEY = "[REDACTED PRIVATE KEY]";
 
 /**

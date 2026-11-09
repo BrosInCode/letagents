@@ -106,6 +106,8 @@ export class BackgroundCommandOutput {
   private lastPublished = "";
   private closed = false;
   private ended: { status: LiveBackgroundCommandStatus; exitCode: number | null; endedAt: string } | null = null;
+  /** The end came from the exit line alone, at this file offset: new output there takes it back to running. */
+  private provisionalAt: number | null = null;
 
   constructor(private readonly input: BackgroundCommandOutputInput) {}
 
@@ -121,7 +123,8 @@ export class BackgroundCommandOutput {
 
   /** The task ended: read what is left, publish the end, and stop. */
   finish(status: unknown, exitCodeHint: number | null): void {
-    if (this.closed || this.ended) return;
+    if (this.closed || this.final()) return;
+    this.provisionalAt = null;
     const endedAt = this.input.now();
     this.ended = { status: "running", exitCode: exitCodeHint, endedAt };
     this.stopWatching();
@@ -181,11 +184,17 @@ export class BackgroundCommandOutput {
   }
 
   private scheduleRead(delayMs = READ_PACE_MS): void {
-    if (this.closed || this.ended || this.readTimer) return;
+    if (this.closed || this.final() || this.readTimer) return;
     this.readTimer = setTimeout(() => {
       this.readTimer = null;
       this.reading = this.reading.then(() => this.readNew()).catch(() => undefined).then(() => {
-        if (this.closed || this.ended) return;
+        if (this.closed || this.final()) return;
+        if (this.provisionalAt !== null) {
+          if (this.offset === this.provisionalAt) return;
+          // Output after the exit line: the command printed that line itself and still runs.
+          this.provisionalAt = null;
+          this.ended = null;
+        }
         this.publish();
         // The CLI writes this line when the command ends: the end is known even if its notice never comes.
         if (this.exitCodeFromOutput() !== null) this.confirmExit();
@@ -203,11 +212,26 @@ export class BackgroundCommandOutput {
       this.reading = this.reading.then(() => this.readNew()).catch(() => undefined).then(() => {
         if (this.closed || this.ended) return;
         const exitCode = this.exitCodeFromOutput();
-        if (this.offset === offset && exitCode !== null) this.finish("completed", exitCode);
+        if (this.offset === offset && exitCode !== null) this.endProvisionally(exitCode);
         else if (exitCode !== null) this.confirmExit();
       });
     }, this.input.exitQuietMs ?? EXIT_QUIET_MS);
     this.exitTimer.unref?.();
+  }
+
+  /**
+   * The exit line ends the command in what the follower shows, but the follower stays: it keeps reading the file,
+   * new output takes the command back to running, and Claude Code's own notice still ends it for good.
+   */
+  private endProvisionally(exitCode: number): void {
+    this.ended = { status: claudeBackgroundEndStatus("completed", exitCode), exitCode, endedAt: this.input.now() };
+    this.provisionalAt = this.offset;
+    this.publish(true);
+  }
+
+  /** The end is known for good: from Claude Code's notice, not from the exit line alone. */
+  private final(): boolean {
+    return this.ended !== null && this.provisionalAt === null;
   }
 
   private async readNew(): Promise<void> {
@@ -263,8 +287,9 @@ export class BackgroundCommandOutput {
       payload.output = "";
       payload.outputTruncated = true;
     }
+    // The same value again says nothing new: Claude Code's notice after an end that the exit line already showed.
     const key = JSON.stringify([payload.status, payload.output, payload.exitCode]);
-    if (!final && key === this.lastPublished) return;
+    if (key === this.lastPublished) return;
     this.lastPublished = key;
     this.input.publish(payload);
   }

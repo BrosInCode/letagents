@@ -764,6 +764,9 @@ test("a cut tail hides a key body longer than the tail, and armored PGP keys, bu
   assert.equal(longKey.cut, true);
   assert.equal(longKey.text, "[REDACTED PRIVATE KEY]\n", "no body line is shown");
   assert.equal(liveOutputTail("x\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n").text, "x\n[REDACTED PRIVATE KEY]\n");
+  // The same key indented in a YAML file.
+  const yaml = liveOutputTail(`key: |\n  -----BEGIN RSA PRIVATE KEY-----\n${body.split("\n").map((line) => `  ${line}`).join("\n")}\n`);
+  assert.equal(yaml.text, "[REDACTED PRIVATE KEY]\n", "no indented body line is shown");
   // A cut list of commit hashes is not a key: lowercase hex has no mixed case.
   const hashes = Array.from({ length: 200 }, (_, index) => `${index.toString(16).padStart(4, "0")}${"a1b2c3d4e5".repeat(4)}`).join("\n");
   const hashTail = liveOutputTail(`${hashes}\n`);
