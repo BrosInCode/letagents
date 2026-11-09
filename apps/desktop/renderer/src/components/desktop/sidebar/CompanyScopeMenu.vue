@@ -7,6 +7,7 @@
     :aria-controls="menuId"
     :aria-expanded="open"
     :aria-label="triggerLabel"
+    title="Change company"
     data-testid="sidebar-company-scope"
     @click="toggleMenu"
   >
@@ -16,7 +17,7 @@
     </template>
     <span v-else class="sidebar-heading">Rooms</span>
     <span v-if="needsAttention" class="company-scope-dot" aria-hidden="true" />
-    <ChevronDown class="company-scope-chevron" aria-hidden="true" />
+    <span class="company-scope-count">{{ roomCount }}</span>
   </button>
 
   <Teleport to="body">
@@ -131,7 +132,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Check, ChevronDown, ExternalLink, Link2, RefreshCw } from "@lucide/vue";
+import { Check, ExternalLink, Link2, RefreshCw } from "@lucide/vue";
 import type { DesktopOrganization, DesktopOrganizationGitHubPage } from "../../../../../electron/ipc-types/organizations.js";
 import type { FirstRunCompanyStepState } from "../setup/types";
 import CompanyAvatar from "../company/CompanyAvatar.vue";
@@ -309,16 +310,16 @@ defineExpose({ close: closeMenu });
   gap: 7px;
   flex: 1;
   min-height: 41px;
-  padding: 8px 11px;
+  padding: 8px 10px 8px 4px;
   border: 0;
-  border-radius: 10px;
+  border-radius: 6px;
   background: transparent;
   color: var(--text-secondary);
   font: inherit;
   font-size: 14px;
   font-weight: 500;
   cursor: pointer;
-  transition: background-color 150ms ease, color 150ms ease;
+  transition: color 150ms ease;
 }
 
 .company-scope-trigger strong {
@@ -333,29 +334,30 @@ defineExpose({ close: closeMenu });
 
 .company-scope-trigger .sidebar-heading {
   flex: 1;
+  min-width: 0;
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0;
   text-align: left;
+  text-transform: none;
 }
 
 .company-scope-trigger[aria-expanded="true"] {
-  background: var(--accent-hover);
   color: var(--text);
 }
 
 .company-scope-trigger:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--text) 28%, transparent);
-  outline-offset: 1px;
+  outline-offset: -2px;
 }
 
-.company-scope-chevron {
+.company-scope-count {
   flex: none;
-  width: 12px;
-  height: 12px;
+  margin-inline-start: 5px;
   color: var(--text-tertiary);
-  transition: transform 160ms var(--ease-out);
-}
-
-.company-scope-trigger[aria-expanded="true"] .company-scope-chevron {
-  transform: rotate(180deg);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
 }
 
 .company-scope-dot {
@@ -512,7 +514,6 @@ defineExpose({ close: closeMenu });
 
 @media (hover: hover) and (pointer: fine) {
   .company-scope-trigger:hover {
-    background: var(--accent-hover);
     color: var(--text);
   }
 
@@ -523,7 +524,7 @@ defineExpose({ close: closeMenu });
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .company-scope-chevron,
+  .company-scope-trigger,
   .company-scope-menu-enter-active,
   .company-scope-menu-leave-active {
     transition: none;
