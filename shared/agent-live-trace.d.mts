@@ -56,6 +56,7 @@ export interface AgentLiveTranscript {
 
 /** A provider's own shell tool, by bare name. */
 export function isShellToolName(name: unknown): boolean;
+export const BACKGROUND_SHELL_HEADLINES: Readonly<{ running: string; complete: string }>;
 
 /** The text block one live event adds to, keyed as the fold keys it; null for other events. */
 export function liveStreamTextPart(event: Pick<AgentLiveStreamEventShape, "method" | "payload">): { kind: "reasoning" | "message"; id: string } | null;

@@ -137,8 +137,11 @@ export abstract class CodexAdapterBase {
     summary: string | null = null,
     nativeEventId: string | null = null,
     nativeLifecyclePhase: "turn_active" | "turn_terminal" | null = null,
+    /** The adapter cut the payload itself (see boundedCommandEnd). */
+    truncated = false,
   ): void {
     const safe = safeStreamPayload(providerPayload);
+    if (truncated) safe.payloadTruncated = true;
     const event: ProviderStreamEvent = {
       workAttemptId: handle.workAttemptId,
       providerContinuationId: handle.providerContinuationId,
