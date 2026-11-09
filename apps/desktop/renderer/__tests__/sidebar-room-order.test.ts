@@ -198,7 +198,7 @@ describe("sidebar room order", () => {
       activeEntryId: "parent-room",
       expanded: false,
     });
-    assert.equal(visibleChildren.length, 8);
+    assert.equal(visibleChildren.length, 3);
     const lastVisible = visibleChildren.at(-1);
     assert.ok(lastVisible);
 
@@ -212,7 +212,7 @@ describe("sidebar room order", () => {
       lastVisible.id,
       -1,
     ), {
-      target: visibleChildren[6],
+      target: visibleChildren[1],
       placement: "before",
     });
   });
