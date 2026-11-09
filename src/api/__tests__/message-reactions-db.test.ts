@@ -86,6 +86,18 @@ test('GIF history and acknowledged retries survive Off, while new GIFs are rejec
   assert.equal(text.text, 'Still working');
 });
 
+test('a room with no settings row reads GIFs and agent reactions as on', options, async () => {
+  const { randomUUID } = await import('node:crypto');
+  const { room, number } = await roomWithMessage();
+  await client!.pool.query('DELETE FROM room_settings WHERE room_id = $1', [room.id]);
+  const owner = await person('no-row-owner');
+  const agent = { key: `${owner.login}/worker-one`, name: 'Ada' };
+  assert.equal(await store!.addMessageReaction({ roomId: room.id, messageNumber: number, accountId: owner.id, emoji: '👍', agent }), 'added');
+  const gif = { provider: 'giphy' as const, id: 'no-row', title: 'Small win' };
+  const sent = await rooms!.addMessage(room.id, 'Owner', '', { source: 'browser', account_id: owner.id, client_message_id: `desktop-send:${randomUUID()}`, gif });
+  assert.deepEqual(sent.gif, gif);
+});
+
 test('a reaction is added once, read back with the message, and removed', options, async () => {
   const { room, message, number } = await roomWithMessage();
   const ada = await person('ada', 'Ada Lovelace');

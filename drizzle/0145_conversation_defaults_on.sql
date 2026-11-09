@@ -1,6 +1,11 @@
 -- Smart conversation routing and GIFs and agent reactions start on in rooms
 -- made from now on. Rooms that already exist keep the value they hold: it
 -- cannot tell a room that never chose from one whose admin turned it off.
+
+-- rooms is read on almost every request. Give up rather than queue all of
+-- them behind a long transaction.
+SET LOCAL lock_timeout = '5s';
+--> statement-breakpoint
 ALTER TABLE rooms ALTER COLUMN jev_routing_enabled SET DEFAULT true;
 --> statement-breakpoint
 ALTER TABLE room_settings ALTER COLUMN expressions_enabled SET DEFAULT true;
