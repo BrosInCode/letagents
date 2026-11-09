@@ -1,7 +1,7 @@
 import { computed, ref } from "vue";
 import type { DesktopRepoRoomSelection, DesktopRoomSnapshot, RepoStatus } from "../../../electron/ipc-types";
 import { copyTextToClipboard } from "../domain/clipboard";
-import { normalizeJoinRoomInput, validateJoinRoomInput } from "../domain/join-room-input";
+import { companyLinkIdFromInput, normalizeJoinRoomInput, validateJoinRoomInput } from "../domain/join-room-input";
 import { projectRoomName } from "../domain/project-room-name";
 import { repoPickerErrorMessage } from "../domain/repo-picker-error";
 import { rootPathLabel, type RecentRootRoom, type RecentRootRoomKind } from "../domain/sidebar-rooms";
@@ -64,6 +64,8 @@ interface DesktopNewRoomModalOptions {
   getDefaultStorageMode?: () => NewRoomStorageChoice;
   /** The company selected in the sidebar; a new shared room is created in it by default. */
   getCompany?: () => NewRoomCompany | null;
+  /** A pasted company link opens the company dialog instead of joining a room. */
+  onCompanyLink?: (organizationId: string) => void;
   /** Called before the new company room opens, so the company lists it at once. */
   onCompanyRoomCreated?: (room: { roomIdentifier: string; displayName: string; organizationId: string }) => void;
 }
@@ -132,6 +134,7 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
   const newRoomStatusMessage = ref<string | null>(null);
 
   const canSubmitJoin = computed(() => {
+    if (options.onCompanyLink && companyLinkIdFromInput(newRoomJoinCode.value)) return true;
     const validation = validateJoinRoomInput(newRoomJoinCode.value);
     return Boolean(validation.normalized) && !validation.error;
   });
@@ -549,6 +552,14 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
 
   async function joinRoomCodeFromModal(): Promise<void> {
     if (newRoomBusy.value) return;
+    const companyId = options.onCompanyLink ? companyLinkIdFromInput(newRoomJoinCode.value) : null;
+    if (companyId) {
+      newRoomJoinCode.value = "";
+      newRoomJoinError.value = null;
+      closeNewRoomModal();
+      options.onCompanyLink?.(companyId);
+      return;
+    }
     const validation = validateJoinRoomInput(newRoomJoinCode.value);
     if (!validation.normalized) {
       newRoomJoinError.value = validation.error;
