@@ -348,9 +348,10 @@ button.room-activity-pill:focus-visible,
   white-space: nowrap;
 }
 
-/* A long command gives way, not the short agent name after it. */
+/* A long command gives way, not the short agent name after it; a long name still ends in an ellipsis. */
 .room-activity-row-copy code + span {
   flex: 0 0 auto;
+  max-width: 45%;
 }
 
 .room-activity-command {

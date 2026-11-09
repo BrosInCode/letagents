@@ -64,13 +64,6 @@ export class ClaudeAdapterBackgroundWork extends ClaudeAdapterNativeExecution {
     return accepted ? "stopping" : "failed";
   }
 
-  /**
-   * Follow the output of shell commands that the agent runs in the background, for the owner's Live tab.
-   * 1. A Bash call of the agent itself (no sub-agent) with `run_in_background` is noted with its command.
-   * 2. Its result names the task in a structured field and the output file in its text: a follower starts.
-   * 3. The task's end (`task_notification`, or `task_updated` to an end state) gives the follower its last read.
-   * Nothing here changes how the turn runs or ends; it only publishes display-only events.
-   */
   /** The CLI's answer to an owner's stop request. It names no session, and it is read in any state of the handle. */
   protected answerBackgroundCommandStop(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
     if (message.type !== "control_response") return;
@@ -79,6 +72,13 @@ export class ClaudeAdapterBackgroundWork extends ClaudeAdapterNativeExecution {
     answer?.(response?.subtype === "success");
   }
 
+  /**
+   * Follow the output of shell commands that the agent runs in the background, for the owner's Live tab.
+   * 1. A Bash call of the agent itself (no sub-agent) with `run_in_background` is noted with its command.
+   * 2. Its result names the task in a structured field and the output file in its text: a follower starts.
+   * 3. The task's end (`task_notification`, or `task_updated` to an end state) gives the follower its last read.
+   * Nothing here changes how the turn runs or ends; it only publishes display-only events.
+   */
   protected observeBackgroundCommandOutput(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
     if (message.type === "control_response") return;
     if (sessionIdOf(message) !== handle.providerContinuationId || message.parent_tool_use_id != null) return;

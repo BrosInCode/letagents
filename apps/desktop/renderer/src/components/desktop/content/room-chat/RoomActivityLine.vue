@@ -287,7 +287,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { Check, ChevronUp, GitBranch, GitPullRequest, MessageSquare, Paperclip, SquareTerminal } from "@lucide/vue";
 import type { DesktopBackgroundCommand } from "../../../../../../electron/ipc-types";
 import RoomActivityCommandRow from "./RoomActivityCommandRow.vue";
-import { closeCommandOutput, openCommandOutput } from "./room-activity-motion";
+import { closeCommandOutput, openCommandOutput, settleCommandMotion } from "./room-activity-motion";
 import { useBackgroundCommandOutput, useBackgroundCommands, type RoomBackgroundAgent } from "../../../../composables/useBackgroundCommands";
 import { typingLabel, typingSentence } from "../../../../../../../../shared/room-typing.mjs";
 import type { ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
@@ -361,7 +361,9 @@ const stopStates = ref(new Map<string, "stopping" | "failed">());
 const listElement = ref<HTMLElement | null>(null);
 
 /** Open or close a command's output, with the strip's motion (see room-activity-motion.ts). */
-function toggleCommand(entryId: string, taskId: string): void {
+async function toggleCommand(entryId: string, taskId: string): Promise<void> {
+  // A close that still runs lands first, so this click sees the row as it will be.
+  await settleCommandMotion();
   const key = commandKey(entryId, taskId);
   const opening = !openCommands.value.has(key);
   const apply = async () => {
@@ -372,7 +374,7 @@ function toggleCommand(entryId: string, taskId: string): void {
   };
   const command = [...(listElement.value?.querySelectorAll<HTMLElement>("[data-command-key]") ?? [])]
     .find((element) => element.dataset.commandKey === key) ?? null;
-  void (opening ? openCommandOutput : closeCommandOutput)(listElement.value, command, apply);
+  await (opening ? openCommandOutput : closeCommandOutput)(listElement.value, command, apply);
 }
 
 // Output is read only for the agents whose command rows are open, and only while the list is open.

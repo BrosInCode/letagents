@@ -96,10 +96,14 @@ export function useBackgroundCommandOutput(entryIds: () => readonly string[]) {
       const watchCommands = desktopIpc.supervisor?.watchBackgroundCommands;
       if (loop.stopped || !watchCommands) { end(); return; }
       try {
+        const before = version;
         const batch = await watchCommands({ entryId, afterVersion: version });
         if (loop.stopped) { end(); return; }
         failures = 0;
         version = batch.version;
+        // A watch that comes back with no change (its time ran out, or a newer watch took its place) waits a
+        // moment before the next one, so watches that push each other out never loop without a pause.
+        if (batch.version === before) await new Promise((resolve) => setTimeout(resolve, 1_000));
         // The batch holds the payloads of the background command events; the shared fold reads them.
         const events = batch.commands.map((payload, index) => ({
           observedAt: "", kind: "tool_lifecycle", method: LIVE_BACKGROUND_COMMAND_METHOD, summary: null, payload, sequence: index,
