@@ -227,6 +227,16 @@
 .desktop-new-room-destination { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 11px; margin-top: 12px; }
 .desktop-new-room-destination span { min-width: 0; overflow-wrap: anywhere; }
 .desktop-new-room-context { margin-top: 24px; max-width: 420px; }
+.desktop-new-room-storage .work-filter-trigger { width: 100%; max-width: none; height: 48px; padding: 0 14px; border-color: var(--border); border-radius: 9px; color: var(--text); font-size: 14px; }
+.desktop-new-room-storage .work-filter-trigger > .desktop-new-room-storage-label { flex: 1; text-align: left; }
+.desktop-new-room-storage .company-avatar { flex-shrink: 0; }
+.desktop-new-room-flow[data-step="standalone"] { background: var(--bg); }
+.desktop-new-room-flow[data-step="standalone"] .new-room-panel { height: auto; flex: 0 1 auto; }
+.desktop-new-room-storage .work-menu-option { min-height: 62px; gap: 12px; }
+.desktop-new-room-storage .work-menu-option > svg:first-child { width: 22px; height: 22px; flex-basis: 22px; }
+.desktop-new-room-storage-option { flex: 1; min-width: 0; }
+.desktop-new-room-storage-option strong { display: block; font-size: 14px; font-weight: 500; }
+.desktop-new-room-storage-option small { display: block; margin-top: 3px; color: var(--text-secondary); font-size: 12px; line-height: 1.4; }
 .desktop-new-room-recent { margin-top: 24px; }
 .desktop-new-room-recent h3 { margin: 0 0 8px; color: var(--text-tertiary); font-size: 11px; font-weight: 500; }
 .desktop-new-room-recent button { display: grid; grid-template-columns: 20px minmax(0, 1fr) 14px; gap: 12px; align-items: center; width: 100%; min-height: 61px; padding: 12px 14px; border: 0; border-radius: 9px; background: none; color: var(--text-secondary); text-align: left; }

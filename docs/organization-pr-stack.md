@@ -192,3 +192,122 @@ to cached private room groups. Returning to the app rechecks company membership.
   confirms it as joined (`activeId`). A saved choice alone, at launch or when
   GitHub does not answer, shows All rooms.
 - The window-focus check moved to slice 4 and runs at most once a minute.
+
+## Company invitations and combined validation (slice 6)
+
+Company links use `/company/<GitHub organization ID>` in the browser and
+`letagents://company/<ID>` in desktop (renamed from `/join/` on 2026-11-08,
+because "join" already means joining a room). Links select a destination; they grant no
+access. Browser sign-in preserves the destination. Desktop persists the pending
+ID across restarts and clears it only after joining or choosing personal rooms.
+A newer invitation cannot be cleared by an older request. Packaged macOS apps
+register the protocol; development runs do not replace an installed handler.
+
+Run `npm --prefix apps/desktop run smoke:organizations` after dependency setup
+for an isolated Electron journey against the built renderer. It uses a temporary
+profile and simulated GitHub responses, without changing MCP configuration.
+Screenshots and a JSON report go to `/tmp/letagents-org-onboarding-results`
+(or `LETAGENTS_ORG_SMOKE_OUTPUT`). It checks owner setup, member waiting, repo
+selection, company switching, empty rooms, provider failures, personal fallback,
+and persisted invitations. This journey also caught and fixed the four-step
+progress layout and sidebar switcher placement.
+
+Combined branch validation: root/web and desktop builds, desktop typechecks,
+967 renderer tests, backend organization/access/migration tests, link parsing,
+auth redirect tests, packaging contract tests, and the Electron journey passed.
+Live GitHub consent/SSO and installed-app OS protocol dispatch still need a real
+account and packaged-app check. No production database was changed. Migration
+0143 adds organization and membership tables and the optional
+`rooms.organization_id`; no reset is required.
+
+### Rework (2026-11-08)
+
+- A company link opens a dialog over any view instead of replacing the main
+  view. The desktop dialog and the web page share one panel
+  (`shared/ui/company-invite/`), styled like the Give-an-agent panel. One rule,
+  `companyInviteView`, decides what it shows: join, set up, waiting for an
+  owner, already joined, invited on GitHub (accept there first), single
+  sign-on, permission needed, GitHub did not answer, or not a member. A missing
+  permission or an outage never reads as "not a member".
+- The not-a-member text names the signed-in GitHub account, tells the person to
+  ask an owner or use the account they added, and tells outside collaborators
+  that their repo rooms still open from All rooms. The web page names the
+  signed-in account on every join.
+- The web page `/company/<id>` follows the Ask-for-an-agent link page: "Open in
+  LetAgents" first, with download links; joining in the browser is a second
+  path. GitHub pages open in a new tab, and the page checks again on focus.
+- The company menu copies `https://…/company/<id>`. The New room dialog's join
+  box also accepts a company link (`https://letagents.chat/company/<id>` or
+  `letagents://company/<id>`) and opens the company dialog.
+- The smoke journey now covers the radio-row company step, the Rooms-heading
+  menu, the empty and GitHub-outage company home, the link dialog over another
+  view, joining from a link, a new room inside the company, a pasted company
+  link, and the All rooms fallback (14 checks). Its window runs with
+  `backgroundThrottling: false`, because a hidden window runs no animation
+  frames and a dialog's leave transition then never ends.
+
+## Independent review follow-up
+
+Separate reviewers checked backend slices 1–3, desktop slices 4–5, and links
+in slice 6. Backend review found no actionable issue. Three UI/entry findings
+were fixed and rechecked: direct HTTP company links now serve the Vue app;
+explicitly opening a room outside a selected company switches to Personal &
+shared; an incoming invitation hides Marketplace while it is being handled.
+The HTTP entry regression and extended isolated desktop walkthrough cover these
+paths. Existing CI now runs organization migration/storage/access tests.
+
+The reviewed stack remains unmerged. Independent agent review is not a GitHub
+approval from a separate human account. Live GitHub/SSO and installed-app protocol
+dispatch remain the documented verification limits.
+
+## Rebuilt on staging (2026-11-07)
+
+The original PRs (#1172–#1178) were closed unmerged on 2026-09-18 with their
+branches deleted, and staging's history was rewritten afterwards. The same
+eight commits were cherry-picked onto staging `bc107382b`. What changed:
+
+- The migration is `drizzle/0143_organizations.sql` (0093 is taken on staging).
+- `App.vue` is now a set of composables. The company code lives in
+  `composables/app/useAppCompany.ts` (`useAppCompany` after the state,
+  `useAppCompanyNavigation` after the sidebar entries). The account rooms for
+  navigation, the company filter on sidebar projects, the window-focus refresh
+  and the explicit-open fallback moved into `useAppNavigation`,
+  `useAppSidebarEntries` and `useAppSessionActions`.
+- Staging already owns `letagents://` (ask links): the single-instance lock,
+  the protocol registration and the macOS `CFBundleURLTypes` entry. Company
+  links now only add their own `open-url` and `second-instance` listeners next
+  to the ask links, so there is no second lock or scheme registration.
+- An invitation also hides Messages, Inbox and My Work, which did not exist in
+  September, in the same way it hides Settings and Marketplace.
+- CI runs the organization tests in `integration-db-tests` group 4;
+  `web-routes.test.ts` already runs in `build-checks`.
+- The Electron smoke follows staging's New room tabs and answers the Messages
+  panel's `conversations` calls.
+
+Validation on the rebuilt stack: root and desktop type-checks, Vue lint, web
+build, 2541 renderer tests, 598 web tests, packaging tests, link and IPC
+registration tests, organization DB tests on a private Postgres, and the
+Electron organization smoke (all 11 checks, no console errors).
+
+## Review of the rework (2026-11-08)
+
+An independent agent reviewed the whole stack against staging. It found no
+server-side access leak. Fixed, each in the slice that owns the code:
+
+- Slice 4: one request counter served the list check and the company choice,
+  so a list check during a join locked the company dialog, and choosing All
+  rooms while the list loaded left it "checking" for good. Two counters now.
+- Slices 4–6: the filters used the saved company ID; a failed first check then
+  showed a blank main view. They now use the confirmed company (`activeId`).
+- Slice 3: the room list dropped rooms whose access check GitHub could not
+  answer, and returned 200. It now answers 503.
+- Slices 2–3: an organization hidden by single sign-on was treated as "not a
+  member" and its stored join was deleted. It now answers
+  `organization_sso_required` and keeps the join.
+- Slice 5: the New room dialog promised company ownership that is not built
+  yet; it now promises only the listing.
+
+Known limits, not fixed here: an organization with more than 1,000 repos
+visible to the person returns 503 from the room list (10 pages of 100); and the
+OAuth `state` is not tied to the browser, the same login-CSRF exposure the
+existing GitHub login has.

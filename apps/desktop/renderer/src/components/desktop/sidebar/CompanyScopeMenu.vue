@@ -63,9 +63,10 @@
           @click="choose(org.github_org_id)"
         >
           <CompanyAvatar :login="org.login" :avatar-url="org.avatar_url" size="m" />
-          <span>{{ org.login }}</span>
+          <span>{{ org.login }}<b v-if="newCompanyIds.has(org.github_org_id)" class="company-scope-new">New</b></span>
           <Check v-if="state.selectedId === org.github_org_id || org.joined" class="company-scope-tick" aria-hidden="true" />
           <span v-else class="company-scope-tag">{{ org.setup ? "Join" : org.role === "owner" ? "Set up" : "Needs owner" }}</span>
+
         </button>
 
         <template v-if="githubSteps.length || state.status === 'github_access_required'">
@@ -96,18 +97,33 @@
         </template>
 
         <hr>
-        <slot name="actions" :close="closeMenu" />
+        <div class="company-scope-footer">
         <button
+          v-if="selected"
           class="company-scope-item company-scope-action"
           type="button"
           role="menuitem"
+          data-testid="company-menu-copy-link"
+          @click="copyLink"
+        >
+          <span class="company-scope-icon"><Link2 aria-hidden="true" /></span>
+          <span>Copy invite link</span>
+        </button>
+        <button
+          class="company-scope-item company-scope-action"
+          :class="{ 'company-scope-refresh-icon': selected }"
+          type="button"
+          role="menuitem"
           :disabled="state.status === 'loading'"
+          :aria-label="state.status === 'loading' ? 'Checking GitHub…' : 'Refresh from GitHub'"
+          title="Refresh from GitHub"
           data-testid="company-menu-refresh"
           @click="refresh"
         >
           <span class="company-scope-icon"><RefreshCw aria-hidden="true" /></span>
-          <span>{{ state.status === "loading" ? "Checking GitHub…" : "Refresh from GitHub" }}</span>
+          <span v-if="!selected">{{ state.status === "loading" ? "Checking GitHub…" : "Refresh from GitHub" }}</span>
         </button>
+        </div>
       </div>
     </Transition>
   </Teleport>
@@ -115,7 +131,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Check, ChevronDown, ExternalLink, RefreshCw } from "@lucide/vue";
+import { Check, ChevronDown, ExternalLink, Link2, RefreshCw } from "@lucide/vue";
 import type { DesktopOrganization, DesktopOrganizationGitHubPage } from "../../../../../electron/ipc-types/organizations.js";
 import type { FirstRunCompanyStepState } from "../setup/types";
 import CompanyAvatar from "../company/CompanyAvatar.vue";
@@ -131,6 +147,7 @@ const emit = defineEmits<{
   choose: [id: string | null];
   refresh: [];
   "open-github": [page: DesktopOrganizationGitHubPage];
+  "copy-link": [];
 }>();
 
 const menuId = "sidebar-company-menu";
@@ -141,9 +158,32 @@ const anchor = ref<{ top: number; left: number; maxHeight: number } | null>(null
 
 const selected = computed(() => props.state.organizations.find((org) => org.github_org_id === props.state.selectedId) ?? null);
 const triggerLabel = computed(() => `Rooms: ${selected.value ? selected.value.login : "all rooms"}. Change company`);
-/** A dot on the trigger: something on GitHub waits for the person. */
+/** Companies the person has seen in this menu; a company they can join but have not seen yet gets the dot. */
+const SEEN_KEY = "letagents:company-menu-seen";
+const seenIds = ref<Set<string>>(readSeenIds());
+const newCompanies = computed(() => props.state.organizations
+  .filter((org) => org.setup && !org.joined && !seenIds.value.has(org.github_org_id)));
+/** A dot on the trigger: something on GitHub waits for the person, or a company they can now join. */
 const needsAttention = computed(() => props.state.status === "github_access_required"
-  || props.state.invitations.length > 0 || props.state.ssoRequired.length > 0);
+  || props.state.invitations.length > 0 || props.state.ssoRequired.length > 0 || newCompanies.value.length > 0);
+
+function readSeenIds(): Set<string> {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(SEEN_KEY) || "[]");
+    return new Set(Array.isArray(value) ? value.filter((id): id is string => typeof id === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function markCompaniesSeen(): void {
+  if (!newCompanies.value.length) return;
+  const next = new Set([...seenIds.value, ...newCompanies.value.map((org) => org.github_org_id)]);
+  seenIds.value = next;
+  try { window.localStorage.setItem(SEEN_KEY, JSON.stringify([...next].slice(-200))); } catch { /* The dot is a convenience. */ }
+}
+/** Companies that were new when the menu opened keep their "New" mark until it closes. */
+const newCompanyIds = ref<Set<string>>(new Set());
 const menuPosition = computed(() => anchor.value
   ? { top: `${anchor.value.top}px`, left: `${anchor.value.left}px`, maxHeight: `${anchor.value.maxHeight}px` }
   : undefined);
@@ -191,7 +231,9 @@ function toggleMenu(): void {
     return;
   }
   placeMenu();
+  newCompanyIds.value = new Set(newCompanies.value.map((org) => org.github_org_id));
   open.value = true;
+  markCompaniesSeen();
   void nextTick(() => {
     placeMenu();
     const items = menuItems();
@@ -225,6 +267,11 @@ function choose(id: string | null): void {
 function openGitHub(page: DesktopOrganizationGitHubPage): void {
   closeMenu(true);
   emit("open-github", page);
+}
+
+function copyLink(): void {
+  closeMenu(true);
+  emit("copy-link");
 }
 
 function refresh(): void {
@@ -340,6 +387,10 @@ defineExpose({ close: closeMenu });
   font-weight: 500;
 }
 
+.company-scope-footer { display: flex; align-items: center; gap: 4px; }
+.company-scope-footer .company-scope-action { min-width: 0; }
+.company-scope-footer .company-scope-refresh-icon { width: 38px; flex: 0 0 38px; display: grid; place-items: center; padding: 6px; }
+
 .company-scope-item {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
@@ -414,6 +465,13 @@ defineExpose({ close: closeMenu });
   padding: 0;
   color: var(--text-secondary);
   font-size: 11.5px;
+}
+
+.company-scope-new {
+  margin-left: 7px;
+  color: var(--amber, #f59e0b);
+  font-size: 11px;
+  font-weight: 600;
 }
 
 .company-scope-action {

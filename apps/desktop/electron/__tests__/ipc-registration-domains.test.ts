@@ -385,6 +385,7 @@ test("application registers startup preparation before rental recovery without d
     } }),
     mock.module("../main/attachments.js", { namedExports: { handleAttachmentProtocolRequest() {} } }),
     mock.module("../main/ask-links.js", { namedExports: { claimDesktopInstance: () => true, registerAskLinks() {} } }),
+    mock.module("../main/company-links.js", { namedExports: { prepareCompanyLinks() {} } }),
     mock.module("../main/menu.js", { namedExports: { configureApplicationMenu() {} } }),
     mock.module("../main/paths.js", { namedExports: { attachmentProtocolScheme: "fixture", htmlDemoProtocolScheme: "fixture-demo", workspaceRoot: "/fixture" } }),
     mock.module("../main/room-stream.js", { namedExports: {

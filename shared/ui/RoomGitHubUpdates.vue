@@ -45,7 +45,7 @@ defineSlots<{ default(props: { message: M; history: boolean }): unknown }>();
 const emit = defineEmits<{ rowsChanged: []; layoutStart: []; layoutSettled: [] }>();
 const element = ref<HTMLElement | null>(null);
 const instant = ref(false);
-const collapsed = ref(false);
+const collapsed = ref(true);
 const open = ref(new Set<string>());
 const unseen = ref(new Set<string>());
 const scrollers = new Map<string, HTMLElement>();
