@@ -920,8 +920,9 @@ test("a binding written by another call during a migration pass is not overwritt
         database.close();
       }
     });
+    let result: Awaited<ReturnType<typeof migrateLegacyProjectBindings>> | null = null;
     try {
-      await migrateLegacyProjectBindings([
+      result = await migrateLegacyProjectBindings([
         { legacyKey: "github.com/other/project", context: { roomIdentifier: "github.com/other/project" }, rootPath: other },
         { legacyKey: "github.com/acme/widgets", context: { roomIdentifier: "github.com/acme/widgets" }, rootPath: mainRoot },
       ], { storePath });
@@ -929,6 +930,9 @@ test("a binding written by another call during a migration pass is not overwritt
       stop();
     }
     assert.equal(wrote, true);
+    // This pass does not validate the row written meanwhile (here its folder
+    // does not even exist), so the legacy hint stays for the next start.
+    assert.deepEqual(result?.retryLegacyKeys, ["github.com/acme/widgets"]);
     const database = new DatabaseSync(storePath);
     try {
       const row = database.prepare("SELECT root_path FROM project_bindings WHERE identity_key = ?")

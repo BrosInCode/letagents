@@ -18,6 +18,62 @@ function binding(rootPath: string): DesktopProjectBinding {
   };
 }
 
+test("startup waits for the list read again after a foreground read made the migration result old", async () => {
+  // The order from the HarborPeak review: a foreground read (for example the
+  // session refresh) reads the list before the migration writes, the migration
+  // then writes a binding, and its result is older than the screen's list.
+  let finishMigration!: (result: DesktopProjectBindingMigrationResult) => void;
+  const migration = new Promise<DesktopProjectBindingMigrationResult>((resolve) => { finishMigration = resolve; });
+  const written = binding("/Users/me/widgets");
+  const listAnswers: Array<(bindings: DesktopProjectBinding[]) => void> = [];
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      letagentsDesktop: {
+        repos: {
+          migrateProjectBindings: () => migration,
+          listProjectBindings: () => new Promise<DesktopProjectBinding[]>((resolve) => { listAnswers.push(resolve); }),
+        },
+      },
+      localStorage: { setItem: () => undefined, removeItem: () => undefined },
+    },
+  });
+  try {
+    const projectBindings = ref<DesktopProjectBinding[]>([]);
+    const repo = useAppProjectRepo({
+      authStatus: ref(null),
+      legacyRepositoryRootBindings: {},
+      legacyRepositoryRootBindingsStorageKey: "legacy",
+      loading: ref(false),
+      openAddAgentAfterRepoPick: ref(false),
+      projectBindings,
+      recentRootRooms: ref([]),
+      repoStatus: ref(null),
+      rootRoomSnapshot: ref(null),
+      selectedRootRoomIdentifier: ref(null),
+      sessionGeneration: ref(0),
+    });
+    let startupSettled = false;
+    const startup = repo.initializeProjectBindings().then(() => { startupSettled = true; });
+    const foreground = repo.refreshProjectBindings();
+    await Promise.resolve();
+    // The foreground read answers with the list from before the migration's write.
+    listAnswers[0]!([]);
+    await foreground;
+    finishMigration({ bindings: [written], retryLegacyKeys: [] });
+    for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
+    assert.equal(listAnswers.length, 2, "the list is read again");
+    assert.equal(startupSettled, false, "startup waits for the read that gives the final list");
+    listAnswers[1]!([written]);
+    await startup;
+    assert.deepEqual(projectBindings.value, [written], "the first room opens with its folder");
+  } finally {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else delete (globalThis as { window?: unknown }).window;
+  }
+});
+
 test("a slow startup migration does not replace a binding that Connect project added meanwhile", async () => {
   let finishMigration!: (result: DesktopProjectBindingMigrationResult) => void;
   const migration = new Promise<DesktopProjectBindingMigrationResult>((resolve) => { finishMigration = resolve; });

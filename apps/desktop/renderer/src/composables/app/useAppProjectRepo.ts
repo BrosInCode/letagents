@@ -106,7 +106,10 @@ export function useAppProjectRepo(context: unknown) {
       if (generation !== sessionGeneration.value) return;
       // A newer list is already shown: it may lack a binding this migration
       // wrote, so read the list once more instead of showing the older one.
-      if (!showBindings(read, migration.bindings)) void refreshProjectBindings();
+      // Startup waits for that read, so the first room opens on the final
+      // list. If the read fails, the newer list on screen stays: the
+      // migration result is older than it in this branch, never as new.
+      if (!showBindings(read, migration.bindings)) await refreshProjectBindings();
       const retryBindings = Object.fromEntries(
         migration.retryLegacyKeys.flatMap((key) => {
           const rootPath = legacyRepositoryRootBindings[key];

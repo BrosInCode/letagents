@@ -840,8 +840,9 @@ export async function migrateLegacyProjectBindings(
   // later candidate for the same project still finds it.
   // Stored rows as the pass found them (SQLite only, no Git). A row that is
   // different before a write below was written by another call during this
-  // pass, for example Connect project; the pass then leaves it alone, as the
-  // old per-candidate list did.
+  // pass, for example Connect project. The pass does not overwrite it, and
+  // keeps the candidate's legacy key for the next start: this pass does not
+  // validate that row, and if it turns out invalid the hint must not be lost.
   const rowVersion = (binding: DesktopProjectBinding) => `${binding.updatedAt}\0${binding.rootPath}`;
   const rowsAtStart = new Map(readBindings(options).map((binding) => [binding.identityKey, rowVersion(binding)]));
   let bindings = await listProjectBindings(options);
@@ -884,7 +885,10 @@ export async function migrateLegacyProjectBindings(
       const stored = identityKey
         ? readBindings(options).find((binding) => binding.identityKey === identityKey)
         : undefined;
-      if (stored && rowVersion(stored) !== rowsAtStart.get(stored.identityKey)) continue;
+      if (stored && rowVersion(stored) !== rowsAtStart.get(stored.identityKey)) {
+        if (candidate.legacyKey) retryLegacyKeys.add(candidate.legacyKey);
+        continue;
+      }
       const binding = await bindProjectRoot({
         context,
         rootPath: status.isGitRepo
