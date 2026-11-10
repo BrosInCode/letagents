@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 
 import type {
@@ -28,39 +28,60 @@ export type RepoStatusBuildOptions = {
   onOriginRemoteRead?: (read: { stdout: string } | { error: unknown }) => void;
 };
 
+/**
+ * Git output already read during one build or refresh, keyed by folder and
+ * arguments. One build asks several helpers for the same fact (the top level,
+ * the branch list, origin HEAD); each command runs once and the others share
+ * its result. It lives only as long as that one call.
+ */
+type GitReads = Map<string, Promise<string>>;
+
+type RepoStatusCallOptions = RepoStatusBuildOptions & { gitReads?: GitReads };
+
+function withGitReads(options: RepoStatusCallOptions): RepoStatusCallOptions {
+  return options.gitReads ? options : { ...options, gitReads: new Map() };
+}
+
+function gitReadKey(cwd: string, args: readonly string[]): string {
+  return [cwd, ...args].join("\0");
+}
+
 function throwIfAborted(options: RepoStatusBuildOptions): void {
   options.signal?.throwIfAborted();
 }
 
 async function runGit(
-  workspaceRoot: string,
-  args: string[],
-  options: RepoStatusBuildOptions,
-): Promise<string> {
-  throwIfAborted(options);
-  const stdout = await runGitStdout(workspaceRoot, args, { signal: options.signal });
-  throwIfAborted(options);
-  return stdout;
-}
-
-async function runGitInPath(
   cwd: string,
   args: string[],
-  options: RepoStatusBuildOptions,
+  options: RepoStatusCallOptions,
 ): Promise<string> {
   throwIfAborted(options);
-  const stdout = await runGitStdout(cwd, args, { signal: options.signal });
+  const reads = options.gitReads;
+  const key = gitReadKey(cwd, args);
+  let read = reads?.get(key);
+  if (!read) {
+    read = runGitStdout(cwd, args, { signal: options.signal });
+    reads?.set(key, read);
+  }
+  const stdout = await read;
   throwIfAborted(options);
   return stdout;
 }
 
 async function getRepoRoot(
   workspaceRoot: string,
-  options: RepoStatusBuildOptions,
+  options: RepoStatusCallOptions,
 ): Promise<string | null> {
   try {
-    const stdout = await runGitInPath(workspaceRoot, ["rev-parse", "--show-toplevel"], options);
-    return normalizeGitPath(stdout.trim()) || null;
+    const stdout = await runGit(workspaceRoot, ["rev-parse", "--show-toplevel"], options);
+    const repoRoot = normalizeGitPath(stdout.trim()) || null;
+    // The top level of a top level is itself: a later lookup from the root
+    // (room routing does one) reuses this answer instead of starting Git.
+    const rootKey = repoRoot ? gitReadKey(repoRoot, ["rev-parse", "--show-toplevel"]) : null;
+    if (rootKey && !options.gitReads?.has(rootKey)) {
+      options.gitReads?.set(rootKey, Promise.resolve(stdout));
+    }
+    return repoRoot;
   } catch (error) {
     throwIfAborted(options);
     const failure = error as { code?: number; stderr?: string };
@@ -76,8 +97,21 @@ async function getGitHeadPath(
   options: RepoStatusBuildOptions,
 ): Promise<string | null> {
   try {
-    const stdout = await runGit(workspaceRoot, ["rev-parse", "--git-path", "HEAD"], options);
-    const headPath = stdout.trim();
+    // One run also finds the repository's info/attributes file, which the
+    // branch shortstat cache watches (see `readDiffContext`).
+    const stdout = await runGit(workspaceRoot, [
+      "rev-parse",
+      "--git-path",
+      "HEAD",
+      "--git-path",
+      "info/attributes",
+    ], options);
+    const [headLine = "", attributesLine, ...extra] = stdout.replace(/\r?\n$/, "").split(/\r?\n/);
+    const attributesPath = attributesLine?.trim();
+    if (attributesPath && extra.length === 0) {
+      rememberInfoAttributesPath(workspaceRoot, resolve(workspaceRoot, attributesPath));
+    }
+    const headPath = headLine.trim();
     if (!headPath) return null;
     return resolve(workspaceRoot, headPath);
   } catch {
@@ -129,23 +163,39 @@ async function getRoutingBranch(
     || await getRebaseHeadBranch(workspaceRoot, options);
 }
 
+/**
+ * Local branch names with the commit each one points at, in Git's order.
+ * `refname:short` gives the bare name only when that name is unambiguous, so a
+ * name found here resolves to exactly this commit wherever Git reads it.
+ */
+async function getLocalBranchTips(
+  workspaceRoot: string,
+  options: RepoStatusBuildOptions,
+): Promise<Map<string, string>> {
+  const tips = new Map<string, string>();
+  try {
+    const stdout = await runGit(workspaceRoot, [
+      "for-each-ref",
+      "--format=%(objectname) %(refname:short)",
+      "refs/heads",
+    ], options);
+    for (const line of stdout.split(/\r?\n/)) {
+      const separator = line.indexOf(" ");
+      if (separator < 0) continue;
+      const branch = line.slice(separator + 1).trim();
+      if (branch) tips.set(branch, line.slice(0, separator).trim());
+    }
+  } catch {
+    throwIfAborted(options);
+  }
+  return tips;
+}
+
 async function getLocalBranches(
   workspaceRoot: string,
   options: RepoStatusBuildOptions,
 ): Promise<string[]> {
-  try {
-    const stdout = await runGit(workspaceRoot, [
-      "for-each-ref",
-      "--format=%(refname:short)",
-      "refs/heads",
-    ], options);
-    return stdout.split(/\r?\n/)
-      .map((branch) => branch.trim())
-      .filter(Boolean);
-  } catch {
-    throwIfAborted(options);
-    return [];
-  }
+  return [...(await getLocalBranchTips(workspaceRoot, options)).keys()];
 }
 
 function fallbackDefaultBranch(localBranches: string[]): string | null {
@@ -246,7 +296,7 @@ async function getMainWorktreeRoot(
   options: RepoStatusBuildOptions,
 ): Promise<string> {
   try {
-    const stdout = await runGitInPath(worktreeRoot, ["rev-parse", "--git-common-dir"], options);
+    const stdout = await runGit(worktreeRoot, ["rev-parse", "--git-common-dir"], options);
     const commonDir = stdout.trim();
     if (commonDir) {
       const absoluteCommonDir = resolve(worktreeRoot, commonDir);
@@ -259,7 +309,7 @@ async function getMainWorktreeRoot(
     // Fall back to the worktree list below.
   }
   try {
-    const stdout = await runGitInPath(worktreeRoot, ["worktree", "list", "--porcelain"], options);
+    const stdout = await runGit(worktreeRoot, ["worktree", "list", "--porcelain"], options);
     const main = parseGitWorktreePorcelain(stdout, worktreeRoot).find((entry) => entry.isMain);
     if (main?.path) return resolve(main.path);
   } catch {
@@ -323,27 +373,378 @@ export function parseGitShortStat(
   };
 }
 
+/**
+ * Shortstat results that can be reused while nothing they depend on changed.
+ *
+ * `git diff --shortstat --merge-base A B`, run in a worktree, depends on:
+ * 1. the two commits (the cache key holds both commit IDs);
+ * 2. the effective Git configuration, for example `diff.renames` or a diff
+ *    driver (the key holds a hash of `git var -l`, which prints the merged
+ *    configuration of every scope and include, less the sections listed at
+ *    `diffRelevantGitVariable`);
+ * 3. the attributes Git reads for each changed path. A diff of two commits
+ *    reads them from the working tree's `.gitattributes` in the path's folder
+ *    and every parent folder, from `$GIT_COMMON_DIR/info/attributes`, from the
+ *    global file (`core.attributesFile`) and from the system file. It does
+ *    not read them from the index or from either commit (checked with Git
+ *    2.51: a `-diff` in the index only, or only in a commit's tree, does not
+ *    change the result). The key holds the state of the last three files;
+ *    each entry keeps the folders of its changed paths and the state of the
+ *    `.gitattributes` in each, and is used only while those are unchanged.
+ * When a source cannot be identified (Git older than 2.42 does not print the
+ * attribute file paths, or `attr.tree` points attributes at a revision),
+ * nothing is cached and every branch is measured.
+ * Not covered: the program a diff driver's `textconv` runs, `refs/replace`
+ * and grafts, and a different Git binary on PATH.
+ * Bounded; the least recently used entry goes first.
+ */
+type CachedBranchDelta = Pick<RepoBranchDelta, "filesChanged" | "additions" | "deletions"> & {
+  attributeFolders: string[];
+  attributeState: string;
+};
+const branchDeltaCacheLimit = 4096;
+/**
+ * Memory bounds: a result whose changed paths span more folders than this is
+ * not cached (it is measured on every build, as before), and the folders kept
+ * by all entries together stay below the total; the oldest entries go first.
+ */
+const branchDeltaMaxFoldersPerEntry = 1_000;
+const branchDeltaMaxFoldersTotal = 100_000;
+const branchDeltaCache = new Map<string, CachedBranchDelta>();
+let branchDeltaCachedFolders = 0;
+/** Shortstats run at most this many at a time. */
+const branchDeltaConcurrency = 4;
+/**
+ * Room for the path list of a large branch; Node's default 1 MiB would fail
+ * it. A diff whose path list is larger still is measured with the plain
+ * shortstat and not cached.
+ */
+let branchDeltaMaxBuffer = 64 * 1024 * 1024;
+/** Where each repository root keeps info/attributes, learned during a build. */
+const infoAttributesPaths = new Map<string, string>();
+
+/** Test-only: forget every cached branch shortstat. */
+export function clearBranchDeltaCacheForTest(): void {
+  branchDeltaCache.clear();
+  branchDeltaCachedFolders = 0;
+}
+
+/** Test-only: shrink the path-list buffer; returns a function that restores it. */
+export function setBranchDeltaMaxBufferForTest(bytes: number): () => void {
+  const previous = branchDeltaMaxBuffer;
+  branchDeltaMaxBuffer = bytes;
+  return () => { branchDeltaMaxBuffer = previous; };
+}
+
+function storeBranchDelta(cacheKey: string, entry: CachedBranchDelta): void {
+  if (entry.attributeFolders.length > branchDeltaMaxFoldersPerEntry) return;
+  const replaced = branchDeltaCache.get(cacheKey);
+  if (replaced) {
+    branchDeltaCache.delete(cacheKey);
+    branchDeltaCachedFolders -= replaced.attributeFolders.length;
+  }
+  branchDeltaCache.set(cacheKey, entry);
+  branchDeltaCachedFolders += entry.attributeFolders.length;
+  while (
+    branchDeltaCache.size > branchDeltaCacheLimit
+    || branchDeltaCachedFolders > branchDeltaMaxFoldersTotal
+  ) {
+    const oldest = branchDeltaCache.entries().next().value;
+    if (!oldest) break;
+    branchDeltaCache.delete(oldest[0]);
+    branchDeltaCachedFolders -= oldest[1].attributeFolders.length;
+  }
+}
+
+function rememberInfoAttributesPath(repoRoot: string, path: string): void {
+  infoAttributesPaths.set(resolve(repoRoot), path);
+}
+
+/** The diff inputs shared by every branch of one build or refresh. */
+type DiffContext = {
+  key: string;
+  /** Memo of `.gitattributes` states read during this build. */
+  attributeStates: Map<string, string>;
+};
+
+/** Identity of a file's contents without reading it: missing, or inode, size and times. */
+function fileState(path: string, followLink: boolean): string {
+  try {
+    const info = followLink ? statSync(path, { bigint: true }) : lstatSync(path, { bigint: true });
+    return [info.ino, info.size, info.mtimeNs, info.ctimeNs].join(":");
+  } catch {
+    return "-";
+  }
+}
+
+async function readGitVariables(
+  repoRoot: string,
+  options: RepoStatusBuildOptions,
+): Promise<string | null> {
+  try {
+    return await runGit(repoRoot, ["var", "-l"], options);
+  } catch {
+    throwIfAborted(options);
+    return null;
+  }
+}
+
+async function readInfoAttributesPath(
+  repoRoot: string,
+  options: RepoStatusBuildOptions,
+): Promise<string | null> {
+  const known = infoAttributesPaths.get(resolve(repoRoot));
+  if (known) return known;
+  try {
+    const stdout = await runGit(repoRoot, ["rev-parse", "--git-path", "info/attributes"], options);
+    const lines = stdout.replace(/\r?\n$/, "").split(/\r?\n/);
+    if (lines.length !== 1 || !lines[0]?.trim()) return null;
+    const path = resolve(repoRoot, lines[0].trim());
+    rememberInfoAttributesPath(repoRoot, path);
+    return path;
+  } catch {
+    throwIfAborted(options);
+    return null;
+  }
+}
+
+/**
+ * `git var -l` lines left out of the diff context, because they cannot change
+ * the output of `git diff --numstat --shortstat --merge-base <commit> <commit>`:
+ * - `GIT_AUTHOR_IDENT` and `GIT_COMMITTER_IDENT` carry the current time;
+ *   identities are used to write commits, never to compare them.
+ * - `branch.<name>.*` (remote, merge, rebase, pushRemote, description, ...)
+ *   set the upstream and pull/push behaviour of a branch name. The diff names
+ *   two commit IDs, so no branch name is resolved and no upstream is read.
+ * - `remote.<name>.*` (url, fetch, push, ...) configure fetch and push. A diff
+ *   reads only local objects.
+ * Git writes these whenever a worktree is added with tracking, a branch is
+ * pushed with -u or deleted, or `gh pr checkout` runs; keeping them would
+ * measure every branch again each time an agent gets a worktree.
+ */
+function diffRelevantGitVariable(line: string): boolean {
+  return !/^GIT_(?:AUTHOR|COMMITTER)_IDENT=/.test(line)
+    && !line.startsWith("branch.")
+    && !line.startsWith("remote.");
+}
+
+function diffContextFrom(
+  repoRoot: string,
+  gitVariables: string | null,
+  infoAttributesPath: string | null,
+): DiffContext | null {
+  if (gitVariables === null || !infoAttributesPath) return null;
+  const allLines = gitVariables.split(/\r?\n/);
+  // With `attr.tree` (or GIT_ATTR_SOURCE) Git reads attributes from a tree
+  // named by a revision, which can move without any file here changing.
+  // Nothing is cached then.
+  if (allLines.some((line) => line.startsWith("attr.tree=")) || process.env.GIT_ATTR_SOURCE !== undefined) {
+    return null;
+  }
+  const lines = allLines.filter(diffRelevantGitVariable);
+  const systemAttributes = lines.find((line) => line.startsWith("GIT_ATTR_SYSTEM="))?.slice("GIT_ATTR_SYSTEM=".length);
+  const globalAttributes = lines.find((line) => line.startsWith("GIT_ATTR_GLOBAL="))?.slice("GIT_ATTR_GLOBAL=".length);
+  if (!systemAttributes || !globalAttributes) return null;
+  // `git var` prints these paths with `~` already expanded but a relative
+  // `core.attributesFile` as written. Git opens that from the top of the
+  // worktree the diff runs in (checked with Git 2.51: from a linked worktree
+  // the main worktree's file does not apply), and the diffs run there.
+  const systemAttributesPath = resolve(repoRoot, systemAttributes);
+  const globalAttributesPath = resolve(repoRoot, globalAttributes);
+  const environment = Object.entries(process.env)
+    .filter(([name]) => name.startsWith("GIT_"))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, value]) => `${name}=${value ?? ""}`);
+  const key = createHash("sha256")
+    .update(lines.join("\n"))
+    .update("\0")
+    .update(environment.join("\n"))
+    .update("\0")
+    .update([
+      fileState(systemAttributesPath, true),
+      fileState(globalAttributesPath, true),
+      fileState(infoAttributesPath, true),
+    ].join("|"))
+    .digest("hex");
+  return { key, attributeStates: new Map() };
+}
+
+/** Folders whose `.gitattributes` apply to these paths: each parent folder and the root. */
+function attributeFoldersOf(paths: readonly string[]): string[] {
+  const folders = new Set<string>([""]);
+  for (const path of paths) {
+    const parts = path.split("/");
+    for (let depth = 1; depth < parts.length; depth += 1) {
+      folders.add(parts.slice(0, depth).join("/"));
+    }
+  }
+  return [...folders].sort();
+}
+
+function attributeStateOf(workspaceRoot: string, folders: readonly string[], context: DiffContext): string {
+  return folders.map((folder) => {
+    let state = context.attributeStates.get(folder);
+    if (state === undefined) {
+      // Git does not follow a symbolic link named .gitattributes in the tree.
+      state = fileState(join(workspaceRoot, folder, ".gitattributes"), false);
+      context.attributeStates.set(folder, state);
+    }
+    return state;
+  }).join("|");
+}
+
+/**
+ * Margin between the clock read before a diff and the file times the kernel
+ * writes. File systems that keep whole seconds (both times end in .000000000)
+ * get two seconds.
+ */
+const attributeClockSlackNs = 10_000_000n;
+const coarseAttributeClockSlackNs = 2_000_000_000n;
+
+function changedSince(path: string, sinceNs: bigint): boolean | null {
+  try {
+    const info = lstatSync(path, { bigint: true });
+    const coarse = info.mtimeNs % 1_000_000_000n === 0n && info.ctimeNs % 1_000_000_000n === 0n;
+    const from = sinceNs - (coarse ? coarseAttributeClockSlackNs : attributeClockSlackNs);
+    return info.ctimeNs >= from || info.mtimeNs >= from;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when a `.gitattributes` in these folders may have changed since
+ * `sinceNs`. A missing file may have been deleted meanwhile; deleting it (or
+ * its folder) changes the times of the nearest folder that still exists, so
+ * that folder is checked instead.
+ */
+function attributesChangedSince(workspaceRoot: string, folders: readonly string[], sinceNs: bigint): boolean {
+  return folders.some((folder) => {
+    const fileChanged = changedSince(join(workspaceRoot, folder, ".gitattributes"), sinceNs);
+    if (fileChanged !== null) return fileChanged;
+    const parts = folder ? folder.split("/") : [];
+    for (let depth = parts.length; depth >= 0; depth -= 1) {
+      const folderChanged = changedSince(join(workspaceRoot, ...parts.slice(0, depth)), sinceNs);
+      if (folderChanged !== null) return folderChanged;
+    }
+    return true;
+  });
+}
+
+/**
+ * Parse `git diff --numstat --shortstat -z`: NUL-terminated numstat records
+ * (a rename has an empty path followed by the old and new paths), then the
+ * shortstat line.
+ */
+export function parseGitNumstatShortStat(stdout: string): { shortStat: string; paths: string[] } {
+  const fields = stdout.split("\0");
+  const shortStat = fields.pop() ?? "";
+  const paths: string[] = [];
+  for (let index = 0; index < fields.length; index += 1) {
+    const match = /^(?:\d+|-)\t(?:\d+|-)\t([\s\S]*)$/.exec(fields[index] ?? "");
+    if (!match) continue;
+    if (match[1]) {
+      paths.push(match[1]);
+    } else {
+      paths.push(fields[index + 1] ?? "", fields[index + 2] ?? "");
+      index += 2;
+    }
+  }
+  return { shortStat, paths: paths.filter(Boolean) };
+}
+
 async function getBranchDelta(
   workspaceRoot: string,
   branch: string | null,
   defaultBranch: string | null,
+  branchTips: ReadonlyMap<string, string>,
+  context: DiffContext | null,
   options: RepoStatusBuildOptions,
 ): Promise<RepoBranchDelta | null> {
   if (!branch || !defaultBranch) return null;
   if (branch === defaultBranch) {
     return { branch, filesChanged: 0, additions: 0, deletions: 0, baseBranch: defaultBranch };
   }
-  try {
-    const stdout = await runGit(workspaceRoot, [
-      "--no-optional-locks",
-      "diff",
-      "--shortstat",
-      "--merge-base",
-      defaultBranch,
+  const baseOid = branchTips.get(defaultBranch);
+  const headOid = branchTips.get(branch);
+  const cacheKey = context && baseOid && headOid
+    ? [resolve(workspaceRoot), baseOid, headOid, context.key].join("\0")
+    : null;
+  const cached = cacheKey ? branchDeltaCache.get(cacheKey) : undefined;
+  if (cacheKey && cached && context
+    && attributeStateOf(workspaceRoot, cached.attributeFolders, context) === cached.attributeState) {
+    branchDeltaCache.delete(cacheKey);
+    branchDeltaCache.set(cacheKey, cached);
+    return {
       branch,
-      "--",
-    ], options);
-    return parseGitShortStat(stdout, defaultBranch, branch);
+      filesChanged: cached.filesChanged,
+      additions: cached.additions,
+      deletions: cached.deletions,
+      baseBranch: defaultBranch,
+    };
+  }
+  try {
+    throwIfAborted(options);
+    if (!cacheKey || !context || !baseOid || !headOid) {
+      const stdout = await runGitStdout(workspaceRoot, [
+        "--no-optional-locks",
+        "diff",
+        "--shortstat",
+        "--merge-base",
+        defaultBranch,
+        branch,
+        "--",
+      ], { signal: options.signal });
+      throwIfAborted(options);
+      return parseGitShortStat(stdout, defaultBranch, branch);
+    }
+    // The diff names the commits of the cache key, so a branch that moves
+    // meanwhile cannot store a later result under an earlier commit.
+    const startedAtNs = BigInt(Date.now()) * 1_000_000n;
+    let stdout: string;
+    try {
+      stdout = await runGitStdout(workspaceRoot, [
+        "--no-optional-locks",
+        "diff",
+        "--numstat",
+        "--shortstat",
+        "-z",
+        "--merge-base",
+        baseOid,
+        headOid,
+        "--",
+      ], { signal: options.signal, maxBuffer: branchDeltaMaxBuffer });
+    } catch (error) {
+      throwIfAborted(options);
+      if (!/maxBuffer/i.test((error as { stderr?: string }).stderr ?? "")) throw error;
+      // The path list is too large to keep: count it as before, uncached.
+      const shortStat = await runGitStdout(workspaceRoot, [
+        "--no-optional-locks",
+        "diff",
+        "--shortstat",
+        "--merge-base",
+        baseOid,
+        headOid,
+        "--",
+      ], { signal: options.signal });
+      throwIfAborted(options);
+      return parseGitShortStat(shortStat, defaultBranch, branch);
+    }
+    throwIfAborted(options);
+    const { shortStat, paths } = parseGitNumstatShortStat(stdout);
+    const delta = parseGitShortStat(shortStat, defaultBranch, branch);
+    const attributeFolders = attributeFoldersOf(paths);
+    // A .gitattributes written while Git ran may or may not be in this
+    // result; keep the result but do not reuse it.
+    if (attributesChangedSince(workspaceRoot, attributeFolders, startedAtNs)) return delta;
+    storeBranchDelta(cacheKey, {
+      filesChanged: delta.filesChanged,
+      additions: delta.additions,
+      deletions: delta.deletions,
+      attributeFolders,
+      attributeState: attributeStateOf(workspaceRoot, attributeFolders, context),
+    });
+    return delta;
   } catch {
     throwIfAborted(options);
     return null;
@@ -354,14 +755,32 @@ async function getKnownBranchDeltas(
   workspaceRoot: string,
   branches: Array<string | null | undefined>,
   defaultBranch: string | null,
+  branchTips: ReadonlyMap<string, string>,
+  context: DiffContext | null,
   options: RepoStatusBuildOptions,
 ): Promise<RepoBranchDelta[]> {
   const uniqueBranches = [...new Set(branches.map((branch) => branch?.trim()).filter(Boolean) as string[])];
-  const deltas: Array<RepoBranchDelta | null> = [];
-  for (const branch of uniqueBranches) {
-    throwIfAborted(options);
-    deltas.push(await getBranchDelta(workspaceRoot, branch, defaultBranch, options));
-  }
+  const deltas: Array<RepoBranchDelta | null> = new Array(uniqueBranches.length).fill(null);
+  let nextIndex = 0;
+  const measureNext = async (): Promise<void> => {
+    while (nextIndex < uniqueBranches.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      throwIfAborted(options);
+      deltas[index] = await getBranchDelta(
+        workspaceRoot,
+        uniqueBranches[index],
+        defaultBranch,
+        branchTips,
+        context,
+        options,
+      );
+    }
+  };
+  await Promise.all(Array.from(
+    { length: Math.min(branchDeltaConcurrency, uniqueBranches.length) },
+    measureNext,
+  ));
   return deltas.filter((delta): delta is RepoBranchDelta => Boolean(delta));
 }
 
@@ -459,8 +878,9 @@ async function getStatusPorcelain(
 
 export async function buildRepoStatus(
   workspaceRoot: string,
-  options: RepoStatusBuildOptions = {},
+  buildOptions: RepoStatusBuildOptions = {},
 ): Promise<RepoStatus> {
+  const options = withGitReads(buildOptions);
   throwIfAborted(options);
   const repoRoot = await getRepoRoot(workspaceRoot, options);
   if (!repoRoot) {
@@ -487,24 +907,28 @@ export async function buildRepoStatus(
     };
   }
 
-  const [worktrees, gitStatus, localBranches, headPath, resolvedRoom] = await Promise.all([
+  const includeBranchDeltas = options.includeBranchDeltas !== false;
+  const [worktrees, gitStatus, branchTips, headPath, resolvedRoom, gitVariables] = await Promise.all([
     getWorktrees(repoRoot, options),
     getStatusPorcelain(repoRoot, options),
-    getLocalBranches(repoRoot, options),
+    getLocalBranchTips(repoRoot, options),
     getGitHeadPath(repoRoot, options),
     resolveRoomIdentifierFromPath(repoRoot, options),
+    includeBranchDeltas ? readGitVariables(repoRoot, options) : Promise.resolve(null),
   ]);
-  const defaultBranch = resolvedRoom.routingDefaultBranch || fallbackDefaultBranch(localBranches);
+  const defaultBranch = resolvedRoom.routingDefaultBranch || fallbackDefaultBranch([...branchTips.keys()]);
   throwIfAborted(options);
 
-  const branchDeltas = options.includeBranchDeltas === false
-    ? []
-    : await getKnownBranchDeltas(
+  const branchDeltas = includeBranchDeltas
+    ? await getKnownBranchDeltas(
       repoRoot,
       [defaultBranch, gitStatus.branch, ...worktrees.map((worktree) => worktree.branch)],
       defaultBranch,
+      branchTips,
+      diffContextFrom(repoRoot, gitVariables, await readInfoAttributesPath(repoRoot, options)),
       options,
-    );
+    )
+    : [];
   const branchDelta = branchDeltas.find((delta) => delta.branch === gitStatus.branch) ?? null;
   throwIfAborted(options);
 
@@ -544,8 +968,9 @@ export async function refreshRepoStatus(
   workspaceRoot: string,
   previous: RepoStatus,
   invalidation: RepoStatusInvalidation,
-  options: RepoStatusBuildOptions = {},
+  refreshOptions: RepoStatusBuildOptions = {},
 ): Promise<RepoStatus> {
+  const options = withGitReads(refreshOptions);
   throwIfAborted(options);
   if (invalidation.full || !previous.isGitRepo || !previous.rootPath) {
     return buildRepoStatus(workspaceRoot, options);
@@ -562,15 +987,20 @@ export async function refreshRepoStatus(
   const worktreesChanged = Boolean(invalidation.worktrees || refsChanged);
   const staticFactsChanged = Boolean(invalidation.static);
 
-  const [worktrees, localBranches, remoteDefaultBranch] = await Promise.all([
+  const refreshBranchDeltas = refsChanged || worktreesChanged;
+  const [worktrees, branchTips, remoteDefaultBranch, gitVariables, infoAttributesPath] = await Promise.all([
     worktreesChanged ? getWorktrees(repoRoot, options) : Promise.resolve(previous.worktrees),
-    refsChanged ? getLocalBranches(repoRoot, options) : Promise.resolve<string[]>([]),
+    // Branch tips and the diff context decide which shortstats are still current.
+    refreshBranchDeltas
+      ? getLocalBranchTips(repoRoot, options)
+      : Promise.resolve(new Map<string, string>()),
     refsChanged ? getRemoteDefaultBranch(repoRoot, options) : Promise.resolve<string | null>(null),
+    refreshBranchDeltas ? readGitVariables(repoRoot, options) : Promise.resolve(null),
+    refreshBranchDeltas ? readInfoAttributesPath(repoRoot, options) : Promise.resolve(null),
   ]);
   const defaultBranch = refsChanged
-    ? remoteDefaultBranch || fallbackDefaultBranch(localBranches)
+    ? remoteDefaultBranch || fallbackDefaultBranch([...branchTips.keys()])
     : previous.defaultBranch ?? null;
-  const refreshBranchDeltas = refsChanged || worktreesChanged;
   const routingChanged = staticFactsChanged
     || branchSelectionChanged
     || (refsChanged && remoteDefaultBranch !== (previous.routingDefaultBranch ?? null))
@@ -582,6 +1012,8 @@ export async function refreshRepoStatus(
         repoRoot,
         [defaultBranch, gitStatus.branch, ...worktrees.map((worktree) => worktree.branch)],
         defaultBranch,
+        branchTips,
+        diffContextFrom(repoRoot, gitVariables, infoAttributesPath),
         options,
       )
       : Promise.resolve(previous.branchDeltas ?? []),
@@ -834,7 +1266,7 @@ export function buildLocalGitRoomInfo(input: {
 
 export async function resolveRoomIdentifierFromPath(
   folderPath: string,
-  options: RepoStatusBuildOptions = {},
+  resolveOptions: RepoStatusBuildOptions = {},
 ): Promise<{
   repoRoot: string | null;
   roomIdentifier: string;
@@ -843,6 +1275,7 @@ export async function resolveRoomIdentifierFromPath(
   warning: string | null;
   routingDefaultBranch: string | null;
 }> {
+  const options = withGitReads(resolveOptions);
   throwIfAborted(options);
   const repoRoot = await getRepoRoot(folderPath, options);
 
@@ -886,7 +1319,7 @@ export async function resolveRoomIdentifierFromPath(
   try {
     let stdout: string;
     try {
-      stdout = await runGitInPath(repoRoot, ["remote", "get-url", "origin"], options);
+      stdout = await runGit(repoRoot, ["remote", "get-url", "origin"], options);
     } catch (error) {
       options.onOriginRemoteRead?.({ error });
       throw error;
