@@ -106,15 +106,66 @@ test("a join answered after sign-out or an account change is not stored or share
   assert.equal((await fresh).name, "new account");
 });
 
-test("forgetting a room makes the next open send a new join", async (t) => {
+test("a join in flight when the room is forgotten is not cached, so the next open asks the server", async (t) => {
   const { subject, calls } = await loadRoomInfo(t);
   const first = subject.getJoinedRoomInfo("alerts-demo");
   await tick();
+  // The stream lost access to the room while the join was on its way.
   subject.forgetJoinedRoomInfo("alerts-demo");
-  const second = subject.getJoinedRoomInfo("alerts-demo");
+  calls[0].resolve({ room_id: "alerts-demo", role: "admin" });
+  assert.equal((await first).role, "admin", "the caller still gets the answer it asked for");
+
+  const next = subject.getJoinedRoomInfo("alerts-demo");
   await tick();
-  assert.equal(calls.length, 2);
-  calls[0].resolve({ room_id: "alerts-demo" });
-  calls[1].resolve({ room_id: "alerts-demo" });
-  await Promise.all([first, second]);
+  assert.equal(calls.length, 2, "the stale answer was not stored");
+  calls[1].reject(new Error("forbidden"));
+  await assert.rejects(next, /forbidden/);
+});
+
+test("sign-out clears joined rooms again after the token is removed", async (t) => {
+  const events: string[] = [];
+  let release: () => void = () => {};
+  const unexpected = () => { throw new Error("unexpected auth/setup operation"); };
+  t.mock.module("../main/organizations.js", { namedExports: { registerOrganizationIpcHandlers: () => {} } });
+  t.mock.module("../main/auth.js", { namedExports: {
+    cancelDeviceAuthFlow: unexpected, pollDeviceAuthFlow: unexpected, startDeviceAuthFlow: unexpected,
+    getDesktopAuthStatus: async () => ({ signedIn: false }),
+    signOutDesktopAuth: async () => { events.push("token removed"); },
+    setAuthAuthorizedHandler: () => {}, setAuthInvalidatedHandler: () => {},
+  } });
+  t.mock.module("../main/mcp-setup.js", { namedExports: {
+    buildMcpInstallState: unexpected, completeMcpOnboarding: unexpected, installLetAgentsMcpServer: unexpected,
+    installLetAgentsMcpServers: unexpected, refreshInstalledLetAgentsMcpServerAuth: async () => {},
+  } });
+  t.mock.module("../main/notifications.js", { namedExports: {
+    refreshDesktopNotificationRegistration: async () => {},
+    // The network delete that can hold sign-out for up to 30 s.
+    unregisterDesktopNotificationAccount: () => new Promise<void>((resolve) => {
+      events.push("unregister started");
+      release = resolve;
+    }),
+  } });
+  t.mock.module("../main/rooms.js", { namedExports: { clearJoinedRoomInfoCache: () => { events.push("joined rooms cleared"); } } });
+  t.mock.module("../main/attachments/html-demo-inline.js", { namedExports: { clearInlineHtmlDemoCache: () => {} } });
+  t.mock.module("../main/rooms/live-demo.js", { namedExports: { reconnectLiveDemos: () => {} } });
+  t.mock.module("../main/external-url.js", { namedExports: { openAllowedExternalUrl: unexpected } });
+  t.mock.module("../main/supervisor-grant.js", { namedExports: {
+    getDesktopSupervisorGrantMetadata: unexpected, provisionDesktopSupervisorGrant: unexpected,
+    revokeDesktopSupervisorGrant: unexpected, getDesktopSupervisorGrantStorageStatus: unexpected,
+  } });
+  t.mock.module("../main/supervisor-grant-coordinator.js", { namedExports: { supervisorGrantCoordinator: {
+    scheduleCredentialRecovery: () => {}, observeSecureStorageAvailability: () => {},
+  } } });
+  const { registerDesktopAuthAndSetupIpcHandlers } = await import(new URL(`../main/ipc-handlers/auth-setup.js?${encodeURIComponent(t.name)}`, import.meta.url).href) as typeof import("../main/ipc-handlers/auth-setup.js");
+  const handlers = new Map<string, () => Promise<unknown>>();
+  registerDesktopAuthAndSetupIpcHandlers({ handle: (channel: string, handler: () => Promise<unknown>) => handlers.set(channel, handler) } as never);
+  const signOut = handlers.get("desktop:auth:sign-out");
+  assert.ok(signOut);
+
+  const done = signOut();
+  await tick();
+  assert.deepEqual(events, ["joined rooms cleared", "unregister started"]);
+  release();
+  await done;
+  assert.deepEqual(events, ["joined rooms cleared", "unregister started", "token removed", "joined rooms cleared"]);
 });

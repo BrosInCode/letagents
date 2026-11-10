@@ -56,8 +56,11 @@ const joinedRoomInfoCache = new Map<string, { payload: RoomInfoPayload; storedAt
  * result or its error. The entry goes away when the request settles, so an error
  * is never reused. `clearJoinedRoomInfoCache` starts a new epoch: a join started
  * before it is not shared with later callers and its answer is not stored.
+ * `forgetJoinedRoomInfo` marks a join of that room as forgotten: it is not shared
+ * any more and its answer is not stored either.
  */
-const joinedRoomInfoInFlight = new Map<string, Promise<RoomInfoPayload>>();
+type JoinedRoomInfoFlight = { promise: Promise<RoomInfoPayload>; forgotten: boolean };
+const joinedRoomInfoInFlight = new Map<string, JoinedRoomInfoFlight>();
 let joinedRoomInfoEpoch = 0;
 
 export function createRoomAccess(
@@ -112,12 +115,15 @@ export function rememberJoinedRoomInfo(
 export function forgetJoinedRoomInfo(roomIdentifier: string | null | undefined): void {
   const key = roomInfoCacheKey(roomIdentifier);
   if (!key) return;
-  // A later check must ask the server again, not reuse a join already on its way.
-  for (const flightKey of [...joinedRoomInfoInFlight.keys()]) {
-    if (flightKey.startsWith(`${key}\n`)) joinedRoomInfoInFlight.delete(flightKey);
-  }
   const remembered = joinedRoomInfoCache.get(key)?.payload;
   const related = new Set([key, ...(remembered ? roomInfoCacheKeys(key, remembered).map(roomInfoCacheKey) : [])]);
+  // A join already on its way may answer for access the person no longer has:
+  // later checks must not share it, and its answer must not be stored.
+  for (const [flightKey, flight] of [...joinedRoomInfoInFlight]) {
+    if (!related.has(flightKey.slice(0, flightKey.lastIndexOf("\n")))) continue;
+    flight.forgotten = true;
+    joinedRoomInfoInFlight.delete(flightKey);
+  }
   // Every alias of the room (its code, a branch name) points at the same room id.
   for (const [cachedKey, entry] of joinedRoomInfoCache) {
     if (related.has(cachedKey) || related.has(roomInfoCacheKey(entry.payload.room_id))) joinedRoomInfoCache.delete(cachedKey);
@@ -163,18 +169,20 @@ export async function getJoinedRoomInfo(
   const noCreate = options?.create === false;
   const flightKey = cacheKey ? `${cacheKey}\n${noCreate ? "no-create" : "create"}` : null;
   const shared = flightKey ? joinedRoomInfoInFlight.get(flightKey) : undefined;
-  if (shared) return shared;
+  if (shared) return shared.promise;
 
   const epoch = joinedRoomInfoEpoch;
-  const flight = (async () => {
+  const flight = { forgotten: false } as JoinedRoomInfoFlight;
+  flight.promise = (async () => {
     const joined = await apiFetch<RoomInfoPayload>(
       `/rooms/${encodeURIComponent(roomIdentifier)}/join${noCreate ? "?create=false" : ""}`,
       {
         method: "POST",
       },
     );
-    // After sign-out or an account change the answer belongs to the old account.
-    if (epoch === joinedRoomInfoEpoch) rememberJoinedRoomInfo(roomIdentifier, joined);
+    // After sign-out or an account change the answer belongs to the old account;
+    // after a forget it may describe access the person lost.
+    if (epoch === joinedRoomInfoEpoch && !flight.forgotten) rememberJoinedRoomInfo(roomIdentifier, joined);
     return joined;
   })();
   if (flightKey) {
@@ -184,9 +192,9 @@ export async function getJoinedRoomInfo(
     const settle = () => {
       if (joinedRoomInfoInFlight.get(flightKey) === flight) joinedRoomInfoInFlight.delete(flightKey);
     };
-    flight.then(settle, settle);
+    flight.promise.then(settle, settle);
   }
-  return flight;
+  return flight.promise;
 }
 
 export function mapDesktopRoomInfoPayload(
