@@ -688,3 +688,164 @@ test("legacy polls at one cursor that see the same event during their backlog re
   assert.equal(store.calls(), initialReads + 1, "one shared read after the event, not one per poll");
   deps.roomEventBroker.close();
 });
+
+// --- Characterization of the legacy wire shapes (worker and delivery paths) ---
+
+const { InvalidRoomAgentDeliverySessionError } = await import("../rooms/agent-delivery.js");
+
+function legacyRouteHarness(overrides: Record<string, unknown> = {}) {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(routePath: string, handler: (req: unknown, res: unknown) => Promise<void>) { handlers.set(routePath, handler); },
+    post(routePath: string, handler: (req: unknown, res: unknown) => Promise<void>) { handlers.set(`POST ${routePath}`, handler); },
+  };
+  let disconnectSession: (() => void) | null = null;
+  const deps = {
+    ...createDeps(),
+    getProjectById: async () => ({ id: "room_1", display_name: "Room" }),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    requireParticipant: async () => true,
+    beginRoomAgentDelivery: async (input: { onSessionDisconnected: () => void }) => {
+      disconnectSession = input.onSessionDisconnected;
+      return {
+        identity: {
+          actor_label: "Agent", agent_key: "owner/agent", agent_session_id: "session_1",
+          owner_account_id: "account_1", session_kind: "worker",
+        },
+        checkCredential: async () => true,
+        end: async () => {},
+      };
+    },
+    ...overrides,
+  };
+  registerLegacyProjectMessageRoutes(app as never, deps as never);
+  const request = (query: Record<string, string> = {}) => {
+    const events = new EventEmitter();
+    return {
+      params: { id: "room_1" }, query, headers: {}, authKind: "owner_token",
+      sessionAccount: { account_id: "account_1" },
+      get() { return undefined; },
+      on: events.on.bind(events), off: events.off.bind(events), emit: events.emit.bind(events),
+    };
+  };
+  const sseResponse = () => ({
+    writes: [] as string[], writableEnded: false, headersSent: false, statusCode: 200, body: undefined as unknown,
+    socket: { setKeepAlive() {} },
+    setHeader() {}, flushHeaders() { this.headersSent = true; },
+    on() { return this; }, off() { return this; },
+    write(chunk: string) { this.writes.push(chunk); return true; },
+    status(code: number) { this.statusCode = code; return this; },
+    json(body: unknown) { this.body = body; this.headersSent = true; return this; },
+    end() { this.writableEnded = true; },
+  });
+  return { deps, handlers, request, sseResponse, disconnect: () => disconnectSession?.() };
+}
+
+const settle = async () => {
+  for (let tick = 0; tick < 10; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+};
+
+test("legacy SSE writes the legacy room_sync frame and bare message frames only", async () => {
+  const harness = legacyRouteHarness();
+  const res = harness.sseResponse();
+  await harness.handlers.get("/projects/:id/messages/stream")!(harness.request(), res);
+  await settle();
+  const frames = () => res.writes.filter((chunk) => !chunk.startsWith(":"));
+  assert.deepEqual(frames(), [
+    `event: room_sync\ndata: ${JSON.stringify({ project_id: "room_1", event_cursor: null, gap: false })}\n\n`,
+  ]);
+
+  harness.deps.messageEvents.emit("message:created", {
+    projectId: "room_1", message: { id: "msg_1", sender: "Human", text: "hello", source: "browser" },
+  });
+  await settle();
+  harness.deps.messageEvents.emit("message:routed", {
+    projectId: "room_1", message: { id: "msg_1", sender: "Human", text: "hello", source: "browser" },
+  });
+  await settle();
+  harness.deps.taskEvents.emit("task:updated", { projectId: "room_1", task: { id: "task_1", title: "T" } });
+  harness.deps.taskEvents.emit("task:removed", { projectId: "room_1", taskId: "task_1" });
+  await settle();
+
+  const written = frames().slice(1);
+  assert.equal(written.length, 2, "only the two message events reach the legacy stream");
+  for (const frame of written) {
+    assert.match(frame, /^id: \S+\ndata: \{.*\}\n\n$/);
+    const data = JSON.parse(frame.split("\n")[1]!.slice(6)) as Record<string, unknown>;
+    assert.equal(data.id, "msg_1");
+    assert.equal("room_id" in data, false);
+    assert.equal("routing_pass" in data, false);
+  }
+
+  harness.disconnect();
+  await settle();
+  assert.equal(frames().at(-1), `event: session_disconnect\ndata: ${JSON.stringify({ project_id: "room_1" })}\n\n`);
+  assert.equal(res.writableEnded, true);
+  harness.deps.roomEventBroker.close();
+});
+
+test("legacy SSE and poll answer an invalid delivery session with 401", async () => {
+  const harness = legacyRouteHarness({
+    beginRoomAgentDelivery: async () => { throw new InvalidRoomAgentDeliverySessionError(); },
+  });
+  for (const route of ["/projects/:id/messages/stream", "/projects/:id/messages/poll"]) {
+    const res = harness.sseResponse();
+    await harness.handlers.get(route)!(harness.request({ timeout: "10" }), res);
+    assert.equal(res.statusCode, 401, route);
+    assert.deepEqual(res.body, { error: "Invalid agent session credentials." }, route);
+  }
+  harness.deps.roomEventBroker.close();
+});
+
+test("a legacy poll whose delivery session ends answers an empty legacy page", async () => {
+  let releaseRead!: () => void;
+  const readGate = new Promise<void>((resolve) => { releaseRead = resolve; });
+  const harness = legacyRouteHarness({
+    getMessagesAfter: async () => { await readGate; return { messages: [], has_more: false }; },
+  });
+  const res = harness.sseResponse();
+  const request = harness.handlers.get("/projects/:id/messages/poll")!(harness.request({ after: "msg_3", timeout: "60000" }), res);
+  await settle();
+  harness.disconnect();
+  await settle();
+  assert.deepEqual(res.body, { project_id: "room_1", messages: [], has_more: false });
+  releaseRead();
+  await request;
+  harness.deps.roomEventBroker.close();
+});
+
+test("a legacy poll answers a routed update of the cursor row with the legacy body", async () => {
+  const store = legacyHeldReadStore();
+  const { deps, open } = legacyPollHarness(store);
+  const poll = open("msg_4");
+  await ticks(1);
+  deps.messageEvents.emit("message:routed", { projectId: "room_1", message: store.row(4) });
+  await store.releaseReads();
+  const { at: _at, ...body } = await poll.body as { at: number } & Record<string, unknown>;
+  await poll.request;
+  assert.deepEqual(Object.keys(body), ["project_id", "messages", "has_more"]);
+  assert.equal(body.project_id, "room_1");
+  deps.roomEventBroker.close();
+});
+
+test("a legacy poll opened after a message joins an older shared first read and misses it", async () => {
+  const store = legacyHeldReadStore();
+  const { deps, open } = legacyPollHarness(store);
+  // A's first read starts before msg_5 is written.
+  const first = open("msg_4");
+  await ticks(10);
+  store.commit(5);
+  deps.messageEvents.emit("message:created", { projectId: "room_1", message: store.row(5) });
+  await ticks(10);
+  // B subscribes after the msg_5 event, so only its first read can find msg_5.
+  const second = open("msg_4");
+  await ticks(10);
+  await store.releaseReads();
+  const [firstBody, secondBody] = await Promise.all([first.body, second.body]);
+  await Promise.all([first.request, second.request]);
+  assert.deepEqual((firstBody.messages ?? []).map((message) => message.id), ["msg_5"]);
+  assert.deepEqual((secondBody.messages ?? []).map((message) => message.id), [],
+    "B's first read was A's read, which began before msg_5");
+  assert.ok(secondBody.at >= 900, `B waited for its timeout, answered after ${secondBody.at} ms`);
+  deps.roomEventBroker.close();
+});

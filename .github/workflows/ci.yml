@@ -787,6 +787,10 @@ jobs:
         if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-link-previews.test.ts src/api/__tests__/message-link-previews-routes.test.ts src/api/__tests__/message-link-previews-db.test.ts src/api/__tests__/room-message-routes.test.ts
 
+      - name: Test legacy project message routes contract
+        if: matrix.group == 3
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/legacy-project-message-routes.test.ts src/api/__tests__/legacy-project-message-contract-db.test.ts
+
       - name: Test message pins
         if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-pins-routes.test.ts src/api/__tests__/message-pin-store.test.ts src/api/__tests__/message-pins-db.test.ts
