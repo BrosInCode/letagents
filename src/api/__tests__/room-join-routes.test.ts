@@ -666,3 +666,99 @@ test("join route refuses a focus locator under a non-GitHub repo with 403 UNSUPP
     room_id: "bitbucket.org/t/p",
   });
 });
+
+test("a repo room join works out the caller's role once and answers with it", async () => {
+  const roleChecks: string[] = [];
+  const room = { id: "github.com/o/r", display_name: "o/r" };
+  const response = await joinThroughRoute(
+    room.id,
+    {
+      resolveRepoRoomAccessDecision: async () => ({ kind: "allow" as const }),
+      resolveRoomOrReply: async () => room as never,
+      resolveExistingRoomRequest: async () => room as never,
+      getProjectAccessRoomId: () => room.id,
+      resolveProjectRepoRoomAccessDecision: async () => ({
+        isRepoBacked: true,
+        roomName: room.id,
+        repoRoomName: room.id,
+        binding: null,
+        decision: { kind: "allow" as const },
+      }),
+      resolveProjectRole: async (_project: unknown, account: { account_id: string }) => {
+        roleChecks.push(account.account_id);
+        return "admin";
+      },
+      toRoomResponse: (_project: unknown, options: { role?: string }) => ({ room_id: room.id, role: options.role }),
+    },
+    "192.0.2.90",
+    { account_id: "acct_repo_member" },
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, { room_id: room.id, role: "admin" });
+  assert.deepEqual(roleChecks, ["acct_repo_member"], "each role check asks GitHub, so one join makes one");
+});
+
+test("the join rate limit counts per account and address for a signed-in caller and per address otherwise", async () => {
+  const room = { id: "office-room", display_name: "Office" };
+  const overrides = {
+    resolveRoomOrReply: async () => room as never,
+    resolveExistingRoomRequest: async () => room as never,
+    getProjectAccessRoomId: () => room.id,
+    resolveProjectRole: async () => "participant",
+    toRoomResponse: () => ({ room_id: room.id }),
+  };
+  const officeAddress = "198.51.100.40";
+  const join = async (accountId: string | null, address = officeAddress) =>
+    (await joinThroughRoute(room.id, overrides, address, accountId ? { account_id: accountId } : null)).statusCode;
+
+  for (let index = 0; index < 10; index += 1) {
+    assert.equal(await join("acct_office_a"), 200, `join ${index + 1} of the first person`);
+  }
+  for (let index = 0; index < 10; index += 1) {
+    assert.equal(await join("acct_office_b"), 200, `a colleague at the same address, join ${index + 1}`);
+  }
+  assert.equal(await join("acct_office_a"), 429, "the eleventh join in a minute by one account is refused, as before");
+  assert.equal(await join(null), 200, "a caller without a sign-in keeps the address budget, unused so far");
+  for (let index = 1; index < 10; index += 1) await join(null);
+  assert.equal(await join(null), 429, "and is refused after ten from that address");
+  assert.equal(await join("acct_office_c"), 200, "which does not touch a signed-in colleague's budget");
+  assert.equal(await join("acct_office_a", "198.51.100.41"), 200,
+    "the same account on another machine (an agent host) has its own budget, as it had before");
+});
+
+test("a caller without a sign-in cannot spend an account's join budget by spelling its key as the address", async () => {
+  const room = { id: "forged-key-room", display_name: "Forged" };
+  const overrides = {
+    resolveRoomOrReply: async () => room as never,
+    resolveExistingRoomRequest: async () => room as never,
+    getProjectAccessRoomId: () => room.id,
+    resolveProjectRole: async () => "participant",
+    toRoomResponse: () => ({ room_id: room.id }),
+  };
+  const victimAddress = "198.51.100.60";
+  // The address comes from the first X-Forwarded-For entry, which a client sets.
+  const forgedAddress = `account:acct_victim@${victimAddress}`;
+  const forgedHeaders = { "x-forwarded-for": forgedAddress };
+  let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
+  registerRoomJoinRoutes({ post: (_path: RegExp, registered: typeof handler) => { handler = registered; } } as never, {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async (value: string) => value,
+    isRepoBackedRoomId,
+    ...overrides,
+  } as never);
+  assert.ok(handler);
+  const join = async (headers: Record<string, string>, sessionAccount: Record<string, unknown> | null) => {
+    const response = {
+      statusCode: 200,
+      status(code: number) { this.statusCode = code; return this; },
+      json() { return this; },
+    };
+    await handler!({ params: { 0: room.id }, headers, socket: { remoteAddress: victimAddress }, sessionAccount }, response as never);
+    return response.statusCode;
+  };
+
+  for (let index = 0; index < 11; index += 1) await join(forgedHeaders, null);
+  assert.equal(await join(forgedHeaders, null), 429, "the forger spends only the budget of the address it claims");
+  assert.equal(await join({}, { account_id: "acct_victim" }), 200, "the victim's budget is untouched");
+});

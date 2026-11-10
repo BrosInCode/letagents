@@ -143,9 +143,18 @@ export function registerRoomJoinRoutes(
       req.socket.remoteAddress ??
       "unknown";
     // Remote MCP sessions' in-process calls have no client address; they get
-    // a budget per account. Every other caller keeps the address key.
+    // a budget per account. A signed-in caller gets one per account and
+    // address, so people behind one office address do not share it, and one
+    // person's machines (desktop, agents on other hosts) keep a budget each,
+    // as they had before. A caller without a sign-in keeps the address key,
+    // under its own `addr:` prefix: the address can come from a header the
+    // client sets, so it must never be able to spell an account key.
     const internal = inProcessPrincipal(req);
-    const rateLimitKey = internal ? `account:${internal.account.account_id}` : ip;
+    const rateLimitKey = internal
+      ? `account:${internal.account.account_id}`
+      : req.sessionAccount
+        ? `account:${req.sessionAccount.account_id}@${ip}`
+        : `addr:${ip}`;
     if (!checkJoinRateLimit(rateLimitKey)) {
       res.status(429).json({
         error: "Too many join attempts. Please slow down.",
@@ -195,9 +204,9 @@ export function registerRoomJoinRoutes(
       return;
     }
 
-    if (projectAccess.isRepoBacked) {
-      await deps.resolveProjectRole(project, req.sessionAccount);
-    } else {
+    // A repo room's role (and its stored admin row) comes from the single
+    // resolveProjectRole call below; a second call here cost GitHub requests.
+    if (!projectAccess.isRepoBacked) {
       // The person who creates a room is its first admin and member. Everyone
       // else must already be a member; a stranger asks to join instead.
       const claimed = !existedBefore
