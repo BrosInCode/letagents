@@ -954,7 +954,7 @@ test("a focus room with its own GitHub binding is judged by that binding in the 
   } finally { await s.close(); }
 });
 
-test("50 busy repo rooms for 10 minutes cost the activity stream no more GitHub calls than the cache rules allow", { skip, concurrency: false }, async () => {
+test("50 busy repo rooms for 30 minutes cost the activity stream at most 2 GitHub calls per room per 5 minutes", { skip, concurrency: false }, async () => {
   const { settleRepoAccessRefreshesForTests } = await import("../github/repo-access.js");
   const clock = useFakeClock();
   const world = await buildWorld("repo_private", "member");
@@ -963,26 +963,29 @@ test("50 busy repo rooms for 10 minutes cost the activity stream no more GitHub 
   const s = await openActivityStream(world);
   try {
     for (const roomId of rooms) assert.ok(s.stream.text.includes(roomId), "every room is listed");
-    const before = githubCalls.length;
-    // A frame in every room every 20 s for 10 minutes.
-    for (let round = 0; round < 30; round++) {
+    // A frame in every room every 20 s for 30 minutes; GitHub calls counted per 5-minute window.
+    const windows: number[] = [];
+    let windowStart = githubCalls.length;
+    for (let round = 1; round <= 90; round++) {
       for (const roomId of rooms) s.frame(roomId, `r${round}`);
-      await s.settle(60);
+      await s.settle(40);
       await settleRepoAccessRefreshesForTests();
       clock.advance(20_000);
+      if (round % 15 === 0) {
+        windows.push(githubCalls.length - windowStart);
+        windowStart = githubCalls.length;
+      }
     }
-    await s.settle(300);
-    await settleRepoAccessRefreshesForTests();
-    const calls = githubCalls.length - before;
+    await s.settle(200);
     const sent = (s.stream.text.match(/event: room/g) ?? []).length;
-    assert.ok(sent >= 50 * 25, `frames flow (${sent})`);
-    // The rules: a lease keeps its answer 5 minutes, so each room is checked
-    // at most 3 times in 10 minutes (at the start, at 5 and at 10 minutes);
-    // a check is a visibility read (60 s shared cache) plus, when the cached
-    // yes is 5 minutes old, a background role refresh of 2 calls: at most
-    // 3 calls a check, 9 a room. A fresh check every 60 s would cost 20.
-    assert.ok(calls <= 50 * 9, `GitHub calls in 10 minutes: ${calls}`);
-    console.log(`[activity stream cost] 50 rooms, 10 minutes, frames every 20 s: ${calls} GitHub calls, ${sent} frames`);
+    assert.ok(sent >= 50 * 85, `frames flow (${sent})`);
+    // The rule: a lease keeps its answer 5 minutes; a check reuses the
+    // visibility paired with the cached yes, so its only GitHub cost is the
+    // background refresh of that yes (repository + permission): at most 2
+    // calls per room per 5 minutes, 100 for 50 rooms.
+    for (const calls of windows) assert.ok(calls <= 50 * 2, `GitHub calls per 5-minute window: ${windows.join(", ")}`);
+    const perHour = windows.slice(1).reduce((sum, calls) => sum + calls, 0) * (60 / 25);
+    console.log(`[activity stream cost] 50 rooms, 30 minutes, frames every 20 s: per 5-minute window ${windows.join(", ")}; about ${Math.round(perHour)} per hour`);
   } finally {
     clock.restore();
     await s.close();

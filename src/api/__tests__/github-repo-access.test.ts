@@ -1539,3 +1539,38 @@ test("an outage at the refresh keeps serving the yes until 30 minutes, without p
     clock.restore();
   }
 });
+
+test("a cached decision reuses the visibility paired with the cached yes; a refresh that sees another visibility drops the pair", async () => {
+  const room = swrRoom("paired");
+  const repo = room.split("/").slice(1).join("/");
+  const state = { private: true, calls: [] as string[] };
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(input)).pathname;
+    const token = new Headers(init?.headers).get("authorization") ? "token" : "anon";
+    state.calls.push(`${token} ${path}`);
+    if (path === `/repos/${repo}`) {
+      if (token === "anon" && state.private) return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+      return new Response(JSON.stringify({ private: state.private, owner: { login: "acme" }, permissions: { pull: true } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ permission: "write" }), { status: 200 });
+  }) as typeof fetch;
+  const account = { provider: "github", provider_access_token: "t-dev", login: "dev" };
+  const decide = () => resolveGitHubRepoRoomAccessDecision({ roomName: room, sessionAccount: account });
+  const clock = fakeClock();
+  try {
+    assert.deepEqual(await decide(), { kind: "allow" });
+    clock.advance(2 * MINUTE);
+    state.calls.length = 0;
+    assert.deepEqual(await decide(), { kind: "allow" });
+    assert.deepEqual(state.calls, [], "no visibility read: the cached yes carries it");
+
+    // The repository becomes public; GitHub's read access is not a role on a public one.
+    state.private = false;
+    clock.advance(4 * MINUTE);
+    assert.deepEqual(await decide(), { kind: "allow" }, "served while it revalidates");
+    await settleRepoAccessRefreshesForTests();
+    state.calls.length = 0;
+    assert.deepEqual(await decide(), { kind: "repo_collaborator_required" }, "the pair was dropped; the next read decides from scratch");
+    assert.ok(state.calls.length > 0);
+  } finally { clock.restore(); }
+});
