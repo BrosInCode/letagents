@@ -936,9 +936,24 @@ export class WorkerBindingStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
       throw error;
     }
-    await protectOwnerPrivate(holding, "file");
+    if (!await this.protectWonClaim(holding)) return null;
     await this.syncDirectory(dirname(holding));
     return holding;
+  }
+
+  /**
+   * Windows renames through an open handle, so two concurrent renames of one
+   * path can BOTH succeed: the file ends at the name of the later one, and the
+   * earlier name is already gone. A claim whose new name is missing right after
+   * its rename was therefore taken by a concurrent importer, exactly as if our
+   * rename had failed with ENOENT. POSIX never reaches the ENOENT branch here.
+   */
+  private async protectWonClaim(claimed: string): Promise<boolean> {
+    try { await protectOwnerPrivate(claimed, "file"); return true; }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
   }
 
   private async moveClaimedToQuarantine(claimed: string, quarantine: string, expectedChecksumPrefix?: string): Promise<void> {
@@ -1092,7 +1107,8 @@ export class WorkerBindingStore {
     const adopted = `${this.legacyJsonPath}.claimed.recovered.${randomUUID()}`;
     try { await rename(claimed, adopted); }
     catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("Legacy worker binding orphan claim disappeared during recovery."); throw error; }
-    await protectOwnerPrivate(adopted, "file");
+    // A concurrent adopter's rename can also succeed on Windows (see protectWonClaim): it is the same lost race.
+    if (!await this.protectWonClaim(adopted)) throw new Error("Legacy worker binding orphan claim disappeared during recovery.");
     await this.syncDirectory(dirname(adopted));
     return adopted;
   }
