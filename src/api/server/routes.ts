@@ -42,8 +42,6 @@ import { fetchPullRequestUnifiedDiff } from "../github/pull-request-diff.js";
 import { toGitHubWebhookId } from "../github/app-sync.js";
 import {
   getProjectAccessRoomId,
-  isRepoBackedProject,
-  isRepoBackedRoomId,
   replyRepoRoomAccessDecision,
   replyRoomMembershipDecision,
   resolveRoomMembershipDecision,
@@ -56,6 +54,7 @@ import {
   resolveProjectRoomEntryDecision,
   resolveRepoRoomAccessDecision,
 } from "../rooms/access.js";
+import { isRepoRoomByIdShape, isRepoShapedRoomId } from "../rooms/room-nature.js";
 import {
   resolveCanonicalRoomRequestId,
   resolveExistingRoomRequest,
@@ -308,7 +307,7 @@ export function registerApiRoutes(app: Express): void {
     getProjectById,
     resolveExistingRoomRequest,
     getGitRoomBindingForRoom,
-    isRepoBackedRoomId,
+    isRepoBackedRoomId: isRepoShapedRoomId,
     resolveGitHubRoomEntryDecision,
     resolveProjectRoomEntryDecision,
   } satisfies RoomEntryRouteDeps;
@@ -330,8 +329,8 @@ export function registerApiRoutes(app: Express): void {
   const legacyProjectRouteDeps = {
     resolveRequestAuth,
     resolveCanonicalRoomRequestId,
-    isRepoBackedRoomId,
-    isRepoBackedProject,
+    isRepoBackedRoomId: isRepoShapedRoomId,
+    isRepoBackedProject: isRepoRoomByIdShape,
     resolveRepoRoomAccessDecision,
     resolveProjectRepoRoomAccessDecision,
     replyRepoRoomAccessDecision,
@@ -524,13 +523,13 @@ export function registerApiRoutes(app: Express): void {
 
   const roomJoinRouteDeps = {
     resolveCanonicalRoomRequestId,
-    isRepoBackedRoomId,
+    isRepoBackedRoomId: isRepoShapedRoomId,
     resolveRepoRoomAccessDecision,
     replyRepoRoomAccessDecision,
     resolveRoomOrReply,
     getProjectAccessRoomId,
     getGitRoomBindingForRoom,
-    isRepoBackedProject,
+    isRepoBackedProject: isRepoRoomByIdShape,
     resolveProjectRepoRoomAccessDecision,
     resolveProjectRole,
     rememberHumanRoomParticipant,

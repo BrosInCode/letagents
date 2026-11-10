@@ -10,9 +10,9 @@ import {
   isKnownProvider,
   normalizeRoomId,
   normalizeRoomName,
-  parseFocusRoomLocator,
   resolveRoomIdentifier,
 } from "../../rooms/routing.js";
+import { parseFocusRoomLocator } from "../../rooms/room-nature.js";
 import { sendAppPage } from "../web/index.js";
 
 export interface RoomEntryRouteDeps {

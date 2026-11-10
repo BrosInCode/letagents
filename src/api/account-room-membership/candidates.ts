@@ -1,5 +1,5 @@
 import { rooms } from "../db/schema.js";
-import { isInviteCode } from "../rooms/routing.js";
+import { isJoinCodeShape } from "../rooms/room-nature.js";
 import type {
   AccountRoomCandidate,
   AccountRoomListFocusRoom,
@@ -111,7 +111,7 @@ export function accountRoomDeleteReason(candidate: AccountRoomCandidate): string
   if (candidate.role !== "admin") {
     return "Only room admins can delete this room.";
   }
-  if (!candidate.canDelete || !isInviteCode(candidate.project.id)) {
+  if (!candidate.canDelete || !isJoinCodeShape(candidate.project.id)) {
     return "Deletion is available only for invite rooms this account created in LetAgents.";
   }
   return null;

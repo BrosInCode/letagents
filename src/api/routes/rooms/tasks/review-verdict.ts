@@ -9,7 +9,7 @@ import {
   WorkflowEffectLeaseStaleError,
 } from "../../../db.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
-import { getProjectAccessRoomId, isRepoBackedRoomId } from "../../../rooms/access.js";
+import { isRepoRoomByIdShape, resolveRepoAccessTarget } from "../../../rooms/room-nature.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
 import { workflowEffectBroker } from "../../../workflow-effects/runtime.js";
 import type { GitHubReviewVerdict } from "../../../workflow-effects/github-review-provider.js";
@@ -123,15 +123,9 @@ export function registerTaskReviewVerdictRoute(app: Express, deps: RoomTaskRoute
       return;
     }
 
-    const accessRoomId = getProjectAccessRoomId(project);
-    let repoRoomName = isRepoBackedRoomId(accessRoomId) ? accessRoomId : null;
-    if (!repoRoomName && deps.getGitRoomBindingForRoom) {
-      const binding = await deps.getGitRoomBindingForRoom(accessRoomId)
-        ?? (accessRoomId === project.id ? null : await deps.getGitRoomBindingForRoom(project.id));
-      if (binding?.provider === "github") {
-        repoRoomName = `${binding.host}/${binding.repository_full_name}`;
-      }
-    }
+    const repoRoomName = deps.getGitRoomBindingForRoom
+      ? (await resolveRepoAccessTarget(project, deps.getGitRoomBindingForRoom))?.repoRoomName ?? null
+      : isRepoRoomByIdShape(project) ? project.parent_room_id ?? project.id : null;
     if (!repoRoomName) {
       res.status(409).json({
         error: "Review verdict effects require a GitHub-backed room.",

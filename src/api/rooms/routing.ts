@@ -18,6 +18,8 @@
  *   - Invite codes (XXXX-XXXX or XXXX-XXXX-XXXX) uppercased for consistency
  */
 
+import { isJoinCodeShape, JOIN_CODE_PATTERN } from "./room-nature.js";
+
 // Known git providers and their normalization rules
 const KNOWN_PROVIDERS = new Set([
   "github.com",
@@ -46,17 +48,9 @@ export function canonicalizeGitHostAlias(host: string): string {
 // Providers where owner and repo names are case-insensitive
 const CASE_INSENSITIVE_PROVIDERS = new Set(["github.com"]);
 
-/**
- * Invite code pattern: XXXX-XXXX or XXXX-XXXX-XXXX
- */
-const INVITE_CODE_PATTERN = /^[A-Z0-9]{4}(?:-[A-Z0-9]{4}){1,2}$/;
-
-/**
- * Check if a string looks like an invite code.
- */
-export function isInviteCode(value: string): boolean {
-  return INVITE_CODE_PATTERN.test(value.toUpperCase());
-}
+// Join-code and focus-room shapes live in room-nature.ts, the one module that
+// classifies rooms. These names stay for existing importers.
+export { isJoinCodeShape as isInviteCode, isReservedMainRoomCreationId, parseFocusRoomLocator } from "./room-nature.js";
 
 /**
  * Drop `user[:password]@` and `:port` from the authority (the text before the
@@ -163,35 +157,10 @@ export function normalizeRoomName(name: string): string {
  */
 export function normalizeRoomId(identifier: string): string {
   const trimmed = identifier.trim();
-  if (INVITE_CODE_PATTERN.test(trimmed.toUpperCase())) {
+  if (JOIN_CODE_PATTERN.test(trimmed.toUpperCase())) {
     return trimmed.toUpperCase();
   }
   return normalizeRoomName(trimmed);
-}
-
-export function parseFocusRoomLocator(
-  roomLocator: string
-): { parentRoomId: string; focusKey: string } | null {
-  const marker = "/focus/";
-  const index = roomLocator.lastIndexOf(marker);
-  if (index < 0) {
-    return null;
-  }
-
-  const parentRoomId = roomLocator.slice(0, index);
-  const focusKey = roomLocator.slice(index + marker.length);
-  if (!parentRoomId || !focusKey || focusKey.includes("/")) {
-    return null;
-  }
-
-  return { parentRoomId, focusKey };
-}
-
-export function isReservedMainRoomCreationId(roomId: string): boolean {
-  const normalized = roomId.trim();
-  return /^focus_\d+$/.test(normalized)
-    || /^git-room:github\.com:/i.test(normalized)
-    || /(?:^|\/)focus\//i.test(normalized);
 }
 
 /**
@@ -211,7 +180,7 @@ export function isKnownProvider(hostname: string): boolean {
 export function resolveRoomIdentifier(
   identifier: string
 ): { type: "room"; name: string } | { type: "invite"; code: string } {
-  if (isInviteCode(identifier)) {
+  if (isJoinCodeShape(identifier)) {
     return { type: "invite", code: identifier.toUpperCase() };
   }
 

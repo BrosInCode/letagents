@@ -34,7 +34,8 @@ import {
   formatGitRoomSummary,
   formatManualGitRoomSummaryForRoomId,
 } from "../../rooms/formatting.js";
-import { isReservedMainRoomCreationId, normalizeRoomId } from "../../rooms/routing.js";
+import { isReservedMainRoomCreationId } from "../../rooms/room-nature.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
 import { isMessageSenderWithinBounds } from "../../../../shared/message-contracts.mjs";
 
 /** Dependencies for creating a room inside a company; tests may stub them. */
