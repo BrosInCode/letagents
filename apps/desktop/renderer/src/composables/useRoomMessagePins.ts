@@ -26,7 +26,13 @@ export function useRoomMessagePins(room: Ref<string>, reportError: (message: str
   watch(() => [room.value, viewer.value, supported.value], () => {
     store.reset(room.value && supported.value ? room.value : null);
   }, { immediate: true, flush: "sync" });
-  watch(() => revisions.get(normalizeRoomIdentifier(room.value) ?? ""), () => { void store.refresh(); });
+  watch(
+    [() => normalizeRoomIdentifier(room.value), () => revisions.get(normalizeRoomIdentifier(room.value) ?? "") ?? 0],
+    ([key], [previousKey]) => {
+      // reset already reads the new room; only a revision of this room is a refresh.
+      if (key === previousKey) void store.refresh();
+    },
+  );
   onScopeDispose(() => store.dispose());
   return {
     state,

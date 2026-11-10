@@ -29,6 +29,7 @@ import {
 } from "./rooms.js";
 import { mapRoomArtifactPayload } from "./rooms/snapshot/mappers.js";
 import { forgetJoinedRoomInfo } from "./rooms/room-info.js";
+import { invalidateInFlightRoomReads } from "./rooms/in-flight-reads.js";
 import { emitToMainWindow } from "./window.js";
 import {
   createManagedMessageDeliveryTracker,
@@ -251,6 +252,7 @@ function refuseRoomStream(
 }
 
 export function emitRoomStreamEvent(event: DesktopRoomStreamEvent): void {
+  invalidateInFlightRoomReads(event);
   emitToMainWindow("desktop:room:stream-event", event);
 }
 
