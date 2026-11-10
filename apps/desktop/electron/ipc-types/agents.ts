@@ -140,12 +140,26 @@ export type DesktopAgentProviderModelsStatus =
   | "unavailable"
   | "error";
 
+/**
+ * Claude Code only: known models this CLI is too old to run. The Add agent
+ * dialog says which ones are missing and how to get them.
+ */
+export interface DesktopAgentProviderCliUpdate {
+  /** Labels of the models a newer CLI would list, in list order. */
+  modelLabels: string[];
+  /** The installed CLI version. */
+  installedVersion: string;
+  /** The command that updates the CLI this app runs. */
+  command: string;
+}
+
 export interface DesktopAgentProviderModelsResult {
   providerId: DesktopAgentProviderId;
   status: DesktopAgentProviderModelsStatus;
   models: DesktopAgentProviderModelOption[];
   defaultModel: string | null;
   error: string | null;
+  cliUpdate?: DesktopAgentProviderCliUpdate | null;
 }
 
 export type DesktopManagedAgentPermissionProfileId =
