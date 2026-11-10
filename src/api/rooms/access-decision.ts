@@ -22,7 +22,7 @@
  */
 import type { GitRoomBinding, OwnerTokenAccount, Project, SessionAccount } from "../db.js";
 import { assignProjectAdmin, getGitRoomBindingForRoom, isProjectAdmin } from "../db.js";
-import { getRoomMemberRole } from "../db/room-members.js";
+import { getRoomMemberRole, memberRoomIdsForAccount } from "../db/room-members.js";
 import {
   GitHubAccessUnavailableError,
   isGitHubRepoAdmin,
@@ -223,6 +223,14 @@ export function classifyTopLevelRoomIds(
     );
   }
   return kinds;
+}
+
+/**
+ * The batch form of the membership branch for top-level membership rooms: the
+ * rooms among `roomIds` where the account has a member or admin row.
+ */
+export async function membershipRoomsReadableBy(accountId: string, roomIds: readonly string[]): Promise<Set<string>> {
+  return memberRoomIdsForAccount(accountId, roomIds);
 }
 
 interface InternalReadDecision {

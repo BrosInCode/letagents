@@ -2,8 +2,8 @@ import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
 import { getGitRoomBindingsForRooms } from "../db/git-room-bindings.js";
-import { memberRoomIdsForAccount } from "../db/room-members.js";
 import { isRepoBackedRoomId } from "../rooms/room-ids.js";
+import { classifyTopLevelRoomIds, membershipRoomsReadableBy } from "../rooms/access-decision.js";
 import {
   account_room_recents,
   messages,
@@ -252,14 +252,16 @@ export async function getAccountRoomsForAccount(
     parentCandidates.delete(roomId);
     parentRoomIds.delete(roomId);
   };
+  // One batch read each for the room kind and the membership rows; the rule
+  // is the access decision's (rooms/access-decision.ts).
   const unboundParentIds = [...parentCandidates.keys()].filter((roomId) => !isRepoBackedRoomId(roomId));
   const [memberRoomIds, bindings] = await Promise.all([
-    memberRoomIdsForAccount(accountId, unboundParentIds),
+    membershipRoomsReadableBy(accountId, unboundParentIds),
     getGitRoomBindingsForRooms(unboundParentIds),
   ]);
   const repoParentIds: string[] = [];
-  for (const roomId of parentCandidates.keys()) {
-    if (isRepoBackedRoomId(roomId) || bindings.get(roomId)?.provider === "github") repoParentIds.push(roomId);
+  for (const [roomId, kind] of classifyTopLevelRoomIds([...parentCandidates.keys()], bindings)) {
+    if (kind === "repo") repoParentIds.push(roomId);
     else if (!memberRoomIds.has(roomId)) dropParent(roomId);
   }
   if (repoParentIds.length) {
