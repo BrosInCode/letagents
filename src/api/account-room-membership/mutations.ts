@@ -6,7 +6,7 @@ import {
   project_admins,
   rooms,
 } from "../db/schema.js";
-import { isInviteCode } from "../rooms/routing.js";
+import { isJoinCodeMainRoom } from "../rooms/room-nature.js";
 import { accountHasRoomAssociation } from "./association.js";
 
 export async function upsertAccountRoomRecent(input: {
@@ -119,7 +119,7 @@ export async function deleteAccountRoomForAccount(input: {
     };
   }
 
-  if (room.kind !== "main" || !isInviteCode(room.id)) {
+  if (!isJoinCodeMainRoom(room)) {
     return {
       room_id: room.id,
       deleted: false,

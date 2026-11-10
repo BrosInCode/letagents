@@ -8,10 +8,11 @@ import {
   type Project,
 } from "../db.js";
 import { getOrCreateGitHubRefRoomFromLocator } from "../github/git-room-routing.js";
-import { isInviteCode, isReservedMainRoomCreationId, normalizeRoomId, parseFocusRoomLocator } from "./routing.js";
+import { classifyRoomLocator, isFocusRoomIdShape, isJoinCodeShape, parseFocusRoomLocator } from "./room-nature.js";
+import { normalizeRoomId } from "./routing.js";
 
 export function isReservedRoomId(roomId: string): boolean {
-  return /^focus_\d+$/.test(roomId);
+  return isFocusRoomIdShape(roomId);
 }
 
 export async function resolveExistingRoomRequest(roomId: string): Promise<Project | undefined> {
@@ -28,8 +29,9 @@ export async function resolveRoomOrReply(
   res: Response,
   { allowCreate }: { allowCreate: boolean } = { allowCreate: false }
 ): Promise<Project | null> {
-  const focusLocator = parseFocusRoomLocator(roomId);
-  if (focusLocator) {
+  const locator = classifyRoomLocator(roomId);
+  if (locator.type === "focus_locator") {
+    const focusLocator = locator;
     const parentRoomId = await resolveCanonicalRoomRequestId(
       normalizeRoomId(focusLocator.parentRoomId)
     );
@@ -55,7 +57,7 @@ export async function resolveRoomOrReply(
   }
 
   // Handle invite codes (e.g., JA0E-4NYO or JA0E-4NYO-L2QP)
-  if (isInviteCode(roomId)) {
+  if (locator.type === "join_code") {
     const project = await getProjectByCode(roomId);
     if (!project) {
       res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
@@ -65,7 +67,7 @@ export async function resolveRoomOrReply(
   }
 
   if (allowCreate) {
-    if (isReservedMainRoomCreationId(roomId)) {
+    if (locator.type === "reserved") {
       const found = await getProjectById(roomId);
       if (!found) {
         res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
@@ -87,7 +89,7 @@ export async function resolveRoomOrReply(
 }
 
 export async function resolveCanonicalRoomRequestId(roomId: string): Promise<string> {
-  if (isInviteCode(roomId)) {
+  if (isJoinCodeShape(roomId)) {
     return roomId;
   }
 

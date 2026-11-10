@@ -9,7 +9,8 @@ import type {
   RepoRoomAccessDenial,
   RoomMembershipDecision,
 } from "../../rooms/access.js";
-import { normalizeRoomId, parseFocusRoomLocator } from "../../rooms/routing.js";
+import { parseFocusRoomLocator } from "../../rooms/room-nature.js";
+import { normalizeRoomId } from "../../rooms/routing.js";
 import { inProcessPrincipal } from "../../remote-mcp/in-process-dispatch.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";

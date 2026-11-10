@@ -901,6 +901,8 @@ jobs:
           --test-concurrency=1
           src/api/__tests__/canonical-focus-id-migration.test.ts
           src/api/__tests__/github-repo-migration.test.ts
+          src/api/__tests__/room-nature.test.ts
+          src/api/__tests__/room-nature-db.test.ts
 
       - name: Run workflow lookup tests
         if: matrix.group == 4
