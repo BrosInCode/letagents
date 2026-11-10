@@ -187,17 +187,22 @@ test("registerLegacyProjectMessageRoutes preserves legacy message route order", 
 });
 
 test("legacy worker message surfaces preserve exact publisher and receipt authority", () => {
-  const source = readFileSync(
-    fileURLToPath(new URL("../routes/legacy/messages.ts", import.meta.url)),
-    "utf8",
-  );
-  assert.match(source, /publisher_agent_key: workerIdentity\.identity\.agent_key/);
-  assert.match(source, /publisher_agent_session_id: workerIdentity\.identity\.agent_session_id/);
-  assert.match(source, /workerIdentity\.identity\.owner_account_id/);
-  assert.match(source, /hydrateLiveMessageForSubscriber\(/);
-  assert.match(source, /messageOverlayTarget/);
-  assert.match(source, /while \(!streamClosed\)[\s\S]*subscription\.next\(\)/);
-  assert.match(source, /failed to hydrate message[\s\S]*connection\?\.close\(\)/);
+  // The legacy routes are adapters: send, poll and stream run the room
+  // handlers, which carry the publisher and receipt authority.
+  const read = (relative: string) => readFileSync(fileURLToPath(new URL(relative, import.meta.url)), "utf8");
+  const legacy = read("../routes/legacy/messages.ts");
+  assert.match(legacy, /createRoomMessage\(/);
+  assert.match(legacy, /pollRoomMessages\(/);
+  assert.match(legacy, /streamRoomMessages\(/);
+  const create = read("../routes/rooms/messages/create-message.ts");
+  assert.match(create, /publisher_agent_key: workerIdentity\.agent_key/);
+  assert.match(create, /publisher_agent_session_id: workerIdentity\.agent_session_id/);
+  assert.match(create, /workerIdentity\?\.owner_account_id/);
+  const stream = read("../routes/rooms/messages/stream.ts");
+  assert.match(stream, /hydrateLiveMessageForSubscriber\(/);
+  assert.match(stream, /messageOverlayTarget/);
+  assert.match(stream, /while \(!streamClosed\)[\s\S]*subscription\.next\(\)/);
+  assert.match(stream, /failed to hydrate message[\s\S]*connection\?\.close\(\)/);
 });
 
 test("legacy SSE serializes authority hydration in message order", async () => {

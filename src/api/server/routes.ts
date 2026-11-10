@@ -352,6 +352,7 @@ export function registerApiRoutes(app: Express): void {
     requireParticipant,
     parseOptionalAgentPromptKind,
     parseOptionalReplyToMessageId,
+    parseOptionalThreadRootMessageId,
     shouldIncludePromptOnlyMessages,
     emitProjectMessage,
     rememberRoomParticipantFromMessage,
