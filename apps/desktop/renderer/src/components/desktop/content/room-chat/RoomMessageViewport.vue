@@ -378,6 +378,8 @@ function followLatestAfterLayout(): void {
 }
 let restoreRequestPending = false;
 let restorePagesRequested = 0;
+/** A restore is waiting for the window to render (retryRestoreAfterRender). */
+let restoreAwaitsWindow = false;
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
 let shouldJumpToLatestOnActivate = false;
@@ -1376,11 +1378,13 @@ function restoreInitialScrollPosition(): boolean {
   const element = messagesElement.value;
   // Loading/hidden viewports must not consume the saved position or publish 0.
   if (props.roomLoading || !props.messages.length || !isMeasurableScrollViewport(element)) return true;
+  // The window changes in the next render: a call before it would not find the rows.
+  if (restoreAwaitsWindow) return true;
   const bookmark = position;
   if (!bookmark.latest && bookmark.anchor && !findScrollAnchor(bookmark.anchor.messageId)
     && includeMessageInWindow(bookmark.anchor.messageId)) {
     // The saved row is loaded but outside the mount window: mount it, then retry.
-    void nextTick(restoreInitialScrollPosition);
+    retryRestoreAfterRender();
     return true;
   }
   if (!bookmark.latest && bookmark.anchor && !findScrollAnchor(bookmark.anchor.messageId)
@@ -1388,6 +1392,15 @@ function restoreInitialScrollPosition(): boolean {
     if (!props.loadingOlderMessages && !restoreRequestPending) {
       restoreRequestPending = true; restorePagesRequested++; emit("load-older");
     }
+    return true;
+  }
+  // The pixel fallback below was saved against the full newest-entries window:
+  // mount that window at once before the offset is used.
+  if (!bookmark.latest && !(bookmark.anchor && findScrollAnchor(bookmark.anchor.messageId))
+    && windowState.value.kind === "latest" && latestWindowSize.value < messageWindowSize && windowBounds.value.start > 0) {
+    cancelLatestWindowGrowth();
+    latestWindowSize.value = messageWindowSize;
+    retryRestoreAfterRender();
     return true;
   }
   hasAppliedInitialScroll = true;
@@ -1400,6 +1413,14 @@ function restoreInitialScrollPosition(): boolean {
   updateScrollState();
   emitScrollPosition();
   return true;
+}
+
+function retryRestoreAfterRender(): void {
+  restoreAwaitsWindow = true;
+  void nextTick(() => {
+    restoreAwaitsWindow = false;
+    restoreInitialScrollPosition();
+  });
 }
 
 function hasInitialScrollPosition(): boolean {

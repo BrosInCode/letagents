@@ -931,3 +931,37 @@ test("a growth step during the reader's scroll does not stop that scroll from cl
     roomUnread.clear = saved.clear;
   }
 });
+
+// Probes from review (HarborPeak): a saved pixel offset was taken against the full window.
+for (const [name, anchor] of [["missing", { messageId: "deleted-message", offsetTop: 0 }], ["null", null]] as const) {
+  test(`a ${name} saved anchor keeps the pixel fallback of the full window`, async () => {
+    const view = await mountViewport(150, { idle: false, initialScrollPosition: { top: 800, latest: false, anchor } });
+    try {
+      assert.deepEqual(view.firstVisible(), { id: "msg_19", offset: 0 }, "restored before any idle step");
+      await runIdle();
+      assert.deepEqual(view.firstVisible(), { id: "msg_19", offset: 0 });
+      assert.equal(view.list.scrollTop, 800);
+    } finally { view.app.unmount(); }
+  });
+}
+
+test("returning to a room restores a saved row outside the first slice at its exact offset", async () => {
+  const view = await mountViewport(300, { idle: false });
+  try {
+    view.props.roomIdentifier = "room-b";
+    view.props.messageNamespace = "room-b";
+    view.props.messages = roomMessages(150, "b");
+    await flush();
+    await runIdle();
+    view.props.initialScrollPosition = { top: 0, latest: false, anchor: { messageId: "msg_217", offsetTop: -14 } };
+    view.props.roomIdentifier = "room-a";
+    view.props.messageNamespace = "room-a";
+    view.props.messages = roomMessages(300);
+    await flush();
+    assert.deepEqual(view.firstVisible(), { id: "msg_217", offset: -14 });
+    const fromBottom = (view.list.scrollHeight as number) - (view.list.scrollTop as number);
+    await runIdle();
+    assert.deepEqual(view.firstVisible(), { id: "msg_217", offset: -14 });
+    assert.equal((view.list.scrollHeight as number) - (view.list.scrollTop as number), fromBottom, "the distance from the bottom did not change");
+  } finally { view.app.unmount(); }
+});
