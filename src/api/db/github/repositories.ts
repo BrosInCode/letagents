@@ -4,8 +4,8 @@ import { normalizeRoomName } from "../../rooms/routing.js";
 import { db } from "../client.js";
 import { normalizeGitRoomVisibility, upsertGitRoomBinding } from "../git-room-bindings.js";
 import { toGitHubRepositoryLink } from "../mappers.js";
-import { room_aliases, rooms, github_repositories } from "../schema.js";
-import { assertRoomAliasAvailable, getOrCreateCanonicalRoom, getProjectById } from "../rooms.js";
+import { room_aliases, github_repositories } from "../schema.js";
+import { assertRoomAliasAvailable, getOrCreateCanonicalRoom, getProjectById, renameRoomId } from "../rooms.js";
 import type { GitHubRepositoryLink, GitRoomVisibility, Project } from "../types.js";
 
 export async function getGitHubRepositoryLinkById(
@@ -71,7 +71,8 @@ export async function upsertGitHubRepositoryLink(input: {
 }
 
 async function upsertDefaultGitHubRoomBinding(
-  link: GitHubRepositoryLink
+  link: GitHubRepositoryLink,
+  executor?: Parameters<typeof upsertGitRoomBinding>[1]
 ): Promise<void> {
   await upsertGitRoomBinding({
     room_id: link.room_id,
@@ -87,7 +88,7 @@ async function upsertDefaultGitHubRoomBinding(
     visibility: link.visibility,
     is_default: true,
     source: "github_repository",
-  });
+  }, executor);
 }
 
 export async function migrateGitHubRepositoryCanonicalRoom(input: {
@@ -127,10 +128,7 @@ export async function migrateGitHubRepositoryCanonicalRoom(input: {
       await tx.delete(room_aliases).where(eq(room_aliases.alias, nextRoomId));
     }
 
-    await tx
-      .update(rooms)
-      .set({ id: nextRoomId })
-      .where(eq(rooms.id, existing.room_id));
+    await renameRoomId(tx, existing.room_id, nextRoomId);
 
     await tx
       .insert(room_aliases)
@@ -151,15 +149,16 @@ export async function migrateGitHubRepositoryCanonicalRoom(input: {
         updated_at,
       })
       .where(eq(github_repositories.github_repo_id, input.github_repo_id));
-  });
 
-  await upsertDefaultGitHubRoomBinding({
-    ...existing,
-    room_id: nextRoomId,
-    owner_login: input.owner_login,
-    repo_name: input.repo_name,
-    full_name: `${input.owner_login}/${input.repo_name}`,
-    updated_at,
+    // Same transaction: the room never has its new id with the old repo name.
+    await upsertDefaultGitHubRoomBinding({
+      ...existing,
+      room_id: nextRoomId,
+      owner_login: input.owner_login,
+      repo_name: input.repo_name,
+      full_name: `${input.owner_login}/${input.repo_name}`,
+      updated_at,
+    }, tx);
   });
 
   return (await getProjectById(nextRoomId)) ?? null;

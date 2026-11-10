@@ -13,9 +13,12 @@ import {
   pinnedOutside,
   startForBudget,
   grownDownwardState,
+  grownLatestWindowSize,
   grownUpwardState,
   indexEntriesByMessageId,
   messageWindowChunk,
+  messageWindowFirstSlice,
+  messageWindowIdleSlice,
   messageWindowReach,
   messageWindowSize,
   messageWindowTargetAbove,
@@ -181,6 +184,35 @@ describe("message mount window rules", () => {
     assert.equal(anchoredScrollTop(4150, -12, -4012), 150, "rows that leave above it move it back");
     assert.equal(anchoredScrollTop(10, 0, -50), 0);
   });
+
+  it("a room opens on a first slice of the newest entries, which grows to the full window", () => {
+    const entries = timeline(150);
+    const index = indexEntriesByMessageId(entries);
+    const first = resolveWindowBounds(entries, { kind: "latest" }, index, [], messageWindowFirstSlice);
+    assert.equal(first.end, entries.length);
+    assert.ok(first.end - first.start <= messageWindowFirstSlice + 1, `${first.end - first.start} entries in the first slice`);
+    const sizes = [messageWindowFirstSlice];
+    while (sizes.at(-1)! < messageWindowSize) sizes.push(grownLatestWindowSize(entries, sizes.at(-1)!));
+    // 153 entries (150 messages, 3 day dividers): the step that would reach 160 mounts them all.
+    assert.deepEqual(sizes, [40, 80, 120, messageWindowSize]);
+    assert.deepEqual(resolveWindowBounds(entries, { kind: "latest" }, index, [], sizes.at(-1)), { start: 0, end: entries.length });
+
+    const long = timeline(5000);
+    const longSizes = [messageWindowFirstSlice];
+    while (longSizes.at(-1)! < messageWindowSize) longSizes.push(grownLatestWindowSize(long, longSizes.at(-1)!));
+    assert.deepEqual(longSizes, [40, 80, 120, 160, 200]);
+    assert.equal(messageWindowIdleSlice, 40);
+  });
+
+  it("a target outside the first slice is mounted at once, with every entry below it", () => {
+    const entries = timeline(150);
+    const index = indexEntriesByMessageId(entries);
+    const first = resolveWindowBounds(entries, { kind: "latest" }, index, [], messageWindowFirstSlice);
+    assert.ok(index.get("m20")! < first.start);
+    const next = bounds(entries, windowStateIncluding(entries, first, index, "m20")!);
+    assert.ok(next.start <= index.get("m20")!);
+    assert.equal(next.end, entries.length, "the newest entries stay mounted");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -320,13 +352,25 @@ async function attachClientRender(component: object, path: string): Promise<void
 
 let vite: ViteDevServer;
 let RoomMessageViewport: object;
-let roomUnread: { visit: { value: { room: string; dividerId: string | null } } };
-const savedGlobals = { window: globalThis.window, document: globalThis.document, CSS: globalThis.CSS, ResizeObserver: globalThis.ResizeObserver, HTMLElement: globalThis.HTMLElement };
+type UnreadVisit = { room: string; account: string | null; revision: string | null; generation: number; dividerId: string | null };
+let roomUnread: {
+  visit: { value: UnreadVisit };
+  get: (room: string | null | undefined) => unknown;
+  clear: (room: string | null | undefined, expected: string) => unknown;
+};
+let unreadRevealKey: symbol;
+const savedGlobals = { window: globalThis.window, document: globalThis.document, CSS: globalThis.CSS, ResizeObserver: globalThis.ResizeObserver, HTMLElement: globalThis.HTMLElement, KeyboardEvent: globalThis.KeyboardEvent };
 const resizeCallbacks: Array<() => void> = [];
+/** Idle callbacks run only when a test asks (runIdle), so each growth step can be seen. */
+const idleQueue = new Map<number, IdleRequestCallback>();
+const idleCounts = { cancelled: 0 };
+let nextIdleHandle = 1;
 
 before(async () => {
   Object.assign(globalThis, {
     window: {
+      requestIdleCallback: (callback: IdleRequestCallback) => { idleQueue.set(nextIdleHandle, callback); return nextIdleHandle++; },
+      cancelIdleCallback: (handle: number) => { if (idleQueue.delete(handle)) idleCounts.cancelled += 1; },
       setTimeout, clearTimeout, addEventListener: () => undefined, removeEventListener: () => undefined,
       requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0),
       cancelAnimationFrame: clearTimeout, localStorage: { getItem: () => null, setItem: () => undefined },
@@ -335,12 +379,13 @@ before(async () => {
     document: { addEventListener() {}, removeEventListener() {}, visibilityState: "visible", hasFocus: () => true },
     CSS: { escape: (value: string) => value },
     HTMLElement: class {},
+    KeyboardEvent: class {},
     ResizeObserver: class { constructor(callback: () => void) { resizeCallbacks.push(callback); } observe() {} disconnect() {} },
   });
   vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
   RoomMessageViewport = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue")).default;
   // The same module instance the viewport reads its unread divider from.
-  ({ roomUnread } = await vite.ssrLoadModule("/renderer/src/composables/roomUnread.ts"));
+  ({ roomUnread, unreadRevealKey } = await vite.ssrLoadModule("/renderer/src/composables/roomUnread.ts"));
   const chatMessage = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue")).default;
   // These tests count mounted rows; the message body itself is covered elsewhere.
   Object.assign(chatMessage, {
@@ -396,13 +441,26 @@ function roomMessages(count: number, prefix = "msg") {
 
 const flush = async () => { for (let index = 0; index < 4; index += 1) { await nextTick(); await new Promise(resolve => setTimeout(resolve, 0)); } };
 
-async function mountViewport(count: number) {
+/** Runs the pending idle callbacks, up to `steps` rounds; returns the rounds run. */
+async function runIdle(steps = 50): Promise<number> {
+  let rounds = 0;
+  for (; rounds < steps && idleQueue.size; rounds += 1) {
+    const callbacks = [...idleQueue.values()];
+    idleQueue.clear();
+    for (const callback of callbacks) callback({ didTimeout: false, timeRemaining: () => 50 });
+    await flush();
+  }
+  return rounds;
+}
+
+async function mountViewport(count: number, options: { idle?: boolean; initialScrollPosition?: unknown; reveal?: (messageId: string) => Promise<boolean> } = {}) {
+  idleQueue.clear();
   const props = Vue.reactive<Record<string, unknown>>({
     active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: false,
     loadingOlderMessages: false, messages: roomMessages(count), threadMessages: [], messageNamespace: "room-a",
     localAgentWork: [], deliveryReceiptsByMessage: {}, hasFilteredRoomActivity: false,
     roomIdentifier: "room-a", githubActivityAvailable: false, roomLoading: false, searchQuery: "", taskReferenceIds: new Set(),
-    initialScrollPosition: null,
+    initialScrollPosition: options.initialScrollPosition ?? null,
   });
   const calls: string[] = [];
   const root = hostNode("element", "root");
@@ -417,10 +475,13 @@ async function mountViewport(count: number) {
     },
   });
   app.provide(ssrContextKey, { modules: new Set<string>() });
+  if (options.reveal) app.provide(unreadRevealKey, options.reveal);
   app.mount(root);
   const list = descendants(root).find(node => isList(node))!;
   list.clientHeight = 600;
   await flush();
+  // By default a test sees the room after its window has grown; `idle: false` shows the first slice.
+  if (options.idle !== false) await runIdle();
   const mounted = () => descendants(list).filter(node => node.type === "article").map(node => String(node.props["data-message-id"]));
   const scroll = async (top: number) => {
     list.scrollTop = top;
@@ -728,5 +789,179 @@ test("at the top of loaded history the viewport asks for older messages", async 
     for (let step = 0; step < 4 && !view.calls.length; step += 1) await view.scroll(100);
     assert.deepEqual(view.calls, ["load-older"]);
     assert.ok(view.mounted().includes("msg_0"), "history is requested only once every loaded row is mounted");
+  } finally { view.app.unmount(); }
+});
+
+// ---------------------------------------------------------------------------
+// The first slice of a room
+// ---------------------------------------------------------------------------
+
+test("a room opens on a first slice at the bottom, then grows in idle steps and stays at the bottom", async () => {
+  articlesCreated.count = 0;
+  const view = await mountViewport(150, { idle: false });
+  try {
+    assert.ok(articlesCreated.count <= messageWindowFirstSlice, `${articlesCreated.count} rows created while opening the room`);
+    assert.equal(view.mounted().at(-1), "msg_149");
+    assert.ok(view.atBottom());
+    const counts = [view.mounted().length];
+    while (await runIdle(1)) {
+      counts.push(view.mounted().length);
+      assert.ok(view.atBottom(), `still at the bottom after ${counts.at(-1)} rows`);
+    }
+    // Messages in slices of 40, 80 and 120 entries: one entry of each is a day divider.
+    assert.deepEqual(counts.slice(0, 3), [39, 79, 119]);
+    assert.equal(counts.at(-1), 150, "every loaded message is mounted in the end, as before");
+    assert.ok(counts.length <= 5, `${counts.length} steps`);
+  } finally { view.app.unmount(); }
+});
+
+test("a saved position keeps its row in place while the window grows above it", async () => {
+  const view = await mountViewport(150, { idle: false, initialScrollPosition: { top: 0, latest: false, anchor: { messageId: "msg_130", offsetTop: 0 } } });
+  try {
+    assert.deepEqual(view.firstVisible(), { id: "msg_130", offset: 0 });
+    assert.ok(view.mounted().length <= messageWindowFirstSlice);
+    await runIdle();
+    assert.equal(view.mounted().length, 150);
+    assert.deepEqual(view.firstVisible(), { id: "msg_130", offset: 0 }, "rows were added above the reader without moving it");
+  } finally { view.app.unmount(); }
+});
+
+test("a saved position outside the first slice is mounted at once", async () => {
+  const view = await mountViewport(150, { idle: false, initialScrollPosition: { top: 0, latest: false, anchor: { messageId: "msg_20", offsetTop: 0 } } });
+  try {
+    assert.ok(view.mounted().includes("msg_20"), "no idle step was needed");
+    assert.deepEqual(view.firstVisible(), { id: "msg_20", offset: 0 });
+  } finally { view.app.unmount(); }
+});
+
+test("a jump outside the first slice mounts the target at once", async () => {
+  const view = await mountViewport(150, { idle: false });
+  try {
+    scrolledIntoView.length = 0;
+    assert.equal(view.viewport().scrollToMessage("msg_5"), true);
+    await flush();
+    assert.ok(view.mounted().includes("msg_5"), "no idle step was needed");
+    assert.deepEqual(scrolledIntoView, ["msg_5"]);
+    assert.equal(view.mounted().at(-1), "msg_149");
+  } finally { view.app.unmount(); }
+});
+
+test("a room change cancels the old room's growth and opens the new room on a first slice", async () => {
+  const view = await mountViewport(150, { idle: false });
+  try {
+    await runIdle(1);
+    assert.equal(view.mounted().length, 79, "one step: 80 entries, one of them a day divider");
+    assert.equal(idleQueue.size, 1, "the next step is waiting");
+    const cancelledBefore = idleCounts.cancelled;
+    articlesCreated.count = 0;
+    view.props.roomIdentifier = "room-b";
+    view.props.messageNamespace = "room-b";
+    view.props.messages = roomMessages(150, "b");
+    await flush();
+    assert.ok(idleCounts.cancelled > cancelledBefore, "the old room's step was cancelled");
+    assert.ok(articlesCreated.count <= messageWindowFirstSlice, `${articlesCreated.count} rows created by the switch`);
+    assert.equal(view.mounted().at(-1), "b_149");
+    assert.ok(view.atBottom());
+    await runIdle();
+    assert.equal(view.mounted().length, 150);
+    assert.ok(view.atBottom());
+  } finally { view.app.unmount(); }
+});
+
+test("a hidden room does not grow until it is shown again", async () => {
+  const view = await mountViewport(150, { idle: false });
+  try {
+    view.props.active = false;
+    await flush();
+    await runIdle();
+    assert.equal(view.mounted().length, messageWindowFirstSlice - 1, "still the first slice (one entry is a day divider)");
+    view.props.active = true;
+    await flush();
+    await runIdle();
+    assert.equal(view.mounted().length, 150);
+  } finally { view.app.unmount(); }
+});
+
+test("a reader who scrolls up during growth and comes back gets the rest in slices, not in one task", async () => {
+  const view = await mountViewport(150, { idle: false });
+  try {
+    await view.scroll(view.list.scrollHeight as number);
+    // A short scroll up at once (past the 80 px "at the bottom" limit): the window becomes a fixed range.
+    await view.scroll((view.list.scrollTop as number) - 150);
+    await runIdle();
+    assert.equal(view.mounted().length, messageWindowFirstSlice - 1, "a fixed range mounts nothing in idle time");
+    // Back to the newest messages.
+    articlesCreated.count = 0;
+    await view.scroll(view.list.scrollHeight as number);
+    assert.ok(view.atBottom());
+    const created = [articlesCreated.count];
+    for (let step = 0; step < 10; step += 1) {
+      articlesCreated.count = 0;
+      if (!await runIdle(1)) break;
+      created.push(articlesCreated.count);
+      assert.ok(view.atBottom(), `still at the bottom after step ${step}`);
+    }
+    assert.ok(created.every(count => count <= messageWindowIdleSlice), `rows created per task: ${created.join(", ")}`);
+    assert.equal(view.mounted().length, 150, "the room still grows to every loaded message");
+  } finally { view.app.unmount(); }
+});
+
+test("a growth step during the reader's scroll does not stop that scroll from clearing the unread mark", async () => {
+  const saved = { visit: roomUnread.visit.value, get: roomUnread.get, clear: roomUnread.clear };
+  const cleared: string[] = [];
+  roomUnread.visit.value = { ...saved.visit, room: "room-a", revision: "r1", generation: saved.visit.generation + 1, dividerId: null };
+  roomUnread.get = (room) => (room === "room-a" ? { revision: "r1", messageId: "msg_140" } : null);
+  roomUnread.clear = (room, expected) => { cleared.push(`${room}:${expected}`); };
+  const view = await mountViewport(150, { idle: false, reveal: async () => true });
+  try {
+    assert.ok(view.mounted().includes("msg_140"));
+    assert.ok(!view.atBottom(), "the room opened at its unread message");
+    assert.deepEqual(cleared, []);
+    // The reader starts a scroll; a growth step runs before it ends.
+    (view.list.dispatchEvent as (event: unknown) => boolean)({ type: "wheel" });
+    assert.equal(await runIdle(1), 1);
+    view.list.scrollTop = view.list.scrollHeight as number;
+    (view.list.dispatchEvent as (event: unknown) => boolean)({ type: "scroll" });
+    await flush();
+    assert.deepEqual(cleared, ["room-a:r1"], "the reader reached the bottom: the room is read");
+  } finally {
+    view.app.unmount();
+    roomUnread.visit.value = { ...saved.visit, generation: roomUnread.visit.value.generation + 1 };
+    roomUnread.get = saved.get;
+    roomUnread.clear = saved.clear;
+  }
+});
+
+// Probes from review (HarborPeak): a saved pixel offset was taken against the full window.
+for (const [name, anchor] of [["missing", { messageId: "deleted-message", offsetTop: 0 }], ["null", null]] as const) {
+  test(`a ${name} saved anchor keeps the pixel fallback of the full window`, async () => {
+    const view = await mountViewport(150, { idle: false, initialScrollPosition: { top: 800, latest: false, anchor } });
+    try {
+      assert.deepEqual(view.firstVisible(), { id: "msg_19", offset: 0 }, "restored before any idle step");
+      await runIdle();
+      assert.deepEqual(view.firstVisible(), { id: "msg_19", offset: 0 });
+      assert.equal(view.list.scrollTop, 800);
+    } finally { view.app.unmount(); }
+  });
+}
+
+test("returning to a room restores a saved row outside the first slice at its exact offset", async () => {
+  const view = await mountViewport(300, { idle: false });
+  try {
+    view.props.roomIdentifier = "room-b";
+    view.props.messageNamespace = "room-b";
+    view.props.messages = roomMessages(150, "b");
+    await flush();
+    await runIdle();
+    view.props.initialScrollPosition = { top: 0, latest: false, anchor: { messageId: "msg_217", offsetTop: -14 } };
+    view.props.roomIdentifier = "room-a";
+    view.props.messageNamespace = "room-a";
+    view.props.messages = roomMessages(300);
+    await flush();
+    assert.deepEqual(view.firstVisible(), { id: "msg_217", offset: -14 });
+    const fromBottom = (view.list.scrollHeight as number) - (view.list.scrollTop as number);
+    await runIdle();
+    assert.deepEqual(view.firstVisible(), { id: "msg_217", offset: -14 });
+    assert.equal((view.list.scrollHeight as number) - (view.list.scrollTop as number), fromBottom, "the distance from the bottom did not change");
   } finally { view.app.unmount(); }
 });

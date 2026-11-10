@@ -10,8 +10,8 @@ import {
   getRoomParticipants,
   getRoomParticipantsForRooms,
   getProjectById,
-  getTasksForRooms,
 } from "../../../db.js";
+import { getRoomActivityHistoryTasks } from "../../../db/tasks.js";
 import {
   parseLimit,
   respondWithInternalError,
@@ -173,8 +173,8 @@ export function registerPresenceReadRoutes(
         reasoningSessionCounts,
       ] = await Promise.all([
         getRoomParticipantsForRooms([selectedRoom.id], { includeHidden: true }),
-        getTasksForRooms([selectedRoom.id]),
-        getRoomAgentPresenceSnapshot(selectedRoom.id, { includeEndedSessions: true }).catch(() => []),
+        getRoomActivityHistoryTasks(selectedRoom.id),
+        getRoomAgentPresenceSnapshot(selectedRoom.id, { includeEndedSessions: true, collapseWorkerSessions: true }).catch(() => []),
         getRoomMessageCountsBySender(selectedRoom.id).catch(() => []),
         getRoomReasoningSessionCountsByActor(selectedRoom.id).catch(() => []),
       ]);

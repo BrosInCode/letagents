@@ -85,12 +85,13 @@ export async function ensureGitHubRepoRoomBinding(
 }
 
 export async function upsertGitRoomBinding(
-  input: UpsertGitRoomBindingInput
+  input: UpsertGitRoomBindingInput,
+  executor: Pick<typeof db, "insert"> = db
 ): Promise<GitRoomBinding> {
   const now = new Date().toISOString();
   const visibility = normalizeGitRoomVisibility(input.visibility);
 
-  const [binding] = await db
+  const [binding] = await executor
     .insert(room_git_bindings)
     .values({
       room_id: input.room_id,

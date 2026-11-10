@@ -1,5 +1,6 @@
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, sql } from "drizzle-orm";
 
+import { ACTIVE_AGENT_PRESENCE_WINDOW_MS } from "../../../shared/agent-presence.js";
 import { db } from "../client.js";
 import { toRoomAgentDeliverySession, toRoomAgentLivenessObservation, toRoomAgentPresence } from "../mappers.js";
 import { room_agent_delivery_sessions, room_agent_liveness_observations, room_agent_presence, room_agent_sessions } from "../schema.js";
@@ -13,6 +14,46 @@ import { clampLimit, MAX_LIST_LIMIT } from "../utils.js";
 import { filterRoomAgentPresenceForLiveRoster, mergeRoomAgentPresenceRecords } from "./merge.js";
 import { getRoomLiveAgentSuppressionActorLabels } from "./suppression.js";
 
+/**
+ * Retain one latest historical row per worker identity and every currently
+ * reachable row. Reachability can expire while SQL runs, so the existing merge
+ * still selects the winner at response time. Distinct instances and legacy rows
+ * stay separate; first positions preserve identity order on stable sort ties.
+ */
+function getHistoryDeliverySessions(roomId: string, now: number) {
+  const nowIso = new Date(now).toISOString();
+  const activeSince = new Date(now - ACTIVE_AGENT_PRESENCE_WINDOW_MS).toISOString();
+  const winners = sql`(
+    WITH ordered AS (
+      SELECT delivery_key, agent_key, agent_instance_id,
+        session_kind = 'worker' AND COALESCE(agent_key, '') <> ''
+          AND COALESCE(agent_instance_id, '') <> '' AS collapsible,
+        COALESCE((active_connection_count > 0
+          AND date_trunc('milliseconds', updated_at) >= ${activeSince}::timestamptz)
+          OR date_trunc('milliseconds', reconnect_grace_expires_at) >= ${nowIso}::timestamptz, FALSE) AS reachable,
+        date_trunc('milliseconds', COALESCE(last_disconnected_at, updated_at, last_connected_at)) AS last_seen,
+        ROW_NUMBER() OVER (ORDER BY updated_at DESC, active_connection_count DESC,
+          last_connected_at DESC, display_name ASC) AS position
+      FROM ${room_agent_delivery_sessions} WHERE room_id = ${roomId}
+    ), ranked AS (
+      SELECT delivery_key, position, reachable,
+        MIN(position) OVER identity AS first_position,
+        ROW_NUMBER() OVER (identity ORDER BY last_seen DESC, position ASC) AS preference
+      FROM ordered
+      WINDOW identity AS (PARTITION BY
+        CASE WHEN collapsible THEN agent_key END,
+        CASE WHEN collapsible THEN agent_instance_id END,
+        CASE WHEN NOT collapsible THEN delivery_key END)
+    )
+    SELECT delivery_key, first_position, position FROM ranked WHERE preference = 1 OR reachable
+  ) AS history_delivery`;
+  return db.select(getTableColumns(room_agent_delivery_sessions))
+    .from(room_agent_delivery_sessions)
+    .innerJoin(winners, eq(room_agent_delivery_sessions.delivery_key, sql`history_delivery.delivery_key`))
+    .where(eq(room_agent_delivery_sessions.room_id, roomId))
+    .orderBy(sql`history_delivery.first_position`, sql`history_delivery.position`);
+}
+
 export async function getMergedRoomAgentPresenceRecords(
   roomId: string,
   options?: {
@@ -20,8 +61,10 @@ export async function getMergedRoomAgentPresenceRecords(
     deliveryLimit?: number;
     excludeSupervisorManaged?: boolean;
     excludeEndedSessions?: boolean;
+    collapseWorkerSessions?: boolean;
   }
 ): Promise<RoomAgentPresence[]> {
+  const historyNow = options?.collapseWorkerSessions ? Date.now() : undefined;
   const statusScope = and(
     eq(room_agent_presence.room_id, roomId),
     options?.excludeEndedSessions
@@ -105,7 +148,9 @@ export async function getMergedRoomAgentPresenceRecords(
 
   const [statusRows, deliveryRows, livenessRows] = await Promise.all([
     options?.statusLimit ? statusQuery.limit(options.statusLimit) : statusQuery,
-    options?.deliveryLimit ? deliveryQuery.limit(options.deliveryLimit) : deliveryQuery,
+    historyNow !== undefined
+      ? getHistoryDeliverySessions(roomId, historyNow)
+      : options?.deliveryLimit ? deliveryQuery.limit(options.deliveryLimit) : deliveryQuery,
     livenessQuery,
   ]);
 
@@ -148,9 +193,10 @@ export async function getRoomAgentPresence(
 
 export async function getRoomAgentPresenceSnapshot(
   roomId: string,
-  options?: { includeEndedSessions?: boolean },
+  options?: { includeEndedSessions?: boolean; collapseWorkerSessions?: boolean },
 ): Promise<RoomAgentPresence[]> {
   return getMergedRoomAgentPresenceRecords(roomId, {
     excludeEndedSessions: !options?.includeEndedSessions,
+    collapseWorkerSessions: options?.includeEndedSessions && options?.collapseWorkerSessions,
   });
 }

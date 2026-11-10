@@ -39,6 +39,13 @@ export function getCanonicalRoomMessageCatchUp(input: {
   waitForRouting?: boolean;
   /** Per-worker reply-turn frontier; part of the coalescing key. */
   holdAgentKey?: string | null;
+  /**
+   * The latest live event the caller saw. A read joined by this key was
+   * started by a caller that had already seen that event, so its row (and
+   * every older row) is in the read. Without it a caller may join a read
+   * that began before its event.
+   */
+  startedAfterEvent?: string | null;
   load: (roomId: string, after?: string, options?: {
     limit?: number;
     include_prompt_only?: boolean;
@@ -54,6 +61,7 @@ export function getCanonicalRoomMessageCatchUp(input: {
     input.includePromptOnly,
     Boolean(input.waitForRouting),
     input.holdAgentKey ?? null,
+    input.startedAfterEvent ?? null,
   ]);
   const existing = pending.get(key);
   if (existing) return existing;

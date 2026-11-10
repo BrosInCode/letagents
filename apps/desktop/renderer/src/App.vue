@@ -199,11 +199,14 @@
         @cycle-sidebar="cycleSidebar"
       />
 
-      <KeepAlive :max="1">
+      <!-- KeepAlive keeps the open room while Settings, Inbox or company home hide it.
+           It is keyed by the last shown room: with only the inner key, a switch after a same-room
+           re-render made Vue 3.5 deactivate the old room and never unmount it. -->
+      <KeepAlive :key="roomShellKeepAliveKey" :max="1">
         <DesktopRoomShell
           :viewer-login="authStatus?.authenticated ? authStatus.account?.login : null"
           :api-url="appInfo?.apiUrl ?? null"
-          v-if="!showCompanyHome && activeEntry.type === 'room' && !selectedNeedsAccess"
+          v-if="roomShellShown"
           :key="selectedRoomRenderKey"
           :sidebar-mode="sidebarMode"
           :room-loading="selectedSnapshotLoading"
@@ -468,7 +471,8 @@
 <script setup lang="ts">
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
-import { defineAsyncComponent } from "vue";
+import { computed, defineAsyncComponent } from "vue";
+import { useKeyWhileShown } from "./composables/useKeyWhileShown";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
 import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
@@ -684,4 +688,8 @@ Object.assign(app, useAppAuthWatchers(app));
 Object.assign(app, useAppLifecycle(app));
 
 const { askAgentOpen, giveAgentToken } = useAppAgentAsks();
+
+const roomShellShown = computed(() =>
+  !showCompanyHome.value && activeEntry.value.type === "room" && !selectedNeedsAccess.value);
+const roomShellKeepAliveKey = useKeyWhileShown(roomShellShown, selectedRoomRenderKey);
 </script>

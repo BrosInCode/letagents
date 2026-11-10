@@ -37,6 +37,7 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   let liveMetadataRefreshDisposed = false;
   let periodicMetadataRefreshInFlight: number | null = null;
   let fullSnapshotRefresh: { context: number; invalidated: boolean } | null = null;
+  let streamStartInFlight: { key: string; context: number; promise: Promise<void> } | null = null;
   let roomAgentWorkCursor: string | null = null;
   let roomAgentWorkRefreshSequence = 0;
   let roomAgentWorkInFlightSequence: number | null = null;
@@ -353,6 +354,29 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     const latestMessageId = afterMessageId === undefined
       ? options.selectedSnapshot.value?.messages.at(-1)?.id || null
       : afterMessageId;
+    // One room switch asks three times in one task (the snapshot barrier, the
+    // selected-room watcher and the newest-message watcher), all for the same
+    // room and cursor. Main answers each with the same stream, so join the
+    // start already in flight instead of sending the same IPC again. Only
+    // calls in the same task join: the entry ends with a microtask. A stream
+    // stopped from elsewhere (for example a fork to a local room) takes an IPC
+    // round trip, so the next start after it always sends its own IPC.
+    const startKey = `${normalizeRoomIdentifier(roomIdentifier)}\n${latestMessageId ?? ""}`;
+    if (streamStartInFlight?.key === startKey && streamStartInFlight.context === liveMetadataRefreshContext) {
+      return streamStartInFlight.promise;
+    }
+    const start = startSelectedRoomStream(roomIdentifier, latestMessageId);
+    const inFlight = { key: startKey, context: liveMetadataRefreshContext, promise: start };
+    streamStartInFlight = inFlight;
+    const forget = () => {
+      if (streamStartInFlight === inFlight) streamStartInFlight = null;
+    };
+    queueMicrotask(forget);
+    return start;
+  }
+
+  async function startSelectedRoomStream(roomIdentifier: string, latestMessageId: string | null): Promise<void> {
+    if (!desktopIpc.room?.startStream) return;
     const shouldRefreshRoomAgentWork = roomAgentWorkStatus.value === "idle";
     const streamReady = desktopIpc.room.startStream(roomIdentifier, latestMessageId);
     const context = liveMetadataRefreshContext;

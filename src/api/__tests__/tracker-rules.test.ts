@@ -175,7 +175,7 @@ type WorkflowEffectLike = Awaited<ReturnType<TrackerRuleEngineDeps["drive"]>>;
 type RunRow = Awaited<ReturnType<TrackerRuleEngineDeps["store"]["getRun"]>> & object;
 
 /** The engine on in-memory runs and journal rows. `outcomes` says what each drive of an action index returns. */
-function engineHarness(rules: LoadedTrackerRule[], options: { bound?: boolean; trusted?: boolean; outcomes?: Record<number, string[]>; driveMs?: number } = {}) {
+function engineHarness(rules: LoadedTrackerRule[], options: { bound?: boolean; trusted?: boolean; outcomes?: Record<number, string[]>; driveMs?: number; ownerIsRoomAdmin?: TrackerRuleEngineDeps["ownerIsRoomAdmin"] } = {}) {
   const runs = new Map<string, RunRow>();
   const effects = new Map<string, WorkflowEffectLike>();
   const reserved: string[] = [];
@@ -208,7 +208,7 @@ function engineHarness(rules: LoadedTrackerRule[], options: { bound?: boolean; t
     roomScope: async () => ({ sources: [{ filter_id: "f", connection_id: "tcon_1", provider: "jira", filter: "project = HT" }], linearTeamKeys: [] }),
     roomConnection: async () => ({ connection_id: "tcon_1", account_id: "acct_1", provider: "jira" }),
     ticketBound: async () => options.bound ?? true,
-    ownerIsRoomAdmin: async () => true,
+    ownerIsRoomAdmin: options.ownerIsRoomAdmin ?? (async () => true),
     countApprovals: async () => 0,
     reserve: async (input) => {
       const id = `effect_${input.idempotency_key}`;
@@ -260,6 +260,37 @@ test("the engine reserves each action only after the one before it succeeded", a
   assert.deepEqual(result.runs, ["run_1"]);
   assert.deepEqual(harness.reserved, ["trule_1:d-1:jira:HT-1234:0", "trule_1:d-1:jira:HT-1234:1"]);
   assert.equal(harness.runs.get("run_1")!.outcome, "succeeded");
+});
+
+test("during a GitHub outage a rule runs for an owner with a stored admin row, and not for one without", async () => {
+  const { isRoomAdminAccount } = await import("../connectors/rules/engine.js");
+  const repoRoom = "github.com/acme/app";
+  const outage = (adminRows: Set<string>) => async (roomId: string, accountId: string, options?: { outage?: "stored_row" | "throw" }) =>
+    isRoomAdminAccount(roomId, accountId, {
+      ...options,
+      getProject: async (id) => ({ id, parent_room_id: null }) as never,
+      isProjectAdmin: async (_room, account) => adminRows.has(account),
+      getAccount: async (id) => ({ account_id: id, provider: "github", login: id, provider_access_token: "token" }),
+      access: {
+        getGitRoomBindingForRoom: async () => null,
+        resolveRepoRoomAccessDecision: async () => ({ kind: "repo_access_unavailable" }),
+      },
+    });
+  const input = { ...keyedInput, task: { ...keyedInput.task, room_id: repoRoom } };
+
+  const admin = engineHarness([loadedRule], { ownerIsRoomAdmin: outage(new Set(["acct_1"])) as never });
+  const ran = await admin.engine.runForRepoEvent(input);
+  await admin.settle();
+  assert.deepEqual(ran.runs, ["run_1"]);
+  assert.equal(admin.runs.get("run_1")!.outcome, "succeeded");
+
+  const notAdmin = engineHarness([loadedRule], { ownerIsRoomAdmin: outage(new Set()) as never });
+  assert.deepEqual((await notAdmin.engine.runForRepoEvent(input)).runs, []);
+  assert.equal(notAdmin.reserved.length, 0);
+
+  // A person waiting on the answer gets the error, and so a retryable 503.
+  const { GitHubAccessUnavailableError } = await import("../github/repo-access.js");
+  await assert.rejects(outage(new Set(["acct_1"]))(repoRoom, "acct_1", { outage: "throw" }), GitHubAccessUnavailableError);
 });
 
 test("a retryable failure waits; once the sweep settles it the next action runs", async () => {

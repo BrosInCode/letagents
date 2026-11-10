@@ -16,6 +16,7 @@ import {
   retireJoinRequestPushesForAccount,
 } from '../notifications/join-request-pushes.js';
 import { pool } from './client.js';
+import { wakeJobQueue } from '../server/job-queue-wakes.js';
 
 // Every function takes the ACCESS room: the room itself, or the parent of a
 // focus room. Rows exist only on top-level rooms. A room admin
@@ -360,7 +361,7 @@ export type RoomJoinRequestCreation =
   | { kind: 'member' };
 
 export async function createRoomJoinRequest(roomId: string, accountId: string): Promise<RoomJoinRequestCreation> {
-  return inTransaction(async (client) => {
+  const creation = await inTransaction(async (client): Promise<RoomJoinRequestCreation> => {
     await lockJoinRequests(client, roomId, accountId);
     if (await getRoomMemberRole(roomId, accountId, client)) return { kind: 'member' };
     const latest = await latestJoinRequestRow(client, roomId, accountId);
@@ -376,6 +377,9 @@ export async function createRoomJoinRequest(roomId: string, accountId: string): 
     await enqueueJoinRequestPushes(client, { roomId, requestId: id, requesterAccountId: accountId });
     return { kind: 'created', join_request: toJoinRequestSummary(inserted.rows[0]!) };
   });
+  // The push worker sleeps until its next due row; the admins' pushes are due now.
+  if (creation.kind === 'created') wakeJobQueue('desktop_push');
+  return creation;
 }
 
 const ADMIN_JOIN_REQUEST_COLUMNS = `request.id, request.room_id, request.account_id, request.state,

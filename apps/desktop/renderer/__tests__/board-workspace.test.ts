@@ -9,12 +9,13 @@ import type { BoardTask, BoardServices } from '../../../../shared/ui/board/types
 let vite: ViteDevServer;
 let model: typeof import('../../../../shared/ui/board/model');
 let useBoardWorkspace: typeof import('../../../../shared/ui/board/useBoardWorkspace').useBoardWorkspace;
-let Settings: any, TaskPlanning: any, ReleaseWidget: any, ReleaseList: any;
+let Workspace: any, Settings: any, TaskPlanning: any, ReleaseWidget: any, ReleaseList: any;
 before(async () => {
   vite = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
   const load = (file: string) => vite.ssrLoadModule(fileURLToPath(new URL(`../../../../shared/ui/board/${file}`, import.meta.url)));
   model = await load('model.ts') as typeof model;
   ({ useBoardWorkspace } = await load('useBoardWorkspace.ts'));
+  Workspace = (await load('BoardWorkspace.vue')).default;
   Settings = (await load('BoardSettings.vue')).default;
   TaskPlanning = (await load('BoardTaskPlanning.vue')).default;
   ReleaseWidget = (await load('ReleaseQueueWidget.vue')).default;
@@ -438,4 +439,40 @@ test('identical tracker names on different sites remain separate sprint stories'
   assert.equal(stories.find(story => story.key === 'jira:site-one:ada')?.planned, 3);
   assert.equal(stories.find(story => story.key === 'jira:site-two:ada')?.planned, 8);
   assert.equal(stories.find(story => story.key === 'agent:brook')?.owner.agent, true);
+});
+
+
+test('proposals stay visible on the main board and in backlog with an active sprint, while execution lanes obey the sprint filter', async t => {
+  const state = snapshot(); state.document.sprints = [sprint()];
+  const proposed = task('task_1', 'proposed'), planned = task('task_2'), outside = task('task_3');
+  proposed.allowedTransitions = [{ id: 'accept', label: 'Accept', targetStatus: 'accepted' }];
+  state.document.tasks[planned.id] = { sprintId: 'sprint-one' };
+  const props = reactive({ roomId: state.roomId, tasks: [proposed, planned, outside], services: services({ loadPlanning: async () => state }) });
+  const vm = component(t, Workspace, props); await settle();
+  assert.equal(vm.sprintId.value, 'sprint-one');
+  assert.equal(vm.view.value, 'board');
+  assert.deepEqual(vm.proposedTasks.value.map((item: BoardTask) => item.id), ['task_1']);
+  assert.deepEqual(vm.backlogTasks.value.map((item: BoardTask) => item.id), ['task_1']);
+  assert.deepEqual(vm.byColumn('progress').map((item: BoardTask) => item.id), ['task_2']);
+  assert.equal(vm.columnTracks.value.split('minmax').length - 1, 5);
+  vm.query.value = 'outside'; assert.equal(vm.proposedTasks.value.length, 0);
+  vm.clearFilters(); assert.equal(vm.proposedTasks.value.length, 1);
+  assert.equal(vm.acceptAction(proposed).id, 'accept');
+  assert.equal(vm.acceptAction({ ...proposed, allowedTransitions: [] }), undefined);
+});
+
+test('proposal acceptance keeps failures visible, prevents duplicate submissions, and uses the normal accepted lane after success', async t => {
+  const state = snapshot(), pending = deferred<boolean>(), proposed = task('task_1', 'proposed');
+  proposed.allowedTransitions = [{ id: 'accept', label: 'Accept', targetStatus: 'accepted' }];
+  let calls = 0;
+  const props = reactive({ roomId: state.roomId, tasks: [proposed], services: services({ loadPlanning: async () => state,
+    moveTask: async (id, action) => { assert.equal(id, proposed.id); assert.equal(action, 'accept'); calls++; return pending.promise; } }) });
+  const vm = component(t, Workspace, props); await settle();
+  const first = vm.runTransition(proposed, 'accept'); await settle();
+  assert.equal(await vm.runTransition(proposed, 'accept'), false); assert.equal(calls, 1);
+  pending.resolve(false); await first;
+  assert.equal(vm.proposedTasks.value.length, 1); assert.match(vm.actionError.value, /could not be moved/);
+  props.services.moveTask = async () => { props.tasks[0].status = 'accepted'; return true; };
+  assert.equal(await vm.runTransition(proposed, 'accept'), true);
+  assert.equal(vm.hasProposals.value, false); assert.equal(vm.byColumn('todo')[0].id, proposed.id);
 });

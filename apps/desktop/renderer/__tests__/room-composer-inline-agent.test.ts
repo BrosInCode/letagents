@@ -167,6 +167,75 @@ test('provider checks map to chip, "Not set up" or the Add agent window', () => 
   assert.deepEqual(launch.composerAgentReadiness('open-model', pf('config_required')), { state: 'not_set_up' });
   assert.deepEqual(launch.composerAgentReadiness('open-model', pf('ready', true), { openModelConfigured: false }), { state: 'not_set_up' });
   assert.deepEqual(launch.composerAgentReadiness('codex', pf('branch_mismatch', false, 'choose_worktree')), { state: 'ready' });
+  assert.deepEqual(launch.composerAgentReadiness('codex', pf('config_required')), { state: 'ready' }, 'a stale environment is fixed in the chip');
+});
+
+const STALE = { status: 'config_required', canStart: false, nextAction: null, message: 'Agent setup needs refreshing.', detail: null };
+
+test('picking a provider whose agent environment is stale adds the chip and refreshes there, never the window', async t => {
+  fakeIpc({ preflight: { codex: STALE, 'claude-code': STALE } });
+  const { host, opened } = fakeHost();
+  const { draft } = useDraft(t, host);
+  await draft.refreshProviders();
+  const inputs: any[] = [];
+  let refreshed = false;
+  ipc.workers.runAgentProviderPreflight = async (id: string, input: any) => {
+    inputs.push([id, Boolean(input.refreshEnvironment)]);
+    if (input.refreshEnvironment) refreshed = true;
+    return refreshed ? { providerId: id, status: 'ready', canStart: true, nextAction: null } : { providerId: id, ...STALE };
+  };
+  assert.equal(draft.pick('codex'), 'chip');
+  assert.equal(draft.chip.value.providerId, 'codex');
+  for (let i = 0; i < 5; i += 1) await flush();
+  assert.deepEqual(opened, [], 'the Add agent window stays closed');
+  assert.deepEqual(inputs.slice(0, 2), [['codex', false], ['codex', true]], 'a plain check first, then one refresh');
+  assert.equal(inputs.filter(([, refresh]) => refresh).length, 1, 'one refresh only');
+  assert.match(draft.notice.value, /^Codex is ready\. Press Enter to start it\.$/);
+  assert.equal(draft.checking.value, false);
+  assert.ok(inputs.some(([id, refresh]) => id === 'claude-code' && !refresh), 'the other stale rows are checked again without a refresh');
+  // Claude's row is current now, so picking it refreshes nothing.
+  draft.pick('claude-code');
+  for (let i = 0; i < 5; i += 1) await flush();
+  assert.equal(inputs.filter(([, refresh]) => refresh).length, 1, 'no second refresh');
+});
+
+test('a stale stored check that is current again starts no refresh', async t => {
+  fakeIpc({ preflight: { codex: STALE } });
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  const refreshes: boolean[] = [];
+  ipc.workers.runAgentProviderPreflight = async (id: string, input: any) => {
+    refreshes.push(Boolean(input.refreshEnvironment));
+    return { providerId: id, status: 'ready', canStart: true, nextAction: null };
+  };
+  draft.pick('codex');
+  for (let i = 0; i < 5; i += 1) await flush();
+  assert.deepEqual(refreshes, [false]);
+  assert.equal(draft.notice.value, null);
+  assert.equal(draft.checking.value, false);
+});
+
+test('a second pick during the check gets a clean chip, and the first result is kept', async t => {
+  fakeIpc({ preflight: { codex: STALE } });
+  const { host, opened } = fakeHost();
+  const { draft } = useDraft(t, host);
+  await draft.refreshProviders();
+  let release!: () => void;
+  ipc.workers.runAgentProviderPreflight = (id: string) => new Promise((resolve) => {
+    release = () => resolve({ providerId: id, status: 'ready', canStart: true, nextAction: null });
+  });
+  draft.pick('codex');
+  assert.equal(draft.checking.value, true);
+  draft.pick('claude-code');
+  assert.equal(draft.chip.value.providerId, 'claude-code');
+  assert.equal(draft.notice.value, null);
+  assert.equal(draft.noticeAction.value, null, 'no dead "Check again"');
+  release();
+  for (let i = 0; i < 5; i += 1) await flush();
+  assert.equal(draft.checking.value, false);
+  assert.equal(draft.notice.value, null);
+  assert.deepEqual(opened, []);
+  assert.equal(draft.rows.value.find((row: any) => row.providerId === 'codex').readiness.state, 'ready');
 });
 
 /* ---------- chip lifecycle ---------- */

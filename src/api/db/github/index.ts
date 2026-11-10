@@ -17,6 +17,8 @@ export {
   upsertGitHubAppRepository,
 } from "./app-repositories.js";
 export {
+  claimGitHubWebhookDelivery,
+  claimStaleGitHubWebhookDelivery,
   markGitHubWebhookDeliveryProcessed,
   recordGitHubWebhookDelivery,
 } from "./webhook-deliveries.js";

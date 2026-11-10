@@ -72,11 +72,12 @@ export function createRoomRefreshController(
   const windowedGapMessageRepairs = new Set<string>()
 
   async function refreshTasksAndPresence(roomIdentifier: string) {
+    const sessionVersion = roomSessionVersion
     const [next, nextArtifacts] = await Promise.all([
       fetchTasksAndPresence(roomIdentifier),
       fetchRoomArtifacts(roomIdentifier),
     ])
-    if (room.value?.identifier !== roomIdentifier) return
+    if (room.value?.identifier !== roomIdentifier || roomSessionVersion !== sessionVersion) return
     tasks.value = next.tasks
     presence.value = next.presence
     boardHandoffPresence.value = next.presence

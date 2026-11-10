@@ -1,5 +1,6 @@
 import type { Express, Response } from "express";
 
+import { replyIfGitHubAccessUnavailable } from "../../rooms/access.js";
 import { WakeRuleError, type WakeRuleActor } from "../../../../shared/wake-rules.mjs";
 import { hashToken } from "../../db/utils.js";
 import { listWakeRules, type WakeRuleCredential } from "../../db/wake-rules.js";
@@ -17,6 +18,8 @@ import type { RoomMessageRouteDeps } from "./messages/types.js";
 export type WakeRuleRouteDeps = Pick<RoomMessageRouteDeps, "resolveCanonicalRoomRequestId" | "resolveRoomOrReply" | "requireParticipant">;
 
 function fail(res: Response, error: unknown): void {
+  // A room admin check GitHub did not answer: retry, not "not allowed".
+  if (replyIfGitHubAccessUnavailable(res, error)) return;
   if (error instanceof WakeRuleError) res.status(error.status).json({ error: error.message });
   else {
     console.error("[wake rules]", error);

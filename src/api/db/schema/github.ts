@@ -1,4 +1,5 @@
-import { index, jsonb, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { index, integer, jsonb, pgTable, serial, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 import { rooms } from "./core.js";
 
@@ -97,11 +98,20 @@ export const github_webhook_deliveries = pgTable(
     error: text("error"),
     received_at: timestamp("received_at", { mode: "string", withTimezone: true }).notNull(),
     processed_at: timestamp("processed_at", { mode: "string", withTimezone: true }),
+    /** The webhook body, kept only while the delivery is 'received' (migration 0146). */
+    payload: jsonb("payload"),
+    /** When processing last started; a 'received' row older than the stale age is retried. */
+    claimed_at: timestamp("claimed_at", { mode: "string", withTimezone: true }),
+    attempts: integer("attempts").notNull().default(0),
   },
   (table) => ({
     event_idx: index("github_webhook_deliveries_event_name_idx").on(table.event_name),
     installation_idx: index("github_webhook_deliveries_installation_id_idx").on(table.installation_id),
     room_idx: index("github_webhook_deliveries_room_id_idx").on(table.room_id),
+    // Built CONCURRENTLY after migration 0146 by github-webhook-integrity-rollout.ts.
+    received_idx: index("github_webhook_deliveries_received_idx")
+      .on(table.claimed_at)
+      .where(sql`${table.status} = 'received' AND ${table.payload} IS NOT NULL`),
   })
 );
 
@@ -229,5 +239,9 @@ export const github_room_events = pgTable(
     ref_idx: index("github_room_events_room_ref_idx").on(table.room_id, table.ref),
     head_ref_idx: index("github_room_events_room_head_ref_idx").on(table.room_id, table.head_ref),
     head_sha_idx: index("github_room_events_room_head_sha_idx").on(table.room_id, table.head_sha),
+    // Built CONCURRENTLY after migration 0146 by github-webhook-integrity-rollout.ts.
+    semantic_id_uq: uniqueIndex("github_room_events_semantic_id_unique")
+      .on(table.semantic_id)
+      .where(sql`${table.semantic_id} IS NOT NULL`),
   })
 );

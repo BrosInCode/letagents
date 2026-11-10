@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { parseRepoRoomName } from "../repo-workflow.js";
 import { createBridgedEmitter } from "../server/bridged-emitter.js";
 import { githubRequest } from "./app-client.js";
@@ -70,6 +72,12 @@ const REPO_ACCESS_TTL_MS = 1000 * 60 * 30;
 // A "no role" answer for a public repository is kept briefly, so a refused
 // client that reconnects does not spend the person's GitHub rate limit.
 const PUBLIC_REPO_NO_ROLE_TTL_MS = 1000 * 60;
+// How long a "not admin" answer is reused for the credential that got it.
+// Only "not admin" is kept: a "yes" makes the caller store a permanent admin
+// row, so a stale "yes" would become a permanent grant. A stale "not admin"
+// can only delay a promotion: by at most 5 minutes, or until a `member` or
+// `membership` webhook (or a sign-in) clears it.
+const REPO_NOT_ADMIN_TTL_MS = 1000 * 60 * 5;
 const REPO_CACHE_MAX_ENTRIES = 5_000;
 const repoVisibilityCache = new Map<string, { visibility: GitHubRepoVisibility; expiresAt: number }>();
 const repoVisibilityLastKnown = new Map<string, { visibility: "public" | "private"; expiresAt: number }>();
@@ -79,10 +87,20 @@ const publicRepoRoleCache = new Map<string, { allowed: boolean; expiresAt: numbe
 // collaborator out. Webhook invalidation (role removed) discards it at once.
 const publicRepoRoleLastKnown = new Map<string, { expiresAt: number }>();
 const publicRepoRoleInflight = new Map<string, Promise<boolean>>();
+// Keyed `room::credential::login`, where the credential is a hash of the
+// GitHub token: an answer is reused only by the token that got it.
+const repoNotAdminCache = new Map<string, { expiresAt: number }>();
+const repoAdminInflight = new Map<string, {
+  roomKey: string;
+  loginKey: string;
+  promise: Promise<boolean>;
+}>();
 const repoVisibilityInflight = new Map<string, {
   roomKey: string;
   promise: Promise<GitHubRepoVisibility>;
 }>();
+// Keyed by room: the token-first lookup for a repository last seen private.
+const knownPrivateVisibilityInflight = new Map<string, Promise<GitHubRepoVisibility | null>>();
 const repoAccessInflight = new Map<string, {
   roomKey: string;
   loginKey: string;
@@ -164,6 +182,28 @@ function setCachedRepoAccess(roomName: string, login: string, allowed: boolean):
   });
 }
 
+function canonicalRepoRoomKey(roomName: string): string | null {
+  const repo = parseGitHubRepoName(roomName);
+  return repo ? `github.com/${repo.owner}/${repo.repo}`.toLowerCase() : null;
+}
+
+/** A check that stays true only while no invalidation touched this room, login or person. */
+function captureRepoPersonGenerations(roomKey: string, loginKey: string): () => boolean {
+  const personKey = `${roomKey}::${loginKey}`;
+  const roomGeneration = getCacheGeneration(repoRoomCacheGeneration, roomKey);
+  const loginGeneration = getCacheGeneration(repoLoginCacheGeneration, loginKey);
+  const personGeneration = getCacheGeneration(repoPersonCacheGeneration, personKey);
+  return () => getCacheGeneration(repoRoomCacheGeneration, roomKey) === roomGeneration
+    && getCacheGeneration(repoLoginCacheGeneration, loginKey) === loginGeneration
+    && getCacheGeneration(repoPersonCacheGeneration, personKey) === personGeneration;
+}
+
+/** `room::credential::login`: the credential part is a hash, never the token itself. */
+function repoAdminCredentialKey(roomKey: string, accessToken: string, loginKey: string): string {
+  const credential = createHash("sha256").update(accessToken).digest("hex").slice(0, 32);
+  return `${roomKey}::${credential}::${loginKey}`;
+}
+
 function pruneExpiringCache<T extends { expiresAt: number }>(
   cache: Map<string, T>,
   maxEntries: number,
@@ -211,7 +251,7 @@ function forgetRoomAccess(roomKey: string): void {
   rotateCacheGeneration(repoRoomCacheGeneration, roomKey);
   repoVisibilityCache.delete(roomKey);
   repoVisibilityLastKnown.delete(roomKey);
-  for (const cache of [repoAccessCache, publicRepoRoleCache, publicRepoRoleLastKnown]) {
+  for (const cache of [repoAccessCache, publicRepoRoleCache, publicRepoRoleLastKnown, repoNotAdminCache]) {
     for (const cacheKey of cache.keys()) {
       if (cacheKey.startsWith(prefix)) cache.delete(cacheKey);
     }
@@ -219,11 +259,14 @@ function forgetRoomAccess(roomKey: string): void {
   for (const [flightKey, flight] of repoVisibilityInflight) {
     if (flight.roomKey === roomKey) repoVisibilityInflight.delete(flightKey);
   }
+  knownPrivateVisibilityInflight.delete(roomKey);
   for (const flightKey of publicRepoRoleInflight.keys()) {
     if (flightKey.includes(`::${roomKey}::`)) publicRepoRoleInflight.delete(flightKey);
   }
-  for (const [flightKey, flight] of repoAccessInflight) {
-    if (flight.roomKey === roomKey) repoAccessInflight.delete(flightKey);
+  for (const flights of [repoAccessInflight, repoAdminInflight]) {
+    for (const [flightKey, flight] of flights) {
+      if (flight.roomKey === roomKey) flights.delete(flightKey);
+    }
   }
 }
 
@@ -236,8 +279,13 @@ function forgetPersonAccess(roomKey: string, loginKey: string): void {
   const cacheKey = `${roomKey}::${loginKey}`;
   rotateCacheGeneration(repoPersonCacheGeneration, cacheKey);
   for (const cache of [repoAccessCache, publicRepoRoleCache, publicRepoRoleLastKnown]) cache.delete(cacheKey);
-  for (const [flightKey, flight] of repoAccessInflight) {
-    if (flight.roomKey === roomKey && flight.loginKey === loginKey) repoAccessInflight.delete(flightKey);
+  for (const adminKey of repoNotAdminCache.keys()) {
+    if (adminKey.startsWith(`${roomKey}::`) && adminKey.endsWith(`::${loginKey}`)) repoNotAdminCache.delete(adminKey);
+  }
+  for (const flights of [repoAccessInflight, repoAdminInflight]) {
+    for (const [flightKey, flight] of flights) {
+      if (flight.roomKey === roomKey && flight.loginKey === loginKey) flights.delete(flightKey);
+    }
   }
   for (const flightKey of publicRepoRoleInflight.keys()) {
     if (flightKey.endsWith(`::${cacheKey}`)) publicRepoRoleInflight.delete(flightKey);
@@ -253,13 +301,15 @@ export function clearGitHubRepoAccessCacheForRoom(roomName: string): void {
 function forgetLoginAccess(loginKey: string): void {
   const suffix = `::${loginKey}`;
   rotateCacheGeneration(repoLoginCacheGeneration, loginKey);
-  for (const cache of [repoAccessCache, publicRepoRoleCache, publicRepoRoleLastKnown]) {
+  for (const cache of [repoAccessCache, publicRepoRoleCache, publicRepoRoleLastKnown, repoNotAdminCache]) {
     for (const cacheKey of cache.keys()) {
       if (cacheKey.endsWith(suffix)) cache.delete(cacheKey);
     }
   }
-  for (const [flightKey, flight] of repoAccessInflight) {
-    if (flight.loginKey === loginKey) repoAccessInflight.delete(flightKey);
+  for (const flights of [repoAccessInflight, repoAdminInflight]) {
+    for (const [flightKey, flight] of flights) {
+      if (flight.loginKey === loginKey) flights.delete(flightKey);
+    }
   }
   for (const flightKey of publicRepoRoleInflight.keys()) {
     if (flightKey.endsWith(`::${loginKey}`)) publicRepoRoleInflight.delete(flightKey);
@@ -343,6 +393,16 @@ export async function getGitHubRepoVisibility(
   if (cached && (cached !== "unknown" || !accessToken)) return cached;
 
   if (!cached) {
+    // A repository last seen private answers a token-less lookup with 404, so
+    // a caller with a token asks with it first. A 200 is the answer and an
+    // outage keeps the remembered one, as below; any other answer leaves every
+    // cache alone and the usual two-step lookup runs. A change to public shows
+    // in this answer; a change to private (last seen public) still goes
+    // through the token-less lookup.
+    if (accessToken && getLastKnownVisibility(roomName) === "private") {
+      const knownPrivate = await loadKnownPrivateRepoVisibility(roomName, accessToken);
+      if (knownPrivate) return knownPrivate;
+    }
     const unauthenticatedVisibility = await loadGitHubRepoVisibility(roomName, undefined, "anonymous");
     if (unauthenticatedVisibility !== "unknown") return unauthenticatedVisibility;
   }
@@ -354,6 +414,52 @@ export async function getGitHubRepoVisibility(
   }
 
   return "unknown";
+}
+
+/**
+ * The token-first lookup: the visibility on a 200, the remembered visibility
+ * in an outage, otherwise null and no cache change.
+ */
+async function loadKnownPrivateRepoVisibility(
+  roomName: string,
+  accessToken: string,
+): Promise<GitHubRepoVisibility | null> {
+  const roomKey = normalizeCacheKey(roomName);
+  const existing = knownPrivateVisibilityInflight.get(roomKey);
+  if (existing) return existing;
+
+  const roomGeneration = getCacheGeneration(repoRoomCacheGeneration, roomKey);
+  // GitHub is down or timed out: keep the remembered answer for the short
+  // retry time, as the token-less lookup does in an outage, instead of
+  // waiting on a second request to the same failing service.
+  const outage = (): GitHubRepoVisibility | null => {
+    const lastKnown = getLastKnownVisibility(roomName);
+    if (!lastKnown || getCacheGeneration(repoRoomCacheGeneration, roomKey) !== roomGeneration) return null;
+    setCachedVisibility(roomName, lastKnown, REPO_VISIBILITY_UNKNOWN_TTL_MS);
+    return lastKnown;
+  };
+  let pending!: Promise<GitHubRepoVisibility | null>;
+  pending = (async () => {
+    let response: Response;
+    try {
+      response = await fetchGitHubRepo(roomName, accessToken);
+    } catch {
+      return outage();
+    }
+    if (response.status === 408 || response.status >= 500) return outage();
+    if (response.status !== 200) return null;
+    const payload = (await response.json()) as GitHubRepo;
+    const visibility: GitHubRepoVisibility = payload.private ? "private" : "public";
+    if (getCacheGeneration(repoRoomCacheGeneration, roomKey) === roomGeneration) {
+      setCachedVisibility(roomName, visibility);
+      setLastKnownVisibility(roomName, visibility);
+    }
+    return visibility;
+  })().finally(() => {
+    if (knownPrivateVisibilityInflight.get(roomKey) === pending) knownPrivateVisibilityInflight.delete(roomKey);
+  });
+  knownPrivateVisibilityInflight.set(roomKey, pending);
+  return pending;
 }
 
 async function loadGitHubRepoVisibility(
@@ -728,44 +834,75 @@ export async function isGitHubRepoWriter(input: {
     || payload.role_name === "maintain" || payload.role_name === "write" || payload.role_name === "admin";
 }
 
+/**
+ * Whether this login owns the repository or has the "admin" collaborator
+ * permission, asked of GitHub with this token.
+ *
+ * Only a definitive "not admin" (a 200 without "admin", or a 404) is kept, for
+ * REPO_NOT_ADMIN_TTL_MS, and only for the same token: the cache and the
+ * in-flight request are keyed by room, a hash of the token, and login. A "yes"
+ * is never kept, because the caller turns it into a permanent admin row. A
+ * 401, a plain 403 or an outage is "not admin" and is not kept. Webhook,
+ * sign-in and fresh-"no" invalidation clear both maps.
+ */
 export async function isGitHubRepoAdmin(input: {
   roomName: string;
   login: string;
   accessToken: string;
 }): Promise<boolean> {
   const repo = parseGitHubRepoName(input.roomName);
-  if (!repo) return false;
+  const roomKey = canonicalRepoRoomKey(input.roomName);
+  if (!repo || !roomKey) return false;
+  const loginKey = normalizeCacheKey(input.login);
+  // A call without a token asks GitHub every time, as before.
+  const shared = Boolean(input.accessToken);
+  const cacheKey = repoAdminCredentialKey(roomKey, input.accessToken, loginKey);
 
-  const ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken);
-
-  if (!ownerResponse.ok) {
-    return false;
+  if (shared) {
+    const cached = repoNotAdminCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return false;
+    if (cached) repoNotAdminCache.delete(cacheKey);
+    const existing = repoAdminInflight.get(cacheKey);
+    if (existing) return existing.promise;
   }
 
-  const repoPayload = (await ownerResponse.json()) as GitHubRepo;
-  if (repoPayload.owner?.login?.toLowerCase() === input.login.toLowerCase()) {
-    return true;
-  }
-
-  const permissionResponse = await fetch(
-    buildGitHubApiUrl(
-      `/repos/${repo.owner}/${repo.repo}/collaborators/${encodeURIComponent(input.login)}/permission`
-    ),
-    {
-      headers: {
-        Authorization: `Bearer ${input.accessToken}`,
-        Accept: "application/vnd.github+json",
-        "User-Agent": "letagents",
-      },
+  const generationsHold = captureRepoPersonGenerations(roomKey, loginKey);
+  const notAdmin = (response: Response): false => {
+    const definitive = response.ok || response.status === 404;
+    if (shared && definitive && generationsHold()) {
+      pruneExpiringCache(repoNotAdminCache, REPO_CACHE_MAX_ENTRIES);
+      repoNotAdminCache.set(cacheKey, { expiresAt: Date.now() + REPO_NOT_ADMIN_TTL_MS });
     }
-  );
-
-  if (!permissionResponse.ok) {
     return false;
-  }
+  };
+  const lookup = async (): Promise<boolean> => {
+    const ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken);
+    if (!ownerResponse.ok) return notAdmin(ownerResponse);
 
-  const permissionPayload = (await permissionResponse.json()) as GitHubPermissionResponse;
-  return permissionPayload.permission === "admin";
+    const repoPayload = (await ownerResponse.json()) as GitHubRepo;
+    if (repoPayload.owner?.login?.toLowerCase() === loginKey) {
+      return true;
+    }
+
+    const permissionResponse = await githubRequest({
+      url: buildGitHubApiUrl(
+        `/repos/${repo.owner}/${repo.repo}/collaborators/${encodeURIComponent(input.login)}/permission`
+      ),
+      token: input.accessToken,
+      timeoutMs: GITHUB_ACCESS_FETCH_TIMEOUT_MS,
+    });
+    if (!permissionResponse.ok) return notAdmin(permissionResponse);
+
+    const permissionPayload = (await permissionResponse.json()) as GitHubPermissionResponse;
+    return permissionPayload.permission === "admin" ? true : notAdmin(permissionResponse);
+  };
+  if (!shared) return lookup();
+  let pending!: Promise<boolean>;
+  pending = lookup().finally(() => {
+    if (repoAdminInflight.get(cacheKey)?.promise === pending) repoAdminInflight.delete(cacheKey);
+  });
+  repoAdminInflight.set(cacheKey, { roomKey, loginKey, promise: pending });
+  return pending;
 }
 
 export async function resolveGitHubRepoRoomAccessDecision(input: {

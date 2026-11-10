@@ -937,7 +937,7 @@ const viewerReacted = (emoji: string): boolean => reactionContext?.viewerReacted
 // A row keeps its component when a sent message is confirmed and takes its
 // server id, so the registration follows the id.
 let stopTrackingReactions: (() => void) | null = null;
-watch(() => [props.message.id, props.message.reactions !== undefined] as const, () => {
+watch([() => props.message.id, () => props.message.reactions !== undefined], () => {
   stopTrackingReactions?.();
   stopTrackingReactions = reactionContext?.track(props.message) ?? null;
 }, { immediate: true });
