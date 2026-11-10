@@ -92,7 +92,7 @@
       ></div>
 
       <!-- Cached rows shown while the room loads need no placeholder rows under them. -->
-      <div v-if="roomLoading && !messages.length" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
+      <div v-if="roomLoading && !cachedPaint" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
         <div
           v-for="index in 4"
           :key="index"
@@ -176,6 +176,7 @@ import RoomActivityLine from "./RoomActivityLine.vue";
 import type { ActivityNotice, ActivitySteerOffer, CalmNoticeActionKey, PresenceTimelineLine } from "./room-activity";
 import type { ComposerEventPreview } from "./composer-event-preview";
 import { roomUnread, unreadRevealKey } from "../../../../composables/roomUnread";
+import { isCachedPaintShown } from "../../../../composables/selected-room-snapshot-cache";
 import { unreadMenuKey, useUnreadTimeline } from "../../../../../../../../shared/room-unread-client";
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, onUpdated, ref, shallowRef, useSlots, watch, type FunctionalComponent } from "vue";
 import { injectRoomMessageLinkPreviews } from "../../../../composables/useRoomMessageLinkPreviews";
@@ -339,6 +340,22 @@ const emptyStateDescription = computed(() => {
 
 const messagesElement = ref<HTMLElement | null>(null);
 const liveStripElement = ref<HTMLElement | null>(null);
+/**
+ * The rows on screen were painted from the room's cached snapshot while its
+ * fresh read runs. The data layer says so explicitly; rows that exist while
+ * loading for another reason (a live message on a first visit) are not cached.
+ */
+const cachedPaint = computed(() => props.roomLoading && isCachedPaintShown(props.roomIdentifier));
+/**
+ * True from a cached paint until the flush in which the room finished
+ * loading. The rows that replace the cached ones in that time are a new
+ * baseline: not new arrivals (no pill, no arrival motion). The unread
+ * divider then runs on the fresh rows, as on a first visit.
+ */
+const cachedBaseline = ref(false);
+watch(cachedPaint, (shown) => { if (shown) cachedBaseline.value = true; }, { flush: "sync", immediate: true });
+// Post-flush: the message watchers of the flush that ended loading still see the baseline.
+watch(cachedPaint, (shown) => { if (!shown) cachedBaseline.value = false; }, { flush: "post" });
 const unreadRoom = computed(() => props.roomIdentifier);
 provide(unreadMenuKey, { client: roomUnread, room: unreadRoom });
 const revealUnreadMessage = inject(unreadRevealKey, null);
@@ -744,6 +761,20 @@ const messageReferenceIds = useStableIdSet(() => props.messages.map((message) =>
 watch(
   () => props.messages,
   async (newMessages, oldMessages) => {
+    if (cachedBaseline.value && oldMessages) {
+      // Fresh rows replace cached ones: messages that came while the reader
+      // was away are not live arrivals. Keep the reader's place; a reader at
+      // the bottom stays at the bottom. The unread divider marks them later.
+      const following = isScrolledToBottom;
+      const anchor = following ? null : captureScrollAnchor();
+      if (!following) freezeWindow();
+      const revision = scrollRevision;
+      await nextTick();
+      if (revision !== scrollRevision || !props.active) return;
+      if (following) jumpToBottom();
+      else if (!restoreScrollAnchor(anchor)) updateScrollState();
+      return;
+    }
     const appendedIds = getAppendedMessageIds(
       (oldMessages || []).map((message) => message.id),
       newMessages.map((message) => message.id),
@@ -843,7 +874,8 @@ const messageMotion = useRoomMessageMotion({
   scope: () => props.messageNamespace,
   // Loading older history must not disable navigation for a new own send.
   // The motion watcher independently excludes prepended/historical messages.
-  ready: () => props.active && !props.roomLoading && !shouldRestoreInitialScroll,
+  // Not on the flush that replaces cached rows with fresh ones (see cachedBaseline).
+  ready: () => props.active && !props.roomLoading && !shouldRestoreInitialScroll && !cachedBaseline.value,
   onOwnSend: () => { if (props.active && !props.roomLoading) cancelInitialRestore(); },
   following: () => isScrolledToBottom,
   scrollToLatest: () => scrollToBottom("auto"),
@@ -894,7 +926,7 @@ const workHandoff = useRoomWorkHandoff({
   // Keep the animation watcher above restricted to rows rendered in this list.
   messages: () => sortedVisibleMessages.value.map(toMotionMessage),
   scope: () => props.messageNamespace,
-  enabled: () => props.active && !props.roomLoading && !shouldRestoreInitialScroll && isScrolledToBottom,
+  enabled: () => props.active && !props.roomLoading && !shouldRestoreInitialScroll && !cachedBaseline.value && isScrolledToBottom,
 });
 
 function applyEchoCoalescing(): void {
@@ -1107,7 +1139,7 @@ onMounted(() => {
   void nextTick(() => {
     if (!hasAppliedInitialScroll && !restoreInitialScrollPosition()) {
       // Cached rows painted while the room loads open at the bottom too.
-      if (props.messages.length) scrollToBottom("auto");
+      if (props.messages.length && (!props.roomLoading || cachedPaint.value)) scrollToBottom("auto");
       else updateScrollState();
     }
     scheduleAutoFillViewport();
@@ -1318,9 +1350,12 @@ function handleScroll(): void {
     trimWindowWhileFollowing();
   } else {
     freezeWindow(false);
-    if (!windowReachesLatest.value) growWindowDownwardWhenNear(element);
+    if (!windowReachesLatest.value && !props.roomLoading) growWindowDownwardWhenNear(element);
   }
   emitScrollPosition();
+  // Rows shown while the room loads (a cached paint) are replaced by the
+  // fresh read: paging history from them could leave a gap.
+  if (props.roomLoading) return;
   if (element.scrollTop < 180) {
     // Mount loaded rows above the window first; ask for older history only at its top.
     if (growWindowUpward()) return;
@@ -1378,10 +1413,10 @@ function restoreInitialScrollPosition(): boolean {
   const position = props.initialScrollPosition;
   if (position === null || position === undefined) return false;
   const element = messagesElement.value;
-  // Empty/hidden viewports must not consume the saved position or publish 0.
+  // Loading/hidden viewports must not consume the saved position or publish 0.
   // Rows painted from the room's cached snapshot while it loads are restored
   // at once, so no frame shows the top of the mount window.
-  if (!props.messages.length || !isMeasurableScrollViewport(element)) return true;
+  if ((props.roomLoading && !cachedPaint.value) || !props.messages.length || !isMeasurableScrollViewport(element)) return true;
   // The window changes in the next render: a call before it would not find the rows.
   if (restoreAwaitsWindow) return true;
   const bookmark = position;

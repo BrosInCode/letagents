@@ -37,7 +37,13 @@ import {
 import { defaultMcpTargetSelection } from "../domain/mcp-install";
 import { applySupervisedAgentsSupport } from "../domain/supervised-agents-support";
 import { preserveRoomRepoStatistics } from "../domain/repo-status";
-import { SelectedRoomSnapshotCache, withoutCachedPaint } from "./selected-room-snapshot-cache";
+import {
+  SelectedRoomSnapshotCache,
+  clearCachedPaint,
+  isTransientSnapshotFailure,
+  showCachedPaint,
+  withoutCachedPaint,
+} from "./selected-room-snapshot-cache";
 import { desktopIpc } from "../ipc/index.js";
 import {
   normalizeRoomIdentifier,
@@ -187,7 +193,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   watch(() => accountRoomKeys(options.accountRooms.value), (next, previous) => {
     if (!previous) return;
     const kept = new Set(next);
-    cachedSelectedSnapshots.forget(previous.filter((key) => !kept.has(key)));
+    // Kept out until a fresh ready read: a queued stream update cannot store it again.
+    cachedSelectedSnapshots.drop(previous.filter((key) => !kept.has(key)));
   }, { flush: "sync" });
 
   if (getCurrentScope()) onScopeDispose(() => {
@@ -426,6 +433,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         finishRoomSnapshotBarrier(nextRootRoomSnapshot.roomIdentifier, rootBarrierToken);
       }
       await refreshSelectedSnapshot(nextRootRoomSnapshot);
+      // The root read above is fresh; when it is the room shown, it may be kept.
+      if (sessionIsCurrent(sessionGeneration)) {
+        rememberFreshSelectedSnapshot(nextRootRoomSnapshot, [requestedRootRoomIdentifier]);
+      }
     } finally {
       queueSkippedRecoveryAfterFailedRead(streamReconcileRoom, rootBarrierToken);
       if (streamReconcileRoom) finishRoomSnapshotBarrier(streamReconcileRoom, rootBarrierToken);
@@ -599,7 +610,6 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (!paintCachedSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot, { loading: true })) {
         publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
       }
-      let applied = false;
       try {
         const openedContext = await loadRootRoomContext({
           roomIdentifier,
@@ -615,8 +625,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         const aliases = [roomIdentifier, openedContext.openedRoom?.roomIdentifier];
         cachedSelectedSnapshots.noteFreshAccess(nextRootSnapshot, aliases);
         setSelectedSnapshot(mergeFreshSelectedSnapshot(nextRootSnapshot), { cache: false, activitySnapshot: true });
-        applied = true;
-        cachedSelectedSnapshots.remember(options.selectedSnapshot.value, aliases);
+        rememberFreshSelectedSnapshot(nextRootSnapshot, aliases);
         options.selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
         options.rememberRootRoomSnapshot(nextRootSnapshot, {
           aliasIdentifiers: [roomIdentifier, openedContext.openedRoom?.roomIdentifier],
@@ -626,9 +635,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         });
         options.activeEntry.value = options.currentParentRoom.value;
       } finally {
-        // A failed read shows what the uncached path shows, not the old snapshot as if it were fresh.
-        if (!applied && requestId === selectedSnapshotRequestId) revertCachedPaint(roomIdentifier);
-        if (requestId === selectedSnapshotRequestId) selectedSnapshotLoading.value = false;
+        // A read that failed (error or timeout) keeps the cached rows on screen,
+        // as a focus room does; the next fresh read of the room replaces them.
+        if (requestId === selectedSnapshotRequestId) {
+          clearCachedPaint();
+          selectedSnapshotLoading.value = false;
+        }
       }
       return;
     }
@@ -655,6 +667,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
       cachedSelectedSnapshots.noteFreshAccess(nextSnapshot, [roomIdentifier]);
       setSelectedSnapshot(mergeFreshSelectedSnapshot(nextSnapshot), { cacheAlias: roomIdentifier, activitySnapshot: true });
+      rememberFreshSelectedSnapshot(nextSnapshot, [roomIdentifier]);
       queueRepairReadIfGapChanged(roomIdentifier, repairToken);
       finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
     } finally {
@@ -825,6 +838,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     baseRootSnapshot: DesktopRoomSnapshot,
   ): void {
     if (requestId !== selectedSnapshotRequestId) return;
+    clearCachedPaint();
     setSelectedSnapshot(createOptimisticSelectedSnapshot(entry, roomIdentifier, baseRootSnapshot), { cache: false });
     selectedSnapshotLoading.value = true;
   }
@@ -1013,6 +1027,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       ) return;
       cachedSelectedSnapshots.noteFreshAccess(snapshot, [roomIdentifier]);
       setSelectedSnapshot(mergeFreshSelectedSnapshot(snapshot), { activitySnapshot: true });
+      rememberFreshSelectedSnapshot(snapshot, [roomIdentifier]);
       const pending = streamBufferOverflow ? [] : bufferedStreamEvents;
       const overflowed = streamBufferOverflow;
       resetBufferedStreamEvents();
@@ -1151,7 +1166,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       activityUnread.observeLatest(normalizeRoomIdentifier(snapshot.room?.identifier || snapshot.roomIdentifier) || "", snapshot.githubEvents.events.map(event => event.id));
     }
     const previousSnapshot = options.selectedSnapshot.value;
-    if (cachedPaint && !snapshotMatchesRoom(snapshot, cachedPaint.roomIdentifier)) cachedPaint = null;
+    if (cachedPaint && !snapshotMatchesRoom(snapshot, cachedPaint.roomIdentifier)) {
+      cachedPaint = null;
+      clearCachedPaint();
+    }
     if (input.cache === false) {
       skipNextSelectedSnapshotCache = true;
       nextSelectedSnapshotCacheAlias = undefined;
@@ -1171,13 +1189,28 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   function clearSelectedSnapshotCache(): void {
     cachedSelectedSnapshots.clear();
     cachedPaint = null;
+    clearCachedPaint();
   }
 
+  /** Any change to the selected snapshot: updates the room's entry if one exists, never adds one. */
   function rememberCachedSelectedSnapshot(
     snapshot: DesktopRoomSnapshot | null,
     roomIdentifierAlias?: string | null,
   ): void {
     cachedSelectedSnapshots.remember(snapshot, [roomIdentifierAlias]);
+  }
+
+  /**
+   * After a fresh read of the selected room ended ready and was applied, the
+   * room may be added to the cache with what it shows now.
+   */
+  function rememberFreshSelectedSnapshot(
+    fresh: DesktopRoomSnapshot,
+    aliases: readonly (string | null | undefined)[],
+  ): void {
+    const shown = options.selectedSnapshot.value;
+    if (fresh.access.status !== "ready" || !shown || !roomSnapshotsMatch(shown, fresh)) return;
+    cachedSelectedSnapshots.remember(shown, aliases, { create: true });
   }
 
   /**
@@ -1200,6 +1233,13 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       snapshot: cachedSnapshot,
       placeholder: createOptimisticSelectedSnapshot(entry, roomIdentifier, baseRootSnapshot),
     };
+    // Only a paint shown with the loading state tells the message viewport
+    // that its rows are cached; a focus room keeps its earlier path.
+    if (loading) {
+      showCachedPaint([roomIdentifier, cachedSnapshot.roomIdentifier, cachedSnapshot.room?.identifier]);
+    } else {
+      clearCachedPaint();
+    }
     selectedSnapshotLoading.value = loading;
     return true;
   }
@@ -1214,18 +1254,20 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     return withoutCachedPaint(current, cachedPaint.snapshot, cachedPaint.placeholder);
   }
 
-  /** Applies a fresh snapshot through the usual merge; it replaces a cached paint. */
+  /**
+   * Applies a fresh snapshot through the usual merge; it replaces a cached
+   * paint. A read that failed for a passing reason (no answer, 5xx) keeps the
+   * rows on screen, as before the cache; the next fresh read replaces them.
+   * An access refusal is not a passing failure: the merge shows the refusal.
+   */
   function mergeFreshSelectedSnapshot(fresh: DesktopRoomSnapshot): DesktopRoomSnapshot {
+    const replacesPaint = Boolean(cachedPaint && snapshotMatchesRoom(fresh, cachedPaint.roomIdentifier));
+    if (replacesPaint && isTransientSnapshotFailure(fresh)) {
+      return mergeRoomSnapshotMessages(options.selectedSnapshot.value, fresh);
+    }
     const current = selectedSnapshotWithoutCachedPaint();
-    if (cachedPaint && snapshotMatchesRoom(fresh, cachedPaint.roomIdentifier)) cachedPaint = null;
+    if (replacesPaint) cachedPaint = null;
     return mergeRoomSnapshotMessages(current, fresh);
-  }
-
-  function revertCachedPaint(roomIdentifier: string): void {
-    if (!cachedPaint || cachedPaint.roomIdentifier !== roomIdentifier) return;
-    const current = selectedSnapshotWithoutCachedPaint();
-    cachedPaint = null;
-    setSelectedSnapshot(current, { cache: false });
   }
 
   const repoStatusValue = computed<RepoStatus>(() => options.repoStatus.value || {

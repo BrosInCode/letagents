@@ -1,6 +1,41 @@
-import { toRaw } from "vue";
+import { shallowRef, toRaw } from "vue";
 import type { DesktopRoomSnapshot } from "../../../electron/ipc-types";
 import { normalizeRoomIdentifier } from "../domain/sidebar-rooms";
+
+/**
+ * The room whose rows on screen were painted from its cached snapshot while
+ * its fresh read runs (the room is loading). The message viewport reads this:
+ * it restores the scroll position on those rows at once, and treats the
+ * fresh rows that replace them as a new baseline, not as new arrivals.
+ */
+const cachedPaintRoomKeys = shallowRef<ReadonlySet<string>>(new Set());
+
+export function showCachedPaint(roomIdentifiers: readonly (string | null | undefined)[]): void {
+  cachedPaintRoomKeys.value = new Set(roomIdentifiers
+    .map(normalizeRoomIdentifier)
+    .filter((key): key is string => Boolean(key)));
+}
+
+export function clearCachedPaint(): void {
+  if (cachedPaintRoomKeys.value.size) cachedPaintRoomKeys.value = new Set();
+}
+
+/** Reactive: whether `roomIdentifier`'s rows came from a cached paint of this loading period. */
+export function isCachedPaintShown(roomIdentifier: string | null | undefined): boolean {
+  const key = normalizeRoomIdentifier(roomIdentifier);
+  return Boolean(key && cachedPaintRoomKeys.value.has(key));
+}
+
+/**
+ * A fresh read that failed for a passing reason (no answer, timeout, or a 5xx
+ * or 408/429 answer). The rows on screen stay; an access refusal replaces them.
+ * Same rule as `shouldPreserveCurrentRoomSnapshot` in desktop-room-snapshots.
+ */
+export function isTransientSnapshotFailure(snapshot: DesktopRoomSnapshot): boolean {
+  if (snapshot.access.status !== "unavailable") return false;
+  const httpStatus = snapshot.access.httpStatus;
+  return httpStatus === null || [408, 429, 500, 502, 503, 504].includes(httpStatus);
+}
 
 /**
  * The last snapshot shown for each recently opened room, kept in memory for
@@ -39,10 +74,17 @@ export class SelectedRoomSnapshotCache {
     return snapshot;
   }
 
-  /** Stores what the room shows now, or drops the room when it may not be kept. */
+  /**
+   * Stores what the room shows now, or drops the room when it may not be kept.
+   * Only a fresh read that ended ready may add a room (`create`); any other
+   * update (stream events, own sends) changes an entry that exists. A room
+   * that was dropped (refused access, or left the account's room list) is
+   * not stored again until a fresh ready read (`noteFreshAccess`).
+   */
   remember(
     snapshot: DesktopRoomSnapshot | null,
     aliases: readonly (string | null | undefined)[] = [],
+    { create = false }: { create?: boolean } = {},
   ): void {
     const keys = snapshotKeys(snapshot, aliases);
     if (!keys.length) return;
@@ -50,6 +92,7 @@ export class SelectedRoomSnapshotCache {
       this.forget(keys);
       return;
     }
+    if (!create && !keys.some((key) => this.entries.has(this.aliases.get(key) || key))) return;
     const canonical = keys[0]!;
     for (const key of keys) {
       const previous = this.aliases.get(key);
@@ -82,7 +125,24 @@ export class SelectedRoomSnapshotCache {
       for (const key of keys) this.refused.delete(key);
       return;
     }
-    this.forget(keys);
+    this.drop(keys);
+  }
+
+  /**
+   * Drops each named room (with its aliases) and keeps it out until a fresh
+   * read of it is ready: a late stream update cannot store it again.
+   */
+  drop(roomIdentifiers: readonly (string | null | undefined)[]): void {
+    const keys = new Set<string>();
+    for (const identifier of roomIdentifiers) {
+      const key = normalizeRoomIdentifier(identifier);
+      if (!key) continue;
+      const canonical = this.aliases.get(key) || key;
+      keys.add(key);
+      keys.add(canonical);
+      for (const [alias, target] of this.aliases) if (target === canonical) keys.add(alias);
+    }
+    this.forget([...keys]);
     for (const key of keys) this.refused.add(key);
   }
 

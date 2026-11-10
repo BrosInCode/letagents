@@ -5,13 +5,38 @@ import { reactive } from "vue";
 import type { DesktopGitHubRoomEvent, DesktopRoomMessage, DesktopRoomSnapshot } from "../../electron/ipc-types";
 import { SelectedRoomSnapshotCache, withoutCachedPaint } from "../src/composables/selected-room-snapshot-cache";
 
+/** A fresh read that ended ready may add a room. */
+const fresh = { create: true };
+
 describe("SelectedRoomSnapshotCache", () => {
+  it("adds a room only from a fresh read; other updates change an existing entry", () => {
+    const cache = new SelectedRoomSnapshotCache(8, 200);
+    cache.remember(snapshot("room_a"));
+    assert.equal(cache.read("room_a"), null, "a stream update does not add a room");
+    cache.remember(snapshot("room_a"), [], { create: true });
+    cache.remember(snapshot("room_a", { messages: [message("m1")] }));
+    assert.deepEqual(cache.read("room_a")?.messages.map((entry) => entry.id), ["m1"]);
+  });
+
+  it("keeps a dropped room and its aliases out until a fresh ready read", () => {
+    const cache = new SelectedRoomSnapshotCache(8, 200);
+    cache.remember(snapshot("room_a"), ["Alias-A"], { create: true });
+    cache.drop(["alias-a"]);
+    assert.equal(cache.read("room_a"), null);
+    cache.remember(snapshot("room_a"), [], { create: true });
+    cache.remember(snapshot("room_a"), ["alias-a"]);
+    assert.equal(cache.read("room_a"), null, "no write before a fresh ready read");
+    cache.noteFreshAccess(snapshot("room_a"), ["alias-a"]);
+    cache.remember(snapshot("room_a"), ["alias-a"], { create: true });
+    assert.ok(cache.read("alias-a"));
+  });
+
   it("evicts the least recently used room and its aliases", () => {
     const cache = new SelectedRoomSnapshotCache(2, 200);
-    cache.remember(snapshot("room_a"), ["Alias-A"]);
-    cache.remember(snapshot("room_b"));
+    cache.remember(snapshot("room_a"), ["Alias-A"], fresh);
+    cache.remember(snapshot("room_b"), [], fresh);
     assert.ok(cache.read("alias-a"));
-    cache.remember(snapshot("room_c"));
+    cache.remember(snapshot("room_c"), [], fresh);
     assert.equal(cache.read("room_b"), null);
     assert.ok(cache.read("room_a"));
     assert.ok(cache.read("room_c"));
@@ -22,19 +47,19 @@ describe("SelectedRoomSnapshotCache", () => {
 
   it("keeps only the newest page of messages", () => {
     const cache = new SelectedRoomSnapshotCache(8, 3);
-    cache.remember(snapshot("room_a", { messages: ["m1", "m2", "m3", "m4", "m5"].map(message) }));
+    cache.remember(snapshot("room_a", { messages: ["m1", "m2", "m3", "m4", "m5"].map(message) }), [], fresh);
     assert.deepEqual(cache.read("room_a")?.messages.map((entry) => entry.id), ["m3", "m4", "m5"]);
   });
 
   it("does not keep a room whose last fresh read was not ready, until a ready read", () => {
     const cache = new SelectedRoomSnapshotCache(8, 200);
-    cache.remember(snapshot("room_a"));
+    cache.remember(snapshot("room_a"), [], fresh);
     cache.noteFreshAccess({ ...snapshot("room_a"), access: { ...snapshot("room_a").access, status: "forbidden" } });
     assert.equal(cache.read("room_a"), null);
-    cache.remember(snapshot("room_a"));
+    cache.remember(snapshot("room_a"), [], fresh);
     assert.equal(cache.read("room_a"), null);
     cache.noteFreshAccess(snapshot("room_a"));
-    cache.remember(snapshot("room_a"));
+    cache.remember(snapshot("room_a"), [], fresh);
     assert.ok(cache.read("room_a"));
   });
 
@@ -42,12 +67,12 @@ describe("SelectedRoomSnapshotCache", () => {
     const cache = new SelectedRoomSnapshotCache(8, 200);
     const local = snapshot("room_local");
     local.storage = { ...local.storage, effectiveMode: "local" };
-    cache.remember(local);
+    cache.remember(local, [], fresh);
     assert.equal(cache.read("room_local"), null);
     const localFocus = snapshot("focus_local");
     localFocus.storage = { ...localFocus.storage, effectiveMode: "local" };
     localFocus.room = { ...localFocus.room!, kind: "focus" };
-    cache.remember(localFocus);
+    cache.remember(localFocus, [], fresh);
     assert.ok(cache.read("focus_local"));
   });
 });

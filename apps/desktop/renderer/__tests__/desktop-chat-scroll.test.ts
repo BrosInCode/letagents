@@ -42,6 +42,7 @@ import { createServer } from "vite";
 import { createRenderer, h, nextTick, reactive, ref, ssrContextKey } from "vue";
 
 let Viewport: any, Thread: any, provideReactions: any, providePreviews: any, provideMotion: any;
+let showCachedPaint: (rooms: string[]) => void, clearCachedPaint: () => void;
 before(async () => {
   const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
   try {
@@ -49,6 +50,7 @@ before(async () => {
     Thread = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomThreadPanel.vue")).default;
     ({ provideRoomMessageReactions: provideReactions } = await vite.ssrLoadModule("/renderer/src/composables/useRoomMessageReactions.ts"));
     ({ provideRoomMessageLinkPreviews: providePreviews } = await vite.ssrLoadModule("/renderer/src/composables/useRoomMessageLinkPreviews.ts"));
+    ({ showCachedPaint, clearCachedPaint } = await vite.ssrLoadModule("/renderer/src/composables/selected-room-snapshot-cache.ts"));
     ({ provideRoomMessageMotion: provideMotion } = await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/useRoomMessageMotion.ts", import.meta.url))));
   } finally { await vite.close(); }
 });
@@ -483,19 +485,32 @@ test("timeline: returning during snapshot loading keeps the saved position until
 });
 
 // A return to a room paints its cached snapshot while the fresh read runs
-// (roomLoading stays true). The rows must open at the saved place at mount,
-// before any animation frame, and the fresh rows must not move them.
+// (roomLoading stays true, and the data layer marks the room as a cached
+// paint). The rows must open at the saved place at mount, before any
+// animation frame, and the fresh rows must not move them.
+async function cachedPaintSurface(
+  initialScrollPosition: unknown,
+  mount: { props?: Record<string, unknown>; anchorRow?: { id: string; contentTop: number } } = {},
+) {
+  showCachedPaint(["room"]);
+  const s = await scrollSurface(false, false, null, {
+    scrollTop: 0,
+    props: { roomLoading: true, initialScrollPosition, ...mount.props },
+    anchorRow: mount.anchorRow,
+  });
+  const close = s.close;
+  return { ...s, close: () => { clearCachedPaint(); close(); } };
+}
+
+const savedRow = { top: 500, latest: false, anchor: { messageId: "msg_1", offsetTop: 0 } };
+
 for (const saved of ["none", "latest", "anchor"] as const) {
   test(`timeline: cached rows painted while loading open at the ${saved === "anchor" ? "saved row" : "bottom"} at mount (saved position: ${saved})`, async () => {
     const savedPosition = saved === "none" ? null
       : saved === "latest" ? { top: 1600, latest: true, anchor: null }
-      : { top: 500, latest: false, anchor: { messageId: "msg_1", offsetTop: 0 } };
-    const s = await scrollSurface(false, false, null, {
-      scrollTop: 0,
-      props: { roomLoading: true, initialScrollPosition: savedPosition },
-      // The saved row starts 700 px below the top of the content.
-      anchorRow: { id: "msg_1", contentTop: 700 },
-    });
+      : savedRow;
+    // The saved row starts 700 px below the top of the content.
+    const s = await cachedPaintSurface(savedPosition, { anchorRow: { id: "msg_1", contentTop: 700 } });
     try {
       const expected = saved === "anchor" ? 700 : 1600;
       assert.equal(s.el.scrollTop, expected, "no frame shows the top of the mount window");
@@ -512,10 +527,10 @@ for (const saved of ["none", "latest", "anchor"] as const) {
 }
 
 test("timeline: a cached row that is missing waits for fresh data before paging history", async () => {
-  const s = await scrollSurface(false, false, null, {
-    scrollTop: 0,
-    props: { roomLoading: true, hasOlderMessages: true, initialScrollPosition: { top: 500, latest: false, anchor: { messageId: "msg_old", offsetTop: 0 } } },
-  });
+  const s = await cachedPaintSurface(
+    { top: 500, latest: false, anchor: { messageId: "msg_old", offsetTop: 0 } },
+    { props: { hasOlderMessages: true } },
+  );
   try {
     assert.equal(s.el.scrollTop, 1600, "the newest cached rows show while the room loads");
     assert.ok(!s.calls.includes("load-older"));
@@ -525,18 +540,71 @@ test("timeline: a cached row that is missing waits for fresh data before paging 
   } finally { s.close(); }
 });
 
-test("timeline: a reader at the bottom of cached rows follows new messages from the fresh read", async () => {
-  const s = await scrollSurface(false, false, null, {
-    scrollTop: 0,
-    props: { roomLoading: true, initialScrollPosition: { top: 1600, latest: true, anchor: null } },
+test("timeline: scrolling cached rows near the top does not page history until the room loads", async () => {
+  const s = await cachedPaintSurface(savedRow, {
+    props: { hasOlderMessages: true }, anchorRow: { id: "msg_1", contentTop: 700 },
   });
   try {
+    s.el.scrollTop = 40; s.vm.handleScroll(); await flush();
+    assert.ok(!s.calls.includes("load-older"), "no history page is cut from cached rows");
+    s.props.roomLoading = false;
+    await flush();
+    s.el.scrollTop = 40; s.vm.handleScroll(); await flush();
+    assert.ok(s.calls.includes("load-older"));
+  } finally { s.close(); }
+});
+
+test("timeline: messages that came while away are no new-message pill when fresh rows replace cached ones", async () => {
+  const s = await cachedPaintSurface(savedRow, { anchorRow: { id: "msg_1", contentTop: 700 } });
+  try {
+    assert.equal(s.el.scrollTop, 700);
+    s.props.messages = ["msg_1", "msg_2", "msg_3", "msg_4", "msg_5", "msg_6", "msg_7", "msg_8"].map(message);
+    s.props.roomLoading = false;
+    await flush(); s.frame(); await flush();
+    assert.equal(s.vm.unreadCount.value, 0);
+    assert.equal(s.vm.arrivingMessageIds.value.size, 0);
+    assert.equal(s.el.scrollTop, 700, "the reader's row stays in place");
+
+    // After the baseline, a live message counts again.
+    s.props.messages = [...s.props.messages, message("msg_9")];
+    await flush();
+    assert.equal(s.vm.unreadCount.value, 1);
+  } finally { s.close(); }
+});
+
+test("timeline: a reader at the bottom stays there, with no arrival motion, when fresh rows replace cached ones", async () => {
+  const s = await cachedPaintSurface({ top: 1600, latest: true, anchor: null });
+  const animated: string[] = [];
+  try {
     assert.equal(s.el.scrollTop, 1600);
+    const row = {
+      dataset: { messageId: "msg_3" }, isConnected: true,
+      getBoundingClientRect: () => ({ top: 300, bottom: 360 }),
+      animate: () => { animated.push("msg_3"); return { finished: Promise.resolve(), cancel() {} }; },
+    };
+    s.el.querySelectorAll = (() => [row]) as typeof s.el.querySelectorAll;
     s.el.scrollHeight = 2300;
     s.props.messages = [message("msg_1"), message("msg_2"), message("msg_3")];
     s.props.roomLoading = false;
-    await flush(); s.frame(); await flush();
-    assert.equal(s.el.scrollTop, 1900);
+    await flush(); s.frame(); await flush(); s.frame(); await flush();
+    assert.equal(s.el.scrollTop, 1900, "the reader stays at the bottom");
+    assert.deepEqual(animated, [], "messages that came while away do not animate in");
+    assert.equal(s.vm.arrivingMessageIds.value.size, 0);
+  } finally { s.close(); }
+});
+
+test("timeline: rows that exist while a first visit loads do not use up the saved position", async () => {
+  // A live message reaches the placeholder before the first read: not a cached paint.
+  const s = await scrollSurface(false, false, null, {
+    scrollTop: 0,
+    props: { roomLoading: true, messages: [message("msg_1")], initialScrollPosition: { top: 820, latest: false, anchor: null } },
+  });
+  try {
+    assert.equal(s.el.scrollTop, 0, "the saved position waits for the loaded room");
+    s.props.messages = [message("msg_1"), message("msg_2")];
+    s.props.roomLoading = false;
+    await flush();
+    assert.equal(s.el.scrollTop, 820);
   } finally { s.close(); }
 });
 
