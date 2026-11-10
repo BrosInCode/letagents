@@ -20,7 +20,6 @@ export function readNotificationsEnabled(): boolean {
 export const githubEventsVisibilityRevision = ref(0);
 
 const githubEventsVisibilityStorageKey = "letagents-desktop:github-events-inline-visible";
-const environmentPanelOpenStorageKey = "letagents-desktop:environment-panel-open";
 
 export function readGitHubEventsVisible(roomIdentifier: string | null | undefined): boolean {
   const key = roomPreferenceKey(roomIdentifier);
@@ -42,30 +41,6 @@ export function rememberGitHubEventsVisible(roomIdentifier: string | null | unde
     preferences[key] = visible;
     window.localStorage.setItem(githubEventsVisibilityStorageKey, JSON.stringify(preferences));
     githubEventsVisibilityRevision.value += 1;
-  } catch {
-    // Local preference persistence is best-effort.
-  }
-}
-
-export function readEnvironmentPanelOpen(roomIdentifier: string | null | undefined): boolean {
-  const key = roomPreferenceKey(roomIdentifier);
-  if (!key) return false;
-  try {
-    const preferences = readBooleanPreferenceMap(environmentPanelOpenStorageKey);
-    const storedValue = preferences[key];
-    return typeof storedValue === "boolean" ? storedValue : false;
-  } catch {
-    return false;
-  }
-}
-
-export function rememberEnvironmentPanelOpen(roomIdentifier: string | null | undefined, open: boolean): void {
-  const key = roomPreferenceKey(roomIdentifier);
-  if (!key) return;
-  try {
-    const preferences = readBooleanPreferenceMap(environmentPanelOpenStorageKey);
-    preferences[key] = open;
-    window.localStorage.setItem(environmentPanelOpenStorageKey, JSON.stringify(preferences));
   } catch {
     // Local preference persistence is best-effort.
   }

@@ -1,3 +1,4 @@
+import { releaseLabels, releaseOptions, type ReleaseField } from './release-fields.js';
 import { mapTicketState } from "../status-map.js";
 import { isAtlassianCloudId, normalizeJiraSiteUrl } from "../site-url.js";
 import { asRecord, asString, trackerRequest } from "./http.js";
@@ -18,7 +19,7 @@ import {
 export const JIRA_EFFECT_PROPERTY_KEY = "letagents.effect";
 
 const ISSUE_KEY = /^[A-Z][A-Z0-9_]*-\d{1,12}$/;
-const ITEM_FIELDS = ["summary", "status", "assignee", "updated"];
+const ITEM_FIELDS = ["summary", "status", "assignee", "updated", "labels"];
 const PAGE_SIZE = 100;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -26,7 +27,7 @@ const MAX_LIMIT = 200;
 const TRANSITION_SKEW_MS = 60_000;
 const PLANNING_FIELDS_TTL_MS = 5 * 60_000;
 
-interface JiraPlanningFields { sprint: string[]; estimate: string | null }
+interface JiraPlanningFields { sprint: string[]; estimate: string | null; release: { id: string; name: string }[] }
 
 /** No fixed custom-field IDs: each Jira site creates its own. Ambiguous estimates stay unknown. */
 function discoverPlanningFields(value: unknown): JiraPlanningFields {
@@ -40,7 +41,12 @@ function discoverPlanningFields(value: unknown): JiraPlanningFields {
   const estimates = fields.filter(field => asRecord(field.schema).type === "number"
     && /^(story points|story point estimate)$/i.test(asString(field.name)?.trim() ?? ""))
     .flatMap(field => id(field) ? [id(field)!] : []);
-  return { sprint: [...new Set(sprint)], estimate: estimates.length === 1 ? estimates[0] : null };
+  const release = fields.flatMap(field => {
+    const schema = asRecord(field.schema), fieldId = id(field), name = asString(field.name);
+    return fieldId && name && name.length <= 240 && (schema.type === "boolean" || schema.type === "option"
+      || (schema.type === "array" && schema.items === "option")) ? [{ id: fieldId, name }] : [];
+  });
+  return { sprint: [...new Set(sprint)], estimate: estimates.length === 1 ? estimates[0] : null, release };
 }
 
 function issuePlanning(fields: Record<string, unknown>, mapping: JiraPlanningFields | null): TrackerPlanning {
@@ -182,8 +188,8 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
     return value;
   }
 
-  function fieldsWithPlanning(mapping: JiraPlanningFields | null | undefined): string[] {
-    return [...ITEM_FIELDS, ...(mapping?.sprint ?? []), ...(mapping?.estimate ? [mapping.estimate] : [])];
+  function fieldsWithPlanning(mapping: JiraPlanningFields | null | undefined, includeRelease = true): string[] {
+    return [...ITEM_FIELDS, ...(mapping?.sprint ?? []), ...(mapping?.estimate ? [mapping.estimate] : []), ...(includeRelease ? mapping?.release.map(field => field.id) ?? [] : [])];
   }
 
   function toItem(conn: ProviderConnection, issue: unknown, mapping?: JiraPlanningFields | null): ExternalItem | null {
@@ -211,6 +217,9 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
       payload: {
         id: asString(record.id),
         status_category: statusCategory,
+        releaseMetadataAvailable: mapping != null,
+        releaseFields: [{ id: 'labels', name: 'Label', values: releaseLabels(fields.labels) },
+          ...(mapping?.release.map(field => ({ ...field, values: Object.hasOwn(fields, field.id) ? releaseOptions(fields[field.id]) : null })) ?? [])] satisfies ReleaseField[],
         ...(mapping !== undefined ? { planning: issuePlanning(fields, mapping) } : {}),
       },
     };
@@ -219,9 +228,21 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
   async function getItem(conn: ProviderConnection, rawKey: string, opts?: { includePlanning?: boolean }): Promise<ExternalItem | null> {
     const key = assertJiraKey(rawKey);
     const mapping = opts?.includePlanning ? await readPlanningFields(conn) : undefined;
+    // Use a read-only POST when site-defined fields could overflow a GET URL.
+    // A denied optional read must not block the normal ticket import.
+    if (mapping?.release.length) {
+      try {
+        const response = await api(conn, "/issue/bulkfetch", { method: "POST", body: { issueIdsOrKeys: [key], fields: fieldsWithPlanning(mapping) } });
+        const issues = asRecord(response.json).issues;
+        const issue = Array.isArray(issues) ? issues.find(issue => asString(asRecord(issue).key) === key) : null;
+        if (issue) return toItem(conn, issue, mapping);
+      } catch { /* The regular read below still enforces ticket authorization. */ }
+    }
     try {
-      const response = await api(conn, `/issue/${encodeURIComponent(key)}?fields=${fieldsWithPlanning(mapping).join(",")}`);
-      return toItem(conn, response.json, mapping);
+      const response = await api(conn, `/issue/${encodeURIComponent(key)}?fields=${fieldsWithPlanning(mapping, false).join(",")}`);
+      const item = toItem(conn, response.json, mapping);
+      if (item && mapping?.release.length) item.payload.releaseMetadataAvailable = false;
+      return item;
     } catch (error) {
       if (error instanceof TrackerProviderError && error.status === 404) return null;
       throw error;

@@ -19,7 +19,7 @@ import { createTaskLeaseRow } from "./coordination/lease-rows.js";
 import { updateTaskLeaseWorkflowRefs } from "./coordination/task-leases.js";
 import { acquireLeaseFenceTx, LeaseFenceStaleError, type LeaseFence } from "./coordination/lease-rebind.js";
 import { resolveTaskAssignmentState, type TaskAssignmentPatch } from "./task-assignment.js";
-import { normalizeTaskWorkflowArtifacts, synchronizeTaskWorkflowArtifactsWithPrUrl, type TaskWorkflowArtifact, type TaskWorkflowArtifactMatch } from "../repo-workflow.js";
+import { buildTaskWorkflowRefs, normalizeTaskWorkflowArtifacts, synchronizeTaskWorkflowArtifactsWithPrUrl, type TaskWorkflowArtifact, type TaskWorkflowArtifactMatch } from "../repo-workflow.js";
 import type { BoardIntent, BoardIntentConsumptionInput, BoardIntentPayload, Task, TaskOwnershipState, TaskRow, TaskStatus, TaskWorkLeaseCreationInput } from "./types.js";
 
 export const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
@@ -89,6 +89,33 @@ export async function getTasksForRooms(roomIds: readonly string[]): Promise<Task
     .orderBy(desc(tasks.updated_at), asc(tasks.number));
 
   return (rows as TaskRow[]).map(toTask);
+}
+
+/** Keep all task titles for history search without transferring unused task bodies. */
+export async function getRoomActivityHistoryTasks(roomId: string) {
+  const rows = await db.select({
+    number: tasks.number,
+    room_id: tasks.room_id,
+    title: tasks.title,
+    status: tasks.status,
+    assignee: tasks.assignee,
+    assignee_agent_key: tasks.assignee_agent_key,
+    created_by: tasks.created_by,
+    updated_at: tasks.updated_at,
+    pr_url: tasks.pr_url,
+    workflow_artifacts: tasks.workflow_artifacts,
+  }).from(tasks).where(eq(tasks.room_id, roomId))
+    .orderBy(desc(tasks.updated_at), asc(tasks.number));
+
+  return rows.map(({ number, pr_url, workflow_artifacts, ...task }) => ({
+    ...task,
+    id: formatTaskId(number),
+    workflow_refs: buildTaskWorkflowRefs({
+      artifacts: normalizeTaskWorkflowArtifacts({ artifacts: workflow_artifacts, prUrl: pr_url }),
+      prUrl: pr_url,
+      status: task.status,
+    }),
+  }));
 }
 
 async function insertTaskRow(

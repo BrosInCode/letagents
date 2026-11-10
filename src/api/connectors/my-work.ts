@@ -458,7 +458,7 @@ async function readOpenRequests(roomIds: readonly string[]): Promise<OpenRequest
   });
 }
 
-function pullRequestsFor(row: CandidateRow, status: TaskGitHubArtifactStatus | undefined): MyWorkPullRequest[] {
+export function pullRequestsFor(row: Pick<CandidateRow, "pr_url" | "workflow_artifacts">, status: TaskGitHubArtifactStatus | undefined): MyWorkPullRequest[] {
   const list: MyWorkPullRequest[] = [];
   const seen = new Set<string>();
   if (status?.pr_url) {

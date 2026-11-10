@@ -37,6 +37,13 @@ import {
 import { defaultMcpTargetSelection } from "../domain/mcp-install";
 import { applySupervisedAgentsSupport } from "../domain/supervised-agents-support";
 import { preserveRoomRepoStatistics } from "../domain/repo-status";
+import {
+  SelectedRoomSnapshotCache,
+  clearCachedPaint,
+  isTransientSnapshotFailure,
+  showCachedPaint,
+  withoutCachedPaint,
+} from "./selected-room-snapshot-cache";
 import { desktopIpc } from "../ipc/index.js";
 import {
   normalizeRoomIdentifier,
@@ -85,7 +92,12 @@ interface DesktopAppDataOptions {
   workers: Ref<WorkerSnapshot[]>;
 }
 
+// One snapshot is about 90-190 KB; 8 rooms stay under about 1.5 MB and cover
+// the set of rooms a person moves between in one session.
 const selectedSnapshotCacheLimit = 8;
+// A snapshot read returns the newest 150 messages plus thread ancestors, and
+// live messages are appended to it. Keep only the newest page of a room.
+const selectedSnapshotCacheMaxMessages = 200;
 const defaultRoomSnapshotTimeoutMs = 15_000;
 const defaultDeliveryRepairRetryMs = 500;
 const maxDeliveryRepairRetryMs = 5_000;
@@ -108,7 +120,22 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   }, { immediate: true, flush: "sync" });
   let selectedSnapshotRequestId = 0;
   const selectedSnapshotLoading = ref(false);
-  const cachedSelectedSnapshots = new Map<string, DesktopRoomSnapshot>();
+  const cachedSelectedSnapshots = new SelectedRoomSnapshotCache(
+    selectedSnapshotCacheLimit,
+    selectedSnapshotCacheMaxMessages,
+  );
+  /**
+   * The cached snapshot painted for the selected room while its fresh read
+   * runs, and the placeholder the uncached path shows instead. The first
+   * fresh snapshot of the room replaces what came from the cache (see
+   * mergeFreshSelectedSnapshot); changes made after the paint (stream
+   * events, own sends) are kept exactly as without the cache.
+   */
+  let cachedPaint: {
+    roomIdentifier: string;
+    snapshot: DesktopRoomSnapshot;
+    placeholder: DesktopRoomSnapshot;
+  } | null = null;
   let nextSelectedSnapshotCacheAlias: string | null | undefined;
   let skipNextSelectedSnapshotCache = false;
   let streamReconcileGeneration = 0;
@@ -121,7 +148,17 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   let streamBufferOverflow = false;
   const degradedStreamRooms = new Map<string, number>();
   const pendingVerifiedRecoveries = new Map<string, number>();
+  // Recoveries not queued because the barrier read had not started yet.
+  const skippedVerifiedRecoveries = new Map<string, number>();
   const pendingDeliveryRepairs = new Map<string, PendingDeliveryRepairState>();
+  // The barrier token whose stream start is still awaited: its read has not
+  // started yet, so every open the stream reports now precedes that read.
+  let barrierAwaitingStream: number | null = null;
+  let sameTaskSelectionRefresh: {
+    key: string;
+    base: DesktopRoomSnapshot | null;
+    promise: Promise<void>;
+  } | null = null;
   let artifactRefreshContext = 0;
   let artifactRefreshDisposed = false;
   let artifactRefresh: {
@@ -144,6 +181,21 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     () => options.authStatus.value?.apiUrl,
     () => normalizeRoomIdentifier(options.selectedSnapshot.value?.roomIdentifier),
   ], invalidateArtifactRefresh, { flush: "sync" });
+
+  // Another account or server never sees this account's cached rooms.
+  watch([
+    () => options.authStatus.value?.authenticated ? options.authStatus.value.account?.id ?? null : null,
+    () => options.authStatus.value?.apiUrl ?? null,
+  ], () => clearSelectedSnapshotCache(), { flush: "sync" });
+
+  // A room that left the account's room list (left, removed, archived or
+  // deleted) is not painted from the cache again.
+  watch(() => accountRoomKeys(options.accountRooms.value), (next, previous) => {
+    if (!previous) return;
+    const kept = new Set(next);
+    // Kept out until a fresh ready read: a queued stream update cannot store it again.
+    cachedSelectedSnapshots.drop(previous.filter((key) => !kept.has(key)));
+  }, { flush: "sync" });
 
   if (getCurrentScope()) onScopeDispose(() => {
     artifactRefreshDisposed = true;
@@ -306,6 +358,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (barrierRoomIdentifier) {
         rootBarrierToken = await beginRoomSnapshotBarrier(barrierRoomIdentifier);
       }
+      const rootRepairToken = pendingRepairTokenFor(barrierRoomIdentifier);
       if (!sessionIsCurrent(sessionGeneration)) return;
       const [
         nextAppInfo,
@@ -338,13 +391,15 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         nextAccountRooms || nextSettingsAccountRooms || [],
       );
       if (!sessionIsCurrent(sessionGeneration)) return;
-      const nextRootRoomKey = normalizeRoomIdentifier(nextRootRoomSnapshot.roomIdentifier);
+      const rootReadMatchesBarrier = Boolean(barrierRoomIdentifier)
+        && normalizeRoomIdentifier(nextRootRoomSnapshot.roomIdentifier) === normalizeRoomIdentifier(barrierRoomIdentifier);
       await acknowledgeStreamGapRepairFromSnapshot(
         nextRootRoomSnapshot.roomIdentifier || "",
         nextRootRoomSnapshot,
-        nextRootRoomKey ? pendingDeliveryRepairs.get(nextRootRoomKey)?.token ?? null : null,
+        rootReadMatchesBarrier ? rootRepairToken : null,
       );
       if (!sessionIsCurrent(sessionGeneration)) return;
+      cachedSelectedSnapshots.noteFreshAccess(nextRootRoomSnapshot);
       const recoveredAlias = recoveredRootRoomAlias(requestedRootRoomIdentifier, nextRootRoomSnapshot);
       options.appInfo.value = nextAppInfo;
       applySupervisedAgentsSupport(nextAppInfo);
@@ -374,10 +429,16 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         : defaultMcpTargetSelection(nextMcpInstallState);
       options.reconcileActiveEntry();
       if (nextRootRoomSnapshot.roomIdentifier) {
+        if (rootReadMatchesBarrier) queueRepairReadIfGapChanged(nextRootRoomSnapshot.roomIdentifier, rootRepairToken);
         finishRoomSnapshotBarrier(nextRootRoomSnapshot.roomIdentifier, rootBarrierToken);
       }
       await refreshSelectedSnapshot(nextRootRoomSnapshot);
+      // The root read above is fresh; when it is the room shown, it may be kept.
+      if (sessionIsCurrent(sessionGeneration)) {
+        rememberFreshSelectedSnapshot(nextRootRoomSnapshot, [requestedRootRoomIdentifier]);
+      }
     } finally {
+      queueSkippedRecoveryAfterFailedRead(streamReconcileRoom, rootBarrierToken);
       if (streamReconcileRoom) finishRoomSnapshotBarrier(streamReconcileRoom, rootBarrierToken);
       options.loading.value = false;
     }
@@ -476,7 +537,48 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     )?.rootPath || null;
   }
 
-  async function refreshSelectedSnapshot(baseRootSnapshot: DesktopRoomSnapshot | null = options.rootRoomSnapshot.value): Promise<void> {
+  /**
+   * A cold start asks twice for the same selection in one task: refresh()
+   * itself, and the active-entry watcher that reconcileActiveEntry woke. No
+   * IPC reply or stream event can land between two calls in one task, so the
+   * second call joins the first (which stays the current request) instead of
+   * reading the room again. A call in a later task, or for another entry,
+   * room, root snapshot object or session, runs on its own.
+   *
+   * The join entry ends with a microtask queued by the first call. The
+   * watcher's flush was queued earlier (when reconcileActiveEntry changed the
+   * entry), so it still joins; nothing from a later task can. A caller that
+   * needs data newer than a read already in flight passes `fresh` and never
+   * joins.
+   */
+  function refreshSelectedSnapshot(
+    baseRootSnapshot: DesktopRoomSnapshot | null = options.rootRoomSnapshot.value,
+    { fresh = false }: { fresh?: boolean } = {},
+  ): Promise<void> {
+    const entry = options.activeEntry.value;
+    const key = JSON.stringify([
+      options.sessionGeneration.value,
+      entry.id,
+      entry.type,
+      baseRootSnapshot?.roomIdentifier ?? null,
+      baseRootSnapshot ? options.resolveSelectedRoomIdentifier(baseRootSnapshot) : null,
+    ]);
+    const base = baseRootSnapshot ? toRaw(baseRootSnapshot) : null;
+    if (!fresh && sameTaskSelectionRefresh?.key === key && sameTaskSelectionRefresh.base === base) {
+      return sameTaskSelectionRefresh.promise;
+    }
+    const promise = refreshSelectedSnapshotNow(baseRootSnapshot);
+    const current = { key, base, promise };
+    sameTaskSelectionRefresh = current;
+    const forget = () => {
+      if (sameTaskSelectionRefresh === current) sameTaskSelectionRefresh = null;
+    };
+    queueMicrotask(forget);
+    promise.then(forget, forget);
+    return promise;
+  }
+
+  async function refreshSelectedSnapshotNow(baseRootSnapshot: DesktopRoomSnapshot | null): Promise<void> {
     const requestId = ++selectedSnapshotRequestId;
 
     if (!baseRootSnapshot) {
@@ -489,7 +591,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
     if (options.activeEntry.value.type !== "room") {
       if (requestId === selectedSnapshotRequestId) {
-        setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot), { activitySnapshot: true });
+        setSelectedSnapshot(mergeFreshSelectedSnapshot(baseRootSnapshot), { activitySnapshot: true });
         selectedSnapshotLoading.value = false;
       }
       return;
@@ -502,7 +604,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       && roomIdentifier
       && normalizeRoomIdentifier(roomIdentifier) !== normalizeRoomIdentifier(baseRootSnapshot.roomIdentifier)
     ) {
-      publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
+      // A return to a room shown earlier in this session paints its last
+      // known snapshot at once; the read below replaces it. Loading stays on
+      // until then, so nothing that waits for a loaded room acts on it.
+      if (!paintCachedSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot, { loading: true })) {
+        publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
+      }
       try {
         const openedContext = await loadRootRoomContext({
           roomIdentifier,
@@ -515,7 +622,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
           ? preserveRoomRepoStatistics(options.repoStatus.value, nextRepoStatus)
           : nextRepoStatus;
         options.rootRoomSnapshot.value = nextRootSnapshot;
-        setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextRootSnapshot), { cache: false, activitySnapshot: true });
+        const aliases = [roomIdentifier, openedContext.openedRoom?.roomIdentifier];
+        cachedSelectedSnapshots.noteFreshAccess(nextRootSnapshot, aliases);
+        setSelectedSnapshot(mergeFreshSelectedSnapshot(nextRootSnapshot), { cache: false, activitySnapshot: true });
+        rememberFreshSelectedSnapshot(nextRootSnapshot, aliases);
         options.selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
         options.rememberRootRoomSnapshot(nextRootSnapshot, {
           aliasIdentifiers: [roomIdentifier, openedContext.openedRoom?.roomIdentifier],
@@ -524,41 +634,53 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
           meta: openedContext.openedRoom?.repoStatus?.branch || null,
         });
         options.activeEntry.value = options.currentParentRoom.value;
+      } catch (error) {
+        // A read that threw or timed out: the rows on screen stay, but the
+        // entry is not painted again. A later ready read may add it again.
+        cachedSelectedSnapshots.forget([roomIdentifier]);
+        throw error;
       } finally {
-        if (requestId === selectedSnapshotRequestId) selectedSnapshotLoading.value = false;
+        // A read that failed (error or timeout) keeps the cached rows on screen,
+        // as a focus room does; the next fresh read of the room replaces them.
+        if (requestId === selectedSnapshotRequestId) {
+          clearCachedPaint();
+          selectedSnapshotLoading.value = false;
+        }
       }
       return;
     }
     if (!roomIdentifier || roomIdentifier === baseRootSnapshot.roomIdentifier) {
       if (requestId === selectedSnapshotRequestId) {
-        setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, baseRootSnapshot), { activitySnapshot: true });
+        setSelectedSnapshot(mergeFreshSelectedSnapshot(baseRootSnapshot), { activitySnapshot: true });
         selectedSnapshotLoading.value = false;
       }
       return;
     }
 
-    const cachedSnapshot = readCachedSelectedSnapshot(roomIdentifier);
-    if (cachedSnapshot) {
-      setSelectedSnapshot(cachedSnapshot, { cacheAlias: roomIdentifier });
-      selectedSnapshotLoading.value = false;
-    } else {
+    // A focus room keeps its earlier behaviour: the cached snapshot shows
+    // without the loading state.
+    if (!paintCachedSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot, { loading: false })) {
       publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
     }
     let barrierToken: number | null = null;
     try {
       barrierToken = await beginRoomSnapshotBarrier(roomIdentifier);
+      const repairToken = pendingRepairTokenFor(roomIdentifier);
       const nextSnapshot = await getRoomSnapshot(roomIdentifier);
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
-      const roomKey = normalizeRoomIdentifier(roomIdentifier);
-      await acknowledgeStreamGapRepairFromSnapshot(
-        roomIdentifier,
-        nextSnapshot,
-        roomKey ? pendingDeliveryRepairs.get(roomKey)?.token ?? null : null,
-      );
+      await acknowledgeStreamGapRepairFromSnapshot(roomIdentifier, nextSnapshot, repairToken);
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
-      setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextSnapshot), { cacheAlias: roomIdentifier, activitySnapshot: true });
+      cachedSelectedSnapshots.noteFreshAccess(nextSnapshot, [roomIdentifier]);
+      setSelectedSnapshot(mergeFreshSelectedSnapshot(nextSnapshot), { cacheAlias: roomIdentifier, activitySnapshot: true });
+      rememberFreshSelectedSnapshot(nextSnapshot, [roomIdentifier]);
+      queueRepairReadIfGapChanged(roomIdentifier, repairToken);
       finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
+    } catch (error) {
+      // As for a parent room: a failed read keeps the rows, not the entry.
+      cachedSelectedSnapshots.forget([roomIdentifier]);
+      throw error;
     } finally {
+      queueSkippedRecoveryAfterFailedRead(roomIdentifier, barrierToken);
       if (streamReconcileRoom === roomIdentifier) finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
       if (requestId === selectedSnapshotRequestId) selectedSnapshotLoading.value = false;
     }
@@ -573,6 +695,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     );
     if (!preserveDegradedStream) {
       pendingVerifiedRecoveries.clear();
+      skippedVerifiedRecoveries.clear();
       clearPendingDeliveryRepairs();
       degradedStreamRooms.clear();
     }
@@ -582,13 +705,57 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     if (!preserveDegradedStream) activeStreamToken = token;
     streamReconcileRoom = roomIdentifier;
     resetBufferedStreamEvents();
+    barrierAwaitingStream = token;
     try {
       await options.syncRoomStream(roomIdentifier, null);
       return token;
     } catch (error) {
       releaseRoomSnapshotBarrier(roomIdentifier, token, false);
       throw error;
+    } finally {
+      if (barrierAwaitingStream === token) barrierAwaitingStream = null;
     }
+  }
+
+  /** The repair token the stream reported so far; read it right before a barrier read starts. */
+  function pendingRepairTokenFor(roomIdentifier: string | null | undefined): number | null {
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    return roomKey ? pendingDeliveryRepairs.get(roomKey)?.token ?? null : null;
+  }
+
+  /**
+   * A barrier read closes only the gap whose token was pending when the read
+   * started. If the stream reported a newer gap while the read ran, ask the
+   * barrier release for one more read: it captures the new token first.
+   */
+  function queueRepairReadIfGapChanged(roomIdentifier: string, tokenAtReadStart: number | null): void {
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    if (!roomKey || normalizeRoomIdentifier(activeStreamRoom) !== roomKey) return;
+    // This read completed after the boundary whose recovery was skipped.
+    skippedVerifiedRecoveries.delete(roomKey);
+    const pendingToken = pendingDeliveryRepairs.get(roomKey)?.token;
+    if (pendingToken === undefined || pendingToken === tokenAtReadStart) return;
+    pendingVerifiedRecoveries.set(roomKey, activeStreamToken);
+  }
+
+  /**
+   * A barrier read that did not complete (error, timeout, or dropped) while
+   * its room is still the stream's room: queue the recovery read that was
+   * skipped because this read was expected to cover it. Call before the
+   * barrier is released; the release then runs exactly one read.
+   */
+  function queueSkippedRecoveryAfterFailedRead(roomIdentifier: string | null, barrierToken: number | null): void {
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    if (
+      !roomKey
+      || barrierToken === null
+      || barrierToken !== streamReconcileGeneration
+      || normalizeRoomIdentifier(streamReconcileRoom) !== roomKey
+      || normalizeRoomIdentifier(activeStreamRoom) !== roomKey
+      || skippedVerifiedRecoveries.get(roomKey) !== activeStreamToken
+    ) return;
+    skippedVerifiedRecoveries.delete(roomKey);
+    pendingVerifiedRecoveries.set(roomKey, activeStreamToken);
   }
 
   async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<void> {
@@ -601,6 +768,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       resetBufferedStreamEvents();
       degradedStreamRooms.clear();
       pendingVerifiedRecoveries.clear();
+      skippedVerifiedRecoveries.clear();
       clearPendingDeliveryRepairs();
       await options.syncRoomStream(null);
       return;
@@ -614,6 +782,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       resetBufferedStreamEvents();
       degradedStreamRooms.clear();
       pendingVerifiedRecoveries.clear();
+      skippedVerifiedRecoveries.clear();
       clearPendingDeliveryRepairs();
     }
     await options.syncRoomStream(roomIdentifier);
@@ -678,6 +847,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     baseRootSnapshot: DesktopRoomSnapshot,
   ): void {
     if (requestId !== selectedSnapshotRequestId) return;
+    clearCachedPaint();
     setSelectedSnapshot(createOptimisticSelectedSnapshot(entry, roomIdentifier, baseRootSnapshot), { cache: false });
     selectedSnapshotLoading.value = true;
   }
@@ -724,7 +894,17 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         && degradedStreamRooms.get(roomKey) === activeStreamToken
         && normalizeRoomIdentifier(streamReconcileRoom) === roomKey
       ) {
-        pendingVerifiedRecoveries.set(roomKey, activeStreamToken);
+        // While the barrier still awaits its stream, its read has not started:
+        // that read comes after this verified boundary and already covers it.
+        // Main sends a verified gap and then a verified gap:false boundary in
+        // one handshake; queueing a recovery here read the room twice.
+        // The skipped recovery is kept: if that read then fails, it is the
+        // only retry (queueSkippedRecoveryAfterFailedRead).
+        if (barrierAwaitingStream !== streamReconcileGeneration) {
+          pendingVerifiedRecoveries.set(roomKey, activeStreamToken);
+        } else {
+          skippedVerifiedRecoveries.set(roomKey, activeStreamToken);
+        }
         return;
       }
       if (event.verified && normalizeRoomIdentifier(streamReconcileRoom) === roomKey) return;
@@ -854,7 +1034,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         generation !== streamReconcileGeneration
         || normalizeRoomIdentifier(activeStreamRoom) !== roomKey
       ) return;
-      setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, snapshot), { activitySnapshot: true });
+      cachedSelectedSnapshots.noteFreshAccess(snapshot, [roomIdentifier]);
+      setSelectedSnapshot(mergeFreshSelectedSnapshot(snapshot), { activitySnapshot: true });
+      rememberFreshSelectedSnapshot(snapshot, [roomIdentifier]);
       const pending = streamBufferOverflow ? [] : bufferedStreamEvents;
       const overflowed = streamBufferOverflow;
       resetBufferedStreamEvents();
@@ -864,6 +1046,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (roomKey) {
         degradedStreamRooms.delete(roomKey);
         pendingVerifiedRecoveries.delete(roomKey);
+        skippedVerifiedRecoveries.delete(roomKey);
       }
     } finally {
       if (generation === streamReconcileGeneration) {
@@ -896,12 +1079,15 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   }
 
   function scheduleSelectedSnapshotRefresh(): void {
-    void refreshSelectedSnapshot().catch(() => undefined);
+    // An explicit room refresh wants data newer than any read in flight.
+    void refreshSelectedSnapshot(options.rootRoomSnapshot.value, { fresh: true }).catch(() => undefined);
   }
 
   function handleRefreshRoom(snapshot?: DesktopRoomSnapshot): void {
     if (snapshot) {
       options.rootRoomSnapshot.value = snapshot;
+      cachedPaint = null;
+      cachedSelectedSnapshots.noteFreshAccess(snapshot);
       setSelectedSnapshot(snapshot, { activitySnapshot: true });
       options.selectedRootRoomIdentifier.value = snapshot.roomIdentifier;
       options.rememberRootRoomSnapshot(snapshot);
@@ -989,6 +1175,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       activityUnread.observeLatest(normalizeRoomIdentifier(snapshot.room?.identifier || snapshot.roomIdentifier) || "", snapshot.githubEvents.events.map(event => event.id));
     }
     const previousSnapshot = options.selectedSnapshot.value;
+    if (cachedPaint && !snapshotMatchesRoom(snapshot, cachedPaint.roomIdentifier)) {
+      cachedPaint = null;
+      clearCachedPaint();
+    }
     if (input.cache === false) {
       skipNextSelectedSnapshotCache = true;
       nextSelectedSnapshotCacheAlias = undefined;
@@ -1007,35 +1197,86 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
   function clearSelectedSnapshotCache(): void {
     cachedSelectedSnapshots.clear();
+    cachedPaint = null;
+    clearCachedPaint();
   }
 
-  function readCachedSelectedSnapshot(roomIdentifier: string): DesktopRoomSnapshot | null {
-    const cacheKey = selectedSnapshotCacheKey(roomIdentifier);
-    if (!cacheKey) return null;
-    const cachedSnapshot = cachedSelectedSnapshots.get(cacheKey) || null;
-    if (!cachedSnapshot) return null;
-    cachedSelectedSnapshots.delete(cacheKey);
-    cachedSelectedSnapshots.set(cacheKey, cachedSnapshot);
-    return cachedSnapshot;
-  }
-
+  /** Any change to the selected snapshot: updates the room's entry if one exists, never adds one. */
   function rememberCachedSelectedSnapshot(
     snapshot: DesktopRoomSnapshot | null,
     roomIdentifierAlias?: string | null,
   ): void {
-    const cacheKey = selectedSnapshotCacheKey(roomIdentifierAlias || snapshot?.roomIdentifier || snapshot?.room?.identifier);
-    if (!cacheKey) return;
-    if (!snapshot || snapshot.access.status !== "ready" || snapshot.room?.kind !== "focus") {
-      cachedSelectedSnapshots.delete(cacheKey);
-      return;
+    cachedSelectedSnapshots.remember(snapshot, [roomIdentifierAlias]);
+  }
+
+  /**
+   * After a fresh read of the selected room ended ready and was applied, the
+   * room may be added to the cache with what it shows now.
+   */
+  function rememberFreshSelectedSnapshot(
+    fresh: DesktopRoomSnapshot,
+    aliases: readonly (string | null | undefined)[],
+  ): void {
+    const shown = options.selectedSnapshot.value;
+    if (fresh.access.status !== "ready" || !shown || !roomSnapshotsMatch(shown, fresh)) return;
+    cachedSelectedSnapshots.remember(shown, aliases, { create: true });
+  }
+
+  /**
+   * Shows the room's last known snapshot while its fresh read runs. Returns
+   * false (and shows nothing) when the room has no usable cache entry.
+   */
+  function paintCachedSelectedSnapshot(
+    requestId: number,
+    entry: RoomEntry,
+    roomIdentifier: string,
+    baseRootSnapshot: DesktopRoomSnapshot,
+    { loading }: { loading: boolean },
+  ): boolean {
+    if (requestId !== selectedSnapshotRequestId) return false;
+    const cachedSnapshot = cachedSelectedSnapshots.read(roomIdentifier);
+    if (!cachedSnapshot || cachedSnapshot.access.status !== "ready") return false;
+    setSelectedSnapshot(cachedSnapshot, { cache: false });
+    cachedPaint = {
+      roomIdentifier,
+      snapshot: cachedSnapshot,
+      placeholder: createOptimisticSelectedSnapshot(entry, roomIdentifier, baseRootSnapshot),
+    };
+    // Only a paint shown with the loading state tells the message viewport
+    // that its rows are cached; a focus room keeps its earlier path.
+    if (loading) {
+      showCachedPaint([roomIdentifier, cachedSnapshot.roomIdentifier, cachedSnapshot.room?.identifier]);
+    } else {
+      clearCachedPaint();
     }
-    cachedSelectedSnapshots.delete(cacheKey);
-    cachedSelectedSnapshots.set(cacheKey, snapshot);
-    while (cachedSelectedSnapshots.size > selectedSnapshotCacheLimit) {
-      const oldestKey = cachedSelectedSnapshots.keys().next().value as string | undefined;
-      if (!oldestKey) break;
-      cachedSelectedSnapshots.delete(oldestKey);
+    selectedSnapshotLoading.value = loading;
+    return true;
+  }
+
+  /**
+   * The selected snapshot as the uncached path would hold it now: the
+   * placeholder plus what changed after a cached paint. Unchanged without one.
+   */
+  function selectedSnapshotWithoutCachedPaint(): DesktopRoomSnapshot | null {
+    const current = options.selectedSnapshot.value;
+    if (!cachedPaint || !current || !snapshotMatchesRoom(current, cachedPaint.roomIdentifier)) return current;
+    return withoutCachedPaint(current, cachedPaint.snapshot, cachedPaint.placeholder);
+  }
+
+  /**
+   * Applies a fresh snapshot through the usual merge; it replaces a cached
+   * paint. A read that failed for a passing reason (no answer, 5xx) keeps the
+   * rows on screen, as before the cache; the next fresh read replaces them.
+   * An access refusal is not a passing failure: the merge shows the refusal.
+   */
+  function mergeFreshSelectedSnapshot(fresh: DesktopRoomSnapshot): DesktopRoomSnapshot {
+    const replacesPaint = Boolean(cachedPaint && snapshotMatchesRoom(fresh, cachedPaint.roomIdentifier));
+    if (replacesPaint && isTransientSnapshotFailure(fresh)) {
+      return mergeRoomSnapshotMessages(options.selectedSnapshot.value, fresh);
     }
+    const current = selectedSnapshotWithoutCachedPaint();
+    if (replacesPaint) cachedPaint = null;
+    return mergeRoomSnapshotMessages(current, fresh);
   }
 
   const repoStatusValue = computed<RepoStatus>(() => options.repoStatus.value || {
@@ -1099,8 +1340,11 @@ function recoveredRootRoomAlias(
   return requestedIdentifier === recoveredIdentifier ? null : requestedRoomIdentifier;
 }
 
-function selectedSnapshotCacheKey(roomIdentifier: string | null | undefined): string | null {
-  return normalizeRoomIdentifier(roomIdentifier);
+function accountRoomKeys(rooms: readonly DesktopAccountRoomEntry[]): string[] {
+  return rooms.flatMap((room) => [
+    room.roomIdentifier,
+    ...(room.focusRooms || []).map((focusRoom) => focusRoom.roomIdentifier),
+  ]).map(normalizeRoomIdentifier).filter((key): key is string => Boolean(key));
 }
 
 function createOptimisticSelectedSnapshot(

@@ -98,8 +98,10 @@ const {
   acknowledgeDesktopRoomStreamGapRepair,
   setExecutionDelegationInvalidationHandler,
   roomStreamReconnectDelayMs,
+  emitRoomStreamEvent,
 } =
   await import("../main/room-stream.js");
+
 
 const { getJoinedRoomInfo, rememberJoinedRoomInfo } = await import("../main/rooms/room-info.js");
 const boardService = await import("../main/rooms/local-board-service.js");
@@ -115,6 +117,31 @@ await boardSocket.start();
 test.after(async () => { await boardSocket.stop(); delete process.env.LETAGENTS_BOARD_SOCKET_PATH; });
 
 const ROOM = "focus_fallback_room";
+
+test("pin/reaction invalidations and reconnects fence pending reads before a new view loads", async () => {
+  const { createInFlightRoomReads } = await import("../main/rooms/in-flight-reads.js");
+  for (const event of [
+    { type: "resource_invalidation", roomIdentifier: "alias", resource: "message_pins" },
+    { type: "resource_invalidation", roomIdentifier: "alias", resource: "message_reactions" },
+    { type: "open", roomIdentifier: "alias" },
+  ] as const) {
+    const pending: Array<(result: string) => void> = [];
+    const reads = createInFlightRoomReads(() => new Promise<string>((resolve) => pending.push(resolve)), async () => ({ token: "viewer" }));
+    const old = reads.get("/rooms/canonical/messages/pins", "canonical");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    emitRoomStreamEvent(event);
+    const fresh = reads.get("/rooms/canonical/messages/pins", "canonical");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(pending.length, 2, "a view created after the event cannot join the old read");
+    pending[0]!("old");
+    await old;
+    const duplicate = reads.get("/rooms/canonical/messages/pins", "canonical");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(pending.length, 2, "old cleanup cannot evict the new shared read");
+    pending[1]!("fresh");
+    assert.deepEqual(await Promise.all([fresh, duplicate]), ["fresh", "fresh"]);
+  }
+});
 
 type StreamHandler =
   | { kind: "ok"; sse: ControllableSse }

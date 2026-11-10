@@ -79,8 +79,12 @@
       @retry="retryJoin"
     />
 
+    <div v-if="isConnected && activeTab === 'chat'" class="web-room-release-widget">
+      <ReleaseQueueWidget :key="room?.identifier" :room-id="room?.identifier || ''" :load="loadReleasePlanning" :open-external="openReleaseLink" @select="openBoardTask" />
+    </div>
+    <TaskLinkPreview v-if="isConnected" :room-id="room?.identifier || ''" :tasks="previewTasks" :active="activeTab === 'chat'" :accept="acceptPreviewTask" :open-external="openReleaseLink" @open-board="openBoardTask">
+    <template #description="{ text }"><div v-html="renderMessageContent(text)" /></template>
     <RoomTabPanels
-      v-if="isConnected"
       ref="roomTabPanelsRef"
       :activeTab="activeTab"
       :tabTransitionName="tabTransitionName"
@@ -161,6 +165,7 @@
           @clear-reply="clearQuote" @sign-in="handleSignIn" />
       </template>
     </RoomTabPanels>
+    </TaskLinkPreview>
 
     <!-- Requests to join, for room admins: a pill above the composer, where the room asks things of you. -->
     <div class="room-join-request-slot" v-show="activeTab === 'chat' && !hideMainComposer">
@@ -241,6 +246,12 @@
 </template>
 
 <script setup lang="ts">
+import TaskLinkPreview from '../../../../shared/ui/board/TaskLinkPreview.vue'
+import { webBoardTask } from '../components/room/task-board/workspace-tasks'
+import { getTaskActions } from '../components/room/task-board/model'
+import { renderMessageContent } from '../components/room/chat-message/formatting'
+import ReleaseQueueWidget from '../../../../shared/ui/board/ReleaseQueueWidget.vue'
+import { fetchBoardPlanning } from '../composables/room/boardPlanning'
 import { activityUnread } from '../../../../shared/ui/activity/unread'
 import { provideRoomMessageMotion } from "../../../../shared/ui/useRoomMessageMotion";
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
@@ -483,6 +494,9 @@ function openBoardTask(taskId: string) {
   })
 }
 
+function loadReleasePlanning() { return fetchBoardPlanning(room.value?.identifier || '') }
+function openReleaseLink(url: string) { window.open(url, '_blank', 'noopener,noreferrer') }
+
 function clearBoardTask() {
   if (route.query.task) void router.replace({ query: { ...route.query, task: undefined } })
 }
@@ -561,6 +575,13 @@ const {
   setTaskStalePromptMute,
   toast,
 })
+
+const previewTasks = computed(() => tasks.value.map(task => webBoardTask(task, boardHandoffPresence.value, taskGithubStatus.value[task.id])))
+async function acceptPreviewTask(id: string) {
+  const task = tasks.value.find(item => item.id === id)
+  if (!task || task.status !== 'proposed' || !getTaskActions(task).some(action => action.status === 'accepted')) return false
+  return updateTask(id, { status: 'accepted' })
+}
 
 function openRulesFromDrawer() {
   drawerOpen.value = false
@@ -810,4 +831,10 @@ watch(
   }
 }
 
+</style>
+
+<style scoped>
+.web-room-release-widget { display:flex; justify-content:flex-end; padding:8px 20px 0; }
+.web-room-release-widget:has(.release-widget-trigger) { padding-bottom:8px; }
+.web-room-release-widget:not(:has(.release-widget-trigger)) { display:none; }
 </style>

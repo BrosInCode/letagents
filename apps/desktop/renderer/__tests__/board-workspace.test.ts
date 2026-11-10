@@ -9,14 +9,17 @@ import type { BoardTask, BoardServices } from '../../../../shared/ui/board/types
 let vite: ViteDevServer;
 let model: typeof import('../../../../shared/ui/board/model');
 let useBoardWorkspace: typeof import('../../../../shared/ui/board/useBoardWorkspace').useBoardWorkspace;
-let Settings: any, TaskPlanning: any;
+let Workspace: any, Settings: any, TaskPlanning: any, ReleaseWidget: any, ReleaseList: any;
 before(async () => {
   vite = await createServer({ root: fileURLToPath(new URL('../..', import.meta.url)), appType: 'custom', logLevel: 'silent', server: { middlewareMode: true } });
   const load = (file: string) => vite.ssrLoadModule(fileURLToPath(new URL(`../../../../shared/ui/board/${file}`, import.meta.url)));
   model = await load('model.ts') as typeof model;
   ({ useBoardWorkspace } = await load('useBoardWorkspace.ts'));
+  Workspace = (await load('BoardWorkspace.vue')).default;
   Settings = (await load('BoardSettings.vue')).default;
   TaskPlanning = (await load('BoardTaskPlanning.vue')).default;
+  ReleaseWidget = (await load('ReleaseQueueWidget.vue')).default;
+  ReleaseList = (await load('ReleaseQueue.vue')).default;
 });
 after(async () => { await vite?.close(); });
 
@@ -54,6 +57,50 @@ function sprint(state: BoardSprint['state'] = 'active'): BoardSprint {
 function services(input: Partial<BoardServices> = {}): BoardServices {
   return { loadPlanning: async () => snapshot(), savePlanning: async (_, document) => ({ ...snapshot(), revision: 1, document }), moveTask: async () => false, openExternal() {}, ...input };
 }
+
+test('release widget fences room changes, accepts canonical aliases, and retains data after refresh errors', async t => {
+  const originalDocument = globalThis.document;
+  (globalThis as any).document = { visibilityState: 'visible', addEventListener() {}, removeEventListener() {} };
+  const old = deferred<BoardPlanningSnapshot>(), current = deferred<BoardPlanningSnapshot>();
+  const props = reactive({ roomId: 'old-room', load: () => old.promise, openExternal() {} });
+  const vm = component(t, ReleaseWidget, props);
+  t.after(() => { (globalThis as any).document = originalDocument; });
+  props.roomId = 'local-alias'; props.load = () => current.promise;
+  await settle();
+  const state = snapshot('canonical-cloud-room'); state.document.releaseRule = { kind: 'column', columnId: 'done' };
+  state.releases = { sources: [], items: [], unavailable: 0 };
+  current.resolve(state); await settle();
+  assert.equal(vm.snapshot.value.roomId, 'canonical-cloud-room');
+  old.resolve(snapshot('old-room')); await settle();
+  assert.equal(vm.snapshot.value.roomId, 'canonical-cloud-room');
+  props.load = async () => { throw new Error('offline'); };
+  await vm.refresh(); assert.match(vm.error.value, /last loaded/);
+  assert.equal(vm.snapshot.value.roomId, 'canonical-cloud-room');
+  vm.toggled({ newState: 'open' }); await settle();
+  props.load = async () => snapshot('canonical-cloud-room'); await vm.refresh();
+  assert.equal(vm.open.value, false, 'disabling the rule closes the open panel');
+});
+
+test('release rows distinguish recorded draft and failed PRs from merged work without inventing a release state', t => {
+  const vm = component(t, ReleaseList, { items: [], unavailable: 0, description: '' });
+  const item = { taskId: 'task_1', title: 'Release work', owner: null, ticketKey: null, ticketUrl: null, checkedAt: null,
+    pullRequests: [{ url: 'https://github.com/acme/app/pull/7', state: 'draft', draft: null, merged: null, check_summary: { failure: 1 } }] };
+  assert.deepEqual(vm.exceptions(item), ['Checks failed', 'Draft PR']);
+  item.pullRequests[0].state = 'merged'; item.pullRequests[0].check_summary.failure = 0;
+  assert.deepEqual(vm.exceptions(item), []);
+  assert.deepEqual(vm.exceptions({ ...item, pullRequests: [] }), ['No PR linked']);
+});
+
+test('removing the release column turns the queue off and cancelling settings keeps the saved rule', async t => {
+  const state = snapshot(); state.document.releaseRule = { kind: 'column', columnId: 'review' };
+  const props = reactive({ open: true, snapshot: state, save: async () => true });
+  const vm = component(t, Settings, props); await settle();
+  vm.removing.value = 'review'; vm.destination.value = 'progress'; vm.removeColumn();
+  assert.equal(vm.draft.value.releaseRule, null);
+  assert.deepEqual(state.document.releaseRule, { kind: 'column', columnId: 'review' });
+  props.open = false; await settle(); props.open = true; await settle();
+  assert.deepEqual(vm.draft.value.releaseRule, state.document.releaseRule);
+});
 
 test('imported sprint history remains visible until an explicit native override or no-sprint choice', () => {
   const state = snapshot(), item = task('task_1');
@@ -392,4 +439,40 @@ test('identical tracker names on different sites remain separate sprint stories'
   assert.equal(stories.find(story => story.key === 'jira:site-one:ada')?.planned, 3);
   assert.equal(stories.find(story => story.key === 'jira:site-two:ada')?.planned, 8);
   assert.equal(stories.find(story => story.key === 'agent:brook')?.owner.agent, true);
+});
+
+
+test('proposals stay visible on the main board and in backlog with an active sprint, while execution lanes obey the sprint filter', async t => {
+  const state = snapshot(); state.document.sprints = [sprint()];
+  const proposed = task('task_1', 'proposed'), planned = task('task_2'), outside = task('task_3');
+  proposed.allowedTransitions = [{ id: 'accept', label: 'Accept', targetStatus: 'accepted' }];
+  state.document.tasks[planned.id] = { sprintId: 'sprint-one' };
+  const props = reactive({ roomId: state.roomId, tasks: [proposed, planned, outside], services: services({ loadPlanning: async () => state }) });
+  const vm = component(t, Workspace, props); await settle();
+  assert.equal(vm.sprintId.value, 'sprint-one');
+  assert.equal(vm.view.value, 'board');
+  assert.deepEqual(vm.proposedTasks.value.map((item: BoardTask) => item.id), ['task_1']);
+  assert.deepEqual(vm.backlogTasks.value.map((item: BoardTask) => item.id), ['task_1']);
+  assert.deepEqual(vm.byColumn('progress').map((item: BoardTask) => item.id), ['task_2']);
+  assert.equal(vm.columnTracks.value.split('minmax').length - 1, 5);
+  vm.query.value = 'outside'; assert.equal(vm.proposedTasks.value.length, 0);
+  vm.clearFilters(); assert.equal(vm.proposedTasks.value.length, 1);
+  assert.equal(vm.acceptAction(proposed).id, 'accept');
+  assert.equal(vm.acceptAction({ ...proposed, allowedTransitions: [] }), undefined);
+});
+
+test('proposal acceptance keeps failures visible, prevents duplicate submissions, and uses the normal accepted lane after success', async t => {
+  const state = snapshot(), pending = deferred<boolean>(), proposed = task('task_1', 'proposed');
+  proposed.allowedTransitions = [{ id: 'accept', label: 'Accept', targetStatus: 'accepted' }];
+  let calls = 0;
+  const props = reactive({ roomId: state.roomId, tasks: [proposed], services: services({ loadPlanning: async () => state,
+    moveTask: async (id, action) => { assert.equal(id, proposed.id); assert.equal(action, 'accept'); calls++; return pending.promise; } }) });
+  const vm = component(t, Workspace, props); await settle();
+  const first = vm.runTransition(proposed, 'accept'); await settle();
+  assert.equal(await vm.runTransition(proposed, 'accept'), false); assert.equal(calls, 1);
+  pending.resolve(false); await first;
+  assert.equal(vm.proposedTasks.value.length, 1); assert.match(vm.actionError.value, /could not be moved/);
+  props.services.moveTask = async () => { props.tasks[0].status = 'accepted'; return true; };
+  assert.equal(await vm.runTransition(proposed, 'accept'), true);
+  assert.equal(vm.hasProposals.value, false); assert.equal(vm.byColumn('todo')[0].id, proposed.id);
 });

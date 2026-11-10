@@ -1,6 +1,9 @@
 import { isPinMessageId, type MessagePinsResponse, type MessagePinMutationResponse } from "../../../../../shared/message-pins.mjs";
-import { apiFetch } from "../auth.js";
+import { apiFetch, readStoredAuth } from "../auth.js";
+import { createInFlightRoomReads } from "./in-flight-reads.js";
 import { cloudRoomIdentifierForStorage, resolveLocalAwareRoomStorageMode } from "./local-store.js";
+
+const reads = createInFlightRoomReads<MessagePinsResponse>(apiFetch, readStoredAuth);
 
 async function messagesPath(identifier: string): Promise<string | null> {
   if (!identifier?.trim()) throw new Error("Choose a room first.");
@@ -10,12 +13,17 @@ async function messagesPath(identifier: string): Promise<string | null> {
 }
 export async function getDesktopMessagePins(identifier: string): Promise<MessagePinsResponse> {
   const path = await messagesPath(identifier);
-  return path ? apiFetch<MessagePinsResponse>(`${path}/pins`)
+  return path ? reads.get(`${path}/pins`, path)
     : { room_id: identifier, available: false, pins: [] };
 }
 export async function setDesktopMessagePin(identifier: string, messageId: string, pinned: boolean): Promise<MessagePinMutationResponse> {
   if (!isPinMessageId(messageId) || typeof pinned !== "boolean") throw new Error("Choose a message and pin action.");
   const path = await messagesPath(identifier);
   if (!path) throw new Error("Pins require a cloud room.");
-  return apiFetch<MessagePinMutationResponse>(`${path}/${messageId}/pin`, { method: pinned ? "PUT" : "DELETE" });
+  reads.invalidate(path);
+  try {
+    return await apiFetch<MessagePinMutationResponse>(`${path}/${messageId}/pin`, { method: pinned ? "PUT" : "DELETE" });
+  } finally {
+    reads.invalidate(path);
+  }
 }

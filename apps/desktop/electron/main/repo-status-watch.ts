@@ -678,18 +678,18 @@ async function repoStatusWatchTargets(
     commonGitDirectoryPath,
     branchPath,
     upstreamPath,
-  ] = await Promise.all([
-    gitPath(status.rootPath, "index", signal),
-    gitPath(status.rootPath, "packed-refs", signal),
-    gitPath(status.rootPath, "refs/heads", signal),
-    gitPath(status.rootPath, "refs/remotes", signal),
-    gitPath(status.rootPath, "worktrees", signal),
-    gitPath(status.rootPath, "config", signal),
-    gitPath(status.rootPath, ".", signal),
-    gitCommonDirectory(status.rootPath, signal),
-    status.branch ? gitPath(status.rootPath, `refs/heads/${status.branch}`, signal) : null,
-    status.upstream ? gitPath(status.rootPath, `refs/remotes/${status.upstream}`, signal) : null,
-  ]);
+  ] = await gitMetadataPaths(status.rootPath, [
+    { gitPath: "index" },
+    { gitPath: "packed-refs" },
+    { gitPath: "refs/heads" },
+    { gitPath: "refs/remotes" },
+    { gitPath: "worktrees" },
+    { gitPath: "config" },
+    { gitPath: "." },
+    { commonDirectory: true },
+    status.branch ? { gitPath: `refs/heads/${status.branch}` } : null,
+    status.upstream ? { gitPath: `refs/remotes/${status.upstream}` } : null,
+  ], signal);
   const linkedWorktreeMetadataTargets = worktreeMetadataTargets(worktreesPath);
   const metadataPaths = [
     join(status.rootPath, ".git"),
@@ -787,6 +787,45 @@ function coalesceWatchTargets(
 
 function repoStatusWatchTargetsKey(targets: readonly RepoStatusWatchTarget[]): string {
   return targets.map((target) => JSON.stringify(target)).join("\n");
+}
+
+type GitMetadataPathQuery = { gitPath: string } | { commonDirectory: true };
+
+/**
+ * Resolve several Git metadata paths with one `git rev-parse`, which prints one
+ * line per query in order. If that run fails or its lines do not match the
+ * queries (a path with a line break), each path is asked for on its own as
+ * before, so one bad path still resolves to null alone.
+ */
+async function gitMetadataPaths(
+  repoRoot: string,
+  queries: ReadonlyArray<GitMetadataPathQuery | null>,
+  signal: AbortSignal,
+): Promise<Array<string | null>> {
+  const asked = queries.filter((query): query is GitMetadataPathQuery => query !== null);
+  const args = asked.flatMap((query) => (
+    "gitPath" in query ? ["--git-path", query.gitPath] : ["--git-common-dir"]
+  ));
+  let lines: string[] | null = null;
+  try {
+    const stdout = await runGitStdout(repoRoot, ["rev-parse", ...args], { signal });
+    const printed = stdout.replace(/\r?\n$/, "").split(/\r?\n/);
+    if (printed.length === asked.length) lines = printed;
+  } catch {
+    signal.throwIfAborted();
+  }
+  let answer = 0;
+  return Promise.all(queries.map((query) => {
+    if (!query) return null;
+    const line = lines?.[answer++];
+    if (line !== undefined) {
+      const path = line.trim();
+      return path ? resolve(repoRoot, path) : null;
+    }
+    return "gitPath" in query
+      ? gitPath(repoRoot, query.gitPath, signal)
+      : gitCommonDirectory(repoRoot, signal);
+  }));
 }
 
 async function gitPath(

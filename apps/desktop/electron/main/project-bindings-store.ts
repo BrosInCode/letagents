@@ -832,12 +832,43 @@ export async function migrateLegacyProjectBindings(
   options: ProjectBindingsStoreOptions = {},
 ): Promise<DesktopProjectBindingMigrationResult> {
   const retryLegacyKeys = new Set<string>();
+  // One validated list for the whole pass. The renderer sends every remembered
+  // project on every start (its recent rooms, and the same rooms again as
+  // legacy keys), so listing and validating every binding again per candidate
+  // repeated the same Git work many times. A candidate whose binding already
+  // exists costs nothing more; a binding written below joins this list, so a
+  // later candidate for the same project still finds it.
+  // Stored rows as the pass found them (SQLite only, no Git). A row that is
+  // different before a write below was written by another call during this
+  // pass, for example Connect project. The pass does not overwrite it, and
+  // keeps the candidate's legacy key for the next start: this pass does not
+  // validate that row, and if it turns out invalid the hint must not be lost.
+  const rowVersion = (binding: DesktopProjectBinding) => `${binding.updatedAt}\0${binding.rootPath}`;
+  const rowsAtStart = new Map(readBindings(options).map((binding) => [binding.identityKey, rowVersion(binding)]));
+  let bindings = await listProjectBindings(options);
+  let wroteBinding = false;
+  // Candidates for one folder share one resolution (identity and status).
+  const folderResolutions = new Map<string, Promise<{
+    resolved: Awaited<ReturnType<typeof resolveRoomIdentifierFromPath>>;
+    status: Awaited<ReturnType<typeof buildRepoStatus>>;
+  }>>();
+  const resolveFolder = (rootPath: string) => {
+    let resolution = folderResolutions.get(rootPath);
+    if (!resolution) {
+      resolution = (async () => {
+        const resolved = await resolveRoomIdentifierFromPath(rootPath, { ignoreConfiguredRoom: true });
+        const status = await buildRepoStatus(resolved.repoRoot || rootPath, { includeBranchDeltas: false });
+        return { resolved, status };
+      })();
+      folderResolutions.set(rootPath, resolution);
+    }
+    return resolution;
+  };
   for (const candidate of candidates) {
     try {
-      if (findProjectBinding(await listProjectBindings(options), candidate.context)) continue;
+      if (findProjectBinding(bindings, candidate.context)) continue;
       const rootPath = await canonicalDirectory(candidate.rootPath);
-      const resolved = await resolveRoomIdentifierFromPath(rootPath, { ignoreConfiguredRoom: true });
-      const status = await buildRepoStatus(resolved.repoRoot || rootPath, { includeBranchDeltas: false });
+      const { resolved, status } = await resolveFolder(rootPath);
       const resolvedContext: DesktopProjectBindingContext = {
         roomIdentifier: resolved.roomIdentifier,
         gitRoom: resolved.gitRoom,
@@ -846,22 +877,35 @@ export async function migrateLegacyProjectBindings(
         if (candidate.legacyKey) retryLegacyKeys.add(candidate.legacyKey);
         continue;
       }
-      await bindProjectRoot({
-        context: {
-          roomIdentifier: candidate.context.roomIdentifier || resolved.roomIdentifier,
-          gitRoom: candidate.context.gitRoom || resolved.gitRoom,
-        },
+      const context: DesktopProjectBindingContext = {
+        roomIdentifier: candidate.context.roomIdentifier || resolved.roomIdentifier,
+        gitRoom: candidate.context.gitRoom || resolved.gitRoom,
+      };
+      const identityKey = projectBindingIdentityKey(context);
+      const stored = identityKey
+        ? readBindings(options).find((binding) => binding.identityKey === identityKey)
+        : undefined;
+      if (stored && rowVersion(stored) !== rowsAtStart.get(stored.identityKey)) {
+        if (candidate.legacyKey) retryLegacyKeys.add(candidate.legacyKey);
+        continue;
+      }
+      const binding = await bindProjectRoot({
+        context,
         rootPath: status.isGitRepo
           ? status.mainRootPath || status.rootPath
           : rootPath,
         source: resolved.source || "local_folder",
       }, options);
+      wroteBinding = true;
+      rowsAtStart.set(binding.identityKey, rowVersion(binding));
+      bindings = [...bindings.filter((existing) => existing.identityKey !== binding.identityKey), binding];
     } catch {
       if (candidate.legacyKey) retryLegacyKeys.add(candidate.legacyKey);
     }
   }
   return {
-    bindings: await listProjectBindings(options),
+    // Validate again only after a write; otherwise the first list is current.
+    bindings: wroteBinding ? await listProjectBindings(options) : bindings,
     retryLegacyKeys: [...retryLegacyKeys].sort(),
   };
 }

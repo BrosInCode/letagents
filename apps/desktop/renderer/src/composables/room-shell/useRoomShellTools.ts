@@ -2,7 +2,7 @@ import type { ChatScrollPosition } from "../../domain/chat-scroll";
 import { nextTick, watch } from "vue";
 import type { DesktopRoomStorageState } from "../../../../electron/ipc-types";
 import { initialMessageInspectorRequest } from "../../domain/room-message-reveal";
-import { rememberEnvironmentPanelOpen, rememberGitHubEventsVisible } from "../../components/desktop/content/room-shell/preferences";
+import { rememberGitHubEventsVisible } from "../../components/desktop/content/room-shell/preferences";
 import { exportRoomChat } from "../../components/desktop/content/room-shell/roomExport";
 import type { RoomTabId } from "../../components/desktop/content/room-shell/types";
 import { desktopIpc } from "../../ipc/index.js";
@@ -14,8 +14,8 @@ export function useRoomShellToolActions(context: unknown) {
   const {
     actionPanelOpen, actionPanelSection, activeTab, activityHistoryRequest, addAgentModalOpen, agentInspectorCompact,
     agentInspectorInitialTab, artifactTimelineTaskFilterId, boardSelectedTaskId,
-    copyRoomLinkToClipboard, emit, environmentPanelOpen, githubEventsVisible, props,
-    pushActionToast, refreshedEnvironmentRepoStatus, revealedMessageId, roomActiveTabStorageKey,
+    copyRoomLinkToClipboard, emit, githubEventsVisible, props,
+    pushActionToast, revealedMessageId, roomActiveTabStorageKey,
     rulesOpen, storageBusy, storageFeedback, supervisorEntries,
   } = context as RoomShellContextOf<"inputs" | "useRoomShellState">;
   const app = context as RoomShellContextOf<
@@ -24,7 +24,6 @@ export function useRoomShellToolActions(context: unknown) {
     | "useRoomShellIntegrations"
     | "useRoomShellParticipants"
   >;
-  let environmentRepoStatusRefreshRequestId = 0;
   function openBoardTask(taskId: string): void {
     boardSelectedTaskId.value = taskId;
     activeTab.value = "board";
@@ -59,22 +58,6 @@ export function useRoomShellToolActions(context: unknown) {
   function toggleGitHubEventsVisible(): void {
     githubEventsVisible.value = !githubEventsVisible.value;
     rememberGitHubEventsVisible(props.room.identifier, githubEventsVisible.value);
-  }
-
-  function setEnvironmentPanelOpen(open: boolean): void {
-    environmentPanelOpen.value = open;
-    rememberEnvironmentPanelOpen(props.room.identifier, open);
-    if (open) void refreshEnvironmentRepoStatus();
-  }
-
-  async function refreshEnvironmentRepoStatus(): Promise<void> {
-    const rootPath = props.repoStatus.rootPath?.trim();
-    if (!rootPath || !desktopIpc.repos?.getStatus) return;
-    const requestId = ++environmentRepoStatusRefreshRequestId;
-    const nextStatus = await desktopIpc.repos.getStatus(rootPath).catch(() => null);
-    if (requestId !== environmentRepoStatusRefreshRequestId || !nextStatus) return;
-    if (nextStatus.rootPath !== props.repoStatus.rootPath) return;
-    refreshedEnvironmentRepoStatus.value = nextStatus;
   }
 
   async function setRoomStorageMode(mode: DesktopRoomStorageState["overrideMode"]): Promise<void> {
@@ -237,8 +220,8 @@ export function useRoomShellToolActions(context: unknown) {
   }
   return {
     openBoardTask, rememberChatScrollPosition, selectTab, rememberRoomActiveTab,
-    openArtifactsForTask, toggleGitHubEventsVisible, setEnvironmentPanelOpen,
-    refreshEnvironmentRepoStatus, setRoomStorageMode, forkRoomToLocal, publishLocalRoom,
+    openArtifactsForTask, toggleGitHubEventsVisible,
+    setRoomStorageMode, forkRoomToLocal, publishLocalRoom,
     toggleSearchTool, toggleActionPanel, openActionPanelAt, closeActionPanel, openRules, openAddAgentModal,
     revealRoomMessage, revealRecordedWorkMessage, revealWakeMessage, revealSharedLiveRequest,
     openAgentWorktree, copyRoomLink, exportChat,

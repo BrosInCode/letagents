@@ -76,6 +76,7 @@ import { requireWorkerRequestAgentIdentity } from "../request/agent-identity.js"
 import { resolveRequestAuth } from "../request/auth.js";
 import { registerAccountRoomRoutes } from "../routes/account/rooms.js";
 import { registerAccountActivityStreamRoute } from "../routes/account/activity-stream.js";
+import { registerAccountUnreadRoutes } from "../routes/account/unread.js";
 import { registerMyWorkRoute } from "../routes/account/my-work.js";
 import { registerConnectorRoutes } from "../routes/account/connectors/index.js";
 import { registerTrackerRuleRoutes } from "../routes/account/connectors/rules.js";
@@ -565,6 +566,7 @@ export function registerApiRoutes(app: Express): void {
   registerOrganizationConsentRoutes(app);
   registerConversationRoutes(app);
   registerAccountRoomRoutes(app);
+  registerAccountUnreadRoutes(app);
   registerAccountActivityStreamRoute(app, { hub: getAccountActivityHub(), getAccountRoomsForAccount });
   registerMyWorkRoute(app);
   registerConnectorRoutes(app);

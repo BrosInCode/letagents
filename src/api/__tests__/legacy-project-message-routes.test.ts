@@ -499,3 +499,192 @@ test("legacy poll timeout cannot overtake an in-flight canonical hydration", asy
   assert.equal(responseBody?.messages?.[0]?.id, "msg_7");
   deps.roomEventBroker.close();
 });
+
+test("a live event during the first legacy backlog read never makes a person's poll skip older messages", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: string, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path, handler);
+    },
+    post() {},
+  };
+  const row = (number: number) => ({
+    id: `msg_${number}`, sender: "Human", text: `message ${number}`, source: "browser",
+    timestamp: new Date().toISOString(), routing_snapshot_version: 1,
+  });
+  let reads = 0;
+  let releaseFirstRead!: () => void;
+  const firstReadGate = new Promise<void>((resolve) => { releaseFirstRead = resolve; });
+  const bodies: Array<{ messages?: Array<{ id?: string }> }> = [];
+  const deps = {
+    ...createDeps(),
+    beginRoomAgentDelivery: async () => null,
+    getProjectById: async () => ({ id: "room_1", display_name: "Room" }),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    requireParticipant: async () => true,
+    // The first read began before msg_10 was written: it holds msg_5..msg_9.
+    getMessagesAfter: async () => {
+      reads += 1;
+      if (reads === 1) {
+        await firstReadGate;
+        return { messages: [5, 6, 7, 8, 9].map(row), has_more: false };
+      }
+      return { messages: [5, 6, 7, 8, 9, 10].map(row), has_more: false };
+    },
+  };
+  registerLegacyProjectMessageRoutes(app as never, deps as never);
+  const handler = handlers.get("/projects/:id/messages/poll");
+  assert.ok(handler);
+  const events = new EventEmitter();
+  const req = {
+    params: { id: "room_1" }, query: { after: "msg_4", timeout: "60000" }, headers: {},
+    authKind: "session", sessionAccount: { account_id: "acct_1" }, get() { return undefined; },
+    on: events.on.bind(events), off: events.off.bind(events),
+  };
+  const res = {
+    headersSent: false,
+    status() { return this; },
+    json(payload: { messages?: Array<{ id?: string }> }) {
+      bodies.push(payload); this.headersSent = true; return this;
+    },
+  };
+  const request = handler(req, res);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads, 1, "the first backlog read is in flight");
+
+  deps.messageEvents.emit("message:created", { projectId: "room_1", message: row(10) });
+  for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  releaseFirstRead();
+  await request;
+  for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(bodies.length, 1);
+  const ids = (bodies[0]!.messages ?? []).map((message) => message.id);
+  assert.equal(ids[0], "msg_5", `the response starts right after the cursor, got ${ids.join(", ")}`);
+  deps.roomEventBroker.close();
+});
+
+function legacyHeldReadStore() {
+  const committed: number[] = [];
+  const pending: Array<() => void> = [];
+  let calls = 0;
+  const row = (number: number) => ({
+    id: `msg_${number}`, sender: "Human", text: `message ${number}`, source: "browser",
+    timestamp: new Date().toISOString(), routing_snapshot_version: 1,
+  });
+  return {
+    row,
+    commit(number: number) { committed.push(number); },
+    calls: () => calls,
+    async getMessagesAfter(_roomId: string, after?: string) {
+      calls += 1;
+      const cursor = Number(after?.slice(4) ?? 0);
+      const snapshot = committed.filter((number) => number > cursor).map(row);
+      await new Promise<void>((resolve) => pending.push(resolve));
+      return { messages: snapshot, has_more: false };
+    },
+    async releaseReads() {
+      for (let round = 0; round < 10; round += 1) {
+        while (pending.length) pending.shift()!();
+        for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+      }
+    },
+  };
+}
+
+function legacyPollHarness(store: ReturnType<typeof legacyHeldReadStore>) {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: string, handler: (req: unknown, res: unknown) => Promise<void>) { handlers.set(path, handler); },
+    post() {},
+  };
+  const deps = {
+    ...createDeps(),
+    beginRoomAgentDelivery: async () => null,
+    getProjectById: async () => ({ id: "room_1", display_name: "Room" }),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    requireParticipant: async () => true,
+    getMessagesAfter: store.getMessagesAfter,
+  };
+  registerLegacyProjectMessageRoutes(app as never, deps as never);
+  const handler = handlers.get("/projects/:id/messages/poll")!;
+  const open = (after: string) => {
+    const events = new EventEmitter();
+    const startedAt = Date.now();
+    let resolveBody!: (body: { messages?: Array<{ id?: string }>; at: number }) => void;
+    const body = new Promise<{ messages?: Array<{ id?: string }>; at: number }>((resolve) => { resolveBody = resolve; });
+    const req = {
+      params: { id: "room_1" }, query: { after, timeout: "1000" }, headers: {},
+      authKind: "session", sessionAccount: { account_id: "acct_1" }, get() { return undefined; },
+      on: events.on.bind(events), off: events.off.bind(events),
+    };
+    const res = {
+      headersSent: false,
+      status() { return this; },
+      json(payload: { messages?: Array<{ id?: string }> }) {
+        this.headersSent = true; resolveBody({ ...payload, at: Date.now() - startedAt }); return this;
+      },
+    };
+    return { request: handler(req, res), body };
+  };
+  return { deps, open };
+}
+
+const ticks = async (count: number) => {
+  for (let tick = 0; tick < count; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+};
+
+test("a message that arrives while two legacy polls read their backlog reaches both without waiting for the timeout", async () => {
+  const store = legacyHeldReadStore();
+  const { deps, open } = legacyPollHarness(store);
+  // P1 reads from msg_4 and sees a routed update of msg_4 meanwhile.
+  const first = open("msg_4");
+  await ticks(1);
+  deps.messageEvents.emit("message:routed", { projectId: "room_1", message: store.row(4) });
+  await ticks(10);
+  // P2 opens at msg_4; msg_5 is written and announced during P2's first read.
+  const second = open("msg_4");
+  await ticks(10);
+  store.commit(5);
+  deps.messageEvents.emit("message:created", { projectId: "room_1", message: store.row(5) });
+  await ticks(10);
+  await store.releaseReads();
+
+  const [firstBody, secondBody] = await Promise.all([first.body, second.body]);
+  await Promise.all([first.request, second.request]);
+  assert.deepEqual((secondBody.messages ?? []).map((message) => message.id), ["msg_5"]);
+  assert.ok(secondBody.at < 500, `P2 answered after ${secondBody.at} ms`);
+  assert.deepEqual((firstBody.messages ?? []).map((message) => message.id), ["msg_5"]);
+  deps.roomEventBroker.close();
+});
+
+test("a routed update of a row at the cursor during the legacy backlog read is still answered", async () => {
+  const store = legacyHeldReadStore();
+  const { deps, open } = legacyPollHarness(store);
+  const poll = open("msg_4");
+  await ticks(1);
+  deps.messageEvents.emit("message:routed", { projectId: "room_1", message: store.row(4) });
+  await store.releaseReads();
+  const body = await poll.body;
+  await poll.request;
+  assert.deepEqual((body.messages ?? []).map((message) => message.id), ["msg_4"]);
+  assert.ok(body.at < 500, `answered after ${body.at} ms`);
+  deps.roomEventBroker.close();
+});
+
+test("legacy polls at one cursor that see the same event during their backlog read share one extra read", async () => {
+  const store = legacyHeldReadStore();
+  const { deps, open } = legacyPollHarness(store);
+  const polls = Array.from({ length: 50 }, () => open("msg_4"));
+  await ticks(10);
+  const initialReads = store.calls();
+  store.commit(5);
+  deps.messageEvents.emit("message:created", { projectId: "room_1", message: store.row(5) });
+  await ticks(10);
+  await store.releaseReads();
+  const bodies = await Promise.all(polls.map((poll) => poll.body));
+  await Promise.all(polls.map((poll) => poll.request));
+  assert.ok(bodies.every((body) => (body.messages ?? []).map((message) => message.id).join() === "msg_5"));
+  assert.equal(store.calls(), initialReads + 1, "one shared read after the event, not one per poll");
+  deps.roomEventBroker.close();
+});

@@ -5,6 +5,12 @@ import type {
   RoomAgentActivityState,
 } from "../../shared/room-agent-activity.js";
 
+// History needs task identity, matching/search fields and workflow summaries only.
+export type RoomActivityHistoryTask = Pick<Task,
+  "id" | "room_id" | "title" | "status" | "assignee" | "assignee_agent_key"
+  | "created_by" | "updated_at" | "workflow_refs"
+>;
+
 export type RoomActivityHistoryKind = "all" | "agent" | "human";
 
 export interface RoomActivityHistoryTaskSummary {
@@ -69,7 +75,7 @@ function normalize(value: string | null | undefined): string {
   return String(value ?? "").trim().toLowerCase();
 }
 
-function sortTasksByUpdated(tasks: readonly Task[]): Task[] {
+function sortTasksByUpdated(tasks: readonly RoomActivityHistoryTask[]): RoomActivityHistoryTask[] {
   return [...tasks].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
 }
 
@@ -88,7 +94,7 @@ function latestTimestamp(...values: Array<string | null | undefined>): string {
   return best;
 }
 
-function toTaskSummary(task: Task): RoomActivityHistoryTaskSummary {
+function toTaskSummary(task: RoomActivityHistoryTask): RoomActivityHistoryTaskSummary {
   return {
     id: task.id,
     title: task.title,
@@ -122,7 +128,7 @@ export function sortRoomActivityHistoryEntries(
   return [...entries].sort(compareRoomActivityHistoryEntries);
 }
 
-function participantMatchesAssignee(participant: RoomParticipant, task: Task): boolean {
+function participantMatchesAssignee(participant: RoomParticipant, task: RoomActivityHistoryTask): boolean {
   if (participant.kind === "agent") {
     const assigneeAgentKey = normalize(task.assignee_agent_key);
     if (assigneeAgentKey && assigneeAgentKey === normalize(participant.agent_key)) {
@@ -143,7 +149,7 @@ function participantMatchesAssignee(participant: RoomParticipant, task: Task): b
   );
 }
 
-function participantMatchesCreator(participant: RoomParticipant, task: Task): boolean {
+function participantMatchesCreator(participant: RoomParticipant, task: RoomActivityHistoryTask): boolean {
   const createdBy = normalize(task.created_by);
   if (!createdBy) {
     return false;
@@ -246,10 +252,10 @@ function countForParticipant(
 export function buildRoomActivityHistoryEntries(input: {
   rooms: readonly Project[];
   participants: readonly RoomParticipant[];
-  tasks: readonly Task[];
+  tasks: readonly RoomActivityHistoryTask[];
 }): RoomActivityHistoryEntry[] {
   const roomsById = new Map(input.rooms.map((room) => [room.id, room]));
-  const tasksByRoom = new Map<string, Task[]>();
+  const tasksByRoom = new Map<string, RoomActivityHistoryTask[]>();
 
   for (const task of input.tasks) {
     const existing = tasksByRoom.get(task.room_id);

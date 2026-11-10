@@ -6,7 +6,7 @@ import {
   postTaskReviewLeaseAction,
   setRoomTaskStalePromptMute,
 } from './taskActions'
-import { room, tasks, upsertTask } from './state'
+import { room, roomSessionVersion, tasks, upsertTask } from './state'
 import { fetchTasks } from './data'
 import type {
   RoomTask,
@@ -48,11 +48,15 @@ export function createRoomTaskMutations(deps: RoomTaskMutationDeps) {
     updates: Partial<RoomTask>,
   ): Promise<boolean> {
     if (!room.value) return false
+    const roomIdentifier = room.value.identifier
+    const sessionVersion = roomSessionVersion
+    const isCurrentRoom = () => room.value?.identifier === roomIdentifier && roomSessionVersion === sessionVersion
     try {
-      const task = await patchRoomTask(room.value.identifier, taskId, updates)
+      const task = await patchRoomTask(roomIdentifier, taskId, updates)
+      if (!isCurrentRoom()) return false
       if (task) upsertTask(task)
-      await deps.refreshTasksAndPresence(room.value.identifier)
-      return true
+      await deps.refreshTasksAndPresence(roomIdentifier)
+      return isCurrentRoom()
     } catch {
       return false
     }

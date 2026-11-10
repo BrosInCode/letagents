@@ -435,3 +435,43 @@ for (const text of ["\t\n", "\u00a0\ufeff"]) {
   assert.deepEqual((await turnRows(a.room.id,a.job.message_number)).map(row=>row.released),[true,false,false]);
  });
 }
+
+test("a send that queues a routing job wakes the Jev worker after commit", skip, async () => {
+  const wakes = await import("../server/job-queue-wakes.js");
+  const a = await seed("wake-room");
+  await a.enable(false); // New rooms start on (migration 0145): turn it off to send one that queues nothing.
+  const seen: Array<Promise<number>> = [];
+  const off = wakes.onJobQueueWake("jev_routing", () => {
+    // Another connection sees the job only once the send committed.
+    seen.push(client!.pool.query<{ n: number }>("SELECT count(*)::int AS n FROM jev_routing_jobs WHERE state <> 'completed'")
+      .then((result) => result.rows[0]!.n));
+  });
+  try {
+    await a.send("Who can help with the design?");
+    assert.equal(seen.length, 0, "no job, no wake");
+    await a.enable(true);
+    await a.send("Which agents use Claude?");
+    assert.equal(seen.length, 1);
+    assert.equal(await seen[0], 1, "the job is committed when the wake fires");
+  } finally {
+    off();
+  }
+});
+
+test("a shadow-mode send that queues a routing job also wakes the Jev worker", skip, async () => {
+  const wakes = await import("../server/job-queue-wakes.js");
+  process.env.LETAGENTS_JEV_ROUTING = "shadow";
+  const a = await seed("shadow-wake-room");
+  await a.enable(true);
+  let woken = 0;
+  const off = wakes.onJobQueueWake("jev_routing", () => { woken += 1; });
+  try {
+    await a.send("Which agents use Claude?");
+    const jobs = (await client!.pool.query<{ mode: string }>(
+      "SELECT plan->>'mode' AS mode FROM jev_routing_jobs WHERE room_id = $1", [a.room.id])).rows;
+    assert.deepEqual(jobs.map((job) => job.mode), ["shadow"]);
+    assert.equal(woken, 1, "the shadow job is claimed before its 8 s deadline, not at the fallback");
+  } finally {
+    off();
+  }
+});

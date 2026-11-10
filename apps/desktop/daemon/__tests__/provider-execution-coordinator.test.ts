@@ -852,7 +852,7 @@ test("live launch progress follows the launch phases, records a failure kind, an
   assert.equal(launchProgress.view("agent-1"), null, "a launch that never ran leaves the manifest to tell the rest");
 });
 
-test("a launch waits for the daemon's runtime verification before it takes a launch slot, and a failed verification ends it there", async () => {
+test("a launch waits for the daemon's runtime verification before it takes a launch slot, and a failed verification ends it there", async (t) => {
   let finishVerification: (() => void) | null = null;
   let verifications = 0;
   const acquired: string[] = [];
@@ -900,15 +900,34 @@ test("a launch waits for the daemon's runtime verification before it takes a lau
   await legacy.coordinator.converge("agent-1");
   assert.equal(legacy.installed.length, 1, "a port without the check launches as before");
 
+  // The bound is a setTimeout on the event loop's monotonic clock, but the
+  // phase is measured with Date.now(). On Windows runners the two clocks
+  // disagree by a few ms, so with real timers the phase sometimes read
+  // under 50 although the launch did wait for the bound. One mocked clock
+  // drives both, so the wait is proven exactly: held at 49 ms, released at 50.
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  let stalledCheckStarted = false;
   const stalled = harness({ provider: provider({
-    verifyBundledRuntime: () => new Promise<void>(() => {}),
+    verifyBundledRuntime: () => { stalledCheckStarted = true; return new Promise<void>(() => {}); },
     spawn: async () => returnedHandle,
   }) });
-  await new ProviderExecutionCoordinator({ ...stalled.options, runtimeVerifyWaitMs: 50 }).converge("agent-1");
+  let stalledLaunchEnded = false;
+  const stalledLaunch = new ProviderExecutionCoordinator({ ...stalled.options, runtimeVerifyWaitMs: 50 })
+    .converge("agent-1").finally(() => { stalledLaunchEnded = true; });
+  // The bound's timer is armed in the same synchronous step that starts the check.
+  for (let turn = 0; turn < 50 && !stalledCheckStarted; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(stalledCheckStarted);
+  t.mock.timers.tick(49);
+  for (let turn = 0; turn < 10; turn += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stalledLaunchEnded, false, "the launch is still held before the bound");
+  assert.equal(stalled.installed.length, 0);
+  assert.equal(launchProgress.view("agent-1")!.current, "runtime_verify");
+  t.mock.timers.tick(1);
+  await stalledLaunch;
   assert.equal(stalled.installed.length, 1, "a check that never answers holds a launch only for the bound");
   const bounded = launchProgress.view("agent-1")!;
   assert.equal(bounded.state, "launched");
-  assert.ok((bounded.phases.find((phase) => phase.phase === "runtime_verify")?.ms ?? 0) >= 50);
+  assert.equal(bounded.phases.find((phase) => phase.phase === "runtime_verify")?.ms, 50);
 });
 
 test("delivery handoff freezes convergence and draining never creates a successor", async () => {

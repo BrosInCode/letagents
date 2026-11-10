@@ -246,7 +246,9 @@ test("post-launch worker binding retries the exact provider and preserves the re
     const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     const install = { entry_id: "host_grant_bind_retry", room_id: entry.room_id, agent_key: "owner/agent", grant_id: "grant-1", supervisor_grant: "host-grant-secret", grant_generation: 7, api_url: "http://127.0.0.1:3000", host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z", daemon_generation: generation };
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", install)).ok, true);
-    await eventually(async () => (await internals.store.getEntry("host_grant_bind_retry"))?.condition === "coordination_blocked", "post-spawn binding failure");
+    // Reaching it takes the worker mint's real retry delay (about 1 s) plus a spawn: about 2.5 s on a
+    // loaded Linux runner, past the default 2 s bound (runs 42734104203, 42751540606).
+    await eventually(async () => (await internals.store.getEntry("host_grant_bind_retry"))?.condition === "coordination_blocked", "post-spawn binding failure", 10_000);
     assert.equal(spawns, 1);
     assert.equal(stops, 0, "credential failure must never stop the spawned provider");
     const recoveringProjection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;

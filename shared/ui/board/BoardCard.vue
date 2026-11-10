@@ -14,6 +14,7 @@
         <BoardIcon v-else name="user" />
       </span>
     </div>
+    <div v-if="$slots.footer" class="board-card-footer"><slot name="footer" /></div>
   </article>
 </template>
 <script setup lang="ts">

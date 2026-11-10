@@ -38,6 +38,7 @@
 </template>
 
 <script setup lang="ts">
+import { useTaskLinkPreview } from "../../../../../shared/ui/board/task-link-preview"
 import { computed, ref } from 'vue'
 import MessageReader from '../../../../../shared/ui/MessageReader.vue'
 import type { MessageReaderSender } from '../../../../../shared/ui/message-reader'
@@ -59,6 +60,7 @@ const emit = defineEmits<{
   taskReferenceClick: [taskId: string]
 }>()
 
+const previewTask = useTaskLinkPreview()
 const expanded = ref(false)
 const readerOpen = ref(false)
 
@@ -98,6 +100,10 @@ function handleInlineReferenceClick(event: MouseEvent) {
   if (!taskId) return
   event.preventDefault()
   event.stopPropagation()
+  if (target && previewTask) {
+    void previewTask(taskId, target, event.detail === 0, () => { readerOpen.value = false })
+    return
+  }
   readerOpen.value = false
   emit('taskReferenceClick', taskId)
 }

@@ -1744,7 +1744,9 @@ test("a process with the owner's setup on is replaced for a changed access level
   assert.match(answers[4]!.notice!, /stops running with your own setup/);
 });
 
-test("a turn held back for the end of the owner's setup is delivered by itself once the agent is replaced, even when the first try finds it busy", { timeout: 5_000 }, async () => {
+// The timeout only guards against a hang (the retry is already bounded below). It ran past 5 s on a
+// loaded Windows runner (run 42736461173), where passing runs take up to 2.7 s.
+test("a turn held back for the end of the owner's setup is delivered by itself once the agent is replaced, even when the first try finds it busy", { timeout: 60_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-owner-setup-end-"));
   const inbox = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
   const installed = ownerSetupInstallation();

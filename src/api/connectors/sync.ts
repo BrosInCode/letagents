@@ -20,7 +20,8 @@ import {
 } from "../../../shared/ticket-connectors.mjs";
 import { db } from "../db/client.js";
 import { toTask } from "../db/mappers.js";
-import { external_items, tasks } from "../db/schema.js";
+import { external_items, tasks, room_board_planning } from "../db/schema.js";
+import { readReleaseFields, preserveReleaseFields } from './providers/release-fields.js';
 import { invalidateRoomExternalRefScope } from "../db/task-external-refs.js";
 import type { Task, TaskRow } from "../db/types.js";
 import { nextRoomScopedNumber } from "../db/utils.js";
@@ -64,6 +65,7 @@ const ERROR_SKIP_MS = 60_000;
 const MAX_TITLE_LENGTH = 500;
 const MAX_PLANNING_REFRESH_KEYS = 50;
 const PLANNING_REFRESH_MS = 2 * 60_000;
+const MAX_RELEASE_REFRESH_KEYS = 20;
 
 export function trackerPollIntervalMs(env: NodeJS.ProcessEnv = process.env): number {
   const raw = Number(env[TRACKER_POLL_MS_ENV]);
@@ -214,6 +216,21 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
         const iterations = asRecord(cached.payload?.planning).iterations;
         if (Array.isArray(iterations)) item = { ...item, payload: { ...item.payload,
           planning: { ...asRecord(item.payload.planning), iterations } } };
+      }
+      // Release-only reads can be newer than the normal import search index.
+      // Preserve that evidence without granting it authority over other fields.
+      const releaseUpdatedAt = cached?.payload?.releaseTrackerUpdatedAt;
+      if (!stale && typeof releaseUpdatedAt === 'string' && isOlder(item.tracker_updated_at, releaseUpdatedAt)) {
+        const payload = { ...item.payload };
+        for (const key of ['releaseFields', 'releaseMetadataAvailable', 'releaseMetadataCheckedAt', 'releaseRawStatus',
+          'releaseTrackerUpdatedAt', 'releaseRefreshFailed', 'releaseRefreshAttemptedAt']) {
+          if (Object.hasOwn(cached!.payload!, key)) payload[key] = cached!.payload![key];
+        }
+        item = { ...item, payload };
+      } else if (!stale && (Array.isArray(item.payload.releaseFields) || Array.isArray(cached?.payload?.releaseFields))) {
+        const release = preserveReleaseFields(cached?.payload ?? {}, item.payload);
+        item = { ...item, payload: { ...item.payload, ...release,
+          ...(release.releaseRefreshFailed && cached ? { releaseMetadataCheckedAt: cached.payload?.releaseMetadataCheckedAt ?? cached.synced_at } : {}) } };
       }
 
       const syncedAt = now().toISOString();
@@ -451,6 +468,63 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
     }
   }
 
+  /** Enrich already-bound tickets that predate release metadata. Never imports new cards. */
+  async function refreshReleaseMetadata(connection: TrackerConnectionRow, filter: RoomTrackerFilterRow, startedAt: string) {
+    const [board] = await db.select({ document: room_board_planning.document }).from(room_board_planning)
+      .where(eq(room_board_planning.room_id, filter.room_id));
+    const rule = board?.document.releaseRule;
+    const rows = await db.select({ key: external_items.key, payload: external_items.payload, syncedAt: external_items.synced_at, rawStatus: external_items.raw_status })
+      .from(tasks).innerJoin(external_items, eq(tasks.external_item_id, external_items.id))
+      .where(and(eq(tasks.room_id, filter.room_id), eq(external_items.connection_id, connection.id)));
+    const attemptedAt = (row: typeof rows[number]) => Math.max(Date.parse(row.syncedAt),
+      Date.parse(String(row.payload?.releaseRefreshAttemptedAt ?? '')) || 0);
+    const candidates = rows.filter(row => {
+      const fields = row.payload?.releaseFields;
+      const values = rule?.kind === 'tracker' && rule.connectionId === connection.id
+        ? rule.fieldId === 'status' ? [row.payload?.releaseRawStatus ?? row.rawStatus] : readReleaseFields(fields).find(field => field.id === rule.fieldId)?.values : null;
+      // Matching tickets may leave the import filter when their flag is cleared.
+      const waiting = rule?.kind === 'tracker' && values?.includes(rule.value);
+      return (!Array.isArray(fields) || row.payload?.releaseMetadataAvailable === false || waiting)
+        && attemptedAt(row) < Date.parse(startedAt) - PLANNING_REFRESH_MS;
+    }).sort((a, b) => attemptedAt(a) - attemptedAt(b) || a.key.localeCompare(b.key)).slice(0, MAX_RELEASE_REFRESH_KEYS);
+    let failed = false;
+    for (const row of candidates) {
+      try {
+        const item = await deps.providers[connection.provider as TrackerProvider].getItem(deps.connections.open(connection), row.key, { includePlanning: true });
+        if (!item || item.key !== row.key) throw new Error('Ticket unavailable');
+        if (Array.isArray(item.payload.releaseFields)) {
+          // This read proves release fields only. Preserve sprint authority, card
+          // ordering and the normal poll cursor; never revive out-of-filter metadata.
+          const payload = { releaseFields: item.payload.releaseFields,
+            releaseMetadataAvailable: item.payload.releaseMetadataAvailable !== false,
+            releaseMetadataCheckedAt: startedAt, releaseRawStatus: item.raw_status,
+            releaseTrackerUpdatedAt: item.tracker_updated_at, releaseRefreshFailed: false };
+          await db.transaction(async tx => {
+            const ref = formatExternalRef(connection.provider as TrackerProvider, row.key);
+            await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`tracker-item:${ref}`}, 0))`);
+            const [cached] = await tx.select().from(external_items)
+              .where(and(eq(external_items.connection_id, connection.id), eq(external_items.key, row.key)));
+            const releaseUpdatedAt = cached?.payload?.releaseTrackerUpdatedAt;
+            if (!cached || isOlder(item.tracker_updated_at, cached.tracker_updated_at)
+              || (typeof releaseUpdatedAt === 'string' && isOlder(item.tracker_updated_at, releaseUpdatedAt))) return;
+            const release = preserveReleaseFields(cached.payload ?? {}, item.payload);
+            await tx.update(external_items).set({ payload: { ...cached.payload, ...payload, ...release,
+              ...(release.releaseRefreshFailed ? { releaseMetadataCheckedAt: cached.payload?.releaseMetadataCheckedAt ?? cached.synced_at } : {}) } })
+              .where(eq(external_items.id, cached.id));
+          });
+        }
+      } catch {
+        failed = true;
+        await db.update(external_items).set({ payload: sql`jsonb_set(${external_items.payload}, '{releaseRefreshFailed}', 'true'::jsonb)` })
+          .where(and(eq(external_items.connection_id, connection.id), eq(external_items.key, row.key)));
+      }
+      // Rotate unavailable/partial reads too, so one denied ticket cannot starve the others.
+      await db.update(external_items).set({ payload: sql`jsonb_set(${external_items.payload}, '{releaseRefreshAttemptedAt}', to_jsonb(${startedAt}::text))` })
+        .where(and(eq(external_items.connection_id, connection.id), eq(external_items.key, row.key)));
+    }
+    return { warning: failed ? 'Some release fields could not be refreshed. Check the tracker connection in Connectors.' : null };
+  }
+
   async function syncFilter(filter: RoomTrackerFilterRow, intervalMs = trackerPollIntervalMs()) {
     const claimedAt = filter.sync_claimed_at;
     const startedAt = now().toISOString();
@@ -493,10 +567,11 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
         before = new Date(oldest).toISOString();
       }
       const planning = await refreshJiraIterations(connection, filter, startedAt);
+      const releases = await refreshReleaseMetadata(connection, filter, startedAt);
       changed += planning.changed;
       const warning = capped
         ? `More than ${MAX_ITEMS_PER_POLL * MAX_BATCHES_PER_POLL} tickets changed in one poll; the oldest changes were skipped. Narrow the filter.`
-        : planning.warning;
+        : planning.warning ?? releases.warning;
       await finishRoomTrackerFilterSync({ id: filter.id, claimed_at: claimedAt, started_at: startedAt, advance: true, error: warning });
       return { seen, changed, error: warning };
     } catch (error) {

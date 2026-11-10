@@ -40,9 +40,10 @@ export async function finishCreatedMessage(
 
   const addressedTo = options?.addressed_to ?? null;
   let notificationEnqueueDurationMs = 0;
+  let queuedPushCount = 0;
   if (!createdMessageIsPromptOnly && !addressedTo) {
     const notificationEnqueueStartedAtMs = Date.now();
-    await enqueueDesktopPushNotifications(tx, createdMessage, {
+    queuedPushCount = await enqueueDesktopPushNotifications(tx, createdMessage, {
       notify_account_ids: options?.notify_account_ids,
       recents_account_ids: options?.recents_account_ids,
     });
@@ -62,5 +63,5 @@ export async function finishCreatedMessage(
   if (options?.with_created_message_in_transaction) {
     await options.with_created_message_in_transaction(tx, createdMessage);
   }
-  return { createdMessageIsPromptOnly, addressedTo, notificationEnqueueDurationMs };
+  return { createdMessageIsPromptOnly, addressedTo, notificationEnqueueDurationMs, queuedPushCount };
 }

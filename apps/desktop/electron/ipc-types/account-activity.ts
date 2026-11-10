@@ -14,4 +14,8 @@ export interface DesktopAccountActivityState {
   connected: boolean;
   /** Keyed by the server's room id. */
   rooms: Record<string, DesktopAccountRoomActivity>;
+  /** Moves each time the account records reads in one of its rooms, on any device: unread counts are read again. */
+  readRevision?: number;
+  /** The read behind the latest `readRevision`: its room and newest message, when the server named them. */
+  lastRead?: { roomId: string; lastMessageId: string | null } | null;
 }

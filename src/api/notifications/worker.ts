@@ -1,4 +1,4 @@
-import { enqueueDueReminders, loadReminderMessage, deleteMessageReminder } from "./reminders.js";
+import { enqueueDueReminders, loadReminderMessage, deleteMessageReminder, REMINDER_ENQUEUE_LIMIT } from "./reminders.js";
 import { randomUUID } from "node:crypto";
 import { canNotifyConversation } from "../conversations/store.js";
 
@@ -19,8 +19,8 @@ import { classifyApnsResult, retryDelayMs, type ApnsDisposition } from "./delive
 import { startWakeWebhookWorker } from "./wake-webhooks.js";
 import { getPushDeliveryAccount } from "./push-account.js";
 import { loadJoinRequestPushPreview } from "./join-request-pushes.js";
+import { DUE_IN_MS_SQL, readDueInMs, startJobQueueLoop } from "../server/job-queue-wakes.js";
 
-const POLL_INTERVAL_MS = 2_000;
 const CLAIM_LIMIT = 50;
 const DELIVERY_CONCURRENCY = 10;
 const MAX_ATTEMPTS = 10;
@@ -370,12 +370,14 @@ export function authorizeReminderAccess(accountId: string, roomId: string): Prom
   });
 }
 
-export async function processBatch(client: Pick<ApnsClient, "send">, workerId: string): Promise<void> {
-  const notifications = [
-    ...await claimNotifications(workerId),
-    ...await claimReminderDeliveries(workerId),
-    ...await claimJoinRequestPushes(workerId),
+/** Claims and sends one batch from each outbox. Returns true when any outbox gave a full batch (more may wait). */
+export async function processBatch(client: Pick<ApnsClient, "send">, workerId: string): Promise<boolean> {
+  const batches = [
+    await claimNotifications(workerId),
+    await claimReminderDeliveries(workerId),
+    await claimJoinRequestPushes(workerId),
   ];
+  const notifications = batches.flat();
   const authorizationChecks = new Map<string, Promise<DesktopPushAuthorizationDecision>>();
   for (let index = 0; index < notifications.length; index += DELIVERY_CONCURRENCY) {
     await Promise.all(
@@ -395,6 +397,27 @@ export async function processBatch(client: Pick<ApnsClient, "send">, workerId: s
         }),
     );
   }
+  return batches.some((batch) => batch.length >= CLAIM_LIMIT);
+}
+
+/**
+ * Milliseconds until the next push work falls due by the database clock: a
+ * pending reminder, a delivery's retry or a stale claim's takeover. Null when
+ * nothing waits. Without APNs only reminders matter (they are still enqueued).
+ */
+export async function nextDesktopPushDueInMs(includeDeliveries: boolean): Promise<number | null> {
+  // Rows already due count too (zero or less): one may fall due after a claim's statement started.
+  const parts = ["(SELECT min(due_at) FROM message_reminders WHERE state = 'pending')"];
+  if (includeDeliveries) {
+    for (const table of DELIVERY_TABLES) {
+      // Only rows a claim can take: a disabled device's rows are never claimed.
+      parts.push(`(SELECT min(next_attempt_at) FROM ${table} WHERE state IN ('queued', 'retry')
+        AND device_id IN (SELECT id FROM desktop_push_devices WHERE enabled))`);
+      parts.push(`(SELECT min(claimed_at) + INTERVAL '5 minutes' FROM ${table} WHERE state = 'processing')`);
+    }
+  }
+  const result = await pool.query<{ due_in_ms: unknown }>(`SELECT ${DUE_IN_MS_SQL(`LEAST(${parts.join(", ")})`)} AS due_in_ms`);
+  return readDueInMs(result.rows[0]);
 }
 
 export async function cleanupTerminalNotifications(): Promise<void> {
@@ -423,7 +446,12 @@ export async function cleanupTerminalNotifications(): Promise<void> {
   }
 }
 
-export function startDesktopPushWorker(): () => Promise<void> {
+/**
+ * Push delivery runs when a transaction that queued a push or a reminder
+ * commits (`wakeJobQueue("desktop_push")`), when the next reminder or retry
+ * falls due, and at the latest every fallback interval.
+ */
+export function startDesktopPushWorker(options: { fallbackMs?: number } = {}): () => Promise<void> {
   let credentials;
   try {
     credentials = readApnsCredentials();
@@ -435,42 +463,28 @@ export function startDesktopPushWorker(): () => Promise<void> {
   }
   const client = credentials ? new ApnsClient(credentials) : null;
   const workerId = randomUUID();
-  let running = false;
-  let runningPromise: Promise<void> | null = null;
-  let stopped = false;
   let lastCleanupAt = 0;
 
-  const tick = () => {
-    if (stopped || running) return;
-    running = true;
-    const run = (async () => {
-      try {
-        if (Date.now() - lastCleanupAt >= CLEANUP_INTERVAL_MS) {
-          await cleanupTerminalNotifications();
-          lastCleanupAt = Date.now();
-        }
-        await enqueueDueReminders();
-        if (client) await processBatch(client, workerId);
-      } catch (error) {
-        console.error(`[desktop-push] Worker iteration failed: ${error instanceof Error ? error.message : String(error)}`);
-      } finally {
-        running = false;
+  const loop = startJobQueueLoop({
+    queue: "desktop_push",
+    label: "desktop-push",
+    fallbackMs: options.fallbackMs,
+    logError: (error) => console.error(`[desktop-push] Worker iteration failed: ${error instanceof Error ? error.message : String(error)}`),
+    async run() {
+      if (Date.now() - lastCleanupAt >= CLEANUP_INTERVAL_MS) {
+        await cleanupTerminalNotifications();
+        lastCleanupAt = Date.now();
       }
-    })();
-    const pending = run.finally(() => {
-      if (runningPromise === pending) runningPromise = null;
-    });
-    runningPromise = pending;
-  };
-  const interval = setInterval(() => void tick(), POLL_INTERVAL_MS);
-  interval.unref();
-  void tick();
+      const dueReminders = await enqueueDueReminders();
+      const fullBatch = client ? await processBatch(client, workerId) : false;
+      if (fullBatch || dueReminders >= REMINDER_ENQUEUE_LIMIT) return { again: true };
+      return { nextDueInMs: await nextDesktopPushDueInMs(Boolean(client)) };
+    },
+  });
   // Wake webhooks run their own loop: a slow receiver never delays a push.
-  const stopWakeWebhooks = startWakeWebhookWorker();
+  const stopWakeWebhooks = startWakeWebhookWorker({ fallbackMs: options.fallbackMs });
   return async () => {
-    stopped = true;
-    clearInterval(interval);
-    await Promise.all([runningPromise, stopWakeWebhooks()]);
+    await Promise.all([loop.stop(), stopWakeWebhooks()]);
     client?.close();
   };
 }

@@ -66,32 +66,12 @@
       @close-action-panel="closeActionPanel"
     />
 
-    <div
-      v-if="showEnvironmentPanelWidget"
-      class="desktop-room-environment-popover"
-      data-testid="desktop-room-environment-popover"
-    >
-      <DesktopFloatingWidget
-        :open="environmentPanelOpen"
-        label="Work"
-        test-id="desktop-room-environment-widget"
-        @update:open="setEnvironmentPanelOpen"
-      >
-        <template #icon>
-          <GitBranch :size="18" aria-hidden="true" />
-        </template>
-        <GitRoomEnvironmentPanel
-          :room="room"
-          :repo-status="effectiveEnvironmentRepoStatus"
-          :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
-          :room-artifacts="roomArtifacts"
-          :github-events="eventsPage"
-          @open-repo-root="emit('open-repo-root', $event)"
-          @open-pull-request="openGitHubUrlExternally"
-        />
-      </DesktopFloatingWidget>
+    <div v-if="activeTab === 'chat' && !actionPanelOpen && !searchOpen" class="desktop-room-release-widget">
+      <ReleaseQueueWidget :key="room.identifier" :room-id="room.identifier" :load="loadReleasePlanning" :open-external="desktopIpc.app.openExternalUrl" @select="openBoardTask" />
     </div>
 
+    <TaskLinkPreview :room-id="room.identifier" :tasks="previewTasks" :active="activeTab === 'chat'" :accept="acceptPreviewTask" :open-external="desktopIpc.app.openExternalUrl" @open-board="openBoardTask">
+    <template #description="{ text }"><MarkdownBlock :text="text" :mentions="false" preserve-paths /></template>
     <RoomChatView
       ref="roomChatView"
       v-show="activeTab === 'chat'"
@@ -167,6 +147,7 @@
         </div>
       </template>
     </RoomChatView>
+    </TaskLinkPreview>
 
     <Transition name="room-panel" mode="out-in">
       <RoomMemoryView v-if="activeTab === 'memory'" :key="`memory:${messageNamespace}`" :room-identifier="room.identifier" @open-message="(id) => { activeTab = 'chat'; revealRoomMessage(id); }" />
@@ -348,7 +329,6 @@
 </template>
 
 <script setup lang="ts">
-import { GitBranch } from "@lucide/vue";
 import { computed, nextTick, provide, ref } from "vue";
 import type { DesktopAgentProviderId } from "../../../../../electron/ipc-types";
 import { composerAgentLaunchKey } from "./room-chat/composer-agent-launch";
@@ -357,11 +337,14 @@ import AddAgentUnavailableModal from "./AddAgentUnavailableModal.vue";
 import { supervisedAgentsSupported } from "../../../domain/supervised-agents-support";
 import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
-import DesktopFloatingWidget from "../controls/DesktopFloatingWidget.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import PersonActionsHost from "./PersonActionsHost.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
+import TaskLinkPreview from "../../../../../../../shared/ui/board/TaskLinkPreview.vue";
+import MarkdownBlock from "./formatting/MarkdownBlock.vue";
+import { useRoomBoardController } from "./room-board/useRoomBoardController";
+import { desktopBoardTask } from "./room-board/board-workspace-tasks";
 import { canManageRoomBoard } from "./room-board/board-presentation";
 import { taskForTicketQuery, ticketRefParts } from "./room-board/ticket-ref";
 import RoomChatView from "./RoomChatView.vue";
@@ -370,7 +353,8 @@ import RoomDetailsView from "./RoomDetailsView.vue";
 import RoomMemoryView from "./RoomMemoryView.vue";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
-import GitRoomEnvironmentPanel from "./room-shell/GitRoomEnvironmentPanel.vue";
+import ReleaseQueueWidget from "../../../../../../../shared/ui/board/ReleaseQueueWidget.vue";
+import { desktopIpc } from "../../../ipc";
 import JoinRequestBanner from "../../../../../../../shared/ui/JoinRequestBanner.vue";
 import type { DesktopRoomShellEmits, DesktopRoomShellProps } from "../../../composables/room-shell/props";
 import type { RoomShellContext } from "../../../composables/room-shell/context";
@@ -391,6 +375,19 @@ import { supervisedAgentInspectorRequest } from "../../../domain/agent-inspector
 import { ownerAttribution as backgroundCommandOwner } from "./room-activity/agentTarget";
 const props = defineProps<DesktopRoomShellProps>();
 const emit = defineEmits<DesktopRoomShellEmits>();
+const previewBoard = useRoomBoardController({
+  get roomIdentifier() { return props.room.identifier; },
+  get tasks() { return props.tasks; },
+  get presence() { return props.presence; },
+  get workers() { return props.workers; },
+  get canEditTasks() { return canManageRoomBoard(props.room.role); },
+}, emit);
+const previewTasks = computed(() => props.tasks.map(task => desktopBoardTask(task, props.presence, previewBoard.actionsFor(task))));
+async function acceptPreviewTask(id: string) {
+  const task = props.tasks.find(item => item.id === id);
+  const action = task?.status === 'proposed' && previewBoard.actionsFor(task).find(item => item.targetStatus === 'accepted');
+  return task && action ? previewBoard.runTaskAction(task, action) : false;
+}
 
 // The shell holds the layout template and this wiring. The context fills in the
 // original order: props and emit, state, then the function composables (only
@@ -407,7 +404,7 @@ const {
   rulesOpen, roomLinkCopied, deliveryRetryingKeys, continuationRepairingKeys,
   roomDeliverySkippingKeys, deliveryRetryAvailable, boardSelectedTaskId, boardGovernanceSection,
   activityHistoryRequest, artifactTimelineTaskFilterId, storageBusy, storageFeedback,
-  githubEventsVisible, environmentPanelOpen, supervisorEntries, agentRosterState, supervisorStatus,
+  githubEventsVisible, supervisorEntries, agentRosterState, supervisorStatus,
   agentInspectorRoomMoveAvailable, continuationRepairAvailable, roomDeliverySkipAvailable,
   selectedAgentDetailTarget,
 } = Object.assign(app, useRoomShellState(app));
@@ -420,7 +417,7 @@ const {
 } = Object.assign(app, useRoomShellDeliveryActions(app));
 const {
   openBoardTask, rememberChatScrollPosition, selectTab, openArtifactsForTask,
-  toggleGitHubEventsVisible, setEnvironmentPanelOpen, setRoomStorageMode, forkRoomToLocal,
+  toggleGitHubEventsVisible, setRoomStorageMode, forkRoomToLocal,
   publishLocalRoom, toggleSearchTool, toggleActionPanel, openActionPanelAt, closeActionPanel, openRules,
   openAddAgentModal, revealRoomMessage, revealRecordedWorkMessage, revealSharedLiveRequest,
   openAgentWorktree, copyRoomLink, exportChat,
@@ -481,7 +478,7 @@ const {
 } = Object.assign(app, useRoomShellIntegrations(app));
 
 const {
-  githubEventsAvailable, showEnvironmentPanelWidget, effectiveEnvironmentRepoStatus,
+  githubEventsAvailable,
   managedAgentRepoStatus, managedAgentRepoRootPath, roomParticipants, localAgentWork,
 } = Object.assign(app, useRoomShellParticipants(app));
 
@@ -546,4 +543,8 @@ provide(composerAgentLaunchKey, {
   },
   chooseWorktree: openAgentWorktree,
 });
+async function loadReleasePlanning() {
+  if (!desktopIpc.room?.getBoardPlanning) throw new Error('Board unavailable');
+  return desktopIpc.room.getBoardPlanning(props.room.identifier);
+}
 </script>

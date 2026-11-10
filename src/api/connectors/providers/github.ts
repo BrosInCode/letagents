@@ -1,3 +1,4 @@
+import { releaseLabels } from './release-fields.js';
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 
 import { createGitHubAppJwt } from "../../github/app-client.js";
@@ -345,6 +346,7 @@ export function createGitHubIssuesProvider(options: GitHubIssuesProviderOptions 
         number,
         state: asString(record.state),
         state_reason: asString(record.state_reason),
+        releaseFields: [{ id: 'labels', name: 'Label', values: releaseLabels(record.labels) }],
       },
     };
   }

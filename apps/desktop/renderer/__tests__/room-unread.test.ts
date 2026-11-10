@@ -9,7 +9,7 @@ import ts from "typescript";
 import { createServer } from "vite";
 import { createRenderer, h, reactive, ref, ssrContextKey } from "vue";
 import { createRoomUnreadStore } from "../../../../shared/room-unread.mjs";
-import { markRoomRead, roomReadKey, roomReadMarkerKey } from "../src/domain/desktop-room-read-state";
+import { localAccountRoomKeys, markRoomRead, roomReadKey, roomReadMarkerKey } from "../src/domain/desktop-room-read-state";
 import { normalizeRoomIdentifier } from "../src/domain/sidebar-rooms";
 import { appFunction } from "./app-source";
 import { roomShellSource } from "./room-shell-source";
@@ -45,6 +45,8 @@ test("per-room storage controls refresh the unread history namespace, including 
     roomReadKey, chatStorageSettings, sidebarLatestMessages, normalizeRoomIdentifier,
     selectedSnapshot, selectedRootRoomIdentifier, activeEntry, sidebarProjectEntries: ref([]),
     accountRooms: ref([{ roomIdentifier, source: "cloud", focusRooms: [] }]),
+    // The composable's computed set of local account rooms, read fresh here.
+    get localRoomKeys() { return { value: localAccountRoomKeys((appContext.accountRooms as { value: never }).value) }; },
     sessionGeneration: ref(1), getChatStorageBridge: () => bridge,
     chatStorageFeedback: ref(null), handleRefreshRoom() { appliedSnapshots++; }, syncSelectedRoomStream() {},
     refreshSidebarLatestMessages: async () => {
@@ -108,8 +110,10 @@ test("App's explicit sidebar read action clears its bookmark even when the old m
   store.mark("bob", "room", "msg_7");
   const readRoomMessageIds = ref({ room: "msg_9" });
   let writes = 0;
+  const confirmed: Array<[string, string]> = [];
   const context = {
     readRoomMessageIds, markRoomRead, roomReadMarkerKey, roomHistoryMode: () => "cloud",
+    confirmRead: (room: string, messageId: string) => { confirmed.push([room, messageId]); },
     latestMessageIdForEntry: () => "msg_9",
     rememberRoomMessageIds: () => { writes++; },
     roomUnread: { get: (room: string) => store.get("alice", room), clear: (room: string, revision: string) => store.clear("alice", room, revision) },
@@ -119,9 +123,11 @@ test("App's explicit sidebar read action clears its bookmark even when the old m
   const automatic = runInNewContext(code + "\nmarkRoomEntryRead", context);
   automatic({ roomIdentifier: "room" });
   assert.ok(store.get("alice", "room"), "selection and automatic read updates preserve the bookmark");
+  assert.deepEqual(confirmed, [], "an automatic marker move is not a read the server hears of");
   const explicit = runInNewContext(code + "\n(" + expression + ")", context);
   explicit({ roomIdentifier: "room" });
   assert.equal(store.get("alice", "room"), null);
+  assert.deepEqual(confirmed, [["room", "msg_9"]], "Mark as read is the person's own word: reported");
   assert.equal(store.get("alice", "other")?.messageId, "msg_6");
   assert.equal(store.get("bob", "room")?.messageId, "msg_7");
   assert.equal(readRoomMessageIds.value.room, "msg_9");

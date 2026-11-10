@@ -20,13 +20,14 @@ export interface DesktopPushEnqueueOptions {
   recents_account_ids?: readonly string[];
 }
 
+/** Returns how many pushes it queued, so the caller can wake the push worker after commit. */
 export async function enqueueDesktopPushNotifications(
   tx: MessageCreateTransaction,
   message: MessageRow,
   options?: DesktopPushEnqueueOptions,
-): Promise<void> {
+): Promise<number> {
   const now = new Date().toISOString();
-  await tx.execute(sql`
+  const roomPushes = await tx.execute(sql`
     INSERT INTO desktop_push_notifications (
       id,
       device_id,
@@ -85,14 +86,16 @@ export async function enqueueDesktopPushNotifications(
     ON CONFLICT (device_id, room_id, message_number) DO NOTHING
   `);
 
+  let queued = roomPushes.rowCount ?? 0;
   const notifyAccountIds = [...new Set(options?.notify_account_ids ?? [])];
   if (notifyAccountIds.length > 0) {
-    await enqueueTargetedDesktopPushNotifications(tx, message, notifyAccountIds, now);
+    queued += await enqueueTargetedDesktopPushNotifications(tx, message, notifyAccountIds, now);
   }
   const recentsAccountIds = [...new Set(options?.recents_account_ids ?? [])];
   if (recentsAccountIds.length > 0) {
     await insertTargetedRoomRecents(tx, message, recentsAccountIds, now);
   }
+  return queued;
 }
 
 /**
@@ -106,9 +109,9 @@ async function enqueueTargetedDesktopPushNotifications(
   message: MessageRow,
   accountIds: readonly string[],
   now: string,
-): Promise<void> {
+): Promise<number> {
   const accountIdList = sql.join(accountIds.map((accountId) => sql`${accountId}`), sql`, `);
-  await tx.execute(sql`
+  const result = await tx.execute(sql`
     INSERT INTO desktop_push_notifications (
       id,
       device_id,
@@ -156,6 +159,7 @@ async function enqueueTargetedDesktopPushNotifications(
       AND COALESCE(preference.level, 'all') <> 'muted'
     ON CONFLICT (device_id, room_id, message_number) DO NOTHING
   `);
+  return result.rowCount ?? 0;
 }
 
 /**

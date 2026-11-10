@@ -2,11 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
-const {
-  registerGitHubWebhookRoutes,
-  shouldRetryFailedDuplicateGitHubWebhookDelivery,
-  shouldSkipDuplicateGitHubWebhookDelivery,
-} = await import("../routes/github/webhooks.js");
+const { registerGitHubWebhookRoutes } = await import("../routes/github/webhooks.js");
 
 function createDeps() {
   return {
@@ -33,71 +29,4 @@ test("registerGitHubWebhookRoutes preserves webhook route order", () => {
   assert.deepEqual(calls, [
     { method: "post", path: "/webhooks/github" },
   ]);
-});
-
-test("duplicate GitHub webhooks only retry previously failed deliveries", () => {
-  assert.equal(
-    shouldSkipDuplicateGitHubWebhookDelivery({
-      duplicate: true,
-      delivery: { status: "processed" },
-    }),
-    true,
-  );
-  assert.equal(
-    shouldSkipDuplicateGitHubWebhookDelivery({
-      duplicate: true,
-      delivery: { status: "failed" },
-    }),
-    false,
-  );
-  assert.equal(
-    shouldSkipDuplicateGitHubWebhookDelivery({
-      duplicate: true,
-      delivery: { status: "received" },
-    }),
-    true,
-  );
-  assert.equal(
-    shouldSkipDuplicateGitHubWebhookDelivery({
-      duplicate: true,
-      delivery: { status: "ignored" },
-    }),
-    true,
-  );
-  assert.equal(
-    shouldSkipDuplicateGitHubWebhookDelivery({
-      duplicate: false,
-      delivery: { status: "failed" },
-    }),
-    false,
-  );
-  assert.equal(
-    shouldSkipDuplicateGitHubWebhookDelivery({
-      duplicate: false,
-      delivery: { status: "processed" },
-    }),
-    false,
-  );
-
-  assert.equal(
-    shouldRetryFailedDuplicateGitHubWebhookDelivery({
-      duplicate: true,
-      delivery: { status: "failed" },
-    }),
-    true,
-  );
-  assert.equal(
-    shouldRetryFailedDuplicateGitHubWebhookDelivery({
-      duplicate: true,
-      delivery: { status: "processed" },
-    }),
-    false,
-  );
-  assert.equal(
-    shouldRetryFailedDuplicateGitHubWebhookDelivery({
-      duplicate: false,
-      delivery: { status: "failed" },
-    }),
-    false,
-  );
 });

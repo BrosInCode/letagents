@@ -491,3 +491,32 @@ test("Linear reconciles a transition from issue history", async () => {
   assert.equal((await linear.findTransition(linearConnection(), "BIL-12", "in review", "2026-10-21T10:00:00.000Z"))?.externalId, "BIL-12:history:h-2");
   assert.equal(await linear.findTransition(linearConnection(), "BIL-12", "In Progress", "2026-10-21T10:00:00.000Z"), null);
 });
+
+test('Jira release fields use safe values and a read-only POST for large site field catalogs', async () => {
+  const metadata = Array.from({ length: 300 }, (_, i) => ({ id: `customfield_${10000 + i}`, name: `Flag ${i}`, schema: { type: 'boolean' } }));
+  metadata.push({ id: 'customfield_99999', name: 'Private text', schema: { type: 'string' } });
+  const { impl, calls } = fakeFetch([
+    at('GET', /\/field$/, metadata),
+    at('POST', /\/issue\/bulkfetch$/, { issues: [{ key: 'APP-1', fields: { summary: 'Release me', status: { name: 'Done' }, labels: ['ship'], customfield_10000: true, customfield_10001: false } }], issueErrors: [] }),
+  ]);
+  const item = await createJiraProvider({ fetchImpl: impl, env: {} }).getItem(jiraConnection(), 'APP-1', { includePlanning: true });
+  assert.equal(item?.title, 'Release me');
+  const fields = item?.payload.releaseFields as Array<{ id: string; values: string[] | null }>;
+  assert.deepEqual(fields.find(f => f.id === 'customfield_10000')?.values, ['true']);
+  assert.deepEqual(fields.find(f => f.id === 'customfield_10001')?.values, ['false']);
+  assert.equal(fields.find(f => f.id === 'customfield_10002')?.values, null);
+  const requested = (calls[1].body as { fields: string[] }).fields;
+  assert.ok(!requested.includes('customfield_99999'), 'arbitrary rich custom fields are not copied');
+  assert.ok(calls.every(c => c.url.length < 300), 'field catalog never overflows the issue URL');
+});
+
+test('a denied optional Jira bulk read still imports the ticket and marks flags unknown', async () => {
+  const { impl } = fakeFetch([
+    at('GET', /\/field$/, [{ id: 'customfield_42', name: 'Release', schema: { type: 'boolean' } }]),
+    call => call.url.endsWith('/issue/bulkfetch') ? { status: 403, json: { errorMessages: ['Denied'] } } : undefined,
+    at('GET', /\/issue\/APP-1\?/, { key: 'APP-1', fields: { summary: 'Ticket', status: { name: 'Done' }, labels: [] } }),
+  ]);
+  const item = await createJiraProvider({ fetchImpl: impl, env: {} }).getItem(jiraConnection(), 'APP-1', { includePlanning: true });
+  assert.equal(item?.title, 'Ticket');
+  assert.deepEqual(item?.payload.releaseFields, [{ id: 'labels', name: 'Label', values: [] }, { id: 'customfield_42', name: 'Release', values: null }]);
+});

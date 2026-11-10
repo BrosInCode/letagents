@@ -941,7 +941,7 @@ describe("room chat helpers", () => {
         undefined,
         new Set(["task_42"]),
       ),
-      '<p>Continue <button class="message-reference-link task-reference-link" type="button" data-task-reference-id="task_42" title="Open task_42 on the Board">task_42</button>, then task_99.</p>',
+      '<p>Continue <button class="message-reference-link task-reference-link" type="button" data-task-reference-id="task_42" title="Preview task_42">task_42</button>, then task_99.</p>',
     );
   });
 
@@ -953,7 +953,7 @@ describe("room chat helpers", () => {
         undefined,
         new Set(["task_42"]),
       ),
-      '<p>Continue <button class="message-reference-link task-reference-link" type="button" data-task-reference-id="task_42" title="Open task_42 on the Board">task_<mark class="message-search-hit">42</mark></button>.</p>',
+      '<p>Continue <button class="message-reference-link task-reference-link" type="button" data-task-reference-id="task_42" title="Preview task_42">task_<mark class="message-search-hit">42</mark></button>.</p>',
     );
   });
 
@@ -980,7 +980,7 @@ describe("room chat helpers", () => {
         undefined,
         new Set(["task_42", "task_7"]),
       ),
-      '<p>Use <code>task_42</code> or <a href="https://example.com/task_42" target="_blank" rel="noopener noreferrer">https://example.com/task_42</a> before <button class="message-reference-link task-reference-link" type="button" data-task-reference-id="task_7" title="Open task_7 on the Board">task_7</button></p>',
+      '<p>Use <code>task_42</code> or <a href="https://example.com/task_42" target="_blank" rel="noopener noreferrer">https://example.com/task_42</a> before <button class="message-reference-link task-reference-link" type="button" data-task-reference-id="task_7" title="Preview task_7">task_7</button></p>',
     );
   });
 
