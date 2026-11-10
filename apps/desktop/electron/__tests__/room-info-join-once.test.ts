@@ -122,6 +122,34 @@ test("a join in flight when the room is forgotten is not cached, so the next ope
   await assert.rejects(next, /forbidden/);
 });
 
+// From review 5835854275 on #1929: a focus locator resolves to a room id, and the
+// members panel forgets the room by that id. A join still pending under the
+// locator must not be shared with the next check under the locator.
+test("forgetting a room by its id fences a pending join under an alias", async (t) => {
+  const { subject, calls } = await loadRoomInfo(t);
+  let now = 1000;
+  t.mock.method(Date, "now", () => now);
+  const alias = "github.com/acme/app/focus/build";
+  const canonical = "focus_123";
+  subject.rememberJoinedRoomInfo(alias, { room_id: canonical, role: "admin" });
+  now += subject.JOINED_ROOM_INFO_TTL_MS + 1;
+  const beforeRefusal = subject.getJoinedRoomInfo(alias);
+  await tick();
+  subject.forgetJoinedRoomInfo(canonical);
+  const afterRefusal = subject.getJoinedRoomInfo(alias);
+  await tick();
+  const requestCount = calls.length;
+  // Finish every promise before asserting, including the shared-read case.
+  calls[0].resolve({ room_id: canonical, role: "admin", name: "before refusal" });
+  if (calls[1]) calls[1].resolve({ room_id: canonical, role: "participant", name: "fresh access check" });
+  assert.equal((await beforeRefusal).name, "before refusal", "the first caller gets its own answer");
+  const checked = await afterRefusal;
+  assert.equal(requestCount, 2, "a canonical invalidation must require a new alias access check");
+  assert.equal(checked.name, "fresh access check");
+  assert.equal((await subject.getJoinedRoomInfo(canonical)).name, "fresh access check", "the old answer is not cached");
+  assert.equal(calls.length, 2);
+});
+
 test("sign-out clears joined rooms again after the token is removed", async (t) => {
   const events: string[] = [];
   let release: () => void = () => {};
