@@ -245,6 +245,8 @@ function onBackdropClick(event: MouseEvent) {
 .task-agent-details-content { padding-top:14px; }
 .task-dialog-section,.task-agent-details-content :deep(.lease-authority),.task-agent-details-content :deep(.review-authority),.task-dialog-sections :deep(.task-merge-readiness) { padding:0; border:0; border-radius:0; background:transparent; min-width:0; }
 .task-agent-details-content :deep(.lease-authority__grid),.task-agent-details-content :deep(.review-authority__grid) { grid-template-columns:minmax(0,1fr); }
+.task-agent-details-content :deep(.lease-authority__handoff .app-select) { min-width:0; }
+.task-agent-details-content :deep(.lease-authority__button),.task-agent-details-content :deep(.review-authority__actions .btn) { flex-shrink:0; white-space:nowrap; }
 .task-agent-details-content :deep(.lease-authority__tile),.task-agent-details-content :deep(.review-authority__tile),.task-dialog-sections :deep(.merge-readiness-signal) { padding:0; border:0; border-radius:0; background:transparent; }
 .task-dialog-links { display:flex; align-items:center; flex-wrap:wrap; gap:12px; }
 .task-dialog-links a { color:var(--blue); font-size:13px; overflow-wrap:anywhere; }
