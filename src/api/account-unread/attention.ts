@@ -23,11 +23,7 @@ import { getProjectById } from "../db/rooms.js";
 import { tasks as tasksTable } from "../db/schema.js";
 import { formatTaskId } from "../db/utils.js";
 import type { BoardIntent, Project } from "../db/types.js";
-import {
-  resolveProjectRepoRoomAccessDecision,
-  resolveRoomMembershipDecision,
-  type RoomAccessAccount,
-} from "../rooms/access.js";
+import { decideRoomRead, type RoomAccessAccount } from "../rooms/access-decision.js";
 import type { KnowledgeRecord } from "../../../shared/room-knowledge.mjs";
 
 const BOARD_INTENT_PENDING_TTL_MS = 24 * 60 * 60 * 1000;
@@ -90,9 +86,7 @@ export async function getAttentionTasksForRooms(roomIds: readonly string[]): Pro
 
 /** The decision `requireGitRoomParticipant` makes for a signed-in person. */
 export async function accountMayReadRoom(project: Project, account: RoomAccessAccount): Promise<boolean> {
-  const access = await resolveProjectRepoRoomAccessDecision({ project, sessionAccount: account });
-  if (!access.isRepoBacked) return (await resolveRoomMembershipDecision(project, account)).kind === "allow";
-  return access.decision.kind === "allow";
+  return (await decideRoomRead({ project, principal: { kind: "person", account } })).kind === "allow";
 }
 
 const defaultDeps: AccountAttentionDeps = {

@@ -4,7 +4,6 @@ import { canNotifyConversation } from "../conversations/store.js";
 
 import { getProjectById } from "../db.js";
 import { pool } from "../db/client.js";
-import { isProjectRoomMember, resolveProjectRepoRoomAccessDecision } from "../rooms/access.js";
 import {
   ApnsClient,
   readApnsCredentials,
@@ -365,8 +364,7 @@ async function recordJoinRequestRetired(notification: ClaimedNotification, worke
 
 export function authorizeReminderAccess(accountId: string, roomId: string): Promise<DesktopPushAuthorizationDecision> {
   return authorizeDesktopPushNotification({ accountId, roomId }, {
-    getProject: getProjectById, getAccount: getPushDeliveryAccount, resolveAccess: resolveProjectRepoRoomAccessDecision,
-    isRoomMember: isProjectRoomMember,
+    getProject: getProjectById, getAccount: getPushDeliveryAccount,
   });
 }
 

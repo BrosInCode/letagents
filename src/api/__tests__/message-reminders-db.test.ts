@@ -127,8 +127,8 @@ test("access revoked at delivery emits no preview and redacts only that account'
   const claimed=await worker!.claimReminderDeliveries("w"), sent: ApnsNotificationInput[]=[];
   const denied=claimed.find(r=>r.account_id===input.accountId)!;
   await worker!.deliverNotification(client(sent),"w",denied,()=>authorizeDesktopPushNotification({accountId:input.accountId,roomId:input.roomId},{
-    getProject:async()=>({id:input.roomId} as any),getAccount:async()=>({account_id:input.accountId,provider:"github",login:"one",provider_access_token:"test"}),isRoomMember:async()=>false,
-    resolveAccess:async({freshCollaboratorCheck})=>{assert.equal(freshCollaboratorCheck,true);return {isRepoBacked:true,decision:{kind:"deny"}} as any;},
+    getProject:async()=>({id:input.roomId} as any),getAccount:async()=>({account_id:input.accountId,provider:"github",login:"one",provider_access_token:"test"}),
+    decideRead:async({freshness})=>{assert.equal(freshness,"fresh");return {kind:"repo_access_denied",target:{kind:"repo"},repo:{kind:"private_repo_no_access"}} as any;},
   }));
   assert.equal(sent.length,0);
   const deliveries=await rows("desktop_reminder_deliveries"); assert.equal(deliveries.find(r=>r.id===denied.id).state,"dead");

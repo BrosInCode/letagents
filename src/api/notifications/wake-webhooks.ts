@@ -30,7 +30,6 @@ import { db, pool } from "../db/client.js";
 import { isWakeRuleCredentialLive, retireWakeRulesForCredential } from "../db/wake-rules.js";
 import { getMcpEventMessage } from "../db/wake-rules-mcp-events.js";
 import { loadConnectorCipher, type ConnectorCipher, type EncryptedCredentials } from "../connectors/crypto.js";
-import { isProjectRoomMember, resolveProjectRepoRoomAccessDecision } from "../rooms/access.js";
 import { queueWakeRuleInvalidation } from "../server/events.js";
 import {
   composeWakeEmail,
@@ -123,8 +122,7 @@ export function defaultWakeWebhookDeps(): WakeWebhookDeliveryDeps {
   return {
     cipher: loadConnectorCipher(),
     authorize: (accountId, roomId) => authorizeDesktopPushNotification({ accountId, roomId }, {
-      getProject: getProjectById, getAccount: getPushDeliveryAccount, resolveAccess: resolveProjectRepoRoomAccessDecision,
-      isRoomMember: isProjectRoomMember,
+      getProject: getProjectById, getAccount: getPushDeliveryAccount,
     }),
     credentialLive: isWakeRuleCredentialLive,
     send: (input) => postWakeWebhook(input),
