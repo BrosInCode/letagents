@@ -357,7 +357,10 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     // One room switch asks three times in one task (the snapshot barrier, the
     // selected-room watcher and the newest-message watcher), all for the same
     // room and cursor. Main answers each with the same stream, so join the
-    // start already in flight instead of sending the same IPC again.
+    // start already in flight instead of sending the same IPC again. Only
+    // calls in the same task join: the entry ends with a microtask. A stream
+    // stopped from elsewhere (for example a fork to a local room) takes an IPC
+    // round trip, so the next start after it always sends its own IPC.
     const startKey = `${normalizeRoomIdentifier(roomIdentifier)}\n${latestMessageId ?? ""}`;
     if (streamStartInFlight?.key === startKey && streamStartInFlight.context === liveMetadataRefreshContext) {
       return streamStartInFlight.promise;
@@ -368,7 +371,7 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     const forget = () => {
       if (streamStartInFlight === inFlight) streamStartInFlight = null;
     };
-    start.then(forget, forget);
+    queueMicrotask(forget);
     return start;
   }
 

@@ -732,6 +732,31 @@ describe("useDesktopRoomLiveSync full-refresh path", () => {
     assert.deepEqual(starts, [[ROOM, null], [ROOM, "msg_3"], [ROOM, null]]);
   });
 
+  it("sends a new stream start after a stop made outside live sync, even while the old start is in flight", async () => {
+    const harness = createHarness();
+    const ready = deferred<void>();
+    harness.nextStreamReady = ready.promise;
+    const room = harness.windowBridge.letagentsDesktop.room;
+    const startStream = room.startStream;
+    const starts: string[] = [];
+    room.startStream = async (roomIdentifier: string) => {
+      starts.push(roomIdentifier);
+      return startStream(roomIdentifier);
+    };
+    harness.currentRoomId.value = ROOM;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const first = harness.sync.syncSelectedRoomStream(ROOM, null);
+      // A fork to a local room stops the stream directly; that takes an IPC round trip.
+      await flush();
+      const second = harness.sync.syncSelectedRoomStream(ROOM, null);
+      ready.resolve();
+      await Promise.all([first, second]);
+    });
+
+    assert.deepEqual(starts, [ROOM, ROOM]);
+  });
+
   it("does not reinstall polling from a delayed stream start after a same-room stop and return", async () => {
     const harness = createHarness();
     const old = deferred<void>();

@@ -121,6 +121,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   let streamBufferOverflow = false;
   const degradedStreamRooms = new Map<string, number>();
   const pendingVerifiedRecoveries = new Map<string, number>();
+  // Recoveries not queued because the barrier read had not started yet.
+  const skippedVerifiedRecoveries = new Map<string, number>();
   const pendingDeliveryRepairs = new Map<string, PendingDeliveryRepairState>();
   // The barrier token whose stream start is still awaited: its read has not
   // started yet, so every open the stream reports now precedes that read.
@@ -389,6 +391,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       }
       await refreshSelectedSnapshot(nextRootRoomSnapshot);
     } finally {
+      queueSkippedRecoveryAfterFailedRead(streamReconcileRoom, rootBarrierToken);
       if (streamReconcileRoom) finishRoomSnapshotBarrier(streamReconcileRoom, rootBarrierToken);
       options.loading.value = false;
     }
@@ -494,8 +497,17 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
    * second call joins the first (which stays the current request) instead of
    * reading the room again. A call in a later task, or for another entry,
    * room, root snapshot object or session, runs on its own.
+   *
+   * The join entry ends with a microtask queued by the first call. The
+   * watcher's flush was queued earlier (when reconcileActiveEntry changed the
+   * entry), so it still joins; nothing from a later task can. A caller that
+   * needs data newer than a read already in flight passes `fresh` and never
+   * joins.
    */
-  function refreshSelectedSnapshot(baseRootSnapshot: DesktopRoomSnapshot | null = options.rootRoomSnapshot.value): Promise<void> {
+  function refreshSelectedSnapshot(
+    baseRootSnapshot: DesktopRoomSnapshot | null = options.rootRoomSnapshot.value,
+    { fresh = false }: { fresh?: boolean } = {},
+  ): Promise<void> {
     const entry = options.activeEntry.value;
     const key = JSON.stringify([
       options.sessionGeneration.value,
@@ -505,7 +517,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       baseRootSnapshot ? options.resolveSelectedRoomIdentifier(baseRootSnapshot) : null,
     ]);
     const base = baseRootSnapshot ? toRaw(baseRootSnapshot) : null;
-    if (sameTaskSelectionRefresh?.key === key && sameTaskSelectionRefresh.base === base) {
+    if (!fresh && sameTaskSelectionRefresh?.key === key && sameTaskSelectionRefresh.base === base) {
       return sameTaskSelectionRefresh.promise;
     }
     const promise = refreshSelectedSnapshotNow(baseRootSnapshot);
@@ -514,7 +526,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     const forget = () => {
       if (sameTaskSelectionRefresh === current) sameTaskSelectionRefresh = null;
     };
-    setTimeout(forget, 0);
+    queueMicrotask(forget);
     promise.then(forget, forget);
     return promise;
   }
@@ -599,6 +611,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       queueRepairReadIfGapChanged(roomIdentifier, repairToken);
       finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
     } finally {
+      queueSkippedRecoveryAfterFailedRead(roomIdentifier, barrierToken);
       if (streamReconcileRoom === roomIdentifier) finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
       if (requestId === selectedSnapshotRequestId) selectedSnapshotLoading.value = false;
     }
@@ -613,6 +626,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     );
     if (!preserveDegradedStream) {
       pendingVerifiedRecoveries.clear();
+      skippedVerifiedRecoveries.clear();
       clearPendingDeliveryRepairs();
       degradedStreamRooms.clear();
     }
@@ -648,8 +662,30 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   function queueRepairReadIfGapChanged(roomIdentifier: string, tokenAtReadStart: number | null): void {
     const roomKey = normalizeRoomIdentifier(roomIdentifier);
     if (!roomKey || normalizeRoomIdentifier(activeStreamRoom) !== roomKey) return;
+    // This read completed after the boundary whose recovery was skipped.
+    skippedVerifiedRecoveries.delete(roomKey);
     const pendingToken = pendingDeliveryRepairs.get(roomKey)?.token;
     if (pendingToken === undefined || pendingToken === tokenAtReadStart) return;
+    pendingVerifiedRecoveries.set(roomKey, activeStreamToken);
+  }
+
+  /**
+   * A barrier read that did not complete (error, timeout, or dropped) while
+   * its room is still the stream's room: queue the recovery read that was
+   * skipped because this read was expected to cover it. Call before the
+   * barrier is released; the release then runs exactly one read.
+   */
+  function queueSkippedRecoveryAfterFailedRead(roomIdentifier: string | null, barrierToken: number | null): void {
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    if (
+      !roomKey
+      || barrierToken === null
+      || barrierToken !== streamReconcileGeneration
+      || normalizeRoomIdentifier(streamReconcileRoom) !== roomKey
+      || normalizeRoomIdentifier(activeStreamRoom) !== roomKey
+      || skippedVerifiedRecoveries.get(roomKey) !== activeStreamToken
+    ) return;
+    skippedVerifiedRecoveries.delete(roomKey);
     pendingVerifiedRecoveries.set(roomKey, activeStreamToken);
   }
 
@@ -663,6 +699,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       resetBufferedStreamEvents();
       degradedStreamRooms.clear();
       pendingVerifiedRecoveries.clear();
+      skippedVerifiedRecoveries.clear();
       clearPendingDeliveryRepairs();
       await options.syncRoomStream(null);
       return;
@@ -676,6 +713,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       resetBufferedStreamEvents();
       degradedStreamRooms.clear();
       pendingVerifiedRecoveries.clear();
+      skippedVerifiedRecoveries.clear();
       clearPendingDeliveryRepairs();
     }
     await options.syncRoomStream(roomIdentifier);
@@ -790,8 +828,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         // that read comes after this verified boundary and already covers it.
         // Main sends a verified gap and then a verified gap:false boundary in
         // one handshake; queueing a recovery here read the room twice.
+        // The skipped recovery is kept: if that read then fails, it is the
+        // only retry (queueSkippedRecoveryAfterFailedRead).
         if (barrierAwaitingStream !== streamReconcileGeneration) {
           pendingVerifiedRecoveries.set(roomKey, activeStreamToken);
+        } else {
+          skippedVerifiedRecoveries.set(roomKey, activeStreamToken);
         }
         return;
       }
@@ -932,6 +974,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (roomKey) {
         degradedStreamRooms.delete(roomKey);
         pendingVerifiedRecoveries.delete(roomKey);
+        skippedVerifiedRecoveries.delete(roomKey);
       }
     } finally {
       if (generation === streamReconcileGeneration) {
@@ -964,7 +1007,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   }
 
   function scheduleSelectedSnapshotRefresh(): void {
-    void refreshSelectedSnapshot().catch(() => undefined);
+    // An explicit room refresh wants data newer than any read in flight.
+    void refreshSelectedSnapshot(options.rootRoomSnapshot.value, { fresh: true }).catch(() => undefined);
   }
 
   function handleRefreshRoom(snapshot?: DesktopRoomSnapshot): void {
