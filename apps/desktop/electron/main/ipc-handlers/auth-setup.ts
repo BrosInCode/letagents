@@ -97,7 +97,13 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
       clearJoinedRoomInfoCache();
       clearInlineHtmlDemoCache();
       await unregisterDesktopNotificationAccount().catch(() => {});
-      await signOutDesktopAuth();
+      try {
+        await signOutDesktopAuth();
+      } finally {
+        // A room join that started while the account was unregistered still used
+        // the old token: drop its answer, also when sign-out fails.
+        clearJoinedRoomInfoCache();
+      }
       // Live sockets were opened with the old sign-in.
       reconnectLiveDemos();
       await refreshInstalledLetAgentsMcpServerAuth().catch(() => {});

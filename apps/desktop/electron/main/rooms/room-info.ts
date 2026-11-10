@@ -46,6 +46,29 @@ export type RoomInfoPayload = {
 export const JOINED_ROOM_INFO_TTL_MS = 5 * 60 * 1000;
 export const JOINED_ROOM_INFO_MAX_ENTRIES = 500;
 const joinedRoomInfoCache = new Map<string, { payload: RoomInfoPayload; storedAt: number }>();
+/**
+ * Joins in flight, shared by callers that miss the cache at the same moment.
+ *
+ * Problem: on a first visit several handlers ask for the room at once, and each
+ * sent its own `POST /join` (slow for a repo room, and each one counts against
+ * the server's join rate limit).
+ * Rule: one request per cache key and `create` variant. Every caller gets its
+ * result or its error. The entry goes away when the request settles, so an error
+ * is never reused.
+ * Invalidation: `clearJoinedRoomInfoCache` and `forgetJoinedRoomInfo` raise one
+ * generation and drop every pending join from this map. A join started before
+ * that is not shared with later callers, and its answer is not stored; its own
+ * callers still get it. This does not need to know a room's aliases (a join code
+ * or a focus locator may be pending for a room forgotten by its id). The cost is
+ * an extra join for rooms that were pending when any room was forgotten (rare).
+ */
+const joinedRoomInfoInFlight = new Map<string, Promise<RoomInfoPayload>>();
+let joinedRoomInfoGeneration = 0;
+
+function invalidatePendingJoinedRoomInfo(): void {
+  joinedRoomInfoGeneration += 1;
+  joinedRoomInfoInFlight.clear();
+}
 
 export function createRoomAccess(
   input: Partial<DesktopRoomAccess>,
@@ -101,6 +124,9 @@ export function forgetJoinedRoomInfo(roomIdentifier: string | null | undefined):
   if (!key) return;
   const remembered = joinedRoomInfoCache.get(key)?.payload;
   const related = new Set([key, ...(remembered ? roomInfoCacheKeys(key, remembered).map(roomInfoCacheKey) : [])]);
+  // A join already on its way, under any alias, may answer for access the person
+  // no longer has: later checks must not share it, and its answer is not stored.
+  invalidatePendingJoinedRoomInfo();
   // Every alias of the room (its code, a branch name) points at the same room id.
   for (const [cachedKey, entry] of joinedRoomInfoCache) {
     if (related.has(cachedKey) || related.has(roomInfoCacheKey(entry.payload.room_id))) joinedRoomInfoCache.delete(cachedKey);
@@ -143,14 +169,34 @@ export async function getJoinedRoomInfo(
     joinedRoomInfoCache.delete(cacheKey);
   }
 
-  const joined = await apiFetch<RoomInfoPayload>(
-    `/rooms/${encodeURIComponent(roomIdentifier)}/join${options?.create === false ? "?create=false" : ""}`,
-    {
-      method: "POST",
-    },
-  );
-  rememberJoinedRoomInfo(roomIdentifier, joined);
-  return joined;
+  const noCreate = options?.create === false;
+  const flightKey = cacheKey ? `${cacheKey}\n${noCreate ? "no-create" : "create"}` : null;
+  const shared = flightKey ? joinedRoomInfoInFlight.get(flightKey) : undefined;
+  if (shared) return shared;
+
+  const generation = joinedRoomInfoGeneration;
+  const flight = (async () => {
+    const joined = await apiFetch<RoomInfoPayload>(
+      `/rooms/${encodeURIComponent(roomIdentifier)}/join${noCreate ? "?create=false" : ""}`,
+      {
+        method: "POST",
+      },
+    );
+    // After sign-out or an account change the answer belongs to the old account;
+    // after a forget it may describe access the person lost.
+    if (generation === joinedRoomInfoGeneration) rememberJoinedRoomInfo(roomIdentifier, joined);
+    return joined;
+  })();
+  if (flightKey) {
+    joinedRoomInfoInFlight.set(flightKey, flight);
+    // Registered before any caller awaits, so it runs first: a caller that sees
+    // the outcome and asks again sends a new join.
+    const settle = () => {
+      if (joinedRoomInfoInFlight.get(flightKey) === flight) joinedRoomInfoInFlight.delete(flightKey);
+    };
+    flight.then(settle, settle);
+  }
+  return flight;
 }
 
 export function mapDesktopRoomInfoPayload(
@@ -184,6 +230,7 @@ export function mapDesktopRoomInfoPayload(
 }
 
 export function clearJoinedRoomInfoCache(): void {
+  invalidatePendingJoinedRoomInfo();
   joinedRoomInfoCache.clear();
 }
 
