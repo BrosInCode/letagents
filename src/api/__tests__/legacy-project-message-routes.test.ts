@@ -409,9 +409,12 @@ test("one legacy broker gap coalesces a thousand poll catch-ups", async () => {
     }>((resolve) => {
       resolveBody = resolve;
     });
+    // Behaviour change (legacy now equals modern): an app session is a person
+    // and is never tracked as an agent delivery, so this worker poll uses an
+    // owner token, as the MCP client does.
     const req = {
       params: { id: "room_1" }, query: { after: "msg_6", timeout: "60000" },
-      headers: {}, authKind: "session", sessionAccount: { account_id: "acct_1" },
+      headers: {}, authKind: "owner_token", sessionAccount: { account_id: "acct_1" },
       get() { return undefined; },
       on: requestEvents.on.bind(requestEvents),
       off: requestEvents.off.bind(requestEvents),
@@ -833,7 +836,28 @@ test("a legacy poll answers a routed update of the cursor row with the legacy bo
   deps.roomEventBroker.close();
 });
 
-test("a legacy poll opened after a message joins an older shared first read and misses it", async () => {
+test("a legacy poll answers a routed update of an older row with the caller's cursor", async () => {
+  // Behaviour change (legacy now equals modern): before, the body was
+  // { project_id, messages: [msg_3], has_more: false } and a client that
+  // takes the last message id as its cursor moved back from msg_4 to msg_3.
+  const store = legacyHeldReadStore();
+  const { deps, open } = legacyPollHarness(store);
+  const poll = open("msg_4");
+  await ticks(1);
+  deps.messageEvents.emit("message:routed", { projectId: "room_1", message: store.row(3) });
+  await store.releaseReads();
+  const { at: _at, ...body } = await poll.body as { at: number } & Record<string, unknown>;
+  await poll.request;
+  assert.deepEqual(Object.keys(body), ["project_id", "messages", "has_more", "last_observed_message_id"]);
+  assert.deepEqual((body.messages as Array<{ id: string }>).map((message) => message.id), ["msg_3"]);
+  assert.equal(body.last_observed_message_id, "msg_4");
+  deps.roomEventBroker.close();
+});
+
+test("a legacy poll opened after a message finds it with its own first read", async () => {
+  // Behaviour change (legacy now equals modern): the first read of each poll
+  // is its own read, started after the poll subscribed. It never joins an
+  // older shared read that began before the message was written.
   const store = legacyHeldReadStore();
   const { deps, open } = legacyPollHarness(store);
   // A's first read starts before msg_5 is written.
@@ -849,8 +873,29 @@ test("a legacy poll opened after a message joins an older shared first read and 
   const [firstBody, secondBody] = await Promise.all([first.body, second.body]);
   await Promise.all([first.request, second.request]);
   assert.deepEqual((firstBody.messages ?? []).map((message) => message.id), ["msg_5"]);
-  assert.deepEqual((secondBody.messages ?? []).map((message) => message.id), [],
-    "B's first read was A's read, which began before msg_5");
-  assert.ok(secondBody.at >= 900, `B waited for its timeout, answered after ${secondBody.at} ms`);
+  assert.deepEqual((secondBody.messages ?? []).map((message) => message.id), ["msg_5"]);
+  assert.ok(secondBody.at < 500, `B answered after ${secondBody.at} ms`);
   deps.roomEventBroker.close();
+});
+
+test("a legacy poll or stream never tracks an app session as an agent delivery", async () => {
+  // Behaviour change (legacy now equals modern): X-Agent-Session headers on
+  // an app session are ignored, as on the room routes.
+  let deliveries = 0;
+  const harness = legacyRouteHarness({
+    beginRoomAgentDelivery: async () => { deliveries += 1; return null; },
+    getMessagesAfter: async () => ({ messages: [], has_more: false }),
+  });
+  for (const authKind of ["session", "owner_token"]) {
+    for (const route of ["/projects/:id/messages/poll", "/projects/:id/messages/stream"]) {
+      const res = harness.sseResponse();
+      const req = { ...harness.request({ after: "msg_1", timeout: "1" }), authKind };
+      await harness.handlers.get(route)!(req, res);
+      await settle();
+      req.emit("close");
+    }
+  }
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(deliveries, 2, "only the owner-token poll and stream begin a delivery");
+  harness.deps.roomEventBroker.close();
 });

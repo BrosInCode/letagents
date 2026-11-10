@@ -222,11 +222,13 @@ test("legacy send returns the created message without a room id", { skip }, asyn
 
 test("legacy send threading and client message ids", { skip }, async () => {
   const root = await send(namedRoomId, "thread root");
+  // Behaviour change (legacy now equals modern): the legacy send honours
+  // thread_root_id and client_message_id, which the MCP client sends.
   const reply = await send(namedRoomId, "thread reply", { thread_root_id: root.id });
-  assert.equal(reply.thread_root_id, reply.id, "the legacy send ignores thread_root_id");
+  assert.equal(reply.thread_root_id, root.id, "the reply joins the root's thread");
   const firstCopy = await send(namedRoomId, "deduplicated?", { client_message_id: "legacy-contract-client-id" });
   const secondCopy = await send(namedRoomId, "deduplicated?", { client_message_id: "legacy-contract-client-id" });
-  assert.notEqual(firstCopy.id, secondCopy.id, "the legacy send ignores client_message_id");
+  assert.equal(secondCopy.id, firstCopy.id, "a retried send returns the first message");
 });
 
 test("legacy send rejects a missing text, a non-string text and an unknown prompt kind with 400", { skip }, async () => {
@@ -239,7 +241,8 @@ test("legacy send rejects a missing text, a non-string text and an unknown promp
   assert.deepEqual(blank.body, { error: "sender and text or attachments are required" });
   const numeric = await api(route, { method: "POST", body: { sender: "Legacy Member", text: 7 } });
   assert.equal(numeric.status, 400);
-  assert.deepEqual(numeric.body, { error: "sender and text or attachments are required" });
+  // Behaviour change (legacy now equals modern): the error names the field.
+  assert.deepEqual(numeric.body, { error: "text must be a string" });
   const kind = await api(route, { method: "POST", body: { sender: "Legacy Member", text: "x", agent_prompt_kind: "join" } });
   assert.equal(kind.status, 400);
   assert.deepEqual(kind.body, { error: "agent_prompt_kind must be one of: inline, auto" });
@@ -345,15 +348,19 @@ test("legacy poll backlog and timeout bodies (cursor fields)", { skip }, async (
   for (let index = 1; index <= 3; index += 1) sent.push((await send(room.id, `cursor ${index}`)).id);
   const base = `/projects/${room.id}/messages/poll`;
 
+  // Behaviour change (legacy now equals modern): the first page comes from
+  // this poll's own read, so it carries no last_observed_message_id; the
+  // last message id is the cursor.
   const backlog = await api(`${base}?after=${sent[0]}&timeout=1000`);
   assert.equal(backlog.status, 200);
   assert.deepEqual(ids(backlog.body), sent.slice(1));
-  assert.deepEqual(Object.keys(backlog.body), ["project_id", "messages", "has_more", "last_observed_message_id"]);
-  assert.equal(backlog.body.last_observed_message_id, sent[2]);
+  assert.deepEqual(Object.keys(backlog.body), ["project_id", "messages", "has_more"]);
 
+  // Behaviour change (legacy now equals modern): an empty page at the
+  // timeout reports the caller's own cursor as last_observed_message_id.
   const timedOut = await api(`${base}?after=${sent[2]}&timeout=50`);
   assert.equal(timedOut.status, 200);
-  assert.deepEqual(timedOut.body, { project_id: room.id, messages: [], has_more: false });
+  assert.deepEqual(timedOut.body, { project_id: room.id, messages: [], has_more: false, last_observed_message_id: sent[2] });
 });
 
 test("legacy SSE stream: headers, room_sync frame, message frames and replay", { skip }, async () => {
@@ -416,9 +423,13 @@ test("legacy SSE stream: headers, room_sync frame, message frames and replay", {
   assert.deepEqual(Object.keys(frameData(unknown.frames[0]!)), ["project_id", "event_cursor", "gap"]);
   assert.equal(frameData(unknown.frames[0]!).gap, true);
 
-  // The legacy stream ignores an `after` message cursor.
+  // Behaviour change (legacy now equals modern): room_sync is written after
+  // the database checkpoint read, so an `after` message cursor that does not
+  // exist in the room is reported as a gap.
   const missingAfter = await readSse(`${route}?after=msg_999999`, { until: (frames) => frames.length >= 1 });
   const missingAfterSync = frameData(missingAfter.frames[0]!);
   assert.deepEqual(Object.keys(missingAfterSync), ["project_id", "event_cursor", "gap"]);
-  assert.equal(missingAfterSync.gap, false);
+  assert.equal(missingAfterSync.gap, true);
+  const existingAfter = await readSse(`${route}?after=${second!.id}`, { until: (frames) => frames.length >= 1 });
+  assert.equal(frameData(existingAfter.frames[0]!).gap, false);
 });
