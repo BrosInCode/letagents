@@ -17,6 +17,19 @@ export function useAccountActivity(options: { authenticated: Ref<boolean>; roomI
    * work reads it. Keyed by the server's room id.
    */
   const tasksChangedAt = ref<Record<string, string | null>>({});
+  /** Moves when the account records reads anywhere; kept apart so it re-reads only the unread counts. */
+  const readRevision = ref(0);
+  /** The read behind the latest revision (room and newest message), so a device can tell its own report's echo. */
+  const lastRead = ref<{ roomId: string; lastMessageId: string | null } | null>(null);
+  /**
+   * Every read since the consumer last looked, in order: two frames in one
+   * tick both arrive here, though `readRevision` moves once for Vue. A gap in
+   * revisions (a missed frame) is an unknown read (null).
+   */
+  const readQueue: Array<{ roomId: string; lastMessageId: string | null } | null> = [];
+  function takeReads(): Array<{ roomId: string; lastMessageId: string | null } | null> {
+    return readQueue.splice(0, readQueue.length);
+  }
   const index = computed(() => indexAccountActivity(state.value));
   const connected = computed(() => state.value.connected);
   const room = desktopIpc.room;
@@ -32,6 +45,14 @@ export function useAccountActivity(options: { authenticated: Ref<boolean>; roomI
     // Equal data keeps its references, so a frame that only moved a stamp changes nothing here.
     state.value = reuseUnchanged(toRaw(state.value), { connected: next.connected, rooms });
     tasksChangedAt.value = reuseUnchanged(toRaw(tasksChangedAt.value), stamps);
+    const revision = next.readRevision ?? 0;
+    if (revision !== readRevision.value) {
+      const missed = revision > readRevision.value ? revision - readRevision.value - 1 : 0;
+      for (let index = 0; index < missed && readQueue.length < 100; index += 1) readQueue.push(null);
+      if (readQueue.length < 100) readQueue.push(next.lastRead ?? null);
+      lastRead.value = next.lastRead ?? null;
+      readRevision.value = revision;
+    }
   }
 
   const unsubscribe = room?.onAccountActivity?.(accept) ?? null;
@@ -61,5 +82,5 @@ export function useAccountActivity(options: { authenticated: Ref<boolean>; roomI
     unsubscribe?.();
   });
 
-  return { state, tasksChangedAt, index, connected };
+  return { state, tasksChangedAt, readRevision, lastRead, takeReads, index, connected };
 }

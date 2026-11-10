@@ -6,7 +6,8 @@
  * 1. A room's read point is the highest message number any of the account's
  *    read ranges covers in that room, from any device or the web.
  * 2. A message after the read point counts when a person can see it in the
- *    room's history: not a blank automatic prompt, not a message hidden from
+ *    room's history: not a blank automatic prompt, not an agent's `[status]`
+ *    post (the room view hides both), not a message hidden from
  *    the room (rental visibility), and not the account's own message.
  * 3. GitHub event messages are counted apart (`github_unread_count`): a
  *    client shows them only where its person chose to see GitHub events in
@@ -42,7 +43,9 @@ const CHECK_CONCLUSION_SQL = String.raw`lower(substring(
     '^\s+|\s+$', '', 'g')
   from '(?i)^Check "[^"]+"(?: \([^)]+\))?\s+([a-z_]+)\s+in\s+\S+(?:\s+linked to\s+task_\d+)?$'))`;
 
-const GITHUB_SQL = `(m.source = 'github' OR lower(m.sender) = 'github')`;
+// Mirrors the room view's hidden messages (apps/desktop/.../room-shell/messages.ts isHiddenChatMessage).
+// COALESCE: a message with no source is not a GitHub event (NULL must not drop it from either count).
+const GITHUB_SQL = `COALESCE(m.source = 'github' OR lower(m.sender) = 'github', FALSE)`;
 
 /** The read point and both counts for each room, in one statement. */
 export async function loadAccountRoomUnread(input: {
@@ -57,6 +60,8 @@ export async function loadAccountRoomUnread(input: {
   const counted = `
     m.room_id = c.room_id AND m.number > c.read_number
     AND (m.agent_prompt_kind IS NULL OR m.agent_prompt_kind <> 'auto' OR BTRIM(m.text) <> '')
+    -- The room view never shows an agent's [status] post (the desktop's isHiddenChatMessage).
+    AND NOT COALESCE(m.source = 'agent' AND m.text ~* '^\\[status\\]', FALSE)
     AND (m.visibility IS NULL OR m.visibility = 'rental_visible')
     AND NOT COALESCE((m.publisher_account_id = $2 AND m.publisher_agent_key IS NULL)
              OR (m.source = 'browser' AND lower(btrim(m.sender)) = ANY($3::text[])), FALSE)`;

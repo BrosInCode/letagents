@@ -301,6 +301,18 @@ export function useAppSidebarEntries(context: unknown) {
       return marker ? [[key, marker]] : [];
     }))),
     storageMode: computed(() => JSON.stringify([chatStorageSettings.value, sidebarRoomIdentifiers().map((id) => [id, roomHistoryMode(id)])])),
+    historyMode: (identifier) => roomHistoryMode(identifier) === "local" ? "local" : "cloud",
+    // The activity feed is set up after the sidebar; read it lazily.
+    readRevision: () => (app as { accountActivity?: { readRevision: { value: number } } }).accountActivity?.readRevision.value ?? 0,
+    confirmedReads: app.confirmedReads,
+    lastRead: () => (app as { accountActivity?: { lastRead: { value: { roomId: string; lastMessageId: string | null } | null } } }).accountActivity?.lastRead.value ?? null,
+    takeReads: () => (app as { accountActivity?: { takeReads(): Array<{ roomId: string; lastMessageId: string | null } | null> } }).accountActivity?.takeReads() ?? [],
+    // Read markers kept before this version, by cloud room key (set up after the sidebar; read lazily).
+    readingRoom: () => {
+      const reader = app as { activeEntry?: { value: { type: string; roomIdentifier?: string } }; activeRoomIsBeingRead?: () => boolean };
+      return reader.activeEntry?.value.type === "room" && reader.activeRoomIsBeingRead?.() ? reader.activeEntry.value.roomIdentifier ?? null : null;
+    },
+    legacyReadMarkers: () => (app as { legacyReadMarkers?: { value: Record<string, string> } }).legacyReadMarkers?.value ?? {},
   });
   Object.assign(app, { unreadRoomCounts, refreshUnreadCounts });
 

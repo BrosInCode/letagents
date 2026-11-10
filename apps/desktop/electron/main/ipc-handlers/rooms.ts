@@ -162,6 +162,7 @@ import {
 } from "../rooms.js";
 import { desktopSmokeBoardGovernance, isDesktopSmokeCheck } from "../smoke.js";
 import { liveSupervisorStateEntries } from "../supervisor-daemon.js";
+import { getDesktopAccountUnread, reportDesktopRoomRead } from "../rooms/account-unread.js";
 
 export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:room:needs-you", async (_event, includeUpdates) => {
@@ -171,6 +172,9 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   });
   targetIpcMain.handle("desktop:room:needs-you-room", (_event, room, includeBoardIntents) =>
     getDesktopNeedsYouRoom(room, includeBoardIntents === true));
+  targetIpcMain.handle("desktop:room:account-unread", () => getDesktopAccountUnread());
+  targetIpcMain.handle("desktop:room:report-read", (_event, room: string, messageId: string, fromMessageId?: string | null) =>
+    reportDesktopRoomRead(String(room ?? ""), String(messageId ?? ""), typeof fromMessageId === "string" ? fromMessageId : null));
   targetIpcMain.handle("desktop:room:knowledge", (_event, room, type) => getDesktopKnowledge(room, type));
   targetIpcMain.handle("desktop:room:knowledge-create", (_event, room, type, input) => createDesktopKnowledge(room, type, input));
   targetIpcMain.handle("desktop:room:knowledge-revise", (_event, room, type, id, input) => reviseDesktopKnowledge(room, type, id, input));

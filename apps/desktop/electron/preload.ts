@@ -118,6 +118,8 @@ const api: DesktopApi = {
   room: {
     getNeedsYou: (includeUpdates = false) => ipcRenderer.invoke("desktop:room:needs-you", includeUpdates),
     getNeedsYouRoom: (room, includeBoardIntents) => ipcRenderer.invoke("desktop:room:needs-you-room", room, includeBoardIntents),
+    getAccountUnread: () => ipcRenderer.invoke("desktop:room:account-unread"),
+    reportRoomRead: (room, messageId, fromMessageId) => ipcRenderer.invoke("desktop:room:report-read", room, messageId, fromMessageId ?? null),
     getKnowledge: (room, type) => ipcRenderer.invoke("desktop:room:knowledge", room, type),
     createKnowledge: (room, type, input) => ipcRenderer.invoke("desktop:room:knowledge-create", room, type, input),
     reviseKnowledge: (room, type, id, input) => ipcRenderer.invoke("desktop:room:knowledge-revise", room, type, id, input),

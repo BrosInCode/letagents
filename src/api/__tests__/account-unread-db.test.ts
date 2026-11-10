@@ -62,6 +62,11 @@ test("unread counts follow the account's read point and the desktop's rules", { 
   await send("emmy display", "own: my display name, an old message with no account");
   await send("Worker", "counted: my own agent", { source: "agent", account_id: me.id, publisher_agent_key: `${me.id}/worker` });
   await send("Worker", "", { source: "agent", agent_prompt_kind: "auto" }); // blank automatic prompt
+  await send("Worker", "[status] reading the diff", { source: "agent" }); // the room view hides status posts
+  await send("Worker", "[STATUS] still reading", { source: "agent" });
+  await send("Ada", "[status] is just how I start this line", { account_id: other.id }); // a person's text is shown
+  const noSource = await send("Ada", "a message stored with no source", { account_id: other.id });
+  await client!.pool.query("UPDATE messages SET source = NULL WHERE room_id = $1 AND number = $2", [room.id, num(noSource.id)]);
   await send("github", "Check \"build\" (GitHub Actions) success in BrosInCode/letagents https://github.com/x/y/runs/1", { source: "github" });
   await send("github", "check \"lint\" SKIPPED in BrosInCode/letagents linked to task_7", { source: "github" });
   await send("github", "Check \"test\" failure in BrosInCode/letagents https://github.com/x/y/runs/2", { source: "github" });
@@ -74,7 +79,7 @@ test("unread counts follow the account's read point and the desktop's rules", { 
   assert.equal(rows.length, 2);
   assert.deepEqual(byRoom.get(room.id), {
     room_id: room.id, read_message_id: first.id,
-    unread_count: 2, // another person, my own agent
+    unread_count: 4, // another person, my own agent, a person's line that starts like a status, a message with no source
     github_unread_count: 2, // the failed check and the pull request; passing and skipped checks never count
   });
   assert.deepEqual(byRoom.get(quiet.id), { room_id: quiet.id, read_message_id: null, unread_count: null, github_unread_count: null });

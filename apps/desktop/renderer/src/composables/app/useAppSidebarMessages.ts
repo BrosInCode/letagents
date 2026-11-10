@@ -1,5 +1,6 @@
 import { roomUnread } from "../roomUnread";
-import { computed, toRaw, watch } from "vue";
+import { computed, onScopeDispose, ref, toRaw, watch } from "vue";
+import { createRestoreGuard, createThrottledCheck, provenRoomRead, roomListReadState } from "../../domain/visible-room-read";
 import type { DesktopRoomLatestMessage } from "../../../../electron/ipc-types";
 import { reuseUnchanged } from "../../domain/reuse-unchanged";
 import type { ProjectGroup, RoomEntry } from "../../components/desktop/types";
@@ -35,6 +36,48 @@ export function useAppSidebarMessages(context: unknown) {
     accountRooms, authStatus, chatStorageSettings, readRoomMessageIds, selectedSnapshot,
     sessionGeneration, sidebarLatestMessages, sidebarMetadataRefresh, windowFocused, windowHidden,
   } = app;
+  /**
+   * Reads this device can prove, by room key (cloud rooms only): the newest
+   * message seen on screen in a focused window, or "Mark as read". Only these
+   * are reported to the server. The local read marker also moves on its own
+   * (a first-seen room's baseline, the end of the open room); those moves stay
+   * on this device.
+   */
+  const confirmedReads = ref<Record<string, string>>({});
+  watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id : null, () => { confirmedReads.value = {}; });
+  function confirmRead(roomIdentifier: string | null | undefined, messageId: string | null | undefined): void {
+    const key = roomReadKey(roomIdentifier);
+    if (!key || !messageId || !/^msg_[1-9]\d*$/.test(messageId) || roomHistoryMode(roomIdentifier) !== "cloud") return;
+    const previous = confirmedReads.value[key];
+    if (previous && Number(previous.slice(4)) >= Number(messageId.slice(4))) return;
+    confirmedReads.value = { ...confirmedReads.value, [key]: messageId };
+  }
+  /** The on-screen check runs at most this often while messages arrive, and once more after the last. */
+  const VISIBLE_READ_EVERY_MS = 250;
+  const scrollPositionFor = (room: string): unknown =>
+    (app as { chatScrollPositionForRoom?: (room: string) => unknown }).chatScrollPositionForRoom?.(room) ?? null;
+  const restoreGuard = createRestoreGuard(scrollPositionFor);
+  const activeRoom = () => app.activeEntry.value.type === "room" ? app.activeEntry.value.roomIdentifier : null;
+  function recordVisibleRead(): void {
+    restoreGuard.note(activeRoom());
+    const room = activeRoom();
+    if (!room || !activeRoomIsBeingRead() || restoreGuard.blocks(room)) return;
+    confirmRead(room, provenRoomRead(roomListReadState(), selectedSnapshot.value?.messages ?? []));
+  }
+  const visibleReadCheck = createThrottledCheck(recordVisibleRead, VISIBLE_READ_EVERY_MS);
+  const scheduleVisibleRead = () => visibleReadCheck.schedule();
+  if (typeof document !== "undefined") {
+    // Scrolling the room's message list down shows newer messages.
+    const onScroll = (event: Event) => {
+      if ((event.target as HTMLElement | null)?.dataset?.testid === "room-chat-list") scheduleVisibleRead();
+    };
+    document.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    onScopeDispose(() => {
+      document.removeEventListener("scroll", onScroll, { capture: true });
+      visibleReadCheck.dispose();
+    });
+  }
+
   async function refreshSidebarRoomMetadata(): Promise<void> {
     if (app.showFirstRunGate.value || !authStatus.value?.authenticated || sidebarMetadataRefresh.inFlight) return;
     sidebarMetadataRefresh.inFlight = true;
@@ -196,14 +239,18 @@ export function useAppSidebarMessages(context: unknown) {
   }
 
   function markActiveRoomRead(): void {
+    restoreGuard.note(activeRoom());
     if (app.activeEntry.value.type !== "room" || !activeRoomIsBeingRead()) return;
     markRoomEntryRead(app.activeEntry.value, false, selectedSnapshot.value?.messages.at(-1)?.id || null);
+    scheduleVisibleRead();
   }
 
   function markRoomEntryRead(entry: RoomEntry, explicit = false, latestMessageId = latestMessageIdForEntry(entry)): void {
     if (explicit) {
       const bookmark = roomUnread.get(entry.roomIdentifier);
       if (bookmark) roomUnread.clear(entry.roomIdentifier, bookmark.revision);
+      // "Mark as read" is the person's own word for the whole room.
+      confirmRead(entry.roomIdentifier, latestMessageId);
     }
     const result = markRoomRead(readRoomMessageIds.value, roomReadMarkerKey(entry.roomIdentifier, roomHistoryMode(entry.roomIdentifier)), latestMessageId);
     if (!result.changed) return;
@@ -215,7 +262,9 @@ export function useAppSidebarMessages(context: unknown) {
     roomHistoryMode, sidebarRoomIdentifiers, withRoomUnreadState, latestMessageIdForEntry,
     latestMessageAtForEntry, latestKnownMessageForEntry, latestMessageForEntry,
     selectedSnapshotMatchesEntry, seedReadMarkersForKnownRooms, projectChildRooms,
-    activeRoomIsBeingRead, markActiveRoomRead, markRoomEntryRead,
+    activeRoomIsBeingRead, markActiveRoomRead, markRoomEntryRead, confirmedReads,
+    /** Called synchronously on every switch of the open entry (useAppHistoryWatchers). */
+    noteOpenRoom: (room: string | null) => restoreGuard.note(room),
   };
 }
 
@@ -250,9 +299,16 @@ export function useAppReadMarkers(context: unknown) {
     authStatus, readRoomMessageIds, readRoomMessagesStorageKey, sidebarLatestMessages,
   } = app;
   let accountReadStorageKey: string | null = null;
+  /**
+   * The markers this device kept before it reported reads to the server,
+   * written once per account on the first start of this version (empty on a
+   * fresh install). They are never reported; they only lower a count.
+   */
+  const legacyReadMarkers = ref<Record<string, string>>({});
   watch(() => authStatus.value?.authenticated ? authStatus.value.account?.id : null, (accountId) => {
     accountReadStorageKey = accountId ? `${readRoomMessagesStorageKey}:${encodeURIComponent(accountId)}` : null;
     sidebarLatestMessages.value = {};
+    legacyReadMarkers.value = {};
     if (!accountReadStorageKey || !accountId) {
       readRoomMessageIds.value = {};
       return;
@@ -268,6 +324,13 @@ export function useAppReadMarkers(context: unknown) {
       }
     } catch { /* Storage failures must not prevent sign-in. */ }
     readRoomMessageIds.value = readStoredRoomMessageIds(window.localStorage, accountReadStorageKey);
+    // Before this start seeds any new room: what is stored now was kept by older versions.
+    const legacyKey = `${accountReadStorageKey}:before-server-reads`;
+    try {
+      const stored = window.localStorage.getItem(legacyKey);
+      if (stored === null) window.localStorage.setItem(legacyKey, JSON.stringify(readRoomMessageIds.value));
+      legacyReadMarkers.value = readStoredRoomMessageIds(window.localStorage, legacyKey);
+    } catch { /* Without storage no count is lowered. */ }
   }, { immediate: true, flush: "sync" });
 
   function rememberRoomMessageIds(): void {
@@ -278,7 +341,7 @@ export function useAppReadMarkers(context: unknown) {
     }
   }
   return {
-    rememberRoomMessageIds,
+    rememberRoomMessageIds, legacyReadMarkers,
   };
 }
 
@@ -296,4 +359,8 @@ export function useAppHistoryWatchers(context: unknown) {
 
   watch(() => activeEntry.value.type === "room" ? selectedRoomIdentifier.value : null,
     roomUnread.enter, { immediate: true, flush: "sync" });
+  // The read check must know a room was opened before the list restores its
+  // saved position (a return from the Inbox restores on the next tick).
+  watch(() => activeEntry.value.type === "room" ? activeEntry.value.roomIdentifier : null,
+    (room) => app.noteOpenRoom(room), { immediate: true, flush: "sync" });
 }
