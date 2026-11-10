@@ -115,7 +115,10 @@ test("a repository filter reads open issues with a token GitHub limits to that r
   assert.equal(issue.assignee_id, "31524469");
   assert.equal(issue.assignee_label, "EmmyMay");
   assert.equal(issue.url, "https://github.com/BrosInCode/letagents/issues/42");
-  assert.deepEqual(issue.payload, { repo: "brosincode/letagents", number: 42, state: "open", state_reason: null });
+  assert.deepEqual(issue.payload, {
+    repo: "brosincode/letagents", number: 42, state: "open", state_reason: null,
+    releaseFields: [{ id: "labels", name: "Label", values: [] }],
+  }, "an issue with no labels records an empty release field so a cleared label leaves the queue");
 
   const minted = fetch.calls.filter((call) => call.url.pathname.endsWith("/access_tokens"));
   assert.equal(minted.length, 1, "the scoped token is reused");
