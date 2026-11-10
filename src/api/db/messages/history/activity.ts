@@ -3,25 +3,11 @@ import { and, eq, sql } from "drizzle-orm";
 import { db } from "../../client.js";
 import { messages } from "../../schema.js";
 import type { RoomActivityActorCount } from "../../types.js";
-import { visibleMessageCondition } from "../visibility.js";
+import { readRoomMessageCountsBySender } from "./activity-counts.js";
 
 export async function getRoomMessageCountsBySender(roomId: string): Promise<RoomActivityActorCount[]> {
-  const rows = await db
-    .select({
-      actor_label: messages.sender,
-      count: sql<number>`COUNT(*)::int`,
-    })
-    .from(messages)
-    .where(and(
-      eq(messages.room_id, roomId),
-      visibleMessageCondition(false),
-    ))
-    .groupBy(messages.sender);
-
-  return rows.map((row) => ({
-    actor_label: row.actor_label,
-    count: Number(row.count) || 0,
-  }));
+  // Incremental: a repeat request reads only messages added since the last one.
+  return readRoomMessageCountsBySender(roomId);
 }
 
 export async function hasMessagesFromSender(roomId: string, sender: string): Promise<boolean> {
