@@ -108,11 +108,15 @@ export async function processJevRoutingJob(job: ClaimedJevRoutingJob): Promise<v
   await completeJevRoutingJob(job, hint);
 }
 
-/** Milliseconds until the next unfinished job falls due (a retry or an expired lease), or null. */
+/**
+ * Milliseconds until the next unfinished job falls due (a retry or an expired
+ * lease), or null; zero or less for a job already due that the last claim did
+ * not take (it fell due after that claim's statement started).
+ */
 export async function nextJevRoutingJobDueInMs(): Promise<number | null> {
   const result = await db.execute(sql.raw(`
     SELECT ${DUE_IN_MS_SQL("min(available_at)")} AS due_in_ms
-      FROM jev_routing_jobs WHERE state <> 'completed' AND available_at > now()
+      FROM jev_routing_jobs WHERE state <> 'completed'
   `));
   return readDueInMs(result.rows[0] as { due_in_ms?: unknown } | undefined);
 }

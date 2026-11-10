@@ -4,6 +4,7 @@ import test, { mock } from "node:test";
 import {
   JOB_QUEUE_ERROR_RETRY_MS,
   JOB_QUEUE_FALLBACK_MS,
+  JOB_QUEUE_OVERDUE_RETRY_MS,
   startJobQueueLoop,
   wakeJobQueue,
   type JobQueuePass,
@@ -124,4 +125,37 @@ test("a failed pass retries after the error delay; a stopped loop never runs aga
   wakeJobQueue("jev_routing");
   await h.advance(10 * JOB_QUEUE_FALLBACK_MS);
   assert.equal(h.runs.length, 2);
+});
+
+test("a row already due that the pass did not take is tried again soon, then less often, never left for the fallback", async () => {
+  const h = harness([{ nextDueInMs: -3 }, { nextDueInMs: 0 }, { nextDueInMs: -1 }, { nextDueInMs: 1_000 }]);
+  await h.advance(0);
+  assert.deepEqual(h.runs, [0]);
+  // It fell due after the claim's statement started: tried again at once-ish.
+  await h.advance(JOB_QUEUE_OVERDUE_RETRY_MS);
+  assert.deepEqual(h.runs, [0, JOB_QUEUE_OVERDUE_RETRY_MS]);
+  // Still due and not taken (another process or a limit holds it): the wait doubles.
+  await h.advance(2 * JOB_QUEUE_OVERDUE_RETRY_MS);
+  assert.equal(h.runs.length, 3);
+  await h.advance(4 * JOB_QUEUE_OVERDUE_RETRY_MS - 1);
+  assert.equal(h.runs.length, 3);
+  await h.advance(1);
+  assert.equal(h.runs.length, 4);
+  // A future due time resets the backoff and is honoured exactly.
+  await h.advance(999);
+  assert.equal(h.runs.length, 4);
+  await h.advance(1);
+  assert.equal(h.runs.length, 5);
+  await h.loop.stop();
+});
+
+test("a row that stays due and untaken backs off to the fallback, never faster", async () => {
+  const results = Array.from({ length: 30 }, () => ({ nextDueInMs: 0 }));
+  const h = harness(results);
+  await h.advance(0);
+  for (let i = 0; i < 25; i++) await h.advance(JOB_QUEUE_FALLBACK_MS);
+  const gaps = h.runs.slice(1).map((at, index) => at - h.runs[index]!);
+  assert.ok(gaps.every((gap, index) => index === 0 || gap >= gaps[index - 1]!), "the waits never shrink");
+  assert.equal(Math.max(...gaps), JOB_QUEUE_FALLBACK_MS, "capped by the fallback");
+  await h.loop.stop();
 });

@@ -16,6 +16,12 @@ export type JobQueue = "jev_routing" | "desktop_push" | "wake_delivery";
 export const JOB_QUEUE_FALLBACK_MS = 30_000;
 /** After a failed pass (for example the database is unreachable), try again this soon. */
 export const JOB_QUEUE_ERROR_RETRY_MS = 5_000;
+/**
+ * A row already due that the pass did not take (it fell due after the claim's
+ * statement started, or another process or a per-account limit holds it) is
+ * tried again this soon, doubling each time up to the fallback.
+ */
+export const JOB_QUEUE_OVERDUE_RETRY_MS = 50;
 
 const signals = new EventEmitter();
 signals.setMaxListeners(0);
@@ -34,7 +40,7 @@ export function onJobQueueWake(queue: JobQueue, listener: () => void): () => voi
 export interface JobQueuePass {
   /** More rows may be claimable now (a full batch): run again at once. */
   again?: boolean;
-  /** Milliseconds until the next row falls due, by the database clock; null when nothing waits. */
+  /** Milliseconds until the next row falls due, by the database clock (zero or less: due now); null when nothing waits. */
   nextDueInMs?: number | null;
 }
 
@@ -67,6 +73,7 @@ export function startJobQueueLoop(options: JobQueueLoopOptions): JobQueueLoop {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let running: Promise<void> | null = null;
   let wokenWhileRunning = false;
+  let overdueRetries = 0;
 
   const schedule = (ms: number) => {
     if (stopped) return;
@@ -82,10 +89,21 @@ export function startJobQueueLoop(options: JobQueueLoopOptions): JobQueueLoop {
     let delay = fallbackMs;
     try {
       const result = await options.run();
-      if (result.again) delay = 0;
-      else if (typeof result.nextDueInMs === "number" && Number.isFinite(result.nextDueInMs)) {
-        // At least 1 ms: the row is strictly in the future by the database clock.
-        delay = Math.min(fallbackMs, Math.max(1, Math.ceil(result.nextDueInMs)));
+      if (result.again) {
+        delay = 0;
+        overdueRetries = 0;
+      } else if (typeof result.nextDueInMs === "number" && Number.isFinite(result.nextDueInMs)) {
+        if (result.nextDueInMs <= 0) {
+          // Due already, yet not taken by this pass: soon, then less and less often.
+          delay = Math.min(fallbackMs, JOB_QUEUE_OVERDUE_RETRY_MS * 2 ** Math.min(overdueRetries, 20));
+          overdueRetries += 1;
+        } else {
+          // At least 1 ms: the row is strictly in the future by the database clock.
+          delay = Math.min(fallbackMs, Math.max(1, Math.ceil(result.nextDueInMs)));
+          overdueRetries = 0;
+        }
+      } else {
+        overdueRetries = 0;
       }
     } catch (error) {
       if (options.logError) options.logError(error);
