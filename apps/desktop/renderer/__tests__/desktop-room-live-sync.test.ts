@@ -698,6 +698,40 @@ describe("useDesktopRoomLiveSync full-refresh path", () => {
     });
   });
 
+  it("sends one stream start when a room switch asks three times for the same room and cursor", async () => {
+    const harness = createHarness();
+    const ready = deferred<void>();
+    harness.nextStreamReady = ready.promise;
+    const room = harness.windowBridge.letagentsDesktop.room;
+    const startStream = room.startStream;
+    const starts: Array<[string, string | null | undefined]> = [];
+    room.startStream = async (roomIdentifier: string, afterMessageId?: string | null) => {
+      starts.push([roomIdentifier, afterMessageId]);
+      return startStream(roomIdentifier);
+    };
+    harness.currentRoomId.value = ROOM;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const calls = [
+        harness.sync.syncSelectedRoomStream(ROOM, null),
+        harness.sync.syncSelectedRoomStream(ROOM),
+        harness.sync.syncSelectedRoomStream(ROOM),
+      ];
+      assert.deepEqual(starts, [[ROOM, null]]);
+      ready.resolve();
+      await Promise.all(calls);
+      assert.equal(harness.setIntervalCalls, 1);
+
+      // A start with a new cursor, and a start after a stop, are sent again.
+      await harness.sync.syncSelectedRoomStream(ROOM, "msg_3");
+      await harness.sync.syncSelectedRoomStream(null);
+      harness.currentRoomId.value = ROOM;
+      await harness.sync.syncSelectedRoomStream(ROOM, null);
+    });
+
+    assert.deepEqual(starts, [[ROOM, null], [ROOM, "msg_3"], [ROOM, null]]);
+  });
+
   it("does not reinstall polling from a delayed stream start after a same-room stop and return", async () => {
     const harness = createHarness();
     const old = deferred<void>();

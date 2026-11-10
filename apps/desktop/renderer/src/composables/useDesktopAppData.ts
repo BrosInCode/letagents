@@ -122,7 +122,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   const degradedStreamRooms = new Map<string, number>();
   const pendingVerifiedRecoveries = new Map<string, number>();
   const pendingDeliveryRepairs = new Map<string, PendingDeliveryRepairState>();
-  const sharedBarrierReads = new Map<string, { generation: number; promise: Promise<unknown> }>();
+  // The barrier token whose stream start is still awaited: its read has not
+  // started yet, so every open the stream reports now precedes that read.
+  let barrierAwaitingStream: number | null = null;
+  let sameTaskSelectionRefresh: { key: string; promise: Promise<void> } | null = null;
   let artifactRefreshContext = 0;
   let artifactRefreshDisposed = false;
   let artifactRefresh: {
@@ -160,7 +163,6 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     selectedSnapshotRequestId += 1;
     clearSelectedSnapshotCache();
     clearPendingDeliveryRepairs();
-    sharedBarrierReads.clear();
   }
 
   function resetBufferedStreamEvents(): void {
@@ -308,6 +310,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (barrierRoomIdentifier) {
         rootBarrierToken = await beginRoomSnapshotBarrier(barrierRoomIdentifier);
       }
+      const rootRepairToken = pendingRepairTokenFor(barrierRoomIdentifier);
       if (!sessionIsCurrent(sessionGeneration)) return;
       const [
         nextAppInfo,
@@ -340,11 +343,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         nextAccountRooms || nextSettingsAccountRooms || [],
       );
       if (!sessionIsCurrent(sessionGeneration)) return;
-      const nextRootRoomKey = normalizeRoomIdentifier(nextRootRoomSnapshot.roomIdentifier);
+      const rootReadMatchesBarrier = Boolean(barrierRoomIdentifier)
+        && normalizeRoomIdentifier(nextRootRoomSnapshot.roomIdentifier) === normalizeRoomIdentifier(barrierRoomIdentifier);
       await acknowledgeStreamGapRepairFromSnapshot(
         nextRootRoomSnapshot.roomIdentifier || "",
         nextRootRoomSnapshot,
-        nextRootRoomKey ? pendingDeliveryRepairs.get(nextRootRoomKey)?.token ?? null : null,
+        rootReadMatchesBarrier ? rootRepairToken : null,
       );
       if (!sessionIsCurrent(sessionGeneration)) return;
       const recoveredAlias = recoveredRootRoomAlias(requestedRootRoomIdentifier, nextRootRoomSnapshot);
@@ -376,6 +380,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         : defaultMcpTargetSelection(nextMcpInstallState);
       options.reconcileActiveEntry();
       if (nextRootRoomSnapshot.roomIdentifier) {
+        if (rootReadMatchesBarrier) queueRepairReadIfGapChanged(nextRootRoomSnapshot.roomIdentifier, rootRepairToken);
         finishRoomSnapshotBarrier(nextRootRoomSnapshot.roomIdentifier, rootBarrierToken);
       }
       await refreshSelectedSnapshot(nextRootRoomSnapshot);
@@ -478,7 +483,36 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     )?.rootPath || null;
   }
 
-  async function refreshSelectedSnapshot(baseRootSnapshot: DesktopRoomSnapshot | null = options.rootRoomSnapshot.value): Promise<void> {
+  /**
+   * A cold start asks twice for the same selection in one task: refresh()
+   * itself, and the active-entry watcher that reconcileActiveEntry woke. No
+   * IPC reply or stream event can land between two calls in one task, so the
+   * second call joins the first (which stays the current request) instead of
+   * reading the room again. A call in a later task, or for another entry,
+   * room, root or session, runs on its own.
+   */
+  function refreshSelectedSnapshot(baseRootSnapshot: DesktopRoomSnapshot | null = options.rootRoomSnapshot.value): Promise<void> {
+    const entry = options.activeEntry.value;
+    const key = JSON.stringify([
+      options.sessionGeneration.value,
+      entry.id,
+      entry.type,
+      baseRootSnapshot?.roomIdentifier ?? null,
+      baseRootSnapshot ? options.resolveSelectedRoomIdentifier(baseRootSnapshot) : null,
+    ]);
+    if (sameTaskSelectionRefresh?.key === key) return sameTaskSelectionRefresh.promise;
+    const promise = refreshSelectedSnapshotNow(baseRootSnapshot);
+    const current = { key, promise };
+    sameTaskSelectionRefresh = current;
+    const forget = () => {
+      if (sameTaskSelectionRefresh === current) sameTaskSelectionRefresh = null;
+    };
+    setTimeout(forget, 0);
+    promise.then(forget, forget);
+    return promise;
+  }
+
+  async function refreshSelectedSnapshotNow(baseRootSnapshot: DesktopRoomSnapshot | null): Promise<void> {
     const requestId = ++selectedSnapshotRequestId;
 
     if (!baseRootSnapshot) {
@@ -505,37 +539,19 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       && normalizeRoomIdentifier(roomIdentifier) !== normalizeRoomIdentifier(baseRootSnapshot.roomIdentifier)
     ) {
       publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
-      let barrierToken: number | null = null;
       try {
-        // Read the room only after its stream is ready, as for a focus room.
-        // That read closes a gap the stream reports while it connects, so the
-        // stream does not need a second full read of the same room. If the
-        // stream cannot start, the room still loads, without the barrier.
-        barrierToken = await beginRoomSnapshotBarrier(roomIdentifier).catch(() => null);
-        const rootPath = rootPathForRoomIdentifier(roomIdentifier);
-        const openedContext = await readSnapshotOncePerBarrier(
-          `context:${normalizeRoomIdentifier(roomIdentifier)}:${rootPath ?? ""}`,
-          barrierToken,
-          () => loadRootRoomContext({ roomIdentifier, rootPath }),
-        );
+        const openedContext = await loadRootRoomContext({
+          roomIdentifier,
+          rootPath: rootPathForRoomIdentifier(roomIdentifier),
+        });
         const nextRootSnapshot = openedContext.snapshot;
         const nextRepoStatus = openedContext.repoStatus;
         if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
-        const roomKey = normalizeRoomIdentifier(roomIdentifier);
-        if (barrierToken !== null && snapshotMatchesRoom(nextRootSnapshot, roomIdentifier)) {
-          await acknowledgeStreamGapRepairFromSnapshot(
-            roomIdentifier,
-            nextRootSnapshot,
-            roomKey ? pendingDeliveryRepairs.get(roomKey)?.token ?? null : null,
-          );
-          if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
-        }
         options.repoStatus.value = openedContext.openedRoom?.repoStatus
           ? preserveRoomRepoStatistics(options.repoStatus.value, nextRepoStatus)
           : nextRepoStatus;
         options.rootRoomSnapshot.value = nextRootSnapshot;
         setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextRootSnapshot), { cache: false, activitySnapshot: true });
-        if (barrierToken !== null) finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
         options.selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
         options.rememberRootRoomSnapshot(nextRootSnapshot, {
           aliasIdentifiers: [roomIdentifier, openedContext.openedRoom?.roomIdentifier],
@@ -545,9 +561,6 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         });
         options.activeEntry.value = options.currentParentRoom.value;
       } finally {
-        if (barrierToken !== null && streamReconcileRoom === roomIdentifier) {
-          finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
-        }
         if (requestId === selectedSnapshotRequestId) selectedSnapshotLoading.value = false;
       }
       return;
@@ -570,20 +583,13 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     let barrierToken: number | null = null;
     try {
       barrierToken = await beginRoomSnapshotBarrier(roomIdentifier);
-      const nextSnapshot = await readSnapshotOncePerBarrier(
-        `room:${normalizeRoomIdentifier(roomIdentifier)}`,
-        barrierToken,
-        () => getRoomSnapshot(roomIdentifier),
-      );
+      const repairToken = pendingRepairTokenFor(roomIdentifier);
+      const nextSnapshot = await getRoomSnapshot(roomIdentifier);
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
-      const roomKey = normalizeRoomIdentifier(roomIdentifier);
-      await acknowledgeStreamGapRepairFromSnapshot(
-        roomIdentifier,
-        nextSnapshot,
-        roomKey ? pendingDeliveryRepairs.get(roomKey)?.token ?? null : null,
-      );
+      await acknowledgeStreamGapRepairFromSnapshot(roomIdentifier, nextSnapshot, repairToken);
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
       setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextSnapshot), { cacheAlias: roomIdentifier, activitySnapshot: true });
+      queueRepairReadIfGapChanged(roomIdentifier, repairToken);
       finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
     } finally {
       if (streamReconcileRoom === roomIdentifier) finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
@@ -609,13 +615,35 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     if (!preserveDegradedStream) activeStreamToken = token;
     streamReconcileRoom = roomIdentifier;
     resetBufferedStreamEvents();
+    barrierAwaitingStream = token;
     try {
       await options.syncRoomStream(roomIdentifier, null);
       return token;
     } catch (error) {
       releaseRoomSnapshotBarrier(roomIdentifier, token, false);
       throw error;
+    } finally {
+      if (barrierAwaitingStream === token) barrierAwaitingStream = null;
     }
+  }
+
+  /** The repair token the stream reported so far; read it right before a barrier read starts. */
+  function pendingRepairTokenFor(roomIdentifier: string | null | undefined): number | null {
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    return roomKey ? pendingDeliveryRepairs.get(roomKey)?.token ?? null : null;
+  }
+
+  /**
+   * A barrier read closes only the gap whose token was pending when the read
+   * started. If the stream reported a newer gap while the read ran, ask the
+   * barrier release for one more read: it captures the new token first.
+   */
+  function queueRepairReadIfGapChanged(roomIdentifier: string, tokenAtReadStart: number | null): void {
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    if (!roomKey || normalizeRoomIdentifier(activeStreamRoom) !== roomKey) return;
+    const pendingToken = pendingDeliveryRepairs.get(roomKey)?.token;
+    if (pendingToken === undefined || pendingToken === tokenAtReadStart) return;
+    pendingVerifiedRecoveries.set(roomKey, activeStreamToken);
   }
 
   async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<void> {
@@ -675,39 +703,6 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     if (overflowed && normalizeRoomIdentifier(activeStreamRoom) === roomKey) {
       scheduleRoomStreamReconciliation(roomIdentifier);
     }
-  }
-
-  /**
-   * Shares one barrier read of a room between callers that start it at the
-   * same time, for example the cold-start refresh and the active-entry watcher
-   * that both open the stored room.
-   *
-   * Invariant: every read registered here starts after its caller awaited
-   * beginRoomSnapshotBarrier for that room, so the room's stream was ready
-   * (its connect gap, if any, was already reported) and stream events were
-   * being buffered. `generation` is streamReconcileGeneration when the read
-   * started. A caller whose barrier token is <= that generation began
-   * buffering before the read started, so the read plus that caller's buffer
-   * covers every event, and the read is as authoritative for a pending
-   * delivery repair as one the caller would start itself. A caller whose
-   * barrier began after the read started, or that has no barrier, reads again.
-   * Stale results are still dropped by each caller's own request id checks.
-   */
-  function readSnapshotOncePerBarrier<T>(
-    key: string,
-    barrierToken: number | null,
-    read: () => Promise<T>,
-  ): Promise<T> {
-    if (barrierToken === null) return read();
-    const existing = sharedBarrierReads.get(key);
-    if (existing && existing.generation >= barrierToken) return existing.promise as Promise<T>;
-    const entry = { generation: streamReconcileGeneration, promise: read() as Promise<unknown> };
-    sharedBarrierReads.set(key, entry);
-    const forget = () => {
-      if (sharedBarrierReads.get(key) === entry) sharedBarrierReads.delete(key);
-    };
-    entry.promise.then(forget, forget);
-    return entry.promise as Promise<T>;
   }
 
   function getRoomSnapshot(roomIdentifier: string | null): Promise<DesktopRoomSnapshot> {
@@ -784,7 +779,13 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         && degradedStreamRooms.get(roomKey) === activeStreamToken
         && normalizeRoomIdentifier(streamReconcileRoom) === roomKey
       ) {
-        pendingVerifiedRecoveries.set(roomKey, activeStreamToken);
+        // While the barrier still awaits its stream, its read has not started:
+        // that read comes after this verified boundary and already covers it.
+        // Main sends a verified gap and then a verified gap:false boundary in
+        // one handshake; queueing a recovery here read the room twice.
+        if (barrierAwaitingStream !== streamReconcileGeneration) {
+          pendingVerifiedRecoveries.set(roomKey, activeStreamToken);
+        }
         return;
       }
       if (event.verified && normalizeRoomIdentifier(streamReconcileRoom) === roomKey) return;
