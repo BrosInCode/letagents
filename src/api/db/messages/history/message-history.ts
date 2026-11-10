@@ -190,81 +190,91 @@ export async function hydrateMessageReplies(
   options?: MessageHydrationOptions,
 ): Promise<Message[]> {
   const executor = options?.executor ?? db;
-  const accountRoutingPromise = options?.accountId && options.accountAgentRouting
-    ? getMessageAccountAgentRouting(executor, roomId, options.accountId, bounded)
-    : Promise.resolve(new Map());
   const replyToNumbers = Array.from(new Set(
     bounded
       .map((row) => row.reply_to_number)
       .filter((value): value is number => value !== null),
   ));
-
-  const replyMap = new Map<number, MessageReplyReference>();
-  if (replyToNumbers.length > 0) {
-    const replyRows = await executor
-      .select(messageReplySelection)
-      .from(messages)
-      .where(and(eq(messages.room_id, roomId), inArray(messages.number, replyToNumbers)));
-
-    for (const replyRow of replyRows) {
-      replyMap.set(replyRow.number, toMessageReplyReference(replyRow));
-    }
-  }
-
   const messageNumbers = bounded.map((row) => row.number);
-  const attachmentMap = new Map<number, MessageAttachment[]>();
-  if (messageNumbers.length > 0) {
-    const attachmentRows = await executor
-      .select(messageAttachmentSelection)
-      .from(message_attachments)
-      .where(
-        and(
-          eq(message_attachments.room_id, roomId),
-          inArray(message_attachments.message_number, messageNumbers),
-        ),
-      )
-      .orderBy(asc(message_attachments.message_number), asc(message_attachments.attachment_number));
-
-    for (const attachmentRow of attachmentRows) {
-      const list = attachmentMap.get(attachmentRow.message_number) ?? [];
-      list.push(toMessageAttachment(attachmentRow));
-      attachmentMap.set(attachmentRow.message_number, list);
-    }
-  }
-
-  const { reactions: reactionMap } = await loadMessageReactions(executor, roomId, { numbers: messageNumbers });
-
-  const materializedSummaries = options?.threadSummaries ?? await buildThreadSummariesForRoots(
-    roomId,
-    Array.from(new Set(bounded.map((row) => row.thread_root_number ?? row.number))),
-    options?.accountId ?? null,
-    executor,
-  );
-  const threadSummaries = new Map(materializedSummaries);
-  const missingThreadRootNumbers = Array.from(new Set(
-    bounded
-      .filter((row) => row.thread_root_number !== null)
-      .map((row) => row.thread_root_number!)
-      .filter((rootNumber) => !threadSummaries.has(rootNumber)),
-  ));
-  if (missingThreadRootNumbers.length > 0) {
-    const emptySummaries = await buildEmptyThreadSummariesForRoots(
-      roomId,
-      missingThreadRootNumbers,
-      options?.accountId ?? null,
-      executor,
-    );
-    for (const [rootNumber, summary] of emptySummaries) {
-      threadSummaries.set(rootNumber, summary);
-    }
-  }
-
   const publisherIds = [...new Set(bounded.filter((row) => row.source === "browser" && !row.publisher_agent_key)
     .map((row) => row.publisher_account_id).filter((id): id is string => Boolean(id)))];
-  const profiles = publisherIds.length ? await executor.select({ id: accounts.id, login: accounts.login, avatar_url: accounts.avatar_url })
-    .from(accounts).where(inArray(accounts.id, publisherIds)) : [];
+
+  // These reads do not depend on each other, so they run together: one page
+  // costs about one round trip plus the thread-summary chain, not one per read.
+  // Six reads start together and the summary chain follows with two more, so
+  // one page holds a few pool connections at once (the pool default is 20).
+  // On a transaction executor the reads simply queue on its one connection.
+  const [accountRouting, replyMap, attachmentMap, { reactions: reactionMap }, threadSummaries, profiles] = await Promise.all([
+    options?.accountId && options.accountAgentRouting
+      ? getMessageAccountAgentRouting(executor, roomId, options.accountId, bounded)
+      : Promise.resolve(new Map()),
+    (async () => {
+      const references = new Map<number, MessageReplyReference>();
+      if (replyToNumbers.length === 0) return references;
+      const replyRows = await executor
+        .select(messageReplySelection)
+        .from(messages)
+        .where(and(eq(messages.room_id, roomId), inArray(messages.number, replyToNumbers)));
+      for (const replyRow of replyRows) {
+        references.set(replyRow.number, toMessageReplyReference(replyRow));
+      }
+      return references;
+    })(),
+    (async () => {
+      const attachmentsByNumber = new Map<number, MessageAttachment[]>();
+      if (messageNumbers.length === 0) return attachmentsByNumber;
+      const attachmentRows = await executor
+        .select(messageAttachmentSelection)
+        .from(message_attachments)
+        .where(
+          and(
+            eq(message_attachments.room_id, roomId),
+            inArray(message_attachments.message_number, messageNumbers),
+          ),
+        )
+        .orderBy(asc(message_attachments.message_number), asc(message_attachments.attachment_number));
+      for (const attachmentRow of attachmentRows) {
+        const list = attachmentsByNumber.get(attachmentRow.message_number) ?? [];
+        list.push(toMessageAttachment(attachmentRow));
+        attachmentsByNumber.set(attachmentRow.message_number, list);
+      }
+      return attachmentsByNumber;
+    })(),
+    loadMessageReactions(executor, roomId, { numbers: messageNumbers }),
+    (async () => {
+      const materializedSummaries = options?.threadSummaries ?? await buildThreadSummariesForRoots(
+        roomId,
+        Array.from(new Set(bounded.map((row) => row.thread_root_number ?? row.number))),
+        options?.accountId ?? null,
+        executor,
+      );
+      const summaries = new Map(materializedSummaries);
+      const missingThreadRootNumbers = Array.from(new Set(
+        bounded
+          .filter((row) => row.thread_root_number !== null)
+          .map((row) => row.thread_root_number!)
+          .filter((rootNumber) => !summaries.has(rootNumber)),
+      ));
+      if (missingThreadRootNumbers.length > 0) {
+        const emptySummaries = await buildEmptyThreadSummariesForRoots(
+          roomId,
+          missingThreadRootNumbers,
+          options?.accountId ?? null,
+          executor,
+        );
+        for (const [rootNumber, summary] of emptySummaries) {
+          summaries.set(rootNumber, summary);
+        }
+      }
+      return summaries;
+    })(),
+    publisherIds.length
+      ? executor.select({ id: accounts.id, login: accounts.login, avatar_url: accounts.avatar_url })
+        .from(accounts).where(inArray(accounts.id, publisherIds))
+      : Promise.resolve([]),
+  ]);
+
   const profileById = new Map(profiles.map(({ id, login, avatar_url }) => [id, { login, avatar_url }]));
-  const accountRouting = await accountRoutingPromise;
   return bounded.map((row) => {
     const threadRootNumber = row.thread_root_number ?? row.number;
     const threadSummary = threadSummaries.get(threadRootNumber) ?? null;

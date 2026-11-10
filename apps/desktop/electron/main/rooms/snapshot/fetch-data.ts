@@ -9,7 +9,11 @@ import { roomMessageHistoryPageSize } from "../../paths.js";
 import type { GitHubEventsResponse } from "../events.js";
 import { getLocalRoomArtifacts } from "../artifacts/local-store.js";
 import { getLatestLocalChatMessages } from "../messages/local-store.js";
-import type { RoomMessagePayload } from "../messages/mappers.js";
+import {
+  expandRoomMessageHistoryPage,
+  ROOM_MESSAGE_HISTORY_DEDUPED_QUERY,
+  type RoomMessagePayload,
+} from "../messages/mappers.js";
 import { resolveLocalThreadReaderKey } from "../messages/thread-reader.js";
 import { drainPaginatedTaskPages, type PaginatedTaskPage } from "./task-pagination.js";
 import type {
@@ -84,9 +88,12 @@ export async function fetchRoomSnapshotData(
             readerKey: await resolveLocalThreadReaderKey(),
           }).then((page) => ({ messages: page.messages }))
         : apiFetch<MessagesResponse>(
-            `/rooms/${encodeURIComponent(apiRoomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
+            `/rooms/${encodeURIComponent(apiRoomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest&${ROOM_MESSAGE_HISTORY_DEDUPED_QUERY}`,
           )
-            .then((page) => expandMessagesWithThreadAncestors(apiRoomIdentifier, page.messages || []))
+            .then((page) => expandMessagesWithThreadAncestors(
+              apiRoomIdentifier,
+              expandRoomMessageHistoryPage(page).messages || [],
+            ))
             .then((messages) => ({ messages })),
       { messages: [] } as MessagesResponse,
     ),

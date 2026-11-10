@@ -76,6 +76,44 @@ export type RoomMessageThreadSummaryPayload = {
   last_read_message_id?: string | null;
 };
 
+/**
+ * Query parameter for `GET /rooms/:id/messages`. A server that knows it sends
+ * each thread summary once; an older server ignores it and sends the classic
+ * page. Every caller must pass the page through `expandRoomMessageHistoryPage`.
+ */
+export const ROOM_MESSAGE_HISTORY_DEDUPED_QUERY = "thread_summaries=deduped";
+
+type RoomMessageHistoryPagePayload = {
+  messages?: RoomMessagePayload[] | null;
+  thread_summaries?: unknown;
+  threads?: unknown;
+};
+
+/**
+ * Give a history page back its classic shape: each message carries its whole
+ * thread summary. The form is read from the response, not from the request, so
+ * a classic page from an older server passes through unchanged.
+ */
+export function expandRoomMessageHistoryPage<Page extends RoomMessageHistoryPagePayload>(
+  page: Page,
+): Omit<Page, "thread_summaries" | "threads"> {
+  if (page?.thread_summaries !== "deduped") return page;
+  const { thread_summaries: _form, threads: rawThreads, ...rest } = page;
+  const threads = rawThreads && typeof rawThreads === "object"
+    ? rawThreads as Record<string, RoomMessageThreadSummaryPayload>
+    : {};
+  if (!Array.isArray(page.messages)) return rest;
+  return {
+    ...rest,
+    messages: page.messages.map((message) => {
+      const thread: unknown = message?.thread;
+      if (typeof thread !== "string") return message;
+      const summary = Object.prototype.hasOwnProperty.call(threads, thread) ? threads[thread] : null;
+      return { ...message, thread: summary ? structuredClone(summary) : null };
+    }),
+  };
+}
+
 export function mapRoomMessagePayload(
   message: RoomMessagePayload,
 ): DesktopRoomMessage {

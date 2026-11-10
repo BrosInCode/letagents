@@ -22,6 +22,7 @@ import {
 import {
   InvalidRoomAgentDeliverySessionError,
 } from "../../../rooms/agent-delivery.js";
+import { dedupeThreadSummaries } from "../../../db/messages/history/thread-summaries.js";
 import { replyTurnHoldAgentKey, resolveMessageActivationIdentity } from "./activation-identity.js";
 import { isAppSession } from "../../../request/app-session.js";
 import { attachReceiptAuthorityActivations } from "./receipt-activation.js";
@@ -110,11 +111,18 @@ export function registerMessageHistoryRoutes(
             ...workerFrontier,
           });
 
+      const deliveredMessages = await attachReceiptAuthorityActivations(project.id, activationIdentity, result.messages, {
+        includeTaskOwnerLeases: false,
+      });
+      // Opt-in only: callers that do not ask keep the classic page, where each
+      // message carries its whole thread summary.
+      const deduped = req.query.thread_summaries === "deduped"
+        ? dedupeThreadSummaries(deliveredMessages)
+        : null;
       res.json({
         room_id: project.id,
-        messages: await attachReceiptAuthorityActivations(project.id, activationIdentity, result.messages, {
-          includeTaskOwnerLeases: false,
-        }),
+        ...(deduped ? { thread_summaries: "deduped", threads: deduped.threads } : {}),
+        messages: deduped ? deduped.messages : deliveredMessages,
         has_more: result.has_more,
         has_older: before ? result.has_more : undefined,
       });

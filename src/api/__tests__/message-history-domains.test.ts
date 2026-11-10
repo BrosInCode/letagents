@@ -49,6 +49,7 @@ const domainDeclarations = {
     "UnreadThreadStats:export",
     "getUnreadThreadStats:export",
     "loadUnreadThreadPageKeys:export",
+    "dedupeThreadSummaries:export",
   ],
   threads: [
     "MessageThreadPage:export",
@@ -190,7 +191,7 @@ test("every message-history declaration keeps one exact domain owner and visibil
       allDeclarations.add(name);
     }
   }
-  assert.equal(allDeclarations.size, 37);
+  assert.equal(allDeclarations.size, 38);
 });
 
 test("message-history domains are acyclic and never import the facade", () => {

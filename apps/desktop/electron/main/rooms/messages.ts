@@ -58,8 +58,10 @@ import {
 import { roomMessageHistoryPageSize } from "../paths.js";
 import { desktopSmokeRoomSnapshot, isDesktopSmokeCheck } from "../smoke.js";
 import {
+  expandRoomMessageHistoryPage,
   mapCloudRoomMessagePayload,
   mapRoomMessagePayload,
+  ROOM_MESSAGE_HISTORY_DEDUPED_QUERY,
   mapRoomMessageThreadSummary,
   type RoomMessagePayload,
 } from "./messages/mappers.js";
@@ -430,9 +432,9 @@ export async function getDesktopRoomMessagesAfter(
         limit: 100,
         readerKey: await resolveLocalThreadReaderKey(),
       })
-    : await apiFetch<{ messages: RoomMessagePayload[]; has_more: boolean }>(
-        `/rooms/${encodeURIComponent(cloudRoomIdentifierForStorage(storage, roomIdentifier))}/messages?limit=100${afterMessageId ? `&after=${encodeURIComponent(afterMessageId)}` : ""}`,
-      );
+    : expandRoomMessageHistoryPage(await apiFetch<{ messages: RoomMessagePayload[]; has_more: boolean }>(
+        `/rooms/${encodeURIComponent(cloudRoomIdentifierForStorage(storage, roomIdentifier))}/messages?limit=100${afterMessageId ? `&after=${encodeURIComponent(afterMessageId)}` : ""}&${ROOM_MESSAGE_HISTORY_DEDUPED_QUERY}`,
+      ));
   return { messages: page.messages.map(mapRoomMessagePayload), hasMore: page.has_more };
 }
 
@@ -472,13 +474,13 @@ export async function getDesktopRoomMessagesBefore(
     storage,
     trimmedRoomIdentifier,
   );
-  const page = await apiFetch<{
+  const page = expandRoomMessageHistoryPage(await apiFetch<{
     messages?: RoomMessagePayload[];
     has_older?: boolean;
     has_more?: boolean;
   }>(
-    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages?limit=${encodeURIComponent(String(limit))}&before=${encodeURIComponent(trimmedBeforeMessageId)}`,
-  );
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages?limit=${encodeURIComponent(String(limit))}&before=${encodeURIComponent(trimmedBeforeMessageId)}&${ROOM_MESSAGE_HISTORY_DEDUPED_QUERY}`,
+  ));
 
   return {
     messages: [...(page.messages || [])]

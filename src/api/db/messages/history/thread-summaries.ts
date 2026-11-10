@@ -436,3 +436,33 @@ export async function loadUnreadThreadPageKeys(
     .sort((left, right) => right.summary_latest_reply_number - left.summary_latest_reply_number)
     .slice(0, limit);
 }
+
+/**
+ * The opt-in compact history page (`thread_summaries=deduped`): each thread
+ * summary appears once in `threads`, keyed by its root message id, and each
+ * message of that thread carries the root id string in `thread` instead of a
+ * copy. A message whose summary differs from the one already keyed keeps its
+ * own copy inline, so expanding the page always gives back the exact input.
+ */
+export function dedupeThreadSummaries<T extends { thread: MessageThreadSummary | null }>(
+  messages: readonly T[],
+): {
+  threads: Record<string, MessageThreadSummary>;
+  messages: Array<Omit<T, "thread"> & { thread: MessageThreadSummary | string | null }>;
+} {
+  const threads = new Map<string, MessageThreadSummary>();
+  const compact = messages.map((message) => {
+    const thread = message.thread;
+    if (!thread) return message;
+    const rootId = thread.root_message_id;
+    const known = threads.get(rootId);
+    if (!known) {
+      threads.set(rootId, thread);
+      return { ...message, thread: rootId };
+    }
+    return known === thread || JSON.stringify(known) === JSON.stringify(thread)
+      ? { ...message, thread: rootId }
+      : message;
+  });
+  return { threads: Object.fromEntries(threads), messages: compact };
+}
