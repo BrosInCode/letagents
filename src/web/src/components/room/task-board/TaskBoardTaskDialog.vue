@@ -267,6 +267,7 @@ function onBackdropClick(event: MouseEvent) {
 @media(hover:hover) and (pointer:fine) { .task-dialog button:hover:not(:disabled) { background:var(--accent-hover); } .task-dialog .task-dialog-primary:hover:not(:disabled) { background:var(--text); opacity:.9; } }
 @media(min-width:1600px) { .task-dialog { width:960px; } }
 @media(max-width:760px) { .task-dialog h2 { font-size:25px; } .task-dialog-properties>div { grid-template-columns:minmax(78px,1fr) 145px; } }
+@media(max-width:640px) { .task-agent-details-content :deep(.lease-authority__handoff .app-select) { flex:0 0 auto; } }
 @media(max-width:600px) { .task-dialog { inset:0; width:100%; height:100dvh; border:0; border-radius:0; } .task-dialog-edit-form { padding:24px 20px; } .task-dialog-footer { padding:16px 20px max(16px,env(safe-area-inset-bottom)); flex-wrap:wrap; } }
 @media(prefers-reduced-motion:reduce) { .task-dialog { animation:none; } .task-agent-details>summary span { transition:none; } }
 </style>
