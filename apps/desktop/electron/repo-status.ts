@@ -1,6 +1,8 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { promisify } from "node:util";
 
 import type {
   DesktopGitRoomInfo,
@@ -12,7 +14,10 @@ import type {
   RepoWorktreeEntry,
 } from "./ipc-types.js";
 import { runGitStdout } from "./main/git-exec.js";
+import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "./main/desktop-shell-environment.js";
 import { normalizeGitPath, sameLocalPath } from "./main/local-paths.js";
+
+const execFileAsync = promisify(execFile);
 
 export type RepoStatusBuildOptions = {
   signal?: AbortSignal;
@@ -26,6 +31,11 @@ export type RepoStatusBuildOptions = {
    * a decision was based on.
    */
   onOriginRemoteRead?: (read: { stdout: string } | { error: unknown }) => void;
+  /**
+   * Looks up the HostName that ~/.ssh/config gives an SSH alias. Defaults to
+   * `ssh -G`; tests pass their own.
+   */
+  resolveSshHostName?: (alias: string) => Promise<string | null>;
 };
 
 /**
@@ -1058,8 +1068,8 @@ export async function refreshRepoStatus(
  * ssh.github.com is GitHub's SSH-over-HTTPS endpoint (port 443) and
  * www.github.com is the same site as github.com. An SSH config alias such as
  * `git@github-work:acme/app.git` is not listed: its real host lives in
- * ~/.ssh/config, so it keeps the alias and the server refuses that room as an
- * unsupported provider.
+ * ~/.ssh/config, so the parser keeps the alias. Room detection then asks
+ * `ssh -G` for the alias's HostName (resolveRemoteRoomIdentifier).
  */
 const GITHUB_HOST_ALIASES = new Set(["ssh.github.com", "www.github.com"]);
 
@@ -1082,14 +1092,22 @@ function normalizeDerivedRoomIdentifierCasing(identifier: string): string {
   return host === "github.com" ? `${host}/${rest.toLowerCase()}` : `${host}/${rest}`;
 }
 
+/**
+ * Git's scp-like SSH form, `[user@]host:path`. Any user is allowed (`git@`,
+ * a personal login, `org-123@` for managed users) and so is no user at all.
+ * A host of one letter is a Windows drive (`C:\repo`), and a path that starts
+ * with `//` is a URL scheme (`https://`), so neither is SSH.
+ */
+const SCP_LIKE_REMOTE = /^(?:[^@\s/:]+@)?([^@\s/:\\]{2,}):(?!\/\/)(.+?)(?:\.git)?$/;
+
 export function normalizeGitRemoteToRoomIdentifier(remote: string): string | null {
   const value = remote.trim();
   if (!value) return null;
 
-  const sshMatch = /^git@([^:]+):(.+?)(?:\.git)?$/.exec(value);
+  const sshMatch = SCP_LIKE_REMOTE.exec(value);
   if (sshMatch) {
     return normalizeDerivedRoomIdentifierCasing(
-      `${sshMatch[1]}/${sshMatch[2]}`.replace(/\.git$/, ""),
+      `${sshMatch[1]}/${sshMatch[2].replace(/^\/+/, "")}`.replace(/\.git$/, ""),
     );
   }
 
@@ -1112,6 +1130,125 @@ function readConfiguredRoomIdentifierAt(repoRoot: string): string | null {
     return parsed.room?.trim() || null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Why a Git repository opened as a local room instead of its GitHub room.
+ * The same sentence explains the local room when it opens and the refusal
+ * when it is published.
+ */
+export type LocalGitRoomReason =
+  | { kind: "no_remote" }
+  | { kind: "no_origin"; remotes: string[] }
+  | { kind: "unreadable_origin"; url: string };
+
+/** A remote URL for display: any user name and password are removed. */
+export function displayRemoteUrl(remote: string): string {
+  const value = remote.trim();
+  try {
+    const url = new URL(value);
+    if (url.username || url.password) {
+      url.username = "";
+      url.password = "";
+    }
+    return url.toString();
+  } catch {
+    return value;
+  }
+}
+
+export function describeLocalGitRoomReason(reason: LocalGitRoomReason): string {
+  switch (reason.kind) {
+    case "no_remote":
+      return "This Git repository has no remote, so it is not linked to a GitHub repository.";
+    case "no_origin":
+      return `This Git repository has no remote named origin (it has ${reason.remotes.join(", ")}).`;
+    case "unreadable_origin":
+      return `LetAgents could not read the origin remote ${displayRemoteUrl(reason.url)} as a repository address.`;
+  }
+}
+
+function localGitRoomWarning(reason: LocalGitRoomReason): string {
+  return `${describeLocalGitRoomReason(reason)} LetAgents opened it as a local room. `
+    + "If this project is on GitHub, open the folder you cloned from GitHub, or add its GitHub remote as origin.";
+}
+
+const SSH_HOST_NAME_TTL_MS = 60_000;
+const SSH_HOST_NAME_TIMEOUT_MS = 3_000;
+const sshHostNames = new Map<string, { hostName: Promise<string | null>; expiresAt: number }>();
+
+/** The `HostName` that ~/.ssh/config gives an alias, read with `ssh -G` (it does not connect). */
+async function sshConfigHostName(alias: string): Promise<string | null> {
+  const cached = sshHostNames.get(alias);
+  if (cached && cached.expiresAt > Date.now()) return cached.hostName;
+  const hostName = (async () => {
+    try {
+      await desktopShellEnvironmentReady();
+      const { stdout } = await execFileAsync("ssh", ["-G", "--", alias], {
+        env: desktopRuntimeEnvironment(),
+        encoding: "utf8",
+        timeout: SSH_HOST_NAME_TIMEOUT_MS,
+        windowsHide: true,
+      });
+      const line = String(stdout).split(/\r?\n/).find((entry) => /^hostname\s+/i.test(entry));
+      return line?.replace(/^hostname\s+/i, "").trim().toLowerCase() || null;
+    } catch {
+      return null;
+    }
+  })();
+  sshHostNames.set(alias, { hostName, expiresAt: Date.now() + SSH_HOST_NAME_TTL_MS });
+  return hostName;
+}
+
+/** The host of an SSH remote (scp-like or ssh://), or null for any other remote. */
+function sshRemoteHost(remote: string): string | null {
+  const value = remote.trim();
+  const scp = SCP_LIKE_REMOTE.exec(value);
+  if (scp) return scp[1];
+  try {
+    const url = new URL(value);
+    return url.protocol === "ssh:" || url.protocol === "git+ssh:" ? url.hostname : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The room for a remote URL. An SSH alias such as `git@github-work:acme/app`
+ * lands in the GitHub room when ~/.ssh/config points the alias at GitHub.
+ */
+async function resolveRemoteRoomIdentifier(
+  remote: string,
+  options: RepoStatusBuildOptions,
+): Promise<string | null> {
+  const room = normalizeGitRemoteToRoomIdentifier(remote);
+  if (!room) return null;
+  const host = sshRemoteHost(remote)?.toLowerCase();
+  const roomHost = room.slice(0, room.indexOf("/"));
+  // Only a plain host name is passed to ssh, so it can never read as an option.
+  if (!host || roomHost === "github.com" || host !== roomHost || !/^[a-z0-9][a-z0-9._-]*$/.test(host)) {
+    return room;
+  }
+  const hostName = await (options.resolveSshHostName ?? sshConfigHostName)(host);
+  throwIfAborted(options);
+  if (!hostName || hostName === host) return room;
+  const resolved = normalizeDerivedRoomIdentifierCasing(`${hostName}${room.slice(roomHost.length)}`);
+  return resolved.startsWith("github.com/") ? resolved : room;
+}
+
+async function localGitRoomReason(
+  repoRoot: string,
+  origin: string | null,
+  options: RepoStatusCallOptions,
+): Promise<LocalGitRoomReason> {
+  if (origin !== null) return { kind: "unreadable_origin", url: origin };
+  try {
+    const remotes = (await runGit(repoRoot, ["remote"], options)).split(/\r?\n/).map((name) => name.trim()).filter(Boolean);
+    return remotes.length ? { kind: "no_origin", remotes } : { kind: "no_remote" };
+  } catch {
+    throwIfAborted(options);
+    return { kind: "no_remote" };
   }
 }
 
@@ -1274,6 +1411,8 @@ export async function resolveRoomIdentifierFromPath(
   gitRoom: DesktopGitRoomInfo | null;
   warning: string | null;
   routingDefaultBranch: string | null;
+  /** Why a Git repository opened as a local room; null for every other source. */
+  localReason: LocalGitRoomReason | null;
 }> {
   const options = withGitReads(resolveOptions);
   throwIfAborted(options);
@@ -1287,6 +1426,7 @@ export async function resolveRoomIdentifierFromPath(
       gitRoom: null,
       warning: "This folder is not a Git repository. LetAgents opened a plain local folder room.",
       routingDefaultBranch: null,
+      localReason: null,
     };
   }
 
@@ -1313,9 +1453,12 @@ export async function resolveRoomIdentifierFromPath(
       gitRoom: null,
       warning: null,
       routingDefaultBranch,
+      localReason: null,
     };
   }
 
+  // The origin URL when Git has one this parser cannot read as a repository.
+  let unreadableOrigin: string | null = null;
   try {
     let stdout: string;
     try {
@@ -1325,7 +1468,8 @@ export async function resolveRoomIdentifierFromPath(
       throw error;
     }
     options.onOriginRemoteRead?.({ stdout });
-    const repoRoom = normalizeGitRemoteToRoomIdentifier(stdout);
+    const repoRoom = await resolveRemoteRoomIdentifier(stdout, options);
+    if (!repoRoom) unreadableOrigin = stdout.trim() || null;
     if (repoRoom) {
       return {
         repoRoot,
@@ -1338,6 +1482,7 @@ export async function resolveRoomIdentifierFromPath(
         gitRoom: null,
         warning: null,
         routingDefaultBranch,
+        localReason: null,
       };
     }
   } catch (error) {
@@ -1353,12 +1498,16 @@ export async function resolveRoomIdentifierFromPath(
   // main worktree root so a linked worktree resolves to the same room as the main
   // checkout. The returned `repoRoot` stays the actually-opened worktree root.
   const identityRoot = await getMainWorktreeRoot(repoRoot, options);
+  // Say why, so a folder that only looks like the GitHub project (a parent
+  // folder with its own `git init`, a remote under another name) is clear.
+  const localReason = await localGitRoomReason(repoRoot, unreadableOrigin, options);
   return {
     repoRoot,
     roomIdentifier: buildLocalGitRoomIdentifier(identityRoot, currentBranch),
     source: "local_git",
     gitRoom: buildLocalGitRoomInfo({ repoRoot: identityRoot, currentBranch, defaultBranch }),
-    warning: null,
+    warning: localGitRoomWarning(localReason),
     routingDefaultBranch,
+    localReason,
   };
 }
