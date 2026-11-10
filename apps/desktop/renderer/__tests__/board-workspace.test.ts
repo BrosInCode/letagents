@@ -75,7 +75,7 @@ test('release widget fences room changes, accepts canonical aliases, and retains
   props.load = async () => { throw new Error('offline'); };
   await vm.refresh(); assert.match(vm.error.value, /last loaded/);
   assert.equal(vm.snapshot.value.roomId, 'canonical-cloud-room');
-  vm.show(); await settle();
+  vm.toggled({ newState: 'open' }); await settle();
   props.load = async () => snapshot('canonical-cloud-room'); await vm.refresh();
   assert.equal(vm.open.value, false, 'disabling the rule closes the open panel');
 });
