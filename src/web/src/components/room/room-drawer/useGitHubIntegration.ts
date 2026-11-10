@@ -46,7 +46,7 @@ export function useGitHubIntegration(room: Readonly<Ref<RoomInfo | null>>) {
       })
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
-        ghError.value = body.error || `Failed (${res.status})`
+        ghError.value = body.message || body.error || `Failed (${res.status})`
         return
       }
       const data = await res.json()

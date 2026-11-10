@@ -348,7 +348,7 @@
             </div>
             <div class="room-settings-row-action">
               <button
-                v-if="githubStatus && !githubStatus.connected && githubStatus.installUrlAvailable"
+                v-if="githubStatus && !githubStatus.connected && githubStatus.installUrlAvailable && !githubNeedsRepositoryAdmin"
                 class="room-settings-button"
                 type="button"
                 data-variant="primary"
@@ -362,7 +362,7 @@
             <p v-if="githubFriendlyError" class="room-settings-error" role="alert">{{ githubFriendlyError }}</p>
           </div>
 
-          <RoomGitHubEventFilter v-if="githubIntegrationAvailable && cloudRoom" :room-identifier="room.identifier" />
+          <RoomGitHubEventFilter v-if="githubIntegrationAvailable && cloudRoom" :room-identifier="room.identifier" :repository-name="githubRepositoryName" />
 
           <div
             v-if="githubEventsAvailable"
@@ -408,6 +408,7 @@ import RoomExpressions from "./RoomExpressions.vue";
 import RoomReplyOrder from "./RoomReplyOrder.vue";
 import RoomHistorySummary from "./RoomHistorySummary.vue";
 import RoomGitHubEventFilter from "./RoomGitHubEventFilter.vue";
+import { githubRoomRepositoryName } from "./room-settings-presentation";
 import SmoothHeight from "./SmoothHeight.vue";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import { usePinnedMessageVisibility } from "../../../../../../../../shared/ui/usePinnedMessageVisibility";
@@ -614,11 +615,23 @@ const notificationDescription = computed(() => {
   return "Turn on desktop alerts for all joined rooms.";
 });
 
+const githubRepositoryName = computed(() => githubRoomRepositoryName(props.room.gitRoom));
+
+// The server installs only for a room admin. In a GitHub room a participant
+// has write access at most, so the Install button would only fail.
+const githubNeedsRepositoryAdmin = computed(() => Boolean(
+  props.githubStatus
+  && !props.githubStatus.connected
+  && props.githubStatus.installUrlAvailable
+  && props.room.role === "participant",
+));
+
 const githubDotState = computed(() => {
   if (props.githubLoading) return "loading";
   if (githubBridgeUpgradeNeeded.value) return "off";
   if (props.githubError) return "error";
   if (props.githubStatus?.connected) return "connected";
+  if (githubNeedsRepositoryAdmin.value) return "off";
   if (props.githubStatus?.installUrlAvailable) return "ready";
   return "off";
 });
@@ -628,6 +641,7 @@ const githubTitle = computed(() => {
   if (githubBridgeUpgradeNeeded.value) return "Restart the app";
   if (props.githubError) return "GitHub integration unavailable";
   if (props.githubStatus?.connected) return "Connected";
+  if (githubNeedsRepositoryAdmin.value) return "Needs a repository admin";
   if (props.githubStatus?.installUrlAvailable) return "Ready to install";
   if (props.githubStatus?.configured === false) return "Not configured";
   return "Not connected";
@@ -639,6 +653,10 @@ const githubDescription = computed(() => {
   }
   if (props.githubStatus?.connected && props.githubStatus.repository?.fullName) {
     return props.githubStatus.repository.fullName;
+  }
+  if (githubNeedsRepositoryAdmin.value) {
+    const repository = githubRepositoryName.value ?? "this repository";
+    return `Only the owner or an admin of ${repository} on GitHub can install the GitHub app. Write access is not enough. Ask one of them to install it here.`;
   }
   if (props.githubStatus?.installUrlAvailable) {
     return "Install the GitHub app to bring PRs, checks, and repo events into the room.";
@@ -654,6 +672,7 @@ const githubStatusLabel = computed(() => {
   if (githubBridgeUpgradeNeeded.value) return "Restart";
   if (props.githubError) return "Error";
   if (props.githubStatus?.connected) return "Connected";
+  if (githubNeedsRepositoryAdmin.value) return "Admin needed";
   if (props.githubStatus?.installUrlAvailable) return "Ready";
   if (props.githubStatus?.configured === false) return "Setup needed";
   return "Offline";

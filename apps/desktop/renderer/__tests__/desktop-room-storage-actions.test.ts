@@ -235,6 +235,32 @@ test("GitHub connection displays review permission evidence separately without p
   }
 });
 
+test("only a room admin is offered Install; a participant is told who can install", async () => {
+  const room = { ...githubRoom, identifier: "github.com/bobaifromtima/tima-connect",
+    gitRoom: { ...githubRoom.gitRoom, visibility: "private", accessMode: "private",
+      repository: { id: "1", fullName: "bobaifromtima/tima-connect", owner: "bobaifromtima", name: "tima-connect" } } };
+  const githubStatus = { connected: false, configured: true, installUrlAvailable: true, repository: null };
+
+  const admin = await renderPanel({ room: { ...room, role: "admin" }, storage: cloudStorage, githubStatus });
+  assert.match(admin, /Ready to install/);
+  assert.match(admin, />Install</);
+
+  const participant = await renderPanel({ room: { ...room, role: "participant" }, storage: cloudStorage, githubStatus });
+  assert.doesNotMatch(participant, />Install</);
+  assert.doesNotMatch(participant, /Ready to install/);
+  assert.match(participant, /Needs a repository admin/);
+  assert.match(participant, /Only the owner or an admin of bobaifromtima\/tima-connect on GitHub can install the GitHub app\. Write access is not enough\./);
+  assert.match(participant, /Check connection/);
+});
+
+test("an install refusal is shown without the IPC wrapper text", async () => {
+  const { safeUserVisibleErrorDetail } = await import("../src/domain/user-visible-error");
+  assert.equal(
+    safeUserVisibleErrorDetail(new Error("Error invoking remote method 'desktop:room:open-github-install': DesktopApiError: Only the owner or an admin of o/r on GitHub can install the GitHub app for this room."), "x"),
+    "Only the owner or an admin of o/r on GitHub can install the GitHub app for this room.",
+  );
+});
+
 test("the Conversation nav summary stays short: one active setting by name, more as a count", () => {
   assert.equal(conversationSettingsSummary(null, null), null);
   assert.equal(conversationSettingsSummary("Standard", null), null);
