@@ -35,6 +35,11 @@ const onDemandViews = [
   "shared/ui/my-work/MyWork.vue",
 ];
 
+/** A module id as a repository path with "/" separators, on Windows too. */
+function repositoryPath(id) {
+  return relative(repositoryRoot, id).replaceAll("\\", "/");
+}
+
 let built;
 function renderer() {
   built ??= (async () => {
@@ -58,7 +63,7 @@ function renderer() {
     /** The chunk that holds a component's code: its script, not its style sub-modules. */
     const chunkOf = (path) => [...chunks.values()].find((chunk) => Object.keys(chunk.modules).some((id) => {
       const [file, query = ""] = id.split("?");
-      return relative(repositoryRoot, file) === path && (query === "" || query.startsWith("vue&type=script"));
+      return repositoryPath(file) === path && (query === "" || query.startsWith("vue&type=script"));
     }));
     const html = output.find((item) => item.fileName === "index.html").source;
     return { output, chunks, entry, staticClosure, chunkOf, html };
@@ -99,17 +104,28 @@ test("the split views bring no stylesheet of their own: their styles stay in the
   // One rule from a view's scoped styles, and one from a stylesheet a view imports.
   assert.match(css, /\.settings-shell\b/);
   assert.match(css, /\.connector-detail \.primary-button/);
-  // Rules of equal specificity where the later one wins today. Loaded as chunk CSS,
-  // the view's rule would come last and win instead.
-  const before = (first, second) => {
-    const a = css.indexOf(first);
-    const b = css.indexOf(second);
-    assert.ok(a >= 0 && b >= 0 && a < b, `${first} must come before ${second}`);
+  // Pairs of rules with equal specificity where the later rule wins today. Loaded
+  // as chunk CSS, a split view's stylesheet would come last and win instead. The
+  // checks match the first rule with each selector (minified: `selector{`), not
+  // the declarations, so a normal style change does not break them.
+  const firstRule = (selector) => css.search(new RegExp(`(?:^|[{};])${selector}\\{`));
+  const before = (first, second, protects) => {
+    const a = firstRule(first);
+    const b = firstRule(second);
+    assert.ok(a >= 0, `No rule ${first} in the entry CSS. ${protects} If the rule was renamed on purpose, update this check.`);
+    assert.ok(b >= 0, `No rule ${second} in the entry CSS. ${protects} If the rule was renamed on purpose, update this check.`);
+    assert.ok(a < b, `${first} must come before ${second}. ${protects} A split view's styles moved out of the entry CSS or out of their import's place: keep them in the entry with "lazy-view-styles:" (vite.config.ts).`);
   };
-  // The board's own segmented-control look overrides the control's default.
-  before(".desktop-segmented-control[data-size=large][data-v-", ".desktop-board-panel .desktop-board-segmented.desktop-segmented-control{");
-  // Inbox: its own padding (inbox-view.css) overrides the shared room-knowledge.css.
-  before(".app-main:has(>.needs-you-page){gap:24px;padding:20px 28px 24px}", ".app-main:has(>.needs-you-page){padding:28px 36px 24px;gap:0}");
+  before(
+    "\\.desktop-segmented-control\\[data-size=large\\]\\[data-v-[0-9a-f]+\\]",
+    "\\.desktop-board-panel \\.desktop-board-segmented\\.desktop-segmented-control",
+    "It keeps the board's own segmented-control look (global 06-task-board.css) over the control's default.",
+  );
+  before(
+    "\\.knowledge-notice",
+    "\\.inbox-desktop-detail",
+    "It keeps inbox-view.css after room-knowledge.css, so the Inbox page padding wins over the shared one.",
+  );
 });
 
 test("the built page and its dynamic imports use relative paths, as Electron loads them from file://", async () => {
@@ -127,5 +143,9 @@ test("the built page and its dynamic imports use relative paths, as Electron loa
 
 test("the packaging script copies the whole renderer output, so every chunk ships", async () => {
   const script = await readFile(join(desktopRoot, "electron/scripts/package-artifact.mjs"), "utf8");
-  assert.match(script, /for \(const directory of \[[^\]]*"dist-renderer"[^\]]*\]\) \{\s*await cp\(join\(root, directory\), join\(app, directory\), \{ recursive: true \}\);/);
+  const help = "The app loads split views from dist-renderer/assets at run time; the package must copy that whole folder, not a list of files.";
+  const loop = script.match(/for \(const directory of \[([^\]]*)\]\)([\s\S]*?)\n\}/);
+  assert.ok(loop, `package-artifact.mjs no longer copies its build folders in one loop. ${help}`);
+  assert.match(loop[1], /"dist-renderer"/, `package-artifact.mjs does not copy dist-renderer. ${help}`);
+  assert.match(loop[2], /\bcp\([\s\S]*recursive: true/, `package-artifact.mjs does not copy the folders recursively. ${help}`);
 });
