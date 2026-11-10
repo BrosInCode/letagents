@@ -1265,6 +1265,10 @@ test('v36 upgrades existing publication receipts to store real diffs without los
 
 test('a background staging pass preserves a workspace captured while its authority check yielded', async t => {
   const f = await fixture(t);
+  // captureMessage() arms the publisher's own 1 s flush timer. Where Git is slow (Windows), that
+  // timer pass could still be running when the flush below starts, and flush() then returns at
+  // once without publishing. With mocked timers the flush below is the only staging pass.
+  t.mock.timers.enable({ apis: ['setTimeout'] });
   f.captureMessage();
   f.options.workspaceLocation = async () => f.location;
   await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
@@ -1274,9 +1278,8 @@ test('a background staging pass preserves a workspace captured while its authori
     // First check enters flush; second occurs after stageChanged loaded its v1 row.
     if (++checks === 2) await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1');
   };
-  // The staging pass needs the first workspace capture's background Git work to have finished. Git starts much slower on Windows.
-  if (process.platform === 'win32') await new Promise((resolve) => setTimeout(resolve, 1500));
   await f.publisher.flush();
+  assert.equal(checks >= 2, true, 'this flush was the staging pass that yielded to the capture');
   assert.equal(f.row().summary?.version, 3);
   assert.deepEqual(f.sent.at(-1)?.summary, f.row().summary);
 });
