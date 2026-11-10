@@ -79,6 +79,9 @@
       @retry="retryJoin"
     />
 
+    <div v-if="isConnected && activeTab === 'chat'" class="web-room-release-widget">
+      <ReleaseQueueWidget :key="room?.identifier" :room-id="room?.identifier || ''" :load="loadReleasePlanning" :open-external="openReleaseLink" @select="openBoardTask" />
+    </div>
     <RoomTabPanels
       v-if="isConnected"
       ref="roomTabPanelsRef"
@@ -241,6 +244,8 @@
 </template>
 
 <script setup lang="ts">
+import ReleaseQueueWidget from '../../../../shared/ui/board/ReleaseQueueWidget.vue'
+import { fetchBoardPlanning } from '../composables/room/boardPlanning'
 import { activityUnread } from '../../../../shared/ui/activity/unread'
 import { provideRoomMessageMotion } from "../../../../shared/ui/useRoomMessageMotion";
 import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
@@ -482,6 +487,9 @@ function openBoardTask(taskId: string) {
     },
   })
 }
+
+function loadReleasePlanning() { return fetchBoardPlanning(room.value?.identifier || '') }
+function openReleaseLink(url: string) { window.open(url, '_blank', 'noopener,noreferrer') }
 
 function clearBoardTask() {
   if (route.query.task) void router.replace({ query: { ...route.query, task: undefined } })
@@ -810,4 +818,10 @@ watch(
   }
 }
 
+</style>
+
+<style scoped>
+.web-room-release-widget { display:flex; justify-content:flex-end; padding:8px 20px 0; }
+.web-room-release-widget:has(.release-widget-trigger) { padding-bottom:8px; }
+.web-room-release-widget:not(:has(.release-widget-trigger)) { display:none; }
 </style>

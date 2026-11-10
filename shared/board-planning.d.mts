@@ -33,6 +33,7 @@ export interface BoardTaskPlanning {
     priority?: "low" | "medium" | "high" | "urgent";
 }
 export interface BoardPlanningDocument {
+    releaseRule?: BoardReleaseRule | null;
     columns: BoardColumn[];
     sprints: BoardSprint[];
     defaultTargetPoints: number;
@@ -72,6 +73,7 @@ export interface BoardPlanningSnapshot {
     imported: BoardImportedPlanning;
     /** Complete room facts, including finished tasks, independent of task-list pagination. */
     taskFacts: BoardTaskFact[];
+    releases?: BoardReleases;
     canEdit: boolean;
 }
 export interface BoardPlanningUpdate {
@@ -90,3 +92,20 @@ export declare function boardTaskPlanning(snapshot: Pick<BoardPlanningSnapshot, 
 /** Ignore stale placement after an authoritative lifecycle change. Always fall back to a visible column. */
 export declare function boardTaskColumn(document: BoardPlanningDocument, task: Pick<BoardTaskFact, "id" | "status">): string | null;
 export declare function validateBoardPlanningReferences(document: BoardPlanningDocument, taskIds: ReadonlySet<string>, importedSprintIds: ReadonlySet<string>): void;
+
+/** One explicit board condition determines queue membership; PR state never does. */
+export type BoardReleaseRule = { kind: 'column'; columnId: string } | {
+    kind: 'tracker'; connectionId: string; fieldId: string; value: string;
+};
+export interface BoardReleaseField { id: string; name: string; values: string[] }
+export interface BoardReleaseSource { id: string; name: string; provider: string; fields: BoardReleaseField[] }
+export interface BoardReleaseItem {
+    taskId: string; title: string; ticketKey: string | null; ticketUrl: string | null;
+    owner: string | null; checkedAt: string | null;
+    pullRequests: import('./ticket-connectors.mjs').MyWorkPullRequest[];
+}
+export interface BoardReleases {
+    sources: BoardReleaseSource[]; items: BoardReleaseItem[];
+    /** Tickets whose condition cannot currently be evaluated; never count these as empty. */
+    unavailable: number;
+}

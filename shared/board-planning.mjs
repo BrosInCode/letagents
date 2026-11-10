@@ -117,7 +117,23 @@ export function validateBoardPlanningUpdate(value) {
         }
         tasks[taskId] = result;
     }
-    return { expectedRevision: Number(input.expectedRevision), document: { columns, sprints, defaultTargetPoints: target(raw.defaultTargetPoints), sprintTargets, tasks } };
+    let releaseRule;
+    if (Object.hasOwn(raw, "releaseRule")) {
+        if (raw.releaseRule === null) releaseRule = null;
+        else {
+            const rule = object(raw.releaseRule, "Release rule");
+            if (rule.kind === "column") {
+                const columnId = id(rule.columnId, "Release column");
+                if (!columns.some(column => column.id === columnId)) fail("Choose an existing release column.");
+                releaseRule = { kind: "column", columnId };
+            } else if (rule.kind === "tracker") {
+                releaseRule = { kind: "tracker", connectionId: id(rule.connectionId, "Tracker connection"),
+                    fieldId: id(rule.fieldId, "Release field"), value: text(rule.value, "Release value", 240) };
+            } else fail("Choose a column or tracker condition for releases.");
+        }
+    }
+    return { expectedRevision: Number(input.expectedRevision), document: { columns, sprints, defaultTargetPoints: target(raw.defaultTargetPoints), sprintTargets, tasks,
+        ...(releaseRule !== undefined ? { releaseRule } : {}) } };
 }
 export function boardTaskPlanning(snapshot, taskId) {
     return { ...snapshot.imported.tasks[taskId], ...snapshot.document.tasks[taskId] };
@@ -129,6 +145,8 @@ export function boardTaskColumn(document, task) {
     return matching.find(column => column.id === placement)?.id ?? matching[0]?.id ?? null;
 }
 export function validateBoardPlanningReferences(document, taskIds, importedSprintIds) {
+    if (document.releaseRule?.kind === "column" && !document.columns.some(column => column.id === document.releaseRule.columnId))
+        throw new BoardPlanningInputError("The release column was removed. Update Releases in board settings.");
     const sprintIds = new Set([...document.sprints.map(sprint => sprint.id), ...importedSprintIds]);
     for (const [taskId, planning] of Object.entries(document.tasks)) {
         if (!taskIds.has(taskId))

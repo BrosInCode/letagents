@@ -1818,6 +1818,7 @@ test("local publication preserves message/task success and copies native plannin
   const task = await addLocalTask(room, { title: "Sprint task", createdBy: "Emmy" });
   const document = defaultBoardPlanning();
   document.columns[0]!.name = "Ready";
+  document.releaseRule = { kind: "column", columnId: "todo" };
   document.defaultTargetPoints = 18;
   document.sprints = [{ id: "native-sprint", name: "Sprint one", state: "active", startDate: "2026-11-02", endDate: "2026-11-13", goal: "Ship the board" }];
   document.sprintTargets = { "native-sprint": 20 };
@@ -1892,4 +1893,27 @@ test("planning publication refuses missing task mappings, existing cloud plannin
     assert.match((await publishLocalBoardPlanning(room, cloud.roomId))!, /could not be published/);
     assert.equal(patches, 1, "a revision-zero race is handled as a non-fatal note");
   } finally { globalThis.fetch = previousFetch; }
+});
+
+
+test("local release queue follows native columns and retains its rule for older settings clients", async () => {
+  const { defaultBoardPlanning } = await import("../../../../shared/board-planning.mjs");
+  const { getLocalBoardPlanning, updateLocalBoardPlanning } = await import("../main/rooms/local-board-planning.js");
+  const room = "local-release-queue";
+  await createLocalRoom({ roomIdentifier: room });
+  const task = await addLocalTask(room, { title: "Waiting work", createdBy: "Emmy" });
+  await updateLocalTask(room, task.id, { status: "accepted" });
+  const document = defaultBoardPlanning();
+  document.releaseRule = { kind: "column", columnId: "todo" };
+  let state = await updateLocalBoardPlanning(room, { expectedRevision: 0, document });
+  assert.equal(state.releases!.items[0]!.taskId, task.id);
+  assert.deepEqual(state.releases!.sources, []);
+  const oldClient = structuredClone(document); delete oldClient.releaseRule;
+  state = await updateLocalBoardPlanning(room, { expectedRevision: 1, document: oldClient });
+  assert.deepEqual(state.document.releaseRule, document.releaseRule);
+  await assert.rejects(updateLocalBoardPlanning(room, { expectedRevision: 2, document: { ...document,
+    releaseRule: { kind: "tracker", connectionId: "foreign", fieldId: "labels", value: "release" } } }), /Local boards/);
+  state = await updateLocalBoardPlanning(room, { expectedRevision: 2, document: { ...document, releaseRule: null } });
+  assert.equal(state.releases!.items.length, 0);
+  assert.equal((await getLocalBoardPlanning(room)).document.releaseRule, null);
 });

@@ -1,5 +1,5 @@
 import {
-  BoardPlanningConflictError, defaultBoardPlanning, validateBoardPlanningReferences, validateBoardPlanningUpdate,
+  boardTaskColumn, BoardPlanningInputError, BoardPlanningConflictError, defaultBoardPlanning, validateBoardPlanningReferences, validateBoardPlanningUpdate,
   type BoardPlanningSnapshot, type BoardPlanningUpdate,
 } from "../../../../../shared/board-planning.mjs";
 import { isLocalBoardOwner, notifyLocalBoardChanged } from "../../../../../shared/local-board-owner.mjs";
@@ -27,7 +27,7 @@ export async function getLocalBoardPlanning(roomId: string): Promise<BoardPlanni
       if (!providers.has(String(grant.agent_key))) providers.set(String(grant.agent_key), String(grant.provider));
     }
   }
-  return {
+  const snapshot: BoardPlanningSnapshot = {
     roomId, revision: Number(row?.revision ?? 0), document: row ? JSON.parse(String(row.document)) : defaultBoardPlanning(),
     imported: { sprints: [], tasks: {} }, canEdit: true,
     taskFacts: tasks.map(task => ({
@@ -36,18 +36,31 @@ export async function getLocalBoardPlanning(roomId: string): Promise<BoardPlanni
       prUrl: task.prUrl ?? null, externalRef: null, ticketUrl: null, updatedAt: task.updatedAt,
     })),
   };
+  const rule = snapshot.document.releaseRule;
+  snapshot.releases = { sources: [], unavailable: rule?.kind === 'tracker' ? 1 : 0,
+    items: rule?.kind === 'column' ? snapshot.taskFacts.filter(task => task.status !== 'cancelled' && boardTaskColumn(snapshot.document, task) === rule.columnId).map(task => ({
+      taskId: task.id, title: task.title, ticketKey: null, ticketUrl: null, owner: task.assignee?.split('|')[0].trim() || null,
+      checkedAt: null, pullRequests: task.prUrl ? [{ url: task.prUrl, number: /\/pull\/(\d+)/.exec(task.prUrl)?.[1] || null,
+        title: null, state: null, draft: null, merged: null, review_summary: null, check_summary: null }] : [],
+    })) : [] };
+  return snapshot;
 }
 
 export async function updateLocalBoardPlanning(roomId: string, raw: BoardPlanningUpdate): Promise<BoardPlanningSnapshot> {
   if (!isLocalBoardOwner()) return requestDesktopBoardMutation("updateLocalBoardPlanning", [roomId, raw]);
   const input = validateBoardPlanningUpdate(raw);
+  if (input.document.releaseRule?.kind === 'tracker') throw new BoardPlanningInputError('Local boards use a column for releases.');
   if (!await getLocalRoom(roomId)) throw new Error("This local room is no longer available.");
   const database = await getLocalTaskDatabase();
   ensurePlanningSchema(database);
   beginImmediate(database);
   try {
-    const row = database.prepare("SELECT revision FROM local_board_planning WHERE room_id=?").get(roomId);
+    const row = database.prepare("SELECT revision, document FROM local_board_planning WHERE room_id=?").get(roomId);
     if (Number(row?.revision ?? 0) !== input.expectedRevision) throw new BoardPlanningConflictError();
+    if (!Object.hasOwn(input.document, 'releaseRule') && row?.document) {
+      const previous = JSON.parse(String(row.document));
+      if (previous.releaseRule) input.document.releaseRule = previous.releaseRule;
+    }
     const taskIds = new Set(database.prepare("SELECT task_id FROM local_tasks WHERE room_id=?").all(roomId).map(row => String(row.task_id)));
     validateBoardPlanningReferences(input.document, taskIds, new Set());
     database.prepare(`INSERT INTO local_board_planning(room_id, revision, document) VALUES (?, ?, ?)

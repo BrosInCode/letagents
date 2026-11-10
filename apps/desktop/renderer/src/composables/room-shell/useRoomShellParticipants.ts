@@ -18,7 +18,7 @@ import type { RoomShellContextOf } from "./context";
 /** Environment and repo state, participants, mentions, and agent work indicators. */
 export function useRoomShellParticipants(context: unknown) {
   const {
-    actionPanelOpen, activeTab, props, refreshedEnvironmentRepoStatus, searchOpen, showEventsTab,
+    actionPanelOpen, activeTab, props, searchOpen, showEventsTab,
     supervisorEntries, supervisorEntriesState,
   } = context as RoomShellContextOf<
       "inputs"
@@ -28,14 +28,7 @@ export function useRoomShellParticipants(context: unknown) {
   >;
   const app = context as object;
   const githubEventsAvailable = showEventsTab;
-  const showEnvironmentPanelWidget = computed(() =>
-    activeTab.value === "chat" && Boolean(props.room.gitRoom) && !actionPanelOpen.value && !searchOpen.value
-  );
-  const effectiveEnvironmentRepoStatus = computed(() => {
-    const refreshed = refreshedEnvironmentRepoStatus.value;
-    if (!refreshed || refreshed.rootPath !== props.repoStatus.rootPath) return props.repoStatus;
-    return refreshed;
-  });
+
   const managedAgentRepoStatus = computed(() =>
     managedAgentRepoStatusForRoom(props.repoStatus, props.room, props.gitRoomMatchesActiveRepo)
   );
@@ -101,7 +94,7 @@ export function useRoomShellParticipants(context: unknown) {
       supervisorEntries.value, [], workWindowNow.value)], props.messages)
   );
   return {
-    githubEventsAvailable, showEnvironmentPanelWidget, effectiveEnvironmentRepoStatus,
+    githubEventsAvailable,
     managedAgentRepoStatus, managedAgentRepoRootPath, roomAttentionResponseNames, roomParticipants,
     agentMentionInsertTextByEntryId, pendingResponseParticipants, workWindowNow, localAgentWork,
   };
