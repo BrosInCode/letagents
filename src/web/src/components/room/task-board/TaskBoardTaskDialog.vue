@@ -94,7 +94,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onBeforeUnmount, ref, useId } from 'vue'
 import { taskContentPatch, type TaskContentPatch } from '../../../../../../shared/task-markdown-editing.mjs'
-import { useRoom, deleteRoomContent } from '@/composables/useRoom'
 import type { RoomAgentPresence, RoomTask, TaskGitHubArtifactStatus } from '@/composables/useRoom'
 import TaskDetailLayout from '../../../../../../shared/ui/board/TaskDetailLayout.vue'
 import GitPullRequestIcon from '@/components/icons/GitPullRequestIcon.vue'
@@ -162,15 +161,20 @@ function discard() {
   if (!busy.value) emit('close')
 }
 const titleId = `task-dialog-${useId()}`
-const { room } = useRoom()
 const deleting = ref(false)
 const deleteError = ref('')
 async function deleteTask() {
-  if (!room.value || deleting.value) return
+  if (deleting.value || busy.value) return
   if (!window.confirm(`Permanently delete “${props.task.title}”? This cannot be undone. Repository files and pull requests will be kept.`)) return
   deleting.value = true
   deleteError.value = ''
-  try { await deleteRoomContent(room.value.identifier, { kind: 'task', id: props.task.id }); emit('close') }
+  try {
+    const { useRoom, deleteRoomContent } = await import('@/composables/useRoom')
+    const { room } = useRoom()
+    if (!room.value) return
+    await deleteRoomContent(room.value.identifier, { kind: 'task', id: props.task.id })
+    emit('close')
+  }
   catch (error) { deleteError.value = error instanceof Error ? error.message : 'Task could not be deleted.' }
   finally { deleting.value = false }
 }

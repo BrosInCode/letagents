@@ -81,6 +81,7 @@ function toAccountFocusRoomResponse(
     id: room.room_id,
     display_name: room.display_name,
     name: room.room_id,
+    archived: room.archived ?? false,
     kind: room.kind,
     parent_room_id: room.parent_room_id,
     focus_key: room.focus_key,

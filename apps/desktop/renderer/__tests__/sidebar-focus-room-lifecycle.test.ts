@@ -89,3 +89,17 @@ describe("sidebar focus room lifecycle", () => {
     );
   });
 });
+
+
+it("personal focus archives stay hidden when a live snapshot still contains the room", () => {
+  const parent = parentEntry();
+  const child = focusRoom("focus_active", "active");
+  const accountRoom = {
+    roomIdentifier: parent.roomIdentifier, displayName: parent.title, kind: "main", gitRoom: null,
+    focusRooms: [{ ...child, roomIdentifier: child.identifier, archived: true }],
+  } as unknown as import("../../electron/ipc-types").DesktopAccountRoomEntry;
+  const input = { currentParentRoom: parent, focusRooms: [child], accountRooms: [accountRoom] };
+  assert.deepEqual(buildSidebarProjectGroups(input)[0].focusRooms, []);
+  accountRoom.focusRooms[0].archived = false;
+  assert.equal(buildSidebarProjectGroups(input)[0].focusRooms.length, 1);
+});

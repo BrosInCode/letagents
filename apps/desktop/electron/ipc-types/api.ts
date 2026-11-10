@@ -1,4 +1,9 @@
 import type { RoomGif, RoomExpressionsSetting } from "../../../../shared/room-expressions.mjs";
+export interface DesktopRoomDeletionPreview {
+  children: Array<{ roomIdentifier: string; displayName: string }>;
+  counts: { messages: number; threads: number; tasks: number; files: number } | null;
+  localOnly?: boolean;
+}
 export interface DesktopConversationRoutingSettings { enabled: boolean; available: boolean; can_manage: boolean; }
 /** "Answer in turns": enabled is the room's sequential reply order; off (parallel) by default. */
 export interface DesktopReplyOrderSettings { enabled: boolean; can_manage: boolean; }
@@ -235,6 +240,7 @@ export interface DesktopApi {
       updates: { pinned?: boolean; archived?: boolean }
     ) => Promise<DesktopAccountRoomActionResult>;
     leaveAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
+    getRoomDeletionPreview: (roomIdentifier: string) => Promise<DesktopRoomDeletionPreview>;
     deleteAccountRoom: (roomIdentifier: string, confirmation: string) => Promise<DesktopAccountRoomActionResult>;
     getSnapshot: (roomIdentifier?: string | null, options?: DesktopRoomSnapshotOptions) => Promise<DesktopRoomSnapshot>;
     /**

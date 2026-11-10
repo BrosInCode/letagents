@@ -7,13 +7,15 @@ const { ContentDeletionError } = await import("../db/content-deletion.js");
 test("content deletion requires human auth, admin scope, existing rooms and exact room confirmation", async () => {
   const handlers: Array<(req: any, res: any) => Promise<void>> = [];
   const calls: any[] = [];
+  let previewHandler: (req: any, res: any) => Promise<void>;
   let admin = true;
-  registerContentDeletionRoutes({ delete(_path: unknown, handler: any) { handlers.push(handler); } } as never, {
+  registerContentDeletionRoutes({ get(_path: unknown, handler: any) { previewHandler = handler; }, delete(_path: unknown, handler: any) { handlers.push(handler); } } as never, {
     resolveCanonicalRoomRequestId: async id => id,
     resolveRoomOrReply: async (id, _res, options) => { assert.equal(options.allowCreate, false); return { id } as never; },
     requireParticipant: async () => true,
     requireAdmin: async (_req, res) => { if (!admin) res.status(403).json({ error: "Admin required" }); return admin; },
     resolveProjectRole: async () => admin ? "admin" : "participant",
+    previewRoom: async id => { calls.push(["preview", id]); return { children: [], counts: { messages: 3, threads: 1, tasks: 2, files: 0 } }; },
     deleteRoom: async id => { calls.push(["room", id]); return { deleted_room_ids: [id, "child-room"], parent_room_id: "parent-room" }; },
     deleteTask: async (...args) => { calls.push(["task", ...args]); return { deleted: true }; },
     deleteMessage: async input => { calls.push(input); if (input.messageId === "msg_9") throw new ContentDeletionError(409, "Busy"); return { deleted: true, message_ids: [input.messageId] }; },
@@ -34,4 +36,11 @@ test("content deletion requires human auth, admin scope, existing rooms and exac
   assert.ok(calls.some(call => call[0] === "invalidate" && call[1] === "child-room"));
   assert.ok(calls.some(call => call[0] === "invalidate" && call[1] === "parent-room"));
   res = response(); await handlers[2]({ ...req, params: { ...req.params, 1: "msg_9" } }, res); assert.equal(res.statusCode, 409);
+  res = response(); await previewHandler!({ ...req, authKind: "agent_session" }, res); assert.equal(res.statusCode, 401);
+  admin = false;
+  res = response(); await previewHandler!(req, res); assert.equal(res.statusCode, 403);
+  admin = true;
+  res = response(); await previewHandler!(req, res); assert.equal(res.statusCode, 200);
+  assert.equal(res.body.counts.messages, 3);
+
 });

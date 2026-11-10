@@ -2044,16 +2044,17 @@ test("PG send-time task-owner routing ignores expired leases and preserves the e
         'Owner', 'Cursor', NOW(), NOW(), NOW())`,
     [room.id, owner],
   );
+  const expiredOwnerTask = await dbModule!.createTask(room.id, "Expired owner work", owner);
   await pool!.query(
     `INSERT INTO task_leases (
        id, room_id, task_id, kind, status, agent_key, agent_instance_id,
        agent_session_id, actor_label, expires_at, created_by, created_at, updated_at
      ) VALUES (
-       'lease_expired_task_owner', $1, 'task_expired_owner', 'work', 'active',
+       'lease_expired_task_owner', $1, $3, 'work', 'active',
        'owner/task-worker', 'task-owner-new', 'task_owner_new', 'New task worker',
        NOW() - INTERVAL '1 hour', $2, NOW(), NOW()
      )`,
-    [room.id, owner],
+    [room.id, owner, expiredOwnerTask.id],
   );
 
   const expiredFollowUp = await addMessage!(room.id, "Human", "continue", { source: "browser" });

@@ -44,7 +44,7 @@ export function useAppNavigation(context: unknown) {
     togglePinnedCollapsed,
     toggleRoomsCollapsed,
   } = useDesktopNavigationState({
-    accountRooms: computed(() => mergeCompanyRooms(accountRooms.value, app.company.rooms.value)),
+    accountRooms: computed(() => mergeCompanyRooms(accountRooms.value, app.company.rooms.value, app.settingsAccountRooms.value.filter(room => room.archived).map(room => room.roomIdentifier))),
     activeEntryStorageKey,
     appInfo,
     recentRootRooms,

@@ -120,6 +120,28 @@ export async function deleteRoomTask(roomId: string, taskId: string): Promise<{ 
   });
 }
 
+export async function getRoomDeletionPreview(roomId: string): Promise<{
+  children: Array<{ roomIdentifier: string; displayName: string }>;
+  counts: { messages: number; threads: number; tasks: number; files: number };
+}> {
+  const { rows: [preview] } = await db.execute<{
+    children: Array<{ roomIdentifier: string; displayName: string }>;
+    messages: number; threads: number; tasks: number; files: number;
+  }>(sql`WITH RECURSIVE affected AS (
+    SELECT id,display_name FROM rooms WHERE id=${roomId}
+    UNION
+    SELECT r.id,r.display_name FROM rooms r JOIN affected a ON r.parent_room_id=a.id
+  ) SELECT
+    COALESCE((SELECT jsonb_agg(jsonb_build_object('roomIdentifier',id,'displayName',display_name) ORDER BY id)
+      FROM affected WHERE id<>${roomId}), '[]'::jsonb) AS children,
+    (SELECT count(*)::int FROM messages WHERE room_id IN (SELECT id FROM affected)) AS messages,
+    (SELECT count(*)::int FROM (SELECT DISTINCT room_id,thread_root_number FROM messages
+      WHERE room_id IN (SELECT id FROM affected) AND thread_root_number IS NOT NULL) t) AS threads,
+    (SELECT count(*)::int FROM tasks WHERE room_id IN (SELECT id FROM affected)) AS tasks,
+    (SELECT count(*)::int FROM message_attachments WHERE room_id IN (SELECT id FROM affected)) AS files`);
+  return { children: preview.children, counts: { messages: preview.messages, threads: preview.threads, tasks: preview.tasks, files: preview.files } };
+}
+
 export async function deleteRoomData(roomId: string): Promise<{ deleted_room_ids: string[]; parent_room_id: string | null }> {
   return db.transaction(async tx => {
     // Lock each parent before discovering its children. FK checks prevent new

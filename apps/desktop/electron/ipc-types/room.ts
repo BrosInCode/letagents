@@ -1021,6 +1021,7 @@ export interface DesktopInviteRoomCreation {
 }
 
 export interface DesktopAccountFocusRoomEntry {
+  archived?: boolean;
   roomIdentifier: string;
   displayName: string;
   name: string;

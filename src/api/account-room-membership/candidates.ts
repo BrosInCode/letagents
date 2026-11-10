@@ -126,6 +126,7 @@ export function toAccountRoomListFocusRoom(
     focus_key: focusRoom.focus_key,
     source_task_id: focusRoom.source_task_id,
     focus_status: focusRoom.focus_status,
+    archived: focusCandidate?.archived ?? false,
     role: focusCandidate?.role ?? parentCandidate.role,
     source: focusCandidate?.source ?? null,
     first_opened_at: focusCandidate?.first_opened_at ?? null,

@@ -1599,6 +1599,15 @@ export async function deleteLocalMessageContent(roomId: string, messageId: strin
   if (!options.validateOnly) await drainLocalAttachmentDeletions();
 }
 
+export async function getLocalRoomDeletionCounts(roomId: string): Promise<{ messages: number; threads: number; files: number }> {
+  const database = await getDb();
+  return database.prepare(`SELECT
+    (SELECT count(*) FROM local_chat_messages WHERE room_id=?) AS messages,
+    (SELECT count(DISTINCT thread_root_number) FROM local_chat_messages WHERE room_id=? AND thread_root_number IS NOT NULL) AS threads,
+    (SELECT count(*) FROM local_chat_attachments WHERE room_id=?) AS files
+  `).get(roomId, roomId, roomId) as { messages: number; threads: number; files: number };
+}
+
 export async function deleteLocalRoomMessages(roomId: string): Promise<void> {
   const database = await getDb();
   prepareLocalDeletion(database);

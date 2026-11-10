@@ -18,7 +18,12 @@ export async function accountHasRoomAssociation(input: {
     .select({ id: rooms.id })
     .from(rooms)
     .where(and(eq(rooms.kind, "focus"), eq(rooms.parent_room_id, input.roomId)));
-  const associatedRoomIds = [input.roomId, ...focusRoomRows.map((row) => row.id)];
+  const [room] = await db.select({ parentRoomId: rooms.parent_room_id, kind: rooms.kind })
+    .from(rooms).where(eq(rooms.id, input.roomId)).limit(1);
+  // Focus rooms inherit access from their parent, including before this person
+  // has opened the child and acquired a recent-room association of their own.
+  const associatedRoomIds = [input.roomId, ...focusRoomRows.map((row) => row.id),
+    ...(room?.kind === "focus" && room.parentRoomId ? [room.parentRoomId] : [])];
 
   const [adminRow] = await db
     .select({ account_id: project_admins.account_id })

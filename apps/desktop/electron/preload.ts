@@ -130,6 +130,7 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:update-account-room", roomIdentifier, updates),
     leaveAccountRoom: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:leave-account-room", roomIdentifier),
+    getRoomDeletionPreview: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:deletion-preview", roomIdentifier),
     deleteAccountRoom: (roomIdentifier: string, confirmation: string) =>
       ipcRenderer.invoke("desktop:room:delete-account-room", roomIdentifier, confirmation),
     getSnapshot: (roomIdentifier?: string | null, options?: DesktopRoomSnapshotOptions) =>

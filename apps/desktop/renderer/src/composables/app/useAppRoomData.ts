@@ -200,7 +200,7 @@ export function useAppRoomManagement(context: unknown) {
     archiveSidebarFocusRoom,
     archiveSidebarRoom,
     concludeSidebarFocusRoom,
-    deleteAccountRoom, pendingRoomDeletion, confirmRoomDeletion,
+    deleteAccountRoom, pendingRoomDeletion, confirmRoomDeletion, finishRoomArchive,
     leaveAccountRoom,
     openAccountRoomFromSettings,
     refreshSettings,
@@ -227,6 +227,11 @@ export function useAppRoomManagement(context: unknown) {
     onRoomArchived: async (roomIdentifier, displayName) => {
       await leaveArchivedRoomIfActive(roomIdentifier, displayName);
     },
+    onActiveRoomDeleted: async () => {
+      const nextRoom = accountRooms.value.find(room => !room.archived);
+      if (nextRoom) await app.openRoomFromAppAgent(nextRoom.roomIdentifier, { create: false });
+      else selectNewRoomEntry();
+    },
     onRoomRenamed: (room) => {
       if (normalizeRoomIdentifier(room.identifier) === normalizeRoomIdentifier(selectedRoomIdentifier.value)) {
         handleRoomRenamed(room);
@@ -246,7 +251,7 @@ export function useAppRoomManagement(context: unknown) {
     newRoomStorage, newRoomCompany, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
     pickNewProjectParent, openSuccessRoom, retryLastAction, selectNewRoomEntry,
     batchConcludeSidebarFocusRooms, batchHideSidebarRooms, batchSetSidebarRoomsPinned,
-    archiveSidebarFocusRoom, archiveSidebarRoom, concludeSidebarFocusRoom, deleteAccountRoom, pendingRoomDeletion, confirmRoomDeletion,
+    archiveSidebarFocusRoom, archiveSidebarRoom, concludeSidebarFocusRoom, deleteAccountRoom, pendingRoomDeletion, confirmRoomDeletion, finishRoomArchive,
     leaveAccountRoom, openAccountRoomFromSettings, refreshSettings, renameSidebarRoom,
     restoreAccountRoom, settingsFeedback, settingsRoomActionBusyKey, toggleAccountRoomPin,
     togglePinSidebarRoom,

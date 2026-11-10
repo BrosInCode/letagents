@@ -69,3 +69,28 @@ test("deleting a sidebar child removes its row and returns an open child to its 
     }
   } finally { globalThis.window = previousWindow; globalThis.localStorage = previousStorage; }
 });
+
+
+test("successful parent deletion navigates away, while a failed deletion keeps the warning", async () => {
+  const oldWindow = globalThis.window, oldStorage = globalThis.localStorage;
+  let fail = true, navigated = 0;
+  globalThis.window = { letagentsDesktop: { room: { deleteAccountRoom: async () => { if (fail) throw new Error("Agents still active"); } } } } as never;
+  globalThis.localStorage = { setItem() {} } as never;
+  try {
+    const state = useDesktopAccountRoomSettings({
+      accountRooms: ref([]), settingsAccountRooms: ref([]), activeEntry: ref({} as never), loading: ref(false),
+      recentRootRooms: ref([]), recentRootRoomsStorageKey: "test", rootRoomSnapshot: ref(null), selectedRootRoomIdentifier: ref("parent"), selectedSnapshot: ref(null), settingsEntry: {} as never,
+      openRoomSnapshot() {}, refresh: async () => {}, refreshAccountRooms: async () => {},
+      onActiveRoomDeleted: async () => { navigated++; },
+    });
+    state.deleteAccountRoom({ roomIdentifier: "parent", displayName: "Parent" });
+    await state.confirmRoomDeletion("parent");
+    assert.equal(state.pendingRoomDeletion.value?.roomIdentifier, "parent");
+    assert.equal(state.settingsFeedback.value?.message, "Agents still active");
+    assert.equal(navigated, 0);
+    fail = false;
+    await state.confirmRoomDeletion("parent");
+    assert.equal(navigated, 1);
+    assert.equal(state.pendingRoomDeletion.value, null);
+  } finally { globalThis.window = oldWindow; globalThis.localStorage = oldStorage; }
+});

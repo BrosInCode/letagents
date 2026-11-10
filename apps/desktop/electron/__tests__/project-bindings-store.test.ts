@@ -966,5 +966,5 @@ test("disconnect preserves files and prevents name-only legacy rebinding until e
     assert.deepEqual(await listProjectBindings(options), []);
     await bindProjectRoot({ context, rootPath, source: "git_remote" }, options);
     assert.equal((await listProjectBindings(options)).length, 1);
-  } finally { rmSync(temporary, { recursive: true, force: true }); }
+  } finally { removeTemporary(temporary); }
 });

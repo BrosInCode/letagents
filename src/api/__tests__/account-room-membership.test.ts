@@ -439,3 +439,24 @@ test(
     assert.equal(await getProjectById(createdInvite.id), undefined);
   }
 );
+
+
+test("parent association can archive and restore an unopened focus room without hiding its sibling", { skip: requiresDatabase }, async () => {
+  requireTestDeps();
+  const account = await upsertAccount!({ provider: "github", provider_user_id: "archive-focus", login: "EmmyMay", display_name: "EmmyMay" });
+  const parent = await createProjectWithName!("github.com/acct/archive-focus");
+  await assignProjectAdmin!(parent.id, account.id);
+  const task = await createTask!(parent.id, "Archive this", "EmmyMay");
+  const siblingTask = await createTask!(parent.id, "Keep this", "EmmyMay");
+  const child = (await createFocusRoomForTask!(parent.id, task.id))!.room;
+  const sibling = (await createFocusRoomForTask!(parent.id, siblingTask.id))!.room;
+  const archived = await updateAccountRoomPreferences!({ accountId: account.id, roomId: child.id, archived: true });
+  assert.equal(archived?.archived, true);
+  const visible = await getAccountRoomsForAccount!(account.id, { login: "EmmyMay" });
+  assert.deepEqual(visible.find(room => room.room_id === parent.id)?.focus_rooms.map(room => room.room_id), [sibling.id]);
+  const all = await getAccountRoomsForAccount!(account.id, { login: "EmmyMay", includeArchived: true });
+  assert.equal(all.find(room => room.room_id === parent.id)?.focus_rooms.find(room => room.room_id === child.id)?.archived, true);
+  await updateAccountRoomPreferences!({ accountId: account.id, roomId: child.id, archived: false });
+  const restored = await getAccountRoomsForAccount!(account.id, { login: "EmmyMay" });
+  assert.equal(restored.find(room => room.room_id === parent.id)?.focus_rooms.length, 2);
+});

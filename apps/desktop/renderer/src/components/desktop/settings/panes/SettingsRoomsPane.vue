@@ -273,8 +273,16 @@ const roomFilters: Array<{ id: RoomFilter; label: string }> = [
   { id: "joined", label: "Joined" },
 ];
 
-const archivedRoomCount = computed(() => props.accountRooms.filter((room) => room.archived).length);
-const createdRoomCount = computed(() => props.accountRooms.filter((room) => room.canDelete && !room.archived).length);
+const restorableRooms = computed<DesktopAccountRoomEntry[]>(() => props.accountRooms.flatMap(parent => [
+  parent,
+  ...parent.focusRooms.filter(room => room.archived).map(room => ({
+    ...parent, ...room, kind: "main" as const, archived: true, pinned: false,
+    canDelete: false, canLeave: true, deleteReason: null, focusRooms: [],
+  })),
+]));
+
+const archivedRoomCount = computed(() => restorableRooms.value.filter((room) => room.archived).length);
+const createdRoomCount = computed(() => restorableRooms.value.filter((room) => room.canDelete && !room.archived).length);
 
 const filteredRooms = computed(() => {
   const search = roomSearch.value.trim().toLowerCase();
@@ -284,7 +292,7 @@ const filteredRooms = computed(() => {
       ? "danger"
       : roomFilter.value;
 
-  return props.accountRooms
+  return restorableRooms.value
     .filter((room) => {
       if (effectiveFilter === "danger" && !room.canLeave && !room.canDelete && !room.archived) return false;
       if (effectiveFilter === "active" && room.archived) return false;
@@ -315,7 +323,7 @@ const filteredRooms = computed(() => {
 
 const selectedRoomDetail = computed(() => {
   if (!selectedRoomDetailIdentifier.value) return null;
-  return props.accountRooms.find((room) => room.roomIdentifier === selectedRoomDetailIdentifier.value) || null;
+  return restorableRooms.value.find((room) => room.roomIdentifier === selectedRoomDetailIdentifier.value) || null;
 });
 
 const roomCountLabel = computed(() => {

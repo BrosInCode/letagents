@@ -38,6 +38,7 @@ import {
 } from "../rooms/wake-rules.js";
 import { getDesktopNeedsYou, getDesktopNeedsYouRoom, getDesktopKnowledge, createDesktopKnowledge, reviseDesktopKnowledge, getDesktopMemoryHistory } from "../rooms/knowledge.js";
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
+import { getDesktopRoomDeletionPreview } from "../rooms/account-rooms.js";
 import { deleteDesktopRoomContent } from "../rooms/content-deletion.js";
 import type { DesktopContentDeletion } from "../../ipc-types/api.js";
 
@@ -181,6 +182,7 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:room:knowledge-create", (_event, room, type, input) => createDesktopKnowledge(room, type, input));
   targetIpcMain.handle("desktop:room:knowledge-revise", (_event, room, type, id, input) => reviseDesktopKnowledge(room, type, id, input));
   targetIpcMain.handle("desktop:room:memory-history", (_event, room, id) => getDesktopMemoryHistory(room, id));
+  targetIpcMain.handle("desktop:room:deletion-preview", (_event, room: string) => getDesktopRoomDeletionPreview(String(room ?? "")));
   targetIpcMain.handle("desktop:room:delete-content", async (_event, roomIdentifier: string, input: DesktopContentDeletion) => deleteDesktopRoomContent(roomIdentifier, input));
   targetIpcMain.handle(
     "desktop:room:list-account-rooms",

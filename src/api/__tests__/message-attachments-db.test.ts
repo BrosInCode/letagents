@@ -658,13 +658,19 @@ test("task deletion blocks active work, removes the task and rejects stale recre
 });
 
 test("room deletion removes child rooms and all content, queues pending files and prevents auto recreation", { skip: requiresDatabase }, async () => {
-  const { deleteRoomData } = await import("../db/content-deletion.js");
+  const { deleteRoomData, getRoomDeletionPreview } = await import("../db/content-deletion.js");
   const room = await createProjectWithName!("delete-room");
   await pool!.query("INSERT INTO rooms(id,display_name,kind,parent_room_id,focus_key,focus_status,created_at) VALUES ('focus_999','Child','focus',$1,'delete-child','active',now())", [room.id]);
   const root = await addMessage!(room.id, "owner", "root");
   await addMessage!(room.id, "owner", "reply", { thread_root_message_id: root.id });
   await addMessage!("focus_999", "owner", "child");
   await createMessageAttachmentUpload!({ upload_id: "upl_room_delete", room_id: "focus_999", filename: "notes.txt", content_type: "text/plain", byte_size: 5, storage_provider: "s3", bucket: "test", object_key: "delete-room/pending", expires_at: new Date(Date.now()+60000).toISOString() });
+  const preview = await getRoomDeletionPreview(room.id);
+  assert.deepEqual(preview.children, [{ roomIdentifier: "focus_999", displayName: "Child" }]);
+  assert.deepEqual(preview.counts, { messages: 3, threads: 1, tasks: 0, files: 0 });
+  const childPreview = await getRoomDeletionPreview("focus_999");
+  assert.deepEqual(childPreview.children, []);
+  assert.equal(childPreview.counts.messages, 1);
   await deleteRoomData(room.id);
   assert.equal((await pool!.query("SELECT * FROM rooms")).rowCount, 0);
   assert.equal((await pool!.query("SELECT * FROM messages")).rowCount, 0);

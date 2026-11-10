@@ -2,7 +2,7 @@ import type { Express, Response } from "express";
 import type { Project } from "../../db.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { respondWithInternalError } from "../../http/helpers.js";
-import { ContentDeletionError, deleteRoomData, deleteRoomMessage, deleteRoomTask } from "../../db/content-deletion.js";
+import { ContentDeletionError, getRoomDeletionPreview, deleteRoomData, deleteRoomMessage, deleteRoomTask } from "../../db/content-deletion.js";
 import { drainAttachmentDeletions } from "../../messages/attachment-deletion.js";
 import { contentDeletionEvents } from "../../server/events.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
@@ -13,6 +13,7 @@ export interface ContentDeletionRouteDeps {
   requireParticipant(req: AuthenticatedRequest, res: Response, room: Project): Promise<boolean>;
   requireAdmin(req: AuthenticatedRequest, res: Response, room: Project): Promise<boolean>;
   resolveProjectRole(room: Project, account: AuthenticatedRequest["sessionAccount"]): Promise<string>;
+  previewRoom?: typeof getRoomDeletionPreview;
   deleteMessage?: typeof deleteRoomMessage;
   deleteTask?: typeof deleteRoomTask;
   deleteRoom?: typeof deleteRoomData;
@@ -23,6 +24,19 @@ export interface ContentDeletionRouteDeps {
 export function registerContentDeletionRoutes(app: Express, deps: ContentDeletionRouteDeps): void {
   const invalidate = deps.invalidate ?? ((roomId: string) => contentDeletionEvents.emit("loss", { roomId, projectId: roomId }));
   const cleanup = deps.cleanup ?? drainAttachmentDeletions;
+  app.get(/^\/rooms\/(.+)\/deletion-preview$/, async (req: AuthenticatedRequest, res) => {
+    if (!req.sessionAccount || !["session", "owner_token"].includes(req.authKind ?? "")) {
+      res.status(401).json({ error: "Sign in to view room deletion details." }); return;
+    }
+    try {
+      const id = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(decodeURIComponent((req.params as Record<string, string>)[0] ?? "")));
+      const room = await deps.resolveRoomOrReply(id, res, { allowCreate: false });
+      if (!room || !await deps.requireParticipant(req, res, room) || !await deps.requireAdmin(req, res, room)) return;
+      res.json(await (deps.previewRoom ?? getRoomDeletionPreview)(room.id));
+    } catch (error) {
+      respondWithInternalError(res, "room.deletion-preview", error, "Room deletion details could not be loaded.");
+    }
+  });
   const routes = [
     { path: /^\/rooms\/(.+)\/messages\/(msg_\d+)\/attachments\/(att_\d+)$/, kind: "attachment" },
     { path: /^\/rooms\/(.+)\/messages\/(msg_\d+)\/thread$/, kind: "thread" },

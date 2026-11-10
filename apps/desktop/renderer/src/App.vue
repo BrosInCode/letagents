@@ -441,7 +441,7 @@
       @after-leave="handleSidebarBatchDialogAfterLeave"
     />
 
-    <RoomDeletionDialog :room="pendingRoomDeletion" :busy="Boolean(settingsRoomActionBusyKey)" :error="settingsFeedback?.state === 'error' ? settingsFeedback.message : null" @close="pendingRoomDeletion = null" @confirm="confirmRoomDeletion" />
+    <RoomDeletionDialog :room="pendingRoomDeletion" :busy="Boolean(settingsRoomActionBusyKey)" :error="settingsFeedback?.state === 'error' ? settingsFeedback.message : null" @close="pendingRoomDeletion = null" @confirm="confirmRoomDeletion" @archived="finishRoomArchive" @restored="app.refreshAccountRooms()" />
     <DesktopDeviceAuthDialog
       :open="authDialogOpen"
       :auth-status="authStatus"
@@ -664,7 +664,7 @@ const {
   newRoomProjectPathError, newRoomProjectSelection, newRoomStatusMessage, newRoomStep,
   newRoomStorage, newRoomCompany, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
   pickNewProjectParent, openSuccessRoom, retryLastAction, selectNewRoomEntry,
-  archiveSidebarFocusRoom, archiveSidebarRoom, deleteAccountRoom, pendingRoomDeletion, confirmRoomDeletion, leaveAccountRoom,
+  archiveSidebarFocusRoom, archiveSidebarRoom, deleteAccountRoom, pendingRoomDeletion, confirmRoomDeletion, finishRoomArchive, leaveAccountRoom,
   openAccountRoomFromSettings, renameSidebarRoom, restoreAccountRoom, settingsFeedback,
   settingsRoomActionBusyKey, toggleAccountRoomPin, togglePinSidebarRoom,
 } = Object.assign(app, useAppRoomManagement(app));
