@@ -9,6 +9,7 @@ import {
   getGitHubAppInstallationById,
   getGitHubAppRepositoryByRoomId,
   isWorkerDisplayNameExhaustedError,
+  getGitRoomBindingForRoom,
   getProjectById,
   getSupervisorGrantOwnerAccount,
   getSupervisorHostGrantById,
@@ -37,11 +38,14 @@ import { isRentalSupervisorGrantActive } from "../rental/session-launch.js";
 import { askIdFromGrantScope, isAskGrantActive } from "../agent-asks/store.js";
 import { accountKnowledgeActor, closeRequestsOfRetiredAgent } from "../rooms/attention-answers.js";
 import {
-  isProjectRoomMember,
-  resolveProjectRepoAccessTarget,
+  classifyRoomAccess,
+  decideRoomRead,
+  getProjectAccessRoomId,
   resolveRepoRoomAccessDecision,
-  type RepoRoomAccessDecision,
-} from "../rooms/access.js";
+  type RoomAccessTarget,
+  type RoomReadDecision,
+} from "../rooms/access-decision.js";
+import type { RepoRoomAccessDecision } from "../github/repo-access.js";
 import type { SupervisorGrantOwnerAccount } from "../db/supervisor-grant-revocation.js";
 
 const MAX_GRANT_TTL_MS = 24 * 60 * 60 * 1000;
@@ -65,7 +69,7 @@ export type RoomResolverDeps = {
     options?: { freshCollaboratorCheck?: boolean; throwOnIndeterminate?: boolean },
   ): Promise<boolean>;
   getProjectById?(roomId: string): Promise<Project | null | undefined>;
-  isProjectRoomMember?(project: Project, accountId: string): Promise<boolean>;
+  /** The repository a room is decided by (null: a membership room). Defaults to the access decision's classification. */
   resolveProjectRepoAccessTarget?(project: Project): Promise<{
     roomName: string;
     repoRoomName: string;
@@ -170,27 +174,41 @@ export async function requireSupervisorGrantRoomAccess(
   const loadOwner = deps.getSupervisorGrantOwnerAccount ?? getSupervisorGrantOwnerAccount;
   const revokeAuthority = deps.revokeSupervisorGrantAuthority ?? revokeSupervisorGrantAuthority;
   const findProject = deps.getProjectById ?? getProjectById;
-  const resolveTarget = deps.resolveProjectRepoAccessTarget ?? resolveProjectRepoAccessTarget;
   const resolveAccess = deps.resolveRepoRoomAccessDecision ?? resolveRepoRoomAccessDecision;
+  const decisionDeps = {
+    getGitRoomBindingForRoom,
+    resolveRepoRoomAccessDecision: resolveAccess as typeof resolveRepoRoomAccessDecision,
+  };
+  const classify = async (project: Project): Promise<RoomAccessTarget> => {
+    if (!deps.resolveProjectRepoAccessTarget) return classifyRoomAccess(project);
+    const repo = await deps.resolveProjectRepoAccessTarget(project);
+    const accessRoomId = getProjectAccessRoomId(project);
+    return repo ? { kind: "repo", accessRoomId, binding: null, ...repo } : { kind: "membership", accessRoomId };
+  };
   const findAppRepository = deps.getGitHubAppRepositoryByRoomId ?? getGitHubAppRepositoryByRoomId;
   const findAppInstallation = deps.getGitHubAppInstallationById ?? getGitHubAppInstallationById;
-  const isMember = deps.isProjectRoomMember ?? isProjectRoomMember;
   const requestedRoomIds = await policyRoomIds(grant, res, policy);
   if (!requestedRoomIds) return false;
 
-  const accessTargets = new Map<string, { repoRoomName: string; roomName: string }>();
+  type RepoTarget = Extract<RoomAccessTarget, { kind: "repo" }>;
+  const accessTargets = new Map<string, { project: Project; target: RepoTarget }>();
   for (const allowedRoomId of requestedRoomIds) {
     const canonicalRoomId = await deps.resolveCanonicalRoomRequestId(allowedRoomId);
     const project = await findProject(canonicalRoomId);
     if (!project) return respondSupervisorScopeStale(res, allowedRoomId);
-    const target = await resolveTarget(project);
-    if (!target) {
+    const target = await classify(project);
+    if (target.kind === "membership") {
       // A room without a repository: the grant owner must still be a member.
       // The call is refused and the grant is kept (it is not revoked); a call
       // that names every room of the grant, such as renew, is refused until
       // the host asks for a grant without this room. The owner's agents here
       // already ended when the owner was removed.
-      if (!(await isMember(project, grant.owner_account_id))) {
+      const membership = await decideRoomRead({
+        project,
+        target,
+        principal: { kind: "account", accountId: grant.owner_account_id },
+      }, decisionDeps);
+      if (membership.kind !== "allow") {
         res.status(403).json({
           error: "The supervisor grant owner is not a member of this room.",
           code: "SUPERVISOR_ROOM_MEMBERSHIP_REQUIRED",
@@ -200,19 +218,19 @@ export async function requireSupervisorGrantRoomAccess(
       }
       continue;
     }
-    accessTargets.set(target.repoRoomName.toLowerCase(), target);
+    accessTargets.set(target.repoRoomName.toLowerCase(), { project, target });
   }
   if (accessTargets.size === 0) return true;
 
   const now = Date.now();
-  const pendingTargets = [...accessTargets.values()].filter((target) =>
+  const pendingTargets = [...accessTargets.values()].filter(({ target }) =>
     (supervisorAccessRevalidationCache.get(accessRevalidationCacheKey(grant, target.repoRoomName)) ?? 0) <= now
   );
   if (pendingTargets.length === 0) return true;
 
   // App removal/suspension is a definitive, independent authority loss and
   // remains enforceable even when the owner's personal OAuth credential is down.
-  for (const target of pendingTargets) {
+  for (const { target } of pendingTargets) {
     const appRepository = await findAppRepository(target.roomName);
     if (!appRepository) continue;
     const installation = await findAppInstallation(appRepository.installation_id);
@@ -232,16 +250,18 @@ export async function requireSupervisorGrantRoomAccess(
     return respondSupervisorAccessRetry(res, "A live GitHub owner credential is required to revalidate this supervisor grant.");
   }
 
-  let decisions: Array<{ target: { repoRoomName: string; roomName: string }; decision: RepoRoomAccessDecision }>;
+  let decisions: Array<{ target: RepoTarget; decision: RoomReadDecision }>;
   try {
-    decisions = await Promise.all(pendingTargets.map(async (target) => ({
+    decisions = await Promise.all(pendingTargets.map(async ({ project, target }) => ({
       target,
-      decision: await resolveAccess({
-        roomName: target.repoRoomName,
-        sessionAccount: owner,
-        freshCollaboratorCheck: true,
-        throwOnIndeterminate: true,
-      }),
+      // Revalidation: any unanswered GitHub check throws, so doubt never revokes.
+      decision: await decideRoomRead({
+        project,
+        target,
+        principal: { kind: "person", account: owner },
+        freshness: "fresh",
+        outage: "revalidation",
+      }, decisionDeps),
     })));
   } catch {
     return respondSupervisorAccessRetry(res, "GitHub access could not be revalidated; retry after the provider recovers.");
@@ -256,12 +276,16 @@ export async function requireSupervisorGrantRoomAccess(
       );
       continue;
     }
-    if (decision.kind === "unsupported_repo_provider") {
+    if (decision.repo?.kind === "unsupported_repo_provider") {
       // The owner did not lose access: no account can open a repo room on this
       // host. Refuse this call for that room below, but keep the grant and its
       // worker sessions. A real loss of access on another room still revokes.
       unsupportedProviderTarget ??= target;
       continue;
+    }
+    if (decision.kind === "indeterminate") {
+      // Unreachable under the revalidation policy (it throws); never revoke on doubt.
+      return respondSupervisorAccessRetry(res, "GitHub access could not be revalidated; retry after the provider recovers.");
     }
     await revokeAuthority({
       grant_id: grant.grant_id,

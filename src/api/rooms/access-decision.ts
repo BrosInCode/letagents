@@ -107,6 +107,8 @@ export interface RoomAccessDecisionDeps {
     freshCollaboratorCheck?: boolean;
     throwOnIndeterminate?: boolean;
   }): Promise<RepoRoomAccessDecision>;
+  /** Stored admin rows; injectable for tests. */
+  isProjectAdmin?(roomId: string, accountId: string): Promise<boolean>;
 }
 
 export interface RoomAccessInput {
@@ -342,12 +344,13 @@ export async function decideRoomAdmin(
     // "first joiner" rule left such rows for strangers).
     if (!memberRole) return { ...decision, role: "anonymous" };
     if (memberRole === "admin") return { ...decision, role: "admin" };
-    const focusAdmin = accessRoomId !== project.id && (await isProjectAdmin(project.id, accountId));
+    const focusAdmin = accessRoomId !== project.id && (await (deps.isProjectAdmin ?? isProjectAdmin)(project.id, accountId));
     return { ...decision, role: focusAdmin ? "admin" : "participant" };
   }
 
-  const storedAdminRow = async () => (await isProjectAdmin(project.id, accountId))
-    || (accessRoomId !== project.id && (await isProjectAdmin(accessRoomId, accountId)));
+  const adminRow = deps.isProjectAdmin ?? isProjectAdmin;
+  const storedAdminRow = async () => (await adminRow(project.id, accountId))
+    || (accessRoomId !== project.id && (await adminRow(accessRoomId, accountId)));
 
   if (decision.kind === "indeterminate") {
     if (outage === "stored_row") {
