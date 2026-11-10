@@ -57,14 +57,59 @@ export async function getAccountRoomsForAccount(
     );
   }
 
-  const adminRows = await db
-    .select({
-      ...roomSelectColumns,
-      assigned_at: project_admins.assigned_at,
-    })
-    .from(project_admins)
-    .innerJoin(rooms, eq(project_admins.project_id, rooms.id))
-    .where(eq(project_admins.account_id, accountId));
+  // The four sources are independent reads; the candidates still merge in
+  // the same order (admin, participant, agent, recent) as before.
+  const loginValue = normalizedLogin ? login || normalizedLogin : null;
+  const [adminRows, participantRows, agentSessionRows, recentRows] = await Promise.all([
+    db
+      .select({
+        ...roomSelectColumns,
+        assigned_at: project_admins.assigned_at,
+      })
+      .from(project_admins)
+      .innerJoin(rooms, eq(project_admins.project_id, rooms.id))
+      .where(eq(project_admins.account_id, accountId)),
+    normalizedLogin && loginValue
+      ? db
+        .select({
+          ...roomSelectColumns,
+          last_seen_at: room_participants.last_seen_at,
+        })
+        .from(room_participants)
+        .innerJoin(rooms, eq(room_participants.room_id, rooms.id))
+        .where(
+          and(
+            eq(room_participants.kind, "human"),
+            or(
+              eq(room_participants.github_login, loginValue),
+              eq(room_participants.participant_key, `human:login:${normalizedLogin}`)
+            )
+          )
+        )
+      : Promise.resolve([]),
+    db
+      .select({
+        ...roomSelectColumns,
+        session_created_at: room_agent_sessions.created_at,
+        last_seen_at: room_agent_sessions.last_seen_at,
+      })
+      .from(room_agent_sessions)
+      .innerJoin(rooms, eq(room_agent_sessions.room_id, rooms.id))
+      .where(eq(room_agent_sessions.owner_account_id, accountId)),
+    db
+      .select({
+        ...roomSelectColumns,
+        recent_display_name: account_room_recents.display_name,
+        source: account_room_recents.source,
+        pinned: account_room_recents.pinned,
+        archived: account_room_recents.archived,
+        first_opened_at: account_room_recents.first_opened_at,
+        last_opened_at: account_room_recents.last_opened_at,
+      })
+      .from(account_room_recents)
+      .innerJoin(rooms, eq(account_room_recents.room_id, rooms.id))
+      .where(eq(account_room_recents.account_id, accountId)),
+  ]);
 
   for (const row of adminRows) {
     const project = toAccountRoomProject(row);
@@ -81,24 +126,6 @@ export async function getAccountRoomsForAccount(
   }
 
   if (normalizedLogin) {
-    const loginValue = login || normalizedLogin;
-    const participantRows = await db
-      .select({
-        ...roomSelectColumns,
-        last_seen_at: room_participants.last_seen_at,
-      })
-      .from(room_participants)
-      .innerJoin(rooms, eq(room_participants.room_id, rooms.id))
-      .where(
-        and(
-          eq(room_participants.kind, "human"),
-          or(
-            eq(room_participants.github_login, loginValue),
-            eq(room_participants.participant_key, `human:login:${normalizedLogin}`)
-          )
-        )
-      );
-
     for (const row of participantRows) {
       const project = toAccountRoomProject(row);
       if (project.kind === "focus" && project.focus_archived_at) {
@@ -114,16 +141,6 @@ export async function getAccountRoomsForAccount(
     }
   }
 
-  const agentSessionRows = await db
-    .select({
-      ...roomSelectColumns,
-      session_created_at: room_agent_sessions.created_at,
-      last_seen_at: room_agent_sessions.last_seen_at,
-    })
-    .from(room_agent_sessions)
-    .innerJoin(rooms, eq(room_agent_sessions.room_id, rooms.id))
-    .where(eq(room_agent_sessions.owner_account_id, accountId));
-
   for (const row of agentSessionRows) {
     const project = toAccountRoomProject(row);
     if (project.kind === "focus" && project.focus_archived_at) {
@@ -137,20 +154,6 @@ export async function getAccountRoomsForAccount(
       lastOpenedAt: row.last_seen_at,
     }));
   }
-
-  const recentRows = await db
-    .select({
-      ...roomSelectColumns,
-      recent_display_name: account_room_recents.display_name,
-      source: account_room_recents.source,
-      pinned: account_room_recents.pinned,
-      archived: account_room_recents.archived,
-      first_opened_at: account_room_recents.first_opened_at,
-      last_opened_at: account_room_recents.last_opened_at,
-    })
-    .from(account_room_recents)
-    .innerJoin(rooms, eq(account_room_recents.room_id, rooms.id))
-    .where(eq(account_room_recents.account_id, accountId));
 
   for (const row of recentRows) {
     const project = {
@@ -350,20 +353,34 @@ export async function getAccountRoomsForAccount(
     });
 }
 
-/** Each room's newest message that its members can see, as the room list reports it. */
+/**
+ * Each room's newest message that its members can see, as the room list reports it.
+ *
+ * One backward walk of messages_pk (room_id, number) per room, stopping at the
+ * first visible message, so the cost follows the number of rooms, not their
+ * history. The highest visible number also has the latest visible timestamp:
+ * a message takes its timestamp after it holds its room's number-sequence row
+ * lock, which the previous message released only at commit.
+ */
 export async function latestMessagesForRooms(roomIds: string[]): Promise<Map<string, LatestRoomMessage>> {
   const uniqueRoomIds = [...new Set(roomIds.filter(Boolean))];
   if (!uniqueRoomIds.length) return new Map();
 
+  const listedRoomIds = sql.join(uniqueRoomIds.map((roomId) => sql`${roomId}`), sql`, `);
   const rows = await db
     .select({
-      room_id: messages.room_id,
-      latest_number: sql<number | null>`MAX(${messages.number})::int`,
-      latest_message_at: sql<string | null>`MAX(${messages.timestamp})`,
+      room_id: sql<string>`listed.room_id`,
+      latest_number: sql<number | null>`latest.number`,
+      latest_message_at: sql<string | null>`latest.timestamp`,
     })
-    .from(messages)
-    .where(and(inArray(messages.room_id, uniqueRoomIds), visibleMessageCondition()))
-    .groupBy(messages.room_id);
+    .from(sql`unnest(ARRAY[${listedRoomIds}]::text[]) AS listed(room_id)
+      CROSS JOIN LATERAL (
+        SELECT ${messages.number} AS number, ${messages.timestamp} AS timestamp
+        FROM ${messages}
+        WHERE ${messages.room_id} = listed.room_id AND ${visibleMessageCondition()}
+        ORDER BY ${messages.number} DESC
+        LIMIT 1
+      ) AS latest`);
 
   return new Map(rows.map((row) => [
     row.room_id,
