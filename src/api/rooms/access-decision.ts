@@ -258,7 +258,10 @@ async function decide(
   // no sign-in could open it.
   const accessRoomId = getProjectAccessRoomId(project);
   if (principal.kind === "anonymous") {
-    if (isRepoBackedRoomId(accessRoomId) && !parseGitHubRepoName(accessRoomId)) {
+    // The repository name to judge: the classified target's when the caller
+    // gave one (a binding may name another host), else the access room id.
+    const repoName = input.target?.kind === "repo" ? input.target.repoRoomName : accessRoomId;
+    if (isRepoBackedRoomId(repoName) && !parseGitHubRepoName(repoName)) {
       return {
         decision: {
           kind: "repo_access_denied",
