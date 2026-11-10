@@ -199,7 +199,10 @@
         @cycle-sidebar="cycleSidebar"
       />
 
-      <KeepAlive :max="1">
+      <!-- KeepAlive keeps the open room while Settings, Inbox or company home hide it.
+           The KeepAlive itself is keyed by room: with only the inner key, Vue 3.5
+           deactivates the old room on a switch but never unmounts it. -->
+      <KeepAlive :key="selectedRoomRenderKey" :max="1">
         <DesktopRoomShell
           :viewer-login="authStatus?.authenticated ? authStatus.account?.login : null"
           :api-url="appInfo?.apiUrl ?? null"
