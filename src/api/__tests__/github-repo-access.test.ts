@@ -1086,78 +1086,185 @@ test("a fresh no stops an older check still in flight from caching or sharing it
   assert.equal(roleCalls, 1, "that no is the one kept for a minute");
 });
 
-/** A GitHub stub for the admin check: one repository, a permission per login, every call logged. */
-function adminCheckGitHub(owner: string, permissions: Record<string, string | number>) {
+/**
+ * A GitHub stub for the admin check. Each token belongs to one person; a dead
+ * token gets 401, a token not authorized for the organization's SSO a plain
+ * 403, and a blind token (one that cannot see the repository) 404. Every call
+ * is logged as `<token> <path>`.
+ */
+function adminCheckGitHub(state: {
+  owner: string;
+  permissions: Record<string, string>;
+  deadTokens?: Set<string>;
+  ssoTokens?: Set<string>;
+  blindTokens?: Set<string>;
+  repoStatus?: number;
+  permissionStatus?: number;
+  gate?: Promise<void>;
+}) {
   const calls: string[] = [];
-  const fetchImpl = (async (input: RequestInfo | URL) => {
+  const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const token = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /, "");
     const url = new URL(String(input));
-    calls.push(url.pathname);
+    calls.push(`${token || "anon"} ${url.pathname}`);
+    if (state.deadTokens?.has(token)) return jsonResponse(401, { message: "Bad credentials" });
+    if (state.ssoTokens?.has(token)) return jsonResponse(403, { message: "Resource protected by organization SAML enforcement." });
+    if (state.blindTokens?.has(token)) return jsonResponse(404, { message: "Not Found" });
     const login = url.pathname.match(/\/collaborators\/([^/]+)\/permission$/)?.[1];
-    if (login === undefined) return jsonResponse(200, { private: true, owner: { login: owner } });
-    const permission = permissions[decodeURIComponent(login)];
-    if (typeof permission === "number") return jsonResponse(permission, { message: "GitHub says no" });
+    if (login === undefined) {
+      if (state.repoStatus) return jsonResponse(state.repoStatus, { message: "unavailable" });
+      return jsonResponse(200, { private: true, owner: { login: state.owner } });
+    }
+    if (state.gate) await state.gate;
+    if (state.permissionStatus) return jsonResponse(state.permissionStatus, { message: "unavailable" });
+    const permission = state.permissions[decodeURIComponent(login).toLowerCase()];
     return permission ? jsonResponse(200, { permission }) : jsonResponse(404, { message: "Not Found" });
   }) as typeof fetch;
   return { calls, fetchImpl };
 }
 
-test("an admin answer is kept for five minutes, shared in flight, and dropped by a webhook", async () => {
-  const roomName = `github.com/acme/admin-cache-${Date.now()}`;
-  const permissions: Record<string, string | number> = { lead: "admin", dev: "write" };
-  const github = adminCheckGitHub("acme", permissions);
+const adminRoom = (name: string) => `github.com/acme/${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+test("a not-admin answer is kept for five minutes, for the same token only", async () => {
+  const roomName = adminRoom("not-admin-cache");
+  const state = { owner: "acme", permissions: { dev: "write" } as Record<string, string> };
+  const github = adminCheckGitHub(state);
   globalThis.fetch = github.fetchImpl;
-  const isAdmin = (login: string, room = roomName) => isGitHubRepoAdmin({ roomName: room, login, accessToken: `token-${login}` });
+  const isAdmin = (token = "t-dev", room = roomName) => isGitHubRepoAdmin({ roomName: room, login: "dev", accessToken: token });
 
-  assert.deepEqual(await Promise.all([isAdmin("lead"), isAdmin("LEAD")]), [true, true]);
-  assert.equal(github.calls.length, 2, "two parallel checks share one repository and one permission request");
-  assert.equal(await isAdmin("lead", roomName.toUpperCase()), true);
-  assert.equal(await isAdmin("acme"), true, "the owner");
-  assert.equal(await isAdmin("dev"), false);
-  const warm = github.calls.length;
-  assert.equal(await isAdmin("lead"), true);
-  assert.equal(await isAdmin("dev"), false, "a no is kept as well");
-  assert.equal(github.calls.length, warm, "a warm check asks GitHub nothing");
+  assert.deepEqual(await Promise.all([isAdmin(), isAdmin()]), [false, false]);
+  assert.equal(github.calls.length, 2, "two parallel checks with one token share one repository and one permission request");
+  assert.equal(await isAdmin("t-dev", roomName.toUpperCase()), false);
+  assert.equal(github.calls.length, 2, "a warm check asks GitHub nothing");
+  assert.equal(await isAdmin("t-dev-laptop"), false);
+  assert.equal(github.calls.length, 4, "another token of the same login asks GitHub itself");
 
-  permissions.lead = "write";
-  assert.equal(await isAdmin("lead"), true, "a demotion GitHub did not report yet is still within the five minutes");
-  clearGitHubRepoAccessCacheForRoom(roomName);
-  assert.equal(await isAdmin("lead"), false, "the member webhook for the demotion clears the answer at once");
-
-  permissions.lead = "admin";
-  clearGitHubRepoAccessCacheForLogin("lead");
-  assert.equal(await isAdmin("lead"), true, "a login invalidation clears it too");
-  permissions.lead = "write";
-  await withClockOffset(4 * 60_000, async () => {
-    assert.equal(await isAdmin("lead"), true);
-  });
+  state.permissions.dev = "admin";
+  assert.equal(await isAdmin(), false, "a promotion GitHub did not report yet waits at most five minutes");
   await withClockOffset(5 * 60_000 + 1_000, async () => {
-    assert.equal(await isAdmin("lead"), false, "without a webhook the demotion shows after five minutes");
+    assert.equal(await isAdmin(), true, "and shows after them");
   });
 });
 
-test("an admin check GitHub cannot answer is not admin and is not kept", async () => {
-  const roomName = `github.com/acme/admin-outage-${Date.now()}`;
-  const permissions: Record<string, string | number> = { lead: 503 };
-  const github = adminCheckGitHub("acme", permissions);
-  globalThis.fetch = github.fetchImpl;
-  const isAdmin = () => isGitHubRepoAdmin({ roomName, login: "lead", accessToken: "token-lead" });
+test("webhook and sign-in invalidation clear a kept not-admin answer", async () => {
+  const roomName = adminRoom("not-admin-webhook");
+  const state = { owner: "acme", permissions: { dev: "write" } as Record<string, string> };
+  globalThis.fetch = adminCheckGitHub(state).fetchImpl;
+  const isAdmin = () => isGitHubRepoAdmin({ roomName, login: "dev", accessToken: "t-dev" });
 
-  assert.equal(await isAdmin(), false, "an outage is never admin");
-  permissions.lead = "admin";
-  assert.equal(await isAdmin(), true, "and the next check asks GitHub again");
-  assert.equal(github.calls.length, 4);
+  assert.equal(await isAdmin(), false);
+  state.permissions.dev = "admin";
+  clearGitHubRepoAccessCacheForRoom(roomName);
+  assert.equal(await isAdmin(), true, "a member webhook for the repository clears it");
+
+  state.permissions.dev = "write";
+  assert.equal(await isAdmin(), false);
+  state.permissions.dev = "admin";
+  clearGitHubRepoAccessCacheForLogin("DEV");
+  assert.equal(await isAdmin(), true, "a login invalidation (membership webhook, sign-in) clears it");
+});
+
+test("an admin yes is never kept, so a demotion shows at the next check (P1)", async () => {
+  const roomName = adminRoom("admin-yes");
+  const state = { owner: "acme", permissions: { lead: "admin" } as Record<string, string> };
+  const github = adminCheckGitHub(state);
+  globalThis.fetch = github.fetchImpl;
+  const isAdmin = (login: string) => isGitHubRepoAdmin({ roomName, login, accessToken: `t-${login}` });
+
+  // P1: an access check (a message read, the room list) runs first; it must not answer the admin check.
+  assert.equal(await isGitHubRepoCollaborator({ roomName, login: "lead", accessToken: "t-lead" }), true);
+  assert.equal(await isAdmin("lead"), true);
+  assert.equal(await isAdmin("acme"), true, "the owner");
+  const afterYes = github.calls.length;
+  state.permissions.lead = "write";
+  assert.equal(await isAdmin("lead"), false, "a demotion with no webhook shows at once");
+  assert.equal(github.calls.length, afterYes + 2, "because the yes was not kept");
+  assert.equal(await isAdmin("acme"), true);
+  assert.equal(github.calls.length, afterYes + 3, "an owner's yes is not kept either");
+});
+
+test("a dead or SSO-blocked token's no is not kept, so the same person's valid session stays admin (P2)", async () => {
+  const roomName = adminRoom("admin-dead-token");
+  const state = {
+    owner: "acme",
+    permissions: { lead: "admin" } as Record<string, string>,
+    deadTokens: new Set(["t-dead"]),
+    ssoTokens: new Set(["t-sso"]),
+  };
+  const github = adminCheckGitHub(state);
+  globalThis.fetch = github.fetchImpl;
+  const isAdmin = (token: string) => isGitHubRepoAdmin({ roomName, login: "lead", accessToken: token });
+
+  assert.equal(await isAdmin("t-dead"), false);
+  assert.equal(await isAdmin("t-sso"), false);
+  assert.equal(await isAdmin("t-lead"), true, "the valid session is not demoted by the other sessions' tokens");
+  const before = github.calls.length;
+  assert.equal(await isAdmin("t-dead"), false);
+  assert.equal(await isAdmin("t-sso"), false);
+  assert.equal(github.calls.length, before + 2, "a 401 or plain 403 is asked again, not kept");
+});
+
+test("a token that cannot see the repository never gets another account's admin answer (P3)", async () => {
+  const roomName = adminRoom("admin-stale-login");
+  // The GitHub user who renamed away from "alice" keeps an old LetAgents
+  // account with login alice; a new user named alice owns the repository.
+  const github = adminCheckGitHub({ owner: "alice", permissions: {}, blindTokens: new Set(["t-old-alice"]) });
+  globalThis.fetch = github.fetchImpl;
+
+  assert.equal(await isGitHubRepoAdmin({ roomName, login: "alice", accessToken: "t-new-alice" }), true);
+  assert.equal(await isGitHubRepoAdmin({ roomName, login: "alice", accessToken: "t-old-alice" }), false);
+  assert.deepEqual(github.calls.at(-1), `t-old-alice /repos/${roomName.slice("github.com/".length)}`,
+    "the old account's own token asked GitHub");
+});
+
+test("an admin check in flight is shared only with callers that hold the same token (P4)", async () => {
+  const roomName = adminRoom("admin-inflight-token");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const state = { owner: "acme", permissions: { lead: "admin" } as Record<string, string>, deadTokens: new Set(["t-dead"]), gate };
+  const github = adminCheckGitHub(state);
+  globalThis.fetch = github.fetchImpl;
+  const isAdmin = (token: string) => isGitHubRepoAdmin({ roomName, login: "lead", accessToken: token });
+
+  const first = isAdmin("t-lead");
+  const sameToken = isAdmin("t-lead");
+  const deadToken = isAdmin("t-dead");
+  release();
+  assert.equal(await deadToken, false, "a dead token does not join the valid token's request");
+  assert.deepEqual(await Promise.all([first, sameToken]), [true, true]);
+  assert.equal(github.calls.filter((call) => call.startsWith("t-lead ")).length, 2, "one shared request pair for the same token");
+  assert.equal(github.calls.filter((call) => call.startsWith("t-dead ")).length, 1, "the dead token asked GitHub itself");
+});
+
+test("an admin check GitHub cannot answer is not admin and is not kept", async () => {
+  for (const [label, outage] of [
+    ["the repository request", { repoStatus: 503 }],
+    ["the repository request, rate limited", { repoStatus: 429 }],
+    ["the permission request", { permissionStatus: 503 }],
+  ] as const) {
+    const roomName = adminRoom("admin-outage");
+    const state = { owner: "acme", permissions: { lead: "admin" } as Record<string, string>, ...outage };
+    const github = adminCheckGitHub(state);
+    globalThis.fetch = github.fetchImpl;
+    const isAdmin = () => isGitHubRepoAdmin({ roomName, login: "lead", accessToken: "t-lead" });
+
+    assert.equal(await isAdmin(), false, `an outage on ${label} is never admin`);
+    delete (state as { repoStatus?: number }).repoStatus;
+    delete (state as { permissionStatus?: number }).permissionStatus;
+    assert.equal(await isAdmin(), true, `and the next check asks GitHub again (${label})`);
+  }
 
   globalThis.fetch = (async () => { throw new TypeError("fetch failed"); }) as typeof fetch;
   await assert.rejects(
-    isGitHubRepoAdmin({ roomName: `${roomName}-down`, login: "lead", accessToken: "token-lead" }),
+    isGitHubRepoAdmin({ roomName: adminRoom("admin-down"), login: "lead", accessToken: "t-lead" }),
     /fetch failed/,
     "a failed request still throws",
   );
 });
 
-test("an admin check without the person's token is neither kept nor shared", async () => {
-  const roomName = `github.com/acme/admin-no-token-${Date.now()}`;
-  const github = adminCheckGitHub("acme", { lead: 401 });
+test("an admin check without a token is neither kept nor shared", async () => {
+  const roomName = adminRoom("admin-no-token");
+  const github = adminCheckGitHub({ owner: "acme", permissions: { lead: "write" } });
   globalThis.fetch = github.fetchImpl;
 
   assert.equal(await isGitHubRepoAdmin({ roomName, login: "lead", accessToken: "" }), false);
@@ -1165,48 +1272,56 @@ test("an admin check without the person's token is neither kept nor shared", asy
   assert.equal(github.calls.length, 4, "each token-less check asks GitHub");
 });
 
-test("an admin check still in flight during an invalidation does not keep its answer", async () => {
-  const roomName = `github.com/acme/admin-inflight-${Date.now()}`;
+test("a fresh no from the access check clears the kept not-admin answers for that person", async () => {
+  const roomName = adminRoom("admin-fresh-no");
+  const state = { owner: "acme", permissions: { dev: "write" } as Record<string, string> };
+  const github = adminCheckGitHub(state);
+  globalThis.fetch = github.fetchImpl;
+  const isAdmin = (token: string) => isGitHubRepoAdmin({ roomName, login: "dev", accessToken: token });
+
+  assert.equal(await isAdmin("t-dev"), false);
+  assert.equal(await isAdmin("t-dev-laptop"), false);
+  delete state.permissions.dev;
+  assert.equal(await isGitHubRepoCollaborator({ roomName, login: "dev", accessToken: "t-dev", bypassCache: true }), false);
+  const afterNo = github.calls.length;
+  state.permissions.dev = "admin";
+  assert.equal(await isAdmin("t-dev"), true);
+  assert.equal(await isAdmin("t-dev-laptop"), true);
+  assert.equal(github.calls.length, afterNo + 4, "every token of that person asks GitHub again");
+});
+
+test("an admin check in flight during an invalidation does not keep its answer", async () => {
+  const roomName = adminRoom("admin-inflight-invalidation");
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
-  const permissions: Record<string, string | number> = { lead: "admin" };
-  const github = adminCheckGitHub("acme", permissions);
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
-    if (String(input).includes("/collaborators/")) await gate;
-    return github.fetchImpl(input);
-  }) as typeof fetch;
-  const isAdmin = () => isGitHubRepoAdmin({ roomName, login: "lead", accessToken: "token-lead" });
+  const state = { owner: "acme", permissions: { dev: "write" } as Record<string, string>, gate: gate as Promise<void> | undefined };
+  globalThis.fetch = adminCheckGitHub(state).fetchImpl;
+  const isAdmin = () => isGitHubRepoAdmin({ roomName, login: "dev", accessToken: "t-dev" });
 
   const older = isAdmin();
   await new Promise((resolve) => setTimeout(resolve, 10));
   clearGitHubRepoAccessCacheForRoom(roomName);
   release();
-  assert.equal(await older, true, "the older caller gets the answer of its own time");
-  permissions.lead = "write";
-  assert.equal(await isAdmin(), false, "the answer from before the webhook was not kept");
+  assert.equal(await older, false, "the older caller gets the answer of its own time");
+  state.gate = undefined;
+  state.permissions.dev = "admin";
+  assert.equal(await isAdmin(), true, "the no from before the webhook was not kept");
 });
 
-test("a private-repo collaborator check also answers the admin check, from the same GitHub fields", async () => {
-  const roomName = `github.com/acme/admin-seed-${Date.now()}`;
-  const github = adminCheckGitHub("acme", { lead: "admin", dev: "write" });
-  globalThis.fetch = github.fetchImpl;
-  const collaborator = (login: string, bypassCache = false, room = roomName) =>
-    isGitHubRepoCollaborator({ roomName: room, login, accessToken: `token-${login}`, bypassCache });
+test("after a rename the webhook clears the new name; a not-admin kept under the old name lasts at most five minutes", async () => {
+  const oldName = adminRoom("admin-old-name");
+  const newName = adminRoom("admin-new-name");
+  const state = { owner: "acme", permissions: { dev: "write" } as Record<string, string> };
+  globalThis.fetch = adminCheckGitHub(state).fetchImpl;
+  const isAdmin = () => isGitHubRepoAdmin({ roomName: oldName, login: "dev", accessToken: "t-dev" });
 
-  assert.equal(await collaborator("lead"), true);
-  assert.equal(await collaborator("dev"), true);
-  assert.equal(await collaborator("acme"), true);
-  const afterAccess = github.calls.length;
-  assert.equal(await isGitHubRepoAdmin({ roomName, login: "lead", accessToken: "token-lead" }), true);
-  assert.equal(await isGitHubRepoAdmin({ roomName, login: "dev", accessToken: "token-dev" }), false);
-  assert.equal(await isGitHubRepoAdmin({ roomName, login: "acme", accessToken: "token-acme" }), true);
-  assert.equal(github.calls.length, afterAccess, "the role check reuses the access check's answer");
-
-  const freshRoom = `${roomName}-fresh`;
-  assert.equal(await collaborator("lead", true, freshRoom), true);
-  const afterFresh = github.calls.length;
-  assert.equal(await isGitHubRepoAdmin({ roomName: freshRoom, login: "lead", accessToken: "token-lead" }), true);
-  assert.equal(github.calls.length, afterFresh + 2, "a fresh access check writes no cache, as before");
+  assert.equal(await isAdmin(), false);
+  state.permissions.dev = "admin";
+  clearGitHubRepoAccessCacheForRoom(newName);
+  assert.equal(await isAdmin(), false, "the room keeps its old id, which the webhook does not name");
+  await withClockOffset(5 * 60_000 + 1_000, async () => {
+    assert.equal(await isAdmin(), true, "only a delayed promotion, bounded by the five minutes");
+  });
 });
 
 /** A GitHub stub for visibility: token-less lookups of a private repository get 404; every call logged. */

@@ -582,14 +582,19 @@ test(
       "token /repos/brosincode/private-repo",
       "token /repos/brosincode/private-repo",
       "token /repos/brosincode/private-repo/collaborators/collab/permission",
-    ], "visibility, then the collaborator check, whose answer also settles the admin check");
+      "token /repos/brosincode/private-repo",
+      "token /repos/brosincode/private-repo/collaborators/collab/permission",
+    ], "visibility, the collaborator check, then one admin check");
     const warmPrivate = await join(PRIVATE_ROOM, memberToken);
     assert.equal(warmPrivate.role, "participant");
-    assert.deepEqual(warmPrivate.calls, [], "a warm member join asks GitHub nothing");
+    assert.deepEqual(warmPrivate.calls, [], "a warm member join asks GitHub nothing within the not-admin time");
 
     const coldAdmin = await join(PRIVATE_ROOM, adminToken);
     assert.equal(coldAdmin.role, "admin", "a repository admin is still the room admin");
-    assert.equal(coldAdmin.calls.length, 2, "visibility is shared; the collaborator check settles the admin check");
+    assert.equal(coldAdmin.calls.length, 4, "visibility is shared; the collaborator check, then one admin check");
+    const warmAdmin = await join(PRIVATE_ROOM, adminToken);
+    assert.equal(warmAdmin.role, "admin");
+    assert.deepEqual(warmAdmin.calls, [], "the stored admin row answers, as before");
 
     const coldPublic = await join(PUBLIC_ROOM, memberToken);
     assert.equal(coldPublic.role, "participant");
