@@ -323,3 +323,23 @@ describe("independent local and cloud unread histories", () => {
     assert.equal(markRoomRead(markers, "room_a", "msg_101").readMarkers.room_a, "msg_101");
   });
 });
+
+it("local account rooms are found by read key, focus rooms included, in one pass over the list", async () => {
+  const { localAccountRoomKeys } = await import("../src/domain/desktop-room-read-state");
+  let reads = 0;
+  const entry = (roomIdentifier: string, source: string | null, focusRooms: unknown[] = []) => ({
+    roomIdentifier, focusRooms,
+    get source() { reads += 1; return source; },
+  });
+  const rooms = [
+    entry("Local-Notes", "local", [entry("focus_9", "local"), entry("focus_10", null)]),
+    entry("github.com/Org/Repo", "account", [entry("focus_1", "local")]),
+    entry("invite-room", null),
+  ] as never;
+  const keys = localAccountRoomKeys(rooms);
+  assert.deepEqual([...keys].sort(), ["focus_1", "focus_9", "local-notes"]);
+  assert.equal(reads, 6, "each entry is looked at once");
+  // A sidebar of many rows asks the set; the list is not scanned again.
+  for (let row = 0; row < 500; row += 1) keys.has("github.com/org/repo");
+  assert.equal(reads, 6);
+});

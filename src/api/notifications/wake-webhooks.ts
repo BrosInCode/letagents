@@ -601,9 +601,9 @@ export async function nextWakeDeliveryDueInMs(kind: WakeDeliveryKind): Promise<n
   const result = await pool.query<{ due_in_ms: unknown }>(`
     SELECT ${DUE_IN_MS_SQL(`LEAST(
       (SELECT min(next_attempt_at) FROM wake_webhook_deliveries
-        WHERE state IN ('queued', 'retry') AND kind = $1 AND next_attempt_at > now()),
+        WHERE state IN ('queued', 'retry') AND kind = $1),
       (SELECT min(claimed_at) + INTERVAL '5 minutes' FROM wake_webhook_deliveries
-        WHERE state = 'processing' AND claimed_at > now() - INTERVAL '5 minutes')
+        WHERE state = 'processing')
     )`)} AS due_in_ms
   `, [kind]);
   return readDueInMs(result.rows[0]);

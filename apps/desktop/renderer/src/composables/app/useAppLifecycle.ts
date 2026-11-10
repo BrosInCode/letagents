@@ -2,6 +2,7 @@ import { onBeforeUnmount, onMounted } from "vue";
 import { ACCOUNT_ROOMS_REFRESH_WHILE_STREAMING_MS } from "../../domain/account-activity";
 import { desktopIpc } from "../../ipc/index.js";
 import { roomJoinRequests } from "../useRoomJoinRequests";
+import { startNeedsYouTimer } from "../useNeedsYou";
 import type { AppContextOf } from "./context";
 
 /** Mount and unmount: IPC subscriptions, intervals, window listeners, and initial loads. */
@@ -33,7 +34,7 @@ export function useAppLifecycle(context: unknown) {
     refreshSidebarLatestMessages, refreshSidebarRoomMetadata, refreshUnreadCounts, roomHistoryMode,
     sidebarMetadataRefresh, sidebarRoomIdentifiers, updateStatus,
   } = app;
-  let needsYouInterval: number | null = null;
+  let stopNeedsYouTimer: (() => void) | null = null;
 
   let unsubscribeRoomStream: (() => void) | null = null;
   let unsubscribeOpenSettings: (() => void) | null = null;
@@ -47,7 +48,7 @@ export function useAppLifecycle(context: unknown) {
 
   onMounted(() => {
     void refreshNeedsYou();
-    needsYouInterval = window.setInterval(() => { if (!document.hidden) void refreshNeedsYou(); }, 60_000);
+    stopNeedsYouTimer = startNeedsYouTimer(() => void refreshNeedsYou());
     unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleDesktopRoomStreamEvent) || null;
     unsubscribeOpenSettings = desktopIpc.ui?.onOpenSettings(openSettingsSurface) || null;
     unsubscribeOpenUpdates = desktopIpc.ui?.onOpenUpdates?.(openUpdatesSurface) || null;
@@ -103,7 +104,7 @@ export function useAppLifecycle(context: unknown) {
   });
 
   onBeforeUnmount(() => {
-    if (needsYouInterval) window.clearInterval(needsYouInterval);
+    stopNeedsYouTimer?.();
     clearAuthPollTimer();
     clearLiveMetadataRefreshTimer();
     clearLiveMetadataRefreshInterval();
