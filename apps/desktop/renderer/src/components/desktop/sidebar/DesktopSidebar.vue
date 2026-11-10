@@ -557,6 +557,7 @@ import {
   RefreshCw,
   Search,
   TriangleAlert,
+  Trash2,
   X,
 } from "@lucide/vue";
 import {
@@ -764,6 +765,7 @@ const emit = defineEmits<{
   "connect-account": [];
   "sign-out": [];
   "archive-room": [entry: RoomEntry];
+  "delete-room": [entry: RoomEntry];
   "archive-focus-room": [entry: RoomEntry];
   "conclude-focus-room": [entry: RoomEntry];
   "mark-room-read": [entry: RoomEntry];
@@ -1022,6 +1024,7 @@ const roomMenuIcons: Record<SidebarRoomMenuActionId, Component> = {
   "conclude-focus-room": CheckCircle2,
   "archive-focus-room": Archive,
   "archive-room": Archive,
+  "delete-room": Trash2,
 };
 
 function roomMenuGroupsFor(entry: RoomEntry, projectId: string | null): DesktopContextMenuItem[][] {
@@ -1074,6 +1077,9 @@ const backgroundContextMenuItemGroups = computed<DesktopContextMenuItem[][]>(() 
 );
 
 function openRoomContextMenu(event: MouseEvent, entry: RoomEntry, projectId: string | null = null): void {
+  // Right-click does not reliably focus a row. Keep it as the return target
+  // when the menu opens a confirmation dialog and the person cancels.
+  if (event.currentTarget instanceof HTMLElement) event.currentTarget.focus({ preventScroll: true });
   if (entry.roomIdentifier) void roomNotificationPreferences.refresh(entry.roomIdentifier);
   backgroundContextMenu.value = null;
   roomContextMenu.value = roomMenuGroupsFor(entry, projectId).length
@@ -1137,6 +1143,7 @@ function handleRoomContextMenuSelect(item: DesktopContextMenuItem): void {
     "conclude-focus-room": () => emit("conclude-focus-room", menu.entry),
     "archive-focus-room": () => emit("archive-focus-room", menu.entry),
     "archive-room": () => emit("archive-room", menu.entry),
+    "delete-room": () => emit("delete-room", menu.entry),
   };
   actions[item.id as SidebarRoomMenuActionId]?.();
 }

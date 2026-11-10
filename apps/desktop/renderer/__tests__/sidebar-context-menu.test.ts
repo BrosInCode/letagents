@@ -81,6 +81,7 @@ describe("sidebar room context menu items", () => {
       "copy-room-url",
       "toggle-project",
       "archive-room",
+      "delete-room",
     ]);
   });
 
@@ -140,6 +141,27 @@ describe("sidebar room context menu items", () => {
       "copy-room-url",
       "toggle-project",
     ]);
+  });
+
+  it("offers destructive deletion for primary, branch and focus rooms, but not synthetic groups", () => {
+    for (const kind of ["parent", "branch", "focus"] as const) {
+      const groups = buildSidebarRoomContextMenuItems({
+        entry: roomEntry({ kind }),
+        isPrimaryRoom: true,
+        hasProjectChildren: false,
+        projectCollapsed: false,
+      });
+      assert.deepEqual(groups.at(-1)?.at(-1), {
+        id: "delete-room", label: "Delete room…", danger: true,
+      });
+    }
+    const synthetic = buildSidebarRoomContextMenuItems({
+      entry: roomEntry({ roomIdentifier: null }),
+      isPrimaryRoom: false,
+      hasProjectChildren: true,
+      projectCollapsed: false,
+    });
+    assert.ok(!menuIds(synthetic).includes("delete-room"));
   });
 
   it("labels pinning from the entry's pinned state", () => {

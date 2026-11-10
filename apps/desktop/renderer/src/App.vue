@@ -112,6 +112,7 @@
           @connect-account="openAccountAuthFlow"
           @sign-out="signOut"
           @archive-room="archiveSidebarRoom"
+          @delete-room="entry => entry.roomIdentifier && deleteAccountRoom({ roomIdentifier: entry.roomIdentifier, displayName: entry.title })"
           @archive-focus-room="archiveSidebarFocusRoom"
           @conclude-focus-room="openSidebarFocusRoomConclusion"
           @mark-room-read="entry => markRoomEntryRead(entry, true)"

@@ -467,16 +467,31 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
         (entry) => normalizeRoomIdentifier(entry.roomIdentifier) !== normalizeRoomIdentifier(room.roomIdentifier)
       );
 
-      if (normalizeRoomIdentifier(options.selectedRootRoomIdentifier.value) === normalizeRoomIdentifier(room.roomIdentifier) || normalizeRoomIdentifier(options.selectedSnapshot.value?.roomIdentifier) === normalizeRoomIdentifier(room.roomIdentifier)) {
+      const deletedIdentifier = normalizeRoomIdentifier(room.roomIdentifier);
+      const root = options.rootRoomSnapshot.value;
+      if (normalizeRoomIdentifier(options.selectedRootRoomIdentifier.value) === deletedIdentifier) {
         options.selectedRootRoomIdentifier.value = null;
         options.rootRoomSnapshot.value = null;
         options.selectedSnapshot.value = null;
         options.activeEntry.value = options.settingsEntry;
+      } else if (root) {
+        const remainingFocusRooms = root.focusRooms.filter(
+          (entry) => normalizeRoomIdentifier(entry.identifier) !== deletedIdentifier
+        );
+        const nextRoot = { ...root, focusRooms: remainingFocusRooms };
+        if (remainingFocusRooms.length !== root.focusRooms.length) options.rootRoomSnapshot.value = nextRoot;
+        if (normalizeRoomIdentifier(options.selectedSnapshot.value?.roomIdentifier) === deletedIdentifier) {
+          options.openRoomSnapshot(nextRoot);
+        } else if (options.selectedSnapshot.value) {
+          const selected = options.selectedSnapshot.value;
+          const focusRooms = selected.focusRooms.filter((entry) => normalizeRoomIdentifier(entry.identifier) !== deletedIdentifier);
+          if (focusRooms.length !== selected.focusRooms.length) options.selectedSnapshot.value = { ...selected, focusRooms };
+        }
       }
 
       pendingRoomDeletion.value = null;
       await options.refreshAccountRooms();
-      settingsFeedback.value = { message: `Deleted ${room.displayName}.`, state: "success" };
+      reportSidebarRoomAction(`Deleted ${room.displayName}.`, "success");
     } catch (error) {
       settingsFeedback.value = {
         message: error instanceof Error ? error.message : `Could not delete ${room.displayName}.`,
