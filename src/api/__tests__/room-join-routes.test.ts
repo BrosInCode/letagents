@@ -666,3 +666,35 @@ test("join route refuses a focus locator under a non-GitHub repo with 403 UNSUPP
     room_id: "bitbucket.org/t/p",
   });
 });
+
+test("a repo room join works out the caller's role once and answers with it", async () => {
+  const roleChecks: string[] = [];
+  const room = { id: "github.com/o/r", display_name: "o/r" };
+  const response = await joinThroughRoute(
+    room.id,
+    {
+      resolveRepoRoomAccessDecision: async () => ({ kind: "allow" as const }),
+      resolveRoomOrReply: async () => room as never,
+      resolveExistingRoomRequest: async () => room as never,
+      getProjectAccessRoomId: () => room.id,
+      resolveProjectRepoRoomAccessDecision: async () => ({
+        isRepoBacked: true,
+        roomName: room.id,
+        repoRoomName: room.id,
+        binding: null,
+        decision: { kind: "allow" as const },
+      }),
+      resolveProjectRole: async (_project: unknown, account: { account_id: string }) => {
+        roleChecks.push(account.account_id);
+        return "admin";
+      },
+      toRoomResponse: (_project: unknown, options: { role?: string }) => ({ room_id: room.id, role: options.role }),
+    },
+    "192.0.2.90",
+    { account_id: "acct_repo_member" },
+  );
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, { room_id: room.id, role: "admin" });
+  assert.deepEqual(roleChecks, ["acct_repo_member"], "each role check asks GitHub, so one join makes one");
+});

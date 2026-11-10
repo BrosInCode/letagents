@@ -195,9 +195,9 @@ export function registerRoomJoinRoutes(
       return;
     }
 
-    if (projectAccess.isRepoBacked) {
-      await deps.resolveProjectRole(project, req.sessionAccount);
-    } else {
+    // A repo room's role (and its stored admin row) comes from the single
+    // resolveProjectRole call below; a second call here cost GitHub requests.
+    if (!projectAccess.isRepoBacked) {
       // The person who creates a room is its first admin and member. Everyone
       // else must already be a member; a stranger asks to join instead.
       const claimed = !existedBefore
