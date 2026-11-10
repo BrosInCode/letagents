@@ -61,12 +61,26 @@ export function useAppProjectRepo(context: unknown) {
     });
   }
 
+  // Each binding read takes a number when it starts. A read that started
+  // before the list on screen was read is older than it and is not shown, so
+  // a slow migration cannot replace a binding that Connect project just added.
+  let bindingsReadsStarted = 0;
+  let bindingsReadShown = 0;
+
+  function showBindings(read: number, nextBindings: typeof projectBindings.value): boolean {
+    if (read < bindingsReadShown) return false;
+    bindingsReadShown = read;
+    projectBindings.value = nextBindings;
+    return true;
+  }
+
   async function refreshProjectBindings(): Promise<void> {
     if (!desktopIpc.repos?.listProjectBindings) return;
     const generation = sessionGeneration.value;
-    const nextBindings = await desktopIpc.repos.listProjectBindings().catch(() => projectBindings.value);
-    if (generation !== sessionGeneration.value) return;
-    projectBindings.value = nextBindings;
+    const read = ++bindingsReadsStarted;
+    const nextBindings = await desktopIpc.repos.listProjectBindings().catch(() => null);
+    if (generation !== sessionGeneration.value || !nextBindings) return;
+    showBindings(read, nextBindings);
   }
 
   async function initializeProjectBindings(): Promise<void> {
@@ -87,9 +101,15 @@ export function useAppProjectRepo(context: unknown) {
       }] : []),
     ];
     try {
+      const read = ++bindingsReadsStarted;
       const migration = await desktopIpc.repos.migrateProjectBindings(candidates);
       if (generation !== sessionGeneration.value) return;
-      projectBindings.value = migration.bindings;
+      // A newer list is already shown: it may lack a binding this migration
+      // wrote, so read the list once more instead of showing the older one.
+      // Startup waits for that read, so the first room opens on the final
+      // list. If the read fails, the newer list on screen stays: the
+      // migration result is older than it in this branch, never as new.
+      if (!showBindings(read, migration.bindings)) await refreshProjectBindings();
       const retryBindings = Object.fromEntries(
         migration.retryLegacyKeys.flatMap((key) => {
           const rootPath = legacyRepositoryRootBindings[key];

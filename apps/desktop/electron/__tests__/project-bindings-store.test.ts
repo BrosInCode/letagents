@@ -22,7 +22,7 @@ import {
   projectBindingAliases,
 } from "../project-bindings.js";
 import { resolveRoomIdentifierFromPath } from "../repo-status.js";
-import { assertOwnerPrivateFile } from "./harness.js";
+import { assertOwnerPrivateFile, observeGitSpawns } from "./harness.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -768,6 +768,178 @@ test("separate desktop processes serialize whole-store updates", async () => {
         },
       )));
       assert.equal((await listProjectBindings({ storePath })).length, roots.length);
+    }
+  } finally {
+    removeTemporary(temporary);
+  }
+});
+
+/** A hosted repository with linked worktrees, as a project folder with many branches has. */
+function repoWithWorktrees(temporary: string, worktrees: number): { mainRoot: string; worktreeRoots: string[] } {
+  const mainRoot = join(temporary, "widgets");
+  mkdirSync(mainRoot);
+  execFileSync("git", ["init", "-b", "main"], { cwd: mainRoot, stdio: "ignore" });
+  execFileSync("git", ["remote", "add", "origin", "git@github.com:acme/widgets.git"], { cwd: mainRoot });
+  writeFileSync(join(mainRoot, "tracked.txt"), "hello\n");
+  execFileSync("git", ["add", "tracked.txt"], { cwd: mainRoot, stdio: "ignore" });
+  execFileSync("git", ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "Initial"], {
+    cwd: mainRoot,
+    stdio: "ignore",
+  });
+  const worktreeRoots = Array.from({ length: worktrees }, (_, index) => {
+    const root = join(temporary, `widgets-wt${index}`);
+    execFileSync("git", ["worktree", "add", "-b", `feature/wt${index}`, root], { cwd: mainRoot, stdio: "ignore" });
+    return root;
+  });
+  return { mainRoot, worktreeRoots };
+}
+
+/** Git processes started while `run` runs, from a cold start (no validation memo). */
+async function gitSpawnsDuring(run: () => Promise<unknown>): Promise<string[]> {
+  resetProjectBindingsStoreCachesForTest();
+  const spawns: string[] = [];
+  const stop = observeGitSpawns(({ args }) => { spawns.push(args.join(" ")); });
+  try {
+    await run();
+  } finally {
+    stop();
+  }
+  return spawns;
+}
+
+test("migration resolves one repository once, however many candidates point at it", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-migration-count-"));
+  try {
+    const { mainRoot, worktreeRoots } = repoWithWorktrees(temporary, 3);
+    const projectCandidate = {
+      legacyKey: "github.com/acme/widgets",
+      context: { roomIdentifier: "github.com/acme/widgets" },
+      rootPath: mainRoot,
+    };
+    // The renderer sends each remembered project twice (recent room and legacy
+    // key), plus its branch rooms, and rooms whose folder proves another identity.
+    const manyCandidates = [
+      projectCandidate,
+      { context: { roomIdentifier: "github.com/acme/widgets" }, rootPath: mainRoot },
+      ...worktreeRoots.map((rootPath, index) => ({
+        context: { roomIdentifier: `github.com/acme/widgets/focus/git:branch:feature-wt${index}` },
+        rootPath,
+      })),
+    ];
+    const unrelated = (count: number) => Array.from({ length: count }, () => ({
+      legacyKey: "github.com/other/project",
+      context: { roomIdentifier: "github.com/other/project" },
+      rootPath: mainRoot,
+    }));
+
+    const one = await gitSpawnsDuring(() => migrateLegacyProjectBindings(
+      [projectCandidate, ...unrelated(1)],
+      { storePath: join(temporary, "one.sqlite") },
+    ));
+    const many = await gitSpawnsDuring(() => migrateLegacyProjectBindings(
+      [...manyCandidates, ...unrelated(4)],
+      { storePath: join(temporary, "many.sqlite") },
+    ));
+    const result = await migrateLegacyProjectBindings(manyCandidates, { storePath: join(temporary, "many.sqlite") });
+    assert.equal(result.bindings.length, 1);
+    assert.equal(result.bindings[0]?.rootPath, canonicalPath(mainRoot));
+    assert.ok(one.length > 0);
+    assert.equal(many.length, one.length, `extra candidates for one repository ran more Git:\n${many.join("\n")}`);
+  } finally {
+    removeTemporary(temporary);
+  }
+});
+
+test("a later start after a completed migration runs no Git beyond listing the bindings", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-migration-done-"));
+  const storeOptions = { storePath: join(temporary, "bindings.sqlite") };
+  try {
+    const { mainRoot, worktreeRoots } = repoWithWorktrees(temporary, 2);
+    const candidates = [
+      { legacyKey: "github.com/acme/widgets", context: { roomIdentifier: "github.com/acme/widgets" }, rootPath: mainRoot },
+      { context: { roomIdentifier: "github.com/acme/widgets" }, rootPath: mainRoot },
+      ...worktreeRoots.map((rootPath, index) => ({
+        context: { roomIdentifier: `github.com/acme/widgets/focus/git:branch:feature-wt${index}` },
+        rootPath,
+      })),
+    ];
+    const first = await migrateLegacyProjectBindings(candidates, storeOptions);
+    assert.equal(first.bindings.length, 1);
+    assert.deepEqual(first.retryLegacyKeys, []);
+
+    // The renderer needs one validated list on every start in any case.
+    const listOnly = await gitSpawnsDuring(() => listProjectBindings(storeOptions));
+    let second: Awaited<ReturnType<typeof migrateLegacyProjectBindings>> | null = null;
+    const migration = await gitSpawnsDuring(async () => {
+      second = await migrateLegacyProjectBindings(candidates, storeOptions);
+    });
+    assert.deepEqual(second, first);
+    assert.equal(
+      migration.length,
+      listOnly.length,
+      `the completed migration ran Git of its own:\n${migration.join("\n")}`,
+    );
+  } finally {
+    removeTemporary(temporary);
+  }
+});
+
+test("a binding written by another call during a migration pass is not overwritten by a legacy candidate", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-migration-race-"));
+  const storePath = join(temporary, "bindings.sqlite");
+  try {
+    const { mainRoot } = repoWithWorktrees(temporary, 0);
+    const other = join(temporary, "other");
+    mkdirSync(other);
+    execFileSync("git", ["init", "-b", "main"], { cwd: other, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:other/project.git"], { cwd: other });
+    const connectedElsewhere = join(temporary, "connected-elsewhere");
+    // The first candidate resolves its folder with Git. While it does, another
+    // call (Connect project) stores a binding for the second candidate's room.
+    let wrote = false;
+    const stop = observeGitSpawns(() => {
+      if (wrote) return;
+      wrote = true;
+      const database = new DatabaseSync(storePath);
+      try {
+        database.prepare(`
+          INSERT INTO project_bindings (id, identity_key, verification_keys_json, aliases_json,
+            root_path, source, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          "connected-elsewhere",
+          "project-room:github.com/acme/widgets",
+          JSON.stringify(["project-room:github.com/acme/widgets"]),
+          JSON.stringify(["project-room:github.com/acme/widgets", "room:github.com/acme/widgets"]),
+          connectedElsewhere,
+          "git_remote",
+          new Date().toISOString(),
+          new Date().toISOString(),
+        );
+      } finally {
+        database.close();
+      }
+    });
+    let result: Awaited<ReturnType<typeof migrateLegacyProjectBindings>> | null = null;
+    try {
+      result = await migrateLegacyProjectBindings([
+        { legacyKey: "github.com/other/project", context: { roomIdentifier: "github.com/other/project" }, rootPath: other },
+        { legacyKey: "github.com/acme/widgets", context: { roomIdentifier: "github.com/acme/widgets" }, rootPath: mainRoot },
+      ], { storePath });
+    } finally {
+      stop();
+    }
+    assert.equal(wrote, true);
+    // This pass does not validate the row written meanwhile (here its folder
+    // does not even exist), so the legacy hint stays for the next start.
+    assert.deepEqual(result?.retryLegacyKeys, ["github.com/acme/widgets"]);
+    const database = new DatabaseSync(storePath);
+    try {
+      const row = database.prepare("SELECT root_path FROM project_bindings WHERE identity_key = ?")
+        .get("project-room:github.com/acme/widgets") as { root_path?: string } | undefined;
+      assert.equal(row?.root_path, connectedElsewhere);
+    } finally {
+      database.close();
     }
   } finally {
     removeTemporary(temporary);
