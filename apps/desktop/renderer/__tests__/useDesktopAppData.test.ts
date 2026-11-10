@@ -2585,3 +2585,204 @@ describe("useDesktopAppData snapshot reads per room switch", () => {
     assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
   });
 });
+
+/**
+ * Opens `entry` the way the app does and returns the selected snapshot as it
+ * stood right after the click, before any IPC answered.
+ */
+async function openRoom(
+  simulation: ReturnType<typeof createSwitchSimulation>,
+  entry: RoomEntry,
+): Promise<{ messages: string[]; loading: boolean }> {
+  const { harness } = simulation;
+  harness.activeEntry.value = entry;
+  // The app's entry watcher makes the same call in this task; it joins this one.
+  void harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value).catch(() => undefined);
+  const atClick = {
+    messages: messageIds(harness.selectedSnapshot.value),
+    loading: harness.state.selectedSnapshotLoading.value,
+  };
+  await simulation.settle();
+  return atClick;
+}
+
+function serveRooms(
+  simulation: ReturnType<typeof createSwitchSimulation>,
+  rooms: Record<string, DesktopRoomSnapshot | (() => Promise<DesktopRoomSnapshot>)>,
+): void {
+  simulation.read = async (roomIdentifier) => {
+    const served = rooms[roomIdentifier];
+    if (typeof served === "function") return served();
+    await flushAsync();
+    return served ?? simulatedSnapshot(roomIdentifier);
+  };
+}
+
+describe("useDesktopAppData return to a room shown earlier", () => {
+  it("paints a parent room's last snapshot at the click and replaces it with the fresh one", async () => {
+    const simulation = await connectedSwitchSimulation("gap");
+    const { harness } = simulation;
+    serveRooms(simulation, {
+      room_b: roomSnapshot("room_b", { messages: [roomMessage("msg_1", "old"), roomMessage("msg_2", "deleted later")] }),
+    });
+    await withDesktopBridge(harness.windowBridge, async () => {
+      // First visit: unchanged, the room starts empty while it loads.
+      const firstVisit = await openRoom(simulation, parentEntryFor("room_b"));
+      assert.deepEqual(firstVisit, { messages: [], loading: true });
+      assert.deepEqual(messageIds(harness.selectedSnapshot.value), ["msg_1", "msg_2"]);
+      await openRoom(simulation, parentEntry());
+      harness.getSnapshotRequests.length = 0;
+      harness.deliveryRepairs.length = 0;
+      simulation.timeline.length = 0;
+
+      const freshReads: Array<ReturnType<typeof deferred<DesktopRoomSnapshot>>> = [];
+      serveRooms(simulation, {
+        room_b: () => {
+          const read = deferred<DesktopRoomSnapshot>();
+          freshReads.push(read);
+          return read.promise;
+        },
+      });
+      const atClick = await openRoom(simulation, parentEntryFor("room_b"));
+      // Painted before any IPC answered; still loading, so nothing acts on it as fresh.
+      assert.deepEqual(atClick, { messages: ["msg_1", "msg_2"], loading: true });
+      assert.ok(freshReads.length >= 1);
+      assert.equal(harness.state.selectedSnapshotLoading.value, true);
+
+      // A live message and an own confirmed send arrive while the reads run.
+      simulation.emit({ type: "message", roomIdentifier: "room_b", message: roomMessage("msg_4", "live"), live: true });
+      harness.state.handleMessageSent(roomMessage("msg_5", "my send"));
+      const fresh = () => roomSnapshot("room_b", { messages: [roomMessage("msg_1", "old"), roomMessage("msg_3", "new")] });
+      for (const read of freshReads.splice(0)) read.resolve(fresh());
+      await simulation.settle();
+      for (const read of freshReads.splice(0)) read.resolve(fresh());
+      await simulation.settle();
+    });
+    simulation.dispose();
+
+    // msg_2 came only from the cache and is gone; msg_4 and msg_5 are kept once each.
+    assert.deepEqual(messageIds(harness.selectedSnapshot.value), ["msg_1", "msg_3", "msg_4", "msg_5"]);
+    assert.equal(harness.state.selectedSnapshotLoading.value, false);
+    // The stream handshake is the same as on a first visit: two reads, one
+    // acknowledgement, from a read that started after its gap.
+    assert.equal(simulation.snapshotRequests("room_b"), 2);
+    assert.equal(acks(harness).length, 1);
+    const [room, token] = acks(harness)[0]!.split(":");
+    assert.ok(simulation.timeline.slice(
+      simulation.timeline.indexOf(`gap:${room}:${token}`),
+      simulation.timeline.indexOf(`ack:${room}:${token}`),
+    ).includes("read:room_b"));
+  });
+
+  it("shows the uncached placeholder when the return read fails", async () => {
+    const simulation = await connectedSwitchSimulation("clean");
+    const { harness } = simulation;
+    serveRooms(simulation, { room_b: roomSnapshot("room_b", { messages: [roomMessage("msg_1", "old")] }) });
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await openRoom(simulation, parentEntryFor("room_b"));
+      await openRoom(simulation, parentEntry());
+      serveRooms(simulation, { room_b: async () => { throw new Error("room_b snapshot timed out"); } });
+      const atClick = await openRoom(simulation, parentEntryFor("room_b"));
+      assert.deepEqual(atClick.messages, ["msg_1"]);
+    });
+    simulation.dispose();
+
+    assert.deepEqual(messageIds(harness.selectedSnapshot.value), []);
+    assert.equal(harness.selectedSnapshot.value?.roomIdentifier, "room_b");
+    assert.equal(harness.state.selectedSnapshotLoading.value, false);
+  });
+
+  it("empties the cache on sign-out and on an account change", async () => {
+    const simulation = await connectedSwitchSimulation("clean");
+    const { harness } = simulation;
+    const signedIn = (id: string) => ({ authenticated: true, apiUrl: "https://letagents.chat", account: { id } }) as DesktopAuthStatus;
+    harness.authStatus.value = signedIn("acct_1");
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await openRoom(simulation, parentEntryFor("room_b"));
+      await openRoom(simulation, parentEntry());
+      assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, ["msg_room_b"]);
+      await openRoom(simulation, parentEntry());
+
+      harness.authStatus.value = signedIn("acct_2");
+      assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, []);
+      await openRoom(simulation, parentEntry());
+      assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, ["msg_room_b"]);
+      await openRoom(simulation, parentEntry());
+
+      harness.state.invalidateSession();
+      assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, []);
+    });
+    simulation.dispose();
+  });
+
+  for (const status of ["forbidden", "membership_required", "unavailable"] as const) {
+    it(`drops a room whose fresh read is ${status} and does not paint it from the cache again`, async () => {
+      const simulation = await connectedSwitchSimulation("clean");
+      const { harness } = simulation;
+      await withDesktopBridge(harness.windowBridge, async () => {
+        await openRoom(simulation, parentEntryFor("room_b"));
+        await openRoom(simulation, parentEntry());
+        const refused = nonReadySnapshot("room_b", status);
+        if (status === "unavailable") refused.access.httpStatus = 503;
+        serveRooms(simulation, { room_b: refused });
+        assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, ["msg_room_b"]);
+        // Never the cached messages after the refusal (a transient 503 keeps today's placeholder).
+        assert.deepEqual(messageIds(harness.selectedSnapshot.value), []);
+        await openRoom(simulation, parentEntry());
+        assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, []);
+        await openRoom(simulation, parentEntry());
+        serveRooms(simulation, {});
+        assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, []);
+        await openRoom(simulation, parentEntry());
+        // A ready read lets the room be kept again.
+        assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, ["msg_room_b"]);
+      });
+      simulation.dispose();
+    });
+  }
+
+  it("drops a room that leaves the account's room list (left, removed, archived or deleted)", async () => {
+    const simulation = await connectedSwitchSimulation("clean");
+    const { harness } = simulation;
+    harness.accountRooms.value = [accountRoomEntry("room_b"), accountRoomEntry("room_c")];
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await openRoom(simulation, parentEntryFor("room_b"));
+      await openRoom(simulation, parentEntryFor("room_c"));
+      await openRoom(simulation, parentEntry());
+      harness.accountRooms.value = [accountRoomEntry("room_c")];
+      assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, []);
+      assert.deepEqual((await openRoom(simulation, parentEntryFor("room_c"))).messages, ["msg_room_c"]);
+    });
+    simulation.dispose();
+  });
+
+  it("drops a room whose storage changes to local and keeps local rooms on their uncached path", async () => {
+    const simulation = await connectedSwitchSimulation("clean");
+    const { harness } = simulation;
+    const local = roomSnapshot("room_b", { messages: [roomMessage("msg_1", "local")] });
+    local.storage = { ...local.storage, effectiveMode: "local", overrideMode: "local" };
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await openRoom(simulation, parentEntryFor("room_b"));
+      harness.state.handleRefreshRoom(local);
+      await openRoom(simulation, parentEntry());
+      serveRooms(simulation, { room_b: local });
+      assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, []);
+      await openRoom(simulation, parentEntry());
+      assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, []);
+    });
+    simulation.dispose();
+  });
+
+  it("keeps the 8 most recently shown rooms", async () => {
+    const simulation = await connectedSwitchSimulation("clean");
+    const { harness } = simulation;
+    await withDesktopBridge(harness.windowBridge, async () => {
+      for (let index = 1; index <= 9; index += 1) await openRoom(simulation, parentEntryFor(`room_${index}`));
+      // room_parent and room_1 are the oldest of the ten rooms shown.
+      assert.deepEqual((await openRoom(simulation, parentEntryFor("room_2"))).messages, ["msg_room_2"]);
+      assert.deepEqual((await openRoom(simulation, parentEntryFor("room_1"))).messages, []);
+      assert.deepEqual((await openRoom(simulation, parentEntryFor("room_9"))).messages, ["msg_room_9"]);
+    });
+    simulation.dispose();
+  });
+});
