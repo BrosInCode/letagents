@@ -10,6 +10,7 @@ import {
 import { analyzeMessageThreadProjection } from "./db/messages/projection-readiness.js";
 import { reconcileDueTimeLivenessRollout } from "./db/due-time-liveness-rollout.js";
 import { reconcileReplyTurnHoldRollout } from "./db/reply-turn-hold-rollout.js";
+import { reconcileGitHubWebhookIntegrityRollout } from "./db/github-webhook-integrity-rollout.js";
 
 const THREAD_PROJECTION_BATCH_SIZE = 500;
 
@@ -31,13 +32,15 @@ async function main(): Promise<void> {
   await migrate(db, { migrationsFolder });
   const dueTimeRollout = await reconcileDueTimeLivenessRollout(pool);
   const replyTurnIndexes = await reconcileReplyTurnHoldRollout(pool);
+  const githubWebhookIndexes = await reconcileGitHubWebhookIntegrityRollout(pool);
   const workUnits = await reconcileMessageThreadProjection();
   await analyzeMessageThreadProjection();
   console.log(
     `Applied migrations from ${migrationsFolder}; reconciled ${workUnits} thread rollout records and `
     + `${dueTimeRollout.delivery_rows} deliveries/${dueTimeRollout.manager_rows} managers/`
     + `${dueTimeRollout.intent_rows} intents/${dueTimeRollout.task_rooms} task rooms; `
-    + `built ${replyTurnIndexes.length} reply turn hold indexes`,
+    + `built ${replyTurnIndexes.length} reply turn hold indexes and `
+    + `${githubWebhookIndexes.length} GitHub webhook integrity indexes`,
   );
 }
 

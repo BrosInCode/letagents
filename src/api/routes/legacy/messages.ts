@@ -1,4 +1,5 @@
 import { waitForMessageRouting } from "../rooms/messages/wait-for-routing.js";
+import { parseScopedId } from "../../db/utils.js";
 import type { Express, Request, Response } from "express";
 
 import {
@@ -488,6 +489,10 @@ export function registerLegacyProjectMessageRoutes(
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
     let settled = false;
     let resolving = false;
+    // Until the backlog read settles, a person's poll keeps live events here
+    // and acts on them once the read returns; see the initial read below.
+    let backlogPhase = true;
+    let backlogEvents: Message[] = [];
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let subscription: RoomEventSubscription | null = null;
     let live: LiveRoomDeliveryController | null = null;
@@ -689,7 +694,10 @@ export function registerLegacyProjectMessageRoutes(
           continue;
         }
         if (delivery.envelope.event.kind === "message_created" || delivery.envelope.event.kind === "message_routed") {
+          // Before the backlog read settles, answering with only this event
+          // would move the caller's cursor past the backlog rows.
           if (liveController.activationIdentity?.session_kind === "worker") await refreshAfterCursor();
+          else if (backlogPhase) backlogEvents.push(delivery.envelope.event.message);
           else await resolveCanonicalEventAsync(delivery.envelope.event.message);
         }
       }
@@ -731,6 +739,38 @@ export function registerLegacyProjectMessageRoutes(
 
     try {
       await refreshAfterCursor();
+      // Events came in while the read ran: it may predate their rows, and it
+      // may have been joined to another poll's earlier read. Read again, as
+      // long as more events keep arriving.
+      const routedAtOrBeforeCursor: Message[] = [];
+      for (let attempt = 0; !settled && backlogEvents.length > 0 && attempt < 3; attempt += 1) {
+        const seen = backlogEvents;
+        backlogEvents = [];
+        routedAtOrBeforeCursor.push(...seen.filter((message) => isAtOrBeforeCursor(message.id, after)));
+        if (!(await liveController.check())) {
+          await denyRequestAsync();
+          return;
+        }
+        // Polls at this cursor that saw the same latest event share one read,
+        // which began after that event; a read that began earlier is never joined.
+        const next = await getCanonicalRoomMessageCatchUp({
+          roomId: projectId,
+          after,
+          limit,
+          includePromptOnly,
+          load: loadMessagesAfter,
+          startedAfterEvent: seen.at(-1)!.id,
+        });
+        if (next.messages.length > 0) await resolveCanonicalCatchUpAsync(next.messages, next.has_more);
+      }
+      backlogPhase = false;
+      if (!settled) {
+        // Nothing is unseen after the cursor, so a routed update of an older
+        // row is answered alone, as before.
+        const routed = [...routedAtOrBeforeCursor, ...backlogEvents.filter((message) => isAtOrBeforeCursor(message.id, after))];
+        backlogEvents = [];
+        if (routed.length > 0) await resolveCanonicalEventAsync(routed.at(-1)!);
+      }
     } catch (error) {
       if (!settled) {
         settled = true;
@@ -740,4 +780,10 @@ export function registerLegacyProjectMessageRoutes(
       }
     }
   });
+}
+
+function isAtOrBeforeCursor(messageId: string, after: string | undefined): boolean {
+  const cursor = after ? parseScopedId(after, "msg") : null;
+  const number = parseScopedId(messageId, "msg");
+  return cursor !== null && number !== null && number <= cursor;
 }

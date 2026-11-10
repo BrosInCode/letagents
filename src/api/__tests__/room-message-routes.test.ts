@@ -1341,6 +1341,230 @@ test("one canonical broker event resolves a thousand long polls without repeat h
   batcher.close();
 });
 
+test("a live event during the first backlog read never makes a person's poll skip older messages", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path.toString(), handler);
+    },
+    post() {}, put() {}, delete() {},
+  };
+  const row = (number: number) => ({
+    id: `msg_${number}`, sender: "Human", text: `message ${number}`, source: "browser",
+    timestamp: new Date().toISOString(), routing_snapshot_version: 1,
+  });
+  let reads = 0;
+  let releaseFirstRead!: () => void;
+  const firstReadGate = new Promise<void>((resolve) => { releaseFirstRead = resolve; });
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+    // The first read began before msg_10 was written: it holds msg_5..msg_9.
+    // Any later read from the same cursor also sees msg_10.
+    getMessagesAfter: async () => {
+      reads += 1;
+      if (reads === 1) {
+        await firstReadGate;
+        return { messages: [5, 6, 7, 8, 9].map(row), has_more: false };
+      }
+      return { messages: [5, 6, 7, 8, 9, 10].map(row), has_more: false };
+    },
+  };
+  registerRoomMessageRoutes(app as never, deps as never);
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages\\/poll$/");
+  assert.ok(handler);
+
+  const requestEvents = new EventEmitter();
+  const bodies: Array<{ messages: Array<{ id?: string }> }> = [];
+  const req = {
+    params: { 0: "room_1" },
+    query: { after: "msg_4", timeout: "60000" },
+    headers: {},
+    authKind: "session",
+    sessionAccount: { account_id: "acct_1" },
+    get() { return undefined; },
+    on: requestEvents.on.bind(requestEvents),
+    off: requestEvents.off.bind(requestEvents),
+  };
+  const res = {
+    headersSent: false,
+    status() { return this; },
+    json(payload: { messages: Array<{ id?: string }> }) {
+      this.headersSent = true;
+      bodies.push(payload);
+      return this;
+    },
+  };
+  const request = handler(req, res);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(reads, 1, "the first backlog read is in flight");
+
+  deps.messageEvents.emit("message:created", { projectId: "room_1", message: row(10) });
+  for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  releaseFirstRead();
+  await request;
+  for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(bodies.length, 1);
+  const ids = bodies[0]!.messages.map((message) => message.id);
+  assert.equal(ids[0], "msg_5", `the response starts right after the cursor, got ${ids.join(", ")}`);
+  assert.deepEqual(ids.slice(0, 5), ["msg_5", "msg_6", "msg_7", "msg_8", "msg_9"]);
+  deps.roomEventBroker.close();
+});
+
+/** A message store whose reads take a snapshot when they start and finish only when released. */
+function heldReadStore() {
+  const committed: number[] = [];
+  const pending: Array<() => void> = [];
+  let calls = 0;
+  const row = (number: number) => ({
+    id: `msg_${number}`, sender: "Human", text: `message ${number}`, source: "browser",
+    timestamp: new Date().toISOString(), routing_snapshot_version: 1,
+  });
+  return {
+    row,
+    commit(number: number) { committed.push(number); },
+    reads: () => pending.length,
+    calls: () => calls,
+    async getMessagesAfter(_roomId: string, after?: string) {
+      calls += 1;
+      const cursor = Number(after?.slice(4) ?? 0);
+      const snapshot = committed.filter((number) => number > cursor).map(row);
+      await new Promise<void>((resolve) => pending.push(resolve));
+      return { messages: snapshot, has_more: false };
+    },
+    async releaseReads() {
+      for (let round = 0; round < 10; round += 1) {
+        while (pending.length) pending.shift()!();
+        for (let tick = 0; tick < 5; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+      }
+    },
+  };
+}
+
+function openPersonPoll(handler: (req: unknown, res: unknown) => Promise<void>, after: string, timeout = "1000") {
+  const events = new EventEmitter();
+  const startedAt = Date.now();
+  let resolveBody!: (body: { messages: Array<{ id?: string }>; last_observed_message_id?: string; at: number }) => void;
+  const body = new Promise<{ messages: Array<{ id?: string }>; last_observed_message_id?: string; at: number }>((resolve) => { resolveBody = resolve; });
+  const req = {
+    params: { 0: "room_1" }, query: { after, timeout }, headers: {},
+    authKind: "session", sessionAccount: { account_id: "acct_1" }, get() { return undefined; },
+    on: events.on.bind(events), off: events.off.bind(events),
+  };
+  const res = {
+    headersSent: false,
+    status() { return this; },
+    json(payload: { messages: Array<{ id?: string }>; last_observed_message_id?: string }) {
+      this.headersSent = true;
+      resolveBody({ ...payload, at: Date.now() - startedAt });
+      return this;
+    },
+  };
+  return { request: handler(req, res), body };
+}
+
+test("a message that arrives while two polls read their backlog reaches both without waiting for the timeout", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) { handlers.set(path.toString(), handler); },
+    post() {}, put() {}, delete() {},
+  };
+  const store = heldReadStore();
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+    getMessagesAfter: store.getMessagesAfter,
+  };
+  registerRoomMessageRoutes(app as never, deps as never);
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages\\/poll$/")!;
+
+  // P1 reads from msg_4 and sees a routed update of msg_4 meanwhile.
+  const first = openPersonPoll(handler, "msg_4");
+  await new Promise((resolve) => setImmediate(resolve));
+  deps.messageEvents.emit("message:routed", { projectId: "room_1", message: store.row(4) });
+  // Any read this event starts begins now, before msg_5 exists.
+  for (let tick = 0; tick < 10; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  // P2 opens at msg_4; msg_5 is written and announced during P2's first read.
+  const second = openPersonPoll(handler, "msg_4");
+  for (let tick = 0; tick < 10; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  store.commit(5);
+  deps.messageEvents.emit("message:created", { projectId: "room_1", message: store.row(5) });
+  for (let tick = 0; tick < 10; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  // Every read is still held: msg_5's event has reached both polls first.
+  await store.releaseReads();
+
+  const [firstBody, secondBody] = await Promise.all([first.body, second.body]);
+  await Promise.all([first.request, second.request]);
+  assert.deepEqual(secondBody.messages.map((message) => message.id), ["msg_5"]);
+  assert.ok(secondBody.at < 500, `P2 answered after ${secondBody.at} ms`);
+  assert.deepEqual(firstBody.messages.map((message) => message.id), ["msg_5"]);
+  assert.ok(firstBody.at < 500, `P1 answered after ${firstBody.at} ms`);
+  deps.roomEventBroker.close();
+});
+
+test("polls at one cursor that see the same event during their backlog read share one extra read", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) { handlers.set(path.toString(), handler); },
+    post() {}, put() {}, delete() {},
+  };
+  const store = heldReadStore();
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+    getMessagesAfter: store.getMessagesAfter,
+  };
+  registerRoomMessageRoutes(app as never, deps as never);
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages\\/poll$/")!;
+  const polls = Array.from({ length: 50 }, () => openPersonPoll(handler, "msg_4"));
+  for (let tick = 0; tick < 10; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(store.calls(), 50, "each poll reads its backlog once");
+  store.commit(5);
+  deps.messageEvents.emit("message:created", { projectId: "room_1", message: store.row(5) });
+  for (let tick = 0; tick < 10; tick += 1) await new Promise((resolve) => setImmediate(resolve));
+  await store.releaseReads();
+  const bodies = await Promise.all(polls.map((poll) => poll.body));
+  await Promise.all(polls.map((poll) => poll.request));
+  assert.ok(bodies.every((body) => body.messages.map((message) => message.id).join() === "msg_5"));
+  assert.equal(store.calls(), 51, "one shared read after the event, not one per poll");
+  deps.roomEventBroker.close();
+});
+
+test("a routed update of a row at the cursor during the backlog read is still answered", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) { handlers.set(path.toString(), handler); },
+    post() {}, put() {}, delete() {},
+  };
+  const store = heldReadStore();
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+    getMessagesAfter: store.getMessagesAfter,
+  };
+  registerRoomMessageRoutes(app as never, deps as never);
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages\\/poll$/")!;
+
+  const poll = openPersonPoll(handler, "msg_4");
+  await new Promise((resolve) => setImmediate(resolve));
+  deps.messageEvents.emit("message:routed", { projectId: "room_1", message: store.row(4) });
+  await store.releaseReads();
+  const body = await poll.body;
+  await poll.request;
+  assert.deepEqual(body.messages.map((message) => message.id), ["msg_4"]);
+  assert.ok(body.at < 500, `answered after ${body.at} ms`);
+  deps.roomEventBroker.close();
+});
+
 test("one broker gap coalesces a thousand poll catch-ups without executor overflow", async () => {
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {

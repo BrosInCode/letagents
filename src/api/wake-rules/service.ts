@@ -240,7 +240,8 @@ export async function confirmWakeEmailByCode(input: {
 /** Whether a person may cancel a webhook or email rule they do not own: room admins may. */
 async function isRoomAdmin(roomId: string, accountId: string): Promise<boolean> {
   const { isRoomAdminAccount } = await import("../connectors/rules/engine.js");
-  return isRoomAdminAccount(roomId, accountId);
+  // A person is waiting: a GitHub outage answers 503, to retry.
+  return isRoomAdminAccount(roomId, accountId, { outage: "throw" });
 }
 
 /**
