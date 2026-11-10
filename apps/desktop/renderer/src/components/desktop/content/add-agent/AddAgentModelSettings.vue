@@ -12,7 +12,7 @@
           :options="modelOptions"
           label="Model"
           id="desktop-add-agent-model-select"
-          described-by="desktop-add-agent-model-description"
+          :described-by="cliUpdate ? 'desktop-add-agent-model-description desktop-add-agent-model-cli-update' : 'desktop-add-agent-model-description'"
           test-id="desktop-add-agent-model-select"
           @update:model-value="emit('update:modelChoice', $event)"
         />
@@ -49,6 +49,14 @@
       :aria-live="catalogError ? 'assertive' : 'polite'"
       aria-atomic="true"
     >{{ catalogLabel }}</p>
+    <p
+      v-else-if="cliUpdate"
+      id="desktop-add-agent-model-cli-update"
+      class="desktop-add-agent-model-catalog"
+      data-tone="status"
+      data-testid="desktop-add-agent-model-cli-update"
+    >{{ cliUpdate.message }} Run <code>{{ cliUpdate.command }}</code>, then
+      <button type="button" class="desktop-add-agent-model-refresh-link" :disabled="loading" @click="emit('refresh')">{{ loading ? "refreshing…" : "refresh models" }}</button>.</p>
   </section>
 </template>
 
@@ -71,6 +79,8 @@ defineProps<{
   effortDescription: string;
   catalogLabel: string;
   catalogError: boolean;
+  /** Models the installed CLI is too old to list, and the command that updates it. */
+  cliUpdate?: { message: string; command: string } | null;
 }>();
 const emit = defineEmits<{
   refresh: [];

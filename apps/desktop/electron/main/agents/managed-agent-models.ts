@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import type {
+  DesktopAgentProviderCliUpdate,
   DesktopAgentProviderId,
   DesktopAgentProviderModelOption,
   DesktopAgentProviderModelSource,
@@ -10,7 +11,7 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopManagedAgentEffort,
 } from "../../ipc-types.js";
-import { claudeCodeVersionAtLeast, resolveClaudeCodeExecutable } from "./claude-code-version.js";
+import { claudeCodeVersionAtLeast, inspectClaudeCodeVersion, resolveClaudeCodeExecutable } from "./claude-code-version.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
 import { DEFAULT_CURSOR_MCP_POLICY, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
@@ -74,10 +75,28 @@ async function listClaudeCodeModels(
   if (!input.refreshModels && cached && cached.expiresAt > Date.now()) {
     return cloneModelResult(cached.result);
   }
-  const models = claudeCodeModelsFor(await claudeCodeVersionLine(command, runtimeEnv));
-  const next = modelResult("claude-code", "ready", models, null, null);
+  const versionLine = await claudeCodeVersionLine(command, runtimeEnv);
+  const models = claudeCodeModelsFor(versionLine);
+  const next = modelResult("claude-code", "ready", models, null, null, claudeCodeCliUpdate(versionLine, models, command));
   modelListCache.set(cacheKey, { expiresAt: Date.now() + MODEL_LIST_CACHE_MS, result: next });
   return cloneModelResult(next);
+}
+
+/**
+ * The known models this CLI leaves out because it is too old, if any. A CLI
+ * that is missing, or whose version can't be read, gets nothing here: the
+ * setup check already says how to install or repair it, and "update" would fail.
+ */
+function claudeCodeCliUpdate(
+  versionLine: string,
+  listed: DesktopAgentProviderModelOption[],
+  command: string,
+): DesktopAgentProviderCliUpdate | null {
+  const installedVersion = inspectClaudeCodeVersion(versionLine).version;
+  const missing = CLAUDE_CODE_KNOWN_MODELS.filter((model) => !listed.some((option) => option.id === model.id));
+  return installedVersion && missing.length
+    ? { modelLabels: missing.map((model) => model.label), installedVersion, command: `${command} update` }
+    : null;
 }
 
 async function claudeCodeVersionLine(command: string, env: NodeJS.ProcessEnv): Promise<string> {
@@ -248,6 +267,7 @@ function modelResult(
   models: DesktopAgentProviderModelOption[],
   defaultModel: string | null,
   error: string | null,
+  cliUpdate: DesktopAgentProviderCliUpdate | null = null,
 ): DesktopAgentProviderModelsResult {
   return {
     providerId,
@@ -258,6 +278,7 @@ function modelResult(
     })),
     defaultModel,
     error,
+    ...(cliUpdate ? { cliUpdate: { ...cliUpdate, modelLabels: [...cliUpdate.modelLabels] } } : {}),
   };
 }
 
@@ -392,6 +413,7 @@ function cloneModelResult(result: DesktopAgentProviderModelsResult): DesktopAgen
     result.models,
     result.defaultModel,
     result.error,
+    result.cliUpdate ?? null,
   );
 }
 
