@@ -440,7 +440,9 @@ test("the supervised runtime backs off after a poll error and resumes intake", a
       publish: async () => { throw new Error("no-reply must not publish"); },
     }, currentAuthority, 0);
     void delivery.start(agent);
-    await waitFor(() => polls >= 3);
+    // A real 250 ms backoff, then a turn with fsynced SQLite writes: about 0.8 s on a
+    // Windows runner, so the default 1 s wait was too short there. It returns once polled.
+    await waitFor(() => polls >= 3, 15_000);
     assert.deepEqual(await store.ingressHealth(agent.agentId), {
       room_id: agent.roomId,
       state: "observing",

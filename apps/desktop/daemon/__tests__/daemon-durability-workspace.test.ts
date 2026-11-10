@@ -620,8 +620,11 @@ test("launching a cached commit never waits on an unreachable origin, and setup 
     const launch = () => provisioner.provision({
       repo: "offline", workAttemptId: randomUUID(), taskId: "task_offline", remoteUrl: unreachable, revision: firstRevision,
     });
+    // Git has no timeout of its own on a black-holed remote, so a launch that waited on it would never end.
+    // The bound only turns that into a failure: a passing launch on a loaded Windows runner took over 6 s.
+    // connections.size below is the proof that origin was never contacted.
     const bounded = <T>(work: Promise<T>) => Promise.race([work, new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error("the launch waited on the unreachable origin")), 10_000).unref();
+      setTimeout(() => reject(new Error("the launch waited on the unreachable origin")), 10_000 * WAIT_SCALE).unref();
     })]);
     const first = await bounded(launch());
     assert.equal(await git(["-C", first.path, "rev-parse", "HEAD"]), firstRevision);
