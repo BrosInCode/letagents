@@ -1,8 +1,8 @@
 import type { Express } from "express";
 
 import {
+  claimGitHubWebhookDelivery,
   markGitHubWebhookDeliveryProcessed,
-  recordGitHubWebhookDelivery,
   type GitHubWebhookDeliveryStatus,
 } from "../../db.js";
 import { getGitHubAppConfig } from "../../github/config.js";
@@ -32,20 +32,6 @@ export interface GitHubWebhookRouteDeps {
     deliveryId: string,
     options?: { retryFailedDelivery?: boolean }
   ): Promise<WebhookProcessingResult>;
-}
-
-export function shouldSkipDuplicateGitHubWebhookDelivery(input: {
-  duplicate: boolean;
-  delivery: { status: GitHubWebhookDeliveryStatus };
-}): boolean {
-  return input.duplicate && input.delivery.status !== "failed";
-}
-
-export function shouldRetryFailedDuplicateGitHubWebhookDelivery(input: {
-  duplicate: boolean;
-  delivery: { status: GitHubWebhookDeliveryStatus };
-}): boolean {
-  return input.duplicate && input.delivery.status === "failed";
 }
 
 export function registerGitHubWebhookRoutes(
@@ -85,22 +71,26 @@ export function registerGitHubWebhookRoutes(
       ? buildGitHubRepoRoomId(payload.repository.full_name)
       : null;
 
-    const delivery = await recordGitHubWebhookDelivery({
+    // A processed delivery, or one another request is processing now, is a
+    // duplicate. A failed one, or one left 'received' by a process that
+    // stopped mid-processing, is processed again.
+    const claim = await claimGitHubWebhookDelivery({
       delivery_id: metadata.deliveryId,
       event_name: metadata.eventName,
       action: payload.action ?? null,
       installation_id: initialInstallationId,
       github_repo_id: initialGitHubRepoId,
       room_id: initialRoomId,
+      payload,
     });
 
-    if (shouldSkipDuplicateGitHubWebhookDelivery(delivery)) {
+    if (!claim.claimed) {
       res.status(202).json({ ok: true, duplicate: true });
       return;
     }
 
     try {
-      const retryFailedDelivery = shouldRetryFailedDuplicateGitHubWebhookDelivery(delivery);
+      const retryFailedDelivery = claim.retry;
       const result = await deps.handleGitHubWebhookEvent(
         metadata.eventName,
         payload,
@@ -113,6 +103,7 @@ export function registerGitHubWebhookRoutes(
         github_repo_id: result.githubRepoId,
         room_id: result.roomId,
         error: null,
+        attempt: claim.attempt,
       });
 
       res.status(202).json({
@@ -126,6 +117,7 @@ export function registerGitHubWebhookRoutes(
         github_repo_id: initialGitHubRepoId,
         room_id: initialRoomId,
         error: error instanceof Error ? error.message : "Unknown GitHub webhook processing error",
+        attempt: claim.attempt,
       });
 
       respondWithInternalError(

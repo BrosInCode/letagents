@@ -175,6 +175,11 @@ export function registerMessageHistoryRoutes(
     const accountAgentRouting = isAppSession(req);
     let settled = false;
     let resolving = false;
+    // Until the backlog read settles, a live event may be newer than unseen
+    // rows after the cursor. A person's poll keeps such events here and acts
+    // on them once the read returns (see settleBacklogEvents).
+    let backlogPhase = true;
+    let backlogEvents: Message[] = [];
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let subscription: RoomEventSubscription | null = null;
     let live: LiveRoomDeliveryController | null = null;
@@ -424,7 +429,11 @@ export function registerMessageHistoryRoutes(
           continue;
         }
         if (delivery.envelope.event.kind === "message_created" || delivery.envelope.event.kind === "message_routed") {
+          // Answering with only this event before the backlog read settles
+          // would move the caller's cursor past the backlog rows. Once the
+          // read found nothing, the event alone is the next row.
           if (liveController.activationIdentity?.session_kind === "worker") await refreshAfterCursor();
+          else if (backlogPhase) backlogEvents.push(delivery.envelope.event.message);
           else await resolveCanonicalEventAsync(delivery.envelope.event.message);
         }
       }
@@ -473,10 +482,44 @@ export function registerMessageHistoryRoutes(
       });
       const page = existing.messages;
       if (!settled && page.length > 0) {
+        backlogPhase = false;
         // The initial/backlog response is awaited so the route handler does
         // not return before the response body is written; only the timeout
         // and message-created event callbacks stay fire-and-forget.
         await resolveRequestAsync(page, existing.has_more, { includeTaskOwnerLeases: false });
+        return;
+      }
+      // Events came in while the read ran: it may predate their rows. Read
+      // again, as long as more events keep arriving during a read. Polls at
+      // this cursor that saw the same latest event share one read, which
+      // began after that event; a read that began earlier is never joined.
+      const routedAtOrBeforeCursor: Message[] = [];
+      for (let attempt = 0; !settled && backlogEvents.length > 0 && attempt < 3; attempt += 1) {
+        const seen = backlogEvents;
+        backlogEvents = [];
+        routedAtOrBeforeCursor.push(...seen.filter((message) => isAtOrBeforeCursor(message.id, after)));
+        if (!(await liveController.check())) return void await denyRequestAsync();
+        const next = await getCanonicalRoomMessageCatchUp({
+          roomId: projectId,
+          after,
+          limit,
+          includePromptOnly,
+          load: deps.getMessagesAfter ?? getMessagesAfter,
+          startedAfterEvent: seen.at(-1)!.id,
+        });
+        if (!settled && next.messages.length > 0) {
+          backlogPhase = false;
+          await resolveCanonicalCatchUpAsync(next.messages, next.has_more);
+          return;
+        }
+      }
+      backlogPhase = false;
+      if (!settled) {
+        // Nothing is unseen after the cursor, so a routed update of an older
+        // row is answered alone, as before; the response keeps the cursor.
+        const routed = [...routedAtOrBeforeCursor, ...backlogEvents.filter((message) => isAtOrBeforeCursor(message.id, after))];
+        backlogEvents = [];
+        if (routed.length > 0) await resolveCanonicalEventAsync(routed.at(-1)!);
       }
     } catch (error) {
       if (!settled) {
@@ -638,6 +681,12 @@ export function registerMessageHistoryRoutes(
       );
     }
   });
+}
+
+function isAtOrBeforeCursor(messageId: string, after: string | undefined): boolean {
+  const cursor = after ? parseScopedId(after, "msg") : null;
+  const number = parseScopedId(messageId, "msg");
+  return cursor !== null && number !== null && number <= cursor;
 }
 
 function isMessageId(value: string): boolean {

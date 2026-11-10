@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { WAKE_RULE_LIMITS, type WakeRuleArguments } from "../../../shared/wake-rules.mjs";
 import type { EncryptedCredentials } from "../connectors/crypto.js";
 import { db, pool } from "./client.js";
+import { wakeJobQueue } from "../server/job-queue-wakes.js";
 import { agent_wake_rules } from "./schema.js";
 import type { WakeRuleRow } from "./wake-rules.js";
 
@@ -261,6 +262,8 @@ export async function replayMcpEventDeliveries(
     }
     await client.query("UPDATE agent_wake_rules SET mcp_replayed_at = $2 WHERE id = $1", [rule.id, nowIso]);
     await client.query("COMMIT");
+    // The re-queued events are due now; the delivery lanes sleep until woken.
+    wakeJobQueue("wake_delivery");
   } catch (error) {
     await client.query("ROLLBACK").catch(() => undefined);
     throw error;

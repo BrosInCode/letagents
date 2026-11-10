@@ -8,6 +8,7 @@ import { parseScopedId } from "../../db/utils.js";
 import type { WorkflowEffect } from "../../db/types/effects.js";
 import type { RepoRoomEvent } from "../../repo-workflow/types.js";
 import type { ReserveResult, SubmitTrackerEffectInput } from "../../workflow-effects/broker.js";
+import { GitHubAccessUnavailableError } from "../../github/repo-access.js";
 import { parseExternalRef } from "../key-detectors.js";
 import { getCachedRoomTrackerScope, type RoomTrackerScope } from "../room-filters.js";
 import { matchTrackerRules, rulesNeedApprovalCount, type TrackerRuleEventFacts } from "./matcher.js";
@@ -44,8 +45,13 @@ export interface TrackerRuleEngineDeps {
    * typed onto a card by hand cannot aim the owner's rules at another ticket.
    */
   ticketBound(input: { connectionId: string; roomId: string; taskId: string; key: string }): Promise<boolean>;
-  /** Whether the connection's owner is still an admin of the room (a filter outlives a role). */
-  ownerIsRoomAdmin(roomId: string, accountId: string): Promise<boolean>;
+  /**
+   * Whether the connection's owner is still an admin of the room (a filter
+   * outlives a role). With `outage: "throw"` (a person is waiting) it throws
+   * GitHubAccessUnavailableError when GitHub gives no answer; otherwise the
+   * stored admin row decides then.
+   */
+  ownerIsRoomAdmin(roomId: string, accountId: string, options?: { outage?: "stored_row" | "throw" }): Promise<boolean>;
   /** Reviewers from the repository whose latest review of the pull request approves it. */
   countApprovals(input: { roomIds: string[]; pullNumber: number; pullUrl: string }): Promise<number>;
   /** The broker's `reserveTrackerEffect`: every tracker write goes through the journal (invariant 3). */
@@ -512,7 +518,8 @@ export function createTrackerRuleEngine(deps: TrackerRuleEngineDeps) {
       if (!await deps.ticketBound({ connectionId: connection.connection_id, roomId: input.room_id, taskId: input.task_id, key: ref.key })) {
         return { status: "refused", reason: "ticket_not_bound" };
       }
-      if (!await deps.ownerIsRoomAdmin(input.room_id, connection.account_id)) return { status: "refused", reason: "owner_not_admin" };
+      // A person approved this in the app: an outage answers 503, to retry.
+      if (!await deps.ownerIsRoomAdmin(input.room_id, connection.account_id, { outage: "throw" })) return { status: "refused", reason: "owner_not_admin" };
       const { run, claimed } = await deps.store.claimRun({
         rule_id: rule.id,
         rule_version: rule.version,
@@ -614,9 +621,27 @@ export async function findRoomRuleConnection(roomId: string, provider: TrackerPr
   return row ? { ...row, provider } : null;
 }
 
-/** An admin of the room, or of the repository room it belongs to, as the room routes decide it. */
-export async function isRoomAdminAccount(roomId: string, accountId: string): Promise<boolean> {
-  const { getProjectById, isProjectAdmin } = await import("../../db.js");
+/**
+ * An admin of the room, or of the repository room it belongs to, as the room
+ * routes decide it. `outage` says what a repo room's check does when GitHub
+ * gives no answer: a background job ("stored_row", the default) falls back to
+ * the stored admin row and logs one line; a route a person is waiting on
+ * ("throw") gets GitHubAccessUnavailableError and answers 503.
+ */
+export async function isRoomAdminAccount(
+  roomId: string,
+  accountId: string,
+  deps: {
+    getAccount?: (accountId: string) => Promise<import("../../rooms/access.js").RoomAccessAccount | null>;
+    access?: import("../../rooms/access.js").ProjectRepoAccessDeps;
+    outage?: "stored_row" | "throw";
+    getProject?: (roomId: string) => Promise<import("../../db/types.js").Project | undefined>;
+    isProjectAdmin?: (roomId: string, accountId: string) => Promise<boolean>;
+  } = {},
+): Promise<boolean> {
+  const db = await import("../../db.js");
+  const getProjectById = deps.getProject ?? db.getProjectById;
+  const isProjectAdmin = deps.isProjectAdmin ?? db.isProjectAdmin;
   const { getProjectAccessRoomId, resolveProjectRepoAccessTarget } = await import("../../rooms/access.js");
   const project = await getProjectById(roomId);
   const accessRoomId = project ? getProjectAccessRoomId(project) : roomId;
@@ -628,8 +653,22 @@ export async function isRoomAdminAccount(roomId: string, accountId: string): Pro
     if (!role) return false;
     return role === "admin" || (accessRoomId !== roomId && await isProjectAdmin(roomId, accountId));
   }
-  if (await isProjectAdmin(roomId, accountId)) return true;
-  return accessRoomId !== roomId && await isProjectAdmin(accessRoomId, accountId);
+  if (!project) return false;
+  // A repository room: an admin row counts only while GitHub still admits the
+  // person, checked with their stored GitHub credential (none: not admin).
+  const { getSupervisorGrantOwnerAccount } = await import("../../db/supervisor-grant-revocation.js");
+  const { isCurrentProjectAdmin } = await import("../../rooms/access.js");
+  const account = await (deps.getAccount ?? getSupervisorGrantOwnerAccount)(accountId);
+  if (!account) return false;
+  try {
+    return await isCurrentProjectAdmin(project, account, deps.access);
+  } catch (error) {
+    if (!(error instanceof GitHubAccessUnavailableError) || deps.outage === "throw") throw error;
+    // GitHub gave no answer: the stored row decides, as before the repo check.
+    console.warn(`[ticket-connectors] GitHub did not answer the admin check in room ${roomId}; using the stored admin row`);
+    return (await isProjectAdmin(roomId, accountId))
+      || (accessRoomId !== roomId && await isProjectAdmin(accessRoomId, accountId));
+  }
 }
 
 /** The card's `external_item_id` names this connection's cached item for the key. */

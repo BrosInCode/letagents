@@ -4,6 +4,7 @@ import type { EventEmitter } from "node:events";
 import type { BoardIntent, Project } from "../../db.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { JevLinkDecisionError, type JevLinkService } from "../../connectors/jev-link.js";
+import { replyIfGitHubAccessUnavailable } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 
 export type JevLinkDecisions = Pick<JevLinkService, "approveIntent" | "denyIntent" | "acceptLink" | "rejectLink">;
@@ -38,6 +39,8 @@ export function requireJevLinkPerson(req: AuthenticatedRequest, res: Response, w
 }
 
 function respondToDecisionError(res: Response, error: unknown): boolean {
+  // The rule owner's admin check got no answer from GitHub: retry later.
+  if (replyIfGitHubAccessUnavailable(res, error)) return true;
   if (!(error instanceof JevLinkDecisionError)) return false;
   const status = error.code === "not_found" || error.code === "not_suggested" ? 404 : error.code === "invalid_intent" ? 400 : 409;
   res.status(status).json({ error: error.message, code: `jev_link_${error.code}` });

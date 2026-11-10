@@ -15,6 +15,7 @@ import {
 } from "../../../shared/wake-rules.mjs";
 import type { EncryptedCredentials } from "../connectors/crypto.js";
 import { db } from "./client.js";
+import { wakeJobQueue } from "../server/job-queue-wakes.js";
 import { repositoryRoomIds } from "./github/repository-rooms.js";
 import { agent_wake_rules } from "./schema.js";
 import type { MessageCreateTransaction } from "./messages/create.js";
@@ -199,7 +200,7 @@ export async function createWakeRule(input: {
   const identityKey = `${wakeRuleIdentityKey(input.rule.event, input.rule.arguments)}${delivery ? `:${delivery.kind}:${delivery.targetFingerprint}` : ""}`;
   const viewer = { accountId: ownerAccountId };
   const confirmExpiresAt = new Date(nowDate.getTime() + WAKE_RULE_LIMITS.emailConfirmTtlMs).toISOString();
-  return db.transaction(async (tx) => {
+  const created = await db.transaction(async (tx) => {
     // One agent's rules are counted and deduplicated one request at a time.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`wake-rules:${input.roomId}:${input.agent.agent_key}`}, 0))`);
     // And one account's delivery rules, across rooms (always after the agent lock).
@@ -348,6 +349,9 @@ export async function createWakeRule(input: {
     }
     return { rule: toWakeRule(row!, viewer), created: true };
   });
+  // A queued confirmation email is due now; the delivery lanes sleep until woken.
+  if (created.confirmation?.sent) wakeJobQueue("wake_delivery");
+  return created;
 }
 
 export async function getWakeRule(roomId: string, id: string): Promise<WakeRuleRow | null> {
@@ -757,7 +761,7 @@ export async function requestWakeEmailConfirmationAgain(
   const nowIso = now.toISOString();
   const confirmExpiresAt = new Date(now.getTime() + WAKE_RULE_LIMITS.emailConfirmTtlMs).toISOString();
   try {
-    return await db.transaction(async (tx) => {
+    const outcome = await db.transaction(async (tx): Promise<WakeLinkOutcome> => {
       const [rule] = await tx.select().from(agent_wake_rules).where(eq(agent_wake_rules.disable_token_hash, tokenHash)).limit(1);
       if (!rule) return { outcome: "unknown" } as const;
       if (!rule.delivery_target_fingerprint) return { outcome: "ended", stopped: false } as const;
@@ -782,6 +786,9 @@ export async function requestWakeEmailConfirmationAgain(
       console.info(`[wake email] an address asked for a new confirmation for rule ${rule.id}.`);
       return { outcome: "done", rule: pending } as const;
     });
+    // A queued confirmation email is due now; the delivery lanes sleep until woken.
+    if (outcome.outcome === "done") wakeJobQueue("wake_delivery");
+    return outcome;
   } catch (error) {
     if (error instanceof WakeRuleError && error.status === 429) return { outcome: "limited" };
     throw error;
