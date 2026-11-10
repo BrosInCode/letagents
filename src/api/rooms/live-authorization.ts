@@ -28,6 +28,8 @@ interface SharedAuthorizationLease {
   credentialFingerprint: string | null;
   credentialRetired: boolean;
   invalidationGeneration: number;
+  /** When the last check threw (no answer), else null. */
+  failedAt: number | null;
   inFlight: Promise<boolean> | null;
   refs: number;
   invalidationHandlers: Set<() => void>;
@@ -35,6 +37,8 @@ interface SharedAuthorizationLease {
 
 export interface LiveRoomAuthorizationLease {
   check(options?: { force?: boolean }): Promise<boolean>;
+  /** True when the last check got no answer (it threw): a false that is not a refusal. */
+  lastCheckFailed(): boolean;
   onInvalidated(handler: () => void): () => void;
   release(): void;
 }
@@ -51,6 +55,7 @@ function invalidateAuthorizationLeases(
     if (login && lease.login !== login) continue;
     if (!shouldInvalidate(lease)) continue;
     lease.invalidated = true;
+    lease.failedAt = null;
     lease.invalidationGeneration += 1;
     for (const handler of lease.invalidationHandlers) {
       try {
@@ -139,13 +144,27 @@ export function acquireLiveRoomAuthorization(input: {
   initiallyAllowed?: boolean;
   /** The caller's entry check was exact (no cache), so the first body needs no recheck. */
   freshAtEntry?: boolean;
+  /**
+   * Leases of different scopes never share a decision (the account activity
+   * stream decides from cached answers, room streams freshly).
+   */
+  scope?: string;
+  /** How long an answer is reused. Defaults to 60 s. */
+  leaseMs?: number;
+  /**
+   * After a check that got no answer, how long a plain check answers false
+   * without asking again. Defaults to 0 (ask again at once).
+   */
+  failureRetryMs?: number;
   now?: () => number;
 }): LiveRoomAuthorizationLease {
-  const now = input.now ?? Date.now;
+  const now = input.now ?? (() => Date.now());
+  const leaseMs = input.leaseMs ?? AUTHORIZATION_LEASE_MS;
+  const failureRetryMs = input.failureRetryMs ?? 0;
   const credentialFingerprint = roomAgentDeliveryCredentialFingerprint(
     input.deliveryCredentialFence ?? requestAgentCredentialFence(input.req),
   );
-  const key = `${input.roomId}\n${requestCredentialKey(input.req)}\n${credentialFingerprint ?? "shared"}`;
+  const key = `${input.scope ?? "room"}\n${input.roomId}\n${requestCredentialKey(input.req)}\n${credentialFingerprint ?? "shared"}`;
   let lease = leases.get(key);
   if (!lease) {
     lease = {
@@ -163,6 +182,7 @@ export function acquireLiveRoomAuthorization(input: {
       credentialFingerprint,
       credentialRetired: false,
       invalidationGeneration: 1,
+      failedAt: null,
       inFlight: null,
       refs: 0,
       invalidationHandlers: new Set(),
@@ -174,8 +194,11 @@ export function acquireLiveRoomAuthorization(input: {
 
   const check = (options: { force?: boolean } = {}): Promise<boolean> => {
     if (lease!.credentialRetired) return Promise.resolve(false);
-    if (!options.force && !lease!.invalidated && now() - lease!.checkedAt < AUTHORIZATION_LEASE_MS) {
+    if (!options.force && !lease!.invalidated && now() - lease!.checkedAt < leaseMs) {
       return Promise.resolve(lease!.allowed);
+    }
+    if (!options.force && lease!.failedAt !== null && now() - lease!.failedAt < failureRetryMs) {
+      return Promise.resolve(false);
     }
     if (lease!.inFlight) return lease!.inFlight;
     let pending!: Promise<boolean>;
@@ -189,8 +212,9 @@ export function acquireLiveRoomAuthorization(input: {
           // Delivery is fail-closed: a dependency failure is not cached as a
           // revocation, but this event must not pass on a stale allow decision.
           lease!.checkedAt = now();
+          lease!.failedAt = now();
           lease!.invalidated = true;
-          console.error("[room authorization] live recheck failed", error);
+          if (failureRetryMs === 0) console.error("[room authorization] live recheck failed", error);
           return false;
         }
         if (lease!.credentialRetired) return false;
@@ -203,6 +227,7 @@ export function acquireLiveRoomAuthorization(input: {
         }
         lease!.allowed = allowed;
         lease!.checkedAt = now();
+        lease!.failedAt = null;
         lease!.invalidated = false;
         return allowed;
       }
@@ -216,6 +241,7 @@ export function acquireLiveRoomAuthorization(input: {
 
   return {
     check,
+    lastCheckFailed: () => lease!.failedAt !== null,
     onInvalidated(handler) {
       lease!.invalidationHandlers.add(handler);
       return () => lease!.invalidationHandlers.delete(handler);

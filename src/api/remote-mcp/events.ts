@@ -36,7 +36,6 @@ import {
 } from "../db/wake-rules-mcp-events.js";
 import { authorizeDesktopPushNotification, type DesktopPushAuthorizationDecision } from "../notifications/authorization.js";
 import { getPushDeliveryAccount } from "../notifications/push-account.js";
-import { isProjectRoomMember, resolveProjectRepoRoomAccessDecision } from "../rooms/access.js";
 import { resolveCanonicalRoomRequestId } from "../rooms/resolution.js";
 import { normalizeRoomId } from "../rooms/routing.js";
 import { queueWakeRuleInvalidation } from "../server/events.js";
@@ -104,8 +103,7 @@ export interface McpEventsDeps {
 function defaultDeps(): McpEventsDeps {
   return {
     authorize: (accountId, roomId) => authorizeDesktopPushNotification({ accountId, roomId }, {
-      getProject: getProjectById, getAccount: getPushDeliveryAccount, resolveAccess: resolveProjectRepoRoomAccessDecision,
-      isRoomMember: isProjectRoomMember,
+      getProject: getProjectById, getAccount: getPushDeliveryAccount,
     }),
     send: postWakeWebhook,
     verifyTimeoutMs: WAKE_WEBHOOK_TIMEOUT_MS,

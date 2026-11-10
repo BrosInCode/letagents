@@ -8,7 +8,6 @@ import { parseScopedId } from "../../db/utils.js";
 import type { WorkflowEffect } from "../../db/types/effects.js";
 import type { RepoRoomEvent } from "../../repo-workflow/types.js";
 import type { ReserveResult, SubmitTrackerEffectInput } from "../../workflow-effects/broker.js";
-import { GitHubAccessUnavailableError } from "../../github/repo-access.js";
 import { parseExternalRef } from "../key-detectors.js";
 import { getCachedRoomTrackerScope, type RoomTrackerScope } from "../room-filters.js";
 import { matchTrackerRules, rulesNeedApprovalCount, type TrackerRuleEventFacts } from "./matcher.js";
@@ -640,35 +639,36 @@ export async function isRoomAdminAccount(
   } = {},
 ): Promise<boolean> {
   const db = await import("../../db.js");
-  const getProjectById = deps.getProject ?? db.getProjectById;
-  const isProjectAdmin = deps.isProjectAdmin ?? db.isProjectAdmin;
-  const { getProjectAccessRoomId, resolveProjectRepoAccessTarget } = await import("../../rooms/access.js");
-  const project = await getProjectById(roomId);
-  const accessRoomId = project ? getProjectAccessRoomId(project) : roomId;
-  if (project && !(await resolveProjectRepoAccessTarget(project))) {
-    // A room without a repository: an admin row counts only for a member of
-    // the access room, as the room routes decide it.
-    const { getRoomMemberRole } = await import("../../db/room-members.js");
-    const role = await getRoomMemberRole(accessRoomId, accountId);
-    if (!role) return false;
-    return role === "admin" || (accessRoomId !== roomId && await isProjectAdmin(roomId, accountId));
-  }
+  const project = await (deps.getProject ?? db.getProjectById)(roomId);
   if (!project) return false;
-  // A repository room: an admin row counts only while GitHub still admits the
-  // person, checked with their stored GitHub credential (none: not admin).
-  const { getSupervisorGrantOwnerAccount } = await import("../../db/supervisor-grant-revocation.js");
-  const { isCurrentProjectAdmin } = await import("../../rooms/access.js");
-  const account = await (deps.getAccount ?? getSupervisorGrantOwnerAccount)(accountId);
-  if (!account) return false;
-  try {
-    return await isCurrentProjectAdmin(project, account, deps.access);
-  } catch (error) {
-    if (!(error instanceof GitHubAccessUnavailableError) || deps.outage === "throw") throw error;
-    // GitHub gave no answer: the stored row decides, as before the repo check.
-    console.warn(`[ticket-connectors] GitHub did not answer the admin check in room ${roomId}; using the stored admin row`);
-    return (await isProjectAdmin(roomId, accountId))
-      || (accessRoomId !== roomId && await isProjectAdmin(accessRoomId, accountId));
+  const { classifyRoomAccess, decideRoomAdmin, resolveRepoRoomAccessDecision } = await import("../../rooms/access-decision.js");
+  const decisionDeps = {
+    getGitRoomBindingForRoom: deps.access?.getGitRoomBindingForRoom ?? db.getGitRoomBindingForRoom,
+    resolveRepoRoomAccessDecision: deps.access?.resolveRepoRoomAccessDecision ?? resolveRepoRoomAccessDecision,
+    isProjectAdmin: deps.isProjectAdmin ?? db.isProjectAdmin,
+  };
+  const target = await classifyRoomAccess(project, decisionDeps);
+  // A membership room is decided by its rows alone. A repository room: an
+  // admin row counts only while GitHub still admits the person, checked with
+  // their stored GitHub credential (none: not admin).
+  let account: import("../../rooms/access.js").RoomAccessAccount | null = null;
+  if (target.kind === "repo") {
+    const { getSupervisorGrantOwnerAccount } = await import("../../db/supervisor-grant-revocation.js");
+    account = await (deps.getAccount ?? getSupervisorGrantOwnerAccount)(accountId);
+    if (!account) return false;
   }
+  const decision = await decideRoomAdmin({
+    project,
+    target,
+    principal: account ? { kind: "person", account } : { kind: "account", accountId },
+    // A person waiting gets GitHubAccessUnavailableError and answers 503; a
+    // background job falls back to the stored admin row.
+    outage: deps.outage === "throw" ? "throw" : "stored_row",
+  }, decisionDeps);
+  if (decision.kind === "indeterminate") {
+    console.warn(`[ticket-connectors] GitHub did not answer the admin check in room ${roomId}; using the stored admin row`);
+  }
+  return decision.role === "admin";
 }
 
 /** The card's `external_item_id` names this connection's cached item for the key. */

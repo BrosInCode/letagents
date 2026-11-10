@@ -12,7 +12,6 @@ import {
   type DesktopPushAuthorizationDecision,
 } from "../notifications/authorization.js";
 import { getPushDeliveryAccount } from "../notifications/push-account.js";
-import { isProjectRoomMember, resolveProjectRepoRoomAccessDecision } from "../rooms/access.js";
 import type { NormalizedMessageAttachmentReference } from "../messages/attachments.js";
 import type { MessageRecipientAgentTarget } from "../db/types.js";
 import {
@@ -129,8 +128,6 @@ export const resolveAccountRoomAccessForEmit: AccountRoomAccessResolver = (input
   authorizeDesktopPushNotification({ ...input, freshCollaboratorCheck: false }, {
     getProject: getProjectById,
     getAccount: getPushDeliveryAccount,
-    resolveAccess: resolveProjectRepoRoomAccessDecision,
-    isRoomMember: isProjectRoomMember,
   });
 
 export interface AccountIdsWithRoomAccess {

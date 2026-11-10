@@ -1,16 +1,11 @@
 import type { Project } from "../db/types.js";
-import type { ProjectRepoAccessDecision, RoomAccessAccount } from "../rooms/access.js";
+import { decideRoomRead, type RoomAccessAccount } from "../rooms/access-decision.js";
 
 export interface DesktopPushAuthorizationDeps {
   getProject(roomId: string): Promise<Project | null | undefined>;
   getAccount(accountId: string): Promise<RoomAccessAccount | null | undefined>;
-  resolveAccess(input: {
-    project: Project;
-    sessionAccount: RoomAccessAccount;
-    freshCollaboratorCheck: boolean;
-  }): Promise<ProjectRepoAccessDecision>;
-  /** Membership of a room that is not tied to a repository (its parent, for a focus room). */
-  isRoomMember(project: Project, accountId: string): Promise<boolean>;
+  /** The room read decision. Defaults to decideRoomRead. */
+  decideRead?: typeof decideRoomRead;
 }
 
 export type DesktopPushAuthorizationDecision = "allow" | "deny" | "retry";
@@ -30,23 +25,23 @@ export async function authorizeDesktopPushNotification(
   ]);
   if (!project || !account) return "deny";
 
-  const access = await deps.resolveAccess({
+  const access = await (deps.decideRead ?? decideRoomRead)({
     project,
-    sessionAccount: account,
-    freshCollaboratorCheck: input.freshCollaboratorCheck ?? true,
+    principal: { kind: "person", account },
+    freshness: (input.freshCollaboratorCheck ?? true) ? "fresh" : "cached",
   });
+  if (access.kind === "allow") return "allow";
   // Only members of a room without a repository get its pushes.
-  if (!access.isRepoBacked) return await deps.isRoomMember(project, account.account_id) ? "allow" : "deny";
-  if (access.decision.kind === "allow") return "allow";
+  if (access.target?.kind !== "repo") return "deny";
 
   // No account can open a repo room on a host other than github.com, so a
   // missing GitHub credential is not the cause and a retry cannot help.
-  if (access.decision.kind === "unsupported_repo_provider") return "deny";
+  if (access.repo?.kind === "unsupported_repo_provider") return "deny";
   // GitHub gave no answer to the role check (outage, rate limit, expired
   // token), and no recent positive answer stood in: not a refusal, retry.
-  if (access.decision.kind === "repo_access_unavailable") return "retry";
+  if (access.kind === "indeterminate") return "retry";
   // A public repository: GitHub answered that this person has no role on it.
-  if (access.decision.kind === "repo_collaborator_required" && account.provider_access_token) return "deny";
+  if (access.repo?.kind === "repo_collaborator_required" && account.provider_access_token) return "deny";
 
   // A missing/expired provider credential is an authentication outage, not
   // proof that the account lost repository access. Preserve the backlog and

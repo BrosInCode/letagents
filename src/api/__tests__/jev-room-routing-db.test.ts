@@ -173,7 +173,7 @@ test("room/global disable and malformed provider answers use fallback without ex
 test("routing setting is admin-only, canonical and on in a new room", skip, async () => {
   const a = await seed();
   const { registerConversationRoutingRoutes } = await import("../routes/rooms/conversation-routing.js");
-  const { requireAdmin, requireParticipant, resolveProjectRole } = await import("../rooms/access.js");
+  const { requireGitRoomAdmin: requireAdmin, requireParticipant, resolveGitRoomProjectRole: resolveProjectRole } = await import("../rooms/access.js");
   const handlers: Record<string, (req: any, res: any) => Promise<void>> = {};
   registerConversationRoutingRoutes({ get: (_p: unknown, h: any) => { handlers.get = h; }, patch: (_p: unknown, h: any) => { handlers.patch = h; } } as never, {
     resolveCanonicalRoomRequestId: async () => a.room.id,
