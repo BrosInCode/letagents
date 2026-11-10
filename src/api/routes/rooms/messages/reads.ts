@@ -6,6 +6,7 @@ import { db } from "../../../db/client.js";
 import { message_human_read_ranges, messages } from "../../../db/schema.js";
 import { parseScopedId } from "../../../db/utils.js";
 import { queueMessageInfoInvalidation } from "../../../server/message-info-events.js";
+import { ACCOUNT_ROOM_READ, accountReadEvents, type AccountRoomReadEvent } from "../../../account-unread/read-events.js";
 import { resolveParticipantRoom } from "./helpers.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import type { RoomMessageRouteDeps } from "./types.js";
@@ -131,6 +132,10 @@ export function registerMessageReadsRoute(
       // Room-level: ranges may cover concealed messages whose ids must not
       // be enumerated on the shared room stream.
       queueMessageInfoInvalidation(project.id, null);
+      // The account's other devices re-read their unread counts.
+      accountReadEvents.emit(ACCOUNT_ROOM_READ, {
+        accountId, roomId: project.id, lastMessageId: `msg_${Math.max(...invalidated.map((range) => range.last))}`,
+      } satisfies AccountRoomReadEvent);
     }
 
     res.json({

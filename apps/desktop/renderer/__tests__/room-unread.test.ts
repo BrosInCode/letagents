@@ -9,7 +9,7 @@ import ts from "typescript";
 import { createServer } from "vite";
 import { createRenderer, h, reactive, ref, ssrContextKey } from "vue";
 import { createRoomUnreadStore } from "../../../../shared/room-unread.mjs";
-import { markRoomRead, roomReadKey, roomReadMarkerKey } from "../src/domain/desktop-room-read-state";
+import { localAccountRoomKeys, markRoomRead, roomReadKey, roomReadMarkerKey } from "../src/domain/desktop-room-read-state";
 import { normalizeRoomIdentifier } from "../src/domain/sidebar-rooms";
 import { appFunction } from "./app-source";
 import { roomShellSource } from "./room-shell-source";
@@ -45,6 +45,8 @@ test("per-room storage controls refresh the unread history namespace, including 
     roomReadKey, chatStorageSettings, sidebarLatestMessages, normalizeRoomIdentifier,
     selectedSnapshot, selectedRootRoomIdentifier, activeEntry, sidebarProjectEntries: ref([]),
     accountRooms: ref([{ roomIdentifier, source: "cloud", focusRooms: [] }]),
+    // The composable's computed set of local account rooms, read fresh here.
+    get localRoomKeys() { return { value: localAccountRoomKeys((appContext.accountRooms as { value: never }).value) }; },
     sessionGeneration: ref(1), getChatStorageBridge: () => bridge,
     chatStorageFeedback: ref(null), handleRefreshRoom() { appliedSnapshots++; }, syncSelectedRoomStream() {},
     refreshSidebarLatestMessages: async () => {

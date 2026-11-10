@@ -17,6 +17,22 @@ export function roomReadKey(roomIdentifier: string | null | undefined): string |
 }
 
 /**
+ * The read keys of every account room and focus room whose history lives only
+ * on this device. Built once per room-list change, so a sidebar row checks its
+ * room with one lookup instead of scanning the whole list.
+ */
+export function localAccountRoomKeys(accountRooms: readonly Pick<DesktopAccountRoomEntry, "roomIdentifier" | "source" | "focusRooms">[]): Set<string> {
+  const keys = new Set<string>();
+  for (const room of accountRooms) {
+    for (const entry of [room, ...room.focusRooms]) {
+      const key = entry.source === "local" ? roomReadKey(entry.roomIdentifier) : null;
+      if (key) keys.add(key);
+    }
+  }
+  return keys;
+}
+
+/**
  * Derive sidebar latest-message state from the `/account/rooms` payload that is
  * already in memory (top-level rooms AND their focus rooms), avoiding a
  * per-room `/rooms/:id/messages` fan-out on every sidebar refresh. Sidebar rooms
