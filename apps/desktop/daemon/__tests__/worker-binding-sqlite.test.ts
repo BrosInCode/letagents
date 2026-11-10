@@ -795,6 +795,63 @@ test("concurrent importers converge when both claim renames succeed, as Windows 
   }
 });
 
+test("an importer whose won claim is moved by a sibling's late rename waits for that sibling", async () => {
+  // The Windows rename race again, with the second rename landing only after the first importer
+  // checked its claim: the file is gone when that importer reads it.
+  const env = await fixture();
+  const fs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+  const realRename = fs.promises.rename;
+  const realReadFile = fs.promises.readFile;
+  const restore = () => { fs.promises.rename = realRename; fs.promises.readFile = realReadFile; syncBuiltinESMExports(); };
+  let first: string | null = null;
+  let late: { to: string; done: (error?: unknown) => void } | null = null;
+  let landed = false;
+  let firstHeld: (() => void) | null = null;
+  fs.promises.rename = (async (from: PathLike, to: PathLike) => {
+    if (String(from) !== env.legacy || !String(to).includes(".claimed.")) return realRename(from, to);
+    if (first === null) {
+      // Hold the first rename until the sibling's has started too, so both importers race for the source.
+      first = String(to);
+      await new Promise<void>((resolve) => {
+        firstHeld = resolve;
+        setTimeout(() => { if (firstHeld === resolve) { firstHeld = null; resolve(); } }, 5_000 * WAIT_SCALE).unref();
+      });
+      return realRename(from, to);
+    }
+    // The sibling's rename started with the first one; it lands when the first importer reads its claim.
+    await new Promise<void>((resolve, reject) => {
+      late = { to: String(to), done: (error) => error ? reject(error) : resolve() };
+      const release = firstHeld as (() => void) | null; firstHeld = null; release?.();
+    });
+  }) as typeof fs.promises.rename;
+  fs.promises.readFile = (async (path: unknown, options?: unknown) => {
+    const pending = late as { to: string; done: (error?: unknown) => void } | null;
+    if (pending && String(path) === first) {
+      late = null; landed = true;
+      await realRename(first, pending.to).then(() => pending.done(), (error) => { pending.done(error); throw error; });
+    }
+    return realReadFile(path as string, options as BufferEncoding);
+  }) as typeof fs.promises.readFile;
+  syncBuiltinESMExports();
+  try {
+    const rawA = legacyRaw("agent_a");
+    const seed = new WorkerBindingStore(join(env.root, "seed.json"), undefined, env.database);
+    await seed.list(); await seed.close();
+    await writeFile(env.legacy, rawA, { mode: 0o644 });
+    const one = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const two = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const [left, right] = await Promise.all([one.list(), two.list()]);
+    assert.equal(landed, true, "the sibling's late rename moved the first importer's claim");
+    assert.equal(left.length, 1); assert.equal(right.length, 1);
+    await one.close(); await two.close();
+    assertRedactedBackup(await realReadFile(`${env.legacy}.migrated-backup`, "utf8"), rawA);
+    assert.deepEqual((await readdir(env.root)).filter((name) => name.includes(".claimed.")), [], "no claim is left behind");
+  } finally {
+    restore();
+    await env.cleanup();
+  }
+});
+
 test("v4 validator rejects malformed private columns and quarantine housekeeping retries", async () => {
   const env = await fixture(); try {
     const store = new WorkerBindingStore(env.legacy, undefined, env.database); await store.list(); await store.close();
