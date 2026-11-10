@@ -5,7 +5,7 @@
         <button v-for="item in views" :key="item.id" type="button" :aria-current="view === item.id ? 'page' : undefined" @click="changeView(item.id)">{{ item.label }}</button>
       </nav>
       <div class="board-heading-actions">
-        <FilterDropdown v-model="sprintId" class="board-sprint-picker" label="Sprint" :options="sprintOptions" :disabled="!snapshot || loading" searchable search-placeholder="Find a sprint…"><template #icon><BoardIcon name="calendar" /></template><template #option="{ option }"><span class="work-option-label">{{ option.label }}<small v-if="sprints.find(sprint => sprint.id === option.id)">{{ sprintState(sprints.find(sprint => sprint.id === option.id)!) }}</small></span></template></FilterDropdown>
+        <FilterDropdown v-if="view !== 'releases'" v-model="sprintId" class="board-sprint-picker" label="Sprint" :options="sprintOptions" :disabled="!snapshot || loading" searchable search-placeholder="Find a sprint…"><template #icon><BoardIcon name="calendar" /></template><template #option="{ option }"><span class="work-option-label">{{ option.label }}<small v-if="sprints.find(sprint => sprint.id === option.id)">{{ sprintState(sprints.find(sprint => sprint.id === option.id)!) }}</small></span></template></FilterDropdown>
         <BoardOptionsMenu label="Board options" icon="settings"><template #default="{ close }">
           <button type="button" :disabled="!snapshot || loading || saving" @click="close(); openSettings('Columns')"><BoardIcon name="settings" />Board settings</button>
           <button type="button" :disabled="loading || saving" @click="close(); refresh()"><BoardIcon name="refresh" />Refresh board</button>
@@ -14,7 +14,7 @@
         <button type="button" class="board-button board-primary" :disabled="busy || saving" @click="emit('create')"><BoardIcon name="plus" />New task</button>
       </div>
     </div>
-    <div class="board-workspace-toolbar">
+    <div v-if="view !== 'releases'" class="board-workspace-toolbar">
       <label class="board-search"><BoardIcon name="search" /><input v-model="query" type="search" placeholder="Search tasks or PRs…" aria-label="Search tasks" /></label>
       <FilterDropdown v-model="ownerFilter" label="Assignee" :options="ownerOptions" searchable search-placeholder="Find an assignee…"><template #icon><BoardIcon name="user" /></template><template #option="{ option }"><ChatAvatar v-if="owners.get(option.id)?.key" :name="owners.get(option.id)!.name" :provider="owners.get(option.id)!.provider" :agent="owners.get(option.id)!.agent" :agent-key="option.id" :avatar-url="owners.get(option.id)!.avatarUrl" /><span class="work-option-label">{{ option.label }}</span></template></FilterDropdown>
       <FilterDropdown v-model="typeFilter" label="Task type" :options="typeOptions"><template #option="{ option }"><BoardIcon v-if="option.id" :name="option.id" /><span class="work-option-label">{{ option.label }}</span></template></FilterDropdown>
@@ -27,7 +27,8 @@
     <div v-if="error || actionError || props.error" class="board-error" role="alert">{{ actionError || error || props.error }} <button v-if="error" type="button" class="board-text-button" :disabled="saving || loading" @click="load">Try again</button></div>
     <div v-if="!snapshot" class="board-empty">{{ loading ? 'Loading board…' : 'The board is unavailable.' }}</div>
     <template v-else>
-      <div v-if="view === 'board'" class="board-lanes" :style="{ gridTemplateColumns: columnTracks }" tabindex="0" aria-label="Task columns">
+      <ReleaseQueue v-if="view === 'releases'" :items="snapshot.releases?.items || []" :unavailable="snapshot.releases?.unavailable || 0" :description="releaseDescription(snapshot)" @select="emit('select', $event)" @external="openExternal" />
+      <div v-else-if="view === 'board'" class="board-lanes" :style="{ gridTemplateColumns: columnTracks }" tabindex="0" aria-label="Task columns">
         <section v-for="(column, index) in snapshot.document.columns" :key="column.id" class="board-lane" :class="{ 'is-collapsed': collapsed.has(column.id), 'is-drag-over': dragOver === column.id }" :data-column="column.id"
           @dragover="dragOverColumn($event, column)" @dragleave.self="dragOver = null" @drop.prevent="dropColumn(column)">
           <button v-if="collapsed.has(column.id)" type="button" class="board-column-rail" :aria-label="`Expand ${column.name} column, ${byColumn(column.id).length} tasks`" :aria-controls="`${prefix}-${column.id}`" :aria-expanded="false" @click="toggleColumn(column.id)" @keydown="columnKey($event, index)"><span class="board-lane-dot" :data-tone="columnTone(column.statuses)" /><span class="board-rail-name">{{ column.name }}</span><span>{{ byColumn(column.id).length }}</span><BoardIcon name="expand" /></button>
@@ -82,6 +83,8 @@ import { columnTone, matchesSprint, replaceBoardColumns, sprintDates, taskOwner,
 import { useBoardWorkspace } from './useBoardWorkspace';
 import type { BoardServices, BoardTask } from './types';
 import './board.css';
+import ReleaseQueue from './ReleaseQueue.vue';
+import { releaseDescription } from './release-queue';
 
 const props = defineProps<{ roomId: string; tasks: readonly BoardTask[]; services: BoardServices; busy?: boolean; error?: string | null }>();
 const emit = defineEmits<{ select: [id: string]; create: []; refresh: [] }>();
@@ -92,7 +95,7 @@ const settingsOpen = ref(false), settingsTab = ref('Columns'), actionError = ref
 const planTaskId = ref<string | null>(null), planDialog = ref<HTMLDialogElement>();
 const collapsed = ref(new Set<string>()), draggedTask = ref<string | null>(null), draggedColumn = ref<string | null>(null), dragOver = ref<string | null>(null);
 const prefix = `board-${useId()}`;
-const views = computed(() => [{ id: 'board', label: 'Board', icon: 'board' }, { id: 'assignees', label: 'By assignee', icon: 'people' }, { id: 'backlog', label: 'Backlog', icon: 'list' }, ...(allTasks.value.some(t => t.status === 'cancelled') ? [{ id: 'cancelled', label: 'Cancelled', icon: 'list' }] : [])]);
+const views = computed(() => [{ id: 'board', label: 'Board', icon: 'board' }, { id: 'assignees', label: 'By assignee', icon: 'people' }, { id: 'backlog', label: 'Backlog', icon: 'list' }, ...(snapshot.value?.document.releaseRule ? [{ id: 'releases', label: 'Releases', icon: 'list' }] : []), ...(allTasks.value.some(t => t.status === 'cancelled') ? [{ id: 'cancelled', label: 'Cancelled', icon: 'list' }] : [])]);
 const typeOptions = [{ id: '', label: 'All types' }, { id: 'task', label: 'Task' }, { id: 'bug', label: 'Bug' }, { id: 'feature', label: 'Feature' }];
 const locked = computed(() => Boolean(props.busy || saving.value || loading.value || moving.value));
 const selectedSprint = computed(() => sprints.value.find(sprint => sprint.id === sprintId.value));
@@ -121,7 +124,7 @@ watch(() => props.roomId, () => {
   view.value = 'board'; collapsed.value = new Set(); sprintId.value = 'all'; clearFilters(); settingsOpen.value = false; sprintDetails.value?.close(); planDialog.value?.close(); planTaskId.value = null; moving.value = false; actionError.value = ''; endDrag();
   try { const saved = JSON.parse(localStorage.getItem(`letagents-board-view:${props.roomId}`) || 'null'); if (views.value.some(v => v.id === saved?.view)) view.value = saved.view; if (Array.isArray(saved?.collapsed)) collapsed.value = new Set(saved.collapsed.filter((id: unknown) => typeof id === 'string')); } catch { /* Ignore stale preferences. */ }
 }, { immediate: true });
-watch(snapshot, (value, previous) => { if (value && !previous) sprintId.value = sprints.value.find(sprint => sprint.state === 'active' && !sprint.source?.stale)?.id || 'all'; });
+watch(snapshot, (value, previous) => { if (view.value === 'releases' && !value?.document.releaseRule) view.value = 'board'; if (value && !previous) sprintId.value = sprints.value.find(sprint => sprint.state === 'active' && !sprint.source?.stale)?.id || 'all'; });
 async function toggleColumn(id: string) { const next = new Set(collapsed.value); if (next.has(id)) next.delete(id); else next.add(id); collapsed.value = next; preferences(); await nextTick(); surface.value?.querySelector<HTMLElement>(`[data-column="${id}"] ${next.has(id) ? '.board-column-rail' : '.board-column-collapse'}`)?.focus({ preventScroll: true }); }
 async function revealTask(id: string) {
   const task = allTasks.value.find(item => item.id === id);

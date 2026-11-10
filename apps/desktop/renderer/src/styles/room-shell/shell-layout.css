@@ -106,14 +106,15 @@
   background: var(--bg);
 }
 
-.desktop-room-environment-popover {
+.desktop-room-release-widget {
   position: absolute;
   grid-row: 3;
   grid-column: 1;
   top: 12px;
   right: 22px;
   z-index: 42;
-  width: min-content;
+  width: max-content;
+  max-width: calc(100% - 44px);
   max-height: calc(100% - 24px);
   pointer-events: auto;
   transform: translateY(0) scale(1);
@@ -123,27 +124,12 @@
     transform 160ms var(--ease-out);
 }
 
-.desktop-room-shell:has(.room-chat-layout[data-thread-open="true"]) .desktop-room-environment-popover {
+.desktop-room-shell:has(.room-chat-layout[data-thread-open="true"]) .desktop-room-release-widget {
+  visibility: hidden;
   pointer-events: none;
   transform: translateY(-8px) scale(0.985);
   opacity: 0;
 }
-
-.desktop-room-environment-pop-enter-active,
-.desktop-room-environment-pop-leave-active {
-  transition:
-    opacity 160ms var(--ease-out),
-    transform 160ms var(--ease-out);
-}
-
-.desktop-room-environment-pop-enter-from,
-.desktop-room-environment-pop-leave-to {
-  opacity: 0;
-  transform: translateY(-8px) scale(0.985);
-}
-
-.desktop-room-environment-pop-enter-to,
-.desktop-room-environment-pop-leave-from {
-  opacity: 1;
-  transform: translateY(0) scale(1);
+@media (prefers-reduced-motion: reduce) {
+  .desktop-room-release-widget { transition: none; }
 }

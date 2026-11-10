@@ -2,7 +2,7 @@ import { nextTick, watch } from "vue";
 import { supervisedAgentInspectorRequest } from "../../domain/agent-inspector-identity";
 import { emptyAgentInspectorWorkResource } from "../../domain/agent-inspector-work";
 import { ownerAttribution as ownerAttributionLabel } from "../../components/desktop/content/room-activity/agentTarget";
-import { readEnvironmentPanelOpen, readGitHubEventsVisible } from "../../components/desktop/content/room-shell/preferences";
+import { readGitHubEventsVisible } from "../../components/desktop/content/room-shell/preferences";
 import { useRoomAttentionNavigation } from "../../components/desktop/content/room-shell/useRoomAttentionNavigation";
 import { desktopIpc } from "../../ipc/index.js";
 import type { RoomShellContextOf } from "./context";
@@ -10,13 +10,13 @@ import type { RoomShellContextOf } from "./context";
 /** React to room, repo, panel, tab, and storage changes. */
 export function useRoomShellRoomWatchers(context: unknown) {
   const {
-    actionPanelOpen, activeTab, addAgentModalOpen, agentInspectorActionState,
+    activeTab, addAgentModalOpen, agentInspectorActionState,
     agentInspectorBackgroundRefresh, agentInspectorDetailRequest, agentInspectorRequestState,
     agentInspectorWorkResource, agentInspectorWorkSourceMessageId, boardGovernanceSection,
-    boardSelectedTaskId, emit, environmentPanelOpen, githubEventsVisible, isLocalRoom,
-    openAddAgentModal, props, readRoomActiveTab, refreshEnvironmentRepoStatus,
-    refreshSupervisorEntries, refreshedEnvironmentRepoStatus, rememberRoomActiveTab,
-    scheduleSupervisorEntriesRepair, searchOpen, selectedAgentDetailRequest,
+    boardSelectedTaskId, emit, githubEventsVisible, isLocalRoom,
+    openAddAgentModal, props, readRoomActiveTab,
+    refreshSupervisorEntries, rememberRoomActiveTab,
+    scheduleSupervisorEntriesRepair, selectedAgentDetailRequest,
     selectedAgentDetailRequestVersion, showEventsTab, supervisorEntries, supervisorEntriesError,
     supervisorEntriesHaveLoaded, supervisorEntriesState, supervisorEntriesUpdatedAt,
     supervisorStateSubscription, supervisorSyncState,
@@ -39,7 +39,6 @@ export function useRoomShellRoomWatchers(context: unknown) {
     agentInspectorWorkResource.value = emptyAgentInspectorWorkResource();
     agentInspectorWorkSourceMessageId.value = null;
     activeTab.value = readRoomActiveTab(props.room.identifier);
-    refreshedEnvironmentRepoStatus.value = null;
     supervisorEntries.value = [];
     supervisorEntriesState.value = "loading";
     supervisorEntriesError.value = null;
@@ -47,7 +46,6 @@ export function useRoomShellRoomWatchers(context: unknown) {
     supervisorEntriesUpdatedAt.value = null;
     boardSelectedTaskId.value = null; boardGovernanceSection.value = null;
     githubEventsVisible.value = readGitHubEventsVisible(props.room.identifier);
-    environmentPanelOpen.value = readEnvironmentPanelOpen(props.room.identifier);
     supervisorSyncState.supervisorStateLastRepairAtMs = null;
     void refreshSupervisorEntries();
     scheduleSupervisorEntriesRepair();
@@ -55,30 +53,11 @@ export function useRoomShellRoomWatchers(context: unknown) {
 
   watch(() => props.room.identifier, supervisorStateSubscription.sync, { flush: "sync" });
 
-  watch(() => props.repoStatus, () => {
-    refreshedEnvironmentRepoStatus.value = null;
-  });
-
   watch(addAgentModalOpen, (open) => {
     if (open) {
       void refreshSupervisorEntries();
     }
   });
-
-  watch(() => actionPanelOpen.value || searchOpen.value, (toolSurfaceOpen) => {
-    if (toolSurfaceOpen && environmentPanelOpen.value) {
-      environmentPanelOpen.value = false;
-    }
-  });
-
-  watch(
-    () => [environmentPanelOpen.value, props.repoStatus.rootPath, props.room.identifier] as const,
-    ([open]) => {
-      if (!open) return;
-      void refreshEnvironmentRepoStatus();
-    },
-    { immediate: true },
-  );
 
   watch(() => props.openAddAgentRequested, (requested) => {
     if (!requested) return;

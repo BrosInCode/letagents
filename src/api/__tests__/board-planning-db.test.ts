@@ -143,3 +143,56 @@ test("retired imported sprint references recover without accepting new or cross-
   }
   assert.equal((await planning!.getBoardPlanning(roomId, true)).revision, 2);
 });
+
+test('release flags are room scoped, retain merged work and expose only confirmed PR relationships', options, async () => {
+  const roomId = await room('release-flags'), source = await importedSprint(roomId);
+  const foreignRoom = await room('release-foreign');
+  await importedSprint(foreignRoom);
+  const payload = { ...source.payload, releaseFields: [{ id: 'customfield_42', name: 'Release', values: ['true'] }] };
+  await client!.pool.query('UPDATE external_items SET payload=$2 WHERE id=$1', [source.itemId, payload]);
+  await client!.pool.query(`UPDATE tasks SET external_ref='jira:APP-1',status='merged',workflow_artifacts=$2 WHERE room_id=$1`, [roomId, JSON.stringify([
+    { provider: 'github', kind: 'pull_request', url: 'https://github.com/acme/app/pull/2', number: 2, linked_by: 'jev_suggested' },
+    { provider: 'github', kind: 'pull_request', url: 'https://github.com/acme/app/pull/3', number: 3, linked_by: 'jev_confirmed', state: 'merged' },
+    { provider: 'github', kind: 'pull_request', url: 'https://github.com/acme/app/pull/4', number: 4, linked_by: 'ticket_key', state: 'open' },
+  ])]);
+  const initial = await planning!.getBoardPlanning(roomId, true);
+  assert.equal(initial.releases?.items.length, 0, 'unconfigured queue is off');
+  assert.equal(initial.releases?.sources.length, 1);
+  const connectionId = initial.releases!.sources[0].id;
+  const document = defaultBoardPlanning();
+  document.releaseRule = { kind: 'tracker', connectionId, fieldId: 'customfield_42', value: 'true' };
+  await planning!.updateBoardPlanning(roomId, 'person', { expectedRevision: 0, document });
+  const current = await planning!.getBoardPlanning(roomId, true);
+  assert.equal(current.releases?.items.length, 1, 'merged ticket is still flagged for release');
+  assert.deepEqual(current.releases!.items[0].pullRequests.map(pr => pr.number), ['3', '4']);
+  assert.equal(current.releases!.items[0].ticketKey, 'APP-1');
+  assert.equal(current.releases!.items[0].ticketUrl, 'https://example.atlassian.net/browse/APP-1');
+  await assert.rejects(planning!.updateBoardPlanning(foreignRoom, 'person', { expectedRevision: 0, document }), /tickets imported to this board/);
+  const oldClient = defaultBoardPlanning();
+  await planning!.updateBoardPlanning(roomId, 'old-client', { expectedRevision: 1, document: oldClient });
+  assert.deepEqual((await planning!.getBoardPlanning(roomId, true)).document.releaseRule, document.releaseRule);
+  await client!.pool.query('UPDATE external_items SET payload=$2 WHERE id=$1', [source.itemId, source.payload]);
+  assert.equal((await planning!.getBoardPlanning(roomId, true)).releases?.unavailable, 1, 'missing field is unknown, not cleared');
+  await client!.pool.query('UPDATE external_items SET payload=$2 WHERE id=$1', [source.itemId, { releaseFields: [{ id: 'customfield_42', name: 'Release', values: ['false'] }] }]);
+  const cleared = await planning!.getBoardPlanning(roomId, true);
+  assert.equal(cleared.releases?.items.length, 0);
+  assert.equal(cleared.releases?.unavailable, 0);
+  await planning!.updateBoardPlanning(roomId, 'person', { expectedRevision: 2, document: { ...cleared.document, releaseRule: null } });
+  assert.equal((await planning!.getBoardPlanning(roomId, true)).document.releaseRule, null);
+});
+
+test('release column includes finished work and older clients cannot orphan its rule', options, async () => {
+  const roomId = await room('release-column');
+  const document = defaultBoardPlanning();
+  const column = document.columns.find(c => c.statuses.includes('done'))!;
+  document.releaseRule = { kind: 'column', columnId: column.id };
+  await client!.pool.query("UPDATE tasks SET status='done',pr_url='https://github.com/acme/app/pull/1' WHERE room_id=$1", [roomId]);
+  await planning!.updateBoardPlanning(roomId, 'person', { expectedRevision: 0, document });
+  const saved = await planning!.getBoardPlanning(roomId, true);
+  assert.equal(saved.releases!.items.length, 1);
+  assert.equal(saved.releases!.items[0].pullRequests.length, 1);
+  const older = defaultBoardPlanning();
+  older.columns = older.columns.filter(c => c.id !== column.id);
+  await assert.rejects(planning!.updateBoardPlanning(roomId, 'old-client', { expectedRevision: 1, document: older }), /release column was removed/);
+  assert.equal((await planning!.getBoardPlanning(roomId, true)).revision, 1);
+});

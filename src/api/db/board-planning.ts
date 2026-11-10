@@ -1,6 +1,7 @@
+import { readBoardReleases } from '../connectors/release-queue.js';
 import { and, eq, sql } from "drizzle-orm";
 import {
-  BoardPlanningConflictError, defaultBoardPlanning, validateBoardPlanningReferences,
+  BoardPlanningInputError, BoardPlanningConflictError, defaultBoardPlanning, validateBoardPlanningReferences,
   type BoardPlanningDocument, type BoardPlanningSnapshot, type BoardPlanningUpdate, type BoardTaskFact,
 } from "../../../shared/board-planning.mjs";
 import { getImportedBoardPlanning } from "../connectors/board-planning.js";
@@ -52,7 +53,8 @@ export async function getBoardPlanning(roomId: string, canEdit: boolean): Promis
     readBoardTaskFacts(roomId), getImportedBoardPlanning(roomId),
   ]);
   const document = reconcileImportedReferences(rows[0]?.document ?? defaultBoardPlanning(), new Set(imported.sprints.map(sprint => sprint.id)));
-  return { roomId, revision: rows[0]?.revision ?? 0, document, imported, taskFacts, canEdit };
+  const releases = await readBoardReleases(roomId, document, taskFacts);
+  return { roomId, revision: rows[0]?.revision ?? 0, document, imported, taskFacts, releases, canEdit };
 }
 
 /** Client revisions prevent silently overwriting another person's sprint or column changes. */
@@ -63,6 +65,14 @@ export async function updateBoardPlanning(roomId: string, actor: string, input: 
       .onConflictDoNothing();
     const [current] = await tx.select().from(room_board_planning).where(eq(room_board_planning.room_id, roomId)).for("update");
     if (!current || current.revision !== input.expectedRevision) throw new BoardPlanningConflictError();
+    // Older clients do not know this optional setting. Only an explicit null disables it.
+    if (!Object.hasOwn(input.document, 'releaseRule') && current.document.releaseRule) input.document.releaseRule = current.document.releaseRule;
+    const rule = input.document.releaseRule;
+    if (rule?.kind === 'tracker' && JSON.stringify(rule) !== JSON.stringify(current.document.releaseRule)) {
+      const { sources } = await readBoardReleases(roomId, { ...input.document, releaseRule: null }, []);
+      const field = sources.find(source => source.id === rule.connectionId)?.fields.find(field => field.id === rule.fieldId);
+      if (!field?.values.includes(rule.value)) throw new BoardPlanningInputError('Choose a field and value from tickets imported to this board.');
+    }
     const taskIds = new Set((await tx.select({ number: tasks.number }).from(tasks).where(eq(tasks.room_id, roomId))).map(row => `task_${row.number}`));
     validateBoardPlanningReferences(input.document, taskIds, new Set(imported.sprints.map(sprint => sprint.id)));
     await tx.update(room_board_planning).set({ document: input.document, revision: sql`${room_board_planning.revision} + 1`, updated_by: actor, updated_at: new Date().toISOString() })

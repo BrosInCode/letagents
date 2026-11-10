@@ -4,7 +4,6 @@ import type {
   DesktopSupervisorManifestEntry,
   DesktopAgentStreamEvent,
   DesktopSupervisorDaemonStatus,
-  RepoStatus,
 } from "../../../../electron/ipc-types";
 import { useCopyIndicator } from "../useCopyIndicator";
 import { useDesktopActionToasts } from "../useDesktopActionToasts";
@@ -20,7 +19,7 @@ import {
 } from "../../domain/agent-inspector-work";
 import PersonActionsHost from "../../components/desktop/content/PersonActionsHost.vue";
 import RoomChatView from "../../components/desktop/content/RoomChatView.vue";
-import { readEnvironmentPanelOpen, readGitHubEventsVisible } from "../../components/desktop/content/room-shell/preferences";
+import { readGitHubEventsVisible } from "../../components/desktop/content/room-shell/preferences";
 import { isRoomTabId, type RoomTabId } from "../../components/desktop/content/room-shell/types";
 import type { AgentInspectorSelection, AgentInspectorRequest } from "../../components/desktop/content/desktop-chat-message/types";
 import { desktopIpc } from "../../ipc/index.js";
@@ -86,8 +85,6 @@ export function useRoomShellState(context: unknown) {
   const storageBusy = ref(false);
   const storageFeedback = ref<{ message: string; error: boolean } | null>(null);
   const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
-  const environmentPanelOpen = ref(readEnvironmentPanelOpen(props.room.identifier));
-  const refreshedEnvironmentRepoStatus = ref<RepoStatus | null>(null);
   const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
   const supervisorEntriesState = ref<SupervisorEntriesResource["state"]>("loading");
   const supervisorEntriesError = ref<string | null>(null);
@@ -179,7 +176,7 @@ export function useRoomShellState(context: unknown) {
     roomDeliverySkipCoordinator, roomDeliverySkippingKeys, deliveryRetryNegotiated,
     deliveryRetryAvailable, boardSelectedTaskId, boardGovernanceSection, activityHistoryRequest,
     artifactTimelineTaskFilterId, storageBusy, storageFeedback, githubEventsVisible,
-    environmentPanelOpen, refreshedEnvironmentRepoStatus, supervisorEntries,
+    supervisorEntries,
     supervisorEntriesState, supervisorEntriesError, supervisorEntriesHaveLoaded, agentRosterState,
     supervisorEntriesUpdatedAt, supervisorStatus, supervisorSyncState,
     agentInspectorRoomMoveAvailable, continuationRepairAvailable, roomDeliverySkipAvailable,

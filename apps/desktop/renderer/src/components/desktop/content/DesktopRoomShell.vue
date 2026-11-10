@@ -66,30 +66,8 @@
       @close-action-panel="closeActionPanel"
     />
 
-    <div
-      v-if="showEnvironmentPanelWidget"
-      class="desktop-room-environment-popover"
-      data-testid="desktop-room-environment-popover"
-    >
-      <DesktopFloatingWidget
-        :open="environmentPanelOpen"
-        label="Work"
-        test-id="desktop-room-environment-widget"
-        @update:open="setEnvironmentPanelOpen"
-      >
-        <template #icon>
-          <GitBranch :size="18" aria-hidden="true" />
-        </template>
-        <GitRoomEnvironmentPanel
-          :room="room"
-          :repo-status="effectiveEnvironmentRepoStatus"
-          :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
-          :room-artifacts="roomArtifacts"
-          :github-events="eventsPage"
-          @open-repo-root="emit('open-repo-root', $event)"
-          @open-pull-request="openGitHubUrlExternally"
-        />
-      </DesktopFloatingWidget>
+    <div v-if="activeTab === 'chat' && !actionPanelOpen && !searchOpen" class="desktop-room-release-widget">
+      <ReleaseQueueWidget :key="room.identifier" :room-id="room.identifier" :load="loadReleasePlanning" :open-external="desktopIpc.app.openExternalUrl" @select="openBoardTask" />
     </div>
 
     <RoomChatView
@@ -348,7 +326,6 @@
 </template>
 
 <script setup lang="ts">
-import { GitBranch } from "@lucide/vue";
 import { computed, nextTick, provide, ref } from "vue";
 import type { DesktopAgentProviderId } from "../../../../../electron/ipc-types";
 import { composerAgentLaunchKey } from "./room-chat/composer-agent-launch";
@@ -357,7 +334,6 @@ import AddAgentUnavailableModal from "./AddAgentUnavailableModal.vue";
 import { supervisedAgentsSupported } from "../../../domain/supervised-agents-support";
 import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
-import DesktopFloatingWidget from "../controls/DesktopFloatingWidget.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import PersonActionsHost from "./PersonActionsHost.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
@@ -370,7 +346,8 @@ import RoomDetailsView from "./RoomDetailsView.vue";
 import RoomMemoryView from "./RoomMemoryView.vue";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
-import GitRoomEnvironmentPanel from "./room-shell/GitRoomEnvironmentPanel.vue";
+import ReleaseQueueWidget from "../../../../../../../shared/ui/board/ReleaseQueueWidget.vue";
+import { desktopIpc } from "../../../ipc";
 import JoinRequestBanner from "../../../../../../../shared/ui/JoinRequestBanner.vue";
 import type { DesktopRoomShellEmits, DesktopRoomShellProps } from "../../../composables/room-shell/props";
 import type { RoomShellContext } from "../../../composables/room-shell/context";
@@ -407,7 +384,7 @@ const {
   rulesOpen, roomLinkCopied, deliveryRetryingKeys, continuationRepairingKeys,
   roomDeliverySkippingKeys, deliveryRetryAvailable, boardSelectedTaskId, boardGovernanceSection,
   activityHistoryRequest, artifactTimelineTaskFilterId, storageBusy, storageFeedback,
-  githubEventsVisible, environmentPanelOpen, supervisorEntries, agentRosterState, supervisorStatus,
+  githubEventsVisible, supervisorEntries, agentRosterState, supervisorStatus,
   agentInspectorRoomMoveAvailable, continuationRepairAvailable, roomDeliverySkipAvailable,
   selectedAgentDetailTarget,
 } = Object.assign(app, useRoomShellState(app));
@@ -420,7 +397,7 @@ const {
 } = Object.assign(app, useRoomShellDeliveryActions(app));
 const {
   openBoardTask, rememberChatScrollPosition, selectTab, openArtifactsForTask,
-  toggleGitHubEventsVisible, setEnvironmentPanelOpen, setRoomStorageMode, forkRoomToLocal,
+  toggleGitHubEventsVisible, setRoomStorageMode, forkRoomToLocal,
   publishLocalRoom, toggleSearchTool, toggleActionPanel, openActionPanelAt, closeActionPanel, openRules,
   openAddAgentModal, revealRoomMessage, revealRecordedWorkMessage, revealSharedLiveRequest,
   openAgentWorktree, copyRoomLink, exportChat,
@@ -481,7 +458,7 @@ const {
 } = Object.assign(app, useRoomShellIntegrations(app));
 
 const {
-  githubEventsAvailable, showEnvironmentPanelWidget, effectiveEnvironmentRepoStatus,
+  githubEventsAvailable,
   managedAgentRepoStatus, managedAgentRepoRootPath, roomParticipants, localAgentWork,
 } = Object.assign(app, useRoomShellParticipants(app));
 
@@ -546,4 +523,8 @@ provide(composerAgentLaunchKey, {
   },
   chooseWorktree: openAgentWorktree,
 });
+async function loadReleasePlanning() {
+  if (!desktopIpc.room?.getBoardPlanning) throw new Error('Board unavailable');
+  return desktopIpc.room.getBoardPlanning(props.room.identifier);
+}
 </script>
