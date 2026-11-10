@@ -1208,3 +1208,106 @@ test("a private-repo collaborator check also answers the admin check, from the s
   assert.equal(await isGitHubRepoAdmin({ roomName: freshRoom, login: "lead", accessToken: "token-lead" }), true);
   assert.equal(github.calls.length, afterFresh + 2, "a fresh access check writes no cache, as before");
 });
+
+/** A GitHub stub for visibility: token-less lookups of a private repository get 404; every call logged. */
+function visibilityGitHub(state: { private: boolean; tokenStatus?: number; anonymousStatus?: number }) {
+  const calls: string[] = [];
+  const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const token = new Headers(init?.headers).get("authorization") !== null;
+    calls.push(token ? "token" : "anon");
+    const forced = token ? state.tokenStatus : state.anonymousStatus;
+    if (forced) return jsonResponse(forced, { message: "GitHub says no" });
+    if (state.private && !token) return jsonResponse(404, { message: "Not Found" });
+    return jsonResponse(200, { private: state.private });
+  }) as typeof fetch;
+  return { calls, fetchImpl };
+}
+
+test("a private repository's visibility refresh asks once with the caller's token", async () => {
+  const roomName = `github.com/brosincode/private-refresh-${Date.now()}`;
+  const github = visibilityGitHub({ private: true });
+  globalThis.fetch = github.fetchImpl;
+
+  assert.equal(await getGitHubRepoVisibility(roomName, "token"), "private");
+  assert.deepEqual(github.calls, ["anon", "token"], "the first lookup cannot know the repository is private");
+  for (const offsetMs of [61_000, 122_000]) {
+    github.calls.length = 0;
+    await withClockOffset(offsetMs, async () => {
+      assert.deepEqual(
+        await Promise.all([getGitHubRepoVisibility(roomName, "token-a"), getGitHubRepoVisibility(roomName, "token-b")]),
+        ["private", "private"],
+      );
+    });
+    assert.deepEqual(github.calls, ["token"], "a refresh is one shared request with a token, no token-less 404");
+  }
+
+  github.calls.length = 0;
+  await withClockOffset(183_000, async () => {
+    assert.equal(await getGitHubRepoVisibility(roomName), "unknown", "a caller without a token still asks without one");
+  });
+  assert.deepEqual(github.calls, ["anon"]);
+});
+
+test("a repository last seen private that turned public is seen at the next refresh", async () => {
+  const roomName = `github.com/brosincode/private-to-public-${Date.now()}`;
+  const state = { private: true };
+  const github = visibilityGitHub(state);
+  globalThis.fetch = github.fetchImpl;
+
+  assert.equal(await getGitHubRepoVisibility(roomName, "token"), "private");
+  state.private = false;
+  github.calls.length = 0;
+  await withClockOffset(61_000, async () => {
+    assert.equal(await getGitHubRepoVisibility(roomName, "token"), "public");
+    assert.equal(await getGitHubRepoVisibility(roomName), "public", "and every caller shares it");
+  });
+  assert.deepEqual(github.calls, ["token"]);
+});
+
+test("a repository last seen public that turned private still goes through the token-less lookup", async () => {
+  const roomName = `github.com/brosincode/public-to-private-${Date.now()}`;
+  const state = { private: false };
+  const github = visibilityGitHub(state);
+  globalThis.fetch = github.fetchImpl;
+
+  assert.equal(await getGitHubRepoVisibility(roomName, "token"), "public");
+  state.private = true;
+  github.calls.length = 0;
+  await withClockOffset(61_000, async () => {
+    assert.equal(await getGitHubRepoVisibility(roomName, "token"), "private");
+    assert.equal(await getGitHubRepoVisibility(roomName), "private");
+  });
+  assert.deepEqual(github.calls, ["anon", "token"]);
+});
+
+test("a token-first lookup GitHub does not answer with 200 changes nothing and falls back to the usual lookup", async () => {
+  const roomName = `github.com/brosincode/private-token-trouble-${Date.now()}`;
+  const state: { private: boolean; tokenStatus?: number; anonymousStatus?: number } = { private: true };
+  const github = visibilityGitHub(state);
+  globalThis.fetch = github.fetchImpl;
+  assert.equal(await getGitHubRepoVisibility(roomName, "token"), "private");
+
+  // An outage: the remembered private answer stands for the short retry time, as before.
+  state.tokenStatus = 503;
+  state.anonymousStatus = 503;
+  github.calls.length = 0;
+  await withClockOffset(61_000, async () => {
+    assert.equal(await getGitHubRepoVisibility(roomName, "token"), "private");
+    assert.equal(await getGitHubRepoVisibility(roomName, "token"), "private");
+  });
+  assert.deepEqual(github.calls, ["token"], "one request, and its answer is kept for the retry time");
+  await withClockOffset(72_000, async () => {
+    globalThis.fetch = (async () => { throw new TypeError("fetch failed"); }) as typeof fetch;
+    assert.equal(await getGitHubRepoVisibility(roomName, "token"), "private", "a failed request too");
+    globalThis.fetch = github.fetchImpl;
+  });
+
+  // A dead token, or a person without access: the token-less 404 answers, as before.
+  state.tokenStatus = 401;
+  state.anonymousStatus = undefined;
+  github.calls.length = 0;
+  await withClockOffset(122_000, async () => {
+    assert.equal(await getGitHubRepoVisibility(roomName, "dead-token"), "unknown");
+  });
+  assert.deepEqual(github.calls, ["token", "anon", "token"]);
+});

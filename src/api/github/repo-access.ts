@@ -96,6 +96,8 @@ const repoVisibilityInflight = new Map<string, {
   roomKey: string;
   promise: Promise<GitHubRepoVisibility>;
 }>();
+// Keyed by room: the token-first lookup for a repository last seen private.
+const knownPrivateVisibilityInflight = new Map<string, Promise<GitHubRepoVisibility | null>>();
 const repoAccessInflight = new Map<string, {
   roomKey: string;
   loginKey: string;
@@ -253,6 +255,7 @@ function forgetRoomAccess(roomKey: string): void {
   for (const [flightKey, flight] of repoVisibilityInflight) {
     if (flight.roomKey === roomKey) repoVisibilityInflight.delete(flightKey);
   }
+  knownPrivateVisibilityInflight.delete(roomKey);
   for (const flightKey of publicRepoRoleInflight.keys()) {
     if (flightKey.includes(`::${roomKey}::`)) publicRepoRoleInflight.delete(flightKey);
   }
@@ -385,6 +388,16 @@ export async function getGitHubRepoVisibility(
   if (cached && (cached !== "unknown" || !accessToken)) return cached;
 
   if (!cached) {
+    // A repository last seen private answers a token-less lookup with 404, so
+    // a caller with a token asks with it first. A 200 is the answer and an
+    // outage keeps the remembered one, as below; any other answer leaves every
+    // cache alone and the usual two-step lookup runs. A change to public shows
+    // in this answer; a change to private (last seen public) still goes
+    // through the token-less lookup.
+    if (accessToken && getLastKnownVisibility(roomName) === "private") {
+      const knownPrivate = await loadKnownPrivateRepoVisibility(roomName, accessToken);
+      if (knownPrivate) return knownPrivate;
+    }
     const unauthenticatedVisibility = await loadGitHubRepoVisibility(roomName, undefined, "anonymous");
     if (unauthenticatedVisibility !== "unknown") return unauthenticatedVisibility;
   }
@@ -396,6 +409,52 @@ export async function getGitHubRepoVisibility(
   }
 
   return "unknown";
+}
+
+/**
+ * The token-first lookup: the visibility on a 200, the remembered visibility
+ * in an outage, otherwise null and no cache change.
+ */
+async function loadKnownPrivateRepoVisibility(
+  roomName: string,
+  accessToken: string,
+): Promise<GitHubRepoVisibility | null> {
+  const roomKey = normalizeCacheKey(roomName);
+  const existing = knownPrivateVisibilityInflight.get(roomKey);
+  if (existing) return existing;
+
+  const roomGeneration = getCacheGeneration(repoRoomCacheGeneration, roomKey);
+  // GitHub is down or timed out: keep the remembered answer for the short
+  // retry time, as the token-less lookup does in an outage, instead of
+  // waiting on a second request to the same failing service.
+  const outage = (): GitHubRepoVisibility | null => {
+    const lastKnown = getLastKnownVisibility(roomName);
+    if (!lastKnown || getCacheGeneration(repoRoomCacheGeneration, roomKey) !== roomGeneration) return null;
+    setCachedVisibility(roomName, lastKnown, REPO_VISIBILITY_UNKNOWN_TTL_MS);
+    return lastKnown;
+  };
+  let pending!: Promise<GitHubRepoVisibility | null>;
+  pending = (async () => {
+    let response: Response;
+    try {
+      response = await fetchGitHubRepo(roomName, accessToken);
+    } catch {
+      return outage();
+    }
+    if (response.status === 408 || response.status >= 500) return outage();
+    if (response.status !== 200) return null;
+    const payload = (await response.json()) as GitHubRepo;
+    const visibility: GitHubRepoVisibility = payload.private ? "private" : "public";
+    if (getCacheGeneration(repoRoomCacheGeneration, roomKey) === roomGeneration) {
+      setCachedVisibility(roomName, visibility);
+      setLastKnownVisibility(roomName, visibility);
+    }
+    return visibility;
+  })().finally(() => {
+    if (knownPrivateVisibilityInflight.get(roomKey) === pending) knownPrivateVisibilityInflight.delete(roomKey);
+  });
+  knownPrivateVisibilityInflight.set(roomKey, pending);
+  return pending;
 }
 
 async function loadGitHubRepoVisibility(
