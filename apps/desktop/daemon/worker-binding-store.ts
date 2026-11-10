@@ -716,11 +716,18 @@ export class WorkerBindingStore {
       if (concurrent.kind === "absent") return;
       claimed = await this.adoptOrphanClaim();
     }
-    let raw: string;
-    try {
-      raw = (await this.readOwnerOnly(claimed))!;
-      if (raw === undefined) throw new Error("Claimed legacy worker binding source disappeared before import.");
-    } catch (error) { throw error; }
+    const claimedRaw = await this.readOwnerOnly(claimed);
+    if (claimedRaw === undefined) {
+      // On Windows a sibling's rename that started with ours can still move
+      // the file after our claim was checked (see protectWonClaim). That
+      // sibling now holds it: wait for its verdict as a lost race does. Any
+      // other disappearance still fails closed.
+      const concurrent = await this.waitForConcurrentClaim(database, key);
+      if (concurrent.kind === "committed") { await this.finishLegacyBackup(backup, concurrent.checksum); return; }
+      if (concurrent.kind === "failed") { await this.reconcileFailedEvidence(concurrent.quarantine); throw new Error(`Legacy worker binding import was previously quarantined: ${concurrent.reason} (${concurrent.quarantine}).`); }
+      throw new Error("Claimed legacy worker binding source disappeared before import.");
+    }
+    const raw = claimedRaw;
     const checksum = checksumOf(raw); let parsed: LegacyBindings;
     try { parsed = JSON.parse(raw) as LegacyBindings; this.validateLegacy(parsed, raw); } catch (error) {
       await this.quarantineLegacyFailure(database, key, checksum, error, claimed);

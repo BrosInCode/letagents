@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import test from "node:test";
-import { stopChildProcess, waitForServer } from "./server.js";
+import { SERVER_READY_TIMEOUT_MS, stopChildProcess, waitForServer } from "./server.js";
 
 class FakeChild extends EventEmitter {
   exitCode: number | null = null;
@@ -97,7 +97,8 @@ test("failed server readiness retires its child before publishing the startup fa
   const child = new FakeChild();
   let failure: Error | null = null;
   const ready = waitForServer(12345, child.asChild(), () => "fixture stderr").catch((error: Error) => { failure = error; });
-  for (let attempt = 0; attempt < 61; attempt += 1) {
+  // One tick per poll, and one more past the readiness bound.
+  for (let attempt = 0; attempt <= SERVER_READY_TIMEOUT_MS / 250; attempt += 1) {
     await flushPromises();
     t.mock.timers.tick(250);
   }
@@ -106,7 +107,7 @@ test("failed server readiness retires its child before publishing the startup fa
   assert.equal(failure, null, "startup failure must not abandon an unretired child");
   child.exit(null, "SIGTERM");
   await ready;
-  assert.match((failure as Error | null)?.message ?? "", /did not become ready: fixture stderr/);
+  assert.match((failure as Error | null)?.message ?? "", /did not become ready in 60 s: fixture stderr/);
   assert.equal(child.listenerCount("exit"), 0);
 });
 
