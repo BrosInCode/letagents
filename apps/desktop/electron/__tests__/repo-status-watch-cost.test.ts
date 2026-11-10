@@ -77,7 +77,9 @@ test("the reconciliation tick is one git status unless repository metadata chang
     const tickSpawns = git.count() - before;
     t.diagnostic(`git spawns per unchanged tick: ${tickSpawns}`);
     assert.equal(tickSpawns, 1, "an unchanged tick runs only git status");
-    assert.ok(fullSpawns >= 10 * tickSpawns, `full (${fullSpawns}) is far more costly than a tick`);
+    // A full refresh reads each repository fact once (8 commands here) and
+    // the watcher's metadata paths in one more; a tick is one `git status`.
+    assert.ok(fullSpawns >= 5 * tickSpawns, `full (${fullSpawns}) is far more costly than a tick`);
 
     execFileSync("git", ["config", "core.someSetting", "1"], { cwd: root });
     assert.deepEqual(await runRepoStatusReconciliationTickForTest(), { full: true }, "a config change promotes to full");
