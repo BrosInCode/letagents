@@ -18,6 +18,7 @@ import {
   enqueue,
   ingest,
 } from "./helpers/supervised-agent-delivery-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 test("pending new turns wait for managed runtime admission without claiming the FIFO head", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-runtime-admission-"));
@@ -758,8 +759,8 @@ test("a Stop that loses to an interrupt-rejection retryable still settles — it
   // must still settle that head cancelled_by_user (not map it to "published"),
   // and the stopped turn must NOT be re-dispatched.
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retryable-race-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const published: string[] = [];
     let calls = 0;
     const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
@@ -781,6 +782,10 @@ test("a Stop that loses to an interrupt-rejection retryable still settles — it
       assert.equal(calls, 1, "the natively-interrupted turn is NOT rerun after the Stop");
       assert.equal(published.length, 0, "and nothing is published for the stopped turn");
     } finally { await delivery.fenceAndDrain().catch(() => undefined); }
+  } finally {
+    // Close the database before the folder goes: on Windows an open daemon.sqlite
+    // cannot be deleted, and that EBUSY would hide the test's own failure.
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+    removeTestDirectory(root);
+  }
 });

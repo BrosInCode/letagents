@@ -64,7 +64,9 @@ function closeSqliteDatabasesUnder(folder: string): void {
 
 function isWindowsOpenFileError(error: unknown): boolean {
   const code = (error as NodeJS.ErrnoException | null)?.code;
-  return process.platform === "win32" && (code === "EBUSY" || code === "EPERM");
+  // ENOTEMPTY: Windows deletes a file that another handle (an indexer or virus scan) still has
+  // open only when that handle closes, so until then its folder is not empty.
+  return process.platform === "win32" && (code === "EBUSY" || code === "EPERM" || code === "ENOTEMPTY");
 }
 
 /**

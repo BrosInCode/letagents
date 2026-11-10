@@ -15,6 +15,7 @@ import {
   waitForAsync,
   ingest,
 } from "./helpers/supervised-agent-delivery-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 test("handoff fences an in-flight ingress poll and drains it before returning", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-poll-drain-"));
@@ -425,10 +426,11 @@ test("the supervised runtime continuously polls and delivers a later activation"
 
 test("the supervised runtime backs off after a poll error and resumes intake", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-loop-retry-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let delivery: SupervisedAgentDelivery | null = null;
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     let polls = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: request.inboxItemId, outcome: "no_reply", text: null })), {
+    delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: request.inboxItemId, outcome: "no_reply", text: null })), {
       poll: ({ signal }) => {
         polls += 1;
         if (polls === 1) return Promise.reject(new Error("temporary poll failure"));
@@ -447,8 +449,13 @@ test("the supervised runtime backs off after a poll error and resumes intake", a
     }, "the successful recovery poll clears backoff before the received turn is exposed");
     await delivery.fenceAndDrain();
     assert.equal((await store.receipts(agent.agentId)).length, 1);
+  } finally {
+    // Stop the loop and close the database before the folder goes: on Windows an open
+    // daemon.sqlite cannot be deleted, and that EBUSY would hide the test's own failure.
+    await delivery?.fenceAndDrain().catch(() => undefined);
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+    removeTestDirectory(root);
+  }
 });
 
 test("poll-error backoff grows, caps, and resets after a healthy poll", async () => {
