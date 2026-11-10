@@ -150,15 +150,48 @@ test("forgetting a room by its id fences a pending join under an alias", async (
   assert.equal(calls.length, 2);
 });
 
+// A room the cache already knows by its id, joined by its code: the code is not
+// a cache key and not known to the forget, but the join must still be fenced.
+test("forgetting a room by its id fences a pending join under its join code", async (t) => {
+  const { subject, calls } = await loadRoomInfo(t);
+  subject.rememberJoinedRoomInfo("design-lounge", { room_id: "design-lounge", code: "ABCX-7291" });
+  const byCode = subject.getJoinedRoomInfo("ABCX-7291");
+  await tick();
+  assert.equal(calls.length, 1, "the code is not a cache key, so a join is sent");
+  subject.forgetJoinedRoomInfo("design-lounge");
+  const byCodeAfterForget = subject.getJoinedRoomInfo("ABCX-7291");
+  await tick();
+  assert.equal(calls.length, 2, "a caller after the forget does not share the old join");
+  calls[0].resolve({ room_id: "design-lounge", code: "ABCX-7291", role: "admin", name: "before forget" });
+  assert.equal((await byCode).name, "before forget");
+  calls[1].reject(new Error("forbidden"));
+  await assert.rejects(byCodeAfterForget, /forbidden/);
+
+  const byId = subject.getJoinedRoomInfo("design-lounge");
+  await tick();
+  assert.equal(calls.length, 3, "the old answer is not stored under the room id");
+  calls[2].reject(new Error("forbidden"));
+  await assert.rejects(byId, /forbidden/);
+  const byCodeAgain = subject.getJoinedRoomInfo("ABCX-7291");
+  await tick();
+  assert.equal(calls.length, 4, "nor under the code");
+  calls[3].reject(new Error("forbidden"));
+  await assert.rejects(byCodeAgain, /forbidden/);
+});
+
 test("sign-out clears joined rooms again after the token is removed", async (t) => {
   const events: string[] = [];
   let release: () => void = () => {};
+  let signOutFails = false;
   const unexpected = () => { throw new Error("unexpected auth/setup operation"); };
   t.mock.module("../main/organizations.js", { namedExports: { registerOrganizationIpcHandlers: () => {} } });
   t.mock.module("../main/auth.js", { namedExports: {
     cancelDeviceAuthFlow: unexpected, pollDeviceAuthFlow: unexpected, startDeviceAuthFlow: unexpected,
     getDesktopAuthStatus: async () => ({ signedIn: false }),
-    signOutDesktopAuth: async () => { events.push("token removed"); },
+    signOutDesktopAuth: async () => {
+      if (signOutFails) { events.push("sign-out failed"); throw new Error("disk full"); }
+      events.push("token removed");
+    },
     setAuthAuthorizedHandler: () => {}, setAuthInvalidatedHandler: () => {},
   } });
   t.mock.module("../main/mcp-setup.js", { namedExports: {
@@ -196,4 +229,13 @@ test("sign-out clears joined rooms again after the token is removed", async (t) 
   release();
   await done;
   assert.deepEqual(events, ["joined rooms cleared", "unregister started", "token removed", "joined rooms cleared"]);
+
+  // The second clear also runs when sign-out fails.
+  events.length = 0;
+  signOutFails = true;
+  const failed = signOut();
+  await tick();
+  release();
+  await assert.rejects(failed, /disk full/);
+  assert.deepEqual(events, ["joined rooms cleared", "unregister started", "sign-out failed", "joined rooms cleared"]);
 });
