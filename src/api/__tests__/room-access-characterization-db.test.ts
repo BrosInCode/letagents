@@ -747,17 +747,13 @@ test("rows added after the first pin keep their pinned answer", { skip, concurre
 
 // ------------------------------------------------ gap fix A: activity stream
 
-test("the account activity stream re-checks a repo room live and drops it after a GitHub webhook clears the cache", { skip, concurrency: false }, async () => {
+/** A real activity stream route over the real room list and leases, for one world's person. */
+async function openActivityStream(world: World) {
   const express = (await import("express")).default;
   const { EventEmitter } = await import("node:events");
   const { AccountActivityHub } = await import("../account-activity/hub.js");
   const { registerAccountActivityStreamRoute } = await import("../routes/account/activity-stream.js");
   const { PRESENCE_CHANGED } = await import("../server/presence-change-events.js");
-  const { clearGitHubRepoAccessCacheForRoom } = await import("../github/repo-access.js");
-
-  const world = await buildWorld("repo_private", "member");
-  const roomId = world.project.id;
-  const repo = repos.get(roomId.split("/").at(-1)!)!;
   const working = new Map<string, string[]>();
   const presence = new EventEmitter();
   const hub = new AccountActivityHub({
@@ -770,7 +766,7 @@ test("the account activity stream re-checks a repo room live and drops it after 
       return result;
     },
     async loadLatest() { return new Map(); },
-  }, { coalesceMs: 5 });
+  }, { coalesceMs: 1 });
   hub.attach({ presence, messages: new EventEmitter() });
   const app = express();
   app.use((req, _res, next) => {
@@ -782,55 +778,214 @@ test("the account activity stream re-checks a repo room live and drops it after 
   await new Promise((resolve) => http.once("listening", resolve));
   const { port } = http.address() as import("node:net").AddressInfo;
   const controller = new AbortController();
-  try {
-    const response = await realFetch(`http://127.0.0.1:${port}/account/activity/stream`, {
-      headers: { cookie: `letagents_session=${world.sessionToken}` },
-      signal: controller.signal,
-    });
-    assert.equal(response.status, 200);
-    const reader = response.body!.getReader();
-    const decoder = new TextDecoder();
-    let text = "";
-    const pump = (async () => {
-      for (;;) {
-        const { value, done } = await reader.read();
-        if (done) return;
-        text += decoder.decode(value, { stream: true });
-      }
-    })().catch(() => undefined);
-    const until = async (condition: () => boolean, label: string) => {
-      for (let i = 0; i < 120 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 25));
-      assert.ok(condition(), label);
-    };
-    await until(() => text.includes("event: snapshot"), "the snapshot arrives");
-    assert.ok(text.includes(roomId), "the snapshot lists the repo room");
+  const response = await realFetch(`http://127.0.0.1:${port}/account/activity/stream`, {
+    headers: { cookie: `letagents_session=${world.sessionToken}` },
+    signal: controller.signal,
+  });
+  assert.equal(response.status, 200);
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  const stream = { text: "", ended: false };
+  const pump = (async () => {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) { stream.ended = true; return; }
+      stream.text += decoder.decode(value, { stream: true });
+    }
+  })().catch(() => { stream.ended = true; });
+  const until = async (condition: () => boolean, label: string, ms = 4_000) => {
+    const deadline = performance.now() + ms;
+    while (!condition() && performance.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.ok(condition(), label);
+  };
+  await until(() => stream.text.includes("event: snapshot"), "the snapshot arrives");
+  return {
+    stream,
+    until,
+    /** Emits one activity frame for the room, named `name`. */
+    frame(roomId: string, name: string) {
+      working.set(roomId, [name]);
+      presence.emit(PRESENCE_CHANGED, roomId);
+    },
+    /** Waits until frames already emitted have been decided. */
+    async settle(ms = 250) { await new Promise((resolve) => setTimeout(resolve, ms)); },
+    async close() {
+      controller.abort();
+      await pump;
+      hub.close();
+      await new Promise((resolve) => http.close(resolve));
+    },
+  };
+}
 
-    const before = githubCalls.length;
-    working.set(roomId, ["First"]);
-    presence.emit(PRESENCE_CHANGED, roomId);
-    await until(() => text.includes("First"), "a frame for a readable room is sent");
-    const freshCalls = githubCalls.slice(before).filter((call) => call.includes(`/repos/acme/`));
-    assert.ok(freshCalls.length >= 1, "the first frame made one fresh check");
+/** One more private repository room for the world's person, with a GitHub role and a recents row. */
+async function addRepoRoomFor(world: World, role: GitHubRole): Promise<string> {
+  serial += 1;
+  const name = `extra-${serial}`;
+  const roomId = `github.com/acme/${name}`;
+  await insertMainRoom(roomId);
+  repos.set(name, { private: true, roles: new Map([[world.login!.toLowerCase(), role]]) });
+  await dbClient!.pool.query(
+    `INSERT INTO account_room_recents (account_id, room_id, first_opened_at, last_opened_at, updated_at)
+     VALUES ($1, $2, NOW(), NOW(), NOW()) ON CONFLICT DO NOTHING`,
+    [world.accountId, roomId],
+  );
+  return roomId;
+}
+
+function useFakeClock() {
+  const realNow = Date.now;
+  let offset = 0;
+  Date.now = () => realNow() + offset;
+  return { advance(ms: number) { offset += ms; }, restore() { Date.now = realNow; } };
+}
+
+test("the account activity stream drops a repo room after a GitHub webhook clears the cache, and shows it again when access returns", { skip, concurrency: false }, async () => {
+  const { clearGitHubRepoAccessCacheForRoom } = await import("../github/repo-access.js");
+  const world = await buildWorld("repo_private", "member");
+  const roomId = world.project.id;
+  const repo = repos.get(roomId.split("/").at(-1)!)!;
+  const s = await openActivityStream(world);
+  try {
+    assert.ok(s.stream.text.includes(roomId), "the snapshot lists the repo room");
+    s.frame(roomId, "First");
+    await s.until(() => s.stream.text.includes("First"), "a frame for a readable room is sent");
 
     // The person leaves the repository; GitHub's webhook clears the cache.
     repo.roles.set(world.login!.toLowerCase(), "none");
     clearGitHubRepoAccessCacheForRoom(roomId);
-    working.set(roomId, ["Second"]);
-    presence.emit(PRESENCE_CHANGED, roomId);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    assert.ok(!text.includes("Second"), "no frame after the webhook: the next frame re-checked and was refused");
+    s.frame(roomId, "Second");
+    await s.settle();
+    assert.ok(!s.stream.text.includes("Second"), "the next frame re-checked and was refused");
     const afterRefusal = githubCalls.length;
-    working.set(roomId, ["Third"]);
-    presence.emit(PRESENCE_CHANGED, roomId);
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    assert.ok(!text.includes("Third"), "the refused room stays out of the stream");
-    assert.equal(githubCalls.length, afterRefusal, "a held room asks GitHub nothing more");
-    controller.abort();
-    await pump;
+    s.frame(roomId, "Third");
+    await s.settle();
+    assert.ok(!s.stream.text.includes("Third"), "the refusal is kept for the lease period");
+    assert.equal(githubCalls.length, afterRefusal, "a kept refusal asks GitHub nothing more");
+
+    // Access comes back; GitHub's webhook says so.
+    repo.roles.set(world.login!.toLowerCase(), "read");
+    clearGitHubRepoAccessCacheForRoom(roomId);
+    s.frame(roomId, "Fourth");
+    await s.until(() => s.stream.text.includes("Fourth"), "the room shows again without a reconnect");
+    assert.equal(s.stream.ended, false);
+  } finally { await s.close(); }
+});
+
+test("a GitHub outage skips frames only; they resume after recovery without a reconnect", { skip, concurrency: false }, async () => {
+  const clock = useFakeClock();
+  const world = await buildWorld("repo_private", "member");
+  const roomId = world.project.id;
+  // The room list must not have warmed the cache: a cold room under an outage.
+  const s = await openActivityStream(world);
+  try {
+    const { clearGitHubRepoAccessCacheForRoom } = await import("../github/repo-access.js");
+    // Forget the warm answers, as after a restart; no lease exists yet.
+    const repo = repos.get(roomId.split("/").at(-1)!)!;
+    repo.private = true;
+    githubDown = true;
+    clearGitHubRepoAccessCacheForRoom(roomId);
+    s.frame(roomId, "DuringOutage");
+    await s.settle();
+    assert.ok(!s.stream.text.includes("DuringOutage"), "no answer from GitHub: the frame is skipped");
+    const duringOutage = githubCalls.length;
+    s.frame(roomId, "StillDown");
+    await s.settle();
+    assert.equal(githubCalls.length, duringOutage, "no new check within 30 s of the failed one");
+
+    githubDown = false;
+    clock.advance(31_000);
+    s.frame(roomId, "AfterRecovery");
+    await s.until(() => s.stream.text.includes("AfterRecovery"), "frames resume after recovery, without a reconnect");
+    assert.equal(s.stream.ended, false);
   } finally {
-    controller.abort();
-    hub.close();
-    await new Promise((resolve) => http.close(resolve));
+    githubDown = false;
+    clock.restore();
+    await s.close();
+  }
+});
+
+test("without a webhook: a revocation reaches the stream through the background refresh; a refusal is kept one lease period only", { skip, concurrency: false }, async () => {
+  const { settleRepoAccessRefreshesForTests } = await import("../github/repo-access.js");
+  const clock = useFakeClock();
+  const world = await buildWorld("repo_private", "member");
+  const roomId = world.project.id;
+  const repo = repos.get(roomId.split("/").at(-1)!)!;
+  const s = await openActivityStream(world);
+  try {
+    s.frame(roomId, "Readable");
+    await s.until(() => s.stream.text.includes("Readable"), "readable");
+    // GitHub removes the role and no webhook comes.
+    repo.roles.set(world.login!.toLowerCase(), "none");
+    clock.advance(6 * 60_000);
+    s.frame(roomId, "StaleYes");
+    await s.until(() => s.stream.text.includes("StaleYes"), "the cached yes is served while it revalidates");
+    await settleRepoAccessRefreshesForTests();
+    s.frame(roomId, "AfterRefresh");
+    await s.settle();
+    assert.ok(!s.stream.text.includes("AfterRefresh"), "the refresh's definite no reached the stream at once");
+
+    // Access returns, still without a webhook.
+    repo.roles.set(world.login!.toLowerCase(), "read");
+    s.frame(roomId, "SameWindow");
+    await s.settle();
+    assert.ok(!s.stream.text.includes("SameWindow"), "within the lease period the refusal stands");
+    clock.advance(5 * 60_000 + 1_000);
+    s.frame(roomId, "NextWindow");
+    await s.until(() => s.stream.text.includes("NextWindow"), "the next lease period checks again; no reconnect");
+    assert.equal(s.stream.ended, false);
+  } finally {
+    clock.restore();
+    await s.close();
+  }
+});
+
+test("a focus room with its own GitHub binding is judged by that binding in the activity stream", { skip, concurrency: false }, async () => {
+  const world = await buildWorld("bound_focus_membership_parent", "stranger");
+  // A member of the parent membership room, with no role on the focus room's repository.
+  await dbClient!.pool.query(`INSERT INTO room_members (room_id, account_id, added_via) VALUES ($1, $2, 'seed')`, [world.accessRoomId, world.accountId]);
+  const s = await openActivityStream(world);
+  try {
+    s.frame(world.project.id, "FocusFrame");
+    s.frame(world.accessRoomId, "ParentFrame");
+    await s.until(() => s.stream.text.includes("ParentFrame"), "the parent's frame is sent");
+    await s.settle();
+    assert.ok(!s.stream.text.includes("FocusFrame"), "the bound focus room's frame is not");
+  } finally { await s.close(); }
+});
+
+test("50 busy repo rooms for 10 minutes cost the activity stream no more GitHub calls than the cache rules allow", { skip, concurrency: false }, async () => {
+  const { settleRepoAccessRefreshesForTests } = await import("../github/repo-access.js");
+  const clock = useFakeClock();
+  const world = await buildWorld("repo_private", "member");
+  const rooms = [world.project.id];
+  for (let i = 1; i < 50; i++) rooms.push(await addRepoRoomFor(world, "read"));
+  const s = await openActivityStream(world);
+  try {
+    for (const roomId of rooms) assert.ok(s.stream.text.includes(roomId), "every room is listed");
+    const before = githubCalls.length;
+    // A frame in every room every 20 s for 10 minutes.
+    for (let round = 0; round < 30; round++) {
+      for (const roomId of rooms) s.frame(roomId, `r${round}`);
+      await s.settle(60);
+      await settleRepoAccessRefreshesForTests();
+      clock.advance(20_000);
+    }
+    await s.settle(300);
+    await settleRepoAccessRefreshesForTests();
+    const calls = githubCalls.length - before;
+    const sent = (s.stream.text.match(/event: room/g) ?? []).length;
+    assert.ok(sent >= 50 * 25, `frames flow (${sent})`);
+    // The rules: a lease keeps its answer 5 minutes, so each room is checked
+    // at most 3 times in 10 minutes (at the start, at 5 and at 10 minutes);
+    // a check is a visibility read (60 s shared cache) plus, when the cached
+    // yes is 5 minutes old, a background role refresh of 2 calls: at most
+    // 3 calls a check, 9 a room. A fresh check every 60 s would cost 20.
+    assert.ok(calls <= 50 * 9, `GitHub calls in 10 minutes: ${calls}`);
+    console.log(`[activity stream cost] 50 rooms, 10 minutes, frames every 20 s: ${calls} GitHub calls, ${sent} frames`);
+  } finally {
+    clock.restore();
+    await s.close();
   }
 });
 

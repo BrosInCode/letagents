@@ -33,7 +33,7 @@ async function server(options: { auth?: Auth; roomsFail?: boolean; admin?: boole
   const listedFor: string[] = [];
   // The live read re-check, one fake lease per top-level room: `readable`
   // answers it, `invalidate` fires its invalidation handlers.
-  const readable = new Map<string, boolean>();
+  const readable = new Map<string, boolean | 'error'>();
   const checks: string[] = [];
   const invalidationHandlers = new Map<string, Set<() => void>>();
   const stale = new Set<string>();
@@ -55,6 +55,7 @@ async function server(options: { auth?: Auth; roomsFail?: boolean; admin?: boole
       invalidationHandlers.set(roomId, handlers);
       stale.add(roomId);
       let allowed = true;
+      let failed = false;
       return {
         // Like the real lease: a stale lease asks again, a fresh one reuses its answer.
         async check(checkOptions) {
@@ -62,9 +63,14 @@ async function server(options: { auth?: Auth; roomsFail?: boolean; admin?: boole
           checks.push(roomId);
           leaseChecksSince.set(roomId, (leaseChecksSince.get(roomId) ?? 0) + 1);
           stale.delete(roomId);
-          allowed = readable.get(roomId) ?? true;
+          const answer = readable.get(roomId) ?? true;
+          // 'error': GitHub gave no answer; like the real lease, ask again next time.
+          failed = answer === 'error';
+          if (failed) { stale.add(roomId); allowed = false; return false; }
+          allowed = answer as boolean;
           return allowed;
         },
+        lastCheckFailed: () => failed,
         onInvalidated(handler) { handlers.add(handler); return () => handlers.delete(handler); },
         release() {},
       };
@@ -200,7 +206,8 @@ test('closing the stream stops watching its rooms', async () => {
   try {
     const response = await fetch(`${s.base}/account/activity/stream`);
     await readEvents(response, 1);
-    for (let i = 0; i < 20 && s.hub.watches('invite-room'); i++) await new Promise(resolve => setTimeout(resolve, 25));
+    const deadline = Date.now() + 5_000;
+    while (s.hub.watches('invite-room') && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 25));
     assert.equal(s.hub.watches('invite-room'), false);
   } finally { await s.close(); }
 });
@@ -273,23 +280,27 @@ test('a room the account can no longer read stops appearing in frames after an i
     await new Promise(resolve => setTimeout(resolve, 100));
     s.working.set('focus_1', ['MapleRidge']);
     s.presence.emit(PRESENCE_CHANGED, 'focus_1');
-    await waitFor(() => s.checks.length === 1, 'the first frame of a room re-checks its access room once');
-    assert.deepEqual(s.checks, ['github.com/org/repo'], 'a focus room is decided by its parent, as the room list decides it');
+    await waitFor(() => s.checks.length === 1, 'the first frame of a room re-checks it once');
+    assert.deepEqual(s.checks, ['focus_1'], 'a focus room is judged by its own lease, as the room gates judge it');
 
     // GitHub says the person left the repository: the webhook clears the cache.
+    s.readable.set('focus_1', false);
     s.readable.set('github.com/org/repo', false);
-    s.invalidate('github.com/org/repo');
+    s.invalidate('focus_1');
     s.working.set('focus_1', ['MapleRidge', 'Second']);
     s.presence.emit(PRESENCE_CHANGED, 'focus_1');
     await waitFor(() => s.checks.length === 2, 'the next frame after the invalidation re-checks');
     s.working.set('github.com/org/repo', ['Third']);
     s.presence.emit(PRESENCE_CHANGED, 'github.com/org/repo');
+    await waitFor(() => s.checks.length === 3, 'the parent room is checked on its own');
+    s.working.set('focus_1', ['Again']);
+    s.presence.emit(PRESENCE_CHANGED, 'focus_1');
     await new Promise(resolve => setTimeout(resolve, 100));
-    assert.equal(s.checks.length, 2, 'a refused room is held: no further checks until an event');
+    assert.equal(s.checks.length, 3, 'a refusal is kept for the lease period: no check per frame');
 
     // Access comes back (a webhook again): the room shows again.
-    s.readable.set('github.com/org/repo', true);
-    s.invalidate('github.com/org/repo');
+    s.readable.set('focus_1', true);
+    s.invalidate('focus_1');
     s.working.set('focus_1', ['Fourth']);
     s.presence.emit(PRESENCE_CHANGED, 'focus_1');
     s.working.set('invite-room', ['CedarRidge']);
@@ -298,8 +309,27 @@ test('a room the account can no longer read stops appearing in frames after an i
     assert.deepEqual(
       events.map(e => `${e.data.room_id ?? 'snapshot'}${e.data.working ? `:${e.data.working.map((a: any) => a.display_name).join('+')}` : ''}`),
       ['snapshot', 'focus_1:MapleRidge', 'focus_1:Fourth', 'invite-room:CedarRidge'],
-      'no frame about the repo room or its focus room while it was refused',
+      'no frame about a room while it was refused',
     );
+  } finally { await s.close(); }
+});
+
+test('a check that gets no answer skips that frame only; the next frame asks again', async () => {
+  const s = await server();
+  try {
+    const response = await fetch(`${s.base}/account/activity/stream`);
+    const reading = readEvents(response, 2);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    s.readable.set('invite-room', 'error');
+    s.working.set('invite-room', ['DuringOutage']);
+    s.presence.emit(PRESENCE_CHANGED, 'invite-room');
+    await waitFor(() => s.checks.length === 1, 'checked once');
+    s.readable.set('invite-room', true);
+    s.working.set('invite-room', ['AfterRecovery']);
+    s.presence.emit(PRESENCE_CHANGED, 'invite-room');
+    const events = await reading;
+    assert.deepEqual(events.map(e => e.data.working?.[0]?.display_name ?? e.event), ['snapshot', 'AfterRecovery']);
+    assert.deepEqual(s.checks, ['invite-room', 'invite-room']);
   } finally { await s.close(); }
 });
 
