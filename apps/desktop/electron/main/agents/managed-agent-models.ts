@@ -46,10 +46,12 @@ const modelListCache = new Map<string, ModelListCacheEntry>();
 // version, so its name cannot be shown. A CLI refuses a full id its own model
 // catalog does not describe, so a newer model is listed only from the CLI
 // version that names it. Each id was run on Claude Code 2.1.278; that CLI
-// asks for 2.1.280 for the 5.5 models.
+// asks for 2.1.280 for the 5.5 models. Fable 5.2 is in the catalog from
+// 2.1.321 (Claude Code changelog; 2.1.278 does not name it).
 const CLAUDE_CODE_KNOWN_MODELS: Array<DesktopAgentProviderModelOption & { minimumCliVersion?: string }> = [
   // "best" is the one alias kept: it means the best model the CLI has.
   { id: "best", label: "Best available", source: "known" },
+  { id: "claude-fable-5-2", label: "Fable 5.2", source: "known", minimumCliVersion: "2.1.321" },
   { id: "claude-fable-5-1", label: "Fable 5.1", source: "known" },
   { id: "claude-fable-5", label: "Fable 5", source: "known" },
   { id: "claude-opus-5-5", label: "Opus 5.5", source: "known", minimumCliVersion: "2.1.280" },
@@ -72,14 +74,36 @@ async function listClaudeCodeModels(
   if (!input.refreshModels && cached && cached.expiresAt > Date.now()) {
     return cloneModelResult(cached.result);
   }
-  const version = await execFileWithTimeout(command, ["--version"], { env: runtimeEnv });
-  const versionLine = version.ok ? firstNonEmptyLine(version.stdout) ?? firstNonEmptyLine(version.stderr) ?? "" : "";
-  const models = CLAUDE_CODE_KNOWN_MODELS
-    .filter((model) => !model.minimumCliVersion || claudeCodeVersionAtLeast(versionLine, model.minimumCliVersion))
-    .map(({ minimumCliVersion: _minimum, ...model }) => model);
+  const models = claudeCodeModelsFor(await claudeCodeVersionLine(command, runtimeEnv));
   const next = modelResult("claude-code", "ready", models, null, null);
   modelListCache.set(cacheKey, { expiresAt: Date.now() + MODEL_LIST_CACHE_MS, result: next });
   return cloneModelResult(next);
+}
+
+async function claudeCodeVersionLine(command: string, env: NodeJS.ProcessEnv): Promise<string> {
+  const version = await execFileWithTimeout(command, ["--version"], { env });
+  return version.ok ? firstNonEmptyLine(version.stdout) ?? firstNonEmptyLine(version.stderr) ?? "" : "";
+}
+
+/** The known models this CLI version takes; an unreadable version gets only those every CLI takes. */
+function claudeCodeModelsFor(versionLine: string): DesktopAgentProviderModelOption[] {
+  return CLAUDE_CODE_KNOWN_MODELS
+    .filter((model) => !model.minimumCliVersion || claudeCodeVersionAtLeast(versionLine, model.minimumCliVersion))
+    .map(({ minimumCliVersion: _minimum, ...model }) => model);
+}
+
+/**
+ * The full model ids this Claude Code takes, read from its version now.
+ * Null when the version can't be read: the short list an unreadable version
+ * gets cannot show that a newer model is missing.
+ */
+export async function claudeCodeModelIds(): Promise<ReadonlySet<string> | null> {
+  await desktopShellEnvironmentReady();
+  const runtimeEnv = desktopRuntimeEnvironment();
+  const versionLine = await claudeCodeVersionLine(resolveClaudeCodeExecutable(runtimeEnv), runtimeEnv);
+  // Every real version is at least 0.0.0, so this is false only for a version that doesn't parse.
+  if (!claudeCodeVersionAtLeast(versionLine, "0.0.0")) return null;
+  return new Set(claudeCodeModelsFor(versionLine).map((model) => model.id));
 }
 
 export function normalizeManagedAgentModel(value: string | null | undefined): string | null {
@@ -444,7 +468,31 @@ export function parseCursorModelsOutput(output: string): DesktopAgentProviderMod
   return models;
 }
 
-export function parseCodexModelsOutput(output: string): DesktopAgentProviderModelOption[] {
+/**
+ * Every model id this Codex takes, hidden ones too (a thread may start with
+ * any of them), from its account catalog only. The bundled catalog can be
+ * older than the CLI's account catalog, so it cannot show that a model is
+ * missing. When Codex can't read the account catalog it prints the bundled
+ * one and still exits 0 (codex-cli 0.162.1), so an answer equal to the
+ * bundled catalog proves nothing either. Null when nothing is known.
+ */
+export async function codexCatalogModelIds(): Promise<ReadonlySet<string> | null> {
+  await desktopShellEnvironmentReady();
+  const runtimeEnv = desktopRuntimeEnvironment();
+  const command = resolveCodexExecutable({ env: runtimeEnv });
+  const [account, bundled] = await Promise.all([
+    execFileWithTimeout(command, ["debug", "models"], { env: runtimeEnv }),
+    execFileWithTimeout(command, ["debug", "models", "--bundled"], { env: runtimeEnv }),
+  ]);
+  if (!account.ok || (bundled.ok && bundled.stdout.trim() === account.stdout.trim())) return null;
+  const ids = parseCodexModelsOutput(account.stdout, { includeHidden: true }).map((model) => model.id);
+  return ids.length ? new Set(ids) : null;
+}
+
+export function parseCodexModelsOutput(
+  output: string,
+  { includeHidden = false }: { includeHidden?: boolean } = {},
+): DesktopAgentProviderModelOption[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(output);
@@ -458,9 +506,8 @@ export function parseCodexModelsOutput(output: string): DesktopAgentProviderMode
   for (const entry of modelEntries) {
     if (!entry || typeof entry !== "object") continue;
     const record = entry as Record<string, unknown>;
-    if (record.hidden === true) continue;
     const visibility = typeof record.visibility === "string" ? record.visibility.toLowerCase() : null;
-    if (visibility && visibility !== "list") continue;
+    if (!includeHidden && (record.hidden === true || (visibility && visibility !== "list"))) continue;
 
     const id = firstStringField(record, ["slug", "id", "model"]);
     if (!id || seen.has(id)) continue;

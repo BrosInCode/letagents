@@ -28,9 +28,9 @@
       <section>
         <div class="give-section-label"><h3>Agent</h3><span v-if="handoff || current?.requested" class="give-requested">Requested</span></div>
         <div v-if="handoff" class="give-model-summary"><ChatAvatar :name="request.model_label" :provider="request.provider_id" agent /><strong>{{ request.model_label }}</strong></div>
-        <FilterDropdown v-else class="give-picker" :model-value="selected || ''" label="Agent" :options="dropdownOptions" :disabled="Boolean(busy) || !options.length" match-trigger-width @update:model-value="select">
+        <FilterDropdown v-else class="give-picker" :model-value="selected || ''" label="Agent" :options="dropdownOptions" :disabled="Boolean(busy) || !options.length" searchable search-placeholder="Find a model…" match-trigger-width @update:model-value="select">
           <template #trigger><ChatAvatar v-if="current" :name="current.model.label" :provider="current.model.providerId" agent /><span class="give-picker-label"><strong>{{ current?.model.label || 'No agents available' }}</strong><small>{{ current ? providerLabel(current.model.providerId) : 'Connect an agent app to continue.' }}</small></span></template>
-          <template #option="{ option }"><ChatAvatar :name="option.label" :provider="options.find(item => item.key === option.id)?.model.providerId" agent /><span class="give-picker-label">{{ option.label }}<small v-if="option.disabled">Can’t be given yet</small><small v-else-if="options.find(item => item.key === option.id)?.requested" class="give-requested">Requested</small></span></template>
+          <template #option="{ option }"><ChatAvatar :name="option.label" :provider="options.find(item => item.key === option.id)?.model.providerId" agent /><span class="give-picker-label">{{ option.label }}<small v-if="option.disabled">{{ providerLabel(options.find(item => item.key === option.id)?.model.providerId ?? '') }} · Can’t be given yet</small><small v-else-if="options.find(item => item.key === option.id)?.requested" class="give-requested">{{ providerLabel(options.find(item => item.key === option.id)?.model.providerId ?? '') }} · Requested</small><small v-else>{{ providerLabel(options.find(item => item.key === option.id)?.model.providerId ?? '') }}</small></span></template>
         </FilterDropdown>
         <p v-if="!handoff && current && !current.requested" class="give-choice-note"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.1"/></svg>{{ request.asker }} will need to accept this alternative.</p>
       </section>
@@ -71,7 +71,7 @@ watch(() => props.done, async done => { if (done) { await nextTick(); resultHead
 const preset = ref(10), custom = ref(false), customText = ref('10'), customInput = ref<HTMLInputElement>();
 const amount = computed(() => custom.value ? parseCustomAmount(customText.value) : preset.value);
 const current = computed(() => props.options.find(option => option.key === props.selected));
-const dropdownOptions = computed(() => props.options.map(option => ({ id: option.key, label: option.model.label, disabled: !option.canGive })));
+const dropdownOptions = computed(() => props.options.map(option => ({ id: option.key, label: option.model.label, disabled: !option.canGive, keywords: `${providerLabel(option.model.providerId)} ${option.model.model ?? ''}` })));
 watch([() => props.request?.id, () => props.initialAmount], () => {
   preset.value = props.initialAmount; customText.value = String(props.initialAmount);
   custom.value = !(AMOUNT_CHOICES as readonly number[]).includes(props.initialAmount);

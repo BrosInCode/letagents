@@ -20,6 +20,8 @@ const { tempDir } = createElectronTestEnv({
 });
 
 const {
+  claudeCodeModelIds,
+  codexCatalogModelIds,
   listDesktopAgentProviderModels,
   normalizeManagedAgentEffort,
   normalizeManagedAgentModel,
@@ -144,6 +146,15 @@ test("Claude models are full ids with real names, and newer ones only from the C
   assert.equal(cached.models.some((model) => model.id === "claude-opus-5-5"), true, "a different CLI path is its own cache entry");
   const newer = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
   assert.deepEqual(newer.models.filter((model) => model.id.endsWith("-5-5")).map((model) => model.label), ["Opus 5.5", "Sonnet 5.5", "Haiku 5.5"]);
+  assert.equal(newer.models.some((model) => model.id === "claude-fable-5-2"), false, "Fable 5.2 needs 2.1.321");
+
+  fakeClaude("2.1.321");
+  const newest = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
+  assert.deepEqual(newest.models.slice(0, 3).map((model) => [model.id, model.label]), [
+    ["best", "Best available"],
+    ["claude-fable-5-2", "Fable 5.2"],
+    ["claude-fable-5-1", "Fable 5.1"],
+  ]);
 
   process.env.LETAGENTS_CLAUDE_CODE_BIN = join(tempDir, "no-such-claude");
   const missing = await listDesktopAgentProviderModels("claude-code", { refreshModels: true });
@@ -212,6 +223,39 @@ test("Codex model discovery reads debug model catalog output", async () => {
     model: "gpt-5.4-mini",
     modelSource: "provider",
   }), { model: "gpt-5.4-mini", error: null });
+
+  // This fake prints the same list for --bundled: Codex does that when it can't read the
+  // account catalog, so the answer could be the older bundled one and nothing is known.
+  assert.equal(await codexCatalogModelIds(), null);
+  const fakeCodex = (name: string, lines: string[]) => {
+    process.env.LETAGENTS_CODEX_BIN = writeFakeProvider(join(tempDir, name), [...lines, ""].join("\n"));
+  };
+  // A gift checks the whole account catalog: a hidden model still starts a thread.
+  fakeCodex("codex-account-catalog", [
+    "const bundled = process.argv[4] === '--bundled';",
+    "console.log(JSON.stringify({ models: [{ slug: 'gpt-5.5', visibility: 'list' }, ...(bundled ? [] : [",
+    "  { slug: 'gpt-6-astra', visibility: 'list' }, { slug: 'gpt-6-sol', visibility: 'hide' }])] }));",
+  ]);
+  assert.deepEqual([...await codexCatalogModelIds() ?? []], ["gpt-5.5", "gpt-6-astra", "gpt-6-sol"]);
+  // Only the bundled catalog answers: nothing is known.
+  fakeCodex("codex-bundled-only", [
+    "if (process.argv[4] !== '--bundled') { console.error('offline'); process.exit(1); }",
+    "console.log(JSON.stringify({ models: [{ slug: 'gpt-5.5', visibility: 'list' }] }));",
+  ]);
+  assert.equal(await codexCatalogModelIds(), null);
+  delete process.env.LETAGENTS_CODEX_BIN;
+});
+
+test("a gift checks Claude models against the CLI version, and knows nothing from an unreadable one", async () => {
+  fakeClaude("2.1.280");
+  const ids = await claudeCodeModelIds();
+  assert.equal(ids?.has("claude-opus-5-5"), true);
+  assert.equal(ids?.has("claude-fable-5-2"), false);
+  fakeClaude("2.1.321");
+  assert.equal((await claudeCodeModelIds())?.has("claude-fable-5-2"), true);
+  fakeClaude("unknown");
+  assert.equal(await claudeCodeModelIds(), null);
+  delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
 });
 
 test("Codex stale ready model cache is extended after failed rediscovery", async (t) => {
