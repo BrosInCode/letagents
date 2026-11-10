@@ -50,8 +50,11 @@ interface RepoRoomAccessDecisionDeps {
     accessToken: string;
     bypassCache?: boolean;
     throwOnIndeterminate?: boolean;
+    prefetchedRepo?: GitHubRepo | null;
   }) => Promise<boolean>;
   isPublicRepoRoleHolder?: typeof isGitHubPublicRepoRoleHolder;
+  /** The fresh signed-in repository read; defaults to the real one only with the real getVisibility. */
+  loadFreshRepo?: (roomName: string, accessToken: string) => Promise<FreshRepoRead>;
   getLastKnownVisibility?: (roomName: string) => "public" | "private" | null;
 }
 
@@ -68,7 +71,13 @@ const REPO_VISIBILITY_LAST_KNOWN_MAX_AGE_MS = 1000 * 60 * 60;
 const REPO_VISIBILITY_RATE_LIMIT_DEFAULT_BACKOFF_MS = 1000 * 60;
 const REPO_VISIBILITY_RATE_LIMIT_MAX_BACKOFF_MS = 1000 * 60 * 60;
 let anonymousVisibilityLookupsBlockedUntil = 0;
-const REPO_ACCESS_TTL_MS = 1000 * 60 * 30;
+// How long a "yes" from GitHub (a role on the repository) is reused by
+// ordinary HTTP reads. Live streams re-check every 60 s and webhooks clear it
+// at once; this bounds how long a missed webhook can keep a removed person
+// reading over plain HTTP. Five minutes costs at most 12 role checks per hour
+// per person and repository (24 GitHub calls for a private repository, 12 for
+// a public one), against GitHub's 5,000 calls per hour per token.
+export const REPO_ACCESS_TTL_MS = 1000 * 60 * 5;
 // A "no role" answer for a public repository is kept briefly, so a refused
 // client that reconnects does not spend the person's GitHub rate limit.
 const PUBLIC_REPO_NO_ROLE_TTL_MS = 1000 * 60;
@@ -260,6 +269,9 @@ function forgetRoomAccess(roomKey: string): void {
     if (flight.roomKey === roomKey) repoVisibilityInflight.delete(flightKey);
   }
   knownPrivateVisibilityInflight.delete(roomKey);
+  for (const [flightKey, flight] of freshRepoInflight) {
+    if (flight.roomKey === roomKey) freshRepoInflight.delete(flightKey);
+  }
   for (const flightKey of publicRepoRoleInflight.keys()) {
     if (flightKey.includes(`::${roomKey}::`)) publicRepoRoleInflight.delete(flightKey);
   }
@@ -534,6 +546,54 @@ async function loadGitHubRepoVisibility(
   return pending;
 }
 
+// Keyed `room::credential`: a fresh read shared only by the same token.
+const freshRepoInflight = new Map<string, {
+  roomKey: string;
+  promise: Promise<FreshRepoRead>;
+}>();
+
+/** `repo`: GitHub's 200 body; null for a 404; undefined for any other answer. */
+type FreshRepoRead = { visibility: GitHubRepoVisibility; repo: GitHubRepo | null | undefined };
+
+/**
+ * The fresh, signed-in visibility lookup, keeping GitHub's 200 body for the
+ * role check that follows with the same token. Visibility caches change as in
+ * the "fresh-authenticated" lookup: a fresh check never falls back to a
+ * remembered answer, and one GitHub did not answer replaces nothing.
+ */
+async function loadFreshRepoForCredential(
+  roomName: string,
+  accessToken: string,
+): Promise<FreshRepoRead> {
+  const roomKey = normalizeCacheKey(roomName);
+  const credential = createHash("sha256").update(accessToken).digest("hex").slice(0, 32);
+  const flightKey = `${roomKey}::${credential}`;
+  const existing = freshRepoInflight.get(flightKey);
+  if (existing) return existing.promise;
+  const roomGeneration = getCacheGeneration(repoRoomCacheGeneration, roomKey);
+  let pending!: Promise<FreshRepoRead>;
+  pending = (async () => {
+    const response = await fetchGitHubRepo(roomName, accessToken);
+    const outcome = await classifyVisibilityLookupResponse(response, Date.now(), false);
+    const unanswered = outcome.kind === "unanswered";
+    let visibility: GitHubRepoVisibility = "unknown";
+    let repo: GitHubRepo | null | undefined = response.status === 404 ? null : undefined;
+    if (response.ok) {
+      repo = (await response.json()) as GitHubRepo;
+      visibility = repo.private ? "private" : "public";
+    }
+    if (getCacheGeneration(repoRoomCacheGeneration, roomKey) === roomGeneration) {
+      if (!unanswered || !getLastKnownVisibility(roomName)) setCachedVisibility(roomName, visibility);
+      if (!unanswered) setLastKnownVisibility(roomName, visibility);
+    }
+    return { visibility, repo };
+  })().finally(() => {
+    if (freshRepoInflight.get(flightKey)?.promise === pending) freshRepoInflight.delete(flightKey);
+  });
+  freshRepoInflight.set(flightKey, { roomKey, promise: pending });
+  return pending;
+}
+
 type VisibilityLookupOutcome =
   | { kind: "answered" }
   | { kind: "unanswered"; retryAt: number | null };
@@ -595,6 +655,9 @@ export async function isGitHubRepoCollaborator(input: {
   throwOnIndeterminate?: boolean;
   // Injectable for tests; production uses the global fetch (bounded by a deadline).
   fetchImpl?: typeof fetch;
+  // The repository as GitHub just returned it (200) to this same token, or
+  // null for a 404 to it, so a fresh check does not read it twice.
+  prefetchedRepo?: GitHubRepo | null;
 }): Promise<boolean> {
   const roomKey = normalizeCacheKey(input.roomName);
   const loginKey = normalizeCacheKey(input.login);
@@ -621,21 +684,28 @@ export async function isGitHubRepoCollaborator(input: {
     const repo = parseGitHubRepoName(input.roomName);
     if (!repo) return false;
 
-    let ownerResponse: Response;
-    try {
-      ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken, doFetch);
-    } catch {
-      throw new GitHubAccessUnavailableError(null);
-    }
-    if (!ownerResponse.ok) {
-      if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(ownerResponse)) {
-        throw new Error(`GitHub repo access revalidation was indeterminate (${ownerResponse.status}).`);
-      }
-      if (await isGitHubOutageResponse(ownerResponse)) throw new GitHubAccessUnavailableError(ownerResponse.status);
+    let repoPayload: GitHubRepo;
+    if (input.prefetchedRepo === null) {
+      // A 404: the token cannot see the repository. An answer, not an outage.
       return false;
+    } else if (input.prefetchedRepo) {
+      repoPayload = input.prefetchedRepo;
+    } else {
+      let ownerResponse: Response;
+      try {
+        ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken, doFetch);
+      } catch {
+        throw new GitHubAccessUnavailableError(null);
+      }
+      if (!ownerResponse.ok) {
+        if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(ownerResponse)) {
+          throw new Error(`GitHub repo access revalidation was indeterminate (${ownerResponse.status}).`);
+        }
+        if (await isGitHubOutageResponse(ownerResponse)) throw new GitHubAccessUnavailableError(ownerResponse.status);
+        return false;
+      }
+      repoPayload = (await ownerResponse.json()) as GitHubRepo;
     }
-
-    const repoPayload = (await ownerResponse.json()) as GitHubRepo;
     let allowed = repoPayload.owner?.login?.toLowerCase() === loginKey;
     if (!allowed) {
       let permissionResponse: Response;
@@ -711,6 +781,8 @@ export async function isGitHubPublicRepoRoleHolder(input: {
   bypassCache?: boolean;
   throwOnIndeterminate?: boolean;
   fetchImpl?: typeof fetch;
+  /** As for isGitHubRepoCollaborator: GitHub's 200 body (or null for a 404) to this same token. */
+  prefetchedRepo?: GitHubRepo | null;
 }): Promise<boolean> {
   const roomKey = normalizeCacheKey(input.roomName);
   const loginKey = normalizeCacheKey(input.login);
@@ -734,25 +806,33 @@ export async function isGitHubPublicRepoRoleHolder(input: {
       if (lastKnown && lastKnown.expiresAt > Date.now()) return true;
       throw new GitHubAccessUnavailableError(status);
     };
-    let response: Response;
-    try {
-      response = await fetchGitHubRepo(input.roomName, input.accessToken, input.fetchImpl ?? fetch);
-    } catch {
-      return unavailable(null);
-    }
-    if (!response.ok) {
-      // Authority revalidation keeps its grant on any unanswered check,
-      // a dead owner token included.
-      if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(response)) {
-        throw new Error(`GitHub repo role check was indeterminate (${response.status}).`);
-      }
-      // A dead token (401) or one blocked by the organization (plain 403) is
-      // GitHub's answer for this token: no role. Only an outage is a retry.
-      if (await isGitHubOutageResponse(response)) return unavailable(response.status);
+    let payload: GitHubRepo;
+    if (input.prefetchedRepo === null) {
       publicRepoRoleLastKnown.delete(cacheKey);
       return false;
+    } else if (input.prefetchedRepo) {
+      payload = input.prefetchedRepo;
+    } else {
+      let response: Response;
+      try {
+        response = await fetchGitHubRepo(input.roomName, input.accessToken, input.fetchImpl ?? fetch);
+      } catch {
+        return unavailable(null);
+      }
+      if (!response.ok) {
+        // Authority revalidation keeps its grant on any unanswered check,
+        // a dead owner token included.
+        if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(response)) {
+          throw new Error(`GitHub repo role check was indeterminate (${response.status}).`);
+        }
+        // A dead token (401) or one blocked by the organization (plain 403) is
+        // GitHub's answer for this token: no role. Only an outage is a retry.
+        if (await isGitHubOutageResponse(response)) return unavailable(response.status);
+        publicRepoRoleLastKnown.delete(cacheKey);
+        return false;
+      }
+      payload = (await response.json()) as GitHubRepo;
     }
-    const payload = (await response.json()) as GitHubRepo;
     const permissions = payload.permissions ?? {};
     const allowed = payload.owner?.login?.toLowerCase() === loginKey
       || Boolean(permissions.triage || permissions.push || permissions.maintain || permissions.admin);
@@ -932,9 +1012,22 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
   }
 
   const accessToken = input.sessionAccount.provider_access_token ?? undefined;
-  let visibility = await deps.getVisibility(canonicalRoomName, accessToken, {
-    bypassCache: input.freshCollaboratorCheck,
-  });
+  // A fresh check with a token reads the repository once: its 200 body gives
+  // the visibility, the owner and the token's own permissions, and the role
+  // check below reuses it. Any other answer leaves the role check to ask
+  // again, as before, so its outage and refusal handling is unchanged.
+  let prefetchedRepo: GitHubRepo | null | undefined;
+  let visibility: GitHubRepoVisibility;
+  const loadFresh = deps.loadFreshRepo ?? (deps.getVisibility === getGitHubRepoVisibility ? loadFreshRepoForCredential : null);
+  if (input.freshCollaboratorCheck && accessToken && loadFresh) {
+    const fresh = await loadFresh(canonicalRoomName, accessToken);
+    visibility = fresh.visibility;
+    prefetchedRepo = fresh.repo;
+  } else {
+    visibility = await deps.getVisibility(canonicalRoomName, accessToken, {
+      bypassCache: input.freshCollaboratorCheck,
+    });
+  }
   // GitHub gave no answer (a fresh check does not use the remembered one): a
   // repository known to be public in the last hour goes to its role check,
   // which retries during an outage instead of refusing like a private repo.
@@ -959,6 +1052,7 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
         accessToken: input.sessionAccount.provider_access_token,
         bypassCache: input.freshCollaboratorCheck,
         throwOnIndeterminate: input.throwOnIndeterminate,
+        ...(prefetchedRepo !== undefined ? { prefetchedRepo } : {}),
       });
     } catch (error) {
       // Authority revalidation keeps its grant on an outage, by the throw.
@@ -984,6 +1078,7 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
       accessToken: input.sessionAccount.provider_access_token,
       bypassCache: input.freshCollaboratorCheck,
       throwOnIndeterminate: input.throwOnIndeterminate,
+      ...(prefetchedRepo !== undefined ? { prefetchedRepo } : {}),
     });
   } catch (error) {
     // A GitHub outage is a retry, not "no access"; a dead or blocked token

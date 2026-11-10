@@ -564,3 +564,45 @@ test("the account activity stream re-checks a repo room live and drops it after 
     await new Promise((resolve) => http.close(resolve));
   }
 });
+
+// ------------------------------------------------ gap fix B: GitHub calls
+
+test("GitHub calls per check: a fresh check asks for the repository once; a cached check reuses a yes for five minutes", { skip, concurrency: false }, async () => {
+  const decisionModule = await import("../rooms/access-decision.js");
+  const callsFor = (login: string) => githubCalls.filter((call) => call.startsWith(`gh-${login} `));
+  const count = async (roomKind: RoomKind, principal: PrincipalKind, freshness: "fresh" | "cached") => {
+    const world = await buildWorld(roomKind, principal);
+    const before = callsFor(world.login!).length;
+    const decision = await decisionModule.decideRoomRead({
+      project: world.project,
+      principal: { kind: "person", account: world.sessionAccount! },
+      freshness,
+    });
+    return { decision: decision.kind, calls: callsFor(world.login!).length - before, world };
+  };
+
+  // A fresh check: one repository read with the person's token, plus the
+  // permission read when they do not own a private repository.
+  assert.deepEqual(
+    (({ decision, calls }) => ({ decision, calls }))(await count("repo_private", "member", "fresh")),
+    { decision: "allow", calls: 2 },
+  );
+  assert.deepEqual(
+    (({ decision, calls }) => ({ decision, calls }))(await count("repo_public", "triage", "fresh")),
+    { decision: "allow", calls: 1 },
+  );
+  assert.deepEqual(
+    (({ decision, calls }) => ({ decision, calls }))(await count("repo_private", "stranger", "fresh")),
+    { decision: "repo_access_denied", calls: 1 },
+  );
+
+  // A cached yes is reused, and kept no longer than five minutes.
+  const { world } = await count("repo_private", "member", "cached");
+  const again = callsFor(world.login!).length;
+  const reread = await decisionModule.decideRoomRead({ project: world.project, principal: { kind: "person", account: world.sessionAccount! } });
+  assert.equal(reread.kind, "allow");
+  assert.equal(callsFor(world.login!).filter((call) => call.includes("/permission")).length, 1, "the yes is reused");
+  assert.ok(callsFor(world.login!).length - again <= 1, "at most the shared visibility read");
+  const repoAccess = await import("../github/repo-access.js");
+  assert.equal(repoAccess.REPO_ACCESS_TTL_MS, 5 * 60 * 1000);
+});
