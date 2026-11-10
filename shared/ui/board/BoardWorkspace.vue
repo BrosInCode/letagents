@@ -29,6 +29,16 @@
     <template v-else>
       <ReleaseQueue v-if="view === 'releases'" :items="snapshot.releases?.items || []" :unavailable="snapshot.releases?.unavailable || 0" :description="releaseDescription(snapshot)" @select="emit('select', $event)" @external="openExternal" />
       <div v-else-if="view === 'board'" class="board-lanes" :style="{ gridTemplateColumns: columnTracks }" tabindex="0" aria-label="Task columns">
+        <section v-if="hasProposals" class="board-lane board-proposals" aria-label="Proposed tasks">
+          <header class="board-lane-heading"><span class="board-lane-dot" data-tone="muted" /><h2>Proposed</h2><span class="board-lane-count">{{ proposedTasks.length }}</span></header>
+          <div class="board-lane-cards">
+            <p v-if="selectedSprint" class="board-proposals-hint">Awaiting acceptance · all sprints</p>
+            <BoardCard v-for="task in proposedTasks" :key="task.id" :task="task" :type="planning(task.id).type" @select="emit('select', task.id)" @external="openExternal">
+              <template v-if="acceptAction(task)" #footer><button type="button" class="board-button" :disabled="locked" @click="runTransition(task, acceptAction(task)!.id, $event)">Accept task</button></template>
+            </BoardCard>
+            <p v-if="!proposedTasks.length" class="board-lane-empty">No matching proposals</p>
+          </div>
+        </section>
         <section v-for="(column, index) in snapshot.document.columns" :key="column.id" class="board-lane" :class="{ 'is-collapsed': collapsed.has(column.id), 'is-drag-over': dragOver === column.id }" :data-column="column.id"
           @dragover="dragOverColumn($event, column)" @dragleave.self="dragOver = null" @drop.prevent="dropColumn(column)">
           <button v-if="collapsed.has(column.id)" type="button" class="board-column-rail" :aria-label="`Expand ${column.name} column, ${byColumn(column.id).length} tasks`" :aria-controls="`${prefix}-${column.id}`" :aria-expanded="false" @click="toggleColumn(column.id)" @keydown="columnKey($event, index)"><span class="board-lane-dot" :data-tone="columnTone(column.statuses)" /><span class="board-rail-name">{{ column.name }}</span><span>{{ byColumn(column.id).length }}</span><BoardIcon name="expand" /></button>
@@ -51,7 +61,7 @@
       <BoardAssignees v-else-if="view === 'assignees'" :tasks="sprintTasks" :visible="visibleTasks" :snapshot="snapshot" :sprint="selectedSprint" @select="emit('select', $event)" @external="openExternal" @target="openSettings('Sprints')" />
       <div v-else class="board-backlog">
         <p v-if="!backlogTasks.length" class="board-empty">{{ view === 'cancelled' ? 'No matching cancelled tasks.' : 'No proposed tasks.' }}</p>
-        <div v-for="task in backlogTasks" :key="task.id" class="board-backlog-row"><BoardIcon :name="planning(task.id).type || 'task'" /><button class="board-backlog-title" type="button" @click="emit('select', task.id)"><strong>{{ task.title }}</strong><small>{{ task.ticket?.key || task.id.replace(/^task_/, 'T') }}</small></button><a v-if="safeWorkUrl(task.pr?.url || null)" class="board-pr" :href="task.pr!.url" @click.prevent="openExternal(task.pr!.url)"><BoardIcon name="pr" />{{ task.pr!.number ? '#' + task.pr!.number : 'PR' }}</a><button class="board-button" type="button" @click="openPlan(task.id, $event)">Plan</button><button v-if="task.allowedTransitions.some(a => a.targetStatus === 'accepted')" class="board-button" type="button" :disabled="locked" @click="runTransition(task, task.allowedTransitions.find(a => a.targetStatus === 'accepted')!.id, $event)">Accept</button></div>
+        <div v-for="task in backlogTasks" :key="task.id" class="board-backlog-row" :data-board-task-id="task.id"><BoardIcon :name="planning(task.id).type || 'task'" /><button class="board-backlog-title" type="button" @click="emit('select', task.id)"><strong>{{ task.title }}</strong><small>{{ task.ticket?.key || task.id.replace(/^task_/, 'T') }}</small></button><a v-if="safeWorkUrl(task.pr?.url || null)" class="board-pr" :href="task.pr!.url" @click.prevent="openExternal(task.pr!.url)"><BoardIcon name="pr" />{{ task.pr!.number ? '#' + task.pr!.number : 'PR' }}</a><button class="board-button" type="button" @click="openPlan(task.id, $event)">Plan</button><button v-if="task.allowedTransitions.some(a => a.targetStatus === 'accepted')" class="board-button" type="button" :disabled="locked" @click="runTransition(task, task.allowedTransitions.find(a => a.targetStatus === 'accepted')!.id, $event)">Accept</button></div>
       </div>
       <BoardSettings :open="settingsOpen" :initial-tab="settingsTab" :start-adding="settingsAdd" :snapshot="snapshot" :save="save" @close="settingsOpen = false" />
       <dialog ref="sprintDetails" class="board-dialog board-sprint-detail-dialog" aria-labelledby="board-sprint-detail-title" @click="sprintBackdrop" @cancel="sprintDetails?.close()">
@@ -112,10 +122,14 @@ function matchesFilters(task: BoardTask) {
     && (!typeFilter.value || (planning(task.id).type || 'task') === typeFilter.value) && (!blockedOnly.value || (snapshot.value && taskIsBlocked(task, snapshot.value)));
 }
 const visibleTasks = computed(() => sprintTasks.value.filter(matchesFilters));
+// Proposals await acceptance before sprint planning; an active sprint must not hide them.
+const hasProposals = computed(() => allTasks.value.some(task => task.status === 'proposed'));
+const proposedTasks = computed(() => allTasks.value.filter(task => task.status === 'proposed' && matchesFilters(task)));
+function acceptAction(task: BoardTask) { return task.allowedTransitions.find(action => action.targetStatus === 'accepted'); }
 const backlogTasks = computed(() => view.value === 'cancelled'
   ? allTasks.value.filter(task => task.status === 'cancelled' && snapshot.value && matchesSprint(task, snapshot.value, sprintId.value) && matchesFilters(task))
-  : visibleTasks.value.filter(task => task.status === 'proposed'));
-const columnTracks = computed(() => (snapshot.value?.document.columns.map(column => collapsed.value.has(column.id) ? '52px' : 'minmax(var(--board-column-min), 1fr)') || []).join(' '));
+  : proposedTasks.value);
+const columnTracks = computed(() => [...(hasProposals.value ? ['minmax(var(--board-column-min), 1fr)'] : []), ...(snapshot.value?.document.columns.map(column => collapsed.value.has(column.id) ? '52px' : 'minmax(var(--board-column-min), 1fr)') || [])].join(' '));
 function byColumn(id: string) { return snapshot.value ? visibleTasks.value.filter(task => boardTaskColumn(snapshot.value!.document, task) === id) : []; }
 function clearFilters() { query.value = ''; ownerFilter.value = ''; typeFilter.value = ''; blockedOnly.value = false; }
 function preferences() { try { localStorage.setItem(`letagents-board-view:${props.roomId}`, JSON.stringify({ view: view.value, collapsed: [...collapsed.value] })); } catch { /* View preferences must never prevent board use. */ } }
@@ -131,7 +145,7 @@ async function revealTask(id: string) {
   if (!task || !snapshot.value) return;
   if (!matchesSprint(task, snapshot.value, sprintId.value)) sprintId.value = 'all';
   if (!matchesFilters(task)) clearFilters();
-  if (task.status === 'proposed') view.value = 'backlog';
+  if (task.status === 'proposed') view.value = 'board';
   else if (task.status === 'cancelled') view.value = 'cancelled';
   else if (view.value === 'backlog' || view.value === 'cancelled') view.value = 'board';
   const column = boardTaskColumn(snapshot.value.document, task);

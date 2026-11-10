@@ -95,7 +95,7 @@ function linkTaskReferences(html: string, taskReferenceIds?: ReadonlySet<string>
       return [
         '<button class="task-reference-link" type="button"',
         ` data-task-reference-id="${taskId}"`,
-        ` title="Open ${taskId} on the Board">`,
+        ` title="Preview ${taskId}">`,
         taskId,
         '</button>',
       ].join('')

@@ -32,6 +32,7 @@
 </template>
 
 <script setup lang="ts">
+import { useTaskLinkPreview } from "../../../../../../../shared/ui/board/task-link-preview";
 import { formatDecimalNumber } from "../../../domain/formatters";
 import { computed, ref } from "vue";
 
@@ -61,6 +62,7 @@ const emit = defineEmits<{
   "mention-click": [mentionKey: string, position: PersonMenuPosition];
 }>();
 
+const previewTask = useTaskLinkPreview();
 const expanded = ref(false);
 const readerOpen = ref(false);
 
@@ -127,6 +129,10 @@ function handleInlineReferenceClick(event: MouseEvent): void {
   if (!messageId && !taskId) return;
   event.preventDefault();
   event.stopPropagation();
+  if (!messageId && taskId && taskTarget && previewTask) {
+    void previewTask(taskId, taskTarget, event.detail === 0, closeReader);
+    return;
+  }
   readerOpen.value = false;
   if (messageId) {
     emit("message-reference-click", messageId);

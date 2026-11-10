@@ -220,3 +220,6 @@
 @media(max-width:650px) { .board-workspace { padding:18px 14px 0; }.board-dialog { inset:6px; width:calc(100vw - 12px); height:calc(100dvh - 12px); border-radius:12px; }.board-dialog-header { padding:18px 20px; }.board-dialog-body { padding:10px 20px 24px; }.board-dialog-footer { padding:16px 20px; }.board-settings-tabs { margin:0 20px; }.board-settings-column-main { gap:8px; }.board-settings-column-copy input { font-size:16px; }.board-settings-intro>span { font-size:10px; }.board-settings .board-dialog-footer { padding:16px; }.board-remove-column { padding-left:16px; }.board-default-target { padding:14px; gap:12px; }.board-search input { font-size:16px; } }
 .board-workspace[data-instant=true] :is(.board-lanes,.board-story-fill,.board-dialog,.board-options-menu) { transition:none; animation:none; }
 @media(prefers-reduced-motion:reduce) { .board-workspace *, .board-workspace *::before,.board-workspace *::after { scroll-behavior:auto!important; transition-duration:.01ms!important; animation-duration:.01ms!important; }.board-dialog[open] { animation:none; } }
+
+.board-proposals-hint { margin:0 0 8px; color:var(--board-muted); font-size:12px; line-height:1.5; }
+.board-card-footer { margin-top:16px; }
