@@ -25,11 +25,11 @@ async function load(t: test.TestContext, options: { local?: boolean; respond?: (
 const room = "github.com/org/repo";
 const path = `/rooms/${encodeURIComponent(room)}/agent-reply-order`;
 
-test("a room that has not chosen shows the switch off", async (t) => {
+test("a room that has not chosen shows the switch on", async (t) => {
   const { subject, calls } = await load(t, {
-    respond: () => ({ room_id: room, order: "parallel", chosen: false, can_manage: false }),
+    respond: () => ({ room_id: room, order: "sequential", chosen: false, can_manage: false }),
   });
-  assert.deepEqual(await subject.getDesktopReplyOrder(room), { enabled: false, can_manage: false });
+  assert.deepEqual(await subject.getDesktopReplyOrder(room), { enabled: true, can_manage: false });
   assert.deepEqual(calls, [{ path, method: "GET", body: null }]);
 });
 

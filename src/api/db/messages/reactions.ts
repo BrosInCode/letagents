@@ -149,7 +149,7 @@ export async function addMessageReaction(input: {
     if (input.agent) {
       const [setting] = await tx.select({ enabled: room_settings.expressions_enabled }).from(room_settings)
         .where(eq(room_settings.room_id, input.roomId)).for("share");
-      if (!setting?.enabled) return "disabled";
+      if (setting?.enabled === false) return "disabled";
     }
     // One writer per message at a time, so the distinct-emoji limit holds.
     // NO KEY UPDATE leaves the message's other child rows writable.
