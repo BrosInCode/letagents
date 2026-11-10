@@ -515,7 +515,7 @@ import { useAppLifecycle } from "./composables/app/useAppLifecycle";
 import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAlerts";
 import { useAppCompany, useAppCompanyNavigation } from "./composables/app/useAppCompany";
 import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
-import { CompanyHomeLazy, DesktopNewRoomModalLazy, InboxViewLazy, MyWorkViewLazy, SettingsViewLazy } from "./lazy-views";
+import { CompanyHomeLazy, DesktopNewRoomModalLazy, InboxViewLazy, MyWorkViewLazy, SettingsViewLazy, lazyView } from "./lazy-views";
 
 const RentMarketplaceView = defineAsyncComponent(
   () => import("./components/desktop/content/RentMarketplaceView.vue"),
@@ -527,11 +527,10 @@ const MyWorkView = MyWorkViewLazy.component;
 const CompanyHome = CompanyHomeLazy.component;
 const DesktopNewRoomModal = DesktopNewRoomModalLazy.component;
 // On a fresh profile the launch splash stays, drawn where it was, until the wizard's chunk has run.
-const FirstRunOnboardingView = defineAsyncComponent({
-  loader: () => import("./components/desktop/setup/FirstRunOnboardingView.vue"),
-  loadingComponent: () => h(FirstRunSplashView, { style: "position: fixed; inset: 0" }),
-  delay: 0,
-});
+const FirstRunOnboardingView = lazyView(() => import("./components/desktop/setup/FirstRunOnboardingView.vue"), {
+  label: "Setup",
+  loading: () => h(FirstRunSplashView, { style: "position: fixed; inset: 0" }),
+}).component;
 
 // App.vue holds the template and this wiring. The context fills in the original
 // order: state, then the function composables (only function definitions, like

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
-import { defineComponent } from "vue";
+import { createRenderer, defineComponent, h, nextTick, ref, type Component } from "vue";
 
 import { createIdlePreloader, lazyView, type IdleScheduler } from "../src/lazy-views";
 
@@ -118,33 +119,158 @@ test("without requestIdleCallback or requestAnimationFrame the default scheduler
   assert.equal(loads, 1);
 });
 
-test("a preloaded view is resolved, so its next mount renders in the same pass", async () => {
-  const View = defineComponent({ name: "PreloadedView", render: () => null });
-  let loads = 0;
-  const view = lazyView(async () => { loads += 1; return moduleOf(View); });
-  const wrapper = view.component as { __asyncResolved?: unknown };
-  assert.equal(wrapper.__asyncResolved, undefined);
-
-  await view.preload();
-  assert.equal(wrapper.__asyncResolved, View);
-  await view.preload();
-  assert.equal(loads, 1, "the chunk is requested once");
+// A tiny DOM: enough to see what a mounted lazy view draws, and to click it.
+type FakeNode = { kind: string; parent: FakeNode | null; children: FakeNode[]; text?: string; props: Record<string, unknown> };
+function fakeNode(kind: string, text?: string): FakeNode {
+  return { kind, parent: null, children: [], text, props: {} };
+}
+function detach(node: FakeNode): void {
+  if (!node.parent) return;
+  node.parent.children.splice(node.parent.children.indexOf(node), 1);
+  node.parent = null;
+}
+const renderer = createRenderer<FakeNode, FakeNode>({
+  patchProp(node, key, _previous, next) { node.props[key] = next; },
+  insert(child, parent, anchor) {
+    detach(child);
+    const index = anchor ? parent.children.indexOf(anchor) : -1;
+    if (index < 0) parent.children.push(child);
+    else parent.children.splice(index, 0, child);
+    child.parent = parent;
+  },
+  remove: detach,
+  createElement: (tag) => fakeNode(tag),
+  createText: (text) => fakeNode("#text", text),
+  createComment: (text) => fakeNode("#comment", text),
+  setText(node, text) { node.text = text; },
+  setElementText(node, text) { node.children = []; node.text = text; },
+  parentNode: (node) => node.parent,
+  nextSibling(node) {
+    if (!node.parent) return null;
+    return node.parent.children[node.parent.children.indexOf(node) + 1] ?? null;
+  },
+});
+function find(node: FakeNode, match: (candidate: FakeNode) => boolean): FakeNode | null {
+  if (match(node)) return node;
+  for (const child of node.children) {
+    const found = find(child, match);
+    if (found) return found;
+  }
+  return null;
+}
+const failureOf = (root: FakeNode) => find(root, (node) => node.props["data-testid"] === "lazy-view-failed");
+const textOf = (node: FakeNode): string => (node.text ?? "") + node.children.map(textOf).join("");
+async function settle(): Promise<void> {
+  for (let i = 0; i < 20; i += 1) {
+    await Promise.resolve();
+    await nextTick();
+  }
+}
+function mount(component: unknown, props: () => Record<string, unknown>) {
+  const root = fakeNode("root");
+  const app = renderer.createApp({ render: () => h(component as Component, props()) });
+  app.config.warnHandler = () => undefined;
+  app.mount(root);
+  return { root, unmount: () => app.unmount() };
+}
+const Modal = defineComponent({
+  props: { open: Boolean },
+  render() { return this.open ? h("main", "Add agent controls") : null; },
 });
 
-test("a failed preload resolves quietly and does not poison the view's own load", async () => {
-  const View = defineComponent({ name: "LateView", render: () => null });
+test("a preloaded view renders in the same pass as it mounts", async () => {
+  let loads = 0;
+  const view = lazyView(async () => { loads += 1; return moduleOf(Modal); }, { label: "Add agent" });
+  await view.preload();
+  await view.preload();
+  assert.equal(loads, 1, "the chunk is requested once");
+  assert.equal(view.loaded(), true);
+
+  const { root, unmount } = mount(view.component, () => ({ open: true }));
+  assert.ok(find(root, (node) => node.kind === "main"), "rendered without waiting for a tick");
+  unmount();
+});
+
+test("a view whose import failed at mount renders once a later preload succeeds", async () => {
   let attempts = 0;
   const view = lazyView(async () => {
     attempts += 1;
-    if (attempts === 1) throw new Error("chunk missing");
-    return moduleOf(View);
-  });
-  await assert.doesNotReject(view.preload());
-  const wrapper = view.component as { __asyncLoader: () => Promise<unknown>; __asyncResolved?: unknown };
-  assert.equal(wrapper.__asyncResolved, undefined);
+    if (attempts === 1) throw new Error("Failed to fetch dynamically imported module");
+    return moduleOf(Modal);
+  }, { label: "Add agent", retryDelaysMs: [60_000], visible: (attrs) => attrs.open === true });
+  const open = ref(false);
+  const { root, unmount } = mount(view.component, () => ({ open: open.value }));
+  await settle();
+  assert.equal(attempts, 1);
+  assert.equal(failureOf(root), null, "a closed window shows no failure");
 
-  // Mounting the view calls the wrapper's loader: it asks for the chunk again.
-  assert.equal(await wrapper.__asyncLoader(), View);
+  await view.preload();
+  open.value = true;
+  await settle();
   assert.equal(attempts, 2);
-  assert.equal(wrapper.__asyncResolved, View);
+  assert.ok(find(root, (node) => node.kind === "main"), "the mounted window renders after the preload");
+  unmount();
+});
+
+test("a mounted view retries its import a bounded number of times", async () => {
+  let attempts = 0;
+  const view = lazyView(async () => {
+    attempts += 1;
+    if (attempts < 3) throw new Error("chunk missing");
+    return moduleOf(Modal);
+  }, { label: "Board", retryDelaysMs: [1, 1] });
+  const { root, unmount } = mount(view.component, () => ({ open: true }));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  await settle();
+  assert.equal(attempts, 3);
+  assert.ok(find(root, (node) => node.kind === "main"));
+  assert.equal(failureOf(root), null);
+  unmount();
+});
+
+test("a chunk that stays missing shows the error toast, and its button tries again", async () => {
+  let missing = true;
+  let attempts = 0;
+  const view = lazyView(async () => {
+    attempts += 1;
+    if (missing) throw new Error("chunk missing");
+    return moduleOf(Modal);
+  }, { label: "Settings", retryDelaysMs: [1] });
+  const { root, unmount } = mount(view.component, () => ({ open: true }));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await settle();
+  assert.equal(attempts, 2, "one load and one retry, then it stops");
+  const failure = failureOf(root);
+  assert.ok(failure, "the failure is visible");
+  assert.equal(failure.props.class, "desktop-action-toast");
+  assert.equal(failure.props["data-state"], "error");
+  assert.match(textOf(failure), /Settings did not load\. Click to try again, or restart LetAgents\./);
+
+  missing = false;
+  (failure.props.onClick as () => void)();
+  await settle();
+  assert.equal(failureOf(root), null);
+  assert.ok(find(root, (node) => node.kind === "main"));
+  unmount();
+});
+
+test("the first-run wizard keeps the launch splash while it loads, and shows the failure over it", async () => {
+  const Splash = defineComponent({ render: () => h("section", { class: "desktop-launch-splash" }) });
+  const view = lazyView(async () => { throw new Error("chunk missing"); }, {
+    label: "Setup",
+    loading: () => h(Splash),
+    retryDelaysMs: [],
+  });
+  const { root, unmount } = mount(view.component, () => ({}));
+  assert.ok(find(root, (node) => node.kind === "section"), "the splash is drawn at once");
+  assert.equal(failureOf(root), null);
+  await settle();
+  assert.ok(find(root, (node) => node.kind === "section"), "the splash stays under the failure");
+  assert.match(textOf(failureOf(root)!), /Setup did not load/);
+  unmount();
+});
+
+test("App.vue builds the first-run wizard with the launch splash and the failure path", () => {
+  const app = readFileSync(new URL("../src/App.vue", import.meta.url), "utf8");
+  assert.match(app, /const FirstRunOnboardingView = lazyView\(\(\) => import\("\.\/components\/desktop\/setup\/FirstRunOnboardingView\.vue"\), \{\s*label: "Setup",\s*loading: \(\) => h\(FirstRunSplashView/);
 });

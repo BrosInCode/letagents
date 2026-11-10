@@ -1,4 +1,4 @@
-import { defineAsyncComponent, type Component } from "vue";
+import { defineComponent, h, onBeforeUnmount, ref, shallowRef, watch, type Component, type VNodeChild } from "vue";
 
 // Views that the first paint of a room does not need. Each one is its own chunk,
 // so the entry chunk holds only the room chat path. After the first room has
@@ -6,46 +6,146 @@ import { defineAsyncComponent, type Component } from "vue";
 // time, so a later click renders at once, exactly as with a static import.
 
 export interface LazyView<T extends Component = Component> {
+  /** Use it like the view itself: props, listeners and slots pass through. */
   component: T;
-  /** Loads and evaluates the chunk, and marks the component resolved. Never rejects. */
+  /** Loads and evaluates the chunk. Never rejects. */
   preload: () => Promise<void>;
+  /** True once the chunk has loaded. */
+  loaded: () => boolean;
 }
 
-export function lazyView<T extends Component>(loader: () => Promise<{ default: T }>): LazyView<T> {
-  // One request at a time; a failed request is forgotten, so a later mount tries again.
-  let pending: Promise<{ default: T }> | null = null;
-  const load = () => pending ??= loader().catch((error: unknown) => {
-    pending = null;
-    throw error;
+export interface LazyViewOptions {
+  /** Names the view in the failure message, for example "Settings". */
+  label: string;
+  /** Drawn while the chunk loads, and under the failure message. Nothing by default. */
+  loading?: () => VNodeChild;
+  /** Whether the view is on screen. A view mounted while closed shows no failure. */
+  visible?: (attrs: Record<string, unknown>) => boolean;
+  /** Waits before the automatic retries of a mounted view; after the last one it shows the failure. */
+  retryDelaysMs?: readonly number[];
+}
+
+export const LAZY_VIEW_RETRY_DELAYS_MS: readonly number[] = [400, 1_600];
+
+function moduleDefault<T>(loaded: { default: T } | T): T {
+  return loaded !== null && typeof loaded === "object" && "default" in loaded
+    ? (loaded as { default: T }).default
+    : loaded as T;
+}
+
+export function lazyView<T extends Component>(
+  loader: () => Promise<{ default: T }>,
+  options: LazyViewOptions,
+): LazyView<T> {
+  // Shared by every mounted copy: once any load succeeds (a mount, a retry or the
+  // idle preload), each mounted copy renders the view. A failed request is forgotten.
+  const resolved = shallowRef<T | null>(null);
+  let pending: Promise<T> | null = null;
+  const load = (): Promise<T> => {
+    if (resolved.value) return Promise.resolve(resolved.value);
+    return pending ??= loader().then((loaded) => {
+      const view = moduleDefault(loaded);
+      resolved.value = view;
+      return view;
+    }, (error: unknown) => {
+      pending = null;
+      throw error;
+    });
+  };
+  const retryDelaysMs = options.retryDelaysMs ?? LAZY_VIEW_RETRY_DELAYS_MS;
+  const visible = options.visible ?? (() => true);
+
+  const wrapper = defineComponent({
+    name: `Lazy${options.label.replace(/\W/g, "")}`,
+    inheritAttrs: false,
+    setup(_props, { attrs, slots }) {
+      const failed = ref(false);
+      let attempt = 0;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      let unmounted = false;
+      const tryLoad = (): void => {
+        if (resolved.value || unmounted) return;
+        load().catch(() => {
+          if (unmounted || resolved.value) return;
+          const delay = retryDelaysMs[attempt];
+          attempt += 1;
+          if (delay === undefined) {
+            failed.value = true;
+            return;
+          }
+          timer = setTimeout(() => {
+            timer = null;
+            tryLoad();
+          }, delay);
+        });
+      };
+      const retry = (): void => {
+        if (timer) clearTimeout(timer);
+        timer = null;
+        attempt = 0;
+        failed.value = false;
+        tryLoad();
+      };
+      // A view mounted while closed loads at mount; if its chunk failed for good,
+      // opening it tries again.
+      watch(() => visible(attrs), (shown) => {
+        if (shown && failed.value) retry();
+      });
+      tryLoad();
+      onBeforeUnmount(() => {
+        unmounted = true;
+        if (timer) clearTimeout(timer);
+      });
+      return () => {
+        const view = resolved.value;
+        if (view) return h(view as Component, { ...attrs }, slots);
+        const placeholder = options.loading?.() ?? null;
+        if (!failed.value || !visible(attrs)) return placeholder;
+        // The house error toast (action-toasts.css), fixed at the bottom left.
+        return [placeholder, h("div", { class: "desktop-action-toasts", role: "alert" }, [
+          h("button", {
+            type: "button",
+            class: "desktop-action-toast",
+            "data-state": "error",
+            "data-testid": "lazy-view-failed",
+            onClick: retry,
+          }, `${options.label} did not load. Click to try again, or restart LetAgents.`),
+        ])];
+      };
+    },
   });
-  const component = defineAsyncComponent(load);
+
   return {
-    component,
+    component: wrapper as unknown as T,
     async preload() {
       try {
         await load();
-        // The wrapper's own loader reuses the resolved request and records the
-        // component, so its next mount renders in the same pass, with no empty frame.
-        await (component as { __asyncLoader?: () => Promise<unknown> }).__asyncLoader?.();
       } catch {
-        // The view still loads when it is opened.
+        // The view loads again when it is opened.
       }
     },
+    loaded: () => resolved.value !== null,
   };
 }
 
-export const SettingsViewLazy = lazyView(() => import("./components/desktop/content/SettingsView.vue"));
-export const InboxViewLazy = lazyView(() => import("./components/desktop/content/InboxView.vue"));
-export const MyWorkViewLazy = lazyView(() => import("./components/desktop/content/MyWorkView.vue"));
-export const CompanyHomeLazy = lazyView(() => import("./components/desktop/content/CompanyHome.vue"));
-export const DesktopNewRoomModalLazy = lazyView(() => import("./components/desktop/content/DesktopNewRoomModal.vue"));
-export const AddAgentModalLazy = lazyView(() => import("./components/desktop/content/AddAgentModal.vue"));
-export const AgentInspectorHostLazy = lazyView(() => import("./components/desktop/content/agent-inspector/AgentInspectorHost.vue"));
-export const RoomBoardViewLazy = lazyView(() => import("./components/desktop/content/RoomBoardView.vue"));
-export const RoomActivityTabViewLazy = lazyView(() => import("./components/desktop/content/RoomActivityTabView.vue"));
-export const RoomEventsViewLazy = lazyView(() => import("./components/desktop/content/RoomEventsView.vue"));
-export const RoomMemoryViewLazy = lazyView(() => import("./components/desktop/content/RoomMemoryView.vue"));
-export const RoomDetailsViewLazy = lazyView(() => import("./components/desktop/content/RoomDetailsView.vue"));
+export const SettingsViewLazy = lazyView(() => import("./components/desktop/content/SettingsView.vue"), { label: "Settings" });
+export const InboxViewLazy = lazyView(() => import("./components/desktop/content/InboxView.vue"), { label: "Inbox" });
+export const MyWorkViewLazy = lazyView(() => import("./components/desktop/content/MyWorkView.vue"), { label: "My work" });
+export const CompanyHomeLazy = lazyView(() => import("./components/desktop/content/CompanyHome.vue"), { label: "Company home" });
+export const DesktopNewRoomModalLazy = lazyView(() => import("./components/desktop/content/DesktopNewRoomModal.vue"), { label: "New room" });
+export const AddAgentModalLazy = lazyView(() => import("./components/desktop/content/AddAgentModal.vue"), {
+  label: "Add agent",
+  // It stays mounted while closed, as before, so its open animation, focus and
+  // first-open provider choice behave as they did. Its chunk therefore loads with
+  // the first room; a failure shows only when the window is opened.
+  visible: (attrs) => attrs.open === true,
+});
+export const AgentInspectorHostLazy = lazyView(() => import("./components/desktop/content/agent-inspector/AgentInspectorHost.vue"), { label: "Agent details" });
+export const RoomBoardViewLazy = lazyView(() => import("./components/desktop/content/RoomBoardView.vue"), { label: "Board" });
+export const RoomActivityTabViewLazy = lazyView(() => import("./components/desktop/content/RoomActivityTabView.vue"), { label: "Activity" });
+export const RoomEventsViewLazy = lazyView(() => import("./components/desktop/content/RoomEventsView.vue"), { label: "Events" });
+export const RoomMemoryViewLazy = lazyView(() => import("./components/desktop/content/RoomMemoryView.vue"), { label: "Memory" });
+export const RoomDetailsViewLazy = lazyView(() => import("./components/desktop/content/RoomDetailsView.vue"), { label: "Rooms" });
 
 /** Most likely first. */
 const likelyViews: readonly LazyView[] = [
