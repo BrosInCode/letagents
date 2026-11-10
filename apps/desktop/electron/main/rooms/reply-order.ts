@@ -10,8 +10,8 @@ async function replyOrderPath(identifier: string): Promise<string> {
   return `/rooms/${encodeURIComponent(cloudRoomIdentifierForStorage(storage, identifier))}/agent-reply-order`;
 }
 
-// The room's reply order is off ("parallel") unless an admin turned it on;
-// the switch shows only that, not whether the default or a choice applies.
+// Agents answer in turns ("sequential", the default) unless an admin turned
+// that off; the switch shows only that, not whether the default or a choice applies.
 function toSettings(response: RoomAgentReplyOrderSetting): DesktopReplyOrderSettings {
   return { enabled: response.order === "sequential", can_manage: response.can_manage === true };
 }

@@ -93,7 +93,7 @@ export async function resolveMessageTargets(
   }
 
   if (options?.gif) {
-    if (!expressionSetting?.enabled) throw new RequestValidationError("expressions_disabled: GIF sending is disabled in this room. Send text instead.");
+    if (expressionSetting?.enabled === false) throw new RequestValidationError("expressions_disabled: GIF sending is disabled in this room. Send text instead.");
   }
   if (options?.reply_to_message_id && !replyToNumber) {
     throw new RequestValidationError("reply_to must be a valid message id");

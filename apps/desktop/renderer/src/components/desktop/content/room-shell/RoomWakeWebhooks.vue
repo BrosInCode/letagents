@@ -1,40 +1,46 @@
 <template>
-  <section
-    v-if="agents.length"
-    class="room-settings-section"
-    data-section="wake"
-    aria-labelledby="room-settings-heading-wake"
-    data-testid="room-wake-webhooks"
-  >
-    <h3 id="room-settings-heading-wake">Wake a bot by webhook</h3>
-    <div class="room-settings-list">
-      <div class="room-settings-row room-wake-webhooks-row">
-        <WakeWebhookSection
-          :room-id="roomIdentifier"
-          :agents="agents"
-          :rules="rules"
-          :api="api"
-          :loading="loading"
-          :error="error"
-          @changed="refresh"
-        />
+  <SmoothHeight v-if="agents.length">
+    <div class="room-settings-row" data-inline="true" data-testid="room-wake-webhooks">
+      <div class="room-settings-row-copy">
+        <p class="room-settings-row-title">Wake a bot by webhook</p>
+        <p class="room-settings-row-description">{{ WAKE_WEBHOOK_INTRO }}</p>
       </div>
+      <div class="room-settings-row-action">
+        <button
+          class="room-settings-button"
+          type="button"
+          data-testid="room-wake-webhooks-toggle"
+          :aria-expanded="expanded"
+          :aria-disabled="form.saving.value"
+          @click="toggle"
+        >{{ toggleLabel }}</button>
+      </div>
+      <WakeWebhookSection
+        class="room-wake-webhooks-body"
+        :controller="form"
+        :room-id="roomIdentifier"
+        :agents="agents"
+        :rules="rules"
+        :api="api"
+        :loading="loading"
+        :error="error"
+      />
     </div>
-  </section>
+  </SmoothHeight>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, toRef, watch } from "vue";
+import SmoothHeight from "./SmoothHeight.vue";
 import WakeWebhookSection from "../../../../../../../../shared/ui/WakeWebhookSection.vue";
 import type { WakeRule, WakeWebhookAgent, WakeWebhookApi } from "../../../../../../../../shared/wake-rules.mjs";
-import { selectOwnWakeWebhookRules } from "../../../../../../../../shared/ui/wake-webhook-form";
+import { WAKE_WEBHOOK_INTRO, useWakeWebhookForm } from "../../../../../../../../shared/ui/wake-webhook-form";
 import { desktopIpc } from "../../../../ipc/index";
 import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
 import { invalidateRoomWakeRules, useRoomWakeRules } from "../../../../composables/useRoomWakeRules";
 
+// A row of the Room settings Bot section, shown only while the person owns an agent here.
 const props = defineProps<{ roomIdentifier: string }>();
-// The Room settings rail lists this section only while the person owns an agent here (null hides it).
-const emit = defineEmits<{ summary: [summary: string | null] }>();
 
 const agents = ref<WakeWebhookAgent[]>([]);
 const loading = ref(true);
@@ -79,6 +85,17 @@ const api: WakeWebhookApi = {
     return rule;
   },
 };
+// The row's one button opens the form under it, cancels it, and dismisses
+// the secret after a save. It stays the same element, so focus stays on it.
+const form = useWakeWebhookForm({ roomId: roomIdentifier, agents, api, onChanged: refresh });
+const expanded = computed(() => form.open.value || form.revealedSecret.value !== null);
+const toggleLabel = computed(() => (form.revealedSecret.value ? "Done" : form.open.value ? "Cancel" : "Add wake-up"));
+function toggle(): void {
+  if (form.saving.value) return;
+  if (form.revealedSecret.value) form.dismissSecret();
+  else if (form.open.value) form.hide();
+  else form.show();
+}
 
 async function loadAgents(): Promise<void> {
   const version = ++generation;
@@ -102,16 +119,12 @@ function refresh(): void {
 }
 
 watch(() => props.roomIdentifier, () => { agents.value = []; void loadAgents(); }, { immediate: true, flush: "sync" });
-watch([agents, rules], ([list, all]) => {
-  if (!list.length) { emit("summary", null); return; }
-  const held = selectOwnWakeWebhookRules(all, list).filter((rule) => rule.status === "active" || rule.status === "paused").length;
-  emit("summary", held ? `${held} set` : "None");
-}, { immediate: true });
 onBeforeUnmount(() => { generation++; });
 </script>
 
 <style>
-.room-wake-webhooks-row {
-  display: block;
+/* The form, the secret and the list of wake-ups sit under the row's title and button, across both columns. */
+.room-wake-webhooks-body {
+  grid-column: 1 / -1;
 }
 </style>

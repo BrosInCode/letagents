@@ -53,7 +53,7 @@ export declare const DEFAULT_ROOM_AGENT_REPLY_ORDER: RoomAgentReplyOrder;
 
 export interface RoomAgentReplyOrderSetting {
   room_id: string;
-  /** The order that applies; "parallel" when the room has not chosen. */
+  /** The order that applies; "sequential" when the room has not chosen. */
   order: RoomAgentReplyOrder;
   /** Whether a room admin chose it, rather than the default applying. */
   chosen: boolean;
@@ -62,3 +62,5 @@ export interface RoomAgentReplyOrderSetting {
 
 /** A known order, or null when the input is not one. */
 export declare function normalizeRoomAgentReplyOrder(value: unknown): RoomAgentReplyOrder | null;
+/** The order that applies: the room's choice, or the default when it has none. */
+export declare function effectiveRoomAgentReplyOrder(value: unknown): RoomAgentReplyOrder;
