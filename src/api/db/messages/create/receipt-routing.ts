@@ -17,6 +17,7 @@ import { planJevRoutingMode, type DeferredJevRoutingPlan } from "../jev-routing-
 import { resolveMessageThreadRoutingProjection } from "../thread-routing-membership.js";
 import { planReplyTurns, releaseAgentReplyTurnHoldsTx, sequentialReplyReason, type ReleasedReplyTurn } from "../reply-turns.js";
 import type { MessageCreateTransaction } from "./types.js";
+import { effectiveRoomAgentReplyOrder } from "../../../../../shared/room-settings.mjs";
 import { insertMessageReceiptRows } from "./receipt-rows.js";
 import type { MessageRoutingContext } from "./routing-context.js";
 
@@ -389,21 +390,22 @@ export async function routeMessageToActiveSessions(
     && !isPromptOnlyAgentMessage(visibleHumanRequest.text, visibleHumanRequest.promptKind));
   const sharedHumanThread = sharedHumanThreadCandidate && freshHumanRequest;
   // Several agents woken by one broadcast or small-room message answer
-  // one after another only in a room whose admin turned sequential replies
-  // on (NULL is parallel). The setting is read only when the receipts
-  // could be sequenced at all.
+  // one after another unless the room's admin turned that off ('parallel';
+  // NULL is the sequential default). The setting is read only when the
+  // receipts could be sequenced at all.
   const sequenceCandidate = routedReceipts.length >= 2
     && routedReceipts.every((receipt) => sequentialReplyReason(receipt.activation_reason, sharedHumanThread));
   const [replyOrder] = sequenceCandidate
     ? await tx.select({ order: room_settings.agent_reply_order })
       .from(room_settings).where(eq(room_settings.room_id, roomId)).for("share")
     : [];
+  const sequential = sequenceCandidate && effectiveRoomAgentReplyOrder(replyOrder?.order) === "sequential";
   const receiptRowsToInsert = planReplyTurns(routedReceipts, {
     messageNumber: createdMessage.number,
     timestamp: createdMessage.timestamp,
-    sequential: sequenceCandidate && replyOrder?.order === "sequential",
+    sequential,
     sharedHumanThread,
-    readySessionIds: replyOrder?.order === "sequential"
+    readySessionIds: sequential
       ? await getReplyTurnReadySessions(tx, roomId, routedReceipts.map(receipt => receipt.agent_session_id))
       : undefined,
   });

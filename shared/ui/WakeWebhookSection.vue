@@ -1,9 +1,6 @@
 <template>
   <div v-if="agents.length" class="wake-webhook" data-testid="wake-webhook-section">
-    <p class="wake-webhook-intro">
-      LetAgents sends a signed POST to the receiver's URL each time a room message is for the agent.
-      Set it here instead of handing the URL and key to the bot by chat.
-    </p>
+    <p v-if="!hostControlled" class="wake-webhook-intro">{{ WAKE_WEBHOOK_INTRO }}</p>
 
     <div
       v-if="form.revealedSecret.value"
@@ -20,7 +17,7 @@
         <button type="button" class="wake-webhook-button" :data-copied="copied" @click="copySecret">{{ copied ? "Copied" : "Copy" }}</button>
       </div>
       <p class="wake-webhook-secret-notice">{{ WAKE_WEBHOOK_SECRET_NOTICE }}</p>
-      <button type="button" class="wake-webhook-button" data-variant="primary" @click="form.dismissSecret()">Done</button>
+      <button v-if="!hostControlled" type="button" class="wake-webhook-button" data-variant="primary" @click="form.dismissSecret()">Done</button>
     </div>
 
     <form v-else-if="form.open.value" class="wake-webhook-form" data-testid="wake-webhook-form" novalidate @submit.prevent="submit">
@@ -79,11 +76,11 @@
       <p v-if="form.saveError.value" class="wake-webhook-error" role="alert">{{ form.saveError.value }}</p>
       <div class="wake-webhook-actions">
         <button type="submit" class="wake-webhook-button" data-variant="primary" :disabled="!form.canSubmit.value">{{ form.saving.value ? "Saving…" : "Save" }}</button>
-        <button type="button" class="wake-webhook-button" :disabled="form.saving.value" @click="form.hide()">Cancel</button>
+        <button v-if="!hostControlled" type="button" class="wake-webhook-button" :disabled="form.saving.value" @click="form.hide()">Cancel</button>
       </div>
     </form>
 
-    <button v-else type="button" class="wake-webhook-button wake-webhook-add" data-variant="primary" data-testid="wake-webhook-add" @click="form.show()">
+    <button v-else-if="!hostControlled" type="button" class="wake-webhook-button wake-webhook-add" data-variant="primary" data-testid="wake-webhook-add" @click="form.show()">
       Wake a bot by webhook
     </button>
 
@@ -121,6 +118,7 @@ import { computed, ref, toRef } from "vue";
 import type { WakeRule, WakeWebhookAgent, WakeWebhookApi } from "../wake-rules.mjs";
 import WakeWebhookRuleList from "./WakeWebhookRuleList.vue";
 import {
+  WAKE_WEBHOOK_INTRO,
   WAKE_WEBHOOK_KEY_HELP,
   WAKE_WEBHOOK_SECRET_NOTICE,
   WAKE_WEBHOOK_TEST_HELP,
@@ -128,6 +126,7 @@ import {
   useCancelledWakeWebhookRules,
   useWakeWebhookForm,
   wakeWebhookEmptyText,
+  type WakeWebhookForm,
 } from "./wake-webhook-form";
 
 const props = withDefaults(defineProps<{
@@ -141,10 +140,18 @@ const props = withDefaults(defineProps<{
   error?: string | null;
   /** Whether the host shows the section now. A host that stays mounted while shut (the web drawer) passes it, so the cancelled list is closed again on the next opening. */
   open?: boolean;
-}>(), { loading: false, error: null, open: true });
+  /**
+   * The host's own form state, for a host that shows the opening line and the
+   * buttons that open and close the form itself (Room settings puts them in
+   * its row): Add, Cancel, and Done after a save. The section then shows
+   * none of them.
+   */
+  controller?: WakeWebhookForm | null;
+}>(), { loading: false, error: null, open: true, controller: null });
 const emit = defineEmits<{ changed: [] }>();
 
-const form = useWakeWebhookForm({
+const hostControlled = props.controller !== null;
+const form = props.controller ?? useWakeWebhookForm({
   roomId: toRef(props, "roomId"),
   agents: toRef(props, "agents"),
   api: props.api,

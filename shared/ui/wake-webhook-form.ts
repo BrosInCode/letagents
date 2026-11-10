@@ -17,6 +17,8 @@ import {
 } from "../wake-rules.mjs";
 
 export const WAKE_WEBHOOK_SECRET_CHARS = 32;
+/** What a webhook wake-up does: the section's opening line, or the description of the host's row. */
+export const WAKE_WEBHOOK_INTRO = "LetAgents sends a signed POST to the receiver's URL each time a room message is for the agent. Set it here instead of handing the URL and key to the bot by chat.";
 /** The help text under the key field. */
 export const WAKE_WEBHOOK_KEY_HELP = "The receiver's sender key, sent as Authorization: Bearer. Grok Bot routines need one.";
 /** Shown with the secret, once. */

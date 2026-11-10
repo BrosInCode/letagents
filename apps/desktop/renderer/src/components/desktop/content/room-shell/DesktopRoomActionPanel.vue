@@ -104,18 +104,41 @@
               </button>
             </div>
           </div>
-
-          <div v-if="cloudRoom" class="room-settings-row room-invite-bot-row" data-testid="desktop-room-invite-bot">
-            <div class="room-settings-row-copy">
-              <p class="room-settings-row-title">Invite a bot</p>
-              <p class="room-settings-row-description">One message for the bot's owner. Their bot connects, joins this room and is guided from there.</p>
-            </div>
-            <InviteBotSection :room="inviteBotRoom" :admin="room.role === 'admin'" />
-          </div>
         </div>
       </section>
 
       <RoomMembers v-if="cloudRoom" :room-identifier="room.identifier" @summary="membersSummary = $event" />
+
+      <section v-if="cloudRoom" class="room-settings-section" data-section="bot" aria-labelledby="room-settings-heading-bot">
+        <h3 id="room-settings-heading-bot">Bot</h3>
+        <div class="room-settings-list">
+          <SmoothHeight>
+            <div class="room-settings-row" data-inline="true" data-testid="desktop-room-invite-bot">
+              <div class="room-settings-row-copy">
+                <p class="room-settings-row-title">Invite a bot</p>
+                <p class="room-settings-row-description">One message for the bot's owner. Their bot connects, joins this room and is guided from there.</p>
+              </div>
+              <div class="room-settings-row-action">
+                <button
+                  class="room-settings-button"
+                  type="button"
+                  data-testid="desktop-room-invite-bot-toggle"
+                  :aria-expanded="inviteBot.open.value"
+                  @click="inviteBot.open.value ? inviteBot.close() : inviteBot.show()"
+                >{{ inviteBot.open.value ? "Close" : "Create invite" }}</button>
+              </div>
+              <InviteBotSection
+                v-if="inviteBot.open.value"
+                class="room-invite-bot-body"
+                :controller="inviteBot"
+                :room="inviteBotRoom"
+                :admin="room.role === 'admin'"
+              />
+            </div>
+          </SmoothHeight>
+          <RoomWakeWebhooks :room-identifier="room.identifier" />
+        </div>
+      </section>
 
       <section
         v-if="cloudRoom"
@@ -133,8 +156,6 @@
       </section>
 
       <RoomTrackerFilters v-if="cloudRoom" :room-identifier="room.identifier" @summary="ticketsSummary = $event" />
-
-      <RoomWakeWebhooks v-if="cloudRoom" :room-identifier="room.identifier" @summary="wakeSummary = $event" />
 
       <section class="room-settings-section" data-section="guidelines" aria-labelledby="room-settings-heading-guidelines">
         <h3 id="room-settings-heading-guidelines">Guidelines</h3>
@@ -376,7 +397,7 @@
 
 <script setup lang="ts">
 import RoomNotificationSettings from "./RoomNotificationSettings.vue";
-import { Bell, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, Ticket, Users, Webhook, X } from "@lucide/vue";
+import { Bell, Bot, Check, Copy, Database, Download, FileText, GitBranch, MessageSquare, SlidersHorizontal, Ticket, Users, X } from "@lucide/vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
 import RoomAgentGuidelines from "./RoomAgentGuidelines.vue";
 import RoomConversationRouting from "./RoomConversationRouting.vue";
@@ -391,7 +412,7 @@ import SmoothHeight from "./SmoothHeight.vue";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import { usePinnedMessageVisibility } from "../../../../../../../../shared/ui/usePinnedMessageVisibility";
 import InviteBotSection from "../../../../../../../../shared/ui/InviteBotSection.vue";
-import type { InviteBotRoom } from "../../../../../../../../shared/ui/invite-bot";
+import { useInviteBot, type InviteBotRoom } from "../../../../../../../../shared/ui/invite-bot";
 import { remoteConnectorUrl } from "../../settings/connectors";
 import { useSectionScrollSpy } from "./useSectionScrollSpy";
 import type {
@@ -454,13 +475,11 @@ const replyOrderSummary = ref<string | null>(null);
 const guidelinesSummary = ref<string | null>(null);
 // Null while the Ticket filters block shows nothing (no filter and no tracker connection).
 const ticketsSummary = ref<string | null>(null);
-// Null while the webhook wake-up block shows nothing (the person owns no agent in this room).
-const wakeSummary = ref<string | null>(null);
 // Null while the Members block shows nothing (a server without members, or not a member).
 const membersSummary = ref<string | null>(null);
 const contentElement = ref<HTMLElement | null>(null);
 
-type SectionId = "general" | "members" | "conversation" | "tickets" | "wake" | "guidelines" | "data" | "alerts" | "github";
+type SectionId = "general" | "members" | "bot" | "conversation" | "tickets" | "guidelines" | "data" | "alerts" | "github";
 type StorageChoice = "inherit" | "cloud" | "local";
 interface SectionLink {
   id: SectionId;
@@ -484,6 +503,8 @@ const inviteBotRoom = computed<InviteBotRoom>(() => ({
   gitRoom: props.room.gitRoom !== null,
   connectorUrl: remoteConnectorUrl(props.apiUrl),
 }));
+// The row's own button opens and closes the invite under it.
+const inviteBot = useInviteBot({ room: inviteBotRoom });
 
 const shortRoomUrl = computed(() => {
   try {
@@ -682,6 +703,7 @@ const sections = computed<SectionLink[]>(() => {
     cloudRoom.value && membersSummary.value
       ? { id: "members", title: "Members", icon: Users, summary: membersSummary.value }
       : null,
+    cloudRoom.value ? { id: "bot", title: "Bot", icon: Bot, summary: null } : null,
     cloudRoom.value
       ? {
           id: "conversation",
@@ -692,9 +714,6 @@ const sections = computed<SectionLink[]>(() => {
       : null,
     cloudRoom.value && ticketsSummary.value
       ? { id: "tickets", title: "Tickets", icon: Ticket, summary: ticketsSummary.value }
-      : null,
-    cloudRoom.value && wakeSummary.value
-      ? { id: "wake", title: "Wake-ups", icon: Webhook, summary: wakeSummary.value }
       : null,
     { id: "guidelines", title: "Guidelines", icon: FileText, summary: cloudRoom.value ? guidelinesSummary.value : null },
     {
@@ -824,8 +843,8 @@ function discardRenameOnEscape(event: KeyboardEvent): void {
 </script>
 
 <style>
-/* The row's own class alone ties with .room-settings-row's grid; the pair wins. */
-.room-settings-row.room-invite-bot-row {
-  display: block;
+/* The open invite sits under the row's title and button, across both columns. */
+.room-invite-bot-body {
+  grid-column: 1 / -1;
 }
 </style>

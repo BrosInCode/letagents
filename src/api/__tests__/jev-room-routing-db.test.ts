@@ -72,8 +72,11 @@ function hint(keys: string[]): import("../db/messages/jev-routing-hint.js").JevC
     confidence: 0.9, respondByAgentKey: {}, candidateAgentKeys: keys, latencyMs: 1 };
 }
 
-test("default off and deterministic paths never enqueue; opt-in is room scoped and atomic", skip, async () => {
+test("new rooms start on; a room turned off and deterministic paths never enqueue; the switch is room scoped and atomic", skip, async () => {
   const a = await seed();
+  const stored = await client!.pool.query("SELECT jev_routing_enabled FROM rooms WHERE id = $1", [a.room.id]);
+  assert.equal(stored.rows[0]!.jev_routing_enabled, true, "rooms made since migration 0145 start on");
+  await a.enable(false);
   await a.send("Who can help with the design?");
   assert.equal((await worker!.claimJevRoutingJobs()).length, 0);
   await a.enable(true);
@@ -83,6 +86,7 @@ test("default off and deterministic paths never enqueue; opt-in is room scoped a
   await a.send("Thanks for the update", { source: "agent", publisher_agent_key: a.sessions[0]!.agent_key,
     publisher_agent_session_id: a.sessions[0]!.session_id });
   const b = await seed("other-room");
+  await b.enable(false);
   await b.send("Who can help with the design?");
   assert.equal((await worker!.claimJevRoutingJobs()).length, 0);
   await assert.rejects(a.send("roll back this send", {
@@ -166,7 +170,7 @@ test("room/global disable and malformed provider answers use fallback without ex
   } finally { globalThis.fetch = originalFetch; }
 });
 
-test("routing setting is admin-only, canonical and disabled by default", skip, async () => {
+test("routing setting is admin-only, canonical and on in a new room", skip, async () => {
   const a = await seed();
   const { registerConversationRoutingRoutes } = await import("../routes/rooms/conversation-routing.js");
   const { requireAdmin, requireParticipant, resolveProjectRole } = await import("../rooms/access.js");
@@ -182,7 +186,8 @@ test("routing setting is admin-only, canonical and disabled by default", skip, a
       sessionAccount: accountId ? { account_id: accountId, provider: "github", login: accountId } : null }, res);
     return res;
   };
-  assert.deepEqual((await request("get", a.ownerId)).body, { enabled: false, available: true, can_manage: true });
+  assert.deepEqual((await request("get", a.ownerId)).body, { enabled: true, available: true, can_manage: true });
+  assert.equal((await request("patch", a.ownerId, { enabled: false })).body.enabled, false);
   assert.equal((await request("patch", null, { enabled: true })).statusCode, 401);
   assert.equal((await request("patch", "not-admin", { enabled: true })).statusCode, 403);
   assert.equal((await request("patch", a.ownerId, { enabled: true }, "agent_session")).statusCode, 403);
@@ -251,9 +256,9 @@ test("shadow evaluations never hold the worker frontier", skip, async () => {
   assert.equal((await api!.getLatestMessages(a.room.id, { wait_for_routing: true })).messages.at(-1)?.id, sent.message.id);
 });
 
-test("a Jev election answers in turns only in a room set to sequential", skip, async () => {
+test("a Jev election answers in turns unless the room chose parallel", skip, async () => {
   const settings = await import("../db/room-settings.js");
-  for (const order of ["sequential", null] as const) {
+  for (const order of ["sequential", null, "parallel"] as const) {
     const a = await seed(`turns-${order ?? "default"}`);
     if (order) await settings.setRoomAgentReplyOrder(a.room.id, order);
     await connect(a);
@@ -275,9 +280,9 @@ test("a Jev election answers in turns only in a room set to sequential", skip, a
     )).rows;
     assert.ok(receipts.every((row) => row.activation_reason === "jev_routed"));
     const indexOf = (key: string) => a.sessions.findIndex((session) => session.agent_key === key);
-    if (!order) {
+    if (order === "parallel") {
       assert.deepEqual(receipts.map((row) => [row.turn_position, row.released]), [[null, false], [null, false], [null, false]],
-        "a room with no setting stays parallel");
+        "a room whose admin turned turns off stays parallel");
       for (const index of [1, 2, 3]) assert.deepEqual(await read(index), [asked.message.id]);
       continue;
     }
