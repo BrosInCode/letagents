@@ -6,6 +6,7 @@ import { memberRoomIdsForAccount } from "../db/room-members.js";
 import { isRepoBackedRoomId } from "../rooms/room-ids.js";
 import {
   account_room_recents,
+  id_sequences,
   messages,
   project_admins,
   room_agent_sessions,
@@ -356,11 +357,18 @@ export async function getAccountRoomsForAccount(
 /**
  * Each room's newest message that its members can see, as the room list reports it.
  *
- * One backward walk of messages_pk (room_id, number) per room, stopping at the
- * first visible message, so the cost follows the number of rooms, not their
- * history. The highest visible number also has the latest visible timestamp:
- * a message takes its timestamp after it holds its room's number-sequence row
- * lock, which the previous message released only at commit.
+ * The id is the highest visible number: one backward walk of messages_pk
+ * (room_id, number) per room, stopping at the first visible message.
+ *
+ * The time is the latest visible timestamp. Numbers come from the room's
+ * `messages:<roomId>` counter, and a message takes its timestamp only after it
+ * holds that counter row's lock, which the previous message keeps until it
+ * commits. So while the counter is at or above the room's top number, the
+ * highest visible number also has the latest visible timestamp. A room renamed
+ * before the counters moved with the room (or any room whose counter is
+ * missing or behind) can hand out a vacant LOWER number to a NEWER message;
+ * for such a room the time is MAX(timestamp) over its visible messages, the
+ * same scan as before, so the answer matches the old aggregate exactly.
  */
 export async function latestMessagesForRooms(roomIds: string[]): Promise<Map<string, LatestRoomMessage>> {
   const uniqueRoomIds = [...new Set(roomIds.filter(Boolean))];
@@ -371,7 +379,20 @@ export async function latestMessagesForRooms(roomIds: string[]): Promise<Map<str
     .select({
       room_id: sql<string>`listed.room_id`,
       latest_number: sql<number | null>`latest.number`,
-      latest_message_at: sql<string | null>`latest.timestamp`,
+      // CASE evaluates the aggregate subquery only for a room whose counter
+      // is missing or behind its top number.
+      latest_message_at: sql<string | null>`CASE
+        WHEN counter.value >= (
+          SELECT ${messages.number} FROM ${messages}
+          WHERE ${messages.room_id} = listed.room_id
+          ORDER BY ${messages.number} DESC
+          LIMIT 1
+        ) THEN latest.timestamp
+        ELSE (
+          SELECT MAX(${messages.timestamp}) FROM ${messages}
+          WHERE ${messages.room_id} = listed.room_id AND ${visibleMessageCondition()}
+        )
+      END`,
     })
     .from(sql`unnest(ARRAY[${listedRoomIds}]::text[]) AS listed(room_id)
       CROSS JOIN LATERAL (
@@ -380,7 +401,8 @@ export async function latestMessagesForRooms(roomIds: string[]): Promise<Map<str
         WHERE ${messages.room_id} = listed.room_id AND ${visibleMessageCondition()}
         ORDER BY ${messages.number} DESC
         LIMIT 1
-      ) AS latest`);
+      ) AS latest
+      LEFT JOIN ${id_sequences} AS counter ON counter.name = 'messages:' || listed.room_id`);
 
   return new Map(rows.map((row) => [
     row.room_id,

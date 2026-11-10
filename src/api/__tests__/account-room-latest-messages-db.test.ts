@@ -26,7 +26,10 @@ function deps() {
   return {
     db: dbClientModule.db,
     pool: dbClientModule.pool,
+    addMessage: dbModule.addMessage,
     createProjectWithName: dbModule.createProjectWithName,
+    migrateGitHubRepositoryCanonicalRoom: dbModule.migrateGitHubRepositoryCanonicalRoom,
+    upsertGitHubRepositoryLink: dbModule.upsertGitHubRepositoryLink,
     messages: schemaModule.messages,
     visibleMessageCondition: visibilityModule.visibleMessageCondition,
     latestMessagesForRooms: listModule.latestMessagesForRooms,
@@ -80,6 +83,27 @@ async function insertMessages(roomId: string, rows: SeedMessage[]): Promise<void
       [roomId, row.number, row.text, row.agent_prompt_kind ?? null, row.timestamp]
     );
   }
+}
+
+/** Sets the room's message counter, as nextRoomScopedNumber keeps it; null removes it. */
+async function setMessageCounter(roomId: string, value: number | null): Promise<void> {
+  const { pool } = deps();
+  await pool.query("DELETE FROM id_sequences WHERE name = $1", [`messages:${roomId}`]);
+  if (value !== null) {
+    await pool.query("INSERT INTO id_sequences (name, value) VALUES ($1, $2)", [`messages:${roomId}`, value]);
+  }
+}
+
+/** Asserts the new answer equals the previous query's answer exactly, and returns it. */
+async function assertSameAsPrevious(roomIds: string[]) {
+  const { latestMessagesForRooms } = deps();
+  const current = await latestMessagesForRooms(roomIds);
+  const previous = await previousLatestMessagesForRooms(roomIds);
+  assert.deepEqual(
+    new Map([...current].sort(([a], [b]) => a.localeCompare(b))),
+    new Map([...previous].sort(([a], [b]) => a.localeCompare(b)))
+  );
+  return current;
 }
 
 if (!requiresDatabase) {
@@ -137,13 +161,15 @@ test(
       visible.id,
     ];
 
-    const current = await latestMessagesForRooms(roomIds);
-    const previous = await previousLatestMessagesForRooms(roomIds);
+    // No counters: every room takes the exact MAX(timestamp) path.
+    await assertSameAsPrevious(roomIds);
 
-    assert.deepEqual(
-      new Map([...current].sort(([a], [b]) => a.localeCompare(b))),
-      new Map([...previous].sort(([a], [b]) => a.localeCompare(b)))
-    );
+    // Counters at the top number, as the writer leaves them: the fast path.
+    await setMessageCounter(visible.id, 3);
+    await setMessageCounter(newestHidden.id, 4);
+    await setMessageCounter(onlyHidden.id, 2);
+    await setMessageCounter(blankVisible.id, 1);
+    const current = await assertSameAsPrevious(roomIds);
 
     assert.equal(current.size, 3);
     assert.equal(current.get(visible.id)?.latest_message_id, "msg_3");
@@ -158,6 +184,92 @@ test(
     assert.equal(current.has("latest-no-such-room"), false);
 
     assert.deepEqual(await latestMessagesForRooms([]), new Map());
+  }
+);
+
+test(
+  "latestMessagesForRooms keeps MAX(timestamp) when a lower number holds a newer message",
+  { skip: requiresDatabase },
+  async () => {
+    const { createProjectWithName } = deps();
+
+    // #1 arrived after #2 (a vacant number handed out again); the counter is behind.
+    const behind = await createProjectWithName("latest-counter-behind");
+    await insertMessages(behind.id, [
+      { number: 1, text: "newer, lower number", timestamp: "2026-11-05T11:00:00.000Z" },
+      { number: 2, text: "older, higher number", timestamp: "2026-11-05T10:00:00.000Z" },
+      { number: 3, text: "", agent_prompt_kind: "auto", timestamp: "2026-11-05T10:30:00.000Z" },
+    ]);
+    await setMessageCounter(behind.id, 1);
+
+    // The same rows with no counter row at all.
+    const missing = await createProjectWithName("latest-counter-missing");
+    await insertMessages(missing.id, [
+      { number: 1, text: "newer, lower number", timestamp: "2026-11-06T11:00:00.000Z" },
+      { number: 2, text: "older, higher number", timestamp: "2026-11-06T10:00:00.000Z" },
+    ]);
+
+    const current = await assertSameAsPrevious([behind.id, missing.id]);
+    assert.equal(current.get(behind.id)?.latest_message_id, "msg_2");
+    assert.equal(Date.parse(current.get(behind.id)?.latest_message_at ?? ""), Date.parse("2026-11-05T11:00:00.000Z"));
+    assert.equal(current.get(missing.id)?.latest_message_id, "msg_2");
+    assert.equal(Date.parse(current.get(missing.id)?.latest_message_at ?? ""), Date.parse("2026-11-06T11:00:00.000Z"));
+  }
+);
+
+test(
+  "latestMessagesForRooms matches the previous query in a repo room renamed before counters moved",
+  { skip: requiresDatabase },
+  async () => {
+    const {
+      pool,
+      addMessage,
+      createProjectWithName,
+      migrateGitHubRepositoryCanonicalRoom,
+      upsertGitHubRepositoryLink,
+    } = deps();
+
+    const oldRoomId = "github.com/latest-org/old-name";
+    const newRoomId = "github.com/latest-org/new-name";
+    await createProjectWithName(oldRoomId);
+    await upsertGitHubRepositoryLink({
+      github_repo_id: "repo-latest-rename",
+      room_id: oldRoomId,
+      owner_login: "latest-org",
+      repo_name: "old-name",
+    });
+
+    assert.equal((await addMessage(oldRoomId, "agent", "", { agent_prompt_kind: "auto" })).id, "msg_1");
+    const visibleTwo = await addMessage(oldRoomId, "alice", "visible two");
+    assert.equal(visibleTwo.id, "msg_2");
+    // A new blank auto prompt from the same sender removes the earlier one (#1).
+    assert.equal((await addMessage(oldRoomId, "agent", "", { agent_prompt_kind: "auto" })).id, "msg_3");
+    const { rows: remaining } = await pool.query(
+      "SELECT number FROM messages WHERE room_id = $1 ORDER BY number",
+      [oldRoomId]
+    );
+    assert.deepEqual(remaining.map((row) => row.number), [2, 3]);
+
+    await migrateGitHubRepositoryCanonicalRoom({
+      github_repo_id: "repo-latest-rename",
+      owner_login: "latest-org",
+      repo_name: "new-name",
+    });
+    // Before #1917 a rename left the counter under the old room id. Put it back
+    // there to reproduce a room renamed by that code.
+    await pool.query("UPDATE id_sequences SET name = $1 WHERE name = $2", [
+      `messages:${oldRoomId}`,
+      `messages:${newRoomId}`,
+    ]);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const newerOne = await addMessage(newRoomId, "alice", "newer visible message");
+    assert.equal(newerOne.id, "msg_1", "the renamed room reuses the vacant number 1");
+    assert.ok(Date.parse(newerOne.timestamp) > Date.parse(visibleTwo.timestamp));
+
+    const current = await assertSameAsPrevious([newRoomId]);
+    assert.equal(current.get(newRoomId)?.latest_message_id, "msg_2");
+    assert.equal(Date.parse(current.get(newRoomId)?.latest_message_at ?? ""), Date.parse(newerOne.timestamp));
   }
 );
 
@@ -180,8 +292,10 @@ test(
          FROM generate_series(1, 3000) AS n`,
         [room.id]
       );
+      await setMessageCounter(room.id, 3000);
     }
     await pool.query("ANALYZE messages");
+    await pool.query("ANALYZE id_sequences");
 
     // Capture the SQL that latestMessagesForRooms sends, then ask Postgres for its plan.
     const captured: Array<{ text: string; values: unknown[] }> = [];
@@ -208,12 +322,21 @@ test(
     const messageQueries = captured.filter((entry) => /\bmessages\b/.test(entry.text));
     assert.equal(messageQueries.length, 1, "one query reads messages");
     const [{ text, values }] = messageQueries;
-    const plan = await pool.query(`EXPLAIN ${text}`, values);
+    const plan = await pool.query(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) ${text}`, values);
     const planText = plan.rows.map((row) => row["QUERY PLAN"]).join("\n");
 
     assert.match(planText, /Index Scan Backward using messages_pk on messages/, planText);
     assert.match(planText, /Limit/, planText);
     assert.doesNotMatch(planText, /Seq Scan on messages/, planText);
-    assert.doesNotMatch(planText, /Bitmap Heap Scan on messages/, planText);
+    // With healthy counters every read of messages that runs is a backward walk
+    // of messages_pk; the exact MAX(timestamp) fallback never runs.
+    const messageReads = planText.split("\n").filter((line) => / on messages\b/.test(line));
+    assert.ok(messageReads.length > 0, planText);
+    for (const line of messageReads) {
+      assert.ok(
+        /Backward using messages_pk on messages/.test(line) || /\(never executed\)/.test(line),
+        `unexpected read of messages:\n${line}\n\n${planText}`
+      );
+    }
   }
 );
