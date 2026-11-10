@@ -1,9 +1,10 @@
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { asc, eq, inArray, sql } from "drizzle-orm";
 
 import { defaultRoomDisplayName, generateRoomDisplayName, normalizeRoomDisplayName } from "../rooms/display-name.js";
 import { isJoinCodeShape, isReservedMainRoomCreationId } from "../rooms/room-nature.js";
 import { normalizeRoomId, normalizeRoomName } from "../rooms/routing.js";
 import { db } from "./client.js";
+import { findFocusRoomRowByKey } from "./focus-room-lookup.js";
 import { ensureGitHubRepoRoomBinding } from "./git-room-bindings.js";
 import {
   agent_asks,
@@ -206,17 +207,14 @@ export async function getGitChildRoom(input: {
   parentRoomId: string;
   focusKey: string;
 }): Promise<Project | undefined> {
-  const [fallback] = await db
-    .select()
-    .from(rooms)
-    .where(and(
-      eq(rooms.parent_room_id, input.parentRoomId),
-      eq(rooms.focus_key, input.focusKey),
-      eq(rooms.kind, "focus")
-    ))
-    .limit(1);
+  // Archived rooms count: a branch room is reopened, never recreated.
+  const row = await findFocusRoomRowByKey({
+    parentRoomId: input.parentRoomId,
+    focusKey: input.focusKey,
+    includeArchived: true,
+  });
 
-  return fallback ? toProject(fallback) : undefined;
+  return row ? toProject(row) : undefined;
 }
 
 export async function buildFocusRoomId(executor: RoomSequenceExecutor = db): Promise<string> {

@@ -1027,6 +1027,18 @@ jobs:
           --test
           src/api/__tests__/focus-rooms.test.ts
 
+      # Its own step: focus-rooms.test.ts drops and rebuilds the schema, so
+      # the two files must not run at the same time.
+      - name: Run focus room lookup tests
+        if: matrix.group == 3
+        timeout-minutes: 5
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          --test-concurrency=1
+          src/api/__tests__/focus-room-lookup-db.test.ts
+
       - name: Run focus lineage repair tests
         if: matrix.group == 3
         run: >-

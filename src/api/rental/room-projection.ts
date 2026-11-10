@@ -35,6 +35,7 @@ import {
 } from "../db/schema.js";
 import { isRentalParticipantProvisionableStatus } from "./room-provisioning-policy.js";
 import { buildFocusRoomId } from "../db/rooms.js";
+import { findFocusRoomRowByKey } from "../db/focus-room-lookup.js";
 
 // ===== ID helpers =====
 
@@ -183,16 +184,10 @@ export async function provisionRentalRoom(
     const parentId = session.target_room_id ?? parentRoomId;
 
     const focusKey = `rental:${sessionId}`;
-    const [existingRoom] = await tx
-      .select({ id: rooms.id })
-      .from(rooms)
-      .where(
-        and(
-          eq(rooms.parent_room_id, parentId),
-          eq(rooms.focus_key, focusKey),
-        ),
-      )
-      .limit(1);
+    const existingRoom = await findFocusRoomRowByKey(
+      { parentRoomId: parentId, focusKey, includeArchived: true },
+      tx,
+    );
 
     const roomId = existingRoom?.id ?? await buildFocusRoomId(tx);
     const now = new Date().toISOString();
