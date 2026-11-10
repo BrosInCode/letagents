@@ -315,7 +315,7 @@ async function workflowHttp(t: import("node:test").TestContext, effects: Record<
   const { registerLegacyProjectTaskRoutes } = await import("../routes/legacy/tasks.js");
   const { registerTaskLeaseActionRoute } = await import("../routes/rooms/tasks/lease-action.js");
   const { resolveCanonicalRoomRequestId, resolveRoomOrReply } = await import("../rooms/resolution.js");
-  const { requireAdmin, requireParticipant } = await import("../rooms/access.js");
+  const { requireGitRoomAdmin: requireAdmin, requireParticipant } = await import("../rooms/access.js");
   const services = await import("../server/room-services.js");
   const common = { resolveCanonicalRoomRequestId, resolveRoomOrReply, requireAdmin, requireParticipant,
     normalizeOptionalString: (v: unknown) => typeof v === "string" ? v.trim() || null : null,
