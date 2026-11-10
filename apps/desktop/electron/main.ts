@@ -1,3 +1,4 @@
+import { drainLocalAttachmentDeletions } from "./main/rooms/local-content-deletion.js";
 import { app, autoUpdater, protocol } from "electron";
 import { join } from "node:path";
 
@@ -111,6 +112,10 @@ function startDesktopApp(): void {
     startWindowsSmokeNotification();
     void backgroundStartup;
     initializeDesktopUpdates();
+    void drainLocalAttachmentDeletions().catch(() => undefined);
+    const attachmentCleanup = setInterval(() => { void drainLocalAttachmentDeletions().catch(() => undefined); }, 60_000);
+    attachmentCleanup.unref();
+    app.once("before-quit", () => clearInterval(attachmentCleanup));
     await initializeDesktopNotifications().catch((error) => {
       console.warn(`Desktop notification setup unavailable: ${error instanceof Error ? error.message : String(error)}`);
     });

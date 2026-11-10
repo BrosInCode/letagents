@@ -44,6 +44,7 @@ export function useAppRoomData(context: unknown) {
     clearSelectedSnapshotCache,
     handleMessageSent,
     handleRefreshRoom,
+    handleContentDeleted,
     handleRoomRenamed,
     handleRoomStreamEvent,
     invalidateSession,
@@ -78,7 +79,7 @@ export function useAppRoomData(context: unknown) {
     syncRoomStream: syncDesktopRoomStream,
     workers,
   });
-  Object.assign(app, { clearSelectedSnapshotCache, handleMessageSent, handleRefreshRoom, handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms, refreshSelectedSnapshot, selectedSnapshotLoading, syncSelectedRoomStream });
+  Object.assign(app, { clearSelectedSnapshotCache, handleMessageSent, handleRefreshRoom, handleContentDeleted, handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms, refreshSelectedSnapshot, selectedSnapshotLoading, syncSelectedRoomStream });
 
   const authSnapshotPending = computed(() =>
     isAuthSnapshotPending({
@@ -91,7 +92,7 @@ export function useAppRoomData(context: unknown) {
     clearLiveMetadataRefreshInterval, clearLiveMetadataRefreshTimer, clearSelectedRoomAgentWork,
     invalidateSelectedRoomAgentWork, refreshSelectedRoomLiveMetadata, roomAgentWork,
     roomAgentWorkStatus, roomAgentWorkTruncated, scheduleLiveMetadataRefresh,
-    syncDesktopRoomStream, clearSelectedSnapshotCache, handleMessageSent, handleRefreshRoom,
+    syncDesktopRoomStream, clearSelectedSnapshotCache, handleMessageSent, handleRefreshRoom, handleContentDeleted,
     handleRoomRenamed, handleRoomStreamEvent, invalidateSession, refresh, refreshAccountRooms,
     refreshSelectedSnapshot, repoStatusValue, selectedSnapshotLoading, syncSelectedRoomStream,
     upsertSelectedTask, authSnapshotPending,
@@ -199,7 +200,7 @@ export function useAppRoomManagement(context: unknown) {
     archiveSidebarFocusRoom,
     archiveSidebarRoom,
     concludeSidebarFocusRoom,
-    deleteAccountRoom,
+    deleteAccountRoom, pendingRoomDeletion, confirmRoomDeletion,
     leaveAccountRoom,
     openAccountRoomFromSettings,
     refreshSettings,
@@ -245,7 +246,7 @@ export function useAppRoomManagement(context: unknown) {
     newRoomStorage, newRoomCompany, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
     pickNewProjectParent, openSuccessRoom, retryLastAction, selectNewRoomEntry,
     batchConcludeSidebarFocusRooms, batchHideSidebarRooms, batchSetSidebarRoomsPinned,
-    archiveSidebarFocusRoom, archiveSidebarRoom, concludeSidebarFocusRoom, deleteAccountRoom,
+    archiveSidebarFocusRoom, archiveSidebarRoom, concludeSidebarFocusRoom, deleteAccountRoom, pendingRoomDeletion, confirmRoomDeletion,
     leaveAccountRoom, openAccountRoomFromSettings, refreshSettings, renameSidebarRoom,
     restoreAccountRoom, settingsFeedback, settingsRoomActionBusyKey, toggleAccountRoomPin,
     togglePinSidebarRoom,

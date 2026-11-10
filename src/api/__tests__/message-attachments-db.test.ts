@@ -612,3 +612,148 @@ test("cleanup keeps a row a send attached meanwhile, and an aborted tick stops b
   assert.equal(await getMessageAttachmentUpload!(room.id, "upl_cleanup_race_second"), undefined);
   assert.ok(await getMessageAttachmentUpload!(room.id, "upl_cleanup_race_third"));
 });
+
+
+test("deletion removes a reply, repairs thread counts, and prevents replay", { skip: requiresDatabase }, async () => {
+  const { deleteRoomMessage } = await import("../db/content-deletion.js");
+  const room = await createProjectWithName!("delete-thread");
+  const root = await addMessageWithCreateStatus!(room.id, "owner", "root", { account_id: "owner" });
+  const first = await addMessageWithCreateStatus!(room.id, "owner", "first", { account_id: "owner", thread_root_message_id: root.message.id, client_message_id: "delete-replay" });
+  await addMessageWithCreateStatus!(room.id, "other", "second", { account_id: "other", thread_root_message_id: root.message.id });
+  await assert.rejects(deleteRoomMessage({ roomId: room.id, messageId: first.message.id, accountId: "other", admin: false }), /own messages/);
+  await assert.rejects(deleteRoomMessage({ roomId: room.id, messageId: root.message.id, accountId: "owner", admin: true }), /whole thread/);
+  await deleteRoomMessage({ roomId: room.id, messageId: first.message.id, accountId: "owner", admin: false });
+  const summary = await pool!.query("SELECT reply_count FROM message_thread_summaries WHERE room_id=$1", [room.id]);
+  assert.equal(summary.rows[0].reply_count, 1);
+  await assert.rejects(addMessageWithCreateStatus!(room.id, "owner", "first", { account_id: "owner", thread_root_message_id: root.message.id, client_message_id: "delete-replay" }), /permanently deleted/);
+  await deleteRoomMessage({ roomId: room.id, messageId: root.message.id, accountId: "owner", admin: true, thread: true });
+  assert.equal((await pool!.query("SELECT * FROM messages WHERE room_id=$1", [room.id])).rowCount, 0);
+  assert.equal((await pool!.query("SELECT thread_count FROM message_room_thread_stats WHERE room_id=$1", [room.id])).rows[0].thread_count, 0);
+});
+
+test("sent attachment deletion queues object cleanup and preserves its message", { skip: requiresDatabase }, async () => {
+  const { deleteRoomMessage } = await import("../db/content-deletion.js");
+  const room = await createProjectWithName!("delete-attachment");
+  await createMessageAttachmentUpload!({ upload_id: "upl_delete12345678", room_id: room.id, filename: "notes.txt", content_type: "text/plain", byte_size: 5, storage_provider: "s3", bucket: "test", object_key: "delete-test/notes", expires_at: new Date(Date.now()+60000).toISOString() });
+  const result = await addMessageWithCreateStatus!(room.id, "owner", "keep", { account_id: "owner", attachments: [{ upload_id: "upl_delete12345678" }] });
+  await deleteRoomMessage({ roomId: room.id, messageId: result.message.id, accountId: "owner", admin: false, attachmentId: "att_1" });
+  assert.equal((await pool!.query("SELECT text FROM messages WHERE room_id=$1", [room.id])).rows[0].text, "keep");
+  assert.equal((await pool!.query("SELECT * FROM message_attachments WHERE room_id=$1", [room.id])).rowCount, 0);
+  assert.equal((await pool!.query("SELECT object_key FROM attachment_deletion_queue")).rows[0].object_key, "delete-test/notes");
+});
+
+
+test("task deletion blocks active work, removes the task and rejects stale recreation and leases", { skip: requiresDatabase }, async () => {
+  const { deleteRoomTask } = await import("../db/content-deletion.js");
+  const room = await createProjectWithName!("delete-task");
+  const task = await dbModule!.createTask(room.id, "Delete me", "owner", undefined, undefined, { clientTaskId: "delete-task-key" });
+  await pool!.query("UPDATE tasks SET status='in_progress' WHERE room_id=$1", [room.id]);
+  await assert.rejects(deleteRoomTask(room.id, task.id), /Cancel the task/);
+  await pool!.query("UPDATE tasks SET status='cancelled' WHERE room_id=$1", [room.id]);
+  await deleteRoomTask(room.id, task.id);
+  assert.equal((await dbModule!.getTasks(room.id)).tasks.length, 0);
+  await assert.rejects(dbModule!.createTask(room.id, "Delete me", "owner", undefined, undefined, { clientTaskId: "delete-task-key" }));
+  const { createTaskLease } = await import("../db/coordination/task-leases.js");
+  await assert.rejects(createTaskLease({ room_id: room.id, task_id: task.id, kind: "review", agent_key: "reviewer", actor_label: "reviewer", created_by: "owner" }), (error: any) => error.cause?.message === "Task no longer exists.");
+});
+
+test("room deletion removes child rooms and all content, queues pending files and prevents auto recreation", { skip: requiresDatabase }, async () => {
+  const { deleteRoomData } = await import("../db/content-deletion.js");
+  const room = await createProjectWithName!("delete-room");
+  await pool!.query("INSERT INTO rooms(id,display_name,kind,parent_room_id,focus_key,focus_status,created_at) VALUES ('focus_999','Child','focus',$1,'delete-child','active',now())", [room.id]);
+  const root = await addMessage!(room.id, "owner", "root");
+  await addMessage!(room.id, "owner", "reply", { thread_root_message_id: root.id });
+  await addMessage!("focus_999", "owner", "child");
+  await createMessageAttachmentUpload!({ upload_id: "upl_room_delete", room_id: "focus_999", filename: "notes.txt", content_type: "text/plain", byte_size: 5, storage_provider: "s3", bucket: "test", object_key: "delete-room/pending", expires_at: new Date(Date.now()+60000).toISOString() });
+  await deleteRoomData(room.id);
+  assert.equal((await pool!.query("SELECT * FROM rooms")).rowCount, 0);
+  assert.equal((await pool!.query("SELECT * FROM messages")).rowCount, 0);
+  assert.equal((await pool!.query("SELECT * FROM message_thread_summaries")).rowCount, 0);
+  assert.equal((await pool!.query("SELECT * FROM attachment_deletion_queue")).rows[0].object_key, "delete-room/pending");
+  await assert.rejects(createProjectWithName!("delete-room"));
+});
+
+
+test("message deletion rejects active agent work and releases after acknowledgement", { skip: requiresDatabase }, async () => {
+  const { deleteRoomMessage } = await import("../db/content-deletion.js");
+  const room = await createProjectWithName!("delete-busy-message");
+  const message = await addMessage!(room.id, "owner", "working");
+  await pool!.query(`INSERT INTO message_agent_receipts(id,message_room_id,message_number,room_id,agent_session_id,agent_key,actor_label,activation_reason,receipt_state,created_at,updated_at) VALUES ('busy-receipt',$1,1,$1,'busy-session','busy-agent','Agent','mention','responding',now(),now())`, [room.id]);
+  await assert.rejects(deleteRoomMessage({ roomId: room.id, messageId: message.id, accountId: "owner", admin: true }), /Stop the agents/);
+  await pool!.query("UPDATE message_agent_receipts SET receipt_state='replied' WHERE id='busy-receipt'");
+  await deleteRoomMessage({ roomId: room.id, messageId: message.id, accountId: "owner", admin: true });
+  assert.equal((await pool!.query("SELECT * FROM message_agent_receipts")).rowCount, 0);
+});
+
+
+test("message deletion revokes summaries and pending notifications before rebuilding history", { skip: requiresDatabase }, async () => {
+  const { deleteRoomMessage } = await import("../db/content-deletion.js");
+  const history = await import("../history-summary/store.js");
+  const room = await createProjectWithName!("delete-derived-history");
+  const message = await addMessage!(room.id, "owner", "private text to remove");
+  await history.startOrWakeRoomHistory(room.id);
+  const [claim] = await history.claimRoomHistoryRooms(1);
+  await history.ingestRoomHistoryMessages(claim);
+  assert.ok((await pool!.query("SELECT * FROM room_history_summary_nodes WHERE room_id=$1", [room.id])).rowCount);
+  await pool!.query(`INSERT INTO agent_wake_rules (id,room_id,agent_key,agent_name,event,arguments,identity_key,cursor_at,created_at,updated_at,delivery_kind,delivery_target)
+    VALUES ('delete-rule',$1,'agent','Agent','room.message','{}','delete-rule',now(),now(),now(),'webhook','{"sealed":"unused"}')`, [room.id]);
+  await pool!.query(`INSERT INTO wake_webhook_deliveries (id,rule_id,room_id,message_number,sender,text_preview,state,scheduled_at,next_attempt_at,created_at,updated_at)
+    VALUES ('delete-delivery','delete-rule',$1,1,'owner','private text to remove','processing',now(),now(),now(),now())`, [room.id]);
+  await assert.rejects(deleteRoomMessage({ roomId: room.id, messageId: message.id, accountId: "owner", admin: true }), /notification/);
+  await pool!.query("UPDATE wake_webhook_deliveries SET state='retry' WHERE id='delete-delivery'");
+  await deleteRoomMessage({ roomId: room.id, messageId: message.id, accountId: "owner", admin: true });
+  assert.equal((await pool!.query("SELECT * FROM room_history_summary_nodes WHERE room_id=$1", [room.id])).rowCount, 0);
+  assert.equal((await pool!.query("SELECT * FROM wake_webhook_deliveries WHERE room_id=$1", [room.id])).rowCount, 0);
+  assert.equal(await history.writeRoomHistoryLine(claim, 0, 0, "private text to remove"), false);
+  const state = (await pool!.query("SELECT claim_token,next_number,leaf_count FROM room_history_summary_state WHERE room_id=$1", [room.id])).rows[0];
+  assert.deepEqual(state, { claim_token: null, next_number: 2, leaf_count: 0 });
+});
+
+test("task deletion removes only its planning entry and advances the edit revision", { skip: requiresDatabase }, async () => {
+  const { deleteRoomTask } = await import("../db/content-deletion.js");
+  const { defaultBoardPlanning } = await import("../../../shared/board-planning.mjs");
+  const room = await createProjectWithName!("delete-planned-task");
+  const task = await dbModule!.createTask(room.id, "Delete planned task", "owner");
+  await pool!.query("UPDATE tasks SET external_ref='jira:DELETED-1' WHERE room_id=$1 AND number=$2", [room.id, Number(task.id.slice(5))]);
+  const document = { ...defaultBoardPlanning(), tasks: { [task.id]: { points: 3 }, task_999: { points: 5 } } };
+  await pool!.query("INSERT INTO room_board_planning(room_id,document,updated_by,revision) VALUES ($1,$2,'owner',7)", [room.id, document]);
+  await deleteRoomTask(room.id, task.id);
+  const result = (await pool!.query("SELECT document,revision FROM room_board_planning WHERE room_id=$1", [room.id])).rows[0];
+  const replay = await pool!.query("INSERT INTO tasks(room_id,number,title,created_by,external_ref,created_at,updated_at) VALUES ($1,99,'replayed','import','jira:DELETED-1',now(),now()) RETURNING number", [room.id]);
+  assert.equal(replay.rowCount, 0);
+  assert.equal(result.revision, 8);
+  assert.deepEqual(result.document, { ...document, tasks: { task_999: { points: 5 } } });
+});
+
+
+test("room removal requires closing agent requests and removes their retained records", { skip: requiresDatabase }, async () => {
+  const { deleteRoomData } = await import("../db/content-deletion.js");
+  const room = await createProjectWithName!("delete-asked-room");
+  const account = await dbModule!.upsertAccount({ provider: "github", provider_user_id: "delete-owner", login: "owner" });
+  await pool!.query(`INSERT INTO agent_asks(id,link_token_hash,room_id,asker_account_id,provider_id,model_label,expires_at)
+    VALUES ('delete-ask','delete-token',$1,$2,'claude-code','Claude',now()+interval '1 day')`, [room.id, account.id]);
+  await assert.rejects(deleteRoomData(room.id), /agent requests/);
+  assert.equal((await pool!.query("SELECT id FROM rooms WHERE id=$1", [room.id])).rowCount, 1);
+  await pool!.query("UPDATE agent_asks SET state='cancelled',ended_at=now() WHERE id='delete-ask'");
+  await pool!.query("INSERT INTO agent_ask_reads(id,ask_id,kind,target) VALUES ('deleted-read','delete-ask','file','README.md')");
+  await deleteRoomData(room.id);
+  assert.equal((await pool!.query("SELECT id FROM agent_asks")).rowCount, 0);
+  assert.equal((await pool!.query("SELECT id FROM agent_ask_reads")).rowCount, 0);
+});
+
+
+test("room deletion fences external actions and returns gone to stale clients", { skip: requiresDatabase }, async () => {
+  const { deleteRoomData } = await import("../db/content-deletion.js");
+  const { resolveRoomOrReply } = await import("../rooms/resolution.js");
+  const room = await createProjectWithName!("delete-effect-room");
+  await pool!.query(`INSERT INTO workflow_effects(id,room_id,task_id,kind,provider,idempotency_key,correlation_key,request_fingerprint,request_payload,
+    processing_token,processing_started_at,created_by,created_at,updated_at) VALUES ('deleting-effect',$1,'task_1','tracker_comment','jira','retry','correlation','fingerprint','{}','active',now(),'owner',now(),now())`, [room.id]);
+  await assert.rejects(deleteRoomData(room.id), /external actions/);
+  await pool!.query("UPDATE workflow_effects SET processing_token=NULL,processing_started_at=NULL WHERE id='deleting-effect'");
+  await deleteRoomData(room.id);
+  const response = { code: 200, body: null as any, status(code: number) { this.code=code; return this; }, json(body: any) { this.body=body; return this; } };
+  assert.equal(await resolveRoomOrReply(room.id, response as never, { allowCreate: true }), null);
+  assert.equal(response.code, 410);
+  assert.equal(response.body.code, "ROOM_DELETED");
+  assert.equal((await pool!.query("SELECT * FROM workflow_effects")).rowCount, 0);
+});

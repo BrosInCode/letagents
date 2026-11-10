@@ -48,6 +48,8 @@ export async function addMessageWithCreateStatus(
     // post-watermark reply. Bound that work—and every other statement in this
     // atomic send—so a pathological archive cannot wedge an API worker.
     await tx.execute(sql.raw("SET LOCAL statement_timeout = '15s'"));
+    await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(hashtextextended(${roomId}, 9510))`);
+    if (clientMessageId && (await tx.execute(sql`SELECT 1 FROM deleted_content_keys WHERE room_id=${roomId} AND kind='message' AND client_key=${clientMessageId}`)).rows.length) throw new RequestValidationError("This message was permanently deleted and cannot be replayed.");
     const targets = await resolveMessageTargets(tx, roomId, sender, text, options, clientMessageId);
     if ("replay" in targets) return targets.replay;
     const { replyToNumber, threadRootNumber } = targets;

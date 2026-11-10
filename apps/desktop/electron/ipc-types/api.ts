@@ -166,6 +166,8 @@ import type {
   DesktopBoardIntentDecisionInput,
 } from "./board-governance.js";
 
+export type DesktopContentDeletion = { kind: "message" | "thread" | "task"; id: string } | { kind: "attachment"; id: string; attachmentId: string };
+
 export interface DesktopApi {
   conversations: ConversationApi;
   organizations: DesktopOrganizationApi;
@@ -226,13 +228,14 @@ export interface DesktopApi {
     createKnowledge?: (room: string, type: KnowledgeType, input: KnowledgeInput & { client_id: string }) => Promise<KnowledgeRecord>;
     reviseKnowledge?: (room: string, type: KnowledgeType, id: string, input: KnowledgeRevisionInput) => Promise<KnowledgeRecord>;
     getMemoryHistory?: (room: string, id: string) => Promise<KnowledgePage>;
+    deleteContent: (roomIdentifier: string, input: DesktopContentDeletion) => Promise<void>;
     listAccountRooms: (options?: DesktopAccountRoomListOptions) => Promise<DesktopAccountRoomEntry[]>;
     updateAccountRoom: (
       roomIdentifier: string,
       updates: { pinned?: boolean; archived?: boolean }
     ) => Promise<DesktopAccountRoomActionResult>;
     leaveAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
-    deleteAccountRoom: (roomIdentifier: string) => Promise<DesktopAccountRoomActionResult>;
+    deleteAccountRoom: (roomIdentifier: string, confirmation: string) => Promise<DesktopAccountRoomActionResult>;
     getSnapshot: (roomIdentifier?: string | null, options?: DesktopRoomSnapshotOptions) => Promise<DesktopRoomSnapshot>;
     /**
      * Optional: absent on a stale live bridge (renderer updated before the
@@ -572,6 +575,7 @@ export interface DesktopApi {
     pickRoom: () => Promise<DesktopRepoRoomSelection>;
     pickProjectParent: () => Promise<string | null>;
     createProject: (parentPath: string, name: string) => Promise<DesktopRepoRoomSelection>;
+    disconnectProject: (id: string) => Promise<void>;
     listProjectBindings: () => Promise<DesktopProjectBinding[]>;
     migrateProjectBindings: (
       candidates: DesktopLegacyProjectBindingCandidate[],

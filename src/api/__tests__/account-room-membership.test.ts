@@ -433,6 +433,8 @@ test(
     assert.deepEqual(deleted, {
       room_id: createdInvite.id,
       deleted: true,
+      deleted_room_ids: [createdInvite.id],
+      parent_room_id: null,
     });
     assert.equal(await getProjectById(createdInvite.id), undefined);
   }

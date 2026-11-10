@@ -1,5 +1,4 @@
 import { rooms } from "../db/schema.js";
-import { isJoinCodeShape } from "../rooms/room-nature.js";
 import type {
   AccountRoomCandidate,
   AccountRoomListFocusRoom,
@@ -110,9 +109,6 @@ export function recentSourceHasDirectParentAccess(source: string | null): boolea
 export function accountRoomDeleteReason(candidate: AccountRoomCandidate): string | null {
   if (candidate.role !== "admin") {
     return "Only room admins can delete this room.";
-  }
-  if (!candidate.canDelete || !isJoinCodeShape(candidate.project.id)) {
-    return "Deletion is available only for invite rooms this account created in LetAgents.";
   }
   return null;
 }

@@ -1030,6 +1030,13 @@
       "when": 1795000300000,
       "tag": "0146_github_webhook_integrity",
       "breakpoints": true
+    },
+    {
+      "idx": 147,
+      "version": "7",
+      "when": 1795000400000,
+      "tag": "0147_content_deletion",
+      "breakpoints": true
     }
   ]
 }

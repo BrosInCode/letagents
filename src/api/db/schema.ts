@@ -36,3 +36,4 @@ export * from "./schema/demo-marks.js";
 export * from "./schema/agent-asks.js";
 export * from "./schema/remote-mcp-sessions.js";
 export * from "./schema/mcp-oauth.js";
+export * from "./schema/content-deletion.js";

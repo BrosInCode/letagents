@@ -76,6 +76,7 @@ export type DesktopRoomShellEmits = {
   "room-renamed": [room: DesktopRoomInfo];
   "task-updated": [task: DesktopTaskSummary];
   "refresh-room": [snapshot?: DesktopRoomSnapshot];
+  "content-deleted": [roomIdentifier: string];
   "open-focus-room": [roomIdentifier: string];
   "request-focus-room-conclusion": [focusRoom: DesktopFocusRoomInfo];
   "chat-scroll-position": [roomIdentifier: string, scrollTop: ChatScrollPosition];

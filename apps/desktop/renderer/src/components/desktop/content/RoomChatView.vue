@@ -226,6 +226,7 @@ import type {
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
+  DesktopRoomSnapshot,
   DesktopRoomAgentDeliveryAttention,
   DesktopRoomAgentWork,
   DesktopRoomMessageThreadSummary,
@@ -270,6 +271,8 @@ import { roomMessageRevealDestination } from "../../../domain/room-message-revea
 import { attentionResponseAgentNames, attentionResponseAgentNamesKey } from "../../../domain/attention-response";
 import { buildRoomMentionDirectory, roomMentionDirectoryKey } from "../../../domain/room-mention-links";
 import { roomThreadOpenKey, roomThreadReplyKey } from "../../../composables/roomThreadReply";
+
+import { deleteRoomContentKey } from "./room-chat/content-deletion";
 
 const props = defineProps<{
   active: boolean;
@@ -342,6 +345,7 @@ const timelineSupervisorEntries = computed<DesktopSupervisorManifestEntry[]>((pr
 const emit = defineEmits<{
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, threadRootId: string | null, complete: (sent: boolean) => void, gif?: RoomGif | null];
   "load-older": [];
+  "content-deleted": [roomIdentifier: string];
   "discard-attachment": [uploadId: string];
   "open-reasoning": [sessionId: string];
   "open-agent-reasoning-fallback": [target: AgentModalTarget];
@@ -418,6 +422,27 @@ provide(roomThreadReplyKey, (threadRootId, text, attachments) =>
   new Promise<boolean>((resolve) => sendThreadMessage(text, threadRootId, null, attachments, resolve)));
 // Its "Open thread" shows the reply it just sent.
 provide(roomThreadOpenKey, (threadRootId) => openThread(threadRootId));
+const deletingContent = ref(false);
+provide(deleteRoomContentKey, async (input) => {
+  if (!props.roomIdentifier || deletingContent.value) return;
+  const description = input.kind === "thread" ? "this entire thread, including all replies and attachments" : input.kind === "attachment" ? "this attachment from the sent message" : "this message and its attachments";
+  if (!window.confirm(`Permanently delete ${description}? This cannot be undone.`)) return;
+  deletingContent.value = true;
+  try {
+    await desktopIpc.room.deleteContent(props.roomIdentifier, input);
+    clearReplyTarget();
+    threadSummaryOverrides.value.clear();
+    openedThreadSummaries.value.clear();
+    if (input.kind === "thread" || input.id === activeThreadParentId.value) closeThread();
+    fetchedThreadRoot.value = null;
+    fetchedThreadReplies.value = [];
+    emit("content-deleted", props.roomIdentifier);
+    if (activeThreadParentId.value) await loadThread(activeThreadParentId.value);
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : "Content could not be deleted.");
+  } finally { deletingContent.value = false; }
+});
+
 const messagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.messages));
 const threadMessagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.threadMessages));
 const activeThreadParent = computed(() =>
@@ -612,7 +637,12 @@ async function loadThread(threadRootId: string): Promise<void> {
     fetchedThreadReplies.value = page.replies;
     fetchedThreadHasOlder.value = page.hasOlder;
 
-  } catch {
+  } catch (error) {
+    if (/Thread not found/.test(String(error)) && isActiveThreadContext(threadRootId, roomIdentifier, messageNamespace)) {
+      fetchedThreadRoot.value = null;
+      fetchedThreadReplies.value = [];
+      closeThread();
+    }
     // Keep the already loaded room messages usable if the thread endpoint is unavailable.
   }
 }
@@ -857,8 +887,10 @@ watch(
 watch(
   () => props.threadMessages,
   () => {
-    if (activeThreadParentId.value && !activeThreadParent.value) {
-      activeThreadParentId.value = null;
+    if (activeThreadParentId.value) {
+      threadSummaryOverrides.value.clear();
+      openedThreadSummaries.value.clear();
+      void loadThread(activeThreadParentId.value);
     }
   },
 );

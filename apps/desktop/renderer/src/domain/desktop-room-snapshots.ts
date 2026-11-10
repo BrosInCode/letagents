@@ -216,6 +216,7 @@ export function mergeRoomSnapshotMessages(
   incoming: DesktopRoomSnapshot
 ): DesktopRoomSnapshot {
   if (!current || !roomSnapshotsMatch(current, incoming)) return incoming;
+  if (["ROOM_DELETED", "ROOM_NOT_FOUND"].includes(incoming.access.code ?? "")) return incoming;
   if (shouldPreserveCurrentRoomSnapshot(current, incoming)) {
     return {
       ...current,

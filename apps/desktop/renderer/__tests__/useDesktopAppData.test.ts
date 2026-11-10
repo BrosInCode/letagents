@@ -1339,6 +1339,7 @@ function createHarness(options: {
   rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
   sessionGeneration: Ref<number>;
+  selectedRootRoomIdentifier: Ref<string | null>;
   settingsAccountRooms: Ref<DesktopAccountRoomEntry[]>;
   state: ReturnType<typeof useDesktopAppData>;
   windowBridge: object;
@@ -1356,6 +1357,7 @@ function createHarness(options: {
   const authStatus = ref<DesktopAuthStatus | null>(null);
   const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
   const sessionGeneration = ref(0);
+  const selectedRootRoomIdentifier = ref<string | null>(options.selectedRootRoomIdentifier || "room_parent");
   const getSnapshotRequests: Array<string | null> = [];
   const deliveryRepairs: Array<{ roomIdentifier: string; repair: DesktopRoomDeliveryRepair }> = [];
   const getArtifactsRequests: Array<string> = [];
@@ -1397,7 +1399,7 @@ function createHarness(options: {
     },
     sessionGeneration,
     selectedMcpTargetIds: ref<DesktopMcpInstallTargetId[]>([]),
-    selectedRootRoomIdentifier: ref(options.selectedRootRoomIdentifier || "room_parent"),
+    selectedRootRoomIdentifier,
     selectedSnapshot,
     settingsAccountRooms,
     deliveryRepairRetryMs: options.deliveryRepairRetryMs,
@@ -1461,6 +1463,7 @@ function createHarness(options: {
     rootRoomSnapshot,
     selectedSnapshot,
     sessionGeneration,
+    selectedRootRoomIdentifier,
     settingsAccountRooms,
     state,
     windowBridge: {
@@ -2567,6 +2570,55 @@ describe("useDesktopAppData snapshot reads per room switch", () => {
 
     assert.deepEqual(harness.getSnapshotRequests, ["room_b"]);
     assert.deepEqual(acks(harness), ["room_b:7"]);
+  });
+
+  it("removes deleted messages when a live gap returns an authoritative empty snapshot", async () => {
+    const simulation = await connectedSwitchSimulation("clean");
+    const { harness } = simulation;
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.activeEntry.value = parentEntryFor("room_b");
+      await simulation.settle();
+      assert.ok(harness.selectedSnapshot.value!.messages.length);
+      serveRooms(simulation, { room_b: async () => ({ ...simulatedSnapshot("room_b"), messages: [], threadMessages: [] }) });
+      simulation.emit({ type: "open", roomIdentifier: "room_b", checkpoint: null, gap: true, verified: true, deliveryRepairToken: 101 });
+      await simulation.settle();
+      assert.deepEqual(harness.selectedSnapshot.value!.messages, []);
+    });
+    simulation.dispose();
+  });
+
+  it("refreshes deleted focus-room content without changing the selected root", async () => {
+    const simulation = await connectedSwitchSimulation("clean");
+    const { harness } = simulation;
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const root = harness.rootRoomSnapshot.value;
+      const selected = harness.selectedRootRoomIdentifier.value;
+      const id = harness.selectedSnapshot.value!.roomIdentifier!;
+      serveRooms(simulation, { [id]: async () => ({ ...simulatedSnapshot(id), messages: [], threadMessages: [] }) });
+      harness.state.handleContentDeleted(id);
+      await simulation.settle();
+      assert.deepEqual(harness.selectedSnapshot.value!.messages, []);
+      assert.equal(harness.rootRoomSnapshot.value?.roomIdentifier, root?.roomIdentifier);
+      assert.equal(harness.selectedRootRoomIdentifier.value, selected);
+    });
+    simulation.dispose();
+  });
+
+  it("drops an open room's content when another client deletes the room", async () => {
+    const simulation = await connectedSwitchSimulation("clean");
+    const { harness } = simulation;
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const id = harness.selectedSnapshot.value!.roomIdentifier!;
+      const previous = simulatedSnapshot(id);
+      serveRooms(simulation, { [id]: async () => ({ ...previous, messages: [], tasks: [], room: null,
+        access: { ...previous.access, status: "unavailable", code: "ROOM_DELETED", httpStatus: 410 } }) });
+      simulation.emit({ type: "open", roomIdentifier: id, checkpoint: null, gap: true, verified: true, deliveryRepairToken: 102 });
+      await simulation.settle();
+      assert.equal(harness.selectedSnapshot.value!.access.code, "ROOM_DELETED");
+      assert.deepEqual(harness.selectedSnapshot.value!.messages, []);
+      assert.deepEqual(harness.selectedSnapshot.value!.tasks, []);
+    });
+    simulation.dispose();
   });
 
   it("still reads again when the stream reconnects after a gap", async () => {

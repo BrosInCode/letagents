@@ -386,6 +386,15 @@
             </button>
           </template>
         </template>
+        <template v-if="deleteContent && !contextLinkHref">
+          <div class="room-message-context-menu-separator" role="separator" />
+          <button type="button" role="menuitem" @click="removeContent(threadSummary.count > 0 && (!message.threadRootId || message.threadRootId === message.id) ? 'thread' : 'message')">
+            {{ threadSummary.count > 0 && (!message.threadRootId || message.threadRootId === message.id) ? 'Delete thread…' : 'Delete message…' }}
+          </button>
+          <button v-for="attachment in message.attachments" :key="attachment.id || attachment.fileName || 'file'" type="button" role="menuitem" :disabled="!attachment.id" @click="removeContent('attachment', attachment.id || undefined)">
+            Delete attachment: {{ attachment.fileName || 'file' }}…
+          </button>
+        </template>
       </div>
 
       <MessageReactionPicker
@@ -484,6 +493,14 @@ import { excludeGitHubEventLink, linkPreviewPresentation } from "../../../../../
 import { injectRoomMessagePins } from "../../../composables/useRoomMessagePins";
 import { useMessageViewer, injectRoomMessageReactions } from "../../../composables/useRoomMessageReactions";
 import { WAKE_NOTICE_SOURCE } from "../../../../../../../shared/wake-rules.mjs";
+
+import { deleteRoomContentKey } from "./room-chat/content-deletion";
+const deleteContent = inject(deleteRoomContentKey, null);
+function removeContent(kind: "message" | "thread" | "attachment", attachmentId?: string): void {
+  closeContextMenu("action");
+  if (kind === "attachment") { if (attachmentId) void deleteContent?.({ kind, id: props.message.id, attachmentId }); }
+  else void deleteContent?.({ kind, id: props.message.id });
+}
 
 const props = withDefaults(defineProps<{
   githubHistory?: boolean;
@@ -855,7 +872,8 @@ function openContextMenu(event: MouseEvent): void {
   // cover the tallest variant or the last row ("Message info") clips below
   // the viewport near the bottom edge. Message info and its separator show
   // only on your own messages, which carry a receipt.
-  const menuHeight = (linkHref ? 140 : 176 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0)) - (hasReceipt.value ? 0 : 41);
+  const deletionMenuHeight = deleteContent ? 44 + props.message.attachments.length * 36 : 0;
+  const menuHeight = deletionMenuHeight + (linkHref ? 140 : 176 + (reactable.value ? 32 : 0) + (pinnable.value ? 32 : 0)) - (hasReceipt.value ? 0 : 41);
   const clampedMenuHeight = menuHeight + (!linkHref && remindable.value ? 32 : 0) + (!linkHref && canCopyMessageLink.value ? 32 : 0)
     + (!linkHref && canMarkUnread.value ? 32 : 0);
   contextMenuPosition.value = {

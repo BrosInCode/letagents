@@ -462,3 +462,39 @@ test('Activity catchup and pagination keep unread identities and reject retired 
   release(); await oldSession
   assert.deepEqual(githubEvents.value, [], 'leaving and returning to the same room does not accept retired responses')
 })
+
+
+test('deletion gap with no new messages replaces the loaded window', async (t) => {
+  resetRoomState({ activityHistoryLoading: false, githubEventsLoading: false, connectionState: 'connecting' })
+  room.value = { identifier: 'delete_gap', kind: 'main' } as never
+  messages.value = [{ id: 'msg_1', sender: 'human', source: 'browser', text: 'deleted', timestamp: new Date().toISOString() }]
+  const controller = createRoomRefreshController({ refreshParticipants: async () => {}, refreshPresence: async () => {} })
+  const original = globalThis.fetch
+  const requests: string[] = []
+  globalThis.fetch = (async (input: any) => {
+    requests.push(String(input))
+    return new Response(JSON.stringify({ messages: [], has_more: false, has_older: false }), { headers: { 'Content-Type': 'application/json' } })
+  }) as typeof fetch
+  t.after(() => { globalThis.fetch = original; resetRoomState({ activityHistoryLoading: false, githubEventsLoading: false, connectionState: 'idle' }) })
+  assert.equal((await controller.refreshRoomMessages('msg_1', true)).success, true)
+  assert.deepEqual(messages.value, [])
+  assert.equal(requests.length, 2)
+})
+
+
+test('authoritative deletion refresh preserves a successful send arriving during its read', async (t) => {
+  resetRoomState({ activityHistoryLoading: false, githubEventsLoading: false, connectionState: 'connecting' })
+  room.value = { identifier: 'delete_race', kind: 'main' } as never
+  messages.value = [{ id: 'msg_1', sender: 'human', source: 'browser', text: 'deleted', timestamp: new Date().toISOString() }]
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const original = globalThis.fetch
+  globalThis.fetch = (async () => { await gate; return new Response(JSON.stringify({ messages: [], has_older: false }), { headers: { 'Content-Type': 'application/json' } }) }) as typeof fetch
+  t.after(() => { globalThis.fetch = original; resetRoomState({ activityHistoryLoading: false, githubEventsLoading: false, connectionState: 'idle' }) })
+  const controller = createRoomRefreshController({ refreshParticipants: async () => {}, refreshPresence: async () => {} })
+  const refresh = controller.refreshRoomMessages(null, true)
+  messages.value.push({ id: 'msg_2', sender: 'human', source: 'browser', text: 'new send', timestamp: new Date().toISOString() })
+  release()
+  assert.equal((await refresh).success, true)
+  assert.deepEqual(messages.value.map(message => message.id), ['msg_2'])
+})

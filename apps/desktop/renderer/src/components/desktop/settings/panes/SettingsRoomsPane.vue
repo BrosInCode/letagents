@@ -1,5 +1,13 @@
 <template>
   <section class="settings-panel settings-rooms-panel" data-testid="settings-rooms-panel">
+    <section v-if="projectBindings?.length && !selectedRoomDetail" class="settings-room-detail-section">
+      <h2>Connected projects</h2>
+      <p>Disconnect a saved project folder from LetAgents. Its files and Git repository stay on this computer.</p>
+      <div v-for="binding in projectBindings" :key="binding.id" class="surface-row">
+        <code>{{ binding.rootPath }}</code>
+        <button type="button" class="ghost-button" :disabled="busy" @click="$emit('disconnect-project', binding)">Disconnect project</button>
+      </div>
+    </section>
     <template v-if="selectedRoomDetail">
       <button class="settings-back-button settings-detail-back" type="button" @click="selectedRoomDetailIdentifier = null">
         <ArrowRight aria-hidden="true" />
@@ -62,8 +70,8 @@
             <dd>{{ selectedRoomDetail.focusRooms.length }}</dd>
           </div>
           <div>
-            <dt>Created</dt>
-            <dd>{{ selectedRoomDetail.canDelete ? "By you" : "Joined" }}</dd>
+            <dt>Deletion access</dt>
+            <dd>{{ selectedRoomDetail.canDelete ? "Room admin" : "Member" }}</dd>
           </div>
         </dl>
 
@@ -72,6 +80,7 @@
           <div v-if="selectedRoomDetail.focusRooms.length" class="settings-focus-list">
             <span v-for="focusRoom in selectedRoomDetail.focusRooms" :key="focusRoom.roomIdentifier">
               {{ focusRoom.displayName }}
+              <button v-if="focusRoom.role === 'admin'" type="button" class="ghost-button settings-danger-button" :disabled="busy" @click="$emit('delete-room', focusRoom)">Delete…</button>
             </span>
           </div>
           <p v-else class="settings-muted-note">No focus rooms yet.</p>
@@ -226,6 +235,7 @@ import type { SettingsFeedback, SettingsPaneId } from "../types";
 type RoomFilter = "active" | "pinned" | "created" | "joined";
 
 const props = defineProps<{
+  projectBindings?: import("../../../../../../electron/ipc-types").DesktopProjectBinding[];
   accountRooms: DesktopAccountRoomEntry[];
   activePane: SettingsPaneId;
   busy: boolean;
@@ -234,7 +244,8 @@ const props = defineProps<{
 }>();
 
 defineEmits<{
-  "delete-room": [room: DesktopAccountRoomEntry];
+  "disconnect-project": [binding: import("../../../../../../electron/ipc-types").DesktopProjectBinding];
+  "delete-room": [room: Pick<DesktopAccountRoomEntry, "roomIdentifier" | "displayName">];
   "leave-room": [room: DesktopAccountRoomEntry];
   "open-room": [room: DesktopAccountRoomEntry];
   "restore-room": [room: DesktopAccountRoomEntry];

@@ -182,6 +182,7 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       connectionState: 'idle',
     })
     connectionState.value = 'error'
+    if (error.code === 'ROOM_DELETED' || error.code === 'ROOM_NOT_FOUND') clearPersistedSession()
     joinError.value = roomJoinErrorFrom(error, current.identifier)
   })
 
