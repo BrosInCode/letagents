@@ -252,6 +252,12 @@ export function useComposerAgentDraft(options: {
     pendingCreationRequestId = null;
     void loadCatalog(providerId);
     if (providerId === "open-model") void refreshOpenModelStatus();
+    // A stale agent environment is refreshed at once, in the chip.
+    const preflight = preflights[providerId];
+    if (preflight && !preflight.canStart && preflightNoticeAction(preflight) === "check-again") {
+      noticeAction.value = "check-again";
+      void runNoticeAction();
+    }
     return "chip";
   }
 

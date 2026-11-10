@@ -167,6 +167,23 @@ test('provider checks map to chip, "Not set up" or the Add agent window', () => 
   assert.deepEqual(launch.composerAgentReadiness('open-model', pf('config_required')), { state: 'not_set_up' });
   assert.deepEqual(launch.composerAgentReadiness('open-model', pf('ready', true), { openModelConfigured: false }), { state: 'not_set_up' });
   assert.deepEqual(launch.composerAgentReadiness('codex', pf('branch_mismatch', false, 'choose_worktree')), { state: 'ready' });
+  assert.deepEqual(launch.composerAgentReadiness('codex', pf('config_required')), { state: 'ready' }, 'a stale environment is fixed in the chip');
+});
+
+test('picking a provider whose agent environment is stale adds the chip and checks again there, never the window', async t => {
+  fakeIpc({ preflight: { codex: { status: 'config_required', canStart: false, nextAction: null, message: 'Agent setup needs refreshing.', detail: null } } });
+  const { host, opened } = fakeHost();
+  const { draft } = useDraft(t, host);
+  await draft.refreshProviders();
+  const inputs: any[] = [];
+  ipc.workers.runAgentProviderPreflight = async (id: string, input: any) => { inputs.push(input); return { providerId: id, status: 'ready', canStart: true, nextAction: null }; };
+  assert.equal(draft.pick('codex'), 'chip');
+  assert.equal(draft.chip.value.providerId, 'codex');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(opened, [], 'the Add agent window stays closed');
+  assert.equal(inputs.length, 1);
+  assert.equal(inputs[0].refreshEnvironment, true);
+  assert.match(draft.notice.value, /^Codex is ready\. Press Enter to start it\.$/);
 });
 
 /* ---------- chip lifecycle ---------- */
