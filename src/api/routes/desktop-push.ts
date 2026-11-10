@@ -7,6 +7,7 @@ import { desktop_push_devices } from "../db/schema.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
 import { requireAppSession } from "../request/app-session.js";
 import { respondWithInternalError } from "../http/helpers.js";
+import { wakeJobQueue } from "../server/job-queue-wakes.js";
 
 const DESKTOP_BUNDLE_ID = "chat.letagents.desktop";
 const INSTALLATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/;
@@ -121,6 +122,8 @@ export function registerDesktopPushRoutes(app: Express): void {
         return registered;
       });
 
+      // Pushes queued for this device while it was disabled are due now; the push worker sleeps until woken.
+      wakeJobQueue("desktop_push");
       res.status(200).json({ device_id: device.id, enabled: true });
     } catch (error) {
       respondWithInternalError(res, "desktop-push-register", error, "Could not register this desktop for notifications");

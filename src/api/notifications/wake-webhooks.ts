@@ -67,8 +67,8 @@ import { wakeWebhookBearerBinding, wakeWebhookBearerHeader } from "../wake-rules
 import { authorizeDesktopPushNotification, type DesktopPushAuthorizationDecision } from "./authorization.js";
 import { retryDelayMs } from "./delivery-policy.js";
 import { getPushDeliveryAccount } from "./push-account.js";
+import { DUE_IN_MS_SQL, readDueInMs, startJobQueueLoop, type JobQueueLoop } from "../server/job-queue-wakes.js";
 
-const POLL_INTERVAL_MS = 1_000;
 export const WAKE_WEBHOOK_MAX_ATTEMPTS = 10;
 /** Deliveries of one account in flight at once, across instances. */
 export const WAKE_DELIVERY_IN_FLIGHT_PER_ACCOUNT = 3;
@@ -593,53 +593,71 @@ export async function cleanupWakeWebhookDeliveries(maxBatches = 20): Promise<num
 }
 
 /**
+ * Milliseconds until the next delivery of this kind falls due by the database
+ * clock (a retry, a scheduled or held delivery), or until a claim of any kind
+ * goes stale and may be taken back. Null when nothing waits.
+ */
+export async function nextWakeDeliveryDueInMs(kind: WakeDeliveryKind): Promise<number | null> {
+  const result = await pool.query<{ due_in_ms: unknown }>(`
+    SELECT ${DUE_IN_MS_SQL(`LEAST(
+      (SELECT min(next_attempt_at) FROM wake_webhook_deliveries
+        WHERE state IN ('queued', 'retry') AND kind = $1 AND next_attempt_at > now()),
+      (SELECT min(claimed_at) + INTERVAL '5 minutes' FROM wake_webhook_deliveries
+        WHERE state = 'processing' AND claimed_at > now() - INTERVAL '5 minutes')
+    )`)} AS due_in_ms
+  `, [kind]);
+  return readDueInMs(result.rows[0]);
+}
+
+/**
  * One lane per kind (webhook, email, MCP event), each a pool: whenever it has
  * free slots it claims that many and starts each at once, without waiting for
- * the rest.
+ * the rest. A lane claims when a transaction that queued a delivery commits
+ * (`wakeJobQueue("wake_delivery")`), when one of its deliveries finishes, when
+ * its next delivery falls due, and at the latest every fallback interval.
  */
-export function startWakeWebhookWorker(): () => Promise<void> {
+export function startWakeWebhookWorker(options: { fallbackMs?: number; deps?: WakeWebhookDeliveryDeps } = {}): () => Promise<void> {
   const workerId = randomUUID();
-  const deps = defaultWakeWebhookDeps();
+  const deps = options.deps ?? defaultWakeWebhookDeps();
   const running = new Set<Promise<void>>();
   const inLane = Object.fromEntries(LANE_KINDS.map((kind) => [kind, 0])) as Record<WakeDeliveryKind, number>;
-  const claiming = Object.fromEntries(LANE_KINDS.map((kind) => [kind, false])) as Record<WakeDeliveryKind, boolean>;
-  let stopped = false;
-  let lastCleanupAt = 0;
+  const lanes = new Map<WakeDeliveryKind, JobQueueLoop>();
 
   const fill = async (kind: WakeDeliveryKind) => {
     const free = WAKE_DELIVERY_LANES[kind] - inLane[kind];
-    if (stopped || claiming[kind] || free <= 0) return;
-    claiming[kind] = true;
-    try {
-      for (const delivery of await claimWakeWebhookDeliveries(workerId, free, kind)) {
-        inLane[kind] += 1;
-        const task: Promise<void> = deliverSafely(delivery, workerId, deps).finally(() => {
-          inLane[kind] -= 1;
-          running.delete(task);
-          void fill(kind).catch(() => undefined);
-        });
-        running.add(task);
-      }
-    } catch (error) {
-      console.error(`[wake webhooks] claim failed: ${error instanceof Error ? error.name : "error"}`);
-    } finally {
-      claiming[kind] = false;
+    // A full lane claims again when one of its deliveries finishes.
+    if (free <= 0) return {};
+    const deliveries = await claimWakeWebhookDeliveries(workerId, free, kind);
+    for (const delivery of deliveries) {
+      inLane[kind] += 1;
+      const task: Promise<void> = deliverSafely(delivery, workerId, deps).finally(() => {
+        inLane[kind] -= 1;
+        running.delete(task);
+        // The per-account cap counts deliveries of every kind, so a finished
+        // webhook may unblock an email or MCP event: every lane claims again.
+        for (const lane of lanes.values()) lane.wake();
+      });
+      running.add(task);
     }
+    if (deliveries.length === free) return {};
+    return { nextDueInMs: await nextWakeDeliveryDueInMs(kind) };
   };
-  const tick = () => {
-    if (stopped) return;
-    if (Date.now() - lastCleanupAt >= CLEANUP_INTERVAL_MS) {
-      lastCleanupAt = Date.now();
-      void cleanupWakeWebhookDeliveries().catch(() => undefined);
-    }
-    for (const kind of LANE_KINDS) void fill(kind);
-  };
-  const interval = setInterval(tick, POLL_INTERVAL_MS);
-  interval.unref();
-  tick();
+  for (const kind of LANE_KINDS) {
+    lanes.set(kind, startJobQueueLoop({
+      queue: "wake_delivery",
+      label: `wake webhooks ${kind}`,
+      fallbackMs: options.fallbackMs,
+      run: () => fill(kind),
+      logError: (error) => console.error(`[wake webhooks] claim failed: ${error instanceof Error ? error.name : "error"}`),
+    }));
+  }
+  const cleanup = () => { void cleanupWakeWebhookDeliveries().catch(() => undefined); };
+  const cleanupTimer = setInterval(cleanup, CLEANUP_INTERVAL_MS);
+  cleanupTimer.unref();
+  cleanup();
   return async () => {
-    stopped = true;
-    clearInterval(interval);
+    clearInterval(cleanupTimer);
+    await Promise.all([...lanes.values()].map((lane) => lane.stop()));
     await Promise.allSettled([...running]);
   };
 }

@@ -12,6 +12,9 @@ import {
 } from "../db/messages/jev-routing-hint.js";
 import { messageEvents } from "../server/events.js";
 import { queueMessageInfoInvalidation } from "../server/message-info-events.js";
+import { DUE_IN_MS_SQL, readDueInMs, startJobQueueLoop } from "../server/job-queue-wakes.js";
+
+const JEV_ROUTING_CLAIM_LIMIT = 8;
 
 export interface ClaimedJevRoutingJob {
   room_id: string;
@@ -28,7 +31,7 @@ export async function claimJevRoutingJobs(): Promise<ClaimedJevRoutingJob[]> {
     WITH candidates AS (
       SELECT room_id, message_number FROM ${jev_routing_jobs}
        WHERE state <> 'completed' AND available_at <= now()
-       ORDER BY available_at LIMIT 8 FOR UPDATE SKIP LOCKED
+       ORDER BY available_at LIMIT ${JEV_ROUTING_CLAIM_LIMIT} FOR UPDATE SKIP LOCKED
     )
     UPDATE ${jev_routing_jobs} j
        SET state = 'processing', claim_token = ${randomUUID()},
@@ -105,15 +108,26 @@ export async function processJevRoutingJob(job: ClaimedJevRoutingJob): Promise<v
   await completeJevRoutingJob(job, hint);
 }
 
-export function startJevRoutingWorker(): () => Promise<void> {
-  let stopped = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let running: Promise<void>;
-  async function tick(): Promise<void> {
-    let batchFull = false;
-    try {
+/** Milliseconds until the next unfinished job falls due (a retry or an expired lease), or null. */
+export async function nextJevRoutingJobDueInMs(): Promise<number | null> {
+  const result = await db.execute(sql.raw(`
+    SELECT ${DUE_IN_MS_SQL("min(available_at)")} AS due_in_ms
+      FROM jev_routing_jobs WHERE state <> 'completed' AND available_at > now()
+  `));
+  return readDueInMs(result.rows[0] as { due_in_ms?: unknown } | undefined);
+}
+
+/**
+ * Claims run when a message that queued a job commits (`wakeJobQueue`), when
+ * a lease or retry falls due, and at the latest every fallback interval.
+ */
+export function startJevRoutingWorker(options: { fallbackMs?: number } = {}): () => Promise<void> {
+  const loop = startJobQueueLoop({
+    queue: "jev_routing",
+    label: "jev routing",
+    fallbackMs: options.fallbackMs,
+    async run() {
       const jobs = await claimJevRoutingJobs();
-      batchFull = jobs.length === 8;
       await Promise.all(jobs.map(async (job) => {
         try {
           await processJevRoutingJob(job);
@@ -121,12 +135,9 @@ export function startJevRoutingWorker(): () => Promise<void> {
           console.error(`[jev routing] job failed ${job.room_id}/msg_${job.message_number}`, error);
         }
       }));
-    } catch (error) {
-      console.error("[jev routing] queue unavailable", error);
-    } finally {
-      if (!stopped) timer = setTimeout(() => { running = tick(); }, batchFull ? 0 : 250);
-    }
-  }
-  running = tick();
-  return async () => { stopped = true; clearTimeout(timer); await running; };
+      if (jobs.length === JEV_ROUTING_CLAIM_LIMIT) return { again: true };
+      return { nextDueInMs: await nextJevRoutingJobDueInMs() };
+    },
+  });
+  return loop.stop;
 }

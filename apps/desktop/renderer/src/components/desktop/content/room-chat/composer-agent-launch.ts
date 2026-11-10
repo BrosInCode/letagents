@@ -58,8 +58,10 @@ export function composerAgentReadiness(
   switch (preflight.status) {
     case "missing_runtime": return { state: "setup", word: "Install" };
     case "auth_required": return { state: "setup", word: "Sign in" };
+    // A stale agent environment or a model to change is fixed in the chip
+    // ("Check again", the model picker), so the row adds the chip.
+    case "config_required": return { state: "ready" };
     case "bridge_required":
-    case "config_required":
     case "runtime_installed": return { state: "setup", word: "Set up" };
     default:
       // A room-level step (a project, a worktree) is chosen in the chip or on Enter.
