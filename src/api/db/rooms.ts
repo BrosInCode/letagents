@@ -1,10 +1,20 @@
-import { and, asc, eq, inArray } from "drizzle-orm";
+import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import { defaultRoomDisplayName, generateRoomDisplayName, normalizeRoomDisplayName } from "../rooms/display-name.js";
 import { isInviteCode, isReservedMainRoomCreationId, normalizeRoomId, normalizeRoomName } from "../rooms/routing.js";
 import { db } from "./client.js";
 import { ensureGitHubRepoRoomBinding } from "./git-room-bindings.js";
-import { id_sequences, room_aliases, rooms } from "./schema.js";
+import {
+  agent_asks,
+  agent_wake_rules,
+  desktop_reminder_deliveries,
+  github_app_repositories,
+  id_sequences,
+  room_aliases,
+  rooms,
+  supervisor_host_grants,
+  tracker_rule_versions,
+} from "./schema.js";
 import { generateCode, getRoomScopedSequenceNames, isUniqueConstraintError, nextPrefixedId, type RoomSequenceExecutor } from "./utils.js";
 import { toProject, toRoomAlias } from "./mappers.js";
 import type { Project, RoomAlias } from "./types.js";
@@ -273,6 +283,63 @@ export async function getProjectById(id: string): Promise<Project | undefined> {
   return aliasedProject ? toProject(aliasedProject) : undefined;
 }
 
+/**
+ * Change a room's id inside the caller's transaction. Foreign keys with
+ * ON UPDATE CASCADE carry most rows along; this also moves what they cannot:
+ * the per-room message and task counters (their names embed the room id) and
+ * the columns that store a room id with no foreign key. Without the counters,
+ * numbering restarts at 1 and every new message collides with an old one.
+ */
+export async function renameRoomId(
+  tx: RoomSequenceExecutor,
+  fromRoomId: string,
+  toRoomId: string
+): Promise<void> {
+  await tx.update(rooms).set({ id: toRoomId }).where(eq(rooms.id, fromRoomId));
+
+  const fromSequences = getRoomScopedSequenceNames(fromRoomId);
+  const toSequences = getRoomScopedSequenceNames(toRoomId);
+  // No room has the new id, so a counter under that name is a leftover.
+  await tx.delete(id_sequences).where(inArray(id_sequences.name, toSequences));
+  for (const [index, fromName] of fromSequences.entries()) {
+    await tx
+      .update(id_sequences)
+      .set({ name: toSequences[index] })
+      .where(eq(id_sequences.name, fromName));
+  }
+
+  await tx
+    .update(supervisor_host_grants)
+    .set({
+      allowed_room_ids: sql`CASE
+        WHEN ${toRoomId}::text = ANY(${supervisor_host_grants.allowed_room_ids})
+          THEN array_remove(${supervisor_host_grants.allowed_room_ids}, ${fromRoomId}::text)
+        ELSE array_replace(${supervisor_host_grants.allowed_room_ids}, ${fromRoomId}::text, ${toRoomId}::text)
+      END`,
+    })
+    .where(sql`${fromRoomId}::text = ANY(${supervisor_host_grants.allowed_room_ids})`);
+  await tx.update(agent_asks).set({ room_id: toRoomId }).where(eq(agent_asks.room_id, fromRoomId));
+  await tx
+    .update(tracker_rule_versions)
+    .set({ room_id: toRoomId })
+    .where(eq(tracker_rule_versions.room_id, fromRoomId));
+  await tx
+    .update(github_app_repositories)
+    .set({ room_id: toRoomId })
+    .where(eq(github_app_repositories.room_id, fromRoomId));
+  // A task-watch rule keeps the task's room in its baseline; a stale copy
+  // never matches the task again, so the rule would never fire.
+  await tx
+    .update(agent_wake_rules)
+    .set({ baseline: sql`jsonb_set(${agent_wake_rules.baseline}, '{room_id}', to_jsonb(${toRoomId}::text))` })
+    .where(sql`${agent_wake_rules.baseline}->>'room_id' = ${fromRoomId}::text`);
+  // A queued reminder whose message is not found under its room is deleted.
+  await tx
+    .update(desktop_reminder_deliveries)
+    .set({ room_id: toRoomId })
+    .where(eq(desktop_reminder_deliveries.room_id, fromRoomId));
+}
+
 export async function rotateProjectCode(projectId: string): Promise<Project | null> {
   const project = await getProjectById(projectId);
   if (!project || !project.code) return null;
@@ -282,15 +349,7 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
 
     try {
       await db.transaction(async (tx) => {
-        await tx.update(rooms).set({ id: nextCode }).where(eq(rooms.id, projectId));
-        await tx
-          .update(id_sequences)
-          .set({ name: `messages:${nextCode}` })
-          .where(eq(id_sequences.name, `messages:${projectId}`));
-        await tx
-          .update(id_sequences)
-          .set({ name: `tasks:${nextCode}` })
-          .where(eq(id_sequences.name, `tasks:${projectId}`));
+        await renameRoomId(tx, projectId, nextCode);
       });
 
       return {

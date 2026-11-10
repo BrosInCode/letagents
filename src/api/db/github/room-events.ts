@@ -70,6 +70,9 @@ export async function insertGitHubRoomEvent(input: {
       linked_task_id: input.linked_task_id ?? null,
       created_at: now,
     })
+    // No conflict target: a racing insert with the same idempotency_key or,
+    // once the 0146 rollout built its unique index, the same semantic_id
+    // waits for the other writer and then reads that row below.
     .onConflictDoNothing()
     .returning();
 

@@ -16,6 +16,7 @@ import {
   type SessionAccount,
 } from "../db.js";
 import {
+  GitHubAccessUnavailableError,
   isGitHubRepoAdmin,
   parseGitHubRepoName,
   resolveGitHubRepoRoomAccessDecision,
@@ -250,6 +251,17 @@ export function replyRepoRoomAccessDecision(
   return false;
 }
 
+/**
+ * The answer for a GitHubAccessUnavailableError from a check that has no
+ * response of its own: the retryable 503 with Retry-After, never a refusal.
+ */
+export function replyIfGitHubAccessUnavailable(res: Response, error: unknown, roomId: string | null = null): boolean {
+  if (!(error instanceof GitHubAccessUnavailableError)) return false;
+  res.setHeader?.("Retry-After", "30");
+  res.status(503).json({ ...REPO_ACCESS_UNAVAILABLE, message: REPO_ACCESS_UNAVAILABLE_MESSAGE, room_id: roomId });
+  return true;
+}
+
 export async function resolveRepoRoomAccessDecision(input: {
   roomName: string;
   sessionAccount: RequestAccount;
@@ -325,6 +337,12 @@ async function resolveProjectRoleForAccessDecision(
       : "participant";
   }
 
+  // An admin row is never removed when someone leaves the repository, so it
+  // counts only while GitHub still admits the person to the room now.
+  if (accessDecision.decision.kind !== "allow") {
+    return "participant";
+  }
+
   if (
     (await isProjectAdmin(project.id, sessionAccount.account_id)) ||
     (accessRoomId !== project.id && (await isProjectAdmin(accessRoomId, sessionAccount.account_id)))
@@ -367,14 +385,34 @@ export async function resolveProjectRole(
 
 export async function resolveGitRoomProjectRole(
   project: Project,
-  sessionAccount: RequestAccount
+  sessionAccount: RequestAccount,
+  deps?: ProjectRepoAccessDeps,
 ): Promise<RoomRole> {
   const accessDecision = await resolveProjectRepoRoomAccessDecision({
     project,
     sessionAccount,
-  });
+  }, deps);
 
   return resolveProjectRoleForAccessDecision(project, sessionAccount, accessDecision);
+}
+
+/**
+ * Whether the account is a room admin now, for a check with no response of
+ * its own (a background job, or a route that answers its own errors). In a
+ * repo room an admin row counts only while GitHub still admits the person.
+ * When GitHub gives no answer it throws GitHubAccessUnavailableError, never
+ * "not admin": the caller retries or answers 503.
+ */
+export async function isCurrentProjectAdmin(
+  project: Project,
+  account: RequestAccount,
+  deps?: ProjectRepoAccessDeps,
+): Promise<boolean> {
+  const accessDecision = await resolveProjectRepoRoomAccessDecision({ project, sessionAccount: account }, deps);
+  if (accessDecision.isRepoBacked && accessDecision.decision.kind === "repo_access_unavailable") {
+    throw new GitHubAccessUnavailableError(null);
+  }
+  return (await resolveProjectRoleForAccessDecision(project, account, accessDecision)) === "admin";
 }
 
 /** Whether the account is a member of the project's access room (its parent, for a focus room). */
@@ -455,7 +493,8 @@ export async function requireAdmin(
 export async function requireGitRoomAdmin(
   req: AuthenticatedRequest,
   res: Response,
-  project: Project
+  project: Project,
+  deps?: ProjectRepoAccessDeps,
 ): Promise<boolean> {
   if (req.authKind === "agent_session") {
     res.status(403).json({ error: "Worker bearers cannot perform owner or admin actions." });
@@ -466,7 +505,21 @@ export async function requireGitRoomAdmin(
     return false;
   }
 
-  const role = await resolveGitRoomProjectRole(project, req.sessionAccount);
+  const accessDecision = await resolveProjectRepoRoomAccessDecision({
+    project,
+    sessionAccount: req.sessionAccount,
+  }, deps);
+  // The same answers as requireGitRoomParticipant: a refusal for someone
+  // GitHub no longer admits, and a 503 to retry when GitHub gives no answer.
+  if (accessDecision.isRepoBacked && accessDecision.decision.kind !== "allow") {
+    return replyRepoRoomAccessDecision(
+      res,
+      accessDecision.roomName ?? getProjectAccessRoomId(project),
+      accessDecision.decision,
+    );
+  }
+
+  const role = await resolveProjectRoleForAccessDecision(project, req.sessionAccount, accessDecision);
   if (role !== "admin") {
     res.status(403).json({ error: "Admin privileges required" });
     return false;
