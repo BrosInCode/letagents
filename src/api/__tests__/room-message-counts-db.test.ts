@@ -194,3 +194,55 @@ test("a change made outside the app is corrected within the full-recount bound",
     sorted(await counts!.readRoomMessageCountsBySender(room.id, start + counts!.ROOM_MESSAGE_COUNT_FULL_RECOUNT_MS)),
     await referenceCounts(room.id));
 });
+
+test("a room renamed before its counter moved with it is counted exactly", skip, async () => {
+  // Review reproduction on #1923: before #1917 a rename changed rooms.id (the
+  // messages follow by cascade) but left the counter under the old name.
+  const room = await newRoom();
+  await autoPrompt(room.id, "Agent");
+  await send(room.id, "Agent", "visible");
+  await autoPrompt(room.id, "Agent"); // deletes the first blank auto prompt
+  const renamedId = `${room.id}-renamed-before-1917`;
+  await client!.pool.query("UPDATE rooms SET id = $1 WHERE id = $2", [renamedId, room.id]);
+  const { rows: [counter] } = await client!.pool.query<{ n: number }>(
+    "SELECT COUNT(*)::int AS n FROM id_sequences WHERE name = $1", [`messages:${renamedId}`]);
+  assert.equal(counter!.n, 0, "the renamed room has no counter of its own");
+
+  assert.deepEqual(await expectMatches(renamedId), [{ actor_label: "Agent", count: 1 }]);
+  // The counter restarts at 1, below the room's highest number. Number 1 is
+  // free because the blank auto prompt that held it was deleted.
+  const message = await send(renamedId, "Agent", "after the rename");
+  assert.equal(message.id, "msg_1");
+  assert.deepEqual(await expectMatches(renamedId), [{ actor_label: "Agent", count: 2 }]);
+  assert.deepEqual(await expectMatches(renamedId), [{ actor_label: "Agent", count: 2 }]);
+});
+
+test("a healthy counter keeps the incremental path after a damaged room is repaired", skip, async () => {
+  const room = await newRoom();
+  for (let i = 0; i < 3; i++) await send(room.id, "Alice", `m${i}`);
+  await expectMatches(room.id);
+  const sequence = `messages:${room.id}`;
+  // No counter: every request counts in full and nothing is cached.
+  await client!.pool.query("DELETE FROM id_sequences WHERE name = $1", [sequence]);
+  const capture = captureQueries();
+  try {
+    await api!.getRoomMessageCountsBySender(room.id);
+    capture.seen.length = 0;
+    await api!.getRoomMessageCountsBySender(room.id);
+  } finally {
+    capture.restore();
+  }
+  const reads = capture.seen.filter(q => /count\(/i.test(q.text) && /"messages"/.test(q.text));
+  assert.equal(reads.length, 1, "one statement: nothing was cached to build on");
+  assert.ok(reads[0]!.values.includes(0) && !reads[0]!.values.includes(3), "a full count from number 0");
+  await expectMatches(room.id);
+
+  // A repaired counter at the highest number makes the room cacheable again.
+  await client!.pool.query("INSERT INTO id_sequences (name, value) VALUES ($1, 3)", [sequence]);
+  await expectMatches(room.id);
+  await send(room.id, "Bob", "m3");
+  assert.deepEqual(await expectMatches(room.id), [
+    { actor_label: "Alice", count: 3 },
+    { actor_label: "Bob", count: 1 },
+  ]);
+});
