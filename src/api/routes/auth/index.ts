@@ -1,3 +1,4 @@
+import { retireAccountCredentials } from "../../rooms/live-authorization.js";
 import crypto from "crypto";
 import type { Express } from "express";
 import { parseBearerAuthorization } from "../../request/bearer-authorization.js";
@@ -58,11 +59,14 @@ const deviceAuthClientStartWindows = new Map<string, DeviceAuthStartWindow>();
 export interface AuthLogoutRouteDeps {
   deleteOwnerTokenById: typeof deleteOwnerTokenById;
   deleteSessionByToken: typeof deleteSessionByToken;
+  /** Closes the live streams of the ended credentials. Defaults to the live-authorization event. */
+  retireCredentials?: typeof retireAccountCredentials;
 }
 
 const defaultAuthLogoutRouteDeps: AuthLogoutRouteDeps = {
   deleteOwnerTokenById,
   deleteSessionByToken,
+  retireCredentials: retireAccountCredentials,
 };
 
 function consumeWindow(
@@ -438,16 +442,23 @@ export function registerAuthLogoutRoute(
 ): void {
   app.post("/auth/logout", async (req: AuthenticatedRequest, res) => {
     const cookies = parseCookies(req.headers.cookie);
+    const retired: string[] = [];
     if (cookies.letagents_session) {
       await deps.deleteSessionByToken(cookies.letagents_session);
+      retired.push(cookies.letagents_session);
     }
     const authorization = parseBearerAuthorization(req.headers.authorization);
     if (req.authKind === "session" && authorization.kind === "token") {
       await deps.deleteSessionByToken(authorization.token);
+      retired.push(authorization.token);
     }
     if (req.authKind === "owner_token" && req.sessionAccount && "token_id" in req.sessionAccount) {
       await deps.deleteOwnerTokenById(req.sessionAccount.token_id);
+      if (authorization.kind === "token") retired.push(authorization.token);
     }
+    // The ended credentials' room streams and account activity stream close
+    // now, on every API instance, instead of at their next re-check.
+    (deps.retireCredentials ?? retireAccountCredentials)(retired);
     clearSessionCookie(res);
     res.json({ success: true });
   });

@@ -2,7 +2,8 @@ import { createHash } from "node:crypto";
 
 import { githubRepoAccessInvalidationEvents } from "../github/repo-access.js";
 import { parseCookies, type AuthenticatedRequest } from "../http/helpers.js";
-import { roomEventBridgeLossEvents } from "../server/bridged-emitter.js";
+import { parseBearerAuthorization } from "../request/bearer-authorization.js";
+import { createBridgedEmitter, roomEventBridgeLossEvents } from "../server/bridged-emitter.js";
 import { roomMembershipInvalidationEvents } from "./membership-events.js";
 import type { RoomAgentDeliveryCredentialFence } from "../../shared/agent-presence.js";
 import {
@@ -27,6 +28,8 @@ interface SharedAuthorizationLease {
   invalidated: boolean;
   credentialFingerprint: string | null;
   credentialRetired: boolean;
+  /** The hash of the person's session or owner token this lease is keyed by, if any. */
+  accountCredentialHash: string | null;
   invalidationGeneration: number;
   /** When the last check threw (no answer), else null. */
   failedAt: number | null;
@@ -44,6 +47,66 @@ export interface LiveRoomAuthorizationLease {
 }
 
 const leases = new Map<string, SharedAuthorizationLease>();
+
+/**
+ * A person's app session or owner token ended (sign-out, token revocation).
+ * The payload names only hashes of the credentials, never the tokens. Every
+ * live lease keyed by one of them is retired at once, so room streams and
+ * the account activity stream of that credential close at once, on every
+ * API instance.
+ */
+export const accountCredentialRetirementEvents = createBridgedEmitter("account_credentials");
+
+/** The hash a live lease keys a person's token by. */
+export function accountCredentialHash(token: string): string {
+  return createHash("sha256").update(token).digest("base64url");
+}
+
+/** Retires every live lease of these app session or owner tokens. */
+export function retireAccountCredentials(tokens: readonly string[]): void {
+  const hashes = [...new Set(tokens.filter(Boolean).map(accountCredentialHash))];
+  if (hashes.length) accountCredentialRetirementEvents.emit("retire", { credential_hashes: hashes });
+}
+
+/** The person's token behind a request: a bearer token, else the session cookie. */
+function requestAccountToken(req: AuthenticatedRequest): string | null {
+  const bearer = parseBearerAuthorization(req.headers?.authorization as string | undefined);
+  if (bearer.kind === "token") return bearer.token;
+  if (bearer.kind === "invalid") return null;
+  return parseCookies(req.headers?.cookie).letagents_session || null;
+}
+
+/** Calls `handler` once this request's own app session or owner token is retired. Returns the unsubscribe. */
+export function onRequestCredentialRetired(req: AuthenticatedRequest, handler: () => void): () => void {
+  const token = requestAccountToken(req);
+  if (!token) return () => undefined;
+  const hash = accountCredentialHash(token);
+  const listener = (payload: unknown) => {
+    const hashes = payload && typeof payload === "object" ? (payload as { credential_hashes?: unknown }).credential_hashes : null;
+    if (Array.isArray(hashes) && hashes.includes(hash)) handler();
+  };
+  accountCredentialRetirementEvents.on("retire", listener);
+  return () => { accountCredentialRetirementEvents.off("retire", listener); };
+}
+
+accountCredentialRetirementEvents.on("retire", (payload: unknown) => {
+  const hashes = payload && typeof payload === "object" ? (payload as { credential_hashes?: unknown }).credential_hashes : null;
+  if (!Array.isArray(hashes)) return;
+  const retired = new Set(hashes.filter((value): value is string => typeof value === "string"));
+  for (const lease of leases.values()) {
+    if (!lease.accountCredentialHash || !retired.has(lease.accountCredentialHash)) continue;
+    lease.credentialRetired = true;
+    lease.invalidated = true;
+    lease.invalidationGeneration += 1;
+    for (const handler of lease.invalidationHandlers) {
+      try {
+        handler();
+      } catch (error) {
+        console.error("[room authorization] account credential retirement handler failed", error);
+      }
+    }
+  }
+});
 
 function invalidateAuthorizationLeases(
   roomName: string | null,
@@ -181,6 +244,10 @@ export function acquireLiveRoomAuthorization(input: {
       invalidated: !input.freshAtEntry,
       credentialFingerprint,
       credentialRetired: false,
+      accountCredentialHash: input.req.authKind === "agent_session" ? null : (() => {
+        const token = requestAccountToken(input.req);
+        return token ? accountCredentialHash(token) : null;
+      })(),
       invalidationGeneration: 1,
       failedAt: null,
       inFlight: null,
