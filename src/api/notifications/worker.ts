@@ -406,12 +406,14 @@ export async function processBatch(client: Pick<ApnsClient, "send">, workerId: s
  * nothing waits. Without APNs only reminders matter (they are still enqueued).
  */
 export async function nextDesktopPushDueInMs(includeDeliveries: boolean): Promise<number | null> {
-  const parts = ["(SELECT min(due_at) FROM message_reminders WHERE state = 'pending' AND due_at > now())"];
+  // Rows already due count too (zero or less): one may fall due after a claim's statement started.
+  const parts = ["(SELECT min(due_at) FROM message_reminders WHERE state = 'pending')"];
   if (includeDeliveries) {
     for (const table of DELIVERY_TABLES) {
-      parts.push(`(SELECT min(next_attempt_at) FROM ${table} WHERE state IN ('queued', 'retry') AND next_attempt_at > now())`);
-      parts.push(`(SELECT min(claimed_at) + INTERVAL '5 minutes' FROM ${table}
-        WHERE state = 'processing' AND claimed_at > now() - INTERVAL '5 minutes')`);
+      // Only rows a claim can take: a disabled device's rows are never claimed.
+      parts.push(`(SELECT min(next_attempt_at) FROM ${table} WHERE state IN ('queued', 'retry')
+        AND device_id IN (SELECT id FROM desktop_push_devices WHERE enabled))`);
+      parts.push(`(SELECT min(claimed_at) + INTERVAL '5 minutes' FROM ${table} WHERE state = 'processing')`);
     }
   }
   const result = await pool.query<{ due_in_ms: unknown }>(`SELECT ${DUE_IN_MS_SQL(`LEAST(${parts.join(", ")})`)} AS due_in_ms`);
