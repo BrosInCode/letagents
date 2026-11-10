@@ -634,6 +634,11 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
           meta: openedContext.openedRoom?.repoStatus?.branch || null,
         });
         options.activeEntry.value = options.currentParentRoom.value;
+      } catch (error) {
+        // A read that threw or timed out: the rows on screen stay, but the
+        // entry is not painted again. A later ready read may add it again.
+        cachedSelectedSnapshots.forget([roomIdentifier]);
+        throw error;
       } finally {
         // A read that failed (error or timeout) keeps the cached rows on screen,
         // as a focus room does; the next fresh read of the room replaces them.
@@ -670,6 +675,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       rememberFreshSelectedSnapshot(nextSnapshot, [roomIdentifier]);
       queueRepairReadIfGapChanged(roomIdentifier, repairToken);
       finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
+    } catch (error) {
+      // As for a parent room: a failed read keeps the rows, not the entry.
+      cachedSelectedSnapshots.forget([roomIdentifier]);
+      throw error;
     } finally {
       queueSkippedRecoveryAfterFailedRead(roomIdentifier, barrierToken);
       if (streamReconcileRoom === roomIdentifier) finishRoomSnapshotBarrier(roomIdentifier, barrierToken);

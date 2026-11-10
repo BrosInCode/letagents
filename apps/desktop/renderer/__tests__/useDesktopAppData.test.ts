@@ -2708,6 +2708,59 @@ describe("useDesktopAppData return to a room shown earlier", () => {
     assert.deepEqual(messageIds(harness.selectedSnapshot.value), ["msg_1", "msg_3"]);
   });
 
+  // MorrowStorm's order on 060590354: a read that rejects kept the entry, so it painted again.
+  it("does not paint a parent room from the cache again after its fresh read rejected", async () => {
+    const simulation = await connectedSwitchSimulation("clean");
+    const { harness } = simulation;
+    try {
+      await withDesktopBridge(harness.windowBridge, async () => {
+        await openRoom(simulation, parentEntryFor("room_b"));
+        await openRoom(simulation, parentEntry());
+        serveRooms(simulation, { room_b: async () => { throw new Error("room_b snapshot timed out"); } });
+        assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, ["msg_room_b"]);
+        assert.deepEqual(messageIds(harness.selectedSnapshot.value), ["msg_room_b"], "the rows on screen stay");
+        await openRoom(simulation, parentEntry());
+        // The first-visit path runs: an empty room while it loads.
+        assert.deepEqual(await openRoom(simulation, parentEntryFor("room_b")), { messages: [], loading: true });
+        serveRooms(simulation, {});
+        await openRoom(simulation, parentEntry());
+        await openRoom(simulation, parentEntryFor("room_b"));
+        await openRoom(simulation, parentEntry());
+        // Not blocked: a ready read adds the room again.
+        assert.deepEqual((await openRoom(simulation, parentEntryFor("room_b"))).messages, ["msg_room_b"]);
+      });
+    } finally {
+      simulation.dispose();
+    }
+  });
+
+  it("does not paint a focus room from the cache again after its fresh read rejected", async () => {
+    const harness = createHarness();
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.nextSelectedSnapshot = Promise.resolve(focusSnapshot([roomMessage("msg_1", "Focus A")]));
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      harness.activeEntry.value = parentEntry();
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+
+      harness.nextSelectedSnapshot = Promise.reject(new Error("focus_a snapshot timed out"));
+      harness.nextSelectedSnapshot.catch(() => undefined);
+      harness.activeEntry.value = focusEntry("focus_a", "Focus A");
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value).catch(() => undefined);
+      assert.deepEqual(messageIds(harness.selectedSnapshot.value), ["msg_1"], "the rows on screen stay");
+
+      harness.activeEntry.value = parentEntry();
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      const pending = deferred<DesktopRoomSnapshot>();
+      harness.nextSelectedSnapshot = pending.promise;
+      harness.activeEntry.value = focusEntry("focus_a", "Focus A");
+      const reopen = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      assert.deepEqual(messageIds(harness.selectedSnapshot.value), [], "no cached paint after a failed read");
+      assert.equal(harness.state.selectedSnapshotLoading.value, true);
+      pending.resolve(focusSnapshot([roomMessage("msg_2", "fresh")]));
+      await reopen;
+    });
+  });
+
   it("keeps a focus room's cached rows when its fresh read answers 503, as before the cache", async () => {
     const harness = createHarness();
     await withDesktopBridge(harness.windowBridge, async () => {
