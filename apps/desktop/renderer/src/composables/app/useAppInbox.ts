@@ -92,7 +92,7 @@ export function useAppInboxState(context: unknown) {
   } = app;
   const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, refreshRoom: refreshNeedsYouRoom, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
   Object.assign(app, { needsYouError, loadNeedsYou, resetNeedsYou });
-  useNeedsYouRoomActivity(accountActivity.state, refreshNeedsYouRoom);
+  useNeedsYouRoomActivity(accountActivity.state, refreshNeedsYouRoom, undefined, accountActivity.tasksChangedAt);
   // A room's composer offers the recommendation of its open Needs you request as a suggested reply.
   provide(composerSuggestedReplyKey, (roomIdentifier) => roomSuggestedReply(needsYouData.value, roomIdentifier));
   const { items: agentAttentionItems, refreshApprovals: refreshAgentApprovals, approvalsReady } = useAgentAttention(needsYouData);

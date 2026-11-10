@@ -16,6 +16,7 @@ import {
 } from "../../rooms/join-request-events.js";
 import { roomMembershipInvalidationEvents } from "../../rooms/membership-events.js";
 import { roomEventBridgeLossEvents } from "../../server/bridged-emitter.js";
+import { ACCOUNT_ROOM_READ, ACCOUNT_ROOM_READ_STREAM_EVENT, accountReadEvents, type AccountRoomReadEvent } from "../../account-unread/read-events.js";
 
 export interface AccountActivityStreamDeps {
   hub: AccountActivityHub;
@@ -83,6 +84,17 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
     const send = (activity: AccountRoomActivity) => {
       void connection.write(frame("room", activity));
     };
+    // This account read a room, here or on another device: its unread count
+    // changed. The frame names the room and the newest message read, so a
+    // client can tell its own report's echo; it re-reads /account/unread.
+    const readerId = req.sessionAccount.account_id;
+    const onRead = (event: AccountRoomReadEvent) => {
+      if (event.accountId === readerId && watchedRoomIds.has(event.roomId.toLowerCase()) && !connection.closed) {
+        void connection.write(frame(ACCOUNT_ROOM_READ_STREAM_EVENT, { room_id: event.roomId, last_message_id: event.lastMessageId }));
+      }
+    };
+    accountReadEvents.on(ACCOUNT_ROOM_READ, onRead);
+    connection.addCleanup(() => { accountReadEvents.off(ACCOUNT_ROOM_READ, onRead); });
     // A request to join one of this person's rooms reaches them here even when
     // that room is not open, so the desktop can alert them at once. It names
     // the person who asked, so the role is checked for every event, and only

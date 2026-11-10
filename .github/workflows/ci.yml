@@ -745,7 +745,7 @@ jobs:
 
       - name: Test the sidebar's account activity stream
         if: matrix.group == 4
-        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/account-activity-hub.test.ts src/api/__tests__/account-activity-stream.test.ts src/api/__tests__/account-activity-db.test.ts
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/account-activity-hub.test.ts src/api/__tests__/account-activity-stream.test.ts src/api/__tests__/account-activity-db.test.ts src/api/__tests__/account-unread-routes.test.ts src/api/__tests__/account-unread-db.test.ts
 
       - name: Test room settings, event filters and agent guidelines
         if: matrix.group == 1

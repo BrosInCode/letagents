@@ -160,6 +160,92 @@ test("Needs you marks each focus room with the room it is listed under, and says
   assert.equal(updatesRead.length, 4);
 });
 
+test("Needs you reads every listed cloud room in one request and only uncovered rooms one by one", async (t) => {
+  const repo = "github.com/acme/app";
+  const entry = (roomIdentifier: string, role = "participant", focusRooms: unknown[] = []) => ({ roomIdentifier, displayName: roomIdentifier, role, latestMessageAt: null, focusRooms });
+  const paths: string[] = [];
+  const record = (id: string) => ({ id, room_id: id, type: "attention", title: id, response: null });
+  const intent = { id: "bi_1", room_id: repo, task_id: "task_7", action_type: "task_claim", payload: {}, payload_hash: "h", status: "pending",
+    proposer_actor_label: "Summit", proposer_actor_key: "k", proposer_actor_instance_id: null, proposer_agent_session_id: null, decision_by: null,
+    decision_reason: null, approval_token_hash: null, decided_at: null, expires_at: null, created_at: "2026-11-10T00:00:00.000Z", updated_at: "2026-11-10T00:00:00.000Z" };
+  t.mock.module("../main/auth.js", { namedExports: {
+    readStoredAuth: async () => ({ token: "token" }),
+    apiFetch: async (path: string) => {
+      paths.push(path);
+      if (path === "/account/attention") return {
+        rooms: [
+          { room_id: "GitHub.com/acme/app", records: [record("ask-repo")], truncated: false, tasks: [], board_intents: [intent] },
+          { room_id: "focus_1", records: [record("ask-focus")], truncated: true, tasks: [{ id: "task_1", title: "Card", status: "blocked", description: null, updated_at: "T" }] },
+        ],
+        failures: [{ room_id: "focus_2" }],
+      };
+      return { records: [record(path)], truncated: false, tasks: [] };
+    },
+  } });
+  t.mock.module("../main/rooms/local-store.js", { namedExports: {
+    resolveLocalAwareRoomStorageMode: async () => ({ effectiveMode: "cloud" }),
+    cloudRoomIdentifierForStorage: (_storage: unknown, roomIdentifier: string) => roomIdentifier,
+    localRoomIdentifierForStorage: (_storage: unknown, roomIdentifier: string) => roomIdentifier,
+    listLocalRoomEntries: async () => [],
+    listLocalTasks: async () => [],
+  } });
+  t.mock.module("../main/rooms/local-db.js", { namedExports: { getLocalChatDatabase: async () => { throw new Error("cloud rooms only"); } } });
+  t.mock.module("../main/rooms/messages/local-store.js", { namedExports: { addLocalChatMessage: async () => undefined } });
+  t.mock.module("../main/rooms/board-governance.js", { namedExports: { listDesktopPendingBoardIntents: async (id: string) => { paths.push(`intents:${id}`); return []; } } });
+  t.mock.module("../main/rooms/account-rooms.js", { namedExports: {
+    listDesktopAccountRooms: async () => [entry(repo, "admin", [entry("focus_1"), entry("focus_2")]), entry("ad-hoc", "admin")],
+  } });
+  t.mock.module("../main/rooms/inbox.js", { namedExports: { getDesktopInboxUpdates: async () => { throw new Error("not read outside the Inbox"); } } });
+  const { getDesktopNeedsYou } = await import(new URL(`../main/rooms/knowledge.js?${encodeURIComponent(t.name)}`, import.meta.url).href) as typeof import("../main/rooms/knowledge.js");
+  const result = await getDesktopNeedsYou();
+  assert.deepEqual(paths.sort(), ["/account/attention", "/rooms/ad-hoc/attention", "intents:ad-hoc"].sort(),
+    "a room the account read does not cover is still read by itself");
+  const byRoom = Object.fromEntries(result.rooms.map((room) => [room.roomIdentifier, room]));
+  assert.deepEqual(byRoom[repo]!.records.map((r) => r.id), ["ask-repo"]);
+  assert.deepEqual(byRoom[repo]!.boardIntents!.map((i) => i.id), ["bi_1"]);
+  assert.equal(byRoom.focus_1!.truncated, true);
+  assert.deepEqual(byRoom.focus_1!.tasks.map((task) => task.id), ["task_1"]);
+  assert.equal(byRoom.focus_1!.boardIntents, undefined);
+  assert.deepEqual(result.failures.map((failure) => failure.roomIdentifier), ["focus_2"], "a room the server refused is a failure, as before");
+});
+
+test("a cloud room whose history is local on this device keeps reading its requests from the local store", async (t) => {
+  const entry = (roomIdentifier: string) => ({ roomIdentifier, displayName: roomIdentifier, role: "participant", latestMessageAt: null, focusRooms: [] });
+  const paths: string[] = [];
+  t.mock.module("../main/auth.js", { namedExports: {
+    readStoredAuth: async () => ({ token: "token" }),
+    apiFetch: async (path: string) => {
+      paths.push(path);
+      if (path === "/account/attention") return { rooms: [
+        { room_id: "forked-room", records: [{ id: "server-ask" }], truncated: false, tasks: [] },
+        { room_id: "cloud-room", records: [{ id: "cloud-ask" }], truncated: false, tasks: [] },
+      ], failures: [] };
+      throw new Error(`unexpected ${path}`);
+    },
+  } });
+  t.mock.module("../main/rooms/local-store.js", { namedExports: {
+    resolveLocalAwareRoomStorageMode: async (room: string) => ({ effectiveMode: room === "forked-room" ? "local" : "cloud" }),
+    cloudRoomIdentifierForStorage: (_storage: unknown, roomIdentifier: string) => roomIdentifier,
+    localRoomIdentifierForStorage: (_storage: unknown, roomIdentifier: string) => `local:${roomIdentifier}`,
+    listLocalRoomEntries: async () => [],
+    listLocalTasks: async () => [],
+  } });
+  t.mock.module("../main/rooms/local-db.js", { namedExports: { getLocalChatDatabase: async () => ({ prepare: () => ({ all: () => [], run: () => undefined }) }) } });
+  t.mock.module("../../../../shared/local-room-knowledge.mjs", { namedExports: {
+    getLocalKnowledge: () => null, initializeRoomKnowledge: () => undefined, localKnowledgeHistory: () => [], saveLocalKnowledge: () => undefined,
+    listLocalKnowledge: (_db: unknown, room: string) => ({ records: [{ id: `local-ask:${room}` }], truncated: false }),
+  } });
+  t.mock.module("../main/rooms/messages/local-store.js", { namedExports: { addLocalChatMessage: async () => undefined } });
+  t.mock.module("../main/rooms/board-governance.js", { namedExports: { listDesktopPendingBoardIntents: async () => [] } });
+  t.mock.module("../main/rooms/account-rooms.js", { namedExports: { listDesktopAccountRooms: async () => [entry("forked-room"), entry("cloud-room")] } });
+  t.mock.module("../main/rooms/inbox.js", { namedExports: { getDesktopInboxUpdates: async () => undefined } });
+  const { getDesktopNeedsYou } = await import(new URL(`../main/rooms/knowledge.js?${encodeURIComponent(t.name)}`, import.meta.url).href) as typeof import("../main/rooms/knowledge.js");
+  const result = await getDesktopNeedsYou();
+  const byRoom = Object.fromEntries(result.rooms.map((room) => [room.roomIdentifier, room.records.map((record) => record.id)]));
+  assert.deepEqual(byRoom, { "forked-room": ["local-ask:local:forked-room"], "cloud-room": ["cloud-ask"] });
+  assert.deepEqual(paths, ["/account/attention"]);
+});
+
 test("Needs you merges changes-only answers, reads the whole state again when they do not fit, and starts over on a new daemon generation", async () => {
   const entry = (id: string, desiredState: "running" | "paused" | "stopped") => ({ id, desiredState, activity: [] });
   const status = { implementationVersion: SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION, generation: 1, capabilities: { agentStateSubscription: true } };
