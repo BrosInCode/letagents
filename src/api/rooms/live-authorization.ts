@@ -56,6 +56,8 @@ const leases = new Map<string, SharedAuthorizationLease>();
  * API instance.
  */
 export const accountCredentialRetirementEvents = createBridgedEmitter("account_credentials");
+// One listener per open account activity stream, plus the lease listener.
+accountCredentialRetirementEvents.setMaxListeners(0);
 
 /** The hash a live lease keys a person's token by. */
 export function accountCredentialHash(token: string): string {

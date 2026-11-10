@@ -292,13 +292,23 @@ function setCachedRepoAccess(roomName: string, login: string, allowed: boolean, 
 /**
  * The visibility paired with this person's cached "yes" for the repository,
  * or null. A cached decision uses it instead of a separate visibility read.
+ * When the shared 60 s visibility cache already holds a definite value that
+ * differs (another read saw the repository change), the shared value wins
+ * and the pair is dropped: a flip is seen as soon as any read sees it, at no
+ * extra GitHub call.
  */
 function cachedVisibilityForPerson(roomName: string, login: string): "private" | "public" | null {
   const cacheKey = `${normalizeCacheKey(roomName)}::${normalizeCacheKey(login)}`;
   const now = Date.now();
   for (const cache of [repoAccessCache, publicRepoRoleCache]) {
     const entry = cache.get(cacheKey);
-    if (entry?.allowed && entry.expiresAt > now) return entry.visibility;
+    if (!entry?.allowed || entry.expiresAt <= now) continue;
+    const shared = getCachedVisibility(roomName, false);
+    if (shared && shared !== "unknown" && shared !== entry.visibility) {
+      cache.delete(cacheKey);
+      return shared;
+    }
+    return entry.visibility;
   }
   return null;
 }

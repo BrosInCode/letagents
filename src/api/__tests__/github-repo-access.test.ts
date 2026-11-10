@@ -1574,3 +1574,33 @@ test("a cached decision reuses the visibility paired with the cached yes; a refr
     assert.ok(state.calls.length > 0);
   } finally { clock.restore(); }
 });
+
+test("a flip to public seen by any other read refuses a read-only collaborator on the next decision, before the refresh", async () => {
+  const room = swrRoom("flip");
+  const repo = room.split("/").slice(1).join("/");
+  const state = { private: true, calls: [] as string[] };
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const path = new URL(String(input)).pathname;
+    const token = new Headers(init?.headers).get("authorization") ? "token" : "anon";
+    state.calls.push(`${token} ${path}`);
+    if (path === `/repos/${repo}`) {
+      if (token === "anon" && state.private) return new Response(JSON.stringify({ message: "Not Found" }), { status: 404 });
+      return new Response(JSON.stringify({ private: state.private, owner: { login: "acme" }, permissions: { pull: true } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ permission: "read" }), { status: 200 });
+  }) as typeof fetch;
+  const account = { provider: "github", provider_access_token: "t-reader", login: "reader" };
+  const decide = () => resolveGitHubRepoRoomAccessDecision({ roomName: room, sessionAccount: account });
+  const clock = fakeClock();
+  try {
+    assert.deepEqual(await decide(), { kind: "allow" }, "a read-only collaborator of a private repository");
+    state.private = false;
+    clock.advance(2 * MINUTE);
+    assert.deepEqual(await decide(), { kind: "allow" }, "nothing has seen the flip yet: the pair stands");
+    // Another reader's visibility read (the shared 60 s cache) sees the flip.
+    assert.equal(await getGitHubRepoVisibility(room), "public");
+    state.calls.length = 0;
+    assert.deepEqual(await decide(), { kind: "repo_collaborator_required" }, "refused at once, 2 minutes after the flip, not after the refresh");
+    assert.ok(state.calls.every((call) => !call.startsWith("anon")), "the shared answer is reused, no extra visibility read");
+  } finally { clock.restore(); }
+});
