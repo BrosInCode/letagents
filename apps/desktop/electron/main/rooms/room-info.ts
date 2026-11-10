@@ -46,6 +46,19 @@ export type RoomInfoPayload = {
 export const JOINED_ROOM_INFO_TTL_MS = 5 * 60 * 1000;
 export const JOINED_ROOM_INFO_MAX_ENTRIES = 500;
 const joinedRoomInfoCache = new Map<string, { payload: RoomInfoPayload; storedAt: number }>();
+/**
+ * Joins in flight, shared by callers that miss the cache at the same moment.
+ *
+ * Problem: on a first visit several handlers ask for the room at once, and each
+ * sent its own `POST /join` (slow for a repo room, and each one counts against
+ * the server's join rate limit).
+ * Rule: one request per cache key and `create` variant. Every caller gets its
+ * result or its error. The entry goes away when the request settles, so an error
+ * is never reused. `clearJoinedRoomInfoCache` starts a new epoch: a join started
+ * before it is not shared with later callers and its answer is not stored.
+ */
+const joinedRoomInfoInFlight = new Map<string, Promise<RoomInfoPayload>>();
+let joinedRoomInfoEpoch = 0;
 
 export function createRoomAccess(
   input: Partial<DesktopRoomAccess>,
@@ -99,6 +112,10 @@ export function rememberJoinedRoomInfo(
 export function forgetJoinedRoomInfo(roomIdentifier: string | null | undefined): void {
   const key = roomInfoCacheKey(roomIdentifier);
   if (!key) return;
+  // A later check must ask the server again, not reuse a join already on its way.
+  for (const flightKey of [...joinedRoomInfoInFlight.keys()]) {
+    if (flightKey.startsWith(`${key}\n`)) joinedRoomInfoInFlight.delete(flightKey);
+  }
   const remembered = joinedRoomInfoCache.get(key)?.payload;
   const related = new Set([key, ...(remembered ? roomInfoCacheKeys(key, remembered).map(roomInfoCacheKey) : [])]);
   // Every alias of the room (its code, a branch name) points at the same room id.
@@ -143,14 +160,33 @@ export async function getJoinedRoomInfo(
     joinedRoomInfoCache.delete(cacheKey);
   }
 
-  const joined = await apiFetch<RoomInfoPayload>(
-    `/rooms/${encodeURIComponent(roomIdentifier)}/join${options?.create === false ? "?create=false" : ""}`,
-    {
-      method: "POST",
-    },
-  );
-  rememberJoinedRoomInfo(roomIdentifier, joined);
-  return joined;
+  const noCreate = options?.create === false;
+  const flightKey = cacheKey ? `${cacheKey}\n${noCreate ? "no-create" : "create"}` : null;
+  const shared = flightKey ? joinedRoomInfoInFlight.get(flightKey) : undefined;
+  if (shared) return shared;
+
+  const epoch = joinedRoomInfoEpoch;
+  const flight = (async () => {
+    const joined = await apiFetch<RoomInfoPayload>(
+      `/rooms/${encodeURIComponent(roomIdentifier)}/join${noCreate ? "?create=false" : ""}`,
+      {
+        method: "POST",
+      },
+    );
+    // After sign-out or an account change the answer belongs to the old account.
+    if (epoch === joinedRoomInfoEpoch) rememberJoinedRoomInfo(roomIdentifier, joined);
+    return joined;
+  })();
+  if (flightKey) {
+    joinedRoomInfoInFlight.set(flightKey, flight);
+    // Registered before any caller awaits, so it runs first: a caller that sees
+    // the outcome and asks again sends a new join.
+    const settle = () => {
+      if (joinedRoomInfoInFlight.get(flightKey) === flight) joinedRoomInfoInFlight.delete(flightKey);
+    };
+    flight.then(settle, settle);
+  }
+  return flight;
 }
 
 export function mapDesktopRoomInfoPayload(
@@ -184,6 +220,8 @@ export function mapDesktopRoomInfoPayload(
 }
 
 export function clearJoinedRoomInfoCache(): void {
+  joinedRoomInfoEpoch += 1;
+  joinedRoomInfoInFlight.clear();
   joinedRoomInfoCache.clear();
 }
 
