@@ -20,7 +20,17 @@ import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { PENDING_PEER_REPORT_SQL } from "../queued-peer-deliveries.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
-async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex") {
+/**
+ * The publisher arms its own flush timer (1 s after a change, at once after a settled hint). When that
+ * pass is still running as a test calls flush(), flush() returns at once without staging or publishing,
+ * and the test sees nothing sent. Git work and loaded runners make the overlap real (runs 42729899747,
+ * 42769491005, 42785031407). So by default the publisher never arms its timer: the test's own flush()
+ * calls are the only passes. Only the publisher's scheduling is stubbed, not the global setTimeout, which
+ * the stores' own bounded waits (for example a busy SQLite open on Windows) still need. Tests that drive
+ * the publisher's timers themselves, or that need real time, pass realTimers.
+ */
+async function fixture(t: TestContext, provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex", { realTimers = false } = {}) {
+  if (!realTimers) t.mock.method(RoomWorkPublisher.prototype as unknown as { schedule(): void }, "schedule", () => {});
   const directory = await mkdtemp(join(tmpdir(), "room-work-publisher-"));
   const workspacePath = await mkdtemp(join(tmpdir(), 'publisher-workspace-'));
   const git = (...args: string[]) => execFileSync('git', args, { cwd: workspacePath, encoding: 'utf8' }).trim();
@@ -535,7 +545,7 @@ test("close aborts optional HTTP and ignores late receipts without a shutdown up
 });
 
 test("capture hints expedite an existing retry timer and singleton loss never dispatches", async t => {
-  const f = await fixture(t); f.captureMessage(); f.restart(); await f.publisher.flush();
+  const f = await fixture(t, "codex", { realTimers: true }); f.captureMessage(); f.restart(); await f.publisher.flush();
   const delays: number[] = [];
   const realTimeout = globalThis.setTimeout;
   t.mock.method(globalThis, "setTimeout", (...args: Parameters<typeof setTimeout>) => { delays.push(args[1] ?? 0); return realTimeout(...args); });
@@ -546,7 +556,7 @@ test("capture hints expedite an existing retry timer and singleton loss never di
 });
 
 test("settled delivery hints publish promptly without accelerating ordinary progress", async t => {
-  const f = await fixture(t); const attempt = f.captureMessage(); f.restart(); await f.publisher.flush();
+  const f = await fixture(t, "codex", { realTimers: true }); const attempt = f.captureMessage(); f.restart(); await f.publisher.flush();
   const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];
   const realTimeout = globalThis.setTimeout;
   t.mock.method(globalThis, "setTimeout", (callback: () => void, delay: number) => {
@@ -565,7 +575,7 @@ test("settled delivery hints publish promptly without accelerating ordinary prog
 });
 
 test("a settled hint survives its timer firing during an existing upload", async t => {
-  const f = await fixture(t); const attempt = f.captureMessage(); f.restart();
+  const f = await fixture(t, "codex", { realTimers: true }); const attempt = f.captureMessage(); f.restart();
   let release!: (result: RoomWorkPublishResult) => void;
   let started!: () => void;
   const ready = new Promise<void>(resolve => { started = resolve; });
@@ -646,7 +656,7 @@ test("completion reserves one bounded upload slot without skipping retry backoff
 });
 
 test("settled hints retain bounded retries when authority fails before consumption", async t => {
-  const f = await fixture(t); f.captureMessage(); f.restart();
+  const f = await fixture(t, "codex", { realTimers: true }); f.captureMessage(); f.restart();
   const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];
   const cleared = new Set<ReturnType<typeof setTimeout>>();
   const realTimeout = globalThis.setTimeout;
@@ -732,7 +742,7 @@ test("live hints preserve recovery progress and a hint arriving during upload", 
 });
 
 test("a hint timer firing during an upload remains pending until a new flush can run", async t => {
-  const f = await fixture(t); f.captureMessage(); f.restart();
+  const f = await fixture(t, "codex", { realTimers: true }); f.captureMessage(); f.restart();
   let release!: (result: RoomWorkPublishResult) => void;
   let started!: () => void;
   const ready = new Promise<void>(resolve => { started = resolve; });
@@ -741,7 +751,8 @@ test("a hint timer firing during an upload remains pending until a new flush can
   const timers: Array<{ delay: number; fire: () => void; timer: ReturnType<typeof setTimeout> }> = [];
   const realTimeout = globalThis.setTimeout;
   t.mock.method(globalThis, "setTimeout", (callback: () => void, delay: number) => {
-    const timer = realTimeout(callback, delay); timers.push({ delay, fire: callback, timer }); return timer;
+    // Fired by hand only, like the tests above: a real 1 s wake could otherwise run its own pass before the last flush().
+    const timer = realTimeout(callback, 60_000); timers.push({ delay, fire: callback, timer }); return timer;
   });
   f.operation(1);
   assert.equal(timers.length, 1); clearTimeout(timers[0].timer); timers[0].fire();
@@ -1168,7 +1179,7 @@ test('only a recorded remote that is reached over the network is asked', async (
 });
 
 test('a remote that does not answer delays neither the start of a turn nor its capture for long', async t => {
-  const f = await fixture(t);
+  const f = await fixture(t, "codex", { realTimers: true });
   // The recorded remote accepts the connection and never says anything.
   const sockets: Socket[] = [];
   const silent = createServer(socket => { sockets.push(socket); socket.on('error', () => { /* The killed Git resets the connection; Windows reports it. */ }); }).listen(0, '127.0.0.1');
@@ -1265,10 +1276,6 @@ test('v36 upgrades existing publication receipts to store real diffs without los
 
 test('a background staging pass preserves a workspace captured while its authority check yielded', async t => {
   const f = await fixture(t);
-  // captureMessage() arms the publisher's own 1 s flush timer. Where Git is slow (Windows), that
-  // timer pass could still be running when the flush below starts, and flush() then returns at
-  // once without publishing. With mocked timers the flush below is the only staging pass.
-  t.mock.timers.enable({ apis: ['setTimeout'] });
   f.captureMessage();
   f.options.workspaceLocation = async () => f.location;
   await f.publisher.beginWorkspace(f.agent, 'msg_1', 'inbox-1');
