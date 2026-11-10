@@ -7,7 +7,7 @@ import {
 } from "../db.js";
 import { normalizeGitRoomVisibility } from "../db/git-room-bindings.js";
 import type { GitRoomRefType } from "../db/types.js";
-import { parseFocusRoomLocator } from "../rooms/routing.js";
+import { parseFocusRoomLocator, parseGitHubRefParentRoomId } from "../rooms/room-nature.js";
 import {
   buildGitHubRepoRoomId,
   type GitHubWebhookPayload,
@@ -78,14 +78,14 @@ export function parseGitHubRefRoomLocator(roomLocator: string): {
     return null;
   }
 
-  const parentMatch = /^github\.com\/([^/\s]+\/[^/\s]+)$/.exec(focusLocator.parentRoomId);
+  const parentFullName = parseGitHubRefParentRoomId(focusLocator.parentRoomId);
   const ref = parseGitHubRefFocusKey(focusLocator.focusKey);
-  if (!parentMatch || !ref) {
+  if (!parentFullName || !ref) {
     return null;
   }
 
   return {
-    repositoryFullName: parentMatch[1].toLowerCase(),
+    repositoryFullName: parentFullName.toLowerCase(),
     ...ref,
   };
 }

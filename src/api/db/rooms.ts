@@ -1,7 +1,8 @@
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 
 import { defaultRoomDisplayName, generateRoomDisplayName, normalizeRoomDisplayName } from "../rooms/display-name.js";
-import { isInviteCode, isReservedMainRoomCreationId, normalizeRoomId, normalizeRoomName } from "../rooms/routing.js";
+import { isJoinCodeShape, isReservedMainRoomCreationId } from "../rooms/room-nature.js";
+import { normalizeRoomId, normalizeRoomName } from "../rooms/routing.js";
 import { db } from "./client.js";
 import { ensureGitHubRepoRoomBinding } from "./git-room-bindings.js";
 import {
@@ -240,7 +241,7 @@ export async function getAllProjects(): Promise<Pick<Project, "id" | "code" | "d
 
 export async function getProjectByCode(code: string): Promise<Project | undefined> {
   const normalizedCode = code.toUpperCase();
-  if (!isInviteCode(normalizedCode)) {
+  if (!isJoinCodeShape(normalizedCode)) {
     return undefined;
   }
 
@@ -266,7 +267,7 @@ export async function getProjectById(id: string): Promise<Project | undefined> {
     return toProject(project);
   }
 
-  if (isInviteCode(normalizedId)) {
+  if (isJoinCodeShape(normalizedId)) {
     return undefined;
   }
 
@@ -420,7 +421,7 @@ export async function assertRoomAliasAvailable(
 
 export async function createRoomAlias(roomId: string, alias: string): Promise<RoomAlias> {
   const normalizedAlias = normalizeRoomName(alias);
-  if (isInviteCode(normalizedAlias)) {
+  if (isJoinCodeShape(normalizedAlias)) {
     throw new Error("Invite codes cannot be registered as room aliases");
   }
   if (normalizedAlias === roomId) {

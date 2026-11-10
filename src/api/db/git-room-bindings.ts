@@ -1,5 +1,6 @@
 import { eq, inArray } from "drizzle-orm";
 
+import { parseGitHubRepoRoomId } from "../rooms/room-nature.js";
 import { db } from "./client.js";
 import { toGitRoomBinding } from "./mappers.js";
 import { room_git_bindings } from "./schema.js";
@@ -42,14 +43,12 @@ export function normalizeGitRoomVisibility(
 export function buildManualGitHubRepoRoomBindingInput(
   roomId: string
 ): UpsertGitRoomBindingInput | null {
-  const match = /^github\.com\/([^/:\s]+)\/([^/:\s]+)$/i.exec(roomId.trim());
-  if (!match) {
+  const repo = parseGitHubRepoRoomId(roomId);
+  if (!repo) {
     return null;
   }
 
-  const [, rawOwner, rawName] = match;
-  const owner = rawOwner.toLowerCase();
-  const name = rawName.toLowerCase();
+  const { owner, name } = repo;
   const canonicalRoomId = `github.com/${owner}/${name}`;
   return {
     room_id: canonicalRoomId,
