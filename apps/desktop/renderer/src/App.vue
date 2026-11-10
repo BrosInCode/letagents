@@ -471,15 +471,16 @@
 <script setup lang="ts">
 import { roomUnread } from "./composables/roomUnread";
 import PrivateMessages from "../../../../shared/ui/PrivateMessages.vue";
-import { computed, defineAsyncComponent } from "vue";
+import { computed, defineAsyncComponent, h } from "vue";
 import { useKeyWhileShown } from "./composables/useKeyWhileShown";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
 import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
-import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
-import CompanyHome from "./components/desktop/content/CompanyHome.vue";
+// A view that loads on demand keeps its styles here, where its import was (see vite.config.ts).
+import "lazy-view-styles:./components/desktop/content/DesktopNewRoomModal.vue";
+import "lazy-view-styles:./components/desktop/content/CompanyHome.vue";
 import AskAgentDialog from "./components/desktop/content/asks/AskAgentDialog.vue";
 import GiveAgentDialog from "./components/desktop/content/asks/GiveAgentDialog.vue";
 import { useAppAgentAsks } from "./composables/app/useAppAgentAsks";
@@ -487,13 +488,13 @@ import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceA
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
 import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
-import SettingsView from "./components/desktop/content/SettingsView.vue";
+import "lazy-view-styles:./components/desktop/content/SettingsView.vue";
 import CompanyInviteDialog from "./components/desktop/company/CompanyInviteDialog.vue";
-import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
+import "lazy-view-styles:./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import { settingsEntry } from "./domain/desktop-navigation";
-import InboxView from "./components/desktop/content/InboxView.vue";
-import MyWorkView from "./components/desktop/content/MyWorkView.vue";
+import "lazy-view-styles:./components/desktop/content/InboxView.vue";
+import "lazy-view-styles:./components/desktop/content/MyWorkView.vue";
 import { desktopIpc } from "./ipc/index.js";
 import type { AppContext } from "./composables/app/context";
 import { useAppState } from "./composables/app/useAppState";
@@ -514,10 +515,23 @@ import { useAppLifecycle } from "./composables/app/useAppLifecycle";
 import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAlerts";
 import { useAppCompany, useAppCompanyNavigation } from "./composables/app/useAppCompany";
 import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
+import { CompanyHomeLazy, DesktopNewRoomModalLazy, InboxViewLazy, MyWorkViewLazy, SettingsViewLazy } from "./lazy-views";
 
 const RentMarketplaceView = defineAsyncComponent(
   () => import("./components/desktop/content/RentMarketplaceView.vue"),
 );
+// Views a room's first paint does not need load on demand, and at idle after a room paints.
+const SettingsView = SettingsViewLazy.component;
+const InboxView = InboxViewLazy.component;
+const MyWorkView = MyWorkViewLazy.component;
+const CompanyHome = CompanyHomeLazy.component;
+const DesktopNewRoomModal = DesktopNewRoomModalLazy.component;
+// On a fresh profile the launch splash stays, drawn where it was, until the wizard's chunk has run.
+const FirstRunOnboardingView = defineAsyncComponent({
+  loader: () => import("./components/desktop/setup/FirstRunOnboardingView.vue"),
+  loadingComponent: () => h(FirstRunSplashView, { style: "position: fixed; inset: 0" }),
+  delay: 0,
+});
 
 // App.vue holds the template and this wiring. The context fills in the original
 // order: state, then the function composables (only function definitions, like

@@ -329,18 +329,19 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, provide, ref } from "vue";
+import { computed, nextTick, onMounted, provide, ref } from "vue";
 import type { DesktopAgentProviderId } from "../../../../../electron/ipc-types";
 import { composerAgentLaunchKey } from "./room-chat/composer-agent-launch";
-import AddAgentModal from "./AddAgentModal.vue";
+// A view that loads on demand keeps its styles here, where its import was (see vite.config.ts).
+import "lazy-view-styles:./AddAgentModal.vue";
 import AddAgentUnavailableModal from "./AddAgentUnavailableModal.vue";
 import { supervisedAgentsSupported } from "../../../domain/supervised-agents-support";
-import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
+import "lazy-view-styles:./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
 import PersonActionsHost from "./PersonActionsHost.vue";
-import RoomActivityTabView from "./RoomActivityTabView.vue";
-import RoomBoardView from "./RoomBoardView.vue";
+import "lazy-view-styles:./RoomActivityTabView.vue";
+import "lazy-view-styles:./RoomBoardView.vue";
 import TaskLinkPreview from "../../../../../../../shared/ui/board/TaskLinkPreview.vue";
 import MarkdownBlock from "./formatting/MarkdownBlock.vue";
 import { useRoomBoardController } from "./room-board/useRoomBoardController";
@@ -348,9 +349,9 @@ import { desktopBoardTask } from "./room-board/board-workspace-tasks";
 import { canManageRoomBoard } from "./room-board/board-presentation";
 import { taskForTicketQuery, ticketRefParts } from "./room-board/ticket-ref";
 import RoomChatView from "./RoomChatView.vue";
-import RoomEventsView from "./RoomEventsView.vue";
-import RoomDetailsView from "./RoomDetailsView.vue";
-import RoomMemoryView from "./RoomMemoryView.vue";
+import "lazy-view-styles:./RoomEventsView.vue";
+import "lazy-view-styles:./RoomDetailsView.vue";
+import "lazy-view-styles:./RoomMemoryView.vue";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
 import ReleaseQueueWidget from "../../../../../../../shared/ui/board/ReleaseQueueWidget.vue";
@@ -373,6 +374,18 @@ import { useRoomShellJoinRequests } from "../../../composables/room-shell/useRoo
 import { provideBackgroundCommands } from "../../../composables/useBackgroundCommands";
 import { supervisedAgentInspectorRequest } from "../../../domain/agent-inspector-identity";
 import { ownerAttribution as backgroundCommandOwner } from "./room-activity/agentTarget";
+import {
+  AddAgentModalLazy, AgentInspectorHostLazy, RoomActivityTabViewLazy, RoomBoardViewLazy, RoomDetailsViewLazy,
+  RoomEventsViewLazy, RoomMemoryViewLazy, preloadLikelyViews,
+} from "../../../lazy-views";
+// The room's other tabs, the agent inspector and the Add agent window load on demand.
+const AddAgentModal = AddAgentModalLazy.component;
+const AgentInspectorHost = AgentInspectorHostLazy.component;
+const RoomActivityTabView = RoomActivityTabViewLazy.component;
+const RoomBoardView = RoomBoardViewLazy.component;
+const RoomDetailsView = RoomDetailsViewLazy.component;
+const RoomEventsView = RoomEventsViewLazy.component;
+const RoomMemoryView = RoomMemoryViewLazy.component;
 const props = defineProps<DesktopRoomShellProps>();
 const emit = defineEmits<DesktopRoomShellEmits>();
 const previewBoard = useRoomBoardController({
@@ -543,6 +556,8 @@ provide(composerAgentLaunchKey, {
   },
   chooseWorktree: openAgentWorktree,
 });
+// The first room to paint starts the idle preload of the views people open next.
+onMounted(preloadLikelyViews);
 async function loadReleasePlanning() {
   if (!desktopIpc.room?.getBoardPlanning) throw new Error('Board unavailable');
   return desktopIpc.room.getBoardPlanning(props.room.identifier);
