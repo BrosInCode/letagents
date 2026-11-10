@@ -544,8 +544,15 @@ test("an ended runtime whose room access was refused is not minted for again on 
     // The runtime itself now ends without its process exiting.
     agent.client.emit({ method: "process/systemError", params: { status: "systemError" } });
     // The failure itself is reconciled once; let that settle before counting.
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    const settledMints = agent.mints();
+    // That mint lands later on a loaded Windows runner than a fixed wait
+    // allows, so wait until the count has held still for half a second.
+    let settledMints = agent.mints();
+    await agent.eventually(async () => {
+      const before = agent.mints();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      settledMints = agent.mints();
+      return settledMints === before;
+    }, "the ended runtime's own reconciliation to settle");
     // Thirty heartbeats. Each used to send convergence to mint once more.
     await new Promise((resolve) => setTimeout(resolve, 1_500));
     assert.equal(agent.mints(), settledMints, "no heartbeat mints for an agent that has no room binding");
@@ -670,7 +677,7 @@ for (const [fault, inject] of Object.entries(EXIT_RECORDING_FAULTS)) {
       assert.equal(agent.harness.launches.length, 1, "while the exit may still be recorded, no replacement is started");
       assert.equal(terminals.settling(agent.id), true);
 
-      await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again once the wait has ended", 5_000).catch(async (error) => {
+      await agent.eventually(() => agent.harness.clients.length === 2, "the agent is started again once the wait has ended").catch(async (error) => {
         const current = await agent.view();
         throw new Error(`${(error as Error).message}: agent is ${current.observed_state}/${current.condition} (${current.last_error}); settling=${terminals.settling(agent.id)}`);
       });
@@ -697,7 +704,7 @@ for (const [fault, inject] of Object.entries(EXIT_RECORDING_FAULTS)) {
 
       // The replacement crashes as well, and its exit cannot be recorded either: that is a second exit, and the owner is told of it too.
       agent.exitProcess(1, "SIGKILL");
-      await agent.eventually(() => agent.harness.clients.length === 3, "the agent is started again after the second crash", 5_000);
+      await agent.eventually(() => agent.harness.clients.length === 3, "the agent is started again after the second crash");
       await agent.eventually(async () => ((await agent.request("manifest.list")).result[0] as typeof entry).activity
         ?.filter((event) => event.summary === EXIT_UNSETTLED_NOTICE).length === 2, "the owner reads of each exit once");
       await answerOnReplacement(agent, 3);

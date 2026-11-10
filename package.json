@@ -32,6 +32,7 @@
     "db:migrate": "tsx src/api/migrate.ts",
     "db:studio": "drizzle-kit studio",
     "prepublishOnly": "npm run build",
+    "prepare": "node scripts/install-git-hooks.mjs",
     "dev:api": "tsx src/api/server.ts",
     "dev:mcp": "tsx src/mcp/server.ts",
     "dev:desktop": "node scripts/ensure-desktop-dependencies.mjs && npm --prefix apps/desktop run dev"

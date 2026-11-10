@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 
 const workflowPaths = [
@@ -714,42 +714,65 @@ test("desktop-tests and desktop-tests-windows run every desktop suite, with elec
   const suiteScripts = [...desktopScripts.test.matchAll(/npm run (test:[\w:-]+)/g)].map((match) => match[1]);
   // A suite added to `npm test` in apps/desktop must also run in CI.
   assert.equal(desktopScripts.test, suiteScripts.map((name) => `npm run ${name}`).join(" && "));
-  // The shards must choose from the same files `npm test` runs locally.
-  const electronFiles = desktopScripts["test:electron"].match(/^npm run test:electron:files -- (\S+)$/)?.[1];
-  assert.ok(electronFiles, "test:electron must pass one file pattern to test:electron:files");
+  // A sharded suite's shards must choose from the same files `npm test` runs
+  // locally: its script passes one file pattern to a runner script, and CI
+  // hands that pattern to the shard selector with the suite's weights file.
+  const shardable = {};
+  for (const kind of ["electron", "daemon"]) {
+    const runner = `test:${kind}:files`;
+    const files = desktopScripts[`test:${kind}`].match(new RegExp(`^npm run ${runner} -- (\\S+)$`))?.[1];
+    assert.ok(files, `test:${kind} must pass one file pattern to ${runner}`);
+    shardable[kind] = { runner, files, weights: `${kind}-test-weights.json` };
+  }
 
-  const shardTotals = [];
-  for (const [jobName, otherSuites] of [["desktop-tests", ["daemon", "renderer"]], ["desktop-tests-windows", ["build", "daemon", "renderer"]]]) {
+  const electronTotals = [];
+  for (const [jobName, wholeSuites] of [["desktop-tests", ["daemon", "renderer"]], ["desktop-tests-windows", ["build", "renderer"]]]) {
     const suites = [...workflowJobText(workflow, jobName).matchAll(/^ {10}- (.+)$/gm)].map((match) => match[1].trim());
-    const shards = suites.flatMap((suite) => {
-      const match = suite.match(/^electron (\d+)\/(\d+)$/);
-      return match ? [{ index: Number(match[1]), total: Number(match[2]) }] : [];
-    });
-    assert.deepEqual(suites.filter((suite) => !suite.startsWith("electron ")).sort(), otherSuites, jobName);
+    const shards = new Map();
+    const whole = [];
+    for (const suite of suites) {
+      const match = suite.match(/^(electron|daemon) (\d+)\/(\d+)$/);
+      if (!match) {
+        whole.push(suite);
+        continue;
+      }
+      const list = shards.get(match[1]) ?? [];
+      list.push({ index: Number(match[2]), total: Number(match[3]) });
+      shards.set(match[1], list);
+    }
+    assert.deepEqual(whole.sort(), wholeSuites, jobName);
+    for (const [kind, list] of shards) {
+      assert.deepEqual(
+        list.map(({ index, total }) => `${index}/${total}`).sort(),
+        Array.from({ length: list[0].total }, (_, index) => `${index + 1}/${list[0].total}`).sort(),
+        `${jobName} must run every ${kind} shard of one total`,
+      );
+    }
+    assert.ok(shards.has("electron"), `${jobName} must run the electron suite`);
+    electronTotals.push(shards.get("electron")[0].total);
 
     const desktopJob = workflowJobs(".github/workflows/ci.yml").find((job) => job.name === jobName);
     const testStep = desktopJob.steps.find((step) => step.name === "Test desktop (${{ matrix.suite }})");
     assert.ok(testStep, `${jobName} must define its test step`);
+    const run = `${testStep.run}\n`;
     for (const name of suiteScripts) {
-      const run = `${testStep.run}\n`;
-      const ran = name === "test:electron"
-        ? run.includes("npm run test:electron:files -- ")
+      const kind = name.replace(/^test:/, "");
+      const ran = shards.has(kind)
+        ? run.includes(`npm run ${shardable[kind].runner} -- `)
         : [`npm --prefix apps/desktop run ${name}\n`, `npm --prefix apps/desktop run ${name} ||`].some((command) => run.includes(command));
       assert.ok(ran, `${jobName} must run ${name}`);
     }
-    assert.ok(
-      testStep.run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" --weights ../../scripts/electron-test-weights.json ${electronFiles} > `),
-      `the ${jobName} electron shards must select from ${electronFiles}, as test:electron does`,
-    );
-    assert.ok(shards.length > 0, `${jobName} must run the electron suite`);
-    assert.deepEqual(
-      shards.map(({ index, total }) => `${index}/${total}`).sort(),
-      Array.from({ length: shards[0].total }, (_, index) => `${index + 1}/${shards[0].total}`).sort(),
-      jobName,
-    );
-    shardTotals.push(shards[0].total);
+    for (const kind of shards.keys()) {
+      const suite = shardable[kind];
+      assert.ok(suite, `${jobName} shards the ${kind} suite, which apps/desktop does not run from one file pattern`);
+      assert.ok(
+        run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" --weights ../../scripts/${suite.weights} ${suite.files} > `),
+        `the ${jobName} ${kind} shards must select from ${suite.files}, as test:${kind} does`,
+      );
+      assert.ok(existsSync(`scripts/${suite.weights}`), `scripts/${suite.weights} must exist for the ${jobName} ${kind} shards`);
+    }
   }
-  assert.equal(new Set(shardTotals).size, 1, "desktop-tests and desktop-tests-windows must split the electron suite the same way");
+  assert.equal(new Set(electronTotals).size, 1, "desktop-tests and desktop-tests-windows must split the electron suite the same way");
 
   // The Windows job also type checks and builds the desktop app.
   const windowsStep = workflowJobs(".github/workflows/ci.yml")

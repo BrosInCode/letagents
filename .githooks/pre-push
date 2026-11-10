@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Runs, before a push, the checks CI would otherwise fail on ten minutes later:
+# the type checks of each tree this push touches, and the workflow policy tests
+# when the workflow or its policy changed. Scoped to the files between the
+# remote's commit and the pushed one, so a push that touches only the daemon
+# checks only the desktop app. Set LETAGENTS_SKIP_PRE_PUSH=1 to push without it.
+set -euo pipefail
+
+if [ "${LETAGENTS_SKIP_PRE_PUSH:-}" = "1" ]; then
+  exit 0
+fi
+
+root="$(git rev-parse --show-toplevel)"
+cd "${root}"
+
+zero="0000000000000000000000000000000000000000"
+changed=""
+while read -r _local_ref local_sha _remote_ref remote_sha; do
+  # A deleted remote branch pushes nothing to check.
+  [ "${local_sha}" = "${zero}" ] && continue
+  base="${remote_sha}"
+  if [ "${base}" = "${zero}" ]; then
+    # A new branch: compare with the integration branch it will merge into.
+    base="$(git merge-base "${local_sha}" origin/staging 2>/dev/null || git merge-base "${local_sha}" origin/main 2>/dev/null || true)"
+  fi
+  if [ -z "${base}" ]; then
+    changed="$(git ls-tree -r --name-only "${local_sha}")"
+  else
+    changed+="$(git diff --name-only "${base}" "${local_sha}")"$'\n'
+  fi
+done
+
+if [ -z "${changed}" ]; then
+  exit 0
+fi
+
+touches() {
+  printf '%s\n' "${changed}" | grep -Eq "$1"
+}
+
+failed=0
+run_check() {
+  local label="$1"
+  shift
+  echo "pre-push: ${label}"
+  local started
+  started="$(date +%s)"
+  if "$@"; then
+    echo "pre-push: ${label} passed in $(( $(date +%s) - started ))s"
+  else
+    echo "pre-push: ${label} failed" >&2
+    failed=1
+  fi
+}
+
+deps_present() {
+  if [ -d "$1/node_modules" ]; then
+    return 0
+  fi
+  echo "pre-push: $1/node_modules is missing, so its checks are skipped; CI will run them" >&2
+  return 1
+}
+
+# Server, shared modules and the MCP server (everything the root tsconfig covers).
+if touches '^(src/(api|mcp|orchestrator|shared)/|shared/|scripts/|tsconfig\.json|package\.json|package-lock\.json)'; then
+  deps_present . && run_check "type check (server)" npx tsc --noEmit
+fi
+
+if touches '^src/web/'; then
+  deps_present src/web && run_check "type check (Vue)" npm --prefix src/web exec -- vue-tsc --noEmit
+fi
+
+if touches '^apps/desktop/'; then
+  deps_present apps/desktop && run_check "type check (desktop)" npm --prefix apps/desktop run typecheck
+fi
+
+if touches '^(\.github/workflows/|scripts/verify-|scripts/select-test-shard|scripts/measure-test-weights|scripts/.*-test-weights\.json|apps/desktop/package\.json)'; then
+  deps_present . && run_check "workflow policy tests" npm run -s test:workflow-supply-chain
+fi
+
+if [ "${failed}" -ne 0 ]; then
+  echo "pre-push: fix the failures above, or push with LETAGENTS_SKIP_PRE_PUSH=1 to let CI report them." >&2
+  exit 1
+fi
