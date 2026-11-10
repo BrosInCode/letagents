@@ -56,7 +56,10 @@ const renderer = createRenderer<any, any>({ patchProp() {}, insert() {}, remove(
 const flush = async () => { await nextTick(); await new Promise(resolve => setImmediate(resolve)); await nextTick(); };
 const message = (id: string) => ({ id, sender: "Ada", source: "browser", text: id, timestamp: "2026-10-02T00:00:00Z", attachments: [], agentIdentity: null });
 
-async function scrollSurface(thread = false, rememberPosition = false, initialScrollTop: number | null = null) {
+async function scrollSurface(
+  thread = false, rememberPosition = false, initialScrollTop: number | null = null,
+  mount: { props?: Record<string, unknown>; scrollTop?: number; anchorRow?: { id: string; contentTop: number } } = {},
+) {
   const old = { window: globalThis.window, document: globalThis.document, CSS: globalThis.CSS, ResizeObserver: globalThis.ResizeObserver, IntersectionObserver: globalThis.IntersectionObserver };
   let resize = () => {};
   let intersect: (entries: any[]) => void = () => {};
@@ -77,7 +80,7 @@ async function scrollSurface(thread = false, rememberPosition = false, initialSc
   });
   const calls: string[] = [];
   const positions: any[] = [];
-  let top = 1600;
+  let top = mount.scrollTop ?? 1600;
   let revealTop: number | null = 100;
   const reveal = () => { if (revealTop !== null) top = revealTop; calls.push("reveal"); };
   const el = Object.assign(new EventTarget(), {
@@ -89,12 +92,18 @@ async function scrollSurface(thread = false, rememberPosition = false, initialSc
     scrollTop: top,
   });
   Object.defineProperty(el, "scrollTop", { get: () => top, set: value => { top = Math.min(value, el.scrollHeight - el.clientHeight); calls.push("scroll"); } });
+  if (mount.anchorRow) {
+    const { id, contentTop } = mount.anchorRow;
+    const row = { dataset: { messageId: id }, getBoundingClientRect: () => ({ top: contentTop - top, bottom: contentTop + 120 - top }) };
+    el.querySelectorAll = (() => [row]) as typeof el.querySelectorAll;
+  }
   const props = reactive<any>({
     active: true, messages: [message("msg_1"), message("msg_2")], threadMessages: [], localAgentWork: [],
     hasOlderMessages: false, loadingOlderMessages: false, roomLoading: false, roomIdentifier: "room", messageNamespace: "room", searchQuery: "", activeSearchMessageId: null,
     initialScrollPosition: initialScrollTop === null ? null : { top: initialScrollTop, latest: false, anchor: null },
     initialScrollTop,
     parent: message("msg_1"), replies: [message("msg_2")], initialThreadSummary: null, participants: [], attachmentDrafts: [], pendingAttachmentDrafts: [], taskReferenceIds: new Set(), deliveryReceiptsByMessage: {},
+    ...mount.props,
   });
   const reactions = { revision: ref(0) }, previews = { revision: ref(0) };
   let vm: any, motion: any;
@@ -470,6 +479,64 @@ test("timeline: returning during snapshot loading keeps the saved position until
     s.props.messages = [message('msg_1'), message('msg_2')]; s.props.roomLoading = false;
     await flush();
     assert.equal(s.el.scrollTop, 820);
+  } finally { s.close(); }
+});
+
+// A return to a room paints its cached snapshot while the fresh read runs
+// (roomLoading stays true). The rows must open at the saved place at mount,
+// before any animation frame, and the fresh rows must not move them.
+for (const saved of ["none", "latest", "anchor"] as const) {
+  test(`timeline: cached rows painted while loading open at the ${saved === "anchor" ? "saved row" : "bottom"} at mount (saved position: ${saved})`, async () => {
+    const savedPosition = saved === "none" ? null
+      : saved === "latest" ? { top: 1600, latest: true, anchor: null }
+      : { top: 500, latest: false, anchor: { messageId: "msg_1", offsetTop: 0 } };
+    const s = await scrollSurface(false, false, null, {
+      scrollTop: 0,
+      props: { roomLoading: true, initialScrollPosition: savedPosition },
+      // The saved row starts 700 px below the top of the content.
+      anchorRow: { id: "msg_1", contentTop: 700 },
+    });
+    try {
+      const expected = saved === "anchor" ? 700 : 1600;
+      assert.equal(s.el.scrollTop, expected, "no frame shows the top of the mount window");
+      // Positions seen on cached rows are not saved for the room.
+      assert.deepEqual(s.positions, []);
+
+      // The fresh read lands with the same rows: nothing moves.
+      s.props.messages = [message("msg_1"), message("msg_2")];
+      s.props.roomLoading = false;
+      await flush();
+      assert.equal(s.el.scrollTop, expected);
+    } finally { s.close(); }
+  });
+}
+
+test("timeline: a cached row that is missing waits for fresh data before paging history", async () => {
+  const s = await scrollSurface(false, false, null, {
+    scrollTop: 0,
+    props: { roomLoading: true, hasOlderMessages: true, initialScrollPosition: { top: 500, latest: false, anchor: { messageId: "msg_old", offsetTop: 0 } } },
+  });
+  try {
+    assert.equal(s.el.scrollTop, 1600, "the newest cached rows show while the room loads");
+    assert.ok(!s.calls.includes("load-older"));
+    s.props.roomLoading = false;
+    await flush();
+    assert.ok(s.calls.includes("load-older"), "the saved row is looked for on fresh data");
+  } finally { s.close(); }
+});
+
+test("timeline: a reader at the bottom of cached rows follows new messages from the fresh read", async () => {
+  const s = await scrollSurface(false, false, null, {
+    scrollTop: 0,
+    props: { roomLoading: true, initialScrollPosition: { top: 1600, latest: true, anchor: null } },
+  });
+  try {
+    assert.equal(s.el.scrollTop, 1600);
+    s.el.scrollHeight = 2300;
+    s.props.messages = [message("msg_1"), message("msg_2"), message("msg_3")];
+    s.props.roomLoading = false;
+    await flush(); s.frame(); await flush();
+    assert.equal(s.el.scrollTop, 1900);
   } finally { s.close(); }
 });
 

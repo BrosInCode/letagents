@@ -91,7 +91,8 @@
         :style="{ height: `${windowGapHeight}px` }"
       ></div>
 
-      <div v-if="roomLoading" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
+      <!-- Cached rows shown while the room loads need no placeholder rows under them. -->
+      <div v-if="roomLoading && !messages.length" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
         <div
           v-for="index in 4"
           :key="index"
@@ -1105,7 +1106,8 @@ function keepLatestInViewOnResize(): void {
 onMounted(() => {
   void nextTick(() => {
     if (!hasAppliedInitialScroll && !restoreInitialScrollPosition()) {
-      if (props.messages.length && !props.roomLoading) scrollToBottom("auto");
+      // Cached rows painted while the room loads open at the bottom too.
+      if (props.messages.length) scrollToBottom("auto");
       else updateScrollState();
     }
     scheduleAutoFillViewport();
@@ -1376,8 +1378,10 @@ function restoreInitialScrollPosition(): boolean {
   const position = props.initialScrollPosition;
   if (position === null || position === undefined) return false;
   const element = messagesElement.value;
-  // Loading/hidden viewports must not consume the saved position or publish 0.
-  if (props.roomLoading || !props.messages.length || !isMeasurableScrollViewport(element)) return true;
+  // Empty/hidden viewports must not consume the saved position or publish 0.
+  // Rows painted from the room's cached snapshot while it loads are restored
+  // at once, so no frame shows the top of the mount window.
+  if (!props.messages.length || !isMeasurableScrollViewport(element)) return true;
   // The window changes in the next render: a call before it would not find the rows.
   if (restoreAwaitsWindow) return true;
   const bookmark = position;
@@ -1385,6 +1389,13 @@ function restoreInitialScrollPosition(): boolean {
     && includeMessageInWindow(bookmark.anchor.messageId)) {
     // The saved row is loaded but outside the mount window: mount it, then retry.
     retryRestoreAfterRender();
+    return true;
+  }
+  if (props.roomLoading && !bookmark.latest && bookmark.anchor && !findScrollAnchor(bookmark.anchor.messageId)) {
+    // The cached rows do not hold the saved row, and history is paged only on
+    // fresh data: show the newest cached rows and restore when the room loads.
+    setInstantScrollTop(element, element.scrollHeight);
+    updateScrollState();
     return true;
   }
   if (!bookmark.latest && bookmark.anchor && !findScrollAnchor(bookmark.anchor.messageId)
