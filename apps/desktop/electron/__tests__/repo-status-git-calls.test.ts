@@ -234,7 +234,7 @@ test("opening a repository watch asks for its metadata paths in one Git run", as
     const status = await startRepoStatusWatch(root);
     await waitForActiveRepoStatusRefreshForTest();
     const metadataReads = calls.spawns.filter((args) => (
-      args[0] === "rev-parse" && args.join(" ") !== "rev-parse --git-path HEAD" && args[1] !== "--show-toplevel"
+      args[0] === "rev-parse" && !args.join(" ").startsWith("rev-parse --git-path HEAD ") && args[1] !== "--show-toplevel"
     ));
     // One read when the watch opens and one after the full rebuild behind it.
     assert.equal(metadataReads.length, 2, metadataReads.map((args) => args.join(" ")).join("\n"));
@@ -243,6 +243,98 @@ test("opening a repository watch asks for its metadata paths in one Git run", as
     stopRepoStatusWatch();
     calls.restore();
     restoreWatch();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+/** What Git itself says now for `branch` against main, run in `root`. */
+function gitDelta(root: string, branch: string) {
+  return parseGitShortStat(git(root, "diff", "--shortstat", "--merge-base", "main", branch, "--"), "main", branch);
+}
+
+test("a changed diff configuration is measured again, also by a full refresh", async () => {
+  clearBranchDeltaCacheForTest();
+  const { temporary, root, worktrees } = repoWithWorktrees(1);
+  try {
+    git(worktrees[0]!, "mv", "README.md", "README-renamed.md");
+    git(worktrees[0]!, "commit", "-qm", "rename");
+    git(root, "config", "diff.renames", "true");
+    const first = await buildRepoStatus(root);
+    const before = first.branchDeltas?.find((delta) => delta.branch === "agent/0");
+    assert.deepEqual(before, gitDelta(root, "agent/0"));
+
+    git(root, "config", "diff.renames", "false");
+    const expected = gitDelta(root, "agent/0");
+    assert.notDeepEqual(expected, before, "the fixture must make diff.renames matter");
+    const refreshed = await refreshRepoStatus(root, first, { full: true });
+    assert.deepEqual(refreshed.branchDeltas?.find((delta) => delta.branch === "agent/0"), expected);
+    const rebuilt = await buildRepoStatus(root);
+    assert.deepEqual(rebuilt.branchDeltas?.find((delta) => delta.branch === "agent/0"), expected);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a changed info/attributes file is measured again", async () => {
+  clearBranchDeltaCacheForTest();
+  const { temporary, root } = repoWithWorktrees(2);
+  try {
+    const first = await buildRepoStatus(root);
+    assert.deepEqual(first.branchDeltas?.find((delta) => delta.branch === "agent/1"), gitDelta(root, "agent/1"));
+
+    writeFileSync(join(root, ".git", "info", "attributes"), "*.txt binary\n");
+    const expected = gitDelta(root, "agent/1");
+    assert.equal(expected.additions, 0, "the fixture must make the attribute matter");
+    const rebuilt = await buildRepoStatus(root);
+    assert.deepEqual(rebuilt.branchDeltas?.find((delta) => delta.branch === "agent/1"), expected);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("checking out a branch whose .gitattributes changes a diff is measured again", async () => {
+  clearBranchDeltaCacheForTest();
+  const { temporary, root } = repoWithWorktrees(1);
+  try {
+    git(root, "switch", "-qc", "attributes");
+    writeFileSync(join(root, ".gitattributes"), "work-0.txt -diff\n");
+    git(root, "add", ".gitattributes");
+    git(root, "commit", "-qm", "attributes");
+    git(root, "switch", "-q", "main");
+    const first = await buildRepoStatus(root);
+    assert.deepEqual(first.branchDeltas?.find((delta) => delta.branch === "agent/0"), gitDelta(root, "agent/0"));
+
+    // Neither compared tip moves; the clean checkout brings the attribute file.
+    git(root, "switch", "-q", "attributes");
+    const expected = gitDelta(root, "agent/0");
+    assert.equal(expected.additions, 0, "the fixture must make the attribute matter");
+    const headRefresh = await refreshRepoStatus(root, first, { head: true });
+    assert.deepEqual(headRefresh.branchDeltas?.find((delta) => delta.branch === "agent/0"), expected);
+    const fullRefresh = await refreshRepoStatus(root, first, { full: true });
+    assert.deepEqual(fullRefresh.branchDeltas?.find((delta) => delta.branch === "agent/0"), expected);
+    const rebuilt = await buildRepoStatus(root);
+    assert.deepEqual(rebuilt.branchDeltas?.find((delta) => delta.branch === "agent/0"), expected);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("an unrelated configuration change measures once, then the cache holds again", async () => {
+  clearBranchDeltaCacheForTest();
+  const { temporary, root } = repoWithWorktrees(4);
+  const calls = recordGit();
+  try {
+    const first = await buildRepoStatus(root);
+    assert.equal(calls.diffs(), 4);
+    git(root, "config", "letagents.unrelated", "1");
+    let before = calls.diffs();
+    assert.deepEqual(await buildRepoStatus(root), first);
+    assert.equal(calls.diffs() - before, 4, "a configuration change measures every branch once");
+    before = calls.diffs();
+    assert.deepEqual(await buildRepoStatus(root), first);
+    assert.equal(calls.diffs() - before, 0, "then unchanged builds measure nothing");
+  } finally {
+    calls.restore();
     rmSync(temporary, { recursive: true, force: true });
   }
 });
