@@ -11,7 +11,7 @@ const {
   isRepoBackedProject,
   isRepoBackedRoomId,
   replyRepoRoomAccessDecision,
-  requireAdmin,
+  requireGitRoomAdmin,
   requireGitRoomParticipant,
   requireParticipant,
   resolveGitHubRoomEntryDecision,
@@ -377,11 +377,11 @@ test("replyRepoRoomAccessDecision preserves auth-required response shape", () =>
   }
 });
 
-test("requireAdmin rejects unauthenticated requests before role lookup", async () => {
+test("requireGitRoomAdmin rejects unauthenticated requests before role lookup", async () => {
   const { res, state } = jsonResponse();
 
   assert.equal(
-    await requireAdmin({ sessionAccount: null } as never, res, project("invite-room")),
+    await requireGitRoomAdmin({ sessionAccount: null } as never, res, project("invite-room")),
     false
   );
   assert.equal(state.statusCode, 401);

@@ -50,8 +50,11 @@ interface RepoRoomAccessDecisionDeps {
     accessToken: string;
     bypassCache?: boolean;
     throwOnIndeterminate?: boolean;
+    prefetchedRepo?: GitHubRepo | null;
   }) => Promise<boolean>;
   isPublicRepoRoleHolder?: typeof isGitHubPublicRepoRoleHolder;
+  /** The fresh signed-in repository read; defaults to the real one only with the real getVisibility. */
+  loadFreshRepo?: (roomName: string, accessToken: string) => Promise<FreshRepoRead>;
   getLastKnownVisibility?: (roomName: string) => "public" | "private" | null;
 }
 
@@ -68,7 +71,21 @@ const REPO_VISIBILITY_LAST_KNOWN_MAX_AGE_MS = 1000 * 60 * 60;
 const REPO_VISIBILITY_RATE_LIMIT_DEFAULT_BACKOFF_MS = 1000 * 60;
 const REPO_VISIBILITY_RATE_LIMIT_MAX_BACKOFF_MS = 1000 * 60 * 60;
 let anonymousVisibilityLookupsBlockedUntil = 0;
-const REPO_ACCESS_TTL_MS = 1000 * 60 * 30;
+// A "yes" from GitHub (a role on the repository) is served from the cache
+// (stale-while-revalidate):
+// - up to REPO_ACCESS_REFRESH_AFTER_MS old: served, no GitHub call;
+// - older: still served at once, and ONE background refresh starts (shared
+//   per person and repository; the request never waits for it). A definite
+//   "no" evicts the entry and fires the invalidation a webhook fires, so live
+//   leases and streams re-check at once; an unanswered refresh keeps the "yes"
+//   and is retried no sooner than REPO_ACCESS_REFRESH_RETRY_MS;
+// - REPO_ACCESS_TTL_MS old: gone; the next read asks GitHub and waits.
+// Webhooks clear it at once, as before. An active reader sees a revocation
+// within about 5 minutes plus one GitHub response; one who returns after a
+// pause, within 30 minutes at most.
+export const REPO_ACCESS_TTL_MS = 1000 * 60 * 30;
+export const REPO_ACCESS_REFRESH_AFTER_MS = 1000 * 60 * 5;
+const REPO_ACCESS_REFRESH_RETRY_MS = 1000 * 60;
 // A "no role" answer for a public repository is kept briefly, so a refused
 // client that reconnects does not spend the person's GitHub rate limit.
 const PUBLIC_REPO_NO_ROLE_TTL_MS = 1000 * 60;
@@ -81,8 +98,11 @@ const REPO_NOT_ADMIN_TTL_MS = 1000 * 60 * 5;
 const REPO_CACHE_MAX_ENTRIES = 5_000;
 const repoVisibilityCache = new Map<string, { visibility: GitHubRepoVisibility; expiresAt: number }>();
 const repoVisibilityLastKnown = new Map<string, { visibility: "public" | "private"; expiresAt: number }>();
-const repoAccessCache = new Map<string, { allowed: boolean; expiresAt: number }>();
-const publicRepoRoleCache = new Map<string, { allowed: boolean; expiresAt: number }>();
+interface RepoAccessCacheEntry { allowed: boolean; expiresAt: number; refreshAt: number }
+const repoAccessCache = new Map<string, RepoAccessCacheEntry>();
+const publicRepoRoleCache = new Map<string, RepoAccessCacheEntry>();
+// Background refreshes of a stale "yes", keyed `kind::room::login`.
+const repoAccessRefreshInflight = new Map<string, { roomKey: string; loginKey: string; promise: Promise<void> }>();
 // The last "has a role" answer, kept so that a GitHub outage does not lock a
 // collaborator out. Webhook invalidation (role removed) discards it at once.
 const publicRepoRoleLastKnown = new Map<string, { expiresAt: number }>();
@@ -161,7 +181,7 @@ function setLastKnownVisibility(roomName: string, visibility: GitHubRepoVisibili
   });
 }
 
-function getCachedRepoAccess(roomName: string, login: string): boolean | null {
+function getCachedRepoAccess(roomName: string, login: string): RepoAccessCacheEntry | null {
   const cacheKey = `${normalizeCacheKey(roomName)}::${normalizeCacheKey(login)}`;
   const cached = repoAccessCache.get(cacheKey);
   if (!cached) return null;
@@ -169,16 +189,80 @@ function getCachedRepoAccess(roomName: string, login: string): boolean | null {
     repoAccessCache.delete(cacheKey);
     return null;
   }
-  return cached.allowed;
+  return cached;
+}
+
+/**
+ * Starts the one background refresh of a stale cached "yes". The caller has
+ * already answered from the cache; this never throws and never waits.
+ */
+function refreshStaleRepoAccess(input: {
+  kind: "collaborator" | "public_role";
+  entry: RepoAccessCacheEntry;
+  roomName: string;
+  login: string;
+  accessToken: string;
+}): void {
+  const now = Date.now();
+  if (!input.entry.allowed || input.entry.refreshAt > now || !input.accessToken) return;
+  const roomKey = normalizeCacheKey(input.roomName);
+  const loginKey = normalizeCacheKey(input.login);
+  const flightKey = `${input.kind}::${roomKey}::${loginKey}`;
+  if (repoAccessRefreshInflight.has(flightKey)) return;
+  const generationsHold = captureRepoPersonGenerations(roomKey, loginKey);
+  const cache = input.kind === "collaborator" ? repoAccessCache : publicRepoRoleCache;
+  const cacheKey = `${roomKey}::${loginKey}`;
+  const promise = (async () => {
+    let allowed: boolean;
+    try {
+      allowed = input.kind === "collaborator"
+        ? await isGitHubRepoCollaborator({
+          roomName: input.roomName, login: input.login, accessToken: input.accessToken, bypassCache: true,
+        })
+        : await isGitHubPublicRepoRoleHolder({
+          roomName: input.roomName, login: input.login, accessToken: input.accessToken, bypassCache: true,
+          noLastKnownFallback: true,
+        });
+    } catch {
+      // GitHub gave no answer: keep serving the "yes" until it expires, and
+      // try again no sooner than a minute from now.
+      const current = cache.get(cacheKey);
+      if (current === input.entry) current.refreshAt = Date.now() + REPO_ACCESS_REFRESH_RETRY_MS;
+      return;
+    }
+    if (allowed) {
+      // A webhook or a fresh "no" during the refresh wins over this "yes".
+      if (!generationsHold()) return;
+      pruneExpiringCache(cache, REPO_CACHE_MAX_ENTRIES);
+      const at = Date.now();
+      cache.set(cacheKey, { allowed: true, expiresAt: at + REPO_ACCESS_TTL_MS, refreshAt: at + REPO_ACCESS_REFRESH_AFTER_MS });
+      return;
+    }
+    // A definite "no": the fresh check already forgot this person's answers.
+    // Tell every live lease and stream, on every instance, as a webhook would.
+    githubRepoAccessInvalidationEvents.emit("invalidate", { roomName: roomKey, login: loginKey });
+  })().catch((error: unknown) => {
+    console.warn("[repo access] background refresh failed", error);
+  }).finally(() => {
+    if (repoAccessRefreshInflight.get(flightKey)?.promise === promise) repoAccessRefreshInflight.delete(flightKey);
+  });
+  repoAccessRefreshInflight.set(flightKey, { roomKey, loginKey, promise });
+}
+
+/** Waits for background refreshes; for tests. */
+export async function settleRepoAccessRefreshesForTests(): Promise<void> {
+  await Promise.all([...repoAccessRefreshInflight.values()].map((flight) => flight.promise));
 }
 
 function setCachedRepoAccess(roomName: string, login: string, allowed: boolean): void {
   if (!allowed) return;
   pruneExpiringCache(repoAccessCache, REPO_CACHE_MAX_ENTRIES);
   const cacheKey = `${normalizeCacheKey(roomName)}::${normalizeCacheKey(login)}`;
+  const now = Date.now();
   repoAccessCache.set(cacheKey, {
     allowed,
-    expiresAt: Date.now() + REPO_ACCESS_TTL_MS,
+    expiresAt: now + REPO_ACCESS_TTL_MS,
+    refreshAt: now + REPO_ACCESS_REFRESH_AFTER_MS,
   });
 }
 
@@ -260,10 +344,13 @@ function forgetRoomAccess(roomKey: string): void {
     if (flight.roomKey === roomKey) repoVisibilityInflight.delete(flightKey);
   }
   knownPrivateVisibilityInflight.delete(roomKey);
+  for (const [flightKey, flight] of freshRepoInflight) {
+    if (flight.roomKey === roomKey) freshRepoInflight.delete(flightKey);
+  }
   for (const flightKey of publicRepoRoleInflight.keys()) {
     if (flightKey.includes(`::${roomKey}::`)) publicRepoRoleInflight.delete(flightKey);
   }
-  for (const flights of [repoAccessInflight, repoAdminInflight]) {
+  for (const flights of [repoAccessInflight, repoAdminInflight, repoAccessRefreshInflight]) {
     for (const [flightKey, flight] of flights) {
       if (flight.roomKey === roomKey) flights.delete(flightKey);
     }
@@ -330,6 +417,12 @@ githubRepoAccessInvalidationEvents.on("invalidate", (payload: unknown) => {
   const invalidation = payload && typeof payload === "object"
     ? payload as { roomName?: unknown; login?: unknown }
     : {};
+  // Both names: one person lost one repository (a background refresh got a
+  // definite "no"); forget only that. One name: a webhook or a sign-in.
+  if (typeof invalidation.roomName === "string" && typeof invalidation.login === "string") {
+    forgetPersonAccess(normalizeCacheKey(invalidation.roomName), normalizeCacheKey(invalidation.login));
+    return;
+  }
   if (typeof invalidation.roomName === "string") forgetRoomAccess(normalizeCacheKey(invalidation.roomName));
   if (typeof invalidation.login === "string") forgetLoginAccess(normalizeCacheKey(invalidation.login));
 });
@@ -534,6 +627,54 @@ async function loadGitHubRepoVisibility(
   return pending;
 }
 
+// Keyed `room::credential`: a fresh read shared only by the same token.
+const freshRepoInflight = new Map<string, {
+  roomKey: string;
+  promise: Promise<FreshRepoRead>;
+}>();
+
+/** `repo`: GitHub's 200 body; null for a 404; undefined for any other answer. */
+type FreshRepoRead = { visibility: GitHubRepoVisibility; repo: GitHubRepo | null | undefined };
+
+/**
+ * The fresh, signed-in visibility lookup, keeping GitHub's 200 body for the
+ * role check that follows with the same token. Visibility caches change as in
+ * the "fresh-authenticated" lookup: a fresh check never falls back to a
+ * remembered answer, and one GitHub did not answer replaces nothing.
+ */
+async function loadFreshRepoForCredential(
+  roomName: string,
+  accessToken: string,
+): Promise<FreshRepoRead> {
+  const roomKey = normalizeCacheKey(roomName);
+  const credential = createHash("sha256").update(accessToken).digest("hex").slice(0, 32);
+  const flightKey = `${roomKey}::${credential}`;
+  const existing = freshRepoInflight.get(flightKey);
+  if (existing) return existing.promise;
+  const roomGeneration = getCacheGeneration(repoRoomCacheGeneration, roomKey);
+  let pending!: Promise<FreshRepoRead>;
+  pending = (async () => {
+    const response = await fetchGitHubRepo(roomName, accessToken);
+    const outcome = await classifyVisibilityLookupResponse(response, Date.now(), false);
+    const unanswered = outcome.kind === "unanswered";
+    let visibility: GitHubRepoVisibility = "unknown";
+    let repo: GitHubRepo | null | undefined = response.status === 404 ? null : undefined;
+    if (response.ok) {
+      repo = (await response.json()) as GitHubRepo;
+      visibility = repo.private ? "private" : "public";
+    }
+    if (getCacheGeneration(repoRoomCacheGeneration, roomKey) === roomGeneration) {
+      if (!unanswered || !getLastKnownVisibility(roomName)) setCachedVisibility(roomName, visibility);
+      if (!unanswered) setLastKnownVisibility(roomName, visibility);
+    }
+    return { visibility, repo };
+  })().finally(() => {
+    if (freshRepoInflight.get(flightKey)?.promise === pending) freshRepoInflight.delete(flightKey);
+  });
+  freshRepoInflight.set(flightKey, { roomKey, promise: pending });
+  return pending;
+}
+
 type VisibilityLookupOutcome =
   | { kind: "answered" }
   | { kind: "unanswered"; retryAt: number | null };
@@ -595,13 +736,17 @@ export async function isGitHubRepoCollaborator(input: {
   throwOnIndeterminate?: boolean;
   // Injectable for tests; production uses the global fetch (bounded by a deadline).
   fetchImpl?: typeof fetch;
+  // The repository as GitHub just returned it (200) to this same token, or
+  // null for a 404 to it, so a fresh check does not read it twice.
+  prefetchedRepo?: GitHubRepo | null;
 }): Promise<boolean> {
   const roomKey = normalizeCacheKey(input.roomName);
   const loginKey = normalizeCacheKey(input.login);
   if (!input.bypassCache) {
     const cached = getCachedRepoAccess(input.roomName, input.login);
     if (cached !== null) {
-      return cached;
+      refreshStaleRepoAccess({ kind: "collaborator", entry: cached, roomName: input.roomName, login: input.login, accessToken: input.accessToken });
+      return cached.allowed;
     }
   }
   const cacheKey = `${roomKey}::${loginKey}`;
@@ -621,21 +766,28 @@ export async function isGitHubRepoCollaborator(input: {
     const repo = parseGitHubRepoName(input.roomName);
     if (!repo) return false;
 
-    let ownerResponse: Response;
-    try {
-      ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken, doFetch);
-    } catch {
-      throw new GitHubAccessUnavailableError(null);
-    }
-    if (!ownerResponse.ok) {
-      if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(ownerResponse)) {
-        throw new Error(`GitHub repo access revalidation was indeterminate (${ownerResponse.status}).`);
-      }
-      if (await isGitHubOutageResponse(ownerResponse)) throw new GitHubAccessUnavailableError(ownerResponse.status);
+    let repoPayload: GitHubRepo;
+    if (input.prefetchedRepo === null) {
+      // A 404: the token cannot see the repository. An answer, not an outage.
       return false;
+    } else if (input.prefetchedRepo) {
+      repoPayload = input.prefetchedRepo;
+    } else {
+      let ownerResponse: Response;
+      try {
+        ownerResponse = await fetchGitHubRepo(input.roomName, input.accessToken, doFetch);
+      } catch {
+        throw new GitHubAccessUnavailableError(null);
+      }
+      if (!ownerResponse.ok) {
+        if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(ownerResponse)) {
+          throw new Error(`GitHub repo access revalidation was indeterminate (${ownerResponse.status}).`);
+        }
+        if (await isGitHubOutageResponse(ownerResponse)) throw new GitHubAccessUnavailableError(ownerResponse.status);
+        return false;
+      }
+      repoPayload = (await ownerResponse.json()) as GitHubRepo;
     }
-
-    const repoPayload = (await ownerResponse.json()) as GitHubRepo;
     let allowed = repoPayload.owner?.login?.toLowerCase() === loginKey;
     if (!allowed) {
       let permissionResponse: Response;
@@ -711,18 +863,25 @@ export async function isGitHubPublicRepoRoleHolder(input: {
   bypassCache?: boolean;
   throwOnIndeterminate?: boolean;
   fetchImpl?: typeof fetch;
+  /** As for isGitHubRepoCollaborator: GitHub's 200 body (or null for a 404) to this same token. */
+  prefetchedRepo?: GitHubRepo | null;
+  /** A background refresh: an unanswered check throws instead of standing in the last known "yes". */
+  noLastKnownFallback?: boolean;
 }): Promise<boolean> {
   const roomKey = normalizeCacheKey(input.roomName);
   const loginKey = normalizeCacheKey(input.login);
   const cacheKey = `${roomKey}::${loginKey}`;
   if (!input.bypassCache) {
     const cached = publicRepoRoleCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) return cached.allowed;
+    if (cached && cached.expiresAt > Date.now()) {
+      refreshStaleRepoAccess({ kind: "public_role", entry: cached, roomName: input.roomName, login: input.login, accessToken: input.accessToken });
+      return cached.allowed;
+    }
     if (cached) publicRepoRoleCache.delete(cacheKey);
   }
   if (!parseGitHubRepoName(input.roomName)) return false;
 
-  const flightKey = `${input.throwOnIndeterminate ? "strict" : "lenient"}::${input.bypassCache ? "fresh" : "cached"}::${cacheKey}`;
+  const flightKey = `${input.throwOnIndeterminate ? "strict" : input.noLastKnownFallback ? "refresh" : "lenient"}::${input.bypassCache ? "fresh" : "cached"}::${cacheKey}`;
   const existing = publicRepoRoleInflight.get(flightKey);
   if (existing) return existing;
   const pending = (async () => {
@@ -731,28 +890,36 @@ export async function isGitHubPublicRepoRoleHolder(input: {
     const personGeneration = getCacheGeneration(repoPersonCacheGeneration, cacheKey);
     const unavailable = (status: number | null): boolean => {
       const lastKnown = publicRepoRoleLastKnown.get(cacheKey);
-      if (lastKnown && lastKnown.expiresAt > Date.now()) return true;
+      if (!input.noLastKnownFallback && lastKnown && lastKnown.expiresAt > Date.now()) return true;
       throw new GitHubAccessUnavailableError(status);
     };
-    let response: Response;
-    try {
-      response = await fetchGitHubRepo(input.roomName, input.accessToken, input.fetchImpl ?? fetch);
-    } catch {
-      return unavailable(null);
-    }
-    if (!response.ok) {
-      // Authority revalidation keeps its grant on any unanswered check,
-      // a dead owner token included.
-      if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(response)) {
-        throw new Error(`GitHub repo role check was indeterminate (${response.status}).`);
-      }
-      // A dead token (401) or one blocked by the organization (plain 403) is
-      // GitHub's answer for this token: no role. Only an outage is a retry.
-      if (await isGitHubOutageResponse(response)) return unavailable(response.status);
+    let payload: GitHubRepo;
+    if (input.prefetchedRepo === null) {
       publicRepoRoleLastKnown.delete(cacheKey);
       return false;
+    } else if (input.prefetchedRepo) {
+      payload = input.prefetchedRepo;
+    } else {
+      let response: Response;
+      try {
+        response = await fetchGitHubRepo(input.roomName, input.accessToken, input.fetchImpl ?? fetch);
+      } catch {
+        return unavailable(null);
+      }
+      if (!response.ok) {
+        // Authority revalidation keeps its grant on any unanswered check,
+        // a dead owner token included.
+        if (input.throwOnIndeterminate && isIndeterminateGitHubAccessResponse(response)) {
+          throw new Error(`GitHub repo role check was indeterminate (${response.status}).`);
+        }
+        // A dead token (401) or one blocked by the organization (plain 403) is
+        // GitHub's answer for this token: no role. Only an outage is a retry.
+        if (await isGitHubOutageResponse(response)) return unavailable(response.status);
+        publicRepoRoleLastKnown.delete(cacheKey);
+        return false;
+      }
+      payload = (await response.json()) as GitHubRepo;
     }
-    const payload = (await response.json()) as GitHubRepo;
     const permissions = payload.permissions ?? {};
     const allowed = payload.owner?.login?.toLowerCase() === loginKey
       || Boolean(permissions.triage || permissions.push || permissions.maintain || permissions.admin);
@@ -767,9 +934,11 @@ export async function isGitHubPublicRepoRoleHolder(input: {
     }
     if (!input.bypassCache && generationsHold) {
       pruneExpiringCache(publicRepoRoleCache, REPO_CACHE_MAX_ENTRIES);
+      const at = Date.now();
       publicRepoRoleCache.set(cacheKey, {
         allowed,
-        expiresAt: Date.now() + (allowed ? REPO_ACCESS_TTL_MS : PUBLIC_REPO_NO_ROLE_TTL_MS),
+        expiresAt: at + (allowed ? REPO_ACCESS_TTL_MS : PUBLIC_REPO_NO_ROLE_TTL_MS),
+        refreshAt: at + REPO_ACCESS_REFRESH_AFTER_MS,
       });
     }
     return allowed;
@@ -932,9 +1101,22 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
   }
 
   const accessToken = input.sessionAccount.provider_access_token ?? undefined;
-  let visibility = await deps.getVisibility(canonicalRoomName, accessToken, {
-    bypassCache: input.freshCollaboratorCheck,
-  });
+  // A fresh check with a token reads the repository once: its 200 body gives
+  // the visibility, the owner and the token's own permissions, and the role
+  // check below reuses it. Any other answer leaves the role check to ask
+  // again, as before, so its outage and refusal handling is unchanged.
+  let prefetchedRepo: GitHubRepo | null | undefined;
+  let visibility: GitHubRepoVisibility;
+  const loadFresh = deps.loadFreshRepo ?? (deps.getVisibility === getGitHubRepoVisibility ? loadFreshRepoForCredential : null);
+  if (input.freshCollaboratorCheck && accessToken && loadFresh) {
+    const fresh = await loadFresh(canonicalRoomName, accessToken);
+    visibility = fresh.visibility;
+    prefetchedRepo = fresh.repo;
+  } else {
+    visibility = await deps.getVisibility(canonicalRoomName, accessToken, {
+      bypassCache: input.freshCollaboratorCheck,
+    });
+  }
   // GitHub gave no answer (a fresh check does not use the remembered one): a
   // repository known to be public in the last hour goes to its role check,
   // which retries during an outage instead of refusing like a private repo.
@@ -959,6 +1141,7 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
         accessToken: input.sessionAccount.provider_access_token,
         bypassCache: input.freshCollaboratorCheck,
         throwOnIndeterminate: input.throwOnIndeterminate,
+        ...(prefetchedRepo !== undefined ? { prefetchedRepo } : {}),
       });
     } catch (error) {
       // Authority revalidation keeps its grant on an outage, by the throw.
@@ -984,6 +1167,7 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
       accessToken: input.sessionAccount.provider_access_token,
       bypassCache: input.freshCollaboratorCheck,
       throwOnIndeterminate: input.throwOnIndeterminate,
+      ...(prefetchedRepo !== undefined ? { prefetchedRepo } : {}),
     });
   } catch (error) {
     // A GitHub outage is a retry, not "no access"; a dead or blocked token

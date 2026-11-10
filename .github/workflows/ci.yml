@@ -892,6 +892,11 @@ jobs:
         timeout-minutes: 5
         run: node --import tsx --test src/api/__tests__/room-access-live-recheck-db.test.ts src/api/__tests__/live-room-authorization.test.ts
 
+      - name: Test the one room access decision at every call site
+        if: matrix.group == 3
+        timeout-minutes: 5
+        run: node --import tsx --test src/api/__tests__/room-access-characterization-db.test.ts
+
       - name: Test GitHub webhook delivery recovery and event dedup
         if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/github-webhook-routes.test.ts src/api/__tests__/github-webhook-delivery-recovery-db.test.ts

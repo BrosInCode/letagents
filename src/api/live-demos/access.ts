@@ -1,11 +1,7 @@
 import { parseLiveDemoKey } from '../../../shared/live-demo.mjs';
 import { getMessageAttachment, getSessionAccountByToken, type Project, type SessionAccount } from '../db.js';
-import {
-  getProjectAccessRoomId,
-  resolveProjectRepoRoomAccessDecision,
-  resolveRoomMembershipDecision,
-  type RoomAccessAccount,
-} from '../rooms/access.js';
+import { decideRoomRead, getProjectAccessRoomId, type RoomAccessAccount } from '../rooms/access-decision.js';
+import { roomAccessName } from '../rooms/access.js';
 import { resolveExistingRoomRequest } from '../rooms/resolution.js';
 
 export type LiveRoomDecision = 'allow' | 'deny' | 'unavailable';
@@ -43,18 +39,14 @@ export const liveDemoAccess: LiveDemoAccess = {
   },
   async canView(room, account, options = {}) {
     if (!liveDemosOffered(room)) return { decision: 'deny', accessRoomName: getProjectAccessRoomId(room).toLowerCase() };
-    const access = await resolveProjectRepoRoomAccessDecision({
+    const access = await decideRoomRead({
       project: room,
-      sessionAccount: account,
-      freshCollaboratorCheck: options.fresh,
+      principal: { kind: 'person', account },
+      freshness: options.fresh ? 'fresh' : 'cached',
     });
-    const accessRoomName = (access.repoRoomName ?? getProjectAccessRoomId(room)).toLowerCase();
-    if (!access.isRepoBacked) {
-      const membership = await resolveRoomMembershipDecision(room, account);
-      return { decision: membership.kind === 'allow' ? 'allow' : 'deny', accessRoomName };
-    }
-    if (access.decision.kind === 'allow') return { decision: 'allow', accessRoomName };
-    return { decision: access.decision.kind === 'repo_access_unavailable' ? 'unavailable' : 'deny', accessRoomName };
+    const accessRoomName = (access.target ? roomAccessName(access.target) : getProjectAccessRoomId(room)).toLowerCase();
+    if (access.kind === 'allow') return { decision: 'allow', accessRoomName };
+    return { decision: access.kind === 'indeterminate' ? 'unavailable' : 'deny', accessRoomName };
   },
   async demoExists(roomId, demo) {
     const key = parseLiveDemoKey(demo);

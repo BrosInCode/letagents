@@ -6,8 +6,14 @@ import { ROOM_JOIN_REQUEST_EVENT } from "../../../../shared/room-join-requests.m
 import type { AccountActivityHub, AccountRoomActivity } from "../../account-activity/hub.js";
 import type { getAccountRoomsForAccount } from "../../account-room-membership/list.js";
 import { getRoomMemberRole } from "../../db/room-members.js";
+import { getProjectById } from "../../db/rooms.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 import { openSseConnection } from "../../http/sse.js";
+import { resolveRequestAuth } from "../../request/auth.js";
+import { GitHubAccessUnavailableError, REPO_ACCESS_REFRESH_AFTER_MS } from "../../github/repo-access.js";
+import { classifyRoomAccess, decideRoomRead, roomAccessPrincipal } from "../../rooms/access-decision.js";
+import { roomAccessName } from "../../rooms/access.js";
+import { acquireLiveRoomAuthorization, type LiveRoomAuthorizationLease } from "../../rooms/live-authorization.js";
 import {
   ROOM_JOIN_REQUEST_CHANGED,
   readRoomJoinRequestChangedEvent,
@@ -25,6 +31,66 @@ export interface AccountActivityStreamDeps {
   joinRequestEvents?: EventEmitter;
   /** Whether the account is an admin of the room right now. Defaults to the members store. */
   isRoomAdmin?(accountId: string, roomId: string): Promise<boolean>;
+  /**
+   * The live read re-check of one watched room. Defaults to a lease of
+   * live-authorization.ts in the activity scope over the cached room read
+   * decision. Null: the room is gone.
+   */
+  openRoomAuthorization?(req: AuthenticatedRequest, roomId: string): Promise<LiveRoomAuthorizationLease | null>;
+  /** Whether the stream's own credential still names the same account. Defaults to a fresh credential read. */
+  credentialStillValid?(req: AuthenticatedRequest): Promise<boolean>;
+}
+
+/**
+ * After a check that got no answer, a frame for that room is skipped without
+ * asking again for this long, so a GitHub outage costs one check per room per
+ * period, not one per frame.
+ */
+const ACTIVITY_FAILURE_RETRY_MS = 30_000;
+
+/**
+ * The activity frames' own lease for one watched room (a focus room is
+ * judged by its own target, as the room gates judge it). Activity frames
+ * carry only ids, times, agent names and `tasks_changed_at`, so they are
+ * decided from CACHED answers: the cached GitHub "yes" is refreshed in the
+ * background after 5 minutes (a definite "no" invalidates at once), and the
+ * lease keeps an answer for the same 5 minutes. A membership end, a GitHub
+ * webhook cache clear, a bridge loss or a credential retirement invalidates
+ * it at once. It is a separate lease from the room stream's, which keeps its
+ * fresh 60 s check; neither can starve or close the other. No timer: an idle
+ * room costs nothing.
+ */
+async function openRoomAuthorization(req: AuthenticatedRequest, roomId: string): Promise<LiveRoomAuthorizationLease | null> {
+  const project = await getProjectById(roomId);
+  if (!project) return null;
+  const target = await classifyRoomAccess(project);
+  return acquireLiveRoomAuthorization({
+    req,
+    roomId: project.id,
+    accessRoomName: roomAccessName(target),
+    scope: "account_activity",
+    leaseMs: REPO_ACCESS_REFRESH_AFTER_MS,
+    failureRetryMs: ACTIVITY_FAILURE_RETRY_MS,
+    authorize: async () => {
+      // A revoked session or owner token must not keep receiving frames.
+      const fresh = await resolveRequestAuth(req);
+      if (fresh.authKind !== req.authKind || fresh.account?.account_id !== req.sessionAccount?.account_id) return false;
+      const decision = await decideRoomRead({
+        project,
+        target,
+        principal: roomAccessPrincipal(fresh.account),
+        freshness: "cached",
+      });
+      // No answer from GitHub is not a "no": the lease skips the frame and holds nothing.
+      if (decision.kind === "indeterminate") throw new GitHubAccessUnavailableError(null);
+      return decision.kind === "allow";
+    },
+  });
+}
+
+async function credentialStillValid(req: AuthenticatedRequest): Promise<boolean> {
+  const fresh = await resolveRequestAuth(req);
+  return fresh.authKind === req.authKind && fresh.account?.account_id === req.sessionAccount?.account_id;
 }
 
 async function isRoomAdminInStore(accountId: string, roomId: string): Promise<boolean> {
@@ -48,12 +114,15 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
       return;
     }
     let roomIds: string[];
+    // Each watched room, lower-cased, to its id as listed.
+    const watchedRoomOf = new Map<string, string>();
     try {
       const rooms = await deps.getAccountRoomsForAccount(req.sessionAccount.account_id, {
         login: req.sessionAccount.login,
         limit: ACCOUNT_ACTIVITY_ROOM_LIMIT,
       });
       roomIds = rooms.flatMap((room) => [room.room_id, ...room.focus_rooms.map((focus) => focus.room_id)]);
+      for (const roomId of roomIds) watchedRoomOf.set(roomId.toLowerCase(), roomId);
     } catch (error) {
       console.error("[account activity] could not list rooms", error);
       res.status(500).json({ error: "Room activity could not be loaded. Please retry." });
@@ -81,8 +150,65 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
     roomEventBridgeLossEvents.on("loss", onBridgeLoss);
     connection.addCleanup(() => { roomEventBridgeLossEvents.off("loss", onBridgeLoss); });
     const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+
+    // Every frame about a room passes a live read re-check of that room (its
+    // own lease, see openRoomAuthorization). A room the account can no longer
+    // read stops appearing in frames: before the next frame after an
+    // invalidation event, else within one lease period. A refusal is kept
+    // only for the lease period or until an invalidation; a check that got no
+    // answer skips that frame only. The stream stays open for the other rooms;
+    // a revoked credential closes it.
+    const openLease = deps.openRoomAuthorization ?? openRoomAuthorization;
+    const checkCredential = deps.credentialStillValid ?? credentialStillValid;
+    const leases = new Map<string, Promise<LiveRoomAuthorizationLease | null>>();
+    const queues = new Map<string, Promise<void>>();
+    let credentialCheckedAt = -Infinity;
+    connection.addCleanup(() => {
+      for (const lease of leases.values()) void lease.then((value) => value?.release(), () => undefined);
+      leases.clear();
+    });
+    const leaseFor = (roomId: string) => {
+      let lease = leases.get(roomId);
+      if (!lease) {
+        lease = openLease(req, roomId).then((opened) => {
+          if (opened && connection.closed) { opened.release(); return null; }
+          return opened;
+        }, (error: unknown) => {
+          // Load the room again on its next frame.
+          leases.delete(roomId);
+          throw error;
+        });
+        leases.set(roomId, lease);
+      }
+      return lease;
+    };
+    const mayShow = async (roomId: string): Promise<boolean> => {
+      const watched = watchedRoomOf.get(roomId.toLowerCase());
+      if (!watched || connection.closed) return false;
+      const lease = await leaseFor(watched);
+      if (!lease) return false;
+      if (await lease.check()) return !connection.closed;
+      // A refusal (not a missing answer): is the credential itself gone? At
+      // most one read per lease period, then close the whole stream.
+      if (!lease.lastCheckFailed() && !connection.closed && Date.now() - credentialCheckedAt >= REPO_ACCESS_REFRESH_AFTER_MS) {
+        credentialCheckedAt = Date.now();
+        if (!(await checkCredential(req).catch(() => true))) connection.close();
+      }
+      return false;
+    };
+    /** Writes a room's frames in order, each after its room's re-check. */
+    const writeAboutRoom = (roomId: string, data: () => string) => {
+      const key = roomId.toLowerCase();
+      const next = (queues.get(key) ?? Promise.resolve()).then(async () => {
+        if (await mayShow(roomId)) await connection.write(data());
+      }).catch((error) => {
+        console.warn("[account activity] room re-check failed", error);
+      });
+      queues.set(key, next);
+      void next.finally(() => { if (queues.get(key) === next) queues.delete(key); });
+    };
     const send = (activity: AccountRoomActivity) => {
-      void connection.write(frame("room", activity));
+      writeAboutRoom(activity.room_id, () => frame("room", activity));
     };
     // This account read a room, here or on another device: its unread count
     // changed. The frame names the room and the newest message read, so a
@@ -90,7 +216,7 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
     const readerId = req.sessionAccount.account_id;
     const onRead = (event: AccountRoomReadEvent) => {
       if (event.accountId === readerId && watchedRoomIds.has(event.roomId.toLowerCase()) && !connection.closed) {
-        void connection.write(frame(ACCOUNT_ROOM_READ_STREAM_EVENT, { room_id: event.roomId, last_message_id: event.lastMessageId }));
+        writeAboutRoom(event.roomId, () => frame(ACCOUNT_ROOM_READ_STREAM_EVENT, { room_id: event.roomId, last_message_id: event.lastMessageId }));
       }
     };
     accountReadEvents.on(ACCOUNT_ROOM_READ, onRead);
@@ -108,7 +234,7 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
         // The event is published once per room under the access room; one frame is enough here.
         if (!event || event.projectId !== event.accessRoomId || !watchedRoomIds.has(event.accessRoomId.toLowerCase())) return;
         void isRoomAdmin(accountId, event.accessRoomId).then((admin) => {
-          if (admin && !connection.closed) void connection.write(frame(ROOM_JOIN_REQUEST_EVENT, roomJoinRequestStreamPayload(event.accessRoomId, event)));
+          if (admin && !connection.closed) writeAboutRoom(event.accessRoomId, () => frame(ROOM_JOIN_REQUEST_EVENT, roomJoinRequestStreamPayload(event.accessRoomId, event)));
         }).catch((error) => {
           console.warn("[account activity] join request role check failed", error);
         });
