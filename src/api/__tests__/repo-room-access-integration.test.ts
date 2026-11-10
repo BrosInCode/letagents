@@ -246,11 +246,15 @@ function writeJson(res: ServerResponse, statusCode: number, payload: unknown): v
   res.end(JSON.stringify(payload));
 }
 
+/** Every request the GitHub stub served, as `<anon|token> <path>`, for tests that count calls. */
+const githubApiCalls: string[] = [];
+
 function handleGitHubApiRequest(req: IncomingMessage, res: ServerResponse): void {
   const method = req.method || "GET";
   const url = new URL(req.url || "/", "http://127.0.0.1");
   const pathname = url.pathname.toLowerCase();
   const authorization = req.headers.authorization;
+  githubApiCalls.push(`${authorization ? "token" : "anon"} ${pathname}`);
 
   if (method !== "GET") {
     writeJson(res, 405, { error: "method_not_allowed" });
@@ -542,6 +546,56 @@ test(
     const payload = await response.json();
     assert.equal(payload.room_id, PRIVATE_ROOM);
     assert.equal(payload.authenticated, true);
+  }
+);
+
+test(
+  "a repeat join by a repo room member asks GitHub nothing, and a first join asks the fewest questions",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed repo room access integration tests" : false,
+  },
+  async (t) => {
+    const githubApi = await startGitHubApiStub();
+    t.after(async () => {
+      await stopGitHubApiStub(githubApi.server);
+    });
+
+    const memberToken = await createGitHubSessionToken({ login: "collab", accessToken: "github-token-collab" });
+    const adminToken = await createGitHubSessionToken({ login: "repoadmin", accessToken: "github-token-repoadmin" });
+    const { child, port } = await startApiServer(githubApi.baseUrl);
+    t.after(async () => {
+      await stopChildProcess(child);
+    });
+
+    const join = async (roomName: string, sessionToken: string) => {
+      githubApiCalls.length = 0;
+      const response = await joinRoom({ port, roomName, sessionToken });
+      assert.equal(response.status, 200);
+      return { role: (await response.json()).role as string, calls: [...githubApiCalls] };
+    };
+
+    const coldPrivate = await join(PRIVATE_ROOM, memberToken);
+    assert.equal(coldPrivate.role, "participant");
+    assert.deepEqual(coldPrivate.calls, [
+      "anon /repos/brosincode/private-repo",
+      "token /repos/brosincode/private-repo",
+      "token /repos/brosincode/private-repo",
+      "token /repos/brosincode/private-repo/collaborators/collab/permission",
+    ], "visibility, then the collaborator check, whose answer also settles the admin check");
+    const warmPrivate = await join(PRIVATE_ROOM, memberToken);
+    assert.equal(warmPrivate.role, "participant");
+    assert.deepEqual(warmPrivate.calls, [], "a warm member join asks GitHub nothing");
+
+    const coldAdmin = await join(PRIVATE_ROOM, adminToken);
+    assert.equal(coldAdmin.role, "admin", "a repository admin is still the room admin");
+    assert.equal(coldAdmin.calls.length, 2, "visibility is shared; the collaborator check settles the admin check");
+
+    const coldPublic = await join(PUBLIC_ROOM, memberToken);
+    assert.equal(coldPublic.role, "participant");
+    assert.equal(coldPublic.calls.length, 4, "visibility, the role check, then the admin check (repository and permission)");
+    const warmPublic = await join(PUBLIC_ROOM, memberToken);
+    assert.deepEqual(warmPublic.calls, [], "a warm public-repo member join asks GitHub nothing");
   }
 );
 
