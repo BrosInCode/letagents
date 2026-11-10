@@ -11,10 +11,17 @@
 //   in chunks while the reader scrolls down, and drops rows far above the
 //   reader as it grows (the viewport keeps the visible row in place);
 // - at the bottom, and on a room change, the range returns to the newest entries.
+// - a room opens on the newest `messageWindowFirstSlice` entries only (enough
+//   to fill the view), and the newest-entries window then grows to
+//   `messageWindowSize` in idle slices (see `grownLatestWindowSize`).
 // The budget counts rows: a GitHub group counts up to `githubGroupRowLimit`.
 
 /** Newest timeline entries mounted when a room opens or the reader follows. */
 export const messageWindowSize = 200;
+/** Newest entries mounted in the first render of a room: the view and a margin above it. */
+export const messageWindowFirstSlice = 40;
+/** Entries added above the first slice in each idle step, until `messageWindowSize`. */
+export const messageWindowIdleSlice = 40;
 /** Entries added at an edge each time the reader nears it. */
 export const messageWindowChunk = 100;
 /** Entries kept above a jump target. */
@@ -223,6 +230,16 @@ export function windowStateIncluding(
   }
   const end = index + messageWindowTargetBelow >= length - size ? length : index + messageWindowTargetBelow;
   return windowStateFor(entries, start, end);
+}
+
+/**
+ * The budget of the newest-entries window after one more idle step. A step
+ * that would mount every loaded entry goes to `full` at once, so the window
+ * is complete and no step is left that mounts nothing.
+ */
+export function grownLatestWindowSize(entries: readonly WindowEntry[], size: number, slice = messageWindowIdleSlice, full = messageWindowSize): number {
+  const next = Math.min(full, size + slice);
+  return startForBudget(entries, entries.length, next) === 0 ? full : next;
 }
 
 /**
