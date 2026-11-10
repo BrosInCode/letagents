@@ -832,12 +832,36 @@ export async function migrateLegacyProjectBindings(
   options: ProjectBindingsStoreOptions = {},
 ): Promise<DesktopProjectBindingMigrationResult> {
   const retryLegacyKeys = new Set<string>();
+  // One validated list for the whole pass. The renderer sends every remembered
+  // project on every start (its recent rooms, and the same rooms again as
+  // legacy keys), so listing and validating every binding again per candidate
+  // repeated the same Git work many times. A candidate whose binding already
+  // exists costs nothing more; a binding written below joins this list, so a
+  // later candidate for the same project still finds it.
+  let bindings = await listProjectBindings(options);
+  let wroteBinding = false;
+  // Candidates for one folder share one resolution (identity and status).
+  const folderResolutions = new Map<string, Promise<{
+    resolved: Awaited<ReturnType<typeof resolveRoomIdentifierFromPath>>;
+    status: Awaited<ReturnType<typeof buildRepoStatus>>;
+  }>>();
+  const resolveFolder = (rootPath: string) => {
+    let resolution = folderResolutions.get(rootPath);
+    if (!resolution) {
+      resolution = (async () => {
+        const resolved = await resolveRoomIdentifierFromPath(rootPath, { ignoreConfiguredRoom: true });
+        const status = await buildRepoStatus(resolved.repoRoot || rootPath, { includeBranchDeltas: false });
+        return { resolved, status };
+      })();
+      folderResolutions.set(rootPath, resolution);
+    }
+    return resolution;
+  };
   for (const candidate of candidates) {
     try {
-      if (findProjectBinding(await listProjectBindings(options), candidate.context)) continue;
+      if (findProjectBinding(bindings, candidate.context)) continue;
       const rootPath = await canonicalDirectory(candidate.rootPath);
-      const resolved = await resolveRoomIdentifierFromPath(rootPath, { ignoreConfiguredRoom: true });
-      const status = await buildRepoStatus(resolved.repoRoot || rootPath, { includeBranchDeltas: false });
+      const { resolved, status } = await resolveFolder(rootPath);
       const resolvedContext: DesktopProjectBindingContext = {
         roomIdentifier: resolved.roomIdentifier,
         gitRoom: resolved.gitRoom,
@@ -846,7 +870,7 @@ export async function migrateLegacyProjectBindings(
         if (candidate.legacyKey) retryLegacyKeys.add(candidate.legacyKey);
         continue;
       }
-      await bindProjectRoot({
+      const binding = await bindProjectRoot({
         context: {
           roomIdentifier: candidate.context.roomIdentifier || resolved.roomIdentifier,
           gitRoom: candidate.context.gitRoom || resolved.gitRoom,
@@ -856,12 +880,15 @@ export async function migrateLegacyProjectBindings(
           : rootPath,
         source: resolved.source || "local_folder",
       }, options);
+      wroteBinding = true;
+      bindings = [...bindings.filter((existing) => existing.identityKey !== binding.identityKey), binding];
     } catch {
       if (candidate.legacyKey) retryLegacyKeys.add(candidate.legacyKey);
     }
   }
   return {
-    bindings: await listProjectBindings(options),
+    // Validate again only after a write; otherwise the first list is current.
+    bindings: wroteBinding ? await listProjectBindings(options) : bindings,
     retryLegacyKeys: [...retryLegacyKeys].sort(),
   };
 }

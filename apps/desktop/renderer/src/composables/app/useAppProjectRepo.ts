@@ -1,10 +1,51 @@
 import { watch } from "vue";
 import type { RepoStatus } from "../../../../electron/ipc-types";
 import { preserveRoomRepoStatistics } from "../../domain/repo-status";
-import { activeRepoRoomContext, resolveActiveProjectRootPath } from "../../domain/room-project-context";
+import { activeRepoRoomContext, canonicalRepoIdentity, resolveActiveProjectRootPath } from "../../domain/room-project-context";
 import { openManagedAgentWorktree } from "../../domain/managed-agent-worktrees";
+import { readStoredString } from "../../domain/desktop-storage";
+import type { RecentRootRoom } from "../../domain/sidebar-rooms";
 import { desktopIpc } from "../../ipc/index.js";
 import type { AppContextOf } from "./context";
+
+/**
+ * Whether the room a cold start opens can show project state, which comes
+ * only from a project binding. Such a room waits for the binding migration;
+ * without its binding it would show "Connect this room to its local project".
+ *
+ * A room needs no binding to open when it is a plain room: a remembered room
+ * of kind "room" with no folder, not a migration candidate, and with an
+ * identifier that cannot name a Git Room (no "/", no ":", not a local folder
+ * room). Anything unknown waits, as before. The stored active entry counts
+ * too, because the startup refresh shows it: a plain root room's own entry
+ * or a non-room view does not wait; a focus or project entry waits.
+ */
+export function startupRoomNeedsProjectBindings(input: {
+  rootRoomIdentifier: string | null;
+  activeEntryId: string | null;
+  recentRootRooms: readonly RecentRootRoom[];
+  legacyRootBindings: Readonly<Record<string, string>>;
+}): boolean {
+  const legacyKeys = new Set(Object.keys(input.legacyRootBindings).map((key) => canonicalRepoIdentity(key)));
+  const isPlainRoom = (identifier: string | null | undefined): boolean => {
+    const normalized = identifier?.trim().toLowerCase();
+    if (!normalized || /[/:]/.test(normalized) || /^local-/.test(normalized)) return false;
+    if (legacyKeys.has(canonicalRepoIdentity(normalized))) return false;
+    const recent = input.recentRootRooms.find((room) => room.identifier.trim().toLowerCase() === normalized);
+    return Boolean(recent && recent.kind === "room" && !recent.rootPath);
+  };
+  if (!isPlainRoom(input.rootRoomIdentifier)) return true;
+  const entryId = input.activeEntryId?.trim();
+  if (!entryId) return false;
+  if (entryId.startsWith("room:parent:")) {
+    try {
+      return !isPlainRoom(decodeURIComponent(entryId.slice("room:parent:".length)));
+    } catch {
+      return true;
+    }
+  }
+  return entryId.startsWith("room:") || entryId.startsWith("project:");
+}
 
 /** The local project behind the active room: bindings, Git status watch, and opening its Git Room. */
 export function useAppProjectRepo(context: unknown) {
@@ -69,7 +110,34 @@ export function useAppProjectRepo(context: unknown) {
     projectBindings.value = nextBindings;
   }
 
-  async function initializeProjectBindings(): Promise<void> {
+  /** Set when the startup migration starts; it ends with a full binding list. */
+  let startupMigration: Promise<void> | null = null;
+
+  /**
+   * The startup room load replaces the recent rooms. Before the migration has
+   * started, its own final list sees that change, so no extra (Git) list runs
+   * beside the first room load. While it runs, list once after it.
+   */
+  function refreshProjectBindingsAfterRecentRoomsChange(): void {
+    if (!startupMigration) return;
+    void startupMigration.then(refreshProjectBindings);
+  }
+
+  function startupRoomNeedsBindings(): boolean {
+    return startupRoomNeedsProjectBindings({
+      rootRoomIdentifier: selectedRootRoomIdentifier.value,
+      activeEntryId: readStoredString(app.activeEntryStorageKey),
+      recentRootRooms: recentRootRooms.value,
+      legacyRootBindings: legacyRepositoryRootBindings,
+    });
+  }
+
+  function initializeProjectBindings(): Promise<void> {
+    startupMigration ??= migrateProjectBindings().catch(() => undefined);
+    return startupMigration;
+  }
+
+  async function migrateProjectBindings(): Promise<void> {
     const generation = sessionGeneration.value;
     if (!desktopIpc.repos?.migrateProjectBindings) {
       await refreshProjectBindings();
@@ -195,7 +263,8 @@ export function useAppProjectRepo(context: unknown) {
   }
   return {
     refreshActiveRepoStatus, activeProjectRootPath, refreshProjectBindings,
-    initializeProjectBindings, restartRepoStatusWatch, handleRepoStatusChanged,
+    initializeProjectBindings, refreshProjectBindingsAfterRecentRoomsChange, startupRoomNeedsBindings,
+    restartRepoStatusWatch, handleRepoStatusChanged,
     openWorkspaceGitRoom, connectActiveRoomProject, openWorktreeForAgent,
   };
 }
@@ -204,7 +273,8 @@ export function useAppProjectRepo(context: unknown) {
 export function useAppProjectRepoWatchers(context: unknown) {
   const app = context as AppContextOf<"useAppProjectRepo" | "useAppState">;
   const {
-    activeProjectRootPath, recentRootRooms, refreshProjectBindings, restartRepoStatusWatch,
+    activeProjectRootPath, recentRootRooms, refreshProjectBindingsAfterRecentRoomsChange,
+    restartRepoStatusWatch,
   } = app;
   watch(
     () => activeProjectRootPath(),
@@ -217,6 +287,6 @@ export function useAppProjectRepoWatchers(context: unknown) {
   // The list is only ever replaced, never edited in place, so an identity watch sees
   // every change without walking each room.
   watch(recentRootRooms, () => {
-    void refreshProjectBindings();
+    refreshProjectBindingsAfterRecentRoomsChange();
   });
 }

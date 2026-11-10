@@ -31,7 +31,7 @@ export function useAppLifecycle(context: unknown) {
     loadChatStorageSettings, loadFirstRunSetup, openSettingsSurface, openUpdatesSurface,
     refreshDesktopUpdateStatus, refreshNeedsYou, refreshRentalRequestCount,
     refreshSidebarLatestMessages, refreshSidebarRoomMetadata, refreshUnreadCounts, roomHistoryMode,
-    sidebarMetadataRefresh, sidebarRoomIdentifiers, updateStatus,
+    sidebarMetadataRefresh, sidebarRoomIdentifiers, startupRoomNeedsBindings, updateStatus,
   } = app;
   let needsYouInterval: number | null = null;
 
@@ -94,7 +94,12 @@ export function useAppLifecycle(context: unknown) {
     void loadAppAgentSettingsStatus();
     void loadAppAgentActions();
     // The startup room first, then the room link that started the app, so the link's room is the one left open.
-    void loadFirstRunSetup(initializeProjectBindings())
+    // The project-binding migration runs Git in the main process. A plain startup room loads before it;
+    // a room that can be a project room waits for it (see loadFirstRunSetup). The link waits for both.
+    void loadFirstRunSetup({
+      initialize: initializeProjectBindings,
+      roomNeedsBindings: startupRoomNeedsBindings(),
+    })
       .then(() => desktopIpc.links?.takePendingRoom?.())
       .then((target) => { if (target) void handleRoomLink(target); })
       .catch(() => undefined);
