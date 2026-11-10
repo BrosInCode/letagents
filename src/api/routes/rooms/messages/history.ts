@@ -1,5 +1,5 @@
 import { parseScopedId } from "../../../db/utils.js";
-import type { Express } from "express";
+import type { Express, Response } from "express";
 
 import {
   getLatestMessages,
@@ -11,6 +11,7 @@ import {
   getMessagesBefore,
   markMessageThreadRead,
   type Message,
+  type Project,
 } from "../../../db.js";
 import {
   parseLimit,
@@ -26,7 +27,7 @@ import { replyTurnHoldAgentKey, resolveMessageActivationIdentity } from "./activ
 import { isAppSession } from "../../../request/app-session.js";
 import { attachReceiptAuthorityActivations } from "./receipt-activation.js";
 import { resolveParticipantRoom } from "./helpers.js";
-import type { RoomMessageRouteDeps } from "./types.js";
+import type { RoomMessageHandlerDeps, RoomMessageRouteDeps } from "./types.js";
 import { parsePositivePgIntegerScopedId } from "../../../../shared/scoped-ids.js";
 import type { RoomEventSubscription } from "../../../server/room-event-broker.js";
 import { createTrailingSingleFlight } from "../../../single-flight.js";
@@ -73,50 +74,29 @@ export function registerMessageHistoryRoutes(
         res.status(400).json({ error: "message cursor must be a valid message id" });
         return;
       }
-      const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
-      const accountId = req.sessionAccount?.account_id ?? null;
-      const accountAgentRouting = isAppSession(req);
-      const activationIdentity = await resolveMessageActivationIdentity(req, project.id);
-      if (req.query.context_only === "true") {
-        // Observation is not delivery. A later held turn must not hide a
-        // public human correction from the turn this worker is answering now.
-        // Keep prompt-only messages and activation/cursor authority out of
-        // this read; ordinary history, poll and SSE keep their frontiers.
-        if (!activationIdentity || before !== "latest" || after) {
-          res.status(400).json({ error: "Context reads require a worker and before=latest." });
-          return;
-        }
-        const context = await getLatestMessages(project.id, {
-          limit: Math.min(limit ?? 30, 30), include_prompt_only: false,
-          account_id: accountId, account_agent_routing: false,
-        });
-        res.json({ room_id: project.id, context_only: true, messages: context.messages });
+      const result = await listRoomMessages(req, project, {
+        after,
+        before,
+        limit,
+        includePromptOnly: deps.shouldIncludePromptOnlyMessages(req),
+        accountId: req.sessionAccount?.account_id ?? null,
+        accountAgentRouting: isAppSession(req),
+        contextOnly: req.query.context_only === "true",
+      });
+      if (result.kind === "invalid") {
+        res.status(400).json({ error: result.error });
         return;
       }
-      const workerFrontier = {
-        wait_for_routing: activationIdentity?.session_kind === "worker",
-        hold_agent_key: replyTurnHoldAgentKey(activationIdentity),
-      };
-      const result = before === "latest"
-        ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, ...workerFrontier })
-        : before
-          ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, ...workerFrontier })
-          : await getMessages(project.id, {
-            limit,
-            after,
-            include_prompt_only: includePromptOnly,
-            account_id: accountId,
-            account_agent_routing: accountAgentRouting,
-            ...workerFrontier,
-          });
+      if (result.kind === "context") {
+        res.json({ room_id: project.id, context_only: true, messages: result.messages });
+        return;
+      }
 
       res.json({
         room_id: project.id,
-        messages: await attachReceiptAuthorityActivations(project.id, activationIdentity, result.messages, {
-          includeTaskOwnerLeases: false,
-        }),
+        messages: result.messages,
         has_more: result.has_more,
-        has_older: before ? result.has_more : undefined,
+        has_older: result.has_older,
       });
     } catch (error) {
       respondWithInternalError(res, "GET /rooms/:room_id/messages", error, "Messages could not be fetched.");
@@ -162,377 +142,7 @@ export function registerMessageHistoryRoutes(
   app.get(/^\/rooms\/(.+)\/messages\/poll$/, async (req: AuthenticatedRequest, res) => {
     const project = await resolveParticipantRoom(req, res, deps);
     if (!project) return;
-
-    const projectId = project.id;
-    const accessRoomName = await (
-      deps.resolveRequestProjectRepoAccessRoomName ?? resolveRequestProjectRepoAccessRoomName
-    )(req, project);
-    const after = typeof req.query.after === "string" ? req.query.after : undefined;
-    const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
-    const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-    const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
-    const accountId = req.sessionAccount?.account_id ?? null;
-    const accountAgentRouting = isAppSession(req);
-    let settled = false;
-    let resolving = false;
-    // Until the backlog read settles, a live event may be newer than unseen
-    // rows after the cursor. A person's poll keeps such events here and acts
-    // on them once the read returns (see settleBacklogEvents).
-    let backlogPhase = true;
-    let backlogEvents: Message[] = [];
-    let timeout: ReturnType<typeof setTimeout> | null = null;
-    let subscription: RoomEventSubscription | null = null;
-    let live: LiveRoomDeliveryController | null = null;
-    try {
-      live = await openLiveRoomDeliveryController({
-        req,
-        project,
-        accessRoomName,
-        transport: "long_poll",
-        trackDelivery: !isAppSession(req),
-        onSessionDisconnected: resolveDisconnectedRequest,
-        onAuthorizationDenied: denyRequest,
-        reauthorize: deps.reauthorizeGitRoomParticipant,
-        onEndError: (error) => {
-          console.error(`[room messages poll] failed to end agent delivery for ${projectId}`, error);
-        },
-        beginDelivery: deps.beginRoomAgentDelivery,
-      });
-    } catch (error) {
-        if (error instanceof InvalidRoomAgentDeliverySessionError) {
-          res.status(401).json({ error: error.message });
-          return;
-        }
-        throw error;
-    }
-    if (!live) return;
-    const liveController = live;
-    const messageOverlayTarget = resolveLiveMessageOverlayTarget(
-      req,
-      liveController.activationIdentity,
-    );
-    async function cleanup() {
-      if (timeout) {
-        clearTimeout(timeout);
-      }
-      subscription?.close();
-      subscription = null;
-      req.off("close", onClientClose);
-      await liveController.close();
-    }
-
-    function denyRequest() {
-      void denyRequestAsync();
-    }
-
-    async function denyRequestAsync() {
-      if (settled) return;
-      settled = true;
-      await cleanup();
-      if (!res.headersSent) res.status(403).json({ error: "Room access is no longer authorized." });
-    }
-
-    function resolveDisconnectedRequest() {
-      void resolveDisconnectedRequestAsync();
-    }
-
-    async function resolveDisconnectedRequestAsync() {
-      if (settled) return;
-      settled = true;
-      await cleanup();
-      res.json({ room_id: projectId, messages: [], has_more: false });
-    }
-
-    function resolveRequest(
-      msgs: Message[],
-      hasMore = false,
-      options?: { includeTaskOwnerLeases?: boolean }
-    ) {
-      void resolveRequestAsync(msgs, hasMore, options).catch((error: unknown) => {
-        console.error(`[room messages poll] failed to resolve poll for ${projectId}`, error);
-        if (!res.headersSent) {
-          res.status(500).json({ error: "Messages could not be fetched." });
-        }
-      });
-    }
-
-    // A page may carry catch-up rows older than the poller's cursor; report
-    // the cursor itself so durable progress never regresses.
-    function cursorFloor(page: readonly Message[]): { last_observed_message_id?: string } {
-      const cursorNumber = after ? parseScopedId(after, "msg") : null;
-      if (!cursorNumber) return {};
-      const highest = Math.max(0, ...page.map((message) => parseScopedId(message.id, "msg") ?? 0));
-      return cursorNumber > highest ? { last_observed_message_id: after } : {};
-    }
-
-    async function resolveRequestAsync(
-      msgs: Message[],
-      hasMore = false,
-      options?: { includeTaskOwnerLeases?: boolean }
-    ) {
-      if (settled || resolving) return;
-      resolving = true;
-      try {
-        if (!(await liveController.check())) {
-          await denyRequestAsync();
-          return;
-        }
-        const attached = await runPollOverlay(
-          () => attachReceiptAuthorityActivations(projectId, liveController.activationIdentity, msgs, options),
-        );
-        if (!(await liveController.check())) {
-          await denyRequestAsync();
-          return;
-        }
-        settled = true;
-        await cleanup();
-        res.json({
-          room_id: projectId,
-          messages: attached,
-          has_more: hasMore,
-          ...cursorFloor(attached),
-        });
-      } catch (error) {
-        console.error(`[room messages poll] failed to resolve poll for ${projectId}`, error);
-        if (!settled) {
-          settled = true;
-          await cleanup();
-        }
-        if (!res.headersSent) {
-          res.status(500).json({ error: "Messages could not be fetched." });
-        }
-      } finally {
-        resolving = false;
-      }
-    }
-
-    async function resolveBrokerClosedRequestAsync() {
-      if (settled) return;
-      settled = true;
-      await cleanup();
-      res.json({ room_id: projectId, messages: [], has_more: false });
-    }
-
-    async function resolveCanonicalEventAsync(message: Message) {
-      if (settled || resolving) return;
-      resolving = true;
-      try {
-        if (!(await liveController.check())) {
-          await denyRequestAsync();
-          return;
-        }
-        // Normal broker delivery is already bounded/coalesced across every
-        // subscriber. Keep the executor for backlog pages, not this shared
-        // canonical event, or large poll populations fail before batching.
-        const attached = await hydrateLiveMessageForSubscriber({
-          roomId: projectId,
-          message,
-          identity: liveController.activationIdentity,
-          target: messageOverlayTarget,
-          broker: deps.roomEventBroker,
-          batcher: deps.roomMessageOverlayBatcher,
-        });
-        if (!(await liveController.check())) {
-          await denyRequestAsync();
-          return;
-        }
-        settled = true;
-        await cleanup();
-        // A re-published (routed) message can be older than the poller's
-        // cursor; never let it regress durable progress.
-        res.json({
-          room_id: projectId,
-          messages: [attached],
-          has_more: false,
-          ...cursorFloor([attached]),
-        });
-      } catch (error) {
-        console.error(`[room messages poll] failed to hydrate broker message for ${projectId}`, error);
-        if (!settled) {
-          settled = true;
-          await cleanup();
-        }
-        if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
-      } finally {
-        resolving = false;
-      }
-    }
-
-    async function resolveCanonicalCatchUpAsync(msgs: Message[], hasMore: boolean) {
-      if (settled || resolving) return;
-      resolving = true;
-      try {
-        if (!(await liveController.check())) return void await denyRequestAsync();
-        const hydratedPage = await hydrateLiveMessagesForSubscriber({
-          roomId: projectId,
-          messages: msgs,
-          identity: liveController.activationIdentity,
-          target: messageOverlayTarget,
-          broker: deps.roomEventBroker,
-          batcher: deps.roomMessageOverlayBatcher,
-          allowSilentPromptOnly: true,
-        });
-        const attached: Message[] = [];
-        for (const hydrated of hydratedPage) {
-          if (!liveController.activationIdentity
-            || isMessageVisibleToCurrentWorker(hydrated)) attached.push(hydrated);
-        }
-        if (!(await liveController.check())) return void await denyRequestAsync();
-        settled = true;
-        await cleanup();
-        res.json({
-          room_id: projectId,
-          messages: attached,
-          has_more: hasMore,
-          last_observed_message_id: msgs.at(-1)?.id ?? null,
-        });
-      } catch (error) {
-        console.error(`[room messages poll] failed canonical gap catch-up for ${projectId}`, error);
-        if (!settled) { settled = true; await cleanup(); }
-        if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
-      } finally {
-        resolving = false;
-      }
-    }
-
-    const runRefreshAfterCursor = createTrailingSingleFlight(async () => {
-      if (settled) return;
-      if (!(await liveController.check())) {
-        await denyRequestAsync();
-        return;
-      }
-      const next = await getCanonicalRoomMessageCatchUp({
-        roomId: projectId,
-        after,
-        limit,
-        includePromptOnly,
-        load: deps.getMessagesAfter ?? getMessagesAfter,
-        waitForRouting: liveController.activationIdentity?.session_kind === "worker",
-        holdAgentKey: replyTurnHoldAgentKey(liveController.activationIdentity),
-      });
-      if (next.messages.length > 0) {
-        await resolveCanonicalCatchUpAsync(next.messages, next.has_more);
-      }
-    });
-    const refreshAfterCursor = () => runRefreshAfterCursor();
-
-    async function pumpMessageEvents() {
-      while (!settled && subscription) {
-        const delivery = await subscription.next();
-        if (!delivery) {
-          await resolveBrokerClosedRequestAsync();
-          return;
-        }
-        if (settled) return;
-        if (delivery.type === "gap") {
-          await refreshAfterCursor();
-          continue;
-        }
-        if (delivery.envelope.event.kind === "message_created" || delivery.envelope.event.kind === "message_routed") {
-          // Answering with only this event before the backlog read settles
-          // would move the caller's cursor past the backlog rows. Once the
-          // read found nothing, the event alone is the next row.
-          if (liveController.activationIdentity?.session_kind === "worker") await refreshAfterCursor();
-          else if (backlogPhase) backlogEvents.push(delivery.envelope.event.message);
-          else await resolveCanonicalEventAsync(delivery.envelope.event.message);
-        }
-      }
-    }
-
-    function onClientClose() {
-      if (settled) return;
-      settled = true;
-      void cleanup();
-    }
-
-    liveController.activate();
-    if (settled) return;
-
-    // Subscribe before the initial fetch so a message created while the fetch
-    // is in flight wakes this poll instead of waiting out the full timeout.
-    timeout = setTimeout(() => {
-      resolveRequest([]);
-    }, timeoutMs);
-    subscription = subscribeVisibleRoomEvents({
-      broker: deps.roomEventBroker,
-      roomId: projectId,
-      includePromptOnly,
-      activationIdentity: liveController.activationIdentity,
-      messageOnly: true,
-      messageOverlayTarget,
-    });
-    req.on("close", onClientClose);
-    void pumpMessageEvents().catch(async (error: unknown) => {
-      console.error(`[room messages poll] failed to observe room event for ${projectId}`, error);
-      if (!settled) {
-        settled = true;
-        await cleanup();
-        if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
-      }
-    });
-
-    try {
-      const existing = await (deps.getMessagesAfter ?? getMessagesAfter)(projectId, after, {
-        limit,
-        include_prompt_only: includePromptOnly,
-        account_id: accountId,
-        account_agent_routing: accountAgentRouting,
-        wait_for_routing: liveController.activationIdentity?.session_kind === "worker",
-        hold_agent_key: replyTurnHoldAgentKey(liveController.activationIdentity),
-      });
-      const page = existing.messages;
-      if (!settled && page.length > 0) {
-        backlogPhase = false;
-        // The initial/backlog response is awaited so the route handler does
-        // not return before the response body is written; only the timeout
-        // and message-created event callbacks stay fire-and-forget.
-        await resolveRequestAsync(page, existing.has_more, { includeTaskOwnerLeases: false });
-        return;
-      }
-      // Events came in while the read ran: it may predate their rows. Read
-      // again, as long as more events keep arriving during a read. Polls at
-      // this cursor that saw the same latest event share one read, which
-      // began after that event; a read that began earlier is never joined.
-      const routedAtOrBeforeCursor: Message[] = [];
-      for (let attempt = 0; !settled && backlogEvents.length > 0 && attempt < 3; attempt += 1) {
-        const seen = backlogEvents;
-        backlogEvents = [];
-        routedAtOrBeforeCursor.push(...seen.filter((message) => isAtOrBeforeCursor(message.id, after)));
-        if (!(await liveController.check())) return void await denyRequestAsync();
-        const next = await getCanonicalRoomMessageCatchUp({
-          roomId: projectId,
-          after,
-          limit,
-          includePromptOnly,
-          load: deps.getMessagesAfter ?? getMessagesAfter,
-          startedAfterEvent: seen.at(-1)!.id,
-        });
-        if (!settled && next.messages.length > 0) {
-          backlogPhase = false;
-          await resolveCanonicalCatchUpAsync(next.messages, next.has_more);
-          return;
-        }
-      }
-      backlogPhase = false;
-      if (!settled) {
-        // Nothing is unseen after the cursor, so a routed update of an older
-        // row is answered alone, as before; the response keeps the cursor.
-        const routed = [...routedAtOrBeforeCursor, ...backlogEvents.filter((message) => isAtOrBeforeCursor(message.id, after))];
-        backlogEvents = [];
-        if (routed.length > 0) await resolveCanonicalEventAsync(routed.at(-1)!);
-      }
-    } catch (error) {
-      if (!settled) {
-        settled = true;
-        await cleanup();
-        respondWithInternalError(
-          res,
-          "GET /rooms/:room_id/messages/poll",
-          error,
-          "Messages could not be fetched.",
-        );
-      }
-    }
+    await pollRoomMessages({ req, res, project, deps });
   });
 
   app.get(/^\/rooms\/(.+)\/messages\/threads$/, async (req: AuthenticatedRequest, res) => {
@@ -681,6 +291,474 @@ export function registerMessageHistoryRoutes(
       );
     }
   });
+}
+
+/** The query of one history read, already parsed by the calling route. */
+export interface RoomMessageListRequest {
+  after?: string;
+  /** A message id, or "latest" for the newest page. */
+  before?: string;
+  limit?: number;
+  includePromptOnly: boolean;
+  accountId: string | null;
+  accountAgentRouting: boolean;
+  /** A worker's observation read of the latest public messages. */
+  contextOnly: boolean;
+}
+
+export type RoomMessageListResult =
+  | { kind: "invalid"; error: string }
+  | { kind: "context"; messages: Message[] }
+  | { kind: "page"; messages: Message[]; has_more: boolean; has_older: boolean | undefined };
+
+/** One history page of a resolved room the caller participates in. */
+export async function listRoomMessages(
+  req: AuthenticatedRequest,
+  project: Project,
+  request: RoomMessageListRequest,
+): Promise<RoomMessageListResult> {
+  const { after, before, limit, includePromptOnly } = request;
+  const accountId = request.accountId;
+  const accountAgentRouting = request.accountAgentRouting;
+  const activationIdentity = await resolveMessageActivationIdentity(req, project.id);
+  if (request.contextOnly) {
+    // Observation is not delivery. A later held turn must not hide a
+    // public human correction from the turn this worker is answering now.
+    // Keep prompt-only messages and activation/cursor authority out of
+    // this read; ordinary history, poll and SSE keep their frontiers.
+    if (!activationIdentity || before !== "latest" || after) {
+      return { kind: "invalid", error: "Context reads require a worker and before=latest." };
+    }
+    const context = await getLatestMessages(project.id, {
+      limit: Math.min(limit ?? 30, 30), include_prompt_only: false,
+      account_id: accountId, account_agent_routing: false,
+    });
+    return { kind: "context", messages: context.messages };
+  }
+  const workerFrontier = {
+    wait_for_routing: activationIdentity?.session_kind === "worker",
+    hold_agent_key: replyTurnHoldAgentKey(activationIdentity),
+  };
+  const result = before === "latest"
+    ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, ...workerFrontier })
+    : before
+      ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting, ...workerFrontier })
+      : await getMessages(project.id, {
+        limit,
+        after,
+        include_prompt_only: includePromptOnly,
+        account_id: accountId,
+        account_agent_routing: accountAgentRouting,
+        ...workerFrontier,
+      });
+
+  return {
+    kind: "page",
+    messages: await attachReceiptAuthorityActivations(project.id, activationIdentity, result.messages, {
+      includeTaskOwnerLeases: false,
+    }),
+    has_more: result.has_more,
+    has_older: before ? result.has_more : undefined,
+  };
+}
+
+/** One response body of the room long poll; legacy callers re-shape it. */
+export interface RoomMessagePollBody {
+  room_id: string;
+  messages: Message[];
+  has_more: boolean;
+  last_observed_message_id?: string | null;
+}
+
+/**
+ * The long poll of one resolved room the caller participates in: answers
+ * the first unseen page after `after`, or the next live message, or an empty
+ * page at the timeout. Every poll route calls this; `renderBody` shapes each
+ * 200 body.
+ */
+export async function pollRoomMessages(input: {
+  req: AuthenticatedRequest;
+  res: Response;
+  project: Project;
+  deps: RoomMessageHandlerDeps;
+  renderBody?: (body: RoomMessagePollBody) => unknown;
+  logLabel?: string;
+  route?: string;
+}): Promise<void> {
+  const { req, res, project, deps } = input;
+  const renderBody = input.renderBody ?? ((body: RoomMessagePollBody) => body);
+  const logLabel = input.logLabel ?? "room messages poll";
+  const route = input.route ?? "GET /rooms/:room_id/messages/poll";
+  const projectId = project.id;
+  const accessRoomName = await (
+    deps.resolveRequestProjectRepoAccessRoomName ?? resolveRequestProjectRepoAccessRoomName
+  )(req, project);
+  const after = typeof req.query.after === "string" ? req.query.after : undefined;
+  const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
+  const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
+  const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+  const accountId = req.sessionAccount?.account_id ?? null;
+  const accountAgentRouting = isAppSession(req);
+  let settled = false;
+  let resolving = false;
+  // Until the backlog read settles, a live event may be newer than unseen
+  // rows after the cursor. A person's poll keeps such events here and acts
+  // on them once the read returns (see settleBacklogEvents).
+  let backlogPhase = true;
+  let backlogEvents: Message[] = [];
+  let timeout: ReturnType<typeof setTimeout> | null = null;
+  let subscription: RoomEventSubscription | null = null;
+  let live: LiveRoomDeliveryController | null = null;
+  try {
+    live = await openLiveRoomDeliveryController({
+      req,
+      project,
+      accessRoomName,
+      transport: "long_poll",
+      trackDelivery: !isAppSession(req),
+      onSessionDisconnected: resolveDisconnectedRequest,
+      onAuthorizationDenied: denyRequest,
+      reauthorize: deps.reauthorizeGitRoomParticipant,
+      onEndError: (error) => {
+        console.error(`[${logLabel}] failed to end agent delivery for ${projectId}`, error);
+      },
+      beginDelivery: deps.beginRoomAgentDelivery,
+    });
+  } catch (error) {
+      if (error instanceof InvalidRoomAgentDeliverySessionError) {
+        res.status(401).json({ error: error.message });
+        return;
+      }
+      throw error;
+  }
+  if (!live) return;
+  const liveController = live;
+  const messageOverlayTarget = resolveLiveMessageOverlayTarget(
+    req,
+    liveController.activationIdentity,
+  );
+  async function cleanup() {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+    subscription?.close();
+    subscription = null;
+    req.off("close", onClientClose);
+    await liveController.close();
+  }
+
+  function denyRequest() {
+    void denyRequestAsync();
+  }
+
+  async function denyRequestAsync() {
+    if (settled) return;
+    settled = true;
+    await cleanup();
+    if (!res.headersSent) res.status(403).json({ error: "Room access is no longer authorized." });
+  }
+
+  function resolveDisconnectedRequest() {
+    void resolveDisconnectedRequestAsync();
+  }
+
+  async function resolveDisconnectedRequestAsync() {
+    if (settled) return;
+    settled = true;
+    await cleanup();
+    res.json(renderBody({ room_id: projectId, messages: [], has_more: false }));
+  }
+
+  function resolveRequest(
+    msgs: Message[],
+    hasMore = false,
+    options?: { includeTaskOwnerLeases?: boolean }
+  ) {
+    void resolveRequestAsync(msgs, hasMore, options).catch((error: unknown) => {
+      console.error(`[${logLabel}] failed to resolve poll for ${projectId}`, error);
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Messages could not be fetched." });
+      }
+    });
+  }
+
+  // A page may carry catch-up rows older than the poller's cursor; report
+  // the cursor itself so durable progress never regresses.
+  function cursorFloor(page: readonly Message[]): { last_observed_message_id?: string } {
+    const cursorNumber = after ? parseScopedId(after, "msg") : null;
+    if (!cursorNumber) return {};
+    const highest = Math.max(0, ...page.map((message) => parseScopedId(message.id, "msg") ?? 0));
+    return cursorNumber > highest ? { last_observed_message_id: after } : {};
+  }
+
+  async function resolveRequestAsync(
+    msgs: Message[],
+    hasMore = false,
+    options?: { includeTaskOwnerLeases?: boolean }
+  ) {
+    if (settled || resolving) return;
+    resolving = true;
+    try {
+      if (!(await liveController.check())) {
+        await denyRequestAsync();
+        return;
+      }
+      const attached = await runPollOverlay(
+        () => attachReceiptAuthorityActivations(projectId, liveController.activationIdentity, msgs, options),
+      );
+      if (!(await liveController.check())) {
+        await denyRequestAsync();
+        return;
+      }
+      settled = true;
+      await cleanup();
+      res.json(renderBody({
+        room_id: projectId,
+        messages: attached,
+        has_more: hasMore,
+        ...cursorFloor(attached),
+      }));
+    } catch (error) {
+      console.error(`[${logLabel}] failed to resolve poll for ${projectId}`, error);
+      if (!settled) {
+        settled = true;
+        await cleanup();
+      }
+      if (!res.headersSent) {
+        res.status(500).json({ error: "Messages could not be fetched." });
+      }
+    } finally {
+      resolving = false;
+    }
+  }
+
+  async function resolveBrokerClosedRequestAsync() {
+    if (settled) return;
+    settled = true;
+    await cleanup();
+    res.json(renderBody({ room_id: projectId, messages: [], has_more: false }));
+  }
+
+  async function resolveCanonicalEventAsync(message: Message) {
+    if (settled || resolving) return;
+    resolving = true;
+    try {
+      if (!(await liveController.check())) {
+        await denyRequestAsync();
+        return;
+      }
+      // Normal broker delivery is already bounded/coalesced across every
+      // subscriber. Keep the executor for backlog pages, not this shared
+      // canonical event, or large poll populations fail before batching.
+      const attached = await hydrateLiveMessageForSubscriber({
+        roomId: projectId,
+        message,
+        identity: liveController.activationIdentity,
+        target: messageOverlayTarget,
+        broker: deps.roomEventBroker,
+        batcher: deps.roomMessageOverlayBatcher,
+      });
+      if (!(await liveController.check())) {
+        await denyRequestAsync();
+        return;
+      }
+      settled = true;
+      await cleanup();
+      // A re-published (routed) message can be older than the poller's
+      // cursor; never let it regress durable progress.
+      res.json(renderBody({
+        room_id: projectId,
+        messages: [attached],
+        has_more: false,
+        ...cursorFloor([attached]),
+      }));
+    } catch (error) {
+      console.error(`[${logLabel}] failed to hydrate broker message for ${projectId}`, error);
+      if (!settled) {
+        settled = true;
+        await cleanup();
+      }
+      if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
+    } finally {
+      resolving = false;
+    }
+  }
+
+  async function resolveCanonicalCatchUpAsync(msgs: Message[], hasMore: boolean) {
+    if (settled || resolving) return;
+    resolving = true;
+    try {
+      if (!(await liveController.check())) return void await denyRequestAsync();
+      const hydratedPage = await hydrateLiveMessagesForSubscriber({
+        roomId: projectId,
+        messages: msgs,
+        identity: liveController.activationIdentity,
+        target: messageOverlayTarget,
+        broker: deps.roomEventBroker,
+        batcher: deps.roomMessageOverlayBatcher,
+        allowSilentPromptOnly: true,
+      });
+      const attached: Message[] = [];
+      for (const hydrated of hydratedPage) {
+        if (!liveController.activationIdentity
+          || isMessageVisibleToCurrentWorker(hydrated)) attached.push(hydrated);
+      }
+      if (!(await liveController.check())) return void await denyRequestAsync();
+      settled = true;
+      await cleanup();
+      res.json(renderBody({
+        room_id: projectId,
+        messages: attached,
+        has_more: hasMore,
+        last_observed_message_id: msgs.at(-1)?.id ?? null,
+      }));
+    } catch (error) {
+      console.error(`[${logLabel}] failed canonical gap catch-up for ${projectId}`, error);
+      if (!settled) { settled = true; await cleanup(); }
+      if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
+    } finally {
+      resolving = false;
+    }
+  }
+
+  const runRefreshAfterCursor = createTrailingSingleFlight(async () => {
+    if (settled) return;
+    if (!(await liveController.check())) {
+      await denyRequestAsync();
+      return;
+    }
+    const next = await getCanonicalRoomMessageCatchUp({
+      roomId: projectId,
+      after,
+      limit,
+      includePromptOnly,
+      load: deps.getMessagesAfter ?? getMessagesAfter,
+      waitForRouting: liveController.activationIdentity?.session_kind === "worker",
+      holdAgentKey: replyTurnHoldAgentKey(liveController.activationIdentity),
+    });
+    if (next.messages.length > 0) {
+      await resolveCanonicalCatchUpAsync(next.messages, next.has_more);
+    }
+  });
+  const refreshAfterCursor = () => runRefreshAfterCursor();
+
+  async function pumpMessageEvents() {
+    while (!settled && subscription) {
+      const delivery = await subscription.next();
+      if (!delivery) {
+        await resolveBrokerClosedRequestAsync();
+        return;
+      }
+      if (settled) return;
+      if (delivery.type === "gap") {
+        await refreshAfterCursor();
+        continue;
+      }
+      if (delivery.envelope.event.kind === "message_created" || delivery.envelope.event.kind === "message_routed") {
+        // Answering with only this event before the backlog read settles
+        // would move the caller's cursor past the backlog rows. Once the
+        // read found nothing, the event alone is the next row.
+        if (liveController.activationIdentity?.session_kind === "worker") await refreshAfterCursor();
+        else if (backlogPhase) backlogEvents.push(delivery.envelope.event.message);
+        else await resolveCanonicalEventAsync(delivery.envelope.event.message);
+      }
+    }
+  }
+
+  function onClientClose() {
+    if (settled) return;
+    settled = true;
+    void cleanup();
+  }
+
+  liveController.activate();
+  if (settled) return;
+
+  // Subscribe before the initial fetch so a message created while the fetch
+  // is in flight wakes this poll instead of waiting out the full timeout.
+  timeout = setTimeout(() => {
+    resolveRequest([]);
+  }, timeoutMs);
+  subscription = subscribeVisibleRoomEvents({
+    broker: deps.roomEventBroker,
+    roomId: projectId,
+    includePromptOnly,
+    activationIdentity: liveController.activationIdentity,
+    messageOnly: true,
+    messageOverlayTarget,
+  });
+  req.on("close", onClientClose);
+  void pumpMessageEvents().catch(async (error: unknown) => {
+    console.error(`[${logLabel}] failed to observe room event for ${projectId}`, error);
+    if (!settled) {
+      settled = true;
+      await cleanup();
+      if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
+    }
+  });
+
+  try {
+    const existing = await (deps.getMessagesAfter ?? getMessagesAfter)(projectId, after, {
+      limit,
+      include_prompt_only: includePromptOnly,
+      account_id: accountId,
+      account_agent_routing: accountAgentRouting,
+      wait_for_routing: liveController.activationIdentity?.session_kind === "worker",
+      hold_agent_key: replyTurnHoldAgentKey(liveController.activationIdentity),
+    });
+    const page = existing.messages;
+    if (!settled && page.length > 0) {
+      backlogPhase = false;
+      // The initial/backlog response is awaited so the route handler does
+      // not return before the response body is written; only the timeout
+      // and message-created event callbacks stay fire-and-forget.
+      await resolveRequestAsync(page, existing.has_more, { includeTaskOwnerLeases: false });
+      return;
+    }
+    // Events came in while the read ran: it may predate their rows. Read
+    // again, as long as more events keep arriving during a read. Polls at
+    // this cursor that saw the same latest event share one read, which
+    // began after that event; a read that began earlier is never joined.
+    const routedAtOrBeforeCursor: Message[] = [];
+    for (let attempt = 0; !settled && backlogEvents.length > 0 && attempt < 3; attempt += 1) {
+      const seen = backlogEvents;
+      backlogEvents = [];
+      routedAtOrBeforeCursor.push(...seen.filter((message) => isAtOrBeforeCursor(message.id, after)));
+      if (!(await liveController.check())) return void await denyRequestAsync();
+      const next = await getCanonicalRoomMessageCatchUp({
+        roomId: projectId,
+        after,
+        limit,
+        includePromptOnly,
+        load: deps.getMessagesAfter ?? getMessagesAfter,
+        startedAfterEvent: seen.at(-1)!.id,
+      });
+      if (!settled && next.messages.length > 0) {
+        backlogPhase = false;
+        await resolveCanonicalCatchUpAsync(next.messages, next.has_more);
+        return;
+      }
+    }
+    backlogPhase = false;
+    if (!settled) {
+      // Nothing is unseen after the cursor, so a routed update of an older
+      // row is answered alone, as before; the response keeps the cursor.
+      const routed = [...routedAtOrBeforeCursor, ...backlogEvents.filter((message) => isAtOrBeforeCursor(message.id, after))];
+      backlogEvents = [];
+      if (routed.length > 0) await resolveCanonicalEventAsync(routed.at(-1)!);
+    }
+  } catch (error) {
+    if (!settled) {
+      settled = true;
+      await cleanup();
+      respondWithInternalError(
+        res,
+        route,
+        error,
+        "Messages could not be fetched.",
+      );
+    }
+  }
 }
 
 function isAtOrBeforeCursor(messageId: string, after: string | undefined): boolean {
