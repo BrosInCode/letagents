@@ -1,6 +1,6 @@
 import { normalizeRoomGif } from "../../../../../shared/room-expressions.mjs";
 import { isHumanAppWrite } from "../../../request/app-session.js";
-import type { Express } from "express";
+import type { Express, Response } from "express";
 
 import {
   respondWithValidationOrInternalError,
@@ -17,7 +17,14 @@ import {
   isAgentLikeSender,
 } from "./request-identity.js";
 import { resolveParticipantRoom } from "./helpers.js";
-import type { RoomMessageRouteDeps } from "./types.js";
+import type { Message, Project } from "../../../db.js";
+import type { RoomMessageHandlerDeps, RoomMessageRouteDeps } from "./types.js";
+
+/** The 201 body of a created message on the room route. */
+export type CreatedRoomMessageBody = Omit<Message, "account_agent_routing"> & {
+  account_agent_routing?: Message["account_agent_routing"];
+  room_id: string;
+};
 
 export function registerCreateMessageRoute(
   app: Express,
@@ -26,112 +33,128 @@ export function registerCreateMessageRoute(
   app.post(/^\/rooms\/(.+)\/messages$/, async (req: AuthenticatedRequest, res) => {
     const project = await resolveParticipantRoom(req, res, deps);
     if (!project) return;
-
-    try {
-      const body = parseCreateMessageBody(req.body);
-      const sessionCredentials = {
-        agent_session_id: body.agent_session_id ?? undefined,
-        agent_session_token: body.agent_session_token ?? undefined,
-      };
-      const promptKind = deps.parseOptionalAgentPromptKind(body.agent_prompt_kind);
-      const replyToMessageId = deps.parseOptionalReplyToMessageId(body.reply_to);
-      const threadRootMessageId = deps.parseOptionalThreadRootMessageId(body.thread_root_id);
-      const attachments = normalizeMessageAttachmentReferences(body.attachments);
-      const gif = body.gif == null ? null : normalizeRoomGif(body.gif);
-      if (body.gif != null && !gif) { res.status(400).json({ error: "gif must contain a GIPHY provider and valid ID" }); return; }
-      const desktopHumanWrite = isHumanAppWrite(req, sessionCredentials);
-      const requiresWorkerSession = !desktopHumanWrite && (req.authKind === "owner_token"
-        || req.authKind === "agent_session"
-        || hasAgentSessionCredentials(sessionCredentials)
-        || isAgentLikeSender(body.sender));
-      const agentSessionIdentity = requiresWorkerSession
-        ? await requireWorkerRequestAgentIdentity({
-          req,
-          body: sessionCredentials,
-          room_id: project.id,
-        })
-        : null;
-      if (agentSessionIdentity && !agentSessionIdentity.ok) {
-        res.status(agentSessionIdentity.status).json({ error: agentSessionIdentity.error });
-        return;
-      }
-      const workerIdentity = agentSessionIdentity?.ok ? agentSessionIdentity.identity : null;
-      const normalizedSender = workerIdentity?.actor_label || body.sender?.trim() || "";
-      const text = body.text;
-      if (
-        !normalizedSender ||
-        typeof text !== "string" ||
-        (!text.trim() && !gif && attachments.length === 0 && (!promptKind || promptKind !== "auto"))
-      ) {
-        res.status(400).json({ error: "sender and text or attachments are required" });
-        return;
-      }
-      if (promptKind === "auto" && (attachments.length > 0 || gif)) {
-        res.status(400).json({ error: "auto prompt messages cannot include attachments" });
-        return;
-      }
-      const source = workerIdentity
-        ? "agent"
-        : req.authKind === "session" || desktopHumanWrite
-        ? "browser"
-        : undefined;
-      const message = await deps.emitProjectMessage(project.id, normalizedSender, text, {
-        source,
-        agent_prompt_kind: promptKind,
-        reply_to: replyToMessageId,
-        thread_root_id: threadRootMessageId,
-        attachments,
-        attachment_uploader: resolveMessageAttachmentUploader(req),
-        ...(gif ? { gif } : {}),
-        ...(body.client_message_id ? { client_message_id: body.client_message_id } : {}),
-        ...(workerIdentity ? {
-          publisher_agent_key: workerIdentity.agent_key,
-          publisher_agent_session_id: workerIdentity.agent_session_id,
-        } : {}),
-        account_id: workerIdentity?.owner_account_id
-          ?? req.sessionAccount?.account_id
-          ?? null,
-        account_agent_routing: desktopHumanWrite,
-      });
-      // The message and routing receipts are already saved. Bookkeeping must
-      // not turn that success into a failed send or delay its acknowledgement.
-      void Promise.resolve().then(() => deps.rememberRoomParticipantFromMessage({
-        projectId: project.id,
-        sender: normalizedSender,
-        agentKey: workerIdentity?.agent_key ?? null,
-        source,
-        sessionAccount: req.sessionAccount,
-        timestamp: message.timestamp,
-      })).catch((error) => {
-        console.error(`[room messages] failed to remember participant for ${project.id}`, error);
-      });
-      if (req.sessionAccount && (source === "browser" || source === "agent")) {
-        const accountId = req.sessionAccount.account_id;
-        void Promise.resolve().then(() => deps.rememberAccountRoom({
-          accountId,
-          roomId: project.id,
-          displayName: project.display_name,
-          source: "open_room",
-        })).catch((error) => {
-          console.error(`[room messages] failed to remember account room for ${project.id}`, error);
-        });
-      }
-      const { account_agent_routing: createdRouting, ...responseMessage } = message;
-      const responseRouting = desktopHumanWrite && req.sessionAccount
-        ? createdRouting ?? null
-        : null;
-      res.status(201).json({
-        ...responseMessage,
-        ...(responseRouting ? { account_agent_routing: responseRouting } : {}),
-        room_id: project.id,
-      });
-    } catch (error) {
-      respondWithValidationOrInternalError(
-        res,
-        "POST /rooms/:room_id/messages",
-        error,
-        "Message could not be created."
-      );
-    }
+    await createRoomMessage({ req, res, project, deps });
   });
+}
+
+/**
+ * Creates one message in a resolved room the caller participates in. Every
+ * route that sends a message calls this; `renderBody` shapes the 201 body.
+ */
+export async function createRoomMessage(input: {
+  req: AuthenticatedRequest;
+  res: Response;
+  project: Project;
+  deps: RoomMessageHandlerDeps;
+  renderBody?: (body: CreatedRoomMessageBody) => unknown;
+  route?: string;
+}): Promise<void> {
+  const { req, res, project, deps } = input;
+  const renderBody = input.renderBody ?? ((body: CreatedRoomMessageBody) => body);
+  try {
+    const body = parseCreateMessageBody(req.body);
+    const sessionCredentials = {
+      agent_session_id: body.agent_session_id ?? undefined,
+      agent_session_token: body.agent_session_token ?? undefined,
+    };
+    const promptKind = deps.parseOptionalAgentPromptKind(body.agent_prompt_kind);
+    const replyToMessageId = deps.parseOptionalReplyToMessageId(body.reply_to);
+    const threadRootMessageId = deps.parseOptionalThreadRootMessageId(body.thread_root_id);
+    const attachments = normalizeMessageAttachmentReferences(body.attachments);
+    const gif = body.gif == null ? null : normalizeRoomGif(body.gif);
+    if (body.gif != null && !gif) { res.status(400).json({ error: "gif must contain a GIPHY provider and valid ID" }); return; }
+    const desktopHumanWrite = isHumanAppWrite(req, sessionCredentials);
+    const requiresWorkerSession = !desktopHumanWrite && (req.authKind === "owner_token"
+      || req.authKind === "agent_session"
+      || hasAgentSessionCredentials(sessionCredentials)
+      || isAgentLikeSender(body.sender));
+    const agentSessionIdentity = requiresWorkerSession
+      ? await requireWorkerRequestAgentIdentity({
+        req,
+        body: sessionCredentials,
+        room_id: project.id,
+      })
+      : null;
+    if (agentSessionIdentity && !agentSessionIdentity.ok) {
+      res.status(agentSessionIdentity.status).json({ error: agentSessionIdentity.error });
+      return;
+    }
+    const workerIdentity = agentSessionIdentity?.ok ? agentSessionIdentity.identity : null;
+    const normalizedSender = workerIdentity?.actor_label || body.sender?.trim() || "";
+    const text = body.text;
+    if (
+      !normalizedSender ||
+      typeof text !== "string" ||
+      (!text.trim() && !gif && attachments.length === 0 && (!promptKind || promptKind !== "auto"))
+    ) {
+      res.status(400).json({ error: "sender and text or attachments are required" });
+      return;
+    }
+    if (promptKind === "auto" && (attachments.length > 0 || gif)) {
+      res.status(400).json({ error: "auto prompt messages cannot include attachments" });
+      return;
+    }
+    const source = workerIdentity
+      ? "agent"
+      : req.authKind === "session" || desktopHumanWrite
+      ? "browser"
+      : undefined;
+    const message = await deps.emitProjectMessage(project.id, normalizedSender, text, {
+      source,
+      agent_prompt_kind: promptKind,
+      reply_to: replyToMessageId,
+      thread_root_id: threadRootMessageId,
+      attachments,
+      attachment_uploader: resolveMessageAttachmentUploader(req),
+      ...(gif ? { gif } : {}),
+      ...(body.client_message_id ? { client_message_id: body.client_message_id } : {}),
+      ...(workerIdentity ? {
+        publisher_agent_key: workerIdentity.agent_key,
+        publisher_agent_session_id: workerIdentity.agent_session_id,
+      } : {}),
+      account_id: workerIdentity?.owner_account_id
+        ?? req.sessionAccount?.account_id
+        ?? null,
+      account_agent_routing: desktopHumanWrite,
+    });
+    // The message and routing receipts are already saved. Bookkeeping must
+    // not turn that success into a failed send or delay its acknowledgement.
+    void Promise.resolve().then(() => deps.rememberRoomParticipantFromMessage({
+      projectId: project.id,
+      sender: normalizedSender,
+      agentKey: workerIdentity?.agent_key ?? null,
+      source,
+      sessionAccount: req.sessionAccount,
+      timestamp: message.timestamp,
+    })).catch((error) => {
+      console.error(`[room messages] failed to remember participant for ${project.id}`, error);
+    });
+    if (req.sessionAccount && (source === "browser" || source === "agent")) {
+      const accountId = req.sessionAccount.account_id;
+      void Promise.resolve().then(() => deps.rememberAccountRoom({
+        accountId,
+        roomId: project.id,
+        displayName: project.display_name,
+        source: "open_room",
+      })).catch((error) => {
+        console.error(`[room messages] failed to remember account room for ${project.id}`, error);
+      });
+    }
+    const { account_agent_routing: createdRouting, ...responseMessage } = message;
+    const responseRouting = desktopHumanWrite && req.sessionAccount
+      ? createdRouting ?? null
+      : null;
+    res.status(201).json(renderBody({
+      ...responseMessage,
+      ...(responseRouting ? { account_agent_routing: responseRouting } : {}),
+      room_id: project.id,
+    }));
+  } catch (error) {
+    respondWithValidationOrInternalError(
+      res,
+      input.route ?? "POST /rooms/:room_id/messages",
+      error,
+      "Message could not be created."
+    );
+  }
 }

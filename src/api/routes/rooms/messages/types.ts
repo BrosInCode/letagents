@@ -96,3 +96,13 @@ export interface RoomMessageRouteDeps {
     source?: string | null;
   }): Promise<void>;
 }
+
+/**
+ * What a message handler needs once its room is resolved and the caller is
+ * known to be a participant. Room routes and the legacy `/projects/:id`
+ * adapters resolve the room in their own way, then share one handler.
+ */
+export type RoomMessageHandlerDeps = Omit<
+  RoomMessageRouteDeps,
+  "resolveCanonicalRoomRequestId" | "resolveRoomOrReply" | "requireParticipant"
+>;

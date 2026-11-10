@@ -168,7 +168,7 @@ jobs:
         run: node --import tsx --test src/api/__tests__/room-artifact-routes.test.ts
 
       - name: Test legacy project message routes
-        run: node --import tsx --test src/api/__tests__/legacy-project-message-routes.test.ts
+        run: node --import tsx --test src/api/__tests__/legacy-project-message-routes.test.ts src/api/__tests__/legacy-message-shapes.test.ts
 
       - name: Test the database pool size setting
         run: node --import tsx --test src/api/__tests__/db-pool-size.test.ts
@@ -786,6 +786,10 @@ jobs:
       - name: Test message link previews
         if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/message-link-previews.test.ts src/api/__tests__/message-link-previews-routes.test.ts src/api/__tests__/message-link-previews-db.test.ts src/api/__tests__/room-message-routes.test.ts
+
+      - name: Test legacy project message routes contract
+        if: matrix.group == 3
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/legacy-project-message-routes.test.ts src/api/__tests__/legacy-project-message-contract-db.test.ts
 
       - name: Test message pins
         if: matrix.group == 2
