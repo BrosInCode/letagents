@@ -352,8 +352,14 @@ async function attachClientRender(component: object, path: string): Promise<void
 
 let vite: ViteDevServer;
 let RoomMessageViewport: object;
-let roomUnread: { visit: { value: { room: string; dividerId: string | null } } };
-const savedGlobals = { window: globalThis.window, document: globalThis.document, CSS: globalThis.CSS, ResizeObserver: globalThis.ResizeObserver, HTMLElement: globalThis.HTMLElement };
+type UnreadVisit = { room: string; account: string | null; revision: string | null; generation: number; dividerId: string | null };
+let roomUnread: {
+  visit: { value: UnreadVisit };
+  get: (room: string | null | undefined) => unknown;
+  clear: (room: string | null | undefined, expected: string) => unknown;
+};
+let unreadRevealKey: symbol;
+const savedGlobals = { window: globalThis.window, document: globalThis.document, CSS: globalThis.CSS, ResizeObserver: globalThis.ResizeObserver, HTMLElement: globalThis.HTMLElement, KeyboardEvent: globalThis.KeyboardEvent };
 const resizeCallbacks: Array<() => void> = [];
 /** Idle callbacks run only when a test asks (runIdle), so each growth step can be seen. */
 const idleQueue = new Map<number, IdleRequestCallback>();
@@ -373,12 +379,13 @@ before(async () => {
     document: { addEventListener() {}, removeEventListener() {}, visibilityState: "visible", hasFocus: () => true },
     CSS: { escape: (value: string) => value },
     HTMLElement: class {},
+    KeyboardEvent: class {},
     ResizeObserver: class { constructor(callback: () => void) { resizeCallbacks.push(callback); } observe() {} disconnect() {} },
   });
   vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
   RoomMessageViewport = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue")).default;
   // The same module instance the viewport reads its unread divider from.
-  ({ roomUnread } = await vite.ssrLoadModule("/renderer/src/composables/roomUnread.ts"));
+  ({ roomUnread, unreadRevealKey } = await vite.ssrLoadModule("/renderer/src/composables/roomUnread.ts"));
   const chatMessage = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue")).default;
   // These tests count mounted rows; the message body itself is covered elsewhere.
   Object.assign(chatMessage, {
@@ -446,7 +453,7 @@ async function runIdle(steps = 50): Promise<number> {
   return rounds;
 }
 
-async function mountViewport(count: number, options: { idle?: boolean; initialScrollPosition?: unknown } = {}) {
+async function mountViewport(count: number, options: { idle?: boolean; initialScrollPosition?: unknown; reveal?: (messageId: string) => Promise<boolean> } = {}) {
   idleQueue.clear();
   const props = Vue.reactive<Record<string, unknown>>({
     active: true, activeSearchMessageId: null, activeThreadParentId: null, hasOlderMessages: false,
@@ -468,6 +475,7 @@ async function mountViewport(count: number, options: { idle?: boolean; initialSc
     },
   });
   app.provide(ssrContextKey, { modules: new Set<string>() });
+  if (options.reveal) app.provide(unreadRevealKey, options.reveal);
   app.mount(root);
   const list = descendants(root).find(node => isList(node))!;
   list.clientHeight = 600;
@@ -872,4 +880,54 @@ test("a hidden room does not grow until it is shown again", async () => {
     await runIdle();
     assert.equal(view.mounted().length, 150);
   } finally { view.app.unmount(); }
+});
+
+test("a reader who scrolls up during growth and comes back gets the rest in slices, not in one task", async () => {
+  const view = await mountViewport(150, { idle: false });
+  try {
+    await view.scroll(view.list.scrollHeight as number);
+    // A short scroll up at once (past the 80 px "at the bottom" limit): the window becomes a fixed range.
+    await view.scroll((view.list.scrollTop as number) - 150);
+    await runIdle();
+    assert.equal(view.mounted().length, messageWindowFirstSlice - 1, "a fixed range mounts nothing in idle time");
+    // Back to the newest messages.
+    articlesCreated.count = 0;
+    await view.scroll(view.list.scrollHeight as number);
+    assert.ok(view.atBottom());
+    const created = [articlesCreated.count];
+    for (let step = 0; step < 10; step += 1) {
+      articlesCreated.count = 0;
+      if (!await runIdle(1)) break;
+      created.push(articlesCreated.count);
+      assert.ok(view.atBottom(), `still at the bottom after step ${step}`);
+    }
+    assert.ok(created.every(count => count <= messageWindowIdleSlice), `rows created per task: ${created.join(", ")}`);
+    assert.equal(view.mounted().length, 150, "the room still grows to every loaded message");
+  } finally { view.app.unmount(); }
+});
+
+test("a growth step during the reader's scroll does not stop that scroll from clearing the unread mark", async () => {
+  const saved = { visit: roomUnread.visit.value, get: roomUnread.get, clear: roomUnread.clear };
+  const cleared: string[] = [];
+  roomUnread.visit.value = { ...saved.visit, room: "room-a", revision: "r1", generation: saved.visit.generation + 1, dividerId: null };
+  roomUnread.get = (room) => (room === "room-a" ? { revision: "r1", messageId: "msg_140" } : null);
+  roomUnread.clear = (room, expected) => { cleared.push(`${room}:${expected}`); };
+  const view = await mountViewport(150, { idle: false, reveal: async () => true });
+  try {
+    assert.ok(view.mounted().includes("msg_140"));
+    assert.ok(!view.atBottom(), "the room opened at its unread message");
+    assert.deepEqual(cleared, []);
+    // The reader starts a scroll; a growth step runs before it ends.
+    (view.list.dispatchEvent as (event: unknown) => boolean)({ type: "wheel" });
+    assert.equal(await runIdle(1), 1);
+    view.list.scrollTop = view.list.scrollHeight as number;
+    (view.list.dispatchEvent as (event: unknown) => boolean)({ type: "scroll" });
+    await flush();
+    assert.deepEqual(cleared, ["room-a:r1"], "the reader reached the bottom: the room is read");
+  } finally {
+    view.app.unmount();
+    roomUnread.visit.value = { ...saved.visit, generation: roomUnread.visit.value.generation + 1 };
+    roomUnread.get = saved.get;
+    roomUnread.clear = saved.clear;
+  }
 });

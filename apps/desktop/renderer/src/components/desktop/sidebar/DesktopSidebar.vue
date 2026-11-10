@@ -670,9 +670,31 @@ const SidebarRoomOrderList = defineComponent({
   },
 });
 
+/** True when `moveClass` gives the row a transition of its transform (Vue's hasCSSTransform, on a hidden copy). */
+function hasMoveTransition(element: HTMLElement, moveClass: string): boolean {
+  const container = element.parentNode;
+  if (!container) return false;
+  const copy = element.cloneNode() as HTMLElement;
+  copy.classList.remove(moveClass);
+  copy.classList.add(moveClass);
+  copy.style.display = "none";
+  container.appendChild(copy);
+  const style = window.getComputedStyle(copy);
+  container.removeChild(copy);
+  const properties = (style.transitionProperty || "").split(", ");
+  const durations = (style.transitionDuration || "").split(", ");
+  const delays = (style.transitionDelay || "").split(", ");
+  const seconds = (value: string | undefined) => Number.parseFloat(value || "0") * (value?.trim().endsWith("ms") ? 0.001 : 1) || 0;
+  return properties.some((property, index) => /^(transform|all)$/.test(property.trim())
+    && seconds(durations[index % durations.length]) + seconds(delays[index % delays.length]) > 0);
+}
+
 /** Slides each row that moved from its old place to its new one (TransitionGroup's move). */
 function playRoomOrderMove(before: Map<HTMLElement, DOMRect>, moveClass: string): void {
   for (const element of before.keys()) roomOrderMoveDone.get(element)?.();
+  // As TransitionGroup does: no move without a CSS transform transition (reduced motion has `transition: none`).
+  const first = [...before.keys()].find((element) => element.isConnected);
+  if (!first || !hasMoveTransition(first, moveClass)) return;
   const moved: HTMLElement[] = [];
   for (const [element, old] of before) {
     if (!element.isConnected) continue;

@@ -229,6 +229,7 @@ import {
   resolveWindowBounds,
   windowStateFor,
   windowStateIncluding,
+  windowWeight,
   type MessageWindowState,
   type WindowBounds,
   type WindowEntry,
@@ -531,7 +532,13 @@ function windowMatchesLatest(): boolean {
 function resetWindowToLatest(): void {
   windowGrowthPending = false;
   windowJumpRequest++;
-  if (windowState.value.kind !== "latest") windowState.value = { kind: "latest" };
+  if (windowState.value.kind === "latest") return;
+  // Rows already mounted down to the newest entry stay mounted; growth above them goes on in idle slices.
+  const { start, end } = windowBounds.value;
+  if (end >= timelineEntries.value.length) {
+    latestWindowSize.value = Math.max(latestWindowSize.value, Math.min(messageWindowSize, windowWeight(windowEntries(), start, end)));
+  }
+  windowState.value = { kind: "latest" };
 }
 
 /**
@@ -642,6 +649,8 @@ watch(() => props.activeThreadParentId, (parentId) => { if (parentId) includeMes
  * ends the growth, and from there the window works as before.
  */
 let cancelLatestWindowStep: (() => void) | null = null;
+/** True while a growth step corrects the scroll position (see setInstantScrollTop). */
+let growthScrollCorrection = false;
 
 function restartLatestWindowGrowth(): void {
   cancelLatestWindowGrowth();
@@ -668,8 +677,11 @@ function scheduleLatestWindowGrowth(delayMs = 0): void {
 function growLatestWindow(): void {
   cancelLatestWindowStep = null;
   if (latestWindowSize.value >= messageWindowSize || props.roomLoading || !props.messages.length) return;
-  if (windowState.value.kind !== "latest" || windowBounds.value.start === 0) {
-    // Nothing more to mount for this window: later windows use the full budget.
+  // A fixed range does not use the budget. It keeps the budget grown so far,
+  // and growth goes on when the window returns to the newest entries.
+  if (windowState.value.kind !== "latest") return;
+  if (windowBounds.value.start === 0) {
+    // Every loaded entry is mounted: later windows use the full budget.
     latestWindowSize.value = messageWindowSize;
     return;
   }
@@ -689,14 +701,21 @@ function growLatestWindow(): void {
   void nextTick(() => {
     const current = messagesElement.value;
     if (namespace !== props.messageNamespace || !current) return;
-    if (following) {
-      if (isScrolledToBottom) jumpToBottom();
-      return;
-    }
-    if (!restoreScrollAnchor(anchor)) {
-      setInstantScrollTop(current, current.scrollTop + current.scrollHeight - previousScrollHeight);
+    // The view does not move for the reader, so a scroll they are making still counts for unread.
+    growthScrollCorrection = true;
+    try {
+      if (following) {
+        if (!isScrolledToBottom) return;
+        setInstantScrollTop(current, current.scrollHeight);
+      } else if (restoreScrollAnchor(anchor)) {
+        return;
+      } else {
+        setInstantScrollTop(current, current.scrollTop + current.scrollHeight - previousScrollHeight);
+      }
       updateScrollState();
       emitScrollPosition();
+    } finally {
+      growthScrollCorrection = false;
     }
   });
 }
@@ -1220,6 +1239,8 @@ function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   hasAppliedInitialScroll = true;
   shouldRestoreInitialScroll = false;
   cancelMessageReveal();
+  // Same rows: only the state changes, so idle growth can go on.
+  if (windowState.value.kind !== "latest" && windowMatchesLatest()) resetWindowToLatest();
   if (windowState.value.kind !== "latest" && !windowMatchesLatest()) {
     // The mounted rows change in the next render. A smooth scroll would aim at
     // the old list height, so go there at once and settle again after the render.
@@ -1512,7 +1533,7 @@ function isMeasurableScrollViewport(element: HTMLElement): boolean {
 function setInstantScrollTop(element: HTMLElement, scrollTop: number): void {
   const previousScrollBehavior = element.style.scrollBehavior;
   element.style.scrollBehavior = "auto";
-  unreadTimeline.programmaticScroll();
+  if (!growthScrollCorrection) unreadTimeline.programmaticScroll();
   element.scrollTop = scrollTop;
   element.style.scrollBehavior = previousScrollBehavior;
 }

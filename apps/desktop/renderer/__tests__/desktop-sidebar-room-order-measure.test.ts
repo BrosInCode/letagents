@@ -13,6 +13,7 @@ import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
 
 const rowHeight = 30;
 const counts = { positionReads: 0 };
+const motion = { reduced: false };
 
 /** A host node that is an `Element` (TransitionGroup checks), with counted geometry. */
 class FakeElement {
@@ -32,6 +33,7 @@ class FakeElement {
   }
   get isConnected(): boolean { return this.parent !== null; }
   get ownerDocument() { return globalThis.document; }
+  get parentNode(): FakeElement | null { return this.parent; }
   get offsetWidth(): number { return 200; }
   get offsetHeight(): number { return this.height(); }
   get classList() {
@@ -133,7 +135,10 @@ before(async () => {
       requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0),
       cancelAnimationFrame: clearTimeout, localStorage: { getItem: () => null, setItem: () => undefined },
       matchMedia: () => ({ matches: false, addEventListener: () => undefined, removeEventListener: () => undefined }),
-      getComputedStyle: () => ({ transitionDelay: "0s", transitionDuration: "0.18s", transitionProperty: "transform", animationDelay: "", animationDuration: "" }),
+      // Under reduced motion the move class has `transition: none` (sidebar-rooms.css).
+      getComputedStyle: () => (motion.reduced
+        ? { transitionDelay: "0s", transitionDuration: "0s", transitionProperty: "none", animationDelay: "", animationDuration: "" }
+        : { transitionDelay: "0s", transitionDuration: "0.18s", transitionProperty: "transform", animationDelay: "", animationDuration: "" }),
     },
     requestAnimationFrame: (callback: FrameRequestCallback) => setTimeout(() => callback(Date.now()), 0),
     document: { body, activeElement: null, addEventListener() {}, removeEventListener() {}, querySelector: () => null, visibilityState: "visible", hasFocus: () => true },
@@ -242,4 +247,24 @@ test("opening a project's room list still measures, so the rows below it slide",
     assert.ok(gamma.classes.has("sidebar-room-order-move"), "the row below the opened list slides down");
     assert.deepEqual(view.errors, []);
   } finally { view.app.unmount(); }
+});
+
+test("under reduced motion a reorder leaves no move class and no pending listener on a row", async () => {
+  const view = await mountSidebar();
+  motion.reduced = true;
+  try {
+    view.props.projectEntries = [view.projects[2]!, view.projects[0]!, view.projects[1]!];
+    await flush();
+    assert.deepEqual(view.order(), ["room-group-gamma", "room-group-alpha", "room-group-beta"]);
+    for (const row of view.projectList.children.filter(node => node.type === "article")) {
+      const name = String(row.props["data-testid"]);
+      assert.ok(!row.classes.has("sidebar-room-order-move"), `${name} has no move class`);
+      assert.equal(row.listeners.get("transitionend")?.size ?? 0, 0, `${name} waits for no transitionend`);
+      assert.ok(!row.style.transform, `${name} has no transform`);
+    }
+    assert.deepEqual(view.errors, []);
+  } finally {
+    motion.reduced = false;
+    view.app.unmount();
+  }
 });
