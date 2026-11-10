@@ -7,19 +7,13 @@ import {
   roomMembershipRequiredBody,
 } from "../../../shared/room-membership.mjs";
 import {
-  assignProjectAdmin,
   getGitRoomBindingForRoom,
-  isProjectAdmin,
   type GitRoomBinding,
-  type OwnerTokenAccount,
   type Project,
-  type SessionAccount,
 } from "../db.js";
 import {
   GitHubAccessUnavailableError,
-  isGitHubRepoAdmin,
   parseGitHubRepoName,
-  resolveGitHubRepoRoomAccessDecision,
   type RepoRoomAccessDecision,
 } from "../github/repo-access.js";
 import {
@@ -27,22 +21,32 @@ import {
   type AuthenticatedRequest,
 } from "../http/helpers.js";
 import { resolveRequestAuth } from "../request/auth.js";
-import { getLatestRoomJoinRequest, getRoomMemberRole } from "../db/room-members.js";
+import { getLatestRoomJoinRequest } from "../db/room-members.js";
+import {
+  classifyRoomAccess,
+  decideRoomAdmin,
+  decideRoomRead,
+  getProjectAccessRoomId,
+  resolveProjectRepoAccessTarget,
+  resolveRepoRoomAccessDecision,
+  roomAccessPrincipal,
+  type RepoRoomAccessDenial,
+  type RoomAccessAccount,
+  type RoomAccessDecisionDeps,
+  type RoomAccessTarget,
+  type RoomRole,
+} from "./access-decision.js";
 import { isRepoBackedRoomId } from "./room-ids.js";
 
 export { isRepoBackedRoomId };
-export type { RepoRoomAccessDecision };
-
-export type RoomAccessAccount = Pick<
-  SessionAccount | OwnerTokenAccount,
-  "account_id" | "provider" | "login" | "provider_access_token"
->;
+export {
+  getProjectAccessRoomId,
+  resolveProjectRepoAccessTarget,
+  resolveRepoRoomAccessDecision,
+};
+export type { RepoRoomAccessDecision, RepoRoomAccessDenial, RoomAccessAccount, RoomRole };
 
 type RequestAccount = RoomAccessAccount | null | undefined;
-
-export type RoomRole = "admin" | "participant" | "anonymous";
-
-export type RepoRoomAccessDenial = Exclude<RepoRoomAccessDecision, { kind: "allow" }>;
 
 export interface ProjectRepoAccessDecision {
   isRepoBacked: boolean;
@@ -52,19 +56,7 @@ export interface ProjectRepoAccessDecision {
   decision: RepoRoomAccessDecision;
 }
 
-export interface ProjectRepoAccessDeps {
-  getGitRoomBindingForRoom(roomId: string): Promise<GitRoomBinding | null>;
-  resolveRepoRoomAccessDecision(input: {
-    roomName: string;
-    sessionAccount: RequestAccount;
-    freshCollaboratorCheck?: boolean;
-    throwOnIndeterminate?: boolean;
-  }): Promise<RepoRoomAccessDecision>;
-}
-
-export function getProjectAccessRoomId(project: Project): string {
-  return project.parent_room_id ?? project.id;
-}
+export type ProjectRepoAccessDeps = RoomAccessDecisionDeps;
 
 export function isRepoBackedProject(project: Project): boolean {
   return isRepoBackedRoomId(getProjectAccessRoomId(project));
@@ -84,51 +76,9 @@ export async function resolveRequestProjectRepoAccessRoomName(
   return target?.repoRoomName ?? getProjectAccessRoomId(project);
 }
 
-function gitRoomBindingRepoRoomName(binding: GitRoomBinding): string | null {
-  if (binding.provider !== "github") {
-    return null;
-  }
-
-  return `${binding.host}/${binding.repository_full_name}`;
-}
-
-export async function resolveProjectRepoAccessTarget(
-  project: Project,
-  deps: Pick<ProjectRepoAccessDeps, "getGitRoomBindingForRoom"> = { getGitRoomBindingForRoom },
-): Promise<{
-  roomName: string;
-  repoRoomName: string;
-  binding: GitRoomBinding | null;
-} | null> {
-  const accessRoomId = getProjectAccessRoomId(project);
-  if (isRepoBackedRoomId(accessRoomId)) {
-    return {
-      roomName: accessRoomId,
-      repoRoomName: accessRoomId,
-      binding: null,
-    };
-  }
-
-  const candidateRoomIds = [...new Set([accessRoomId, project.id])];
-  for (const roomId of candidateRoomIds) {
-    const binding = await deps.getGitRoomBindingForRoom(roomId);
-    if (!binding) {
-      continue;
-    }
-
-    const repoRoomName = gitRoomBindingRepoRoomName(binding);
-    if (!repoRoomName) {
-      continue;
-    }
-
-    return {
-      roomName: roomId,
-      repoRoomName,
-      binding,
-    };
-  }
-
-  return null;
+/** The name live leases and invalidation events use for a room: its repository, or its access room. */
+export function roomAccessName(target: RoomAccessTarget): string {
+  return target.kind === "repo" ? target.repoRoomName : target.accessRoomId;
 }
 
 function getPublicBaseUrl(): string {
@@ -262,25 +212,11 @@ export function replyIfGitHubAccessUnavailable(res: Response, error: unknown, ro
   return true;
 }
 
-export async function resolveRepoRoomAccessDecision(input: {
-  roomName: string;
-  sessionAccount: RequestAccount;
-  freshCollaboratorCheck?: boolean;
-  throwOnIndeterminate?: boolean;
-}): Promise<RepoRoomAccessDecision> {
-  if (!isRepoBackedRoomId(input.roomName)) {
-    return { kind: "allow" };
-  }
-
-  // Fail closed before any provider lookup: a `host/owner/repo` id on any host
-  // other than github.com has no visibility or collaborator check to run.
-  if (!parseGitHubRepoName(input.roomName)) {
-    return { kind: "unsupported_repo_provider" };
-  }
-
-  return resolveGitHubRepoRoomAccessDecision(input);
-}
-
+/**
+ * The repository half of a room's decision, for callers that already handle
+ * the membership half themselves (room join and creation flows). Other callers
+ * use decideRoomRead.
+ */
 export async function resolveProjectRepoRoomAccessDecision(input: {
   project: Project;
   sessionAccount: RequestAccount;
@@ -290,8 +226,8 @@ export async function resolveProjectRepoRoomAccessDecision(input: {
   getGitRoomBindingForRoom,
   resolveRepoRoomAccessDecision,
 }): Promise<ProjectRepoAccessDecision> {
-  const target = await resolveProjectRepoAccessTarget(input.project, deps);
-  if (!target) {
+  const target = await classifyRoomAccess(input.project, deps);
+  if (target.kind === "membership") {
     return {
       isRepoBacked: false,
       roomName: null,
@@ -315,85 +251,12 @@ export async function resolveProjectRepoRoomAccessDecision(input: {
   };
 }
 
-async function resolveProjectRoleForAccessDecision(
-  project: Project,
-  sessionAccount: RequestAccount,
-  accessDecision: ProjectRepoAccessDecision
-): Promise<RoomRole> {
-  const accessRoomId = getProjectAccessRoomId(project);
-  if (!sessionAccount) {
-    return "anonymous";
-  }
-
-  if (!accessDecision.isRepoBacked) {
-    // A room without a repository: the role comes from the members of the
-    // access room. A focus-room admin row counts only for a member of the
-    // parent (the old "first joiner" rule left such rows for strangers).
-    const accessRole = await getRoomMemberRole(accessRoomId, sessionAccount.account_id);
-    if (!accessRole) return "anonymous";
-    if (accessRole === "admin") return "admin";
-    return accessRoomId !== project.id && (await isProjectAdmin(project.id, sessionAccount.account_id))
-      ? "admin"
-      : "participant";
-  }
-
-  // An admin row is never removed when someone leaves the repository, so it
-  // counts only while GitHub still admits the person to the room now.
-  if (accessDecision.decision.kind !== "allow") {
-    return "participant";
-  }
-
-  if (
-    (await isProjectAdmin(project.id, sessionAccount.account_id)) ||
-    (accessRoomId !== project.id && (await isProjectAdmin(accessRoomId, sessionAccount.account_id)))
-  ) {
-    return "admin";
-  }
-
-  const adminRepoRoomName = accessDecision.repoRoomName ?? accessRoomId;
-  if (parseGitHubRepoName(adminRepoRoomName) && sessionAccount.provider === "github") {
-    const eligible = await isGitHubRepoAdmin({
-      roomName: adminRepoRoomName,
-      login: sessionAccount.login,
-      accessToken: sessionAccount.provider_access_token ?? "",
-    });
-
-    if (eligible) {
-      await assignProjectAdmin(project.id, sessionAccount.account_id);
-      return "admin";
-    }
-  }
-
-  return "participant";
-}
-
-export async function resolveProjectRole(
-  project: Project,
-  sessionAccount: RequestAccount
-): Promise<RoomRole> {
-  const accessRoomId = getProjectAccessRoomId(project);
-  const repoBacked = isRepoBackedProject(project);
-
-  return resolveProjectRoleForAccessDecision(project, sessionAccount, {
-    isRepoBacked: repoBacked,
-    roomName: repoBacked ? accessRoomId : null,
-    repoRoomName: repoBacked ? accessRoomId : null,
-    binding: null,
-    decision: { kind: "allow" },
-  });
-}
-
 export async function resolveGitRoomProjectRole(
   project: Project,
   sessionAccount: RequestAccount,
   deps?: ProjectRepoAccessDeps,
 ): Promise<RoomRole> {
-  const accessDecision = await resolveProjectRepoRoomAccessDecision({
-    project,
-    sessionAccount,
-  }, deps);
-
-  return resolveProjectRoleForAccessDecision(project, sessionAccount, accessDecision);
+  return (await decideRoomAdmin({ project, principal: roomAccessPrincipal(sessionAccount) }, deps)).role;
 }
 
 /**
@@ -408,16 +271,18 @@ export async function isCurrentProjectAdmin(
   account: RequestAccount,
   deps?: ProjectRepoAccessDeps,
 ): Promise<boolean> {
-  const accessDecision = await resolveProjectRepoRoomAccessDecision({ project, sessionAccount: account }, deps);
-  if (accessDecision.isRepoBacked && accessDecision.decision.kind === "repo_access_unavailable") {
-    throw new GitHubAccessUnavailableError(null);
-  }
-  return (await resolveProjectRoleForAccessDecision(project, account, accessDecision)) === "admin";
+  const decision = await decideRoomAdmin({ project, principal: roomAccessPrincipal(account), outage: "throw" }, deps);
+  return decision.role === "admin";
 }
 
 /** Whether the account is a member of the project's access room (its parent, for a focus room). */
 export async function isProjectRoomMember(project: Project, accountId: string): Promise<boolean> {
-  return (await getRoomMemberRole(getProjectAccessRoomId(project), accountId)) !== null;
+  const decision = await decideRoomRead({
+    project,
+    principal: { kind: "account", accountId },
+    target: { kind: "membership", accessRoomId: getProjectAccessRoomId(project) },
+  });
+  return decision.kind === "allow";
 }
 
 export type RoomMembershipDecision =
@@ -434,9 +299,14 @@ export async function resolveRoomMembershipDecision(
   project: Project,
   sessionAccount: RequestAccount,
 ): Promise<RoomMembershipDecision> {
-  if (!sessionAccount) return { kind: "auth_required" };
-  const role = await getRoomMemberRole(getProjectAccessRoomId(project), sessionAccount.account_id);
-  return role ? { kind: "allow" } : { kind: "membership_required" };
+  const decision = await decideRoomRead({
+    project,
+    principal: roomAccessPrincipal(sessionAccount),
+    target: { kind: "membership", accessRoomId: getProjectAccessRoomId(project) },
+  });
+  return decision.kind === "allow" ? { kind: "allow" }
+    : decision.kind === "membership_required" ? { kind: "membership_required" }
+      : { kind: "auth_required" };
 }
 
 /**
@@ -467,29 +337,6 @@ export async function replyRoomMembershipDecision(
   return false;
 }
 
-export async function requireAdmin(
-  req: AuthenticatedRequest,
-  res: Response,
-  project: Project
-): Promise<boolean> {
-  if (req.authKind === "agent_session") {
-    res.status(403).json({ error: "Worker bearers cannot perform owner or admin actions." });
-    return false;
-  }
-  if (!req.sessionAccount) {
-    res.status(401).json({ error: "Authentication required" });
-    return false;
-  }
-
-  const role = await resolveProjectRole(project, req.sessionAccount);
-  if (role !== "admin") {
-    res.status(403).json({ error: "Admin privileges required" });
-    return false;
-  }
-
-  return true;
-}
-
 export async function requireGitRoomAdmin(
   req: AuthenticatedRequest,
   res: Response,
@@ -505,38 +352,19 @@ export async function requireGitRoomAdmin(
     return false;
   }
 
-  const accessDecision = await resolveProjectRepoRoomAccessDecision({
-    project,
-    sessionAccount: req.sessionAccount,
-  }, deps);
+  const decision = await decideRoomAdmin({ project, principal: roomAccessPrincipal(req.sessionAccount) }, deps);
   // The same answers as requireGitRoomParticipant: a refusal for someone
   // GitHub no longer admits, and a 503 to retry when GitHub gives no answer.
-  if (accessDecision.isRepoBacked && accessDecision.decision.kind !== "allow") {
-    return replyRepoRoomAccessDecision(
-      res,
-      accessDecision.roomName ?? getProjectAccessRoomId(project),
-      accessDecision.decision,
-    );
+  if (decision.target?.kind === "repo" && decision.kind !== "allow" && decision.repo && decision.repo.kind !== "allow") {
+    return replyRepoRoomAccessDecision(res, decision.target.roomName, decision.repo);
   }
 
-  const role = await resolveProjectRoleForAccessDecision(project, req.sessionAccount, accessDecision);
-  if (role !== "admin") {
+  if (decision.role !== "admin") {
     res.status(403).json({ error: "Admin privileges required" });
     return false;
   }
 
   return true;
-}
-
-function resolveScopedWorkerParticipation(
-  req: AuthenticatedRequest,
-  res: Response,
-  project: Project,
-): boolean | null {
-  if (req.authKind !== "agent_session") return null;
-  if (req.agentSession?.room_id === project.id) return true;
-  res.status(403).json({ error: "Worker bearer is scoped to a different room." });
-  return false;
 }
 
 /** The same gate as requireGitRoomParticipant; kept for callers that import this name. */
@@ -559,45 +387,37 @@ export async function requireGitRoomParticipant(
   // human session account, so sending them through the GitHub collaborator
   // check would misclassify a valid worker as an anonymous user and return
   // 401 for Git-backed Focus rooms.
-  const workerParticipation = resolveScopedWorkerParticipation(req, res, project);
-  if (workerParticipation !== null) return workerParticipation;
-
-  // Every room needs a sign-in, so no lookup can admit a caller without one.
-  // A repo-shaped id on a host other than github.com keeps its own 403: no
+  // Every room needs a sign-in, so no lookup admits a caller without one. A
+  // repo-shaped id on a host other than github.com keeps its own 403: no
   // sign-in could open it, so a sign-in request would mislead.
-  const accessRoomId = getProjectAccessRoomId(project);
-  if (!req.sessionAccount && (!isRepoBackedRoomId(accessRoomId) || parseGitHubRepoName(accessRoomId))) {
-    // The id the caller asked for: a focus room id never reveals its parent.
-    return replyRepoRoomAccessDecision(res, project.id, { kind: "auth_required" });
-  }
-
-  const accessDecision = await resolveProjectRepoRoomAccessDecision({
+  const decision = await decideRoomRead({
     project,
-    sessionAccount: req.sessionAccount,
-    freshCollaboratorCheck: options.freshCollaboratorCheck,
-    throwOnIndeterminate: options.throwOnIndeterminate,
+    principal: req.authKind === "agent_session"
+      ? { kind: "worker", roomId: req.agentSession?.room_id ?? null }
+      : roomAccessPrincipal(req.sessionAccount),
+    freshness: options.freshCollaboratorCheck ? "fresh" : "cached",
+    outage: options.throwOnIndeterminate ? "revalidation" : "indeterminate",
   });
-  requestRepoAccessRoomNames.set(
-    req,
-    accessDecision.repoRoomName ?? getProjectAccessRoomId(project),
-  );
-  requestUsesRepoAuthorization.set(req, accessDecision.isRepoBacked);
-
-  if (!accessDecision.isRepoBacked) {
-    const membership = await resolveRoomMembershipDecision(project, req.sessionAccount);
-    if (membership.kind === "allow") return true;
-    return replyRoomMembershipDecision(res, project, req.sessionAccount, membership);
+  if (decision.target) {
+    requestRepoAccessRoomNames.set(req, roomAccessName(decision.target));
+    requestUsesRepoAuthorization.set(req, decision.target.kind === "repo");
   }
 
-  if (accessDecision.decision.kind === "allow") {
-    return true;
+  switch (decision.kind) {
+    case "allow":
+      return true;
+    case "worker_scope_mismatch":
+      res.status(403).json({ error: "Worker bearer is scoped to a different room." });
+      return false;
+    case "auth_required":
+      // The id the caller asked for: a focus room id never reveals its parent.
+      return replyRepoRoomAccessDecision(res, project.id, { kind: "auth_required" });
+    case "membership_required":
+      return replyRoomMembershipDecision(res, project, req.sessionAccount, decision);
+    case "repo_access_denied":
+    case "indeterminate":
+      return replyRepoRoomAccessDecision(res, (decision.target as Extract<RoomAccessTarget, { kind: "repo" }>).roomName, decision.repo);
   }
-
-  return replyRepoRoomAccessDecision(
-    res,
-    accessDecision.roomName ?? getProjectAccessRoomId(project),
-    accessDecision.decision
-  );
 }
 
 /**
@@ -631,18 +451,14 @@ export async function reauthorizeGitRoomParticipant(
   ) {
     return false;
   }
-  if (fresh.authKind === "agent_session") {
-    return fresh.agentSession?.room_id === project.id;
-  }
-  const accessDecision = await resolveProjectRepoRoomAccessDecision({
+  const decision = await decideRoomRead({
     project,
-    sessionAccount: fresh.account,
-    freshCollaboratorCheck: true,
+    principal: fresh.authKind === "agent_session"
+      ? { kind: "worker", roomId: fresh.agentSession?.room_id ?? null }
+      : roomAccessPrincipal(fresh.account),
+    freshness: "fresh",
   });
-  if (!accessDecision.isRepoBacked) {
-    return (await resolveRoomMembershipDecision(project, fresh.account)).kind === "allow";
-  }
-  return accessDecision.decision.kind === "allow";
+  return decision.kind === "allow";
 }
 
 export async function resolveProjectRoomEntryDecision(input: {
@@ -653,26 +469,27 @@ export async function resolveProjectRoomEntryDecision(input: {
   | { kind: "allow" }
   | { kind: "redirect"; location: string }
 > {
-  const accessDecision = await resolveProjectRepoRoomAccessDecision({
+  // A membership room always serves the app: its own room calls answer a
+  // non-member with the "Ask to join" refusal.
+  const target = await classifyRoomAccess(input.project);
+  if (target.kind === "membership") return { kind: "allow" };
+  const decision = await decideRoomRead({
     project: input.project,
-    sessionAccount: input.sessionAccount,
+    principal: roomAccessPrincipal(input.sessionAccount),
+    target,
   });
 
   // GitHub gave no answer: serve the app, whose own room calls get the 503
   // and retry, instead of a landing page that says the access is missing.
-  if (
-    !accessDecision.isRepoBacked
-    || accessDecision.decision.kind === "allow"
-    || accessDecision.decision.kind === "repo_access_unavailable"
-  ) {
+  if (decision.kind === "allow" || decision.kind === "indeterminate" || !decision.repo || decision.repo.kind === "allow") {
     return { kind: "allow" };
   }
 
   return {
     kind: "redirect",
     location: buildLandingRedirect({
-      reason: landingRedirectReason(accessDecision.decision),
-      roomName: accessDecision.roomName ?? getProjectAccessRoomId(input.project),
+      reason: landingRedirectReason(decision.repo),
+      roomName: target.roomName,
       redirectTo: input.redirectTo,
     }),
   };
