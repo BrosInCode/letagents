@@ -4,10 +4,16 @@ import {
   type MessageReaction,
 } from "../../../../../shared/message-reactions.mjs";
 import type { DesktopMessageReactionChange, DesktopMessageReactionsRange } from "../../ipc-types/api.js";
-import { apiFetch } from "../auth.js";
+import { apiFetch, readStoredAuth } from "../auth.js";
+import { createInFlightRoomReads } from "./in-flight-reads.js";
 import { cloudRoomIdentifierForStorage, resolveLocalAwareRoomStorageMode } from "./local-store.js";
 
 const MESSAGE_ID = /^msg_[1-9]\d*$/;
+const reads = createInFlightRoomReads<{
+  reactions?: Record<string, unknown>;
+  viewer_reactions?: Record<string, unknown>;
+  next_first_message_id?: unknown;
+}>(apiFetch, readStoredAuth);
 
 async function messagesPath(identifier: string): Promise<string> {
   if (!identifier?.trim()) throw new Error("Choose a room first.");
@@ -27,11 +33,8 @@ export async function getDesktopMessageReactions(
   lastMessageId: string,
 ): Promise<DesktopMessageReactionsRange> {
   const query = new URLSearchParams({ first: requireMessageId(firstMessageId), last: requireMessageId(lastMessageId) });
-  const response = await apiFetch<{
-    reactions?: Record<string, unknown>;
-    viewer_reactions?: Record<string, unknown>;
-    next_first_message_id?: unknown;
-  }>(`${await messagesPath(identifier)}/reactions?${query}`);
+  const path = await messagesPath(identifier);
+  const response = await reads.get(`${path}/reactions?${query}`, path);
   const reactions: Record<string, MessageReaction[]> = {};
   for (const [messageId, value] of Object.entries(response.reactions ?? {})) {
     if (!MESSAGE_ID.test(messageId)) continue;
@@ -63,9 +66,16 @@ export async function setDesktopMessageReaction(
   const normalized = normalizeMessageReactionEmoji(emoji);
   if (!normalized) throw new Error("A reaction must be a single emoji.");
   if (typeof reacted !== "boolean") throw new Error("Choose whether to add or remove the reaction.");
-  const response = await apiFetch<{ changed?: boolean; reactions?: unknown }>(
-    `${await messagesPath(identifier)}/${requireMessageId(messageId)}/reactions/${encodeURIComponent(normalized)}`,
-    { method: reacted ? "PUT" : "DELETE" },
-  );
-  return { changed: Boolean(response.changed), reactions: normalizeMessageReactions(response.reactions) };
+  const path = await messagesPath(identifier);
+  const id = requireMessageId(messageId);
+  reads.invalidate(path);
+  try {
+    const response = await apiFetch<{ changed?: boolean; reactions?: unknown }>(
+      `${path}/${id}/reactions/${encodeURIComponent(normalized)}`,
+      { method: reacted ? "PUT" : "DELETE" },
+    );
+    return { changed: Boolean(response.changed), reactions: normalizeMessageReactions(response.reactions) };
+  } finally {
+    reads.invalidate(path);
+  }
 }

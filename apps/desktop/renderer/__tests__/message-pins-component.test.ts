@@ -162,6 +162,27 @@ test("desktop provider captures the room, clears on account changes, and refresh
   } finally { scope.stop(); Object.assign(globalThis, { window: oldWindow }); }
 });
 
+test("switching to a room with a different pin revision performs one IPC read", async () => {
+  const oldWindow = globalThis.window, calls: string[] = [];
+  Object.assign(globalThis, { window: { letagentsDesktop: { room: {
+    getMessagePins: async (id: string) => { calls.push(id); return { pins: [pin] }; },
+    setMessagePin: async () => ({ changed: true }),
+  } } } });
+  const scope = effectScope(), room = ref("pins-switch-a");
+  const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
+  try {
+    provider.invalidateRoomMessagePins("pins-switch-b");
+    scope.run(() => provider.useRoomMessagePins(room, () => {}));
+    await settle();
+    room.value = "pins-switch-b";
+    await settle();
+    assert.deepEqual(calls, ["pins-switch-a", "pins-switch-b"]);
+    provider.invalidateRoomMessagePins("pins-switch-b");
+    await settle();
+    assert.deepEqual(calls, ["pins-switch-a", "pins-switch-b", "pins-switch-b"], "a real invalidation still refreshes");
+  } finally { scope.stop(); Object.assign(globalThis, { window: oldWindow }); }
+});
+
 test("desktop pin errors sanitize IPC wrappers in both the list and toast, preserving the exact limit notice", async () => {
   const oldWindow = globalThis.window, notices: string[] = [];
   const limit = "This room already has 50 pinned messages. Unpin a message first.";
