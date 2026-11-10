@@ -1,5 +1,5 @@
 import { rooms } from "../db/schema.js";
-import { isJoinCodeShape } from "../rooms/room-nature.js";
+import { getRoomNature, recordStoredRoomOrigin } from "../rooms/room-nature.js";
 import type {
   AccountRoomCandidate,
   AccountRoomListFocusRoom,
@@ -20,10 +20,12 @@ export const roomSelectColumns = {
   focus_status: rooms.focus_status,
   focus_archived_at: rooms.focus_archived_at,
   created_at: rooms.created_at,
+  // Read for the room's nature only; never copied into the listed room.
+  origin: rooms.origin,
 };
 
 export function toAccountRoomProject(row: AccountRoomProjectRow): AccountRoomProject {
-  return {
+  const project: AccountRoomProject = {
     id: row.id,
     display_name: row.display_name,
     kind: row.kind as RoomKind,
@@ -34,6 +36,8 @@ export function toAccountRoomProject(row: AccountRoomProjectRow): AccountRoomPro
     focus_archived_at: row.focus_archived_at,
     created_at: row.created_at,
   };
+  recordStoredRoomOrigin(project, row.origin);
+  return project;
 }
 
 function earlierTimestamp(current: string | null, next: string | null): string | null {
@@ -111,7 +115,7 @@ export function accountRoomDeleteReason(candidate: AccountRoomCandidate): string
   if (candidate.role !== "admin") {
     return "Only room admins can delete this room.";
   }
-  if (!candidate.canDelete || !isJoinCodeShape(candidate.project.id)) {
+  if (!candidate.canDelete || getRoomNature(candidate.project).origin !== "join_code") {
     return "Deletion is available only for invite rooms this account created in LetAgents.";
   }
   return null;

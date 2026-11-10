@@ -13,6 +13,8 @@ import { reconcileReplyTurnHoldRollout } from "./db/reply-turn-hold-rollout.js";
 import { reconcileGitHubWebhookIntegrityRollout } from "./db/github-webhook-integrity-rollout.js";
 import { reconcileMessageLatestTimeRollout } from "./db/message-latest-time-rollout.js";
 import { reconcileReadRangeIndexRollout } from "./db/read-range-index-rollout.js";
+import { logRoomOriginAudit } from "./db/room-origin-audit.js";
+import { reconcileRoomOriginBackfill } from "./db/room-origin-backfill.js";
 
 const THREAD_PROJECTION_BATCH_SIZE = 500;
 
@@ -40,6 +42,12 @@ async function main(): Promise<void> {
   const readRangeIndexes = await reconcileReadRangeIndexRollout(pool);
   const workUnits = await reconcileMessageThreadProjection();
   await analyzeMessageThreadProjection();
+  // Rooms migration 0147 left without an origin (ids outside ASCII), filled
+  // with the server's own rule; then a read-only audit of origins and of the
+  // repository identity stores.
+  const roomOrigins = await reconcileRoomOriginBackfill(pool);
+  console.log(`Filled the origin of ${roomOrigins} rooms after migration 0147`);
+  await logRoomOriginAudit(pool);
   console.log(
     `Applied migrations from ${migrationsFolder}; reconciled ${workUnits} thread rollout records and `
     + `${dueTimeRollout.delivery_rows} deliveries/${dueTimeRollout.manager_rows} managers/`

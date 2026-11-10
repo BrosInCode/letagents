@@ -52,6 +52,8 @@ export interface AccountRoomProject {
 export type AccountRoomProjectRow = Omit<AccountRoomProject, "kind" | "focus_status"> & {
   kind: string;
   focus_status: string | null;
+  /** The stored `rooms.origin`; recorded for the room's nature, not listed. */
+  origin?: string | null;
 };
 
 export interface AccountRoomCandidate {

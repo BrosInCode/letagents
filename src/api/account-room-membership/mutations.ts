@@ -105,7 +105,7 @@ export async function deleteAccountRoomForAccount(input: {
   reason?: string;
 }> {
   const [room] = await db
-    .select({ id: rooms.id, kind: rooms.kind })
+    .select({ id: rooms.id, kind: rooms.kind, origin: rooms.origin })
     .from(rooms)
     .where(eq(rooms.id, input.roomId))
     .limit(1);
