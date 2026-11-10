@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { PoolClient } from "pg";
 import { pool } from "../db/client.js";
+import { wakeJobQueue } from "../server/job-queue-wakes.js";
 import type {
   Conversation,
   ConversationList,
@@ -270,7 +271,7 @@ export async function sendConversationMessage(
       400,
       "Write a message of up to 20,000 characters.",
     );
-  return transaction(async (client) => {
+  const sent = await transaction(async (client) => {
     const context = await membership(client, accountId, id, true);
     const existing = await client.query<ConversationMessage>(
       "SELECT * FROM conversation_messages WHERE conversation_id=$1 AND sender_account_id=$2 AND client_message_id=$3",
@@ -328,6 +329,9 @@ export async function sendConversationMessage(
     await invalidateConversations(client, context.ids);
     return message.rows[0];
   });
+  // The push worker sleeps until its next due row; this send may have queued pushes.
+  wakeJobQueue("desktop_push");
+  return sent;
 }
 
 export async function updateConversation(

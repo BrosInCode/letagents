@@ -42,6 +42,8 @@ export async function routeMessageToActiveSessions(
   noWake: MessageNoWake | null;
   /** Deferred conversation routing decides the recipients after commit. */
   jevPending: boolean;
+  /** A routing job was queued (active or shadow mode): the Jev worker must be woken after commit. */
+  jevJobQueued: boolean;
 }> {
   let receiptCount = 0;
   let recipientAgentKeys: readonly string[] = [];
@@ -472,5 +474,8 @@ export async function routeMessageToActiveSessions(
       noWake = await resolveLargeRoomNoWake();
     }
   }
-  return { receiptCount, recipientAgentKeys, recipientAgentTargets, mentionNotices, noWake, jevPending: jevDecides };
+  return {
+    receiptCount, recipientAgentKeys, recipientAgentTargets, mentionNotices, noWake,
+    jevPending: jevDecides, jevJobQueued: Boolean(jevMode && jevEligible),
+  };
 }
