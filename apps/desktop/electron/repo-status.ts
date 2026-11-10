@@ -529,6 +529,7 @@ function diffRelevantGitVariable(line: string): boolean {
 }
 
 function diffContextFrom(
+  repoRoot: string,
   gitVariables: string | null,
   infoAttributesPath: string | null,
 ): DiffContext | null {
@@ -544,6 +545,12 @@ function diffContextFrom(
   const systemAttributes = lines.find((line) => line.startsWith("GIT_ATTR_SYSTEM="))?.slice("GIT_ATTR_SYSTEM=".length);
   const globalAttributes = lines.find((line) => line.startsWith("GIT_ATTR_GLOBAL="))?.slice("GIT_ATTR_GLOBAL=".length);
   if (!systemAttributes || !globalAttributes) return null;
+  // `git var` prints these paths with `~` already expanded but a relative
+  // `core.attributesFile` as written. Git opens that from the top of the
+  // worktree the diff runs in (checked with Git 2.51: from a linked worktree
+  // the main worktree's file does not apply), and the diffs run there.
+  const systemAttributesPath = resolve(repoRoot, systemAttributes);
+  const globalAttributesPath = resolve(repoRoot, globalAttributes);
   const environment = Object.entries(process.env)
     .filter(([name]) => name.startsWith("GIT_"))
     .sort(([left], [right]) => left.localeCompare(right))
@@ -554,8 +561,8 @@ function diffContextFrom(
     .update(environment.join("\n"))
     .update("\0")
     .update([
-      fileState(systemAttributes, true),
-      fileState(globalAttributes, true),
+      fileState(systemAttributesPath, true),
+      fileState(globalAttributesPath, true),
       fileState(infoAttributesPath, true),
     ].join("|"))
     .digest("hex");
@@ -918,7 +925,7 @@ export async function buildRepoStatus(
       [defaultBranch, gitStatus.branch, ...worktrees.map((worktree) => worktree.branch)],
       defaultBranch,
       branchTips,
-      diffContextFrom(gitVariables, await readInfoAttributesPath(repoRoot, options)),
+      diffContextFrom(repoRoot, gitVariables, await readInfoAttributesPath(repoRoot, options)),
       options,
     )
     : [];
@@ -1006,7 +1013,7 @@ export async function refreshRepoStatus(
         [defaultBranch, gitStatus.branch, ...worktrees.map((worktree) => worktree.branch)],
         defaultBranch,
         branchTips,
-        diffContextFrom(gitVariables, infoAttributesPath),
+        diffContextFrom(repoRoot, gitVariables, infoAttributesPath),
         options,
       )
       : Promise.resolve(previous.branchDeltas ?? []),

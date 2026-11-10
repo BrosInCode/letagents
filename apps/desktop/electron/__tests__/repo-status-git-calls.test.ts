@@ -430,3 +430,29 @@ test("a path list larger than the buffer still gives the count, uncached", async
     rmSync(temporary, { recursive: true, force: true });
   }
 });
+
+test("a relative core.attributesFile is watched in the worktree the diffs run in", async () => {
+  clearBranchDeltaCacheForTest();
+  const { temporary, root, worktrees } = repoWithWorktrees(1);
+  try {
+    git(root, "config", "core.attributesFile", "attrs/relative");
+    const first = await buildRepoStatus(root);
+    assert.deepEqual(first.branchDeltas?.find((delta) => delta.branch === "agent/0"), gitDelta(root, "agent/0"));
+
+    mkdirSync(join(root, "attrs"));
+    writeFileSync(join(root, "attrs", "relative"), "*.txt binary\n");
+    const expected = gitDelta(root, "agent/0");
+    assert.equal(expected.additions, 0, "the fixture must make the attribute file matter");
+    const refreshed = await refreshRepoStatus(root, first, { full: true });
+    assert.deepEqual(refreshed.branchDeltas?.find((delta) => delta.branch === "agent/0"), expected);
+
+    // From a linked worktree Git opens its own attrs/relative, not the main one.
+    const linked = await buildRepoStatus(worktrees[0]!);
+    assert.deepEqual(
+      linked.branchDeltas?.find((delta) => delta.branch === "agent/0"),
+      parseGitShortStat(git(worktrees[0]!, "diff", "--shortstat", "--merge-base", "main", "agent/0", "--"), "main", "agent/0"),
+    );
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
