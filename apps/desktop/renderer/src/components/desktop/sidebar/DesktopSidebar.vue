@@ -72,12 +72,13 @@
           </span>
         </button>
         <Transition name="sidebar-pinned-reveal">
-          <TransitionGroup
+          <SidebarRoomOrderList
             v-if="!pinnedCollapsed"
             id="sidebar-pinned-rooms"
             name="sidebar-room-order"
             tag="div"
             class="pinned-list"
+            :row-layout="projectRowLayout"
           >
           <article
             v-for="project in pinnedProjectEntries"
@@ -147,7 +148,7 @@
             </div>
 
             <Transition name="sidebar-reveal">
-              <TransitionGroup
+              <SidebarRoomOrderList
                 v-if="!projectIsCollapsed(project.id) && projectChildRooms(project).length"
                 :id="projectChildListId(project.id)"
                 name="sidebar-room-order"
@@ -187,10 +188,10 @@
                   <span>{{ projectRoomOverflowLabel(project) }}</span>
                   <RoomUnreadBadge v-bind="projectOverflowUnreadBadge(project)" />
                 </button>
-              </TransitionGroup>
+              </SidebarRoomOrderList>
             </Transition>
           </article>
-          </TransitionGroup>
+          </SidebarRoomOrderList>
         </Transition>
       </section>
 
@@ -241,11 +242,12 @@
         </span>
       </button>
       <Transition name="sidebar-reveal">
-        <TransitionGroup
+        <SidebarRoomOrderList
           v-if="zenMode || !roomsCollapsed"
           name="sidebar-room-order"
           tag="div"
           class="project-list"
+          :row-layout="projectRowLayout"
         >
           <article
             v-for="project in roomProjectEntries"
@@ -317,7 +319,7 @@
             </div>
 
             <Transition name="sidebar-reveal">
-              <TransitionGroup
+              <SidebarRoomOrderList
                 v-if="!projectIsCollapsed(project.id) && projectChildRooms(project).length"
                 :id="projectChildListId(project.id)"
                 name="sidebar-room-order"
@@ -357,11 +359,11 @@
                   <span>{{ projectRoomOverflowLabel(project) }}</span>
                   <RoomUnreadBadge v-bind="projectOverflowUnreadBadge(project)" />
                 </button>
-              </TransitionGroup>
+              </SidebarRoomOrderList>
             </Transition>
           </article>
           <p v-if="!roomProjectEntries.length" class="room-empty">No other rooms</p>
-        </TransitionGroup>
+        </SidebarRoomOrderList>
       </Transition>
         </section>
         <button v-if="!selectionActive" class="sidebar-browse" type="button" @click="openRoomSwitcher">
@@ -557,7 +559,10 @@ import {
   TriangleAlert,
   X,
 } from "@lucide/vue";
-import { computed, nextTick, onMounted, onBeforeUnmount, ref, watch, type Component } from "vue";
+import {
+  computed, defineComponent, getCurrentInstance, getTransitionRawChildren, h, nextTick, onMounted, onBeforeUnmount, onUpdated, ref,
+  resolveTransitionHooks, setTransitionHooks, useTransitionState, watch, type BaseTransitionProps, type Component, type PropType, type VNode,
+} from "vue";
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { isMacPlatform } from "../../../domain/room-switcher-shortcut";
 import { desktopUpdateSidebarPresentation } from "../../../domain/desktop-update-status";
@@ -611,6 +616,93 @@ import SidebarAccountMenu from "./SidebarAccountMenu.vue";
 import type { ProjectGroup, SidebarEntry, SystemEntry, RoomEntry } from "../types";
 import { desktopIpc } from "../../../ipc/index.js";
 import type { DesktopAuthStatus, DesktopUpdateStatus } from "../../../../../electron/ipc-types";
+
+/*
+ * A room list with TransitionGroup's move transition, without its cost on
+ * every update. TransitionGroup reads the position of every row
+ * (getBoundingClientRect) in each render and again after it, and it renders
+ * on every room switch and unread change: that forced layout once per list,
+ * in the middle of the update. This list reads positions only in an update
+ * in which its row keys, or a row's `rowLayout` (which child rooms a project
+ * shows), changed, and then plays the same `<name>-move` transition. A
+ * removed row stays two frames, as it does in TransitionGroup without leave
+ * styles, so the rows below it do not slide.
+ */
+const roomOrderMoveDone = new WeakMap<HTMLElement, () => void>();
+const SidebarRoomOrderList = defineComponent({
+  name: "SidebarRoomOrderList",
+  props: {
+    name: { type: String, required: true },
+    tag: { type: String, default: "div" },
+    rowLayout: { type: Function as PropType<(key: string) => string>, default: null },
+  },
+  setup(listProps, { slots }) {
+    const instance = getCurrentInstance()!;
+    const state = useTransitionState();
+    const hooks: BaseTransitionProps<Element> = {
+      onLeave: (_element, done) => requestAnimationFrame(() => requestAnimationFrame(done)),
+    };
+    let children: VNode[] = [];
+    let order: string | null = null;
+    let positions: Map<HTMLElement, DOMRect> | null = null;
+    onUpdated(() => {
+      const before = positions;
+      positions = null;
+      if (before) playRoomOrderMove(before, `${listProps.name}-move`);
+    });
+    return () => {
+      const next = getTransitionRawChildren(slots.default?.() ?? []);
+      for (const child of next) {
+        if (child.key != null) setTransitionHooks(child, resolveTransitionHooks(child, hooks, state, instance));
+      }
+      const nextOrder = next.map((child) => `${String(child.key)}:${listProps.rowLayout?.(String(child.key)) ?? ""}`).join("\n");
+      if (order !== null && nextOrder !== order) {
+        positions = new Map();
+        for (const child of children) {
+          const element = child.el as HTMLElement | null;
+          if (element && typeof element.getBoundingClientRect === "function") positions.set(element, element.getBoundingClientRect());
+        }
+      }
+      order = nextOrder;
+      children = next;
+      return h(listProps.tag, null, next);
+    };
+  },
+});
+
+/** Slides each row that moved from its old place to its new one (TransitionGroup's move). */
+function playRoomOrderMove(before: Map<HTMLElement, DOMRect>, moveClass: string): void {
+  for (const element of before.keys()) roomOrderMoveDone.get(element)?.();
+  const moved: HTMLElement[] = [];
+  for (const [element, old] of before) {
+    if (!element.isConnected) continue;
+    const rect = element.getBoundingClientRect();
+    const dx = old.left - rect.left;
+    const dy = old.top - rect.top;
+    if (!dx && !dy) continue;
+    let scaleX = element.offsetWidth ? rect.width / element.offsetWidth : 1;
+    let scaleY = element.offsetHeight ? rect.height / element.offsetHeight : 1;
+    if (!Number.isFinite(scaleX) || !scaleX || Math.abs(scaleX - 1) < 0.01) scaleX = 1;
+    if (!Number.isFinite(scaleY) || !scaleY || Math.abs(scaleY - 1) < 0.01) scaleY = 1;
+    element.style.transform = `translate(${dx / scaleX}px,${dy / scaleY}px)`;
+    element.style.transitionDuration = "0s";
+    moved.push(element);
+  }
+  if (!moved.length) return;
+  void document.body.offsetHeight;
+  for (const element of moved) {
+    element.classList.add(moveClass);
+    element.style.transform = element.style.transitionDuration = "";
+    const done = (event?: TransitionEvent) => {
+      if (event && (event.target !== element || !event.propertyName.endsWith("transform"))) return;
+      element.removeEventListener("transitionend", done);
+      roomOrderMoveDone.delete(element);
+      element.classList.remove(moveClass);
+    };
+    roomOrderMoveDone.set(element, done);
+    element.addEventListener("transitionend", done);
+  }
+}
 
 const props = defineProps<{
   /** The person's companies; the Rooms heading becomes a company filter when there is one to show. */
@@ -1058,6 +1150,15 @@ function visibleProjectChildRooms(project: ProjectGroup): RoomEntry[] {
     activeEntryId: props.activeEntry.id,
     expanded: projectRoomListExpanded(project.id),
   });
+}
+
+const projectGroupsById = computed(() => new Map([...pinnedProjectEntries.value, ...roomProjectEntries.value].map((project) => [project.id, project])));
+
+/** What sets a project row's height: its shown child rooms. A change moves the rows below it. */
+function projectRowLayout(projectId: string): string {
+  const project = projectGroupsById.value.get(projectId);
+  if (!project || projectIsCollapsed(projectId)) return "";
+  return `${visibleProjectChildRooms(project).length}${hasProjectRoomOverflow(project) ? "+" : ""}`;
 }
 
 function hasProjectRoomOverflow(project: ProjectGroup): boolean {
