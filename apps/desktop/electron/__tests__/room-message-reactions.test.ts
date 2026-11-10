@@ -3,10 +3,11 @@ import test from "node:test";
 
 type Call = { path: string; method: string };
 
-async function load(t: test.TestContext, options: { local?: boolean; respond?: (call: Call) => unknown } = {}) {
+async function load(t: test.TestContext, options: { local?: boolean; token?: () => string; respond?: (call: Call) => unknown } = {}) {
   const calls: Call[] = [];
   t.mock.module("../main/auth.js", {
     namedExports: {
+      readStoredAuth: async () => ({ token: options.token?.() ?? "reactions-account" }),
       apiFetch: async (path: string, init?: RequestInit) => {
         const call = { path, method: init?.method ?? "GET" };
         calls.push(call);
@@ -27,6 +28,47 @@ async function load(t: test.TestContext, options: { local?: boolean; respond?: (
 
 const room = "github.com/org/repo";
 const roomPath = `/rooms/${encodeURIComponent(room)}/messages`;
+
+test("concurrent reaction reads share only the same room, range, and account", async (t) => {
+  let token = "a";
+  const pending: Array<(value: unknown) => void> = [];
+  const { subject, calls } = await load(t, { token: () => token, respond: () => new Promise((resolve) => pending.push(resolve)) });
+  const reads = Array.from({ length: 7 }, () => subject.getDesktopMessageReactions(room, "msg_1", "msg_9"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls.length, 1);
+  reads.push(subject.getDesktopMessageReactions(room, "msg_10", "msg_19"));
+  reads.push(subject.getDesktopMessageReactions("other-room", "msg_1", "msg_9"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  token = "b";
+  reads.push(subject.getDesktopMessageReactions(room, "msg_1", "msg_9"));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls.length, 4);
+  pending.forEach((resolve) => resolve({ reactions: {}, viewer_reactions: { msg_1: ["👍"] }, next_first_message_id: null }));
+  const results = await Promise.all(reads);
+  assert.deepEqual(results[0], results[6]);
+  assert.deepEqual(results[0]?.viewer_reactions, { msg_1: ["👍"] });
+  const fresh = subject.getDesktopMessageReactions(room, "msg_1", "msg_9");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls.length, 5, "settled results are not retained");
+  pending.at(-1)!({ reactions: {} });
+  await fresh;
+});
+
+test("a reaction mutation fences pending reads of every range in its room", async (t) => {
+  const pending: Array<(value: unknown) => void> = [];
+  const { subject, calls } = await load(t, { respond: ({ method }) => method === "GET"
+    ? new Promise((resolve) => pending.push(resolve)) : { changed: true, reactions: [] } });
+  const first = subject.getDesktopMessageReactions(room, "msg_1", "msg_9");
+  const second = subject.getDesktopMessageReactions(room, "msg_10", "msg_19");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await subject.setDesktopMessageReaction(room, "msg_1", "👍", true);
+  const fresh = subject.getDesktopMessageReactions(room, "msg_1", "msg_9");
+  const freshSecond = subject.getDesktopMessageReactions(room, "msg_10", "msg_19");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(calls.filter(({ method }) => method === "GET").length, 4);
+  pending.forEach((resolve) => resolve({ reactions: {} }));
+  await Promise.all([first, second, fresh, freshSecond]);
+});
 
 test("adding and removing a reaction use the idempotent verbs and an encoded emoji", async (t) => {
   const { subject, calls } = await load(t, {

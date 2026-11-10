@@ -123,6 +123,7 @@ const loaded = {} as Record<ComponentName, object>;
 let messageDrafts: typeof import("../src/domain/desktop-message-drafts");
 let roomActivity: typeof import("../src/components/desktop/content/room-chat/room-activity");
 let supervisorEntries: typeof import("../src/domain/supervisor-entries-resource");
+let messageReactions: typeof import("../src/composables/useRoomMessageReactions");
 
 before(async () => {
   vite = await createServer({
@@ -132,6 +133,7 @@ before(async () => {
   messageDrafts = await vite.ssrLoadModule("/renderer/src/domain/desktop-message-drafts.ts") as typeof messageDrafts;
   roomActivity = await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/room-activity.ts") as typeof roomActivity;
   supervisorEntries = await vite.ssrLoadModule("/renderer/src/domain/supervisor-entries-resource.ts") as typeof supervisorEntries;
+  messageReactions = await vite.ssrLoadModule("/renderer/src/composables/useRoomMessageReactions.ts") as typeof messageReactions;
   for (const [name, path] of Object.entries(components) as Array<[ComponentName, string]>) {
     const url = path.startsWith("../") ? fileURLToPath(new URL(`../src/${path}`, import.meta.url)) : `/renderer/src/${path}`;
     loaded[name] = (await vite.ssrLoadModule(url)).default as object;
@@ -164,6 +166,39 @@ function mountCounting(setup: () => () => unknown): { root: HostNode; app: App; 
 }
 
 const ROOM = "room-counts";
+
+test("room snapshot replacements do not re-request an unchanged reaction range", async (t) => {
+  const calls: string[][] = [];
+  const previousBridge = window.letagentsDesktop;
+  Object.assign(window, { letagentsDesktop: { room: {
+    getMessageReactions: async (...args: string[]) => { calls.push(args); return { reactions: {}, next_first_message_id: null }; },
+    setMessageReaction: async () => ({ changed: true, reactions: [] }),
+  } } });
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const row = shallowRef({ ...messages(2)[1]!, reactions: [] });
+  const mounted = mountCounting(() => {
+    messageReactions.provideRoomMessageReactions(messageReactions.useRoomMessageReactions(ref("reaction-switch"), assert.fail));
+    return () => Vue.h(loaded.DesktopChatMessage, {
+      message: row.value,
+      threadSummary: { count: 0, unreadCount: 0, latest: null, latestPreview: null, latestTimestamp: null, participants: [], hasPartialHistory: false, loadingEarlier: false },
+      activeThreadRoot: false, highlightQuery: "", searchActive: false,
+    });
+  });
+  const settle = async () => { await nextTick(); t.mock.timers.tick(50); await new Promise<void>((resolve) => setImmediate(resolve)); };
+  try {
+    await settle();
+    assert.deepEqual(calls, [["reaction-switch", "msg_1", "msg_1"]]);
+    row.value = { ...row.value, reactions: [] };
+    await settle();
+    assert.equal(calls.length, 1, "a fresh snapshot of the same row must not retrack it");
+    row.value = { ...row.value, id: "msg_2" };
+    await settle();
+    assert.deepEqual(calls[1], ["reaction-switch", "msg_2", "msg_2"]);
+    messageReactions.invalidateRoomMessageReactions("reaction-switch");
+    await settle();
+    assert.equal(calls.length, 3, "real reaction invalidations still fetch");
+  } finally { mounted.app.unmount(); Object.assign(window, { letagentsDesktop: previousBridge }); }
+});
 
 /** Message rows on screen, so a zero update count cannot come from rows that never mounted. */
 function mountedRows(root: HostNode): number {
