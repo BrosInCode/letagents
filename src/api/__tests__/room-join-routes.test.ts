@@ -698,3 +698,29 @@ test("a repo room join works out the caller's role once and answers with it", as
   assert.deepEqual(response.body, { room_id: room.id, role: "admin" });
   assert.deepEqual(roleChecks, ["acct_repo_member"], "each role check asks GitHub, so one join makes one");
 });
+
+test("the join rate limit counts per account for a signed-in caller and per address otherwise", async () => {
+  const room = { id: "office-room", display_name: "Office" };
+  const overrides = {
+    resolveRoomOrReply: async () => room as never,
+    resolveExistingRoomRequest: async () => room as never,
+    getProjectAccessRoomId: () => room.id,
+    resolveProjectRole: async () => "participant",
+    toRoomResponse: () => ({ room_id: room.id }),
+  };
+  const officeAddress = "198.51.100.40";
+  const join = async (accountId: string | null) =>
+    (await joinThroughRoute(room.id, overrides, officeAddress, accountId ? { account_id: accountId } : null)).statusCode;
+
+  for (let index = 0; index < 10; index += 1) {
+    assert.equal(await join("acct_office_a"), 200, `join ${index + 1} of the first person`);
+  }
+  for (let index = 0; index < 10; index += 1) {
+    assert.equal(await join("acct_office_b"), 200, `a colleague at the same address, join ${index + 1}`);
+  }
+  assert.equal(await join("acct_office_a"), 429, "the eleventh join in a minute by one account is refused, as before");
+  assert.equal(await join(null), 200, "a caller without a sign-in keeps the address budget, unused so far");
+  for (let index = 1; index < 10; index += 1) await join(null);
+  assert.equal(await join(null), 429, "and is refused after ten from that address");
+  assert.equal(await join("acct_office_c"), 200, "which does not touch a signed-in colleague's budget");
+});

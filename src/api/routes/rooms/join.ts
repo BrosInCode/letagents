@@ -143,9 +143,15 @@ export function registerRoomJoinRoutes(
       req.socket.remoteAddress ??
       "unknown";
     // Remote MCP sessions' in-process calls have no client address; they get
-    // a budget per account. Every other caller keeps the address key.
+    // a budget per account. A signed-in caller gets one per account as well,
+    // so people behind one office address do not share it. Everyone else
+    // keeps the address key.
     const internal = inProcessPrincipal(req);
-    const rateLimitKey = internal ? `account:${internal.account.account_id}` : ip;
+    const rateLimitKey = internal
+      ? `account:${internal.account.account_id}`
+      : req.sessionAccount
+        ? `session-account:${req.sessionAccount.account_id}`
+        : ip;
     if (!checkJoinRateLimit(rateLimitKey)) {
       res.status(429).json({
         error: "Too many join attempts. Please slow down.",
