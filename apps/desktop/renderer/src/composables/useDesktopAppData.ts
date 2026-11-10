@@ -125,7 +125,11 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   // The barrier token whose stream start is still awaited: its read has not
   // started yet, so every open the stream reports now precedes that read.
   let barrierAwaitingStream: number | null = null;
-  let sameTaskSelectionRefresh: { key: string; promise: Promise<void> } | null = null;
+  let sameTaskSelectionRefresh: {
+    key: string;
+    base: DesktopRoomSnapshot | null;
+    promise: Promise<void>;
+  } | null = null;
   let artifactRefreshContext = 0;
   let artifactRefreshDisposed = false;
   let artifactRefresh: {
@@ -489,7 +493,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
    * IPC reply or stream event can land between two calls in one task, so the
    * second call joins the first (which stays the current request) instead of
    * reading the room again. A call in a later task, or for another entry,
-   * room, root or session, runs on its own.
+   * room, root snapshot object or session, runs on its own.
    */
   function refreshSelectedSnapshot(baseRootSnapshot: DesktopRoomSnapshot | null = options.rootRoomSnapshot.value): Promise<void> {
     const entry = options.activeEntry.value;
@@ -500,9 +504,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       baseRootSnapshot?.roomIdentifier ?? null,
       baseRootSnapshot ? options.resolveSelectedRoomIdentifier(baseRootSnapshot) : null,
     ]);
-    if (sameTaskSelectionRefresh?.key === key) return sameTaskSelectionRefresh.promise;
+    const base = baseRootSnapshot ? toRaw(baseRootSnapshot) : null;
+    if (sameTaskSelectionRefresh?.key === key && sameTaskSelectionRefresh.base === base) {
+      return sameTaskSelectionRefresh.promise;
+    }
     const promise = refreshSelectedSnapshotNow(baseRootSnapshot);
-    const current = { key, promise };
+    const current = { key, base, promise };
     sameTaskSelectionRefresh = current;
     const forget = () => {
       if (sameTaskSelectionRefresh === current) sameTaskSelectionRefresh = null;
