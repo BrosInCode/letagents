@@ -252,13 +252,47 @@ export function useComposerAgentDraft(options: {
     pendingCreationRequestId = null;
     void loadCatalog(providerId);
     if (providerId === "open-model") void refreshOpenModelStatus();
-    // A stale agent environment is refreshed at once, in the chip.
-    const preflight = preflights[providerId];
-    if (preflight && !preflight.canStart && preflightNoticeAction(preflight) === "check-again") {
-      noticeAction.value = "check-again";
-      void runNoticeAction();
-    }
+    // A stale agent environment is fixed in the chip, never in the window.
+    if (isStaleEnvironment(preflights[providerId])) void recheckStaleEnvironment();
     return "chip";
+  }
+
+  /**
+   * Checks the chip's provider again without a refresh first: the stored
+   * check can be old, and a refresh restarts the agent process. Only a check
+   * that still says the environment is stale runs "Check again" (the refresh).
+   * A check already running (from an earlier chip) is left to finish; Enter
+   * waits for it and checks again.
+   */
+  async function recheckStaleEnvironment(): Promise<void> {
+    const current = chip.value;
+    if (!current || checking.value) return;
+    const { providerId, id: chipId } = current;
+    const isCurrent = () => chip.value?.id === chipId;
+    checking.value = true;
+    notice.value = "Checking…";
+    noticeAction.value = null;
+    let stillStale = true;
+    try {
+      const result = await desktopIpc.workers.runAgentProviderPreflight(
+        providerId,
+        preflightInput(providerId, { access: current.access, model: current.model, effort: current.effort }),
+      );
+      preflights[providerId] = result;
+      failedChecks[providerId] = false;
+      stillStale = isStaleEnvironment(result);
+    } catch {
+      // The refresh below reports any error.
+    } finally {
+      checking.value = false;
+    }
+    if (!isCurrent()) return;
+    if (!stillStale) {
+      notice.value = null;
+      return;
+    }
+    noticeAction.value = "check-again";
+    await runNoticeAction();
   }
 
   function removeChip(): void {
@@ -526,9 +560,15 @@ export function useComposerAgentDraft(options: {
         ...preflightInput(providerId, { access: current.access, model: current.model, effort: current.effort }),
         refreshEnvironment: true,
       });
-      if (!isCurrent()) return;
+      // Kept even if the chip changed meanwhile: the refresh is done either way.
       preflights[providerId] = result;
       failedChecks[providerId] = false;
+      // The refresh applies to every provider, so the other rows' stored
+      // "needs refreshing" results are out of date: check them again (no refresh).
+      if (Object.entries(preflights).some(([id, check]) => id !== providerId && isStaleEnvironment(check))) {
+        void refreshProviders({ force: true });
+      }
+      if (!isCurrent()) return;
       if (result.canStart) {
         notice.value = `${name} is ready. Press Enter to start it.`;
       } else {
@@ -599,6 +639,11 @@ function preflightReason(preflight: DesktopAgentProviderPreflight): string {
  * - a model that is not available is changed in the chip;
  * - a provider environment to refresh is checked again.
  */
+/** "Agent setup needs refreshing.": the one check that "Check again" fixes. */
+function isStaleEnvironment(preflight: DesktopAgentProviderPreflight | null | undefined): boolean {
+  return Boolean(preflight && !preflight.canStart && preflightNoticeAction(preflight) === "check-again");
+}
+
 function preflightNoticeAction(preflight: DesktopAgentProviderPreflight): ComposerAgentNoticeAction | null {
   if (preflight.nextAction === "authenticate"
     || preflight.nextAction === "install_runtime"
