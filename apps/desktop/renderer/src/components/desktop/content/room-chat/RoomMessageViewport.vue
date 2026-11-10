@@ -220,13 +220,18 @@ import {
   firstMessageIdFrom,
   githubGroupRowLimit,
   grownDownwardState,
+  grownLatestWindowSize,
   grownUpwardState,
   indexEntriesByMessageId,
+  messageWindowFirstSlice,
+  messageWindowSize,
   pinnedOutside,
   resolveWindowBounds,
   windowStateFor,
   windowStateIncluding,
+  windowWeight,
   type MessageWindowState,
+  type WindowBounds,
   type WindowEntry,
 } from "./message-window";
 
@@ -373,6 +378,8 @@ function followLatestAfterLayout(): void {
 }
 let restoreRequestPending = false;
 let restorePagesRequested = 0;
+/** A restore is waiting for the window to render (retryRestoreAfterRender). */
+let restoreAwaitsWindow = false;
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
 let shouldJumpToLatestOnActivate = false;
@@ -453,11 +460,16 @@ const timelineEntries = computed(() => buildGroupedTimeline(buildMessageTimeline
 // Bounded mount window (see message-window.ts): only a contiguous range of
 // the timeline is mounted.
 const windowState = shallowRef<MessageWindowState>({ kind: "latest" });
+// Budget of the "latest" window: a room opens on a small first slice, which
+// grows to messageWindowSize in idle steps (growLatestWindow).
+const latestWindowSize = ref(messageWindowFirstSlice);
 const windowEntries = () => timelineEntries.value as readonly WindowEntry[];
 const entryIndexByMessageId = computed(() => indexEntriesByMessageId(windowEntries()));
-const windowBounds = computed(() => resolveWindowBounds(
-  windowEntries(), windowState.value, entryIndexByMessageId.value, [props.activeThreadParentId],
-));
+// The same object while the range is the same, so a budget change that mounts nothing does not re-render the list.
+const windowBounds = computed<WindowBounds>((previous) => {
+  const next = resolveWindowBounds(windowEntries(), windowState.value, entryIndexByMessageId.value, [props.activeThreadParentId], latestWindowSize.value);
+  return previous && previous.start === next.start && previous.end === next.end ? previous : next;
+});
 // The open thread root stays mounted wherever the window is, so its inline
 // thread keeps its state (draft, GIF choice, scroll). Outside the window it is
 // hidden; it is the same keyed row, so it is not remounted when it returns.
@@ -515,14 +527,20 @@ function freezeWindow(rendered = true): void {
 
 /** True when a reset to the newest entries would mount the same rows. */
 function windowMatchesLatest(): boolean {
-  const latest = resolveWindowBounds(windowEntries(), { kind: "latest" }, entryIndexByMessageId.value, [props.activeThreadParentId]);
+  const latest = resolveWindowBounds(windowEntries(), { kind: "latest" }, entryIndexByMessageId.value, [props.activeThreadParentId], latestWindowSize.value);
   return latest.start === windowBounds.value.start && latest.end === windowBounds.value.end;
 }
 
 function resetWindowToLatest(): void {
   windowGrowthPending = false;
   windowJumpRequest++;
-  if (windowState.value.kind !== "latest") windowState.value = { kind: "latest" };
+  if (windowState.value.kind === "latest") return;
+  // Rows already mounted down to the newest entry stay mounted; growth above them goes on in idle slices.
+  const { start, end } = windowBounds.value;
+  if (end >= timelineEntries.value.length) {
+    latestWindowSize.value = Math.max(latestWindowSize.value, Math.min(messageWindowSize, windowWeight(windowEntries(), start, end)));
+  }
+  windowState.value = { kind: "latest" };
 }
 
 /**
@@ -623,6 +641,89 @@ function includeMessageInWindow(messageId: string): boolean {
 
 // Opening a thread far from the window (search, links) mounts its root.
 watch(() => props.activeThreadParentId, (parentId) => { if (parentId) includeMessageInWindow(parentId); }, { flush: "sync" });
+
+/*
+ * A room opens on the newest messageWindowFirstSlice entries, not on every
+ * loaded message: mounting them all at once was one long task per room
+ * switch. The "latest" window then grows to messageWindowSize, one slice per
+ * idle period, above the reader: the bottom, or the visible row, stays in
+ * place. Any other window (a jump, a restored row, a frozen read position)
+ * ends the growth, and from there the window works as before.
+ */
+let cancelLatestWindowStep: (() => void) | null = null;
+/** True while a growth step corrects the scroll position (see setInstantScrollTop). */
+let growthScrollCorrection = false;
+
+function restartLatestWindowGrowth(): void {
+  cancelLatestWindowGrowth();
+  latestWindowSize.value = messageWindowFirstSlice;
+  scheduleLatestWindowGrowth();
+}
+
+function cancelLatestWindowGrowth(): void {
+  cancelLatestWindowStep?.();
+  cancelLatestWindowStep = null;
+}
+
+function scheduleLatestWindowGrowth(delayMs = 0): void {
+  if (cancelLatestWindowStep || latestWindowSize.value >= messageWindowSize || typeof window === "undefined") return;
+  if (!delayMs && typeof window.requestIdleCallback === "function") {
+    const handle = window.requestIdleCallback(growLatestWindow, { timeout: 500 });
+    cancelLatestWindowStep = () => window.cancelIdleCallback(handle);
+    return;
+  }
+  const handle = window.setTimeout(growLatestWindow, delayMs || 16);
+  cancelLatestWindowStep = () => window.clearTimeout(handle);
+}
+
+function growLatestWindow(): void {
+  cancelLatestWindowStep = null;
+  if (latestWindowSize.value >= messageWindowSize || props.roomLoading || !props.messages.length) return;
+  // A fixed range does not use the budget. It keeps the budget grown so far,
+  // and growth goes on when the window returns to the newest entries.
+  if (windowState.value.kind !== "latest") return;
+  if (windowBounds.value.start === 0) {
+    // Every loaded entry is mounted: later windows use the full budget.
+    latestWindowSize.value = messageWindowSize;
+    return;
+  }
+  const element = messagesElement.value;
+  // A hidden room continues when it is shown (the watch below, the resize observer).
+  if (!props.active || !element || !isMeasurableScrollViewport(element)) return;
+  // A jump, a follow or a layout restore owns the scroll position now.
+  if (revealingMessage || windowGrowthPending || bottomFollowQueued || layoutAnchorRestoreFrame !== null) {
+    scheduleLatestWindowGrowth(100);
+    return;
+  }
+  const following = isScrolledToBottom;
+  const anchor = following ? null : captureScrollAnchor();
+  const previousScrollHeight = element.scrollHeight;
+  const namespace = props.messageNamespace;
+  latestWindowSize.value = grownLatestWindowSize(windowEntries(), latestWindowSize.value);
+  void nextTick(() => {
+    const current = messagesElement.value;
+    if (namespace !== props.messageNamespace || !current) return;
+    // The view does not move for the reader, so a scroll they are making still counts for unread.
+    growthScrollCorrection = true;
+    try {
+      if (following) {
+        if (!isScrolledToBottom) return;
+        setInstantScrollTop(current, current.scrollHeight);
+      } else if (restoreScrollAnchor(anchor)) {
+        return;
+      } else {
+        setInstantScrollTop(current, current.scrollTop + current.scrollHeight - previousScrollHeight);
+      }
+      updateScrollState();
+      emitScrollPosition();
+    } finally {
+      growthScrollCorrection = false;
+    }
+  });
+}
+
+watch([latestWindowSize, windowState, () => props.messages.length, () => props.roomLoading, () => props.active],
+  () => scheduleLatestWindowGrowth(), { flush: "post" });
 // One set, edited in place: a new Set per update re-rendered every message.
 const threadIndicatorMemo = createThreadIndicatorMemo();
 // Highlighting re-scans every mounted message, so typing waits for a short
@@ -835,6 +936,7 @@ watch(
   (namespace, previousNamespace) => {
     if (namespace === previousNamespace) return;
     resetWindowToLatest();
+    restartLatestWindowGrowth();
     threadActivityNamespace = namespace;
     suppressNextThreadActivityNotice = true;
     threadActivityNotice.value = null;
@@ -938,6 +1040,7 @@ watch(
   () => {
     scrollRevision++;
     resetWindowToLatest();
+    restartLatestWindowGrowth();
     cancelMessageReveal();
     clearMessageArrivals();
     unreadCount.value = 0;
@@ -996,6 +1099,7 @@ function keepLatestInViewOnResize(): void {
     && (isScrolledToBottom || element.scrollHeight - element.scrollTop - observedViewportHeight < 80);
   observedViewportHeight = element.clientHeight;
   if (props.active && wasAtLatest && !revealingMessage && !shouldRestoreInitialScroll) jumpToBottom();
+  scheduleLatestWindowGrowth();
 }
 
 onMounted(() => {
@@ -1006,6 +1110,7 @@ onMounted(() => {
     }
     scheduleAutoFillViewport();
   });
+  scheduleLatestWindowGrowth();
   if (typeof ResizeObserver !== "undefined" && messagesElement.value) {
     observedViewportHeight = messagesElement.value.clientHeight;
     viewportResizeObserver = new ResizeObserver(keepLatestInViewOnResize);
@@ -1014,6 +1119,7 @@ onMounted(() => {
 });
 
 onDeactivated(() => {
+  cancelLatestWindowGrowth();
   rememberScrollAnchor();
   shouldRestoreKeepAliveScroll = true;
   emitScrollPosition();
@@ -1025,11 +1131,13 @@ onActivated(() => {
     if (restoreKnownScrollPosition()) {
       shouldRestoreKeepAliveScroll = false;
     }
+    scheduleLatestWindowGrowth();
   });
 });
 
 onBeforeUnmount(() => {
   scrollRevision++;
+  cancelLatestWindowGrowth();
   cancelMessageReveal();
   viewportResizeObserver?.disconnect();
   clearMessageArrivals();
@@ -1133,6 +1241,8 @@ function scrollToBottom(behavior: ScrollBehavior = "smooth"): void {
   hasAppliedInitialScroll = true;
   shouldRestoreInitialScroll = false;
   cancelMessageReveal();
+  // Same rows: only the state changes, so idle growth can go on.
+  if (windowState.value.kind !== "latest" && windowMatchesLatest()) resetWindowToLatest();
   if (windowState.value.kind !== "latest" && !windowMatchesLatest()) {
     // The mounted rows change in the next render. A smooth scroll would aim at
     // the old list height, so go there at once and settle again after the render.
@@ -1268,11 +1378,13 @@ function restoreInitialScrollPosition(): boolean {
   const element = messagesElement.value;
   // Loading/hidden viewports must not consume the saved position or publish 0.
   if (props.roomLoading || !props.messages.length || !isMeasurableScrollViewport(element)) return true;
+  // The window changes in the next render: a call before it would not find the rows.
+  if (restoreAwaitsWindow) return true;
   const bookmark = position;
   if (!bookmark.latest && bookmark.anchor && !findScrollAnchor(bookmark.anchor.messageId)
     && includeMessageInWindow(bookmark.anchor.messageId)) {
     // The saved row is loaded but outside the mount window: mount it, then retry.
-    void nextTick(restoreInitialScrollPosition);
+    retryRestoreAfterRender();
     return true;
   }
   if (!bookmark.latest && bookmark.anchor && !findScrollAnchor(bookmark.anchor.messageId)
@@ -1280,6 +1392,15 @@ function restoreInitialScrollPosition(): boolean {
     if (!props.loadingOlderMessages && !restoreRequestPending) {
       restoreRequestPending = true; restorePagesRequested++; emit("load-older");
     }
+    return true;
+  }
+  // The pixel fallback below was saved against the full newest-entries window:
+  // mount that window at once before the offset is used.
+  if (!bookmark.latest && !(bookmark.anchor && findScrollAnchor(bookmark.anchor.messageId))
+    && windowState.value.kind === "latest" && latestWindowSize.value < messageWindowSize && windowBounds.value.start > 0) {
+    cancelLatestWindowGrowth();
+    latestWindowSize.value = messageWindowSize;
+    retryRestoreAfterRender();
     return true;
   }
   hasAppliedInitialScroll = true;
@@ -1292,6 +1413,14 @@ function restoreInitialScrollPosition(): boolean {
   updateScrollState();
   emitScrollPosition();
   return true;
+}
+
+function retryRestoreAfterRender(): void {
+  restoreAwaitsWindow = true;
+  void nextTick(() => {
+    restoreAwaitsWindow = false;
+    restoreInitialScrollPosition();
+  });
 }
 
 function hasInitialScrollPosition(): boolean {
@@ -1425,7 +1554,7 @@ function isMeasurableScrollViewport(element: HTMLElement): boolean {
 function setInstantScrollTop(element: HTMLElement, scrollTop: number): void {
   const previousScrollBehavior = element.style.scrollBehavior;
   element.style.scrollBehavior = "auto";
-  unreadTimeline.programmaticScroll();
+  if (!growthScrollCorrection) unreadTimeline.programmaticScroll();
   element.scrollTop = scrollTop;
   element.style.scrollBehavior = previousScrollBehavior;
 }

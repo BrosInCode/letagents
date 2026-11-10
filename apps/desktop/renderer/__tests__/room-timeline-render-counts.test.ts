@@ -360,13 +360,16 @@ test("a start-up clock tick redraws only its own row", async (context) => {
     await nextTick();
     assert.ok(descendants(mounted.root).some((node) => node.props["data-testid"] === "room-agent-startup-supervised_wren"), "the start-up row shows");
     mounted.reset();
+    // 42 entries (a day divider, 40 messages, the start-up row): the room opens on its first slice of 40.
+    const rowsBefore = mountedRows(mounted.root);
+    assert.ok(rowsBefore >= 39, `${rowsBefore} message rows mounted`);
     for (let second = 0; second < 5; second += 1) {
       context.mock.timers.tick(1_000);
       await nextTick();
     }
     console.log(`start-up ticks: 5 s; list redraws=${mounted.updates("RoomMessageViewport")} row redraws=${mounted.updates("RoomAgentStartupRow")} message row redraws=${mounted.updates("DesktopChatMessage")}`);
     assert.equal(mounted.updates("RoomMessageViewport"), 0, "the list does not redraw on the clock");
-    assert.equal(mountedRows(mounted.root), 40, "every message row is mounted");
+    assert.equal(mountedRows(mounted.root), rowsBefore, "the clock mounts and unmounts no message row");
     assert.equal(mounted.updates("DesktopChatMessage"), 0);
     assert.ok(mounted.updates("RoomAgentStartupRow") > 0, "the start-up row itself keeps time");
   } finally {
