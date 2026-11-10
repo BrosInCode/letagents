@@ -36,3 +36,34 @@ test("the owner's Stop reaches the agent's provider only for a command that runs
   assert.deepEqual(await stopBackgroundCommand({ entryId: "agent", daemonGeneration: 7, taskId: "task-1" },
     ports({ stop: async () => { throw new Error("gone"); } })), { outcome: "failed" });
 });
+
+test("the live feed knows of the Stop before the provider is asked, and the mark is taken back without stopping", async () => {
+  for (const [answer, expected] of [["stopping", [["task-1", true]]], ["not_running", [["task-1", true], ["task-1", false]]],
+    ["failed", [["task-1", true], ["task-1", false]]], ["throws", [["task-1", true], ["task-1", false]]]] as const) {
+    const marks: Array<[string, boolean]> = [];
+    let markedWhenAsked: boolean | null = null;
+    const live = ports({
+      markStopRequested: (_entryId, taskId, requested) => { marks.push([taskId, requested]); },
+      stop: async () => {
+        markedWhenAsked = marks.length === 1;
+        if (answer === "throws") throw new Error("gone");
+        return answer;
+      },
+    });
+    await stopBackgroundCommand({ entryId: "agent", daemonGeneration: 7, taskId: "task-1" }, live);
+    assert.equal(markedWhenAsked, true, answer);
+    assert.deepEqual(marks, expected, answer);
+  }
+});
+
+test("a command that the provider no longer knows, while the feed shows it running, ends as lost", async () => {
+  for (const [answer, expected] of [["not_running", ["task-1"]], ["stopping", []], ["failed", []]] as const) {
+    const lost: string[] = [];
+    await stopBackgroundCommand({ entryId: "agent", daemonGeneration: 7, taskId: "task-1" },
+      ports({ stop: async () => answer, endLost: (_entryId, taskId) => { lost.push(taskId); } }));
+    assert.deepEqual(lost, expected, answer);
+  }
+  const lost: string[] = [];
+  await stopBackgroundCommand({ entryId: "agent", daemonGeneration: 7, taskId: "sub-agent" }, ports({ endLost: (_entryId, taskId) => { lost.push(taskId); } }));
+  assert.deepEqual(lost, [], "a command the feed does not show as running is left alone");
+});

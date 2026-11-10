@@ -6,7 +6,7 @@
  * every snapshot it stores against normalizeRoomLiveSnapshot.
  */
 
-import { LIVE_BACKGROUND_COMMAND_METHOD } from "./live-command-output.mjs";
+import { LIVE_BACKGROUND_COMMAND_METHOD, plainShellCommand } from "./live-command-output.mjs";
 
 function record(value) {
   return value && typeof value === "object" && !Array.isArray(value) ? value : null;
@@ -270,8 +270,11 @@ const NATIVE_TOOL_HEADLINES = {
   globToolCall: { running: "Listing matching files", complete: "Listed matching files" },
 };
 
-/** A shell call that starts its command in the background (Claude Code's `run_in_background`). */
-const BACKGROUND_SHELL_HEADLINES = { running: "Starting a background command", complete: "Started a background command" };
+/**
+ * A shell call that starts its command in the background (Claude Code's `run_in_background`), or a call whose
+ * command still runs after its turn (Codex: the Live tab knows it from the background command's own events).
+ */
+export const BACKGROUND_SHELL_HEADLINES = { running: "Starting a background command", complete: "Started a background command" };
 
 /** The bare name of a live tool, without the MCP wrapper or the per-turn server alias. */
 function bareLiveToolName(tool, inputRecord) {
@@ -298,7 +301,9 @@ export function describeLiveToolCall(tool, input, outcome) {
   const bareTool = bareLiveToolName(tool, inputRecord);
   const known = describeLetAgentsTool(bareTool, inputRecord, outcome);
   if (known) return known;
-  const nativeHeadlines = isShellToolName(bareTool) && inputRecord?.run_in_background === true
+  // Claude Code's shell input says `run_in_background`, Cursor's says `isBackground`.
+  const background = inputRecord?.run_in_background === true || inputRecord?.isBackground === true;
+  const nativeHeadlines = isShellToolName(bareTool) && background
     ? BACKGROUND_SHELL_HEADLINES : ownEntry(NATIVE_TOOL_HEADLINES, bareTool);
   if (nativeHeadlines) {
     const headline = outcome?.status === "pending" ? `Requested: ${nativeHeadlines.running}`
@@ -313,9 +318,11 @@ export function describeLiveToolCall(tool, input, outcome) {
       const value = record(change);
       return typeof value?.path === "string" ? [value.path] : [];
     });
+    // Codex wraps each command in a login shell (`/bin/zsh -lc '…'`): the row shows the command itself.
+    const shellCommand = isShellToolName(bareTool) ? stringArg(inputRecord, "command") : null;
     const detail = ["grepToolCall", "searchToolCall", "globToolCall"].includes(bareTool)
       ? [stringArg(inputRecord, "pattern") ?? stringArg(inputRecord, "query"), stringArg(inputRecord, "path")].filter(Boolean).join(" · ")
-      : paths.length ? paths.join(", ") : null;
+      : paths.length ? paths.join(", ") : shellCommand ? plainShellCommand(shellCommand) : null;
     return { ...action(title, inputRecord, bareTool), ...(detail ? { detail: truncateDetail(detail) } : {}) };
   }
   return action(bareTool, inputRecord, bareTool);

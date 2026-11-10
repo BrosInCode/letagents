@@ -125,7 +125,9 @@ Do not replace an existing GitHub release asset with different bytes after it ha
 ## Room team and expression trial (desktop 0.1.119)
 
 Release the API/migration and MCP 0.12.37 before desktop 0.1.119. Keep both Room
-conversation switches off by default. **Answer in turns (Beta)** controls reply
+conversation switches off by default. (Since the server applied migration 0145,
+Answer in turns is on in every room that has not chosen, and GIFs and agent
+reactions are on in every room, including rooms that had turned them off.) **Answer in turns (Beta)** controls reply
 coordination; **GIFs and agent reactions (Beta)** independently enables optional
 expression tools. Neither switch gives an agent the authority of a human admin.
 

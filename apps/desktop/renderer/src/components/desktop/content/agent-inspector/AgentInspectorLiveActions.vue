@@ -75,7 +75,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
 import { Check, ChevronRight, CircleAlert, FilePenLine, FileText, Hourglass, Search, SquareTerminal, Wrench } from "@lucide/vue";
-import { formatLiveValue, liveActionFailure, liveActionStatus, type LiveTraceEntry } from "../../../../domain/agent-inspector-live-trace";
+import { BACKGROUND_SHELL_HEADLINES, formatLiveValue, liveActionFailure, liveActionStatus, type LiveTraceEntry } from "../../../../domain/agent-inspector-live-trace";
 import { formatLiveWorkDuration, isShellToolName, type LiveBackgroundCommand } from "../../../../domain/agent-inspector-live";
 import { useNow } from "../../../../composables/useNow";
 import MarkdownBlock from "../formatting/MarkdownBlock.vue";
@@ -104,7 +104,7 @@ const statusLabel = computed(() => backgroundRunning.value ? "In background" : l
  * The newest lines of a shell command while it runs, under its row: the
  * output arrives while the command runs, so nobody has to open the row.
  */
-const tailVisible = computed(() => Boolean(single.value && props.current && ongoing.value
+const tailVisible = computed(() => Boolean(single.value && props.current && ongoing.value && !backgroundRunning.value
   && isShellToolName(single.value.item.tool)
   && (typeof single.value.item.output === "string" || single.value.item.outputHidden)));
 const now = useNow(1_000, () => tailVisible.value);
@@ -137,6 +137,8 @@ watch(() => single.value?.item.output, async () => {
 }, { flush: "pre" });
 const headline = computed(() => {
   if (single.value) {
+    // A call whose command still runs after its turn started a background command; it is not unfinished.
+    if (backgroundRunning.value) return BACKGROUND_SHELL_HEADLINES.complete;
     if (ongoing.value && !props.current) return `Unfinished action · ${single.value.tool.toolName.replace(/ToolCall$/, "")}`;
     return single.value.tool.headline;
   }
@@ -146,7 +148,7 @@ const detail = computed(() => single.value ? single.value.tool.detail : props.en
   .map(action => action.tool.detail).filter(Boolean).join(" · "));
 const icon = computed(() => {
   if (["error", "failed"].includes(status.value)) return CircleAlert;
-  if (status.value === "interrupted" || (ongoing.value && !props.current)) return Hourglass;
+  if (status.value === "interrupted" || (ongoing.value && !props.current && !backgroundRunning.value)) return Hourglass;
   if (single.value?.tool.kind === "reply") return Check;
   const name = props.entry.actions[0]?.tool.toolName ?? "";
   if (/readToolCall/.test(name)) return FileText;

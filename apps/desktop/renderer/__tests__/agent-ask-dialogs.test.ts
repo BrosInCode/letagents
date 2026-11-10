@@ -123,6 +123,32 @@ test('unsafe/missing receiver images fall back to initials; unavailable agents r
   assert.match(picker, /role="option"[^>]*disabled/);
 });
 
+test('both model pickers find a model by name, provider or id, word by word, and name the provider on each row', async t => {
+  const catalog = [{ providerId: 'claude-code', model: 'claude-opus-5-5', label: 'Claude Opus 5.5' },
+    { providerId: 'cursor', model: 'claude-opus-5-5-medium', label: 'Claude Opus 5.5' }, { providerId: 'codex', model: 'gpt-6-astra', label: 'GPT-6-Astra' }];
+  const ask = mount(t, AskPanel, reactive({ models: catalog, rooms: [], loading: false }));
+  // The dropdown drops its window listeners on unmount; the restore is registered after it, so it runs after.
+  const saved = globalThis.window;
+  Object.assign(globalThis, { window: { addEventListener() {}, removeEventListener() {} } });
+  const { vm } = mount(t, Dropdown, reactive({ modelValue: '0', label: 'Agent', searchable: true, options: ask.vm.modelOptions.value }));
+  t.after(() => Object.assign(globalThis, { window: saved }));
+  const found = (query: string) => { vm.query.value = query; return vm.visible.value.map((option: any) => catalog[Number(option.id)].providerId); };
+  assert.deepEqual(found('opus'), ['claude-code', 'cursor']);
+  assert.deepEqual(found('cursor opus'), ['cursor']);
+  assert.deepEqual(found('  OPUS   claude code '), ['claude-code']);
+  assert.deepEqual(found('gpt-6'), ['codex']);
+  assert.deepEqual(found('gemini 9'), []);
+  const html = await renderToString(createSSRApp(AskPanel, { models: catalog, rooms: [], loading: false }));
+  assert.match(html, /placeholder="Find a model…"/);
+  assert.match(html, /Claude Opus 5\.5<small>Cursor<\/small>/);
+  assert.match(html, /No matches found\.|role="listbox"/);
+  const give = mount(t, Panel, reactive({ request: receiver, options: catalog.map((model, index) => ({ key: String(index), model, requested: index === 1, canGive: true })), selected: '1' }));
+  assert.deepEqual(give.vm.dropdownOptions.value.map((option: any) => option.keywords), ['Claude Code claude-opus-5-5', 'Cursor claude-opus-5-5-medium', 'Codex gpt-6-astra']);
+  const giving = await renderToString(createSSRApp(Panel, { request: receiver, options: catalog.map((model, index) => ({ key: String(index), model, requested: index === 1, canGive: true })), selected: '1' }));
+  assert.match(giving, /placeholder="Find a model…"/);
+  assert.match(giving, /GPT-6-Astra<small>Codex<\/small>/);
+});
+
 function askController(t: any, overrides: any = {}) {
   const saved = { window: globalThis.window, localStorage: globalThis.localStorage };
   const inputs: any[] = [], rooms: any[] = [];

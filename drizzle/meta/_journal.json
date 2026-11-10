@@ -1016,6 +1016,13 @@
       "when": 1795000100000,
       "tag": "0144_message_no_wake",
       "breakpoints": true
+    },
+    {
+      "idx": 145,
+      "version": "7",
+      "when": 1795000200000,
+      "tag": "0145_conversation_defaults_on",
+      "breakpoints": true
     }
   ]
 }

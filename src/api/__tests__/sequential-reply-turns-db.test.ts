@@ -44,9 +44,9 @@ test.after(async () => {
 
 type Activation = { decision: string; reason: string; turn?: { position: number; count: number; prior_speakers: string[] }; guidance?: string };
 
-async function seed(count = 3, replyOrder: "sequential" | null = "sequential") {
+async function seed(count = 3, replyOrder: "sequential" | "parallel" | null = "sequential") {
   const room = await api!.createProjectWithName("turns-room");
-  // Turn order is off by default; these cases run in a room whose admin turned it on.
+  // Turns are on by default (null); most cases choose sequential so they do not depend on it.
   if (replyOrder) await settings!.setRoomAgentReplyOrder(room.id, replyOrder);
   const now = new Date().toISOString();
   const ownerId = "owner-turns";
@@ -263,7 +263,7 @@ test("explicit human mentions and quotes to agents inside a thread remain parall
 });
 
 test("shared human thread follow-ups stay parallel with turn ordering disabled", skip, async () => {
-  const a = await seed(3, null);
+  const a = await seed(3, "parallel");
   const root = await a.send("@everyone discuss this");
   const follow = await a.send("How should we change it?", { thread_root_message_id: root.message.id });
   const rows = await a.turns(follow.message.id);
@@ -390,8 +390,16 @@ test("parallel rooms and explicit mentions never hold", skip, async () => {
   }
 });
 
-test("a room with no reply order setting stays parallel", skip, async () => {
+test("a room with no reply order setting answers in turns", skip, async () => {
   const a = await seed(3, null);
+  const sent = await a.send("@everyone what should we build next?");
+  const rows = await a.turns(sent.message.id);
+  assert.deepEqual([rows[0]!.turn_position, rows[0]!.released], [1, true]);
+  assert.ok(rows.some((row) => row.turn_position === 2 && !row.released), "position 2 waits for position 1");
+});
+
+test("a room whose admin turned turns off stays parallel", skip, async () => {
+  const a = await seed(3, "parallel");
   const before = await a.send("@Agent0 warm up");
   const broadcast = await a.send("@everyone what should we build next?");
   assert.deepEqual((await a.turns(broadcast.message.id)).map((row) => [row.turn_position, row.turn_count, row.released]),
@@ -856,7 +864,7 @@ test("speaking-position yields require the current routed identity and an exclus
 });
 
 test("speaking-position yield does not invent an order for an unsequenced receipt", skip, async () => {
-  const a = await seed(3, null);
+  const a = await seed(3, "parallel");
   const sent = await a.send("@everyone compare the options");
   const route = pollRoute(a.room.id);
   try {
@@ -906,45 +914,54 @@ test("a successor can settle its retired session's silent outcome without revivi
   } finally { route.close(); }
 });
 
-for (const off of ["parallel", null] as const) {
-  test(`switching off (${off}) releases waiting turns and removes guidance without cancelling work`, skip, async () => {
-    const a = await seed();
-    const sent = await a.send("@everyone compare approaches");
-    const [first, second] = await order(a, sent.message.id);
-    assert.equal((await a.read(second!)).length, 0);
-    const wakes: Set<string> = new Set();
-    const onRouted = (event: { wakeAgentKeys?: string[] }) => {
-      for (const key of event.wakeAgentKeys ?? []) wakes.add(key);
-    };
-    events!.messageEvents.on("message:routed", onRouted);
-    try {
-      await settings!.setRoomAgentReplyOrder(a.room.id, off);
-      assert.equal(await settings!.getRoomAgentReplyOrder(a.room.id), off);
-      assert.ok((await a.turns(sent.message.id)).every((row) => row.released));
-      for (let index = 0; index < 3; index++) {
-        assert.deepEqual(a.forAgent(await a.read(index), sent.message.id), {
-          decision: "activate", reason: "broadcast", addressed: true,
-        });
-        assert.equal((await a.live(index, sent.message.id)).activation.for_current_agent.guidance, undefined);
-      }
-      const state = await client!.pool.query(
-        "SELECT receipt_state, turn_done_at, hold_release_reason FROM message_agent_receipts WHERE message_room_id = $1",
-        [a.room.id]);
-      assert.ok(state.rows.every((row) => row.receipt_state === "queued" && row.turn_done_at === null && row.hold_release_reason === "disabled"));
-      for (let i = 0; i < 50 && wakes.size < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
-      assert.deepEqual([...wakes].sort(), a.sessions.filter((_, index) => index !== first).map((session) => session.agent_key).sort());
-      await settings!.setRoomAgentReplyOrder(a.room.id, off); // idempotent
-      const next = await a.send("@everyone another question");
-      assert.ok((await a.turns(next.message.id)).every((row) => row.turn_position === null));
-      await settings!.setRoomAgentReplyOrder(a.room.id, "sequential");
-      assert.equal(a.forAgent(await a.read(second!), sent.message.id)?.guidance, undefined, "on again must not revive old turns");
-      const resumed = await a.send("@everyone a fresh exchange");
-      assert.ok((await a.turns(resumed.message.id)).some((row) => row.turn_position === 2 && !row.released));
-    } finally {
-      events!.messageEvents.off("message:routed", onRouted);
+test("switching off (parallel) releases waiting turns and removes guidance without cancelling work", skip, async () => {
+  const off = "parallel";
+  const a = await seed();
+  const sent = await a.send("@everyone compare approaches");
+  const [first, second] = await order(a, sent.message.id);
+  assert.equal((await a.read(second!)).length, 0);
+  const wakes: Set<string> = new Set();
+  const onRouted = (event: { wakeAgentKeys?: string[] }) => {
+    for (const key of event.wakeAgentKeys ?? []) wakes.add(key);
+  };
+  events!.messageEvents.on("message:routed", onRouted);
+  try {
+    await settings!.setRoomAgentReplyOrder(a.room.id, off);
+    assert.equal(await settings!.getRoomAgentReplyOrder(a.room.id), off);
+    assert.ok((await a.turns(sent.message.id)).every((row) => row.released));
+    for (let index = 0; index < 3; index++) {
+      assert.deepEqual(a.forAgent(await a.read(index), sent.message.id), {
+        decision: "activate", reason: "broadcast", addressed: true,
+      });
+      assert.equal((await a.live(index, sent.message.id)).activation.for_current_agent.guidance, undefined);
     }
-  });
-}
+    const state = await client!.pool.query(
+      "SELECT receipt_state, turn_done_at, hold_release_reason FROM message_agent_receipts WHERE message_room_id = $1",
+      [a.room.id]);
+    assert.ok(state.rows.every((row) => row.receipt_state === "queued" && row.turn_done_at === null && row.hold_release_reason === "disabled"));
+    for (let i = 0; i < 50 && wakes.size < 2; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual([...wakes].sort(), a.sessions.filter((_, index) => index !== first).map((session) => session.agent_key).sort());
+    await settings!.setRoomAgentReplyOrder(a.room.id, off); // idempotent
+    const next = await a.send("@everyone another question");
+    assert.ok((await a.turns(next.message.id)).every((row) => row.turn_position === null));
+    await settings!.setRoomAgentReplyOrder(a.room.id, "sequential");
+    assert.equal(a.forAgent(await a.read(second!), sent.message.id)?.guidance, undefined, "on again must not revive old turns");
+    const resumed = await a.send("@everyone a fresh exchange");
+    assert.ok((await a.turns(resumed.message.id)).some((row) => row.turn_position === 2 && !row.released));
+  } finally {
+    events!.messageEvents.off("message:routed", onRouted);
+  }
+});
+
+test("resetting the order to the default (null) keeps waiting turns and sequences new messages", skip, async () => {
+  const a = await seed();
+  const sent = await a.send("@everyone compare approaches");
+  await settings!.setRoomAgentReplyOrder(a.room.id, null);
+  assert.equal(await settings!.getRoomAgentReplyOrder(a.room.id), null);
+  assert.ok((await a.turns(sent.message.id)).some((row) => !row.released), "the default answers in turns, so nothing is released");
+  const next = await a.send("@everyone another question");
+  assert.ok((await a.turns(next.message.id)).some((row) => row.turn_position === 2 && !row.released));
+});
 
 test("switching off waits for an in-flight receipt plan, then releases its holds", skip, async () => {
   const a = await seed();

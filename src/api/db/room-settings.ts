@@ -1,6 +1,7 @@
 import { eq, inArray, sql } from "drizzle-orm";
 import {
   GITHUB_ROOM_CHAT_EVENT_KINDS,
+  effectiveRoomAgentReplyOrder,
   normalizeGitHubRoomChatEventKinds,
   normalizeRoomAgentReplyOrder,
   type GitHubRoomChatEventKind,
@@ -143,7 +144,7 @@ export async function setRoomAgentGuidelines(
   return row;
 }
 
-/** The order this room chose, or null when it has not chosen (parallel applies). */
+/** The order this room chose, or null when it has not chosen (sequential applies). */
 export async function getRoomAgentReplyOrder(roomId: string): Promise<RoomAgentReplyOrder | null> {
   const [row] = await db
     .select({ order: room_settings.agent_reply_order })
@@ -152,7 +153,7 @@ export async function getRoomAgentReplyOrder(roomId: string): Promise<RoomAgentR
   return normalizeRoomAgentReplyOrder(row?.order);
 }
 
-/** null returns the room to the default (parallel) without choosing it. */
+/** null returns the room to the default (sequential) without choosing it. */
 export async function setRoomAgentReplyOrder(roomId: string, order: RoomAgentReplyOrder | null): Promise<void> {
   const released = await db.transaction(async (tx) => {
     await tx.insert(room_settings)
@@ -163,16 +164,16 @@ export async function setRoomAgentReplyOrder(roomId: string, order: RoomAgentRep
       });
     // Receipt creation holds a shared lock on this setting until commit. Once
     // this update wins, no old sequential plan can commit behind the release.
-    return order === "sequential" ? [] : disableRoomReplyTurnsTx(tx, roomId);
+    return effectiveRoomAgentReplyOrder(order) === "sequential" ? [] : disableRoomReplyTurnsTx(tx, roomId);
   });
   queueReplyTurnWakes(released);
 }
 
-/** Expressions are chosen per room and always default off. */
+/** Expressions are on unless a room admin turned them off. */
 export async function getRoomExpressionsEnabled(roomId: string): Promise<boolean> {
   const [row] = await db.select({ enabled: room_settings.expressions_enabled })
     .from(room_settings).where(eq(room_settings.room_id, roomId));
-  return row?.enabled === true;
+  return row?.enabled !== false;
 }
 
 export async function setRoomExpressionsEnabled(roomId: string, enabled: boolean): Promise<void> {

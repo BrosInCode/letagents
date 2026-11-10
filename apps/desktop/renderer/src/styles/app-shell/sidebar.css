@@ -350,22 +350,29 @@
   text-transform: none;
 }
 
-/* With a company to choose, the Rooms heading holds two controls: the company
-   filter on the left and the collapse toggle (count and chevron) on the right. */
+/* One row, with a leading disclosure and a company-menu trigger. The row owns
+   the highlight so it includes both controls and the room count. */
 .sidebar-company-header {
+  display: flex;
+  align-items: center;
+  width: 100%;
   padding: 0;
   min-height: 41px;
-  cursor: default;
+  border-radius: 8px;
+  transition: background-color var(--duration-fast) var(--ease-out);
+}
+
+.sidebar-company-header:has(:focus-visible),
+.sidebar-company-header:has(.company-scope-trigger[aria-expanded="true"]) {
+  background: var(--sidebar-hover);
 }
 
 .sidebar-company-collapse {
-  display: inline-grid;
-  justify-items: end;
-  align-items: center;
-  flex: 0 0 auto;
-  min-width: 24px;
-  height: 24px;
-  padding: 0 4px;
+  display: grid;
+  place-items: center;
+  flex: 0 0 28px;
+  align-self: stretch;
+  padding: 0;
   border: 0;
   border-radius: 6px;
   background: transparent;
@@ -373,21 +380,9 @@
   cursor: pointer;
 }
 
-.sidebar-company-collapse > * {
-  grid-area: 1 / 1;
-}
-
-.sidebar-company-collapse .sidebar-section-arrow {
-  opacity: 0;
-}
-
 .sidebar-company-collapse:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--text) 28%, transparent);
-  outline-offset: 1px;
-}
-
-.sidebar-company-collapse:focus-visible .section-count {
-  opacity: 0;
+  outline-offset: -2px;
 }
 
 .sidebar-company-collapse:focus-visible .sidebar-section-arrow {
@@ -725,34 +720,22 @@
   }
 
   .sidebar-company-header:hover {
-    background: transparent;
-  }
-
-  .sidebar-company-header:hover .sidebar-section-arrow {
-    opacity: 0;
-  }
-
-  .sidebar-company-header:hover .section-count {
-    opacity: 1;
-  }
-
-  .sidebar-company-collapse:hover {
     background: var(--sidebar-hover);
   }
 
-  .sidebar-company-header .sidebar-company-collapse:hover .sidebar-section-arrow {
+  .sidebar-company-header:hover .sidebar-section-arrow {
     opacity: 1;
     color: var(--text-secondary);
-  }
-
-  .sidebar-company-header .sidebar-company-collapse:hover .section-count {
-    opacity: 0;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
   .project-list,
   .pinned-list {
+    transition: none;
+  }
+
+  .sidebar-company-header {
     transition: none;
   }
 

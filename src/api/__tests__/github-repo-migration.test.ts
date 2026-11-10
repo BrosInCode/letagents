@@ -26,6 +26,7 @@ const getProjectById = dbModule?.getProjectById;
 const getRoomAlias = dbModule?.getRoomAlias;
 const migrateGitHubRepositoryCanonicalRoom = dbModule?.migrateGitHubRepositoryCanonicalRoom;
 const upsertGitHubAppInstallation = dbModule?.upsertGitHubAppInstallation;
+const getGitHubAppInstallationById = dbModule?.getGitHubAppInstallationById;
 const upsertGitHubAppRepository = dbModule?.upsertGitHubAppRepository;
 const upsertGitHubRepositoryLink = dbModule?.upsertGitHubRepositoryLink;
 const provisionRentalRoom = rentalProjectionModule?.provisionRentalRoom;
@@ -288,5 +289,52 @@ test(
     assert.equal(projectedRoom?.kind, "focus");
     assert.equal(projectedRoom?.parent_room_id, parentRoomId);
     assert.equal(projectedRoom?.focus_key, "rental:session-canonical-room");
+  },
+);
+
+test(
+  "a repository webhook marks the installation as an organization and keeps what it does not carry",
+  { concurrency: false, skip: requiresDatabase ? "set TEST_DB_URL or DB_URL to run DB-backed migration tests" : false },
+  async () => {
+    if (!upsertGitHubAppInstallation || !getGitHubAppInstallationById) {
+      throw new Error("DB-backed repo migration tests require TEST_DB_URL or DB_URL");
+    }
+
+    // The installation event: the whole installation.
+    await upsertGitHubAppInstallation({
+      installation_id: "inst-keep",
+      target_type: "Organization",
+      target_login: "BrosInCode",
+      target_github_id: "269600601",
+      repository_selection: "all",
+      permissions: { contents: "read", pull_requests: "write" },
+      suspended_at: null,
+      uninstalled_at: null,
+    });
+    // A later push or pull request event: only the ID and the organization.
+    await upsertGitHubAppInstallation({
+      installation_id: "inst-keep",
+      target_type: "Organization",
+      target_login: "BrosInCode",
+      target_github_id: "269600601",
+    });
+
+    const stored = await getGitHubAppInstallationById("inst-keep");
+    assert.equal(stored?.target_type, "Organization");
+    assert.equal(stored?.repository_selection, "all");
+    assert.equal(stored?.permissions_json, JSON.stringify({ contents: "read", pull_requests: "write" }));
+    assert.equal(stored?.suspended_at, null);
+    assert.equal(stored?.uninstalled_at, null);
+
+    // An explicit null still clears: unsuspend and permission changes say so.
+    await upsertGitHubAppInstallation({
+      installation_id: "inst-keep",
+      target_type: "Organization",
+      target_login: "BrosInCode",
+      target_github_id: "269600601",
+      permissions: null,
+      suspended_at: null,
+    });
+    assert.equal((await getGitHubAppInstallationById("inst-keep"))?.permissions_json, null);
   },
 );

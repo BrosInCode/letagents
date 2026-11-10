@@ -21,6 +21,7 @@ import { MAX_ACCOUNT_ROUTING_TARGETS } from "./account-agent-routing.js";
 import { chooseAnsweringSession } from "../../rooms/answering-session.js";
 import { getReplyTurnReadySessions, getSessionConnections } from "./session-connections.js";
 import { planReplyTurns, releaseAgentReplyTurnHoldsTx } from "./reply-turns.js";
+import { effectiveRoomAgentReplyOrder } from "../../../../shared/room-settings.mjs";
 
 /** Rooms above this size fall back to deterministic routing rather than ship a huge state. */
 const MAX_JEV_ROUTING_SESSIONS = 200;
@@ -322,7 +323,7 @@ export async function applyDeferredJevReceipts(
     }];
   });
   if (rows.length === 0) return [];
-  // Several elected agents answer in turns when the room turned that on,
+  // Several elected agents answer in turns unless the room turned that off,
   // exactly as at send time. Deadlines count from the message's send time,
   // not from this pass: a slow Jev run shortens the turns, and a run longer
   // than one step (90 s) leaves the message effectively parallel. Only the
@@ -331,11 +332,12 @@ export async function applyDeferredJevReceipts(
     ? await tx.select({ order: room_settings.agent_reply_order })
       .from(room_settings).where(eq(room_settings.room_id, plan.roomId)).for("share")
     : [];
+  const sequential = rows.length >= 2 && effectiveRoomAgentReplyOrder(replyOrder?.order) === "sequential";
   const planned = planReplyTurns(rows, {
     messageNumber: plan.message.number,
     timestamp: visible.sent_at,
-    sequential: replyOrder?.order === "sequential",
-    readySessionIds: replyOrder?.order === "sequential"
+    sequential,
+    readySessionIds: sequential
       ? await getReplyTurnReadySessions(tx, plan.roomId, rows.map(row => row.agent_session_id))
       : undefined,
   });

@@ -1941,7 +1941,9 @@ for (const change of ["installation", "handle", "execution", "continuation", "bi
 }
 
 for (const trigger of ["arrival", "retry", "deferred", "descriptor failure", "receipt failure"] as const) {
-  test(`managed ${trigger} waits for guarded replacement before exact-continuation FIFO delivery`, { timeout: 5_000 }, async () => {
+  // Windows directory protection and a fresh SQLite schema are fixture setup,
+  // not part of the delivery deadline. Bound the full fixture separately.
+  test(`managed ${trigger} waits for guarded replacement before exact-continuation FIFO delivery`, { timeout: 60_000 }, async t => {
     const root = await mkdtemp(join(tmpdir(), "letagents-managed-admission-"));
     const inbox = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const env = managedHarness();
@@ -2042,45 +2044,47 @@ for (const trigger of ["arrival", "retry", "deferred", "descriptor failure", "re
     try {
       await inbox.ingestPoll({ agent_id: "agent-1", room_id: "room-1", last_observed_message_id: "2",
         messages: ["1", "2"].map(id => ({ source_message_id: id, source_message: { id, text: "check" }, activation: {} })) });
-      const originalHead = await inbox.head("agent-1");
-      if (trigger === "retry") {
-        await inbox.transition(originalHead!.inbox_item_id, "dispatching");
-        await inbox.transition(originalHead!.inbox_item_id, "blocked", { last_error: "preflight unavailable" });
-        await delivery.retry(deliveryAgentFor(current), "1");
-      }
-      if (trigger === "deferred") await delivery.start(deliveryAgentFor(current));
-      else await delivery.pump(deliveryAgentFor(current));
-      await requested;
-      for (let index = 0; index < scheduled.length; index += 1) await scheduled[index];
-      if (trigger === "deferred") {
-        assert.equal(wakes, 1);
-        assert.deepEqual(invoked, []);
-        assert.equal((await inbox.head("agent-1"))!.state, "pending");
-        assert.equal(env.state.resumedDelivery, 1);
-        assert.equal(current, installation, "deferral retains the exact original native installation");
-        assert.equal(polls, 2, "deferral restarted the real observation loop");
-        assert.equal(demands[0], demands[1], "loop replacement retains its original delivery demand");
-        requested = new Promise<void>(resolve => { sawRequest = resolve; });
-        // Native idle becomes readable without emitting a provider/approval
-        // event. Only an independent delivery wake retries the same runtime.
-        assert.equal(delivery.wake(deliveryAgentFor(current)), true);
+      await t.test("guarded replacement and FIFO delivery", { timeout: 5_000 }, async () => {
+        const originalHead = await inbox.head("agent-1");
+        if (trigger === "retry") {
+          await inbox.transition(originalHead!.inbox_item_id, "dispatching");
+          await inbox.transition(originalHead!.inbox_item_id, "blocked", { last_error: "preflight unavailable" });
+          await delivery.retry(deliveryAgentFor(current), "1");
+        }
+        if (trigger === "deferred") await delivery.start(deliveryAgentFor(current));
+        else await delivery.pump(deliveryAgentFor(current));
         await requested;
         for (let index = 0; index < scheduled.length; index += 1) await scheduled[index];
-      }
-      assert.equal(env.state.nativeStops, 1);
-      if (trigger === "descriptor failure" || trigger === "receipt failure") {
-        assert.deepEqual(recoveryDelays, [250], "existing tracked fault recovery owns the read retry");
-        assert.equal(demands[0], demands[1], "the failed read did not consume or replace its delivery demand");
-      }
-      const receipts = await inbox.receipts("agent-1");
-      assert.equal(receipts.length, 2);
-      assert.deepEqual(invoked, receipts.map(receipt => receipt.inbox_item_id));
-      for (const receipt of receipts) {
-        assert.equal(receipt.state, "acknowledged_no_reply");
-        assert.equal(receipt.attempt_count, 1);
-        assert.equal((await inbox.providerTurnBinding(receipt.inbox_item_id))!.origin_execution_generation_id, "generation-2");
-        assert.equal((await inbox.providerTurnBinding(receipt.inbox_item_id))!.provider_continuation_id, installation.providerContinuationId);
-      }
+        if (trigger === "deferred") {
+          assert.equal(wakes, 1);
+          assert.deepEqual(invoked, []);
+          assert.equal((await inbox.head("agent-1"))!.state, "pending");
+          assert.equal(env.state.resumedDelivery, 1);
+          assert.equal(current, installation, "deferral retains the exact original native installation");
+          assert.equal(polls, 2, "deferral restarted the real observation loop");
+          assert.equal(demands[0], demands[1], "loop replacement retains its original delivery demand");
+          requested = new Promise<void>(resolve => { sawRequest = resolve; });
+          // Native idle becomes readable without emitting a provider/approval
+          // event. Only an independent delivery wake retries the same runtime.
+          assert.equal(delivery.wake(deliveryAgentFor(current)), true);
+          await requested;
+          for (let index = 0; index < scheduled.length; index += 1) await scheduled[index];
+        }
+        assert.equal(env.state.nativeStops, 1);
+        if (trigger === "descriptor failure" || trigger === "receipt failure") {
+          assert.deepEqual(recoveryDelays, [250], "existing tracked fault recovery owns the read retry");
+          assert.equal(demands[0], demands[1], "the failed read did not consume or replace its delivery demand");
+        }
+        const receipts = await inbox.receipts("agent-1");
+        assert.equal(receipts.length, 2);
+        assert.deepEqual(invoked, receipts.map(receipt => receipt.inbox_item_id));
+        for (const receipt of receipts) {
+          assert.equal(receipt.state, "acknowledged_no_reply");
+          assert.equal(receipt.attempt_count, 1);
+          assert.equal((await inbox.providerTurnBinding(receipt.inbox_item_id))!.origin_execution_generation_id, "generation-2");
+          assert.equal((await inbox.providerTurnBinding(receipt.inbox_item_id))!.provider_continuation_id, installation.providerContinuationId);
+        }
+      });
     } finally { await delivery.fenceAndDrain(); await inbox.close(); await rm(root, { recursive: true, force: true }); }
   });
 }

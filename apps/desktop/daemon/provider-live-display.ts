@@ -2,16 +2,30 @@ import type { DaemonActivityEvent } from "./types.js";
 import { isAgentInspectorLiveDisplayEvent } from "./provider-stream-policy.js";
 import { redactCredentialText } from "./credential-redaction.js";
 import {
+  LIVE_BACKGROUND_COMMAND_METHOD,
   LIVE_OUTPUT_TAIL_CHARS,
   liveBackgroundLatestKey,
   liveOutputLatestKey,
   liveOutputTail,
+  plainShellCommand,
   plainTerminalText,
+  type LiveBackgroundCommandStatus,
 } from "../../../shared/live-command-output.mjs";
 
 /** Raw output kept per running command for its live tail: more than one tail, so a cut lands on a line start. */
 const LIVE_OUTPUT_RAW_CHARS = LIVE_OUTPUT_TAIL_CHARS * 2;
 const TERMINAL_TOOL_STATUSES = new Set(["completed", "error", "failed", "interrupted"]);
+/** Codex commands that one agent leaves running between turns; more are not followed. */
+const MAX_CODEX_BACKGROUND = 16;
+/** The longest command a background event carries. */
+const MAX_BACKGROUND_COMMAND_CHARS = 2_000;
+
+type CodexCommandOutput = {
+  turn: string; text: string; truncated: boolean; redacted: boolean; unavailable: boolean;
+  command: unknown; cwd: unknown; tail: string; tailCut: boolean; liveHidden: boolean; startedAt: string | null;
+  /** Its process started: Codex named the process, or output arrived. A call waiting for approval has not. */
+  started: boolean;
+};
 
 /** How the daemon puts a live display event on the feed: as one more event, or as the newest value of a key. */
 export type LiveDisplayFeedPlacement =
@@ -59,19 +73,56 @@ function toolResultError(value: unknown): string | null {
   return text || null;
 }
 
+/** Add a fragment to a command's live tail; a broken text boundary hides the tail for good. */
+function appendLiveTail(output: { tail: string; tailCut: boolean; liveHidden: boolean }, delta: string, broken: boolean): void {
+  output.liveHidden ||= broken;
+  output.tail = output.liveHidden ? "" : output.tail + delta;
+  if (output.tail.length > LIVE_OUTPUT_RAW_CHARS) {
+    output.tail = output.tail.slice(-LIVE_OUTPUT_RAW_CHARS);
+    output.tailCut = true;
+  }
+}
+
+/**
+ * How a Codex background command ended. Codex ends a terminated session (the owner's Stop, or the agent's own
+ * clean-up) with exit code -1 when it has no terminal; a terminal session (`tty`) gives its shell's own code,
+ * often 1, so the owner's Stop is known from the request itself (see ProviderLiveDisplay.noteStopRequested).
+ */
+function codexBackgroundEnd(status: unknown, exitCode: number | null): LiveBackgroundCommandStatus {
+  if (status === "interrupted" || status === "cancelled" || exitCode === -1) return "stopped";
+  if (status === "failed" || status === "declined" || (exitCode !== null && exitCode !== 0)) return "failed";
+  return "completed";
+}
+
 /** Display-only projection of already-redacted evidence from one exact installation. */
 export class ProviderLiveDisplay {
   private claudeTurn: string | null = null;
   private readonly texts = new Map<string, string>();
   private readonly tools = new Map<string, { name: string; completed: boolean; running?: boolean }>();
-  private readonly commandOutputs = new Map<string, {
-    turn: string; text: string; truncated: boolean; redacted: boolean; unavailable: boolean;
-    command: unknown; cwd: unknown; tail: string; tailCut: boolean; liveHidden: boolean;
-  }>();
+  private readonly commandOutputs = new Map<string, CodexCommandOutput>();
+  /**
+   * Codex commands that still ran when their turn ended: exec sessions that the agent left running. Codex goes
+   * on reporting their output and their end between turns, under the turn that started them.
+   */
+  private readonly codexBackground = new Map<string, CodexCommandOutput & { itemId: string }>();
+  /** Codex background commands (by item id) that the owner asked to stop: their end reads as stopped. */
+  private readonly codexStopRequested = new Set<string>();
 
   private readonly finishedTurns = new Set<string>();
 
   constructor(private readonly continuation: string) {}
+
+  /**
+   * The owner's Stop for a background command, marked before the provider is asked (its end can arrive before
+   * the answer) and cleared when the provider does not stop it.
+   */
+  noteStopRequested(taskId: string, requested: boolean): void {
+    if (!requested) {
+      this.codexStopRequested.delete(taskId);
+      return;
+    }
+    if ([...this.codexBackground.values()].some((command) => command.itemId === taskId)) this.codexStopRequested.add(taskId);
+  }
 
   project(event: DaemonActivityEvent, nativePhase?: "turn_active" | "turn_terminal" | null): DaemonActivityEvent[] {
     const payload = record(event.payload);
@@ -84,6 +135,11 @@ export class ProviderLiveDisplay {
         || (payload.turnId !== undefined && nativeTurnId !== undefined && payload.turnId !== nativeTurnId)) return [];
       const commandKey = (itemId: string) => JSON.stringify([turnId, itemId]);
       if (event.method === "item/commandExecution/outputDelta" && id(payload.itemId) && typeof payload.delta === "string") {
+        const background = this.codexBackground.get(commandKey(payload.itemId as string));
+        if (background) {
+          appendLiveTail(background, payload.delta, event.payload_redacted || event.payload_truncated);
+          return [this.codexBackgroundCommand(event, background)];
+        }
         const output = this.commandOutputs.get(commandKey(payload.itemId as string));
         if (!output) return [];
         // Redaction or upstream truncation breaks the original text boundary.
@@ -96,31 +152,69 @@ export class ProviderLiveDisplay {
         output.truncated ||= combined.length > 6_000;
         output.unavailable ||= combined.length > 6_000;
         output.text = output.unavailable ? "" : combined;
-        // The live tail keeps the newest output, and hides it for good after a broken boundary.
-        output.liveHidden ||= broken;
-        output.tail = output.liveHidden ? "" : output.tail + payload.delta;
-        if (output.tail.length > LIVE_OUTPUT_RAW_CHARS) {
-          output.tail = output.tail.slice(-LIVE_OUTPUT_RAW_CHARS);
-          output.tailCut = true;
-        }
+        output.started = true;
+        appendLiveTail(output, payload.delta, broken);
         return [this.codexLiveOutput(event, turnId, payload.itemId as string, output)];
       }
       if (/^turn\/(completed|failed|interrupted|cancelled|stopped)$/.test(event.method)) {
-        for (const [key, output] of this.commandOutputs) if (output.turn === turnId) this.commandOutputs.delete(key);
+        // A started command that still runs when its turn completes runs in the background: Codex keeps its exec
+        // session, and the agent no longer waits for it. A turn that ended otherwise leaves no command to follow.
+        const turnStatus = record(payload.turn)?.status;
+        const completed = event.method === "turn/completed" && (turnStatus === undefined || turnStatus === "completed");
+        const background: DaemonActivityEvent[] = [];
+        for (const [key, output] of this.commandOutputs) {
+          if (output.turn !== turnId) continue;
+          this.commandOutputs.delete(key);
+          if (!completed || !output.started) continue;
+          if (this.codexBackground.size >= MAX_CODEX_BACKGROUND) {
+            // The oldest gives its place to the newest: it is no longer followed, and says so.
+            const [oldestKey, oldest] = this.codexBackground.entries().next().value!;
+            this.codexBackground.delete(oldestKey);
+            this.codexStopRequested.delete(oldest.itemId);
+            background.push(this.codexBackgroundCommand(event, oldest, { status: "lost", exitCode: null, endedAt: event.observed_at ?? null }));
+          }
+          const command = { ...output, itemId: JSON.parse(key)[1] as string };
+          this.codexBackground.set(key, command);
+          background.push(this.codexBackgroundCommand(event, command));
+        }
+        return [...background, ...(isAgentInspectorLiveDisplayEvent(event) ? [event] : [])];
       }
       const item = record(payload.item);
       if ((event.method === "item/started" || event.method === "item/completed") && item && id(item.id)) {
         const key = commandKey(item.id as string);
-        if (item.type === "commandExecution" && event.method === "item/started" && !this.commandOutputs.has(key)) {
+        // A later item/started can name the process that an approval let start.
+        const known = item.type === "commandExecution" && event.method === "item/started" ? this.commandOutputs.get(key) : undefined;
+        if (known && (typeof item.processId === "string" || typeof item.processId === "number")) known.started = true;
+        if (item.type === "commandExecution" && event.method === "item/started" && !known) {
           // Bound unfinished commands independently of the lifetime of the provider session.
           if (this.commandOutputs.size >= 128) this.commandOutputs.delete(this.commandOutputs.keys().next().value!);
           this.commandOutputs.set(key, {
             turn: turnId, text: "", truncated: false, redacted: false, unavailable: false,
             command: item.command, cwd: item.cwd, tail: "", tailCut: false, liveHidden: false,
+            startedAt: event.observed_at ?? null,
+            // item/started can come before the approval: only a named process proves that the command started.
+            started: typeof item.processId === "string" || typeof item.processId === "number",
           });
         }
         const streamed = item.type === "commandExecution" ? this.commandOutputs.get(key) : undefined;
         if (event.method === "item/completed") this.commandOutputs.delete(key);
+        const background = event.method === "item/completed" && item.type === "commandExecution" ? this.codexBackground.get(key) : undefined;
+        if (background) {
+          this.codexBackground.delete(key);
+          const exitCode = Number.isInteger(item.exitCode) ? Number(item.exitCode) : null;
+          const end = this.codexStopRequested.delete(item.id as string) ? "stopped" : codexBackgroundEnd(item.status, exitCode);
+          // The call's own row ends too: a command that the owner stopped reads as interrupted, not failed.
+          return [
+            this.codexBackgroundCommand(event, background, { status: end, exitCode, endedAt: event.observed_at ?? null }),
+            { ...emit("item/toolCall/updated", "tool_lifecycle", {
+              callID: `codex:${this.continuation}:${turnId}:${item.id}`, tool: "shellToolCall",
+              status: end === "stopped" ? "interrupted" : end === "failed" ? "error" : "completed",
+              input: { command: item.command, cwd: item.cwd },
+              output: null,
+              error: end === "failed" ? (exitCode !== null ? `Command exited with code ${exitCode}.` : "The command failed.") : null,
+            }) },
+          ];
+        }
         const failed = item.status === "failed" || item.status === "declined" || Boolean(item.error)
           || record(item.result)?.isError === true
           || (item.type === "commandExecution" && typeof item.exitCode === "number" && item.exitCode !== 0);
@@ -227,6 +321,38 @@ export class ProviderLiveDisplay {
       }
     }
     return result;
+  }
+
+  /** A Codex command that runs in the background, as one live value of it: the same event as Claude Code's. */
+  private codexBackgroundCommand(
+    event: DaemonActivityEvent,
+    command: CodexCommandOutput & { itemId: string },
+    end?: { status: LiveBackgroundCommandStatus; exitCode: number | null; endedAt: string | null },
+  ): DaemonActivityEvent {
+    const tail = liveOutputTail(plainTerminalText(command.tail), { cut: command.tailCut, final: Boolean(end) });
+    const shown = command.liveHidden ? null : redactCredentialText(tail.text, LIVE_OUTPUT_TAIL_CHARS);
+    const text = typeof command.command === "string" ? plainShellCommand(command.command) : "";
+    const shownCommand = redactCredentialText(text, MAX_BACKGROUND_COMMAND_CHARS);
+    return {
+      ...event,
+      method: LIVE_BACKGROUND_COMMAND_METHOD,
+      kind: "tool_lifecycle",
+      summary: "",
+      payload: {
+        taskId: command.itemId,
+        toolUseId: command.itemId,
+        command: shownCommand.value,
+        description: null,
+        status: end?.status ?? "running",
+        output: shown?.value ?? "",
+        outputTruncated: tail.cut || command.liveHidden,
+        exitCode: end ? end.exitCode : null,
+        startedAt: command.startedAt,
+        endedAt: end ? end.endedAt : null,
+      },
+      payload_truncated: tail.cut || Boolean(shown?.truncated || shownCommand.truncated),
+      payload_redacted: Boolean(shown?.redacted || shownCommand.redacted),
+    };
   }
 
   /** The newest output of a running Codex command, as one live value of its call. */

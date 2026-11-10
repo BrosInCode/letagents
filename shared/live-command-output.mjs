@@ -122,6 +122,18 @@ export function liveOutputTail(text, options = {}) {
   return { text: hidePartialPrivateKeys(cut ? hideLeadingKeyBody(tail) : tail), cut };
 }
 
+/**
+ * The command as the agent wrote it, without the login-shell wrapper that
+ * some agents add: Codex reports `/bin/zsh -lc 'npm run dev'`. Single quotes
+ * inside come back from the `'"'"'` form. A command that the wrapper quotes in
+ * any other way stays whole.
+ */
+export function plainShellCommand(command) {
+  const text = String(command ?? "");
+  const match = /^(?:\/[\w./-]*\/)?(?:ba|z|da)?sh -l?c '((?:[^']|'"'"')*)'$/s.exec(text);
+  return match ? match[1].replaceAll(`'"'"'`, "'") : text;
+}
+
 /** The feed key of a live output event, or null for any other event. */
 export function liveOutputLatestKey(event) {
   const payload = event?.payload;

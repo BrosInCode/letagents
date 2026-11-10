@@ -1,7 +1,7 @@
 <template>
   <div class="invite-bot" data-testid="invite-bot-section">
     <button
-      v-if="!invite.open.value"
+      v-if="!invite.open.value && !hostControlled"
       type="button"
       class="invite-bot-button"
       data-variant="primary"
@@ -11,7 +11,7 @@
       Invite a bot
     </button>
 
-    <template v-else>
+    <template v-else-if="invite.open.value">
       <div class="invite-bot-picker" role="group" aria-label="Which bot" data-testid="invite-bot-picker">
         <button
           v-for="choice in INVITE_BOT_PLATFORMS"
@@ -39,7 +39,7 @@
           >
             {{ invite.copied.value ? "Copied" : "Copy" }}
           </button>
-          <button type="button" class="invite-bot-button" @click="invite.close()">Done</button>
+          <button v-if="!hostControlled" type="button" class="invite-bot-button" @click="invite.close()">Done</button>
         </div>
         <p v-if="invite.copyError.value" class="invite-bot-error" role="alert">{{ invite.copyError.value }}</p>
         <p class="invite-bot-hint">{{ INVITE_BOT_HINT }}</p>
@@ -57,6 +57,7 @@ import {
   INVITE_BOT_APPROVE_HINT,
   INVITE_BOT_HINT,
   INVITE_BOT_PLATFORMS,
+  type InviteBot,
   type InviteBotPlatform,
   type InviteBotRoom,
   useInviteBot,
@@ -68,9 +69,16 @@ const props = withDefaults(defineProps<{
   admin?: boolean;
   /** Start with this bot picked (deep links and tests). */
   initialPlatform?: InviteBotPlatform | null;
-}>(), { admin: false, initialPlatform: null });
+  /**
+   * The host's own state, for a host that shows the buttons which open and
+   * close the section itself (Room settings puts one in its row's action
+   * column). The section then shows neither of them.
+   */
+  controller?: InviteBot | null;
+}>(), { admin: false, initialPlatform: null, controller: null });
 
-const invite = useInviteBot({ room: toRef(props, "room"), initialPlatform: props.initialPlatform });
+const hostControlled = props.controller !== null;
+const invite = props.controller ?? useInviteBot({ room: toRef(props, "room"), initialPlatform: props.initialPlatform });
 </script>
 
 <style src="./invite-bot.css"></style>
