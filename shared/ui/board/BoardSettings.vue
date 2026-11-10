@@ -26,6 +26,7 @@
             <section v-if="removing === column.id" class="board-remove-column">
               <h3>Remove {{ column.name }}?</h3>
               <p>Choose where its cards and work states go. No tasks are deleted.</p>
+              <p v-if="draft.releaseRule?.kind === 'column' && draft.releaseRule.columnId === column.id">This column supplies the release queue. Removing it turns the queue off.</p>
               <FilterDropdown v-model="destination" label="Move cards to" :options="[{ id: '', label: 'Choose a column' }, ...draft.columns.filter(item => item.id !== removing).map(item => ({ id: item.id, label: item.name }))]" :disabled="locked"><template #option="{ option }"><span class="work-option-label">{{ option.label }}</span></template></FilterDropdown>
               <div class="board-plan-actions"><button class="board-button" type="button" :disabled="saving" @click="keepColumn">Keep column</button><button class="board-button board-option-danger" type="button" :disabled="!destination || locked" @click="removeColumn">Move &amp; remove</button></div>
             </section>
@@ -40,7 +41,7 @@
         </Transition>
         <p v-if="snapshot.canEdit" class="board-settings-footnote">Drag to reorder. Click a name to rename it.</p>
       </section>
-      <section v-else :id="`${prefix}-Sprints`" role="tabpanel" :aria-labelledby="`${prefix}-tab-Sprints`">
+      <section v-else-if="tab === 'Sprints'" :id="`${prefix}-Sprints`" role="tabpanel" :aria-labelledby="`${prefix}-tab-Sprints`">
         <div class="board-settings-intro"><h3>Sprint targets</h3></div>
         <p class="board-settings-hint">The story points each person aims to complete per sprint.</p>
         <div class="board-default-target"><div><label :for="`${prefix}-default-target`">Default target</label><span>Applies unless a sprint has its own target.</span></div><div class="board-target-number"><input :id="`${prefix}-default-target`" v-model.number="draft.defaultTargetPoints" type="number" min="1" max="1000" step="1" :disabled="locked" /><span>SP</span></div></div>
@@ -61,6 +62,7 @@
         </form>
         <details class="board-target-explainer"><summary>How progress is counted<BoardIcon name="down" /></summary><p>Only completed work counts toward the target. Tasks in review remain unfinished. Missing estimates are called out in the assignee view.</p></details>
       </section>
+      <section v-else :id="`${prefix}-Releases`" role="tabpanel" :aria-labelledby="`${prefix}-tab-Releases`"><BoardReleaseSettings v-model="draft.releaseRule" :columns="draft.columns" :sources="snapshot.releases?.sources || []" :disabled="locked" /></section>
     </div>
     <footer class="board-dialog-footer"><span class="board-settings-dirty" role="status">{{ dirty ? 'Unsaved changes' : '' }}</span><button class="board-button" type="button" :disabled="saving" @click="close">Cancel</button><button v-if="snapshot.canEdit" class="board-button board-primary" type="button" :disabled="saving || !dirty || Boolean(sprintEditor) || Boolean(removing) || adding || Boolean(editing)" @click="submit">{{ saving ? 'Saving…' : 'Save changes' }}</button></footer>
     <span class="board-sr-only" aria-live="polite">{{ announcement }}</span>
@@ -71,11 +73,13 @@ import { computed, nextTick, onBeforeUnmount, ref, shallowRef, useId, watch } fr
 import { boardTaskColumn, validateBoardPlanningUpdate, type BoardColumn, type BoardPlanningDocument, type BoardPlanningSnapshot, type BoardSprint } from '../../board-planning.mjs';
 import FilterDropdown from '../FilterDropdown.vue';
 import BoardIcon from './BoardIcon.vue';
+import BoardReleaseSettings from './BoardReleaseSettings.vue';
+import './release-queue.css';
 import BoardOptionsMenu from './BoardOptionsMenu.vue';
 import { columnTone, replaceBoardColumns, sprintDates } from './model';
 const props = defineProps<{ open: boolean; initialTab?: string; startAdding?: boolean; snapshot: BoardPlanningSnapshot; save: (document: BoardPlanningDocument) => Promise<boolean> }>();
 const emit = defineEmits<{ close: [] }>();
-const dialog = ref<HTMLDialogElement>(), prefix = `board-settings-${useId()}`, tabs = ['Columns', 'Sprints'];
+const dialog = ref<HTMLDialogElement>(), prefix = `board-settings-${useId()}`, tabs = ['Columns', 'Sprints', 'Releases'];
 const draft = ref<BoardPlanningDocument>(JSON.parse(JSON.stringify(props.snapshot.document))), initialDocument = ref(JSON.stringify(props.snapshot.document));
 let draftRevision = props.snapshot.revision;
 const tab = ref('Columns'), saving = ref(false), error = ref(''), removing = ref(''), destination = ref(''), columnName = ref(''), adding = ref(false), editing = ref(''), originalName = ref(''), announcement = ref(''), keyboard = ref(false);
@@ -121,7 +125,9 @@ function removeColumn() {
   for (const [id, meta] of Object.entries(draft.value.tasks)) {
     if (meta.columnId === source.id) meta.columnId = previousColumns.has(id) ? previousColumns.get(id)! : target.id;
   }
-  removing.value = ''; announcement.value = `${source.name} removed from the draft`; focus(`rename-${target.id}`);
+  const removedReleaseColumn = draft.value.releaseRule?.kind === 'column' && draft.value.releaseRule.columnId === source.id;
+  if (removedReleaseColumn) draft.value.releaseRule = null;
+  removing.value = ''; announcement.value = `${source.name} removed from the draft${removedReleaseColumn ? ". The release queue is now off." : ""}`; focus(`rename-${target.id}`);
 }
 function beginDrag(event: PointerEvent, id: string) { if (locked.value || event.button !== 0 || !event.isPrimary) return; keyboard.value = false; dragMoved.value = false; dragging.value = { id, x: event.clientX, y: event.clientY, pointerId: event.pointerId, target: event.currentTarget as HTMLElement }; dragging.value.target.setPointerCapture(event.pointerId); }
 function moveDrag(event: PointerEvent) { const drag = dragging.value; if (!drag || event.pointerId !== drag.pointerId) return; if (!dragMoved.value && Math.hypot(event.clientX - drag.x, event.clientY - drag.y) < 5) return; dragMoved.value = true; const nodes = [...(dialog.value?.querySelectorAll<HTMLElement>('[data-settings-row]') || [])].filter(node => node.dataset.settingsRow !== drag.id); dropBefore.value = nodes.find(node => event.clientY < node.getBoundingClientRect().top + node.getBoundingClientRect().height / 2)?.dataset.settingsRow || 'end'; }

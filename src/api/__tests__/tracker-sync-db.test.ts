@@ -750,3 +750,146 @@ test("a GitHub issue imports through the same sync path; messages match only the
   const [web] = await client!.db.select().from(schema!.room_tracker_filters).where(eq(schema!.room_tracker_filters.room_id, other.id));
   assert.equal(web?.sync_requested_at, null);
 });
+
+
+test("release metadata backfills unchanged bound tickets without rescan or new imports", options, async () => {
+  let clock = new Date("2026-11-10T10:00:00Z");
+  const ctx = await setup("release-backfill", new Map(), { now: () => clock });
+  const old = item("HT-9001", "done", "2026-01-01T00:00:00Z", "Done");
+  await ctx.service.applyItem(ctx.connection, old, { roomIds: [ctx.room.id] });
+  const enriched = { ...old, payload: { releaseMetadataAvailable: true, releaseFields: [
+    { id: "customfield_release", name: "Release", values: ["true"] },
+    { id: "customfield_other", name: "Other context", values: null },
+  ] } };
+  ctx.tickets.set(old.key, enriched);
+  ctx.tickets.set("HT-9999", item("HT-9999", "todo", "2026-01-01T00:00:00Z"));
+  ctx.jira.provider.listItems = async (_connection, _filter, opts) => {
+    assert.ok(opts.updatedSince, "keep the incremental cursor"); return [];
+  };
+  clock = new Date("2026-11-10T10:03:00Z");
+  await ctx.service.syncFilter({ ...ctx.filter, last_synced_at: "2026-11-10T10:00:00Z" });
+  assert.deepEqual(ctx.jira.calls.getItem, [old.key]);
+  const rows = (await client!.pool.query("SELECT payload FROM external_items WHERE connection_id=$1", [ctx.connection.id])).rows;
+  assert.deepEqual(rows[0].payload.releaseFields, enriched.payload.releaseFields);
+  assert.equal((await roomTasks(ctx.room.id)).length, 1, "backfill never imports an unbound ticket");
+  clock = new Date("2026-11-10T10:06:00Z");
+  await ctx.service.syncFilter({ ...ctx.filter, last_synced_at: "2026-11-10T10:03:00Z" });
+  assert.deepEqual(ctx.jira.calls.getItem, [old.key], "unrelated unknown field is not an endless refresh candidate");
+});
+
+test("release metadata refresh bounds requests and rotates unavailable tickets", options, async () => {
+  let clock = new Date("2026-11-10T11:00:00Z");
+  const ctx = await setup("release-refresh-bound", new Map(), { now: () => clock });
+  for (let i = 1; i <= 22; i++) {
+    const ticket = item(`HT-${9100+i}`, "todo", "2026-01-01T00:00:00Z");
+    await ctx.service.applyItem(ctx.connection, ticket, { roomIds: [ctx.room.id] });
+    ctx.tickets.set(ticket.key, { ...ticket, payload: { releaseMetadataAvailable: false, releaseFields: [{ id: "labels", name: "Label", values: [] }] } });
+  }
+  ctx.jira.provider.listItems = async () => [];
+  ctx.jira.failures.getItem = new Error("unavailable");
+  clock = new Date("2026-11-10T11:03:00Z");
+  await ctx.service.syncFilter(ctx.filter);
+  assert.equal(ctx.jira.calls.getItem.length, 20);
+  clock = new Date("2026-11-10T11:04:00Z");
+  await ctx.service.syncFilter(ctx.filter);
+  assert.equal(ctx.jira.calls.getItem.length, 22, "remaining tickets proceed while failed reads cool down");
+  ctx.jira.failures.getItem = null;
+  clock = new Date("2026-11-10T11:07:00Z");
+  await ctx.service.syncFilter(ctx.filter);
+  assert.equal(ctx.jira.calls.getItem.length, 42);
+  clock = new Date("2026-11-10T11:10:00Z");
+  await ctx.service.syncFilter(ctx.filter);
+  assert.equal(ctx.jira.calls.getItem.length, 62, "failed catalog discovery remains retryable");
+});
+
+
+test("release polling observes cleared flags outside the import filter without changing sprint authority or card order", options, async () => {
+  const { defaultBoardPlanning } = await import("../../../shared/board-planning.mjs");
+  const { getBoardPlanning } = await import("../db/board-planning.js");
+  let clock = new Date("2026-11-10T12:00:00Z");
+  const ctx = await setup("release-cleared", new Map(), { now: () => clock });
+  const ticket = { ...item("HT-9201", "done", "2026-11-10T11:00:00Z", "Ready for release"), payload: {
+    releaseMetadataAvailable: true, releaseFields: [{ id: "customfield_release", name: "Release", values: ["true"] }],
+    planning: { iterationsAvailable: false, iterations: [] },
+  } };
+  await ctx.service.applyItem(ctx.connection, ticket, { roomIds: [ctx.room.id] });
+  const document = defaultBoardPlanning();
+  document.releaseRule = { kind: "tracker", connectionId: ctx.connection.id, fieldId: "customfield_release", value: "true" };
+  await client!.db.insert(schema!.room_board_planning).values({ room_id: ctx.room.id, document, revision: 1, updated_by: 'test' });
+  const before = await roomTasks(ctx.room.id);
+  const cached = (await client!.pool.query("SELECT synced_at, payload FROM external_items WHERE connection_id=$1", [ctx.connection.id])).rows[0];
+  ctx.jira.provider.listItems = async () => [];
+  ctx.tickets.set(ticket.key, { ...ticket, tracker_updated_at: "2026-11-10T12:02:00Z", raw_status: "Released", payload: { ...ticket.payload,
+    releaseFields: [{ id: "customfield_release", name: "Release", values: ["false"] }], planning: { iterationsAvailable: true, iterations: [] } } });
+  assert.equal((await getBoardPlanning(ctx.room.id, true)).releases!.items.length, 1);
+  clock = new Date("2026-11-10T12:03:00Z");
+  await ctx.service.syncFilter(ctx.filter);
+  assert.equal((await getBoardPlanning(ctx.room.id, true)).releases!.items.length, 0);
+  assert.deepEqual(await roomTasks(ctx.room.id), before, "release enrichment cannot reorder or mutate cards");
+  const after = (await client!.pool.query("SELECT synced_at, payload FROM external_items WHERE connection_id=$1", [ctx.connection.id])).rows[0];
+  assert.deepEqual(after.payload.planning.iterations, cached.payload.planning.iterations);
+  assert.equal(after.payload.planning.iterationsAvailable, cached.payload.planning.iterationsAvailable);
+  assert.deepEqual(after.synced_at, cached.synced_at);
+
+  await ctx.service.applyItem(ctx.connection, { ...ticket, tracker_updated_at: '2026-11-10T12:01:00Z' });
+  assert.equal((await getBoardPlanning(ctx.room.id, true)).releases!.items.length, 0, 'a lagging normal import cannot restore the cleared flag');
+
+  document.releaseRule = { ...document.releaseRule, fieldId: "status", value: "Released" };
+  await client!.pool.query("UPDATE room_board_planning SET document=$1 WHERE room_id=$2", [JSON.stringify(document), ctx.room.id]);
+  ctx.tickets.set(ticket.key, { ...ctx.tickets.get(ticket.key)!, raw_status: "Archived" });
+  clock = new Date("2026-11-10T12:06:00Z");
+  assert.equal((await getBoardPlanning(ctx.room.id, true)).releases!.items.length, 1);
+  const released = ctx.tickets.get(ticket.key)!;
+  ctx.tickets.set(ticket.key, { ...ticket, tracker_updated_at: '2026-11-10T12:01:00Z' });
+  await ctx.service.syncFilter(ctx.filter);
+  assert.equal((await getBoardPlanning(ctx.room.id, true)).releases!.items.length, 1, 'a lagging supplemental read cannot erase newer release evidence');
+  ctx.tickets.set(ticket.key, released);
+  clock = new Date('2026-11-10T12:09:00Z');
+  await ctx.service.syncFilter(ctx.filter);
+  assert.equal((await getBoardPlanning(ctx.room.id, true)).releases!.items.length, 0, "status rules are rechecked too");
+});
+
+test("a lagging release read cannot overwrite newer tracker evidence", options, async () => {
+  let clock = new Date("2026-11-10T13:00:00Z");
+  const ctx = await setup("release-lagging", new Map(), { now: () => clock });
+  const ticket = item("HT-9301", "todo", "2026-11-10T12:30:00Z");
+  await ctx.service.applyItem(ctx.connection, ticket, { roomIds: [ctx.room.id] });
+  ctx.jira.provider.listItems = async () => [];
+  ctx.jira.provider.getItem = async () => {
+    await ctx.service.applyItem(ctx.connection, { ...ticket, tracker_updated_at: "2026-11-10T13:02:00Z", payload: { releaseMetadataAvailable: true,
+      releaseFields: [{ id: "labels", name: "Label", values: ["release"] }] } });
+    return { ...ticket, payload: { releaseMetadataAvailable: true, releaseFields: [{ id: "labels", name: "Label", values: [] }] } };
+  };
+  clock = new Date("2026-11-10T13:03:00Z"); await ctx.service.syncFilter(ctx.filter);
+  const row = (await client!.pool.query("SELECT payload FROM external_items WHERE connection_id=$1", [ctx.connection.id])).rows[0];
+  assert.deepEqual(row.payload.releaseFields[0].values, ["release"]);
+});
+
+test("partial tracker metadata keeps known waiting tickets until an authoritative clear", options, async () => {
+  const { defaultBoardPlanning } = await import('../../../shared/board-planning.mjs');
+  const { getBoardPlanning } = await import('../db/board-planning.js');
+  let clock = new Date('2026-11-10T14:00:00Z');
+  const ctx = await setup('release-partial', new Map(), { now: () => clock });
+  const ticket = { ...item('HT-9401', 'done', '2026-11-10T13:00:00Z'), payload: {
+    releaseMetadataAvailable: true, releaseFields: [{ id: 'release', name: 'Release', values: ['true'] }],
+  } };
+  await ctx.service.applyItem(ctx.connection, ticket, { roomIds: [ctx.room.id] });
+  const document = defaultBoardPlanning();
+  document.releaseRule = { kind: 'tracker', connectionId: ctx.connection.id, fieldId: 'release', value: 'true' };
+  await client!.db.insert(schema!.room_board_planning).values({ room_id: ctx.room.id, document, updated_by: 'test' });
+  ctx.jira.provider.listItems = async () => [];
+  ctx.tickets.set(ticket.key, { ...ticket, payload: { releaseMetadataAvailable: false,
+    releaseFields: [{ id: 'release', name: 'Release', values: null }] } });
+  clock = new Date('2026-11-10T14:03:00Z'); await ctx.service.syncFilter(ctx.filter);
+  let queue = (await getBoardPlanning(ctx.room.id, true)).releases!;
+  assert.equal(queue.items.length, 1); assert.equal(queue.unavailable, 1);
+  await ctx.service.applyItem(ctx.connection, { ...ticket, tracker_updated_at: '2026-11-10T14:04:00Z',
+    payload: { releaseMetadataAvailable: false, releaseFields: [] } });
+  queue = (await getBoardPlanning(ctx.room.id, true)).releases!;
+  assert.equal(queue.items.length, 1, 'normal poll catalog failure preserves known flags'); assert.equal(queue.unavailable, 1);
+  await ctx.service.applyItem(ctx.connection, { ...ticket, tracker_updated_at: '2026-11-10T14:05:00Z', payload: {
+    releaseMetadataAvailable: true, releaseFields: [{ id: 'release', name: 'Release', values: [] }],
+  } });
+  queue = (await getBoardPlanning(ctx.room.id, true)).releases!;
+  assert.equal(queue.items.length, 0); assert.equal(queue.unavailable, 0);
+});

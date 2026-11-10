@@ -1,3 +1,4 @@
+import { releaseLabels } from './release-fields.js';
 import { createHash } from "node:crypto";
 
 import { mapTicketState } from "../status-map.js";
@@ -24,6 +25,7 @@ const TRANSITION_SKEW_MS = 60_000;
 const ISSUE_FIELDS = `
   id identifier title url updatedAt
   state { id name type }
+  labels(first: 100) { nodes { name } pageInfo { hasNextPage } }
   assignee { id name displayName avatarUrl }
   team { key }
   project { id }
@@ -132,6 +134,8 @@ export function createLinearProvider(options: LinearProviderOptions = {}): WorkI
       payload: {
         id: asString(record.id),
         state_type: asString(state.type),
+        releaseFields: [{ id: 'labels', name: 'Label', values: asRecord(asRecord(record.labels).pageInfo).hasNextPage === true
+          ? null : releaseLabels(asRecord(record.labels).nodes) }],
         team_key: asString(asRecord(record.team).key),
         project_id: asString(asRecord(record.project).id),
         planning: linearPlanning(record, now()),
