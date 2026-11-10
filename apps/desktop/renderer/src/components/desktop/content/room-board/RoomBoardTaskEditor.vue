@@ -1,6 +1,6 @@
 <template>
   <form class="desktop-task-editor" @submit.prevent="save">
-    <header><span class="desktop-task-id">{{ shortTaskId(task.id) }}</span><h3>Edit task</h3></header>
+    <div class="desktop-task-editor-fields"><header><h3>Edit task</h3></header>
     <label class="desktop-task-create-field"><span>Title</span><input ref="titleInput" v-model="title" type="text" required :disabled="busy" /></label>
     <TaskMarkdownEditor v-model="description" :disabled="busy" />
     <label v-if="ticketKeys" class="desktop-task-create-field">
@@ -9,6 +9,7 @@
       <small v-if="externalRefInvalid" class="desktop-task-dialog-error">Use a key such as HT-1234, linear:ENG-12 or github:owner/repo#12.</small>
     </label>
     <p v-if="error" class="desktop-task-dialog-error" role="alert">{{ error }}</p>
+    </div>
     <footer class="desktop-task-create-actions">
       <button type="button" class="desktop-task-detail-button" :disabled="busy" @click="emit('cancel')">Cancel edits</button>
       <button type="submit" class="desktop-board-primary-action" :disabled="busy || !title.trim() || !dirty || externalRefInvalid">{{ busy ? 'Saving...' : 'Save changes' }}</button>
@@ -19,7 +20,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
 import type { DesktopTaskSummary } from '../../../../../../electron/ipc-types';
-import { shortTaskId } from './formatters';
 import TaskMarkdownEditor from './TaskMarkdownEditor.vue';
 import { taskContentPatch } from '../../../../../../../../shared/task-markdown-editing.mjs';
 import { normalizedExternalRef, type TaskEditPatch } from './ticket-ref';
@@ -57,7 +57,9 @@ function save() {
 </script>
 
 <style scoped>
-.desktop-task-editor { display: grid; gap: 24px; min-width: 0; }
-.desktop-task-editor header { padding-right: 48px; }
-.desktop-task-editor h3 { margin: 10px 0 0; font-size: 18px; line-height: 1.4; letter-spacing: 0; }
+.desktop-task-editor { display:flex; flex-direction:column; min-width:0; min-height:0; flex:1; }
+.desktop-task-editor-fields { display:grid; align-content:start; gap:24px; padding:26px 32px 32px; min-height:0; overflow:auto; flex:1; overscroll-behavior:contain; }
+.desktop-task-editor h3 { margin:0; font-size:24px; font-weight:600; line-height:1.4; letter-spacing:-.4px; }
+.desktop-task-create-actions { padding:16px 24px; border-top:1px solid var(--border); flex-shrink:0; }
+@media(max-width:600px) { .desktop-task-editor-fields { padding:24px 20px; } }
 </style>
