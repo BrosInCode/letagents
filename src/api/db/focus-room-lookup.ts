@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
 import { rooms } from "./schema.js";
@@ -11,10 +11,8 @@ type FocusRoomRow = typeof rooms.$inferSelect;
  * not archived and any number of archived rows for one key, so the order is
  * fixed here:
  *   1. the row that is not archived;
- *   2. else an archived row: the newest (default) or the oldest
- *      (`archivedOrder: "oldest"`, for a caller whose released response
- *      showed the first-created row);
- *   3. ties break on `created_at`, then `id`.
+ *   2. else the most recently archived row (latest `focus_archived_at`);
+ *   3. ties break on the newest `created_at`, then `id`.
  * With `includeArchived: false` only step 1 runs.
  */
 export async function findFocusRoomRowByKey(
@@ -22,7 +20,6 @@ export async function findFocusRoomRowByKey(
     parentRoomId: string;
     focusKey: string;
     includeArchived: boolean;
-    archivedOrder?: "newest" | "oldest";
   },
   executor: Pick<typeof db, "select"> = db,
 ): Promise<FocusRoomRow | undefined> {
@@ -35,16 +32,15 @@ export async function findFocusRoomRowByKey(
     conditions.push(isNull(rooms.focus_archived_at));
   }
 
-  const newest = (input.archivedOrder ?? "newest") === "newest";
   const [row] = await executor
     .select()
     .from(rooms)
     .where(and(...conditions))
     .orderBy(
       sql`${rooms.focus_archived_at} IS NOT NULL`,
-      newest ? desc(rooms.focus_archived_at) : asc(rooms.focus_archived_at),
-      newest ? desc(rooms.created_at) : asc(rooms.created_at),
-      newest ? desc(rooms.id) : asc(rooms.id),
+      desc(rooms.focus_archived_at),
+      desc(rooms.created_at),
+      desc(rooms.id),
     )
     .limit(1);
   return row;

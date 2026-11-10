@@ -103,13 +103,12 @@ export async function getActiveFocusRoomForTask(
 export async function getFocusRoomByKey(
   parentRoomId: string,
   focusKey: string,
-  options: { includeArchived?: boolean; archivedOrder?: "newest" | "oldest" } = {}
+  options: { includeArchived?: boolean } = {}
 ): Promise<Project | undefined> {
   const focusRoom = await findFocusRoomRowByKey({
     parentRoomId,
     focusKey,
     includeArchived: Boolean(options.includeArchived),
-    archivedOrder: options.archivedOrder,
   });
 
   return focusRoom ? toProject(focusRoom) : undefined;
@@ -121,12 +120,10 @@ export async function archiveFocusRoom(
 ): Promise<{ room: Project; archived: boolean } | null> {
   const focusRoom = await getFocusRoomByKey(parentRoomId, focusKey);
   if (!focusRoom) {
-    // The archive route shows this room to released clients. Before the
-    // shared lookup, an unordered query returned the first-created row, so
-    // keep the oldest archived row here.
+    // No live row: answer with the most recently archived one, which is
+    // the row a concurrent or earlier archive call just archived.
     const archivedFocusRoom = await getFocusRoomByKey(parentRoomId, focusKey, {
       includeArchived: true,
-      archivedOrder: "oldest",
     });
     return archivedFocusRoom ? { room: archivedFocusRoom, archived: false } : null;
   }
@@ -148,7 +145,6 @@ export async function archiveFocusRoom(
 
   const current = await getFocusRoomByKey(parentRoomId, focusKey, {
     includeArchived: true,
-    archivedOrder: "oldest",
   });
   return current ? { room: current, archived: false } : null;
 }

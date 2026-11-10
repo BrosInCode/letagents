@@ -1029,6 +1029,7 @@ jobs:
       # the two files must not run at the same time.
       - name: Run focus room lookup tests
         if: matrix.group == 3
+        timeout-minutes: 5
         run: >-
           node
           --import ./node_modules/tsx/dist/loader.mjs

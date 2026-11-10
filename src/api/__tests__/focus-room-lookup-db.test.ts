@@ -103,16 +103,16 @@ test("an active row and older archived rows with one key: lookups that include a
 test("only archived rows with one key: lookups return the newest archived row", options, async () => {
   const parent = await db!.createProjectWithName(unique("lookup-archived-only"));
   const focusKey = unique("task");
-  const oldest = await insertFocusRow({ parentRoomId: parent.id, focusKey, archivedAt: "2026-01-02T00:00:00.000Z", createdAt: "2026-01-01T00:00:00.000Z" });
+  await insertFocusRow({ parentRoomId: parent.id, focusKey, archivedAt: "2026-01-02T00:00:00.000Z", createdAt: "2026-01-01T00:00:00.000Z" });
   const newest = await insertFocusRow({ parentRoomId: parent.id, focusKey, archivedAt: "2026-03-02T00:00:00.000Z", createdAt: "2026-03-01T00:00:00.000Z" });
   await insertFocusRow({ parentRoomId: parent.id, focusKey, archivedAt: "2026-02-02T00:00:00.000Z", createdAt: "2026-02-01T00:00:00.000Z" });
 
   assert.equal(await db!.getFocusRoomByKey(parent.id, focusKey), undefined);
   assert.equal((await db!.getFocusRoomByKey(parent.id, focusKey, { includeArchived: true }))?.id, newest);
   assert.equal((await db!.getGitChildRoom({ parentRoomId: parent.id, focusKey }))?.id, newest);
-  // The archive route's "already archived" answer keeps the first-created
-  // row, as the unordered query returned before.
-  assert.equal((await db!.archiveFocusRoom(parent.id, focusKey))?.room.id, oldest);
+  // The archive route's "already archived" answer is the most recently
+  // archived row (staging returned the first row read, usually the oldest).
+  assert.deepEqual(await db!.archiveFocusRoom(parent.id, focusKey).then((r) => ({ id: r?.room.id, archived: r?.archived })), { id: newest, archived: false });
 });
 
 test("rental provisioning reuses an existing room with its key, archived or not", options, async () => {
@@ -142,4 +142,16 @@ test("rental provisioning reuses an existing room with its key, archived or not"
 
   const provisioned = await rental!.provisionRentalRoom({ sessionId, parentRoomId: parent.id, providerDisplayName: "Provider" });
   assert.equal(provisioned.roomId, newest);
+});
+
+test("archiving a live room next to an older archived one: a retry answers with the room just archived", options, async () => {
+  const parent = await db!.createProjectWithName(unique("lookup-archive-retry"));
+  const focusKey = unique("task");
+  await insertFocusRow({ parentRoomId: parent.id, focusKey, archivedAt: "2026-01-02T00:00:00.000Z", createdAt: "2026-01-01T00:00:00.000Z" });
+  const live = await insertFocusRow({ parentRoomId: parent.id, focusKey, archivedAt: null, createdAt: "2026-02-01T00:00:00.000Z" });
+
+  const first = await db!.archiveFocusRoom(parent.id, focusKey);
+  assert.deepEqual({ id: first?.room.id, archived: first?.archived }, { id: live, archived: true });
+  const retry = await db!.archiveFocusRoom(parent.id, focusKey);
+  assert.deepEqual({ id: retry?.room.id, archived: retry?.archived }, { id: live, archived: false });
 });
