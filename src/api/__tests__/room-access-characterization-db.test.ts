@@ -65,6 +65,7 @@ function permissionsFor(role: GitHubRole) {
   };
 }
 
+const realFetch = globalThis.fetch;
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const url = new URL(String(input));
   const token = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /, "");
@@ -472,5 +473,94 @@ test("every room access call site keeps its pinned answer", { skip, concurrency:
   assert.deepEqual(Object.keys(lines), Object.keys(pinned), "the same table rows");
   for (const key of Object.keys(pinned)) {
     assert.equal(lines[key], pinned[key], `answers changed for ${key}`);
+  }
+});
+
+// ------------------------------------------------ gap fix A: activity stream
+
+test("the account activity stream re-checks a repo room live and drops it after a GitHub webhook clears the cache", { skip, concurrency: false }, async () => {
+  const express = (await import("express")).default;
+  const { EventEmitter } = await import("node:events");
+  const { AccountActivityHub } = await import("../account-activity/hub.js");
+  const { registerAccountActivityStreamRoute } = await import("../routes/account/activity-stream.js");
+  const { PRESENCE_CHANGED } = await import("../server/presence-change-events.js");
+  const { clearGitHubRepoAccessCacheForRoom } = await import("../github/repo-access.js");
+
+  const world = await buildWorld("repo_private", "member");
+  const roomId = world.project.id;
+  const repo = repos.get(roomId.split("/").at(-1)!)!;
+  const working = new Map<string, string[]>();
+  const presence = new EventEmitter();
+  const hub = new AccountActivityHub({
+    async loadWorking(roomIds) {
+      const result = new Map();
+      for (const id of roomIds) {
+        const names = working.get(id);
+        if (names?.length) result.set(id, { agents: names.map((name) => ({ agent_key: name, display_name: name })), oldestHeartbeatMs: Date.now() });
+      }
+      return result;
+    },
+    async loadLatest() { return new Map(); },
+  }, { coalesceMs: 5 });
+  hub.attach({ presence, messages: new EventEmitter() });
+  const app = express();
+  app.use((req, _res, next) => {
+    Object.assign(req, { authKind: "session", sessionAccount: world.sessionAccount, agentSession: null });
+    next();
+  });
+  registerAccountActivityStreamRoute(app, { hub, getAccountRoomsForAccount: roomList!.getAccountRoomsForAccount });
+  const http = app.listen(0);
+  await new Promise((resolve) => http.once("listening", resolve));
+  const { port } = http.address() as import("node:net").AddressInfo;
+  const controller = new AbortController();
+  try {
+    const response = await realFetch(`http://127.0.0.1:${port}/account/activity/stream`, {
+      headers: { cookie: `letagents_session=${world.sessionToken}` },
+      signal: controller.signal,
+    });
+    assert.equal(response.status, 200);
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    const pump = (async () => {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        text += decoder.decode(value, { stream: true });
+      }
+    })().catch(() => undefined);
+    const until = async (condition: () => boolean, label: string) => {
+      for (let i = 0; i < 120 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.ok(condition(), label);
+    };
+    await until(() => text.includes("event: snapshot"), "the snapshot arrives");
+    assert.ok(text.includes(roomId), "the snapshot lists the repo room");
+
+    const before = githubCalls.length;
+    working.set(roomId, ["First"]);
+    presence.emit(PRESENCE_CHANGED, roomId);
+    await until(() => text.includes("First"), "a frame for a readable room is sent");
+    const freshCalls = githubCalls.slice(before).filter((call) => call.includes(`/repos/acme/`));
+    assert.ok(freshCalls.length >= 1, "the first frame made one fresh check");
+
+    // The person leaves the repository; GitHub's webhook clears the cache.
+    repo.roles.set(world.login!.toLowerCase(), "none");
+    clearGitHubRepoAccessCacheForRoom(roomId);
+    working.set(roomId, ["Second"]);
+    presence.emit(PRESENCE_CHANGED, roomId);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.ok(!text.includes("Second"), "no frame after the webhook: the next frame re-checked and was refused");
+    const afterRefusal = githubCalls.length;
+    working.set(roomId, ["Third"]);
+    presence.emit(PRESENCE_CHANGED, roomId);
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.ok(!text.includes("Third"), "the refused room stays out of the stream");
+    assert.equal(githubCalls.length, afterRefusal, "a held room asks GitHub nothing more");
+    controller.abort();
+    await pump;
+  } finally {
+    controller.abort();
+    hub.close();
+    await new Promise((resolve) => http.close(resolve));
   }
 });

@@ -31,6 +31,14 @@ async function server(options: { auth?: Auth; roomsFail?: boolean; admin?: boole
   }, { coalesceMs: 5 });
   hub.attach({ presence, messages });
   const listedFor: string[] = [];
+  // The live read re-check, one fake lease per top-level room: `readable`
+  // answers it, `invalidate` fires its invalidation handlers.
+  const readable = new Map<string, boolean>();
+  const checks: string[] = [];
+  const invalidationHandlers = new Map<string, Set<() => void>>();
+  const stale = new Set<string>();
+  const leaseChecksSince = new Map<string, number>();
+  let credentialValid = true;
   const app = express();
   app.use((req, _res, next) => {
     const auth = options.auth === undefined ? 'session' : options.auth;
@@ -41,6 +49,26 @@ async function server(options: { auth?: Auth; roomsFail?: boolean; admin?: boole
     hub,
     joinRequestEvents,
     isRoomAdmin: async (accountId, roomId) => { adminChecks.push(`${accountId}:${roomId}`); return options.admin ?? false; },
+    credentialStillValid: async () => credentialValid,
+    openRoomAuthorization: async (_req, roomId) => {
+      const handlers = invalidationHandlers.get(roomId) ?? new Set<() => void>();
+      invalidationHandlers.set(roomId, handlers);
+      stale.add(roomId);
+      let allowed = true;
+      return {
+        // Like the real lease: a stale lease asks again, a fresh one reuses its answer.
+        async check(checkOptions) {
+          if (!stale.has(roomId) && !checkOptions?.force) return allowed;
+          checks.push(roomId);
+          leaseChecksSince.set(roomId, (leaseChecksSince.get(roomId) ?? 0) + 1);
+          stale.delete(roomId);
+          allowed = readable.get(roomId) ?? true;
+          return allowed;
+        },
+        onInvalidated(handler) { handlers.add(handler); return () => handlers.delete(handler); },
+        release() {},
+      };
+    },
     getAccountRoomsForAccount: (async (accountId: string) => {
       listedFor.push(accountId);
       if (options.roomsFail) throw new Error('database unavailable');
@@ -54,7 +82,13 @@ async function server(options: { auth?: Auth; roomsFail?: boolean; admin?: boole
   await new Promise(resolve => http.once('listening', resolve));
   const base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
   return {
-    base, hub, presence, working, listedFor, joinRequestEvents, adminChecks,
+    base, hub, presence, working, listedFor, joinRequestEvents, adminChecks, readable, checks,
+    invalidate(roomId: string) {
+      stale.add(roomId);
+      for (const handler of invalidationHandlers.get(roomId) ?? []) handler();
+    },
+    handlerCount: (roomId: string) => invalidationHandlers.get(roomId)?.size ?? 0,
+    revokeCredential() { credentialValid = false; },
     async close() { hub.close(); await new Promise(resolve => http.close(resolve)); },
   };
 }
@@ -223,5 +257,74 @@ test('a read the account records in a watched room reaches its stream; others do
     const events = await reading;
     assert.deepEqual(events.map(event => event.event), ['snapshot', 'room_read']);
     assert.deepEqual(events[1]!.data, { room_id: 'Focus_1', last_message_id: 'msg_7' });
+  } finally { await s.close(); }
+});
+
+async function waitFor(condition: () => boolean, label: string) {
+  for (let i = 0; i < 80 && !condition(); i++) await new Promise(resolve => setTimeout(resolve, 25));
+  assert.ok(condition(), label);
+}
+
+test('a room the account can no longer read stops appearing in frames after an invalidation, and comes back after one', async () => {
+  const s = await server();
+  try {
+    const response = await fetch(`${s.base}/account/activity/stream`);
+    const reading = readEvents(response, 4);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    s.working.set('focus_1', ['MapleRidge']);
+    s.presence.emit(PRESENCE_CHANGED, 'focus_1');
+    await waitFor(() => s.checks.length === 1, 'the first frame of a room re-checks its access room once');
+    assert.deepEqual(s.checks, ['github.com/org/repo'], 'a focus room is decided by its parent, as the room list decides it');
+
+    // GitHub says the person left the repository: the webhook clears the cache.
+    s.readable.set('github.com/org/repo', false);
+    s.invalidate('github.com/org/repo');
+    s.working.set('focus_1', ['MapleRidge', 'Second']);
+    s.presence.emit(PRESENCE_CHANGED, 'focus_1');
+    await waitFor(() => s.checks.length === 2, 'the next frame after the invalidation re-checks');
+    s.working.set('github.com/org/repo', ['Third']);
+    s.presence.emit(PRESENCE_CHANGED, 'github.com/org/repo');
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(s.checks.length, 2, 'a refused room is held: no further checks until an event');
+
+    // Access comes back (a webhook again): the room shows again.
+    s.readable.set('github.com/org/repo', true);
+    s.invalidate('github.com/org/repo');
+    s.working.set('focus_1', ['Fourth']);
+    s.presence.emit(PRESENCE_CHANGED, 'focus_1');
+    s.working.set('invite-room', ['CedarRidge']);
+    s.presence.emit(PRESENCE_CHANGED, 'invite-room');
+    const events = await reading;
+    assert.deepEqual(
+      events.map(e => `${e.data.room_id ?? 'snapshot'}${e.data.working ? `:${e.data.working.map((a: any) => a.display_name).join('+')}` : ''}`),
+      ['snapshot', 'focus_1:MapleRidge', 'focus_1:Fourth', 'invite-room:CedarRidge'],
+      'no frame about the repo room or its focus room while it was refused',
+    );
+  } finally { await s.close(); }
+});
+
+test('a frame within the lease period reuses the answer; a revoked credential closes the stream', async () => {
+  const s = await server();
+  try {
+    const response = await fetch(`${s.base}/account/activity/stream`);
+    const reading = readEvents(response, 10);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    for (const name of ['A', 'B', 'C']) {
+      s.working.set('invite-room', [name]);
+      s.presence.emit(PRESENCE_CHANGED, 'invite-room');
+      await new Promise(resolve => setTimeout(resolve, 30));
+    }
+    await waitFor(() => s.checks.length >= 1, 'checked');
+    assert.deepEqual(s.checks, ['invite-room'], 'three frames, one check');
+
+    s.revokeCredential();
+    s.readable.set('invite-room', false);
+    s.invalidate('invite-room');
+    s.working.set('invite-room', ['D']);
+    s.presence.emit(PRESENCE_CHANGED, 'invite-room');
+    const events = await reading;
+    assert.ok(!events.some(e => e.data.working?.[0]?.display_name === 'D'), 'nothing after the refusal');
+    assert.equal(events.at(-1)?.data.room_id, 'invite-room');
+    await waitFor(() => s.handlerCount('invite-room') === 0, 'the closed stream stops listening for invalidations');
   } finally { await s.close(); }
 });
