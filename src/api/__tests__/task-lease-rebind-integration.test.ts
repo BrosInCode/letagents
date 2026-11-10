@@ -63,8 +63,9 @@ async function seed(options: { endFrom?: boolean; successorUnderGrant?: boolean;
     supervisor_grant_id: grant.grant_id,
   });
 
+  const task = await db!.createTask(room.id, `Rebind work ${n}`, "Human");
   const lease = await db!.createTaskLease({
-    room_id: room.id, task_id: `task_${n}`, kind: "work", agent_key: agentKey,
+    room_id: room.id, task_id: task.id, kind: "work", agent_key: agentKey,
     actor_label: from.actor_label, created_by: from.actor_label, agent_session_id: from.session_id,
   });
 
@@ -251,8 +252,9 @@ test("a review lease is not rebindable — the generic route rejects the non-wor
   // attestation the rebind consumes (§4.5). The rebind must refuse it outright
   // so a dead reviewer's review lease is released, never silently moved.
   const s = await seed();
+  const reviewTask = await db!.createTask(s.room.id, "Review lease", "Human");
   const reviewLease = await db!.createTaskLease({
-    room_id: s.room.id, task_id: `task_review_${ordinal}`, kind: "review", agent_key: s.from.agent_key,
+    room_id: s.room.id, task_id: reviewTask.id, kind: "review", agent_key: s.from.agent_key,
     actor_label: s.from.actor_label, created_by: s.from.actor_label, agent_session_id: s.from.session_id,
   });
   const result = await rebindTaskLease(rebindArgs(s, { lease_id: reviewLease.id }));
@@ -451,8 +453,9 @@ test("recordRebindAttestation default-denies internally: cause enum, UUID ids, l
   await expectReason({ ...base, supervisor_grant_fence: live.fence }, "grant_scope");
 
   // A review lease is not attestable work state.
+  const reviewTask = await db!.createTask(s.room.id, "Review attestation", "Human");
   const reviewLease = await db!.createTaskLease({
-    room_id: s.room.id, task_id: `task_att_review_${ordinal}`, kind: "review", agent_key: s.from.agent_key,
+    room_id: s.room.id, task_id: reviewTask.id, kind: "review", agent_key: s.from.agent_key,
     actor_label: s.from.actor_label, created_by: s.from.actor_label, agent_session_id: s.from.session_id,
   });
   await expectReason({ ...base, lease_id: reviewLease.id }, "lease_mismatch");

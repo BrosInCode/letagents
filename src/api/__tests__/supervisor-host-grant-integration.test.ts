@@ -1727,7 +1727,8 @@ test("attestation route: strict inputs, in-tx authorization, immutable evidence"
   // The predecessor is a real supervised worker: minted under THIS grant, then
   // ended (terminal) — the in-tx authorization requires both.
   const from = await authDb!.createRoomAgentSession({ room_id: room.id, session_kind: "worker", runtime: "test", actor_label: "Route Agent", agent_key: agent.canonical_key, display_name: "Route Agent", owner_account_id: "owner_route", owner_label: "Owner", ide_label: "Agent", supervisor_grant_id: grantResult.grant.grant_id });
-  const lease = await authDb!.createTaskLease({ room_id: room.id, task_id: "task_1", kind: "work", agent_key: agent.canonical_key, actor_label: "Route Agent", created_by: "Route Agent", agent_session_id: from.session_id });
+  const task = await authDb!.createTask(room.id, "Attested work", "Human");
+  const lease = await authDb!.createTaskLease({ room_id: room.id, task_id: task.id, kind: "work", agent_key: agent.canonical_key, actor_label: "Route Agent", created_by: "Route Agent", agent_session_id: from.session_id });
   const wa = randomUUID();
   const eg = randomUUID();
   const goodBody = { generation: 1, expected_epoch: 0, from_agent_session_id: from.session_id, work_attempt_id: wa, execution_generation_id: eg, cause: "crashed" };
@@ -1793,7 +1794,8 @@ test("attestation route: strict inputs, in-tx authorization, immutable evidence"
 
   // A lease the grant does not scope (different agent key) → 403, nothing written.
   const otherAgent = await authDb!.registerAgentIdentity({ canonical_key: "owner/other-agent", name: "other-agent", display_name: "Other", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
-  const otherLease = await authDb!.createTaskLease({ room_id: room.id, task_id: "task_2", kind: "work", agent_key: otherAgent.canonical_key, actor_label: "Other", created_by: "Other" });
+  const otherTask = await authDb!.createTask(room.id, "Out-of-scope work", "Human");
+  const otherLease = await authDb!.createTaskLease({ room_id: room.id, task_id: otherTask.id, kind: "work", agent_key: otherAgent.canonical_key, actor_label: "Other", created_by: "Other" });
   const denied = await call({ ...goodBody, from_agent_session_id: "sess_x" }, otherLease.id);
   assert.equal(denied.statusCode, 403);
   assert.equal((denied.body as any).code, "grant_scope");
