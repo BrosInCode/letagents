@@ -18,11 +18,13 @@ const dbModule = testDatabaseUrl ? await import("../db.js") : null;
 const schemaModule = testDatabaseUrl ? await import("../db/schema.js") : null;
 const visibilityModule = testDatabaseUrl ? await import("../db/messages/visibility.js") : null;
 const listModule = testDatabaseUrl ? await import("../account-room-membership/list.js") : null;
+const rolloutModule = testDatabaseUrl ? await import("../db/message-latest-time-rollout.js") : null;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
+const TIMESTAMP_INDEX = "messages_room_timestamp_idx";
 
 function deps() {
-  assert.ok(dbClientModule && dbModule && schemaModule && visibilityModule && listModule);
+  assert.ok(dbClientModule && dbModule && schemaModule && visibilityModule && listModule && rolloutModule);
   return {
     db: dbClientModule.db,
     pool: dbClientModule.pool,
@@ -33,18 +35,32 @@ function deps() {
     messages: schemaModule.messages,
     visibleMessageCondition: visibilityModule.visibleMessageCondition,
     latestMessagesForRooms: listModule.latestMessagesForRooms,
+    reconcileMessageLatestTimeRollout: rolloutModule.reconcileMessageLatestTimeRollout,
   };
 }
 
+/** Fresh schema from the SQL migrations, then the post-migration index rollout, as `npm run db:migrate` does. */
 async function resetDatabase(): Promise<void> {
-  const { db, pool } = deps();
+  const { db, pool, reconcileMessageLatestTimeRollout } = deps();
   await pool.query("DROP SCHEMA IF EXISTS public CASCADE");
   await pool.query("DROP SCHEMA IF EXISTS drizzle CASCADE");
   await pool.query("CREATE SCHEMA public");
   await migrate(db, { migrationsFolder });
+  await reconcileMessageLatestTimeRollout(pool, { log: () => {} });
 }
 
-/** The query the room list ran before it walked messages_pk: the reference result. */
+async function indexState(): Promise<"valid" | "invalid" | "missing"> {
+  const { rows } = await deps().pool.query<{ valid: boolean }>(
+    `SELECT pg_index.indisvalid AS valid FROM pg_index
+       JOIN pg_class ON pg_class.oid = pg_index.indexrelid
+      WHERE pg_class.relname = $1`,
+    [TIMESTAMP_INDEX],
+  );
+  if (!rows[0]) return "missing";
+  return rows[0].valid ? "valid" : "invalid";
+}
+
+/** The query the room list ran before it walked indexes: the reference result. */
 async function previousLatestMessagesForRooms(roomIds: string[]) {
   const { db, messages, visibleMessageCondition } = deps();
   const uniqueRoomIds = [...new Set(roomIds.filter(Boolean))];
@@ -85,15 +101,6 @@ async function insertMessages(roomId: string, rows: SeedMessage[]): Promise<void
   }
 }
 
-/** Sets the room's message counter, as nextRoomScopedNumber keeps it; null removes it. */
-async function setMessageCounter(roomId: string, value: number | null): Promise<void> {
-  const { pool } = deps();
-  await pool.query("DELETE FROM id_sequences WHERE name = $1", [`messages:${roomId}`]);
-  if (value !== null) {
-    await pool.query("INSERT INTO id_sequences (name, value) VALUES ($1, $2)", [`messages:${roomId}`, value]);
-  }
-}
-
 /** Asserts the new answer equals the previous query's answer exactly, and returns it. */
 async function assertSameAsPrevious(roomIds: string[]) {
   const { latestMessagesForRooms } = deps();
@@ -104,6 +111,29 @@ async function assertSameAsPrevious(roomIds: string[]) {
     new Map([...previous].sort(([a], [b]) => a.localeCompare(b)))
   );
   return current;
+}
+
+/** Captures the SQL latestMessagesForRooms sends and returns its EXPLAIN ANALYZE text. */
+async function explainLatestMessages(roomIds: string[]): Promise<string> {
+  const { pool, latestMessagesForRooms } = deps();
+  const captured: Array<{ text: string; values: unknown[] }> = [];
+  const originalQuery = pool.query;
+  pool.query = function patchedQuery(this: typeof pool, ...args: unknown[]) {
+    const [config, values] = args as [string | { text: string; values?: unknown[] }, unknown[] | undefined];
+    if (typeof config === "string") captured.push({ text: config, values: values ?? [] });
+    else captured.push({ text: config.text, values: values ?? config.values ?? [] });
+    return (originalQuery as (...input: unknown[]) => unknown).apply(this, args);
+  } as typeof pool.query;
+  try {
+    await latestMessagesForRooms(roomIds);
+  } finally {
+    pool.query = originalQuery;
+  }
+  const messageQueries = captured.filter((entry) => /\bmessages\b/.test(entry.text));
+  assert.equal(messageQueries.length, 1, "one query reads messages");
+  const [{ text, values }] = messageQueries;
+  const plan = await pool.query(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) ${text}`, values);
+  return plan.rows.map((row) => row["QUERY PLAN"]).join("\n");
 }
 
 if (!requiresDatabase) {
@@ -117,10 +147,10 @@ if (!requiresDatabase) {
 }
 
 test(
-  "latestMessagesForRooms returns the same ids and timestamps as the previous MAX query",
+  "latestMessagesForRooms returns the same ids and timestamps as the previous MAX query, with and without the index",
   { skip: requiresDatabase },
   async () => {
-    const { createProjectWithName, latestMessagesForRooms } = deps();
+    const { pool, createProjectWithName, latestMessagesForRooms } = deps();
 
     const visible = await createProjectWithName("latest-visible");
     await insertMessages(visible.id, [
@@ -161,14 +191,7 @@ test(
       visible.id,
     ];
 
-    // No counters: every room takes the exact MAX(timestamp) path.
-    await assertSameAsPrevious(roomIds);
-
-    // Counters at the top number, as the writer leaves them: the fast path.
-    await setMessageCounter(visible.id, 3);
-    await setMessageCounter(newestHidden.id, 4);
-    await setMessageCounter(onlyHidden.id, 2);
-    await setMessageCounter(blankVisible.id, 1);
+    assert.equal(await indexState(), "valid");
     const current = await assertSameAsPrevious(roomIds);
 
     assert.equal(current.size, 3);
@@ -182,38 +205,43 @@ test(
     assert.equal(current.has(onlyHidden.id), false);
     assert.equal(current.has(empty.id), false);
     assert.equal(current.has("latest-no-such-room"), false);
-
     assert.deepEqual(await latestMessagesForRooms([]), new Map());
+
+    // Before the rollout has built the index (or after a failed build), the
+    // answer is the same; Postgres only takes another plan.
+    await pool.query(`DROP INDEX ${TIMESTAMP_INDEX}`);
+    assert.equal(await indexState(), "missing");
+    assert.deepEqual(await latestMessagesForRooms(roomIds), current);
   }
 );
 
 test(
-  "latestMessagesForRooms keeps MAX(timestamp) when a lower number holds a newer message",
+  "latestMessagesForRooms returns the true latest time when a higher number has an older timestamp",
   { skip: requiresDatabase },
   async () => {
     const { createProjectWithName } = deps();
 
-    // #1 arrived after #2 (a vacant number handed out again); the counter is behind.
-    const behind = await createProjectWithName("latest-counter-behind");
-    await insertMessages(behind.id, [
-      { number: 1, text: "newer, lower number", timestamp: "2026-11-05T11:00:00.000Z" },
-      { number: 2, text: "older, higher number", timestamp: "2026-11-05T10:00:00.000Z" },
+    // A clock that stepped back: #2 was written after #1 but carries an earlier time.
+    const clockStep = await createProjectWithName("latest-clock-step");
+    await insertMessages(clockStep.id, [
+      { number: 1, text: "written first", timestamp: "2026-11-05T10:00:00.500Z" },
+      { number: 2, text: "written second, clock stepped back", timestamp: "2026-11-05T10:00:00.000Z" },
       { number: 3, text: "", agent_prompt_kind: "auto", timestamp: "2026-11-05T10:30:00.000Z" },
     ]);
-    await setMessageCounter(behind.id, 1);
+    await deps().pool.query("INSERT INTO id_sequences (name, value) VALUES ($1, 3)", [`messages:${clockStep.id}`]);
 
-    // The same rows with no counter row at all.
-    const missing = await createProjectWithName("latest-counter-missing");
-    await insertMessages(missing.id, [
+    // A reused lower number with a newer message.
+    const reused = await createProjectWithName("latest-reused-number");
+    await insertMessages(reused.id, [
       { number: 1, text: "newer, lower number", timestamp: "2026-11-06T11:00:00.000Z" },
       { number: 2, text: "older, higher number", timestamp: "2026-11-06T10:00:00.000Z" },
     ]);
 
-    const current = await assertSameAsPrevious([behind.id, missing.id]);
-    assert.equal(current.get(behind.id)?.latest_message_id, "msg_2");
-    assert.equal(Date.parse(current.get(behind.id)?.latest_message_at ?? ""), Date.parse("2026-11-05T11:00:00.000Z"));
-    assert.equal(current.get(missing.id)?.latest_message_id, "msg_2");
-    assert.equal(Date.parse(current.get(missing.id)?.latest_message_at ?? ""), Date.parse("2026-11-06T11:00:00.000Z"));
+    const current = await assertSameAsPrevious([clockStep.id, reused.id]);
+    assert.equal(current.get(clockStep.id)?.latest_message_id, "msg_2");
+    assert.equal(Date.parse(current.get(clockStep.id)?.latest_message_at ?? ""), Date.parse("2026-11-05T10:00:00.500Z"));
+    assert.equal(current.get(reused.id)?.latest_message_id, "msg_2");
+    assert.equal(Date.parse(current.get(reused.id)?.latest_message_at ?? ""), Date.parse("2026-11-06T11:00:00.000Z"));
   }
 );
 
@@ -274,7 +302,49 @@ test(
 );
 
 test(
-  "latestMessagesForRooms walks messages_pk backward per room instead of reading every message",
+  "latestMessagesForRooms matches the previous query after a pre-#1917 rename A -> B -> A",
+  { skip: requiresDatabase },
+  async () => {
+    const { pool, addMessage, createProjectWithName } = deps();
+
+    const roomA = "github.com/latest-org/round-trip";
+    const roomB = "github.com/latest-org/round-trip-renamed";
+    await createProjectWithName(roomA);
+    assert.equal((await addMessage(roomA, "agent", "", { agent_prompt_kind: "auto" })).id, "msg_1");
+    assert.equal((await addMessage(roomA, "alice", "visible two")).id, "msg_2");
+    assert.equal((await addMessage(roomA, "agent", "", { agent_prompt_kind: "auto" })).id, "msg_3");
+    // Model elapsed time: the old messages are two days old.
+    await pool.query(
+      "UPDATE messages SET timestamp = now() - INTERVAL '48 hours' WHERE room_id = $1",
+      [roomA]
+    );
+
+    // The rename before #1917 changed rooms.id (messages follow by cascade)
+    // and left every counter under its old name.
+    await pool.query("UPDATE rooms SET id = $1 WHERE id = $2", [roomB, roomA]);
+    const current = await addMessage(roomB, "alice", "current visible message");
+    assert.equal(current.id, "msg_1", "room B reuses the vacant number 1");
+    await pool.query("UPDATE rooms SET id = $1 WHERE id = $2", [roomA, roomB]);
+
+    const counters = await pool.query(
+      "SELECT name, value FROM id_sequences WHERE name LIKE 'messages:%' ORDER BY name"
+    );
+    assert.deepEqual(counters.rows, [
+      { name: `messages:${roomA}`, value: 3 },
+      { name: `messages:${roomB}`, value: 1 },
+    ]);
+
+    const latest = await assertSameAsPrevious([roomA]);
+    assert.equal(latest.get(roomA)?.latest_message_id, "msg_2");
+    assert.equal(Date.parse(latest.get(roomA)?.latest_message_at ?? ""), Date.parse(current.timestamp));
+    // The desktop "Needs you" list reads pending board requests only for a
+    // room whose latest message is under 24 hours old.
+    assert.ok(Date.now() - Date.parse(latest.get(roomA)?.latest_message_at ?? "") < 24 * 60 * 60 * 1000);
+  }
+);
+
+test(
+  "latestMessagesForRooms walks messages_pk and the timestamp index backward instead of reading every message",
   { skip: requiresDatabase },
   async () => {
     const { pool, createProjectWithName, latestMessagesForRooms } = deps();
@@ -292,51 +362,88 @@ test(
          FROM generate_series(1, 3000) AS n`,
         [room.id]
       );
-      await setMessageCounter(room.id, 3000);
     }
     await pool.query("ANALYZE messages");
-    await pool.query("ANALYZE id_sequences");
 
-    // Capture the SQL that latestMessagesForRooms sends, then ask Postgres for its plan.
-    const captured: Array<{ text: string; values: unknown[] }> = [];
-    const originalQuery = pool.query;
-    pool.query = function patchedQuery(this: typeof pool, ...args: unknown[]) {
-      const [config, values] = args as [string | { text: string; values?: unknown[] }, unknown[] | undefined];
-      if (typeof config === "string") captured.push({ text: config, values: values ?? [] });
-      else captured.push({ text: config.text, values: values ?? config.values ?? [] });
-      return (originalQuery as (...input: unknown[]) => unknown).apply(this, args);
-    } as typeof pool.query;
-    let latest;
-    try {
-      latest = await latestMessagesForRooms(roomIds);
-    } finally {
-      pool.query = originalQuery;
-    }
-
+    const latest = await latestMessagesForRooms(roomIds);
     assert.equal(latest.size, 4);
     for (const roomId of roomIds) {
       // Every seventh message is a hidden blank auto prompt; 3000 % 7 = 4, so 3000 is visible.
       assert.equal(latest.get(roomId)?.latest_message_id, "msg_3000");
     }
 
-    const messageQueries = captured.filter((entry) => /\bmessages\b/.test(entry.text));
-    assert.equal(messageQueries.length, 1, "one query reads messages");
-    const [{ text, values }] = messageQueries;
-    const plan = await pool.query(`EXPLAIN (ANALYZE, COSTS OFF, TIMING OFF, SUMMARY OFF) ${text}`, values);
-    const planText = plan.rows.map((row) => row["QUERY PLAN"]).join("\n");
-
+    const planText = await explainLatestMessages(roomIds);
     assert.match(planText, /Index Scan Backward using messages_pk on messages/, planText);
-    assert.match(planText, /Limit/, planText);
+    assert.match(planText, new RegExp(`Index Scan Backward using ${TIMESTAMP_INDEX} on messages`), planText);
     assert.doesNotMatch(planText, /Seq Scan on messages/, planText);
-    // With healthy counters every read of messages that runs is a backward walk
-    // of messages_pk; the exact MAX(timestamp) fallback never runs.
-    const messageReads = planText.split("\n").filter((line) => / on messages\b/.test(line));
-    assert.ok(messageReads.length > 0, planText);
-    for (const line of messageReads) {
-      assert.ok(
-        /Backward using messages_pk on messages/.test(line) || /\(never executed\)/.test(line),
-        `unexpected read of messages:\n${line}\n\n${planText}`
+    assert.doesNotMatch(planText, /Bitmap Heap Scan on messages/, planText);
+    assert.doesNotMatch(planText, /Sort/, planText);
+  }
+);
+
+test(
+  "the post-migration rollout builds the timestamp index, skips a valid one and replaces an invalid shell",
+  { skip: requiresDatabase },
+  async () => {
+    const { pool, reconcileMessageLatestTimeRollout } = deps();
+
+    assert.equal(await indexState(), "valid");
+    assert.deepEqual(await reconcileMessageLatestTimeRollout(pool), [], "a second run builds nothing");
+
+    await pool.query(`UPDATE pg_index SET indisvalid = false WHERE indexrelid = '${TIMESTAMP_INDEX}'::regclass`);
+    assert.equal(await indexState(), "invalid");
+    assert.deepEqual(await reconcileMessageLatestTimeRollout(pool), [TIMESTAMP_INDEX]);
+    assert.equal(await indexState(), "valid");
+
+    await pool.query(`DROP INDEX ${TIMESTAMP_INDEX}`);
+    assert.deepEqual(await reconcileMessageLatestTimeRollout(pool), [TIMESTAMP_INDEX]);
+    assert.equal(await indexState(), "valid");
+
+    const fs = await import("node:fs");
+    for (const file of fs.readdirSync(migrationsFolder).filter((name) => name.endsWith(".sql"))) {
+      assert.doesNotMatch(
+        fs.readFileSync(path.join(migrationsFolder, file), "utf8"),
+        new RegExp(TIMESTAMP_INDEX),
+        `${file}: the index is built only by the rollout, outside the migration transaction`,
       );
     }
+  }
+);
+
+test(
+  "when an open write transaction blocks the build, the rollout gives up without failing and a later run builds it",
+  { skip: requiresDatabase },
+  async () => {
+    const { pool, createProjectWithName, reconcileMessageLatestTimeRollout } = deps();
+
+    await pool.query(`DROP INDEX ${TIMESTAMP_INDEX}`);
+    const room = await createProjectWithName("latest-held-write");
+    const other = await pool.connect();
+    const lines: string[] = [];
+    try {
+      await other.query("BEGIN");
+      await other.query(
+        `INSERT INTO messages (room_id, number, sender, text, timestamp) VALUES ($1, 1, 'held', 'held', now())`,
+        [room.id]
+      );
+      const built = await reconcileMessageLatestTimeRollout(pool, {
+        lockTimeout: "100ms",
+        lockRetryDelaysMs: [20],
+        log: (line) => lines.push(line),
+      });
+      assert.deepEqual(built, []);
+    } finally {
+      await other.query("COMMIT");
+      other.release();
+    }
+    assert.ok(lines.some((line) => /waiting for an older transaction; retry 1/.test(line)), lines.join("\n"));
+    assert.ok(lines.some((line) => new RegExp(`${TIMESTAMP_INDEX} was not built`).test(line)), lines.join("\n"));
+    // The drop of the unfinished shell waits for the same transaction, so it
+    // may be left invalid; the queries ignore an invalid index.
+    assert.notEqual(await indexState(), "valid");
+    assert.deepEqual(await deps().latestMessagesForRooms([room.id]), await previousLatestMessagesForRooms([room.id]));
+
+    assert.deepEqual(await reconcileMessageLatestTimeRollout(pool, { log: () => {} }), [TIMESTAMP_INDEX]);
+    assert.equal(await indexState(), "valid");
   }
 );

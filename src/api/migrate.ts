@@ -11,6 +11,7 @@ import { analyzeMessageThreadProjection } from "./db/messages/projection-readine
 import { reconcileDueTimeLivenessRollout } from "./db/due-time-liveness-rollout.js";
 import { reconcileReplyTurnHoldRollout } from "./db/reply-turn-hold-rollout.js";
 import { reconcileGitHubWebhookIntegrityRollout } from "./db/github-webhook-integrity-rollout.js";
+import { reconcileMessageLatestTimeRollout } from "./db/message-latest-time-rollout.js";
 
 const THREAD_PROJECTION_BATCH_SIZE = 500;
 
@@ -33,6 +34,8 @@ async function main(): Promise<void> {
   const dueTimeRollout = await reconcileDueTimeLivenessRollout(pool);
   const replyTurnIndexes = await reconcileReplyTurnHoldRollout(pool);
   const githubWebhookIndexes = await reconcileGitHubWebhookIntegrityRollout(pool);
+  const messageLatestTimeIndexes = await reconcileMessageLatestTimeRollout(pool);
+  console.log(`Built ${messageLatestTimeIndexes.length} message latest-time indexes`);
   const workUnits = await reconcileMessageThreadProjection();
   await analyzeMessageThreadProjection();
   console.log(
