@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { spawn } from "node:child_process";
 import { mkdtemp, readFile, readdir, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import type { PathLike } from "node:fs";
+import { createRequire, syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -749,6 +751,48 @@ test("concurrent valid legacy importers converge on one exact private backup", a
     await assertOwnerPrivate(backup, "file");
     await assert.rejects(() => readFile(env.legacy, "utf8"), { code: "ENOENT" });
   } finally { await env.cleanup(); }
+});
+
+test("concurrent importers converge when both claim renames succeed, as Windows allows", async () => {
+  // Windows renames through an open handle: two renames of one path that start together can both
+  // succeed, and the file ends at the later name. This replays that on every platform.
+  const env = await fixture();
+  const fs = createRequire(import.meta.url)("node:fs") as typeof import("node:fs");
+  const realRename = fs.promises.rename;
+  const claims: Array<{ to: string; done: (error?: unknown) => void }> = [];
+  fs.promises.rename = (async (from: PathLike, to: PathLike) => {
+    if (String(from) !== env.legacy || !String(to).includes(".claimed.")) return realRename(from, to);
+    await new Promise<void>((resolve, reject) => {
+      claims.push({ to: String(to), done: (error) => error ? reject(error) : resolve() });
+      // Should a second importer never get here, the first rename still happens (and the claim count assertion fails).
+      if (claims.length === 1) setTimeout(() => { if (claims.length === 1) realRename(from, to).then(() => resolve(), reject); }, 5_000 * WAIT_SCALE).unref();
+      if (claims.length < 2) return;
+      fs.promises.rename = realRename; syncBuiltinESMExports();
+      const [first, second] = claims as [typeof claims[0], typeof claims[0]];
+      // Both succeed; the second rename moves the file the first one had just named.
+      void realRename(env.legacy, first.to).then(() => realRename(first.to, second.to))
+        .then(() => { first.done(); second.done(); }, (error) => { first.done(error); second.done(error); });
+    });
+  }) as typeof fs.promises.rename;
+  syncBuiltinESMExports();
+  try {
+    const rawA = legacyRaw("agent_a");
+    const seed = new WorkerBindingStore(join(env.root, "seed.json"), undefined, env.database);
+    await seed.list(); await seed.close();
+    await writeFile(env.legacy, rawA, { mode: 0o644 });
+    const one = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const two = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const [left, right] = await Promise.all([one.list(), two.list()]);
+    assert.equal(claims.length, 2, "both importers claimed the source at once");
+    assert.equal(left.length, 1); assert.equal(right.length, 1);
+    await one.close(); await two.close();
+    assertRedactedBackup(await readFile(`${env.legacy}.migrated-backup`, "utf8"), rawA);
+    await assert.rejects(() => readFile(env.legacy, "utf8"), { code: "ENOENT" });
+    assert.deepEqual((await readdir(env.root)).filter((name) => name.includes(".claimed.")), [], "no claim is left behind");
+  } finally {
+    fs.promises.rename = realRename; syncBuiltinESMExports();
+    await env.cleanup();
+  }
 });
 
 test("v4 validator rejects malformed private columns and quarantine housekeeping retries", async () => {

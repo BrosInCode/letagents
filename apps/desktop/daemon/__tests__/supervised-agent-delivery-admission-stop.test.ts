@@ -18,6 +18,7 @@ import {
   enqueue,
   ingest,
 } from "./helpers/supervised-agent-delivery-fixture.js";
+import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 test("pending new turns wait for managed runtime admission without claiming the FIFO head", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-runtime-admission-"));
@@ -758,10 +759,13 @@ test("a Stop that loses to an interrupt-rejection retryable still settles — it
   // must still settle that head cancelled_by_user (not map it to "published"),
   // and the stopped turn must NOT be re-dispatched.
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retryable-race-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const published: string[] = [];
     let calls = 0;
+    // The catch sleeps between `retryable` and `pending`. A real 200 ms sleep let a slow
+    // Windows runner miss that window; this sleep ends only once the Stop has landed.
+    const stopLanded = deferred<void>();
     const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
       calls += 1;
       await options?.checkpointTurnStarted?.(request.inboxItemId);
@@ -770,17 +774,22 @@ test("a Stop that loses to an interrupt-rejection retryable still settles — it
     }), {
       poll: async () => ({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }),
       publish: async (input) => { published.push(input.clientMessageId); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
-    }, currentAuthority, 200 /* catch sleeps here between retryable and pending */);
+    }, currentAuthority, 200, () => stopLanded.promise);
     try {
       const pollPromise = delivery.poll(agent);
-      await waitForAsync(async () => (await store.receipts(agent.agentId)).find((receipt) => receipt.source_message_id === "1")?.state === "retryable");
+      await waitForAsync(async () => (await store.receipts(agent.agentId)).find((receipt) => receipt.source_message_id === "1")?.state === "retryable", 15_000);
       const settlement = await delivery.interruptActiveDelivery(agent);
+      stopLanded.resolve();
       assert.equal(settlement, "settled", "a retryable (pre-publish) head is settled by the Stop, not called published");
       assert.equal((await store.receipts(agent.agentId)).find((receipt) => receipt.source_message_id === "1")?.state, "cancelled_by_user");
       await pollPromise;
       assert.equal(calls, 1, "the natively-interrupted turn is NOT rerun after the Stop");
       assert.equal(published.length, 0, "and nothing is published for the stopped turn");
-    } finally { await delivery.fenceAndDrain().catch(() => undefined); }
+    } finally { stopLanded.resolve(); await delivery.fenceAndDrain().catch(() => undefined); }
+  } finally {
+    // Close the database before the folder goes: on Windows an open daemon.sqlite
+    // cannot be deleted, and that EBUSY would hide the test's own failure.
     await store.close();
-  } finally { await rm(root, { recursive: true, force: true }); }
+    removeTestDirectory(root);
+  }
 });
