@@ -54,6 +54,7 @@ import { normalizedExternalRef, ticketRefParts } from "../src/components/desktop
 
 let vite: ViteDevServer;
 let TaskCard: object;
+let TaskInspector: object;
 let Kanban: object;
 let Toolbar: object;
 let GovernanceManagerSection: object;
@@ -66,6 +67,7 @@ before(async () => {
     server: { middlewareMode: true },
   });
   TaskCard = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardTaskCard.vue")).default;
+  TaskInspector = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardTaskInspector.vue")).default;
   Kanban = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardKanban.vue")).default;
   Toolbar = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardToolbar.vue")).default;
   GovernanceManagerSection = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-board/RoomBoardGovernanceManagerSection.vue")).default;
@@ -74,6 +76,19 @@ before(async () => {
 after(async () => { await vite?.close(); });
 
 describe("board card hierarchy", () => {
+  it("keeps event navigation when the only workflow reference becomes the prominent PR", async () => {
+    const html = await renderToString(createSSRApp({
+      render: () => h(TaskInspector, {
+        task: task({ workflowRefs: [{ provider: "github", kind: "pull_request", label: "PR #42", url: "https://github.com/org/repo/pull/42" }] }),
+        actions: [], busyAction: null, error: null, reviewAssignmentCandidates: [], selectedReviewer: "",
+      }),
+    }));
+    assert.match(html, /class="board-inspector-pr"[^>]+href="https:\/\/github.com\/org\/repo\/pull\/42"/);
+    assert.match(html, /View events/);
+    assert.match(html, /aria-expanded="false"[^>]*aria-controls="task-details-/);
+    assert.match(html, /Show details/);
+  });
+
   it("renders labelled filters and shows Clear filters only for active refinements", async () => {
     const render = (filters: { searchQuery?: string; ownerFilter?: string; statusFilter?: string; sort?: string } = {}) => renderToString(createSSRApp({
       render: () => h(Toolbar, {

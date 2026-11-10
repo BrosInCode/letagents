@@ -1,13 +1,9 @@
 <template>
-  <aside class="desktop-task-detail-panel" :data-status="task.status">
+  <TaskDetailLayout :summary="compactPerson(task.assignee) || 'Unassigned'" :detail-key="task.id">
+    <template #heading>
     <header class="desktop-task-detail-header">
       <div>
         <div class="desktop-task-detail-status-row">
-          <template v-if="ticket">
-            <span class="desktop-task-provider-chip" :data-provider="ticket.provider">{{ ticket.providerLabel }}</span>
-            <span class="desktop-task-id" :title="`${ticket.key} (${task.id})`">{{ ticket.key }}</span>
-          </template>
-          <span v-else class="desktop-task-id" :title="task.id">{{ shortTaskId(task.id) }}</span>
           <span class="desktop-task-status-badge" :data-status="task.status">
             {{ readableStatus(task.status) }}
           </span>
@@ -24,26 +20,7 @@
       <button v-if="canEdit" type="button" class="desktop-task-detail-button" title="Edit task" aria-label="Edit task" :disabled="busyAction !== null" @click="emit('edit')"><Pencil :size="16" aria-hidden="true" /></button>
     </header>
 
-    <section class="desktop-task-detail-grid" aria-label="Task ownership">
-      <span>
-        <small>Owner</small>
-        <strong>{{ compactPerson(task.assignee) || "Unassigned" }}</strong>
-      </span>
-      <span>
-        <small>Created by</small>
-        <strong>{{ compactPerson(task.createdBy) || "Unknown" }}</strong>
-      </span>
-      <span>
-        <small>Updated</small>
-        <strong>{{ relativeTime(task.updatedAt || task.createdAt, now) }}</strong>
-      </span>
-      <span>
-        <small>Working agent</small>
-        <strong>{{ compactPerson(taskWorkLease?.holderLabel || taskWorkLease?.agentKey) || "No one is working on this now" }}</strong>
-      </span>
-    </section>
-
-    <slot name="planning" />
+    </template>
 
     <section class="board-inspector-description">
       <h4>Description</h4>
@@ -52,94 +29,7 @@
     </section>
     <p v-if="error" class="desktop-task-dialog-error" role="alert">{{ error }}</p>
 
-    <details v-if="showAuthority || showReviewPanel || coordinationItems.length" class="board-agent-details">
-      <summary>Agent details <ChevronDown :size="16" aria-hidden="true" /></summary>
-      <div class="board-agent-details-content">
-    <section
-      v-if="showAuthority"
-      class="desktop-task-detail-section desktop-task-authority-panel"
-      :data-state="authorityState.state"
-    >
-      <header>
-        <div>
-          <small>Who can work on this</small>
-          <strong>{{ authorityState.label }}</strong>
-        </div>
-        <span>{{ authorityState.badge }}</span>
-      </header>
-      <p>{{ authorityState.detail }}</p>
-    </section>
-
-    <section
-      v-if="showReviewPanel"
-      class="desktop-task-review-panel"
-      :data-state="reviewAuthorityState.state"
-    >
-      <header>
-        <div>
-          <small>Reviewer</small>
-          <strong>{{ reviewAuthorityState.label }}</strong>
-        </div>
-        <span>{{ reviewAuthorityState.badge }}</span>
-      </header>
-      <p>{{ reviewAuthorityState.detail }}</p>
-
-      <div class="desktop-task-detail-grid">
-        <span>
-          <small>Working agent</small>
-          <strong>{{ compactPerson(taskWorkLease?.holderLabel || taskWorkLease?.agentKey) || "No one is working on this now" }}</strong>
-        </span>
-        <span>
-          <small>Reviewer</small>
-          <strong>{{ reviewerSummary }}</strong>
-        </span>
-      </div>
-
-      <div v-if="reviewAssignmentCandidates.length" class="desktop-task-review-assign">
-        <select
-          :value="selectedReviewer"
-          :disabled="busyAction !== null"
-          @change="onReviewerChange"
-        >
-          <option value="">Assign reviewer...</option>
-          <option
-            v-for="candidate in reviewAssignmentCandidates"
-            :key="reviewCandidateKey(candidate)"
-            :value="reviewCandidateValue(candidate)"
-          >
-            {{ reviewCandidateLabel(candidate) }}
-          </option>
-        </select>
-        <button
-          type="button"
-          class="desktop-task-action"
-          data-tone="neutral"
-          :disabled="busyAction !== null || !selectedReviewer"
-          @click="$emit('assign-review')"
-        >
-          {{ busyAction === `${task.id}:assign-review` ? "Assigning..." : "Assign" }}
-        </button>
-      </div>
-    </section>
-
-    <section v-if="coordinationItems.length" class="desktop-task-detail-section">
-      <h4>Coordination</h4>
-      <div class="desktop-task-coordination">
-        <span
-          v-for="item in coordinationItems"
-          :key="item.key"
-          class="desktop-task-chip"
-          :data-kind="item.kind"
-        >
-          {{ item.label }}
-        </span>
-      </div>
-    </section>
-
-      </div>
-    </details>
-
-    <section v-if="secondaryWorkflowRefs.length || hasArtifactNavigationRefs" class="desktop-task-detail-section">
+    <section v-if="secondaryWorkflowRefs.length || hasArtifactNavigationRefs || hasGitHubEventRefs" class="desktop-task-detail-section">
       <h4>Workflow</h4>
       <div v-if="secondaryWorkflowRefs.length" class="desktop-task-detail-list">
         <a
@@ -253,11 +143,108 @@
       @open-thread="emit('open-thread', $event)"
     />
 
-    <section v-if="actions.length" class="desktop-task-detail-section">
-      <h4>Actions</h4>
-      <div class="desktop-task-actions">
+    <template #details>
+      <dl class="board-inspector-properties">
+        <div><dt>Assignee</dt><dd>{{ compactPerson(task.assignee) || 'Unassigned' }}</dd></div>
+      </dl>
+      <slot name="planning" />
+      <dl class="board-inspector-properties board-inspector-created">
+        <div><dt>Created by</dt><dd>{{ compactPerson(task.createdBy) || 'Unknown' }}</dd></div>
+        <div><dt>Updated</dt><dd>{{ relativeTime(task.updatedAt || task.createdAt, now) }}</dd></div>
+      </dl>
+      <details class="board-agent-details">
+        <summary>Agent details <ChevronDown :size="14" aria-hidden="true" /></summary>
+        <div class="board-agent-details-content">
+          <p class="desktop-task-detail-muted">Working agent: {{ compactPerson(taskWorkLease?.holderLabel || taskWorkLease?.agentKey) || 'No active worker' }}</p>
+    <section
+      v-if="showAuthority"
+      class="desktop-task-detail-section desktop-task-authority-panel"
+      :data-state="authorityState.state"
+    >
+      <header>
+        <div>
+          <small>Who can work on this</small>
+          <strong>{{ authorityState.label }}</strong>
+        </div>
+        <span>{{ authorityState.badge }}</span>
+      </header>
+      <p>{{ authorityState.detail }}</p>
+    </section>
+
+    <section
+      v-if="showReviewPanel"
+      class="desktop-task-review-panel"
+      :data-state="reviewAuthorityState.state"
+    >
+      <header>
+        <div>
+          <small>Reviewer</small>
+          <strong>{{ reviewAuthorityState.label }}</strong>
+        </div>
+        <span>{{ reviewAuthorityState.badge }}</span>
+      </header>
+      <p>{{ reviewAuthorityState.detail }}</p>
+
+      <div class="desktop-task-detail-grid">
+        <span>
+          <small>Working agent</small>
+          <strong>{{ compactPerson(taskWorkLease?.holderLabel || taskWorkLease?.agentKey) || "No one is working on this now" }}</strong>
+        </span>
+        <span>
+          <small>Reviewer</small>
+          <strong>{{ reviewerSummary }}</strong>
+        </span>
+      </div>
+
+      <div v-if="reviewAssignmentCandidates.length" class="desktop-task-review-assign">
+        <select
+          :value="selectedReviewer"
+          :disabled="busyAction !== null"
+          @change="onReviewerChange"
+        >
+          <option value="">Assign reviewer...</option>
+          <option
+            v-for="candidate in reviewAssignmentCandidates"
+            :key="reviewCandidateKey(candidate)"
+            :value="reviewCandidateValue(candidate)"
+          >
+            {{ reviewCandidateLabel(candidate) }}
+          </option>
+        </select>
         <button
-          v-for="action in actions"
+          type="button"
+          class="desktop-task-action"
+          data-tone="neutral"
+          :disabled="busyAction !== null || !selectedReviewer"
+          @click="$emit('assign-review')"
+        >
+          {{ busyAction === `${task.id}:assign-review` ? "Assigning..." : "Assign" }}
+        </button>
+      </div>
+    </section>
+
+    <section v-if="coordinationItems.length" class="desktop-task-detail-section">
+      <h4>Coordination</h4>
+      <div class="desktop-task-coordination">
+        <span
+          v-for="item in coordinationItems"
+          :key="item.key"
+          class="desktop-task-chip"
+          :data-kind="item.kind"
+        >
+          {{ item.label }}
+        </span>
+      </div>
+    </section>
+
+        </div>
+      </details>
+    </template>
+    <template #actions>
+      <button type="button" class="desktop-task-back" :disabled="busyAction !== null" @click="emit('close')">View on board</button>
+      <div class="desktop-task-actions task-detail-actions">
+        <button
+          v-for="action in footerActions"
           :key="`${task.id}:${action.id}`"
           type="button"
           class="desktop-task-action"
@@ -268,19 +255,20 @@
           {{ busyAction === `${task.id}:${action.id}` ? action.busyLabel || "Working..." : action.label }}
         </button>
       </div>
-    </section>
-  </aside>
+    </template>
+  </TaskDetailLayout>
 </template>
 
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
+import TaskDetailLayout from "../../../../../../../../shared/ui/board/TaskDetailLayout.vue";
 import { Pencil, GitPullRequest, ArrowUpRight, ChevronDown } from '@lucide/vue';
 import MarkdownBlock from '../formatting/MarkdownBlock.vue';
 import TaskLinkedThreads from './TaskLinkedThreads.vue';
 import type { DesktopAgentPresence, DesktopTaskSummary, DesktopTaskTicket } from "../../../../../../electron/ipc-types";
 import { desktopIpc, getRoomBridge } from "../../../../ipc/index.js";
 import { ticketRefParts, ticketStateLabel } from "./ticket-ref";
-import { compactPerson, readableStatus, relativeTime, shortTaskId, staleSummary } from "./formatters";
+import { compactPerson, readableStatus, relativeTime, staleSummary } from "./formatters";
 import { useNow } from "../../../../composables/useNow";
 
 // Labels such as "2m ago" move on with the shared clock even when the data is unchanged.
@@ -311,6 +299,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   edit: [];
+  close: [];
   "assign-review": [];
   "run-action": [action: TaskAction];
   "update:selected-reviewer": [value: string];
@@ -369,6 +358,7 @@ watch(
   { immediate: true },
 );
 
+const footerActions = computed(() => [...props.actions.filter(action => action.tone !== "primary"), ...props.actions.filter(action => action.tone === "primary")]);
 const showAuthority = computed(() => shouldShowAuthority(props.task));
 const authorityState = computed(() => executionAuthorityState(props.task));
 const showReviewPanel = computed(() => shouldShowReviewPanel(props.task));
@@ -377,7 +367,7 @@ const taskWorkLease = computed(() => workLease(props.task));
 const taskSecondaryLeases = computed(() => secondaryLeases(props.task));
 const taskWorkflowRefs = computed(() => workflowRefs(props.task));
 const primaryPr = computed(() => {
-  const url = props.task.prUrl || props.task.workflowArtifacts.find(item => item.kind === "pull_request")?.url;
+  const url = props.task.prUrl || props.task.workflowArtifacts.find(item => item.kind === "pull_request")?.url || taskWorkflowRefs.value.find(item => item.kind === "pull_request")?.url;
   if (!url || !/^https?:\/\//i.test(url)) return null;
   const number = /\/pull\/(\d+)(?:[/?#]|$)/.exec(url)?.[1];
   return { url, label: number ? `#${number}` : "Open pull request" };
@@ -426,25 +416,33 @@ function onReviewerChange(event: Event): void {
 </script>
 
 <style scoped>
-.desktop-task-detail-panel { gap: 28px; font-size: 14px; }
-.desktop-task-detail-header { gap: 16px; padding-right: 42px; }
-.desktop-task-detail-header h3 { margin: 14px 0 0; font-size: 28px; font-weight: 600; line-height: 1.3; letter-spacing: -.65px; overflow-wrap: anywhere; }
-.desktop-task-detail-status-row { gap: 10px; font-size: 13px; }
-.desktop-task-detail-panel .desktop-task-detail-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px 28px; padding: 0; }
-.desktop-task-detail-grid small { font-size: 12px; }
-.desktop-task-detail-grid strong { color: var(--text); font-size: 14px; font-weight: 450; }
-.board-inspector-pr { display: inline-flex; align-items: center; gap: 7px; margin-top: 16px; color: var(--blue); font-size: 14px; font-weight: 550; text-decoration: none; }
-.board-inspector-description h4 { margin: 0 0 12px; font-size: 14px; font-weight: 550; }
-.board-inspector-description .task-markdown-preview { color: var(--text); font-size: 15px; line-height: 1.75; }
-.board-agent-details { min-width: 0; }
-.board-agent-details > summary { display: flex; align-items: center; justify-content: space-between; min-height: 40px; list-style: none; cursor: pointer; color: var(--text-secondary); font-size: 14px; }
-.board-agent-details > summary::-webkit-details-marker { display: none; }
-.board-agent-details > summary svg { transition: transform 180ms ease; }
-.board-agent-details[open] > summary svg { transform: rotate(180deg); }
-.board-agent-details-content { display: grid; gap: 20px; padding-top: 14px; }
-.board-agent-details-content :is(.desktop-task-detail-section, .desktop-task-review-panel) { border: 0; background: transparent; padding: 0; }
-.desktop-task-detail-panel > .desktop-task-detail-section { border: 0; padding: 0; }
-.desktop-task-detail-panel :is(a, summary):focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
-@media (max-width: 600px) { .desktop-task-detail-header h3 { font-size: 24px; } .desktop-task-detail-panel { gap: 24px; } }
-@media (prefers-reduced-motion: reduce) { .board-agent-details > summary svg { transition: none; } }
+.desktop-task-detail-header { gap:16px; }
+.desktop-task-detail-header h3 { margin:16px 0 0; color:var(--text); font-size:28px; font-weight:600; line-height:1.28; letter-spacing:-.65px; overflow-wrap:anywhere; }
+.desktop-task-detail-status-row { gap:10px; font-size:12px; }
+.desktop-task-status-badge { font-size:12px; }
+.board-inspector-pr { display:inline-flex; align-items:center; gap:8px; margin-top:20px; color:var(--blue); font-size:16px; font-weight:600; text-decoration:none; }
+.board-inspector-pr:hover { text-decoration:underline; text-underline-offset:3px; }
+.board-inspector-description h4 { margin:0 0 12px; font-size:13px; font-weight:600; }
+.board-inspector-properties { display:grid; gap:4px; margin:0; font-size:12px; }
+.board-inspector-properties>div { display:grid; grid-template-columns:78px minmax(0,1fr); gap:6px; align-items:start; min-height:32px; padding:7px 0; }
+.board-inspector-properties dt { color:var(--text-secondary); }
+.board-inspector-properties dd { margin:0; color:var(--text); overflow-wrap:anywhere; }
+.board-inspector-created { padding-top:18px; margin-top:18px; border-top:1px solid var(--border); }
+.board-agent-details { margin-top:14px; min-width:0; }
+.board-agent-details>summary { display:flex; align-items:center; justify-content:space-between; min-height:36px; list-style:none; cursor:pointer; color:var(--text-secondary); font-size:12px; border-radius:6px; }
+.board-agent-details>summary::-webkit-details-marker { display:none; }
+.board-agent-details>summary svg { transition:transform 160ms ease; }
+.board-agent-details[open]>summary svg { transform:rotate(180deg); }
+.board-agent-details-content { display:grid; gap:20px; padding-top:14px; }
+.board-agent-details-content :is(.desktop-task-detail-section,.desktop-task-review-panel) { border:0; background:transparent; padding:0; }
+.board-agent-details-content .desktop-task-detail-grid { grid-template-columns:minmax(0,1fr); }
+.board-agent-details-content :is(strong,span) { white-space:normal; overflow-wrap:anywhere; }
+.board-agent-details-content .desktop-task-review-assign { flex-wrap:wrap; }
+.board-agent-details-content select { min-width:0; max-width:100%; }
+.task-detail-actions { justify-content:flex-end; align-items:center; margin-left:auto; }
+.task-detail-actions .desktop-task-action { flex:0 0 auto; }
+.task-detail-actions .desktop-task-action[data-tone="primary"] { min-width:104px; border-color:transparent; background:var(--text); color:var(--bg); }
+.desktop-task-back { border:0; background:transparent; color:var(--text-secondary); padding:8px 0; font:inherit; font-size:12px; cursor:pointer; }
+@media(max-width:760px) { .desktop-task-detail-header h3 { font-size:25px; } .board-inspector-properties>div { grid-template-columns:minmax(78px,1fr) 145px; } }
+@media(prefers-reduced-motion:reduce) { .board-agent-details>summary svg { transition:none; } }
 </style>
