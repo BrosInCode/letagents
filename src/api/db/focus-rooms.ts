@@ -7,6 +7,7 @@ import { normalizeRoomDisplayName } from "../rooms/display-name.js";
 import { db } from "./client.js";
 import { id_sequences, rooms } from "./schema.js";
 import { getRoomScopedSequenceNames, isUniqueConstraintError } from "./utils.js";
+import { findFocusRoomRowByKey } from "./focus-room-lookup.js";
 import { toProject } from "./mappers.js";
 import { buildFocusRoomId, getProjectById } from "./rooms.js";
 import { getTaskById } from "./tasks.js";
@@ -102,22 +103,14 @@ export async function getActiveFocusRoomForTask(
 export async function getFocusRoomByKey(
   parentRoomId: string,
   focusKey: string,
-  options: { includeArchived?: boolean } = {}
+  options: { includeArchived?: boolean; archivedOrder?: "newest" | "oldest" } = {}
 ): Promise<Project | undefined> {
-  const conditions = [
-    eq(rooms.parent_room_id, parentRoomId),
-    eq(rooms.focus_key, focusKey),
-    eq(rooms.kind, "focus"),
-  ];
-  if (!options.includeArchived) {
-    conditions.push(isNull(rooms.focus_archived_at));
-  }
-
-  const [focusRoom] = await db
-    .select()
-    .from(rooms)
-    .where(and(...conditions))
-    .limit(1);
+  const focusRoom = await findFocusRoomRowByKey({
+    parentRoomId,
+    focusKey,
+    includeArchived: Boolean(options.includeArchived),
+    archivedOrder: options.archivedOrder,
+  });
 
   return focusRoom ? toProject(focusRoom) : undefined;
 }
@@ -128,8 +121,12 @@ export async function archiveFocusRoom(
 ): Promise<{ room: Project; archived: boolean } | null> {
   const focusRoom = await getFocusRoomByKey(parentRoomId, focusKey);
   if (!focusRoom) {
+    // The archive route shows this room to released clients. Before the
+    // shared lookup, an unordered query returned the first-created row, so
+    // keep the oldest archived row here.
     const archivedFocusRoom = await getFocusRoomByKey(parentRoomId, focusKey, {
       includeArchived: true,
+      archivedOrder: "oldest",
     });
     return archivedFocusRoom ? { room: archivedFocusRoom, archived: false } : null;
   }
@@ -151,6 +148,7 @@ export async function archiveFocusRoom(
 
   const current = await getFocusRoomByKey(parentRoomId, focusKey, {
     includeArchived: true,
+    archivedOrder: "oldest",
   });
   return current ? { room: current, archived: false } : null;
 }
