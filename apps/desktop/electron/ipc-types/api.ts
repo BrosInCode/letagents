@@ -253,6 +253,10 @@ export interface DesktopApi {
     /** Receipts for the signed-in person's own messages among `messageIds`; other messages are left out. */
     getMessageReceipts?: (roomIdentifier: string, messageIds: string[]) => Promise<DesktopMessageReceipt[]>;
     getMessagesAfter?: (roomIdentifier: string, afterMessageId: string | null) => Promise<{ messages: DesktopRoomMessage[]; hasMore: boolean }>;
+    /** The account's server-side read points and unread counts; null from a server without them. */
+    getAccountUnread?: () => Promise<import("./unread.js").DesktopAccountUnread | null>;
+    /** Records that this account read a cloud room from one message (or only the last) up to a message, as the web does. */
+    reportRoomRead?: (roomIdentifier: string, messageId: string, fromMessageId?: string | null) => Promise<void>;
     getMessagesBefore: (roomIdentifier: string, beforeMessageId: string, limit?: number) => Promise<DesktopRoomMessagesPage>;
     getThreads: (roomIdentifier: string, filter?: DesktopRoomThreadInboxFilter, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadInboxPage>;
     getThread: (roomIdentifier: string, threadRootId: string, beforeMessageId?: string | null, limit?: number) => Promise<DesktopRoomThreadPage>;

@@ -101,6 +101,20 @@ test("valid join requests are forwarded to the room stream boundary; malformed f
   assert.deepEqual(roomEvents, [{ type: "join_request", roomIdentifier: "design-lounge", event: payload }]);
 });
 
+test("a read the account recorded anywhere moves the read revision and keeps the rooms", async () => {
+  let send!: (event: string, data: unknown) => void;
+  responders.push((res) => { send = sse(res); });
+  stream.restartAccountActivityStream();
+  await until(() => Boolean(send), "the stream to open");
+  send("snapshot", { rooms: [{ room_id: "room-a", latest_message_id: "msg_3", latest_message_at: null, working: [] }] });
+  await until(() => stream.getAccountActivityState().connected, "the snapshot");
+  const before = stream.getAccountActivityState().readRevision ?? 0;
+  send("room_read", { room_id: "room-a", last_message_id: "msg_3" });
+  await until(() => (stream.getAccountActivityState().readRevision ?? 0) === before + 1, "the read revision");
+  assert.deepEqual(stream.getAccountActivityState().lastRead, { roomId: "room-a", lastMessageId: "msg_3" });
+  assert.equal(stream.getAccountActivityState().rooms["room-a"].latestMessageId, "msg_3");
+});
+
 test("a dropped stream is shown as disconnected and reconnects by itself", async () => {
   let first!: ServerResponse;
   let secondOpened = false;
