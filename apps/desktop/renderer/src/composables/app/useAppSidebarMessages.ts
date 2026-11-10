@@ -6,6 +6,7 @@ import type { ProjectGroup, RoomEntry } from "../../components/desktop/types";
 import {
   deriveSidebarLatestMessages,
   isRoomBeingRead,
+  localAccountRoomKeys,
   markRoomRead,
   readStoredRoomMessageIds,
   roomReadKey,
@@ -89,11 +90,12 @@ export function useAppSidebarMessages(context: unknown) {
     void app.refreshUnreadCounts();
   }
 
+  // One set per room-list change; each sidebar row then checks its room in constant time.
+  const localRoomKeys = computed(() => localAccountRoomKeys(accountRooms.value));
   function roomUsesLocalHistory(identifier: string): boolean {
     const override = chatStorageSettings.value?.roomOverrides[identifier];
     return /^local[_-]|^git-room:local:/i.test(identifier)
-      || accountRooms.value.some((room) => [room, ...room.focusRooms].some((entry) =>
-        roomReadKey(entry.roomIdentifier) === roomReadKey(identifier) && entry.source === "local"))
+      || localRoomKeys.value.has(roomReadKey(identifier) ?? "")
       || (override && override !== "inherit" ? override : chatStorageSettings.value?.mode) === "local";
   }
 

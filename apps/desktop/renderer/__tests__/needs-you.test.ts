@@ -483,6 +483,25 @@ test('Needs you re-reads a room a moment after its activity, at most once per ga
   } finally { scope.stop(); }
 });
 
+test('a card that changes in a room re-reads that room, with no message posted', async (context) => {
+  context.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: Date.parse('2026-09-30T06:00:00Z') });
+  const { useNeedsYouRoomActivity } = await import('../src/composables/useNeedsYou');
+  const { effectScope, nextTick, ref } = await import('vue');
+  const reads: string[] = [];
+  const activity = ref({ connected: true, rooms: {} as Record<string, { roomId: string; latestMessageId: string | null; latestMessageAt: string | null; working: Array<{ displayName: string }> }> });
+  const stamps = ref<Record<string, string | null>>({ 'github.com/acme/app': null, focus_1: null });
+  const scope = effectScope();
+  scope.run(() => useNeedsYouRoomActivity(activity, async (room) => { reads.push(room); }, 3_000, stamps));
+  try {
+    stamps.value = { ...stamps.value, 'github.com/acme/app': '2026-09-30T06:00:01Z', other_room: '2026-09-30T06:00:01Z' };
+    await nextTick(); context.mock.timers.tick(0);
+    assert.deepEqual(reads, ['github.com/acme/app'], 'only a watched room whose cards changed; a room first seen now is not a change');
+    stamps.value = { ...stamps.value };
+    await nextTick(); context.mock.timers.tick(10_000);
+    assert.equal(reads.length, 1, 'an unchanged stamp reads nothing');
+  } finally { scope.stop(); }
+});
+
 test('Open room from the Inbox switches at once for a room the sidebar lists', async () => {
   const { openInboxRoom } = await import('../src/domain/desktop-navigation');
   const calls: string[] = [];
@@ -543,4 +562,24 @@ test('a room an Inbox item opened reports a failed load once; other loads stay q
   assert.equal(await opens.load('room:c', async () => 'loaded'), 'loaded');
   await assert.rejects(opens.load('room:c', fail));
   assert.equal(reported.length, 1, 'a later load of the same room is not the Inbox\'s');
+});
+
+test('the one-minute Needs you read runs while the activity stream is open, and pauses only while hidden', async (context) => {
+  context.mock.timers.enable({ apis: ['setInterval'] });
+  const { startNeedsYouTimer, NEEDS_YOU_REFRESH_MS } = await import('../src/composables/useNeedsYou');
+  let hidden = false;
+  let reads = 0;
+  const stop = startNeedsYouTimer(() => { reads += 1; }, () => hidden);
+  try {
+    context.mock.timers.tick(NEEDS_YOU_REFRESH_MS);
+    assert.equal(reads, 1, 'approvals, rentals and reminders are read again with no stream signal');
+    hidden = true;
+    context.mock.timers.tick(NEEDS_YOU_REFRESH_MS);
+    assert.equal(reads, 1);
+    hidden = false;
+    context.mock.timers.tick(NEEDS_YOU_REFRESH_MS);
+    assert.equal(reads, 2);
+  } finally { stop(); }
+  context.mock.timers.tick(NEEDS_YOU_REFRESH_MS);
+  assert.equal(reads, 2, 'stopped');
 });

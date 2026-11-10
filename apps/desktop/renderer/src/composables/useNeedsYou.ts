@@ -87,6 +87,21 @@ export function useNeedsYou() {
   return { data, loading, error, count, refresh, refreshRoom, reset, mergeThreads };
 }
 
+/** How often Needs you is read again while the window is shown. */
+export const NEEDS_YOU_REFRESH_MS = 60_000;
+
+/**
+ * The one-minute Needs you read. It stays on whether or not the account
+ * activity stream is open: besides the rooms' requests (one account request)
+ * it re-reads the local agents, their tool approvals (which have no push
+ * signal), rental requests and, in the Inbox, reminders. Paused while hidden.
+ */
+export function startNeedsYouTimer(refresh: () => void, hidden: () => boolean = () => typeof document !== 'undefined' && document.hidden,
+  intervalMs = NEEDS_YOU_REFRESH_MS): () => void {
+  const timer = setInterval(() => { if (!hidden()) refresh(); }, intervalMs);
+  return () => clearInterval(timer);
+}
+
 /** A busy room is re-read at most this often. */
 export const NEEDS_YOU_ROOM_REFRESH_GAP_MS = 3_000;
 
@@ -97,7 +112,9 @@ export const NEEDS_YOU_ROOM_REFRESH_GAP_MS = 3_000;
  * Like that poll, it pauses while the window is hidden and catches up on return.
  */
 export function useNeedsYouRoomActivity(activity: Ref<DesktopAccountActivityState>, refreshRoom: (roomId: string) => Promise<void>,
-  gapMs = NEEDS_YOU_ROOM_REFRESH_GAP_MS) {
+  gapMs = NEEDS_YOU_ROOM_REFRESH_GAP_MS,
+  /** When each room's cards last changed (by server room id): a card that becomes blocked or in review posts no message. */
+  tasksChangedAt?: Ref<Record<string, string | null>>) {
   const timers = new Map<string, ReturnType<typeof setTimeout>>();
   const lastRead = new Map<string, number>();
   const missedWhileHidden = new Set<string>();
@@ -121,6 +138,11 @@ export function useNeedsYouRoomActivity(activity: Ref<DesktopAccountActivityStat
     for (const [key, room] of Object.entries(rooms)) {
       const before = previous?.[key];
       if (before && room.latestMessageId && before.latestMessageId !== room.latestMessageId) schedule(room.roomId);
+    }
+  });
+  if (tasksChangedAt) watch(tasksChangedAt, (stamps, previous) => {
+    for (const [roomId, stamp] of Object.entries(stamps)) {
+      if (previous && roomId in previous && stamp && previous[roomId] !== stamp) schedule(roomId);
     }
   });
   if (typeof document !== 'undefined') document.addEventListener('visibilitychange', catchUp);

@@ -28,6 +28,12 @@ const reminders = testDatabaseUrl ? await import("../notifications/reminders.js"
 const settle = testDatabaseUrl ? await import("./settle-background-db-work.js") : null;
 
 const FAR_FALLBACK_MS = 600_000;
+/**
+ * How long a claim may take on a slow shared runner. Every bound here is
+ * generous: with the fallback ten minutes away, a claim within it can only
+ * come from a wake or a due time, so the bound proves nothing by being tight.
+ */
+const CLAIM_WITHIN_MS = 15_000;
 
 if (testDatabaseUrl) {
   test.beforeEach(async () => {
@@ -64,7 +70,7 @@ function countPoolUse(): { count(): number; reset(): void; restore(): void } {
   };
 }
 
-async function until(label: string, check: () => Promise<boolean>, limitMs = 5_000): Promise<number> {
+async function until(label: string, check: () => Promise<boolean>, limitMs = CLAIM_WITHIN_MS): Promise<number> {
   const started = Date.now();
   while (Date.now() - started < limitMs) {
     if (await check()) return Date.now() - started;
@@ -88,14 +94,17 @@ async function jobState(roomId: string, messageNumber: number): Promise<string |
   return result.rows[0]?.state;
 }
 
-async function insertJevJob(roomId: string, messageNumber: number, dueInMs: number): Promise<void> {
+async function insertJevJob(roomId: string, messageNumber: number, dueInMs: number): Promise<string> {
   // A shadow plan past its deadline completes with no inference call.
   const plan = { mode: "shadow", roomId, message: { number: messageNumber, publisher_agent_key: null },
     heuristic: null, agent_count: 3, no_wake: null };
-  await client!.pool.query(`
+  const inserted = await client!.pool.query<{ due: string }>(`
     INSERT INTO jev_routing_jobs (room_id, message_number, plan, available_at, expires_at)
     VALUES ($1, $2, $3, now() + ($4::int * interval '1 millisecond'), now() - interval '1 second')
+    RETURNING available_at::text AS due
   `, [roomId, messageNumber, JSON.stringify(plan), dueInMs]);
+  // A claim moves available_at to the end of its lease: keep the due time it was inserted with.
+  return inserted.rows[0]!.due;
 }
 
 test("idle workers run no claim query between fallbacks", { skip }, async () => {
@@ -123,16 +132,23 @@ test("a Jev job is claimed at once on a wake and a lease or retry at its due tim
     const { room, messageNumber } = await seedRoom();
     await insertJevJob(room.id, messageNumber, 0);
     wakes!.wakeJobQueue("jev_routing");
-    const prompt = await until("the woken claim", async () => await jobState(room.id, messageNumber) === "completed");
-    assert.ok(prompt < 1_000, `claimed ${prompt} ms after the wake`);
+    await until("the woken claim", async () => await jobState(room.id, messageNumber) === "completed");
 
     const later = await api!.addMessage(room.id, "Agent", "later", { source: "agent" });
     const laterNumber = Number(later.id.slice(4));
-    await insertJevJob(room.id, laterNumber, 1_200);
+    const dueAt = await insertJevJob(room.id, laterNumber, 1_500);
     wakes!.wakeJobQueue("jev_routing");
-    await delay(700);
-    assert.equal(await jobState(room.id, laterNumber), "pending", "not claimed before it is due");
-    await until("the due claim", async () => await jobState(room.id, laterNumber) === "completed", 3_000);
+    // Until the database says the job is due, it must still be pending; then it is claimed.
+    let sawPendingBeforeDue = false;
+    await until("the due claim", async () => {
+      const row = (await client!.pool.query<{ state: string; due: boolean }>(
+        "SELECT state, $3::timestamptz <= now() AS due FROM jev_routing_jobs WHERE room_id = $1 AND message_number = $2",
+        [room.id, laterNumber, dueAt])).rows[0]!;
+      if (!row.due && row.state !== "pending") assert.fail(`claimed before its due time (${row.state})`);
+      if (!row.due) sawPendingBeforeDue = true;
+      return row.state === "completed";
+    });
+    assert.ok(sawPendingBeforeDue, "the job was seen waiting before its due time");
   } finally {
     await stop();
   }
@@ -171,13 +187,17 @@ test("a reminder becomes a push at its due time, and push retries are scheduled"
     await delay(200);
     const { account, room, messageNumber } = await seedRoom();
     const created = await reminders!.createMessageReminder({ accountId: account.id, roomId: room.id, messageNumber,
-      dueAt: new Date(Date.now() + 1_200).toISOString() });
+      dueAt: new Date(Date.now() + 1_500).toISOString() });
     assert.ok(created.reminder);
-    const state = async () => (await client!.pool.query<{ state: string }>(
-      "SELECT state FROM message_reminders WHERE id = $1", [created.reminder.id])).rows[0]?.state;
-    await delay(700);
-    assert.equal(await state(), "pending", "not before it is due");
-    await until("the due reminder", async () => await state() === "due", 3_000);
+    let sawPendingBeforeDue = false;
+    await until("the due reminder", async () => {
+      const row = (await client!.pool.query<{ state: string; due: boolean }>(
+        "SELECT state, due_at <= now() AS due FROM message_reminders WHERE id = $1", [created.reminder.id])).rows[0]!;
+      if (!row.due && row.state !== "pending") assert.fail("enqueued before its due time");
+      if (!row.due) sawPendingBeforeDue = true;
+      return row.state === "due";
+    });
+    assert.ok(sawPendingBeforeDue, "the reminder was seen waiting before its due time");
 
     // The next due time counts a retry of any outbox.
     assert.equal(await push!.nextDesktopPushDueInMs(true), null);
@@ -222,14 +242,19 @@ test("a wake delivery is claimed at once on a wake and a retry at its due time",
 
     await insert("whd-now", 0);
     wakes!.wakeJobQueue("wake_delivery");
-    const prompt = await until("the woken claim", async () => await state("whd-now") === "dead");
-    assert.ok(prompt < 1_000, `claimed ${prompt} ms after the wake`);
+    await until("the woken claim", async () => await state("whd-now") === "dead");
 
-    await insert("whd-later", 1_200);
+    await insert("whd-later", 1_500);
     wakes!.wakeJobQueue("wake_delivery");
-    await delay(700);
-    assert.equal(await state("whd-later"), "retry", "not claimed before it is due");
-    await until("the due claim", async () => await state("whd-later") === "dead", 3_000);
+    let sawWaitingBeforeDue = false;
+    await until("the due claim", async () => {
+      const row = (await client!.pool.query<{ state: string; due: boolean }>(
+        "SELECT state, next_attempt_at <= now() AS due FROM wake_webhook_deliveries WHERE id = 'whd-later'")).rows[0]!;
+      if (!row.due && row.state !== "retry") assert.fail(`claimed before its due time (${row.state})`);
+      if (!row.due) sawWaitingBeforeDue = true;
+      return row.state === "dead";
+    });
+    assert.ok(sawWaitingBeforeDue, "the delivery was seen waiting before its due time");
     assert.equal(await wakeDeliveries!.nextWakeDeliveryDueInMs("webhook"), null);
   } finally {
     await stop();
@@ -271,10 +296,38 @@ test("a finished delivery of one kind wakes the lanes its account cap was blocki
     await delay(500);
     assert.equal(await state("cap-email"), "retry", "the account cap holds the email back");
     release();
-    const waited = await until("the email claim", async () => await state("cap-email") === "dead", 3_000);
-    assert.ok(waited < 2_000, `claimed ${waited} ms after the webhooks finished`);
+    // The fallback is ten minutes away: only the finished webhooks' wake explains the claim.
+    await until("the email claim", async () => await state("cap-email") === "dead");
   } finally {
     release();
     await stop();
   }
+});
+
+test("a row that falls due between a claim and the next-due read is still found, not left for the fallback", { skip }, async () => {
+  // The race behind CI run 42751540606: the timer fires a moment before the row
+  // is claimable (timers may fire early, and now() is the start of each
+  // statement), the claim finds nothing, and by the next-due read the row is
+  // due. A read that only looks at rows due later then sees nothing and the
+  // loop sleeps for the whole fallback.
+  const { room, messageNumber } = await seedRoom();
+  await insertJevJob(room.id, messageNumber, 300);
+  assert.equal((await jev!.claimJevRoutingJobs()).length, 0, "not due yet");
+  await delay(400);
+  const jevDue = await jev!.nextJevRoutingJobDueInMs();
+  assert.ok(jevDue !== null && jevDue <= 0, `the overdue job is reported as due now (got ${jevDue})`);
+
+  const { account } = await seedRoom();
+  await client!.pool.query(`
+    INSERT INTO desktop_push_devices (id, account_id, installation_id, device_token, token_hash, bundle_id,
+      environment, enabled, failure_count, last_registered_at, created_at, updated_at)
+    VALUES ('device-overdue', $1, 'installation-overdue', $2, 'hash-overdue', 'chat.letagents.desktop', 'production', TRUE, 0, now(), now(), now())
+  `, [account.id, "c".repeat(64)]);
+  await client!.pool.query(`
+    INSERT INTO desktop_push_notifications (id, device_id, room_id, message_number, room_display_name, sender, body,
+      state, attempt_count, next_attempt_at, created_at, updated_at)
+    VALUES ('overdue-1', 'device-overdue', $1, $2, 'Room', 'Agent', 'hello', 'retry', 1, now() - interval '1 second', now(), now())
+  `, [room.id, messageNumber]);
+  const pushDue = await push!.nextDesktopPushDueInMs(true);
+  assert.ok(pushDue !== null && pushDue <= 0, `an overdue push retry is due now (got ${pushDue})`);
 });
