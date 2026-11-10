@@ -146,13 +146,15 @@ export function registerRoomJoinRoutes(
     // a budget per account. A signed-in caller gets one per account and
     // address, so people behind one office address do not share it, and one
     // person's machines (desktop, agents on other hosts) keep a budget each,
-    // as they had before. A caller without a sign-in keeps the address key.
+    // as they had before. A caller without a sign-in keeps the address key,
+    // under its own `addr:` prefix: the address can come from a header the
+    // client sets, so it must never be able to spell an account key.
     const internal = inProcessPrincipal(req);
     const rateLimitKey = internal
       ? `account:${internal.account.account_id}`
       : req.sessionAccount
         ? `account:${req.sessionAccount.account_id}@${ip}`
-        : ip;
+        : `addr:${ip}`;
     if (!checkJoinRateLimit(rateLimitKey)) {
       res.status(429).json({
         error: "Too many join attempts. Please slow down.",

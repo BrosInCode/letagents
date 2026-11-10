@@ -726,3 +726,39 @@ test("the join rate limit counts per account and address for a signed-in caller 
   assert.equal(await join("acct_office_a", "198.51.100.41"), 200,
     "the same account on another machine (an agent host) has its own budget, as it had before");
 });
+
+test("a caller without a sign-in cannot spend an account's join budget by spelling its key as the address", async () => {
+  const room = { id: "forged-key-room", display_name: "Forged" };
+  const overrides = {
+    resolveRoomOrReply: async () => room as never,
+    resolveExistingRoomRequest: async () => room as never,
+    getProjectAccessRoomId: () => room.id,
+    resolveProjectRole: async () => "participant",
+    toRoomResponse: () => ({ room_id: room.id }),
+  };
+  const victimAddress = "198.51.100.60";
+  // The address comes from the first X-Forwarded-For entry, which a client sets.
+  const forgedAddress = `account:acct_victim@${victimAddress}`;
+  const forgedHeaders = { "x-forwarded-for": forgedAddress };
+  let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
+  registerRoomJoinRoutes({ post: (_path: RegExp, registered: typeof handler) => { handler = registered; } } as never, {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async (value: string) => value,
+    isRepoBackedRoomId,
+    ...overrides,
+  } as never);
+  assert.ok(handler);
+  const join = async (headers: Record<string, string>, sessionAccount: Record<string, unknown> | null) => {
+    const response = {
+      statusCode: 200,
+      status(code: number) { this.statusCode = code; return this; },
+      json() { return this; },
+    };
+    await handler!({ params: { 0: room.id }, headers, socket: { remoteAddress: victimAddress }, sessionAccount }, response as never);
+    return response.statusCode;
+  };
+
+  for (let index = 0; index < 11; index += 1) await join(forgedHeaders, null);
+  assert.equal(await join(forgedHeaders, null), 429, "the forger spends only the budget of the address it claims");
+  assert.equal(await join({}, { account_id: "acct_victim" }), 200, "the victim's budget is untouched");
+});
