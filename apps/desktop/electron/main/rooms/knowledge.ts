@@ -8,6 +8,7 @@ import { listDesktopAccountRooms } from './account-rooms.js';
 import { addLocalChatMessage } from './messages/local-store.js';
 import { getDesktopInboxUpdates } from './inbox.js';
 import { listDesktopPendingBoardIntents } from './board-governance.js';
+import { mapDesktopBoardIntent } from './board-governance/mappers.js';
 import type { DesktopAccountFocusRoomEntry, DesktopAccountRoomEntry, DesktopBoardIntentSummary } from '../../ipc-types.js';
 
 async function target(roomIdentifier: string) {
@@ -112,6 +113,30 @@ export function readPendingBoardIntents(room: DesktopAccountRoomEntry | DesktopA
   if (room.role !== 'admin') return Promise.resolve(undefined);
   return mayHoldPendingBoardIntents(room, now) ? list(room.roomIdentifier) : Promise.resolve([]);
 }
+type AccountAttentionPage = Pick<DesktopAttentionRoom, 'records' | 'truncated' | 'tasks' | 'boardIntents'>;
+const accountRoomKey = (id: string) => id.trim().toLowerCase();
+/**
+ * Every listed room's requests, cards and (admin rooms) pending board intents
+ * in one request, with the per-room access check done by the server. Null when
+ * the server has no such route or the read fails: rooms are then read one by one.
+ */
+export async function readAccountAttention(): Promise<{ rooms: Map<string, AccountAttentionPage>; failures: Set<string> } | null> {
+  let data: { rooms?: Array<{ room_id: string; records: KnowledgeRecord[]; truncated: boolean; tasks: DesktopAttentionTask[]; board_intents?: unknown[] }>; failures?: Array<{ room_id: string }> };
+  try {
+    data = await apiFetch('/account/attention');
+  } catch (error) {
+    if ((error as { status?: unknown } | null)?.status !== 404) console.warn('[needs you] account read failed; reading rooms one by one', error instanceof Error ? error.message : error);
+    return null;
+  }
+  if (!Array.isArray(data.rooms) || !Array.isArray(data.failures)) return null;
+  return {
+    rooms: new Map(data.rooms.map(room => [accountRoomKey(room.room_id), {
+      records: room.records, truncated: room.truncated, tasks: room.tasks ?? [],
+      boardIntents: Array.isArray(room.board_intents) ? room.board_intents.map(intent => mapDesktopBoardIntent(intent as never)) : undefined,
+    }])),
+    failures: new Set(data.failures.map(failure => accountRoomKey(failure.room_id))),
+  };
+}
 export async function getDesktopNeedsYou(includeUpdates = false): Promise<DesktopNeedsYou> {
   const auth = await readStoredAuth();
   let cloudUnavailable = false;
@@ -124,14 +149,22 @@ export async function getDesktopNeedsYou(includeUpdates = false): Promise<Deskto
   const parents = new Map(accountRooms.flatMap(room => room.focusRooms.map(focus => [focus.roomIdentifier, room.roomIdentifier] as const)));
   const result: DesktopNeedsYou = { rooms: [], failures: [], cloudUnavailable, limited: accountRooms.length >= 100, signedOut: !auth.token, updatesIncluded: includeUpdates };
   const now = Date.now();
+  // One read for every cloud room the account lists; only rooms it does not cover are read one by one.
+  const account = cloudUnavailable || !auth.token ? null : await readAccountAttention();
   // Bound concurrency; never load full room snapshots just to build an inbox.
   await Promise.all(Array.from({ length: Math.min(4, queue.length) }, async () => {
     for (let room = queue.shift(); room; room = queue.shift()) {
       try {
+        const key = accountRoomKey(room.roomIdentifier);
+        // A room whose history lives on this device keeps its requests in the local store.
+        const cloud = account ? (await resolveLocalAwareRoomStorageMode(room.roomIdentifier)).effectiveMode !== 'local' : false;
+        const fromAccount = cloud ? account?.rooms.get(key) : undefined;
+        const deniedByAccount = cloud && !fromAccount && Boolean(account?.failures.has(key));
         const [attention, updates, boardIntents] = await Promise.allSettled([
-          getDesktopKnowledge(room.roomIdentifier, 'attention'),
+          fromAccount ? Promise.resolve(fromAccount)
+            : deniedByAccount ? Promise.reject(new Error('Room unavailable.')) : getDesktopKnowledge(room.roomIdentifier, 'attention'),
           includeUpdates ? getDesktopInboxUpdates(room.roomIdentifier) : Promise.resolve(undefined),
-          readPendingBoardIntents(room, now),
+          fromAccount || deniedByAccount ? Promise.resolve(fromAccount?.boardIntents) : readPendingBoardIntents(room, now),
         ]);
         if (attention.status === 'rejected' || updates.status === 'rejected' || boardIntents.status === 'rejected') result.failures.push({ roomIdentifier: room.roomIdentifier, displayName: room.displayName });
         const page = attention.status === 'fulfilled' ? attention.value : { records: [], truncated: false, tasks: [] };

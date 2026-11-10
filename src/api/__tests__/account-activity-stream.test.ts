@@ -209,3 +209,19 @@ test('a member who is not an admin, an owner token, and a room the account is no
     } finally { await s.close(); }
   }
 });
+
+test('a read the account records in a watched room reaches its stream; others do not', async () => {
+  const { accountReadEvents, ACCOUNT_ROOM_READ } = await import('../account-unread/read-events.js');
+  const s = await server();
+  try {
+    const response = await fetch(`${s.base}/account/activity/stream`);
+    const reading = readEvents(response, 2);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    accountReadEvents.emit(ACCOUNT_ROOM_READ, { accountId: 'acct-2', roomId: 'invite-room', lastMessageId: 'msg_1' });
+    accountReadEvents.emit(ACCOUNT_ROOM_READ, { accountId: 'acct-1', roomId: 'unwatched-room', lastMessageId: 'msg_1' });
+    accountReadEvents.emit(ACCOUNT_ROOM_READ, { accountId: 'acct-1', roomId: 'Focus_1', lastMessageId: 'msg_7' });
+    const events = await reading;
+    assert.deepEqual(events.map(event => event.event), ['snapshot', 'room_read']);
+    assert.deepEqual(events[1]!.data, { room_id: 'Focus_1', last_message_id: 'msg_7' });
+  } finally { await s.close(); }
+});

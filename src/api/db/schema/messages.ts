@@ -611,6 +611,8 @@ export const message_human_read_ranges = pgTable(
   (table) => ({
     room_account_idx: index("message_human_read_ranges_room_account_idx").on(table.room_id, table.account_id),
     batch_uq: uniqueIndex("message_human_read_ranges_batch_uq").on(table.room_id, table.account_id, table.client_batch_id),
+    // Built CONCURRENTLY after the migrations by read-range-index-rollout.ts; the account's read point per room.
+    read_point_idx: index("message_human_read_ranges_read_point_idx").on(table.room_id, table.account_id, table.last_message_sequence),
   })
 );
 
