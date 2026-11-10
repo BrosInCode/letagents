@@ -848,6 +848,7 @@ jobs:
           src/api/__tests__/message-reminders-routes.test.ts
           src/api/__tests__/job-queue-wakes.test.ts
           src/api/__tests__/job-queue-wakes-db.test.ts
+          src/api/__tests__/activity-history-read-db.test.ts
 
       - name: Run ask-for-an-agent tests
         if: matrix.group == 1
