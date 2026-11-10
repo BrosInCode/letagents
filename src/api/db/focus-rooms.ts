@@ -7,6 +7,7 @@ import { normalizeRoomDisplayName } from "../rooms/display-name.js";
 import { db } from "./client.js";
 import { id_sequences, rooms } from "./schema.js";
 import { getRoomScopedSequenceNames, isUniqueConstraintError } from "./utils.js";
+import { findFocusRoomRowByKey } from "./focus-room-lookup.js";
 import { toProject } from "./mappers.js";
 import { buildFocusRoomId, getProjectById } from "./rooms.js";
 import { getTaskById } from "./tasks.js";
@@ -104,20 +105,11 @@ export async function getFocusRoomByKey(
   focusKey: string,
   options: { includeArchived?: boolean } = {}
 ): Promise<Project | undefined> {
-  const conditions = [
-    eq(rooms.parent_room_id, parentRoomId),
-    eq(rooms.focus_key, focusKey),
-    eq(rooms.kind, "focus"),
-  ];
-  if (!options.includeArchived) {
-    conditions.push(isNull(rooms.focus_archived_at));
-  }
-
-  const [focusRoom] = await db
-    .select()
-    .from(rooms)
-    .where(and(...conditions))
-    .limit(1);
+  const focusRoom = await findFocusRoomRowByKey({
+    parentRoomId,
+    focusKey,
+    includeArchived: Boolean(options.includeArchived),
+  });
 
   return focusRoom ? toProject(focusRoom) : undefined;
 }
@@ -128,6 +120,8 @@ export async function archiveFocusRoom(
 ): Promise<{ room: Project; archived: boolean } | null> {
   const focusRoom = await getFocusRoomByKey(parentRoomId, focusKey);
   if (!focusRoom) {
+    // No live row: answer with the most recently archived one, which is
+    // the row a concurrent or earlier archive call just archived.
     const archivedFocusRoom = await getFocusRoomByKey(parentRoomId, focusKey, {
       includeArchived: true,
     });
