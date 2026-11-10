@@ -26,6 +26,8 @@ const testDatabaseUrl = process.env.TEST_DB_URL;
 if (testDatabaseUrl) process.env.DB_URL = testDatabaseUrl;
 else process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const skip = testDatabaseUrl ? false : "set TEST_DB_URL to run the room access characterization";
+// Worker bearers are resolved from the database at the live re-check.
+process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "true";
 
 const dbClient = testDatabaseUrl ? await import("../db/client.js") : null;
 const accountSessions = testDatabaseUrl ? await import("../db/auth/account-sessions.js") : null;
@@ -41,6 +43,10 @@ const engine = testDatabaseUrl ? await import("../connectors/rules/engine.js") :
 const agentAsks = testDatabaseUrl ? await import("../routes/agent-asks.js") : null;
 const supervisorGrants = testDatabaseUrl ? await import("../routes/supervisor-host-grants.js") : null;
 const roomList = testDatabaseUrl ? await import("../account-room-membership/list.js") : null;
+const repoAccessModule = testDatabaseUrl ? await import("../github/repo-access.js") : null;
+const agentSessions = testDatabaseUrl ? await import("../db/auth/room-agent-sessions.js") : null;
+const supervisorGrantStore = testDatabaseUrl ? await import("../db/auth/supervisor-grants.js") : null;
+const jevLinkRoutes = testDatabaseUrl ? await import("../routes/rooms/jev-links.js") : null;
 
 const FIXTURE = path.resolve(process.cwd(), "src/api/__tests__/fixtures/room-access-characterization.json");
 
@@ -49,6 +55,8 @@ const FIXTURE = path.resolve(process.cwd(), "src/api/__tests__/fixtures/room-acc
 type GitHubRole = "none" | "read" | "triage" | "admin";
 const repos = new Map<string, { private: boolean; roles: Map<string, GitHubRole> }>();
 let githubDown = false;
+/** Other ways GitHub gives no answer: a dead token (401) or an exhausted rate limit (403). */
+let githubFailure: null | "401" | "ratelimit" = null;
 const githubCalls: string[] = [];
 
 function json(status: number, body: unknown): Response {
@@ -71,6 +79,17 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const token = (new Headers(init?.headers).get("authorization") ?? "").replace(/^Bearer /, "");
   githubCalls.push(`${token || "anon"} ${url.pathname}`);
   if (githubDown) return json(503, { message: "unavailable" });
+  if (githubFailure === "401" && token) return json(401, { message: "Bad credentials" });
+  if (githubFailure === "ratelimit") {
+    return new Response(JSON.stringify({ message: "API rate limit exceeded" }), {
+      status: 403,
+      headers: {
+        "content-type": "application/json",
+        "x-ratelimit-remaining": "0",
+        "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 60),
+      },
+    });
+  }
   const match = /^\/repos\/acme\/([^/]+)(?:\/collaborators\/([^/]+)\/permission)?$/.exec(url.pathname);
   const repo = match ? repos.get(match[1]!.toLowerCase()) : undefined;
   if (!match || !repo) return json(404, { message: "Not Found" });
@@ -101,6 +120,15 @@ const ROOM_KINDS = [
   "unsupported_host",
 ] as const;
 type RoomKind = typeof ROOM_KINDS[number];
+
+/**
+ * Room kinds added after the first pin (their rows are prefixed `x:`):
+ * - bound_ghe_host: a binding with provider github on a host other than github.com
+ * - bound_focus_membership_parent: a focus room with its own GitHub binding under a membership room
+ */
+const EXTRA_ROOM_KINDS = ["bound_ghe_host", "bound_focus_membership_parent"] as const;
+type AnyRoomKind = RoomKind | typeof EXTRA_ROOM_KINDS[number];
+const REPO_ROOM_KINDS = ["repo_private", "repo_public", "repo_focus", "bound_private"] as const;
 
 /**
  * - stranger: signed in, no row, no GitHub role
@@ -155,6 +183,7 @@ interface World {
   accountId: string | null;
   sessionToken: string | null;
   sessionAccount: SessionAccount | null;
+  ownerToken?: string;
 }
 
 async function insertMainRoom(id: string): Promise<void> {
@@ -174,7 +203,22 @@ async function insertFocusRoom(parentId: string): Promise<string> {
   return id;
 }
 
-async function buildWorld(roomKind: RoomKind, principal: PrincipalKind): Promise<World> {
+async function insertBinding(roomId: string, input: { provider: string; host: string; name: string }): Promise<void> {
+  await bindings!.upsertGitRoomBinding({
+    room_id: roomId,
+    provider: input.provider,
+    host: input.host,
+    repository_full_name: `acme/${input.name}`,
+    repository_owner: "acme",
+    repository_name: input.name,
+    ref_type: "branch",
+    ref_name: "main",
+    visibility: "private",
+    source: "manual",
+  } as never);
+}
+
+async function buildWorld(roomKind: AnyRoomKind, principal: PrincipalKind): Promise<World> {
   serial += 1;
   const n = serial;
   let roomId: string;
@@ -229,11 +273,24 @@ async function buildWorld(roomKind: RoomKind, principal: PrincipalKind): Promise
       roomId = accessRoomId = `gitlab.com/acme/x-${n}`;
       await insertMainRoom(roomId);
       break;
+    case "bound_ghe_host":
+      roomId = accessRoomId = `char-bg-${n}`;
+      await insertMainRoom(roomId);
+      await insertBinding(roomId, { provider: "github", host: "github.example.com", name: `ghe-${n}` });
+      break;
+    case "bound_focus_membership_parent":
+      repoName = `bfocus-${n}`;
+      accessRoomId = `char-bfp-${n}`;
+      await insertMainRoom(accessRoomId);
+      roomId = await insertFocusRoom(accessRoomId);
+      await insertBinding(roomId, { provider: "github", host: "github.com", name: repoName });
+      break;
   }
   const project = (await roomsDb!.getProjectById(roomId))!;
   assert.ok(project, `room ${roomId} exists`);
   const roles = new Map<string, GitHubRole>();
-  const repoRoomName = repoName ? `github.com/acme/${repoName}` : null;
+  const repoRoomName = repoName ? `github.com/acme/${repoName}`
+    : roomKind === "bound_ghe_host" ? `github.example.com/acme/ghe-${n}` : null;
   if (repoName) repos.set(repoName.toLowerCase(), { private: repoPrivate, roles });
 
   if (principal === "anonymous") {
@@ -289,7 +346,10 @@ async function buildWorld(roomKind: RoomKind, principal: PrincipalKind): Promise
   );
   const sessionAccount = await accountSessions!.getSessionAccountByToken(sessionToken);
   assert.ok(sessionAccount);
-  return { project, accessRoomId, repoRoomName, login, accountId: account.id, sessionToken, sessionAccount };
+  return {
+    project, accessRoomId, repoRoomName, login, accountId: account.id, sessionToken, sessionAccount,
+    ownerToken: `char-owner-${n}`,
+  };
 }
 
 function personRequest(world: World): AuthenticatedRequest {
@@ -465,15 +525,224 @@ test("every room access call site keeps its pinned answer", { skip, concurrency:
     key,
     Object.entries(row).map(([site, value]) => `${site}=${value}`).join(" "),
   ]));
+  pin(lines, (key) => !key.startsWith("x:"));
+});
+
+/**
+ * Compares rows with the fixture. With UPDATE_ROOM_ACCESS_CHARACTERIZATION=1
+ * it writes them instead, keeping every other row where it is.
+ */
+function pin(lines: Record<string, string>, ownsKey: (key: string) => boolean): void {
+  // ROOM_ACCESS_CHARACTERIZATION_DUMP=<file>: also write this run's rows there, to list every difference at once.
+  const dump = process.env.ROOM_ACCESS_CHARACTERIZATION_DUMP;
+  if (dump) {
+    let previous: Record<string, string> = {};
+    try { previous = JSON.parse(readFileSync(dump, "utf8")) as Record<string, string>; } catch { previous = {}; }
+    writeFileSync(dump, JSON.stringify({ ...previous, ...lines }, null, 1));
+  }
+  let pinned: Record<string, string> = {};
+  try { pinned = JSON.parse(readFileSync(FIXTURE, "utf8")) as Record<string, string>; } catch { pinned = {}; }
   if (process.env.UPDATE_ROOM_ACCESS_CHARACTERIZATION === "1") {
-    writeFileSync(FIXTURE, `${JSON.stringify(lines, null, 1)}\n`);
+    for (const key of Object.keys(pinned)) if (ownsKey(key) && !(key in lines)) delete pinned[key];
+    writeFileSync(FIXTURE, `${JSON.stringify(Object.assign(pinned, lines), null, 1)}\n`);
     return;
   }
-  const pinned = JSON.parse(readFileSync(FIXTURE, "utf8")) as Record<string, string>;
-  assert.deepEqual(Object.keys(lines), Object.keys(pinned), "the same table rows");
-  for (const key of Object.keys(pinned)) {
+  assert.deepEqual(Object.keys(lines), Object.keys(pinned).filter(ownsKey), "the same table rows");
+  for (const key of Object.keys(lines)) {
     assert.equal(lines[key], pinned[key], `answers changed for ${key}`);
   }
+}
+
+function toLines(table: Record<string, Record<string, string>>): Record<string, string> {
+  return Object.fromEntries(Object.entries(table).map(([key, row]) => [
+    key,
+    Object.entries(row).map(([site, value]) => `${site}=${value}`).join(" "),
+  ]));
+}
+
+function credentialRequest(world: World, kind: "owner_token" | "mcp_oauth"): AuthenticatedRequest {
+  // An owner token is sent as a bearer. A remote MCP OAuth session reaches the
+  // routes with the account of its grant; outside the remote MCP path its
+  // credential is not resolvable again, which the live re-check shows.
+  return {
+    headers: kind === "owner_token" ? { authorization: `Bearer ${world.ownerToken}` } : {},
+    authKind: kind,
+    sessionAccount: world.sessionAccount,
+    agentSession: null,
+  } as unknown as AuthenticatedRequest;
+}
+
+async function requestSites(req: AuthenticatedRequest, world: World): Promise<Record<string, string>> {
+  const row: Record<string, string> = {};
+  for (const site of ["participant", "participant_fresh", "participant_strict", "admin_route", "live_recheck"] as const) {
+    const { res, state } = recordingResponse();
+    row[site] = await settle(async () => {
+      if (site === "admin_route") return replyCell(await access!.requireGitRoomAdmin(req, res, world.project), state, world);
+      if (site === "live_recheck") return String(await access!.reauthorizeGitRoomParticipant(req, world.project));
+      return replyCell(await access!.requireGitRoomParticipant(req, res, world.project, {
+        freshCollaboratorCheck: site !== "participant",
+        throwOnIndeterminate: site === "participant_strict",
+      }), state, world);
+    });
+  }
+  return row;
+}
+
+async function entryCell(world: World): Promise<string> {
+  return settle(async () => {
+    const decision = await access!.resolveProjectRoomEntryDecision({
+      project: world.project, sessionAccount: world.sessionAccount, redirectTo: "/back",
+    });
+    if (decision.kind === "allow") return "allow";
+    const reason = new URLSearchParams(decision.location.split("?")[1] ?? "").get("reason");
+    return `redirect:${reason}`;
+  });
+}
+
+async function jevLinkCell(world: World): Promise<string> {
+  const handlers: Array<(req: unknown, res: unknown) => Promise<void>> = [];
+  jevLinkRoutes!.registerJevLinkRoutes({ post: (_path: unknown, handler: never) => handlers.push(handler) } as never, {
+    resolveCanonicalRoomRequestId: async (roomId) => roomId,
+    resolveRoomOrReply: async () => world.project,
+    requireAdmin: access!.requireGitRoomAdmin,
+    jevLinks: async () => ({
+      acceptLink: async () => ({ id: "task_1" }),
+      rejectLink: async () => ({ id: "task_1" }),
+    }) as never,
+  });
+  const req = {
+    ...personRequest(world),
+    params: { 0: encodeURIComponent(world.project.id), 1: "task_1", 2: "accept" },
+    body: { pr_url: "https://github.com/acme/repo/pull/1" },
+  };
+  const { res, state } = recordingResponse();
+  return settle(async () => {
+    await handlers[0]!(req, res);
+    return state.body && (state.body as { task?: unknown }).task ? "accepted" : replyCell(false, state, world);
+  });
+}
+
+async function withGitHub<T>(mode: "up" | "503" | "401" | "ratelimit", run: () => Promise<T>): Promise<T> {
+  githubDown = mode === "503";
+  githubFailure = mode === "401" || mode === "ratelimit" ? mode : null;
+  try {
+    return await run();
+  } finally {
+    githubDown = false;
+    githubFailure = null;
+    repoAccessModule!.resetGitHubRepoVisibilityBackoffForTests();
+  }
+}
+
+test("rows added after the first pin keep their pinned answer", { skip, concurrency: false }, async () => {
+  const table: Record<string, Record<string, string>> = {};
+
+  // GitHub answering 401 (a dead token) and an exhausted rate limit (403).
+  for (const mode of ["401", "ratelimit"] as const) {
+    for (const roomKind of REPO_ROOM_KINDS) {
+      for (const principal of PRINCIPALS.filter((value) => value !== "anonymous")) {
+        const row: Record<string, string> = {};
+        for (const site of CALL_SITES) {
+          const world = await buildWorld(roomKind, principal);
+          row[site] = await withGitHub(mode, () => callSite(site, world));
+        }
+        table[`x:github_${mode} ${roomKind} ${principal}`] = row;
+      }
+    }
+  }
+
+  // Rooms bound to another host, and a bound focus room under a membership room.
+  for (const mode of ["up", "503"] as const) {
+    for (const roomKind of EXTRA_ROOM_KINDS) {
+      for (const principal of PRINCIPALS) {
+        const row: Record<string, string> = {};
+        for (const site of CALL_SITES) {
+          const world = await buildWorld(roomKind, principal);
+          row[site] = await withGitHub(mode, () => callSite(site, world));
+        }
+        table[`x:${mode === "up" ? "github_up" : "outage"} ${roomKind} ${principal}`] = row;
+      }
+    }
+  }
+
+  // Owner token and remote MCP OAuth principals at the request gates and the live re-check.
+  for (const roomKind of [...ROOM_KINDS, ...EXTRA_ROOM_KINDS]) {
+    for (const kind of ["owner_token", "mcp_oauth"] as const) {
+      for (const principal of ["stranger", "member", "stale_admin", "gh_admin"] as const) {
+        const world = await buildWorld(roomKind, principal);
+        table[`x:${kind} ${roomKind} ${principal}`] = await withGitHub("up", () => requestSites(credentialRequest(world, kind), world));
+      }
+    }
+  }
+
+  // A cached yes that became stale: GitHub removed the role, no webhook came.
+  for (const age of ["fresh", "6min", "31min"] as const) {
+    for (const roomKind of REPO_ROOM_KINDS) {
+      const row: Record<string, string> = {};
+      for (const site of CALL_SITES) {
+        const world = await buildWorld(roomKind, "triage");
+        const decision = await access!.requireGitRoomParticipant(personRequest(world), recordingResponse().res, world.project);
+        assert.equal(decision, true, "the yes is cached");
+        const repo = repos.get(world.repoRoomName!.split("/").at(-1)!)!;
+        repo.roles.set(world.login!.toLowerCase(), "none");
+        const realNow = Date.now;
+        const shift = age === "6min" ? 6 * 60_000 : age === "31min" ? 31 * 60_000 : 0;
+        Date.now = () => realNow() + shift;
+        try {
+          row[site] = await withGitHub("up", () => callSite(site, world));
+        } finally {
+          Date.now = realNow;
+        }
+      }
+      table[`x:stale_yes_${age} ${roomKind} triage`] = row;
+    }
+  }
+
+  // The Jev link accept route (admin only) and the room page entry.
+  for (const mode of ["up", "503"] as const) {
+    for (const roomKind of [...ROOM_KINDS, ...EXTRA_ROOM_KINDS]) {
+      for (const principal of PRINCIPALS) {
+        const jevWorld = await buildWorld(roomKind, principal);
+        const entryWorld = await buildWorld(roomKind, principal);
+        table[`x:${mode === "up" ? "github_up" : "outage"} ${roomKind} ${principal} pages`] = {
+          jev_link: await withGitHub(mode, () => jevLinkCell(jevWorld)),
+          entry_page: await withGitHub(mode, () => entryCell(entryWorld)),
+        };
+      }
+    }
+  }
+
+  // Worker bearers at the live re-check, resolved from the database.
+  for (const roomKind of [...ROOM_KINDS, ...EXTRA_ROOM_KINDS]) {
+    const row: Record<string, string> = {};
+    for (const scope of ["same_room", "other_room", "ended"] as const) {
+      const world = await buildWorld(roomKind, "member");
+      const ownerId = world.accountId!;
+      const grant = (await supervisorGrantStore!.createSupervisorHostGrant({
+        owner_account_id: ownerId, host_id: `host_${serial}`, installation_id: `install_${serial}`,
+        allowed_room_ids: [world.project.id], allowed_agent_keys: [`owner/agent-${serial}`],
+        expires_at: new Date(Date.now() + 600_000).toISOString(),
+      })).grant;
+      const session = await agentSessions!.createRoomAgentSession({
+        room_id: world.project.id, session_kind: "worker", runtime: "codex",
+        actor_label: `W${serial} | Owner's agent | Agent`, agent_key: `owner/agent-${serial}`, agent_instance_id: `inst_${serial}`,
+        display_name: `W${serial}`, owner_account_id: ownerId, owner_label: "Owner", ide_label: "Agent",
+        supervisor_grant_id: grant.grant_id,
+      } as never) as unknown as { session_id: string; worker_bearer: string };
+      if (scope === "ended") await agentSessions!.endRoomAgentSession({ session_id: session.session_id } as never);
+      const target = scope === "other_room" ? (await buildWorld("membership", "anonymous")).project : world.project;
+      const req = {
+        headers: { authorization: `Bearer ${session.worker_bearer}` },
+        authKind: "agent_session",
+        sessionAccount: null,
+        agentSession: { room_id: world.project.id },
+      } as unknown as AuthenticatedRequest;
+      row[scope] = await withGitHub("up", () => settle(async () => String(await access!.reauthorizeGitRoomParticipant(req, target))));
+    }
+    table[`x:worker_live_recheck ${roomKind}`] = row;
+  }
+
+  pin(toLines(table), (key) => key.startsWith("x:"));
 });
 
 // ------------------------------------------------ gap fix A: activity stream
