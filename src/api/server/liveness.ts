@@ -364,6 +364,16 @@ export function startLivenessSweep(): void {
       } catch (error) {
       console.error("Agent ask sweep failed:", error);
       }
+      try {
+      // GitHub webhook deliveries a stopped process left half processed.
+      const [{ redriveStaleGitHubWebhookDeliveries }, { handleGitHubWebhookEvent }] = await Promise.all([
+        import("../github/webhook-redrive.js"),
+        import("../github/webhook-handler.js"),
+      ]);
+      await redriveStaleGitHubWebhookDeliveries({ handleGitHubWebhookEvent });
+      } catch (error) {
+      console.error("GitHub webhook redrive sweep failed:", error);
+      }
     })();
     const pending = run.finally(() => {
       if (sweepPromise === pending) sweepPromise = null;

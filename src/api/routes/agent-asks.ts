@@ -2,10 +2,10 @@ import type { Express, Response } from "express";
 
 import type { AuthenticatedRequest } from "../http/helpers.js";
 import { isAppSession } from "../request/app-session.js";
-import { isProjectAdmin } from "../db/auth/project-admins.js";
 import { getProjectById } from "../db.js";
 import { getGitRoomBindingForRoom } from "../db/git-room-bindings.js";
 import { isGitHubRepoWriter } from "../github/repo-access.js";
+import { isCurrentProjectAdmin, replyIfGitHubAccessUnavailable, type RoomAccessAccount } from "../rooms/access.js";
 import { resolveParticipantRoom } from "./rooms/messages/helpers.js";
 import type { RoomMessageRouteDeps } from "./rooms/messages/types.js";
 import {
@@ -19,7 +19,7 @@ const databaseStore = {
   create: asks.createAsk, byToken: asks.getAskByToken, byId: asks.getAskById, listRoom: asks.listRoomAsks,
   listAccount: asks.listAccountAsks, cancel: asks.cancelAsk, claim: asks.claimAsk, release: asks.releaseClaim,
   authority: asks.createAskLaunchAuthority, joined: asks.acknowledgeAskJoin, accept: asks.acceptSubstitute,
-  decline: asks.declineSubstitute, end: asks.endAsk, name: asks.personName, avatar: asks.personAvatarUrl, isAdmin: isProjectAdmin,
+  decline: asks.declineSubstitute, end: asks.endAsk, name: asks.personName, avatar: asks.personAvatarUrl, isAdmin: isCurrentRoomAdmin,
   room: getProjectById, forWorker: asks.askForWorker, canWrite: canWriteRoomRepo,
   files: workspace.listFiles, read: workspace.readRepoFile, search: workspace.searchRepo, propose: workspace.proposeChange,
   proposals: workspace.listProposals, reads: workspace.listReads, decide: workspace.decideProposal,
@@ -31,12 +31,22 @@ export type AgentAskStore = typeof databaseStore;
  * its changes (which the GitHub App pushes) need write access to that repo,
  * checked with GitHub now, or room admin. Rooms with no repo have no such gate.
  */
-async function canWriteRoomRepo(roomId: string, account: { account_id: string; provider?: string; login?: string; provider_access_token?: string | null }): Promise<boolean> {
+export async function canWriteRoomRepo(roomId: string, account: RoomAccessAccount): Promise<boolean> {
   const binding = await getGitRoomBindingForRoom(roomId);
   if (!binding) return true;
-  if (await isProjectAdmin(roomId, account.account_id)) return true;
+  if (await isCurrentRoomAdmin(roomId, account)) return true;
   if (binding.provider !== "github" || account.provider !== "github" || !account.login) return false;
   return isGitHubRepoWriter({ roomName: `github.com/${binding.repository_full_name}`, login: account.login, accessToken: account.provider_access_token ?? "" });
+}
+
+/**
+ * A room admin as the room routes decide it: in a repo room an admin row
+ * counts only while GitHub still admits the person to the room.
+ */
+export async function isCurrentRoomAdmin(roomId: string, account: RoomAccessAccount): Promise<boolean> {
+  const room = await getProjectById(roomId);
+  // GitHub giving no answer throws, and the route answers a retryable 503.
+  return Boolean(room) && await isCurrentProjectAdmin(room!, account);
 }
 
 const TOKEN = /^[A-Za-z0-9_-]{20,64}$/;
@@ -57,6 +67,7 @@ function fail(res: Response, error: unknown) {
     gift_limit: [409, "You're already giving 3 agents. Wait for one to finish, then try again."],
   };
   if (known[code]) { res.status(known[code][0]).json({ code, error: known[code][1] }); return; }
+  if (replyIfGitHubAccessUnavailable(res, error)) return;
   if (error instanceof workspace.AskWorkspaceError) { res.status(error.status).json({ code: error.code, error: error.message }); return; }
   const pg = (error as { code?: string; cause?: { code?: string } })?.code ?? (error as { cause?: { code?: string } })?.cause?.code;
   if (pg === "55P03") { res.status(503).json({ code: "ask_busy", error: "Busy right now. Try again." }); return; }
@@ -239,7 +250,7 @@ export function registerAgentAskRoutes(app: Express, deps: RoomMessageRouteDeps,
     const id = String(req.params.id ?? "");
     const ask = ASK_ID.test(id) ? await store.byId(id) : null;
     if (!ask) { res.status(404).json({ code: "ask_not_found", error: "Request not found." }); return null; }
-    const allowed = ask.asker_account_id === accountId || (allowAdmin && await store.isAdmin(ask.room_id, accountId));
+    const allowed = ask.asker_account_id === accountId || (allowAdmin && await store.isAdmin(ask.room_id, req.sessionAccount!));
     if (!allowed) { res.status(403).json({ code: "not_allowed", error: "Only the person who asked can do that." }); return null; }
     return ask;
   }
