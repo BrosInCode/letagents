@@ -13,6 +13,7 @@ import {
   isGitHubRepoWriter,
   resetGitHubRepoVisibilityBackoffForTests,
   resolveGitHubRepoRoomAccessDecision,
+  settleRepoAccessRefreshesForTests,
 } from "../github/repo-access.js";
 import { setBridgedEventPublisher } from "../server/bridged-emitter.js";
 
@@ -1425,4 +1426,116 @@ test("a token-first lookup GitHub does not answer with 200 changes nothing and f
     assert.equal(await getGitHubRepoVisibility(roomName, "dead-token"), "unknown");
   });
   assert.deepEqual(github.calls, ["token", "anon", "token"]);
+});
+
+// ------------------------------------------------ stale-while-revalidate
+
+/** A private repository with one collaborator; `mode` decides GitHub's answers. */
+function staleWhileRevalidateGitHub(room: string) {
+  const state = { mode: "yes" as "yes" | "no" | "outage", calls: [] as string[] };
+  const repo = room.split("/").slice(1).join("/");
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const path = new URL(String(input)).pathname;
+    state.calls.push(path);
+    if (state.mode === "outage") return new Response("{}", { status: 503 });
+    if (path === `/repos/${repo}`) {
+      return state.mode === "no"
+        ? new Response(JSON.stringify({ message: "Not Found" }), { status: 404 })
+        : new Response(JSON.stringify({ private: true, owner: { login: "acme" } }), { status: 200 });
+    }
+    return new Response(JSON.stringify({ permission: "write" }), { status: 200 });
+  }) as typeof fetch;
+  return state;
+}
+
+function fakeClock() {
+  const realNow = Date.now;
+  let offset = 0;
+  Date.now = () => realNow() + offset;
+  return {
+    advance(ms: number) { offset += ms; },
+    restore() { Date.now = realNow; },
+  };
+}
+
+const MINUTE = 60_000;
+const swrRoom = (name: string) => `github.com/acme/swr-${name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const check = (room: string) => isGitHubRepoCollaborator({ roomName: room, login: "dev", accessToken: "t-dev" });
+
+test("a cached yes older than five minutes is served at once, with exactly one background refresh", async () => {
+  const room = swrRoom("served");
+  const github = staleWhileRevalidateGitHub(room);
+  const clock = fakeClock();
+  try {
+    assert.equal(await check(room), true);
+    assert.equal(github.calls.length, 2, "the first check asks GitHub");
+    clock.advance(6 * MINUTE);
+    let resolved = false;
+    github.calls.length = 0;
+    const answers = await Promise.all([check(room), check(room), check(room)].map((p) => p.then((v) => { resolved = true; return v; })));
+    assert.deepEqual(answers, [true, true, true], "served from the cache");
+    assert.ok(resolved);
+    await settleRepoAccessRefreshesForTests();
+    assert.equal(github.calls.length, 2, "one refresh (repository + permission), not one per read");
+    github.calls.length = 0;
+    assert.equal(await check(room), true);
+    await settleRepoAccessRefreshesForTests();
+    assert.equal(github.calls.length, 0, "the refreshed yes is fresh again");
+  } finally { clock.restore(); }
+});
+
+test("a definite no from the background refresh revokes at once and fires the webhook invalidation", async () => {
+  const room = swrRoom("revoked");
+  const github = staleWhileRevalidateGitHub(room);
+  const clock = fakeClock();
+  const seen: unknown[] = [];
+  const listener = (payload: unknown) => seen.push(payload);
+  githubRepoAccessInvalidationEvents.on("invalidate", listener);
+  try {
+    assert.equal(await check(room), true);
+    github.mode = "no";
+    clock.advance(6 * MINUTE);
+    assert.equal(await check(room), true, "this read is served from the cache");
+    await settleRepoAccessRefreshesForTests();
+    assert.deepEqual(seen, [{ roomName: room.toLowerCase(), login: "dev" }], "one person-scoped invalidation");
+    assert.equal(await check(room), false, "the next read asks GitHub and gets the no");
+  } finally {
+    githubRepoAccessInvalidationEvents.off("invalidate", listener);
+    clock.restore();
+  }
+});
+
+test("an outage at the refresh keeps serving the yes until 30 minutes, without piling up refreshes", async () => {
+  const room = swrRoom("outage");
+  const github = staleWhileRevalidateGitHub(room);
+  const clock = fakeClock();
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    assert.equal(await check(room), true);
+    github.mode = "outage";
+    clock.advance(6 * MINUTE);
+    github.calls.length = 0;
+    for (let i = 0; i < 5; i++) assert.equal(await check(room), true);
+    await settleRepoAccessRefreshesForTests();
+    assert.equal(github.calls.length, 1, "one refresh attempt, then a wait of a minute");
+    for (let i = 0; i < 5; i++) assert.equal(await check(room), true);
+    await settleRepoAccessRefreshesForTests();
+    assert.equal(github.calls.length, 1, "no retry within the minute");
+    clock.advance(MINUTE);
+    assert.equal(await check(room), true);
+    await settleRepoAccessRefreshesForTests();
+    assert.equal(github.calls.length, 2, "one retry after the minute");
+    clock.advance(23 * MINUTE - 5_000);
+    assert.equal(await check(room), true, "still served at 30 minutes less a few seconds");
+    await settleRepoAccessRefreshesForTests();
+    clock.advance(10_000);
+    await assert.rejects(check(room), GitHubAccessUnavailableError, "after 30 minutes the read waits for GitHub, which gives no answer");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, [], "no unhandled rejection from a background refresh");
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    clock.restore();
+  }
 });

@@ -836,7 +836,7 @@ test("the account activity stream re-checks a repo room live and drops it after 
 
 // ------------------------------------------------ gap fix B: GitHub calls
 
-test("GitHub calls per check: a fresh check asks for the repository once; a cached check reuses a yes for five minutes", { skip, concurrency: false }, async () => {
+test("GitHub calls per check: a fresh check asks for the repository once; a cached check reuses a yes without a call", { skip, concurrency: false }, async () => {
   const decisionModule = await import("../rooms/access-decision.js");
   const callsFor = (login: string) => githubCalls.filter((call) => call.startsWith(`gh-${login} `));
   const count = async (roomKind: RoomKind, principal: PrincipalKind, freshness: "fresh" | "cached") => {
@@ -873,5 +873,6 @@ test("GitHub calls per check: a fresh check asks for the repository once; a cach
   assert.equal(callsFor(world.login!).filter((call) => call.includes("/permission")).length, 1, "the yes is reused");
   assert.ok(callsFor(world.login!).length - again <= 1, "at most the shared visibility read");
   const repoAccess = await import("../github/repo-access.js");
-  assert.equal(repoAccess.REPO_ACCESS_TTL_MS, 5 * 60 * 1000);
+  assert.equal(repoAccess.REPO_ACCESS_REFRESH_AFTER_MS, 5 * 60 * 1000, "a yes is refreshed in the background after five minutes");
+  assert.equal(repoAccess.REPO_ACCESS_TTL_MS, 30 * 60 * 1000, "and expires after thirty");
 });
