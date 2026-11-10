@@ -19,6 +19,8 @@ export const accountActivityTiming = {
   idleTimeoutMs: 45_000,
 };
 export const ACCOUNT_ACTIVITY_CHANNEL = "desktop:account-activity:changed";
+/** The server's frame for reads the account recorded in a room. */
+const ACCOUNT_ROOM_READ_EVENT = "room_read";
 
 type Stream = { abort: AbortController; retryTimer: NodeJS.Timeout | null; retryMs: number };
 
@@ -166,6 +168,12 @@ function handleFrame(current: Stream, frame: string): void {
     // The server sends it to the room's admins only.
     const parsed = parseRoomJoinRequestEvent(payload);
     if (parsed) emitRoomStreamEvent({ type: "join_request", roomIdentifier: parsed.room_id, event: parsed });
+  } else if (event === ACCOUNT_ROOM_READ_EVENT) {
+    // This account read a room here or elsewhere: its unread counts changed.
+    const read = payload as { room_id?: unknown; last_message_id?: unknown } | null;
+    const lastRead = typeof read?.room_id === "string" && read.room_id
+      ? { roomId: read.room_id, lastMessageId: typeof read.last_message_id === "string" ? read.last_message_id : null } : null;
+    publish({ ...state, readRevision: (state.readRevision ?? 0) + 1, lastRead });
   }
 }
 
