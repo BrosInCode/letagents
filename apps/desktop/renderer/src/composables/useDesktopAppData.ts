@@ -122,6 +122,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   const degradedStreamRooms = new Map<string, number>();
   const pendingVerifiedRecoveries = new Map<string, number>();
   const pendingDeliveryRepairs = new Map<string, PendingDeliveryRepairState>();
+  const sharedBarrierReads = new Map<string, { generation: number; promise: Promise<unknown> }>();
   let artifactRefreshContext = 0;
   let artifactRefreshDisposed = false;
   let artifactRefresh: {
@@ -159,6 +160,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     selectedSnapshotRequestId += 1;
     clearSelectedSnapshotCache();
     clearPendingDeliveryRepairs();
+    sharedBarrierReads.clear();
   }
 
   function resetBufferedStreamEvents(): void {
@@ -503,19 +505,37 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       && normalizeRoomIdentifier(roomIdentifier) !== normalizeRoomIdentifier(baseRootSnapshot.roomIdentifier)
     ) {
       publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
+      let barrierToken: number | null = null;
       try {
-        const openedContext = await loadRootRoomContext({
-          roomIdentifier,
-          rootPath: rootPathForRoomIdentifier(roomIdentifier),
-        });
+        // Read the room only after its stream is ready, as for a focus room.
+        // That read closes a gap the stream reports while it connects, so the
+        // stream does not need a second full read of the same room. If the
+        // stream cannot start, the room still loads, without the barrier.
+        barrierToken = await beginRoomSnapshotBarrier(roomIdentifier).catch(() => null);
+        const rootPath = rootPathForRoomIdentifier(roomIdentifier);
+        const openedContext = await readSnapshotOncePerBarrier(
+          `context:${normalizeRoomIdentifier(roomIdentifier)}:${rootPath ?? ""}`,
+          barrierToken,
+          () => loadRootRoomContext({ roomIdentifier, rootPath }),
+        );
         const nextRootSnapshot = openedContext.snapshot;
         const nextRepoStatus = openedContext.repoStatus;
         if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
+        const roomKey = normalizeRoomIdentifier(roomIdentifier);
+        if (barrierToken !== null && snapshotMatchesRoom(nextRootSnapshot, roomIdentifier)) {
+          await acknowledgeStreamGapRepairFromSnapshot(
+            roomIdentifier,
+            nextRootSnapshot,
+            roomKey ? pendingDeliveryRepairs.get(roomKey)?.token ?? null : null,
+          );
+          if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
+        }
         options.repoStatus.value = openedContext.openedRoom?.repoStatus
           ? preserveRoomRepoStatistics(options.repoStatus.value, nextRepoStatus)
           : nextRepoStatus;
         options.rootRoomSnapshot.value = nextRootSnapshot;
         setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextRootSnapshot), { cache: false, activitySnapshot: true });
+        if (barrierToken !== null) finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
         options.selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
         options.rememberRootRoomSnapshot(nextRootSnapshot, {
           aliasIdentifiers: [roomIdentifier, openedContext.openedRoom?.roomIdentifier],
@@ -525,6 +545,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         });
         options.activeEntry.value = options.currentParentRoom.value;
       } finally {
+        if (barrierToken !== null && streamReconcileRoom === roomIdentifier) {
+          finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
+        }
         if (requestId === selectedSnapshotRequestId) selectedSnapshotLoading.value = false;
       }
       return;
@@ -547,7 +570,11 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     let barrierToken: number | null = null;
     try {
       barrierToken = await beginRoomSnapshotBarrier(roomIdentifier);
-      const nextSnapshot = await getRoomSnapshot(roomIdentifier);
+      const nextSnapshot = await readSnapshotOncePerBarrier(
+        `room:${normalizeRoomIdentifier(roomIdentifier)}`,
+        barrierToken,
+        () => getRoomSnapshot(roomIdentifier),
+      );
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
       const roomKey = normalizeRoomIdentifier(roomIdentifier);
       await acknowledgeStreamGapRepairFromSnapshot(
@@ -648,6 +675,39 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     if (overflowed && normalizeRoomIdentifier(activeStreamRoom) === roomKey) {
       scheduleRoomStreamReconciliation(roomIdentifier);
     }
+  }
+
+  /**
+   * Shares one barrier read of a room between callers that start it at the
+   * same time, for example the cold-start refresh and the active-entry watcher
+   * that both open the stored room.
+   *
+   * Invariant: every read registered here starts after its caller awaited
+   * beginRoomSnapshotBarrier for that room, so the room's stream was ready
+   * (its connect gap, if any, was already reported) and stream events were
+   * being buffered. `generation` is streamReconcileGeneration when the read
+   * started. A caller whose barrier token is <= that generation began
+   * buffering before the read started, so the read plus that caller's buffer
+   * covers every event, and the read is as authoritative for a pending
+   * delivery repair as one the caller would start itself. A caller whose
+   * barrier began after the read started, or that has no barrier, reads again.
+   * Stale results are still dropped by each caller's own request id checks.
+   */
+  function readSnapshotOncePerBarrier<T>(
+    key: string,
+    barrierToken: number | null,
+    read: () => Promise<T>,
+  ): Promise<T> {
+    if (barrierToken === null) return read();
+    const existing = sharedBarrierReads.get(key);
+    if (existing && existing.generation >= barrierToken) return existing.promise as Promise<T>;
+    const entry = { generation: streamReconcileGeneration, promise: read() as Promise<unknown> };
+    sharedBarrierReads.set(key, entry);
+    const forget = () => {
+      if (sharedBarrierReads.get(key) === entry) sharedBarrierReads.delete(key);
+    };
+    entry.promise.then(forget, forget);
+    return entry.promise as Promise<T>;
   }
 
   function getRoomSnapshot(roomIdentifier: string | null): Promise<DesktopRoomSnapshot> {
