@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import type { Express } from "express";
+import type { Express, Response } from "express";
 
 import {
   createMessageAttachmentUpload,
@@ -35,20 +35,7 @@ export function registerMessageAttachmentRoutes(
     const project = await resolveParticipantRoom(req, res, deps);
     if (!project) return;
 
-    const messageId = routeParam(req, 1);
-    const attachmentId = routeParam(req, 2);
-    const attachment = await getMessageAttachment(project.id, messageId, attachmentId);
-    if (!attachment) {
-      res.status(404).json({ error: "Attachment not found", code: "ATTACHMENT_NOT_FOUND" });
-      return;
-    }
-
-    if (!isAttachmentStorageConfigured()) {
-      res.status(503).json({ error: "Attachment object storage is not configured" });
-      return;
-    }
-
-    res.redirect(302, createPresignedAttachmentDownload(attachment));
+    await redirectToMessageAttachment(res, project.id, routeParam(req, 1), routeParam(req, 2));
   });
 
   app.post(/^\/rooms\/(.+)\/attachments\/uploads$/, async (req: AuthenticatedRequest, res) => {
@@ -149,4 +136,25 @@ export function registerMessageAttachmentRoutes(
 
     res.status(200).json({ ok: true, upload_id: uploadId });
   });
+}
+
+/** Redirects to a signed download of one attachment of a message in a resolved room. */
+export async function redirectToMessageAttachment(
+  res: Response,
+  roomId: string,
+  messageId: string,
+  attachmentId: string,
+): Promise<void> {
+  const attachment = await getMessageAttachment(roomId, messageId, attachmentId);
+  if (!attachment) {
+    res.status(404).json({ error: "Attachment not found", code: "ATTACHMENT_NOT_FOUND" });
+    return;
+  }
+
+  if (!isAttachmentStorageConfigured()) {
+    res.status(503).json({ error: "Attachment object storage is not configured" });
+    return;
+  }
+
+  res.redirect(302, createPresignedAttachmentDownload(attachment));
 }
