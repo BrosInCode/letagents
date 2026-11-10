@@ -849,6 +849,8 @@ jobs:
           src/api/__tests__/job-queue-wakes.test.ts
           src/api/__tests__/job-queue-wakes-db.test.ts
           src/api/__tests__/activity-history-read-db.test.ts
+          src/api/__tests__/room-message-counts-db.test.ts
+          src/api/__tests__/account-room-latest-messages-db.test.ts
 
       - name: Run ask-for-an-agent tests
         if: matrix.group == 1
