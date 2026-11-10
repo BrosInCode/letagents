@@ -883,3 +883,61 @@ test("a later start after a completed migration runs no Git beyond listing the b
     removeTemporary(temporary);
   }
 });
+
+test("a binding written by another call during a migration pass is not overwritten by a legacy candidate", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-migration-race-"));
+  const storePath = join(temporary, "bindings.sqlite");
+  try {
+    const { mainRoot } = repoWithWorktrees(temporary, 0);
+    const other = join(temporary, "other");
+    mkdirSync(other);
+    execFileSync("git", ["init", "-b", "main"], { cwd: other, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:other/project.git"], { cwd: other });
+    const connectedElsewhere = join(temporary, "connected-elsewhere");
+    // The first candidate resolves its folder with Git. While it does, another
+    // call (Connect project) stores a binding for the second candidate's room.
+    let wrote = false;
+    const stop = observeGitSpawns(() => {
+      if (wrote) return;
+      wrote = true;
+      const database = new DatabaseSync(storePath);
+      try {
+        database.prepare(`
+          INSERT INTO project_bindings (id, identity_key, verification_keys_json, aliases_json,
+            root_path, source, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          "connected-elsewhere",
+          "project-room:github.com/acme/widgets",
+          JSON.stringify(["project-room:github.com/acme/widgets"]),
+          JSON.stringify(["project-room:github.com/acme/widgets", "room:github.com/acme/widgets"]),
+          connectedElsewhere,
+          "git_remote",
+          new Date().toISOString(),
+          new Date().toISOString(),
+        );
+      } finally {
+        database.close();
+      }
+    });
+    try {
+      await migrateLegacyProjectBindings([
+        { legacyKey: "github.com/other/project", context: { roomIdentifier: "github.com/other/project" }, rootPath: other },
+        { legacyKey: "github.com/acme/widgets", context: { roomIdentifier: "github.com/acme/widgets" }, rootPath: mainRoot },
+      ], { storePath });
+    } finally {
+      stop();
+    }
+    assert.equal(wrote, true);
+    const database = new DatabaseSync(storePath);
+    try {
+      const row = database.prepare("SELECT root_path FROM project_bindings WHERE identity_key = ?")
+        .get("project-room:github.com/acme/widgets") as { root_path?: string } | undefined;
+      assert.equal(row?.root_path, connectedElsewhere);
+    } finally {
+      database.close();
+    }
+  } finally {
+    removeTemporary(temporary);
+  }
+});

@@ -73,38 +73,9 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       || options.setupLoadError.value;
   });
 
-  /**
-   * The startup gate, then the first room. `projectBindings` is the local
-   * project-binding migration (Git work in the main process). A promise is
-   * already running and is awaited before the room loads.
-   *
-   * The object form decides the order. Rule: the first room waits for the
-   * bindings only when `roomNeedsBindings` is true, that is when the startup
-   * room can be a project room. A project room without its binding shows
-   * "Connect this room to its local project" and has no folder for agents or
-   * for the status watch. The room load itself never reads a binding: the
-   * main process opens a project room from its remembered folder and binds
-   * that folder again. A plain room shows no project state, so the migration
-   * starts after its first load. Either way, this call settles only after the
-   * migration has settled, in the same session.
-   */
-  async function loadFirstRunSetup(
-    projectBindings: Promise<void> | {
-      initialize: () => Promise<void>;
-      roomNeedsBindings: boolean;
-    } = Promise.resolve(),
-  ): Promise<void> {
-    let bindingsReady: Promise<void> | null = null;
-    const startBindings = (): Promise<void> => {
-      bindingsReady ??= (projectBindings instanceof Promise
-        ? projectBindings
-        : Promise.resolve().then(() => projectBindings.initialize())
-      ).catch(() => undefined);
-      return bindingsReady;
-    };
-    const waitForBindings = projectBindings instanceof Promise || projectBindings.roomNeedsBindings;
-    // Start local preparation alongside auth when the room depends on it.
-    const preparation = waitForBindings ? startBindings() : null;
+  async function loadFirstRunSetup(projectBindingsReady: Promise<void> = Promise.resolve()): Promise<void> {
+    // Start local preparation alongside auth, but retain its ordering before room loading.
+    const preparation = projectBindingsReady.catch(() => undefined);
     options.loading.value = true;
     options.setupLoadError.value = null;
     try {
@@ -131,7 +102,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       // Do not load any room/account payload until GitHub authorization has
       // completed; useDesktopAuthFlow performs the first refresh after that.
       if (nextMcpInstallState.completed && nextAuthStatus.authenticated) {
-        if (preparation) await preparation;
+        await preparation;
         // The visible shell may have signed out or switched accounts while
         // project identity checks were pending. Do not resume that startup.
         if (options.authStatus.value !== initialAuthStatus) return;
@@ -157,9 +128,6 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     } finally {
       initialBootstrapPending.value = false;
       options.loading.value = false;
-      // A plain startup room has loaded (or no room loads): the migration runs
-      // now, so every binding it creates or repairs still lands in this session.
-      await startBindings();
     }
   }
 

@@ -838,6 +838,12 @@ export async function migrateLegacyProjectBindings(
   // repeated the same Git work many times. A candidate whose binding already
   // exists costs nothing more; a binding written below joins this list, so a
   // later candidate for the same project still finds it.
+  // Stored rows as the pass found them (SQLite only, no Git). A row that is
+  // different before a write below was written by another call during this
+  // pass, for example Connect project; the pass then leaves it alone, as the
+  // old per-candidate list did.
+  const rowVersion = (binding: DesktopProjectBinding) => `${binding.updatedAt}\0${binding.rootPath}`;
+  const rowsAtStart = new Map(readBindings(options).map((binding) => [binding.identityKey, rowVersion(binding)]));
   let bindings = await listProjectBindings(options);
   let wroteBinding = false;
   // Candidates for one folder share one resolution (identity and status).
@@ -870,17 +876,24 @@ export async function migrateLegacyProjectBindings(
         if (candidate.legacyKey) retryLegacyKeys.add(candidate.legacyKey);
         continue;
       }
+      const context: DesktopProjectBindingContext = {
+        roomIdentifier: candidate.context.roomIdentifier || resolved.roomIdentifier,
+        gitRoom: candidate.context.gitRoom || resolved.gitRoom,
+      };
+      const identityKey = projectBindingIdentityKey(context);
+      const stored = identityKey
+        ? readBindings(options).find((binding) => binding.identityKey === identityKey)
+        : undefined;
+      if (stored && rowVersion(stored) !== rowsAtStart.get(stored.identityKey)) continue;
       const binding = await bindProjectRoot({
-        context: {
-          roomIdentifier: candidate.context.roomIdentifier || resolved.roomIdentifier,
-          gitRoom: candidate.context.gitRoom || resolved.gitRoom,
-        },
+        context,
         rootPath: status.isGitRepo
           ? status.mainRootPath || status.rootPath
           : rootPath,
         source: resolved.source || "local_folder",
       }, options);
       wroteBinding = true;
+      rowsAtStart.set(binding.identityKey, rowVersion(binding));
       bindings = [...bindings.filter((existing) => existing.identityKey !== binding.identityKey), binding];
     } catch {
       if (candidate.legacyKey) retryLegacyKeys.add(candidate.legacyKey);

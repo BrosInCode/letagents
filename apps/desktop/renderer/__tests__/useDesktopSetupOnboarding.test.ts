@@ -273,66 +273,6 @@ test("project preparation runs alongside auth without blocking the shell or raci
   assert.equal(refreshCount, 1);
 });
 
-test("a plain startup room loads before the project-binding migration, which still runs in the session", async () => {
-  const order: string[] = [];
-  let finishMigration!: () => void;
-  const migration = new Promise<void>((resolve) => { finishMigration = resolve; });
-  const state = makeSetupState({
-    refresh: async () => { order.push("refresh"); },
-    setupBridge: { getMcpInstallState: async () => mcpInstallStateFixture({ completed: true }) },
-    authBridge: { getStatus: async () => authStatusFixture() },
-  });
-  let settled = false;
-  const pending = withDesktopBridge(state.windowBridge, () => state.onboarding.loadFirstRunSetup({
-    initialize: () => { order.push("migration"); return migration; },
-    roomNeedsBindings: false,
-  })).then(() => { settled = true; });
-  for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
-  assert.deepEqual(order, ["refresh", "migration"], "the room loads first, then the migration starts");
-  assert.equal(state.loading.value, false, "the room does not stay loading while the migration runs");
-  assert.equal(settled, false, "startup settles only after the migration");
-  finishMigration();
-  await pending;
-  assert.deepEqual(order, ["refresh", "migration"]);
-});
-
-test("a startup room that can be a project room waits for its bindings", async () => {
-  const order: string[] = [];
-  let finishMigration!: () => void;
-  const migration = new Promise<void>((resolve) => { finishMigration = resolve; });
-  const state = makeSetupState({
-    refresh: async () => { order.push("refresh"); },
-    setupBridge: { getMcpInstallState: async () => mcpInstallStateFixture({ completed: true }) },
-    authBridge: { getStatus: async () => authStatusFixture() },
-  });
-  const pending = withDesktopBridge(state.windowBridge, () => state.onboarding.loadFirstRunSetup({
-    initialize: () => { order.push("migration"); return migration; },
-    roomNeedsBindings: true,
-  }));
-  for (let tick = 0; tick < 10; tick += 1) await Promise.resolve();
-  assert.equal(state.onboarding.showFirstRunSplash.value, false);
-  assert.deepEqual(order, ["migration"], "the project room waits for the binding that names its folder");
-  finishMigration();
-  await pending;
-  assert.deepEqual(order, ["migration", "refresh"]);
-});
-
-test("a signed-out start still runs the project-binding migration once", async () => {
-  let migrations = 0;
-  let refreshCount = 0;
-  const state = makeSetupState({
-    refresh: async () => { refreshCount += 1; },
-    setupBridge: { getMcpInstallState: async () => mcpInstallStateFixture({ completed: true }) },
-    authBridge: { getStatus: async () => authStatusFixture({ authenticated: false }) },
-  });
-  await withDesktopBridge(state.windowBridge, () => state.onboarding.loadFirstRunSetup({
-    initialize: async () => { migrations += 1; },
-    roomNeedsBindings: false,
-  }));
-  assert.equal(refreshCount, 0);
-  assert.equal(migrations, 1);
-});
-
 test("signing out while project preparation is pending cancels the startup room refresh", async () => {
   let finishPreparation!: () => void;
   const preparation = new Promise<void>((resolve) => { finishPreparation = resolve; });
