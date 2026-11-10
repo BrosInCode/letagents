@@ -1,7 +1,7 @@
 <template>
   <section class="release-queue" aria-label="Work waiting for release">
     <p v-if="unavailable" class="release-notice" role="status">Some ticket data is unavailable. This list may be incomplete. Check the tracker connection in Connectors.</p>
-    <p class="release-context">{{ description }}</p>
+    <p v-if="description && !compact" class="release-context">{{ description }}</p>
     <p v-if="!items.length" class="release-empty">{{ unavailable ? 'Release status is unavailable.' : 'Nothing waiting for release.' }}</p>
     <ul v-else class="release-list">
       <li v-for="item in items" :key="item.taskId" class="release-item">
@@ -12,7 +12,7 @@
         <div v-if="exceptions(item).length" class="release-exceptions"><span v-for="note in exceptions(item)" :key="note">{{ note }}</span></div>
       </li>
     </ul>
-    <p v-if="oldestCheck" class="release-freshness">Tracker data checked {{ oldestCheck }}. PR details reflect recorded GitHub activity.</p>
+    <p v-if="oldestCheck" class="release-freshness" :title="compact ? `Tracker data checked ${oldestCheck}. PR details reflect recorded GitHub activity.` : undefined"><template v-if="compact">Checked {{ oldestCheck }}</template><template v-else>Tracker data checked {{ oldestCheck }}. PR details reflect recorded GitHub activity.</template></p>
   </section>
 </template>
 <script setup lang="ts">
@@ -21,7 +21,7 @@ import type { BoardReleaseItem } from '../../board-planning.mjs';
 import { safeWorkUrl } from '../my-work/model';
 import BoardIcon from './BoardIcon.vue';
 import './release-queue.css';
-const props = defineProps<{ items: BoardReleaseItem[]; unavailable: number; description: string }>();
+const props = defineProps<{ items: BoardReleaseItem[]; unavailable: number; description?: string; compact?: boolean }>();
 const emit = defineEmits<{ select: [id: string]; external: [url: string] }>();
 function prNumber(url: string) { return /\/pull\/(\d+)/.exec(url)?.[1] || 'PR'; }
 function exceptions(item: BoardReleaseItem) {
