@@ -52,6 +52,9 @@ export const messages = pgTable(
   (table) => ({
     pk: primaryKey({ name: "messages_pk", columns: [table.room_id, table.number] }),
     room_idx: index("messages_room_id_idx").on(table.room_id),
+    // Each room's latest visible message time for the room list.
+    // Built CONCURRENTLY by message-latest-time-rollout.ts, not by a migration.
+    room_timestamp_idx: index("messages_room_timestamp_idx").on(table.room_id, table.timestamp),
     reply_to_idx: index("messages_reply_to_idx").on(table.room_id, table.reply_to_number),
     thread_root_idx: index("messages_thread_root_idx").on(table.room_id, table.thread_root_number),
     client_message_id_idx: uniqueIndex("messages_room_client_message_id_uq")
