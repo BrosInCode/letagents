@@ -13,6 +13,7 @@ import {
   clearBranchDeltaCacheForTest,
   parseGitShortStat,
   refreshRepoStatus,
+  setBranchDeltaMaxBufferForTest,
 } from "../repo-status.js";
 import {
   configureRepoStatusWatchForTest,
@@ -335,6 +336,97 @@ test("an unrelated configuration change measures once, then the cache holds agai
     assert.equal(calls.diffs() - before, 0, "then unchanged builds measure nothing");
   } finally {
     calls.restore();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a .gitattributes deleted while its diff runs is not cached as absent", async () => {
+  clearBranchDeltaCacheForTest();
+  const { temporary, root } = repoWithWorktrees(1);
+  const attributes = join(root, ".gitattributes");
+  writeFileSync(attributes, "work-0.txt -diff\n");
+  // A checkout that removes the file while Git is still running the diff.
+  const restore = observeGitSpawns(({ args, child }) => {
+    if (args.includes("--numstat")) child.once("exit", () => rmSync(attributes, { force: true }));
+  });
+  try {
+    await buildRepoStatus(root);
+    restore();
+    const rebuilt = await buildRepoStatus(root);
+    assert.deepEqual(rebuilt.branchDeltas?.find((delta) => delta.branch === "agent/0"), gitDelta(root, "agent/0"));
+  } finally {
+    restore();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("branch and remote settings do not measure other branches again; diff settings do", async () => {
+  clearBranchDeltaCacheForTest();
+  const { temporary, root } = repoWithWorktrees(4);
+  const calls = recordGit();
+  try {
+    await buildRepoStatus(root);
+    assert.equal(calls.diffs(), 4);
+
+    git(root, "config", "branch.agent/1.remote", "origin");
+    git(root, "config", "branch.agent/1.merge", "refs/heads/agent/1");
+    git(root, "config", "remote.origin.pushurl", "git@github.com:acme/other.git");
+    let before = calls.diffs();
+    await buildRepoStatus(root);
+    assert.equal(calls.diffs() - before, 0, "branch.* and remote.* settings cost no diff");
+
+    // A new agent worktree with tracking writes branch.<name>.remote and .merge.
+    git(root, "update-ref", "refs/remotes/origin/main", "main");
+    git(root, "worktree", "add", "-q", "--track", "-b", "tracked", join(temporary, "tracked"), "origin/main");
+    before = calls.diffs();
+    const withTracked = await buildRepoStatus(root);
+    assert.equal(calls.diffs() - before, 1, "only the new worktree's branch is measured");
+    assert.ok(withTracked.branchDeltas?.some((delta) => delta.branch === "tracked"));
+
+    git(root, "config", "diff.renames", "false");
+    before = calls.diffs();
+    await buildRepoStatus(root);
+    assert.equal(calls.diffs() - before, 5, "a diff setting measures every branch again");
+  } finally {
+    calls.restore();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("with attr.tree set nothing is cached", async () => {
+  clearBranchDeltaCacheForTest();
+  const { temporary, root } = repoWithWorktrees(2);
+  git(root, "config", "attr.tree", "HEAD");
+  const calls = recordGit();
+  try {
+    await buildRepoStatus(root);
+    await buildRepoStatus(root);
+    assert.equal(calls.diffs(), 4);
+  } finally {
+    calls.restore();
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a path list larger than the buffer still gives the count, uncached", async () => {
+  clearBranchDeltaCacheForTest();
+  const { temporary, root } = repoWithWorktrees(2);
+  const restoreBuffer = setBranchDeltaMaxBufferForTest(8);
+  const calls = recordGit();
+  try {
+    const status = await buildRepoStatus(root);
+    assert.deepEqual(
+      status.branchDeltas,
+      [{ branch: "main", filesChanged: 0, additions: 0, deletions: 0, baseBranch: "main" }, gitDelta(root, "agent/0"), gitDelta(root, "agent/1")],
+    );
+    const before = calls.spawns.filter((args) => args.includes("--shortstat") && !args.includes("--numstat")).length;
+    assert.equal(before, 2, "each branch fell back to the plain shortstat");
+    await buildRepoStatus(root);
+    const after = calls.spawns.filter((args) => args.includes("--shortstat") && !args.includes("--numstat")).length;
+    assert.equal(after, 4, "the fallback result is not cached");
+  } finally {
+    calls.restore();
+    restoreBuffer();
     rmSync(temporary, { recursive: true, force: true });
   }
 });

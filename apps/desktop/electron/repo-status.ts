@@ -380,7 +380,8 @@ export function parseGitShortStat(
  * 1. the two commits (the cache key holds both commit IDs);
  * 2. the effective Git configuration, for example `diff.renames` or a diff
  *    driver (the key holds a hash of `git var -l`, which prints the merged
- *    configuration of every scope and include);
+ *    configuration of every scope and include, less the sections listed at
+ *    `diffRelevantGitVariable`);
  * 3. the attributes Git reads for each changed path. A diff of two commits
  *    reads them from the working tree's `.gitattributes` in the path's folder
  *    and every parent folder, from `$GIT_COMMON_DIR/info/attributes`, from the
@@ -391,7 +392,10 @@ export function parseGitShortStat(
  *    each entry keeps the folders of its changed paths and the state of the
  *    `.gitattributes` in each, and is used only while those are unchanged.
  * When a source cannot be identified (Git older than 2.42 does not print the
- * attribute file paths), nothing is cached and every branch is measured.
+ * attribute file paths, or `attr.tree` points attributes at a revision),
+ * nothing is cached and every branch is measured.
+ * Not covered: the program a diff driver's `textconv` runs, `refs/replace`
+ * and grafts, and a different Git binary on PATH.
  * Bounded; the least recently used entry goes first.
  */
 type CachedBranchDelta = Pick<RepoBranchDelta, "filesChanged" | "additions" | "deletions"> & {
@@ -399,17 +403,57 @@ type CachedBranchDelta = Pick<RepoBranchDelta, "filesChanged" | "additions" | "d
   attributeState: string;
 };
 const branchDeltaCacheLimit = 4096;
+/**
+ * Memory bounds: a result whose changed paths span more folders than this is
+ * not cached (it is measured on every build, as before), and the folders kept
+ * by all entries together stay below the total; the oldest entries go first.
+ */
+const branchDeltaMaxFoldersPerEntry = 1_000;
+const branchDeltaMaxFoldersTotal = 100_000;
 const branchDeltaCache = new Map<string, CachedBranchDelta>();
+let branchDeltaCachedFolders = 0;
 /** Shortstats run at most this many at a time. */
 const branchDeltaConcurrency = 4;
-/** Path lists of large branches; Node's default 1 MiB would fail them. */
-const branchDeltaMaxBuffer = 64 * 1024 * 1024;
+/**
+ * Room for the path list of a large branch; Node's default 1 MiB would fail
+ * it. A diff whose path list is larger still is measured with the plain
+ * shortstat and not cached.
+ */
+let branchDeltaMaxBuffer = 64 * 1024 * 1024;
 /** Where each repository root keeps info/attributes, learned during a build. */
 const infoAttributesPaths = new Map<string, string>();
 
 /** Test-only: forget every cached branch shortstat. */
 export function clearBranchDeltaCacheForTest(): void {
   branchDeltaCache.clear();
+  branchDeltaCachedFolders = 0;
+}
+
+/** Test-only: shrink the path-list buffer; returns a function that restores it. */
+export function setBranchDeltaMaxBufferForTest(bytes: number): () => void {
+  const previous = branchDeltaMaxBuffer;
+  branchDeltaMaxBuffer = bytes;
+  return () => { branchDeltaMaxBuffer = previous; };
+}
+
+function storeBranchDelta(cacheKey: string, entry: CachedBranchDelta): void {
+  if (entry.attributeFolders.length > branchDeltaMaxFoldersPerEntry) return;
+  const replaced = branchDeltaCache.get(cacheKey);
+  if (replaced) {
+    branchDeltaCache.delete(cacheKey);
+    branchDeltaCachedFolders -= replaced.attributeFolders.length;
+  }
+  branchDeltaCache.set(cacheKey, entry);
+  branchDeltaCachedFolders += entry.attributeFolders.length;
+  while (
+    branchDeltaCache.size > branchDeltaCacheLimit
+    || branchDeltaCachedFolders > branchDeltaMaxFoldersTotal
+  ) {
+    const oldest = branchDeltaCache.entries().next().value;
+    if (!oldest) break;
+    branchDeltaCache.delete(oldest[0]);
+    branchDeltaCachedFolders -= oldest[1].attributeFolders.length;
+  }
 }
 
 function rememberInfoAttributesPath(repoRoot: string, path: string): void {
@@ -464,14 +508,39 @@ async function readInfoAttributesPath(
   }
 }
 
+/**
+ * `git var -l` lines left out of the diff context, because they cannot change
+ * the output of `git diff --numstat --shortstat --merge-base <commit> <commit>`:
+ * - `GIT_AUTHOR_IDENT` and `GIT_COMMITTER_IDENT` carry the current time;
+ *   identities are used to write commits, never to compare them.
+ * - `branch.<name>.*` (remote, merge, rebase, pushRemote, description, ...)
+ *   set the upstream and pull/push behaviour of a branch name. The diff names
+ *   two commit IDs, so no branch name is resolved and no upstream is read.
+ * - `remote.<name>.*` (url, fetch, push, ...) configure fetch and push. A diff
+ *   reads only local objects.
+ * Git writes these whenever a worktree is added with tracking, a branch is
+ * pushed with -u or deleted, or `gh pr checkout` runs; keeping them would
+ * measure every branch again each time an agent gets a worktree.
+ */
+function diffRelevantGitVariable(line: string): boolean {
+  return !/^GIT_(?:AUTHOR|COMMITTER)_IDENT=/.test(line)
+    && !line.startsWith("branch.")
+    && !line.startsWith("remote.");
+}
+
 function diffContextFrom(
   gitVariables: string | null,
   infoAttributesPath: string | null,
 ): DiffContext | null {
   if (gitVariables === null || !infoAttributesPath) return null;
-  const lines = gitVariables.split(/\r?\n/)
-    // The identities carry the current time; they do not affect a diff.
-    .filter((line) => !/^GIT_(?:AUTHOR|COMMITTER)_IDENT=/.test(line));
+  const allLines = gitVariables.split(/\r?\n/);
+  // With `attr.tree` (or GIT_ATTR_SOURCE) Git reads attributes from a tree
+  // named by a revision, which can move without any file here changing.
+  // Nothing is cached then.
+  if (allLines.some((line) => line.startsWith("attr.tree=")) || process.env.GIT_ATTR_SOURCE !== undefined) {
+    return null;
+  }
+  const lines = allLines.filter(diffRelevantGitVariable);
   const systemAttributes = lines.find((line) => line.startsWith("GIT_ATTR_SYSTEM="))?.slice("GIT_ATTR_SYSTEM=".length);
   const globalAttributes = lines.find((line) => line.startsWith("GIT_ATTR_GLOBAL="))?.slice("GIT_ATTR_GLOBAL=".length);
   if (!systemAttributes || !globalAttributes) return null;
@@ -517,17 +586,41 @@ function attributeStateOf(workspaceRoot: string, folders: readonly string[], con
   }).join("|");
 }
 
-/** File times can be coarse (one second on some file systems). */
-const attributeClockSlackMs = 2_000;
+/**
+ * Margin between the clock read before a diff and the file times the kernel
+ * writes. File systems that keep whole seconds (both times end in .000000000)
+ * get two seconds.
+ */
+const attributeClockSlackNs = 10_000_000n;
+const coarseAttributeClockSlackNs = 2_000_000_000n;
 
+function changedSince(path: string, sinceNs: bigint): boolean | null {
+  try {
+    const info = lstatSync(path, { bigint: true });
+    const coarse = info.mtimeNs % 1_000_000_000n === 0n && info.ctimeNs % 1_000_000_000n === 0n;
+    const from = sinceNs - (coarse ? coarseAttributeClockSlackNs : attributeClockSlackNs);
+    return info.ctimeNs >= from || info.mtimeNs >= from;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when a `.gitattributes` in these folders may have changed since
+ * `sinceNs`. A missing file may have been deleted meanwhile; deleting it (or
+ * its folder) changes the times of the nearest folder that still exists, so
+ * that folder is checked instead.
+ */
 function attributesChangedSince(workspaceRoot: string, folders: readonly string[], sinceNs: bigint): boolean {
   return folders.some((folder) => {
-    try {
-      const info = lstatSync(join(workspaceRoot, folder, ".gitattributes"), { bigint: true });
-      return info.ctimeNs >= sinceNs || info.mtimeNs >= sinceNs;
-    } catch {
-      return false;
+    const fileChanged = changedSince(join(workspaceRoot, folder, ".gitattributes"), sinceNs);
+    if (fileChanged !== null) return fileChanged;
+    const parts = folder ? folder.split("/") : [];
+    for (let depth = parts.length; depth >= 0; depth -= 1) {
+      const folderChanged = changedSince(join(workspaceRoot, ...parts.slice(0, depth)), sinceNs);
+      if (folderChanged !== null) return folderChanged;
     }
+    return true;
   });
 }
 
@@ -600,18 +693,36 @@ async function getBranchDelta(
     }
     // The diff names the commits of the cache key, so a branch that moves
     // meanwhile cannot store a later result under an earlier commit.
-    const startedAtNs = BigInt(Date.now() - attributeClockSlackMs) * 1_000_000n;
-    const stdout = await runGitStdout(workspaceRoot, [
-      "--no-optional-locks",
-      "diff",
-      "--numstat",
-      "--shortstat",
-      "-z",
-      "--merge-base",
-      baseOid,
-      headOid,
-      "--",
-    ], { signal: options.signal, maxBuffer: branchDeltaMaxBuffer });
+    const startedAtNs = BigInt(Date.now()) * 1_000_000n;
+    let stdout: string;
+    try {
+      stdout = await runGitStdout(workspaceRoot, [
+        "--no-optional-locks",
+        "diff",
+        "--numstat",
+        "--shortstat",
+        "-z",
+        "--merge-base",
+        baseOid,
+        headOid,
+        "--",
+      ], { signal: options.signal, maxBuffer: branchDeltaMaxBuffer });
+    } catch (error) {
+      throwIfAborted(options);
+      if (!/maxBuffer/i.test((error as { stderr?: string }).stderr ?? "")) throw error;
+      // The path list is too large to keep: count it as before, uncached.
+      const shortStat = await runGitStdout(workspaceRoot, [
+        "--no-optional-locks",
+        "diff",
+        "--shortstat",
+        "--merge-base",
+        baseOid,
+        headOid,
+        "--",
+      ], { signal: options.signal });
+      throwIfAborted(options);
+      return parseGitShortStat(shortStat, defaultBranch, branch);
+    }
     throwIfAborted(options);
     const { shortStat, paths } = parseGitNumstatShortStat(stdout);
     const delta = parseGitShortStat(shortStat, defaultBranch, branch);
@@ -619,17 +730,13 @@ async function getBranchDelta(
     // A .gitattributes written while Git ran may or may not be in this
     // result; keep the result but do not reuse it.
     if (attributesChangedSince(workspaceRoot, attributeFolders, startedAtNs)) return delta;
-    branchDeltaCache.set(cacheKey, {
+    storeBranchDelta(cacheKey, {
       filesChanged: delta.filesChanged,
       additions: delta.additions,
       deletions: delta.deletions,
       attributeFolders,
       attributeState: attributeStateOf(workspaceRoot, attributeFolders, context),
     });
-    if (branchDeltaCache.size > branchDeltaCacheLimit) {
-      const oldest = branchDeltaCache.keys().next().value;
-      if (oldest !== undefined) branchDeltaCache.delete(oldest);
-    }
     return delta;
   } catch {
     throwIfAborted(options);
