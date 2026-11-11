@@ -37,6 +37,7 @@ import {
   type RoomRole,
 } from "./access-decision.js";
 import { isRepoBackedRoomId } from "./room-ids.js";
+import { isRepoAccessRoom } from "./room-nature.js";
 
 export { isRepoBackedRoomId };
 export {
@@ -58,8 +59,9 @@ export interface ProjectRepoAccessDecision {
 
 export type ProjectRepoAccessDeps = RoomAccessDecisionDeps;
 
+/** The room's access room is a repository room, by its stored origin (rooms/room-nature.ts). */
 export function isRepoBackedProject(project: Project): boolean {
-  return isRepoBackedRoomId(getProjectAccessRoomId(project));
+  return isRepoAccessRoom(project);
 }
 
 const requestRepoAccessRoomNames = new WeakMap<AuthenticatedRequest, string>();

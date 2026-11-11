@@ -9,7 +9,7 @@ import {
   isFocusRoomIdShape,
   isJoinCodeMainRoom,
   isJoinCodeShape,
-  isRepoRoomByIdShape,
+  isRepoAccessRoom,
   isRepoShapedRoomId,
   isReservedMainRoomCreationId,
   matchesFocusRoomIdDatabaseCheck,
@@ -303,7 +303,7 @@ test("repo access: shape-only and binding-fallback behaviours both equal staging
     { id: "team/design/notes", kind: "main", parent_room_id: null },
   ];
   for (const project of projects) {
-    assert.equal(isRepoRoomByIdShape(project), legacyIsRepoBackedRoomId(project.parent_room_id ?? project.id));
+    assert.equal(isRepoAccessRoom(project), legacyIsRepoBackedRoomId(project.parent_room_id ?? project.id));
     assert.deepEqual(
       await resolveRepoAccessTarget(project, getBinding),
       await legacyResolveProjectRepoAccessTarget(project, getBinding),
@@ -312,7 +312,7 @@ test("repo access: shape-only and binding-fallback behaviours both equal staging
   }
   // The disagreement the module keeps: a bound room whose id is not repo-shaped.
   const bound = projects[3]!;
-  assert.equal(isRepoRoomByIdShape(bound), false);
+  assert.equal(isRepoAccessRoom(bound), false);
   assert.equal((await resolveRepoAccessTarget(bound, getBinding))?.repoRoomName, "github.com/acme/bound");
 });
 

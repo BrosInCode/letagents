@@ -36,6 +36,7 @@ import {
 import { isRentalParticipantProvisionableStatus } from "./room-provisioning-policy.js";
 import { buildFocusRoomId } from "../db/rooms.js";
 import { findFocusRoomRowByKey } from "../db/focus-room-lookup.js";
+import { insertRoomRow } from "../db/room-rows.js";
 
 // ===== ID helpers =====
 
@@ -193,7 +194,7 @@ export async function provisionRentalRoom(
     const now = new Date().toISOString();
 
     if (!existingRoom) {
-      await tx.insert(rooms).values({
+      await insertRoomRow(tx, {
         id: roomId,
         display_name: `Rental: ${session.task_title}`,
         kind: "focus",

@@ -33,9 +33,9 @@ import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import { createBoundedExecutor } from "../../../bounded-async.js";
 import {
   getProjectAccessRoomId,
-  isRepoBackedProject,
   resolveRequestProjectRepoAccessRoomName,
 } from "../../../rooms/access.js";
+import { isRepoAccessRoom } from "../../../rooms/room-nature.js";
 import type { Message, Project } from "../../../db.js";
 import {
   openLiveRoomDeliveryController,
@@ -85,7 +85,7 @@ export function reasoningStreamFrame(
  * owner token (the MCP client) and a repo room never do.
  */
 export async function resolveRoomStreamAdmin(req: AuthenticatedRequest, project: Project): Promise<boolean> {
-  if (!isAppSession(req) || !req.sessionAccount || isRepoBackedProject(project)) return false;
+  if (!isAppSession(req) || !req.sessionAccount || isRepoAccessRoom(project)) return false;
   return (await getRoomMemberRole(getProjectAccessRoomId(project), req.sessionAccount.account_id)) === "admin";
 }
 
@@ -178,7 +178,7 @@ export async function streamRoomMessages(input: {
   let roomAdmin = false;
   let roleFromEvent: boolean | null = null;
   let stopRoleUpdates = () => {};
-  if (!messageOnly && isAppSession(req) && req.sessionAccount && !isRepoBackedProject(project)) {
+  if (!messageOnly && isAppSession(req) && req.sessionAccount && !isRepoAccessRoom(project)) {
     const accessRoomId = getProjectAccessRoomId(project).trim().toLowerCase();
     const accountId = req.sessionAccount.account_id;
     const onRoleChanged = (payload: unknown) => {

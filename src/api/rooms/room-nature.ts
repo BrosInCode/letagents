@@ -2,9 +2,10 @@
  * The one server module that answers "what kind of room is this?":
  * a join-code room, a repository room, a named (ad-hoc) room, or a focus room.
  *
- * Today the answer comes from the shape of the room id. A later migration
- * stores it as `rooms.origin`; then only the inside of `getRoomNature` changes
- * and every caller keeps its call.
+ * The answer is the stored `rooms.origin` (migration 0148). A row without it
+ * (written by an older server during a deploy, or a room object built without
+ * the column) falls back to the shape of the room id, the rule the backfill
+ * used. A later step makes the column NOT NULL and removes the fallback.
  *
  * Kept free of imports so hot paths (and `routing.ts`, `room-ids.ts`, which
  * re-export from here) can use it without import cycles.
@@ -13,16 +14,20 @@
  * say what they do. It does not pick a winner; see the notes on
  * `isFocusRoomIdShape` / `matchesFocusRoomIdDatabaseCheck`,
  * `parseGitHubRepoRoomId` / `parseGitHubRefParentRoomId`, and
- * `isRepoRoomByIdShape` / `resolveRepoAccessTarget`.
+ * `isRepoAccessRoom` / `resolveRepoAccessTarget`.
  */
 
 export type RoomOrigin = "join_code" | "repo" | "named" | "focus";
 
-/** The columns `getRoomNature` reads. PR2 adds the stored `origin`. */
+export const ROOM_ORIGINS: readonly RoomOrigin[] = ["join_code", "repo", "named", "focus"];
+
+/** The columns `getRoomNature` reads. */
 export interface RoomNatureSource {
   id: string;
   kind: string;
   parent_room_id?: string | null;
+  /** The stored `rooms.origin` when the caller selected it. */
+  origin?: string | null;
 }
 
 export interface RoomNature {
@@ -34,6 +39,14 @@ export interface RoomNature {
   name: string | undefined;
   /** The room whose access rules apply: the parent of a focus room, else itself. */
   accessRoomId: string;
+  /**
+   * The origin of the access room. For a room without a parent it is
+   * `origin`. For a focus room it is the parent's, read from the parent id's
+   * shape: the parent row is not loaded here.
+   */
+  accessOrigin: RoomOrigin;
+  /** Where `origin` came from: the stored column, or the id-shape fallback. */
+  originSource: "stored" | "id_shape";
 }
 
 // ── Join codes ────────────────────────────────────────────────────────────
@@ -180,45 +193,103 @@ export function classifyRoomLocator(input: string): RoomLocator {
 }
 
 /**
- * The nature of a stored room. Reads the id shape until `rooms.origin`
- * exists; callers do not change when it does.
+ * The origin a room gets from the shape of its id: the rule of the 0148
+ * backfill and of the fallback for rows without a stored origin. A focus room
+ * (`kind = 'focus'`) is `focus`; a main room is a join code, a repository or
+ * a named room by its id.
  */
+export function originFromIdShape(room: { id: string; kind: string }): RoomOrigin {
+  if (room.kind === "focus") return "focus";
+  if (isJoinCodeShape(room.id)) return "join_code";
+  if (isRepoShapedRoomId(room.id)) return "repo";
+  return "named";
+}
+
+/** The origin a new main room gets from its id. */
+export function originForNewMainRoom(roomId: string): Exclude<RoomOrigin, "focus"> {
+  return originFromIdShape({ id: roomId, kind: "main" }) as Exclude<RoomOrigin, "focus">;
+}
+
+function isRoomOrigin(value: unknown): value is RoomOrigin {
+  return typeof value === "string" && (ROOM_ORIGINS as readonly string[]).includes(value);
+}
+
+/**
+ * Stored origins of room objects that do not carry the column as a field.
+ * `toProject` and the room list record the column here, so `origin` never
+ * becomes a property of an object that is sent to a client.
+ */
+const storedOrigins = new WeakMap<object, RoomOrigin>();
+
+/** Remember the stored `rooms.origin` of a room object built from a row. */
+export function recordStoredRoomOrigin(room: object, origin: string | null | undefined): void {
+  if (isRoomOrigin(origin)) storedOrigins.set(room, origin);
+}
+
+function storedOriginOf(room: RoomNatureSource): RoomOrigin | null {
+  if (isRoomOrigin(room.origin)) return room.origin;
+  return storedOrigins.get(room) ?? null;
+}
+
+const PARITY_LOG_LIMIT = 1000;
+const parityLogged = new Set<string>();
+
+/** Log once per room when the stored origin and the id-shape rule disagree. */
+function reportOriginParity(room: RoomNatureSource, stored: RoomOrigin, fromShape: RoomOrigin): void {
+  if (stored === fromShape || parityLogged.has(room.id) || parityLogged.size >= PARITY_LOG_LIMIT) return;
+  parityLogged.add(room.id);
+  console.warn(
+    `[room origin parity] room ${JSON.stringify(room.id)} has stored origin ${stored} but its id shape says ${fromShape}`
+  );
+}
+
+/** The nature of a stored room: its stored origin, else its id shape. */
 export function getRoomNature(room: RoomNatureSource): RoomNature {
-  const joinCodeShaped = isJoinCodeShape(room.id);
-  const isFocus = room.kind === "focus";
-  const origin: RoomOrigin = isFocus
-    ? "focus"
-    : joinCodeShaped
-      ? "join_code"
-      : isRepoShapedRoomId(room.id)
-        ? "repo"
-        : "named";
+  const fromShape = originFromIdShape(room);
+  const stored = storedOriginOf(room);
+  if (stored) reportOriginParity(room, stored, fromShape);
+  const origin = stored ?? fromShape;
+  // Without a stored origin, `code` keeps its old rule exactly: any
+  // join-code-shaped id (a focus row cannot have one: rooms_focus_id_check).
+  const joinCode = stored ? origin === "join_code" : isJoinCodeShape(room.id);
+  const parentRoomId = room.parent_room_id ?? null;
   return {
     origin,
-    isFocus,
-    joinCode: joinCodeShaped ? room.id : null,
-    name: joinCodeShaped ? undefined : room.id,
-    accessRoomId: room.parent_room_id ?? room.id,
+    isFocus: room.kind === "focus",
+    joinCode: joinCode ? room.id : null,
+    name: joinCode ? undefined : room.id,
+    accessRoomId: parentRoomId ?? room.id,
+    accessOrigin: parentRoomId === null ? origin : originForNewMainRoom(parentRoomId),
+    originSource: stored ? "stored" : "id_shape",
   };
 }
 
-/** True for a main room whose id is a join code: the only rooms that can be deleted. */
+/** True for a main room whose origin is a join code: the only rooms that can be deleted. */
 export function isJoinCodeMainRoom(room: RoomNatureSource): boolean {
-  return room.kind === "main" && isJoinCodeShape(room.id);
+  return room.kind === "main" && getRoomNature(room).origin === "join_code";
+}
+
+/**
+ * Behaviour A (`isRepoBackedProject`): the access room's origin is `repo`.
+ * A binding is not read.
+ *
+ * Disagrees with `resolveRepoAccessTarget` (behaviour B) for a room whose
+ * origin is not `repo` but which has a GitHub binding: A says no, B says yes.
+ */
+export function isRepoAccessRoom(room: RoomNatureSource): boolean {
+  return getRoomNature(room).accessOrigin === "repo";
+}
+
+/**
+ * A room string from a request, before any stored room is read: repository
+ * shaped or not. The join, entry and create routes gate a repository name
+ * this way even when no room exists yet.
+ */
+export function isRepoRoomLocator(roomLocator: string): boolean {
+  return isRepoShapedRoomId(roomLocator);
 }
 
 // ── Repository access target (two existing behaviours) ───────────────────
-
-/**
- * Behaviour A (today's `isRepoBackedProject`): the access room id has a
- * repository shape. A binding is not read.
- *
- * Disagrees with `resolveRepoAccessTarget` for a room whose id is not
- * repository-shaped but which has a GitHub binding: A says no, B says yes.
- */
-export function isRepoRoomByIdShape(room: RoomNatureSource): boolean {
-  return isRepoShapedRoomId(room.parent_room_id ?? room.id);
-}
 
 export interface RepoBindingLike {
   provider: string;
@@ -227,16 +298,16 @@ export interface RepoBindingLike {
 }
 
 /**
- * Behaviour B (today's `resolveProjectRepoAccessTarget`): the access room id
- * when it has a repository shape; else the first GitHub binding of the access
+ * Behaviour B (`resolveProjectRepoAccessTarget`): the access room id when
+ * its origin is `repo`; else the first GitHub binding of the access
  * room, then of the room itself.
  */
 export async function resolveRepoAccessTarget<TBinding extends RepoBindingLike>(
   room: RoomNatureSource,
   getBinding: (roomId: string) => Promise<TBinding | null>,
 ): Promise<{ roomName: string; repoRoomName: string; binding: TBinding | null } | null> {
-  const accessRoomId = room.parent_room_id ?? room.id;
-  if (isRepoShapedRoomId(accessRoomId)) {
+  const { accessRoomId, accessOrigin } = getRoomNature(room);
+  if (accessOrigin === "repo") {
     return { roomName: accessRoomId, repoRoomName: accessRoomId, binding: null };
   }
 
