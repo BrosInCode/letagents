@@ -162,7 +162,8 @@ function acceptedTaskFor(item: UniversalInboxItem): TaskAcceptance | undefined {
 }
 const allItems = computed(() => buildUniversalInbox(props.data, props.rentals, props.attention, props.joinRequests).map(item => {
   const record = sentAnswers.value[item.key];
-  if (acceptedTasks.value[item.key] && item.record && !item.record.response) item = { ...item, approvalTask: acceptedTasks.value[item.key]!.task };
+  const acceptance = acceptedTasks.value[item.key];
+  if (acceptance && item.record && !item.record.response && (acceptance.response || !item.approvalTask)) item = { ...item, approvalTask: acceptance.task };
   if (acceptedTaskFor(item) && !item.record && item.category === 'proposed') return { ...item, section: 'updates' as const, category: 'accepted' };
   return record && item.record && record.version > item.record.version
     ? { ...item, record, section: 'answered' as const, category: attentionRecordCategory(record), timestamp: record.response?.at || item.timestamp, fingerprint: String(record.version) } : item;

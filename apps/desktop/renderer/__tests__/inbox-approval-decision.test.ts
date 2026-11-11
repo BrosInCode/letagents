@@ -506,6 +506,21 @@ test('an ambiguous acceptance cannot be reconciled under a different account', a
   assert.match(text(root), /Return to the account that accepted this task/);
 });
 
+test('a refreshed proposal supersedes an unconfirmed attempt so its edited scope can be accepted', async context => {
+  const failures = { board: true };
+  const { root, current, writes, section } = await taskApprovalHarness(context, failures);
+  await clickButton(root, 'Accept task');
+  current.value.rooms[0]!.tasks[0]!.title = 'Notify mentioned humans in unopened rooms';
+  current.value.rooms[0]!.tasks[0]!.description = 'Respect muted and archived rooms.';
+  await nextTick();
+  assert.match(text(root), /Respect muted and archived rooms/);
+  failures.board = false;
+  await clickButton(root, 'Accept task');
+  assert.deepEqual(writes.map(write => write.action), ['accept', 'accept', 'answer']);
+  assert.equal(section.value, 'answered');
+  assert.match(text(root), /Accepted task_1: Notify mentioned humans in unopened rooms\./);
+});
+
 test('leaving Inbox during acceptance still records the decision for the same account', async context => {
   let release!: () => void;
   const wait = new Promise<void>(resolve => { release = resolve; });
