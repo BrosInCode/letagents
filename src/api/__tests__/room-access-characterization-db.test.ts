@@ -20,6 +20,7 @@ import test from "node:test";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 
 import type { Project, SessionAccount, SupervisorHostGrant } from "../db/types.js";
+import { getRoomNature, originFromIdShape } from "../rooms/room-nature.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
 
 const testDatabaseUrl = process.env.TEST_DB_URL;
@@ -186,19 +187,37 @@ interface World {
   ownerToken?: string;
 }
 
+/**
+ * The pinned tables run twice: once with rooms inserted the old way (no
+ * `rooms.origin`, so the id-shape fallback answers) and once with the origin
+ * stored, as every room written by the server since migration 0148 has it.
+ * Both runs must give the same pinned answers.
+ */
+const ORIGIN_MODES = ["stored", "null"] as const;
+let originMode: typeof ORIGIN_MODES[number] = "null";
+
+function storedOrigin(id: string, kind: "main" | "focus"): string | null {
+  return originMode === "stored" ? originFromIdShape({ id, kind }) : null;
+}
+
+/** The room under test reads its origin the way this run means it to. */
+function assertOriginMode(project: Project): void {
+  assert.equal(getRoomNature(project).originSource, originMode === "stored" ? "stored" : "id_shape", project.id);
+}
+
 async function insertMainRoom(id: string): Promise<void> {
   await dbClient!.pool.query(
-    `INSERT INTO rooms (id, created_at, display_name, kind) VALUES ($1, NOW(), $1, 'main')`,
-    [id],
+    `INSERT INTO rooms (id, created_at, display_name, kind, origin) VALUES ($1, NOW(), $1, 'main', $2)`,
+    [id, storedOrigin(id, "main")],
   );
 }
 
 async function insertFocusRoom(parentId: string): Promise<string> {
   const id = `focus_${100000 + serial}`;
   await dbClient!.pool.query(
-    `INSERT INTO rooms (id, created_at, display_name, kind, parent_room_id, focus_key, focus_status)
-     VALUES ($1, NOW(), $1, 'focus', $2, $1, 'active')`,
-    [id, parentId],
+    `INSERT INTO rooms (id, created_at, display_name, kind, parent_room_id, focus_key, focus_status, origin)
+     VALUES ($1, NOW(), $1, 'focus', $2, $1, 'active', $3)`,
+    [id, parentId, storedOrigin(id, "focus")],
   );
   return id;
 }
@@ -479,7 +498,8 @@ if (testDatabaseUrl) {
   test.after(async () => { await dbClient?.pool.end(); });
 }
 
-test("every room access call site keeps its pinned answer", { skip, concurrency: false }, async () => {
+for (const mode of ORIGIN_MODES) test(`every room access call site keeps its pinned answer (origin ${mode})`, { skip, concurrency: false }, async () => {
+  originMode = mode;
   const table: Record<string, Record<CallSite, string>> = {};
   for (const outage of [false, true]) {
     for (const roomKind of ROOM_KINDS) {
@@ -487,6 +507,7 @@ test("every room access call site keeps its pinned answer", { skip, concurrency:
         const row = {} as Record<CallSite, string>;
         for (const site of CALL_SITES) {
           const world = await buildWorld(roomKind, principal);
+          assertOriginMode(world.project);
           githubDown = outage;
           try {
             row[site] = await callSite(site, world);
@@ -634,7 +655,8 @@ async function withGitHub<T>(mode: "up" | "503" | "401" | "ratelimit", run: () =
   }
 }
 
-test("rows added after the first pin keep their pinned answer", { skip, concurrency: false }, async () => {
+for (const mode of ORIGIN_MODES) test(`rows added after the first pin keep their pinned answer (origin ${mode})`, { skip, concurrency: false }, async () => {
+  originMode = mode;
   const table: Record<string, Record<string, string>> = {};
 
   // GitHub answering 401 (a dead token) and an exhausted rate limit (403).

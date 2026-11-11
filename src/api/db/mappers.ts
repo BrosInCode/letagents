@@ -2,7 +2,7 @@ import { normalizeBoardManagerFailoverMode } from "../../shared/board-manager-fa
 import { normalizeAgentPromptKind } from "../../shared/room-agent-prompts.js";
 import { buildRoomActivitySourceFlags, deriveRoomAgentActivityState } from "../../shared/room-agent-activity.js";
 import { buildTaskWorkflowRefs, normalizeTaskWorkflowArtifacts } from "../repo-workflow.js";
-import { getRoomNature } from "../rooms/room-nature.js";
+import { getRoomNature, recordStoredRoomOrigin } from "../rooms/room-nature.js";
 import { resolveRoomDisplayName } from "../rooms/display-name.js";
 import { board_intents, board_manager_assignments, github_app_installations, github_app_repositories, github_repositories, github_webhook_deliveries, room_aliases, room_board_settings, rooms, room_git_bindings, room_shared_artifact_tasks, room_shared_artifacts } from "./schema.js";
 import { formatAttachmentId, formatMessageId, formatTaskId } from "./utils.js";
@@ -11,7 +11,7 @@ import type { BoardIntent, BoardIntentRow, BoardManagerAssignment, BoardManagerA
 
 export function toProject(row: typeof rooms.$inferSelect): Project {
   const nature = getRoomNature(row);
-  return {
+  const project: Project = {
     id: row.id,
     code: nature.joinCode,
     display_name: resolveRoomDisplayName(row.id, row.display_name, row.kind),
@@ -31,6 +31,9 @@ export function toProject(row: typeof rooms.$inferSelect): Project {
     conclusion_details: row.conclusion_details ?? null,
     created_at: row.created_at,
   };
+  // The stored origin stays off the object, so it never reaches a response.
+  recordStoredRoomOrigin(project, row.origin);
+  return project;
 }
 
 export function toRoomAlias(row: typeof room_aliases.$inferSelect): RoomAlias {

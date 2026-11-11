@@ -6,6 +6,7 @@ import type {
   FocusGitHubEventRouting,
   FocusParentVisibility,
 } from "../../focus-rooms/settings.js";
+import type { RoomOrigin } from "../../rooms/room-nature.js";
 import { organizations } from "./organizations.js";
 
 export const id_sequences = pgTable("id_sequences", {
@@ -21,6 +22,9 @@ export const rooms = pgTable(
     // On by default. Migration 0145 also turned it on in every existing room.
     jev_routing_enabled: boolean("jev_routing_enabled").notNull().default(true),
     kind: text("kind").notNull().default("main"),
+    // What the room is: join_code, repo, named or focus (migration 0148).
+    // Nullable until every server writes it; read through rooms/room-nature.ts.
+    origin: text("origin").$type<RoomOrigin>(),
     parent_room_id: text("parent_room_id").references((): AnyPgColumn => rooms.id, {
       onDelete: "cascade",
       onUpdate: "cascade",
@@ -58,6 +62,13 @@ export const rooms = pgTable(
       .on(table.parent_room_id, table.source_task_id)
       .where(sql`${table.kind} = 'focus' AND ${table.focus_status} = 'active' AND ${table.focus_archived_at} IS NULL`),
     kind_check: check("rooms_kind_check", sql`${table.kind} IN ('main', 'focus')`),
+    origin_check: check(
+      "rooms_origin_check",
+      sql`${table.origin} IS NULL OR (
+        ${table.origin} IN ('join_code', 'repo', 'named', 'focus')
+        AND (${table.kind} = 'focus') = (${table.origin} = 'focus')
+      )`
+    ),
     focus_id_check: check(
       "rooms_focus_id_check",
       sql`${table.kind} <> 'focus' OR ${table.id} ~ '^focus_[1-9][0-9]*$'`

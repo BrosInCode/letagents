@@ -30,7 +30,7 @@ import {
   resolveGitHubRepoRoomAccessDecision,
   type RepoRoomAccessDecision,
 } from "../github/repo-access.js";
-import { isRepoBackedRoomId } from "./room-ids.js";
+import { getRoomNature, isRepoRoomLocator, type RoomNatureSource } from "./room-nature.js";
 
 export type RoomAccessAccount = Pick<
   SessionAccount | OwnerTokenAccount,
@@ -130,7 +130,8 @@ export async function resolveRepoRoomAccessDecision(input: {
   freshCollaboratorCheck?: boolean;
   throwOnIndeterminate?: boolean;
 }): Promise<RepoRoomAccessDecision> {
-  if (!isRepoBackedRoomId(input.roomName)) {
+  // A repository name (from a request or a binding), not a stored room.
+  if (!isRepoRoomLocator(input.roomName)) {
     return { kind: "allow" };
   }
 
@@ -165,8 +166,8 @@ export async function resolveProjectRepoAccessTarget(
   repoRoomName: string;
   binding: GitRoomBinding | null;
 } | null> {
-  const accessRoomId = getProjectAccessRoomId(project);
-  if (isRepoBackedRoomId(accessRoomId)) {
+  const { accessRoomId, accessOrigin } = getRoomNature(project);
+  if (accessOrigin === "repo") {
     return {
       roomName: accessRoomId,
       repoRoomName: accessRoomId,
@@ -210,16 +211,16 @@ export async function classifyRoomAccess(
  * The batch form of classifyRoomAccess for top-level rooms (no focus rooms):
  * one binding read for all of them.
  */
-export function classifyTopLevelRoomIds(
-  roomIds: readonly string[],
+export function classifyTopLevelRooms(
+  rooms: readonly RoomNatureSource[],
   bindings: ReadonlyMap<string, GitRoomBinding>,
 ): Map<string, RoomAccessTarget["kind"]> {
   const kinds = new Map<string, RoomAccessTarget["kind"]>();
-  for (const roomId of roomIds) {
-    const binding = bindings.get(roomId);
+  for (const room of rooms) {
+    const binding = bindings.get(room.id);
     kinds.set(
-      roomId,
-      isRepoBackedRoomId(roomId) || (binding && gitRoomBindingRepoRoomName(binding)) ? "repo" : "membership",
+      room.id,
+      getRoomNature(room).accessOrigin === "repo" || (binding && gitRoomBindingRepoRoomName(binding)) ? "repo" : "membership",
     );
   }
   return kinds;
@@ -260,8 +261,12 @@ async function decide(
   if (principal.kind === "anonymous") {
     // The repository name to judge: the classified target's when the caller
     // gave one (a binding may name another host), else the access room id.
+    // A target's repo name is a name; the room itself is judged by its origin.
     const repoName = input.target?.kind === "repo" ? input.target.repoRoomName : accessRoomId;
-    if (isRepoBackedRoomId(repoName) && !parseGitHubRepoName(repoName)) {
+    const repoShaped = input.target?.kind === "repo"
+      ? isRepoRoomLocator(repoName)
+      : getRoomNature(project).accessOrigin === "repo";
+    if (repoShaped && !parseGitHubRepoName(repoName)) {
       return {
         decision: {
           kind: "repo_access_denied",
