@@ -413,6 +413,22 @@ test("the fill step skips a row another transaction holds, and stops without fai
   );
   assert.equal(broken.error, "connection refused");
   assert.equal(lines.length, 1);
+
+  // A query that fails on a live connection: the connection is released
+  // with the error, so the pool destroys it instead of reusing it.
+  const released: unknown[] = [];
+  const failing = await backfill.reconcileRoomOriginBackfill(
+    {
+      connect: async () => ({
+        query: async (sql: string) => { if (sql.startsWith("SELECT")) throw new Error("server closed the connection"); return {}; },
+        release: (error?: unknown) => { released.push(error); },
+      }),
+    } as never,
+    () => undefined,
+  );
+  assert.equal(failing.error, "server closed the connection");
+  assert.equal(released.length, 1);
+  assert.ok(released[0] instanceof Error);
   await backfill.reconcileRoomOriginBackfill(client!.pool, () => undefined);
   assert.equal(await storedOrigin(held), "named", "the next run fills the row once it is free");
 });
