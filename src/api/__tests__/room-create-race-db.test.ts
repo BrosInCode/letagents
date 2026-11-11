@@ -45,6 +45,12 @@ const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toSt
 let sequence = 0;
 const unique = (label: string) => `${label}-${suffix}-${++sequence}`;
 
+async function storedOrigin(roomId: string): Promise<string | null> {
+  const result = await client!.pool.query<{ origin: string | null }>("SELECT origin FROM rooms WHERE id = $1", [roomId]);
+  assert.equal(result.rowCount, 1, `room ${roomId} exists`);
+  return result.rows[0]!.origin;
+}
+
 function fakeResponse() {
   const res = {
     statusCode: 200,
@@ -120,13 +126,15 @@ test("two joins that create the same named room: both get the one room, no 500",
   const name = unique("race-named");
   const res = fakeResponse();
   const joined = await raceAgainstUncommittedInsert(
-    { sql: "INSERT INTO rooms (id, display_name, created_at) VALUES ($1, 'Other', now())", params: [name] },
+    // The other request is a server create too: it stores the origin.
+    { sql: "INSERT INTO rooms (id, display_name, origin, created_at) VALUES ($1, 'Other', 'named', now())", params: [name] },
     () => resolution!.resolveRoomOrReply(name, res as unknown as Response, { allowCreate: true }),
   );
   assert.equal(res.statusCode, 200);
   assert.equal(joined?.id, name);
   assert.equal(joined?.display_name, "Other", "the room the other join created");
   assert.equal((await client!.pool.query("SELECT 1 FROM rooms WHERE id = $1", [name])).rowCount, 1);
+  assert.equal(await storedOrigin(name), "named");
 
   // And plain concurrency: ten joins at once, one room.
   const many = unique("race-many");
@@ -136,6 +144,7 @@ test("two joins that create the same named room: both get the one room, no 500",
       .then((room) => ({ room, status: each.statusCode }));
   }));
   assert.deepEqual([...new Set(results.map((result) => `${result.status} ${result.room?.id}`))], [`200 ${many}`]);
+  assert.equal(await storedOrigin(many), "named");
 });
 
 test("two creations of the same branch room: both get the one room", options, async () => {
@@ -144,15 +153,18 @@ test("two creations of the same branch room: both get the one room", options, as
   const otherId = await roomsDb!.buildFocusRoomId();
   const result = await raceAgainstUncommittedInsert(
     {
-      sql: `INSERT INTO rooms (id, display_name, kind, parent_room_id, focus_key, focus_status, created_at)
-            VALUES ($1, 'Branch', 'focus', $2, $3, 'active', now())`,
+      sql: `INSERT INTO rooms (id, display_name, kind, origin, parent_room_id, focus_key, focus_status, created_at)
+            VALUES ($1, 'Branch', 'focus', 'focus', $2, $3, 'active', now())`,
       params: [otherId, parent.id, focusKey],
     },
     () => db!.getOrCreateGitChildRoom({ parentRoomId: parent.id, focusKey }),
   );
   assert.deepEqual({ id: result.room.id, created: result.created }, { id: otherId, created: false });
-  const rows = await client!.pool.query("SELECT id FROM rooms WHERE parent_room_id = $1 AND focus_key = $2", [parent.id, focusKey]);
+  const rows = await client!.pool.query("SELECT id, origin FROM rooms WHERE parent_room_id = $1 AND focus_key = $2", [parent.id, focusKey]);
   assert.equal(rows.rowCount, 1);
+  assert.equal(rows.rows[0]!.origin, "focus");
+  // The retried attempt left no stray row behind under the next focus id.
+  assert.equal((await client!.pool.query("SELECT 1 FROM rooms WHERE parent_room_id = $1", [parent.id])).rowCount, 1);
 });
 
 test("two creations of a task's focus room: both get the one room", options, async () => {
@@ -161,13 +173,14 @@ test("two creations of a task's focus room: both get the one room", options, asy
   const otherId = await roomsDb!.buildFocusRoomId();
   const result = await raceAgainstUncommittedInsert(
     {
-      sql: `INSERT INTO rooms (id, display_name, kind, parent_room_id, focus_key, source_task_id, focus_status, created_at)
-            VALUES ($1, 'Task room', 'focus', $2, $3, $3, 'active', now())`,
+      sql: `INSERT INTO rooms (id, display_name, kind, origin, parent_room_id, focus_key, source_task_id, focus_status, created_at)
+            VALUES ($1, 'Task room', 'focus', 'focus', $2, $3, $3, 'active', now())`,
       params: [otherId, parent.id, task.id],
     },
     () => db!.createFocusRoomForTask(parent.id, task.id),
   );
   assert.deepEqual({ id: result?.room.id, created: result?.created }, { id: otherId, created: false });
+  assert.equal(await storedOrigin(otherId), "focus");
 });
 
 test("createProject tries another code after a collision or a deleted code, a bounded number of times", options, async () => {
@@ -179,6 +192,7 @@ test("createProject tries another code after a collision or a deleted code, a bo
   const codes = [taken, deletedCode, fresh];
   const created = await roomsDb!.createProject({}, () => codes.shift()!);
   assert.equal(created.id, fresh);
+  assert.equal(await storedOrigin(fresh), "join_code", "the retried attempt stores its origin");
   assert.equal(codes.length, 0, "it tried the taken code and the deleted code first");
 
   let calls = 0;
