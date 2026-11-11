@@ -1,11 +1,12 @@
 import { asc, eq, inArray, sql } from "drizzle-orm";
 
 import { defaultRoomDisplayName, generateRoomDisplayName, normalizeRoomDisplayName } from "../rooms/display-name.js";
-import { isJoinCodeShape, isReservedMainRoomCreationId } from "../rooms/room-nature.js";
+import { getRoomNature, isJoinCodeShape, isReservedMainRoomCreationId, originForNewMainRoom, recordStoredRoomOrigin } from "../rooms/room-nature.js";
 import { normalizeRoomId, normalizeRoomName } from "../rooms/routing.js";
 import { db } from "./client.js";
 import { findFocusRoomRowByKey } from "./focus-room-lookup.js";
 import { ensureGitHubRepoRoomBinding } from "./git-room-bindings.js";
+import { insertRoomRow } from "./room-rows.js";
 import {
   agent_asks,
   agent_wake_rules,
@@ -46,9 +47,10 @@ export async function createProject(
 
     try {
       await db.transaction(async (tx) => {
-        await tx.insert(rooms).values({
+        await insertRoomRow(tx, {
           id: roomId,
           display_name,
+          origin: "join_code",
           created_at,
           ...(options.organizationId ? { organization_id: options.organizationId } : {}),
         });
@@ -56,7 +58,7 @@ export async function createProject(
           .delete(id_sequences)
           .where(inArray(id_sequences.name, getRoomScopedSequenceNames(roomId)));
       });
-      return {
+      const project: Project = {
         id: roomId,
         code: roomId,
         display_name,
@@ -75,6 +77,8 @@ export async function createProject(
         conclusion_details: null,
         created_at,
       };
+      recordStoredRoomOrigin(project, "join_code");
+      return project;
     } catch (error) {
       if (!isUniqueConstraintError(error) && !isDeletedRoomInsertError(error)) {
         throw error;
@@ -117,7 +121,7 @@ export async function getOrCreateCanonicalRoom(
   const display_name = defaultRoomDisplayName(canonicalId);
   try {
     await db.transaction(async (tx) => {
-      await tx.insert(rooms).values({ id: canonicalId, display_name, created_at });
+      await insertRoomRow(tx, { id: canonicalId, display_name, origin: originForNewMainRoom(canonicalId), created_at });
       await tx
         .delete(id_sequences)
         .where(inArray(id_sequences.name, getRoomScopedSequenceNames(canonicalId)));
@@ -142,6 +146,7 @@ export async function getOrCreateCanonicalRoom(
       conclusion_details: null,
       created_at,
     } satisfies Project;
+    recordStoredRoomOrigin(room, originForNewMainRoom(canonicalId));
     await ensureGitHubRepoRoomBinding(room.id);
     return {
       room,
@@ -187,18 +192,15 @@ export async function getOrCreateGitChildRoom(input: {
     const display_name = input.displayName?.trim() || generateRoomDisplayName(input.focusKey);
     try {
       const created = await db.transaction(async (tx) => {
-        const [row] = await tx
-          .insert(rooms)
-          .values({
-            id: roomId,
-            display_name,
-            kind: "focus",
-            parent_room_id: parent.id,
-            focus_key: input.focusKey,
-            focus_status: "active",
-            created_at,
-          })
-          .returning();
+        const [row] = await insertRoomRow(tx, {
+          id: roomId,
+          display_name,
+          kind: "focus",
+          parent_room_id: parent.id,
+          focus_key: input.focusKey,
+          focus_status: "active",
+          created_at,
+        });
 
         await tx
           .delete(id_sequences)
@@ -318,7 +320,25 @@ export async function renameRoomId(
   fromRoomId: string,
   toRoomId: string
 ): Promise<void> {
-  await tx.update(rooms).set({ id: toRoomId }).where(eq(rooms.id, fromRoomId));
+  // A main room's origin follows its id: today's callers keep the class
+  // (code -> code, repo -> repo), and this keeps any later caller honest.
+  // A focus room stays `focus`. Set in the same statement as the new id.
+  const [before] = await tx
+    .select({ kind: rooms.kind, origin: rooms.origin })
+    .from(rooms)
+    .where(eq(rooms.id, fromRoomId))
+    .limit(1);
+  const nextOrigin = before?.kind === "main" ? originForNewMainRoom(toRoomId) : null;
+  const originChanges = nextOrigin !== null && before?.origin !== nextOrigin;
+  await tx
+    .update(rooms)
+    .set(originChanges ? { id: toRoomId, origin: nextOrigin } : { id: toRoomId })
+    .where(eq(rooms.id, fromRoomId));
+  if (originChanges && before?.origin) {
+    console.warn(
+      `[room origin] rename ${JSON.stringify(fromRoomId)} -> ${JSON.stringify(toRoomId)} changed origin ${before.origin} -> ${nextOrigin}`
+    );
+  }
 
   const fromSequences = getRoomScopedSequenceNames(fromRoomId);
   const toSequences = getRoomScopedSequenceNames(toRoomId);
@@ -375,7 +395,7 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
         await renameRoomId(tx, projectId, nextCode);
       });
 
-      return {
+      const rotated: Project = {
         id: nextCode,
         code: nextCode,
         display_name: project.display_name,
@@ -394,6 +414,9 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
         conclusion_details: project.conclusion_details,
         created_at: project.created_at,
       };
+      // A rotation changes the id only; the room keeps its origin.
+      recordStoredRoomOrigin(rotated, getRoomNature(project).origin);
+      return rotated;
     } catch (error) {
       if (!isUniqueConstraintError(error)) {
         throw error;

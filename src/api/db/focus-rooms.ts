@@ -8,6 +8,7 @@ import { db } from "./client.js";
 import { id_sequences, rooms } from "./schema.js";
 import { getRoomScopedSequenceNames, isDeletedRoomInsertError, isUniqueConstraintError, MAX_ROOM_CREATE_ATTEMPTS } from "./utils.js";
 import { findFocusRoomRowByKey } from "./focus-room-lookup.js";
+import { insertRoomRow } from "./room-rows.js";
 import { toProject } from "./mappers.js";
 import { buildFocusRoomId, getProjectById } from "./rooms.js";
 import { getTaskById } from "./tasks.js";
@@ -332,7 +333,7 @@ export async function createFocusRoomFromIntent(
 
     try {
       await db.transaction(async (tx) => {
-        await tx.insert(rooms).values({
+        await insertRoomRow(tx, {
           id,
           display_name,
           kind: "focus",
@@ -404,7 +405,7 @@ export async function createFocusRoomForTask(
         if (options?.leaseFence && !(await acquireLeaseFenceTx(tx, options.leaseFence))) {
           throw new LeaseFenceStaleError();
         }
-        await tx.insert(rooms).values({
+        await insertRoomRow(tx, {
           id,
           display_name,
           kind: "focus",
