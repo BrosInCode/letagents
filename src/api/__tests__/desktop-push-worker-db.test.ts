@@ -553,3 +553,79 @@ test('targeted push skips a muted account and leaves its recents row as it was',
   const recent = await pool!.query('SELECT archived FROM account_room_recents WHERE account_id=$1 AND room_id=$2', [muted.id, scenario.roomId]);
   assert.deepEqual(recent.rows, [{ archived: true }]);
 });
+
+test('own-agent ordinary message stays silent on All messages while own-agent @mention pushes across open, unopened, and archived rooms', runOptions, async () => {
+  requireTestDeps();
+  const owner = await upsertAccount!({ provider: 'github', provider_user_id: 'owner-agent-push', login: 'emmymay-owner' });
+  const openScenario = await seedScenario({ states: [], accountId: owner.id });
+  await pool!.query(`INSERT INTO account_room_recents (account_id, room_id, first_opened_at, last_opened_at, updated_at, archived)
+    VALUES ($1, $2, NOW(), NOW(), NOW(), FALSE)`, [owner.id, openScenario.roomId]);
+
+  // 1. Ordinary message from owner's own agent in an All-messages room -> 0 pushes.
+  const ordinary = await dbModule!.addMessageWithCreateStatus!(openScenario.roomId, "FjordSpring | emmymay-owner's agent | Agent", 'working on slice 1', {
+    source: 'agent',
+    account_id: owner.id,
+    publisher_agent_key: 'emmymay-owner/fjordspring',
+  });
+  const ordinaryPushes = await pool!.query(
+    'SELECT device_id FROM desktop_push_notifications WHERE room_id=$1 AND message_number=$2',
+    [openScenario.roomId, Number(ordinary.message.id.slice(4))],
+  );
+  assert.deepEqual(ordinaryPushes.rows, []);
+
+  // 2. Explicit @mention from owner's own agent in the same open room -> 1 push.
+  const openMention = await dbModule!.addMessageWithCreateStatus!(openScenario.roomId, "FjordSpring | emmymay-owner's agent | Agent", '@emmymay-owner ready for review', {
+    source: 'agent',
+    account_id: owner.id,
+    publisher_agent_key: 'emmymay-owner/fjordspring',
+    notify_account_ids: [owner.id],
+    recents_account_ids: [owner.id],
+  });
+  const openMentionPushes = await pool!.query(
+    'SELECT device_id FROM desktop_push_notifications WHERE room_id=$1 AND message_number=$2',
+    [openScenario.roomId, Number(openMention.message.id.slice(4))],
+  );
+  assert.deepEqual(openMentionPushes.rows, [{ device_id: openScenario.deviceId }]);
+
+  // 3. Explicit @mention in an unopened room -> 1 push + unarchived recents row seeded.
+  const unopenedRoom = await createProjectWithName!('github.com/acme/unopened-mention-room');
+  const unopenedMention = await dbModule!.addMessageWithCreateStatus!(unopenedRoom.id, "FjordSpring | emmymay-owner's agent | Agent", '@emmymay-owner check this room', {
+    source: 'agent',
+    account_id: owner.id,
+    publisher_agent_key: 'emmymay-owner/fjordspring',
+    notify_account_ids: [owner.id],
+    recents_account_ids: [owner.id],
+  });
+  const unopenedPushes = await pool!.query(
+    'SELECT device_id FROM desktop_push_notifications WHERE room_id=$1 AND message_number=$2',
+    [unopenedRoom.id, Number(unopenedMention.message.id.slice(4))],
+  );
+  assert.deepEqual(unopenedPushes.rows, [{ device_id: openScenario.deviceId }]);
+  const unopenedRecent = await pool!.query(
+    'SELECT archived FROM account_room_recents WHERE account_id=$1 AND room_id=$2',
+    [owner.id, unopenedRoom.id],
+  );
+  assert.deepEqual(unopenedRecent.rows, [{ archived: false }]);
+
+  // 4. Explicit @mention in an archived room -> 1 push while keeping archived = true.
+  const archivedRoom = await createProjectWithName!('github.com/acme/archived-mention-room');
+  await pool!.query(`INSERT INTO account_room_recents (account_id, room_id, first_opened_at, last_opened_at, updated_at, archived)
+    VALUES ($1, $2, NOW(), NOW(), NOW(), TRUE)`, [owner.id, archivedRoom.id]);
+  const archivedMention = await dbModule!.addMessageWithCreateStatus!(archivedRoom.id, "FjordSpring | emmymay-owner's agent | Agent", '@emmymay-owner ping in archived room', {
+    source: 'agent',
+    account_id: owner.id,
+    publisher_agent_key: 'emmymay-owner/fjordspring',
+    notify_account_ids: [owner.id],
+    recents_account_ids: [owner.id],
+  });
+  const archivedPushes = await pool!.query(
+    'SELECT device_id FROM desktop_push_notifications WHERE room_id=$1 AND message_number=$2',
+    [archivedRoom.id, Number(archivedMention.message.id.slice(4))],
+  );
+  assert.deepEqual(archivedPushes.rows, [{ device_id: openScenario.deviceId }]);
+  const archivedRecent = await pool!.query(
+    'SELECT archived FROM account_room_recents WHERE account_id=$1 AND room_id=$2',
+    [owner.id, archivedRoom.id],
+  );
+  assert.deepEqual(archivedRecent.rows, [{ archived: true }]);
+});

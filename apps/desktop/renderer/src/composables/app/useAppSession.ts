@@ -29,6 +29,7 @@ export function useAppSessionActions(context: unknown) {
     | "useAppInboxActions"
     | "useAppInboxState"
     | "useAppJoinRequestAlerts"
+    | "useAppMessageNotifications"
     | "useAppNavigation"
     | "useAppProjectRepo"
     | "useAppRentalActions"
@@ -166,6 +167,10 @@ export function useAppSessionActions(context: unknown) {
     if (event.type === "join_request") {
       // A request to join a room this account administers: the banner, the Inbox and the alerts read the store.
       roomJoinRequests.receive(event.event);
+      return;
+    }
+    if (event.type === "room_mention") {
+      void app.receiveRoomMention?.(event.event);
       return;
     }
     if (event.type === "resource_invalidation") {

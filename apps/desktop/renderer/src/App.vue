@@ -518,6 +518,7 @@ import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./
 import { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./composables/app/useAppRoomData";
 import { useAppLifecycle } from "./composables/app/useAppLifecycle";
 import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAlerts";
+import { useAppMessageNotifications } from "./composables/app/useAppMessageNotifications";
 import { useAppCompany, useAppCompanyNavigation } from "./composables/app/useAppCompany";
 import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
 
@@ -615,6 +616,7 @@ const {
 } = Object.assign(app, useAppRoomAttention(app));
 
 Object.assign(app, useAppJoinRequestAlerts(app));
+Object.assign(app, useAppMessageNotifications(app));
 // The settings-section request belongs to one room; another room ignores it.
 function roomSettingsSectionRequestFor(roomIdentifier: string) {
   const request = roomSettingsSectionRequest.value;

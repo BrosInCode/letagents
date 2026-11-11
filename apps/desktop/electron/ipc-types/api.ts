@@ -181,6 +181,7 @@ export interface DesktopApi {
     onOpenUpdates?: (callback: () => void) => () => void;
   };
   notifications: {
+    activate?: (target: DesktopNotificationTarget) => Promise<boolean>;
     getStatus: () => Promise<DesktopNotificationStatus>;
     setBadgeCount?: (count: number) => Promise<void>;
     onReceived?: (callback: (target: DesktopNotificationTarget) => void) => () => void;

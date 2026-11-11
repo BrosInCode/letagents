@@ -17,6 +17,7 @@ async function server(options: { auth?: Auth; roomsFail?: boolean; admin?: boole
   const presence = new EventEmitter();
   const messages = new EventEmitter();
   const joinRequestEvents = new EventEmitter();
+  const mentionEvents = new EventEmitter();
   const adminChecks: string[] = [];
   const hub = new AccountActivityHub({
     async loadWorking(roomIds) {
@@ -48,6 +49,7 @@ async function server(options: { auth?: Auth; roomsFail?: boolean; admin?: boole
   registerAccountActivityStreamRoute(app, {
     hub,
     joinRequestEvents,
+    mentionEvents,
     isRoomAdmin: async (accountId, roomId) => { adminChecks.push(`${accountId}:${roomId}`); return options.admin ?? false; },
     credentialStillValid: async () => credentialValid,
     openRoomAuthorization: async (_req, roomId) => {
@@ -88,7 +90,7 @@ async function server(options: { auth?: Auth; roomsFail?: boolean; admin?: boole
   await new Promise(resolve => http.once('listening', resolve));
   const base = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
   return {
-    base, hub, presence, working, listedFor, joinRequestEvents, adminChecks, readable, checks,
+    base, hub, presence, working, listedFor, joinRequestEvents, mentionEvents, adminChecks, readable, checks,
     invalidate(roomId: string) {
       stale.add(roomId);
       for (const handler of invalidationHandlers.get(roomId) ?? []) handler();
@@ -357,4 +359,100 @@ test('a frame within the lease period reuses the answer; a revoked credential cl
     assert.equal(events.at(-1)?.data.room_id, 'invite-room');
     await waitFor(() => s.handlerCount('invite-room') === 0, 'the closed stream stops listening for invalidations');
   } finally { await s.close(); }
+});
+
+test('targeted room_mention frames reach session streams for unopened and archived rooms after live authorization, and block unauthorized or owner_token streams', async () => {
+  const s = await server();
+  try {
+    s.readable.set('focus_unopened', true);
+    s.readable.set('archived-room', true);
+    s.readable.set('secret-room', false);
+    const response = await fetch(`${s.base}/account/activity/stream`);
+    const reading = readEvents(response, 3);
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    // Ignored: another target account, self human publisher, or denied room authorization.
+    s.mentionEvents.emit('room_mention:created', {
+      projectId: 'focus_unopened',
+      roomDisplayName: 'Unopened Focus',
+      messageId: 'msg_1',
+      threadRootId: null,
+      targetAccountIds: ['acct-other'],
+      publisherAccountId: null,
+    });
+    s.mentionEvents.emit('room_mention:created', {
+      projectId: 'focus_unopened',
+      roomDisplayName: 'Unopened Focus',
+      messageId: 'msg_2',
+      threadRootId: null,
+      targetAccountIds: ['acct-1'],
+      publisherAccountId: 'acct-1',
+    });
+    s.mentionEvents.emit('room_mention:created', {
+      projectId: 'secret-room',
+      roomDisplayName: 'Secret Room',
+      messageId: 'msg_3',
+      threadRootId: null,
+      targetAccountIds: ['acct-1'],
+      publisherAccountId: null,
+    });
+
+    // Allowed: unopened Focus Room and archived room (neither is in getAccountRoomsForAccount).
+    s.mentionEvents.emit('room_mention:created', {
+      projectId: 'focus_unopened',
+      roomDisplayName: 'Unopened Focus',
+      messageId: 'msg_4',
+      threadRootId: null,
+      targetAccountIds: ['acct-1'],
+      publisherAccountId: null,
+    });
+    s.mentionEvents.emit('room_mention:created', {
+      projectId: 'archived-room',
+      roomDisplayName: 'Archived Room',
+      messageId: 'msg_9',
+      threadRootId: 'msg_5',
+      targetAccountIds: ['acct-1'],
+      publisherAccountId: null,
+    });
+
+    const events = await reading;
+    assert.deepEqual(events.map(e => e.event), ['snapshot', 'room_mention', 'room_mention']);
+    assert.deepEqual(events[1]!.data, {
+      room_id: 'focus_unopened',
+      room_display_name: 'Unopened Focus',
+      message_id: 'msg_4',
+      thread_root_id: null,
+    });
+    assert.deepEqual(events[2]!.data, {
+      room_id: 'archived-room',
+      room_display_name: 'Archived Room',
+      message_id: 'msg_9',
+      thread_root_id: 'msg_5',
+    });
+    assert.deepEqual(s.checks, ['secret-room', 'focus_unopened', 'archived-room']);
+  } finally {
+    await s.close();
+  }
+
+  // `owner_token` never receives `room_mention` frames.
+  const owner = await server({ auth: 'owner_token' });
+  try {
+    const response = await fetch(`${owner.base}/account/activity/stream`);
+    const reading = readEvents(response, 2);
+    await new Promise(resolve => setTimeout(resolve, 100));
+    owner.mentionEvents.emit('room_mention:created', {
+      projectId: 'focus_unopened',
+      roomDisplayName: 'Unopened Focus',
+      messageId: 'msg_10',
+      threadRootId: null,
+      targetAccountIds: ['acct-1'],
+      publisherAccountId: null,
+    });
+    owner.working.set('invite-room', ['CedarRidge']);
+    owner.presence.emit(PRESENCE_CHANGED, 'invite-room');
+    const events = await reading;
+    assert.deepEqual(events.map(e => e.event), ['snapshot', 'room']);
+  } finally {
+    await owner.close();
+  }
 });
