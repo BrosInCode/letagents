@@ -666,6 +666,7 @@ for (const mode of ORIGIN_MODES) test(`rows added after the first pin keep their
         const row: Record<string, string> = {};
         for (const site of CALL_SITES) {
           const world = await buildWorld(roomKind, principal);
+          assertOriginMode(world.project);
           row[site] = await withGitHub(mode, () => callSite(site, world));
         }
         table[`x:github_${mode} ${roomKind} ${principal}`] = row;
@@ -680,6 +681,7 @@ for (const mode of ORIGIN_MODES) test(`rows added after the first pin keep their
         const row: Record<string, string> = {};
         for (const site of CALL_SITES) {
           const world = await buildWorld(roomKind, principal);
+          assertOriginMode(world.project);
           row[site] = await withGitHub(mode, () => callSite(site, world));
         }
         table[`x:${mode === "up" ? "github_up" : "outage"} ${roomKind} ${principal}`] = row;
@@ -692,6 +694,7 @@ for (const mode of ORIGIN_MODES) test(`rows added after the first pin keep their
     for (const kind of ["owner_token", "mcp_oauth"] as const) {
       for (const principal of ["stranger", "member", "stale_admin", "gh_admin"] as const) {
         const world = await buildWorld(roomKind, principal);
+        assertOriginMode(world.project);
         table[`x:${kind} ${roomKind} ${principal}`] = await withGitHub("up", () => requestSites(credentialRequest(world, kind), world));
       }
     }
@@ -703,6 +706,7 @@ for (const mode of ORIGIN_MODES) test(`rows added after the first pin keep their
       const row: Record<string, string> = {};
       for (const site of CALL_SITES) {
         const world = await buildWorld(roomKind, "triage");
+        assertOriginMode(world.project);
         const decision = await access!.requireGitRoomParticipant(personRequest(world), recordingResponse().res, world.project);
         assert.equal(decision, true, "the yes is cached");
         const repo = repos.get(world.repoRoomName!.split("/").at(-1)!)!;
@@ -739,6 +743,7 @@ for (const mode of ORIGIN_MODES) test(`rows added after the first pin keep their
     const row: Record<string, string> = {};
     for (const scope of ["same_room", "other_room", "ended"] as const) {
       const world = await buildWorld(roomKind, "member");
+      assertOriginMode(world.project);
       const ownerId = world.accountId!;
       const grant = (await supervisorGrantStore!.createSupervisorHostGrant({
         owner_account_id: ownerId, host_id: `host_${serial}`, installation_id: `install_${serial}`,
