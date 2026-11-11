@@ -1,4 +1,5 @@
 import { ROOM_JOIN_REQUEST_EVENT, parseRoomJoinRequestEvent } from "../../../../shared/room-join-requests.mjs";
+import { ROOM_MENTION_EVENT, parseRoomMentionEvent } from "../../../../shared/room-mention-events.mjs";
 import { readStoredAuth } from "./auth.js";
 import { apiUrl } from "./paths.js";
 import { emitRoomStreamEvent } from "./room-stream.js";
@@ -168,6 +169,9 @@ function handleFrame(current: Stream, frame: string): void {
     // The server sends it to the room's admins only.
     const parsed = parseRoomJoinRequestEvent(payload);
     if (parsed) emitRoomStreamEvent({ type: "join_request", roomIdentifier: parsed.room_id, event: parsed });
+  } else if (event === ROOM_MENTION_EVENT) {
+    const parsed = parseRoomMentionEvent(payload);
+    if (parsed) emitRoomStreamEvent({ type: "room_mention", roomIdentifier: parsed.room_id, event: parsed });
   } else if (event === ACCOUNT_ROOM_READ_EVENT) {
     // This account read a room here or elsewhere: its unread counts changed.
     const read = payload as { room_id?: unknown; last_message_id?: unknown } | null;

@@ -7,6 +7,7 @@ import test, { mock } from "node:test";
 const directory = await mkdtemp(join(tmpdir(), "desktop-badge-"));
 const badges: number[] = [];
 const events: Array<{ channel: string; value: unknown }> = [];
+let focusCalls = 0;
 let received: ((_event: unknown, info: Record<string, unknown>) => void) | null = null;
 mock.module("electron", { defaultExport: {
   app: { getPath: () => directory, isPackaged: false, isReady: () => true, setBadgeCount: (count: number) => { badges.push(count); return true; } },
@@ -15,12 +16,12 @@ mock.module("electron", { defaultExport: {
 } });
 mock.module("../main/auth.js", { namedExports: { apiFetch: async () => ({}) } });
 mock.module("../main/window.js", { namedExports: {
-  createWindow() {}, focusMainWindow() {}, hasOpenWindows: () => true,
+  createWindow() {}, focusMainWindow() { focusCalls += 1; }, hasOpenWindows: () => true,
   emitToMainWindow: (channel: string, value: unknown) => { events.push({ channel, value }); },
 } });
 const notifications = await import("../main/notifications.js");
 
-test("native badge updates, clearing on sign-out, and push invalidation reach Electron", async () => {
+test("native badge updates, clearing on sign-out, status broadcasts, fallback click activation, and push invalidation reach Electron", async () => {
   try {
     notifications.setDesktopNotificationBadgeCount(12);
     notifications.setDesktopNotificationBadgeCount(0);
@@ -30,9 +31,35 @@ test("native badge updates, clearing on sign-out, and push invalidation reach El
     if (["darwin", "linux"].includes(process.platform)) assert.deepEqual(badges, [12, 0]);
     notifications.setDesktopNotificationBadgeCount(7);
     await notifications.setDesktopNotificationsEnabled(true);
+    assert.equal(events.at(-1)?.channel, "desktop:notifications:status-changed");
+    assert.equal((events.at(-1)?.value as { enabled?: boolean })?.enabled, true);
     if (["darwin", "linux"].includes(process.platform)) assert.deepEqual(badges.slice(-2), [7, 7], "granting notification permission reapplies the count");
+    await notifications.setDesktopNotificationsEnabled(false);
+    assert.equal(events.at(-1)?.channel, "desktop:notifications:status-changed");
+    assert.equal((events.at(-1)?.value as { enabled?: boolean })?.enabled, false);
+    await notifications.setDesktopNotificationsEnabled(true);
     await notifications.unregisterDesktopNotificationAccount();
     if (["darwin", "linux"].includes(process.platform)) assert.equal(badges.at(-1), 0);
+    assert.equal(notifications.activateDesktopNotificationTarget({ roomIdentifier: "", messageId: "msg_1" }), false);
+    assert.equal(notifications.activateDesktopNotificationTarget(null), false);
+    const beforeFocus = focusCalls;
+    assert.equal(
+      notifications.activateDesktopNotificationTarget({
+        notificationId: "fallback:focus_103:msg_9",
+        roomIdentifier: "focus_103",
+        messageId: "msg_9",
+        threadRootId: "msg_2",
+      }),
+      true,
+    );
+    assert.equal(focusCalls, beforeFocus + 1);
+    assert.equal(events.at(-1)?.channel, "desktop:notifications:activated");
+    assert.deepEqual(events.at(-1)?.value, {
+      notificationId: "fallback:focus_103:msg_9",
+      roomIdentifier: "focus_103",
+      messageId: "msg_9",
+      threadRootId: "msg_2",
+    });
     notifications.prepareDesktopNotifications();
     if (process.platform === "darwin") {
       received!({}, { letagents: { notification_id: "notification-1", room_id: "room-a", message_id: "msg_3", thread_root_id: null } });

@@ -51,6 +51,7 @@ const api: DesktopApi = {
     },
   },
   notifications: {
+    activate: (target) => ipcRenderer.invoke("desktop:notifications:activate", target),
     getStatus: () => ipcRenderer.invoke("desktop:notifications:get-status"),
     setBadgeCount: (count) => ipcRenderer.invoke("desktop:notifications:set-badge-count", count),
     onReceived: (callback) => {

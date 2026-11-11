@@ -101,6 +101,25 @@ test("valid join requests are forwarded to the room stream boundary; malformed f
   assert.deepEqual(roomEvents, [{ type: "join_request", roomIdentifier: "design-lounge", event: payload }]);
 });
 
+test("valid room_mention frames are forwarded to the room stream boundary; malformed frames are ignored", async () => {
+  let send!: (event: string, data: unknown) => void;
+  responders.push((res) => { send = sse(res); });
+  stream.restartAccountActivityStream();
+  await until(() => Boolean(send), "the stream to open");
+  roomEvents.length = 0;
+  const payload = {
+    room_id: "focus_103",
+    room_display_name: "Focus: Features",
+    message_id: "msg_19",
+    thread_root_id: "msg_9",
+  };
+  send("room_mention", { room_id: "focus_103", message_id: "not-a-msg-id" });
+  send("room_mention", { room_id: "", message_id: "msg_19" });
+  send("room_mention", payload);
+  await until(() => roomEvents.length > 0, "the forwarded room mention");
+  assert.deepEqual(roomEvents, [{ type: "room_mention", roomIdentifier: "focus_103", event: payload }]);
+});
+
 test("a read the account recorded anywhere moves the read revision and keeps the rooms", async () => {
   let send!: (event: string, data: unknown) => void;
   responders.push((res) => { send = sse(res); });

@@ -7,6 +7,7 @@ import { isPromptOnlyAgentMessage, type AgentPromptKind } from "../../../../shar
 import { messages } from "../../schema.js";
 import type { MessageRow } from "../../types.js";
 import { enqueueDesktopPushNotifications } from "../../../notifications/enqueue.js";
+import { isHiddenAgentStatusMessage } from "../../../notifications/mention-accounts.js";
 import { mayLinkTaskMentions, recordTaskMentionsForMessage } from "../../task-external-refs.js";
 import type { MessageCreateTransaction, AddMessageOptions } from "./types.js";
 
@@ -39,9 +40,10 @@ export async function finishCreatedMessage(
   }
 
   const addressedTo = options?.addressed_to ?? null;
+  const hiddenStatusMessage = isHiddenAgentStatusMessage(createdMessage.source, createdMessage.text);
   let notificationEnqueueDurationMs = 0;
   let queuedPushCount = 0;
-  if (!createdMessageIsPromptOnly && !addressedTo) {
+  if (!createdMessageIsPromptOnly && !addressedTo && !hiddenStatusMessage) {
     const notificationEnqueueStartedAtMs = Date.now();
     queuedPushCount = await enqueueDesktopPushNotifications(tx, createdMessage, {
       notify_account_ids: options?.notify_account_ids,

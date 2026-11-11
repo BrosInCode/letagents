@@ -8,12 +8,24 @@ export function readSoundEnabled(): boolean {
   }
 }
 
+export const notificationsPreferenceRevision = ref(0);
+
 export function readNotificationsEnabled(): boolean {
+  void notificationsPreferenceRevision.value;
   try {
     return window.localStorage.getItem("letagents-desktop:notifications") === "on";
   } catch {
     return false;
   }
+}
+
+export function writeNotificationsEnabled(enabled: boolean): void {
+  try {
+    window.localStorage.setItem("letagents-desktop:notifications", enabled ? "on" : "off");
+  } catch {
+    // Local preference persistence is best-effort.
+  }
+  notificationsPreferenceRevision.value += 1;
 }
 
 // Unread counts must be recomputed when chat visibility changes.

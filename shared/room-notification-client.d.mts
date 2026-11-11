@@ -9,6 +9,8 @@ export declare function createRoomNotificationClient(api: {
 }, changed?: () => void, normalizeKey?: (roomId: string) => string): {
   setViewer(viewer: { id: string; login: string } | null): void;
   signedIn(): boolean;
+  viewerId(): string | null;
+  viewerLogin(): string | null;
   allowsAfterRead(roomId: string, text: unknown): Promise<boolean>;
   state(roomId: string): RoomNotificationClientState;
   refresh(roomId: string): Promise<void>;

@@ -136,5 +136,16 @@ export function createRoomNotificationClient(api, changed = () => {}, normalizeK
     }
     return currentEpoch === epoch && allows(roomId, text);
   }
-  return { setViewer, state, refresh, refreshAll, update, allows, allowsAfterRead, signedIn: () => Boolean(viewer) };
+  return {
+    setViewer,
+    state,
+    refresh,
+    refreshAll,
+    update,
+    allows,
+    allowsAfterRead,
+    signedIn: () => Boolean(viewer),
+    viewerId: () => viewer?.id ?? null,
+    viewerLogin: () => viewer?.login ?? null,
+  };
 }

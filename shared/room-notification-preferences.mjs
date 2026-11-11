@@ -4,11 +4,33 @@ export const DEFAULT_ROOM_NOTIFICATION_PREFERENCE = Object.freeze({ level: 'all'
 // a dot followed by a handle character is part of a longer handle.
 export const PERSON_MENTION_START = '(^|[^A-Za-z0-9_./@:-])@';
 export const PERSON_MENTION_END = '(?![A-Za-z0-9_/@:-]|\\.[A-Za-z0-9_])';
+export const MAX_MENTIONED_LOGINS = 50;
+
+const PERSON_MENTION_TOKEN_PATTERN = /(?:^|[^A-Za-z0-9_./@:-])@([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_][A-Za-z0-9_-]*)*)(?![A-Za-z0-9_/@:-]|\.[A-Za-z0-9_])/g;
+const RESERVED_GROUP_MENTIONS = new Set(['everyone', 'agents']);
 
 export function mentionsPerson(text, login) {
   if (typeof login !== 'string' || !login) return false;
   const escaped = login.replace(/[^A-Za-z0-9_-]/g, '\\$&');
   return new RegExp(PERSON_MENTION_START + escaped + PERSON_MENTION_END, 'i').test(String(text ?? ''));
+}
+
+export function extractMentionedLogins(text, maxLogins = MAX_MENTIONED_LOGINS) {
+  const source = String(text ?? '');
+  if (!source.includes('@') || maxLogins <= 0) return [];
+  const logins = [];
+  const seen = new Set();
+  PERSON_MENTION_TOKEN_PATTERN.lastIndex = 0;
+  let match;
+  while ((match = PERSON_MENTION_TOKEN_PATTERN.exec(source)) !== null) {
+    const login = match[1].toLowerCase();
+    if (!RESERVED_GROUP_MENTIONS.has(login) && !seen.has(login) && mentionsPerson(source, login)) {
+      seen.add(login);
+      logins.push(login);
+      if (logins.length >= maxLogins) break;
+    }
+  }
+  return logins;
 }
 
 export function roomNotificationsSuppressed(preference, now = Date.now()) {

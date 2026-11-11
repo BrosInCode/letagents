@@ -1,4 +1,4 @@
-import { computed, onBeforeUnmount, ref, toRaw, watch, type Ref } from "vue";
+import { computed, getCurrentInstance, onBeforeUnmount, onScopeDispose, ref, toRaw, watch, type Ref } from "vue";
 import type { DesktopAccountActivityState, DesktopAccountRoomActivity } from "../../../electron/ipc-types";
 import { indexAccountActivity } from "../domain/account-activity";
 import { reuseUnchanged } from "../domain/reuse-unchanged";
@@ -64,8 +64,10 @@ export function useAccountActivity(options: { authenticated: Ref<boolean>; roomI
   watch([options.authenticated, roomSetKey], ([authenticated]) => {
     if (restartTimer) clearTimeout(restartTimer);
     restartTimer = null;
-    // Signed out, or no rooms yet (the list has not loaded): nothing to watch.
-    if (!authenticated || !options.roomIds.value.length) {
+    // Signed out: nothing to watch. Keep the stream open when signed in even
+    // with zero listed rooms so targeted `room_mention` frames for unopened or
+    // archived rooms still reach the session.
+    if (!authenticated) {
       void room?.stopAccountActivity?.().catch(() => undefined);
       state.value = { connected: false, rooms: {} };
       tasksChangedAt.value = {};
@@ -77,10 +79,13 @@ export function useAccountActivity(options: { authenticated: Ref<boolean>; roomI
     }, 400);
   }, { immediate: true });
 
-  onBeforeUnmount(() => {
+  function cleanup(): void {
     if (restartTimer) clearTimeout(restartTimer);
+    restartTimer = null;
     unsubscribe?.();
-  });
+  }
+  if (getCurrentInstance()) onBeforeUnmount(cleanup);
+  onScopeDispose(cleanup);
 
   return { state, tasksChangedAt, readRevision, lastRead, takeReads, index, connected };
 }

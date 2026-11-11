@@ -66,6 +66,7 @@ const expectedDirectChannels = [
   "desktop:diagnostics:get-snapshot",
   "desktop:maintenance:restart",
   "desktop:maintenance:status",
+  "desktop:notifications:activate",
   "desktop:notifications:get-status",
   "desktop:notifications:set-badge-count",
   "desktop:notifications:set-enabled",
