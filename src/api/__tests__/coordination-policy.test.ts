@@ -457,6 +457,22 @@ test("evaluateWorkflowArtifactMutation denies before projection when a stop lock
   assert.equal(result.kind === "deny" ? result.code : null, "active_lock");
 });
 
+test("evaluateReviewLeaseRouting rejects an actor without an agent key", () => {
+  const result = evaluateReviewLeaseRouting({
+    taskId: "task_90",
+    actor: {
+      actorLabel: "BayOtter | EmmyMay's agent | Agent",
+      agentKey: null,
+      agentInstanceId: "instance:bayotter-1",
+    },
+    leases: [lease()],
+    now: new Date("2026-04-19T19:00:00.000Z"),
+  });
+
+  assert.equal(result.kind, "deny");
+  assert.equal(result.kind === "deny" ? result.code : null, "missing_actor");
+});
+
 test("evaluateReviewLeaseRouting rejects the active work lease holder", () => {
   const result = evaluateReviewLeaseRouting({
     taskId: "task_90",
@@ -472,6 +488,23 @@ test("evaluateReviewLeaseRouting rejects the active work lease holder", () => {
 
   assert.equal(result.kind, "deny");
   assert.equal(result.kind === "deny" ? result.code : null, "work_lease_holder");
+});
+
+test("evaluateReviewLeaseRouting allows an actor whose own work lease has expired", () => {
+  const result = evaluateReviewLeaseRouting({
+    taskId: "task_90",
+    actor: {
+      actorLabel: "BayOtter | EmmyMay's agent | Agent",
+      agentKey: "EmmyMay/bayotter",
+      agentInstanceId: "instance:bayotter-1",
+    },
+    leases: [lease({ expires_at: "2026-04-19T18:59:59.000Z" })],
+    reviewerAgentKeys: ["EmmyMay/bayotter"],
+    now: new Date("2026-04-19T19:00:00.000Z"),
+  });
+
+  assert.equal(result.kind, "allow");
+  assert.equal(result.kind === "allow" ? result.activeWorkLease : undefined, null);
 });
 
 test("evaluateReviewLeaseRouting allows assigned reviewers without taking over work", () => {
