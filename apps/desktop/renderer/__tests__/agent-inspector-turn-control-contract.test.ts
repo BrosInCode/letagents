@@ -64,3 +64,12 @@ test("turn actions stay contextual, keyboard-sized, and do not introduce broad m
   assert.doesNotMatch(styles, /\.agent-inspector-turn-control[\s\S]*transition:\s*all/i);
   assert.doesNotMatch(styles, /\.agent-inspector-turn-control[\s\S]*ease-in/i);
 });
+
+test("a stop notice records the stopped turn and clears only when the same agent starts a different turn", () => {
+  const inspectorActions = source("../src/composables/room-shell/useRoomShellInspectorActions.ts");
+  const agentInspector = source("../src/composables/room-shell/useRoomShellAgentInspector.ts");
+  // The success path stores the identity of the stopped turn, and only for stop_turn.
+  assert.match(inspectorActions, /kind: intent\.kind,\s*status: "success",[\s\S]{0,200}?\.\.\.\(intent\.kind === "stop_turn" && turnControlFence\s*\?\s*\{ stoppedTurnKey: agentInspectorTurnKey\(turnControlFence\) \}/);
+  // The watcher runs for the selected entry only and clears the notice when the helper reports a new turn.
+  assert.match(agentInspector, /watch\(\(\) => agentInspectorStopNoticeEndedByNewTurn\(\s*agentInspectorActionStateForEntry\(agentInspectorActionState\.value, selectedAgentDetailProjection\.value\?\.entryId \?\? null\),\s*selectedAgentDetailProjection\.value\?\.entry\.roomAgentState\?\.turn,\s*\), \(ended\) => \{\s*if \(ended\) agentInspectorActionState\.value = null;\s*\}\);/);
+});
