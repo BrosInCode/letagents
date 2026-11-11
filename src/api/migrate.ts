@@ -45,8 +45,9 @@ async function main(): Promise<void> {
   // Rooms migration 0148 left without an origin (ids outside ASCII), filled
   // with the server's own rule; then a read-only audit of origins and of the
   // repository identity stores.
+  // Never throws: a NULL origin reads through the id-shape fallback.
   const roomOrigins = await reconcileRoomOriginBackfill(pool);
-  console.log(`Filled the origin of ${roomOrigins} rooms after migration 0148`);
+  console.log(`Filled the origin of ${roomOrigins.filled} rooms after migration 0148`);
   await logRoomOriginAudit(pool);
   console.log(
     `Applied migrations from ${migrationsFolder}; reconciled ${workUnits} thread rollout records and `

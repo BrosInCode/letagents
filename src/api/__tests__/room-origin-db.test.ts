@@ -103,7 +103,7 @@ test("ids outside ASCII are left to the server's rule after the migration", opti
   assert.equal((await readRoom(ligature)).code, ligature);
 
   const backfill = await import("../db/room-origin-backfill.js");
-  assert.ok(await backfill.reconcileRoomOriginBackfill(client!.pool) >= 2);
+  assert.ok((await backfill.reconcileRoomOriginBackfill(client!.pool)).filled >= 2);
   assert.equal(await storedOrigin(ligature), "join_code");
   assert.equal(await storedOrigin(accented), "named");
   assert.equal((await readRoom(ligature)).code, ligature);
@@ -327,4 +327,92 @@ test("a permanently deleted room cannot come back under its id, so it never gets
   // A new room under a new id still stores its origin.
   const again = await db!.createProjectWithName(`${namedId}-again`);
   assert.equal(await storedOrigin(again.id), "named");
+});
+
+test("a rename recomputes a main room's origin from its new id, and a focus room stays focus", options, async () => {
+  const rooms = await import("../db/rooms.js");
+  const warnings: string[] = [];
+  const warn = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    // A class change: named -> repo. Logged once.
+    const named = await db!.createProjectWithName(unique("rename-named"));
+    const repoId = `github.com/${unique("rename-repo")}/app`;
+    await client!.db.transaction(async (tx) => rooms.renameRoomId(tx, named.id, repoId));
+    assert.equal(await storedOrigin(repoId), "repo");
+    assert.equal(warnings.filter((line) => line.includes("[room origin] rename")).length, 1);
+    assert.match(warnings.at(-1)!, /changed origin named -> repo/);
+
+    // No class change: code -> code. Nothing logged.
+    const project = await db!.createProject();
+    const rotated = await db!.rotateProjectCode(project.id);
+    assert.equal(await storedOrigin(rotated!.id), "join_code");
+    assert.equal(warnings.filter((line) => line.includes("[room origin] rename")).length, 1);
+
+    // A row with no origin gets one, without a log line.
+    const oldId = unique("rename-old");
+    await client!.pool.query("INSERT INTO rooms (id, display_name, created_at) VALUES ($1, 'Old', now())", [oldId]);
+    const newId = `github.com/${unique("rename-old-repo")}/app`;
+    await client!.db.transaction(async (tx) => rooms.renameRoomId(tx, oldId, newId));
+    assert.equal(await storedOrigin(newId), "repo");
+    assert.equal(warnings.filter((line) => line.includes("[room origin] rename")).length, 1);
+
+    // A focus room keeps focus.
+    const parent = await db!.createProjectWithName(unique("rename-parent"));
+    const focus = await db!.createFocusRoomFromIntent(parent.id, "Child");
+    const nextFocusId = await rooms.buildFocusRoomId();
+    await client!.db.transaction(async (tx) => rooms.renameRoomId(tx, focus.room.id, nextFocusId));
+    assert.equal(await storedOrigin(nextFocusId), "focus");
+  } finally {
+    console.warn = warn;
+  }
+});
+
+test("the fill step skips a row another transaction holds, and stops without failing on a table lock", options, async () => {
+  const backfill = await import("../db/room-origin-backfill.js");
+  const free = unique("fill-free");
+  const held = unique("fill-held");
+  for (const id of [free, held]) {
+    await client!.pool.query("INSERT INTO rooms (id, display_name, created_at) VALUES ($1, 'Old', now())", [id]);
+  }
+
+  const holder = new Pool({ connectionString: url, max: 1 });
+  const holding = await holder.connect();
+  try {
+    // A row lock: that row is skipped, the rest are filled.
+    await holding.query("BEGIN");
+    await holding.query("SELECT 1 FROM rooms WHERE id = $1 FOR UPDATE", [held]);
+    const result = await backfill.reconcileRoomOriginBackfill(client!.pool, () => undefined);
+    assert.equal(result.error, null);
+    assert.equal(await storedOrigin(free), "named");
+    assert.equal(await storedOrigin(held), null, "the held row is left for the next deploy");
+    await holding.query("ROLLBACK");
+
+    // A table lock: the step stops after its lock_timeout, logs one line, and does not throw.
+    await holding.query("BEGIN");
+    await holding.query('LOCK TABLE "rooms" IN ACCESS EXCLUSIVE MODE');
+    const lines: string[] = [];
+    const started = Date.now();
+    const stopped = await backfill.reconcileRoomOriginBackfill(client!.pool, (line) => lines.push(line));
+    assert.ok(Date.now() - started < 10_000);
+    assert.match(stopped.error ?? "", /lock timeout/);
+    assert.equal(lines.length, 1);
+    assert.match(lines[0]!, /\[room origin fill\] stopped after 0 rooms/);
+    await holding.query("ROLLBACK");
+  } finally {
+    await holding.query("ROLLBACK").catch(() => undefined);
+    holding.release();
+    await holder.end();
+  }
+
+  // Any other failure is logged and returned, never thrown.
+  const lines: string[] = [];
+  const broken = await backfill.reconcileRoomOriginBackfill(
+    { connect: async () => { throw new Error("connection refused"); } } as never,
+    (line) => lines.push(line),
+  );
+  assert.equal(broken.error, "connection refused");
+  assert.equal(lines.length, 1);
+  await backfill.reconcileRoomOriginBackfill(client!.pool, () => undefined);
+  assert.equal(await storedOrigin(held), "named", "the next run fills the row once it is free");
 });

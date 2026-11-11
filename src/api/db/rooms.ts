@@ -296,7 +296,25 @@ export async function renameRoomId(
   fromRoomId: string,
   toRoomId: string
 ): Promise<void> {
-  await tx.update(rooms).set({ id: toRoomId }).where(eq(rooms.id, fromRoomId));
+  // A main room's origin follows its id: today's callers keep the class
+  // (code -> code, repo -> repo), and this keeps any later caller honest.
+  // A focus room stays `focus`. Set in the same statement as the new id.
+  const [before] = await tx
+    .select({ kind: rooms.kind, origin: rooms.origin })
+    .from(rooms)
+    .where(eq(rooms.id, fromRoomId))
+    .limit(1);
+  const nextOrigin = before?.kind === "main" ? originForNewMainRoom(toRoomId) : null;
+  const originChanges = nextOrigin !== null && before?.origin !== nextOrigin;
+  await tx
+    .update(rooms)
+    .set(originChanges ? { id: toRoomId, origin: nextOrigin } : { id: toRoomId })
+    .where(eq(rooms.id, fromRoomId));
+  if (originChanges && before?.origin) {
+    console.warn(
+      `[room origin] rename ${JSON.stringify(fromRoomId)} -> ${JSON.stringify(toRoomId)} changed origin ${before.origin} -> ${nextOrigin}`
+    );
+  }
 
   const fromSequences = getRoomScopedSequenceNames(fromRoomId);
   const toSequences = getRoomScopedSequenceNames(toRoomId);
