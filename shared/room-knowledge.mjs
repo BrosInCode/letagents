@@ -120,9 +120,8 @@ const OPENS_WITH_BLOCK = /^(?: {4}|\t| {0,3}(?:`{3}|~{3}|[-*+](?:\s|$)|\d{1,9}[.
 /**
  * What people see for a message formatAttentionResponse wrote. The handle and
  * request id route the answer to the agent that asked; the room reads it as a
- * reply to that agent by name, or to a neutral @agent when the room no longer
- * lists it (the visible mention is the record of who was woken). Null for any
- * other text.
+ * reply to that agent by name, or to the requesting agent when the room no
+ * longer lists it. Null for any other text.
  */
 export function attentionResponseDisplayText(text, agentName) {
   const match = ATTENTION_RESPONSE_TEXT.exec(typeof text === 'string' ? text : '');

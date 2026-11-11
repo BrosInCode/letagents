@@ -1837,7 +1837,7 @@ test("a person's Needs-you answer reads as a reply to the agent by name", () => 
   const named = renderedMessage({}).html;
   assert.match(named, /<span class="mention-token">@SummitMisty<\/span> Noted\. Post each verdict as a PR comment\./);
   assert.doesNotMatch(named, /@agent:|desktop-cursor|Human response|summitmisty-gh-app/);
-  // Outside a room roster the mention stays visible, as a neutral @agent.
+  // Outside a room roster the message still identifies its recipient.
   const unnamed = renderedMessage({}, false).html;
   assert.match(unnamed, /Reply to the requesting agent:[\s\S]*Noted\. Post each verdict/);
   assert.doesNotMatch(unnamed, /@agent:|Human response/);
