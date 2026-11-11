@@ -98,7 +98,17 @@ const REPO_NOT_ADMIN_TTL_MS = 1000 * 60 * 5;
 const REPO_CACHE_MAX_ENTRIES = 5_000;
 const repoVisibilityCache = new Map<string, { visibility: GitHubRepoVisibility; expiresAt: number }>();
 const repoVisibilityLastKnown = new Map<string, { visibility: "public" | "private"; expiresAt: number }>();
-interface RepoAccessCacheEntry { allowed: boolean; expiresAt: number; refreshAt: number }
+interface RepoAccessCacheEntry {
+  allowed: boolean;
+  expiresAt: number;
+  refreshAt: number;
+  /**
+   * The visibility GitHub reported in the same answer. A cached decision for
+   * this person reuses it instead of its own visibility read (60 s cache), so
+   * the pair is as old as its role answer and is refreshed with it.
+   */
+  visibility: "private" | "public";
+}
 const repoAccessCache = new Map<string, RepoAccessCacheEntry>();
 const publicRepoRoleCache = new Map<string, RepoAccessCacheEntry>();
 // Background refreshes of a stale "yes", keyed `kind::room::login`.
@@ -214,14 +224,17 @@ function refreshStaleRepoAccess(input: {
   const cacheKey = `${roomKey}::${loginKey}`;
   const promise = (async () => {
     let allowed: boolean;
+    // The refresh's own repository read also tells the visibility now.
+    let seenVisibility: "private" | "public" | null = null;
+    const onRepo = (repo: GitHubRepo) => { seenVisibility = repo.private === false ? "public" : "private"; };
     try {
       allowed = input.kind === "collaborator"
         ? await isGitHubRepoCollaborator({
-          roomName: input.roomName, login: input.login, accessToken: input.accessToken, bypassCache: true,
+          roomName: input.roomName, login: input.login, accessToken: input.accessToken, bypassCache: true, onRepo,
         })
         : await isGitHubPublicRepoRoleHolder({
           roomName: input.roomName, login: input.login, accessToken: input.accessToken, bypassCache: true,
-          noLastKnownFallback: true,
+          noLastKnownFallback: true, onRepo,
         });
     } catch {
       // GitHub gave no answer: keep serving the "yes" until it expires, and
@@ -230,13 +243,22 @@ function refreshStaleRepoAccess(input: {
       if (current === input.entry) current.refreshAt = Date.now() + REPO_ACCESS_REFRESH_RETRY_MS;
       return;
     }
-    if (allowed) {
+    const visibility = (seenVisibility as "private" | "public" | null) ?? input.entry.visibility;
+    if (allowed && visibility === input.entry.visibility) {
       // A webhook or a fresh "no" during the refresh wins over this "yes".
       if (!generationsHold()) return;
       pruneExpiringCache(cache, REPO_CACHE_MAX_ENTRIES);
       const at = Date.now();
-      cache.set(cacheKey, { allowed: true, expiresAt: at + REPO_ACCESS_TTL_MS, refreshAt: at + REPO_ACCESS_REFRESH_AFTER_MS });
+      cache.set(cacheKey, {
+        allowed: true, expiresAt: at + REPO_ACCESS_TTL_MS, refreshAt: at + REPO_ACCESS_REFRESH_AFTER_MS, visibility,
+      });
       return;
+    }
+    if (allowed) {
+      // The repository changed visibility: the rule changed (any role on a
+      // private repository, triage or more on a public one). Forget the pair
+      // and let the next read decide from scratch.
+      if (cache.get(cacheKey) === input.entry) cache.delete(cacheKey);
     }
     // A definite "no": the fresh check already forgot this person's answers.
     // Tell every live lease and stream, on every instance, as a webhook would.
@@ -254,7 +276,7 @@ export async function settleRepoAccessRefreshesForTests(): Promise<void> {
   await Promise.all([...repoAccessRefreshInflight.values()].map((flight) => flight.promise));
 }
 
-function setCachedRepoAccess(roomName: string, login: string, allowed: boolean): void {
+function setCachedRepoAccess(roomName: string, login: string, allowed: boolean, visibility: "private" | "public"): void {
   if (!allowed) return;
   pruneExpiringCache(repoAccessCache, REPO_CACHE_MAX_ENTRIES);
   const cacheKey = `${normalizeCacheKey(roomName)}::${normalizeCacheKey(login)}`;
@@ -263,7 +285,32 @@ function setCachedRepoAccess(roomName: string, login: string, allowed: boolean):
     allowed,
     expiresAt: now + REPO_ACCESS_TTL_MS,
     refreshAt: now + REPO_ACCESS_REFRESH_AFTER_MS,
+    visibility,
   });
+}
+
+/**
+ * The visibility paired with this person's cached "yes" for the repository,
+ * or null. A cached decision uses it instead of a separate visibility read.
+ * When the shared 60 s visibility cache already holds a definite value that
+ * differs (another read saw the repository change), the shared value wins
+ * and the pair is dropped: a flip is seen as soon as any read sees it, at no
+ * extra GitHub call.
+ */
+function cachedVisibilityForPerson(roomName: string, login: string): "private" | "public" | null {
+  const cacheKey = `${normalizeCacheKey(roomName)}::${normalizeCacheKey(login)}`;
+  const now = Date.now();
+  for (const cache of [repoAccessCache, publicRepoRoleCache]) {
+    const entry = cache.get(cacheKey);
+    if (!entry?.allowed || entry.expiresAt <= now) continue;
+    const shared = getCachedVisibility(roomName, false);
+    if (shared && shared !== "unknown" && shared !== entry.visibility) {
+      cache.delete(cacheKey);
+      return shared;
+    }
+    return entry.visibility;
+  }
+  return null;
 }
 
 function canonicalRepoRoomKey(roomName: string): string | null {
@@ -739,6 +786,8 @@ export async function isGitHubRepoCollaborator(input: {
   // The repository as GitHub just returned it (200) to this same token, or
   // null for a 404 to it, so a fresh check does not read it twice.
   prefetchedRepo?: GitHubRepo | null;
+  /** Sees GitHub's 200 body for the repository, when this check has one. */
+  onRepo?: (repo: GitHubRepo) => void;
 }): Promise<boolean> {
   const roomKey = normalizeCacheKey(input.roomName);
   const loginKey = normalizeCacheKey(input.login);
@@ -788,6 +837,7 @@ export async function isGitHubRepoCollaborator(input: {
       }
       repoPayload = (await ownerResponse.json()) as GitHubRepo;
     }
+    input.onRepo?.(repoPayload);
     let allowed = repoPayload.owner?.login?.toLowerCase() === loginKey;
     if (!allowed) {
       let permissionResponse: Response;
@@ -821,7 +871,7 @@ export async function isGitHubRepoCollaborator(input: {
       && getCacheGeneration(repoLoginCacheGeneration, loginKey) === loginGeneration
       && getCacheGeneration(repoPersonCacheGeneration, cacheKey) === personGeneration
     ) {
-      setCachedRepoAccess(input.roomName, input.login, true);
+      setCachedRepoAccess(input.roomName, input.login, true, repoPayload.private === false ? "public" : "private");
     }
     return allowed;
   })().then((allowed) => {
@@ -867,6 +917,8 @@ export async function isGitHubPublicRepoRoleHolder(input: {
   prefetchedRepo?: GitHubRepo | null;
   /** A background refresh: an unanswered check throws instead of standing in the last known "yes". */
   noLastKnownFallback?: boolean;
+  /** Sees GitHub's 200 body for the repository, when this check has one. */
+  onRepo?: (repo: GitHubRepo) => void;
 }): Promise<boolean> {
   const roomKey = normalizeCacheKey(input.roomName);
   const loginKey = normalizeCacheKey(input.login);
@@ -920,6 +972,7 @@ export async function isGitHubPublicRepoRoleHolder(input: {
       }
       payload = (await response.json()) as GitHubRepo;
     }
+    input.onRepo?.(payload);
     const permissions = payload.permissions ?? {};
     const allowed = payload.owner?.login?.toLowerCase() === loginKey
       || Boolean(permissions.triage || permissions.push || permissions.maintain || permissions.admin);
@@ -939,6 +992,7 @@ export async function isGitHubPublicRepoRoleHolder(input: {
         allowed,
         expiresAt: at + (allowed ? REPO_ACCESS_TTL_MS : PUBLIC_REPO_NO_ROLE_TTL_MS),
         refreshAt: at + REPO_ACCESS_REFRESH_AFTER_MS,
+        visibility: payload.private === true ? "private" : "public",
       });
     }
     return allowed;
@@ -1113,7 +1167,14 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
     visibility = fresh.visibility;
     prefetchedRepo = fresh.repo;
   } else {
-    visibility = await deps.getVisibility(canonicalRoomName, accessToken, {
+    // A cached decision for a person with a cached "yes" reuses the
+    // visibility GitHub reported with that "yes" (refreshed with it every 5
+    // minutes, cleared with it by webhooks), not a separate 60 s visibility read.
+    const paired = !input.freshCollaboratorCheck && accessToken && input.sessionAccount.login
+      && deps.getVisibility === getGitHubRepoVisibility
+      ? cachedVisibilityForPerson(canonicalRoomName, input.sessionAccount.login)
+      : null;
+    visibility = paired ?? await deps.getVisibility(canonicalRoomName, accessToken, {
       bypassCache: input.freshCollaboratorCheck,
     });
   }
