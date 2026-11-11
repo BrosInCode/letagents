@@ -9,6 +9,8 @@ import {
   agentInspectorTurnControlActionIdIfCurrent,
   agentInspectorTurnControlFenceMatches,
   agentInspectorActionStateForEntry,
+  agentInspectorStopNoticeEndedByNewTurn,
+  agentInspectorTurnKey,
   clearAgentInspectorActionStateIfMatching,
   settleAgentInspectorRetirementCompletion,
   settleAgentInspectorRetirementEvent,
@@ -20,7 +22,7 @@ import type { AgentInspectorActionState } from "../src/domain/agent-inspector";
 import { useAgentPauseRequests } from "../src/domain/agent-pause-requests";
 import { ref } from "vue";
 import type { AgentInspectorWorkResource } from "../src/domain/agent-inspector-work";
-import { agentInspectorActionErrorMessage, agentInspectorSignal } from "../src/domain/agent-inspector-presentation";
+import { actionSuccessMessage, agentInspectorActionErrorMessage, agentInspectorSignal } from "../src/domain/agent-inspector-presentation";
 import { isCurrentAgentInspectorSupervisorUpdate } from "../src/domain/agent-inspector-identity";
 import { projectAgentInspectorDiagnostics } from "../src/domain/agent-inspector-diagnostics";
 import {
@@ -1843,4 +1845,36 @@ test("a state-watch receipt timeline gives the same turn start and continuation 
   assert.equal(full?.continuationRecovery?.state, "restored");
   assert.equal(full?.continuationRecovery?.noticeId, `supervised_1:${delivery.inboxItemId}:7`);
   assert.deepEqual(fromWatch?.continuationRecovery, full?.continuationRecovery);
+});
+
+test("a stop notice stays until the same agent starts a different turn", () => {
+  const stoppedTurn = { inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1" };
+  const stopped: AgentInspectorActionState = {
+    operationId: "operation_stop",
+    entryId: "supervised_1",
+    kind: "stop_turn",
+    status: "success",
+    message: actionSuccessMessage("stop_turn"),
+    stoppedTurnKey: agentInspectorTurnKey(stoppedTurn),
+  };
+
+  // After the stop, the notice text is shown.
+  assert.equal(actionSuccessMessage("stop_turn"), "Turn stopped. The agent still answers new mentions.");
+  assert.notEqual(stopped.stoppedTurnKey, null);
+
+  // The stopped turn is still responding or publishing: the notice stays.
+  assert.equal(agentInspectorStopNoticeEndedByNewTurn(stopped, { state: "responding", ...stoppedTurn }), false);
+  assert.equal(agentInspectorStopNoticeEndedByNewTurn(stopped, { state: "publishing", ...stoppedTurn }), false);
+
+  // Nothing new starts: the agent is idle with no turn identity, so the notice stays.
+  assert.equal(agentInspectorStopNoticeEndedByNewTurn(stopped, { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null }), false);
+
+  // A new mention starts a new turn for the same agent: the notice clears.
+  assert.equal(agentInspectorStopNoticeEndedByNewTurn(stopped, { state: "dispatching", inboxItemId: "inbox_2", sourceMessageId: "message_2", providerTurnId: null }), true);
+  assert.equal(agentInspectorStopNoticeEndedByNewTurn(stopped, { state: "responding", inboxItemId: "inbox_2", sourceMessageId: "message_2", providerTurnId: "turn_2" }), true);
+
+  // Only a successful stop notice can clear this way.
+  assert.equal(agentInspectorStopNoticeEndedByNewTurn({ ...stopped, status: "running" }, { state: "responding", inboxItemId: "inbox_2", sourceMessageId: "message_2", providerTurnId: "turn_2" }), false);
+  assert.equal(agentInspectorStopNoticeEndedByNewTurn({ ...stopped, kind: "pause" }, { state: "responding", inboxItemId: "inbox_2", sourceMessageId: "message_2", providerTurnId: "turn_2" }), false);
+  assert.equal(agentInspectorStopNoticeEndedByNewTurn({ ...stopped, stoppedTurnKey: undefined }, { state: "responding", inboxItemId: "inbox_2", sourceMessageId: "message_2", providerTurnId: "turn_2" }), false);
 });

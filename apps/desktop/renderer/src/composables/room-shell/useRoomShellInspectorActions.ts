@@ -9,6 +9,7 @@ import {
   agentInspectorTurnControlActionIdIfCurrent,
   agentInspectorRetryableTurnControlInput,
   agentInspectorTurnControlFenceMatches,
+  agentInspectorTurnKey,
   type AgentInspectorTurnControlFence,
   type AgentInspectorActionIntent,
 } from "../../domain/agent-inspector";
@@ -366,6 +367,9 @@ export function useRoomShellInspectorRunActions(context: unknown) {
         kind: intent.kind,
         status: "success",
         message: actionSuccessMessage(intent.kind),
+        ...(intent.kind === "stop_turn" && turnControlFence
+          ? { stoppedTurnKey: agentInspectorTurnKey(turnControlFence) }
+          : {}),
       };
     } catch (error) {
       if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;

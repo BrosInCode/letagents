@@ -131,7 +131,7 @@ export function actionSuccessMessage(kind: Exclude<AgentInspectorActionIntent["k
     reconnect_runtime: "Reconnection requested. Check the agent and room connection status.",
     restart_runtime: "Restart requested with the saved conversation. Wait for the agent to be ready before continuing.",
     fresh_runtime: "A new conversation was requested. Your project files and history are kept. Wait for the agent to be ready before continuing.",
-    stop_turn: "Current turn stopped.",
+    stop_turn: "Turn stopped. The agent still answers new mentions.",
     steer_turn: "Correction applied to the same agent session.",
     retry_turn_control: "Previous stop or correction completed.",
     resolve_turn_control: "Confirmed result saved.",
