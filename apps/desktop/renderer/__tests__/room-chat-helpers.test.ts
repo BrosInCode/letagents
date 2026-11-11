@@ -290,11 +290,11 @@ describe("room chat helpers", () => {
   it("previews a Needs-you answer in threads without its routing handle or request id", () => {
     const answerText = "@agent:emmymay/desktop-cursor-5849cfa6\n\nHuman response (summitmisty-gh-app-pr-write-2026-09-30):\n\nNoted.";
     const answer = { ...roomMessage("msg_3", "msg_1", "2026-05-28T00:03:00.000Z"), text: answerText, source: "browser" };
-    assert.equal(threadQuotePreview(answer), "@agent Noted.");
+    assert.equal(threadQuotePreview(answer), "Reply to the requesting agent: Noted.");
     const names = new Map([["emmymay/desktop-cursor-5849cfa6", "SummitMisty"]]);
     assert.equal(threadQuotePreview(answer, names), "@SummitMisty Noted.");
     const parent = roomMessage("msg_1", null);
-    assert.equal(buildThreadIndicatorSummary(parent, { count: 1, latest: answer, replies: [answer] }).latestPreview, "@agent Noted.");
+    assert.equal(buildThreadIndicatorSummary(parent, { count: 1, latest: answer, replies: [answer] }).latestPreview, "Reply to the requesting agent:\n\nNoted.");
     assert.equal(
       buildThreadIndicatorSummary(parent, { count: 1, latest: answer, replies: [answer] }, names).latestPreview,
       "@SummitMisty Noted.",

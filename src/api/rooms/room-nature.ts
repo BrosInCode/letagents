@@ -2,7 +2,7 @@
  * The one server module that answers "what kind of room is this?":
  * a join-code room, a repository room, a named (ad-hoc) room, or a focus room.
  *
- * The answer is the stored `rooms.origin` (migration 0147). A row without it
+ * The answer is the stored `rooms.origin` (migration 0148). A row without it
  * (written by an older server during a deploy, or a room object built without
  * the column) falls back to the shape of the room id, the rule the backfill
  * used. A later step makes the column NOT NULL and removes the fallback.
@@ -193,7 +193,7 @@ export function classifyRoomLocator(input: string): RoomLocator {
 }
 
 /**
- * The origin a room gets from the shape of its id: the rule of the 0147
+ * The origin a room gets from the shape of its id: the rule of the 0148
  * backfill and of the fallback for rows without a stored origin. A focus room
  * (`kind = 'focus'`) is `focus`; a main room is a join code, a repository or
  * a named room by its id.

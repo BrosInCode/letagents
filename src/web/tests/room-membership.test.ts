@@ -1025,3 +1025,25 @@ test('the docs describe members-only rooms and no longer promise rooms without a
   assert.doesNotMatch(roomCopy, /Anyone with the code can join/)
   assert.match(roomCopy, /asks to join, and a room admin approves or declines/)
 })
+
+
+test('a deleted room closes its open session and stops retrying stale content', async (t) => {
+  let deleted = false
+  t.mock.method(globalThis, 'fetch', async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (deleted) return json({ code: 'ROOM_DELETED', error: 'Room was permanently deleted.' }, 410)
+    if (init?.method === 'POST') return json({ room_id: 'ROOM-1234', display_name: 'Planning', kind: 'main' })
+    return json({})
+  })
+  let stops = 0
+  const lifecycle = createRoomLifecycle({ startParticipantRefreshLoop() {}, startPresenceRefreshLoop() {}, async startStreaming() {}, finishStreamingBootstrap() {}, stopStreaming() { stops++ } })
+  try {
+    assert.equal(await lifecycle.joinRoom('ROOM-1234'), true)
+    const before = stops
+    deleted = true
+    await assert.rejects(apiFetch('/rooms/ROOM-1234/messages'))
+    assert.equal(room.value, null)
+    assert.equal(isConnected.value, false)
+    assert.equal(stops, before + 1)
+    assert.equal(joinError.value?.message, 'Room was permanently deleted.')
+  } finally { lifecycle.leaveRoom(); lifecycle.dispose() }
+})

@@ -1010,7 +1010,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
   }
 
-  async function reconcileRoomStreamSnapshot(roomIdentifier: string): Promise<void> {
+  async function reconcileRoomStreamSnapshot(roomIdentifier: string, replaceMessages = false): Promise<void> {
     const generation = ++streamReconcileGeneration;
     const roomKey = normalizeRoomIdentifier(roomIdentifier);
     const deliveryRepairToken = roomKey
@@ -1025,6 +1025,15 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         || !roomKey
         || normalizeRoomIdentifier(activeStreamRoom) !== roomKey
       ) return;
+      if (["ROOM_DELETED", "ROOM_NOT_FOUND"].includes(snapshot.access.code ?? "")) {
+        cachedSelectedSnapshots.noteFreshAccess(snapshot, [roomIdentifier]);
+        cachedPaint = null;
+        setSelectedSnapshot(snapshot);
+        if (snapshotMatchesRoom(options.rootRoomSnapshot.value, roomIdentifier)) options.rootRoomSnapshot.value = snapshot;
+        await syncSelectedRoomStream(null);
+        void refreshAccountRooms().catch(() => undefined);
+        return;
+      }
       await acknowledgeStreamGapRepairFromSnapshot(
         roomIdentifier,
         snapshot,
@@ -1035,7 +1044,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         || normalizeRoomIdentifier(activeStreamRoom) !== roomKey
       ) return;
       cachedSelectedSnapshots.noteFreshAccess(snapshot, [roomIdentifier]);
-      setSelectedSnapshot(mergeFreshSelectedSnapshot(snapshot), { activitySnapshot: true });
+      const authoritativeMessages = (replaceMessages || deliveryRepairToken !== null) && snapshot.access.status === "ready"
+        && (!snapshot.sourceStates || snapshot.sourceStates.messages?.status === "ready");
+      if (authoritativeMessages) cachedPaint = null;
+      setSelectedSnapshot(authoritativeMessages ? snapshot : mergeFreshSelectedSnapshot(snapshot), { activitySnapshot: true });
       rememberFreshSelectedSnapshot(snapshot, [roomIdentifier]);
       const pending = streamBufferOverflow ? [] : bufferedStreamEvents;
       const overflowed = streamBufferOverflow;
@@ -1083,6 +1095,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     void refreshSelectedSnapshot(options.rootRoomSnapshot.value, { fresh: true }).catch(() => undefined);
   }
 
+  function handleContentDeleted(roomIdentifier: string): void {
+    void reconcileRoomStreamSnapshot(roomIdentifier, true).catch(() => undefined);
+  }
+
   function handleRefreshRoom(snapshot?: DesktopRoomSnapshot): void {
     if (snapshot) {
       options.rootRoomSnapshot.value = snapshot;
@@ -1110,6 +1126,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   }
 
   function handleMessageSent(message: DesktopRoomMessage): void {
+    if (streamReconcileRoom && snapshotMatchesRoom(options.selectedSnapshot.value, streamReconcileRoom)) {
+      bufferStreamEvent({ type: "message", roomIdentifier: streamReconcileRoom, message, live: true });
+    }
     const priorMessages = options.selectedSnapshot.value?.messages ?? [];
     setSelectedSnapshot(appendSnapshotMessage(options.selectedSnapshot.value, message, true));
     if (messageReferencesMissingThreadContext(message, priorMessages)) {
@@ -1306,6 +1325,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     clearSelectedSnapshotCache,
     handleMessageSent,
     handleRefreshRoom,
+    handleContentDeleted,
     handleRoomRenamed,
     handleRoomStreamEvent,
     invalidateSession,

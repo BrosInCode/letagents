@@ -5,13 +5,21 @@ import {
   type Message,
 } from "../db.js";
 import { createBridgedEmitter } from "./event-bridge.js";
-import { resolveGitHubNotifyAccountIds } from "../db/auth/find-account-by-github.js";
+import {
+  resolveGitHubNotifyAccountIds,
+  type GitHubUserReference,
+} from "../db/auth/find-account-by-github.js";
 import { getProjectById } from "../db/rooms.js";
 import {
   authorizeDesktopPushNotification,
   type DesktopPushAuthorizationDecision,
 } from "../notifications/authorization.js";
+import {
+  isHiddenAgentStatusMessage,
+  resolveMentionedAccountIds,
+} from "../notifications/mention-accounts.js";
 import { getPushDeliveryAccount } from "../notifications/push-account.js";
+import { announceRoomMentionCreated } from "../rooms/mention-events.js";
 import type { NormalizedMessageAttachmentReference } from "../messages/attachments.js";
 import type { MessageRecipientAgentTarget } from "../db/types.js";
 import {
@@ -36,6 +44,7 @@ export interface MessageRoutedEvent {
   recipientAgentTargets: readonly MessageRecipientAgentTarget[];
 }
 
+export const contentDeletionEvents = createBridgedEmitter("content-deletions");
 export const messageEvents = createBridgedEmitter("messages");
 export const taskEvents = createBridgedEmitter("tasks");
 export const githubRoomEvents = createBridgedEmitter("github");
@@ -173,19 +182,115 @@ export async function filterAccountIdsWithRoomAccess(
   return { notify, recents };
 }
 
-async function resolveNotifiedAccountIds(
-  projectId: string,
-  users: Array<{ login: string; github_user_id: string | null }> | undefined,
-): Promise<{ notify_account_ids: string[]; recents_account_ids: string[] }> {
+export interface MessageNotificationTargetInput {
+  projectId: string;
+  text: string;
+  source?: string | null;
+  agent_prompt_kind?: AgentPromptKind | null;
+  addressed_to?: AddMessageOptions["addressed_to"];
+  account_id?: string | null;
+  publisher_agent_key?: string | null;
+  notify_github_users?: readonly GitHubUserReference[];
+}
+
+export interface MessageNotificationTargetDeps {
+  resolveGitHubAccounts?: (users: readonly GitHubUserReference[] | undefined) => Promise<string[]>;
+  resolveMentionAccounts?: (text: string, excludeAccountId: string | null) => Promise<string[]>;
+  resolveAccess?: AccountRoomAccessResolver;
+}
+
+export interface ResolvedMessageNotificationTargets {
+  notify_account_ids: string[];
+  recents_account_ids: string[];
+  mention_notify_account_ids: string[];
+  human_publisher_account_id: string | null;
+}
+
+export async function resolveMessageNotificationTargets(
+  input: MessageNotificationTargetInput,
+  deps?: MessageNotificationTargetDeps,
+): Promise<ResolvedMessageNotificationTargets> {
+  const humanPublisherAccountId = input.publisher_agent_key
+    ? null
+    : (input.account_id?.trim() || null);
+
+  if (
+    isPromptOnlyAgentMessage(input.text, input.agent_prompt_kind ?? null)
+    || Boolean(input.addressed_to)
+    || isHiddenAgentStatusMessage(input.source, input.text)
+  ) {
+    return {
+      notify_account_ids: [],
+      recents_account_ids: [],
+      mention_notify_account_ids: [],
+      human_publisher_account_id: humanPublisherAccountId,
+    };
+  }
+
+  const resolveGitHubAccounts = deps?.resolveGitHubAccounts ?? resolveGitHubNotifyAccountIds;
+  const resolveMentionAccounts = deps?.resolveMentionAccounts
+    ?? ((messageText: string, excludeAccountId: string | null) =>
+      resolveMentionedAccountIds(messageText, { excludeAccountId }));
+  const resolveAccess = deps?.resolveAccess ?? resolveAccountRoomAccessForEmit;
+
   try {
-    const accountIds = await resolveGitHubNotifyAccountIds(users);
-    const access = await filterAccountIdsWithRoomAccess(projectId, accountIds);
-    return { notify_account_ids: access.notify, recents_account_ids: access.recents };
+    const [githubAccountIds, mentionAccountIds] = await Promise.all([
+      input.notify_github_users?.length
+        ? resolveGitHubAccounts(input.notify_github_users).catch((error) => {
+            console.warn(
+              `[room-access] github notify lookup failed room=${input.projectId}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+            return [] as string[];
+          })
+        : Promise.resolve([] as string[]),
+      input.source === "github"
+        ? Promise.resolve([] as string[])
+        : resolveMentionAccounts(input.text, humanPublisherAccountId).catch((error) => {
+            console.warn(
+              `[room-access] mention notify lookup failed room=${input.projectId}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+            return [] as string[];
+          }),
+    ]);
+
+    const candidateAccountIds = [
+      ...new Set(
+        [...githubAccountIds, ...mentionAccountIds].filter(
+          (accountId) => Boolean(accountId) && accountId !== humanPublisherAccountId,
+        ),
+      ),
+    ];
+    if (candidateAccountIds.length === 0) {
+      return {
+        notify_account_ids: [],
+        recents_account_ids: [],
+        mention_notify_account_ids: [],
+        human_publisher_account_id: humanPublisherAccountId,
+      };
+    }
+
+    const access = await filterAccountIdsWithRoomAccess(input.projectId, candidateAccountIds, resolveAccess);
+    const mentionSet = new Set(mentionAccountIds);
+    return {
+      notify_account_ids: access.notify,
+      recents_account_ids: access.recents,
+      mention_notify_account_ids: access.notify.filter((accountId) => mentionSet.has(accountId)),
+      human_publisher_account_id: humanPublisherAccountId,
+    };
   } catch (error) {
     console.warn(
-      `[room-access] notify lookup failed room=${projectId}: ${error instanceof Error ? error.message : String(error)}`,
+      `[room-access] notify lookup failed room=${input.projectId}: ${error instanceof Error ? error.message : String(error)}`,
     );
-    return { notify_account_ids: [], recents_account_ids: [] };
+    return {
+      notify_account_ids: [],
+      recents_account_ids: [],
+      mention_notify_account_ids: [],
+      human_publisher_account_id: humanPublisherAccountId,
+    };
   }
 }
 
@@ -212,13 +317,24 @@ export async function emitProjectMessage(
     notify_github_users?: Array<{ login: string; github_user_id: string | null }>;
   }
 ): Promise<Message> {
+  const notified = await resolveMessageNotificationTargets({
+    projectId,
+    text,
+    source: options?.source,
+    agent_prompt_kind: options?.agent_prompt_kind ?? null,
+    addressed_to: options?.addressed_to,
+    account_id: options?.account_id ?? null,
+    publisher_agent_key: options?.publisher_agent_key ?? null,
+    notify_github_users: options?.notify_github_users,
+  });
   const {
     message,
     canonical_message: canonicalMessage,
     created,
     recipientAgentTargets,
   } = await addMessageWithCreateStatus(projectId, sender, text, {
-    ...(await resolveNotifiedAccountIds(projectId, options?.notify_github_users)),
+    notify_account_ids: notified.notify_account_ids,
+    recents_account_ids: notified.recents_account_ids,
     source: options?.source,
     display_text: options?.display_text,
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
@@ -244,6 +360,22 @@ export async function emitProjectMessage(
         canonicalMessage.agent_prompt_kind,
       ) ? recipientAgentTargets ?? [] : [],
     } satisfies MessageCreatedEvent);
+
+    if (notified.mention_notify_account_ids.length > 0) {
+      void getProjectById(projectId)
+        .then((project) => project?.display_name ?? "")
+        .catch(() => "")
+        .then((roomDisplayName) => {
+          announceRoomMentionCreated({
+            projectId,
+            roomDisplayName,
+            messageId: canonicalMessage.id,
+            threadRootId: canonicalMessage.thread_reply_to_id ? canonicalMessage.thread_root_id : null,
+            targetAccountIds: notified.mention_notify_account_ids,
+            publisherAccountId: notified.human_publisher_account_id,
+          });
+        });
+    }
   }
   return message;
 }

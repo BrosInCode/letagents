@@ -886,6 +886,15 @@ export type DesktopRoomStreamEvent =
       event: import("../../../../shared/room-join-requests.mjs").RoomJoinRequestEvent;
     }
   | {
+      /**
+       * Someone @mentioned this account in a room (including unopened or
+       * archived rooms), delivered on `/account/activity/stream`.
+       */
+      type: "room_mention";
+      roomIdentifier: string;
+      event: import("../../../../shared/room-mention-events.mjs").RoomMentionEvent;
+    }
+  | {
       type: "rental_activity";
       roomIdentifier: string;
       activity: DesktopRentalActivityEvent;
@@ -1021,6 +1030,7 @@ export interface DesktopInviteRoomCreation {
 }
 
 export interface DesktopAccountFocusRoomEntry {
+  archived?: boolean;
   roomIdentifier: string;
   displayName: string;
   name: string;

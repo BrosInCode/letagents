@@ -110,6 +110,7 @@ async function enqueueTargetedDesktopPushNotifications(
   accountIds: readonly string[],
   now: string,
 ): Promise<number> {
+  const humanPublisherAccountId = message.publisher_agent_key ? null : message.publisher_account_id;
   const accountIdList = sql.join(accountIds.map((accountId) => sql`${accountId}`), sql`, `);
   const result = await tx.execute(sql`
     INSERT INTO desktop_push_notifications (
@@ -154,7 +155,7 @@ async function enqueueTargetedDesktopPushNotifications(
       ON preference.account_id = device.account_id AND preference.room_id = ${message.room_id}
     WHERE device.enabled = TRUE
       AND device.account_id IN (${accountIdList})
-      AND (${message.publisher_account_id}::text IS NULL OR device.account_id <> ${message.publisher_account_id})
+      AND (${humanPublisherAccountId}::text IS NULL OR device.account_id <> ${humanPublisherAccountId})
       AND (preference.snoozed_until IS NULL OR preference.snoozed_until <= statement_timestamp())
       AND COALESCE(preference.level, 'all') <> 'muted'
     ON CONFLICT (device_id, room_id, message_number) DO NOTHING
@@ -173,6 +174,7 @@ async function insertTargetedRoomRecents(
   accountIds: readonly string[],
   now: string,
 ): Promise<void> {
+  const humanPublisherAccountId = message.publisher_agent_key ? null : message.publisher_account_id;
   const accountIdList = sql.join(accountIds.map((accountId) => sql`${accountId}`), sql`, `);
   await tx.execute(sql`
     INSERT INTO account_room_recents (
@@ -199,7 +201,7 @@ async function insertTargetedRoomRecents(
     FROM accounts AS account
     INNER JOIN rooms AS room ON room.id = ${message.room_id}
     WHERE account.id IN (${accountIdList})
-      AND (${message.publisher_account_id}::text IS NULL OR account.id <> ${message.publisher_account_id})
+      AND (${humanPublisherAccountId}::text IS NULL OR account.id <> ${humanPublisherAccountId})
     ON CONFLICT (account_id, room_id) DO NOTHING
   `);
 }

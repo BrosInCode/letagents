@@ -3,6 +3,7 @@ import type { EventEmitter } from "node:events";
 import type { Express } from "express";
 
 import { ROOM_JOIN_REQUEST_EVENT } from "../../../../shared/room-join-requests.mjs";
+import { ROOM_MENTION_EVENT } from "../../../../shared/room-mention-events.mjs";
 import type { AccountActivityHub, AccountRoomActivity } from "../../account-activity/hub.js";
 import type { getAccountRoomsForAccount } from "../../account-room-membership/list.js";
 import { getRoomMemberRole } from "../../db/room-members.js";
@@ -20,6 +21,12 @@ import {
   roomJoinRequestEvents,
   roomJoinRequestStreamPayload,
 } from "../../rooms/join-request-events.js";
+import {
+  ROOM_MENTION_CREATED,
+  readRoomMentionCreatedEvent,
+  roomMentionEvents,
+  roomMentionStreamPayload,
+} from "../../rooms/mention-events.js";
 import { roomMembershipInvalidationEvents } from "../../rooms/membership-events.js";
 import { roomEventBridgeLossEvents } from "../../server/bridged-emitter.js";
 import { ACCOUNT_ROOM_READ, ACCOUNT_ROOM_READ_STREAM_EVENT, accountReadEvents, type AccountRoomReadEvent } from "../../account-unread/read-events.js";
@@ -29,6 +36,8 @@ export interface AccountActivityStreamDeps {
   getAccountRoomsForAccount: typeof getAccountRoomsForAccount;
   /** Someone asked to join a room, or the request was answered. Defaults to the server's emitter. */
   joinRequestEvents?: EventEmitter;
+  /** Someone was @mentioned in a room, including unopened or archived rooms. Defaults to the server's emitter. */
+  mentionEvents?: EventEmitter;
   /** Whether the account is an admin of the room right now. Defaults to the members store. */
   isRoomAdmin?(accountId: string, roomId: string): Promise<boolean>;
   /**
@@ -168,24 +177,24 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
       leases.clear();
     });
     const leaseFor = (roomId: string) => {
-      let lease = leases.get(roomId);
+      const leaseKey = roomId.toLowerCase();
+      let lease = leases.get(leaseKey);
       if (!lease) {
         lease = openLease(req, roomId).then((opened) => {
           if (opened && connection.closed) { opened.release(); return null; }
           return opened;
         }, (error: unknown) => {
           // Load the room again on its next frame.
-          leases.delete(roomId);
+          leases.delete(leaseKey);
           throw error;
         });
-        leases.set(roomId, lease);
+        leases.set(leaseKey, lease);
       }
       return lease;
     };
-    const mayShow = async (roomId: string): Promise<boolean> => {
-      const watched = watchedRoomOf.get(roomId.toLowerCase());
-      if (!watched || connection.closed) return false;
-      const lease = await leaseFor(watched);
+    const authorizeRoom = async (targetRoomId: string): Promise<boolean> => {
+      if (!targetRoomId || connection.closed) return false;
+      const lease = await leaseFor(targetRoomId);
       if (!lease) return false;
       if (await lease.check()) return !connection.closed;
       // A refusal (not a missing answer): is the credential itself gone? At
@@ -196,6 +205,15 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
       }
       return false;
     };
+    const mayShow = async (roomId: string): Promise<boolean> => {
+      const watched = watchedRoomOf.get(roomId.toLowerCase());
+      if (!watched) return false;
+      return authorizeRoom(watched);
+    };
+    const mayShowTargetRoom = async (roomId: string): Promise<boolean> => {
+      const canonical = watchedRoomOf.get(roomId.toLowerCase()) ?? roomId;
+      return authorizeRoom(canonical);
+    };
     /** Writes a room's frames in order, each after its room's re-check. */
     const writeAboutRoom = (roomId: string, data: () => string) => {
       const key = roomId.toLowerCase();
@@ -203,6 +221,17 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
         if (await mayShow(roomId)) await connection.write(data());
       }).catch((error) => {
         console.warn("[account activity] room re-check failed", error);
+      });
+      queues.set(key, next);
+      void next.finally(() => { if (queues.get(key) === next) queues.delete(key); });
+    };
+    /** Writes a targeted room frame (including unopened/archived rooms) after a live read check. */
+    const writeAboutTargetRoom = (roomId: string, data: () => string) => {
+      const key = roomId.toLowerCase();
+      const next = (queues.get(key) ?? Promise.resolve()).then(async () => {
+        if (await mayShowTargetRoom(roomId)) await connection.write(data());
+      }).catch((error) => {
+        console.warn("[account activity] target room re-check failed", error);
       });
       queues.set(key, next);
       void next.finally(() => { if (queues.get(key) === next) queues.delete(key); });
@@ -241,6 +270,22 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
       };
       joinRequestEvents.on(ROOM_JOIN_REQUEST_CHANGED, onJoinRequest);
       connection.addCleanup(() => { joinRequestEvents.off(ROOM_JOIN_REQUEST_CHANGED, onJoinRequest); });
+
+      const mentionEvents = deps.mentionEvents ?? roomMentionEvents;
+      const onRoomMention = (payload: unknown) => {
+        const event = readRoomMentionCreatedEvent(payload);
+        if (
+          !event
+          || connection.closed
+          || !event.targetAccountIds.includes(accountId)
+          || event.publisherAccountId === accountId
+        ) {
+          return;
+        }
+        writeAboutTargetRoom(event.projectId, () => frame(ROOM_MENTION_EVENT, roomMentionStreamPayload(event)));
+      };
+      mentionEvents.on(ROOM_MENTION_CREATED, onRoomMention);
+      connection.addCleanup(() => { mentionEvents.off(ROOM_MENTION_CREATED, onRoomMention); });
     }
     try {
       const watch = await deps.hub.watch(roomIds, send);

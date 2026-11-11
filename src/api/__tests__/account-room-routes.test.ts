@@ -608,6 +608,8 @@ test("delete route blocks rooms the account cannot delete", async () => {
     {
       params: { 0: encodeURIComponent("github.com/owner/repo") },
       sessionAccount: { account_id: "acct_1", login: "EmmyMay" },
+      authKind: "session",
+      body: { confirmation: "github.com/owner/repo" },
     },
     res
   );
@@ -645,6 +647,8 @@ test("delete route deletes account-owned invite rooms", async () => {
     {
       params: { 0: "ABCD-1234" },
       sessionAccount: { account_id: "acct_1" },
+      authKind: "session",
+      body: { confirmation: "ABCD-1234" },
     },
     res
   );

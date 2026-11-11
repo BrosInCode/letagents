@@ -2,6 +2,7 @@ import { readLocalSupervisorPresence } from "./local-supervision-authority.js";
 import type { DesktopRoomSnapshot, DesktopRoomSnapshotOptions } from "../../ipc-types.js";
 import { basename } from "node:path";
 import { resolveWorkspaceRoom } from "../../repo-status.js";
+import { forgetJoinedRoomInfo } from "./room-info.js";
 import { DesktopApiError } from "../auth.js";
 import { workspaceRoot } from "../paths.js";
 import {
@@ -88,6 +89,7 @@ export async function fetchRoomSnapshot(
     return createReadyRoomSnapshot(canonicalRoomIdentifier, joined, snapshotData, storage);
   } catch (error) {
     if (error instanceof DesktopApiError) {
+      if (["ROOM_DELETED", "ROOM_NOT_FOUND"].includes(String(error.payload?.code))) forgetJoinedRoomInfo(roomIdentifier);
       return createApiErrorRoomSnapshot(roomIdentifier, error);
     }
     return createUnavailableRoomSnapshot(roomIdentifier, error);

@@ -5,6 +5,40 @@ import { createNeedsYouChime } from '../components/desktop/content/room-shell/ro
 import { readSoundEnabled } from '../components/desktop/content/room-shell/preferences';
 import { roomNotificationsMuted, roomNotificationState } from './useRoomNotificationPreferences';
 
+/** Seeing a request clears its badge, without answering or dismissing it. */
+export function useInboxUnread(items: Readonly<Ref<readonly { key: string; fingerprint: string; roomIdentifier: string | null }[]>>, options: {
+  account(): string;
+  /** null while Needs you is closed; [] shows every room. */
+  inboxRooms(): readonly string[] | null;
+}) {
+  const seen = ref<Record<string, string>>({});
+  const visible = ref(typeof document === 'undefined' || !document.hidden);
+  const storageKey = () => `letagents-desktop:inbox-seen:${options.account()}`;
+  watch(options.account, () => {
+    seen.value = {};
+    try {
+      const saved: unknown = JSON.parse(window.localStorage.getItem(storageKey()) || '{}');
+      if (saved && typeof saved === 'object' && !Array.isArray(saved)) seen.value = Object.fromEntries(Object.entries(saved).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+    } catch { /* Read state remains available for this session. */ }
+  }, { immediate: true, flush: 'sync' });
+  watch([items, options.inboxRooms, visible, options.account], ([requests, rooms, shown]) => {
+    if (!shown || rooms === null) return;
+    const next = { ...seen.value };
+    let changed = false;
+    for (const item of requests) {
+      if (rooms.length && (!item.roomIdentifier || !rooms.includes(item.roomIdentifier))) continue;
+      if (next[item.key] !== item.fingerprint) { next[item.key] = item.fingerprint; changed = true; }
+    }
+    if (!changed) return;
+    seen.value = next;
+    try { window.localStorage.setItem(storageKey(), JSON.stringify(next)); } catch { /* Storage is optional. */ }
+  }, { immediate: true });
+  const visibilityChanged = () => { visible.value = !document.hidden; };
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', visibilityChanged);
+  onScopeDispose(() => { if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', visibilityChanged); });
+  return computed(() => items.value.filter(item => seen.value[item.key] !== item.fingerprint).length);
+}
+
 /** Session-scoped acknowledgement survives room navigation and KeepAlive eviction. */
 export function useNeedsYouSignal(data: Ref<DesktopNeedsYou | null>, agents: Readonly<Ref<readonly AgentAttentionItem[]>>, options: {
   account(): string;

@@ -22,7 +22,7 @@ export const rooms = pgTable(
     // On by default. Migration 0145 also turned it on in every existing room.
     jev_routing_enabled: boolean("jev_routing_enabled").notNull().default(true),
     kind: text("kind").notNull().default("main"),
-    // What the room is: join_code, repo, named or focus (migration 0147).
+    // What the room is: join_code, repo, named or focus (migration 0148).
     // Nullable until every server writes it; read through rooms/room-nature.ts.
     origin: text("origin").$type<RoomOrigin>(),
     parent_room_id: text("parent_room_id").references((): AnyPgColumn => rooms.id, {

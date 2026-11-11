@@ -4,6 +4,7 @@ export type FocusRoomStatus = "active" | "concluded";
 export type AccountRoomMembershipRole = "admin" | "participant";
 
 export interface AccountRoomListFocusRoom {
+  archived?: boolean;
   room_id: string;
   display_name: string;
   kind: "focus";

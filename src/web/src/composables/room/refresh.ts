@@ -46,6 +46,7 @@ import {
   room,
   roomArtifacts,
   roomSessionVersion,
+  roomContentRevision,
   setLastActivityHistoryRequest,
   taskGithubStatus,
   tasks,
@@ -167,12 +168,15 @@ export function createRoomRefreshController(
     if (!room.value) return { success: false, cursor: after }
     const roomIdentifier = room.value.identifier
     const canCommit = () => isCurrent() && room.value?.identifier === roomIdentifier
+    const priorIds = new Set(messages.value.map(message => message.id))
+    const keepConcurrentMessages = (fresh: typeof messages.value) => mergeMessages(fresh, messages.value.filter(message => !priorIds.has(message.id)))
     if (!after) {
       try {
         const page = await fetchMessages(roomIdentifier)
         if (!canCommit()) return { success: false, cursor: after }
-        replaceRoomMessages(mergeMessages(messages.value, page.messages))
-        messagesHasOlder.value = page.hasOlder || messagesHasOlder.value
+        replaceRoomMessages(authoritativeGap ? keepConcurrentMessages(page.messages) : mergeMessages(messages.value, page.messages))
+        messagesHasOlder.value = authoritativeGap ? page.hasOlder : page.hasOlder || messagesHasOlder.value
+        if (authoritativeGap) roomContentRevision.value++
         return {
           success: true,
           cursor: page.messages[page.messages.length - 1]?.id ?? null,
@@ -199,7 +203,8 @@ export function createRoomRefreshController(
         }
         hasMore = page.hasMore
         if (page.messages.length === 0) {
-          return { success: !hasMore, cursor, ...(hasMore ? { complete: false } : {}) }
+          if (!hasMore) break
+          return { success: false, cursor, complete: false }
         }
         pages += 1
         repairedMessages += page.messages.length
@@ -231,8 +236,9 @@ export function createRoomRefreshController(
         if (!canCommit()) {
           return { success: false, cursor: after }
         }
-        replaceRoomMessages(latest.messages)
+        replaceRoomMessages(keepConcurrentMessages(latest.messages))
         messagesHasOlder.value = latest.hasOlder
+        roomContentRevision.value++
         windowedGapMessageRepairs.delete(roomIdentifier)
       }
       return { success: true, cursor }

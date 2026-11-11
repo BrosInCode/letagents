@@ -1,4 +1,5 @@
 import type { Response } from "express";
+import { isRoomDeleted } from "../db/content-deletion.js";
 
 import {
   getFocusRoomByKey,
@@ -29,6 +30,10 @@ export async function resolveRoomOrReply(
   res: Response,
   { allowCreate }: { allowCreate: boolean } = { allowCreate: false }
 ): Promise<Project | null> {
+  if (await isRoomDeleted(roomId)) {
+    res.status(410).json({ error: "Room was permanently deleted.", code: "ROOM_DELETED", room_id: roomId });
+    return null;
+  }
   const locator = classifyRoomLocator(roomId);
   if (locator.type === "focus_locator") {
     const focusLocator = locator;

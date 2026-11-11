@@ -186,7 +186,16 @@ export async function setDesktopNotificationsEnabled(enabled: boolean): Promise<
     current.deviceToken = null;
     await persistState();
   }
-  return getDesktopNotificationStatus();
+  const status = await getDesktopNotificationStatus();
+  emitToMainWindow("desktop:notifications:status-changed", status);
+  return status;
+}
+
+export function activateDesktopNotificationTarget(rawTarget: unknown): boolean {
+  const target = parseDesktopNotificationTarget(rawTarget);
+  if (!target) return false;
+  activateTarget(target);
+  return true;
 }
 
 export function takePendingDesktopNotificationActivation(): DesktopNotificationTarget | null {

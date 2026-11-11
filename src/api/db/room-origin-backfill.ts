@@ -5,7 +5,7 @@ import { originFromIdShape } from "../rooms/room-nature.js";
 const BATCH_SIZE = 500;
 
 /**
- * Fill `rooms.origin` where migration 0147 left it NULL: ids with letters
+ * Fill `rooms.origin` where migration 0148 left it NULL: ids with letters
  * outside ASCII, whose JavaScript upper-case form the SQL rule cannot copy.
  * Runs after the migrations, outside their transaction: each batch is one
  * UPDATE that locks only its own rows and writes only `origin`, so no

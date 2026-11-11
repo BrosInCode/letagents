@@ -41,7 +41,7 @@ export function registerRoomKnowledgeRoutes(app: Express, deps: KnowledgeRouteDe
         const project = await room(req, res); if (!project) return;
         const page = await db.listRoomKnowledge(project.id, type);
         const tasks = type === 'attention' ? (await (deps.getTasks ?? getTasksForRooms)([project.id]))
-          .filter(task => task.status === 'blocked' || task.status === 'in_review')
+          .filter(task => ['proposed', 'blocked', 'in_review'].includes(task.status))
           .map(task => ({ id: task.id, title: task.title, status: task.status, description: task.description, updated_at: task.updated_at })) : undefined;
         res.json({ room_id: project.id, ...page, ...(tasks ? { tasks } : {}) });
       } catch (error) { fail(res, error); }

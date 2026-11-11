@@ -297,6 +297,7 @@ export async function getAccountRoomsForAccount(
       }
 
       const focusCandidate = candidatesByRoomId.get(focusRoom.id);
+      if (focusCandidate?.archived && !options.includeArchived) continue;
       if (!directParentRoomIds.has(parentRoomId) && !focusCandidate && !directFocusRoomIds.has(focusRoom.id)) {
         continue;
       }

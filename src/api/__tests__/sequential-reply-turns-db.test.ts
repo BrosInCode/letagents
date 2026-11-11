@@ -485,12 +485,13 @@ for (const leaseState of ["active", "expired", "ambiguous"] as const) {
     const a = await seedThreadTurn();
     const [first, second, third] = a.positions as [number, number, number];
     for (const index of leaseState === "ambiguous" ? [third, second] : [third]) {
+      const task = await api!.createTask(a.room.id, `Thread work ${index}`, a.ownerId);
       await client!.pool.query(`INSERT INTO task_leases (
         id, room_id, task_id, kind, status, agent_key, agent_session_id,
         actor_label, expires_at, created_by, created_at, updated_at
       ) VALUES ($1, $2, $3, 'work', 'active', $4, $5, $6,
         NOW() + $7::interval, $8, NOW(), NOW())`, [
-        `thread-lease-${index}`, a.room.id, `thread-task-${index}`,
+        `thread-lease-${index}`, a.room.id, task.id,
         a.sessions[index]!.agent_key, a.sessions[index]!.session_id,
         a.sessions[index]!.actor_label, leaseState === "expired" ? "-1 hour" : "1 hour", a.ownerId,
       ]);

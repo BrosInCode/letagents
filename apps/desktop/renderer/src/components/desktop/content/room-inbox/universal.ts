@@ -1,6 +1,6 @@
 import { compareText } from "../../../../domain/formatters";
 import type { DesktopAccountRoomJoinRequest, DesktopRentalRequest } from '../../../../../../electron/ipc-types.js';
-import type { DesktopNeedsYou } from '../../../../../../electron/ipc-types/knowledge.js';
+import type { DesktopAttentionTask, DesktopNeedsYou } from '../../../../../../electron/ipc-types/knowledge.js';
 import type { KnowledgeRecord } from '../../../../../../../../shared/room-knowledge.mjs';
 import { buildDesktopInboxItems, desktopInboxItemFingerprint, type DesktopInboxItem } from './items';
 import { claimGitHubEvents } from './github-event-claims';
@@ -26,6 +26,7 @@ export interface UniversalInboxItem {
   /** A person asks to join a room you admin; you approve or decline it here. */
   joinRequest?: DesktopAccountRoomJoinRequest;
   taskId?: string;
+  approvalTask?: DesktopAttentionTask;
   fingerprint: string;
 }
 
@@ -47,15 +48,33 @@ export function buildUniversalInbox(data: DesktopNeedsYou | null, rentals: Deskt
   const githubEvents = claimGitHubEvents(data?.rooms ?? []);
   for (const room of data?.rooms ?? []) {
     const scope = { roomIdentifier: room.roomIdentifier, roomName: room.displayName };
-    for (const record of room.records) result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, record.id]),
-      section: record.response ? 'answered' : 'needs-you', category: attentionRecordCategory(record),
-      title: record.title, body: record.body, timestamp: record.response?.at || record.created_at,
-      actor: record.author.label, record, fingerprint: String(record.version) });
+    const linkedTasks = new Set<string>();
+    const approvalTaskFor = (record: KnowledgeRecord) => {
+      if (record.response || record.category !== 'approval') return undefined;
+      // Only an explicit, unambiguous task reference in the request's title.
+      // The person sees the real board card before choosing Accept task.
+      const ids = [...new Set(record.title.match(/\btask_[1-9]\d*\b/g) ?? [])];
+      const task = ids.length === 1 ? room.tasks.find(task => task.id === ids[0] && task.status === 'proposed') : undefined;
+      if (task) linkedTasks.add(task.id);
+      return task;
+    };
+    for (const record of room.records) {
+      const approvalTask = approvalTaskFor(record);
+      result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, record.id]),
+        section: record.response ? 'answered' : 'needs-you', category: attentionRecordCategory(record),
+        title: record.title, body: record.body, timestamp: record.response?.at || record.created_at,
+        actor: record.author.label, record, approvalTask,
+        fingerprint: approvalTask ? JSON.stringify([record.version, approvalTask.id, approvalTask.title, approvalTask.description, approvalTask.updated_at]) : String(record.version) });
+    }
     const tasks = new Map(room.tasks.map(task => [task.id, { id: task.id, title: task.title, description: task.description, status: task.status, updatedAt: task.updated_at }]));
     for (const task of room.updates?.tasks ?? []) if (!tasks.has(task.id)) tasks.set(task.id, task);
-    for (const task of tasks.values()) result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, 'task', task.id]),
-      section: 'updates', category: task.status, title: task.title, body: task.description || '',
-      timestamp: task.updatedAt || '', actor: 'Task board', taskId: task.id, fingerprint: `${task.status}:${task.updatedAt}` });
+    for (const task of tasks.values()) {
+      if (linkedTasks.has(task.id)) continue;
+      result.push({ ...scope, key: JSON.stringify([room.roomIdentifier, 'task', task.id]),
+        section: task.status === 'proposed' ? 'needs-you' : 'updates', category: task.status, title: task.title, body: task.description || '',
+        timestamp: task.updatedAt || '', actor: 'Task board', taskId: task.id, fingerprint: `${task.status}:${task.updatedAt}`,
+        approvalTask: task.status === 'proposed' ? room.tasks.find(entry => entry.id === task.id) : undefined });
+    }
     if (!room.updates) continue;
     for (const activity of buildDesktopInboxItems({ filter: 'actionable', threadPage: room.updates.threads, tasks: [],
       githubEvents: githubEvents.get(room.roomIdentifier) ?? [], reasoningSessions: room.updates.reasoningSessions,
@@ -172,7 +191,7 @@ export function attentionRecordCategory(record: KnowledgeRecord): string {
 }
 
 export function inboxCategoryLabel(category: string): string {
-  return ({ question: 'Question', decision: 'Decision', approval: 'Approval', review: 'Review', closed: 'Closed', blocked: 'Blocked task',
+  return ({ question: 'Question', decision: 'Decision', approval: 'Approval', review: 'Review', closed: 'Closed', proposed: 'Proposed task', accepted: 'Task accepted', blocked: 'Blocked task',
     in_review: 'Task review', done: 'Completed', merged: 'Merged', thread: 'Unread replies', github_failure: 'Failed check',
     agent_blocked: 'Blocked agent', agent_offline: 'Agent offline', rental_request: 'Rental request',
     tool_approval: 'Tool approval', agent_attention: 'Stuck agent', board_intent: 'Board request',

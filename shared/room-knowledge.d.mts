@@ -27,4 +27,5 @@ export function attentionResponseHandle(agentKey: string | null | undefined): st
 export const ATTENTION_CLOSED_RESPONSE: string;
 export function formatAttentionRequest(record: KnowledgeRecord): string;
 export function formatAttentionResponse(record: KnowledgeRecord): string;
+export function attentionRecommendationReply(recommendation: string | null | undefined): string;
 export function attentionResponseDisplayText(text: string, agentName: (handle: string) => string | null | undefined): string | null;

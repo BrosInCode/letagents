@@ -5,7 +5,7 @@ import { apiFetch, readStoredAuth } from '../auth.js';
 import { getLocalChatDatabase } from './local-db.js';
 import { cloudRoomIdentifierForStorage, listLocalRoomEntries, listLocalTasks, localRoomIdentifierForStorage, resolveLocalAwareRoomStorageMode } from './local-store.js';
 import { listDesktopAccountRooms } from './account-rooms.js';
-import { addLocalChatMessage } from './messages/local-store.js';
+import { addLocalChatMessage, getLocalChatMessageByClientId } from './messages/local-store.js';
 import { getDesktopInboxUpdates } from './inbox.js';
 import { listDesktopPendingBoardIntents } from './board-governance.js';
 import { mapDesktopBoardIntent } from './board-governance/mappers.js';
@@ -38,9 +38,10 @@ async function flushResponses(roomId: string) {
   const rows = db.prepare('SELECT value FROM local_room_knowledge_outbox WHERE room_id = ?').all(roomId);
   for (const row of rows) {
     const record = JSON.parse(String(row.value)) as KnowledgeRecord;
+    const notice = await getLocalChatMessageByClientId(roomId, `attention-request:${record.id}`);
     await addLocalChatMessage(roomId, { sender: record.response!.actor.label, source: 'browser',
       text: formatAttentionResponse(record),
-      reply_to: record.source_message_id || null, idempotency_key: `attention-response:${record.id}` });
+      reply_to: notice?.id ?? null, idempotency_key: `attention-response:${record.id}` });
     db.prepare('DELETE FROM local_room_knowledge_outbox WHERE room_id = ? AND id = ?').run(roomId, record.id);
   }
 }
@@ -49,7 +50,7 @@ export async function getDesktopKnowledge(roomIdentifier: string, type: Knowledg
   if (!room.local) return apiFetch(path(room.id, type));
   if (type === 'attention') await flushResponses(room.id);
   const page = listLocalKnowledge(await getLocalChatDatabase(), room.id, type);
-  return { ...page, ...(type === 'attention' ? { tasks: (await listLocalTasks(room.id)).filter(task => ['blocked', 'in_review'].includes(task.status)).map(task => ({ id: task.id, title: task.title, status: task.status, description: task.description ?? null, updated_at: task.updatedAt ?? '' })) } : {}) };
+  return { ...page, ...(type === 'attention' ? { tasks: (await listLocalTasks(room.id)).filter(task => ['proposed', 'blocked', 'in_review'].includes(task.status)).map(task => ({ id: task.id, title: task.title, status: task.status, description: task.description ?? null, updated_at: task.updatedAt ?? '' })) } : {}) };
 }
 export async function createDesktopKnowledge(roomIdentifier: string, type: KnowledgeType, input: KnowledgeInput & { client_id: string }): Promise<KnowledgeRecord> {
   const room = await target(roomIdentifier);

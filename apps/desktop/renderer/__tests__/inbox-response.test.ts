@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { attentionRecommendationReply } from '../../../../shared/room-knowledge.mjs';
 import { after, before, test, type TestContext } from 'node:test';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -83,7 +84,7 @@ function mount(t: TestContext, options: Partial<{ id: string; modelValue: string
 test('a ghost response is only a placeholder and cannot be submitted before acceptance', async t => {
   const { textarea, button, form, events, key } = mount(t);
   assert.equal(textarea().props.value, '');
-  assert.equal(textarea().props.placeholder, 'Use the existing auth flow.');
+  assert.equal(textarea().props.placeholder, 'I agree with your recommendation:\n\n> Use the existing auth flow.');
   assert.equal(button('Send response').props.disabled, true);
   form().props.onSubmit({ preventDefault() {} });
   await key('Enter', { metaKey: true });
@@ -93,9 +94,9 @@ test('a ghost response is only a placeholder and cannot be submitted before acce
 test('Tab accepts once, preserves focus and then returns to normal keyboard navigation', async t => {
   const { props, textarea, button, key, form, events } = mount(t);
   assert.equal(await key('Tab'), true);
-  assert.equal(props.modelValue, props.suggestion);
+  assert.equal(props.modelValue, attentionRecommendationReply(props.suggestion));
   assert.equal(focused, textarea());
-  assert.deepEqual(selection, [props.suggestion.length, props.suggestion.length]);
+  assert.deepEqual(selection, [props.modelValue!.length, props.modelValue!.length]);
   assert.equal(button('Send response').props.disabled, false);
   assert.equal(await key('Tab'), false);
   assert.deepEqual(events, [], 'acceptance never sends');
@@ -129,7 +130,7 @@ test('pointer acceptance uses the same explicit action and disabled requests ign
   const { props, root, events, key } = mount(t);
   const accept = nodes(root).find(node => node.props['aria-label'] === 'Accept suggested response')!;
   await accept.props.onClick(); await nextTick();
-  assert.equal(props.modelValue, props.suggestion);
+  assert.equal(props.modelValue, attentionRecommendationReply(props.suggestion));
   assert.deepEqual(events, []);
   props.disabled = true; await nextTick();
   await key('Enter', { ctrlKey: true });

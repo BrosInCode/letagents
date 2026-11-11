@@ -22,10 +22,10 @@
           <Search aria-hidden="true" />
         </button>
         <button class="sidebar-topbar-action sidebar-inbox-button" type="button" data-testid="sidebar-inbox"
-          :data-active="activeEntry.type === 'inbox'" :aria-label="needsYouCount ? `Inbox, ${needsYouCount} items need you` : 'Inbox'"
+          :data-active="activeEntry.type === 'inbox'" :aria-label="inboxUnreadCount ? `Inbox, ${inboxUnreadCount} unread items` : 'Inbox'"
           title="Inbox" @click="$emit('open-needs-you')">
           <Inbox aria-hidden="true" />
-          <span v-if="needsYouCount" class="sidebar-inbox-count">{{ needsYouCount > 99 ? '99+' : needsYouCount }}</span>
+          <span v-if="inboxUnreadCount" class="sidebar-inbox-count">{{ inboxUnreadCount > 99 ? '99+' : inboxUnreadCount }}</span>
         </button>
         <button class="sidebar-collapse-button" type="button" aria-label="Hide sidebar" title="Hide sidebar"
           data-testid="sidebar-cycle-button" @click="$emit('cycle-sidebar')"><PanelLeftClose aria-hidden="true" /></button>
@@ -557,6 +557,7 @@ import {
   RefreshCw,
   Search,
   TriangleAlert,
+  Trash2,
   X,
 } from "@lucide/vue";
 import {
@@ -741,7 +742,7 @@ const props = defineProps<{
   selectedEntryIds: string[];
   batchActionBusy: SidebarRoomBatchActionId | null;
   rentalRequestCount?: number;
-  needsYouCount?: number;
+  inboxUnreadCount?: number;
   messagesUnread?: number;
   updateStatus: DesktopUpdateStatus | null;
   authStatus: DesktopAuthStatus | null;
@@ -764,6 +765,7 @@ const emit = defineEmits<{
   "connect-account": [];
   "sign-out": [];
   "archive-room": [entry: RoomEntry];
+  "delete-room": [entry: RoomEntry];
   "archive-focus-room": [entry: RoomEntry];
   "conclude-focus-room": [entry: RoomEntry];
   "mark-room-read": [entry: RoomEntry];
@@ -1022,6 +1024,7 @@ const roomMenuIcons: Record<SidebarRoomMenuActionId, Component> = {
   "conclude-focus-room": CheckCircle2,
   "archive-focus-room": Archive,
   "archive-room": Archive,
+  "delete-room": Trash2,
 };
 
 function roomMenuGroupsFor(entry: RoomEntry, projectId: string | null): DesktopContextMenuItem[][] {
@@ -1074,6 +1077,9 @@ const backgroundContextMenuItemGroups = computed<DesktopContextMenuItem[][]>(() 
 );
 
 function openRoomContextMenu(event: MouseEvent, entry: RoomEntry, projectId: string | null = null): void {
+  // Right-click does not reliably focus a row. Keep it as the return target
+  // when the menu opens a confirmation dialog and the person cancels.
+  if (event.currentTarget instanceof HTMLElement) event.currentTarget.focus({ preventScroll: true });
   if (entry.roomIdentifier) void roomNotificationPreferences.refresh(entry.roomIdentifier);
   backgroundContextMenu.value = null;
   roomContextMenu.value = roomMenuGroupsFor(entry, projectId).length
@@ -1137,6 +1143,7 @@ function handleRoomContextMenuSelect(item: DesktopContextMenuItem): void {
     "conclude-focus-room": () => emit("conclude-focus-room", menu.entry),
     "archive-focus-room": () => emit("archive-focus-room", menu.entry),
     "archive-room": () => emit("archive-room", menu.entry),
+    "delete-room": () => emit("delete-room", menu.entry),
   };
   actions[item.id as SidebarRoomMenuActionId]?.();
 }

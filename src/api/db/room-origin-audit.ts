@@ -12,7 +12,7 @@ import { originFromIdShape } from "../rooms/room-nature.js";
  *   github_repositories, github_app_repositories, room_git_bindings,
  *   room_aliases). Each query lists rows where two of them disagree.
  */
-/** True for an id the SQL rule can classify (ASCII only; see migration 0147). */
+/** True for an id the SQL rule can classify (ASCII only; see migration 0148). */
 export const ASCII_ROOM_ID_SQL = `r.id ~ E'^[\\\\x01-\\\\x7f]*$'`;
 
 export const ROOM_ORIGIN_SHAPE_SQL = `CASE

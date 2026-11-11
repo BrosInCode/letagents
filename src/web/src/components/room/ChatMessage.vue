@@ -177,6 +177,11 @@
         <button v-if="canMarkUnread" type="button" role="menuitem" @click="markUnreadFromMenu">Mark unread from here</button>
         <div class="web-message-context-menu-separator" role="separator" />
         <button type="button" role="menuitem" @click="messageInfoFromMenu">Message info</button>
+      <template v-if="currentRoom?.authenticated">
+        <div class="web-message-context-menu-separator" role="separator" />
+        <button type="button" role="menuitem" :disabled="deleting" @click="removeContent(hasThread && (!message.thread_root_id || message.thread_root_id === message.id) ? 'thread' : 'message')">{{ hasThread && (!message.thread_root_id || message.thread_root_id === message.id) ? 'Delete thread…' : 'Delete message…' }}</button>
+        <button v-for="attachment in message.attachments?.filter(item => item.id)" :key="attachment.id!" type="button" role="menuitem" :disabled="deleting" @click="removeContent('attachment', attachment.id!)">Delete attachment: {{ attachment.file_name || attachment.filename || attachment.name || 'file' }}…</button>
+      </template>
       </div>
       <MessageReactionPicker
         v-if="reactionPickerAnchor"
@@ -232,6 +237,8 @@ import type { MessageThreadSummary, ProvenanceBadge } from './chat-message/types
 import { parseGitHubEventPresentation } from './githubEventMessage'
 import { buildAgentThinkingEntry } from './agentThinking'
 import {
+  deleteRoomContent,
+  useRoom,
   type RoomMessage,
   type RoomReasoningSession,
   type StalePromptTaskState,
@@ -272,6 +279,19 @@ const emit = defineEmits<{
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
   openTask: [taskId: string]
 }>()
+
+const { room: currentRoom } = useRoom()
+const deleting = ref(false)
+async function removeContent(kind: 'message' | 'thread' | 'attachment', attachmentId?: string) {
+  if (!props.roomIdentifier || deleting.value) return
+  closeContextMenu(true)
+  const label = kind === 'thread' ? 'this entire thread, including all replies and attachments' : kind === 'attachment' ? 'this sent attachment' : 'this message and its attachments'
+  if (!window.confirm(`Permanently delete ${label}? This cannot be undone.`)) return
+  deleting.value = true
+  try { await deleteRoomContent(props.roomIdentifier, { kind, id: props.message.id, attachmentId }) }
+  catch (error) { window.alert(error instanceof Error ? error.message : 'Content could not be deleted.') }
+  finally { deleting.value = false }
+}
 
 const reasoningOpen = ref(false)
 

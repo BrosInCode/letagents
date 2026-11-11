@@ -36,6 +36,8 @@ export type ActivityHistoryRequest = {
   roomId?: string
 }
 
+// Advances only when a server snapshot replaces the loaded message window.
+export const roomContentRevision = ref(0)
 export const messages = ref<RoomMessage[]>([])
 let indexedMessages = messages.value
 const messageIds = new Set<string>()

@@ -1,5 +1,5 @@
 import { rooms } from "../db/schema.js";
-import { getRoomNature, recordStoredRoomOrigin } from "../rooms/room-nature.js";
+import { recordStoredRoomOrigin } from "../rooms/room-nature.js";
 import type {
   AccountRoomCandidate,
   AccountRoomListFocusRoom,
@@ -115,9 +115,6 @@ export function accountRoomDeleteReason(candidate: AccountRoomCandidate): string
   if (candidate.role !== "admin") {
     return "Only room admins can delete this room.";
   }
-  if (!candidate.canDelete || getRoomNature(candidate.project).origin !== "join_code") {
-    return "Deletion is available only for invite rooms this account created in LetAgents.";
-  }
   return null;
 }
 
@@ -134,6 +131,7 @@ export function toAccountRoomListFocusRoom(
     focus_key: focusRoom.focus_key,
     source_task_id: focusRoom.source_task_id,
     focus_status: focusRoom.focus_status,
+    archived: focusCandidate?.archived ?? false,
     role: focusCandidate?.role ?? parentCandidate.role,
     source: focusCandidate?.source ?? null,
     first_opened_at: focusCandidate?.first_opened_at ?? null,

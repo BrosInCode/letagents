@@ -90,7 +90,7 @@
           :reveal-request="sidebarRevealRequest"
           :settings-entry="settingsEntry"
           :rental-request-count="rentalRequestCount"
-          :needs-you-count="needsYouCount"
+          :inbox-unread-count="inboxUnreadCount"
           :messages-unread="messagesUnread"
           :pinned-collapsed="pinnedCollapsed"
           :rooms-collapsed="roomsCollapsed"
@@ -112,6 +112,7 @@
           @connect-account="openAccountAuthFlow"
           @sign-out="signOut"
           @archive-room="archiveSidebarRoom"
+          @delete-room="entry => entry.roomIdentifier && deleteAccountRoom({ roomIdentifier: entry.roomIdentifier, displayName: entry.title })"
           @archive-focus-room="archiveSidebarFocusRoom"
           @conclude-focus-room="openSidebarFocusRoomConclusion"
           @mark-room-read="entry => markRoomEntryRead(entry, true)"
@@ -247,6 +248,7 @@
           @room-renamed="handleRoomRenamed"
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRoomShellRefresh"
+          @content-deleted="handleContentDeleted"
           @open-ask-agent="askAgentOpen = true"
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
           :attention="roomAttention"
@@ -263,6 +265,8 @@
       </KeepAlive>
 
       <SettingsView
+        :project-bindings="projectBindings"
+        @disconnect-project="disconnectProject"
         v-if="!showCompanyHome && activeEntry.type === 'system'"
         :account-rooms="settingsAccountRooms"
         :app-info="appInfo"
@@ -437,6 +441,7 @@
       @after-leave="handleSidebarBatchDialogAfterLeave"
     />
 
+    <RoomDeletionDialog :room="pendingRoomDeletion" :busy="Boolean(settingsRoomActionBusyKey)" :error="settingsFeedback?.state === 'error' ? settingsFeedback.message : null" @close="pendingRoomDeletion = null" @confirm="confirmRoomDeletion" @archived="finishRoomArchive" @restored="app.refreshAccountRooms()" />
     <DesktopDeviceAuthDialog
       :open="authDialogOpen"
       :auth-status="authStatus"
@@ -483,6 +488,7 @@ import CompanyHome from "./components/desktop/content/CompanyHome.vue";
 import AskAgentDialog from "./components/desktop/content/asks/AskAgentDialog.vue";
 import GiveAgentDialog from "./components/desktop/content/asks/GiveAgentDialog.vue";
 import { useAppAgentAsks } from "./composables/app/useAppAgentAsks";
+import RoomDeletionDialog from "./components/desktop/content/RoomDeletionDialog.vue";
 import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
@@ -512,6 +518,7 @@ import { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } from "./
 import { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./composables/app/useAppRoomData";
 import { useAppLifecycle } from "./composables/app/useAppLifecycle";
 import { useAppJoinRequestAlerts } from "./composables/app/useAppJoinRequestAlerts";
+import { useAppMessageNotifications } from "./composables/app/useAppMessageNotifications";
 import { useAppCompany, useAppCompanyNavigation } from "./composables/app/useAppCompany";
 import { normalizeRoomIdentifier } from "./domain/sidebar-rooms";
 
@@ -525,7 +532,7 @@ const RentMarketplaceView = defineAsyncComponent(
 // slice exactly where its code used to run.
 const app = {} as AppContext;
 const {
-  loading, appInfo, updateStatus, workers, rootRoomSnapshot, selectedSnapshot, authStatus,
+  projectBindings, loading, appInfo, updateStatus, workers, rootRoomSnapshot, selectedSnapshot, authStatus,
   authDialogOpen, sidebarMinWidth, sidebarMaxWidth, selectedRootRoomIdentifier,
   newRoomRecentProjectFolders, sidebarWidth, sidebarRevealRequest, isSidebarResizing,
   settingsAccountRooms, rentalRequestCount, inboxRentals, inboxRentalError, messagesUnread,
@@ -556,7 +563,7 @@ const {
   handleSidebarChildRoomReorder,
 } = Object.assign(app, useAppSidebarLayout(app));
 const {
-  openWorkspaceGitRoom, connectActiveRoomProject, openWorktreeForAgent,
+  openWorkspaceGitRoom, connectActiveRoomProject, disconnectProject, openWorktreeForAgent,
 } = Object.assign(app, useAppProjectRepo(app));
 const {
   latestMessageIdForEntry, markRoomEntryRead,
@@ -594,7 +601,7 @@ const { accountActivity } = Object.assign(app, useAppAccountActivityFeed(app));
 
 const {
   needsYouData, needsYouLoading, needsYouError, mergeInboxThreads, agentAttentionItems,
-  needsYouCount, inboxJoinRequests, inboxStorageKey, inboxRooms, chooseInboxRooms,
+  inboxJoinRequests, inboxStorageKey, inboxRooms, chooseInboxRooms,
 } = Object.assign(app, useAppInboxState(app));
 
 const {
@@ -605,10 +612,11 @@ const {
 } = Object.assign(app, useAppNavigation(app));
 
 const {
-  roomAttention,
+  roomAttention, inboxUnreadCount,
 } = Object.assign(app, useAppRoomAttention(app));
 
 Object.assign(app, useAppJoinRequestAlerts(app));
+Object.assign(app, useAppMessageNotifications(app));
 // The settings-section request belongs to one room; another room ignores it.
 function roomSettingsSectionRequestFor(roomIdentifier: string) {
   const request = roomSettingsSectionRequest.value;
@@ -637,6 +645,7 @@ Object.assign(app, useAppHistoryWatchers(app));
 const {
   roomAgentWork, roomAgentWorkStatus, roomAgentWorkTruncated, handleRoomRenamed, refresh,
   repoStatusValue, selectedSnapshotLoading, upsertSelectedTask, authSnapshotPending,
+  handleContentDeleted,
 } = Object.assign(app, useAppRoomData(app));
 
 const {
@@ -657,7 +666,7 @@ const {
   newRoomProjectPathError, newRoomProjectSelection, newRoomStatusMessage, newRoomStep,
   newRoomStorage, newRoomCompany, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
   pickNewProjectParent, openSuccessRoom, retryLastAction, selectNewRoomEntry,
-  archiveSidebarFocusRoom, archiveSidebarRoom, deleteAccountRoom, leaveAccountRoom,
+  archiveSidebarFocusRoom, archiveSidebarRoom, deleteAccountRoom, pendingRoomDeletion, confirmRoomDeletion, finishRoomArchive, leaveAccountRoom,
   openAccountRoomFromSettings, renameSidebarRoom, restoreAccountRoom, settingsFeedback,
   settingsRoomActionBusyKey, toggleAccountRoomPin, togglePinSidebarRoom,
 } = Object.assign(app, useAppRoomManagement(app));

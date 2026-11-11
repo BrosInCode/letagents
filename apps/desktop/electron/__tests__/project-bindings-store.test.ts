@@ -10,6 +10,7 @@ import test from "node:test";
 import type { DesktopGitRoomInfo } from "../ipc-types.js";
 import {
   bindProjectRoot,
+  disconnectProjectBinding,
   listProjectBindings,
   migrateLegacyProjectBindings,
   parseMacosVolumeUuid,
@@ -944,4 +945,26 @@ test("a binding written by another call during a migration pass is not overwritt
   } finally {
     removeTemporary(temporary);
   }
+});
+
+
+test("disconnect preserves files and prevents name-only legacy rebinding until explicit reconnect", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-disconnect-"));
+  const rootPath = join(temporary, "checkout");
+  mkdirSync(rootPath);
+  execFileSync("git", ["init", "-b", "main"], { cwd: rootPath, stdio: "ignore" });
+  execFileSync("git", ["remote", "add", "origin", "git@github.com:BrosInCode/LetAgents.git"], { cwd: rootPath });
+  writeFileSync(join(rootPath, "keep.txt"), "keep me");
+  const options = { storePath: join(temporary, "bindings.sqlite"), resolveFilesystemNamespace: async () => "test-volume" };
+  const context = { roomIdentifier: "github.com/brosincode/letagents", gitRoom: githubGitRoom() };
+  try {
+    const binding = await bindProjectRoot({ context, rootPath, source: "git_remote" }, options);
+    await disconnectProjectBinding(binding.id, options);
+    assert.deepEqual(await listProjectBindings(options), []);
+    assert.equal(readFileSync(join(rootPath, "keep.txt"), "utf8"), "keep me");
+    await migrateLegacyProjectBindings([{ context: { roomIdentifier: context.roomIdentifier }, rootPath }], options);
+    assert.deepEqual(await listProjectBindings(options), []);
+    await bindProjectRoot({ context, rootPath, source: "git_remote" }, options);
+    assert.equal((await listProjectBindings(options)).length, 1);
+  } finally { removeTemporary(temporary); }
 });

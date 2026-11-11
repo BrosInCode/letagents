@@ -19,6 +19,7 @@ import type { useAppNavigation, useAppRoomContext, useAppSelectionWatchers } fro
 import type { useAppRoomData, useAppRoomManagement, useAppRoomStreamWatchers } from "./useAppRoomData";
 import type { useAppLifecycle } from "./useAppLifecycle";
 import type { useAppJoinRequestAlerts } from "./useAppJoinRequestAlerts";
+import type { useAppMessageNotifications } from "./useAppMessageNotifications";
 import type { useAppCompany, useAppCompanyNavigation } from "./useAppCompany";
 
 /** What each composable returns, by composable name. */
@@ -60,6 +61,7 @@ interface AppContextParts {
   useAppAuthWatchers: ReturnType<typeof useAppAuthWatchers>;
   useAppLifecycle: ReturnType<typeof useAppLifecycle>;
   useAppJoinRequestAlerts: ReturnType<typeof useAppJoinRequestAlerts>;
+  useAppMessageNotifications: ReturnType<typeof useAppMessageNotifications>;
 }
 
 type UnionToIntersection<U> = (U extends unknown ? (part: U) => void : never) extends (part: infer I) => void ? I : never;

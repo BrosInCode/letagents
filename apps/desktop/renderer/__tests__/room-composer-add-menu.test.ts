@@ -545,7 +545,7 @@ test('the suggestion is the newest open agent request in this room that carries 
     ] },
     { roomIdentifier: 'other-room', records: [record({ id: 'elsewhere', updated_at: '2026-10-26T13:00:00.000Z' })] },
   ]);
-  assert.deepEqual(suggested.roomSuggestedReply(data, 'github.com/brosincode/letagents'), { recordId: 'new', from: 'Ada', text: 'Newer' });
+  assert.deepEqual(suggested.roomSuggestedReply(data, 'github.com/brosincode/letagents'), { recordId: 'new', from: 'Ada', text: 'I agree with your recommendation:\n\n> Newer' });
   assert.equal(suggested.roomSuggestedReply(data, 'missing-room'), null);
   assert.equal(suggested.roomSuggestedReply(data, null), null);
   assert.equal(suggested.roomSuggestedReply(null, 'other-room'), null);

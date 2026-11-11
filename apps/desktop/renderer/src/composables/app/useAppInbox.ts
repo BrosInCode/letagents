@@ -7,7 +7,8 @@ import { findSidebarRoomEntryByIdentifier } from "../../domain/sidebar-rooms";
 import type { AttentionNavigationIntent } from "../../components/desktop/content/room-shell/types";
 import { refreshMessageReminders } from "../useMessageReminders";
 import { useNeedsYou, useNeedsYouRoomActivity } from "../useNeedsYou";
-import { useNeedsYouSignal } from "../useNeedsYouSignal";
+import { useInboxUnread, useNeedsYouSignal } from "../useNeedsYouSignal";
+import { buildUniversalInbox } from "../../components/desktop/content/room-inbox/universal";
 import { useAgentAttention } from "../useAgentAttention";
 import { useInboxRoomFilter } from "../useInboxRoomFilter";
 import { desktopIpc } from "../../ipc/index.js";
@@ -88,7 +89,7 @@ export function useAppInboxActions(context: unknown) {
 export function useAppInboxState(context: unknown) {
   const app = context as AppContextOf<"useAppAccountActivityFeed" | "useAppRoomContext" | "useAppState">;
   const {
-    accountActivity, authStatus, rentalRequestCount,
+    accountActivity, authStatus,
   } = app;
   const { data: needsYouData, loading: needsYouLoading, error: needsYouError, count: humanRequestCount, refresh: loadNeedsYou, refreshRoom: refreshNeedsYouRoom, reset: resetNeedsYou, mergeThreads: mergeInboxThreads } = useNeedsYou();
   Object.assign(app, { needsYouError, loadNeedsYou, resetNeedsYou });
@@ -99,7 +100,6 @@ export function useAppInboxState(context: unknown) {
   Object.assign(app, { refreshAgentApprovals });
   // Requests to join the rooms you admin wait on you like any other request.
   const inboxJoinRequests = roomJoinRequests.items;
-  const needsYouCount = computed(() => humanRequestCount.value + rentalRequestCount.value + agentAttentionItems.value.length + inboxJoinRequests.value.length);
   // A room opened from the Inbox loads in place; if that load fails, say so.
   const inboxRoomOpens = inboxRoomOpenReporter((error) => app.pushActionToast(
     `Couldn't load this room. ${safeUserVisibleErrorDetail(error, "Try again from the sidebar.")}`, "error"));
@@ -111,7 +111,7 @@ export function useAppInboxState(context: unknown) {
   return {
     needsYouData, needsYouLoading, needsYouError, humanRequestCount, loadNeedsYou,
     refreshNeedsYouRoom, resetNeedsYou, mergeInboxThreads, agentAttentionItems,
-    refreshAgentApprovals, approvalsReady, needsYouCount, inboxJoinRequests, inboxRoomOpens, inboxStorageKey,
+    refreshAgentApprovals, approvalsReady, inboxJoinRequests, inboxRoomOpens, inboxStorageKey,
     inboxRooms, openInboxRooms, chooseInboxRooms, reloadInboxRooms, pruneInboxRooms,
   };
 }
@@ -129,6 +129,12 @@ export function useAppRoomAttention(context: unknown) {
     activeRoom: () => activeEntry.value.type === "room" && !selectedNeedsAccess.value ? selectedRoomInfo.value.identifier : null,
     inboxRooms: () => activeEntry.value.type === "inbox" && inboxSection.value === "needs-you" ? inboxRooms.value : null,
   });
+  const inboxUnreadCount = useInboxUnread(computed(() => buildUniversalInbox(
+    needsYouData.value, app.inboxRentals.value, agentAttentionItems.value, app.inboxJoinRequests.value,
+  ).filter(item => item.section === 'needs-you')), {
+    account: () => inboxStorageKey.value,
+    inboxRooms: () => activeEntry.value.type === 'inbox' && inboxSection.value === 'needs-you' ? inboxRooms.value : null,
+  });
 
   // Every way into the Inbox (the sidebar, a notification, back from Settings) reads join requests.
   watch(() => activeEntry.value.type === "inbox", (open) => {
@@ -141,6 +147,6 @@ export function useAppRoomAttention(context: unknown) {
     if (selectedRoomIdentifier.value) void roomNotificationPreferences.refresh(selectedRoomIdentifier.value);
   }, { immediate: true, flush: "sync" });
   return {
-    roomAttention,
+    roomAttention, inboxUnreadCount,
   };
 }

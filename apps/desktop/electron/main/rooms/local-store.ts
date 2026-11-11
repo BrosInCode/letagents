@@ -170,6 +170,15 @@ async function getDb(): Promise<SqliteDatabase> {
       );
       CREATE INDEX IF NOT EXISTS local_tasks_room_status_idx
         ON local_tasks (room_id, status, updated_at);
+      CREATE TABLE IF NOT EXISTS local_deleted_rooms (room_id TEXT PRIMARY KEY NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS local_rooms_deleted_replay BEFORE INSERT ON local_rooms
+      WHEN EXISTS(SELECT 1 FROM local_deleted_rooms WHERE room_id=NEW.room_id)
+      BEGIN SELECT RAISE(ABORT, 'This room was permanently deleted.'); END;
+      CREATE TABLE IF NOT EXISTS local_deleted_task_keys (room_id TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(room_id,key));
+      CREATE TRIGGER IF NOT EXISTS local_tasks_deleted_replay BEFORE INSERT ON local_tasks
+      WHEN EXISTS(SELECT 1 FROM local_deleted_rooms WHERE room_id=NEW.room_id)
+        OR EXISTS(SELECT 1 FROM local_deleted_task_keys WHERE room_id=NEW.room_id AND (key=NEW.sync_key OR key='cloud:' || NEW.synced_cloud_id))
+      BEGIN SELECT RAISE(ABORT, 'This task or room was permanently deleted.'); END;
       CREATE UNIQUE INDEX IF NOT EXISTS local_tasks_sync_key_idx
         ON local_tasks (room_id, sync_key)
         WHERE sync_key IS NOT NULL;
@@ -1076,6 +1085,7 @@ export async function importLocalTasks(
   beginImmediate(database);
   try {
     for (const task of tasks) {
+      if (database.prepare("SELECT 1 FROM local_deleted_task_keys WHERE room_id=? AND key=?").get(roomId, `cloud:${task.id}`)) continue;
       database
         .prepare(`
           INSERT INTO local_tasks (
@@ -1268,4 +1278,65 @@ function touchLocalRoom(
   database
     .prepare("UPDATE local_rooms SET updated_at = ? WHERE room_id = ?")
     .run(timestamp, roomId);
+}
+
+
+export async function deleteLocalTask(roomId: string, taskId: string, validateOnly = false): Promise<void> {
+  if (!isLocalBoardOwner()) return requestDesktopBoardMutation("deleteLocalTask", [roomId, taskId, validateOnly]);
+  const database = await getDb();
+  beginImmediate(database);
+  try {
+    const task = database.prepare("SELECT * FROM local_tasks WHERE room_id=? AND task_id=?").get(roomId, taskId);
+    if (!task) throw new Error("Task not found.");
+    if (["assigned", "in_progress", "in_review", "blocked"].includes(String(task.status)) || task.review_lease_id) throw new Error("Cancel the task and release its review before deleting it.");
+    if (task.sync_started_at && Date.parse(String(task.sync_started_at)) > Date.now() - 5 * 60 * 1000) throw new Error("Wait for this task to finish publishing before deleting it.");
+    if (readLocalWorkLeases(database, roomId, taskId).length) throw new Error("Release this task's work lease before deleting it.");
+    if (!validateOnly) {
+      if (database.prepare("SELECT 1 FROM sqlite_master WHERE name='local_board_planning'").get()) {
+        const planning = database.prepare("SELECT document FROM local_board_planning WHERE room_id=?").get(roomId);
+        if (planning) {
+          const document = JSON.parse(String(planning.document));
+          if (document.tasks?.[taskId]) {
+            delete document.tasks[taskId];
+            database.prepare("UPDATE local_board_planning SET document=?,revision=revision+1 WHERE room_id=?").run(JSON.stringify(document), roomId);
+          }
+        }
+      }
+      for (const key of [task.sync_key, task.synced_cloud_id ? `cloud:${task.synced_cloud_id}` : null]) {
+        if (key) database.prepare("INSERT OR IGNORE INTO local_deleted_task_keys(room_id,key) VALUES (?,?)").run(roomId, key);
+      }
+      database.prepare("DELETE FROM local_tasks WHERE room_id=? AND task_id=?").run(roomId, taskId);
+      if (database.prepare("SELECT 1 FROM sqlite_master WHERE name='local_room_artifact_tasks'").get()) database.prepare("DELETE FROM local_room_artifact_tasks WHERE room_id=? AND task_id=?").run(roomId, taskId);
+    }
+    database.exec("COMMIT");
+  } catch (error) { rollback(database); throw error; }
+}
+
+export async function getLocalTaskIdForCloudTask(roomId: string, cloudId: string): Promise<string | null> {
+  const database = await getDb();
+  const row = database.prepare("SELECT task_id FROM local_tasks WHERE room_id=? AND synced_cloud_id=?").get(roomId, cloudId);
+  return row ? String(row.task_id) : null;
+}
+
+export async function rememberDeletedCloudTask(roomId: string, cloudId: string): Promise<void> {
+  const database = await getDb();
+  database.prepare("INSERT OR IGNORE INTO local_deleted_task_keys(room_id,key) VALUES (?,?)").run(roomId, `cloud:${cloudId}`);
+}
+
+export async function deleteLocalRoomRecord(roomId: string): Promise<void> {
+  if (!isLocalBoardOwner()) return requestDesktopBoardMutation("deleteLocalRoomRecord", [roomId]);
+  const database = await getDb();
+  beginImmediate(database);
+  try {
+    database.prepare("INSERT OR IGNORE INTO local_deleted_rooms(room_id) VALUES (?)").run(roomId);
+    const exists = (table: string) => database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table);
+    if (exists("local_supervisor_sessions")) database.prepare("DELETE FROM local_supervisor_sessions WHERE grant_id IN (SELECT grant_id FROM local_supervisor_grants WHERE room_id=?)").run(roomId);
+    if (exists("local_supervisor_work_review_pages")) database.prepare("DELETE FROM local_supervisor_work_review_pages WHERE attempt_id IN (SELECT attempt_id FROM local_supervisor_work WHERE room_id=?)").run(roomId);
+    for (const table of ["local_supervisor_work", "local_supervisor_grants", "local_supervisor_message_routes",
+      "local_room_knowledge_outbox", "local_room_knowledge_request_outbox", "local_room_knowledge", "local_room_knowledge_revisions",
+      "local_board_planning", "local_room_artifact_tasks", "local_room_artifacts", "local_tasks", "local_rooms"]) {
+      if (database.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(table)) database.prepare(`DELETE FROM ${table} WHERE room_id=?`).run(roomId);
+    }
+    database.exec("COMMIT");
+  } catch (error) { rollback(database); throw error; }
 }

@@ -85,8 +85,8 @@ describe("desktop room inbox items", () => {
       githubEvents: [],
       reasoningSessions: [],
     });
-    assert.equal(item?.title, "@agent Noted.", "without a roster the mention stays neutral");
-    assert.equal(item?.preview, "@agent Noted.");
+    assert.equal(item?.title, "Reply to the requesting agent:\n\nNoted.", "without a roster the recipient remains explicit");
+    assert.equal(item?.preview, "Reply to the requesting agent:\n\nNoted.");
     assert.doesNotMatch(JSON.stringify(item?.activity), /@agent:|Human response/);
     const [named] = buildDesktopInboxItems({
       filter: "all",

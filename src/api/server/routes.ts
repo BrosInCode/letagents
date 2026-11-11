@@ -15,6 +15,8 @@ import { resolveParticipantRoom } from "../routes/rooms/messages/helpers.js";
 import { liveDemoHub } from "../live-demos/service.js";
 import { claimRoomAsCreator } from "../db/room-members.js";
 import { registerWakeRuleLinkRoutes } from "../routes/wake-rule-links.js";
+import { registerContentDeletionRoutes } from "../routes/rooms/content-deletion.js";
+import { drainAttachmentDeletions } from "../messages/attachment-deletion.js";
 import type { Express } from "express";
 
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
@@ -208,6 +210,7 @@ import { handleGitHubWebhookEvent } from "../github/webhook-handler.js";
 import { replayStoredPullRequestMergeForTask } from "../github/room-event-projection/stored-merge-replay.js";
 import { ensureTaskGitRoomForActiveWorkLease } from "../github/task-git-room.js";
 import {
+  contentDeletionEvents,
   artifactEvents,
   agentApprovalEvents,
   agentWorkEvents,
@@ -245,6 +248,7 @@ import {
   validateOwnerTokenTaskActorKey,
 } from "./room-services.js";
 
+let attachmentCleanupTimer: ReturnType<typeof setInterval> | null = null;
 let sharedRoomEventBroker: RoomEventBroker | null = null;
 let sharedRoomMessageOverlayBatcher: RoomMessageOverlayBatcher | null = null;
 let sharedAccountActivityHub: AccountActivityHub | null = null;
@@ -259,6 +263,7 @@ function getAccountActivityHub(): AccountActivityHub {
 
 function getRoomEventBroker(): RoomEventBroker {
   sharedRoomEventBroker ??= createRoomEventBroker({
+    contentDeletionEvents,
     messageEvents,
     taskEvents,
     githubRoomEvents,
@@ -290,6 +295,8 @@ export function remoteMcpSessionsForTest(): RemoteMcpSessions | null {
 export function closeApiRouteEventBroker(): void {
   sharedRemoteMcpSessions?.close();
   sharedRemoteMcpSessions = null;
+  if (attachmentCleanupTimer) clearInterval(attachmentCleanupTimer);
+  attachmentCleanupTimer = null;
   sharedRoomEventBroker?.close();
   sharedRoomEventBroker = null;
   sharedRoomMessageOverlayBatcher?.close();
@@ -300,6 +307,8 @@ export function closeApiRouteEventBroker(): void {
 }
 
 export function registerApiRoutes(app: Express): void {
+  attachmentCleanupTimer ??= setInterval(() => { void drainAttachmentDeletions().catch(() => {}); }, 60_000);
+  attachmentCleanupTimer.unref();
   const roomEventBroker = getRoomEventBroker();
   sharedRoomMessageOverlayBatcher ??= createRoomMessageOverlayBatcher();
   const roomMessageOverlayBatcher = sharedRoomMessageOverlayBatcher;
@@ -647,4 +656,6 @@ export function registerApiRoutes(app: Express): void {
       return room.id;
     },
   });
+  registerContentDeletionRoutes(app, { resolveCanonicalRoomRequestId, resolveRoomOrReply, requireParticipant, requireAdmin, resolveProjectRole });
+
 }

@@ -42,11 +42,11 @@ async function main(): Promise<void> {
   const readRangeIndexes = await reconcileReadRangeIndexRollout(pool);
   const workUnits = await reconcileMessageThreadProjection();
   await analyzeMessageThreadProjection();
-  // Rooms migration 0147 left without an origin (ids outside ASCII), filled
+  // Rooms migration 0148 left without an origin (ids outside ASCII), filled
   // with the server's own rule; then a read-only audit of origins and of the
   // repository identity stores.
   const roomOrigins = await reconcileRoomOriginBackfill(pool);
-  console.log(`Filled the origin of ${roomOrigins} rooms after migration 0147`);
+  console.log(`Filled the origin of ${roomOrigins} rooms after migration 0148`);
   await logRoomOriginAudit(pool);
   console.log(
     `Applied migrations from ${migrationsFolder}; reconciled ${workUnits} thread rollout records and `

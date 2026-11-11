@@ -51,6 +51,7 @@ const api: DesktopApi = {
     },
   },
   notifications: {
+    activate: (target) => ipcRenderer.invoke("desktop:notifications:activate", target),
     getStatus: () => ipcRenderer.invoke("desktop:notifications:get-status"),
     setBadgeCount: (count) => ipcRenderer.invoke("desktop:notifications:set-badge-count", count),
     onReceived: (callback) => {
@@ -124,13 +125,15 @@ const api: DesktopApi = {
     createKnowledge: (room, type, input) => ipcRenderer.invoke("desktop:room:knowledge-create", room, type, input),
     reviseKnowledge: (room, type, id, input) => ipcRenderer.invoke("desktop:room:knowledge-revise", room, type, id, input),
     getMemoryHistory: (room, id) => ipcRenderer.invoke("desktop:room:memory-history", room, id),
+    deleteContent: (roomIdentifier, input) => ipcRenderer.invoke("desktop:room:delete-content", roomIdentifier, input),
     listAccountRooms: (options) => ipcRenderer.invoke("desktop:room:list-account-rooms", options ?? {}),
     updateAccountRoom: (roomIdentifier: string, updates) =>
       ipcRenderer.invoke("desktop:room:update-account-room", roomIdentifier, updates),
     leaveAccountRoom: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:leave-account-room", roomIdentifier),
-    deleteAccountRoom: (roomIdentifier: string) =>
-      ipcRenderer.invoke("desktop:room:delete-account-room", roomIdentifier),
+    getRoomDeletionPreview: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room:deletion-preview", roomIdentifier),
+    deleteAccountRoom: (roomIdentifier: string, confirmation: string) =>
+      ipcRenderer.invoke("desktop:room:delete-account-room", roomIdentifier, confirmation),
     getSnapshot: (roomIdentifier?: string | null, options?: DesktopRoomSnapshotOptions) =>
       ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null, options ?? null),
     getLiveMetadata: (roomIdentifier: string, options?: DesktopRoomLiveMetadataOptions) =>
@@ -500,6 +503,7 @@ const api: DesktopApi = {
     pickRoom: () => ipcRenderer.invoke("desktop:repos:pick-room"),
     pickProjectParent: () => ipcRenderer.invoke("desktop:repos:pick-project-parent"),
     createProject: (parentPath, name) => ipcRenderer.invoke("desktop:repos:create-project", parentPath, name),
+    disconnectProject: (id: string) => ipcRenderer.invoke("desktop:repos:disconnect-project", id),
     listProjectBindings: () => ipcRenderer.invoke("desktop:repos:list-project-bindings"),
     migrateProjectBindings: (candidates) =>
       ipcRenderer.invoke("desktop:repos:migrate-project-bindings", candidates),

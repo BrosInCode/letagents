@@ -32,7 +32,7 @@ const suffix = `${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toSt
 let sequence = 0;
 const unique = (label: string) => `${label}-${suffix}-${++sequence}`;
 
-const MIGRATION = readFileSync(resolve("drizzle/0147_room_origin.sql"), "utf8");
+const MIGRATION = readFileSync(resolve("drizzle/0148_room_origin.sql"), "utf8");
 const BACKFILL = MIGRATION.split("--> statement-breakpoint")
   .map((statement) => statement.replace(/^\s*--.*$/gm, "").trim())
   .find((statement) => statement.startsWith("UPDATE rooms"))!;

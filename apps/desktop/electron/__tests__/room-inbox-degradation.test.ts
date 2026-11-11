@@ -91,3 +91,8 @@ test('universal updates load bounded sources, include unassigned completions and
     assert.ok(calls.every(url => !url.includes('/messages?') && !url.includes('/activity-history')), 'does not fetch transcripts or participant snippets');
   } finally { globalThis.fetch = prior; }
 });
+
+
+test("deleted room errors escape partial-source fallback", async () => {
+  await assert.rejects(loadSource(Promise.reject(new DesktopApiError(410, { code: "ROOM_DELETED", error: "Room was permanently deleted." })), { messages: [] }), /permanently deleted/);
+});
