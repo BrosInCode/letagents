@@ -1,5 +1,6 @@
 import type { Response } from "express";
 import { isRoomDeleted } from "../db/content-deletion.js";
+import { RoomDeletedError } from "../db/utils.js";
 
 import {
   getFocusRoomByKey,
@@ -31,9 +32,32 @@ export async function resolveRoomOrReply(
   { allowCreate }: { allowCreate: boolean } = { allowCreate: false }
 ): Promise<Project | null> {
   if (await isRoomDeleted(roomId)) {
-    res.status(410).json({ error: "Room was permanently deleted.", code: "ROOM_DELETED", room_id: roomId });
+    replyRoomDeleted(res, roomId);
     return null;
   }
+  try {
+    return await resolveLiveRoomOrReply(roomId, res, allowCreate);
+  } catch (error) {
+    // A create raced a permanent deletion, or a branch locator names a
+    // deleted parent: the deleted-room trigger refused the insert.
+    if (error instanceof RoomDeletedError) {
+      replyRoomDeleted(res, error.roomId);
+      return null;
+    }
+    throw error;
+  }
+}
+
+/** The 410 a deleted room answers with. */
+export function replyRoomDeleted(res: Response, roomId: string): void {
+  res.status(410).json({ error: "Room was permanently deleted.", code: "ROOM_DELETED", room_id: roomId });
+}
+
+async function resolveLiveRoomOrReply(
+  roomId: string,
+  res: Response,
+  allowCreate: boolean,
+): Promise<Project | null> {
   const locator = classifyRoomLocator(roomId);
   if (locator.type === "focus_locator") {
     const focusLocator = locator;
