@@ -394,3 +394,159 @@ test("closing a request without answering sends no draft, moves on, and shows it
     assert.ok(descendants(root).some(node => node.type === "span" && text(node) === "Closed"), "its category reads Closed");
   } finally { app.unmount(); }
 });
+
+async function taskApprovalHarness(context: TestContext, failures: { board?: boolean; lostBoardResponse?: boolean; snapshot?: boolean; boardStatus?: string; answer?: boolean; wait?: Promise<void>; account?: string; storage?: Map<string, string> } = {}, withRequest = true) {
+  const { createKnowledgeRecord, reviseKnowledgeRecord } = await import('../../../../shared/room-knowledge.mjs');
+  const task = { id: 'task_1', title: 'Notify mentioned humans', description: 'Respect muted rooms.', status: 'proposed', updated_at: '2026-11-11T00:00:00Z' };
+  const record = createKnowledgeRecord('room-a', 'attention', { client_id: 'task-approval-request', category: 'approval',
+    title: 'Accept task_1 so Carbon can claim it', body: 'The task is waiting on the board.', recommendation: 'Accept task_1 and I will review its PR.' },
+  { id: 'carbon-supervisor', label: 'Carbon supervisor', kind: 'agent' });
+  const current = ref({ ...data, rooms: [{ ...data.rooms[0]!, records: withRequest ? [record] : [], tasks: [task] }] });
+  const section = ref<'needs-you' | 'answered' | 'updates'>('needs-you');
+  const writes: Array<{ action: string; room: string; id: string; input: unknown }> = [];
+  Object.assign(globalThis, { window: { matchMedia: () => ({ matches: false }), localStorage: { getItem: (key: string) => failures.storage?.get(key) ?? null, setItem: (key: string, value: string) => failures.storage?.set(key, value) }, letagentsDesktop: { auth: { getStatus: async () => ({ account: failures.account ? { id: failures.account } : null }) }, room: {
+    getSnapshot: async () => {
+      if (failures.snapshot) throw new Error('Board unavailable.');
+      return { tasks: [{ ...task, status: failures.boardStatus || 'proposed' }] };
+    },
+    updateTask: async (room: string, id: string, input: unknown) => {
+      writes.push({ action: 'accept', room, id, input });
+      await failures.wait;
+      if (failures.board) throw new Error('Only a room admin may accept tasks.');
+      failures.boardStatus = 'accepted';
+      if (failures.lostBoardResponse) throw new Error('Response lost.');
+      return { task: { ...task, status: 'accepted' } };
+    },
+    reviseKnowledge: async (room: string, _type: string, id: string, input: any) => {
+      writes.push({ action: 'answer', room, id, input });
+      if (failures.answer) throw new Error('Connection lost.');
+      return reviseKnowledgeRecord(record, input, { id: 'human', label: 'EmmyMay', kind: 'human' });
+    },
+  } } } });
+  const root = hostNode('root');
+  const app = renderer.createApp(() => h(InboxView, { data: current.value, loading: false, error: '', section: section.value,
+    'onUpdate:section': (next: typeof section.value) => { section.value = next; } }));
+  app.provide(ssrContextKey, { modules: new Set<string>() }); app.mount(root);
+  let mounted = true; const unmount = () => { if (mounted) { app.unmount(); mounted = false; } }; context.after(unmount);
+  await nextTick();
+  return { root, writes, current, section, unmount };
+}
+
+test('Inbox accepts the displayed board task, records a human decision, and removes the duplicate proposal', async context => {
+  const { root, writes, section } = await taskApprovalHarness(context);
+  assert.deepEqual(queueTitles(root), ['Accept task_1 so Carbon can claim it']);
+  assert.match(text(root), /task_1 · Notify mentioned humans/);
+  assert.match(text(root), /Respect muted rooms/);
+  await clickButton(root, 'Accept task');
+  assert.deepEqual(writes, [
+    { action: 'accept', room: 'room-a', id: 'task_1', input: { status: 'accepted' } },
+    { action: 'answer', room: 'room-a', id: 'task-approval-request', input: { expected_version: 1, response: 'Accepted task_1: Notify mentioned humans.' } },
+  ]);
+  assert.equal(section.value, 'answered');
+  assert.match(text(root), /Accepted task_1: Notify mentioned humans\./);
+  assert.doesNotMatch(text(root), /I will review its PR/);
+});
+
+test('a refused board acceptance leaves the request open and sends no approval message', async context => {
+  const { root, writes, section } = await taskApprovalHarness(context, { board: true });
+  await clickButton(root, 'Accept task');
+  assert.deepEqual(writes.map(write => write.action), ['accept']);
+  assert.equal(section.value, 'needs-you');
+  assert.match(text(root), /Only a room admin may accept tasks/);
+  assert.doesNotMatch(text(root), /Answer recorded|Task accepted on the board/);
+});
+
+test('a saved board decision survives a refresh and retries only the failed inbox answer', async context => {
+  const failures = { answer: true };
+  const { root, writes, current, section } = await taskApprovalHarness(context, failures);
+  await clickButton(root, 'Accept task');
+  assert.match(text(root), /Task accepted, but the inbox answer could not be saved/);
+  current.value.rooms[0]!.tasks = []; // The next attention read no longer includes the accepted card.
+  await nextTick();
+  failures.answer = false;
+  await clickButton(root, 'Retry saving answer');
+  assert.deepEqual(writes.map(write => write.action), ['accept', 'answer', 'answer']);
+  assert.equal(section.value, 'answered');
+});
+
+test('a proposed task can be accepted directly without a separate agent request', async context => {
+  const { root, writes } = await taskApprovalHarness(context, {}, false);
+  assert.deepEqual(queueTitles(root), ['Notify mentioned humans']);
+  await clickButton(root, 'Accept task');
+  assert.deepEqual(writes.map(write => write.action), ['accept']);
+  assert.deepEqual(queueTitles(root), []);
+  assert.match(text(root), /Task accepted on the board/);
+});
+
+test('a committed board acceptance with a lost response is reconciled before answering', async context => {
+  const { root, writes, section } = await taskApprovalHarness(context, { lostBoardResponse: true });
+  await clickButton(root, 'Accept task');
+  assert.deepEqual(writes.map(write => write.action), ['accept', 'answer']);
+  assert.equal(section.value, 'answered');
+});
+
+test('an ambiguous acceptance survives reopening and reads the board before retrying', async context => {
+  const storage = new Map<string, string>();
+  const first = await taskApprovalHarness(context, { lostBoardResponse: true, snapshot: true, storage });
+  await clickButton(first.root, 'Accept task');
+  assert.deepEqual(first.writes.map(write => write.action), ['accept']);
+  assert.doesNotMatch(text(first.root), /Task accepted on the board/);
+  first.unmount();
+  const second = await taskApprovalHarness(context, { boardStatus: 'in_progress', storage });
+  second.current.value.rooms[0]!.tasks = []; await nextTick();
+  await clickButton(second.root, 'Accept task');
+  assert.deepEqual(second.writes.map(write => write.action), ['answer']);
+  assert.equal(second.section.value, 'answered');
+});
+
+test('an ambiguous acceptance cannot be reconciled under a different account', async context => {
+  const { root, writes } = await taskApprovalHarness(context, { lostBoardResponse: true, account: 'different-account' });
+  await clickButton(root, 'Accept task');
+  assert.deepEqual(writes.map(write => write.action), ['accept']);
+  assert.match(text(root), /Return to the account that accepted this task/);
+});
+
+test('leaving Inbox during acceptance still records the decision for the same account', async context => {
+  let release!: () => void;
+  const wait = new Promise<void>(resolve => { release = resolve; });
+  const { root, writes, unmount } = await taskApprovalHarness(context, { wait });
+  const accepting = clickButton(root, 'Accept task');
+  await nextTick(); unmount(); release(); await accepting;
+  assert.deepEqual(writes.map(write => write.action), ['accept', 'answer']);
+});
+
+test('switching accounts during acceptance cannot post the old account decision as the new human', async context => {
+  let release!: () => void;
+  const failures = { wait: new Promise<void>(resolve => { release = resolve; }), account: '' };
+  const { root, writes } = await taskApprovalHarness(context, failures);
+  const accepting = clickButton(root, 'Accept task');
+  await nextTick(); failures.account = 'different-account'; release(); await accepting;
+  assert.deepEqual(writes.map(write => write.action), ['accept']);
+  assert.match(text(root), /Return to the account that accepted this task/);
+});
+
+test('an unsaved acceptance answer remains retryable after closing and reopening Inbox', async context => {
+  const storage = new Map<string, string>();
+  const first = await taskApprovalHarness(context, { answer: true, storage });
+  await clickButton(first.root, 'Accept task'); first.unmount();
+  const second = await taskApprovalHarness(context, { storage });
+  second.current.value.rooms[0]!.tasks = []; await nextTick();
+  await clickButton(second.root, 'Retry saving answer');
+  assert.deepEqual(second.writes.map(write => write.action), ['answer']);
+  assert.equal(second.section.value, 'answered');
+  assert.equal([...storage.values()].some(value => value.includes('Notify mentioned humans')), false, 'successful completion removes the recovery record');
+});
+
+test('later canonical task status and a new proposal supersede the optimistic accepted state', async context => {
+  const { root, current, section, writes } = await taskApprovalHarness(context, {}, false);
+  await clickButton(root, 'Accept task');
+  current.value.rooms[0]!.tasks[0]!.status = 'in_review';
+  current.value.rooms[0]!.tasks[0]!.updated_at = '2026-11-11T01:00:00Z';
+  section.value = 'updates'; await nextTick();
+  assert.ok(descendants(root).some(node => node.type === 'span' && text(node) === 'Task review'));
+  current.value.rooms[0]!.tasks[0]!.status = 'proposed';
+  section.value = 'needs-you'; await nextTick();
+  assert.deepEqual(queueTitles(root), ['Notify mentioned humans']);
+  await clickButton(root, 'Accept task');
+  assert.deepEqual(writes.map(write => write.action), ['accept', 'accept']);
+});

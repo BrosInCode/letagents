@@ -583,3 +583,67 @@ test('the one-minute Needs you read runs while the activity stream is open, and 
   context.mock.timers.tick(NEEDS_YOU_REFRESH_MS);
   assert.equal(reads, 2, 'stopped');
 });
+
+test('Inbox unread badge clears seen items, persists per account, and preserves pending work', async () => {
+  const { useInboxUnread } = await import('../src/composables/useNeedsYouSignal');
+  const storage = new Map<string, string>();
+  const oldWindow = globalThis.window, oldDocument = globalThis.document;
+  const page = Object.assign(new EventTarget(), { hidden: false });
+  Object.assign(globalThis, { document: page, window: { localStorage: {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+  } } });
+  const items = ref([
+    { key: 'request', fingerprint: '1', roomIdentifier: 'a' },
+    { key: 'task', fingerprint: 'proposed:T', roomIdentifier: 'b' },
+    { key: 'rental', fingerprint: 'new', roomIdentifier: null },
+  ]);
+  const account = ref('emmy'), rooms = ref<string[] | null>(null);
+  let scope = effectScope();
+  const mount = () => scope.run(() => useInboxUnread(items, { account: () => account.value, inboxRooms: () => rooms.value }))!;
+  let count = mount();
+  try {
+    assert.equal(count.value, 3);
+    rooms.value = ['a']; await nextTick(); assert.equal(count.value, 2, 'hidden rooms and rentals are not read');
+    rooms.value = []; await nextTick(); assert.equal(count.value, 0);
+    assert.equal(items.value.length, 3, 'seeing work never resolves or dismisses it');
+    rooms.value = null; await nextTick();
+    scope.stop(); scope = effectScope(); count = mount(); assert.equal(count.value, 0, 'read state survives remounts');
+    items.value[0] = { ...items.value[0]!, key: 'replacement' }; await nextTick(); assert.equal(count.value, 1, 'same-count replacement is new');
+    account.value = 'another-person'; await nextTick(); assert.equal(count.value, 3);
+    account.value = 'emmy'; await nextTick(); assert.equal(count.value, 1);
+    page.hidden = true; page.dispatchEvent(new Event('visibilitychange')); rooms.value = []; await nextTick();
+    assert.equal(count.value, 1, 'a hidden inbox cannot read arrivals');
+    page.hidden = false; page.dispatchEvent(new Event('visibilitychange')); await nextTick(); assert.equal(count.value, 0);
+    rooms.value = null; items.value[1]!.fingerprint = 'proposed:edited'; await nextTick(); assert.equal(count.value, 1, 'changed work is unseen again');
+  } finally { scope.stop(); Object.assign(globalThis, { window: oldWindow, document: oldDocument }); }
+});
+
+test('only an unambiguous title reference links an approval to a proposed card in its own room', async () => {
+  const { buildUniversalInbox } = await import('../src/components/desktop/content/room-inbox/universal');
+  const task = { id: 'task_1', title: 'Notify humans', status: 'proposed', description: null, updated_at: 'T' };
+  const approval = { ...record, category: 'approval' as const, title: 'Accept task_1' };
+  const inbox = (request = approval) => buildUniversalInbox({ ...data, rooms: [
+    { ...data.rooms[0]!, records: [request], tasks: [task] },
+    { ...data.rooms[0]!, roomIdentifier: 'another-room', records: [], tasks: [task] },
+  ] });
+  assert.equal(inbox().filter(item => item.roomIdentifier === 'room').length, 1, 'linked proposal is not duplicated');
+  assert.equal(inbox()[0]?.approvalTask?.id, 'task_1');
+  assert.equal(inbox().filter(item => item.roomIdentifier === 'another-room').length, 1, 'same ID in another room is independent');
+  for (const title of ['Approve task_1 and task_2', 'Approve other_task_1', 'No explicit task']) {
+    const items = inbox({ ...approval, title });
+    assert.equal(items[0]?.approvalTask, undefined);
+    assert.equal(items.filter(item => item.roomIdentifier === 'room').length, 2, 'ambiguous or absent links leave the card separate');
+  }
+});
+
+test('editing the task attached to an already-seen approval gives it a new unread fingerprint', async () => {
+  const { buildUniversalInbox } = await import('../src/components/desktop/content/room-inbox/universal');
+  const task = { id: 'task_1', title: 'Original scope', status: 'proposed', description: null, updated_at: 'T1' };
+  const current = { ...data, rooms: [{ ...data.rooms[0]!, records: [{ ...record, category: 'approval' as const, title: 'Accept task_1' }], tasks: [task] }] };
+  const before = buildUniversalInbox(current)[0]!;
+  task.title = 'Changed scope'; task.updated_at = 'T2';
+  const after = buildUniversalInbox(current)[0]!;
+  assert.equal(after.key, before.key);
+  assert.notEqual(after.fingerprint, before.fingerprint);
+});

@@ -1839,12 +1839,12 @@ test("a person's Needs-you answer reads as a reply to the agent by name", () => 
   assert.doesNotMatch(named, /@agent:|desktop-cursor|Human response|summitmisty-gh-app/);
   // Outside a room roster the mention stays visible, as a neutral @agent.
   const unnamed = renderedMessage({}, false).html;
-  assert.match(unnamed, /@agent<\/span> Noted\. Post each verdict/);
+  assert.match(unnamed, /Reply to the requesting agent:[\s\S]*Noted\. Post each verdict/);
   assert.doesNotMatch(unnamed, /@agent:|Human response/);
   // A roster name that is not a plain mention cannot style a person's message.
   for (const spoofed of ["[Approved by EmmyMay](https://evil.example)", "**EmmyMay approved**", "__x__"]) {
     const html = renderedMessage({}, true, spoofed).html;
-    assert.match(html, /@agent<\/span> Noted\./, spoofed);
+    assert.match(html, /Reply to the requesting agent:[\s\S]*Noted\./, spoofed);
     assert.doesNotMatch(html, /<a |<strong>|evil\.example/, spoofed);
   }
   // Only a person's answer is rewritten; an agent posting the same shape is shown as written.

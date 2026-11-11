@@ -10,7 +10,7 @@ const actor = { id: 'human-1', label: 'Emmy', kind: 'human' as const };
 const worker = { id: 'owner/worker-b', label: 'Worker B', kind: 'agent' as const };
 const input = { client_id: 'request-0001', category: 'decision' as const, title: 'Choose a direction', body: 'Option A or B?' };
 
-function harness(options: { skipPublish?: boolean; denied?: boolean; empty?: boolean } = {}) {
+function harness(options: { skipPublish?: boolean; denied?: boolean; empty?: boolean; taskStatuses?: string[] } = {}) {
   const routes: Array<{ method: string; path: RegExp; handler: Function }> = [];
   let record: KnowledgeRecord | null = options.empty ? null : createKnowledgeRecord('github.com/org/repo', 'attention', input, worker);
   let initial = record;
@@ -22,7 +22,7 @@ function harness(options: { skipPublish?: boolean; denied?: boolean; empty?: boo
     resolveCanonicalRoomRequestId: async id => id,
     resolveRoomOrReply: async id => ({ id } as any),
     requireParticipant: async (_req, res) => { if (options.denied) { res.status(403).json({ error: 'Forbidden' }); return false; } return true; },
-    getTasks: async () => [],
+    getTasks: async () => (options.taskStatuses ?? []).map((status, index) => ({ id: `task_${index + 1}`, title: 'Task', status, description: null, updated_at: 'T' })) as any,
     store: {
       listRoomKnowledge: async () => { reads++; return { records: record ? [record] : [], truncated: false }; },
       getRoomKnowledge: async () => { reads++; return record; },
@@ -151,4 +151,25 @@ test('only a signed-in human can close a request, once, and the agent that asked
   assert.equal((await h.request('post', close, { expected_version: 2 })).code, 409);
   assert.equal((await h.request('post', route, { expected_version: 2, response: 'Late answer' })).code, 409);
   assert.equal(h.counts().published, 1);
+});
+
+test('an inbox answer quotes the agent request notice, preserving the original human message only as evidence', async () => {
+  const h = harness({ empty: true });
+  await h.request('post', create, { ...input, source_message_id: 'msg_3' }, 'agent_session');
+  const answer = await h.request('post', route, { expected_version: 1, response: 'Accepted task_1.' });
+  assert.equal(answer.code, 200);
+  assert.equal(h.current().source_message_id, 'msg_3');
+  assert.equal(h.posted[1].opts.reply_to, `msg_${h.posted[0].number}`);
+  assert.equal(h.posted[0].sender, worker.label);
+  assert.equal(h.posted[1].sender, actor.label);
+  const legacy = harness();
+  await legacy.request('post', route, { expected_version: 1, response: 'Yes.' });
+  assert.equal(legacy.posted[0].opts.reply_to, null, 'without a notice, do not misattribute the answer to its evidence message');
+});
+
+test('attention reads include proposed tasks without adding active or finished work', async () => {
+  const h = harness({ taskStatuses: ['proposed', 'accepted', 'in_progress', 'blocked', 'in_review', 'done'] });
+  const result = await h.request('get', create);
+  assert.equal(result.code, 200);
+  assert.deepEqual(result.body.tasks.map((task: { status: string }) => task.status), ['proposed', 'blocked', 'in_review']);
 });

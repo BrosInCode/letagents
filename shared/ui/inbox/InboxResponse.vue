@@ -2,7 +2,7 @@
   <form class="inbox-response" @submit.prevent="submit">
     <label :for="id">Your response</label>
     <div class="inbox-response-box">
-      <textarea :id="id" ref="input" :value="modelValue || ''" rows="3" maxlength="8000" :placeholder="showSuggestion ? suggestion : placeholder" :aria-describedby="showSuggestion ? `${id}-suggestion` : undefined" :disabled="disabled" required @input="updateDraft" @keydown="keydown" />
+      <textarea :id="id" ref="input" :value="modelValue || ''" rows="3" maxlength="8000" :placeholder="showSuggestion ? suggestedReply : placeholder" :aria-describedby="showSuggestion ? `${id}-suggestion` : undefined" :disabled="disabled" required @input="updateDraft" @keydown="keydown" />
       <div class="inbox-response-controls">
         <span class="inbox-response-hint"><button v-if="showSuggestion" type="button" class="inbox-accept-suggestion" :disabled="disabled" aria-label="Accept suggested response" @click="acceptSuggestion"><kbd>Tab</kbd> to accept</button><span v-else-if="recipient">To {{ recipient }}</span><span v-if="showSuggestion" :id="`${id}-suggestion`" class="inbox-sr-only">Suggested response. Press Tab to accept, or type your own.</span></span>
         <button type="submit" class="inbox-button inbox-primary" :disabled="disabled || !modelValue?.trim()">{{ disabled ? 'Sending…' : 'Send response' }}<svg v-if="!disabled" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg></button>
@@ -15,19 +15,21 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
+import { attentionRecommendationReply } from '../../room-knowledge.mjs';
 import './inbox.css';
 const props = withDefaults(defineProps<{ id: string; modelValue: string | undefined; suggestion?: string; disabled?: boolean; recipient?: string }>(), { suggestion: '', disabled: false, recipient: '' });
 const emit = defineEmits<{ 'update:modelValue': [draft: string]; submit: []; close: [] }>();
 const input = ref<HTMLTextAreaElement>(), closeButton = ref<HTMLButtonElement>(), keepButton = ref<HTMLButtonElement>();
 const confirmClose = ref(false);
-const showSuggestion = computed(() => props.modelValue === undefined && Boolean(props.suggestion.trim()) && props.suggestion.length <= 8000);
+const suggestedReply = computed(() => attentionRecommendationReply(props.suggestion));
+const showSuggestion = computed(() => props.modelValue === undefined && Boolean(suggestedReply.value) && suggestedReply.value.length <= 8000);
 const placeholder = computed(() => props.recipient ? `Give ${props.recipient} a decision or next step…` : 'Give the agent a decision or next step…');
 watch(() => props.id, () => { confirmClose.value = false; });
 function updateDraft(event: Event) { if (!props.disabled) emit('update:modelValue', (event.target as HTMLTextAreaElement).value); }
 async function acceptSuggestion() {
   if (props.disabled || !showSuggestion.value || input.value?.value) return;
-  emit('update:modelValue', props.suggestion); await nextTick();
-  input.value?.focus(); input.value?.setSelectionRange(props.suggestion.length, props.suggestion.length);
+  emit('update:modelValue', suggestedReply.value); await nextTick();
+  input.value?.focus(); input.value?.setSelectionRange(suggestedReply.value.length, suggestedReply.value.length);
 }
 function keydown(event: KeyboardEvent) {
   if (props.disabled || event.isComposing) return;

@@ -121,6 +121,7 @@ test("Needs you for the account matches each room's attention route and skips ro
       { client_id: `ask-${room.id}`, category: "decision", title: `Decide in ${room.id}`, body: "Which one?" }, agent));
   }
   const card = await api!.createTask(member.id, "Blocked card", "Worker");
+  const proposed = await api!.createTask(admin.id, "Proposed card", "Worker");
   await client!.pool.query("UPDATE tasks SET status = 'blocked' WHERE room_id = $1 AND number = $2", [member.id, Number(card.id.replace(/^task_/, ""))]);
   const sessionAccount = { account_id: me.id, provider: "github", login: "Emmy", provider_access_token: null } as never;
   const result = await attention!.loadAccountAttention(sessionAccount, [
@@ -136,7 +137,7 @@ test("Needs you for the account matches each room's attention route and skips ro
     assert.equal(room.truncated, perRoom.truncated);
   }
   assert.deepEqual(result.rooms[1]!.tasks.map((task) => [task.id, task.status]), [[card.id, "blocked"]]);
-  assert.deepEqual(result.rooms[0]!.tasks, []);
+  assert.deepEqual(result.rooms[0]!.tasks.map(task => [task.id, task.status]), [[proposed.id, 'proposed']]);
   assert.deepEqual(result.rooms[0]!.board_intents, [], "an admin room carries its pending intents");
   assert.equal(result.rooms[1]!.board_intents, undefined, "a participant does not decide intents");
 });

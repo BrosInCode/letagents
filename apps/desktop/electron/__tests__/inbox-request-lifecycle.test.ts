@@ -8,7 +8,7 @@ createElectronTestEnv({ prefix: "inbox-request-lifecycle-", paths: ["state", "ch
 const { createKnowledgeRecord } = await import("../../../../shared/room-knowledge.mjs");
 const { saveLocalKnowledge } = await import("../../../../shared/local-room-knowledge.mjs");
 const { getLocalChatDatabase } = await import("../main/rooms/local-db.js");
-const { createLocalRoom } = await import("../main/rooms/local-store.js");
+const { createLocalRoom, addLocalTask } = await import("../main/rooms/local-store.js");
 const { getLocalChatMessages } = await import("../main/rooms/messages/local-store.js");
 const { getDesktopKnowledge, reviseDesktopKnowledge } = await import("../main/rooms/knowledge.js");
 
@@ -34,5 +34,16 @@ test("a local agent request shows once in the room chat, and closing it tells th
   messages = (await getLocalChatMessages(room)).messages;
   assert.equal(messages.length, 2);
   assert.equal(messages[1].text, "@agent:owner/harbor\n\nHuman response (request-local-01):\n\nClosed without an answer.");
+  assert.equal(messages[1].reply_to?.id, messages[0].id);
+  assert.equal(messages[1].reply_to?.sender, agent.label);
   await assert.rejects(reviseDesktopKnowledge(room, "attention", "request-local-01", { expected_version: 2, response: "Late answer" }), /already been closed/);
+});
+
+test('local Inbox reads proposed cards for direct acceptance', async () => {
+  const room = 'local_proposals';
+  await createLocalRoom({ roomIdentifier: room, displayName: 'Proposals' });
+  const { runWithLocalBoardOwner } = await import('../../../../shared/local-board-owner.mjs');
+  const task = await runWithLocalBoardOwner(() => {}, () => addLocalTask(room, { title: 'Notify people', createdBy: 'Agent' }));
+  const page = await getDesktopKnowledge(room, 'attention');
+  assert.deepEqual(page.tasks?.map(card => [card.id, card.status]), [[task.id, 'proposed']]);
 });

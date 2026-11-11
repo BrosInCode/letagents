@@ -1,6 +1,7 @@
 import { reactive, type InjectionKey } from "vue";
 import type { DesktopNeedsYou } from "../../../../../../electron/ipc-types/knowledge";
 import { roomReadKey } from "../../../../domain/desktop-room-read-state";
+import { attentionRecommendationReply } from "../../../../../../../../shared/room-knowledge.mjs";
 
 export interface ComposerSuggestedReply {
   /** The attention record the suggestion answers. */
@@ -25,7 +26,7 @@ export function roomSuggestedReply(data: DesktopNeedsYou | null | undefined, roo
   for (const room of data.rooms) {
     if (roomReadKey(room.roomIdentifier) !== key) continue;
     for (const record of room.records) {
-      const text = record.recommendation?.trim();
+      const text = attentionRecommendationReply(record.recommendation);
       if (record.type !== "attention" || record.response || record.archived || record.author?.kind !== "agent" || !text) continue;
       if (!best || record.updated_at > best.record.updated_at) best = { record, text };
     }

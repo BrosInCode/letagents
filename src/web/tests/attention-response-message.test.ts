@@ -61,11 +61,11 @@ after(async () => {
 
 test('a Needs-you answer names the agent and hides its handle and request id', () => {
   assert.equal(messageDisplayText(message(), names), '@SummitMisty Noted. Post each verdict as a PR comment.')
-  // Without a roster entry the mention stays visible as a neutral @agent.
-  assert.equal(messageDisplayText(message()), '@agent Noted. Post each verdict as a PR comment.')
+  // Without a roster entry the requesting agent is still identified as the recipient.
+  assert.equal(messageDisplayText(message()), 'Reply to the requesting agent:\n\nNoted. Post each verdict as a PR comment.')
   // A roster name is used as a mention only; markdown in it is not trusted.
   const spoofed = attentionResponseAgentNames([{ agent_key: 'EmmyMay/desktop-cursor-5849cfa6', display_name: '[Approved by EmmyMay](https://evil.example)' }])
-  assert.equal(messageDisplayText(message(), spoofed), '@agent Noted. Post each verdict as a PR comment.')
+  assert.equal(messageDisplayText(message(), spoofed), 'Reply to the requesting agent:\n\nNoted. Post each verdict as a PR comment.')
   // Only a person's answer is rewritten, and a server display line always wins.
   assert.equal(messageDisplayText(message({ source: 'agent' }), names), answerText)
   assert.equal(messageDisplayText(message({ display_text: 'Server line' }), names), 'Server line')
@@ -157,6 +157,6 @@ test('the Activity status line shows a person\'s answer without its handle', () 
     messages: [message()],
     tasks: [],
   })
-  assert.match(participant.statusText || '', /^@agent Noted\./)
+  assert.match(participant.statusText || '', /^Reply to the requesting agent: Noted\./)
   assert.doesNotMatch(participant.statusText || '', /@agent:|Human response/)
 })

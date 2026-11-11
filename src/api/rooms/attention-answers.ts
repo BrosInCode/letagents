@@ -7,7 +7,7 @@ import { accounts, task_leases } from '../db/schema.js';
 import { emitProjectMessage } from '../server/events.js';
 
 export interface AttentionAnswerDeps {
-  store?: Pick<typeof knowledgeStore, 'listRoomKnowledge' | 'getRoomKnowledge' | 'assertKnowledgeSource' | 'reviseRoomKnowledgeInTransaction'>;
+  store?: Pick<typeof knowledgeStore, 'listRoomKnowledge' | 'getRoomKnowledge' | 'assertKnowledgeSource' | 'reviseRoomKnowledgeInTransaction' | 'roomMessageIdForClientId'>;
   emitMessage?: typeof emitProjectMessage;
   /** Which of these leases are still held in the room. */
   heldLeaseIds?: (roomId: string, leaseIds: string[]) => Promise<string[]>;
@@ -97,8 +97,9 @@ export async function commitAttentionAnswer(
 ): Promise<KnowledgeRecord> {
   const store = deps.store ?? knowledgeStore;
   const publish = deps.emitMessage ?? emitProjectMessage;
+  const noticeId = await store.roomMessageIdForClientId(roomId, requestNoticeClientId(previous.id));
   await publish(roomId, person.label, formatAttentionResponse(next), {
-    source: 'browser', reply_to: previous.source_message_id || null,
+    source: 'browser', reply_to: noticeId,
     client_message_id: `internal:attention-response:${previous.id}`,
     account_id: person.id,
     with_created_message_in_transaction: tx => store.reviseRoomKnowledgeInTransaction(tx, next, previous.version),
