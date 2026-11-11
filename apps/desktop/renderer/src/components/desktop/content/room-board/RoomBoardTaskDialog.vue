@@ -48,6 +48,7 @@
     >
       <template #planning><slot name="planning" /></template>
     </RoomBoardTaskInspector>
+    <button v-if="task && canEdit" type="button" class="desktop-board-delete-task" :disabled="busyAction !== null" @click="emit('delete-task')">{{ busyAction === 'delete' ? 'Deleting…' : 'Delete task…' }}</button>
   </DesktopDialogShell>
 </template>
 
@@ -101,6 +102,7 @@ function requestClose() {
 
 const emit = defineEmits<{
   close: [];
+  "delete-task": [];
   save: [input: TaskEditPatch, onSettled: (saved: boolean) => void];
   "assign-review": [];
   "run-action": [action: TaskAction];
@@ -112,6 +114,7 @@ const emit = defineEmits<{
 </script>
 
 <style scoped>
+.desktop-board-delete-task { margin: 16px 24px; padding: 8px 12px; color: var(--red, #c33); border: 1px solid currentColor; border-radius: 6px; background: transparent; cursor: pointer; }
 .desktop-task-discard { display: grid; gap: 12px; margin: 16px 24px; flex-shrink: 0; padding: 14px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-subtle); }
 .desktop-task-discard p { margin: 0; font-size: 14px; }
 .task-inspector-toolbar { display:flex; align-items:center; justify-content:space-between; flex:0 0 auto; gap:16px; height:61px; padding:0 20px 0 28px; border-bottom:1px solid var(--border); }

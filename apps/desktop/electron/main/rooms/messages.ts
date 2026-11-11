@@ -227,7 +227,10 @@ export async function getDesktopRoomThread(
     has_older?: boolean;
   }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedThreadRootId)}/thread?${params.toString()}`,
-  );
+  ).catch(error => {
+    if (error instanceof DesktopApiError && error.status === 404) throw new Error("Thread not found.");
+    throw error;
+  });
   const summary = mapRoomMessageThreadSummary(
     page.summary ?? page.root.thread ?? null,
   );

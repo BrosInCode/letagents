@@ -215,7 +215,7 @@ function retryAfterMs(response: Response): number {
 async function readRoomStreamRefusal(
   response: Response,
 ): Promise<RoomStreamAccessRefusedError | RoomStreamRetryLaterError | null> {
-  if (response.status !== 403 && response.status !== 503) return null;
+  if (![403, 404, 410, 503].includes(response.status)) return null;
   let body: unknown = null;
   try {
     body = await response.json();
@@ -223,6 +223,7 @@ async function readRoomStreamRefusal(
     return null;
   }
   const code = body && typeof body === "object" ? (body as { code?: unknown }).code : null;
+  if (code === "ROOM_DELETED" || code === "ROOM_NOT_FOUND") return new RoomStreamAccessRefusedError(response.status, code);
   if (response.status === 503) {
     return code === "REPO_ACCESS_UNAVAILABLE" ? new RoomStreamRetryLaterError(retryAfterMs(response)) : null;
   }

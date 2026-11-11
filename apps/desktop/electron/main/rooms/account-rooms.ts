@@ -1,3 +1,7 @@
+import type { DesktopRoomDeletionPreview } from "../../ipc-types/api.js";
+import { listLocalTasks } from "./local-store.js";
+import { deleteLocalRoomMessages, getLocalRoomDeletionCounts } from "./messages/local-store.js";
+import { deleteLocalRoomRecord } from "./local-store.js";
 import type {
   DesktopAccountFocusRoomEntry,
   DesktopAccountRoomActionResult,
@@ -45,6 +49,7 @@ function mapDesktopAccountFocusRoomEntry(
         ? payload.name
         : roomIdentifier,
     kind: "focus",
+    archived: payload.archived === true,
     parentRoomId:
       typeof payload.parent_room_id === "string"
         ? payload.parent_room_id
@@ -351,24 +356,80 @@ export async function leaveDesktopAccountRoom(
   return mapDesktopAccountRoomActionResult(response);
 }
 
+export async function getDesktopRoomDeletionPreview(roomIdentifier: string): Promise<DesktopRoomDeletionPreview> {
+  const localRoom = await getLocalRoomIncludingArchived(roomIdentifier)
+    || await getLocalRoomByCloudRoomIncludingArchived(roomIdentifier);
+  async function localPreview(): Promise<DesktopRoomDeletionPreview> {
+    if (!localRoom) throw new Error("Local room not found.");
+    const [counts, tasks] = await Promise.all([
+      getLocalRoomDeletionCounts(localRoom.roomIdentifier), listLocalTasks(localRoom.roomIdentifier),
+    ]);
+    return { children: [], counts: { ...counts, tasks: tasks.length }, localOnly: true };
+  }
+  if (localRoom && !localRoom.cloudRoomIdentifier) return localPreview();
+  let preview: DesktopRoomDeletionPreview;
+  try {
+    preview = await apiFetch<DesktopRoomDeletionPreview>(`/rooms/${encodeURIComponent(localRoom?.cloudRoomIdentifier || roomIdentifier)}/deletion-preview`);
+  } catch (error) {
+    if (localRoom && error instanceof DesktopApiError && (error.status === 404 || error.payload?.code === "ROOM_DELETED")) return localPreview();
+    throw error;
+  }
+  // Cloud counts cannot describe additional unsynced local content accurately.
+  // In that case show the content categories instead of incomplete totals.
+  const affected = new Set([localRoom?.cloudRoomIdentifier || roomIdentifier, ...preview.children.map(room => room.roomIdentifier)]);
+  const hasLocalCopies = Boolean(localRoom) || (await listLocalRoomEntries({ includeArchived: true, linkedIdentity: "cloud" }))
+    .some(room => affected.has(room.roomIdentifier));
+  return { ...preview, counts: hasLocalCopies ? null : preview.counts };
+}
+
 export async function deleteDesktopAccountRoom(
   roomIdentifier: string,
+  confirmation: string,
 ): Promise<DesktopAccountRoomActionResult> {
-  const localRoom = await getLocalRoom(roomIdentifier)
-    || await getLocalRoomByCloudRoom(roomIdentifier);
-  if (localRoom) {
-    await archiveAccountLocalRoom(localRoom);
-    return {
-      roomIdentifier: localRoom.cloudRoomIdentifier || localRoom.roomIdentifier,
-      archived: true,
-      deleted: true,
-    };
+  if (confirmation !== roomIdentifier) throw new Error("Type the exact room identifier to confirm permanent deletion.");
+  const localRoom = await getLocalRoomIncludingArchived(roomIdentifier)
+    || await getLocalRoomByCloudRoomIncludingArchived(roomIdentifier);
+  const cloudId = localRoom ? localRoom.cloudRoomIdentifier : roomIdentifier;
+  const localCopies = new Map<string, AccountLocalRoom>();
+  if (localRoom) localCopies.set(localRoom.roomIdentifier, localRoom);
+  // A parent deletion includes focus rooms. Check local workers before making
+  // the cloud mutation, and remove each linked cache after cloud confirmation.
+  if (cloudId && (await listLocalRoomEntries({ includeArchived: true })).length) {
+    const preview = await getDesktopRoomDeletionPreview(roomIdentifier);
+    // The preview includes archived descendants; the ordinary focus-room list
+    // deliberately hides them and cannot be used as a deletion preflight.
+    for (const id of [cloudId, ...preview.children.map(room => room.roomIdentifier)]) {
+      const linked = await getLocalRoomByCloudRoomIncludingArchived(id);
+      if (linked) localCopies.set(linked.roomIdentifier, linked);
+    }
   }
-  const response = await apiFetch<Record<string, unknown>>(
-    `/account/rooms/${encodeURIComponent(roomIdentifier)}`,
-    { method: "DELETE" },
-  );
-  return mapDesktopAccountRoomActionResult(response);
+  if (localCopies.size) {
+    const { supervisorDaemonClient } = await import("../supervisor-daemon.js");
+    for (const copy of localCopies.values()) {
+      const entries = await supervisorDaemonClient.list(copy.roomIdentifier);
+      if (entries.some(entry => entry.desiredState !== "stopped")) throw new Error("Retire this room's and its focus rooms' local agents before deleting it.");
+    }
+  }
+  if (cloudId) {
+    try {
+      const removed = await apiFetch<{ deleted_room_ids?: string[] }>(`/rooms/${encodeURIComponent(cloudId)}`, {
+        method: "DELETE", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmation: cloudId }),
+      });
+      for (const id of removed.deleted_room_ids ?? [cloudId]) {
+        const copy = await getLocalRoomByCloudRoomIncludingArchived(id);
+        if (copy) localCopies.set(copy.roomIdentifier, copy);
+      }
+    } catch (error) {
+      if (!(localRoom && error instanceof DesktopApiError && (error.status === 404 || error.payload?.code === "ROOM_DELETED"))) throw error;
+    }
+  }
+  for (const copy of localCopies.values()) {
+    await deleteLocalRoomMessages(copy.roomIdentifier);
+    await deleteLocalRoomRecord(copy.roomIdentifier);
+    await clearArchivedLinkedLocalOverrides(copy);
+  }
+  return { roomIdentifier, deleted: true };
 }
 
 async function setAccountLocalRoomArchived(

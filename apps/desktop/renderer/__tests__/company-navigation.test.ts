@@ -89,3 +89,9 @@ test("a company room with no repository joins the company list without a repo ad
   const company = companyProjectGroups(projects, "42", [companyRoom]);
   assert.deepEqual(company.map((project) => project.parent.roomIdentifier), ["room_q4"]);
 });
+
+
+test("company discovery does not resurrect personally archived rooms", () => {
+  assert.deepEqual(mergeCompanyRooms([], [room, companyRoom], [room.room_id.toUpperCase()]).map(item => item.roomIdentifier), [companyRoom.room_id]);
+  assert.equal(mergeCompanyRooms([], [room, companyRoom], []).length, 2);
+});

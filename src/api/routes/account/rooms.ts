@@ -1,3 +1,7 @@
+import { ContentDeletionError } from "../../db/content-deletion.js";
+import { drainAttachmentDeletions } from "../../messages/attachment-deletion.js";
+import { contentDeletionEvents } from "../../server/events.js";
+import { respondWithInternalError } from "../../http/helpers.js";
 import type { Express } from "express";
 import { resolveRoomDisplayName } from "../../rooms/display-name.js";
 
@@ -39,6 +43,8 @@ export interface AccountRoomRouteDeps {
   }): Promise<{
     room_id: string;
     deleted: boolean;
+    deleted_room_ids?: string[];
+    parent_room_id?: string | null;
     error?: "not_found" | "forbidden";
     reason?: string;
   }>;
@@ -75,6 +81,7 @@ function toAccountFocusRoomResponse(
     id: room.room_id,
     display_name: room.display_name,
     name: room.room_id,
+    archived: room.archived ?? false,
     kind: room.kind,
     parent_room_id: room.parent_room_id,
     focus_key: room.focus_key,
@@ -254,7 +261,7 @@ export function registerAccountRoomRoutes(
   });
 
   app.delete(/^\/account\/rooms\/(.+)$/, async (req: AuthenticatedRequest, res) => {
-    if (!req.sessionAccount) {
+    if (!req.sessionAccount || !["session", "owner_token"].includes(req.authKind ?? "")) {
       res.status(401).json({ error: "Authentication required" });
       return;
     }
@@ -265,6 +272,11 @@ export function registerAccountRoomRoutes(
       return;
     }
 
+    if (req.body?.confirmation !== roomId) {
+      res.status(400).json({ error: "Permanent room deletion requires the exact room identifier as confirmation." });
+      return;
+    }
+    try {
     const result = await deps.deleteAccountRoomForAccount({
       accountId: req.sessionAccount.account_id,
       roomId,
@@ -281,5 +293,15 @@ export function registerAccountRoomRoutes(
     }
 
     res.json(result);
+    if (result.deleted) {
+      for (const roomId of [...(result.deleted_room_ids ?? [result.room_id]), ...(result.parent_room_id ? [result.parent_room_id] : [])]) {
+        contentDeletionEvents.emit("loss", { roomId, projectId: roomId });
+      }
+      void drainAttachmentDeletions().catch(() => undefined);
+    }
+    } catch (error) {
+      if (error instanceof ContentDeletionError) { res.status(error.status).json({ error: error.message }); return; }
+      respondWithInternalError(res, "account.room.delete", error, "Room could not be deleted.");
+    }
   });
 }

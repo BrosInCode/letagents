@@ -170,6 +170,7 @@ function openStoreConnection(storePath: string): SqliteDatabase {
     throw error;
   }
   database.exec(`
+    CREATE TABLE IF NOT EXISTS disconnected_project_bindings (identity_key TEXT PRIMARY KEY NOT NULL);
     CREATE TABLE IF NOT EXISTS project_bindings (
       id TEXT PRIMARY KEY NOT NULL,
       identity_key TEXT NOT NULL UNIQUE,
@@ -738,6 +739,7 @@ export async function listProjectBindings(
 }
 
 export async function bindProjectRoot(input: {
+  respectDisconnection?: boolean;
   context: DesktopProjectBindingContext;
   rootPath: string;
   source: DesktopProjectBindingSource;
@@ -758,6 +760,9 @@ export async function bindProjectRoot(input: {
   const database = openStore(options);
   try {
     database.exec("BEGIN IMMEDIATE");
+    if (input.respectDisconnection && aliases.some(key => database.prepare("SELECT 1 FROM disconnected_project_bindings WHERE identity_key=?").get(key))) {
+      throw new Error("This project was disconnected. Connect it explicitly to use it again.");
+    }
     const existing = database.prepare(`
       SELECT id, identity_key, verification_keys_json, aliases_json,
              root_path, source, created_at, updated_at
@@ -797,6 +802,7 @@ export async function bindProjectRoot(input: {
       binding.updatedAt,
     );
     projectBindingsStoreTestHooks.beforeCommit?.(database);
+    for (const key of new Set([identityKey, ...aliases])) database.prepare("DELETE FROM disconnected_project_bindings WHERE identity_key = ?").run(key);
     database.exec("COMMIT");
     return binding;
   } catch (error) {
@@ -866,7 +872,9 @@ export async function migrateLegacyProjectBindings(
   };
   for (const candidate of candidates) {
     try {
-      if (findProjectBinding(bindings, candidate.context)) continue;
+      const database = openStore(options);
+      const disconnected = projectBindingAliases(candidate.context).some(key => Boolean(database.prepare("SELECT 1 FROM disconnected_project_bindings WHERE identity_key = ?").get(key)));
+      if (disconnected || findProjectBinding(bindings, candidate.context)) continue;
       const rootPath = await canonicalDirectory(candidate.rootPath);
       const { resolved, status } = await resolveFolder(rootPath);
       const resolvedContext: DesktopProjectBindingContext = {
@@ -890,6 +898,7 @@ export async function migrateLegacyProjectBindings(
         continue;
       }
       const binding = await bindProjectRoot({
+        respectDisconnection: true,
         context,
         rootPath: status.isGitRepo
           ? status.mainRootPath || status.rootPath
@@ -908,4 +917,19 @@ export async function migrateLegacyProjectBindings(
     bindings: wroteBinding ? await listProjectBindings(options) : bindings,
     retryLegacyKeys: [...retryLegacyKeys].sort(),
   };
+}
+
+/** Disconnect only the saved association; never touch repository files. */
+export async function disconnectProjectBinding(id: string, options: ProjectBindingsStoreOptions = {}): Promise<void> {
+  if (typeof id !== "string" || !id.trim()) throw new Error("Select a project connection.");
+  const database = openStore(options);
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    const binding = database.prepare("SELECT identity_key, aliases_json FROM project_bindings WHERE id = ?").get(id) as { identity_key: string; aliases_json: string } | undefined;
+    if (binding) for (const key of new Set([String(binding.identity_key), ...(parseStringArray(String(binding.aliases_json)) || [])])) {
+      database.prepare("INSERT OR IGNORE INTO disconnected_project_bindings(identity_key) VALUES (?)").run(key);
+    }
+    database.prepare("DELETE FROM project_bindings WHERE id = ?").run(id);
+    database.exec("COMMIT");
+  } catch (error) { database.exec("ROLLBACK"); throw error; }
 }

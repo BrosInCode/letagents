@@ -186,7 +186,10 @@ export function buildSidebarProjectGroups(input: {
     }
   }
 
+  const archivedFocusIds = new Set(input.accountRooms.flatMap(room => room.focusRooms)
+    .filter(room => room.archived).map(room => normalizeRoomIdentifier(room.roomIdentifier)));
   const currentFocusEntries = input.focusRooms
+    .filter(room => !archivedFocusIds.has(normalizeRoomIdentifier(room.identifier)))
     .filter(isOpenFocusRoom)
     .map((focusRoom) => desktopFocusRoomToEntry(focusRoom, input.currentParentRoom.roomIdentifier));
   const currentFocusLanes = partitionGitFocusEntries(currentFocusEntries);
@@ -507,8 +510,8 @@ function focusRoomLineage(
   };
 }
 
-export function isOpenFocusRoom(room: { focusStatus: "active" | "concluded" | null }): boolean {
-  return room.focusStatus !== "concluded";
+export function isOpenFocusRoom(room: { focusStatus: "active" | "concluded" | null; archived?: boolean }): boolean {
+  return !room.archived && room.focusStatus !== "concluded";
 }
 
 function accountRoomToEntry(room: DesktopAccountRoomEntry): RoomEntry {

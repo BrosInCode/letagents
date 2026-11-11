@@ -15,11 +15,13 @@ import { workspaceRoot } from "../paths.js";
 import { startRepoStatusWatch, stopRepoStatusWatch } from "../repo-status-watch.js";
 import { connectProjectToRoom, createProjectRoom, createRepoRoomWorktree, openRepoRoomFromPath, pickNewProjectParent, pickRepoRoom } from "../rooms.js";
 import {
+  disconnectProjectBinding,
   listProjectBindings,
   migrateLegacyProjectBindings,
 } from "../project-bindings-store.js";
 
 export function registerDesktopRepoIpcHandlers(targetIpcMain: IpcMain): void {
+  targetIpcMain.handle("desktop:repos:disconnect-project", async (_event, id: string) => disconnectProjectBinding(id));
   targetIpcMain.handle(
     "desktop:repos:get-status",
     async (_event, rootPath?: string | null): Promise<RepoStatus> => buildRepoStatus(rootPath || workspaceRoot),

@@ -1917,3 +1917,55 @@ test("local release queue follows native columns and retains its rule for older 
   assert.equal(state.releases!.items.length, 0);
   assert.equal((await getLocalBoardPlanning(room)).document.releaseRule, null);
 });
+
+
+test("local deletion removes replies, tasks and room data without resurrecting imported messages", async () => {
+  const { deleteLocalMessageContent, deleteLocalRoomMessages } = await import("../main/rooms/messages/local-store.js");
+  const { deleteLocalTask, deleteLocalRoomRecord } = await import("../main/rooms/local-store.js");
+  const room = await createLocalRoom({ displayName: "Delete local room" });
+  const root = await addLocalChatMessage(room.roomIdentifier, { sender: "Human", text: "root", source: "browser" });
+  const reply = await addLocalChatMessage(room.roomIdentifier, { sender: "Human", text: "reply", source: "browser", thread_root_id: root.id });
+  await assert.rejects(deleteLocalMessageContent(room.roomIdentifier, root.id), /whole thread/);
+  await deleteLocalMessageContent(room.roomIdentifier, reply.id);
+  assert.equal((await getLocalChatMessages(room.roomIdentifier)).messages.length, 1);
+  await importLocalChatMessages(room.roomIdentifier, [{ id: "msg_100", sender: "Human", text: "imported", source: "browser", timestamp: new Date().toISOString() }]);
+  const imported = (await getLocalChatMessages(room.roomIdentifier)).messages.find(message => message.text === "imported")!;
+  await deleteLocalMessageContent(room.roomIdentifier, imported.id);
+  await importLocalChatMessages(room.roomIdentifier, [{ id: "msg_100", sender: "Human", text: "imported", source: "browser", timestamp: new Date().toISOString() }]);
+  assert.equal((await getLocalChatMessages(room.roomIdentifier)).messages.some(message => message.text === "imported"), false);
+  const task = await addLocalTask(room.roomIdentifier, { title: "Delete me", clientTaskId: "delete-task-retry" });
+  await deleteLocalTask(room.roomIdentifier, task.id);
+  await assert.rejects(addLocalTask(room.roomIdentifier, { title: "Delete me", clientTaskId: "delete-task-retry" }), /permanently deleted/);
+  assert.deepEqual(await listLocalTasks(room.roomIdentifier), []);
+  await deleteLocalRoomMessages(room.roomIdentifier);
+  await deleteLocalRoomRecord(room.roomIdentifier);
+  assert.equal(await getLocalRoomIncludingArchived(room.roomIdentifier), null);
+  await assert.rejects(addLocalChatMessage(room.roomIdentifier, { sender: "Human", text: "late retry", source: "browser" }), /permanently deleted/);
+  assert.deepEqual((await getLocalChatMessages(room.roomIdentifier)).messages, []);
+});
+
+
+test("sent local attachment deletion preserves the message and repository files", async () => {
+  const { mkdir, writeFile, access } = await import("node:fs/promises");
+  const { localFilesPath } = await import("../main/chat-storage/settings.js");
+  const { deleteLocalMessageContent } = await import("../main/rooms/messages/local-store.js");
+  await mkdir(localFilesPath, { recursive: true });
+  const managedFile = join(localFilesPath, "delete-sent.txt");
+  const repositoryFile = join(tempDir, "repository-file.txt");
+  await writeFile(managedFile, "sent");
+  await writeFile(repositoryFile, "keep");
+  const room = await createLocalRoom({ displayName: "Delete sent file" });
+  const message = await addLocalChatMessage(room.roomIdentifier, { sender: "Human", text: "keep message", source: "browser", attachments: [
+    { id: "local:sent", file_name: "sent.txt", mime_type: "text/plain", size_bytes: 4, url: pathToFileURL(managedFile).href },
+    { id: "local:repo", file_name: "repository-file.txt", mime_type: "text/plain", size_bytes: 4, url: pathToFileURL(repositoryFile).href },
+  ] });
+  await deleteLocalMessageContent(room.roomIdentifier, message.id, { attachmentId: "local:sent" });
+  await assert.rejects(access(managedFile));
+  let retained = (await getLocalChatMessages(room.roomIdentifier)).messages[0];
+  assert.equal(retained.text, "keep message");
+  assert.equal(retained.attachments?.length, 1);
+  await deleteLocalMessageContent(room.roomIdentifier, message.id, { attachmentId: "local:repo" });
+  await access(repositoryFile);
+  retained = (await getLocalChatMessages(room.roomIdentifier)).messages[0];
+  assert.equal(retained.attachments?.length, 0);
+});

@@ -1,3 +1,4 @@
+import { apiFetch, roomPath } from "./room/api";
 import { mergeActivityEvents } from '../../../../shared/ui/activity/model'
 import { readonly, watch } from 'vue'
 import { activityUnread } from '../../../../shared/ui/activity/unread'
@@ -278,6 +279,25 @@ if (typeof window !== 'undefined') {
   window.addEventListener('beforeunload', () => {
     stopStreaming()
   })
+}
+
+export async function deleteRoomContent(roomIdentifier: string, input: { kind: 'message' | 'thread' | 'task' | 'attachment'; id: string; attachmentId?: string }): Promise<void> {
+  const path = input.kind === 'task' ? `tasks/${encodeURIComponent(input.id)}`
+    : `messages/${encodeURIComponent(input.id)}${input.kind === 'thread' ? '/thread' : input.kind === 'attachment' ? `/attachments/${encodeURIComponent(input.attachmentId || '')}` : ''}`
+  const result = await apiFetch(`${roomPath(roomIdentifier)}/${path}`, { method: 'DELETE' })
+  if (room.value?.identifier !== roomIdentifier) return
+  if (input.kind === 'task') {
+    tasks.value = tasks.value.filter(task => task.id !== input.id)
+    await refreshRoomBoard()
+  } else {
+    const removed = new Set<string>(result.message_ids || [])
+    messages.value = messages.value.filter(message => !removed.has(message.id)).map(message => ({
+      ...message,
+      reply_to: message.reply_to && removed.has(message.reply_to.id) ? null : message.reply_to,
+      attachments: input.kind === 'attachment' && message.id === input.id ? message.attachments?.filter(attachment => attachment.id !== input.attachmentId) : message.attachments,
+    }))
+    await refreshRoomMessages(null, true)
+  }
 }
 
 export function useRoom() {

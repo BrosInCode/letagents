@@ -33,6 +33,7 @@ interface DesktopAccountRoomSettingsOptions {
   refresh: () => Promise<void>;
   refreshAccountRooms: () => Promise<void>;
   onRoomArchived?: (roomIdentifier: string, displayName?: string | null) => Promise<void>;
+  onActiveRoomDeleted?: () => Promise<void>;
   onRoomRenamed?: (room: DesktopRoomInfo) => void;
   notify?: (message: string, state: "error" | "info" | "success") => void;
 }
@@ -447,19 +448,30 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     };
   }
 
-  async function deleteAccountRoom(room: DesktopAccountRoomEntry): Promise<void> {
-    const confirmation = window.prompt(
-      `Delete ${room.displayName}? This removes the room and its focus rooms for everyone.\n\nType the room identifier to confirm:`,
-      ""
-    );
-    if (confirmation !== room.roomIdentifier) {
-      return;
-    }
-
+  const pendingRoomDeletion = ref<Pick<DesktopAccountRoomEntry, "roomIdentifier" | "displayName"> | null>(null);
+  function deleteAccountRoom(room: Pick<DesktopAccountRoomEntry, "roomIdentifier" | "displayName">): void {
+    settingsFeedback.value = null;
+    pendingRoomDeletion.value = room;
+  }
+  async function finishRoomArchive(room: { roomIdentifier: string; displayName: string }): Promise<void> {
+    forgetRecentRootRoom(room.roomIdentifier, room.displayName);
+    try {
+      await options.refreshAccountRooms();
+      await options.onRoomArchived?.(room.roomIdentifier, room.displayName);
+    } catch (error) {
+      options.notify?.(error instanceof Error ? error.message : "Room archived, but the room list could not refresh.", "error");
+    } finally { pendingRoomDeletion.value = null; }
+  }
+  async function confirmRoomDeletion(confirmation: string): Promise<void> {
+    const room = pendingRoomDeletion.value;
+    if (!room || confirmation !== room.roomIdentifier || settingsRoomActionBusyKey.value) return;
     settingsRoomActionBusyKey.value = settingsRoomActionKey("delete", room);
     settingsFeedback.value = { message: `Deleting ${room.displayName}...`, state: "info" };
+    let deletedActiveRoot = false;
+    let committed = false;
     try {
-      await desktopIpc.room.deleteAccountRoom(room.roomIdentifier);
+      await desktopIpc.room.deleteAccountRoom(room.roomIdentifier, confirmation);
+      committed = true;
       forgetRecentRootRoom(room.roomIdentifier);
       options.accountRooms.value = options.accountRooms.value.filter(
         (entry) => normalizeRoomIdentifier(entry.roomIdentifier) !== normalizeRoomIdentifier(room.roomIdentifier)
@@ -468,16 +480,39 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
         (entry) => normalizeRoomIdentifier(entry.roomIdentifier) !== normalizeRoomIdentifier(room.roomIdentifier)
       );
 
-      if (normalizeRoomIdentifier(options.selectedRootRoomIdentifier.value) === normalizeRoomIdentifier(room.roomIdentifier)) {
+      const deletedIdentifier = normalizeRoomIdentifier(room.roomIdentifier);
+      const root = options.rootRoomSnapshot.value;
+      if (normalizeRoomIdentifier(options.selectedRootRoomIdentifier.value) === deletedIdentifier) {
+        deletedActiveRoot = true;
         options.selectedRootRoomIdentifier.value = null;
         options.rootRoomSnapshot.value = null;
         options.selectedSnapshot.value = null;
         options.activeEntry.value = options.settingsEntry;
+      } else if (root) {
+        const remainingFocusRooms = root.focusRooms.filter(
+          (entry) => normalizeRoomIdentifier(entry.identifier) !== deletedIdentifier
+        );
+        const nextRoot = { ...root, focusRooms: remainingFocusRooms };
+        if (remainingFocusRooms.length !== root.focusRooms.length) options.rootRoomSnapshot.value = nextRoot;
+        if (normalizeRoomIdentifier(options.selectedSnapshot.value?.roomIdentifier) === deletedIdentifier) {
+          options.openRoomSnapshot(nextRoot);
+        } else if (options.selectedSnapshot.value) {
+          const selected = options.selectedSnapshot.value;
+          const focusRooms = selected.focusRooms.filter((entry) => normalizeRoomIdentifier(entry.identifier) !== deletedIdentifier);
+          if (focusRooms.length !== selected.focusRooms.length) options.selectedSnapshot.value = { ...selected, focusRooms };
+        }
       }
 
+      pendingRoomDeletion.value = null;
       await options.refreshAccountRooms();
-      settingsFeedback.value = { message: `Deleted ${room.displayName}.`, state: "success" };
+      if (deletedActiveRoot) await options.onActiveRoomDeleted?.();
+      reportSidebarRoomAction(`Deleted ${room.displayName}.`, "success");
     } catch (error) {
+      if (committed) {
+        pendingRoomDeletion.value = null;
+        reportSidebarRoomAction(`Deleted ${room.displayName}. The room list could not finish refreshing.`, "error");
+        return;
+      }
       settingsFeedback.value = {
         message: error instanceof Error ? error.message : `Could not delete ${room.displayName}.`,
         state: "error",
@@ -487,7 +522,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     }
   }
 
-  function settingsRoomActionKey(action: "delete" | "leave" | "pin" | "restore", room: DesktopAccountRoomEntry): string {
+  function settingsRoomActionKey(action: "delete" | "leave" | "pin" | "restore", room: Pick<DesktopAccountRoomEntry, "roomIdentifier">): string {
     return `${action}:${room.roomIdentifier}`;
   }
 
@@ -518,6 +553,9 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     archiveSidebarRoom,
     concludeSidebarFocusRoom,
     deleteAccountRoom,
+    pendingRoomDeletion,
+    confirmRoomDeletion,
+    finishRoomArchive,
     leaveAccountRoom,
     renameSidebarRoom,
     openAccountRoomFromSettings,

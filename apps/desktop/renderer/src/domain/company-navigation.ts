@@ -7,8 +7,8 @@ import type { ProjectGroup } from "../components/desktop/types.js";
  * sidebar shows repo rooms the person has not opened. A company room with no
  * repository is listed only for its members, who already have it.
  */
-export function mergeCompanyRooms(existing: DesktopAccountRoomEntry[], rooms: DesktopOrganizationRoom[]): DesktopAccountRoomEntry[] {
-  const known = new Set(existing.map((room) => room.roomIdentifier.toLowerCase()));
+export function mergeCompanyRooms(existing: DesktopAccountRoomEntry[], rooms: DesktopOrganizationRoom[], archivedIds: readonly string[] = []): DesktopAccountRoomEntry[] {
+  const known = new Set([...existing.map((room) => room.roomIdentifier.toLowerCase()), ...archivedIds.map(id => id.toLowerCase())]);
   return [...existing, ...rooms.filter((room) => !known.has(room.room_id.toLowerCase())).map((room): DesktopAccountRoomEntry => {
     const base: DesktopAccountRoomEntry = {
       roomIdentifier: room.room_id, displayName: room.display_name, name: room.room_id,

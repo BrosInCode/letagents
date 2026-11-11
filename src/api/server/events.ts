@@ -36,6 +36,7 @@ export interface MessageRoutedEvent {
   recipientAgentTargets: readonly MessageRecipientAgentTarget[];
 }
 
+export const contentDeletionEvents = createBridgedEmitter("content-deletions");
 export const messageEvents = createBridgedEmitter("messages");
 export const taskEvents = createBridgedEmitter("tasks");
 export const githubRoomEvents = createBridgedEmitter("github");

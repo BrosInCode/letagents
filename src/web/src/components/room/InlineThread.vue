@@ -21,6 +21,7 @@
   </section>
 </template>
 <script setup lang="ts">
+import { roomContentRevision } from '../../composables/room/state'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { RoomMessage, RoomReasoningSession, StalePromptTaskState } from '@/composables/useRoom'
 import { apiFetch, roomPath } from '@/composables/room/api'
@@ -102,6 +103,7 @@ function reveal(id: string) {
   if (highlightTimer) clearTimeout(highlightTimer)
   highlightTimer = setTimeout(() => target.classList.remove('jump-target'), 1600)
 }
+let refreshPending = false
 async function loadReplies(older = false) {
   if (loading.value || !props.roomIdentifier) return
   loading.value = true
@@ -114,10 +116,25 @@ async function loadReplies(older = false) {
     fetched.value = older ? [...page.replies, ...fetched.value] : page.replies
     hasOlder.value = Boolean(page.has_older)
     totalCount = Number(page.summary?.reply_count ?? page.summary?.replyCount ?? 0)
-  } catch {
+  } catch (failure: any) {
+    if (!disposed && failure.status === 404) {
+      fetched.value = []
+      emit('messages', [])
+      emit('close')
+      return
+    }
     if (!disposed) error.value = 'Replies could not be loaded.'
-  } finally { if (!disposed) loading.value = false }
+  } finally {
+    if (!disposed) {
+      loading.value = false
+      if (refreshPending) { refreshPending = false; void loadReplies() }
+    }
+  }
 }
+watch(roomContentRevision, () => {
+  if (loading.value) refreshPending = true
+  else void loadReplies()
+})
 watch(replies, async (next, previous) => {
   const el = body.value
   const top = el?.scrollTop ?? 0

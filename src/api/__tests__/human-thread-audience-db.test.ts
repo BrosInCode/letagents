@@ -134,7 +134,8 @@ test("ordinary agent-directed replies and genuine task-owner follow-ups keep the
   const agentRoot = await a.reply(2, root.message.id);
   const directed = await a.thread(agentRoot.message.id);
   assert.deepEqual((await a.receipts(directed.message.id)).map(r => r.agent_key), [a.sessions[2]!.agent_key]);
-  await api!.createTaskLease({ room_id: a.room.id, task_id: "task_1", kind: "work", agent_key: a.sessions[1]!.agent_key,
+  const task = await api!.createTask(a.room.id, "Follow up", a.ownerId);
+  await api!.createTaskLease({ room_id: a.room.id, task_id: task.id, kind: "work", agent_key: a.sessions[1]!.agent_key,
     agent_session_id: a.sessions[1]!.session_id, actor_label: a.sessions[1]!.actor_label, created_by: a.ownerId });
   const work = await a.thread(root.message.id, "continue");
   assert.deepEqual((await a.receipts(work.message.id)).map(r => [r.agent_key, r.activation_reason]),

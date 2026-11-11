@@ -1,5 +1,6 @@
 import { watch } from "vue";
-import type { RepoStatus } from "../../../../electron/ipc-types";
+import { rememberRecentRootRooms } from "../../domain/sidebar-rooms";
+import type { DesktopProjectBinding, RepoStatus } from "../../../../electron/ipc-types";
 import { preserveRoomRepoStatistics } from "../../domain/repo-status";
 import { activeRepoRoomContext, resolveActiveProjectRootPath } from "../../domain/room-project-context";
 import { openManagedAgentWorktree } from "../../domain/managed-agent-worktrees";
@@ -178,6 +179,20 @@ export function useAppProjectRepo(context: unknown) {
     }
   }
 
+  async function disconnectProject(binding: DesktopProjectBinding): Promise<void> {
+    if (!window.confirm(`Disconnect ${binding.rootPath} from LetAgents? Repository files and worktrees will be kept.`)) return;
+    try {
+      await desktopIpc.repos.disconnectProject(binding.id);
+      recentRootRooms.value = recentRootRooms.value.map(room => room.rootPath === binding.rootPath ? { ...room, rootPath: null } : room);
+      rememberRecentRootRooms(app.recentRootRoomsStorageKey, recentRootRooms.value);
+      for (const [key, path] of Object.entries(legacyRepositoryRootBindings)) if (path === binding.rootPath) delete legacyRepositoryRootBindings[key];
+      window.localStorage.setItem(legacyRepositoryRootBindingsStorageKey, JSON.stringify(legacyRepositoryRootBindings));
+      if (repoStatus.value?.rootPath === binding.rootPath) repoStatus.value = null;
+      await refreshProjectBindings();
+      app.pushActionToast("Project disconnected. Repository files were kept.", "success");
+    } catch (error) { app.pushActionToast(error instanceof Error ? error.message : "Project could not be disconnected.", "error"); }
+  }
+
   async function connectActiveRoomProject(): Promise<void> {
     const groupedContext = activeRepoRoomContext(app.activeEntry.value?.id, app.projectEntries.value);
     const context = groupedContext || {
@@ -216,7 +231,7 @@ export function useAppProjectRepo(context: unknown) {
   return {
     refreshActiveRepoStatus, activeProjectRootPath, refreshProjectBindings,
     initializeProjectBindings, restartRepoStatusWatch, handleRepoStatusChanged,
-    openWorkspaceGitRoom, connectActiveRoomProject, openWorktreeForAgent,
+    openWorkspaceGitRoom, connectActiveRoomProject, disconnectProject, openWorktreeForAgent,
   };
 }
 

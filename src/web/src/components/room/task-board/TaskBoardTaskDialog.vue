@@ -74,6 +74,8 @@
         <template #actions>
           <button type="button" class="task-dialog-back" :disabled="busy" @click="requestClose">View on board</button>
           <div class="task-dialog-secondary">
+            <button v-if="canManageLeases" type="button" class="cancel" :disabled="busy || deleting" @click="deleteTask">{{ deleting ? 'Deleting…' : 'Delete task…' }}</button>
+            <p v-if="deleteError" role="alert">{{ deleteError }}</p>
             <button v-if="canFocusTask(task)" type="button" :disabled="busy" @click="emit('focusTask', task.id)">Focus on this</button>
             <button v-for="action in secondaryActions" :key="action.status" type="button" :class="action.cls" :disabled="busy" @click="emit('updateStatus', task.id, action.status)">{{ updating ? 'Updating...' : action.label }}</button>
             <button v-if="primaryAction" type="button" class="task-dialog-primary" :disabled="busy" @click="emit('updateStatus', task.id, primaryAction.status)">{{ updating ? 'Updating...' : primaryAction.label }}</button>
@@ -159,6 +161,24 @@ function discard() {
   if (!busy.value) emit('close')
 }
 const titleId = `task-dialog-${useId()}`
+const deleting = ref(false)
+const deleteError = ref('')
+async function deleteTask() {
+  if (deleting.value || busy.value) return
+  if (!window.confirm(`Permanently delete “${props.task.title}”? This cannot be undone. Repository files and pull requests will be kept.`)) return
+  deleting.value = true
+  deleteError.value = ''
+  try {
+    const { useRoom, deleteRoomContent } = await import('@/composables/useRoom')
+    const { room } = useRoom()
+    if (!room.value) return
+    await deleteRoomContent(room.value.identifier, { kind: 'task', id: props.task.id })
+    emit('close')
+  }
+  catch (error) { deleteError.value = error instanceof Error ? error.message : 'Task could not be deleted.' }
+  finally { deleting.value = false }
+}
+
 const busy = computed(() => props.locked || props.updating || props.updatingLease || props.updatingReviewLease)
 const taskActions = computed(() => getTaskActions(props.task))
 const primaryAction = computed(() => taskActions.value.find(action => action.cls !== 'cancel'))

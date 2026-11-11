@@ -52,7 +52,7 @@ export async function apiFetch(
     error.payload = payload
     const retryAfterSeconds = Number(res.headers?.get?.('Retry-After'))
     error.retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds * 1000 : null
-    if (reportRoomRefusal && res.status === 403 && roomAccessRefusal(payload)) {
+    if (reportRoomRefusal && ((res.status === 403 && roomAccessRefusal(payload)) || payload?.code === 'ROOM_DELETED' || payload?.code === 'ROOM_NOT_FOUND')) {
       for (const listener of roomAccessRefusedListeners) {
         try {
           listener(path, error)

@@ -1,4 +1,4 @@
-import { apiFetch } from "../../auth.js";
+import { apiFetch, DesktopApiError } from "../../auth.js";
 import type { DesktopSnapshotSourceState } from "../../../ipc-types.js";
 import {
   cloudRoomIdentifierForStorage,
@@ -146,6 +146,7 @@ export async function loadSource<T>(
     const data = await promise;
     return { data, state: { status: "ready", error: null } };
   } catch (error) {
+    if (error instanceof DesktopApiError && ["ROOM_DELETED", "ROOM_NOT_FOUND"].includes(String(error.payload?.code))) throw error;
     return {
       data: fallback,
       state: {

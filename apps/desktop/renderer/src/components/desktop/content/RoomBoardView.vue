@@ -29,6 +29,7 @@
       :room-identifier="roomIdentifier"
       :ticket-keys="ticketKeys"
       @save="saveModalTask"
+      @delete-task="deleteSelectedTask"
       @close="clearTaskSelection"
       @assign-review="assignModalReview"
       @run-action="runModalTaskAction"
@@ -144,6 +145,20 @@ const {
   selectedReviewerByTask,
   setSelectedReviewer,
 } = useRoomBoardController(props, emit);
+
+async function deleteSelectedTask(): Promise<void> {
+  const task = modalTask.value;
+  if (!task || busyAction.value) return;
+  if (!window.confirm(`Permanently delete “${task.title}”? This cannot be undone. Repository files and pull requests will be kept.`)) return;
+  busyAction.value = "delete";
+  errorMessage.value = null;
+  try {
+    await desktopIpc.room.deleteContent(props.roomIdentifier, { kind: "task", id: task.id });
+    clearTaskSelection();
+    emit("refresh-room");
+  } catch (error) { errorMessage.value = error instanceof Error ? error.message : "Task could not be deleted."; }
+  finally { busyAction.value = null; }
+}
 
 const workspace = ref<{ snapshot: BoardPlanningSnapshot | null; selectedSprintId: string; applyCreatedPlanning: (id: string, planning: BoardTaskPlanningFields) => Promise<boolean>; savePlanning: (document: BoardPlanningDocument) => Promise<boolean>; revealTask?: (taskId: string) => Promise<void> } | null>(null);
 const localSelectedTaskId = ref<string | null>(props.selectedTaskId || null);

@@ -50,6 +50,7 @@ export async function completeJevRoutingJob(
   const plan = job.plan;
   let didComplete = false;
   const targets = await db.transaction(async (tx) => {
+    await tx.execute(sql`SELECT pg_advisory_xact_lock_shared(hashtextextended(${job.room_id}, 9510))`);
     // Fence a stale worker and commit completion with receipt insertion. A
     // replay can never run a second election after the first committed.
     const completed = await tx.update(jev_routing_jobs).set({ state: "completed", claim_token: null })

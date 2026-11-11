@@ -1,4 +1,5 @@
 import { captureLocalSupervisedRouting, ensureLocalSupervisedRoutingSchema, runLocalSupervisedMessageWrite } from "../../../../../../shared/local-supervised-routing.mjs";
+import { prepareLocalDeletion, queueLocalAttachmentDeletion, drainLocalAttachmentDeletions } from "../local-content-deletion.js";
 import { randomUUID } from "node:crypto";
 
 import {
@@ -141,6 +142,7 @@ async function getDb(): Promise<SqliteDatabase> {
       await runLocalSqliteWriteTransactionAsync(database, () => {
         ensureLocalSupervisedRoutingSchema(database);
         database.exec(`
+      CREATE TABLE IF NOT EXISTS local_deleted_message_keys (room_id TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(room_id,key));
       CREATE TABLE IF NOT EXISTS local_chat_room_sequences (
         room_id TEXT PRIMARY KEY,
         next_number INTEGER NOT NULL
@@ -166,6 +168,11 @@ async function getDb(): Promise<SqliteDatabase> {
         sync_started_at TEXT,
         PRIMARY KEY (room_id, number)
       );
+      CREATE TABLE IF NOT EXISTS local_deleted_rooms (room_id TEXT PRIMARY KEY NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS local_messages_deleted_replay BEFORE INSERT ON local_chat_messages
+      WHEN EXISTS(SELECT 1 FROM local_deleted_rooms WHERE room_id=NEW.room_id)
+        OR EXISTS(SELECT 1 FROM local_deleted_message_keys WHERE room_id=NEW.room_id AND (key=NEW.sync_key OR key='cloud:' || NEW.synced_cloud_id))
+      BEGIN SELECT RAISE(ABORT, 'This message or room was permanently deleted.'); END;
       CREATE INDEX IF NOT EXISTS local_chat_messages_room_time_idx
         ON local_chat_messages (room_id, timestamp);
       CREATE INDEX IF NOT EXISTS local_chat_messages_sync_idx
@@ -712,6 +719,7 @@ export async function addLocalChatMessage(
   const attachmentRows = (input.attachments || []).map(normalizeAttachmentPayload);
   const row = await runLocalSupervisedMessageWrite(database, trimmedRoomId, threadRootNumber, () => {
     const idempotencyKey = input.idempotency_key?.trim() || null;
+    if (idempotencyKey && database.prepare("SELECT 1 FROM local_deleted_message_keys WHERE room_id=? AND key=?").get(trimmedRoomId, idempotencyKey)) throw new Error("This message was permanently deleted.");
     const existing = idempotencyKey
       ? database
         .prepare("SELECT * FROM local_chat_messages WHERE room_id = ? AND sync_key = ?")
@@ -1353,7 +1361,7 @@ export async function importLocalChatMessages(
     }
     const insertedNumbers = new Set<number>();
     for (const message of sortedMessages) {
-      if (!message.id) continue;
+      if (!message.id || database.prepare("SELECT 1 FROM local_deleted_message_keys WHERE room_id=? AND key=?").get(trimmedRoomId, `cloud:${message.id}`)) continue;
       const publisherAgentKey = message.agent_identity?.agent_key?.trim() || null;
       const senderProfileJson = message.source === "browser" && !publisherAgentKey && message.sender_profile !== undefined
         ? JSON.stringify(publicSenderProfile(message.sender_profile)) : null;
@@ -1552,3 +1560,85 @@ export async function getSyncedCloudMessageId(input: {
   return typeof row?.synced_cloud_id === "string" ? row.synced_cloud_id : null;
 }
 
+export async function deleteLocalMessageContent(roomId: string, messageId: string, options: { thread?: boolean; attachmentId?: string; validateOnly?: boolean } = {}): Promise<void> {
+  const database = await getDb();
+  const number = parseMessageNumber(messageId);
+  if (!number) throw new Error("Invalid message identifier.");
+  prepareLocalDeletion(database);
+  await runLocalSqliteWriteTransactionAsync(database, () => {
+    const target = database.prepare("SELECT * FROM local_chat_messages WHERE room_id=? AND number=?").get(roomId, number);
+    if (!target) throw new Error("Message not found.");
+    if (options.thread && target.thread_root_number) throw new Error("Select the thread's original message.");
+    if (!options.thread && !options.attachmentId && !target.thread_root_number && database.prepare("SELECT 1 FROM local_chat_messages WHERE room_id=? AND thread_root_number=? LIMIT 1").get(roomId, number)) throw new Error("This message has replies. Delete the whole thread instead.");
+    if (target.sync_started_at && Date.parse(String(target.sync_started_at)) > Date.now() - 5 * 60 * 1000) throw new Error("Wait for this message to finish publishing before deleting it.");
+    if (options.attachmentId && !database.prepare("SELECT 1 FROM local_chat_attachments WHERE room_id=? AND message_number=? AND attachment_id=?").get(roomId, number, options.attachmentId)) throw new Error("Attachment not found.");
+    const rows = database.prepare(`SELECT number,sync_key,synced_cloud_id,sync_started_at FROM local_chat_messages WHERE room_id=? AND ${options.thread ? '(number=? OR thread_root_number=?)' : 'number=?'}`)
+      .all(roomId, number, ...(options.thread ? [number] : []));
+    if (rows.some(row => row.sync_started_at && Date.parse(String(row.sync_started_at)) > Date.now() - 5 * 60 * 1000)) throw new Error("Wait for this thread to finish publishing before deleting it.");
+    if (options.validateOnly) return;
+    const numbers = rows.map(row => Number(row.number));
+    queueLocalAttachmentDeletion(database, roomId, numbers, options.attachmentId);
+    for (const row of rows) {
+      if (options.attachmentId) {
+        database.prepare("DELETE FROM local_chat_attachments WHERE room_id=? AND message_number=? AND attachment_id=?").run(roomId, row.number, options.attachmentId);
+      } else {
+        for (const key of [row.sync_key, row.synced_cloud_id ? `cloud:${row.synced_cloud_id}` : null]) {
+          if (key) database.prepare("INSERT OR IGNORE INTO local_deleted_message_keys(room_id,key) VALUES (?,?)").run(roomId, key);
+        }
+        database.prepare("DELETE FROM local_chat_attachments WHERE room_id=? AND message_number=?").run(roomId, row.number);
+        database.prepare("UPDATE local_chat_messages SET reply_to_number=NULL WHERE room_id=? AND reply_to_number=?").run(roomId, row.number);
+        if (database.prepare("SELECT 1 FROM sqlite_master WHERE name='local_supervisor_message_routes'").get()) database.prepare("DELETE FROM local_supervisor_message_routes WHERE room_id=? AND message_id=?").run(roomId, `msg_${row.number}`);
+        database.prepare("DELETE FROM local_chat_messages WHERE room_id=? AND number=?").run(roomId, row.number);
+      }
+    }
+    if (!options.attachmentId) {
+      invalidateLocalThreadRoutingRoots(database, roomId, [Number(target.thread_root_number || number)]);
+      if (options.thread || !target.thread_root_number) database.prepare("DELETE FROM local_chat_thread_reads WHERE room_id=? AND thread_root_number=?").run(roomId, number);
+    }
+  });
+  if (!options.validateOnly) await drainLocalAttachmentDeletions();
+}
+
+export async function getLocalRoomDeletionCounts(roomId: string): Promise<{ messages: number; threads: number; files: number }> {
+  const database = await getDb();
+  return database.prepare(`SELECT
+    (SELECT count(*) FROM local_chat_messages WHERE room_id=?) AS messages,
+    (SELECT count(DISTINCT thread_root_number) FROM local_chat_messages WHERE room_id=? AND thread_root_number IS NOT NULL) AS threads,
+    (SELECT count(*) FROM local_chat_attachments WHERE room_id=?) AS files
+  `).get(roomId, roomId, roomId) as { messages: number; threads: number; files: number };
+}
+
+export async function deleteLocalRoomMessages(roomId: string): Promise<void> {
+  const database = await getDb();
+  prepareLocalDeletion(database);
+  await runLocalSqliteWriteTransactionAsync(database, () => {
+    queueLocalAttachmentDeletion(database, roomId);
+    // Keep sequence and replay tombstones so reopening an identifier cannot reuse old IDs.
+    database.prepare("INSERT OR IGNORE INTO local_deleted_message_keys(room_id,key) SELECT room_id,sync_key FROM local_chat_messages WHERE room_id=? AND sync_key IS NOT NULL").run(roomId);
+    for (const table of ["local_chat_attachments", "local_chat_thread_reads", "local_chat_thread_routing_aliases_v2", "local_chat_thread_routing_agents_v2", "local_chat_thread_routing_root_state_v2", "local_chat_thread_routing_invalidated_roots_v2", "local_chat_messages"]) {
+      database.prepare(`DELETE FROM ${table} WHERE room_id=?`).run(roomId);
+    }
+  });
+  await drainLocalAttachmentDeletions();
+}
+
+export async function getLocalMessageIdForCloudMessage(roomId: string, cloudId: string): Promise<string | null> {
+  const database = await getDb();
+  const row = database.prepare("SELECT number FROM local_chat_messages WHERE room_id=? AND synced_cloud_id=?").get(roomId, cloudId);
+  return row ? `msg_${row.number}` : null;
+}
+
+export async function rememberDeletedCloudMessages(roomId: string, ids: string[]): Promise<void> {
+  const database = await getDb();
+  for (const id of ids) database.prepare("INSERT OR IGNORE INTO local_deleted_message_keys(room_id,key) VALUES (?,?)").run(roomId, `cloud:${id}`);
+}
+
+export async function findLocalAttachmentForCloud(roomId: string, messageId: string, attachment: { id?: string | null; file_name?: string | null; filename?: string | null; size_bytes?: number | null; byte_size?: number | null }): Promise<string | null> {
+  const database = await getDb();
+  const rows = database.prepare("SELECT attachment_id,file_name,size_bytes FROM local_chat_attachments WHERE room_id=? AND message_number=?").all(roomId, parseMessageNumber(messageId));
+  const exact = rows.find(row => row.attachment_id === attachment.id);
+  if (exact) return String(exact.attachment_id);
+  const matches = rows.filter(row => row.file_name === (attachment.file_name || attachment.filename) && row.size_bytes === (attachment.size_bytes ?? attachment.byte_size));
+  if (matches.length > 1) throw new Error("Delete this attachment from the local room first; its local copy cannot be matched uniquely.");
+  return matches[0] ? String(matches[0].attachment_id) : null;
+}

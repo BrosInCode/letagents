@@ -150,6 +150,7 @@ interface EventSourceDeps {
   messagePinEvents?: EventEmitter;
   joinRequestEvents?: EventEmitter;
   bridgeLossEvents?: EventEmitter;
+  contentDeletionEvents?: EventEmitter;
 }
 
 const DEFAULT_MAX_BUFFERED_EVENTS_PER_ROOM = 256;
@@ -347,6 +348,7 @@ export class RoomEventBroker {
         };
       });
     }
+    if (deps.contentDeletionEvents) this.addLossSource(deps.contentDeletionEvents);
     if (deps.bridgeLossEvents) {
       this.addLossSource(deps.bridgeLossEvents);
     }

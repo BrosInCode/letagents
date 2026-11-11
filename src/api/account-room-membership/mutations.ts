@@ -1,3 +1,4 @@
+import { deleteRoomData } from "../db/content-deletion.js";
 import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "../db/client.js";
@@ -101,6 +102,8 @@ export async function deleteAccountRoomForAccount(input: {
 }): Promise<{
   room_id: string;
   deleted: boolean;
+  deleted_room_ids?: string[];
+  parent_room_id?: string | null;
   error?: "not_found" | "forbidden";
   reason?: string;
 }> {
@@ -168,11 +171,12 @@ export async function deleteAccountRoomForAccount(input: {
     };
   }
 
-  await db.delete(rooms).where(eq(rooms.id, room.id));
+  const removed = await deleteRoomData(room.id);
 
   return {
     room_id: room.id,
     deleted: true,
+    ...removed,
   };
 }
 

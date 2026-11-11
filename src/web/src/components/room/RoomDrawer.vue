@@ -61,13 +61,18 @@
         @install="installGitHubApp"
         @setup="setupGitHubAppManifest"
       />
+      <section v-if="room?.role === 'admin'" class="room-removal">
+        <button type="button" :disabled="deletingRoom" @click="deleteRoom">{{ deletingRoom ? 'Deleting…' : 'Permanently delete room…' }}</button>
+        <p v-if="deleteRoomError" role="alert">{{ deleteRoomError }}</p>
+      </section>
     </dialog>
   </Teleport>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, toRef, watch } from 'vue'
-import { RouterLink } from 'vue-router'
+import { RouterLink, useRouter } from 'vue-router'
+import { apiFetch, roomPath } from '@/composables/room/api'
 import { type RoomInfo, type RoomMessage, useRoom } from '@/composables/useRoom'
 import DrawerBrand from './room-drawer/DrawerBrand.vue'
 import { messageDisplayText } from './chat-message/formatting'
@@ -120,7 +125,29 @@ onBeforeUnmount(() => drawerElement.value?.close())
 const roomRef = toRef(props, 'room')
 const messagesRef = toRef(props, 'messages')
 
-const { soundEnabled, toggleSound } = useRoom()
+const { soundEnabled, toggleSound, leaveRoom } = useRoom()
+const router = useRouter()
+const deletingRoom = ref(false)
+const deleteRoomError = ref('')
+async function deleteRoom() {
+  const room = props.room
+  if (!room || deletingRoom.value) return
+  const confirmation = window.prompt(`Permanently delete ${room.displayName}?
+
+This is destructive and cannot be undone. It deletes the room, its focus rooms, messages, threads, tasks, attachments and shared work history for everyone. Repository files and worktrees will be kept.
+
+Type ${room.identifier} to confirm:`)
+  if (confirmation !== room.identifier) return
+  deletingRoom.value = true
+  deleteRoomError.value = ''
+  try {
+    await apiFetch(roomPath(room.identifier), { method: 'DELETE', body: JSON.stringify({ confirmation }) })
+    leaveRoom()
+    emit('close')
+    await router.replace('/')
+  } catch (error) { deleteRoomError.value = error instanceof Error ? error.message : 'Room could not be deleted.' }
+  finally { deletingRoom.value = false }
+}
 const isDark = ref(localStorage.getItem('lac-theme') !== 'light')
 
 const {

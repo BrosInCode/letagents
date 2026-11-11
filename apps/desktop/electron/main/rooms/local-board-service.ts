@@ -10,6 +10,8 @@ import { getLocalBoardPlanning, updateLocalBoardPlanning } from "./local-board-p
 
 const desktopMutations = {
   addLocalTask: store.addLocalTask,
+  deleteLocalTask: store.deleteLocalTask,
+  deleteLocalRoomRecord: store.deleteLocalRoomRecord,
   updateLocalTask: store.updateLocalTask,
   claimLocalTaskWorkLease: store.claimLocalTaskWorkLease,
   changeLocalTaskWorkLease: store.changeLocalTaskWorkLease,

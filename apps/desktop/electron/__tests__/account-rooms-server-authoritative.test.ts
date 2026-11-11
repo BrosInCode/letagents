@@ -12,9 +12,10 @@ const {
   createLocalRoom,
   linkLocalRoomToCloud,
   setLocalRoomPinned,
+  setLocalRoomArchived,
   getLocalRoomIncludingArchived,
 } = await import("../main/rooms/local-store.js");
-const { listDesktopAccountRooms, updateDesktopAccountRoom } = await import(
+const { listDesktopAccountRooms, updateDesktopAccountRoom, getDesktopRoomDeletionPreview, deleteDesktopAccountRoom } = await import(
   "../main/rooms/account-rooms.js"
 );
 
@@ -214,4 +215,40 @@ test("a cloud outage retains unpublished local rooms without treating cloud mirr
     assert.ok(rooms.some(room => room.roomIdentifier === local.roomIdentifier));
     assert.ok(!rooms.some(room => [mirrored.roomIdentifier, "room_offline_mirror"].includes(room.roomIdentifier)));
   } finally { globalThis.fetch = previous; }
+});
+
+
+test("deletion preview counts local-only content and permits cleanup of a deleted cloud mirror", async () => {
+  const local = await createLocalRoom({ displayName: "Local preview" });
+  const preview = await getDesktopRoomDeletionPreview(local.roomIdentifier);
+  assert.deepEqual(preview, { children: [], counts: { messages: 0, threads: 0, tasks: 0, files: 0 }, localOnly: true });
+  await linkLocalRoomToCloud({ roomIdentifier: local.roomIdentifier, cloudRoomIdentifier: "deleted-cloud-preview" });
+  const previous = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ code: "ROOM_DELETED", error: "Room deleted" }), { status: 410, headers: { "Content-Type": "application/json" } });
+  try {
+    assert.deepEqual(await getDesktopRoomDeletionPreview(local.roomIdentifier), preview);
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: "Unavailable" }), { status: 503 });
+    await assert.rejects(getDesktopRoomDeletionPreview(local.roomIdentifier));
+  } finally { globalThis.fetch = previous; }
+});
+
+test("parent deletion checks local agents in archived focus rooms before deleting cloud content", async (t) => {
+  const child = await createLocalRoom({ displayName: "Archived focus copy" });
+  await linkLocalRoomToCloud({ roomIdentifier: child.roomIdentifier, cloudRoomIdentifier: "archived-focus-copy" });
+  await setLocalRoomArchived(child.roomIdentifier, true);
+  const { supervisorDaemonClient } = await import("../main/supervisor-daemon.js");
+  const checked: string[] = [];
+  t.mock.method(supervisorDaemonClient, "list", async (id: string) => {
+    checked.push(id);
+    return [{ desiredState: "running" }];
+  });
+  const calls: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push(init?.method ?? "GET");
+    assert.match(String(input), /\/rooms\/parent-with-archived-focus\/deletion-preview$/);
+    return new Response(JSON.stringify({ children: [{ roomIdentifier: "archived-focus-copy", displayName: "Archived focus copy" }], counts: null }), { headers: { "Content-Type": "application/json" } });
+  });
+  await assert.rejects(deleteDesktopAccountRoom("parent-with-archived-focus", "parent-with-archived-focus"), /Retire.*local agents/);
+  assert.deepEqual(checked, [child.roomIdentifier]);
+  assert.deepEqual(calls, ["GET"], "cloud DELETE must not run while a descendant has local agents");
 });

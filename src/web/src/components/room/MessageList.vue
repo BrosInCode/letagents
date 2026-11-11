@@ -90,6 +90,7 @@
 </template>
 
 <script setup lang="ts">
+import { roomContentRevision } from '../../composables/room/state'
 import type { ChatScrollPosition } from '../../../../../shared/chat-scroll-position'
 import RoomGitHubUpdates from '../../../../../shared/ui/RoomGitHubUpdates.vue'
 import { createGitHubTimeline } from '../../../../../shared/grouped-github-updates'
@@ -351,6 +352,25 @@ watch(() => props.roomIdentifier, () => {
   loadedThreadSummaries.value = new Map()
   loadedThreadMessages.value = new Map()
   threadRevealId.value = null
+})
+
+watch(roomContentRevision, () => {
+  // Search may have loaded roots outside the timeline window. Revalidate those
+  // too, otherwise a deleted root would keep its entire thread visible.
+  const revision = threadRoomRevision
+  for (const id of loadedThreadRoots.value.keys()) {
+    void apiFetch(`${roomPath(props.roomIdentifier || '')}/messages/${encodeURIComponent(id)}/thread`)
+      .then(page => { if (revision === threadRoomRevision) loadedThreadRoots.value.set(id, page.root) })
+      .catch(error => {
+        if (revision !== threadRoomRevision || error.status !== 404) return
+        loadedThreadRoots.value.delete(id)
+        loadedThreadMessages.value.delete(id)
+        loadedThreadSummaries.value.delete(id)
+        openedThreads.value.delete(id)
+        if (activeThreadId.value === id) activeThreadId.value = null
+        rememberThreadMessages(id, [])
+      })
+  }
 })
 
 const threadSummaries = computed(() => buildMessageThreadSummaries(props.messages))

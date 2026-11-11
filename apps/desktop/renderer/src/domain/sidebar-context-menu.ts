@@ -16,7 +16,8 @@ export type SidebarRoomMenuActionId =
   | "toggle-project"
   | "conclude-focus-room"
   | "archive-focus-room"
-  | "archive-room";
+  | "archive-room"
+  | "delete-room";
 
 export type SidebarRoomMenuItem = {
   id: SidebarRoomMenuActionId | "notifications";
@@ -111,6 +112,9 @@ export function buildSidebarRoomContextMenuItems(input: {
       label: entry.source === "recent" ? "Remove from my rooms" : "Hide room",
       danger: true,
     });
+  }
+  if (canManageRooms && selectable) {
+    destructive.push({ id: "delete-room", label: "Delete room…", danger: true });
   }
   if (destructive.length) groups.push(destructive);
 

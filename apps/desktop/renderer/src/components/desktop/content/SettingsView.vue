@@ -127,6 +127,8 @@
       />
 
       <SettingsRoomsPane
+        :project-bindings="projectBindings"
+        @disconnect-project="$emit('disconnect-project', $event)"
         v-else-if="isRoomPane"
         :account-rooms="accountRooms"
         :active-pane="activePane"
@@ -236,6 +238,7 @@ import type { DesktopMcpWizardStep } from "../setup/types";
 import type { AttentionNavigationIntent } from "./room-shell/types";
 
 const props = defineProps<{
+  projectBindings?: import("../../../../../electron/ipc-types").DesktopProjectBinding[];
   accountRooms: DesktopAccountRoomEntry[];
   appInfo: DesktopAppInfo | null;
   appAgentActions: DesktopAppAgentActionMetadata[];
@@ -269,7 +272,8 @@ const emit = defineEmits<{
   "back-to-app": [];
   "clear-mcp-target-selection": [];
   "continue-mcp": [];
-  "delete-room": [room: DesktopAccountRoomEntry];
+  "disconnect-project": [binding: import("../../../../../electron/ipc-types").DesktopProjectBinding];
+  "delete-room": [room: Pick<DesktopAccountRoomEntry, "roomIdentifier" | "displayName">];
   "finish-mcp": [];
   "install-mcp-targets": [];
   "check-update": [];

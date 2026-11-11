@@ -74,6 +74,7 @@
     <template #description="{ text }"><MarkdownBlock :text="text" :mentions="false" preserve-paths /></template>
     <RoomChatView
       ref="roomChatView"
+      @content-deleted="emit('content-deleted', $event)"
       v-show="activeTab === 'chat'"
       :active="activeTab === 'chat'"
       :messages="timelineMessages"
