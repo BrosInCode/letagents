@@ -14,7 +14,11 @@ import { resolveRequestAuth } from "../../request/auth.js";
 import { GitHubAccessUnavailableError, REPO_ACCESS_REFRESH_AFTER_MS } from "../../github/repo-access.js";
 import { classifyRoomAccess, decideRoomRead, roomAccessPrincipal } from "../../rooms/access-decision.js";
 import { roomAccessName } from "../../rooms/access.js";
-import { acquireLiveRoomAuthorization, type LiveRoomAuthorizationLease } from "../../rooms/live-authorization.js";
+import {
+  acquireLiveRoomAuthorization,
+  onRequestCredentialRetired,
+  type LiveRoomAuthorizationLease,
+} from "../../rooms/live-authorization.js";
 import {
   ROOM_JOIN_REQUEST_CHANGED,
   readRoomJoinRequestChangedEvent,
@@ -158,6 +162,8 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
     };
     roomEventBridgeLossEvents.on("loss", onBridgeLoss);
     connection.addCleanup(() => { roomEventBridgeLossEvents.off("loss", onBridgeLoss); });
+    // Sign-out or token revocation of this stream's own credential closes it now.
+    connection.addCleanup(onRequestCredentialRetired(req, () => connection.close()));
     const frame = (event: string, data: unknown) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 
     // Every frame about a room passes a live read re-check of that room (its

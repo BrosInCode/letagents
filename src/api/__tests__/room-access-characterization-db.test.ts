@@ -748,7 +748,7 @@ test("rows added after the first pin keep their pinned answer", { skip, concurre
 // ------------------------------------------------ gap fix A: activity stream
 
 /** A real activity stream route over the real room list and leases, for one world's person. */
-async function openActivityStream(world: World) {
+async function openActivityStream(world: World, options: { ownerToken?: boolean } = {}) {
   const express = (await import("express")).default;
   const { EventEmitter } = await import("node:events");
   const { AccountActivityHub } = await import("../account-activity/hub.js");
@@ -770,7 +770,7 @@ async function openActivityStream(world: World) {
   hub.attach({ presence, messages: new EventEmitter() });
   const app = express();
   app.use((req, _res, next) => {
-    Object.assign(req, { authKind: "session", sessionAccount: world.sessionAccount, agentSession: null });
+    Object.assign(req, { authKind: options.ownerToken ? "owner_token" : "session", sessionAccount: world.sessionAccount, agentSession: null });
     next();
   });
   registerAccountActivityStreamRoute(app, { hub, getAccountRoomsForAccount: roomList!.getAccountRoomsForAccount });
@@ -779,7 +779,9 @@ async function openActivityStream(world: World) {
   const { port } = http.address() as import("node:net").AddressInfo;
   const controller = new AbortController();
   const response = await realFetch(`http://127.0.0.1:${port}/account/activity/stream`, {
-    headers: { cookie: `letagents_session=${world.sessionToken}` },
+    headers: options.ownerToken
+      ? { authorization: `Bearer ${world.ownerToken}` }
+      : { cookie: `letagents_session=${world.sessionToken}` },
     signal: controller.signal,
   });
   assert.equal(response.status, 200);
@@ -954,7 +956,7 @@ test("a focus room with its own GitHub binding is judged by that binding in the 
   } finally { await s.close(); }
 });
 
-test("50 busy repo rooms for 10 minutes cost the activity stream no more GitHub calls than the cache rules allow", { skip, concurrency: false }, async () => {
+test("50 busy repo rooms for 30 minutes cost the activity stream at most 2 GitHub calls per room per 5 minutes", { skip, concurrency: false }, async () => {
   const { settleRepoAccessRefreshesForTests } = await import("../github/repo-access.js");
   const clock = useFakeClock();
   const world = await buildWorld("repo_private", "member");
@@ -963,29 +965,114 @@ test("50 busy repo rooms for 10 minutes cost the activity stream no more GitHub 
   const s = await openActivityStream(world);
   try {
     for (const roomId of rooms) assert.ok(s.stream.text.includes(roomId), "every room is listed");
-    const before = githubCalls.length;
-    // A frame in every room every 20 s for 10 minutes.
-    for (let round = 0; round < 30; round++) {
+    // A frame in every room every 20 s for 30 minutes; GitHub calls counted per 5-minute window.
+    const windows: number[] = [];
+    let windowStart = githubCalls.length;
+    for (let round = 1; round <= 90; round++) {
       for (const roomId of rooms) s.frame(roomId, `r${round}`);
-      await s.settle(60);
+      await s.settle(40);
       await settleRepoAccessRefreshesForTests();
       clock.advance(20_000);
+      if (round % 15 === 0) {
+        windows.push(githubCalls.length - windowStart);
+        windowStart = githubCalls.length;
+      }
     }
-    await s.settle(300);
-    await settleRepoAccessRefreshesForTests();
-    const calls = githubCalls.length - before;
+    await s.settle(200);
     const sent = (s.stream.text.match(/event: room/g) ?? []).length;
-    assert.ok(sent >= 50 * 25, `frames flow (${sent})`);
-    // The rules: a lease keeps its answer 5 minutes, so each room is checked
-    // at most 3 times in 10 minutes (at the start, at 5 and at 10 minutes);
-    // a check is a visibility read (60 s shared cache) plus, when the cached
-    // yes is 5 minutes old, a background role refresh of 2 calls: at most
-    // 3 calls a check, 9 a room. A fresh check every 60 s would cost 20.
-    assert.ok(calls <= 50 * 9, `GitHub calls in 10 minutes: ${calls}`);
-    console.log(`[activity stream cost] 50 rooms, 10 minutes, frames every 20 s: ${calls} GitHub calls, ${sent} frames`);
+    assert.ok(sent >= 50 * 85, `frames flow (${sent})`);
+    // The rule: a lease keeps its answer 5 minutes; a check reuses the
+    // visibility paired with the cached yes, so its only GitHub cost is the
+    // background refresh of that yes (repository + permission): at most 2
+    // calls per room per 5 minutes, 100 for 50 rooms.
+    for (const calls of windows) assert.ok(calls <= 50 * 2, `GitHub calls per 5-minute window: ${windows.join(", ")}`);
+    const perHour = windows.slice(1).reduce((sum, calls) => sum + calls, 0) * (60 / 25);
+    console.log(`[activity stream cost] 50 rooms, 30 minutes, frames every 20 s: per 5-minute window ${windows.join(", ")}; about ${Math.round(perHour)} per hour`);
   } finally {
     clock.restore();
     await s.close();
+  }
+});
+
+// ------------------------------------------------ sign-out closes live streams
+
+async function signOut(req: Record<string, unknown>): Promise<number> {
+  const { registerAuthLogoutRoute } = await import("../routes/auth/index.js");
+  let handler: ((req: unknown, res: unknown) => Promise<void>) | undefined;
+  registerAuthLogoutRoute({ post: (_path: string, h: never) => { handler = h; } } as never);
+  const res = { statusCode: 200, status(code: number) { this.statusCode = code; return this; }, json() { return this; }, setHeader() { return this; }, append() { return this; }, cookie() { return this; }, clearCookie() { return this; } };
+  await handler!(req, res);
+  return res.statusCode;
+}
+
+test("signing out closes the account activity stream of that session at once", { skip, concurrency: false }, async () => {
+  const world = await buildWorld("membership", "member");
+  const s = await openActivityStream(world);
+  try {
+    s.frame(world.project.id, "BeforeSignOut");
+    await s.until(() => s.stream.text.includes("BeforeSignOut"), "frames flow before sign-out");
+    const started = performance.now();
+    assert.equal(await signOut({
+      headers: { cookie: `letagents_session=${world.sessionToken}` },
+      authKind: "session",
+      sessionAccount: world.sessionAccount,
+    }), 200);
+    await s.until(() => s.stream.ended, "the stream ends", 2_000);
+    assert.ok(performance.now() - started < 2_000, "at once, not at a lease re-check");
+  } finally { await s.close(); }
+});
+
+test("revoking an owner token closes the account activity stream of that token at once", { skip, concurrency: false }, async () => {
+  const world = await buildWorld("membership", "member");
+  const ownerAccount = await ownerTokens!.getOwnerTokenAccountByToken(world.ownerToken!);
+  assert.ok(ownerAccount);
+  const s = await openActivityStream(world, { ownerToken: true });
+  try {
+    assert.equal(await signOut({
+      headers: { authorization: `Bearer ${world.ownerToken}` },
+      authKind: "owner_token",
+      sessionAccount: ownerAccount,
+    }), 200);
+    await s.until(() => s.stream.ended, "the stream ends", 2_000);
+    assert.ok(!(await ownerTokens!.getOwnerTokenAccountByToken(world.ownerToken!)), "and the token is gone");
+  } finally { await s.close(); }
+});
+
+test("signing out closes the room streams of that session at once; another session's stream stays", { skip, concurrency: false }, async () => {
+  const { openLiveRoomDeliveryController } = await import("../routes/rooms/messages/live-controller.js");
+  const world = await buildWorld("membership", "member");
+  const otherToken = `char-session-other-${serial}`;
+  await accountSessions!.createSession(world.accountId!, otherToken, new Date(Date.now() + 3_600_000).toISOString(), null);
+  const open = async (token: string) => {
+    let denied = false;
+    const req = {
+      headers: { cookie: `letagents_session=${token}` },
+      authKind: "session",
+      sessionAccount: await accountSessions!.getSessionAccountByToken(token),
+      agentSession: null,
+    } as unknown as AuthenticatedRequest;
+    const controller = await openLiveRoomDeliveryController({
+      req, project: world.project, accessRoomName: world.project.id, transport: "sse", trackDelivery: false,
+      onSessionDisconnected: () => undefined,
+      onAuthorizationDenied: () => { denied = true; },
+    });
+    controller.activate();
+    assert.equal(await controller.check(), true, "the stream may deliver");
+    return { controller, denied: () => denied };
+  };
+  const mine = await open(world.sessionToken!);
+  const other = await open(otherToken);
+  try {
+    await signOut({ headers: { cookie: `letagents_session=${world.sessionToken}` }, authKind: "session", sessionAccount: world.sessionAccount });
+    const deadline = performance.now() + 2_000;
+    while (!mine.denied() && performance.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(mine.denied(), true, "the signed-out session's room stream is closed at once");
+    assert.equal(await mine.controller.check(), false);
+    assert.equal(other.denied(), false, "the other session's stream stays");
+    assert.equal(await other.controller.check(), true);
+  } finally {
+    await mine.controller.close();
+    await other.controller.close();
   }
 });
 
