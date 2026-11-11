@@ -317,9 +317,9 @@ test("a permanently deleted room cannot come back under its id, so it never gets
   const res = { statusCode: 200, status(code: number) { res.statusCode = code; return res; }, json() { return res; } };
   assert.equal(await resolution!.resolveRoomOrReply(named.id, res as unknown as Response, { allowCreate: true }), null);
   assert.equal(res.statusCode, 410);
-  // Drizzle wraps the database error; the trigger's message is its cause.
-  const deletedRoomError = (error: unknown) =>
-    /This room was permanently deleted/.test(String((error as { cause?: { message?: string } }).cause?.message));
+  // The deleted-room trigger's refusal surfaces as RoomDeletedError (410).
+  const { RoomDeletedError } = await import("../db/utils.js");
+  const deletedRoomError = (error: unknown) => error instanceof RoomDeletedError && error.status === 410;
   await assert.rejects(() => rooms.getOrCreateCanonicalRoom(named.id), deletedRoomError);
   await assert.rejects(() => rooms.getOrCreateCanonicalRoom(project.id), deletedRoomError);
   assert.equal((await client!.pool.query("SELECT 1 FROM rooms WHERE id = ANY($1)", [[project.id, named.id]])).rowCount, 0);
