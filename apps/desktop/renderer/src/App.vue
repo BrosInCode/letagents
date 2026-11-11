@@ -90,7 +90,7 @@
           :reveal-request="sidebarRevealRequest"
           :settings-entry="settingsEntry"
           :rental-request-count="rentalRequestCount"
-          :needs-you-count="needsYouCount"
+          :inbox-unread-count="inboxUnreadCount"
           :messages-unread="messagesUnread"
           :pinned-collapsed="pinnedCollapsed"
           :rooms-collapsed="roomsCollapsed"
@@ -601,7 +601,7 @@ const { accountActivity } = Object.assign(app, useAppAccountActivityFeed(app));
 
 const {
   needsYouData, needsYouLoading, needsYouError, mergeInboxThreads, agentAttentionItems,
-  needsYouCount, inboxJoinRequests, inboxStorageKey, inboxRooms, chooseInboxRooms,
+  inboxJoinRequests, inboxStorageKey, inboxRooms, chooseInboxRooms,
 } = Object.assign(app, useAppInboxState(app));
 
 const {
@@ -612,7 +612,7 @@ const {
 } = Object.assign(app, useAppNavigation(app));
 
 const {
-  roomAttention,
+  roomAttention, inboxUnreadCount,
 } = Object.assign(app, useAppRoomAttention(app));
 
 Object.assign(app, useAppJoinRequestAlerts(app));

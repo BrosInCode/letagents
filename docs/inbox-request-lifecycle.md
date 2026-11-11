@@ -4,7 +4,7 @@ An agent asks a person for a decision with the MCP tool `request_human_input`.
 The request is an `attention` record in room knowledge
 (`shared/room-knowledge.mjs`) and shows in the desktop Inbox under
 **Needs you** until it has a `response`. Every way out writes `response`, so
-the Inbox, the sidebar count and `get_human_requests` treat them alike.
+the Inbox queue and `get_human_requests` treat them alike.
 
 ## How a request enters the room
 
@@ -32,9 +32,34 @@ no publisher key, so no supervised agent is woken.
 A retry with the same `client_id` posts nothing more. The client message id
 `internal:attention-request:<id>` is reserved: public message writes cannot
 claim it first. A request created without `source_message_id` takes the notice
-as its source, so the answer replies to the notice. Requests a person files,
+as its source. Answers reply to the agent's notice, even when the request's
+evidence points to a human message. Without a notice, the answer has no quote.
+Requests a person files,
 and requests saved before notices existed, get no notice. In a local room the
-source is not filled in.
+source is not filled in; the answer finds the local notice by its stable message key.
+
+## Accepting a board task in desktop Inbox
+
+Proposed board tasks appear in Needs you with **Accept task**. An unanswered
+approval request whose title names exactly one proposed task in the same room
+shows that card and its acceptance action inline, without a duplicate queue row.
+The card's title and description are shown before the person decides.
+
+Acceptance uses the same task mutation and permission checks as the Board.
+After the board confirms acceptance, a linked request records and posts
+`Accepted task_1: <task title>.` If saving that answer fails, Inbox shows the
+successful board decision and offers to retry saving the answer, including
+after reopening Inbox. Navigation does not cancel saving the answer; switching
+accounts leaves it for the accepting account to finish. If the board response
+is lost, Inbox checks the current task under the same account before retrying
+or recording acceptance. Free-text
+answers remain separate from board changes. Suggested answers quote the
+agent's recommendation so its first-person promises are not attributed to the human.
+
+The desktop sidebar badge counts unseen Needs you items. Opening the visible
+Needs you list acknowledges items in its room filter, without resolving them.
+Read state is saved per account; changed items can become unseen again. The
+Needs you tab continues to show the unresolved count.
 
 ## How a request leaves Needs you
 

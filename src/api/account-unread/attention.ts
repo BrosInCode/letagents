@@ -8,7 +8,7 @@
  *    membership. A room that fails the check is named in `failures`, with no
  *    content, as the per-room route would answer 401 or 403.
  * 3. A readable room returns what `GET /rooms/:room/attention` returns: its
- *    requests (up to 200) and its blocked or in-review cards.
+ *    requests (up to 200) and its proposed, blocked or in-review cards.
  * 4. A room where the account is an admin also returns its pending board
  *    intents, as `GET /rooms/:room/board-intents?status=pending` would. A
  *    pending intent lives 24 hours and is always announced by a message, so a
@@ -63,7 +63,7 @@ export interface AccountAttentionDeps {
   getProject(roomId: string): Promise<Project | undefined>;
   mayRead(project: Project, account: RoomAccessAccount): Promise<boolean>;
   listRequests: typeof listRoomKnowledge;
-  /** Blocked and in-review cards of these rooms, newest change first. */
+  /** Proposed, blocked and in-review cards of these rooms, newest change first. */
   getTasks(roomIds: readonly string[]): Promise<Array<AccountAttentionTask & { room_id: string }>>;
   listBoardIntents: typeof listBoardIntents;
   now(): number;
@@ -76,7 +76,7 @@ export async function getAttentionTasksForRooms(roomIds: readonly string[]): Pro
     room_id: tasksTable.room_id, number: tasksTable.number, title: tasksTable.title, status: tasksTable.status,
     description: tasksTable.description, updated_at: tasksTable.updated_at,
   }).from(tasksTable)
-    .where(and(inArray(tasksTable.room_id, [...roomIds]), inArray(tasksTable.status, ["blocked", "in_review"])))
+    .where(and(inArray(tasksTable.room_id, [...roomIds]), inArray(tasksTable.status, ["proposed", "blocked", "in_review"])))
     .orderBy(desc(tasksTable.updated_at), asc(tasksTable.number));
   return rows.map((row) => ({
     room_id: row.room_id, id: formatTaskId(row.number), title: row.title, status: row.status,

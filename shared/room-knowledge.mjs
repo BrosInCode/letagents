@@ -103,6 +103,12 @@ export function formatAttentionResponse(record) {
   return `${handle ? `@agent:${handle}\n\n` : ''}Human response (${record.id}):\n\n${record.response.body}`;
 }
 
+/** A recommendation belongs to the agent, even when a person agrees with it. */
+export function attentionRecommendationReply(recommendation) {
+  const quote = String(recommendation ?? '').trim();
+  return quote ? `I agree with your recommendation:\n\n${quote.split(/\r?\n/).map(line => `> ${line}`).join('\n')}` : '';
+}
+
 const ATTENTION_RESPONSE_TEXT = /^(?:@agent:([a-z0-9_.:/-]+)\n\n)?Human response \([a-zA-Z0-9_-]{8,80}\):\n\n([\s\S]+)$/;
 // A room display name used as a mention: never markdown, never spaces, and
 // no underscore that could open emphasis (leading, or doubled anywhere).
@@ -114,9 +120,8 @@ const OPENS_WITH_BLOCK = /^(?: {4}|\t| {0,3}(?:`{3}|~{3}|[-*+](?:\s|$)|\d{1,9}[.
 /**
  * What people see for a message formatAttentionResponse wrote. The handle and
  * request id route the answer to the agent that asked; the room reads it as a
- * reply to that agent by name, or to a neutral @agent when the room no longer
- * lists it (the visible mention is the record of who was woken). Null for any
- * other text.
+ * reply to that agent by name, or to the requesting agent when the room no
+ * longer lists it. Null for any other text.
  */
 export function attentionResponseDisplayText(text, agentName) {
   const match = ATTENTION_RESPONSE_TEXT.exec(typeof text === 'string' ? text : '');
@@ -124,7 +129,11 @@ export function attentionResponseDisplayText(text, agentName) {
   const answer = match[2];
   if (!match[1]) return answer;
   const name = String(agentName(match[1]) ?? '').trim();
-  const mention = `@${MENTION_NAME.test(name) ? name : 'agent'}`;
+  if (!MENTION_NAME.test(name)) {
+    const label = /^[\p{L}\p{N} .:-]{1,100}$/u.test(name) ? name : 'the requesting agent';
+    return `Reply to ${label}:\n\n${answer}`;
+  }
+  const mention = `@${name}`;
   // trimEnd: a CRLF line keeps its \r, and trailing space must not hide a rule.
   return OPENS_WITH_BLOCK.test(answer.split('\n', 1)[0].trimEnd()) ? `${mention}\n\n${answer}` : `${mention} ${answer}`;
 }

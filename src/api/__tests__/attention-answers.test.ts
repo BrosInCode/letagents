@@ -18,6 +18,7 @@ function harness(bodies: Record<string, string>, held: string[] = []) {
       listRoomKnowledge: async () => ({ records: [...records.values()], truncated: false }),
       getRoomKnowledge: async (_room, id) => records.get(id) ?? null,
       assertKnowledgeSource: async () => {},
+      roomMessageIdForClientId: async () => null,
       reviseRoomKnowledgeInTransaction: async (_tx, next) => { records.set(next.id, next); },
     },
     emitMessage: async (_room, _sender, _text, options) => {
@@ -70,6 +71,7 @@ test('retiring an agent closes only its own open requests, and tells it in the r
       listRoomKnowledge: async () => ({ records: [...records.values()], truncated: false }),
       getRoomKnowledge: async (_room, id) => records.get(id) ?? null,
       assertKnowledgeSource: async () => {},
+      roomMessageIdForClientId: async () => null,
       reviseRoomKnowledgeInTransaction: async (_tx, next) => { records.set(next.id, next); },
     },
     emitMessage: async (_room, sender, text, options) => {

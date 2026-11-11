@@ -22,10 +22,10 @@
           <Search aria-hidden="true" />
         </button>
         <button class="sidebar-topbar-action sidebar-inbox-button" type="button" data-testid="sidebar-inbox"
-          :data-active="activeEntry.type === 'inbox'" :aria-label="needsYouCount ? `Inbox, ${needsYouCount} items need you` : 'Inbox'"
+          :data-active="activeEntry.type === 'inbox'" :aria-label="inboxUnreadCount ? `Inbox, ${inboxUnreadCount} unread items` : 'Inbox'"
           title="Inbox" @click="$emit('open-needs-you')">
           <Inbox aria-hidden="true" />
-          <span v-if="needsYouCount" class="sidebar-inbox-count">{{ needsYouCount > 99 ? '99+' : needsYouCount }}</span>
+          <span v-if="inboxUnreadCount" class="sidebar-inbox-count">{{ inboxUnreadCount > 99 ? '99+' : inboxUnreadCount }}</span>
         </button>
         <button class="sidebar-collapse-button" type="button" aria-label="Hide sidebar" title="Hide sidebar"
           data-testid="sidebar-cycle-button" @click="$emit('cycle-sidebar')"><PanelLeftClose aria-hidden="true" /></button>
@@ -742,7 +742,7 @@ const props = defineProps<{
   selectedEntryIds: string[];
   batchActionBusy: SidebarRoomBatchActionId | null;
   rentalRequestCount?: number;
-  needsYouCount?: number;
+  inboxUnreadCount?: number;
   messagesUnread?: number;
   updateStatus: DesktopUpdateStatus | null;
   authStatus: DesktopAuthStatus | null;
