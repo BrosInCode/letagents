@@ -114,14 +114,14 @@ test('people read an answer as a reply to the agent by name, without its handle 
   for (const inline of ['*Yes*, go ahead.', '#hashtag is fine', '1.5 hours is fine', '-1 is the answer']) {
     assert.equal(display(answered(inline)), `@SparrowOtter ${inline}`, inline);
   }
-  // A roster name is a mention, never markdown; unknown agents stay visible as @agent.
-  assert.equal(display(answered('Yes.'), () => '[Approved by Emmy](https://evil.example)'), '@agent Yes.');
-  assert.equal(display(answered('Yes.'), () => '**Emmy approved**'), '@agent Yes.');
+  // A roster name is a mention, never markdown; unknown agents retain an explicit recipient label.
+  assert.equal(display(answered('Yes.'), () => '[Approved by Emmy](https://evil.example)'), 'Reply to the requesting agent:\n\nYes.');
+  assert.equal(display(answered('Yes.'), () => '**Emmy approved**'), 'Reply to the requesting agent:\n\nYes.');
   for (const emphasis of ['_x_', '__x__', 'a__b', '_Amber']) {
-    assert.equal(display(answered('Yes.'), () => emphasis), '@agent Yes.', emphasis);
+    assert.equal(display(answered('Yes.'), () => emphasis), 'Reply to the requesting agent:\n\nYes.', emphasis);
   }
   assert.equal(display(answered('Yes.'), () => 'amber_river'), '@amber_river Yes.');
-  assert.equal(display(answered('Yes.'), () => null), '@agent Yes.');
+  assert.equal(display(answered('Yes.'), () => null), 'Reply to the requesting agent:\n\nYes.');
   const humanRequest = createKnowledgeRecord('room', 'attention', { ...input, client_id: 'human-request-01' }, human);
   const humanAnswer = reviseKnowledgeRecord(humanRequest, { expected_version: 1, response: 'Done.' }, human);
   assert.equal(display(formatAttentionResponse(humanAnswer), () => 'unused'), 'Done.');
@@ -169,4 +169,13 @@ test('an agent request waits once in the local request outbox; retries, answers 
     assert.equal(count(), 1);
     assert.equal(db.prepare('SELECT count(*) AS n FROM local_room_knowledge_outbox').get()?.n, 1, 'the close is delivered like an answer');
   } finally { db.close(); }
+});
+
+test('recommendations retain the agent voice and multiword recipients remain legible', async () => {
+  const { attentionRecommendationReply, attentionResponseDisplayText } = await import('../../../shared/room-knowledge.mjs');
+  const recommendation = 'Accept task_1; I will independently review its PR.\nThen I will report back.';
+  const response = attentionRecommendationReply(recommendation);
+  assert.equal(response, 'I agree with your recommendation:\n\n> Accept task_1; I will independently review its PR.\n> Then I will report back.');
+  assert.equal(attentionRecommendationReply('  '), '');
+  assert.equal(attentionResponseDisplayText(`@agent:owner/carbon\n\nHuman response (request-123):\n\n${response}`, () => 'Carbon supervisor'), `Reply to Carbon supervisor:\n\n${response}`);
 });

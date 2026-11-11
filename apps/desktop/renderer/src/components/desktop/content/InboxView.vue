@@ -43,6 +43,13 @@
           <p v-if="joinDecision?.key === selected.key" class="knowledge-success inbox-approval-result" role="status"><CircleCheck :size="16" aria-hidden="true" />{{ joinDecision.label }}</p>
           <div v-else class="knowledge-source-row"><button class="knowledge-button" :disabled="sending" data-testid="inbox-join-decline" @click="decideJoinRequest('decline')">Decline</button><button class="knowledge-button knowledge-primary" :disabled="sending" data-testid="inbox-join-approve" @click="decideJoinRequest('approve')">{{ sending ? 'Recording…' : 'Approve' }}</button></div>
         </div>
+        <div v-else-if="selected.approvalTask" class="knowledge-task-action" data-testid="inbox-task-approval">
+          <p><strong>{{ selected.approvalTask.id }} · {{ selected.approvalTask.title }}</strong></p>
+          <p v-if="selected.approvalTask.description" class="knowledge-prose">{{ selected.approvalTask.description }}</p>
+          <p v-if="acceptedTaskFor(selected)" class="knowledge-success" role="status">Task accepted on the board.</p>
+          <div class="knowledge-source-row"><button v-if="!acceptedTaskFor(selected) || selected.record" class="knowledge-button knowledge-primary" :disabled="sending" @click="acceptTask">{{ sending ? 'Recording…' : acceptedTaskFor(selected) ? 'Retry saving answer' : 'Accept task' }}</button><button class="knowledge-button" :disabled="sending" @click="openRoom({ ...selected, taskId: selected.approvalTask.id })">Open task<ArrowUpRight :size="14" /></button></div>
+          <InboxResponse v-if="selected.record && !acceptedTaskFor(selected)" :id="`response-${selected.record.id}`" v-model="drafts[selected.key]" :recipient="selected.actor" :disabled="sending" @submit="respond" @close="closeRequest" />
+        </div>
         <InboxResponse v-else-if="selected.record" :key="selected.key" :id="`response-${selected.record.id}`" v-model="drafts[selected.key]" :suggestion="selected.record.recommendation" :recipient="selected.actor" :disabled="sending" @submit="respond" @close="closeRequest" />
         <div v-else class="knowledge-task-action">
           <div class="knowledge-source-row"><button class="knowledge-button knowledge-primary" @click="openRoom(selected)">{{ actionLabel(selected) }}<ArrowUpRight :size="14" /></button><button v-if="selected.section === 'updates'" class="knowledge-button" @click="markRead([selected])"><Check :size="14" />Mark read</button></div>
@@ -65,7 +72,7 @@ import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue';
 import { ArrowUpRight, Check, CheckCheck, ChevronDown, CircleCheck, Inbox, Link2, LoaderCircle, MessageSquare, RefreshCw, TriangleAlert, X } from '@lucide/vue';
 import type { DesktopAccountRoomJoinRequest, DesktopRentalRequest, DesktopRoomThreadInboxPage } from '../../../../../electron/ipc-types.js';
 import { roomJoinRequests } from '../../../composables/useRoomJoinRequests';
-import type { DesktopNeedsYou } from '../../../../../electron/ipc-types/knowledge.js';
+import type { DesktopAttentionTask, DesktopNeedsYou } from '../../../../../electron/ipc-types/knowledge.js';
 import type { AttentionNavigationIntent } from './room-shell/types';
 import { desktopBridgeUpgradeMessage, desktopIpc } from '../../../ipc/index.js';
 import { buildUniversalInbox, compareUniversalInboxItems, filterUniversalInbox, inboxCategoryLabel, inboxNavigationIntent, inboxRelativeTime, inboxSourceFailureKey, inboxSourceFailures, markInboxUpdatesRead, nextInboxSelection, stableInboxOrder, undoInboxRead, type InboxReadChange, type InboxSection, type UniversalInboxItem } from './room-inbox/universal';
@@ -128,8 +135,36 @@ const dismissals = ref<Record<string, string>>({}); const lastRead = ref<InboxRe
 let alive = true;
 // An answer sent from here moves its request to Answered before the next refresh confirms it.
 const sentAnswers = ref<Record<string, KnowledgeRecord>>({});
+// An empty response means the board write has not yet been confirmed.
+type TaskAcceptance = { response: string; task: DesktopAttentionTask };
+const acceptedTasks = ref<Record<string, TaskAcceptance>>({});
+const acceptanceStorageKey = (account: string) => `letagents-desktop:inbox-task-acceptances:${account}`;
+function readTaskAcceptances(account: string): Record<string, TaskAcceptance> {
+  try {
+    const saved = JSON.parse(window.localStorage.getItem(acceptanceStorageKey(account)) || '{}');
+    if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return {};
+    return Object.fromEntries(Object.entries(saved).filter((entry): entry is [string, TaskAcceptance] => {
+      const value = entry[1] as TaskAcceptance | null;
+      return typeof value?.response === 'string' && /^task_[1-9]\d*$/.test(value.task?.id ?? '') && typeof value.task?.title === 'string';
+    }));
+  } catch { return {}; }
+}
+function saveTaskAcceptance(account: string, key: string, value: TaskAcceptance | null) {
+  try {
+    const pending = readTaskAcceptances(account);
+    if (value) pending[key] = value; else delete pending[key];
+    window.localStorage.setItem(acceptanceStorageKey(account), JSON.stringify(pending));
+  } catch { /* The current view still offers retry without storage. */ }
+}
+function acceptedTaskFor(item: UniversalInboxItem): TaskAcceptance | undefined {
+  const accepted = acceptedTasks.value[item.key];
+  return accepted?.response && (item.record || item.timestamp === accepted.task.updated_at) ? accepted : undefined;
+}
 const allItems = computed(() => buildUniversalInbox(props.data, props.rentals, props.attention, props.joinRequests).map(item => {
   const record = sentAnswers.value[item.key];
+  const acceptance = acceptedTasks.value[item.key];
+  if (acceptance && item.record && !item.record.response && (acceptance.response || !item.approvalTask)) item = { ...item, approvalTask: acceptance.task };
+  if (acceptedTaskFor(item) && !item.record && item.category === 'proposed') return { ...item, section: 'updates' as const, category: 'accepted' };
   return record && item.record && record.version > item.record.version
     ? { ...item, record, section: 'answered' as const, category: attentionRecordCategory(record), timestamp: record.response?.at || item.timestamp, fingerprint: String(record.version) } : item;
 }).sort(compareUniversalInboxItems));
@@ -208,7 +243,7 @@ watch([selectedKey, () => props.section, () => props.rooms], () => {
   if (item && (item.key !== selectedKey.value || (props.rooms.length && !props.rooms.includes(item.roomIdentifier ?? '')))) decided.value = null;
 });
 watch(() => props.storageKey, () => {
-  query.value = ''; dismissals.value = {}; lastRead.value = []; dismissedSourceNotices.value = {}; selectedKey.value = ''; sendError.value = ''; outcome.value = null; sentAnswers.value = {};
+  query.value = ''; dismissals.value = {}; lastRead.value = []; dismissedSourceNotices.value = {}; selectedKey.value = ''; sendError.value = ''; outcome.value = null; sentAnswers.value = {}; acceptedTasks.value = readTaskAcceptances(props.storageKey); sending.value = false; decided.value = null;
   for (const key of Object.keys(drafts)) delete drafts[key];
   try { const saved = JSON.parse(window.localStorage.getItem(`letagents-desktop:inbox-dismissals:${props.storageKey}`) || '{}'); if (saved && typeof saved === 'object' && !Array.isArray(saved)) dismissals.value = Object.fromEntries(Object.entries(saved).filter((entry): entry is [string, string] => typeof entry[1] === 'string')); } catch { /* Storage is optional. */ }
   try {
@@ -298,6 +333,75 @@ async function respond() {
     emit('update:section', 'answered'); void nextTick(() => layout.value?.focusHeading());
   } catch (error) { if (alive) sendError.value = error instanceof Error ? error.message : 'Unable to send your response.'; }
   finally { if (alive) sending.value = false; }
+}
+
+async function acceptTask() {
+  const item = selected.value;
+  if (!item?.roomIdentifier || !item.approvalTask || sending.value) return;
+  const account = props.storageKey;
+  const acceptances = acceptedTasks.value;
+  const list = items.value;
+  selectedKey.value = item.key; decided.value = item;
+  sending.value = true; sendError.value = '';
+  try {
+    const revise = desktopIpc.room.reviseKnowledge;
+    if (!desktopIpc.auth?.getStatus || !desktopIpc.room.getSnapshot || (item.record && !revise)) throw new Error(desktopBridgeUpgradeMessage());
+    if (!acceptedTaskFor(item)) {
+      const room = item.roomIdentifier; const proposed = item.approvalTask;
+      const reconcile = async () => {
+        const auth = await desktopIpc.auth.getStatus();
+        if (String(auth.account?.id ?? 'local') !== account) throw new Error('Return to the account that accepted this task to save its answer.');
+        const snapshot = await desktopIpc.room.getSnapshot(room, { create: false });
+        const task = snapshot.tasks.find(task => task.id === proposed.id);
+        if (!task || task.title !== proposed.title || (task.description || '') !== (proposed.description || '')) throw new Error('Refresh to review the current task before accepting it.');
+        if (task.status === 'proposed') return null;
+        if (['accepted', 'assigned', 'in_progress', 'blocked', 'in_review', 'merged', 'done'].includes(task.status)) return task;
+        throw new Error('The task was not accepted. Refresh to see its current state.');
+      };
+      // Save the attempt before the write: a lost response must remain retryable
+      // even after the accepted task disappears from the attention feed.
+      let task = acceptances[item.key]?.response === '' ? await reconcile() : null;
+      if (!task) {
+        acceptances[item.key] = { response: '', task: { ...proposed } };
+        if (item.record) saveTaskAcceptance(account, item.key, acceptances[item.key]!);
+        try {
+          const result = await desktopIpc.room.updateTask(room, proposed.id, { status: 'accepted' });
+          if (!result.task || result.task.id !== proposed.id || result.task.status !== 'accepted') throw new Error('The task was not accepted. Refresh to see its current state.');
+          task = result.task;
+        } catch (error) {
+          task = await reconcile();
+          if (!task) throw error;
+        }
+      }
+      acceptances[item.key] = { response: `Accepted ${task.id}: ${task.title}.`, task: { ...proposed } };
+      if (item.record) saveTaskAcceptance(account, item.key, acceptances[item.key]!);
+    }
+    if (item.record && revise) {
+      // Navigation must not cancel the second half of an accepted decision.
+      // Check the live main-process account, since unmounted props stop updating.
+      const auth = await desktopIpc.auth.getStatus();
+      if (String(auth.account?.id ?? 'local') !== account) throw new Error('Return to the account that accepted this task to save its answer.');
+      const answered = await revise(item.roomIdentifier, 'attention', item.record.id, {
+        expected_version: item.record.version, response: acceptances[item.key]!.response,
+      });
+      saveTaskAcceptance(account, item.key, null);
+      if (!alive || account !== props.storageKey) return;
+      sentAnswers.value = { ...sentAnswers.value, [item.key]: answered };
+      delete drafts[item.key];
+    }
+    if (!alive || account !== props.storageKey) return;
+    emit('refresh');
+    if (selectedKey.value !== item.key) return;
+    if (!moveOnFrom(item, list, 'Task accepted', true) && item.record) {
+      decided.value = null; emit('update:section', 'answered');
+    }
+    void nextTick(() => requestHeading.value?.focus({ preventScroll: true }));
+  } catch (error) {
+    if (alive && account === props.storageKey) {
+      const detail = error instanceof Error ? error.message : 'Please retry.';
+      sendError.value = acceptedTaskFor(item) ? `Task accepted, but the inbox answer could not be saved. ${detail}` : detail;
+    }
+  } finally { if (alive && account === props.storageKey) sending.value = false; }
 }
 /** Close the selected request without a decision. A draft response is not sent. */
 async function closeRequest() {

@@ -132,7 +132,7 @@ test("Needs you marks each focus room with the room it is listed under, and says
     listLocalTasks: async () => [],
   } });
   t.mock.module("../main/rooms/local-db.js", { namedExports: { getLocalChatDatabase: async () => { throw new Error("cloud rooms only"); } } });
-  t.mock.module("../main/rooms/messages/local-store.js", { namedExports: { addLocalChatMessage: async () => undefined } });
+  t.mock.module("../main/rooms/messages/local-store.js", { namedExports: { getLocalChatMessageByClientId: async () => null, addLocalChatMessage: async () => undefined } });
   t.mock.module("../main/rooms/board-governance.js", { namedExports: { listDesktopPendingBoardIntents: async () => [] } });
   t.mock.module("../main/rooms/account-rooms.js", { namedExports: {
     listDesktopAccountRooms: async () => [entry(repo, [entry("focus_1"), entry("focus_2")]), entry("ad-hoc")],
@@ -190,7 +190,7 @@ test("Needs you reads every listed cloud room in one request and only uncovered 
     listLocalTasks: async () => [],
   } });
   t.mock.module("../main/rooms/local-db.js", { namedExports: { getLocalChatDatabase: async () => { throw new Error("cloud rooms only"); } } });
-  t.mock.module("../main/rooms/messages/local-store.js", { namedExports: { addLocalChatMessage: async () => undefined } });
+  t.mock.module("../main/rooms/messages/local-store.js", { namedExports: { getLocalChatMessageByClientId: async () => null, addLocalChatMessage: async () => undefined } });
   t.mock.module("../main/rooms/board-governance.js", { namedExports: { listDesktopPendingBoardIntents: async (id: string) => { paths.push(`intents:${id}`); return []; } } });
   t.mock.module("../main/rooms/account-rooms.js", { namedExports: {
     listDesktopAccountRooms: async () => [entry(repo, "admin", [entry("focus_1"), entry("focus_2")]), entry("ad-hoc", "admin")],
@@ -235,7 +235,7 @@ test("a cloud room whose history is local on this device keeps reading its reque
     getLocalKnowledge: () => null, initializeRoomKnowledge: () => undefined, localKnowledgeHistory: () => [], saveLocalKnowledge: () => undefined,
     listLocalKnowledge: (_db: unknown, room: string) => ({ records: [{ id: `local-ask:${room}` }], truncated: false }),
   } });
-  t.mock.module("../main/rooms/messages/local-store.js", { namedExports: { addLocalChatMessage: async () => undefined } });
+  t.mock.module("../main/rooms/messages/local-store.js", { namedExports: { getLocalChatMessageByClientId: async () => null, addLocalChatMessage: async () => undefined } });
   t.mock.module("../main/rooms/board-governance.js", { namedExports: { listDesktopPendingBoardIntents: async () => [] } });
   t.mock.module("../main/rooms/account-rooms.js", { namedExports: { listDesktopAccountRooms: async () => [entry("forked-room"), entry("cloud-room")] } });
   t.mock.module("../main/rooms/inbox.js", { namedExports: { getDesktopInboxUpdates: async () => undefined } });
