@@ -293,3 +293,38 @@ test("the audit reports a stored origin that differs from the id shape, and fixe
   assert.equal(await storedOrigin(roomId), "repo");
   await client!.pool.query("DELETE FROM rooms WHERE id = $1", [roomId]);
 });
+
+test("a permanently deleted room cannot come back under its id, so it never gets a second origin", options, async () => {
+  const deletion = await import("../db/content-deletion.js");
+  const rooms = await import("../db/rooms.js");
+
+  // A join-code room and a named room with a focus child, each deleted for good.
+  const project = await db!.createProject();
+  const namedId = unique("deleted-named");
+  const named = await db!.createProjectWithName(namedId);
+  const child = await db!.createFocusRoomFromIntent(named.id, "Child");
+  assert.equal(await storedOrigin(child.room.id), "focus");
+
+  for (const roomId of [project.id, named.id]) {
+    const removed = await deletion.deleteRoomData(roomId);
+    assert.ok(removed.deleted_room_ids.includes(roomId));
+  }
+  const left = await client!.pool.query("SELECT id FROM rooms WHERE id = ANY($1)", [[project.id, named.id, child.room.id]]);
+  assert.equal(left.rowCount, 0);
+
+  // Re-creating under the same id: the join route answers 410, and the
+  // constructor's insert is refused by the deleted-room trigger.
+  const res = { statusCode: 200, status(code: number) { res.statusCode = code; return res; }, json() { return res; } };
+  assert.equal(await resolution!.resolveRoomOrReply(named.id, res as unknown as Response, { allowCreate: true }), null);
+  assert.equal(res.statusCode, 410);
+  // Drizzle wraps the database error; the trigger's message is its cause.
+  const deletedRoomError = (error: unknown) =>
+    /This room was permanently deleted/.test(String((error as { cause?: { message?: string } }).cause?.message));
+  await assert.rejects(() => rooms.getOrCreateCanonicalRoom(named.id), deletedRoomError);
+  await assert.rejects(() => rooms.getOrCreateCanonicalRoom(project.id), deletedRoomError);
+  assert.equal((await client!.pool.query("SELECT 1 FROM rooms WHERE id = ANY($1)", [[project.id, named.id]])).rowCount, 0);
+
+  // A new room under a new id still stores its origin.
+  const again = await db!.createProjectWithName(`${namedId}-again`);
+  assert.equal(await storedOrigin(again.id), "named");
+});
