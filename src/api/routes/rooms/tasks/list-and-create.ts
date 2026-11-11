@@ -224,7 +224,12 @@ export function registerTaskListAndCreateRoutes(
       return;
     }
 
-    if (!(await deps.isTrustedAgentCreator(project.id, createdBy))) {
+    // A signed-in room admin creating a task is the board authority, so the
+    // task needs no second acceptance. Decide from the session role only,
+    // never from the client-supplied created_by string.
+    const isAdminHumanCreator = isHumanAppWrite(req, requestBody)
+      && (await deps.resolveProjectRole(project, req.sessionAccount)) === "admin";
+    if (!isAdminHumanCreator && !(await deps.isTrustedAgentCreator(project.id, createdBy))) {
       res.status(201).json({ ...task, room_id: project.id });
       return;
     }
