@@ -126,3 +126,157 @@ test("a reaction to a message another transaction holds fails with a wrapped 55P
     await holder.end();
   }
 });
+
+// ── Rental proposals: a concurrent insert with the same idempotency key ───
+
+async function seedRentalSession(): Promise<string> {
+  const renter = unique("renter");
+  const provider = unique("provider");
+  const listing = unique("listing");
+  const sessionId = unique("rsess");
+  const room = await api!.createProjectWithName(unique("rental-room"));
+  await client!.pool.query(
+    `INSERT INTO accounts (id, provider, provider_user_id, login, created_at, updated_at)
+     VALUES ($1, 'github', $1, $1, now(), now()), ($2, 'github', $2, $2, now(), now())`,
+    [renter, provider],
+  );
+  await client!.pool.query(
+    "INSERT INTO rental_listings (id, provider_account_id, display_name, ide_kind) VALUES ($1, $2, 'Provider', 'codex')",
+    [listing, provider],
+  );
+  await client!.pool.query(
+    `INSERT INTO rental_sessions (id, listing_id, renter_account_id, provider_account_id, target_room_id, task_title, task_prompt, status)
+     VALUES ($1, $2, $3, $4, $5, 'Task', 'Prompt', 'accepted')`,
+    [sessionId, listing, renter, provider, room.id],
+  );
+  return sessionId;
+}
+
+type ProposalRow = Record<string, unknown>;
+
+/** The row a call would insert, captured without touching the database. */
+async function capture(run: (insert: (row: ProposalRow) => Promise<never>) => Promise<unknown>): Promise<ProposalRow> {
+  let captured: ProposalRow | null = null;
+  const stop = new Error("captured");
+  await run(async (row) => { captured = row; throw stop; }).catch((error) => { if (error !== stop) throw error; });
+  assert.ok(captured);
+  return captured!;
+}
+
+/** Hold `row` (under another id) in an open transaction; commit it once `waiter` waits on the unique index. */
+async function raceAgainstUncommittedProposal<T>(row: ProposalRow, waiter: () => Promise<T>): Promise<{ result: T | null; error: unknown; winnerId: string }> {
+  const winnerId = unique("rpatch_winner");
+  const holder = new Pool({ connectionString: url, max: 1 });
+  const other = await holder.connect();
+  try {
+    await other.query("BEGIN");
+    await other.query(
+      `INSERT INTO rental_patch_proposals
+         (id, session_id, source, diff_ref, summary, gate_status, risk_score, warnings, check_results, journal_entry, idempotency_key, request_hash, response_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10::jsonb, $11, $12, $13)`,
+      [
+        winnerId, row.session_id, row.source, row.diff_ref, row.summary, row.gate_status, row.risk_score,
+        JSON.stringify(row.warnings ?? []), JSON.stringify(row.check_results ?? {}),
+        row.journal_entry === null || row.journal_entry === undefined ? null : JSON.stringify(row.journal_entry),
+        row.idempotency_key, row.request_hash, row.response_hash,
+      ],
+    );
+    const pending = waiter().then((result) => ({ result, error: null }), (error: unknown) => ({ result: null, error }));
+    for (let i = 0; i < 100; i += 1) {
+      const waiting = await client!.pool.query(
+        "SELECT 1 FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()",
+      );
+      if (waiting.rowCount) break;
+      await new Promise((done) => setTimeout(done, 20));
+    }
+    await other.query("COMMIT");
+    return { ...(await pending), winnerId };
+  } finally {
+    await other.query("ROLLBACK").catch(() => undefined);
+    other.release();
+    await holder.end();
+  }
+}
+
+async function proposalCount(sessionId: string, key: string): Promise<number> {
+  return (await client!.pool.query(
+    "SELECT 1 FROM rental_patch_proposals WHERE session_id = $1 AND idempotency_key = $2", [sessionId, key],
+  )).rowCount ?? 0;
+}
+
+test("signed change journal: a concurrent append with the same key returns the winner, or 409 for another edit", options, async () => {
+  const journal = await import("../rental/signed-change-journal.js");
+  const sessionId = await seedRentalSession();
+  const key = unique("journal-key");
+  const edit = { path: "src/index.ts", beforeContent: "a\n", afterContent: "b\n", summary: "Same edit" };
+  const deps = journal.defaultSignedChangeJournalDeps;
+
+  // Same key, same request: the caller gets the winner's row; one row exists.
+  const same = await capture((insert) => journal.appendSignedChange({ sessionId, idempotencyKey: key, edit }, { ...deps, insertProposal: insert as never }));
+  const raced = await raceAgainstUncommittedProposal(same, () => journal.appendSignedChange({ sessionId, idempotencyKey: key, edit }));
+  assert.equal(raced.error, null);
+  assert.equal(raced.result!.idempotent, true);
+  assert.equal(raced.result!.proposal.id, raced.winnerId);
+  assert.equal(await proposalCount(sessionId, key), 1);
+
+  // Same key, another edit: 409 idempotency_conflict.
+  const otherKey = unique("journal-key");
+  const winnerEdit = await capture((insert) => journal.appendSignedChange(
+    { sessionId, idempotencyKey: otherKey, edit: { ...edit, afterContent: "c\n" } }, { ...deps, insertProposal: insert as never }));
+  const conflict = await raceAgainstUncommittedProposal(winnerEdit, () => journal.appendSignedChange({ sessionId, idempotencyKey: otherKey, edit }));
+  assert.ok(conflict.error instanceof journal.SignedChangeJournalError);
+  assert.deepEqual(
+    [(conflict.error as { status: number }).status, (conflict.error as { code: string }).code],
+    [409, "idempotency_conflict"],
+  );
+  assert.equal(await proposalCount(sessionId, otherKey), 1);
+});
+
+test("patch proposal: a concurrent proposal with the same key returns the winner, or the same 409 as outside a race", options, async () => {
+  const { mkdtemp, mkdir, writeFile, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const proposals = await import("../rental/patch-proposal.js");
+  const sessionId = await seedRentalSession();
+  const workspace = await mkdtemp(join(tmpdir(), "patch-race-"));
+  await mkdir(join(workspace, "src"), { recursive: true });
+  await writeFile(join(workspace, "src", "index.ts"), "export const value = 1;\n");
+  // The database parts are real; the workspace manifest is local.
+  const deps = {
+    ...proposals.createDefaultPatchProposalDeps(),
+    getActiveManifest: async () => ({ id: "manifest", session_id: sessionId, workspace_path: workspace, retention_status: "active" }),
+    isPathExposed: async () => true,
+  };
+  const input = (key: string, value: number) => ({
+    sessionId,
+    idempotencyKey: key,
+    summary: "Update value",
+    files: [{ path: "src/index.ts", operation: "modify" as const, content: `export const value = ${value};\n` }],
+  });
+  try {
+    // Same key, same request.
+    const key = unique("patch-key");
+    const same = await capture((insert) => proposals.proposePatch({ ...deps, insertProposal: insert as never }, input(key, 2)));
+    const raced = await raceAgainstUncommittedProposal(same, () => proposals.proposePatch(deps, input(key, 2)));
+    assert.equal(raced.error, null);
+    assert.equal(raced.result!.idempotent, true);
+    assert.equal(raced.result!.proposal.id, raced.winnerId);
+    assert.equal(await proposalCount(sessionId, key), 1);
+
+    // Same key, another patch: the 409 the non-race path gives.
+    const otherKey = unique("patch-key");
+    const winner = await capture((insert) => proposals.proposePatch({ ...deps, insertProposal: insert as never }, input(otherKey, 3)));
+    const conflict = await raceAgainstUncommittedProposal(winner, () => proposals.proposePatch(deps, input(otherKey, 2)));
+    assert.ok(conflict.error instanceof proposals.PatchProposalError, String(conflict.error));
+    assert.equal((conflict.error as { status: number }).status, 409);
+    const outsideRace = await proposals.proposePatch(deps, input(otherKey, 2)).then(() => null, (error: unknown) => error);
+    assert.ok(outsideRace instanceof proposals.PatchProposalError);
+    assert.deepEqual(
+      [(conflict.error as Error).message, (conflict.error as { status: number }).status],
+      [(outsideRace as Error).message, (outsideRace as { status: number }).status],
+    );
+    assert.equal(await proposalCount(sessionId, otherKey), 1);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});

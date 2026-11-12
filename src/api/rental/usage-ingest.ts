@@ -21,7 +21,7 @@ import {
   rental_sessions,
   rental_usage_meters,
 } from "../db/schema.js";
-import { errorChainMentions } from "../db/pg-errors.js";
+import { pgErrorMentions } from "../db/pg-errors.js";
 import { isUniqueConstraintError } from "../db/utils.js";
 
 /**
@@ -275,10 +275,11 @@ function numericString(value: number | null | undefined): string | null {
 /**
  * Predicate for a unique violation of the usage meter (`23505`). Drizzle
  * wraps the driver error, so the SQLSTATE and the message that names the
- * constraint are on its `cause`; both are looked up through the cause chain.
+ * constraint are on its `cause`. Only that Postgres error is read, never
+ * Drizzle's own message (it carries the query's parameters).
  */
 export function isUniqueViolation(err: unknown): boolean {
-  return isUniqueConstraintError(err) || errorChainMentions(err, "rental_usage_meters_session_idempotency_uq");
+  return isUniqueConstraintError(err) || pgErrorMentions(err, "rental_usage_meters_session_idempotency_uq");
 }
 
 export async function ingestUsage(

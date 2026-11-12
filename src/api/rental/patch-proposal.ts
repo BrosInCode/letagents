@@ -195,7 +195,14 @@ export async function proposePatch(
   } catch (err) {
     if (!isIdempotencyUniqueViolation(err)) throw err;
     const winner = await deps.loadByIdempotency(sessionId, idempotencyKey);
-    if (!winner || winner.request_hash !== requestHash) throw err;
+    if (!winner) throw err;
+    // A concurrent request took the key: the same answer as outside a race.
+    if (winner.request_hash !== requestHash) {
+      throw new PatchProposalError(
+        "idempotency key already used with a different patch request",
+        409,
+      );
+    }
     return {
       proposal: winner,
       gate: gateFromStoredProposal(
