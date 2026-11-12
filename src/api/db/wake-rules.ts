@@ -18,6 +18,7 @@ import { db } from "./client.js";
 import { wakeJobQueue } from "../server/job-queue-wakes.js";
 import { repositoryRoomIds } from "./github/repository-rooms.js";
 import { agent_wake_rules } from "./schema.js";
+import { isUniqueConstraintError } from "./utils.js";
 import type { MessageCreateTransaction } from "./messages/create.js";
 import { wakeRuleExpiry, type WakeRuleEvaluationDeps } from "../wake-rules/evaluate.js";
 
@@ -449,7 +450,8 @@ export async function restoreWakeRule(
       if (!row) throw new WakeRuleError("This wake rule can no longer be restored.", 409);
       return toWakeRule(row, viewer);
     } catch (error) {
-      if ((error as { code?: string }).code === "23505") {
+      // Drizzle wraps the driver error; the SQLSTATE is on its cause.
+      if (isUniqueConstraintError(error)) {
         throw new WakeRuleError("The agent already has an active wake rule for this.", 409);
       }
       throw error;
@@ -683,7 +685,7 @@ export async function confirmWakeEmailRule(tokenHash: string, now = new Date(), 
     .returning();
   } catch (error) {
     // The agent already holds the same rule another way: say so, not 500.
-    if ((error as { code?: string }).code === "23505") return { outcome: "conflict" };
+    if (isUniqueConstraintError(error)) return { outcome: "conflict" };
     throw error;
   }
   if (row) return { outcome: "done", rule: row };

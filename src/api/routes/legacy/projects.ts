@@ -34,6 +34,8 @@ import {
   formatGitRoomSummary,
   formatManualGitRoomSummaryForRoomId,
 } from "../../rooms/formatting.js";
+import { RoomDeletedError } from "../../db/utils.js";
+import { replyRoomDeleted } from "../../rooms/resolution.js";
 import { isReservedMainRoomCreationId } from "../../rooms/room-nature.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 import { isMessageSenderWithinBounds } from "../../../../shared/message-contracts.mjs";
@@ -247,7 +249,17 @@ export function registerLegacyProjectRoutes(
     const account = requireSignIn(req, res);
     if (!account) return;
 
-    const { room: project, created } = await getOrCreateCanonicalRoom(roomId);
+    let created: boolean;
+    let project: Project;
+    try {
+      ({ room: project, created } = await getOrCreateCanonicalRoom(roomId));
+    } catch (error) {
+      if (error instanceof RoomDeletedError) {
+        replyRoomDeleted(res, error.roomId);
+        return;
+      }
+      throw error;
+    }
     const projectAccess = await deps.resolveProjectRepoRoomAccessDecision({
       project,
       sessionAccount: req.sessionAccount,

@@ -18,15 +18,31 @@ import {
   supervisor_host_grants,
   tracker_rule_versions,
 } from "./schema.js";
-import { generateCode, getRoomScopedSequenceNames, isUniqueConstraintError, nextPrefixedId, type RoomSequenceExecutor } from "./utils.js";
+import {
+  generateCode,
+  getRoomScopedSequenceNames,
+  isDeletedRoomInsertError,
+  isUniqueConstraintError,
+  MAX_ROOM_CREATE_ATTEMPTS,
+  nextPrefixedId,
+  RoomDeletedError,
+  type RoomSequenceExecutor,
+} from "./utils.js";
 import { toProject, toRoomAlias } from "./mappers.js";
 import type { Project, RoomAlias } from "./types.js";
 
-export async function createProject(options: { organizationId?: string | null } = {}): Promise<Project> {
+export async function createProject(
+  options: { organizationId?: string | null } = {},
+  // Tests pass a fixed sequence to force a code collision.
+  nextCode: () => string = generateCode,
+): Promise<Project> {
   const created_at = new Date().toISOString();
 
-  while (true) {
-    const roomId = generateCode();
+  // A fresh code collides with a room (23505) or with a permanently deleted
+  // room's code (the deleted-room trigger, 23514): try another code, a
+  // bounded number of times.
+  for (let attempt = 1; attempt <= MAX_ROOM_CREATE_ATTEMPTS; attempt += 1) {
+    const roomId = nextCode();
     const display_name = generateRoomDisplayName(roomId);
 
     try {
@@ -64,11 +80,12 @@ export async function createProject(options: { organizationId?: string | null } 
       recordStoredRoomOrigin(project, "join_code");
       return project;
     } catch (error) {
-      if (!isUniqueConstraintError(error)) {
+      if (!isUniqueConstraintError(error) && !isDeletedRoomInsertError(error)) {
         throw error;
       }
     }
   }
+  throw new Error(`No free join code after ${MAX_ROOM_CREATE_ATTEMPTS} attempts`);
 }
 
 export async function createProjectWithName(name: string): Promise<Project> {
@@ -136,12 +153,16 @@ export async function getOrCreateCanonicalRoom(
       created: true,
     };
   } catch (error) {
+    // A concurrent create won: return its room.
     if (isUniqueConstraintError(error)) {
       const retried = await getProjectById(canonicalId);
       if (retried) {
         await ensureGitHubRepoRoomBinding(retried.id);
         return { room: retried, created: false };
       }
+    }
+    if (isDeletedRoomInsertError(error)) {
+      throw new RoomDeletedError(canonicalId);
     }
     throw error;
   }
@@ -165,7 +186,7 @@ export async function getOrCreateGitChildRoom(input: {
     return { room: existing, created: false };
   }
 
-  while (true) {
+  for (let attempt = 1; attempt <= MAX_ROOM_CREATE_ATTEMPTS; attempt += 1) {
     const roomId = await buildFocusRoomId();
     const created_at = new Date().toISOString();
     const display_name = input.displayName?.trim() || generateRoomDisplayName(input.focusKey);
@@ -190,7 +211,9 @@ export async function getOrCreateGitChildRoom(input: {
 
       return { room: toProject(created), created: true };
     } catch (error) {
-      if (!isUniqueConstraintError(error)) {
+      // A concurrent create of the same branch room (the live-key index) or
+      // a focus id already taken: return the winner, else take the next id.
+      if (!isUniqueConstraintError(error) && !isDeletedRoomInsertError(error)) {
         throw error;
       }
 
@@ -203,6 +226,7 @@ export async function getOrCreateGitChildRoom(input: {
       }
     }
   }
+  throw new Error(`Could not create the room for ${input.focusKey} after ${MAX_ROOM_CREATE_ATTEMPTS} attempts`);
 }
 
 export async function getGitChildRoom(input: {
@@ -363,7 +387,7 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
   const project = await getProjectById(projectId);
   if (!project || !project.code) return null;
 
-  while (true) {
+  for (let attempt = 1; attempt <= MAX_ROOM_CREATE_ATTEMPTS; attempt += 1) {
     const nextCode = generateCode();
 
     try {
@@ -399,6 +423,7 @@ export async function rotateProjectCode(projectId: string): Promise<Project | nu
       }
     }
   }
+  throw new Error(`No free join code after ${MAX_ROOM_CREATE_ATTEMPTS} attempts`);
 }
 
 export async function updateProjectDisplayName(
