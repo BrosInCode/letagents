@@ -4,21 +4,21 @@ import { lstat, mkdtemp, open, readlink, realpath, rm } from 'node:fs/promises';
 import { devNull, tmpdir } from 'node:os';
 import nodePath, { dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { captureWorkspaceChanges, GIT_TIMEOUT_MS, WORKSPACE_CAPTURE_TIMEOUT_MS, WORKSPACE_SETTLE_TIMEOUT_MS } from './workspace-change-capture.mjs';
+import { CAPTURE_GIT_OPTIONS, captureGitEnvironment, captureWorkspaceChanges, GIT_TIMEOUT_MS, WORKSPACE_CAPTURE_TIMEOUT_MS, WORKSPACE_SETTLE_TIMEOUT_MS } from './workspace-change-capture.mjs';
 import { gitSpawnFile } from './git-executable.mjs';
 import { signalTree, spawnTree } from './process-tree.mjs';
-const environment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
 // Hooks off: os.devNull is /dev/null on POSIX and \\.\nul on Windows. A bare
 // "/dev/null" there is \dev\null on the current drive, a folder any local user
 // may create, so a hook placed in it would run.
 const HOOKS_OFF = `core.hooksPath=${devNull}`;
-// Replace refs are off: with them the workspace could put any object in the place of
-// the one a capture reads (a base's tree, the start snapshot itself).
+// Replace refs, grafts, the commit-graph file and lazy fetches are off (captureGitEnvironment):
+// with them the workspace could put any object in the place of the one a capture reads (a
+// base's tree, the start snapshot itself), or give a commit other parents.
 function git(cwd, args, signal, index, input, extra) {
     return new Promise((resolve, reject) => {
-        const child = execFile(gitSpawnFile(), ['-c', HOOKS_OFF, '--no-optional-locks', ...args], {
+        const child = execFile(gitSpawnFile(), ['-c', HOOKS_OFF, ...CAPTURE_GIT_OPTIONS, ...args], {
             cwd, signal, timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 8 * 1024 * 1024, encoding: 'utf8',
-            env: { ...environment(), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', ...(index ? { GIT_INDEX_FILE: index } : {}), ...extra },
+            env: captureGitEnvironment({ ...(index ? { GIT_INDEX_FILE: index } : {}), ...extra }),
         }, (error, stdout) => error ? reject(error) : resolve(stdout));
         child.stdin?.on('error', () => { });
         child.stdin?.end(input);
@@ -32,9 +32,9 @@ function git(cwd, args, signal, index, input, extra) {
  */
 function remoteGit(cwd, args, signal, extra) {
     return new Promise((resolve, reject) => {
-        const child = spawnTree(gitSpawnFile(), ['-c', HOOKS_OFF, '--no-optional-locks', ...args], {
+        const child = spawnTree(gitSpawnFile(), ['-c', HOOKS_OFF, ...CAPTURE_GIT_OPTIONS, ...args], {
             cwd, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'ignore'],
-            env: { ...environment(), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', ...extra },
+            env: captureGitEnvironment(extra),
         });
         let output = '';
         const stop = () => {
@@ -269,18 +269,21 @@ export async function captureWorkspaceHead(workspace) {
 }
 const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 /**
- * How long the remotes get to list their branches. Five seconds was too short: a
- * healthy remote that needs seven or eight seconds for `git ls-remote` never
- * answered, and every turn there was compared plainly. The question is not awaited
- * when the work starts, so the limit delays no start. When the work has settled,
- * only a piece of work that moved HEAD waits for an answer that is still pending
- * (captureWorkspacePair).
+ * How long the remotes get to list their branches. Five seconds was too short: measured on
+ * a healthy remote, the first byte of the answer came after 5.7 seconds and the whole answer
+ * after 7.8, so no turn there ever had an answer and every card was the plain comparison.
+ * The question is not awaited when the work starts, so the limit delays no start, and no
+ * capture waits for it inside a queue. When the work has settled, only a piece of work that
+ * moved HEAD waits for an answer that is still pending (captureSettledWorkspace).
  *
- * The limit is also how long after the start an answer can be taken. A commit that
- * the work pushes before the remote lists its branches is in the answer, and is
- * then a base like any other. The remote lists its branches when its connection
- * opens; a push by the work opens a connection of its own to the same remote, and
- * starts later. A longer limit makes that window longer, it does not close it.
+ * KNOWN LIMIT, not solved here: the push race. The answer is taken while the work already
+ * runs. A commit that the work pushes before the remote lists its branches is in the answer,
+ * and then it is a base like any other: what it changed is not on the card. This is so with
+ * any limit, also for a remote that answers in a second. A longer limit lets the window be
+ * longer, up to the limit. What keeps it narrow, and no more than that: the remote lists its
+ * branches when the connection of the question opens, and a push by the work has to open a
+ * connection of its own to the same remote, later.
+ * Follow-up idea: use only answers that were complete before the turn began.
  */
 export const REMOTE_QUESTION_TIMEOUT_MS = 20_000;
 const noPrompt = (ssh) => ({ GIT_SSH_COMMAND: `${ssh} -o BatchMode=yes -o ConnectTimeout=5`, GIT_ASKPASS: '', SSH_ASKPASS: '', SSH_ASKPASS_REQUIRE: 'never', GCM_INTERACTIVE: 'never' });
@@ -486,66 +489,90 @@ async function updatedBaseTree(root, start, startingHead, head, remoteTips, sign
     return entries.length ? treeWith(root, start, entries, signal) : start;
 }
 /**
- * The turn left the commits it started on: `startingHead` is not in the history
- * of `head`. The usual case is a workspace that was made on an old local branch,
- * and an agent that makes its branch from the remote's branch and commits there.
- * The commits of the old branch are then not in the agent's work. Read as a base
- * that moved, every path those commits changed counts as changed "here before
- * the base moved", and the card shows the whole old branch undone.
+ * The turn left the commits it started on for newer history of the remote. The
+ * case behind it: a workspace that was made on an old local branch, and an agent
+ * that makes its branch from the remote's branch and commits there. The commits
+ * of the old branch are then not in the agent's work. Read as a base that moved,
+ * every path those commits changed counts as changed "here before the base
+ * moved", and the card shows the whole old branch undone.
  *
- * The base M is the nearest commit in the history of `head` that a remote held
- * before the turn: reachable from one of `remoteTips`. Only the tips whose
- * commits are in this repository can show that, and they are named by object id,
- * so no local ref and nothing pushed after the answer takes part. The comparison
- * starts at the tree of M, except for the paths below, which keep their content
- * of S, the start tree, and are measured from S as before:
+ * "Held" below is: reachable from one of `remoteTips`, so on a remote before the
+ * turn. Only the tips whose commits are in this repository can show that, and
+ * they are named by object id, so no local ref and nothing pushed after the
+ * answer takes part. The base M is the nearest held commit in the history of
+ * `head`. The reading applies only when all of these are true:
+ *  1. `startingHead` is not in the history of `head`.
+ *  2. There is exactly one such M.
+ *  3. M is not in the history of `startingHead`. A turn that goes back to history
+ *     that the start already contained (a reset to an older commit, a branch made
+ *     from one) has undone something, and is read as before.
+ *  4. Every held commit in the history of `startingHead` is in the history of M,
+ *     and there is one. A turn that goes sideways, to a remote branch that lacks
+ *     what the remote held under the start, has dropped that, and is read as
+ *     before. So the start itself is never a held commit here: what the turn
+ *     leaves are commits that no remote had.
+ *  5. The commit the workspace was made on is known (`workspaceStart`).
+ *
+ * The comparison then starts at the tree of M, except for the paths below, which
+ * keep their content of S, the start tree, and are measured from S as before:
  *  - a path with an uncommitted or untracked change when the turn began (S
  *    differs from the tree of `startingHead`), wherever the turn carried it;
- *  - a path that a commit made in this workspace changed (S differs from the
- *    tree of `workspaceStart`, the commit the workspace was made on), when no
- *    remote held `startingHead` before the turn. That work is nowhere else: a
- *    turn that leaves it, or resets it away, shows it as given up.
+ *  - a path that was changed in this workspace since it was made (S differs
+ *    from the tree of `workspaceStart`). That work is in no other place: a turn
+ *    that leaves it, or resets it away, shows it as given up.
  *
  * So the turn's commits and edits on top of M are all in the comparison, an
  * upstream change of M that the settled files lack included. What is not in it:
- * a file that the settled tree has as M has it, and that either was never
- * changed in this workspace or is in a commit that a remote already held. The
- * turn made no content there, and no work of this workspace is lost with it.
+ * a file that the settled tree has as M has it, and that this workspace never
+ * changed. The turn made no content there.
  *
- * A rebase also leaves the commits it started on, and it keeps their changes:
- * read this way, earlier work that was pushed shows again as new. Read as a base
- * that moved, a line that was left shows as undone. Both readings hide only
- * start content or a base's content, and they differ only on the committed
- * paths of the line the turn started on, so the caller takes the one with fewer
- * changed paths.
+ * A rebase of commits that were not pushed also leaves the commits it started
+ * on, and it keeps their changes: read this way, a commit the workspace was made
+ * on shows again as new. Read as a base that moved, a line that was left shows
+ * as undone. Both readings hide only start content or a base's content, and they
+ * differ only on the committed paths of the line the turn started on, so the
+ * caller takes the one with fewer changed paths.
  *
- * Null when this reading does not apply: the start is in the settled history,
- * no remote-held commit is in it, more than one independent one is, or the
- * work of the workspace cannot be told (no `workspaceStart`).
+ * Conditions 1, 3 and 4 need true ancestry, in both directions: a parent that
+ * is added makes a commit look held, and a parent that is taken away makes a
+ * step back look like a step to the side. Grafts, replace refs and the
+ * commit-graph file are off for every Git command here (captureGitEnvironment).
+ * The shallow file can only take parents away, and it is off for the commands
+ * of this reading (`--shallow-file ""`): in a clone that is really shallow they
+ * fail at the cut, and the reading does not apply. Ancestry is
+ * asked with `merge-base` only: `rev-list A ^B` orders its walk by commit dates
+ * and can stop too early when they are out of order, and the turn writes the
+ * dates of its own commits.
+ *
+ * Null when the reading does not apply or a command fails.
  */
 async function leftLineTree(root, start, startingHead, head, workspaceStart, remoteTips, signal) {
-    // Ancestry is asked with `merge-base` only. `rev-list A ^B` orders its walk by commit
-    // dates and can stop too early when they are out of order, and the turn writes the dates
-    // of its own commits.
-    const inHistory = await git(root, ['merge-base', '--is-ancestor', startingHead, head], signal).then(() => true, (error) => {
+    if (!objectId.test(workspaceStart ?? ''))
+        return null;
+    // `--shallow-file ""` is Git's own way to say "no shallow file" (fetch-pack uses it).
+    const ancestry = (args) => git(root, ['--shallow-file', '', ...args], signal);
+    /** Whether `ancestor` is in the history of `commit`. Exit status 1 is the answer "no"; anything else is a failure. */
+    const inHistoryOf = (commit, ancestor) => ancestry(['merge-base', '--is-ancestor', ancestor, commit]).then(() => true, (error) => {
         if (error?.code === 1) return false;
         throw error;
     });
-    if (inHistory)
+    if (await inHistoryOf(head, startingHead))
         return null;
     const tips = [...new Set(remoteTips)].filter(tip => objectId.test(tip));
     if (!tips.length || tips.length > 4096)
         return null;
+    // A tip that is not in this repository shows nothing. It is not fetched (GIT_NO_LAZY_FETCH).
     const held = (await git(root, ['cat-file', '--batch-check'], signal, undefined, tips.map(tip => `${tip}\n`).join('')))
         .split('\n').filter(line => / commit \d+$/.test(line)).map(line => line.split(' ')[0]);
     /**
-     * The best common ancestors of `commit` and any held tip, a part of the tips at a time: a
-     * command line holds only so many names. The best of all parts together hold the best of all.
+     * The nearest held commits in the history of `commit`: its best common ancestors with any
+     * held tip, a part of the tips at a time, because a command line holds only so many names.
+     * The best of all parts together hold the best of all.
      */
     const nearestHeld = async (commit) => {
         const nearest = new Set();
         for (let i = 0; i < held.length; i += 200) {
-            const found = await git(root, ['merge-base', '--all', commit, ...held.slice(i, i + 200)], signal).catch((error) => {
+            const found = await ancestry(['merge-base', '--all', commit, ...held.slice(i, i + 200)]).catch((error) => {
                 if (error?.code === 1) return ''; // No common ancestor with these tips.
                 throw error;
             });
@@ -557,54 +584,92 @@ async function leftLineTree(root, start, startingHead, head, workspaceStart, rem
     if (!nearest.size || nearest.size > 256)
         return null;
     // A held commit that another one already contains is not a second base.
-    const bases = nearest.size > 1 ? (await git(root, ['merge-base', '--independent', ...nearest], signal)).split('\n').filter(Boolean) : [...nearest];
+    const bases = nearest.size > 1 ? (await ancestry(['merge-base', '--independent', ...nearest])).split('\n').filter(Boolean) : [...nearest];
     if (bases.length !== 1)
         return null;
-    const kept = await changedEntries(root, `${startingHead}^{tree}`, `${start}^{tree}`, signal);
-    // A commit is its own best common ancestor with a tip exactly when that tip contains it.
-    if (!(await nearestHeld(startingHead)).has(startingHead)) {
-        if (!objectId.test(workspaceStart ?? ''))
+    const [base] = bases;
+    if (await inHistoryOf(startingHead, base))
+        return null;
+    const before = await nearestHeld(startingHead);
+    if (!before.size || before.size > 256)
+        return null;
+    for (const commit of before) {
+        if (!await inHistoryOf(base, commit))
             return null;
-        if (workspaceStart !== startingHead)
-            for (const [path, entries] of await changedEntries(root, `${workspaceStart}^{tree}`, `${start}^{tree}`, signal)) kept.set(path, entries);
     }
-    return treeWith(root, bases[0], [...kept].map(([path, [, entry]]) => `${entry}\t${path}\0`), signal);
+    const kept = await changedEntries(root, `${startingHead}^{tree}`, `${start}^{tree}`, signal);
+    if (workspaceStart !== startingHead)
+        for (const [path, entries] of await changedEntries(root, `${workspaceStart}^{tree}`, `${start}^{tree}`, signal)) kept.set(path, entries);
+    return treeWith(root, base, [...kept].map(([path, [, entry]]) => `${entry}\t${path}\0`), signal);
+}
+const preview = (snapshot) => ({ ...snapshot,
+    files: snapshot.files.slice(0, 200), hidden_files: snapshot.hidden_files + Math.max(0, snapshot.files.length - 200),
+    patch: snapshot.patch.slice(0, 48 * 1024), patch_truncated: snapshot.patch_truncated || snapshot.patch.length > 48 * 1024 });
+/** What a settled turn gives: `full` is the change since the workspace started, `changes` the change of the turn. */
+export const settledWorkspacePair = (full, changes) => ({ workspace: preview(full), contribution: { changes: preview(changes), summary: null },
+    review: { version: 1, workspace: full, contribution: changes } });
+/**
+ * The first part of a settled turn: the settled files are captured (pinned under the
+ * `:settled` ref) and compared with the commit the workspace started on. No part of it
+ * waits for a remote.
+ *
+ * Only a turn that moved HEAD can have taken in a base or left its line. Every other turn
+ * is compared plainly here, and the result is `{ pair }`: the turn is complete and the
+ * settled ref is released. For a turn that moved HEAD the result is `{ pending }`, and the
+ * settled ref stays until compareSettledTurn has had the remotes' answer.
+ */
+export async function captureSettledWorkspace(workspace, startingRevision, baseline, identity, startingHead = null, deadline = AbortSignal.timeout(WORKSPACE_SETTLE_TIMEOUT_MS)) {
+    const tree = await captureWorkspaceTree(workspace, `${identity}:settled`, deadline);
+    let pending = false;
+    try {
+        const full = tree ? await captureWorkspaceChanges(workspace, startingRevision, tree, true, deadline) : unavailableWorkspace();
+        if (!tree || !baseline)
+            return { pair: settledWorkspacePair(full, unavailableWorkspace()) };
+        const head = objectId.test(startingHead ?? '') ? await git(workspace, ['rev-parse', '--verify', 'HEAD^{commit}'], deadline).then(value => value.trim(), () => null) : null;
+        if (!head || head === startingHead)
+            return { pair: settledWorkspacePair(full, await captureWorkspaceChanges(workspace, baseline, tree, true, deadline)) };
+        pending = true;
+        return { pending: { full, tree, head } };
+    }
+    finally {
+        if (!pending)
+            await releaseWorkspaceTree(workspace, `${identity}:settled`, 5_000);
+    }
 }
 /**
- * `startingHead` and `remoteTips` describe the moment `baseline` was captured:
- * the commit HEAD was on, and what the remotes held (the answer, or the pending
- * question). Without both, the turn's changes are the plain difference between
- * the two trees. The changes since the workspace started are always the plain
+ * The second part, for a turn that moved HEAD: the turn's own changes, with what the remotes
+ * held when it began (`remoteTips`, the answer itself; null leaves the plain comparison).
+ * It releases the settled ref.
+ */
+export async function compareSettledTurn(workspace, startingRevision, baseline, identity, startingHead, pending, remoteTips, deadline = AbortSignal.timeout(WORKSPACE_SETTLE_TIMEOUT_MS)) {
+    try {
+        const from = await ownStartingTree(workspace, baseline, startingHead, pending.head, startingRevision, remoteTips, pending.tree, deadline);
+        const own = from === baseline ? null : await captureWorkspaceChanges(workspace, from, pending.tree, true, deadline);
+        return own?.state === 'ready' ? { ...own, base_revision: baseline } : await captureWorkspaceChanges(workspace, baseline, pending.tree, true, deadline);
+    }
+    finally {
+        await releaseWorkspaceTree(workspace, `${identity}:settled`, 5_000);
+    }
+}
+/**
+ * A settled turn in one call. `startingHead` and `remoteTips` describe the moment
+ * `baseline` was captured: the commit HEAD was on, and what the remotes held (the answer,
+ * or the pending question). Without both, the turn's changes are the plain difference
+ * between the two trees. The changes since the workspace started are always the plain
  * difference.
+ *
+ * The settled files are captured before the answer is awaited: a remote that is still silent
+ * delays only the comparison of a turn that moved HEAD. A caller that runs captures one
+ * after the other must not wait inside its queue; it calls the two parts itself
+ * (the daemon's WorkspaceCapture).
  */
 export async function captureWorkspacePair(workspace, startingRevision, baseline, identity, startingHead = null, remoteTips = null) {
     // One budget for the whole settled turn, whatever Defender or a slow disk does to each command.
     const deadline = AbortSignal.timeout(WORKSPACE_SETTLE_TIMEOUT_MS);
     // A question that fails in any way leaves the plain comparison, also when nothing waits for it.
     const answer = Promise.resolve(remoteTips).catch(() => null);
-    const tree = await captureWorkspaceTree(workspace, `${identity}:settled`, deadline);
-    try {
-        const full = tree ? await captureWorkspaceChanges(workspace, startingRevision, tree, true, deadline) : unavailableWorkspace();
-        const turn = async () => {
-            const plain = () => captureWorkspaceChanges(workspace, baseline, tree, true, deadline);
-            // Only a turn that moved HEAD can have taken in a base or left its line. Every other
-            // turn is compared plainly at once: it does not wait for a remote that is still silent.
-            const head = objectId.test(startingHead ?? '') ? await git(workspace, ['rev-parse', '--verify', 'HEAD^{commit}'], deadline).then(value => value.trim(), () => null) : null;
-            if (!head || head === startingHead)
-                return plain();
-            // The settled files are already captured: a remote that is still silent delays only this comparison.
-            const from = await ownStartingTree(workspace, baseline, startingHead, head, startingRevision, await answer, tree, deadline);
-            const own = from === baseline ? null : await captureWorkspaceChanges(workspace, from, tree, true, deadline);
-            return own?.state === 'ready' ? { ...own, base_revision: baseline } : plain();
-        };
-        const changes = tree && baseline ? await turn() : unavailableWorkspace();
-        const preview = (snapshot) => ({ ...snapshot,
-            files: snapshot.files.slice(0, 200), hidden_files: snapshot.hidden_files + Math.max(0, snapshot.files.length - 200),
-            patch: snapshot.patch.slice(0, 48 * 1024), patch_truncated: snapshot.patch_truncated || snapshot.patch.length > 48 * 1024 });
-        return { workspace: preview(full), contribution: { changes: preview(changes), summary: null },
-            review: { version: 1, workspace: full, contribution: changes } };
-    }
-    finally {
-        await releaseWorkspaceTree(workspace, `${identity}:settled`, 5_000);
-    }
+    const settled = await captureSettledWorkspace(workspace, startingRevision, baseline, identity, startingHead, deadline);
+    if (settled.pair)
+        return settled.pair;
+    return settledWorkspacePair(settled.pending.full, await compareSettledTurn(workspace, startingRevision, baseline, identity, startingHead, settled.pending, await answer, deadline));
 }

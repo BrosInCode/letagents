@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Worker } from 'node:worker_threads';
 import { captureRecordedRemoteTips, captureRemoteTips, releaseWorkspaceTree } from '../../../../shared/workspace-turn-capture.mjs';
 import { OWN, OWN_ROWS, STAGING_FILES, assertPlain, card, commit, count, environment, fixture, git, lines, listed, recorded, turn, write } from './fixtures/workspace-turns.js';
@@ -343,7 +344,7 @@ function onOldBranch(f: ReturnType<typeof fixture>, name: string, pushed = false
 }
 const FIX = { 'src/fix.test.ts': lines(33, 'case') };
 
-test('a workspace that starts on an old diverged branch: a branch made from the remote\'s staging shows its one file', async t => {
+test('a workspace that starts on an old diverged branch that no remote has: a branch made from the remote\'s staging shows its one file', async t => {
   for (const pushed of [false, true]) {
     const f = fixture(t);
     const { workspace, old, landed } = onOldBranch(f, 'agent', pushed);
@@ -358,6 +359,14 @@ test('a workspace that starts on an old diverged branch: a branch made from the 
     assert.equal(git(workspace, 'rev-list', '--count', `${landed}..${old}`), '2', 'the old branch has commits that staging lacks');
     // Plainly compared, the card is every difference between the two branches.
     assert.equal(count(result.before), BRANCH_DIFFERENCES + 1, 'every difference between the branches, and the fix');
+    if (pushed) {
+      // The old branch is on the remote: its tip is a held commit, and the turn left it for a line that lacks it.
+      // Nothing tells that from a turn that drops a remote branch's work, so the turn is read as before:
+      // the 17 files of the old branch, and the fix. The file that only staging renamed went with the base.
+      assert.equal(count(result.after), BRANCH_DIFFERENCES);
+      assert.ok(listed(result.after).includes('added src/fix.test.ts +33 -0'));
+      continue;
+    }
     assert.deepEqual(listed(result.after), ['added src/fix.test.ts +33 -0']);
     assert.deepEqual([result.after.additions, result.after.deletions], [33, 0]);
     assert.doesNotMatch(result.after.patch, /old|module|from staging|handbook|legacy/);
@@ -433,7 +442,7 @@ test('an agent that leaves its line cannot hide a commit by pushing it, by movin
   assert.match(dropped.after.patch, /-shared 1 from staging\n\+shared 1\n/);
 });
 
-test('work of this workspace that a turn leaves behind is on the card, unless a remote already held it', async t => {
+test('work of this workspace that a turn leaves behind is on the card, pushed or not', async t => {
   for (const [name, published, leave] of [
     ['a new branch, the earlier work not pushed', false, 'branch'], ['a new branch, the earlier work pushed', true, 'branch'],
     ['a reset, the earlier work not pushed', false, 'reset'], ['a reset, the earlier work pushed', true, 'reset']] as const) {
@@ -451,10 +460,158 @@ test('work of this workspace that a turn leaves behind is on the card, unless a 
     });
     const next = leave === 'branch' ? ['added src/fix.test.ts +33 -0'] : [];
     assert.equal(count(result.before), STAGING_FILES + 2 + next.length, name);
-    // Pushed, the earlier work is on the remote and the turn only left it. Not pushed, it is in no other place:
-    // the turn gave it up, and the card says so as it did before.
-    assert.deepEqual(listed(result.after), published ? next : [...next, 'deleted src/earlier.ts +0 -4', 'modified src/app.ts +1 -1'].sort(), name);
+    // The turn gave the earlier work up, and the card says so as it did before. What staging gained is not on it.
+    assert.deepEqual(listed(result.after), [...next, 'deleted src/earlier.ts +0 -4', 'modified src/app.ts +1 -1'].sort(), name);
   }
+});
+
+test('a turn that goes back, or to the side, onto history that the start already had is read as before', async t => {
+  const f = fixture(t);
+  // A teammate's branch that is not in staging, and two commits on staging: a feature and a security fix.
+  git(f.team, 'checkout', '-q', '-b', 'wip');
+  commit(f.team, 'wip', { 'src/app.ts': lines(5, 'app').replace('app 2', 'app 2 not reviewed') });
+  git(f.team, 'push', '-q', 'origin', 'wip'); git(f.team, 'checkout', '-q', 'staging');
+  f.land('feature', { 'src/feature.ts': lines(4, 'feature') });
+  const tip = f.land('security fix', { 'src/shared.ts': lines(6, 'shared').replace('shared 2', 'shared 2 checks the token') });
+  const undone = ['modified src/shared.ts +1 -1'];
+  const shapes: Array<[string, (workspace: string) => void, string[], boolean]> = [
+    ['a reset to the commit before the security fix', workspace => { git(workspace, 'reset', '-q', '--hard', 'HEAD~1'); }, undone, true],
+    ['a branch from that commit, and an own commit', workspace => { git(workspace, 'checkout', '-q', '-b', 'fix', 'HEAD~1'); commit(workspace, 'own', { 'src/own.ts': 'own\n' }); },
+      ['added src/own.ts +1 -0', ...undone], true],
+    ['a detached checkout of the first commit', workspace => { git(workspace, 'checkout', '-q', '--detach', f.first); }, ['deleted src/feature.ts +0 -4', ...undone], true],
+    // The teammate's file is the content of a branch the remote held. What staging had and that branch lacks was dropped.
+    ['a reset to a remote branch that lacks staging\'s commits', workspace => { git(workspace, 'reset', '-q', '--hard', 'origin/wip'); }, ['deleted src/feature.ts +0 -4', ...undone], false],
+  ];
+  for (const [index, [name, work, rows, plain]] of shapes.entries()) {
+    // Both layouts: a clone on the branch, and the daemon's detached worktree.
+    for (const workspace of [f.clone(`clone-${index}`), f.detachedWorktree(tip, `daemon-${index}`)]) {
+      const result = await turn(workspace, tip, () => work(workspace));
+      assert.ok(result.tips?.includes(tip), 'the turn started on a commit that the remote held');
+      assert.deepEqual(listed(result.after), rows, name);
+      if (plain) assertPlain(result);
+    }
+  }
+});
+
+/** The directory that a workspace shares with its repository: `.git` in a clone, the bare repository under a daemon worktree. */
+const repositoryOf = (workspace: string) => resolve(workspace, git(workspace, 'rev-parse', '--git-common-dir'));
+/**
+ * Ways to give `child` the parent `parent` on paper, with files that an agent can write next to the objects.
+ * Each one makes `merge-base` say that `parent` is in the history of `child`.
+ */
+const FORGED_PARENTS: Record<string, (workspace: string, child: string, parent: string) => void> = {
+  'a grafts file': (workspace, child, parent) => {
+    mkdirSync(join(repositoryOf(workspace), 'info'), { recursive: true });
+    writeFileSync(join(repositoryOf(workspace), 'info', 'grafts'), `${child} ${parent}\n`);
+  },
+  'a replace ref': (workspace, child, parent) => { git(workspace, 'replace', '--graft', child, parent); },
+  // The commit-graph file holds every commit's parents by position. Git reads them from it and not from the commits.
+  'a commit-graph file': (workspace, child, parent) => {
+    execFileSync('git', ['-c', 'commitGraph.generationVersion=1', 'commit-graph', 'write', '--stdin-commits'], { cwd: workspace, env: environment, input: `${child}\n${parent}\n`, stdio: ['pipe', 'ignore', 'pipe'] });
+    const path = join(repositoryOf(workspace), 'objects', 'info', 'commit-graph');
+    const graph = readFileSync(path);
+    assert.equal(graph.subarray(0, 4).toString('latin1'), 'CGPH');
+    const chunks = new Map(Array.from({ length: graph[6] + 1 }, (_, index) => [graph.subarray(8 + index * 12, 12 + index * 12).toString('latin1'), Number(graph.readBigUInt64BE(12 + index * 12))]));
+    const offsets = [...chunks.values()].sort((a, b) => a - b);
+    const ids = chunks.get('OIDL')!, data = chunks.get('CDAT')!, width = child.length / 2;
+    const commits = (offsets[offsets.indexOf(ids) + 1] - ids) / width;
+    const position = (id: string) => {
+      const found = Array.from({ length: commits }, (_, index) => graph.subarray(ids + index * width, ids + (index + 1) * width).toString('hex')).indexOf(id);
+      assert.ok(found >= 0, 'the commit is in the graph');
+      return found;
+    };
+    const entry = (id: string) => data + position(id) * (width + 16) + width;
+    const generation = (id: string) => graph.readUInt32BE(entry(id) + 8) >>> 2;
+    graph.writeUInt32BE(position(parent), entry(child));
+    graph.writeUInt32BE((((Math.max(generation(child), generation(parent) + 1)) << 2) | (graph.readUInt32BE(entry(child) + 8) & 3)) >>> 0, entry(child) + 8);
+    createHash(width === 20 ? 'sha1' : 'sha256').update(graph.subarray(0, graph.length - width)).digest().copy(graph, graph.length - width);
+    rmSync(path, { force: true }); writeFileSync(path, graph);
+  },
+};
+const BACKDOOR = { 'src/shared.ts': lines(6, 'shared').replace('shared 2', 'shared 2 BACKDOOR') };
+
+test('a commit of the turn cannot be made to look held by the remote: grafts, replace refs and a commit-graph file are not read', async t => {
+  for (const [name, forge] of Object.entries(FORGED_PARENTS)) {
+    for (const layout of ['clone', 'daemon'] as const) {
+      const f = fixture(t);
+      // The shape that the left-line reading is for: the workspace was made on an old commit that no remote has.
+      const workspace = layout === 'clone' ? f.clone() : f.detachedWorktree(f.first);
+      git(workspace, 'checkout', '-q', '--detach');
+      const old = commit(workspace, 'old work', { 'old/a.ts': 'a\n' });
+      // Two commits land. Git reads the commit it is asked about from the object itself, and the parents of
+      // every commit below it from where they are kept: the forged parent goes under the commit below the tip.
+      const below = f.land('second', { 'src/feature.ts': lines(4, 'feature') });
+      const tip = f.land('third', { 'src/more.ts': lines(2, 'more') });
+      let twin = '';
+      const result = await turn(workspace, old, () => {
+        git(workspace, 'fetch', '-q', 'origin');
+        git(workspace, 'checkout', '-q', '--detach', 'origin/staging');
+        const real = commit(workspace, 'evil', BACKDOOR);
+        // A twin of the commit, with the same files. On paper a commit of staging gets the twin as its parent,
+        // so that the twin is "in the history of a commit that the remote held", and is the base of its own card.
+        twin = git(workspace, 'commit-tree', `${real}^{tree}`, '-p', f.first, '-m', 'evil');
+        forge(workspace, below, twin);
+        git(workspace, 'checkout', '-q', '--detach', twin);
+      });
+      // The forgery is real: a Git that reads these files takes the twin for an ancestor of the remote's tip.
+      assert.doesNotThrow(() => git(workspace, 'merge-base', '--is-ancestor', twin, tip), `${name} (${layout})`);
+      assert.ok(result.tips?.includes(tip) && !result.tips.includes(twin));
+      assert.ok(listed(result.after).includes('modified src/shared.ts +1 -1'), `${name} (${layout}): ${JSON.stringify(listed(result.after))}`);
+      assert.match(result.after.patch, /\+shared 2 BACKDOOR/);
+      assertPlain(result);
+    }
+  }
+});
+
+test('a shallow file cannot hide that the turn went back: parents that are taken away do not make a step back a step to the side', async t => {
+  const f = fixture(t);
+  f.land('feature', { 'src/feature.ts': lines(4, 'feature') });
+  const fixed = f.land('security fix', { 'src/shared.ts': lines(6, 'shared').replace('shared 2', 'shared 2 checks the token') });
+  const workspace = f.clone();
+  // Commits that no remote has: one on staging's tip, one on the first commit, and their merge. The workspace was made on the merge.
+  const onTip = commit(workspace, 'local on the tip', { 'local/one.ts': 'one\n' });
+  git(workspace, 'checkout', '-q', '--detach', f.first);
+  const onFirst = commit(workspace, 'local on the first commit', { 'local/two.ts': 'two\n' });
+  git(workspace, 'checkout', '-q', '--detach', onTip);
+  git(workspace, 'merge', '-q', '--no-ff', '--no-edit', onFirst);
+  const made = git(workspace, 'rev-parse', 'HEAD');
+  const result = await turn(workspace, made, () => {
+    // Back to the commit before the security fix. The shallow file cuts the only path from the start to it:
+    // the start then seems to contain no more of the remote than the first commit.
+    git(workspace, 'checkout', '-q', '--detach', `${fixed}~1`);
+    writeFileSync(join(workspace, '.git', 'shallow'), `${onTip}\n`);
+  });
+  assert.throws(() => git(workspace, 'merge-base', '--is-ancestor', `${fixed}~1`, made), 'Git itself no longer sees the commit in the start\'s history');
+  assert.deepEqual(listed(result.after), ['deleted local/one.ts +0 -1', 'deleted local/two.ts +0 -1', 'modified src/shared.ts +1 -1']);
+  assert.match(result.after.patch, /-shared 2 checks the token\n\+shared 2\n/);
+  assertPlain(result);
+});
+
+test('a recorded tip that is not in the repository is not fetched, and proves nothing', async t => {
+  const [major, minor] = git(tmpdir(), 'version').replace(/^git version /, '').split('.').map(Number);
+  if (major < 2 || (major === 2 && minor < 44)) return t.skip('GIT_NO_LAZY_FETCH needs Git 2.44');
+  const f = fixture(t);
+  git(f.remote, 'config', 'uploadpack.allowFilter', 'true');
+  git(f.remote, 'config', 'uploadpack.allowAnySHA1InWant', 'true');
+  // A partial clone: Git fetches a missing object when a command names it, with the remote that the clone configures.
+  const workspace = join(f.root, 'partial');
+  git(f.root, 'clone', '-q', '--filter=blob:none', pathToFileURL(f.remote).href, workspace);
+  recorded.set(workspace, f.remote);
+  git(workspace, 'checkout', '-q', '--detach');
+  const old = commit(workspace, 'old work', { 'old/a.ts': 'a\n' });
+  f.landOnStaging();
+  // A teammate's branch that the workspace never fetches.
+  const unfetched = f.pushFeatureBranch();
+  const local = (id: string) => { try { execFileSync('git', ['cat-file', '-e', id], { cwd: workspace, env: { ...environment, GIT_NO_LAZY_FETCH: '1' }, stdio: 'ignore' }); return true; } catch { return false; } };
+  const result = await turn(workspace, old, () => {
+    git(workspace, 'fetch', '-q', 'origin', 'staging');
+    git(workspace, 'checkout', '-q', '--detach', 'FETCH_HEAD');
+    commit(workspace, 'the fix', FIX);
+    assert.equal(local(unfetched), false);
+  });
+  assert.ok(result.tips?.includes(unfetched), 'the remote held the branch');
+  assert.equal(local(unfetched), false, 'the capture started no fetch for it');
+  assert.deepEqual(listed(result.after), ['added src/fix.test.ts +33 -0'], 'the tips that are in the repository are enough');
 });
 
 test('a rebase and an amended commit leave the start too, and show what they showed before', async t => {
