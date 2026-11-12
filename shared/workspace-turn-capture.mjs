@@ -268,6 +268,21 @@ export async function captureWorkspaceHead(workspace) {
     return git(workspace, ['rev-parse', '--verify', 'HEAD^{commit}'], AbortSignal.timeout(GIT_TIMEOUT_MS)).then(value => value.trim(), () => null);
 }
 const objectId = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
+/**
+ * How long the remotes get to list their branches. Five seconds was too short: a
+ * healthy remote that needs seven or eight seconds for `git ls-remote` never
+ * answered, and every turn there was compared plainly. The question is not awaited
+ * when the work starts, so the limit delays no start. When the work has settled,
+ * only a piece of work that moved HEAD waits for an answer that is still pending
+ * (captureWorkspacePair).
+ *
+ * The limit is also how long after the start an answer can be taken. A commit that
+ * the work pushes before the remote lists its branches is in the answer, and is
+ * then a base like any other. The remote lists its branches when its connection
+ * opens; a push by the work opens a connection of its own to the same remote, and
+ * starts later. A longer limit makes that window longer, it does not close it.
+ */
+export const REMOTE_QUESTION_TIMEOUT_MS = 20_000;
 const noPrompt = (ssh) => ({ GIT_SSH_COMMAND: `${ssh} -o BatchMode=yes -o ConnectTimeout=5`, GIT_ASKPASS: '', SSH_ASKPASS: '', SSH_ASKPASS_REQUIRE: 'never', GCM_INTERACTIVE: 'never' });
 const branchTips = (listed) => [...new Set(listed.flatMap(lines => lines.split('\n').map(line => line.split('\t')[0])))].filter(tip => objectId.test(tip));
 /**
@@ -275,10 +290,10 @@ const branchTips = (listed) => [...new Set(listed.flatMap(lines => lines.split('
  * themselves before a piece of work starts. It is the only evidence of "upstream"
  * the capture accepts: remote-tracking branches and reflogs are local files that
  * the work can move or clear. Resolves to null when there is no remote or when a
- * remote does not answer; all of them together get five seconds, and then Git is
- * killed. It never rejects and never asks for a password, a passphrase or a host
- * key. Start it without waiting, so that a slow remote cannot delay the work, and
- * await it when the work has settled.
+ * remote does not answer; all of them together get `limit` (REMOTE_QUESTION_TIMEOUT_MS),
+ * and then Git is killed. It never rejects and never asks for a password, a
+ * passphrase or a host key. Start it without waiting, so that a slow remote cannot
+ * delay the work, and await it when the work has settled.
  *
  * The repository's own configuration names the remotes here, and whoever can
  * write that configuration can name another repository. That is acceptable only
@@ -286,8 +301,8 @@ const branchTips = (listed) => [...new Set(listed.flatMap(lines => lines.split('
  * tools). A supervisor that must not take the workspace's word asks the remote it
  * recorded itself: captureRecordedRemoteTips.
  */
-export async function captureRemoteTips(workspace, { onNoAnswer = noteNoAnswer } = {}) {
-    const signal = AbortSignal.timeout(5_000);
+export async function captureRemoteTips(workspace, { onNoAnswer = noteNoAnswer, limit = REMOTE_QUESTION_TIMEOUT_MS } = {}) {
+    const signal = AbortSignal.timeout(limit);
     try {
         const remotes = (await git(workspace, ['remote'], signal)).split('\n').filter(Boolean);
         if (!remotes.length) {
@@ -298,14 +313,14 @@ export async function captureRemoteTips(workspace, { onNoAnswer = noteNoAnswer }
         return branchTips(await Promise.all(remotes.map(remote => remoteGit(workspace, ['-c', 'credential.interactive=false', 'ls-remote', '--heads', '--', remote], signal, noPrompt(ssh)))));
     }
     catch (error) {
-        onNoAnswer(noAnswerReason(error, signal));
+        onNoAnswer(noAnswerReason(error, signal, limit));
         return null;
     }
 }
 /** Why the remotes gave no answer: a silent null would hide a capture that is compared plainly for a fixable reason. */
-function noAnswerReason(error, signal) {
+function noAnswerReason(error, signal, limit) {
     if (signal.aborted)
-        return 'the remotes did not answer within 5 seconds';
+        return `the remotes did not answer within ${limit / 1000} seconds`;
     const message = error instanceof Error ? error.message.split('\n')[0] : String(error);
     return `${error?.code ? `${error.code}: ` : ''}${message}`;
 }
@@ -323,8 +338,8 @@ const noteNoAnswer = (reason) => console.error(`[letagents] The remotes could no
  * `directory`, which is not the workspace; with no repository it does not matter
  * where.
  */
-export async function captureRecordedRemoteTips(url, directory = tmpdir(), { onNoAnswer = noteNoAnswer } = {}) {
-    const signal = AbortSignal.timeout(5_000);
+export async function captureRecordedRemoteTips(url, directory = tmpdir(), { onNoAnswer = noteNoAnswer, limit = REMOTE_QUESTION_TIMEOUT_MS } = {}) {
+    const signal = AbortSignal.timeout(limit);
     try {
         if (typeof url !== 'string' || !url) {
             onNoAnswer('no remote was recorded');
@@ -342,7 +357,7 @@ export async function captureRecordedRemoteTips(url, directory = tmpdir(), { onN
         return branchTips([await remoteGit(directory, ['-c', 'credential.interactive=false', 'ls-remote', '--heads', '--', url], signal, quiet)]);
     }
     catch (error) {
-        onNoAnswer(noAnswerReason(error, signal));
+        onNoAnswer(noAnswerReason(error, signal, limit));
         return null;
     }
 }
@@ -356,6 +371,21 @@ async function changedEntries(root, from, to, signal) {
     return entries;
 }
 const parents = (path) => path.split('/').slice(0, -1).map((_, index, parts) => parts.slice(0, index + 1).join('/'));
+/** The tree of `base` with `entries` (lines for `update-index --index-info`) put over it. Nothing is checked out. */
+async function treeWith(root, base, entries, signal) {
+    if (!entries.length)
+        return (await git(root, ['rev-parse', '--verify', `${base}^{tree}`], signal)).trim();
+    const scratch = await mkdtemp(join(tmpdir(), 'letagents-workspace-'));
+    try {
+        const index = join(scratch, 'index');
+        await git(root, ['read-tree', `${base}^{tree}`], signal, index);
+        await git(root, ['update-index', '-z', '--index-info'], signal, index, entries.join(''));
+        return (await git(root, ['write-tree'], signal, index)).trim();
+    }
+    finally {
+        await rm(scratch, { recursive: true, force: true });
+    }
+}
 /**
  * The tree to compare a settled turn against so that the result is the agent's
  * own changes. A fetch followed by a checkout, merge, rebase or pull brings
@@ -363,11 +393,61 @@ const parents = (path) => path.split('/').slice(0, -1).map((_, index, parts) => 
  * like work done in the turn.
  *
  * `remoteTips` is what the remotes held before the turn (captureRemoteTips or
- * captureRecordedRemoteTips). The
- * new base N is the one tip among them that HEAD gained during the turn: an
- * ancestor of HEAD now, not an ancestor of `startingHead`. The old base B is the
- * merge base of `startingHead` and N. Then, for each path that differs between B
- * and N, with S the start tree and E the settled tree:
+ * captureRecordedRemoteTips), `head` is the commit the settled turn is on, and
+ * `workspaceStart` is the commit the workspace was made on.
+ * The turn is read in one of two ways, and in a third when neither applies:
+ *  - the base moved under the work that was here (updatedBaseTree);
+ *  - the turn left the commits it started on for another line (leftLineTree);
+ *  - `start`, the plain comparison.
+ * When both readings apply, the one that leaves fewer changed paths is the
+ * comparison (see leftLineTree for why either may be taken).
+ *
+ * In both readings a path leaves the comparison only when its settled content
+ * is, byte for byte, the content of the start snapshot or content that a remote
+ * already held at that path, in the one base commit, before the turn started.
+ * Nothing made during the turn can be hidden, whatever happens to local refs
+ * afterwards. Without that certainty the result is `start`: no answer from the
+ * remotes, an unknown starting commit, a sparse checkout, or any Git failure.
+ */
+async function ownStartingTree(workspace, start, startingHead, head, workspaceStart, remoteTips, settled, deadline) {
+    if (!objectId.test(start ?? '') || !objectId.test(startingHead ?? '') || !objectId.test(head ?? '') || !Array.isArray(remoteTips))
+        return start;
+    const signal = AbortSignal.any([AbortSignal.timeout(WORKSPACE_CAPTURE_TIMEOUT_MS), deadline]);
+    let root;
+    try {
+        root = await realpath(workspace);
+        // A sparse checkout leaves files out: an untouched file would look deleted against a
+        // new base, so the plain comparison is kept for it. The trees hold text files as Git
+        // stores them, so core.autocrlf (on by default in Git for Windows) does not make an
+        // untouched file look changed, and the rules hold under it; the Git-for-Windows suite
+        // proves that.
+        // Git reads the value in effect and its boolean forms (a bare key is true; yes/on/1).
+        if ((await git(root, ['config', '--type=bool', '--get', 'core.sparseCheckout'], signal).catch(() => '')).trim() === 'true')
+            return start;
+    }
+    catch {
+        return start;
+    }
+    const updated = await updatedBaseTree(root, start, startingHead, head, remoteTips, signal).catch(() => start);
+    try {
+        const left = await leftLineTree(root, start, startingHead, head, workspaceStart, remoteTips, signal);
+        if (!left || left === updated)
+            return updated;
+        const kept = await changedEntries(root, updated, settled, signal);
+        return (await changedEntries(root, left, settled, signal)).size < kept.size ? left : updated;
+    }
+    catch {
+        return updated;
+    }
+}
+/**
+ * The base moved under the work that was here: a merge, a rebase, a pull, or a
+ * branch made from the new base when the start had no commits of its own.
+ *
+ * The new base N is the one tip among `remoteTips` that HEAD gained during the
+ * turn: an ancestor of `head`, not an ancestor of `startingHead`. The old base B
+ * is the merge base of `startingHead` and N. Then, for each path that differs
+ * between B and N, with S the start tree and E the settled tree:
  *  - S has B's content and E has N's content: the path changed only because the
  *    base moved. It is not in the comparison.
  *  - S has B's content and E differs from N: the turn changed the path, and it is
@@ -377,66 +457,118 @@ const parents = (path) => path.split('/').slice(0, -1).map((_, index, parts) => 
  *    measured from S as before; a resolved merge conflict shows here.
  * Every other path is measured from S as before.
  *
- * So a path leaves the comparison only when its settled content is, byte for
- * byte, content that a remote already held before the turn started. Nothing made
- * during the turn can be hidden, whatever happens to local refs afterwards.
- * Without that certainty the result is `start`, the plain comparison: no answer
- * from the remotes, an unknown starting commit, no tip or more than one
- * independent tip gained, or any Git failure.
+ * The result is `start` when no tip, or more than one independent tip, was gained.
  */
-async function ownStartingTree(workspace, start, startingHead, remoteTips, deadline) {
-    if (!objectId.test(start ?? '') || !objectId.test(startingHead ?? '') || !Array.isArray(remoteTips))
+async function updatedBaseTree(root, start, startingHead, head, remoteTips, signal) {
+    const gained = new Set((await git(root, ['rev-list', head, `^${startingHead}`], signal)).split('\n'));
+    const candidates = [...new Set(remoteTips)].filter(tip => objectId.test(tip) && gained.has(tip));
+    if (!candidates.length || candidates.length > 256)
         return start;
-    const signal = AbortSignal.any([AbortSignal.timeout(WORKSPACE_CAPTURE_TIMEOUT_MS), deadline]);
-    let scratch;
-    try {
-        const root = await realpath(workspace);
-        const gained = new Set((await git(root, ['rev-list', 'HEAD', `^${startingHead}`], signal)).split('\n'));
-        const candidates = [...new Set(remoteTips)].filter(tip => objectId.test(tip) && gained.has(tip));
-        if (!candidates.length || candidates.length > 256)
-            return start;
-        // A tip that another gained tip already contains is not a second base.
-        const newest = candidates.length > 1 ? (await git(root, ['merge-base', '--independent', ...candidates], signal)).split('\n').filter(Boolean) : candidates;
-        if (newest.length !== 1)
-            return start;
-        const [base] = newest;
-        const old = (await git(root, ['merge-base', startingHead, base], signal)).trim();
-        // A sparse checkout leaves files out: an untouched file would look deleted against the
-        // new base, so the plain comparison is kept for it. The trees hold text files as Git
-        // stores them, so core.autocrlf (on by default in Git for Windows) does not make an
-        // untouched file look changed, and the rule holds under it; the Git-for-Windows suite
-        // proves that.
-        // Git reads the value in effect and its boolean forms (a bare key is true; yes/on/1).
-        if ((await git(root, ['config', '--type=bool', '--get', 'core.sparseCheckout'], signal).catch(() => '')).trim() === 'true')
-            return start;
-        const incoming = await changedEntries(root, `${old}^{tree}`, `${base}^{tree}`, signal);
-        const touched = await changedEntries(root, `${old}^{tree}`, `${start}^{tree}`, signal);
-        const absent = `000000 ${'0'.repeat(base.length)}`;
-        const kept = [...touched].filter(([, [, entry]]) => entry !== absent).map(([path]) => path);
-        const keptFiles = new Set(kept);
-        const keptDirectories = new Set(kept.flatMap(parents));
-        const entries = [];
-        for (const [path, [, entry]] of incoming) {
-            // A file cannot take the place of a directory that holds an earlier change, or the reverse. The earlier change stays.
-            if (touched.has(path) || (entry !== absent && (keptDirectories.has(path) || parents(path).some(parent => keptFiles.has(parent)))))
-                continue;
-            entries.push(`${entry}\t${path}\0`);
+    // A tip that another gained tip already contains is not a second base.
+    const newest = candidates.length > 1 ? (await git(root, ['merge-base', '--independent', ...candidates], signal)).split('\n').filter(Boolean) : candidates;
+    if (newest.length !== 1)
+        return start;
+    const [base] = newest;
+    const old = (await git(root, ['merge-base', startingHead, base], signal)).trim();
+    const incoming = await changedEntries(root, `${old}^{tree}`, `${base}^{tree}`, signal);
+    const touched = await changedEntries(root, `${old}^{tree}`, `${start}^{tree}`, signal);
+    const absent = `000000 ${'0'.repeat(base.length)}`;
+    const kept = [...touched].filter(([, [, entry]]) => entry !== absent).map(([path]) => path);
+    const keptFiles = new Set(kept);
+    const keptDirectories = new Set(kept.flatMap(parents));
+    const entries = [];
+    for (const [path, [, entry]] of incoming) {
+        // A file cannot take the place of a directory that holds an earlier change, or the reverse. The earlier change stays.
+        if (touched.has(path) || (entry !== absent && (keptDirectories.has(path) || parents(path).some(parent => keptFiles.has(parent)))))
+            continue;
+        entries.push(`${entry}\t${path}\0`);
+    }
+    return entries.length ? treeWith(root, start, entries, signal) : start;
+}
+/**
+ * The turn left the commits it started on: `startingHead` is not in the history
+ * of `head`. The usual case is a workspace that was made on an old local branch,
+ * and an agent that makes its branch from the remote's branch and commits there.
+ * The commits of the old branch are then not in the agent's work. Read as a base
+ * that moved, every path those commits changed counts as changed "here before
+ * the base moved", and the card shows the whole old branch undone.
+ *
+ * The base M is the nearest commit in the history of `head` that a remote held
+ * before the turn: reachable from one of `remoteTips`. Only the tips whose
+ * commits are in this repository can show that, and they are named by object id,
+ * so no local ref and nothing pushed after the answer takes part. The comparison
+ * starts at the tree of M, except for the paths below, which keep their content
+ * of S, the start tree, and are measured from S as before:
+ *  - a path with an uncommitted or untracked change when the turn began (S
+ *    differs from the tree of `startingHead`), wherever the turn carried it;
+ *  - a path that a commit made in this workspace changed (S differs from the
+ *    tree of `workspaceStart`, the commit the workspace was made on), when no
+ *    remote held `startingHead` before the turn. That work is nowhere else: a
+ *    turn that leaves it, or resets it away, shows it as given up.
+ *
+ * So the turn's commits and edits on top of M are all in the comparison, an
+ * upstream change of M that the settled files lack included. What is not in it:
+ * a file that the settled tree has as M has it, and that either was never
+ * changed in this workspace or is in a commit that a remote already held. The
+ * turn made no content there, and no work of this workspace is lost with it.
+ *
+ * A rebase also leaves the commits it started on, and it keeps their changes:
+ * read this way, earlier work that was pushed shows again as new. Read as a base
+ * that moved, a line that was left shows as undone. Both readings hide only
+ * start content or a base's content, and they differ only on the committed
+ * paths of the line the turn started on, so the caller takes the one with fewer
+ * changed paths.
+ *
+ * Null when this reading does not apply: the start is in the settled history,
+ * no remote-held commit is in it, more than one independent one is, or the
+ * work of the workspace cannot be told (no `workspaceStart`).
+ */
+async function leftLineTree(root, start, startingHead, head, workspaceStart, remoteTips, signal) {
+    // Ancestry is asked with `merge-base` only. `rev-list A ^B` orders its walk by commit
+    // dates and can stop too early when they are out of order, and the turn writes the dates
+    // of its own commits.
+    const inHistory = await git(root, ['merge-base', '--is-ancestor', startingHead, head], signal).then(() => true, (error) => {
+        if (error?.code === 1) return false;
+        throw error;
+    });
+    if (inHistory)
+        return null;
+    const tips = [...new Set(remoteTips)].filter(tip => objectId.test(tip));
+    if (!tips.length || tips.length > 4096)
+        return null;
+    const held = (await git(root, ['cat-file', '--batch-check'], signal, undefined, tips.map(tip => `${tip}\n`).join('')))
+        .split('\n').filter(line => / commit \d+$/.test(line)).map(line => line.split(' ')[0]);
+    /**
+     * The best common ancestors of `commit` and any held tip, a part of the tips at a time: a
+     * command line holds only so many names. The best of all parts together hold the best of all.
+     */
+    const nearestHeld = async (commit) => {
+        const nearest = new Set();
+        for (let i = 0; i < held.length; i += 200) {
+            const found = await git(root, ['merge-base', '--all', commit, ...held.slice(i, i + 200)], signal).catch((error) => {
+                if (error?.code === 1) return ''; // No common ancestor with these tips.
+                throw error;
+            });
+            for (const ancestor of found.split('\n').filter(Boolean)) nearest.add(ancestor);
         }
-        if (!entries.length)
-            return start;
-        scratch = await mkdtemp(join(tmpdir(), 'letagents-workspace-'));
-        const index = join(scratch, 'index');
-        await git(root, ['read-tree', `${start}^{tree}`], signal, index);
-        await git(root, ['update-index', '-z', '--index-info'], signal, index, entries.join(''));
-        return (await git(root, ['write-tree'], signal, index)).trim();
+        return nearest;
+    };
+    const nearest = await nearestHeld(head);
+    if (!nearest.size || nearest.size > 256)
+        return null;
+    // A held commit that another one already contains is not a second base.
+    const bases = nearest.size > 1 ? (await git(root, ['merge-base', '--independent', ...nearest], signal)).split('\n').filter(Boolean) : [...nearest];
+    if (bases.length !== 1)
+        return null;
+    const kept = await changedEntries(root, `${startingHead}^{tree}`, `${start}^{tree}`, signal);
+    // A commit is its own best common ancestor with a tip exactly when that tip contains it.
+    if (!(await nearestHeld(startingHead)).has(startingHead)) {
+        if (!objectId.test(workspaceStart ?? ''))
+            return null;
+        if (workspaceStart !== startingHead)
+            for (const [path, entries] of await changedEntries(root, `${workspaceStart}^{tree}`, `${start}^{tree}`, signal)) kept.set(path, entries);
     }
-    catch {
-        return start;
-    }
-    finally {
-        if (scratch)
-            await rm(scratch, { recursive: true, force: true });
-    }
+    return treeWith(root, bases[0], [...kept].map(([path, [, entry]]) => `${entry}\t${path}\0`), signal);
 }
 /**
  * `startingHead` and `remoteTips` describe the moment `baseline` was captured:
@@ -448,15 +580,22 @@ async function ownStartingTree(workspace, start, startingHead, remoteTips, deadl
 export async function captureWorkspacePair(workspace, startingRevision, baseline, identity, startingHead = null, remoteTips = null) {
     // One budget for the whole settled turn, whatever Defender or a slow disk does to each command.
     const deadline = AbortSignal.timeout(WORKSPACE_SETTLE_TIMEOUT_MS);
+    // A question that fails in any way leaves the plain comparison, also when nothing waits for it.
+    const answer = Promise.resolve(remoteTips).catch(() => null);
     const tree = await captureWorkspaceTree(workspace, `${identity}:settled`, deadline);
     try {
         const full = tree ? await captureWorkspaceChanges(workspace, startingRevision, tree, true, deadline) : unavailableWorkspace();
         const turn = async () => {
-            // The settled files are already captured: a remote that is still silent delays only this
-            // comparison, and a question that failed in any way leaves the plain one.
-            const from = await ownStartingTree(workspace, baseline, startingHead, await Promise.resolve(remoteTips).catch(() => null), deadline);
+            const plain = () => captureWorkspaceChanges(workspace, baseline, tree, true, deadline);
+            // Only a turn that moved HEAD can have taken in a base or left its line. Every other
+            // turn is compared plainly at once: it does not wait for a remote that is still silent.
+            const head = objectId.test(startingHead ?? '') ? await git(workspace, ['rev-parse', '--verify', 'HEAD^{commit}'], deadline).then(value => value.trim(), () => null) : null;
+            if (!head || head === startingHead)
+                return plain();
+            // The settled files are already captured: a remote that is still silent delays only this comparison.
+            const from = await ownStartingTree(workspace, baseline, startingHead, head, startingRevision, await answer, tree, deadline);
             const own = from === baseline ? null : await captureWorkspaceChanges(workspace, from, tree, true, deadline);
-            return own?.state === 'ready' ? { ...own, base_revision: baseline } : captureWorkspaceChanges(workspace, baseline, tree, true, deadline);
+            return own?.state === 'ready' ? { ...own, base_revision: baseline } : plain();
         };
         const changes = tree && baseline ? await turn() : unavailableWorkspace();
         const preview = (snapshot) => ({ ...snapshot,

@@ -39,6 +39,8 @@ export function commit(directory: string, message: string, files: Files) {
 
 /** The remote the daemon recorded for each workspace when it provisioned it. Nothing in a workspace changes it. */
 export const recorded = new Map<string, string>();
+/** How long a workspace's recorded remote gets to answer in a test that waits for a silent one. Without it, the real limit. */
+export const questionLimits = new Map<string, number>();
 
 /** A bare remote with a `staging` branch, a teammate's clone that lands work on it, and agent workspaces. */
 export function fixture(t: TestContext) {
@@ -122,7 +124,7 @@ export async function turn(workspace: string, startingRevision: string, work: ()
   evidence: { head?: string | null; tips?: string[] | null | Promise<string[] | null> } = {}) {
   const identity = randomUUID();
   // The daemon asks the remote it recorded, with a real `git ls-remote`.
-  const tips = await captureRecordedRemoteTips(recorded.get(workspace));
+  const tips = await captureRecordedRemoteTips(recorded.get(workspace), undefined, { limit: questionLimits.get(workspace) });
   const baseline = await captureWorkspaceTree(workspace, identity);
   assert.ok(baseline);
   const head = await captureWorkspaceHead(workspace);

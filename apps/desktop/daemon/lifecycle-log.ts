@@ -10,6 +10,7 @@ import {
 import { dirname, join } from "node:path";
 
 import { redactCredentialText } from "./credential-redaction.js";
+import { setRemoteUnansweredReporter } from "./recorded-remote-answers.js";
 import { setRoomLatencyReporter } from "./room-latency-trace.js";
 import { setTurnStartLatencyReporter } from "./turn-start-latency.js";
 import { openNoFollowSync, ownerPrivatePlatform, privateEntryCreatedSync, protectOwnerPrivateSync } from "../../../shared/owner-private-fs.mjs";
@@ -41,7 +42,7 @@ function protectLog(path: string, made: boolean): void {
 
 export type DaemonLifecycleEvent = {
   event: "daemon_starting" | "daemon_ready" | "handoff_complete" | "entrypoint_failure" | "fatal_exception" | "process_exit" | "room_latency"
-    | "turn_start_latency" | "provider_launch_latency";
+    | "turn_start_latency" | "provider_launch_latency" | "workspace_remote_unanswered";
   detail?: string | null;
   exitCode?: number | null;
 };
@@ -115,6 +116,9 @@ export class DaemonLifecycleLog {
 export function startDaemonLifecycleDiagnostics(path: string): DaemonLifecycleLog {
   const lifecycle = new DaemonLifecycleLog(path);
   setRoomLatencyReporter(sample => lifecycle.append({ event: "room_latency", detail: JSON.stringify(sample) }));
+  // A recorded remote that gave no answer: the turns that depended on it show a plain comparison.
+  // At most one event per remote in each failure pause, so it stays in the lifecycle file.
+  setRemoteUnansweredReporter(sample => lifecycle.append({ event: "workspace_remote_unanswered", detail: JSON.stringify(sample) }));
   // One start-up sample per turn would soon push process failures out of the
   // lifecycle file, so they get a sibling file, created at the first sample.
   const turnLatencyPath = join(dirname(path), "daemon-turn-latency.jsonl");
@@ -129,6 +133,7 @@ export function startDaemonLifecycleDiagnostics(path: string): DaemonLifecycleLo
   });
   process.on("exit", exitCode => {
     setRoomLatencyReporter(null);
+    setRemoteUnansweredReporter(null);
     setTurnStartLatencyReporter(null);
     turnLatency?.close();
     lifecycle.append({ event: "process_exit", exitCode });

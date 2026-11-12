@@ -14,7 +14,7 @@ import type { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
 import { currentWorkerPublicationAuthority, sameWorkerPublicationOrigin } from "./worker-publication-authority.js";
 import { isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
 import { isNetworkRemote, type WorkspaceMarker } from "./workspace-provisioner.js";
-import { RecordedRemoteAnswers } from "./recorded-remote-answers.js";
+import { askRecordedRemote, RecordedRemoteAnswers } from "./recorded-remote-answers.js";
 import { RoomLatencyTrace } from "./room-latency-trace.js";
 
 type Options = {
@@ -93,9 +93,10 @@ export class RoomWorkPublisher {
   private readonly turnStarts = new Map<string, { head: string; remoteTips: Promise<string[] | null> }>();
   /** One set of answers for all agents and turns of this daemon. It does not outlive this process either. */
   private readonly remoteAnswers = new RecordedRemoteAnswers(
-    // A remote that gives no answer leaves the turn compared plainly; the reason goes to the daemon's diagnostics, not to a stderr nobody reads.
-    (remote) => this.options.askRemote ? this.options.askRemote(remote)
-      : captureRecordedRemoteTips(remote, undefined, { onNoAnswer: (reason) => this.report(`remote_unanswered: ${reason}`) }), () => this.now());
+    // A remote that gives no answer leaves the turn compared plainly; the reason goes to the daemon's diagnostics and,
+    // with the time the question took, to the lifecycle log: the packaged daemon's stderr is read by nobody.
+    (remote) => askRecordedRemote(remote, (address, onNoAnswer) => this.options.askRemote ? this.options.askRemote(address)
+      : captureRecordedRemoteTips(address, undefined, { onNoAnswer }), { warn: (reason) => this.report(`remote_unanswered: ${reason}`) }), () => this.now());
   private readonly cancellation = new AbortController();
   private readonly workspaceCapture = new WorkspaceCapture();
   private scheduled: NodeJS.Timeout | null = null;

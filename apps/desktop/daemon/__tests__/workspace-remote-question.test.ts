@@ -5,9 +5,9 @@ import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSyn
 import { createServer, type AddressInfo, type Socket } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { captureRecordedRemoteTips, captureRemoteTips } from '../../../../shared/workspace-turn-capture.mjs';
+import { REMOTE_QUESTION_TIMEOUT_MS, captureRecordedRemoteTips, captureRemoteTips } from '../../../../shared/workspace-turn-capture.mjs';
 import { needsProcessTreeHelper } from '../../electron/__tests__/platform.js';
-import { OWN, OWN_ROWS, STAGING_FILES, assertPlain, assertPlainRows, commit, count, fixture, git, listed, recorded, turn } from './fixtures/workspace-turns.js';
+import { OWN, OWN_ROWS, STAGING_FILES, assertPlain, assertPlainRows, commit, count, fixture, git, listed, questionLimits, recorded, turn } from './fixtures/workspace-turns.js';
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
 
 // What the capture takes for "upstream" is the answer of the remote that the daemon
@@ -211,7 +211,8 @@ test('the question cannot prompt, and a transport that hangs does not outlive it
   t.after(() => { if (saved === undefined) delete process.env.GIT_SSH_COMMAND; else process.env.GIT_SSH_COMMAND = saved; for (const pid of started) if (alive(pid)) process.kill(pid, 'SIGKILL'); });
   process.env.GIT_SSH_COMMAND = transport;
   const begun = Date.now();
-  assert.deepEqual(await Promise.all([captureRecordedRemoteTips('ssh://git.example.invalid/team/project'), captureRemoteTips(workspace)]), [null, null]);
+  // The real limit is longer (REMOTE_QUESTION_TIMEOUT_MS); the test does not wait that long for a transport that never answers.
+  assert.deepEqual(await Promise.all([captureRecordedRemoteTips('ssh://git.example.invalid/team/project', undefined, { limit: 5_000 }), captureRemoteTips(workspace, { limit: 5_000 })]), [null, null]);
   assert.ok(Date.now() - begun < 7_500);
   const runs = readdirSync(seen);
   assert.equal(runs.length, 2, 'the daemon\'s question and the MCP worker\'s question each started the transport');
@@ -239,14 +240,34 @@ test('a remote that does not answer in time gives no answer and delays nothing',
   git(workspace, 'config', 'protocol.ext.allow', 'always');
   git(workspace, 'remote', 'add', 'slow', 'ext::sleep 8');
   const started = Date.now();
-  const pending = [captureRecordedRemoteTips(`git://127.0.0.1:${(silent.address() as AddressInfo).port}/repository`), captureRemoteTips(workspace)];
+  // The limit of this test is five seconds, not the real one, so that the test does not wait twenty for silence.
+  const reasons: string[] = [];
+  const options = { limit: 5_000, onNoAnswer: (reason: string) => { reasons.push(reason); } };
+  const pending = [captureRecordedRemoteTips(`git://127.0.0.1:${(silent.address() as AddressInfo).port}/repository`, undefined, options), captureRemoteTips(workspace, options)];
   assert.ok(Date.now() - started < 1_000, 'the question is asked without waiting for the answer');
   assert.deepEqual(await Promise.all(pending), [null, null]);
   const waited = Date.now() - started;
   assert.ok(waited >= 4_000 && waited < 7_500, `five seconds in total, waited ${waited} ms`);
+  assert.deepEqual(reasons, ['the remotes did not answer within 5 seconds', 'the remotes did not answer within 5 seconds']);
   assert.equal(sockets.length, 1, 'the recorded remote was really asked');
   recorded.set(workspace, `git://127.0.0.1:${(silent.address() as AddressInfo).port}/repository`);
+  questionLimits.set(workspace, 2_000);
   const result = await turn(workspace, f.first, () => { git(workspace, 'pull', '-q', '--ff-only', 'origin', 'staging'); commit(workspace, 'own work', OWN); });
   assert.equal(result.tips, null);
   assertPlain(result);
+});
+
+test('a remote that needs longer than five seconds, and is healthy, is an answer', { skip: process.platform === 'win32' }, async t => {
+  assert.equal(REMOTE_QUESTION_TIMEOUT_MS, 20_000);
+  const f = fixture(t);
+  const workspace = f.clone();
+  const landed = f.landOnStaging();
+  // The same remote behind a transport that takes six seconds to connect. Five seconds was the limit once: every
+  // turn on such a remote was compared plainly, and a card counted the whole base update as the agent's work.
+  git(workspace, 'config', 'protocol.ext.allow', 'always');
+  git(workspace, 'remote', 'set-url', 'origin', `ext::sh -c sleep% 6;% exec% git% upload-pack% ${f.remote}`);
+  const started = Date.now();
+  const tips = await captureRemoteTips(workspace);
+  assert.ok(Date.now() - started >= 5_500, 'the remote was slow');
+  assert.ok(tips?.includes(landed));
 });

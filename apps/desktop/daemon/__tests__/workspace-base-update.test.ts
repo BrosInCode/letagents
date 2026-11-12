@@ -9,6 +9,8 @@ import { Worker } from 'node:worker_threads';
 import { captureRecordedRemoteTips, captureRemoteTips, releaseWorkspaceTree } from '../../../../shared/workspace-turn-capture.mjs';
 import { OWN, OWN_ROWS, STAGING_FILES, assertPlain, card, commit, count, environment, fixture, git, lines, listed, recorded, turn, write } from './fixtures/workspace-turns.js';
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { DaemonLifecycleLog } from '../lifecycle-log.js';
+import { REMOTE_FAILURE_PAUSE_MS, askRecordedRemote, setRemoteUnansweredReporter } from '../recorded-remote-answers.js';
 
 // A change card must count what the agent changed. Commits that enter the
 // workspace through a fetch followed by a checkout, merge, rebase or pull are
@@ -313,6 +315,205 @@ test('without an answer from the remote, the card is the plain comparison', asyn
   // The same turn with its evidence, to show that the evidence is what makes the difference.
   git(forgotten, 'reset', '-q', '--hard', f.first);
   assert.deepEqual(listed((await turn(forgotten, f.first, work(forgotten))).after), OWN_ROWS);
+});
+
+// The real case behind the tests below: the daemon makes an agent's workspace at the commit the
+// owner's project folder is on, and that was an old local branch, far from the remote's staging on
+// both sides. The agent made its branch from the remote's staging and committed one file. The card
+// showed 3213 files: without an answer from the remote, every difference between the two branches;
+// with one, still each file that the old branch had changed.
+// Between the old branch and staging: 15 files that both changed (12 modules, the readme, shared.ts, legacy.ts),
+// 2 that only the old branch has, and the guide that only staging renamed.
+const BRANCH_DIFFERENCES = 18;
+/**
+ * A workspace that the daemon made on `old`, the commit of an old local branch. That branch changed the
+ * files staging changes too, and files of its own. Staging lands after it.
+ */
+function onOldBranch(f: ReturnType<typeof fixture>, name: string, pushed = false) {
+  const workspace = f.clone(name);
+  git(workspace, 'checkout', '-q', '-b', 'old-work');
+  commit(workspace, 'old work 1', { ...Object.fromEntries(Array.from({ length: 12 }, (_, index) => [`lib/module-${String(index + 1).padStart(2, '0')}.ts`, lines(4, `old module ${index + 1}`)])),
+    'old/one.ts': lines(3, 'old one') });
+  const old = commit(workspace, 'old work 2', { 'README.md': lines(3, 'readme').replace('readme 2', 'readme 2 from the old branch'),
+    'src/shared.ts': lines(6, 'shared').replace('shared 1', 'shared 1 from the old branch'), 'src/legacy.ts': lines(5, 'legacy'), 'old/two.ts': lines(3, 'old two') });
+  if (pushed) git(workspace, 'push', '-q', 'origin', 'old-work');
+  // The daemon's workspace is detached at the commit of the owner's folder.
+  git(workspace, 'checkout', '-q', '--detach');
+  return { workspace, old, landed: f.landOnStaging() };
+}
+const FIX = { 'src/fix.test.ts': lines(33, 'case') };
+
+test('a workspace that starts on an old diverged branch: a branch made from the remote\'s staging shows its one file', async t => {
+  for (const pushed of [false, true]) {
+    const f = fixture(t);
+    const { workspace, old, landed } = onOldBranch(f, 'agent', pushed);
+    const result = await turn(workspace, old, () => {
+      git(workspace, 'fetch', '-q', 'origin');
+      git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
+      commit(workspace, 'the fix', FIX);
+      git(workspace, 'push', '-q', '-u', 'origin', 'fix/own');
+    });
+    assert.equal(git(workspace, 'rev-parse', 'HEAD^'), landed);
+    assert.equal(result.tips?.includes(old), pushed, 'the old branch is on the remote or it is not; the card is the same');
+    assert.equal(git(workspace, 'rev-list', '--count', `${landed}..${old}`), '2', 'the old branch has commits that staging lacks');
+    // Plainly compared, the card is every difference between the two branches.
+    assert.equal(count(result.before), BRANCH_DIFFERENCES + 1, 'every difference between the branches, and the fix');
+    assert.deepEqual(listed(result.after), ['added src/fix.test.ts +33 -0']);
+    assert.deepEqual([result.after.additions, result.after.deletions], [33, 0]);
+    assert.doesNotMatch(result.after.patch, /old|module|from staging|handbook|legacy/);
+  }
+});
+
+test('on a line the turn left, an edit is measured against the new base and an uncommitted start is kept as it was', async t => {
+  const f = fixture(t);
+  const { workspace, old } = onOldBranch(f, 'agent');
+  // Before the turn: an uncommitted edit and an untracked file, in files that no branch changed.
+  write(workspace, { 'src/old-name.ts': lines(8, 'rename me').replace('rename me 4', 'rename me 4 edited earlier'), 'notes.txt': 'earlier notes\n' });
+  const result = await turn(workspace, old, () => {
+    git(workspace, 'fetch', '-q', 'origin');
+    // The checkout carries both along.
+    git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
+    assert.equal(git(workspace, 'status', '--porcelain'), 'M src/old-name.ts\n?? notes.txt');
+    // A file that the old branch and staging both changed, and one that only the old branch had.
+    write(workspace, { 'src/shared.ts': readFileSync(join(workspace, 'src/shared.ts'), 'utf8').replace('shared 6', 'shared 6 edited'), 'old/one.ts': lines(3, 'old one') });
+    git(workspace, 'add', 'src/shared.ts', 'old/one.ts'); git(workspace, 'commit', '-q', '-m', 'own edits');
+    write(workspace, { 'notes.txt': 'earlier notes\nmore notes\n' });
+  });
+  // The old branch's file is new on this line, although its content was in the workspace at the start.
+  assert.deepEqual(listed(result.after), ['added old/one.ts +3 -0', 'modified notes.txt +1 -0', 'modified src/shared.ts +1 -1']);
+  assert.match(result.after.patch, /-shared 6\n\+shared 6 edited\n/);
+  assert.doesNotMatch(result.after.patch, /shared 1|rename me/, 'the first line differs between the branches and is no change of the turn; the earlier edit is not this turn\'s');
+  // The same turn without the two own edits: the earlier, uncommitted changes alone make no card.
+  const quiet = onOldBranch(fixture(t), 'quiet').workspace;
+  write(quiet, { 'src/old-name.ts': lines(8, 'rename me').replace('rename me 4', 'rename me 4 edited earlier'), 'notes.txt': 'earlier notes\n' });
+  const none = await turn(quiet, git(quiet, 'rev-parse', 'HEAD'), () => { git(quiet, 'fetch', '-q', 'origin'); git(quiet, 'checkout', '-q', '-b', 'fix/own', 'origin/staging'); });
+  assert.equal(count(none.before), BRANCH_DIFFERENCES);
+  assert.deepEqual(listed(none.after), []);
+  assert.equal(card(none.after), false);
+});
+
+test('an agent that leaves its line cannot hide a commit by pushing it, by moving local refs or by writing commit dates', async t => {
+  const f = fixture(t);
+  const { workspace, old, landed } = onOldBranch(f, 'agent');
+  const dated = (...args: string[]) => execFileSync('git', args, { cwd: workspace, env: { ...environment, GIT_AUTHOR_DATE: '2001-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2001-01-01T00:00:00Z' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let pushed = '';
+  const result = await turn(workspace, old, () => {
+    git(workspace, 'fetch', '-q', 'origin');
+    git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
+    write(workspace, OWN); git(workspace, 'add', '-A'); dated('commit', '-q', '-m', 'own work');
+    pushed = git(workspace, 'rev-parse', 'HEAD');
+    // On the remote: on a branch of its own, and on the base branch itself.
+    git(workspace, 'push', '-q', 'origin', 'fix/own', 'HEAD:refs/heads/staging');
+    // In the workspace: every local name for "upstream" points at the agent's commit.
+    git(workspace, 'fetch', '-q', 'origin');
+    git(workspace, 'update-ref', 'refs/remotes/origin/release', pushed);
+    git(workspace, 'branch', '-q', '-f', 'old-work', pushed);
+  });
+  assert.equal(git(workspace, 'rev-parse', 'origin/staging'), pushed);
+  assert.ok((await captureRecordedRemoteTips(f.remote))?.includes(pushed), 'the remote holds the commit now');
+  assert.ok(result.tips?.includes(landed) && !result.tips.includes(pushed), 'the answer of the turn is from before the push');
+  assert.deepEqual(listed(result.after), OWN_ROWS);
+  assert.match(result.after.patch, /\+app 3 fixed/);
+
+  // A base that the history holds cannot be passed over for an older one. The agent starts its branch on the
+  // first commit, makes commits with old dates, merges staging and puts one of staging's files back.
+  const g = fixture(t);
+  const { workspace: second, old: secondOld } = onOldBranch(g, 'agent');
+  const older = (...args: string[]) => execFileSync('git', args, { cwd: second, env: { ...environment, GIT_AUTHOR_DATE: '2001-01-01T00:00:00Z', GIT_COMMITTER_DATE: '2001-01-01T00:00:00Z' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const dropped = await turn(second, secondOld, () => {
+    git(second, 'fetch', '-q', 'origin');
+    git(second, 'checkout', '-q', '-b', 'fix/own', g.first);
+    for (let index = 0; index < 12; index++) older('commit', '-q', '--allow-empty', '-m', `empty ${index}`);
+    older('merge', '-q', '--no-edit', 'origin/staging');
+    git(second, 'checkout', g.first, '--', 'src/shared.ts');
+    older('commit', '-q', '-m', 'put the old file back');
+  });
+  assert.equal(readFileSync(join(second, 'src/shared.ts'), 'utf8'), lines(6, 'shared'));
+  assert.deepEqual(listed(dropped.after), ['modified src/shared.ts +1 -1'], 'the upstream change that the turn dropped');
+  assert.match(dropped.after.patch, /-shared 1 from staging\n\+shared 1\n/);
+});
+
+test('work of this workspace that a turn leaves behind is on the card, unless a remote already held it', async t => {
+  for (const [name, published, leave] of [
+    ['a new branch, the earlier work not pushed', false, 'branch'], ['a new branch, the earlier work pushed', true, 'branch'],
+    ['a reset, the earlier work not pushed', false, 'reset'], ['a reset, the earlier work pushed', true, 'reset']] as const) {
+    const f = fixture(t);
+    // The workspace was made on the first commit. An earlier turn committed there.
+    const workspace = f.clone();
+    git(workspace, 'checkout', '-q', '-b', 'fix/earlier');
+    commit(workspace, 'earlier turn', { 'src/earlier.ts': lines(4, 'earlier'), 'src/app.ts': lines(5, 'app').replace('app 1', 'app 1 earlier') });
+    if (published) git(workspace, 'push', '-q', '-u', 'origin', 'fix/earlier');
+    f.landOnStaging();
+    const result = await turn(workspace, f.first, () => {
+      git(workspace, 'fetch', '-q', 'origin');
+      if (leave === 'branch') { git(workspace, 'checkout', '-q', '-b', 'fix/next', 'origin/staging'); commit(workspace, 'the next fix', FIX); }
+      else git(workspace, 'reset', '-q', '--hard', 'origin/staging');
+    });
+    const next = leave === 'branch' ? ['added src/fix.test.ts +33 -0'] : [];
+    assert.equal(count(result.before), STAGING_FILES + 2 + next.length, name);
+    // Pushed, the earlier work is on the remote and the turn only left it. Not pushed, it is in no other place:
+    // the turn gave it up, and the card says so as it did before.
+    assert.deepEqual(listed(result.after), published ? next : [...next, 'deleted src/earlier.ts +0 -4', 'modified src/app.ts +1 -1'].sort(), name);
+  }
+});
+
+test('a rebase and an amended commit leave the start too, and show what they showed before', async t => {
+  const f = fixture(t);
+  const workspace = f.clone();
+  git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
+  commit(workspace, 'earlier turn', { 'src/own.ts': lines(4, 'own'), 'src/other.ts': lines(2, 'other') });
+  // Not pushed: the remote never held the earlier commit.
+  const amended = await turn(workspace, f.first, () => {
+    write(workspace, { 'src/own.ts': lines(5, 'own') });
+    git(workspace, 'add', '-A'); git(workspace, 'commit', '-q', '--amend', '--no-edit');
+  });
+  assert.deepEqual(listed(amended.after), ['modified src/own.ts +1 -0'], 'not the whole amended commit again');
+  assertPlain(amended);
+  f.landOnStaging();
+  const rebased = await turn(workspace, f.first, () => {
+    git(workspace, 'fetch', '-q', 'origin');
+    git(workspace, 'rebase', '-q', 'origin/staging');
+    commit(workspace, 'second', { 'src/second.ts': lines(3, 'second') });
+  });
+  assert.equal(count(rebased.before), STAGING_FILES + 1);
+  assert.deepEqual(listed(rebased.after), ['added src/second.ts +3 -0']);
+});
+
+test('a remote question without an answer is in the lifecycle log, and the card stays the plain comparison', async t => {
+  const f = fixture(t);
+  const directory = mkdtempSync(join(tmpdir(), 'workspace-base-update-log-'));
+  const path = join(directory, 'daemon-lifecycle.jsonl');
+  const log = new DaemonLifecycleLog(path);
+  t.after(() => { setRemoteUnansweredReporter(null); log.close(); removeTestDirectory(directory); });
+  // As the daemon's entrypoint installs it.
+  setRemoteUnansweredReporter(sample => log.append({ event: 'workspace_remote_unanswered', detail: JSON.stringify(sample) }));
+  const events = () => readFileSync(path, 'utf8').split('\n').filter(Boolean).map(line => JSON.parse(line));
+  const warned: string[] = [];
+  // As the daemon's publisher asks.
+  const ask = (remote: string) => askRecordedRemote(remote, (address, onNoAnswer) => captureRecordedRemoteTips(address, undefined, { onNoAnswer }), { warn: reason => { warned.push(reason); } });
+
+  assert.ok((await ask(f.remote))?.length);
+  assert.deepEqual([events(), warned], [[], []], 'an answer is no event');
+
+  const none = await ask(join(f.root, 'missing.git'));
+  assert.equal(none, null);
+  assert.deepEqual(events().map(event => event.event), ['workspace_remote_unanswered']);
+  const detail = JSON.parse(events()[0].detail);
+  assert.deepEqual(Object.keys(detail).sort(), ['elapsed_ms', 'pause_ms', 'reason']);
+  assert.ok(detail.reason.length > 0);
+  assert.deepEqual(warned, [detail.reason], 'the warning is kept, with the same reason');
+  assert.ok(Number.isInteger(detail.elapsed_ms) && detail.elapsed_ms >= 0 && detail.elapsed_ms < 20_000);
+  assert.equal(detail.pause_ms, REMOTE_FAILURE_PAUSE_MS);
+
+  // The turn that had no answer: the card is what it was before, the whole difference between the branches.
+  const { workspace, old } = onOldBranch(f, 'agent');
+  const result = await turn(workspace, old, () => {
+    git(workspace, 'fetch', '-q', 'origin');
+    git(workspace, 'checkout', '-q', '-b', 'fix/own', 'origin/staging');
+    commit(workspace, 'the fix', FIX);
+  }, { tips: none });
+  assert.equal(count(result.after), BRANCH_DIFFERENCES + 1);
+  assertPlain(result);
 });
 
 test('two unrelated upstream lines in one turn give the plain comparison', async t => {
