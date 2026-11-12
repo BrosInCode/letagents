@@ -251,9 +251,18 @@ export function registerTaskListAndCreateRoutes(
       console.warn("Task lifecycle notification failed after auto-accept", { roomId: project.id, taskId: acceptedTask.id });
     }
 
-    const taskWithDetails = await attachTaskDetails(project.id, acceptedTask);
-
-    deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+    let taskWithDetails: typeof acceptedTask | Awaited<ReturnType<typeof attachTaskDetails>> = acceptedTask;
+    try {
+      taskWithDetails = await attachTaskDetails(project.id, acceptedTask);
+    } catch {
+      // Preserve the committed result without inventing unknown lease/lock state.
+      console.warn("Task detail enrichment failed after committed auto-accept", { roomId: project.id, taskId: acceptedTask.id });
+    }
+    try {
+      deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+    } catch {
+      console.warn("Task event delivery failed after committed auto-accept", { roomId: project.id, taskId: acceptedTask.id });
+    }
     res.status(201).json({ ...taskWithDetails, room_id: project.id });
   });
 }

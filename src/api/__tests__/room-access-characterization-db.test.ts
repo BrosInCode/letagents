@@ -1149,13 +1149,19 @@ async function postTask(
   world: World,
   authKind: "session" | "owner_token",
   body: Record<string, unknown>,
-  options: { failNotifier?: boolean } = {},
-): Promise<{ status: number; body: Record<string, any>; lifecycle: string[] }> {
+  options: { failNotifier?: boolean; trustedCreator?: boolean } = {},
+): Promise<{ status: number; body: Record<string, any>; lifecycle: string[]; emitted: Array<{ name: string; projectId: string; status: string }> }> {
   const { default: express } = await import("express");
   const { registerTaskListAndCreateRoutes } = await import("../routes/rooms/tasks/list-and-create.js");
   const lifecycle: string[] = [];
+  const emitted: Array<{ name: string; projectId: string; status: string }> = [];
   const deps = {
-    taskEvents: { emit() {} },
+    taskEvents: {
+      emit(name: string, event: { projectId: string; task: { status: string } }) {
+        emitted.push({ name, projectId: event.projectId, status: event.task.status });
+        return true;
+      },
+    },
     resolveCanonicalRoomRequestId: async (id: string) => id,
     resolveRoomOrReply: async () => world.project,
     requireParticipant: async () => true,
@@ -1163,7 +1169,7 @@ async function postTask(
     normalizeOptionalString: (v: unknown) => (typeof v === "string" ? v.trim() || null : null),
     enforceFocusParentBoardWriteIsolation: async () => ({ kind: "allow" }),
     enforceTaskAdmissionCoordination: async () => ({ kind: "allow" }),
-    isTrustedAgentCreator: async () => false,
+    isTrustedAgentCreator: async () => options.trustedCreator ?? false,
     emitTaskLifecycleStatusMessage: async (_id: string, task: { status: string }) => {
       if (options.failNotifier) throw new Error("notifier down");
       lifecycle.push(task.status);
@@ -1183,7 +1189,7 @@ async function postTask(
     const response = await realFetch(`http://127.0.0.1:${port}/rooms/${encodeURIComponent(world.project.id)}/tasks`, {
       method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
     });
-    return { status: response.status, body: await response.json() as Record<string, any>, lifecycle };
+    return { status: response.status, body: await response.json() as Record<string, any>, lifecycle, emitted };
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
@@ -1196,6 +1202,13 @@ test("task create: a room admin who creates a task as human gets it accepted; a 
   assert.equal(created.body.status, "accepted");
   assert.deepEqual(created.lifecycle, ["accepted"]);
   assert.equal((await api!.getTaskById(admin.project.id, created.body.id))!.status, "accepted");
+
+  // The broadcast is the one the trusted-creator path sends, once.
+  const trusted = await postTask(await buildWorld("membership", "member"), "session", { title: "Trusted", created_by: "Trusted agent" }, { trustedCreator: true });
+  assert.equal(trusted.body.status, "accepted");
+  assert.equal(trusted.emitted.length, 1);
+  assert.deepEqual(created.emitted.map(({ name, status }) => ({ name, status })), trusted.emitted.map(({ name, status }) => ({ name, status })));
+  assert.deepEqual(created.emitted.map((event) => event.projectId), [admin.project.id]);
 
   const member = await buildWorld("membership", "member");
   const proposed = await postTask(member, "session", { title: "Member task", created_by: "human" });
