@@ -270,6 +270,12 @@ test("a wake delivery is claimed at once on a wake and a retry at its due time",
     wakes!.wakeJobQueue("wake_delivery");
     await claimedOnTime("the due delivery claim", deliverySql, ["whd-later"], laterDue,
       { waiting: ["retry"], claimed: ["processing", "dead"] }, true);
+    // claimedOnTime returns on "processing": the claim has committed but the
+    // outcome may not have. A row still processing is due again at its
+    // stale-claim takeover (claimed_at + 5 minutes), so read the next due
+    // time only once both test deliveries have their outcome.
+    await until("both test deliveries finished", async () =>
+      (await Promise.all(["whd-now", "whd-later"].map(state))).every((value) => value === "dead"));
     assert.equal(await wakeDeliveries!.nextWakeDeliveryDueInMs("webhook"), null);
   } finally {
     await stop();
