@@ -22,7 +22,29 @@ mock.module("electron", {
   },
 });
 
+// A preload script always has a window. On macOS preload.ts registers a
+// DOMContentLoaded listener while it loads, so this Node process needs a
+// stand-in before the import; without one the file threw on every Mac.
+const windowListeners: Array<{ type: string; listener: () => void }> = [];
+const documentElement: { dataset: Record<string, string> } = { dataset: {} };
+const globals = globalThis as { window?: unknown; document?: unknown };
+globals.window ??= {
+  addEventListener(type: string, listener: () => void) { windowListeners.push({ type, listener }); },
+};
+globals.document ??= { documentElement };
+
 await import("../preload.js");
+
+test("only macOS marks the document for its hidden title bar, once the page has loaded", () => {
+  if (process.platform !== "darwin") {
+    assert.deepEqual(windowListeners, []);
+    return;
+  }
+  assert.deepEqual(windowListeners.map((entry) => entry.type), ["DOMContentLoaded"]);
+  assert.equal(documentElement.dataset.windowChrome, undefined, "nothing is marked before the page loads");
+  windowListeners[0].listener();
+  assert.equal(documentElement.dataset.windowChrome, "mac");
+});
 
 function listenerFor(channel: string): Listener {
   const listener = listeners.listeners(channel)[0];
