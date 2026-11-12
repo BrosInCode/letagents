@@ -224,7 +224,14 @@ export function registerTaskListAndCreateRoutes(
       return;
     }
 
-    if (!(await deps.isTrustedAgentCreator(project.id, createdBy))) {
+    // A signed-in room admin who creates a task as "human" is the board
+    // authority, so the task needs no second acceptance. The grant comes from
+    // the session and its admin role. created_by only narrows it: a body that
+    // names an agent (the local-room publish) keeps the task proposed.
+    const isAdminHumanCreator = isHumanAppWrite(req, requestBody)
+      && createdBy.trim().toLowerCase() === "human"
+      && (await deps.resolveProjectRole(project, req.sessionAccount)) === "admin";
+    if (!isAdminHumanCreator && !(await deps.isTrustedAgentCreator(project.id, createdBy))) {
       res.status(201).json({ ...task, room_id: project.id });
       return;
     }
@@ -235,11 +242,27 @@ export function registerTaskListAndCreateRoutes(
       return;
     }
 
-    await deps.emitTaskLifecycleStatusMessage(project.id, acceptedTask);
+    try {
+      await deps.emitTaskLifecycleStatusMessage(project.id, acceptedTask);
+    } catch {
+      // The task is committed and accepted. A notification failure must not
+      // turn this into a 500 that makes a client without client_task_id retry
+      // and create a duplicate.
+      console.warn("Task lifecycle notification failed after auto-accept", { roomId: project.id, taskId: acceptedTask.id });
+    }
 
-    const taskWithDetails = await attachTaskDetails(project.id, acceptedTask);
-
-    deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+    let taskWithDetails: typeof acceptedTask | Awaited<ReturnType<typeof attachTaskDetails>> = acceptedTask;
+    try {
+      taskWithDetails = await attachTaskDetails(project.id, acceptedTask);
+    } catch {
+      // Preserve the committed result without inventing unknown lease/lock state.
+      console.warn("Task detail enrichment failed after committed auto-accept", { roomId: project.id, taskId: acceptedTask.id });
+    }
+    try {
+      deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
+    } catch {
+      console.warn("Task event delivery failed after committed auto-accept", { roomId: project.id, taskId: acceptedTask.id });
+    }
     res.status(201).json({ ...taskWithDetails, room_id: project.id });
   });
 }

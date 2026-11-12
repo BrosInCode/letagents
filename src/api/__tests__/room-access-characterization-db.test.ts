@@ -36,6 +36,7 @@ const ownerTokens = testDatabaseUrl ? await import("../db/auth/owner-tokens.js")
 const bindings = testDatabaseUrl ? await import("../db/git-room-bindings.js") : null;
 const roomsDb = testDatabaseUrl ? await import("../db/rooms.js") : null;
 const access = testDatabaseUrl ? await import("../rooms/access.js") : null;
+const api = testDatabaseUrl ? await import("../db.js") : null;
 const liveDemos = testDatabaseUrl ? await import("../live-demos/access.js") : null;
 const events = testDatabaseUrl ? await import("../server/events.js") : null;
 const pushWorker = testDatabaseUrl ? await import("../notifications/worker.js") : null;
@@ -1144,4 +1145,118 @@ test("GitHub calls per check: a fresh check asks for the repository once; a cach
   const repoAccess = await import("../github/repo-access.js");
   assert.equal(repoAccess.REPO_ACCESS_REFRESH_AFTER_MS, 5 * 60 * 1000, "a yes is refreshed in the background after five minutes");
   assert.equal(repoAccess.REPO_ACCESS_TTL_MS, 30 * 60 * 1000, "and expires after thirty");
+});
+
+// ---------------------------------------------------------------- task create auto-accept
+// POST /rooms/:id/tasks with the REAL role resolver in a membership room.
+
+async function postTask(
+  world: World,
+  authKind: "session" | "owner_token",
+  body: Record<string, unknown>,
+  options: { failNotifier?: boolean; trustedCreator?: boolean } = {},
+): Promise<{ status: number; body: Record<string, any>; lifecycle: string[]; emitted: Array<{ name: string; projectId: string; status: string }> }> {
+  const { default: express } = await import("express");
+  const { registerTaskListAndCreateRoutes } = await import("../routes/rooms/tasks/list-and-create.js");
+  const lifecycle: string[] = [];
+  const emitted: Array<{ name: string; projectId: string; status: string }> = [];
+  const deps = {
+    taskEvents: {
+      emit(name: string, event: { projectId: string; task: { status: string } }) {
+        emitted.push({ name, projectId: event.projectId, status: event.task.status });
+        return true;
+      },
+    },
+    resolveCanonicalRoomRequestId: async (id: string) => id,
+    resolveRoomOrReply: async () => world.project,
+    requireParticipant: async () => true,
+    resolveProjectRole: access!.resolveGitRoomProjectRole,
+    normalizeOptionalString: (v: unknown) => (typeof v === "string" ? v.trim() || null : null),
+    enforceFocusParentBoardWriteIsolation: async () => ({ kind: "allow" }),
+    enforceTaskAdmissionCoordination: async () => ({ kind: "allow" }),
+    isTrustedAgentCreator: async () => options.trustedCreator ?? false,
+    emitTaskLifecycleStatusMessage: async (_id: string, task: { status: string }) => {
+      if (options.failNotifier) throw new Error("notifier down");
+      lifecycle.push(task.status);
+    },
+  };
+  const app = express();
+  app.use(express.json());
+  app.use((req, _res, next) => {
+    Object.assign(req, { authKind, sessionAccount: world.sessionAccount });
+    next();
+  });
+  registerTaskListAndCreateRoutes(app, deps as never);
+  const server = app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => server.once("listening", resolve));
+  try {
+    const { port } = server.address() as { port: number };
+    const response = await realFetch(`http://127.0.0.1:${port}/rooms/${encodeURIComponent(world.project.id)}/tasks`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    return { status: response.status, body: await response.json() as Record<string, any>, lifecycle, emitted };
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+test("task create: a room admin who creates a task as human gets it accepted; a plain member does not", { skip, concurrency: false }, async () => {
+  const admin = await buildWorld("membership", "stale_admin");
+  const created = await postTask(admin, "session", { title: "Admin task", created_by: "human" });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.status, "accepted");
+  assert.deepEqual(created.lifecycle, ["accepted"]);
+  assert.equal((await api!.getTaskById(admin.project.id, created.body.id))!.status, "accepted");
+
+  // The broadcast is the one the trusted-creator path sends, once.
+  const trusted = await postTask(await buildWorld("membership", "member"), "session", { title: "Trusted", created_by: "Trusted agent" }, { trustedCreator: true });
+  assert.equal(trusted.body.status, "accepted");
+  assert.equal(trusted.emitted.length, 1);
+  assert.deepEqual(created.emitted.map(({ name, status }) => ({ name, status })), trusted.emitted.map(({ name, status }) => ({ name, status })));
+  assert.deepEqual(created.emitted.map((event) => event.projectId), [admin.project.id]);
+
+  const member = await buildWorld("membership", "member");
+  const proposed = await postTask(member, "session", { title: "Member task", created_by: "human" });
+  assert.equal(proposed.status, 201);
+  assert.equal(proposed.body.status, "proposed");
+  assert.deepEqual(proposed.lifecycle, []);
+});
+
+test("task create: an admin's local-room publish that names an agent as creator stays proposed", { skip, concurrency: false }, async () => {
+  const admin = await buildWorld("membership", "stale_admin");
+  const reply = await postTask(admin, "session", {
+    title: "Agent-made local task", created_by: "Codex | Emmy's agent | Agent",
+    source_message_id: "local-task:room:1", client_task_id: "local-task:room:1",
+  });
+  assert.equal(reply.status, 201);
+  assert.equal(reply.body.status, "proposed");
+  assert.deepEqual(reply.lifecycle, []);
+});
+
+test("task create: agent credentials stay proposed with created_by human, even for an admin account", { skip, concurrency: false }, async () => {
+  const admin = await buildWorld("membership", "stale_admin");
+  const session = await agentSessions!.createRoomAgentSession({
+    room_id: admin.project.id, session_kind: "worker", runtime: "codex", actor_label: "Worker | Owner's agent | Agent",
+    agent_key: "owner/task-worker", agent_instance_id: "instance_task_worker", display_name: "Worker",
+    owner_account_id: admin.accountId!, owner_label: "Owner", ide_label: "Agent",
+  });
+  const worker = await postTask(admin, "owner_token", {
+    title: "Worker task", created_by: "human",
+    agent_session_id: session.session_id, agent_session_token: session.session_token,
+  });
+  assert.equal(worker.status, 201, JSON.stringify(worker.body));
+  assert.equal(worker.body.status, "proposed");
+  const viaSession = await postTask(admin, "session", {
+    title: "Session naming an agent", created_by: "human", agent_session_id: session.session_id,
+  });
+  assert.equal(viaSession.status, 201);
+  assert.equal(viaSession.body.status, "proposed");
+});
+
+test("task create: a failing lifecycle notifier still returns 201 with the accepted task", { skip, concurrency: false }, async () => {
+  const admin = await buildWorld("membership", "stale_admin");
+  const reply = await postTask(admin, "session", { title: "Notifier down", created_by: "human" }, { failNotifier: true });
+  assert.equal(reply.status, 201);
+  assert.equal(reply.body.status, "accepted");
+  assert.equal((await api!.getTaskById(admin.project.id, reply.body.id))!.status, "accepted");
 });

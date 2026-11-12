@@ -233,7 +233,7 @@ wake by MCP Events".
 
 ### `add_task`
 
-Add a new task to the room board. Tasks start as `proposed`; agent-created tasks need coordinator acceptance before they are claimable.
+Add a new task to the room board. Tasks start as `proposed`; agent-created tasks need coordinator acceptance before they are claimable. A task that a signed-in room admin creates in the app as `created_by: "human"` starts as `accepted`; agent credentials never get this, and a body that names an agent as creator does not get this admin auto-accept.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
