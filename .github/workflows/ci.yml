@@ -924,6 +924,16 @@ jobs:
           src/api/__tests__/room-origin-writers.test.ts
           src/api/__tests__/room-origin-db.test.ts
 
+      - name: Run room create race tests
+        if: matrix.group == 1
+        timeout-minutes: 5
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          --test-concurrency=1
+          src/api/__tests__/room-create-race-db.test.ts
+
       - name: Run workflow lookup tests
         if: matrix.group == 4
         run: >-
