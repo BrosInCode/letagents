@@ -222,6 +222,39 @@ export interface AgentInspectorActionState {
   message: string | null;
   /** Present for generation-fenced background operations such as retirement. */
   daemonGeneration?: number;
+  /** Present after a successful stop: identifies the turn that was stopped. */
+  stoppedTurnKey?: string | null;
+}
+
+/** Identity fields of one room agent turn. Null when the turn has no identity. */
+export interface AgentInspectorTurnIdentity {
+  inboxItemId?: string | null;
+  sourceMessageId?: string | null;
+  providerTurnId?: string | null;
+}
+
+/** A stable text key for one turn, or null when the turn has no identity. */
+export function agentInspectorTurnKey(turn: AgentInspectorTurnIdentity | null | undefined): string | null {
+  const inbox = turn?.inboxItemId ?? null;
+  const source = turn?.sourceMessageId ?? null;
+  const provider = turn?.providerTurnId ?? null;
+  if (!inbox && !source && !provider) return null;
+  return [inbox ?? "", source ?? "", provider ?? ""].join("|");
+}
+
+/**
+ * True when a stop notice must clear: the stopped turn is done and the same
+ * agent now runs a different turn. A turn that is still the stopped one never
+ * clears the notice, and an idle agent never clears it either.
+ */
+export function agentInspectorStopNoticeEndedByNewTurn(
+  state: AgentInspectorActionState | null,
+  turn: (AgentInspectorTurnIdentity & { state: DesktopRoomAgentTurnState }) | null | undefined,
+): boolean {
+  if (!state || state.kind !== "stop_turn" || state.status !== "success" || !state.stoppedTurnKey) return false;
+  if (turn?.state !== "dispatching" && turn?.state !== "responding") return false;
+  const currentKey = agentInspectorTurnKey(turn);
+  return currentKey !== null && currentKey !== state.stoppedTurnKey;
 }
 
 /** Settle only the exact accepted retirement. Events for a previous Inspector

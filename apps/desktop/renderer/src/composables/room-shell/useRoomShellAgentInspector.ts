@@ -8,7 +8,7 @@ import {
   supervisedAgentInspectorRequest,
   inspectorInitialTab,
 } from "../../domain/agent-inspector-identity";
-import { agentInspectorActionStateForEntry, projectAgentInspectors } from "../../domain/agent-inspector";
+import { agentInspectorActionStateForEntry, agentInspectorStopNoticeEndedByNewTurn, projectAgentInspectors } from "../../domain/agent-inspector";
 import {
   agentInspectorDetailRevision,
   agentInspectorDetailKey,
@@ -332,6 +332,13 @@ export function useRoomShellAgentProjections(context: unknown) {
       agentInspectorActionState.value,
       target?.kind === "supervised" ? target.supervisorEntryId : null,
     );
+  });
+  // A stop notice stays until the same agent starts a different turn.
+  watch(() => agentInspectorStopNoticeEndedByNewTurn(
+    agentInspectorActionStateForEntry(agentInspectorActionState.value, selectedAgentDetailProjection.value?.entryId ?? null),
+    selectedAgentDetailProjection.value?.entry.roomAgentState?.turn,
+  ), (ended) => {
+    if (ended) agentInspectorActionState.value = null;
   });
   const selectedAgentInspectorWorkArtifacts = computed(() => {
     const projection = selectedAgentDetailProjection.value;
