@@ -799,6 +799,11 @@ jobs:
         if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/giphy-client.test.ts src/api/__tests__/message-reactions-routes.test.ts src/api/__tests__/message-reaction-store.test.ts src/api/__tests__/message-reactions-db.test.ts
 
+      - name: Test database errors wrapped by Drizzle
+        if: matrix.group == 2
+        timeout-minutes: 5
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/wrapped-db-errors.test.ts src/api/__tests__/wrapped-db-errors-db.test.ts
+
       - name: Test the remote MCP endpoint against the API
         if: matrix.group == 3
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/remote-mcp-db.test.ts src/api/__tests__/mcp-oauth-db.test.ts
