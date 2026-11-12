@@ -18,7 +18,7 @@ import {
   removeMessageReaction,
   type MessageReactionRead,
 } from "../../../db/messages/reactions.js";
-import { formatMessageId, parseScopedId } from "../../../db/utils.js";
+import { formatMessageId, parseScopedId, pgErrorCode } from "../../../db/utils.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import { requireWorkerRequestAgentIdentity } from "../../../request/agent-identity.js";
 import { isAppSession, isHumanAppWrite } from "../../../request/app-session.js";
@@ -49,7 +49,8 @@ const MESSAGE_NOT_FOUND = "message does not exist in this room";
 
 function fail(res: Response, error: unknown): void {
   // 55P03: another reaction to the same message held the row past lock_timeout.
-  if ((error as { code?: string } | null)?.code === "55P03") {
+  // Drizzle wraps the driver error; the SQLSTATE is on its cause.
+  if (pgErrorCode(error) === "55P03") {
     res.status(503).json({ error: "This message is busy. Please try again.", code: "reaction_busy" });
     return;
   }

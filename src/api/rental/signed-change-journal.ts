@@ -10,6 +10,7 @@ import crypto from "node:crypto";
 import { and, asc, eq } from "drizzle-orm";
 import { db } from "../db/client.js";
 import { rental_patch_proposals } from "../db/schema.js";
+import { isUniqueViolationOf } from "../db/pg-errors.js";
 
 export type RentalPatchProposalRow = typeof rental_patch_proposals.$inferSelect;
 
@@ -243,10 +244,9 @@ function requestHashFor(input: {
   return stableHash(input);
 }
 
-function isIdempotencyUniqueViolation(error: unknown): boolean {
-  if (!isRecord(error)) return false;
-  const message = typeof error.message === "string" ? error.message : "";
-  return message.includes("rental_patch_proposals_session_idempotency_uq");
+/** A concurrent proposal with the same idempotency key won the insert. */
+export function isIdempotencyUniqueViolation(error: unknown): boolean {
+  return isUniqueViolationOf(error, "rental_patch_proposals_session_idempotency_uq");
 }
 
 function assertSameRequest(existing: RentalPatchProposalRow, requestHash: string): void {
