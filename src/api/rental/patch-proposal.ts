@@ -26,6 +26,7 @@ import {
   sha256,
   type RentalPatchProposalRow,
 } from "./signed-change-journal.js";
+import { isUniqueViolationOf } from "../db/pg-errors.js";
 
 export interface PatchProposalManifest {
   id: string;
@@ -350,8 +351,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function isIdempotencyUniqueViolation(error: unknown): boolean {
-  if (!isRecord(error)) return false;
-  const message = typeof error.message === "string" ? error.message : "";
-  return message.includes("rental_patch_proposals_session_idempotency_uq");
+/** A concurrent proposal with the same idempotency key won the insert. */
+export function isIdempotencyUniqueViolation(error: unknown): boolean {
+  return isUniqueViolationOf(error, "rental_patch_proposals_session_idempotency_uq");
 }

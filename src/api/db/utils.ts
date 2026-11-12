@@ -24,9 +24,66 @@ export function generateCode(): string {
   return `${seg1}-${seg2}-${seg3}`;
 }
 
-export function isUniqueConstraintError(error: unknown): error is { code?: string } {
-  return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
+/** The fields of a Postgres error that callers branch on. */
+export interface PgErrorFields {
+  code: string;
+  constraint?: string;
+  message?: string;
 }
+
+const MAX_ERROR_CAUSE_DEPTH = 5;
+const SQLSTATE = /^[0-9A-Z]{5}$/;
+
+/**
+ * The Postgres error inside `error`. Drizzle 0.45 wraps a database error in a
+ * DrizzleQueryError whose own `code` is undefined; the driver's error, with
+ * the SQLSTATE `code`, is its `cause`. Looks at the error and up to five
+ * causes below it.
+ */
+export function findPgError(error: unknown): PgErrorFields | null {
+  let current: unknown = error;
+  for (let depth = 0; depth <= MAX_ERROR_CAUSE_DEPTH; depth += 1) {
+    if (typeof current !== "object" || current === null) return null;
+    const code = (current as { code?: unknown }).code;
+    if (typeof code === "string" && SQLSTATE.test(code)) return current as PgErrorFields;
+    current = (current as { cause?: unknown }).cause;
+  }
+  return null;
+}
+
+/** The SQLSTATE of a Postgres error, wrapped or not. */
+export function pgErrorCode(error: unknown): string | undefined {
+  return findPgError(error)?.code;
+}
+
+/** A duplicate key (23505), wrapped by Drizzle or not. */
+export function isUniqueConstraintError(error: unknown): boolean {
+  return pgErrorCode(error) === "23505";
+}
+
+/**
+ * The insert was refused because the room id was permanently deleted
+ * (trigger rooms_deleted_replay_before_insert, migration 0147: check
+ * violation 23514 with this message).
+ */
+export function isDeletedRoomInsertError(error: unknown): boolean {
+  const pg = findPgError(error);
+  return pg?.code === "23514" && /This room was permanently deleted/.test(pg.message ?? "");
+}
+
+/** A room id that was permanently deleted; routes answer 410 ROOM_DELETED. */
+export class RoomDeletedError extends Error {
+  readonly status = 410;
+  readonly code = "ROOM_DELETED";
+
+  constructor(readonly roomId: string) {
+    super("Room was permanently deleted.");
+    this.name = "RoomDeletedError";
+  }
+}
+
+/** How many times a create retries after a collision before it gives up. */
+export const MAX_ROOM_CREATE_ATTEMPTS = 5;
 
 export function formatMessageId(number: number): string {
   return `msg_${number}`;
