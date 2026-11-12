@@ -6,7 +6,7 @@ import type { FocusRoomConclusionDetails } from "../focus-rooms/conclusion.js";
 import { normalizeRoomDisplayName } from "../rooms/display-name.js";
 import { db } from "./client.js";
 import { id_sequences, rooms } from "./schema.js";
-import { getRoomScopedSequenceNames, isUniqueConstraintError } from "./utils.js";
+import { getRoomScopedSequenceNames, isDeletedRoomInsertError, isUniqueConstraintError, MAX_ROOM_CREATE_ATTEMPTS } from "./utils.js";
 import { findFocusRoomRowByKey } from "./focus-room-lookup.js";
 import { insertRoomRow } from "./room-rows.js";
 import { toProject } from "./mappers.js";
@@ -326,7 +326,7 @@ export async function createFocusRoomFromIntent(
   const normalizedTitle = normalizeFocusIntentTitle(intentTitle);
   const display_name = buildFocusRoomDisplayNameFromIntent(normalizedTitle, options?.displayName);
 
-  while (true) {
+  for (let attempt = 1; attempt <= MAX_ROOM_CREATE_ATTEMPTS; attempt += 1) {
     const id = await buildFocusRoomId();
     const focus_key = buildAdHocFocusKey(normalizedTitle);
     const created_at = new Date().toISOString();
@@ -358,11 +358,14 @@ export async function createFocusRoomFromIntent(
 
       return { room, created: true };
     } catch (error) {
-      if (!isUniqueConstraintError(error)) {
+      // The focus id or the ad hoc key is taken (or the id was deleted for
+      // good): try the next id, a bounded number of times.
+      if (!isUniqueConstraintError(error) && !isDeletedRoomInsertError(error)) {
         throw error;
       }
     }
   }
+  throw new Error(`Could not create a focus room after ${MAX_ROOM_CREATE_ATTEMPTS} attempts`);
 }
 
 export async function createFocusRoomForTask(
@@ -390,7 +393,7 @@ export async function createFocusRoomForTask(
 
   const display_name = buildFocusRoomDisplayName(task, options?.displayName);
 
-  while (true) {
+  for (let attempt = 1; attempt <= MAX_ROOM_CREATE_ATTEMPTS; attempt += 1) {
     const id = await buildFocusRoomId();
     const created_at = new Date().toISOString();
 
@@ -427,7 +430,8 @@ export async function createFocusRoomForTask(
 
       return { room, task, created: true };
     } catch (error) {
-      if (!isUniqueConstraintError(error)) {
+      // A concurrent create for the same task won: return its room.
+      if (!isUniqueConstraintError(error) && !isDeletedRoomInsertError(error)) {
         throw error;
       }
 
@@ -441,4 +445,5 @@ export async function createFocusRoomForTask(
       }
     }
   }
+  throw new Error(`Could not create the focus room for ${task.id} after ${MAX_ROOM_CREATE_ATTEMPTS} attempts`);
 }

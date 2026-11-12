@@ -237,6 +237,11 @@ test('a store failure is a retryable error, and lock contention says so', async 
   const busy = await harness({ storeFails: Object.assign(new Error('lock timeout'), { code: '55P03' }) })
     .request('put', `/rooms/${room}/messages/msg_7/reactions/${encodeURIComponent('👍')}`);
   assert.deepEqual([busy.code, busy.body.code], [503, 'reaction_busy']);
+  // As Drizzle throws it: the SQLSTATE is on the cause, the wrapper has no code.
+  const wrapped = Object.assign(new Error('Failed query: select ... for no key update'), { cause: { code: '55P03', message: 'canceling statement due to lock timeout' } });
+  const busyWrapped = await harness({ storeFails: wrapped })
+    .request('put', `/rooms/${room}/messages/msg_7/reactions/${encodeURIComponent('👍')}`);
+  assert.deepEqual([busyWrapped.code, busyWrapped.body.code], [503, 'reaction_busy']);
 });
 
 test('a range read lists reacted messages by id and validates its bounds', async () => {

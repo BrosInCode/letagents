@@ -34,6 +34,7 @@ export async function reconcileRoomOriginBackfill(
   try {
     while (true) {
       const client = await pool.connect();
+      let failure: Error | undefined;
       try {
         await client.query("BEGIN");
         await client.query(`SET LOCAL lock_timeout = '${LOCK_TIMEOUT}'`);
@@ -60,10 +61,12 @@ export async function reconcileRoomOriginBackfill(
         await client.query("COMMIT");
         filled += updated.rowCount ?? 0;
       } catch (error) {
+        failure = error instanceof Error ? error : new Error(String(error));
         await client.query("ROLLBACK").catch(() => undefined);
         throw error;
       } finally {
-        client.release();
+        // After an error, pg destroys the connection instead of pooling it.
+        client.release(failure);
       }
     }
   } catch (error) {

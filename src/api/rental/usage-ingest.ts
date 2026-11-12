@@ -21,6 +21,8 @@ import {
   rental_sessions,
   rental_usage_meters,
 } from "../db/schema.js";
+import { pgErrorMentions } from "../db/pg-errors.js";
+import { isUniqueConstraintError } from "../db/utils.js";
 
 /**
  * Set of confidence values the route layer accepts before reaching the
@@ -271,18 +273,13 @@ function numericString(value: number | null | undefined): string | null {
  *     reported in `report.delta`.
  */
 /**
- * Predicate for the Postgres unique-violation error code (`23505`).
- * Drizzle/pg surfaces this either via `err.code` or via the message
- * mentioning the constraint name, depending on the path.
+ * Predicate for a unique violation of the usage meter (`23505`). Drizzle
+ * wraps the driver error, so the SQLSTATE and the message that names the
+ * constraint are on its `cause`. Only that Postgres error is read, never
+ * Drizzle's own message (it carries the query's parameters).
  */
-function isUniqueViolation(err: unknown): boolean {
-  if (!err || typeof err !== "object") return false;
-  const e = err as { code?: unknown; message?: unknown };
-  if (e.code === "23505") return true;
-  if (typeof e.message === "string" && e.message.includes("rental_usage_meters_session_idempotency_uq")) {
-    return true;
-  }
-  return false;
+export function isUniqueViolation(err: unknown): boolean {
+  return isUniqueConstraintError(err) || pgErrorMentions(err, "rental_usage_meters_session_idempotency_uq");
 }
 
 export async function ingestUsage(

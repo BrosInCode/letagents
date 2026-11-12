@@ -317,9 +317,9 @@ test("a permanently deleted room cannot come back under its id, so it never gets
   const res = { statusCode: 200, status(code: number) { res.statusCode = code; return res; }, json() { return res; } };
   assert.equal(await resolution!.resolveRoomOrReply(named.id, res as unknown as Response, { allowCreate: true }), null);
   assert.equal(res.statusCode, 410);
-  // Drizzle wraps the database error; the trigger's message is its cause.
-  const deletedRoomError = (error: unknown) =>
-    /This room was permanently deleted/.test(String((error as { cause?: { message?: string } }).cause?.message));
+  // The deleted-room trigger's refusal surfaces as RoomDeletedError (410).
+  const { RoomDeletedError } = await import("../db/utils.js");
+  const deletedRoomError = (error: unknown) => error instanceof RoomDeletedError && error.status === 410;
   await assert.rejects(() => rooms.getOrCreateCanonicalRoom(named.id), deletedRoomError);
   await assert.rejects(() => rooms.getOrCreateCanonicalRoom(project.id), deletedRoomError);
   assert.equal((await client!.pool.query("SELECT 1 FROM rooms WHERE id = ANY($1)", [[project.id, named.id]])).rowCount, 0);
@@ -413,6 +413,22 @@ test("the fill step skips a row another transaction holds, and stops without fai
   );
   assert.equal(broken.error, "connection refused");
   assert.equal(lines.length, 1);
+
+  // A query that fails on a live connection: the connection is released
+  // with the error, so the pool destroys it instead of reusing it.
+  const released: unknown[] = [];
+  const failing = await backfill.reconcileRoomOriginBackfill(
+    {
+      connect: async () => ({
+        query: async (sql: string) => { if (sql.startsWith("SELECT")) throw new Error("server closed the connection"); return {}; },
+        release: (error?: unknown) => { released.push(error); },
+      }),
+    } as never,
+    () => undefined,
+  );
+  assert.equal(failing.error, "server closed the connection");
+  assert.equal(released.length, 1);
+  assert.ok(released[0] instanceof Error);
   await backfill.reconcileRoomOriginBackfill(client!.pool, () => undefined);
   assert.equal(await storedOrigin(held), "named", "the next run fills the row once it is free");
 });
