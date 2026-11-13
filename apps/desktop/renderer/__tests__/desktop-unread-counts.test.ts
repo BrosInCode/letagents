@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { effectScope, nextTick, ref } from "vue";
+import { computed, effectScope, nextTick, ref, watch, type Ref } from "vue";
+
+const watchTotals = (total: Readonly<Ref<number>>, seen: number[]) => watch(total, (value) => { seen.push(value); }, { flush: "sync" });
 import type { DesktopAuthAccount, DesktopRoomLatestMessage, DesktopRoomMessage } from "../../electron/ipc-types";
-import { useDesktopUnreadCounts } from "../src/composables/useDesktopUnreadCounts";
+import { unreadStorageModeKey, useDesktopUnreadCounts } from "../src/composables/useDesktopUnreadCounts";
 import { rememberGitHubEventsVisible } from "../src/components/desktop/content/room-shell/preferences";
 
 const accountA = { id: "account-a", login: "Emmy", displayName: null } as DesktopAuthAccount;
@@ -484,5 +486,45 @@ test("the room being read shows no count while a burst arrives, even when the se
     await nextTick();
     assert.equal(counts.roomCounts.value["room-r"], 11, "left without proof of reading: the server's count");
     assert.deepEqual(fake.reports, [], "showing no badge reports nothing");
+  } finally { scope.stop(); globalThis.window = originalWindow; }
+});
+
+test("a sidebar that reorders or gains a cloud room keeps every count", async () => {
+  const settings = { mode: "cloud" };
+  const key = unreadStorageModeKey(settings, [["room-a", "cloud"], ["room-b", "cloud"], ["room-l", "local"]]);
+  // The open room moves to the front; a cloud room is added; a cloud room leaves.
+  assert.equal(unreadStorageModeKey(settings, [["room-l", "local"], ["room-b", "cloud"], ["room-a", "cloud"]]), key);
+  assert.equal(unreadStorageModeKey(settings, [["room-a", "cloud"], ["room-b", "cloud"], ["room-c", "cloud"], ["room-l", "local"]]), key);
+  assert.equal(unreadStorageModeKey(settings, [["room-a", "cloud"], ["room-l", "local"]]), key);
+  // Where a room's history lives, or the storage settings, changed: the counts start again.
+  assert.notEqual(unreadStorageModeKey(settings, [["room-a", "local"], ["room-b", "cloud"], ["room-l", "local"]]), key);
+  assert.notEqual(unreadStorageModeKey(settings, [["room-a", "cloud"], ["room-b", "cloud"], ["room-l", "cloud"]]), key);
+  assert.notEqual(unreadStorageModeKey({ mode: "local" }, [["room-a", "cloud"], ["room-b", "cloud"], ["room-l", "local"]]), key);
+
+  const originalWindow = globalThis.window;
+  let loads = 0;
+  globalThis.window = { letagentsDesktop: {
+    room: { getMessagesAfter: async () => { loads += 1; return { messages: [message(2), message(3)], hasMore: false }; } },
+    notifications: { setBadgeCount: async () => {} },
+  } } as never;
+  const scope = effectScope();
+  const rooms = ref([room("room-a", 3), room("room-b", 3)]);
+  const seen: number[] = [];
+  const counts = scope.run(() => useDesktopUnreadCounts({
+    account: ref(accountA), rooms, readMarkers: ref({ "room-a": "msg_1", "room-b": "msg_1" }),
+    // As the sidebar builds it: from the rooms in their current order.
+    storageMode: computed(() => unreadStorageModeKey(settings, rooms.value.map((entry) => [entry.roomIdentifier, "cloud"] as const))),
+  }))!;
+  try {
+    await counts.refresh(); await nextTick();
+    assert.equal(counts.totalCount.value, 4);
+    const loadsBefore = loads;
+    const stop = scope.run(() => watchTotals(counts.totalCount, seen))!;
+    rooms.value = [room("room-b", 3), room("room-a", 3)];
+    await nextTick(); await counts.refresh(); await nextTick();
+    stop();
+    assert.deepEqual(seen, [], "no count changed while the rooms swapped places");
+    assert.equal(counts.totalCount.value, 4);
+    assert.equal(loads, loadsBefore, "no room was counted again");
   } finally { scope.stop(); globalThis.window = originalWindow; }
 });

@@ -32,6 +32,7 @@ import {
   roomMessageAlertGate,
   roomNotificationTag,
 } from "../../domain/room-message-alert-gate";
+import { sharedRoomMessagePages } from "../../domain/shared-room-message-pages";
 import { normalizeRoomIdentifier } from "../../domain/sidebar-rooms";
 import { desktopIpc } from "../../ipc/index.js";
 import {
@@ -289,7 +290,14 @@ export function useAppMessageNotifications(context: unknown) {
     if (!roomApi) return [];
     if (roomApi.getMessagesAfter) {
       try {
-        const page = await roomApi.getMessagesAfter(roomIdentifier, previousMessageId);
+        const accountId = currentAccount()?.id;
+        // The unread counter asks for this same page at the same moment: one read serves both.
+        const page = accountId
+          ? await sharedRoomMessagePages.load({
+            accountId, reader: "notifications", roomIdentifier, afterMessageId: previousMessageId, latestMessageId,
+            loadPage: (room, after) => roomApi.getMessagesAfter!(room, after),
+          })
+          : await roomApi.getMessagesAfter(roomIdentifier, previousMessageId);
         if (version !== sessionVersion) return [];
         if (Array.isArray(page?.messages) && page.messages.length > 0) {
           const targetNum = messageNumber(latestMessageId);

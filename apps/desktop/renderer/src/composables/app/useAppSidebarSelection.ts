@@ -3,7 +3,7 @@ import { companyProjectGroups } from "../../domain/company-navigation";
 import type { DesktopRoomStorageState } from "../../../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../../components/desktop/types";
 import type { SidebarRoomBatchMutationResult } from "../useDesktopAccountRoomSettings";
-import { useDesktopUnreadCounts } from "../useDesktopUnreadCounts";
+import { unreadStorageModeKey, useDesktopUnreadCounts } from "../useDesktopUnreadCounts";
 import { roomReadKey, roomReadMarkerKey } from "../../domain/desktop-room-read-state";
 import { normalizeRoomIdentifier, findSidebarRoomEntryByIdentifier } from "../../domain/sidebar-rooms";
 import {
@@ -300,7 +300,7 @@ export function useAppSidebarEntries(context: unknown) {
       const marker = readRoomMessageIds.value[roomReadMarkerKey(identifier, roomHistoryMode(identifier))!];
       return marker ? [[key, marker]] : [];
     }))),
-    storageMode: computed(() => JSON.stringify([chatStorageSettings.value, sidebarRoomIdentifiers().map((id) => [id, roomHistoryMode(id)])])),
+    storageMode: computed(() => unreadStorageModeKey(chatStorageSettings.value, sidebarRoomIdentifiers().map((id) => [id, roomHistoryMode(id)] as const))),
     historyMode: (identifier) => roomHistoryMode(identifier) === "local" ? "local" : "cloud",
     // The activity feed is set up after the sidebar; read it lazily.
     readRevision: () => (app as { accountActivity?: { readRevision: { value: number } } }).accountActivity?.readRevision.value ?? 0,
