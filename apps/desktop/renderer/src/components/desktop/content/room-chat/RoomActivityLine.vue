@@ -107,34 +107,6 @@
         >Steer</button>
       </div>
       <div
-        v-else-if="pill?.kind === 'notice' && pill.notice.kind === 'join'"
-        :key="pill.notice.id"
-        class="room-activity-pill"
-        data-kind="join"
-        data-testid="room-activity-notice"
-      >
-        <span class="room-activity-badges">
-          <template v-for="agent in pill.notice.agents.slice(0, 3)" :key="agent.key">
-            <ProviderBadge v-if="agent.ideLabel" :label="agent.ideLabel" :agent-key="agent.agentKey" />
-            <span v-else class="room-activity-dot" aria-hidden="true"></span>
-          </template>
-        </span>
-        <span class="room-activity-text"><strong>{{ joinedNames(pill.notice.agents) }}</strong> joined</span>
-        <span v-if="pill.notice.agents.length === 1 && pill.notice.agents[0]!.ideLabel" class="room-activity-meta">{{ pill.notice.agents[0]!.ideLabel }}</span>
-      </div>
-      <div
-        v-else-if="pill?.kind === 'notice' && pill.notice.kind === 'leave'"
-        :key="pill.notice.id"
-        class="room-activity-pill"
-        data-kind="leave"
-        data-tone="muted"
-        data-testid="room-activity-notice"
-      >
-        <ProviderBadge v-if="pill.notice.agent.ideLabel" :label="pill.notice.agent.ideLabel" :agent-key="pill.notice.agent.agentKey" />
-        <span v-else class="room-activity-dot" aria-hidden="true"></span>
-        <span class="room-activity-text"><strong>{{ pill.notice.agent.displayName }}</strong> left</span>
-      </div>
-      <div
         v-else-if="pill?.kind === 'notice' && pill.notice.kind === 'github'"
         :key="pill.notice.id"
         class="room-activity-pill"
@@ -291,11 +263,10 @@ import { closeCommandOutput, openCommandOutput, settleCommandMotion } from "./ro
 import { useBackgroundCommandOutput, useBackgroundCommands, type RoomBackgroundAgent } from "../../../../composables/useBackgroundCommands";
 import { typingLabel, typingSentence } from "../../../../../../../../shared/room-typing.mjs";
 import type { ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
-import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import ActivityOrb from "../../../../../../../../shared/ui/ActivityOrb.vue";
 import { orbStateForWork } from "../../../../domain/activity-orb-state";
 import type { ComposerEventPreview } from "./composer-event-preview";
-import { calmNoticeText, elapsedLabel, joinedNames, pickActivityPill, type ActivityNotice, type ActivitySteerOffer, type CalmNoticeActionKey } from "./room-activity";
+import { calmNoticeText, elapsedLabel, pickActivityPill, type ActivityNotice, type ActivitySteerOffer, type CalmNoticeActionKey } from "./room-activity";
 
 const props = defineProps<{
   notice: ActivityNotice | null;
@@ -453,8 +424,6 @@ const announcement = computed(() => {
   if (current?.kind === "background") return "";
   if (current?.kind !== "notice") return current?.kind === "typing" ? typingLabel(current.names) : "";
   const notice = current.notice;
-  if (notice.kind === "join") return `${joinedNames(notice.agents)} joined`;
-  if (notice.kind === "leave") return `${notice.agent.displayName} left`;
   if (notice.kind === "github") return notice.preview.headline;
   if (notice.kind === "calm") return notice.action ? `${calmNoticeText(notice)}. ${notice.action.label} is available.` : calmNoticeText(notice);
   return `Steering ${notice.displayName}'s current turn`;
