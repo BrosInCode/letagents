@@ -294,7 +294,7 @@ export function useAppMessageNotifications(context: unknown) {
         // The unread counter asks for this same page at the same moment: one read serves both.
         const page = accountId
           ? await sharedRoomMessagePages.load({
-            accountId, roomIdentifier, afterMessageId: previousMessageId, latestMessageId,
+            accountId, reader: "notifications", roomIdentifier, afterMessageId: previousMessageId, latestMessageId,
             loadPage: (room, after) => roomApi.getMessagesAfter!(room, after),
           })
           : await roomApi.getMessagesAfter(roomIdentifier, previousMessageId);

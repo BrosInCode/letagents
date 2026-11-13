@@ -258,7 +258,7 @@ export function useDesktopUnreadCounts(options: {
                 ownSenderNames: [account.login, account.displayName || ""],
                 githubEventsVisible: readGitHubEventsVisible(room.roomIdentifier),
                 loadPage: (after) => sharedRoomMessagePages.load({
-                  accountId: account.id, roomIdentifier: room.roomIdentifier, afterMessageId: after,
+                  accountId: account.id, reader: "unread", roomIdentifier: room.roomIdentifier, afterMessageId: after,
                   latestMessageId: room.latestMessageId, loadPage,
                 }),
                 isCurrent,
