@@ -31,7 +31,7 @@ export function validateRoomWorkspaceSchema(db: DatabaseSync): void {
   const normalize = (sql: string) => sql.replace(/\s+/g, ' ').trim();
   if (normalize(String(db.prepare("SELECT sql FROM sqlite_master WHERE name='room_workspace_captures'").get()?.sql)) !== normalize(schema)) throw new Error('Invalid workspace capture schema.');
   for (const row of db.prepare('SELECT settled_json FROM room_workspace_captures WHERE settled_json IS NOT NULL').iterate()) {
-    if (parseRoomAgentWorkSummary(JSON.parse(String(row.settled_json)))?.version !== 3) throw new Error('Invalid settled workspace capture.');
+    if (![3, 4].includes(parseRoomAgentWorkSummary(JSON.parse(String(row.settled_json)))?.version ?? 0)) throw new Error('Invalid settled workspace capture.');
   }
 }
 export type WorkspaceCaptureIdentity = { agentId: string; roomId: string; sourceMessageId: string; workAttemptId: string; inboxItemId: string };
@@ -69,7 +69,7 @@ export class RoomWorkspaceStore {
   }
   settle(key: WorkspaceCaptureIdentity, summary: RoomAgentWorkSummary, review?: WorkspaceReview): void {
     const parsed = parseRoomAgentWorkSummary(summary);
-    if (parsed?.version !== 3) throw new Error('Invalid settled workspace capture.');
+    if (parsed?.version !== 3 && parsed?.version !== 4) throw new Error('Invalid settled workspace capture.');
     let encoded: ReturnType<typeof encodeWorkspaceReview> | null = null;
     try { encoded = review ? encodeWorkspaceReview(review) : null; }
     catch (error) { if (!(error instanceof RangeError)) throw error; } // Optional archive capacity must never discard a valid preview.

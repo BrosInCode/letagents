@@ -1,0 +1,130 @@
+import type { DesktopRoomAgentWork } from '../../../electron/ipc-types';
+import type { RoomContributionEditFile, RoomContributionEdits, RoomContributionStart } from '../../../../../shared/room-agent-work.mjs';
+import type { WorkspaceChangedFile } from '../../../../../shared/workspace-change-summary.mjs';
+import { readWorkspaceDiffPage, type WorkspaceDiffIndex, type WorkspaceDiffLine } from './workspace-diff';
+import { contributionChanges } from './room-contributions';
+
+export type ContributionCardMode = 'plain' | 'normal' | 'old-copy';
+export type ContributionCardCounts = { additions: number; deletions: number };
+export type ContributionCardRow = {
+  path: string;
+  label: string;
+  /** Null when the row shows no count (a binary file, or 0/0). */
+  counts: ContributionCardCounts | null;
+  /** The agent's own edit of this file; null for a file that only a command changed. */
+  edit: Pick<RoomContributionEditFile, 'patch' | 'patch_truncated'> | null;
+};
+export type ContributionCardButton = { label: string; counts: ContributionCardCounts | null; path: string | null };
+export type ContributionCardComparison = { header: string; title: string; line: string; counts: ContributionCardCounts };
+export type ContributionCard = {
+  mode: ContributionCardMode;
+  rows: ContributionCardRow[];
+  remaining: string | null;
+  button: ContributionCardButton | null;
+  comparison: ContributionCardComparison | null;
+};
+
+const ROWS = 3;
+const DAY = 86_400_000;
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const plural = (count: number, word: string) => `${count} ${count === 1 ? word : `${word}s`}`;
+const statusLabel = (status: string) => (({ added: 'Added', untracked: 'Added', deleted: 'Deleted', renamed: 'Renamed' } as Record<string, string>)[status] ?? 'Updated');
+const shownCounts = (file: WorkspaceChangedFile): ContributionCardCounts | null =>
+  file.binary || (!file.additions && !file.deletions) ? null : { additions: file.additions, deletions: file.deletions };
+
+function contributionExtras(work: DesktopRoomAgentWork): { edits: RoomContributionEdits | null; start: RoomContributionStart | null } {
+  const contribution = 'contribution' in work.summary ? work.summary.contribution : undefined;
+  return { edits: contribution?.edits ?? null, start: contribution?.start ?? null };
+}
+
+/** `20 Sep`, or `20 Sep 2025` when the date is not in the year of `now`. */
+export function contributionStartDate(value: string, now: Date): string {
+  // A fixed month table: Intl's en-GB writes "Sept", and the card's copy is "Sep".
+  const date = new Date(value);
+  const text = `${date.getDate()} ${MONTHS[date.getMonth()]}`;
+  return date.getFullYear() === now.getFullYear() ? text : `${text} ${date.getFullYear()}`;
+}
+
+/** The card shape for one contribution. Edit events are a summary, never proof: every comparison file stays reachable. */
+export function contributionCard(work: DesktopRoomAgentWork, now: Date): ContributionCard | null {
+  const changes = contributionChanges(work);
+  if (!changes) return null;
+  const { edits, start } = contributionExtras(work);
+  const cTotal = changes.files.length + changes.hidden_files;
+  if (!edits || changes.state !== 'ready') {
+    const rows = changes.files.slice(0, ROWS).map(file => ({ path: file.path, label: statusLabel(file.status), counts: null, edit: null }));
+    const rest = cTotal - rows.length;
+    return {
+      mode: 'plain', rows,
+      remaining: rest > 0 ? `${rest} more ${rest === 1 ? 'file' : 'files'} in the diff` : null,
+      button: changes.state === 'ready'
+        ? { label: `Review ${plural(cTotal, 'file')}`, counts: { additions: changes.additions, deletions: changes.deletions }, path: null }
+        : { label: 'View workspace', counts: null, path: null },
+      comparison: null,
+    };
+  }
+  const edited = new Map(edits.files.map(file => [file.path, file]));
+  const extra = changes.files.filter(file => !edited.has(file.path)).length + changes.hidden_files;
+  if (start?.in_history === false && extra > 0) {
+    const statuses = new Map(changes.files.map(file => [file.path, file.status]));
+    const rows = edits.files.slice(0, ROWS).map(file => ({
+      path: file.path, label: statusLabel(statuses.get(file.path) ?? 'modified'),
+      counts: { additions: file.additions, deletions: file.deletions }, edit: { patch: file.patch, patch_truncated: file.patch_truncated },
+    }));
+    const eTotal = edits.files.length + edits.hidden_files;
+    const rest = eTotal - rows.length;
+    const committed = start.committed_at && Number.isFinite(Date.parse(start.committed_at)) ? start.committed_at : null;
+    const days = committed ? Math.floor((now.getTime() - Date.parse(committed)) / DAY) : 0;
+    return {
+      mode: 'old-copy', rows,
+      remaining: rest > 0 ? `${rest} more edited ${rest === 1 ? 'file' : 'files'}` : null,
+      button: edits.files.length ? {
+        label: `Review ${plural(eTotal, 'file')}`,
+        counts: edits.files.reduce((sum, file) => ({ additions: sum.additions + file.additions, deletions: sum.deletions + file.deletions }), { additions: 0, deletions: 0 }),
+        path: edits.files[0]!.path,
+      } : null,
+      comparison: {
+        header: committed ? `Compared with ${contributionStartDate(committed, now)}` : 'Compared with the workspace start',
+        title: `${cTotal} files in the full comparison`,
+        line: days >= 1
+          ? `This workspace started from a copy of the project that is ${plural(days, 'day')} old, so the comparison includes older project history.`
+          : 'This workspace started from a different copy of the project, so the comparison includes other project history.',
+        counts: { additions: changes.additions, deletions: changes.deletions },
+      },
+    };
+  }
+  const ordered = [...changes.files.filter(file => edited.has(file.path)), ...changes.files.filter(file => !edited.has(file.path))];
+  // Past the listed edit files, an edited file is not told apart from a file that a command changed.
+  const editsComplete = edits.hidden_files === 0;
+  const rows = ordered.slice(0, ROWS).map(file => {
+    const edit = edited.get(file.path);
+    return { path: file.path, label: edit || !editsComplete ? statusLabel(file.status) : 'Changed by a command', counts: shownCounts(file),
+      edit: edit ? { patch: edit.patch, patch_truncated: edit.patch_truncated } : null };
+  });
+  const rest = cTotal - rows.length;
+  // A file that only a command changed stays named on the card when it is past the listed rows.
+  const unlisted = editsComplete ? ordered.slice(ROWS).filter(file => !edited.has(file.path)).length : 0;
+  return {
+    mode: 'normal', rows,
+    remaining: rest > 0 ? `${rest} more ${rest === 1 ? 'file' : 'files'} in the diff${unlisted ? `, ${unlisted} changed by a command` : ''}` : null,
+    button: { label: `Review ${plural(cTotal, 'file')}`, counts: { additions: changes.additions, deletions: changes.deletions }, path: null },
+    comparison: null,
+  };
+}
+
+export const EDIT_PREVIEW_LINES = 14;
+export type EditPreview = { lines: WorkspaceDiffLine[]; more: number; truncated: boolean };
+
+/** Lines of one edit's hunks, parsed by the review's own diff reader (numbers come from the hunk headers). */
+export function editPatchLines(patch: string): WorkspaceDiffLine[] {
+  if (!patch) return [];
+  const index: WorkspaceDiffIndex = { patch, files: new Map([['edit', { end: patch.length, checkpoints: [{ position: 0, before: 0, after: 0 }] }]]) };
+  return readWorkspaceDiffPage(index, 'edit').lines
+    .filter(line => line.kind !== 'hunk')
+    .map(({ text, kind, before, after }) => ({ text, kind, before, after }));
+}
+
+export function editPreview(edit: { patch: string; patch_truncated: boolean }): EditPreview {
+  const lines = editPatchLines(edit.patch);
+  return { lines: lines.slice(0, EDIT_PREVIEW_LINES), more: Math.max(0, lines.length - EDIT_PREVIEW_LINES), truncated: edit.patch_truncated || !edit.patch };
+}

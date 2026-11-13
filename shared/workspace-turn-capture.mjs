@@ -24,6 +24,17 @@ function git(cwd, args, signal, index, input, extra) {
         child.stdin?.end(input);
     });
 }
+/** The same hardened Git, for a command whose answer is its exit code: resolves the code (null when Git failed to run or was stopped) and stdout. */
+function gitExit(cwd, args, signal, input) {
+    return new Promise((resolve) => {
+        const child = execFile(gitSpawnFile(), ['-c', HOOKS_OFF, '--no-optional-locks', ...args], {
+            cwd, signal, timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 8 * 1024 * 1024, encoding: 'utf8',
+            env: { ...environment(), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' },
+        }, (error, stdout) => resolve({ code: !error ? 0 : typeof error.code === 'number' && !error.killed ? error.code : null, stdout: String(stdout ?? '') }));
+        child.stdin?.on('error', () => { });
+        child.stdin?.end(input);
+    });
+}
 /**
  * A Git command that starts a transport of its own (ssh, a credential or remote
  * helper). Killing Git alone leaves a stalled transport running. So the command
@@ -439,13 +450,78 @@ async function ownStartingTree(workspace, start, startingHead, remoteTips, deadl
     }
 }
 /**
+ * Where an edited file lies in the workspace, as a workspace-relative POSIX path, or null
+ * when it lies outside it or in Git's own folder. A relative path is relative to the
+ * workspace. Links are resolved on the nearest folder that still exists, as the capture
+ * resolves a tracked path's folder, so a link cannot place a file outside the workspace.
+ */
+async function workspaceRelativePath(root, workspace, candidate) {
+    if (typeof candidate !== 'string' || !candidate || candidate.includes('\0'))
+        return null;
+    const absolute = nodePath.resolve(workspace, candidate);
+    const tail = [nodePath.basename(absolute)];
+    let folder = nodePath.dirname(absolute);
+    for (let depth = 0; depth < 256; depth++) {
+        const real = await realpath(folder).catch(() => null);
+        if (real) {
+            const relative = nodePath.relative(root, nodePath.join(real, ...tail));
+            if (!relative || escapesWorkspace(root, nodePath.join(root, relative)))
+                return null;
+            const posix = relative.split(nodePath.sep).join('/');
+            return posix === '.git' || posix.startsWith('.git/') ? null : posix;
+        }
+        const parent = nodePath.dirname(folder);
+        if (parent === folder)
+            return null;
+        tail.unshift(nodePath.basename(folder));
+        folder = parent;
+    }
+    return null;
+}
+/**
+ * The settle step of the provider's edit evidence, with the capture's own Git:
+ *  - `paths`: each candidate (as the provider gave it) and its workspace-relative path,
+ *    for the candidates inside the workspace that Git does not ignore. The compared
+ *    trees never hold an ignored file, and an edit to one (`.env`) must not reach the room.
+ *  - `start`: the commit date of the turn's starting HEAD and whether the settled HEAD
+ *    still has it in its history; null without a recorded start.
+ * Null when the paths cannot be decided; the caller then has no edit evidence.
+ */
+async function settleEditEvidence(workspace, candidates, startingHead, deadline) {
+    const signal = AbortSignal.any([AbortSignal.timeout(WORKSPACE_CAPTURE_TIMEOUT_MS), deadline]);
+    const root = await realpath(workspace);
+    const paths = [];
+    for (const candidate of candidates.slice(0, 1_000)) {
+        const relative = await workspaceRelativePath(root, workspace, candidate);
+        if (relative)
+            paths.push([candidate, relative]);
+    }
+    let kept = paths;
+    if (paths.length) {
+        const answer = await gitExit(root, ['check-ignore', '-z', '--stdin'], signal, paths.map(([, path]) => `${path}\0`).join(''));
+        if (answer.code !== 0 && answer.code !== 1)
+            return null;
+        const ignored = new Set(answer.stdout.split('\0').filter(Boolean));
+        kept = paths.filter(([, path]) => !ignored.has(path));
+    }
+    let start = null;
+    if (objectId.test(startingHead ?? '')) {
+        const date = await gitExit(root, ['show', '-s', '--format=%cI', startingHead], signal);
+        const committed = date.code === 0 ? Date.parse(date.stdout.trim()) : NaN;
+        const ancestor = await gitExit(root, ['merge-base', '--is-ancestor', startingHead, 'HEAD'], signal);
+        start = { committed_at: Number.isFinite(committed) ? new Date(committed).toISOString() : null,
+            in_history: ancestor.code === 0 ? true : ancestor.code === 1 ? false : null };
+    }
+    return { paths: kept, start };
+}
+/**
  * `startingHead` and `remoteTips` describe the moment `baseline` was captured:
  * the commit HEAD was on, and what the remotes held (the answer, or the pending
  * question). Without both, the turn's changes are the plain difference between
  * the two trees. The changes since the workspace started are always the plain
  * difference.
  */
-export async function captureWorkspacePair(workspace, startingRevision, baseline, identity, startingHead = null, remoteTips = null) {
+export async function captureWorkspacePair(workspace, startingRevision, baseline, identity, startingHead = null, remoteTips = null, editCandidates = null) {
     // One budget for the whole settled turn, whatever Defender or a slow disk does to each command.
     const deadline = AbortSignal.timeout(WORKSPACE_SETTLE_TIMEOUT_MS);
     const tree = await captureWorkspaceTree(workspace, `${identity}:settled`, deadline);
@@ -462,8 +538,11 @@ export async function captureWorkspacePair(workspace, startingRevision, baseline
         const preview = (snapshot) => ({ ...snapshot,
             files: snapshot.files.slice(0, 200), hidden_files: snapshot.hidden_files + Math.max(0, snapshot.files.length - 200),
             patch: snapshot.patch.slice(0, 48 * 1024), patch_truncated: snapshot.patch_truncated || snapshot.patch.length > 48 * 1024 });
+        // Only when asked: the provider's edits are settled against the same workspace and deadline.
+        const editSettlement = Array.isArray(editCandidates)
+            ? await settleEditEvidence(workspace, editCandidates, startingHead, deadline).catch(() => null) : undefined;
         return { workspace: preview(full), contribution: { changes: preview(changes), summary: null },
-            review: { version: 1, workspace: full, contribution: changes } };
+            review: { version: 1, workspace: full, contribution: changes }, ...(editSettlement !== undefined ? { editSettlement } : {}) };
     }
     finally {
         await releaseWorkspaceTree(workspace, `${identity}:settled`, 5_000);

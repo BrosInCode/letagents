@@ -19,6 +19,9 @@ import type { SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { PENDING_PEER_REPORT_SQL } from "../queued-peer-deliveries.js";
 import { removeTestDirectory } from "../../electron/__tests__/harness.js";
+import { TurnEditLedger } from "../turn-edit-ledger.js";
+import { parseRoomAgentWorkSummary } from "../../../../shared/room-agent-work.mjs";
+import type { AgentEditEvidence } from "../../../../shared/agent-edit-evidence.mjs";
 
 /**
  * The publisher arms its own flush timer (1 s after a change, at once after a settled hint). When that
@@ -1515,4 +1518,109 @@ test("ordinary completed work uploads before an awaited grouped receipt and each
     assert.equal(f.row(1).acknowledgedRevision, f.row(1).revision);
   } finally { release(); await flushing; }
   assert.equal(pendingGrouped(f.db).length, 1, "only one grouped report was attempted in this pass");
+});
+
+/** One delivered turn with the provider's edit events: the ledger sees the turn start, the edits, then the capture reads it. */
+async function editTurn(f: Awaited<ReturnType<typeof fixture>>, ledger: TurnEditLedger, id: number, work: () => Promise<void> | void, edits: AgentEditEvidence[]) {
+  f.publisher.observeNewSources(f.agent)?.([`msg_${id}`]);
+  ledger.turnStarted("agent", `inbox-${id}`);
+  const baseline = await f.publisher.beginWorkspace(f.agent, `msg_${id}`, `inbox-${id}`);
+  assert.ok(baseline);
+  await work();
+  ledger.observe("agent", edits);
+  const attemptId = f.captureMessage(id);
+  f.fact(id, { state: "terminal", turnOutcome: "completed" });
+  await f.publisher.captureWorkspace(f.agent, `msg_${id}`, `inbox-${id}`, null, baseline);
+  ledger.turnEnded("agent", `inbox-${id}`);
+  f.db.prepare("UPDATE execution_message_attempts SET state='cleanly_concluded',conclusion='acknowledged_no_reply',settled_at_ms=1000 WHERE attempt_id=?").run(attemptId);
+  f.publisher.changed("agent"); await f.publisher.flush();
+  const summary = f.sent.filter(sent => sent.sourceMessageId === `msg_${id}`).at(-1)?.summary;
+  assert.ok(summary);
+  assert.equal(JSON.stringify(parseRoomAgentWorkSummary(summary)), JSON.stringify(summary), "the published summary is canonical");
+  return summary;
+}
+
+async function editFixture(t: TestContext, provider: "claude-code" | "codex" | "cursor") {
+  const f = await fixture(t, provider);
+  const ledger = new TurnEditLedger();
+  f.options.workspaceLocation = async () => f.location;
+  f.options.turnEdits = ledger;
+  const workspace = f.location.path;
+  const git = (args: string[], env: Record<string, string> = {}) => execFileSync("git", args, { cwd: workspace, encoding: "utf8", env: { ...process.env, ...env } }).trim();
+  await writeFile(join(workspace, ".gitignore"), ".env\n"); git(["add", "."]); git(["commit", "-qm", "ignore"]);
+  return { f, ledger, workspace, git };
+}
+
+const appEdit = (path: string): AgentEditEvidence => ({ path, additions: 1, deletions: 0, patch: "@@ -1,1 +1,2 @@\n original\n+new line", patch_truncated: false });
+
+test("a Claude Code turn publishes v4 with its edited file; ignored, outside and .git paths are not in it", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "claude-code");
+  const outside = await mkdtemp(join(tmpdir(), "publisher-outside-"));
+  t.after(() => removeTestDirectory(outside));
+  const summary = await editTurn(f, ledger, 1, async () => {
+    await writeFile(join(workspace, "app.ts"), "original\nnew line\n");
+    await writeFile(join(workspace, ".env"), "TOKEN=private\n");
+    await writeFile(join(outside, "x.ts"), "x\n");
+  }, [
+    appEdit(join(workspace, "app.ts")),
+    { path: join(workspace, ".env"), additions: 1, deletions: 0, patch: "@@ -0,0 +1,1 @@\n+TOKEN=private", patch_truncated: false },
+    { path: join(outside, "x.ts"), additions: 1, deletions: 0, patch: "@@ -0,0 +1,1 @@\n+x", patch_truncated: false },
+    { path: join(workspace, "..", "elsewhere.ts"), additions: 1, deletions: 0, patch: "", patch_truncated: false },
+    { path: join(workspace, ".git", "config"), additions: 1, deletions: 0, patch: "", patch_truncated: false },
+  ]);
+  assert.equal(summary.version, 4);
+  assert.deepEqual(summary.contribution!.edits, { hidden_files: 0, files: [{ path: "app.ts", additions: 1, deletions: 0, patch: "@@ -1,1 +1,2 @@\n original\n+new line", patch_truncated: false }] });
+  assert.deepEqual(summary.contribution!.changes.files.map(file => file.path), ["app.ts"], "the comparison stays the record");
+  assert.equal(summary.contribution!.start?.in_history, true);
+  assert.match(summary.contribution!.start?.committed_at ?? "", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/);
+  assert.doesNotMatch(JSON.stringify(summary), /TOKEN=private|elsewhere|publisher-outside/);
+  const settled = JSON.parse(String(f.db.prepare("SELECT settled_json FROM room_workspace_captures").get()!.settled_json));
+  assert.equal(settled.version, 4, "the settled capture keeps the edits across a restart");
+});
+
+test("a Codex turn's relative edit path resolves against the workspace", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "codex");
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "app.ts"), "original\nnew line\n"), [appEdit("app.ts")]);
+  assert.equal(summary.version, 4);
+  assert.deepEqual(summary.contribution!.edits?.files.map(file => [file.path, file.additions]), [["app.ts", 1]]);
+});
+
+test("a Cursor turn publishes v3 exactly as before, whatever the ledger holds", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "cursor");
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "app.ts"), "original\nnew line\n"), [appEdit(join(workspace, "app.ts"))]);
+  assert.equal(summary.version, 3);
+  assert.deepEqual(Object.keys(summary.contribution!), ["changes", "summary"]);
+});
+
+test("start.in_history: false after a checkout without the start commit, true after a plain commit on top", async t => {
+  const { f, ledger, workspace, git } = await editFixture(t, "claude-code");
+  await writeFile(join(workspace, "later.ts"), "later\n"); git(["add", "."]);
+  git(["commit", "-qm", "later"], { GIT_COMMITTER_DATE: "2026-09-20T08:00:00+02:00" });
+  const old = await editTurn(f, ledger, 1, () => {
+    git(["checkout", "-q", "-b", "old", "HEAD~1"]);
+  }, []);
+  assert.equal(old.version, 4);
+  assert.deepEqual(old.contribution!.start, { committed_at: "2026-09-20T06:00:00.000Z", in_history: false });
+  assert.deepEqual(old.contribution!.edits, { files: [], hidden_files: 0 }, "the provider reports edits and reported none");
+  const plain = await editTurn(f, ledger, 2, async () => {
+    await writeFile(join(workspace, "app.ts"), "original\nnew line\n"); git(["commit", "-qam", "own"]);
+  }, [appEdit(join(workspace, "app.ts"))]);
+  assert.equal(plain.contribution!.start?.in_history, true);
+});
+
+test("a patch that credential redaction would change is withheld; its counts stay", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "claude-code");
+  const secret = 'const token = "ghp_0123456789abcdefghijABCDEFGHIJ012345";';
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "app.ts"), `original\n${secret}\n`),
+    [{ path: join(workspace, "app.ts"), additions: 1, deletions: 0, patch: `@@ -1,1 +1,2 @@\n original\n+${secret}`, patch_truncated: false }]);
+  assert.deepEqual(summary.contribution!.edits?.files, [{ path: "app.ts", additions: 1, deletions: 0, patch: "", patch_truncated: true }]);
+  assert.doesNotMatch(JSON.stringify(summary.contribution!.edits), /ghp_/);
+});
+
+test("a failure in the edit path keeps the v3 card", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "claude-code");
+  f.options.turnEdits = { take: () => { throw new Error("ledger broke"); } };
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "app.ts"), "original\nnew line\n"), [appEdit(join(workspace, "app.ts"))]);
+  assert.equal(summary.version, 3);
+  assert.ok(f.diagnostics.includes("edit_evidence_unavailable"));
 });

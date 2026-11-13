@@ -147,6 +147,8 @@ export abstract class SupervisorDaemonDelivery extends SupervisorDaemonProviderE
         this.replyAttachmentSpool,
         this.roomTurnAttachments,
         (agentId, change) => {
+          if ("ended" in change) this.turnEdits.turnEnded(agentId, change.ended);
+          else this.turnEdits.turnStarted(agentId, change.inboxItemId);
           if ("ended" in change) this.liveRoomShare.turnEnded(agentId, change.ended);
           else this.liveRoomShare.turnStarted(agentId, change.inboxItemId, change.sourceMessageId);
         },

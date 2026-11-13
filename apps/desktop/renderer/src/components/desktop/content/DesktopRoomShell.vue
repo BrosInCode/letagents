@@ -282,7 +282,7 @@
       :room-identifier="room.identifier"
       :room-display-name="room.displayName || room.name"
       :request-version="selectedAgentDetailRequestVersion"
-      :initial-tab="agentInspectorInitialTab" v-bind="{ roomAgentWork, roomAgentWorkStatus, workspaceSourceMessageId: selectedAgentDetailTarget?.workspaceSourceMessageId }"
+      :initial-tab="agentInspectorInitialTab" v-bind="{ roomAgentWork, roomAgentWorkStatus, workspaceSourceMessageId: selectedAgentDetailTarget?.workspaceSourceMessageId, workspaceFilePath: selectedAgentDetailTarget?.workspaceFilePath }"
       :reasoning-sessions="reasoningSessions"
       :live-activity-sessions="liveActivitySessions ?? []"
       :correction-request="agentInspectorCorrectionRequest"

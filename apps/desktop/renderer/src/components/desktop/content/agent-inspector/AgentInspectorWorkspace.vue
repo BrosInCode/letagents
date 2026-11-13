@@ -8,7 +8,7 @@
         <span>{{ reviewState === 'loading' ? 'Loading complete review…' : reviewState === 'pending' ? 'The host is still sharing this review.' : reviewState === 'error' ? 'Couldn’t load the complete review.' : 'Only the original preview is available for this capture.' }}</span>
         <button v-if="reviewState !== 'loading'" type="button" @click="retryReview++">Try again</button>
       </div>
-      <WorkspaceDiff v-if="!readerOpen" :snapshot="snapshot" :view-key="`${activeRequestId}:${turn}`" :load-page="reviewState === 'ready' ? loadPage : undefined" />
+      <WorkspaceDiff v-if="!readerOpen" :snapshot="snapshot" :view-key="`${activeRequestId}:${turn}`" :initial-path="turn ? filePath : null" :initial-path-key="`${requestVersion}`" :load-page="reviewState === 'ready' ? loadPage : undefined" />
       <WorkspaceReader :open="readerOpen" :snapshot="snapshot" :view-key="`${activeRequestId}:${turn}`" :load-page="reviewState === 'ready' ? loadPage : undefined" :review-message="reviewMessage" :can-retry="reviewState !== 'loading'" @close="readerOpen = false" @retry="retryReview++" />
     </template>
     <div v-else class="agent-workspace-empty"><FileDiff :size="28" aria-hidden="true" /><h3>No workspace snapshot available</h3><p>Changes appear here after this agent finishes a turn and its host shares a snapshot.</p></div>
@@ -22,7 +22,7 @@ import ContributionDescription from '../room-chat/ContributionDescription.vue';
 import { formatShortDateTime } from '../../../../domain/time';
 import WorkspaceDiff from './WorkspaceDiff.vue';
 import WorkspaceReader from './WorkspaceReader.vue';
-const props = defineProps<{ work: readonly DesktopRoomAgentWork[]; agentKey: string | null; sourceMessageId?: string | null; requestVersion?: number; status: string }>();
+const props = defineProps<{ work: readonly DesktopRoomAgentWork[]; agentKey: string | null; sourceMessageId?: string | null; filePath?: string | null; requestVersion?: number; status: string }>();
 const selected = ref<DesktopRoomAgentWork | null>(null);
 const turn = ref(false);
 const readerOpen = ref(false);
@@ -96,8 +96,8 @@ watch(snapshot, value => { if (!value) readerOpen.value = false; });
 .agent-workspace-context p { display: flex; align-items: center; gap: 6px; margin: 0 0 14px; color: var(--text-secondary); font-size: 11px; overflow-wrap: anywhere; }
 .agent-workspace-context p svg { flex-shrink: 0; }
 .agent-workspace-context div { display: flex; flex-wrap: wrap; align-items: baseline; gap: 9px; font-size: 11px; font-variant-numeric: tabular-nums; margin-bottom: 18px; }
-.agent-workspace-context b { color: light-dark(#167544, #88d9a2); font-weight: 500; }
-.agent-workspace-context b + b { color: light-dark(#bd3548, #ef9ba5); }
+.agent-workspace-context b { color: var(--diff-added-text); font-weight: 500; }
+.agent-workspace-context b + b { color: var(--diff-deleted-text); }
 .agent-workspace-context time { margin-left: auto; color: var(--text-secondary); font-size: 10px; }
 .agent-workspace-empty { display: grid; place-items: center; text-align: center; margin: auto; padding: 36px 20px; color: var(--text-secondary); }
 .agent-workspace-empty h3 { color: var(--text); font-size: 15px; }

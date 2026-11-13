@@ -6,7 +6,8 @@ const states = ['added', 'modified', 'deleted', 'renamed', 'copied', 'typechange
 const exact = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key));
 const count = value => Number.isSafeInteger(value) && value >= 0;
-const path = value => typeof value === 'string' && value.length > 0 && value.length <= 2048
+/** A workspace-relative path as a summary may hold it: no host root, no `..`, no control characters. */
+export const isWorkspaceChangePath = value => typeof value === 'string' && value.length > 0 && value.length <= 2048
   && !value.startsWith('/') && !/^[A-Za-z]:/.test(value) && !value.split(/[\\/]/).includes('..')
   && !/[\x00-\x1f\x7f]/.test(value);
 
@@ -27,8 +28,8 @@ export function parseWorkspaceChangeSummary(value, fullReview = false) {
   const paths = new Set();
   for (const file of value.files) {
     if (!exact(file, ['path', 'previous_path', 'status', 'additions', 'deletions', 'binary'])
-      || !path(file.path) || paths.has(file.path)
-      || !(file.previous_path === null || path(file.previous_path)) || !states.includes(file.status)
+      || !isWorkspaceChangePath(file.path) || paths.has(file.path)
+      || !(file.previous_path === null || isWorkspaceChangePath(file.previous_path)) || !states.includes(file.status)
       || !count(file.additions) || !count(file.deletions) || typeof file.binary !== 'boolean') return null;
     paths.add(file.path);
     files.push({ path: file.path, previous_path: file.previous_path, status: file.status,

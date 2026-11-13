@@ -12,6 +12,7 @@ import { COMMAND_OUTPUT_WINDOW_MS, type CodexProviderAdapterDependencies, type C
 import { CodexProviderHandle } from "./handle.js";
 import { codexFoundNotAtLevel, codexFoundWithoutProfile, codexPolicyIsSandboxed } from "./thread-access.js";
 import { recordValue } from "./notifications.js";
+import { codexEditEvidence } from "../../../../../../shared/agent-edit-evidence.mjs";
 
 export abstract class CodexAdapterBase {
   /** Implemented by CodexAdapterLifecycle. */
@@ -140,6 +141,8 @@ export abstract class CodexAdapterBase {
     /** The adapter cut the payload itself (see boundedCommandEnd). */
     truncated = false,
   ): void {
+    // Read from the raw notification: the bounded payload may have lost the diff.
+    const editEvidence = codexEditEvidenceOf(method, providerPayload);
     const safe = safeStreamPayload(providerPayload);
     if (truncated) safe.payloadTruncated = true;
     const event: ProviderStreamEvent = {
@@ -153,6 +156,7 @@ export abstract class CodexAdapterBase {
       ...(nativeEventId ? { nativeEventId } : {}),
       ...(nativeLifecyclePhase ? { nativeLifecyclePhase } : {}),
       summary,
+      ...(editEvidence ? { editEvidence } : {}),
       ...safe,
       durablePayloadRef: null,
     };
@@ -415,4 +419,9 @@ export abstract class CodexAdapterBase {
     if (!promise) throw new Error("Codex provider handle is missing its exit observation.");
     return promise;
   }
+}
+
+/** Optional evidence: a strange notification has none, and never stops its publication. */
+function codexEditEvidenceOf(method: string, params: unknown) {
+  try { return codexEditEvidence(method, params); } catch { return null; }
 }

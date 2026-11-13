@@ -27,6 +27,7 @@ import type { DaemonActivityWrites } from "../activity-write-batcher.js";
 import type { ManifestTransitionCoordinator } from "../manifest-transition-coordinator.js";
 import type { NativeActivityPublicationCoordinator } from "../native-activity-publication-coordinator.js";
 import type { LiveRoomSharePublisher } from "../live-room-share-publisher.js";
+import type { TurnEditLedger } from "../turn-edit-ledger.js";
 import type { ConvergencePacer } from "../convergence-pacer.js";
 import type { RoomWorkPublisher } from "../room-work-publisher.js";
 import type { ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
@@ -134,6 +135,7 @@ export abstract class SupervisorDaemonState {
   protected abstract readonly nowMs: () => number;
   protected abstract readonly agentStreamRegistry: AgentStreamRegistry;
   protected abstract readonly liveRoomShare: LiveRoomSharePublisher;
+  protected abstract readonly turnEdits: TurnEditLedger;
   protected abstract readonly handoff: ProviderHandoffCoordinator;
 
   protected get manifestGeneration(): number {

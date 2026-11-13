@@ -1,5 +1,9 @@
 import { readableContributionText } from "../../../shared/contribution-text.mjs";
-import { hasReviewableRoomContribution } from "../../../shared/room-agent-work.mjs";
+import { hasReviewableRoomContribution, parseRoomAgentWorkSummary, ROOM_CONTRIBUTION_EDIT_LIMITS, type RoomContributionEditFile, type RoomContributionEdits } from "../../../shared/room-agent-work.mjs";
+import { boundEditPatch } from "../../../shared/agent-edit-evidence.mjs";
+import type { WorkspaceEditSettlement } from "../../../shared/workspace-turn-capture.mjs";
+import { redactCredentialText } from "./credential-redaction.js";
+import type { TurnEditLedger } from "./turn-edit-ledger.js";
 import { RoomWorkspaceStore, type WorkspaceCaptureIdentity } from "./room-workspace-store.js";
 import { captureRecordedRemoteTips, captureWorkspaceHead, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
 import { WorkspaceCapture } from "./workspace-capture.js";
@@ -24,11 +28,13 @@ type Options = {
   assertCurrent(): Promise<void>;
   publish?(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult>;
   reportGroupedNoReply?: typeof reportGroupedNoReply;
-  diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict" | `remote_unanswered: ${string}`): void;
+  diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict" | "edit_evidence_unavailable" | `remote_unanswered: ${string}`): void;
   now?(): number;
   /** `remote` is the remote to ask what upstream held (recordedRemote); without it a turn is compared plainly. */
   workspaceLocation?(workAttemptId: string): Promise<{ path: string; revision: string | null; remote?: string | null }>;
   askRemote?(remote: string): Promise<string[] | null>;
+  /** The files each turn changed with the provider's own edit tools (Claude Code, Codex); without it every card is v3. */
+  turnEdits?: Pick<TurnEditLedger, "take">;
 };
 type Row = Record<string, string | number | null>;
 const COALESCE_MS = 1_000;
@@ -39,6 +45,62 @@ const canonicalSource = (id: string) => /^msg_[1-9]\d{0,9}$/.test(id) && Number(
 const key = (record: Pick<RoomWorkPublication, "agentId" | "roomId" | "sourceMessageId">) =>
   JSON.stringify([record.agentId, record.roomId, record.sourceMessageId]);
 const terminalState = (state: unknown) => ["completed", "completed_no_reply", "failed", "interrupted"].includes(String(state));
+/** Below the parser's 500 KiB: the server stores the summary as jsonb, whose text form adds a little. */
+const EDIT_SUMMARY_BYTES = 496 * 1024;
+const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+
+/**
+ * The turn's edits as the room may see them: workspace-relative paths that Git
+ * does not ignore (the settled candidates), no patch that credential redaction
+ * would change, and the total patch limit, later patches withheld first.
+ * The counts always stay. Null when the paths could not be settled.
+ */
+export function roomContributionEdits(edits: RoomContributionEdits, settlement: WorkspaceEditSettlement | null | undefined): RoomContributionEdits | null {
+  if (!settlement) return null;
+  const limits = ROOM_CONTRIBUTION_EDIT_LIMITS;
+  const relative = new Map(settlement.paths);
+  const files = new Map<string, RoomContributionEditFile>();
+  for (const edit of edits.files) {
+    const path = relative.get(edit.path);
+    if (!path) continue;
+    const prior = files.get(path);
+    if (!prior) { files.set(path, { ...edit, path }); continue; }
+    // Two spellings of one file (a link, a relative path): one row.
+    prior.additions = Math.min(Number.MAX_SAFE_INTEGER, prior.additions + edit.additions);
+    prior.deletions = Math.min(Number.MAX_SAFE_INTEGER, prior.deletions + edit.deletions);
+    const bounded = prior.patch_truncated ? { patch: prior.patch, truncated: true }
+      : boundEditPatch(prior.patch && edit.patch ? `${prior.patch}\n${edit.patch}` : prior.patch || edit.patch, limits.patchChars);
+    prior.patch = bounded.patch;
+    prior.patch_truncated = bounded.truncated || edit.patch_truncated || prior.patch_truncated;
+  }
+  let total = 0;
+  const kept = [...files.values()].slice(0, limits.files).map((file) => {
+    const bounded = boundEditPatch(file.patch, limits.patchChars);
+    let patch = bounded.patch;
+    let truncated = bounded.truncated || file.patch_truncated;
+    // A patch that holds a credential is withheld, not edited: its counts stay.
+    if (patch && redactCredentialText(patch, patch.length + 1).value !== patch) { patch = ""; truncated = true; }
+    if (total + patch.length > limits.totalPatchChars) { patch = ""; truncated = true; }
+    total += patch.length;
+    return { path: file.path, additions: file.additions, deletions: file.deletions, patch, patch_truncated: truncated };
+  });
+  return { files: kept, hidden_files: edits.hidden_files + Math.max(0, files.size - limits.files) };
+}
+
+/** The v4 summary when it is valid and fits; patches (never counts) are withheld from the last file back until it does. Null otherwise. */
+export function fittedEditSummary<T extends { contribution: { changes: unknown; summary: string | null } }>(
+  summary: T, edits: RoomContributionEdits, start: WorkspaceEditSettlement["start"],
+) {
+  const files = edits.files.map((file) => ({ ...file }));
+  for (let withheld = files.length; ; withheld--) {
+    const candidate = { ...summary, version: 4 as const,
+      contribution: { ...summary.contribution, edits: { files, hidden_files: edits.hidden_files }, start } };
+    if (jsonBytes(candidate) <= EDIT_SUMMARY_BYTES && parseRoomAgentWorkSummary(candidate)) return candidate;
+    if (withheld <= 0) return null;
+    const file = files[withheld - 1]!;
+    if (file.patch) files[withheld - 1] = { ...file, patch: "", patch_truncated: true };
+  }
+}
 
 /** Reserve one place for completion; the other three keep recovery moving.
  * This changes queue order only, never evidence, authority or retry eligibility. */
@@ -185,7 +247,13 @@ export class RoomWorkPublisher {
       timing.mark("location");
       const ref = JSON.stringify([agent.agentId, sourceMessageId, inboxItemId]);
       const start = this.turnStarts.get(ref);
-      const pair = await this.workspaceCapture.settle(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref, start?.head, start?.remoteTips);
+      // Every edit event of this turn is already in the ledger: the coordinator observes each one
+      // as it arrives, and the provider's turn result that led here comes after all of them.
+      let turnEdits: RoomContributionEdits | null = null;
+      try { turnEdits = this.options.turnEdits?.take(agent.agentId, inboxItemId, agent.provider) ?? null; }
+      catch { this.report("edit_evidence_unavailable"); }
+      const pair = await this.workspaceCapture.settle(location.path, location.revision, invocationBaseline && invocationBaseline === this.workspaces.baseline(identity) ? invocationBaseline : null, ref, start?.head, start?.remoteTips,
+        turnEdits ? turnEdits.files.map((file) => file.path) : null);
       timing.mark("capture");
       pair.contribution.summary = readableContributionText(summaryText);
       await this.options.assertCurrent();
@@ -198,8 +266,17 @@ export class RoomWorkPublisher {
         operation_counts: { unresolved: 0, succeeded: 0, failed: 0, denied_before_start: 0,
           cancelled_before_start: 0, interrupted_after_start: 0, lost_after_start: 0 },
       };
-      const { review, ...preview } = pair;
-      const summary = { ...execution, version: 3 as const, ...preview };
+      const { review, editSettlement, ...preview } = pair;
+      const plain = { ...execution, version: 3 as const, ...preview };
+      // v4 only for a provider that reports edits; any failure keeps the card as v3, as before.
+      let summary: typeof plain | NonNullable<ReturnType<typeof fittedEditSummary<typeof plain>>> = plain;
+      if (turnEdits) {
+        try {
+          const edits = roomContributionEdits(turnEdits, editSettlement);
+          const fitted = edits && fittedEditSummary(plain, edits, editSettlement!.start);
+          if (fitted) summary = fitted; else this.report("edit_evidence_unavailable");
+        } catch { this.report("edit_evidence_unavailable"); }
+      }
       const reviewable = hasReviewableRoomContribution(summary);
       timing.mark("projection");
       // Settlement is also the durable no-review decision. Preserve unavailable
@@ -385,7 +462,7 @@ export class RoomWorkPublisher {
         const settled = this.workspaces.settled(record.agentId, record.roomId, record.sourceMessageId) ?? current.summary;
         // Retain already-staged legacy payloads; do not rewrite shared history.
         // New no-review settlements contribute execution evidence only.
-        if (settled?.workspace && (current.summary?.workspace || hasReviewableRoomContribution(settled))) captured.summary = { ...captured.summary, version: settled.contribution ? 3 : 2,
+        if (settled?.workspace && (current.summary?.workspace || hasReviewableRoomContribution(settled))) captured.summary = { ...captured.summary, version: settled.contribution ? settled.version === 4 ? 4 : 3 : 2,
           workspace: settled.workspace, ...(settled.contribution ? { contribution: settled.contribution } : {}) };
         this.store.stage(current, captured);
         previous.set(recordKey, stamp);
