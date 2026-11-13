@@ -73,7 +73,8 @@ test("Codex add and delete: the diff is the file content", () => {
   assert.deepEqual(evidence, [
     { path: "added.ts", additions: 2, deletions: 0, patch: "@@ -0,0 +1,2 @@\n+one\n+two", patch_truncated: false },
     { path: "gone.ts", additions: 0, deletions: 1, patch: "@@ -1,1 +0,0 @@\n-x", patch_truncated: false },
-    { path: "hunked.ts", additions: 1, deletions: 0, patch: "@@ -0,0 +1,1 @@\n+only", patch_truncated: false },
+    // A new file whose own text is a patch: every line of it is an added line.
+    { path: "hunked.ts", additions: 2, deletions: 0, patch: "@@ -0,0 +1,2 @@\n+@@ -0,0 +1,1 @@\n++only", patch_truncated: false },
   ]);
 });
 

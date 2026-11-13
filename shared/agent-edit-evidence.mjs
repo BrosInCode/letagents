@@ -106,8 +106,9 @@ export function claudeEditEvidence(message) {
 /**
  * One Codex app-server notification. Only `item/completed` of a `fileChange`
  * item whose status is `completed` counts. `kind` is `{ type }` or a plain
- * string. An update's `diff` is a unified diff; an add's or delete's is the
- * file content, unless it holds a hunk header. A moved file is reported at its new path.
+ * string. An update's `diff` is a unified diff (hunks only on Codex 0.162.1); an
+ * add's or delete's is the file content, so a line of it that looks like a hunk
+ * header is still content. A moved file is reported at its new path.
  */
 export function codexEditEvidence(method, params) {
   const item = record(record(params)?.item);
@@ -121,11 +122,11 @@ export function codexEditEvidence(method, params) {
     const movePath = record(change.kind)?.move_path ?? change.move_path;
     const path = kind === 'update' && typeof movePath === 'string' && movePath ? movePath : change.path;
     const diff = typeof change.diff === 'string' ? change.diff : '';
-    if ((kind === 'add' || kind === 'delete') && !/^@@ /m.test(diff)) {
+    if (kind === 'add' || kind === 'delete') {
       files.push(wholeFile(path, diff, kind === 'add'));
       continue;
     }
-    if (kind !== 'add' && kind !== 'delete' && kind !== 'update') continue;
+    if (kind !== 'update') continue;
     const patch = unifiedDiff(diff);
     files.push(evidence(path, patch.additions, patch.deletions, patch.lines));
   }

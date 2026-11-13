@@ -113,6 +113,14 @@ test('hidden comparison files count as extra files', () => {
   assert.equal(card.comparison!.unedited, '4 files in it have no edit from this turn.');
 });
 
+test('an edited file that the comparison does not name makes the no-edit count a lower bound', () => {
+  // The comparison names only its first files: the edited file can be one of the 3210 that it only counts.
+  const changes = snapshot([file('.env.example', 4, 0), file('ci.yml', 10, 2), file('docs.md', 1, 0)], { hidden_files: 3210 });
+  const card = contributionCard(work(changes, { edits: { files: [edit(TEST, 33)], hidden_files: 0 }, start: history('2026-09-20T10:00:00Z') }), NOW)!;
+  assert.equal(card.comparison!.title, '3213 files in the full comparison');
+  assert.equal(card.comparison!.unedited, 'At least 3212 files in it have no edit from this turn.');
+});
+
 test('a changed history never turns a listable command file into a count', () => {
   // The agent edits one file, changes a workflow with a command, and amends: the start commit leaves the history.
   const changes = snapshot([file('.github/workflows/release.yml', 3, 1), file('README.md', 1, 0)]);
@@ -141,7 +149,8 @@ test('more than 3 rows show the remaining text in each mode', () => {
   assert.deepEqual(old.rows.map(row => row.path), ['a.ts', 'b.ts', 'c.ts']);
   assert.equal(old.remaining, '3 more edited files');
   assert.deepEqual(old.button, { label: 'Review 6 files', counts: { additions: 10, deletions: 5 }, path: 'a.ts' });
-  assert.equal(old.comparison!.unedited, 'At least 9 files in it have no edit from this turn.');
+  // 10 files have no listed edit; the 5 listed edits and the 1 hidden edit can each be one of the 9 counted files.
+  assert.equal(old.comparison!.unedited, 'At least 4 files in it have no edit from this turn.');
 });
 
 test('old copy with zero edited files has no main button and keeps the full comparison', () => {
@@ -152,11 +161,11 @@ test('old copy with zero edited files has no main button and keeps the full comp
   assert.equal(card.comparison!.title, '3213 files in the full comparison');
 });
 
-test('a command file past the listed rows is named in the remaining text', () => {
+test('one row is kept for a command file, and the rest are counted in the remaining text', () => {
   const changes = snapshot([file('a.ts', 1, 0), file('b.ts', 1, 0), file('c.ts', 1, 0), file('d.ts', 1, 0), file('e.json', 2, 1)]);
   const card = contributionCard(work(changes, { edits: { files: ['a.ts', 'b.ts', 'c.ts'].map(path => edit(path, 1)), hidden_files: 0 }, start: null }), NOW)!;
-  assert.deepEqual(card.rows.map(row => row.label), ['Updated', 'Updated', 'Updated']);
-  assert.equal(card.remaining, '2 more files in the diff, 2 changed by a command');
+  assert.deepEqual(card.rows.map(row => [row.path, row.label]), [['a.ts', 'Updated'], ['b.ts', 'Updated'], ['d.ts', 'Changed by a command']]);
+  assert.equal(card.remaining, '2 more files in the diff, 1 changed by a command');
   const allEdited = contributionCard(work(changes, { edits: { files: changes.files.map(item => edit(item.path, 1)), hidden_files: 0 }, start: null }), NOW)!;
   assert.equal(allEdited.remaining, '2 more files in the diff');
 });

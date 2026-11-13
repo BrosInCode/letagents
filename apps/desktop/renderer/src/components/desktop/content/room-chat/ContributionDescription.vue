@@ -9,7 +9,7 @@
         </button>
         <code v-else>{{ filename(row.path) }}</code>
         <button v-if="row.edit" type="button" class="edit-toggle" :aria-expanded="openPath === row.path" :aria-controls="editId" :aria-label="openPath === row.path ? 'Hide the edit' : `Show the edit${row.counts ? `, ${countText(row.counts)} lines` : ''}`" @click="toggle(row.path)">
-          <template v-if="row.counts"><b>+{{ row.counts.additions }}</b><b v-if="row.counts.deletions" class="edit-toggle-deleted">−{{ row.counts.deletions }}</b></template><ChevronDown :size="12" aria-hidden="true" />
+          <template v-if="row.counts"><b v-if="row.counts.additions || !row.counts.deletions">+{{ row.counts.additions }}</b><b v-if="row.counts.deletions" class="edit-toggle-deleted">−{{ row.counts.deletions }}</b></template><ChevronDown :size="12" aria-hidden="true" />
         </button>
         <span v-else-if="row.counts && card?.mode !== 'plain'" class="cmd-count">{{ countText(row.counts) }}</span>
       </li>
@@ -61,7 +61,8 @@ const openRow = computed(() => files.value.find(row => row.path === openPath.val
 const preview = computed(() => openRow.value?.edit ? editPreview(openRow.value.edit) : null);
 watch(() => props.work.attemptId, () => { openPath.value = null; });
 const toggle = (path: string) => { openPath.value = openPath.value === path ? null : path; };
-const countText = (counts: ContributionCardCounts) => `+${counts.additions}${counts.deletions ? ` −${counts.deletions}` : ''}`;
+// A zero side is left out, as in the rows of the review: `+3`, `−1`, `+3 −1`.
+const countText = (counts: ContributionCardCounts) => [counts.additions || !counts.deletions ? `+${counts.additions}` : '', counts.deletions ? `−${counts.deletions}` : ''].filter(Boolean).join(' ');
 const formatted = computed(() => {
   const template = proseTemplate.value.cloneNode(true) as HTMLTemplateElement;
   for (const code of inlineCodes(template.content)) {
@@ -147,7 +148,8 @@ async function open(path: string, sourceButton?: HTMLButtonElement) {
 @media (hover: hover) { .contribution-files button:hover, .contribution-prose :deep(.contribution-inline-file:hover code) { background: var(--accent-hover); } }
 .contribution-files .edit-toggle { gap: 3px; padding: 3px 2px; border: 0; background: none; color: var(--diff-added-text); font-variant-numeric: tabular-nums; }
 .edit-toggle b { font-weight: 500; }
-.edit-toggle .edit-toggle-deleted { margin-left: 4px; color: var(--diff-deleted-text); }
+.edit-toggle .edit-toggle-deleted { color: var(--diff-deleted-text); }
+.edit-toggle b + .edit-toggle-deleted { margin-left: 4px; }
 .contribution-files .edit-toggle svg { color: var(--text-secondary); transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1); }
 .contribution-files .edit-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
 .cmd-count { color: var(--text-secondary); font: 11px/1.6 var(--font-mono); font-variant-numeric: tabular-nums; }

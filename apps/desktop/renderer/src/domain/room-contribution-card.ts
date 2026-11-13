@@ -46,6 +46,17 @@ export function contributionStartDate(value: string, now: Date): string {
   return date.getFullYear() === now.getFullYear() ? text : `${text} ${date.getFullYear()}`;
 }
 
+/**
+ * How many comparison files have no edit. The comparison names only its first files and the edits only
+ * their first files, so an edited file can sit in either unnamed rest: the count is then a lower bound.
+ */
+function uneditedText(extra: number, edits: RoomContributionEdits, listed: readonly WorkspaceChangedFile[], unlisted: number): string {
+  const named = new Set(listed.map(file => file.path));
+  const maybeEdited = edits.hidden_files + Math.min(unlisted, edits.files.filter(file => !named.has(file.path)).length);
+  const count = Math.max(0, extra - maybeEdited);
+  return `${maybeEdited ? 'At least ' : ''}${plural(count, 'file')} in it ${count === 1 ? 'has' : 'have'} no edit from this turn.`;
+}
+
 /** The card shape for one contribution. Edit events are a summary, never proof: every comparison file stays reachable. */
 export function contributionCard(work: DesktopRoomAgentWork, now: Date): ContributionCard | null {
   const changes = contributionChanges(work);
@@ -92,15 +103,16 @@ export function contributionCard(work: DesktopRoomAgentWork, now: Date): Contrib
         line: days >= 1
           ? `This workspace started from a copy of the project that is ${plural(days, 'day')} old, so the comparison can include older project history.`
           : 'The history of this workspace changed during the turn, so the comparison can include other work.',
-        // Past the listed edit files an edited file is not told apart, so the count is then a lower bound.
-        unedited: edits.hidden_files
-          ? `At least ${plural(Math.max(0, extra - edits.hidden_files), 'file')} in it ${Math.max(0, extra - edits.hidden_files) === 1 ? 'has' : 'have'} no edit from this turn.`
-          : `${plural(extra, 'file')} in it ${extra === 1 ? 'has' : 'have'} no edit from this turn.`,
+        unedited: uneditedText(extra, edits, changes.files, changes.hidden_files),
         counts: { additions: changes.additions, deletions: changes.deletions },
       },
     };
   }
-  const ordered = [...changes.files.filter(file => edited.has(file.path)), ...changes.files.filter(file => !edited.has(file.path))];
+  const own = changes.files.filter(file => edited.has(file.path));
+  const other = changes.files.filter(file => !edited.has(file.path));
+  // Edited files first, but one row is kept for a file with no edit: its name matters most to a reader.
+  const lead = other.length ? own.slice(0, ROWS - 1) : own;
+  const ordered = [...lead, ...other, ...own.slice(lead.length)];
   // Past the listed edit files, an edited file is not told apart from a file that a command changed.
   const editsComplete = edits.hidden_files === 0;
   const rows = ordered.slice(0, ROWS).map(file => {
