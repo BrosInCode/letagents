@@ -16,6 +16,7 @@
         <div class="room-contribution-scope-head"><History :size="16" aria-hidden="true" /><span>{{ card.comparison.header }}</span></div>
         <p class="room-contribution-scope-title">{{ card.comparison.title }}</p>
         <p class="room-contribution-scope-line">{{ card.comparison.line }}</p>
+        <p class="room-contribution-scope-line room-contribution-scope-unedited">{{ card.comparison.unedited }}</p>
         <button class="room-contribution-review" type="button" @click="emit('open-workspace', work)"><span>Review full comparison</span><span class="room-contribution-counts"><b>+{{ card.comparison.counts.additions }}</b><b>−{{ card.comparison.counts.deletions }}</b></span><ChevronRight :size="14" aria-hidden="true" /></button>
       </div>
       <span v-if="status !== 'ready'" class="room-contribution-unavailable">Updates unavailable</span>
@@ -58,6 +59,7 @@ const identity = computed(() => workspaceAgentTarget(props.work, props.participa
 .room-contribution-scope-head svg { flex: none; color: var(--amber-text); }
 .room-contribution-scope-title { margin: 2px 0 0; font-size: 14px; font-weight: 600; line-height: 1.5; font-variant-numeric: tabular-nums; }
 .room-contribution-scope-line { margin: 0; font-size: 12px; line-height: 1.55; color: var(--text-secondary); }
+.room-contribution-scope-unedited { margin-top: 4px; color: var(--text); font-variant-numeric: tabular-nums; }
 .room-contribution-scope .room-contribution-review { margin-top: 8px; justify-self: start; }
 .room-contribution-scope .room-contribution-counts b { color: var(--text-secondary); }
 .room-contribution-unavailable { display: block; margin-top: 7px; font-size: 10px; color: var(--text-secondary); }

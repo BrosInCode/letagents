@@ -1,6 +1,6 @@
 import { encodeWorkspaceReview, REVIEW_PAGE_SIZE, type WorkspaceReview, type WorkspaceReviewPage } from '../../../shared/workspace-review.mjs';
 import type { DatabaseSync } from 'node:sqlite';
-import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from '../../../shared/room-agent-work.mjs';
+import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary, type RoomContributionEdits, type RoomContributionStart } from '../../../shared/room-agent-work.mjs';
 
 const schema = `CREATE TABLE room_workspace_captures (
   agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
@@ -17,6 +17,19 @@ const reviewSchema = `CREATE TABLE IF NOT EXISTS room_workspace_reviews (
   PRIMARY KEY(agent_id,room_id,source_message_id),
   FOREIGN KEY(agent_id,room_id,source_message_id) REFERENCES room_workspace_captures(agent_id,room_id,source_message_id)
 ) STRICT`;
+/**
+ * The provider's edits and the turn's start, kept beside the settled capture and never
+ * in it: settled_json and the publication receipt stay v3, which a daemon of an earlier
+ * release reads, and this table is one it does not know of. The publication merges the
+ * two into v4 when it is sent. Created when first needed, without a schema version: an
+ * earlier daemon can still open the database after a downgrade.
+ */
+const editEvidenceSchema = `CREATE TABLE IF NOT EXISTS room_work_edit_evidence (
+  agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
+  evidence_json TEXT NOT NULL CHECK(length(evidence_json)<=524288 AND json_valid(evidence_json)),
+  PRIMARY KEY(agent_id,room_id,source_message_id)
+) STRICT`;
+export type RoomWorkEditEvidence = { edits: RoomContributionEdits | null; start: RoomContributionStart | null };
 export function validateRoomWorkspaceReviewSchema(db: DatabaseSync): void {
   const sql = String(db.prepare("SELECT sql FROM sqlite_master WHERE name='room_workspace_reviews'").get()?.sql ?? '');
   const normalize = (value: string) => value.replace('IF NOT EXISTS ', '').replace(/\s+/g, ' ').trim();
@@ -26,13 +39,16 @@ export function applyRoomWorkspaceSchema(db: DatabaseSync): void {
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='room_workspace_captures'").get()) db.exec(schema);
   validateRoomWorkspaceSchema(db);
   db.exec(reviewSchema);
+  db.exec(editEvidenceSchema);
 }
 export function validateRoomWorkspaceSchema(db: DatabaseSync): void {
   const normalize = (sql: string) => sql.replace(/\s+/g, ' ').trim();
   if (normalize(String(db.prepare("SELECT sql FROM sqlite_master WHERE name='room_workspace_captures'").get()?.sql)) !== normalize(schema)) throw new Error('Invalid workspace capture schema.');
   for (const row of db.prepare('SELECT settled_json FROM room_workspace_captures WHERE settled_json IS NOT NULL').iterate()) {
-    if (![3, 4].includes(parseRoomAgentWorkSummary(JSON.parse(String(row.settled_json)))?.version ?? 0)) throw new Error('Invalid settled workspace capture.');
+    if (parseRoomAgentWorkSummary(JSON.parse(String(row.settled_json)))?.version !== 3) throw new Error('Invalid settled workspace capture.');
   }
+  const edits = db.prepare("SELECT sql FROM sqlite_master WHERE name='room_work_edit_evidence'").get()?.sql;
+  if (edits !== undefined && normalize(String(edits).replace('IF NOT EXISTS ', '')) !== normalize(editEvidenceSchema.replace('IF NOT EXISTS ', ''))) throw new Error('Invalid edit evidence schema.');
 }
 export type WorkspaceCaptureIdentity = { agentId: string; roomId: string; sourceMessageId: string; workAttemptId: string; inboxItemId: string };
 const keys = (key: WorkspaceCaptureIdentity) => [key.agentId, key.roomId, key.sourceMessageId, key.workAttemptId, key.inboxItemId];
@@ -67,9 +83,27 @@ export class RoomWorkspaceStore {
     const row = this.db.prepare('SELECT settled_json FROM room_workspace_captures WHERE agent_id=? AND room_id=? AND source_message_id=?').get(agentId, roomId, sourceMessageId);
     return row?.settled_json ? parseRoomAgentWorkSummary(JSON.parse(String(row.settled_json))) : null;
   }
+  /** The turn's edit evidence, beside its settled v3 capture. Optional: a failure leaves the card v3. */
+  saveEdits(key: WorkspaceCaptureIdentity, evidence: RoomWorkEditEvidence): void {
+    this.db.exec(editEvidenceSchema);
+    this.db.prepare(`INSERT INTO room_work_edit_evidence(agent_id,room_id,source_message_id,evidence_json) SELECT ?,?,?,?
+      WHERE EXISTS (SELECT 1 FROM room_workspace_captures WHERE agent_id=? AND room_id=? AND source_message_id=? AND work_attempt_id=? AND inbox_item_id=? AND settled_json IS NOT NULL)
+      ON CONFLICT DO NOTHING`).run(...keys(key).slice(0, 3), JSON.stringify({ edits: evidence.edits, start: evidence.start }), ...keys(key));
+  }
+  edits(agentId: string, roomId: string, sourceMessageId: string): RoomWorkEditEvidence | null {
+    if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='room_work_edit_evidence'").get()) return null;
+    const row = this.db.prepare('SELECT evidence_json FROM room_work_edit_evidence WHERE agent_id=? AND room_id=? AND source_message_id=?').get(agentId, roomId, sourceMessageId);
+    return row ? JSON.parse(String(row.evidence_json)) as RoomWorkEditEvidence : null;
+  }
+  /** A server that does not take v4 refused it: this capture is published as v3 from now on, also after a restart. */
+  dropEdits(agentId: string, roomId: string, sourceMessageId: string): void {
+    if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE name='room_work_edit_evidence'").get()) {
+      this.db.prepare('DELETE FROM room_work_edit_evidence WHERE agent_id=? AND room_id=? AND source_message_id=?').run(agentId, roomId, sourceMessageId);
+    }
+  }
   settle(key: WorkspaceCaptureIdentity, summary: RoomAgentWorkSummary, review?: WorkspaceReview): void {
     const parsed = parseRoomAgentWorkSummary(summary);
-    if (parsed?.version !== 3 && parsed?.version !== 4) throw new Error('Invalid settled workspace capture.');
+    if (parsed?.version !== 3) throw new Error('Invalid settled workspace capture.');
     let encoded: ReturnType<typeof encodeWorkspaceReview> | null = null;
     try { encoded = review ? encodeWorkspaceReview(review) : null; }
     catch (error) { if (!(error instanceof RangeError)) throw error; } // Optional archive capacity must never discard a valid preview.

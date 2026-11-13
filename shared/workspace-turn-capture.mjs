@@ -452,24 +452,34 @@ async function ownStartingTree(workspace, start, startingHead, remoteTips, deadl
 /**
  * Where an edited file lies in the workspace, as a workspace-relative POSIX path, or null
  * when it lies outside it or in Git's own folder. A relative path is relative to the
- * workspace. Links are resolved on the nearest folder that still exists, as the capture
- * resolves a tracked path's folder, so a link cannot place a file outside the workspace.
+ * workspace. A file that exists is resolved whole with the native realpath, its last part
+ * included: a link inside the workspace to a file outside it is outside, a link to another
+ * file inside is that file, and on a case-insensitive volume the path takes the true case.
+ * A file that no longer exists (deleted in the turn) is resolved on the nearest folder
+ * that does; a dangling link is dropped.
  */
 async function workspaceRelativePath(root, workspace, candidate) {
     if (typeof candidate !== 'string' || !candidate || candidate.includes('\0'))
         return null;
     const absolute = nodePath.resolve(workspace, candidate);
+    const inside = (real, tail = []) => {
+        const relative = nodePath.relative(root, nodePath.join(real, ...tail));
+        if (!relative || escapesWorkspace(root, nodePath.join(root, relative)))
+            return null;
+        const posix = relative.split(nodePath.sep).join('/');
+        return posix === '.git' || posix.startsWith('.git/') ? null : posix;
+    };
+    const whole = await realpath(absolute).then(real => ({ real }), error => ({ missing: error?.code === 'ENOENT' || error?.code === 'ENOTDIR' }));
+    if (whole.real)
+        return inside(whole.real);
+    if (!whole.missing || await lstat(absolute).then(() => true, () => false))
+        return null;
     const tail = [nodePath.basename(absolute)];
     let folder = nodePath.dirname(absolute);
     for (let depth = 0; depth < 256; depth++) {
         const real = await realpath(folder).catch(() => null);
-        if (real) {
-            const relative = nodePath.relative(root, nodePath.join(real, ...tail));
-            if (!relative || escapesWorkspace(root, nodePath.join(root, relative)))
-                return null;
-            const posix = relative.split(nodePath.sep).join('/');
-            return posix === '.git' || posix.startsWith('.git/') ? null : posix;
-        }
+        if (real)
+            return inside(real, tail);
         const parent = nodePath.dirname(folder);
         if (parent === folder)
             return null;
@@ -498,10 +508,12 @@ async function settleEditEvidence(workspace, candidates, startingHead, deadline)
     }
     let kept = paths;
     if (paths.length) {
-        const answer = await gitExit(root, ['check-ignore', '-z', '--stdin'], signal, paths.map(([, path]) => `${path}\0`).join(''));
+        // Each path is given as `./path`: a name such as `:(glob)x` would otherwise be read as
+        // pathspec magic and fail the whole call (check-ignore refuses even literal pathspecs).
+        const answer = await gitExit(root, ['check-ignore', '-z', '--stdin'], signal, paths.map(([, path]) => `./${path}\0`).join(''));
         if (answer.code !== 0 && answer.code !== 1)
             return null;
-        const ignored = new Set(answer.stdout.split('\0').filter(Boolean));
+        const ignored = new Set(answer.stdout.split('\0').filter(Boolean).map(path => path.replace(/^\.\//, '')));
         kept = paths.filter(([, path]) => !ignored.has(path));
     }
     let start = null;

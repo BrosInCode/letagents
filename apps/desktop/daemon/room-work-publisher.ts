@@ -8,7 +8,7 @@ import { RoomWorkspaceStore, type WorkspaceCaptureIdentity } from "./room-worksp
 import { captureRecordedRemoteTips, captureWorkspaceHead, releaseWorkspaceTree } from "../../../shared/workspace-turn-capture.mjs";
 import { WorkspaceCapture } from "./workspace-capture.js";
 import type { DatabaseSync } from "node:sqlite";
-import { publishRoomWork, reportGroupedNoReply, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
+import { publishRoomWork, reportGroupedNoReply, RoomWorkSummaryRejectedError, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
 import { PENDING_PEER_REPORT_SQL, resolvePeerReceipt } from "./queued-peer-deliveries.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
 import { ExecutionShadowStore } from "./execution-shadow-store.js";
@@ -28,7 +28,7 @@ type Options = {
   assertCurrent(): Promise<void>;
   publish?(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult>;
   reportGroupedNoReply?: typeof reportGroupedNoReply;
-  diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict" | "edit_evidence_unavailable" | `remote_unanswered: ${string}`): void;
+  diagnostic?(code: "storage_unavailable" | "authority_unavailable" | "publication_unavailable" | "publication_conflict" | "edit_evidence_unavailable" | "edit_evidence_refused" | `remote_unanswered: ${string}`): void;
   now?(): number;
   /** `remote` is the remote to ask what upstream held (recordedRemote); without it a turn is compared plainly. */
   workspaceLocation?(workAttemptId: string): Promise<{ path: string; revision: string | null; remote?: string | null }>;
@@ -90,7 +90,7 @@ export function roomContributionEdits(edits: RoomContributionEdits, settlement: 
 /** The v4 summary when it is valid and fits; patches (never counts) are withheld from the last file back until it does. Null otherwise. */
 export function fittedEditSummary<T extends { contribution: { changes: unknown; summary: string | null } }>(
   summary: T, edits: RoomContributionEdits, start: WorkspaceEditSettlement["start"],
-) {
+): (Omit<T, "version" | "contribution"> & { version: 4; contribution: T["contribution"] & { edits: RoomContributionEdits; start: WorkspaceEditSettlement["start"] } }) | null {
   const files = edits.files.map((file) => ({ ...file }));
   for (let withheld = files.length; ; withheld--) {
     const candidate = { ...summary, version: 4 as const,
@@ -269,19 +269,26 @@ export class RoomWorkPublisher {
       const { review, editSettlement, ...preview } = pair;
       const plain = { ...execution, version: 3 as const, ...preview };
       // v4 only for a provider that reports edits; any failure keeps the card as v3, as before.
-      let summary: typeof plain | NonNullable<ReturnType<typeof fittedEditSummary<typeof plain>>> = plain;
-      if (turnEdits) {
+      // What is stored stays v3; the edits are kept beside it and merged when the card is sent.
+      const summary = plain;
+      const fitted = (() => {
+        if (!turnEdits) return null;
         try {
           const edits = roomContributionEdits(turnEdits, editSettlement);
-          const fitted = edits && fittedEditSummary(plain, edits, editSettlement!.start);
-          if (fitted) summary = fitted; else this.report("edit_evidence_unavailable");
-        } catch { this.report("edit_evidence_unavailable"); }
-      }
+          const result = edits && fittedEditSummary(plain, edits, editSettlement!.start);
+          if (!result) this.report("edit_evidence_unavailable");
+          return result;
+        } catch { this.report("edit_evidence_unavailable"); return null; }
+      })();
       const reviewable = hasReviewableRoomContribution(summary);
       timing.mark("projection");
       // Settlement is also the durable no-review decision. Preserve unavailable
       // evidence instead of treating it as no change or recapturing on restart.
       this.workspaces.settle(identity, summary, reviewable ? review : undefined);
+      if (fitted) {
+        try { this.workspaces.saveEdits(identity, { edits: fitted.contribution.edits, start: fitted.contribution.start }); }
+        catch { this.report("edit_evidence_unavailable"); }
+      }
       if (captured.availability === "available") this.store.stage(current.record,
         reviewable ? { ...captured, summary } : captured);
       timing.mark("persistence");
@@ -365,6 +372,18 @@ export class RoomWorkPublisher {
 
   private sameOrigin(left: RoomWorkOrigin, right: RoomWorkOrigin, requireOriginalSession = false): boolean {
     return sameWorkerPublicationOrigin(left, right, requireOriginalSession);
+  }
+
+  /** The receipt's v3 card with its turn's edits merged in (v4), when they were kept and still fit; else the receipt as stored. */
+  private publicationSummary(record: RoomWorkPublication) {
+    const summary = record.summary!;
+    if (summary.version !== 3 || !summary.contribution) return summary;
+    try {
+      const evidence = this.workspaces.edits(record.agentId, record.roomId, record.sourceMessageId);
+      if (!evidence) return summary;
+      const merged = parseRoomAgentWorkSummary({ ...summary, version: 4, contribution: { ...summary.contribution, edits: evidence.edits, start: evidence.start } });
+      return merged && jsonBytes(merged) <= EDIT_SUMMARY_BYTES ? merged : summary;
+    } catch { this.report("edit_evidence_unavailable"); return summary; }
   }
 
   private pendingReviewPage(record: RoomWorkPublication) {
@@ -462,7 +481,7 @@ export class RoomWorkPublisher {
         const settled = this.workspaces.settled(record.agentId, record.roomId, record.sourceMessageId) ?? current.summary;
         // Retain already-staged legacy payloads; do not rewrite shared history.
         // New no-review settlements contribute execution evidence only.
-        if (settled?.workspace && (current.summary?.workspace || hasReviewableRoomContribution(settled))) captured.summary = { ...captured.summary, version: settled.contribution ? settled.version === 4 ? 4 : 3 : 2,
+        if (settled?.workspace && (current.summary?.workspace || hasReviewableRoomContribution(settled))) captured.summary = { ...captured.summary, version: settled.contribution ? 3 : 2,
           workspace: settled.workspace, ...(settled.contribution ? { contribution: settled.contribution } : {}) };
         this.store.stage(current, captured);
         previous.set(recordKey, stamp);
@@ -546,11 +565,24 @@ export class RoomWorkPublisher {
         this.attemptedAt.set(key(record), this.now());
         try {
           const reviewPage = this.pendingReviewPage(record);
-          const result = await (this.options.publish ?? publishRoomWork)({ apiOrigin: record.apiOrigin,
+          const send = (summary: NonNullable<RoomWorkPublication["summary"]>) => (this.options.publish ?? publishRoomWork)({ apiOrigin: record.apiOrigin,
             grantId: authority.grant.grantId, supervisorGrant: authority.grant.supervisorGrant,
             grantGeneration: authority.grant.grantGeneration, sessionId: authority.worker.agentSessionId,
             roomId: record.roomId, sourceMessageId: record.sourceMessageId, agentKey: record.agentKey,
-            revision: record.revision, summary: record.summary!, ...(reviewPage ? { reviewPage } : {}), signal: this.cancellation.signal });
+            revision: record.revision, summary, ...(reviewPage ? { reviewPage } : {}), signal: this.cancellation.signal });
+          const summary = this.publicationSummary(record);
+          let result: RoomWorkPublishResult;
+          try { result = await send(summary); }
+          catch (error) {
+            // A server that does not know v4 refuses the whole summary. Once, and for good: drop the
+            // edits and send the stored v3 card. A refused v3 card is retried as before.
+            if (!(error instanceof RoomWorkSummaryRejectedError) || summary.version !== 4) throw error;
+            this.report("edit_evidence_refused");
+            this.workspaces.dropEdits(record.agentId, record.roomId, record.sourceMessageId);
+            await this.options.assertCurrent();
+            if (this.unavailable()) return;
+            result = await send(record.summary!);
+          }
           await this.options.assertCurrent();
           if (this.unavailable()) return;
           if (result === "acknowledged") {

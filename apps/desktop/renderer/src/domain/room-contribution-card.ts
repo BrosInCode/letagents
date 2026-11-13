@@ -15,7 +15,8 @@ export type ContributionCardRow = {
   edit: Pick<RoomContributionEditFile, 'patch' | 'patch_truncated'> | null;
 };
 export type ContributionCardButton = { label: string; counts: ContributionCardCounts | null; path: string | null };
-export type ContributionCardComparison = { header: string; title: string; line: string; counts: ContributionCardCounts };
+/** `unedited` says how many comparison files have no edit by the agent: the block never calls a file history without that count. */
+export type ContributionCardComparison = { header: string; title: string; line: string; unedited: string; counts: ContributionCardCounts };
 export type ContributionCard = {
   mode: ContributionCardMode;
   rows: ContributionCardRow[];
@@ -65,7 +66,9 @@ export function contributionCard(work: DesktopRoomAgentWork, now: Date): Contrib
   }
   const edited = new Map(edits.files.map(file => [file.path, file]));
   const extra = changes.files.filter(file => !edited.has(file.path)).length + changes.hidden_files;
-  if (start?.in_history === false && extra > 0) {
+  // The agent controls its own history, so the block is only for a comparison too large to list:
+  // while the files with no edit fit in the rows, each one stays a named row.
+  if (start?.in_history === false && extra > ROWS) {
     const statuses = new Map(changes.files.map(file => [file.path, file.status]));
     const rows = edits.files.slice(0, ROWS).map(file => ({
       path: file.path, label: statusLabel(statuses.get(file.path) ?? 'modified'),
@@ -85,10 +88,14 @@ export function contributionCard(work: DesktopRoomAgentWork, now: Date): Contrib
       } : null,
       comparison: {
         header: committed ? `Compared with ${contributionStartDate(committed, now)}` : 'Compared with the workspace start',
-        title: `${cTotal} files in the full comparison`,
+        title: `${plural(cTotal, 'file')} in the full comparison`,
         line: days >= 1
-          ? `This workspace started from a copy of the project that is ${plural(days, 'day')} old, so the comparison includes older project history.`
-          : 'This workspace started from a different copy of the project, so the comparison includes other project history.',
+          ? `This workspace started from a copy of the project that is ${plural(days, 'day')} old, so the comparison can include older project history.`
+          : 'The history of this workspace changed during the turn, so the comparison can include other work.',
+        // Past the listed edit files an edited file is not told apart, so the count is then a lower bound.
+        unedited: edits.hidden_files
+          ? `At least ${plural(Math.max(0, extra - edits.hidden_files), 'file')} in it ${Math.max(0, extra - edits.hidden_files) === 1 ? 'has' : 'have'} no edit from this turn.`
+          : `${plural(extra, 'file')} in it ${extra === 1 ? 'has' : 'have'} no edit from this turn.`,
         counts: { additions: changes.additions, deletions: changes.deletions },
       },
     };

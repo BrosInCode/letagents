@@ -78,15 +78,16 @@ test('old copy: rows come from the edits, with both buttons and the full compari
   assert.equal(card.remaining, null);
   assert.deepEqual(card.comparison, {
     header: 'Compared with 20 Sep', title: '3213 files in the full comparison',
-    line: 'This workspace started from a copy of the project that is 53 days old, so the comparison includes older project history.',
+    line: 'This workspace started from a copy of the project that is 53 days old, so the comparison can include older project history.',
+    unedited: '3212 files in it have no edit from this turn.',
     counts: { additions: 496281, deletions: 153216 },
   });
 });
 
 test('old copy: the age text for 1 day, 0 days, an unknown date, and another year', () => {
   assert.equal(contributionCard(oldCopy('2026-11-11T11:00:00Z'), NOW)!.comparison!.line,
-    'This workspace started from a copy of the project that is 1 day old, so the comparison includes older project history.');
-  const other = 'This workspace started from a different copy of the project, so the comparison includes other project history.';
+    'This workspace started from a copy of the project that is 1 day old, so the comparison can include older project history.');
+  const other = 'The history of this workspace changed during the turn, so the comparison can include other work.';
   const sameDay = contributionCard(oldCopy('2026-11-12T10:00:00Z'), NOW)!.comparison!;
   assert.equal(sameDay.line, other);
   assert.equal(sameDay.header, 'Compared with 12 Nov');
@@ -105,10 +106,28 @@ test('a start outside the history with no extra comparison file, or an unknown h
 });
 
 test('hidden comparison files count as extra files', () => {
-  const changes = snapshot([file(TEST, 33, 0)], { hidden_files: 2 });
+  const changes = snapshot([file(TEST, 33, 0)], { hidden_files: 4 });
   const card = contributionCard(work(changes, { edits: { files: [edit(TEST, 33)], hidden_files: 0 }, start: history('2026-09-20T10:00:00Z') }), NOW)!;
   assert.equal(card.mode, 'old-copy');
-  assert.equal(card.comparison!.title, '3 files in the full comparison');
+  assert.equal(card.comparison!.title, '5 files in the full comparison');
+  assert.equal(card.comparison!.unedited, '4 files in it have no edit from this turn.');
+});
+
+test('a changed history never turns a listable command file into a count', () => {
+  // The agent edits one file, changes a workflow with a command, and amends: the start commit leaves the history.
+  const changes = snapshot([file('.github/workflows/release.yml', 3, 1), file('README.md', 1, 0)]);
+  const card = contributionCard(work(changes, { edits: { files: [edit('README.md', 1)], hidden_files: 0 }, start: history('2026-11-12T10:00:00Z') }), NOW)!;
+  assert.equal(card.mode, 'normal');
+  assert.deepEqual(card.rows.map(row => [row.path, row.label]), [['README.md', 'Updated'], ['.github/workflows/release.yml', 'Changed by a command']]);
+  assert.equal(card.comparison, null);
+  assert.deepEqual(card.button, { label: 'Review 2 files', counts: { additions: 4, deletions: 1 }, path: null });
+  // Three files with no edit still fit in the rows; the fourth makes the comparison too large to list.
+  const three = snapshot([file('a.yml', 1, 0), file('b.yml', 1, 0), file('c.yml', 1, 0)]);
+  assert.equal(contributionCard(work(three, { edits: { files: [], hidden_files: 0 }, start: history(null) }), NOW)!.mode, 'normal');
+  const four = snapshot([file('a.yml', 1, 0), file('b.yml', 1, 0), file('c.yml', 1, 0), file('d.yml', 1, 0)]);
+  const block = contributionCard(work(four, { edits: { files: [], hidden_files: 0 }, start: history(null) }), NOW)!;
+  assert.equal(block.mode, 'old-copy');
+  assert.equal(block.comparison!.unedited, '4 files in it have no edit from this turn.');
 });
 
 test('more than 3 rows show the remaining text in each mode', () => {
@@ -122,6 +141,7 @@ test('more than 3 rows show the remaining text in each mode', () => {
   assert.deepEqual(old.rows.map(row => row.path), ['a.ts', 'b.ts', 'c.ts']);
   assert.equal(old.remaining, '3 more edited files');
   assert.deepEqual(old.button, { label: 'Review 6 files', counts: { additions: 10, deletions: 5 }, path: 'a.ts' });
+  assert.equal(old.comparison!.unedited, 'At least 9 files in it have no edit from this turn.');
 });
 
 test('old copy with zero edited files has no main button and keeps the full comparison', () => {

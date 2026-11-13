@@ -1574,9 +1574,27 @@ test("a Claude Code turn publishes v4 with its edited file; ignored, outside and
   assert.equal(summary.contribution!.start?.in_history, true);
   assert.match(summary.contribution!.start?.committed_at ?? "", /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.000Z$/);
   assert.doesNotMatch(JSON.stringify(summary), /TOKEN=private|elsewhere|publisher-outside/);
-  const settled = JSON.parse(String(f.db.prepare("SELECT settled_json FROM room_workspace_captures").get()!.settled_json));
-  assert.equal(settled.version, 4, "the settled capture keeps the edits across a restart");
+  assertStagingReadable(f.db);
+  f.restart(); await f.publisher.flush();
+  assert.equal(f.sent.at(-1)!.summary.version, 4, "the edits kept beside the capture survive a restart");
 });
+
+/** What a daemon of the previous release (parser v1–v3, the same table definitions) reads from this database. */
+function assertStagingReadable(db: DatabaseSync) {
+  const stagingParse = (value: unknown) => [1, 2, 3].includes((value as { version?: unknown })?.version as number) ? parseRoomAgentWorkSummary(value) : null;
+  const rows = [
+    ...db.prepare("SELECT settled_json AS json FROM room_workspace_captures WHERE settled_json IS NOT NULL").all(),
+    ...db.prepare("SELECT summary_json AS json FROM room_work_publications WHERE summary_json IS NOT NULL").all(),
+  ].map(row => String(row.json));
+  assert.ok(rows.length >= 2);
+  for (const json of rows) {
+    const value = JSON.parse(json);
+    assert.ok(stagingParse(value), "an earlier daemon's parser accepts every stored summary");
+    assert.equal(JSON.stringify(stagingParse(value)), json, "and reads it back byte for byte");
+    if (value.contribution) assert.deepEqual(Object.keys(value.contribution), ["changes", "summary"]);
+  }
+  assert.equal(db.prepare("SELECT count(*) AS n FROM room_work_edit_evidence").get()!.n, 1, "the edits are in their own table");
+}
 
 test("a Codex turn's relative edit path resolves against the workspace", async t => {
   const { f, ledger, workspace } = await editFixture(t, "codex");
@@ -1623,4 +1641,69 @@ test("a failure in the edit path keeps the v3 card", async t => {
   const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "app.ts"), "original\nnew line\n"), [appEdit(join(workspace, "app.ts"))]);
   assert.equal(summary.version, 3);
   assert.ok(f.diagnostics.includes("edit_evidence_unavailable"));
+});
+
+test("an edit through a link is reported at the link's target inside the workspace, and dropped when the target is outside", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "claude-code");
+  const outside = await mkdtemp(join(tmpdir(), "publisher-outside-"));
+  t.after(() => removeTestDirectory(outside));
+  await writeFile(join(outside, "creds"), "secret context\n");
+  const { symlink } = await import("node:fs/promises");
+  await symlink(join(outside, "creds"), join(workspace, "notes.txt"));
+  await symlink(join(workspace, "app.ts"), join(workspace, "alias.ts"));
+  const summary = await editTurn(f, ledger, 1, async () => {
+    await writeFile(join(outside, "creds"), "secret context\nmore\n");
+    await writeFile(join(workspace, "app.ts"), "original\nnew line\n");
+  }, [
+    { path: join(workspace, "notes.txt"), additions: 1, deletions: 0, patch: "@@ -1,1 +1,2 @@\n secret context\n+more", patch_truncated: false },
+    appEdit(join(workspace, "alias.ts")),
+  ]);
+  assert.deepEqual(summary.contribution!.edits?.files.map(file => [file.path, file.additions]), [["app.ts", 1]]);
+  assert.doesNotMatch(JSON.stringify(summary), /secret context/);
+});
+
+test("a path that differs only in letter case resolves to the file's true case on a case-insensitive volume", async t => {
+  const { f, ledger, workspace, git } = await editFixture(t, "claude-code");
+  await writeFile(join(workspace, "Notes.txt"), "a\n"); git(["add", "."]); git(["commit", "-qm", "notes"]);
+  const { access } = await import("node:fs/promises");
+  const caseInsensitive = await access(join(workspace, "notes.txt")).then(() => true, () => false);
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "Notes.txt"), "a\nb\n"),
+    [{ path: join(workspace, caseInsensitive ? "notes.txt" : "Notes.txt"), additions: 1, deletions: 0, patch: "@@ -1,1 +1,2 @@\n a\n+b", patch_truncated: false }]);
+  assert.deepEqual(summary.contribution!.edits?.files.map(file => file.path), ["Notes.txt"]);
+});
+
+test("a file named like pathspec magic is only itself", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "codex");
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, ":(glob)x"), "x\n"),
+    [{ path: ":(glob)x", additions: 1, deletions: 0, patch: "@@ -0,0 +1,1 @@\n+x", patch_truncated: false }]);
+  assert.equal(summary.version, 4, "the settlement did not fail");
+  assert.deepEqual(summary.contribution!.edits?.files.map(file => file.path), [":(glob)x"]);
+});
+
+test("a server that refuses v4 as invalid gets the same card once as v3, and the receipt is acknowledged", async t => {
+  const { f, ledger, workspace } = await editFixture(t, "claude-code");
+  const { RoomWorkSummaryRejectedError } = await import("../cloud-http.js");
+  const versions: number[] = [];
+  f.options.publish = async (input) => {
+    versions.push(input.summary.version);
+    if (input.summary.version === 4) throw new RoomWorkSummaryRejectedError(400, "Room work publication");
+    f.sent.push(input); return "acknowledged";
+  };
+  const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, "app.ts"), "original\nnew line\n"), [appEdit(join(workspace, "app.ts"))]);
+  assert.equal(summary.version, 3);
+  assert.deepEqual(Object.keys(summary.contribution!), ["changes", "summary"]);
+  assert.equal(JSON.stringify(summary), JSON.stringify(f.row().summary), "byte for byte the stored v3 card");
+  assert.deepEqual(versions.filter(version => version === 4).length, 1, "exactly one downgrade");
+  assert.equal(f.row().revision, f.row().acknowledgedRevision, "acknowledged as a normal v3 publication");
+  assert.ok(f.diagnostics.includes("edit_evidence_refused"));
+  f.publisher.changed("agent"); await f.publisher.flush();
+  f.restart(); f.publisher.changed("agent"); await f.publisher.flush();
+  assert.equal(versions.filter(version => version === 4).length, 1, "no v4 again, also after a restart");
+  // A refused v3 card is retried as before, never downgraded.
+  const rejected: number[] = [];
+  f.options.publish = async (input) => { rejected.push(input.summary.version); throw new RoomWorkSummaryRejectedError(400, "Room work publication"); };
+  const before = f.diagnostics.filter(code => code === "publication_unavailable").length;
+  await editTurn(f, ledger, 2, () => writeFile(join(workspace, "app.ts"), "original\nnew line\nthird\n"), [appEdit(join(workspace, "app.ts"))]).catch(() => null);
+  assert.ok(rejected.length >= 2 && rejected.every((version, index) => index === 0 ? version === 4 : version === 3));
+  assert.ok(f.diagnostics.filter(code => code === "publication_unavailable").length > before);
 });
