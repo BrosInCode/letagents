@@ -6,12 +6,12 @@
     "letagents": "0.12.54"
   },
   "overrides": {
-    "@hono/node-server": "2.1.3",
+    "@hono/node-server": "2.1.6",
     "@esbuild-kit/core-utils": {
       "esbuild": "^0.25.12"
     },
     "fast-uri": "3.1.9",
-    "hono": "4.13.11",
+    "hono": "4.13.16",
     "ip-address": "10.7.4",
     "@modelcontextprotocol/sdk": "1.32.1",
     "proxy-addr": "2.0.8",
