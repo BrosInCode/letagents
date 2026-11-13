@@ -1672,7 +1672,8 @@ test("a path that differs only in letter case resolves to the file's true case o
   assert.deepEqual(summary.contribution!.edits?.files.map(file => file.path), ["Notes.txt"]);
 });
 
-test("a file named like pathspec magic is only itself", async t => {
+// Windows has no file name with a colon, so no such file can exist there.
+test("a file named like pathspec magic is only itself", { skip: process.platform === "win32" }, async t => {
   const { f, ledger, workspace } = await editFixture(t, "codex");
   const summary = await editTurn(f, ledger, 1, () => writeFile(join(workspace, ":(glob)x"), "x\n"),
     [{ path: ":(glob)x", additions: 1, deletions: 0, patch: "@@ -0,0 +1,1 @@\n+x", patch_truncated: false }]);
