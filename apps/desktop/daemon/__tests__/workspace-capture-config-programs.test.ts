@@ -36,7 +36,7 @@ function scratch() {
   };
 }
 
-test('a turn capture never runs the file-system monitor program or a hook of the repository', posix, async () => {
+test('a turn capture never runs the file-system monitor program, a hook file or a configured hook of the repository', posix, async () => {
   const area = scratch();
   try {
     const { repository } = area;
@@ -46,8 +46,11 @@ test('a turn capture never runs the file-system monitor program or a hook of the
     for (const hook of ['post-index-change', 'reference-transaction']) {
       writeFileSync(join(repository, '.git/hooks', hook), `#!/bin/sh\nexec "${area.trap(`hook-${hook}`)}"\n`); chmodSync(join(repository, '.git/hooks', hook), 0o755);
     }
+    // A hook that is configured, not a file (Git 2.54 and later): core.hooksPath does not stop it.
+    git(repository, 'config', 'hook.trap.command', area.trap('configured-hook'));
+    git(repository, 'config', 'hook.trap.event', 'reference-transaction'); git(repository, 'config', '--add', 'hook.trap.event', 'post-index-change');
     attempt(repository, 'status'); attempt(repository, 'update-ref', 'refs/heads/control', base);
-    assert.deepEqual(area.sprung(), ['fsmonitor', 'hook-post-index-change', 'hook-reference-transaction'], 'the traps are live for a plain Git command');
+    assert.deepEqual(area.sprung().filter(name => name !== 'configured-hook'), ['fsmonitor', 'hook-post-index-change', 'hook-reference-transaction'], 'the traps are live for a plain Git command');
 
     const start = await captureWorkspaceTree(repository, 'turn');
     assert.ok(start);
@@ -78,10 +81,13 @@ test('a comparison with the working files never runs a filter program or a submo
     git(repository, 'config', 'filter.clean.clean', area.trap('filter-clean', 'cat'));
     git(repository, 'config', 'filter.clean.required', 'true');
     git(join(repository, 'library'), 'config', 'core.fsmonitor', area.trap('submodule-fsmonitor'));
+    // A filter that only the submodule's own configuration names; the change keeps the file's size.
+    writeFileSync(join(repository, 'library/.gitattributes'), '*.txt filter=inner\n');
+    git(join(repository, 'library'), 'config', 'filter.inner.clean', area.trap('submodule-filter', 'cat'));
     writeFileSync(join(repository, 'data.bin'), 'one\ntwo\n'); writeFileSync(join(repository, 'notes.md'), 'one\ntwo\n');
-    writeFileSync(join(repository, 'library/lib.txt'), 'changed\n');
+    writeFileSync(join(repository, 'library/lib.txt'), 'bil\n');
     for (const path of ['data.bin', 'notes.md', 'library']) attempt(repository, 'diff', 'HEAD', '--', path);
-    assert.deepEqual(area.sprung(), ['filter-clean', 'filter-process', 'submodule-fsmonitor'], 'the traps are live for a plain Git command');
+    assert.deepEqual(area.sprung(), ['filter-clean', 'filter-process', 'submodule-filter', 'submodule-fsmonitor'], 'the traps are live for a plain Git command');
 
     const snapshot = await captureWorkspaceChanges(repository, base);
     assert.equal(snapshot.state, 'ready');
@@ -90,8 +96,12 @@ test('a comparison with the working files never runs a filter program or a submo
     assert.deepEqual(area.sprung(), []);
 
     // `-c` ends a key at the first "=": a driver with one in its name cannot be switched off.
+    writeFileSync(join(repository, '.gitattributes'), '*.md filter=a=b\n');
     git(repository, 'config', 'filter.a=b.clean', area.trap('filter-unnameable', 'cat'));
+    attempt(repository, 'diff', 'HEAD', '--', 'notes.md');
+    assert.deepEqual(area.sprung(), ['filter-unnameable'], 'the trap is live for a plain Git command');
     assert.equal((await captureWorkspaceChanges(repository, base)).state, 'unavailable');
+    assert.equal(await captureWorkspaceTree(repository, 'unnameable'), null);
     assert.deepEqual(area.sprung(), []);
   } finally { area.remove(); }
 });
@@ -133,6 +143,56 @@ test('the options of a capture command keep Git from giving a commit to the sign
     assert.deepEqual(area.sprung(), ['gpg'], 'the trap is live for a plain Git command');
     const shown = execFileSync('git', [...CAPTURE_GIT_OPTIONS, 'show', '-s', '--format=%cI', signed], { cwd: repository, encoding: 'utf8', env: captureGitEnvironment() });
     assert.match(shown, /^\d{4}-\d\d-\d\dT/);
+    assert.deepEqual(area.sprung(), []);
+  } finally { area.remove(); }
+});
+
+test('a turn capture never runs a filter that only the committed attributes name', posix, async () => {
+  const area = scratch();
+  try {
+    const { repository, root } = area;
+    writeFileSync(join(repository, '.gitattributes'), '*.txt filter=committed\n'); writeFileSync(join(repository, 'notes.txt'), 'one\n');
+    git(repository, 'add', '.'); git(repository, 'commit', '-qm', 'base');
+    // The user's index and the working files no longer have the attributes; HEAD still has
+    // them, and the capture's private index starts from HEAD.
+    git(repository, 'rm', '-q', '--cached', '.gitattributes'); rmSync(join(repository, '.gitattributes'));
+    git(repository, 'config', 'core.autocrlf', 'true'); git(repository, 'config', 'filter.committed.clean', area.trap('filter-committed', 'cat'));
+    writeFileSync(join(repository, 'notes.txt'), 'one\ntwo\n');
+    const index = { ...quiet, GIT_INDEX_FILE: join(root, 'control-index') };
+    execFileSync('git', ['read-tree', 'HEAD'], { cwd: repository, env: index });
+    execFileSync('git', ['update-index', '--add', 'notes.txt'], { cwd: repository, env: index, stdio: 'ignore' });
+    assert.deepEqual(area.sprung(), ['filter-committed'], 'the trap is live for a plain Git command');
+
+    const tree = await captureWorkspaceTree(repository, 'committed');
+    await releaseWorkspaceTree(repository, 'committed');
+    assert.ok(tree);
+    assert.deepEqual(area.sprung(), []);
+  } finally { area.remove(); }
+});
+
+test('a comparison of two trees never starts a comparison inside a submodule', posix, async () => {
+  const area = scratch();
+  try {
+    const { repository, root } = area;
+    const library = join(root, 'library'); mkdirSync(library);
+    git(library, 'init', '-q', '-b', 'main'); git(library, 'config', 'user.name', 'Test'); git(library, 'config', 'user.email', 'test@example.com');
+    writeFileSync(join(library, 'lib.txt'), 'lib\n'); git(library, 'add', '.'); git(library, 'commit', '-qm', 'library');
+    git(repository, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', library, 'library');
+    git(repository, 'commit', '-qm', 'base');
+    const base = git(repository, 'rev-parse', 'HEAD');
+    // The turn takes the submodule out of the project and leaves its folder, ignored, in place.
+    git(repository, 'rm', '-q', '--cached', 'library'); writeFileSync(join(repository, '.git/info/exclude'), 'library/\n');
+    git(repository, 'commit', '-qam', 'no library');
+    git(repository, 'config', 'diff.submodule', 'diff');
+    git(join(repository, 'library'), 'config', 'diff.external', area.trap('submodule-external-diff'));
+    attempt(repository, 'diff', base, 'HEAD');
+    assert.deepEqual(area.sprung(), ['submodule-external-diff'], 'the trap is live for a plain Git command');
+
+    // The comparison since the workspace started; a tree that holds a submodule gives a turn no start tree.
+    const pair = await captureWorkspacePair(repository, base, null, 'inner');
+    await releaseWorkspaceTree(repository, 'inner');
+    assert.equal(pair.workspace.state, 'ready');
+    assert.ok(pair.workspace.files.some(file => file.path === 'library' && file.status === 'deleted'));
     assert.deepEqual(area.sprung(), []);
   } finally { area.remove(); }
 });

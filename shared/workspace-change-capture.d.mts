@@ -7,3 +7,5 @@ export const CAPTURE_GIT_OPTIONS: readonly string[];
 /** The environment of every Git command of a capture: no caller GIT_*, no prompt, no replace refs, no lazy fetch. */
 export function captureGitEnvironment(extra?: Record<string, string>): NodeJS.ProcessEnv;
 export function captureWorkspaceChanges(workspace: string, startingRevision: string | null, settledTree?: string | null, fullReview?: boolean, deadline?: AbortSignal): Promise<WorkspaceChangeSummary>;
+/** `-c` options that switch off each configured filter program and configured hook; throws when one cannot be switched off. */
+export function captureProgramGuards(config: (args: string[]) => Promise<string>): Promise<string[]>;

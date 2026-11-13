@@ -59,19 +59,31 @@ async function run(cwd, args, limit = 4 * 1024 * 1024, signal) {
     return result.stdout;
 }
 /**
- * A comparison with the working files (no settled tree) has Git clean every changed
- * file, and a `filter.<driver>` setting names the program that does it. The options
- * here give each configured driver no program, so the working bytes are compared as
- * they are; a turn's own trees are made the same way (captureWorkspaceTree). `-c` ends
- * a key at the first "=", so a driver with one in its name cannot be switched off and
- * the comparison is refused.
+ * Options that switch off the programs that the repository's configuration names one by
+ * one, where no single option exists:
+ *  - `filter.<driver>.clean` and `.process`: the program Git runs to store a working file
+ *    (`update-index --add`, a comparison with the working files). With no program the
+ *    working bytes are taken as they are.
+ *  - `hook.<name>.command` with `hook.<name>.event` (Git 2.54 and later): a hook that is
+ *    configured, not a file, so core.hooksPath does not stop it. An older Git ignores
+ *    the option.
+ * `config` runs one `git config` in the repository and rejects as execFile does. Only
+ * "no such key" (exit code 1) means that there is nothing to switch off; any other
+ * failure is thrown, and so is a name that `-c` cannot carry (`-c` ends a key at the
+ * first "="). The caller then has no capture, never an unguarded one. Give the result
+ * to every command that writes an index or a ref, or that reads the working files.
  */
-async function withoutFilterPrograms(git, workspace) {
-    const keys = (await git(workspace, ['config', '-z', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|process|required)$']).catch(() => '')).split('\0').filter(Boolean);
-    const drivers = [...new Set(keys.map(key => key.slice('filter.'.length, key.lastIndexOf('.'))))];
-    if (drivers.some(driver => /[=\n]/.test(driver)))
-        throw new Error('A filter driver cannot be switched off.');
-    return drivers.flatMap(driver => ['-c', `filter.${driver}.clean=`, '-c', `filter.${driver}.process=`, '-c', `filter.${driver}.required=false`]);
+export async function captureProgramGuards(config) {
+    const listed = await config(['config', '-z', '--name-only', '--get-regexp', '^(filter\\..*\\.(clean|process|required)|hook\\..*\\.(command|event|enabled))$'])
+        .catch(error => { if (error?.code === 1) return ''; throw error; });
+    const keys = listed.split('\0').filter(Boolean);
+    const names = (kind) => [...new Set(keys.filter(key => key.startsWith(`${kind}.`)).map(key => key.slice(kind.length + 1, key.lastIndexOf('.'))))];
+    const filters = names('filter');
+    const hooks = names('hook');
+    if ([...filters, ...hooks].some(name => /[=\n]/.test(name)))
+        throw new Error('A configured program cannot be switched off.');
+    return [...filters.flatMap(driver => ['-c', `filter.${driver}.clean=`, '-c', `filter.${driver}.process=`, '-c', `filter.${driver}.required=false`]),
+        ...hooks.flatMap(name => ['-c', `hook.${name}.enabled=false`])];
 }
 /** Reads the actual provider workspace; never stages, commits, or changes its index.
  * `deadline` ends every Git command of this comparison at once; without it each has GIT_TIMEOUT_MS. */
@@ -99,8 +111,13 @@ export async function captureWorkspaceChanges(workspace, startingRevision, settl
         const base = await git(workspace, ['rev-parse', '--verify', `${startingRevision ?? 'HEAD'}^{tree}`])
             .then(value => value.trim(), error => { if (startingRevision)
             throw error; return null; });
-        const diffArgs = ['--no-ext-diff', '--no-textconv', '--no-color', '-M'];
-        const diff = [...(settledTree || !base ? [] : await withoutFilterPrograms(git, workspace)), 'diff', ...diffArgs];
+        // A submodule is compared by its commit alone. With diff.submodule=diff Git would start
+        // a `git diff` inside it, which takes the submodule's own external diff and textconv
+        // programs; for its working files Git would run its clean filters.
+        const diffArgs = ['--no-ext-diff', '--no-textconv', '--no-color', '-M', '--submodule=short', '--ignore-submodules=dirty'];
+        // A comparison with the working files (no settled tree) has Git clean every changed file.
+        const guards = settledTree || !base ? [] : await captureProgramGuards(args => git(workspace, args));
+        const diff = [...guards, 'diff', ...diffArgs];
         const [names, stats, untracked] = await Promise.all([
             base ? git(workspace, [...diff, '--name-status', '-z', base, ...(settledTree ? [settledTree] : []), '--']) : Promise.resolve(''),
             base ? git(workspace, [...diff, '--numstat', '-z', base, ...(settledTree ? [settledTree] : []), '--']) : Promise.resolve(''),
