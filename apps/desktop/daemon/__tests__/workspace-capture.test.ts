@@ -17,32 +17,56 @@ async function fixture(t: TestContext) {
   return { path, git, capture, head: git("rev-parse", "HEAD") };
 }
 
-test("worker pins settled bytes before a delayed remote answer; queued captures are bounded", async t => {
-  const f = await fixture(t);
-  const baseline = await f.capture.begin(f.path, "turn");
-  assert.ok(baseline);
-  await writeFile(join(f.path, "file"), "settled\n");
-  let answer!: (tips: null) => void;
-  const tips = new Promise<null>(resolve => { answer = resolve; });
-  const settled = f.capture.settle(f.path, f.head, baseline, "turn", f.head, tips);
+const pinned = async (f: Awaited<ReturnType<typeof fixture>>) => {
   // Its settled retention ref proves the bytes were captured, even while the
-  // original remote request remains outstanding. Later edits are excluded.
+  // original remote request remains outstanding.
   for (let count = 0; ; count++) {
     if (f.git("for-each-ref", "--format=%(refname)", "refs/letagents/workspace-review").split("\n").length === 2) break;
     assert.ok(count < 200, "settled snapshot should not wait for remote tips");
     await new Promise(resolve => setTimeout(resolve, 10));
   }
+};
+
+test("settled bytes are pinned before a delayed remote answer, and the wait holds no other capture", async t => {
+  const f = await fixture(t);
+  const other = await fixture(t);
+  const baseline = await f.capture.begin(f.path, "turn");
+  assert.ok(baseline);
+  // The turn moves HEAD: only such a turn needs what the remote held.
+  await writeFile(join(f.path, "file"), "settled\n"); f.git("commit", "-qam", "the turn's commit");
+  let answer!: (tips: null) => void;
+  const tips = new Promise<null>(resolve => { answer = resolve; });
+  let finished = false;
+  const settled = f.capture.settle(f.path, f.head, baseline, "turn", f.head, tips).then(pair => { finished = true; return pair; });
+  await pinned(f);
+  // Later edits are excluded.
   await writeFile(join(f.path, "file"), "later unrelated edit\n");
-  const queued = Array.from({ length: 7 }, (_, i) => f.capture.begin(f.path, `queued-${i}`));
-  await assert.rejects(f.capture.begin(f.path, "overflow"), /unavailable/);
+  // The queue is one for all agents. Another agent's turn does not start before its starting
+  // capture, so that capture must not wait for this turn's remote: here the remote never answers.
+  assert.ok(await f.capture.begin(other.path, "another agent's turn"), "a starting capture runs while a settled turn waits for the remote");
+  const queued = Array.from({ length: 8 }, (_, i) => f.capture.begin(f.path, `queued-${i}`));
+  await assert.rejects(f.capture.begin(f.path, "overflow"), /unavailable/, "queued captures are bounded");
+  assert.ok((await Promise.all(queued)).every(Boolean));
+  assert.equal(finished, false, "the settled turn still waits for its answer");
   answer(null);
   const pair = await settled;
   assert.equal(pair.contribution.changes.state, "ready");
   assert.match(pair.review.contribution.patch, /\+settled/);
   assert.doesNotMatch(pair.review.contribution.patch, /later unrelated/);
-  assert.ok((await Promise.all(queued)).every(Boolean));
   await releaseWorkspaceTree(f.path, "turn");
-  for (let i = 0; i < 7; i++) await releaseWorkspaceTree(f.path, `queued-${i}`);
+  await releaseWorkspaceTree(other.path, "another agent's turn");
+  for (let i = 0; i < 8; i++) await releaseWorkspaceTree(f.path, `queued-${i}`);
+  assert.equal(f.git("for-each-ref", "--format=%(refname)", "refs/letagents/workspace-review"), "");
+});
+
+test("a turn that did not move HEAD is settled without the remote answer", async t => {
+  const f = await fixture(t);
+  const baseline = await f.capture.begin(f.path, "turn");
+  await writeFile(join(f.path, "file"), "edited\n");
+  // The answer never comes.
+  const pair = await f.capture.settle(f.path, f.head, baseline, "turn", f.head, new Promise<null>(() => {}));
+  assert.match(pair.review.contribution.patch, /\+edited/);
+  await releaseWorkspaceTree(f.path, "turn");
   assert.equal(f.git("for-each-ref", "--format=%(refname)", "refs/letagents/workspace-review"), "");
 });
 
@@ -60,26 +84,26 @@ test("unavailable workspace is never reported as no change and does not poison t
 
 test("queue expiry and close never abandon active Git cleanup or start a queued capture", async t => {
   const f = await fixture(t);
-  const baseline = await f.capture.begin(f.path, "active");
+  const baseline = await f.capture.begin(f.path, "waiting");
+  await writeFile(join(f.path, "file"), "settled\n"); f.git("commit", "-qam", "the turn's commit");
   let answer!: (tips: null) => void;
   const tips = new Promise<null>(resolve => { answer = resolve; });
-  let finished = false;
-  const active = f.capture.settle(f.path, f.head, baseline, "active", f.head, tips).then(pair => { finished = true; return pair; });
-  for (let count = 0; ; count++) {
-    if (f.git("for-each-ref", "--format=%(refname)", "refs/letagents/workspace-review").split("\n").length === 2) break;
-    assert.ok(count < 200);
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
+  const waiting = f.capture.settle(f.path, f.head, baseline, "waiting", f.head, tips);
+  await pinned(f);
+  // A capture that runs holds the queue. One behind it expires, and never starts.
+  const active = f.capture.begin(f.path, "active");
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const expired = assert.rejects(f.capture.begin(f.path, "expired"), /queue is busy/);
   t.mock.timers.tick(30_001);
   await expired;
-  assert.equal(finished, false, "queue timeout cannot settle a started capture");
+  t.mock.timers.reset();
+  assert.ok(await active, "queue timeout cannot settle a started capture");
+  await releaseWorkspaceTree(f.path, "active");
+  // Closed while a settled turn waits for its remote: the comparison never starts, and its pinned files are released.
   const closed = assert.rejects(f.capture.begin(f.path, "closed"), /closed or expired/);
   f.capture.close();
-  t.mock.timers.reset();
   answer(null);
-  assert.equal((await active).workspace.state, "ready");
+  await assert.rejects(waiting, /unavailable/);
   await closed;
   assert.equal(f.git("for-each-ref", "--format=%(refname)", "refs/letagents/workspace-review"), "",
     "active refs are cleaned and neither queued job ever captures a tree");

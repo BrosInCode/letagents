@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { RecordedRemoteAnswers, REMOTE_ANSWERS_KEPT, REMOTE_ANSWER_USE_MS, REMOTE_FAILURE_PAUSE_MS } from '../recorded-remote-answers.js';
+import { spawnSync } from 'node:child_process';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { RecordedRemoteAnswers, REMOTE_ANSWERS_KEPT, REMOTE_ANSWER_USE_MS, REMOTE_FAILURE_PAUSE_MS, askRecordedRemote, setRemoteUnansweredReporter, type RemoteUnansweredSample } from '../recorded-remote-answers.js';
 
 // A remote that is asked on purpose: each question waits until the test answers it.
 function remotes() {
@@ -172,4 +176,81 @@ test('only a bounded number of remotes is remembered, and forgetting one means a
   f.answers.clear();
   void f.answers.forTurn('origin-5');
   assert.equal(f.questions('origin-5'), 2, 'a cleared store remembers nothing');
+});
+
+test('a question without an answer is reported once, with its reason and the time it took; an answer is not', async t => {
+  const samples: RemoteUnansweredSample[] = [];
+  t.after(() => setRemoteUnansweredReporter(null));
+  setRemoteUnansweredReporter(sample => { samples.push(sample); });
+  let now = 0;
+  const warned: string[] = [];
+  const options = { clock: () => now, warn: (reason: string) => { warned.push(reason); } };
+
+  assert.deepEqual(await askRecordedRemote('origin-a', async () => { now += 7_900; return ['tip']; }, options), ['tip']);
+  assert.deepEqual([samples, warned], [[], []], 'a slow answer is an answer');
+
+  // The remote stays silent up to the limit.
+  assert.equal(await askRecordedRemote('origin-a', async (remote, onNoAnswer) => {
+    assert.equal(remote, 'origin-a');
+    now += 20_004; onNoAnswer('the remotes did not answer within 20 seconds');
+    return null;
+  }, options), null);
+  assert.deepEqual(samples, [{ reason: 'the remotes did not answer within 20 seconds', elapsed_ms: 20_004, pause_ms: REMOTE_FAILURE_PAUSE_MS }]);
+  assert.deepEqual(warned, ['the remotes did not answer within 20 seconds']);
+
+  // A question that breaks, and one that gives no reason, are events too. Only a given reason is a warning.
+  assert.equal(await askRecordedRemote('origin-a', async () => { now += 12; throw new Error('the question broke\nwith a second line'); }, options), null);
+  assert.equal(await askRecordedRemote('origin-a', async () => null, options), null);
+  assert.deepEqual(samples.slice(1), [{ reason: 'the question broke', elapsed_ms: 12, pause_ms: REMOTE_FAILURE_PAUSE_MS },
+    { reason: 'the question gave no reason', elapsed_ms: 0, pause_ms: REMOTE_FAILURE_PAUSE_MS }]);
+  assert.deepEqual(warned.slice(1), ['the question broke']);
+
+  // Neither a reporter nor a warning that fails changes the answer, and without a reporter nothing is kept.
+  setRemoteUnansweredReporter(() => { throw new Error('the log is gone'); });
+  assert.equal(await askRecordedRemote('origin-a', async (_remote, onNoAnswer) => { onNoAnswer('no remote was recorded'); return null; },
+    { warn: () => { throw new Error('stderr is gone'); } }), null);
+  setRemoteUnansweredReporter(null);
+  assert.equal(await askRecordedRemote('origin-a', async () => null), null);
+  assert.equal(samples.length, 3);
+});
+
+test('a remote that fails is reported for the question only: the turns of the pause add nothing', async t => {
+  const samples: RemoteUnansweredSample[] = [];
+  t.after(() => setRemoteUnansweredReporter(null));
+  setRemoteUnansweredReporter(sample => { samples.push(sample); });
+  let now = 1_000_000;
+  const answers = new RecordedRemoteAnswers((remote) => askRecordedRemote(remote, async (_address, onNoAnswer) => { onNoAnswer('Git could not ask the remote.'); return null; }), () => now);
+  assert.equal(await answers.forTurn('origin-a'), null);
+  now += 4 * minute;
+  assert.equal(await answers.forTurn('origin-a'), null);
+  assert.equal(samples.length, 1, 'the paused turn did not ask');
+  now += minute;
+  assert.equal(await answers.forTurn('origin-a'), null);
+  assert.deepEqual(samples.map(sample => sample.reason), ['Git could not ask the remote.', 'Git could not ask the remote.']);
+});
+
+test('the daemon entrypoint writes the event to the lifecycle log, with stdio discarded', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'remote-unanswered-process-'));
+  try {
+    const path = join(directory, 'daemon-lifecycle.jsonl');
+    const script = `
+      import { startDaemonLifecycleDiagnostics } from ${JSON.stringify(new URL('../lifecycle-log.ts', import.meta.url).href)};
+      import { askRecordedRemote } from ${JSON.stringify(new URL('../recorded-remote-answers.ts', import.meta.url).href)};
+      startDaemonLifecycleDiagnostics(${JSON.stringify(path)});
+      let now = 0;
+      await askRecordedRemote('https://owner:secret-password@git.example.invalid/team/project', async (remote, onNoAnswer) => {
+        now = 8200; onNoAnswer('Command failed: git ls-remote --get-url -- ' + remote); return null;
+      }, { clock: () => now, warn: () => { throw new Error('stderr unavailable'); } });
+    `;
+    const child = spawnSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], { stdio: 'ignore', timeout: 30_000 });
+    assert.ifError(child.error);
+    assert.equal(child.status, 0);
+    const text = await readFile(path, 'utf8');
+    const events = text.trim().split('\n').map(line => JSON.parse(line));
+    assert.deepEqual(events.map(event => event.event), ['daemon_starting', 'workspace_remote_unanswered', 'process_exit']);
+    const detail = JSON.parse(events[1].detail);
+    assert.deepEqual([detail.elapsed_ms, detail.pause_ms], [8200, REMOTE_FAILURE_PAUSE_MS]);
+    assert.match(detail.reason, /^Command failed: git ls-remote --get-url -- /);
+    assert.doesNotMatch(text, /secret-password/, 'a credential in the remote\'s address does not reach the log');
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

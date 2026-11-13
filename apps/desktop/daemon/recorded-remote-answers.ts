@@ -1,3 +1,5 @@
+import { performance } from "node:perf_hooks";
+
 /**
  * What each recorded remote held, as last answered, for every agent and turn of
  * this daemon. A turn asks the remote when it begins, so that it knows a base
@@ -14,6 +16,46 @@ export const REMOTE_ANSWER_USE_MS = 60_000;
 export const REMOTE_FAILURE_PAUSE_MS = 5 * 60_000;
 /** Remotes remembered. The one that was used longest ago is forgotten first. */
 export const REMOTE_ANSWERS_KEPT = 32;
+
+/** One question that got no answer. It carries no room content. The reason can name the remote; the log takes credentials out of it. */
+export type RemoteUnansweredSample = {
+  /** Why there is no answer, as the question gave it. */
+  reason: string;
+  /** From the question to its end. */
+  elapsed_ms: number;
+  /** The turns that begin in this time do not ask: they are compared plainly, with no event of their own. */
+  pause_ms: number;
+};
+
+let reportUnanswered: ((sample: RemoteUnansweredSample) => void) | null = null;
+
+/** The packaged daemon has no stderr; its entrypoint supplies the local log. */
+export function setRemoteUnansweredReporter(report: ((sample: RemoteUnansweredSample) => void) | null): void {
+  reportUnanswered = report;
+}
+
+/**
+ * One question to a recorded remote. `ask` gives the answer, or null and the reason through
+ * its second argument. A question without an answer is reported once, with its reason and how
+ * long it took: the turns that depend on it are compared plainly, and a card that counts a
+ * whole base update needs a record of why. `warn` gets the reason too, when one was given.
+ * Nothing here can fail the question or change its answer.
+ */
+export async function askRecordedRemote(remote: string, ask: (remote: string, onNoAnswer: (reason: string) => void) => Promise<string[] | null>,
+  options: { clock?: () => number; warn?: (reason: string) => void } = {}): Promise<string[] | null> {
+  const clock = options.clock ?? (() => performance.now());
+  const started = clock();
+  let reason = "";
+  let tips: string[] | null = null;
+  try { tips = await ask(remote, (given) => { reason = given; }); }
+  catch (error) { reason = (error instanceof Error ? error.message : String(error)).split("\n")[0]; }
+  if (tips) return tips;
+  try { if (reason) options.warn?.(reason); } catch { /* optional diagnostics */ }
+  try {
+    reportUnanswered?.({ reason: reason || "the question gave no reason", elapsed_ms: Math.max(0, Math.round(clock() - started)), pause_ms: REMOTE_FAILURE_PAUSE_MS });
+  } catch { /* optional diagnostics */ }
+  return null;
+}
 
 type Remote = {
   answer: { tips: string[]; at: number } | null;

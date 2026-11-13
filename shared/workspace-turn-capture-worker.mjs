@@ -1,15 +1,13 @@
 import { parentPort, workerData } from 'node:worker_threads';
-import { captureWorkspaceTree, captureWorkspacePair } from './workspace-turn-capture.mjs';
+import { captureWorkspaceTree, captureSettledWorkspace, compareSettledTurn } from './workspace-turn-capture.mjs';
 
 // Only filesystem/Git observation leaves the daemon. Authority and persistence
 // remain with the caller, which waits for this immutable boundary before ACK.
+// No operation waits for a remote: the caller holds its capture queue while one
+// runs. `settle` pins the settled files; `compare` gets the remotes' answer.
+const operations = { begin: captureWorkspaceTree, settle: captureSettledWorkspace, compare: compareSettledTurn };
 try {
-  const remoteTips = workerData.operation === 'settle'
-    ? new Promise(resolve => parentPort.once('message', resolve)) : null;
-  const result = workerData.operation === 'begin'
-    ? await captureWorkspaceTree(...workerData.args)
-    : await captureWorkspacePair(...workerData.args, remoteTips);
-  parentPort.postMessage({ result });
+  parentPort.postMessage({ result: await operations[workerData.operation](...workerData.args) });
 } catch {
   parentPort.postMessage({ error: 'Workspace observation failed.' });
 }

@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { open, readlink, lstat } from 'node:fs/promises';
+import { devNull } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { gitSpawnFile } from './git-executable.mjs';
@@ -22,12 +23,36 @@ export const WORKSPACE_CAPTURE_TIMEOUT_MS = 40_000;
  * room to encode the review. The daemon waits for the same work before it ACKs a turn.
  */
 export const WORKSPACE_SETTLE_TIMEOUT_MS = 100_000;
-// Replace refs are off: with them the workspace could put another tree in the place of the
-// one a comparison starts from, and the comparison would show nothing.
+/**
+ * What every Git command of a capture runs with. A capture reads commits and trees from a
+ * repository that the agent can write, and the card is only as true as those reads. So
+ * nothing that is written next to the objects may change which commits are related or which
+ * object an id names:
+ *  - Replace refs are off (GIT_NO_REPLACE_OBJECTS). With them the workspace could put another
+ *    tree in the place of the one a comparison starts from, or other parents under a commit.
+ *  - The grafts file is the null device (GIT_GRAFT_FILE; os.devNull is NUL on Windows). A line
+ *    in `info/grafts` gives a commit any parents, so an agent's commit could become an
+ *    "ancestor" of a commit that a remote holds.
+ *  - The commit-graph file is not read (core.commitGraph=false, on the command line, which
+ *    the repository's own configuration cannot override). It is a cache of every commit's
+ *    parents, and Git answers `merge-base` from it without a look at the commits.
+ *  - A missing object is not fetched (GIT_NO_LAZY_FETCH). In a partial clone Git would start a
+ *    `git fetch` for it, with the remote and the programs that the workspace configures.
+ * No GIT_* variable of this process reaches Git, so an alternate object directory, another
+ * index or another configuration file cannot come from there.
+ *
+ * Not closed here: an object store that holds other content under an object id (a crafted
+ * pack). Every comparison reads trees by id from the store, the plain one too. Git refuses a
+ * loose object whose content does not hash to its id.
+ */
+export const CAPTURE_GIT_OPTIONS = ['-c', 'core.commitGraph=false', '--no-optional-locks'];
+export function captureGitEnvironment(extra = {}) {
+    return { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+        GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_GRAFT_FILE: devNull, GIT_NO_LAZY_FETCH: '1', ...extra };
+}
 async function run(cwd, args, limit = 4 * 1024 * 1024, signal) {
-    const result = await execute(gitSpawnFile(), ['--no-optional-locks', ...args], {
-        cwd, encoding: 'utf8', timeout: GIT_TIMEOUT_MS, maxBuffer: limit, signal,
-        env: { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' },
+    const result = await execute(gitSpawnFile(), [...CAPTURE_GIT_OPTIONS, ...args], {
+        cwd, encoding: 'utf8', timeout: GIT_TIMEOUT_MS, maxBuffer: limit, signal, env: captureGitEnvironment(),
     });
     return result.stdout;
 }

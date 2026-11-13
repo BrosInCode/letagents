@@ -12,6 +12,7 @@ import { ExecutionShadowStore } from "../execution-shadow-store.js";
 import { parseExecutionFact } from "../execution-protocol.js";
 import { RoomWorkPublicationStore } from "../room-work-publication-store.js";
 import { RoomWorkPublisher } from "../room-work-publisher.js";
+import { setRemoteUnansweredReporter, type RemoteUnansweredSample } from "../recorded-remote-answers.js";
 import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult } from "../cloud-http.js";
 import { captureRecordedRemoteTips } from "../../../../shared/workspace-turn-capture.mjs";
 import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHostGrant } from "../worker-runtime-custody.js";
@@ -1115,6 +1116,9 @@ test('a remote that failed is not asked again for five minutes, and a restarted 
   f.options.now = () => clock;
   const asked: string[] = [];
   f.options.askRemote = (address) => { asked.push(address); return captureRecordedRemoteTips(address); };
+  const unanswered: RemoteUnansweredSample[] = [];
+  setRemoteUnansweredReporter(sample => { unanswered.push(sample); });
+  t.after(() => setRemoteUnansweredReporter(null));
   const workspace = clone('agent');
   git(workspace, 'reset', '-q', '--hard', revision);
   // The daemon's record names a remote that does not answer. The workspace's own `origin` works.
@@ -1130,12 +1134,16 @@ test('a remote that failed is not asked again for five minutes, and a restarted 
   };
   assert.deepEqual(await turn(1, 'theirs-1.ts'), ['theirs-1.ts'], 'no answer: the plain card');
   assert.equal(asked.length, 1);
+  assert.equal(unanswered.length, 1, 'the question without an answer is reported for the lifecycle log');
+  assert.ok(unanswered[0].elapsed_ms >= 0 && unanswered[0].pause_ms === 5 * 60_000 && unanswered[0].reason.length > 0);
   clock += 4 * 60_000;
   assert.deepEqual(await turn(2, 'theirs-2.ts'), ['theirs-2.ts']);
   assert.equal(asked.length, 1, 'the remote is left alone');
+  assert.equal(unanswered.length, 1, 'a turn that does not ask reports nothing');
   clock += 60_000;
   assert.deepEqual(await turn(3, 'theirs-3.ts'), ['theirs-3.ts']);
   assert.equal(asked.length, 2, 'asked again after five minutes');
+  assert.equal(unanswered.length, 2);
   f.restart();
   assert.deepEqual(await turn(4, 'theirs-4.ts'), ['theirs-4.ts']);
   assert.equal(asked.length, 3, 'a new daemon has neither the answers nor the pause of the old one');
@@ -1195,7 +1203,7 @@ test('a remote that does not answer delays neither the start of a turn nor its c
   f.captureMessage(); f.fact(1, { state: 'terminal', turnOutcome: 'completed' });
   await f.publisher.captureWorkspace(f.agent, 'msg_1', 'inbox-1', null, baseline);
   assert.equal(sockets.length, 1, 'the recorded remote was asked');
-  assert.ok(Date.now() - started < 8_000, 'the capture waits for the remote for five seconds at most');
+  assert.ok(Date.now() - started < 8_000, 'a turn that did not move HEAD has taken in no base: its capture does not wait for the remote');
   await f.publisher.flush();
   assert.match(f.row().summary!.contribution!.changes.patch, /-original\n\+new work/);
 });
