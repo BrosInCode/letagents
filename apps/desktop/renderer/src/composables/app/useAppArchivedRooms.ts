@@ -2,7 +2,7 @@ import { watch } from "vue";
 import type { DesktopAppAgentRunInput, DesktopAppAgentRunResult, DesktopRoomSnapshotOptions } from "../../../../electron/ipc-types";
 import { settingsEntry } from "../../domain/desktop-navigation";
 import { safeUserVisibleErrorDetail } from "../../domain/user-visible-error";
-import { normalizeRoomIdentifier, rememberRecentRootRooms } from "../../domain/sidebar-rooms";
+import { findSidebarRoomEntryByIdentifier, normalizeRoomIdentifier, rememberRecentRootRooms } from "../../domain/sidebar-rooms";
 import { appAgentArchivedRoomIdentifiers } from "../../domain/app-agent";
 import type { AttentionNavigationIntent } from "../../components/desktop/content/room-shell/types";
 import { desktopIpc } from "../../ipc/index.js";
@@ -148,14 +148,34 @@ export function useAppArchivedRooms(context: unknown) {
     rememberRecentRootRooms(recentRootRoomsStorageKey, nextRecentRooms);
   }
 
+  /**
+   * A focus room the sidebar lists under its parent opens in place, as a click
+   * on its row does. Opened as a room of its own, it would get a second,
+   * top-level row beside the one under its parent.
+   */
+  async function openListedFocusRoom(normalizedIdentifier: string): Promise<boolean> {
+    if (!rootRoomSnapshot.value) return false;
+    const listed = findSidebarRoomEntryByIdentifier(app.projectEntries.value, normalizedIdentifier);
+    if (listed?.kind !== "focus") return false;
+    app.selectSidebarEntry(listed);
+    await app.refreshSelectedSnapshot(rootRoomSnapshot.value);
+    return true;
+  }
+
   async function openRoomFromAppAgent(roomIdentifier: string, options?: DesktopRoomSnapshotOptions): Promise<void> {
     const normalizedIdentifier = normalizeRoomIdentifier(roomIdentifier);
     if (!normalizedIdentifier) return;
+    if (await openListedFocusRoom(normalizedIdentifier)) return;
     const knownRoom = [...accountRooms.value, ...settingsAccountRooms.value]
       .find((room) => normalizeRoomIdentifier(room.roomIdentifier) === normalizedIdentifier);
     loading.value = true;
     try {
       const snapshot = await desktopIpc.room.getSnapshot(normalizedIdentifier, options);
+      if (snapshot.room?.kind === "focus" && snapshot.room.parentRoomId) {
+        // A focus room made a moment ago: the sidebar may not list it yet. Read the list once.
+        await app.refreshAccountRooms().catch(() => undefined);
+        if (await openListedFocusRoom(normalizedIdentifier)) return;
+      }
       app.openRoomSnapshot(snapshot, {
         kind: "room",
         rootPath: null,
