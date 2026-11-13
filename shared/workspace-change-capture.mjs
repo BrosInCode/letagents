@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { constants } from 'node:fs';
 import { open, readlink, lstat } from 'node:fs/promises';
+import { devNull } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { gitSpawnFile } from './git-executable.mjs';
@@ -22,14 +23,55 @@ export const WORKSPACE_CAPTURE_TIMEOUT_MS = 40_000;
  * room to encode the review. The daemon waits for the same work before it ACKs a turn.
  */
 export const WORKSPACE_SETTLE_TIMEOUT_MS = 100_000;
-// Replace refs are off: with them the workspace could put another tree in the place of the
-// one a comparison starts from, and the comparison would show nothing.
+/**
+ * What every Git command of a capture starts with. A capture runs as the owner, outside
+ * the sandbox of the work it observes, in a repository whose configuration that work can
+ * write. So a setting that names a program must not decide what runs here:
+ *  - core.hooksPath: no hook runs. os.devNull is /dev/null on POSIX and \\.\nul on
+ *    Windows. A bare "/dev/null" there is \dev\null on the current drive, a folder any
+ *    local user may create, so a hook placed in it would run.
+ *  - core.fsmonitor: Git runs the program it names whenever it looks for changed files
+ *    (ls-files, update-index, a comparison with the working files). `false` also keeps
+ *    Git's own file-system monitor daemon from being started for a capture.
+ *  - log.showSignature: with it `git show` and `git log` give gpg.program every commit
+ *    that carries a signature, and anyone can write a commit with a signature header.
+ * The command line wins over every configuration file, and Git hands these options to
+ * the Git it starts in a submodule.
+ */
+export const CAPTURE_GIT_OPTIONS = Object.freeze(['-c', `core.hooksPath=${devNull}`, '-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false', '--no-optional-locks']);
+/**
+ * The environment of every Git command of a capture: nothing of the caller's GIT_*, no
+ * prompt, and
+ *  - no replace refs: with them the workspace could put any object in the place of the one
+ *    a capture reads (the tree a comparison starts from, the start snapshot itself);
+ *  - no lazy fetch: a promisor remote in the repository's configuration would otherwise
+ *    be asked for an object that is missing, and its url, upload-pack or ssh command is a
+ *    program. A capture compares what is on disk; an object that is not there fails it.
+ */
+export const captureGitEnvironment = (extra = {}) => ({
+    ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))),
+    GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1', ...extra,
+});
 async function run(cwd, args, limit = 4 * 1024 * 1024, signal) {
-    const result = await execute(gitSpawnFile(), ['--no-optional-locks', ...args], {
-        cwd, encoding: 'utf8', timeout: GIT_TIMEOUT_MS, maxBuffer: limit, signal,
-        env: { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_'))), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' },
+    const result = await execute(gitSpawnFile(), [...CAPTURE_GIT_OPTIONS, ...args], {
+        cwd, encoding: 'utf8', timeout: GIT_TIMEOUT_MS, maxBuffer: limit, signal, env: captureGitEnvironment(),
     });
     return result.stdout;
+}
+/**
+ * A comparison with the working files (no settled tree) has Git clean every changed
+ * file, and a `filter.<driver>` setting names the program that does it. The options
+ * here give each configured driver no program, so the working bytes are compared as
+ * they are; a turn's own trees are made the same way (captureWorkspaceTree). `-c` ends
+ * a key at the first "=", so a driver with one in its name cannot be switched off and
+ * the comparison is refused.
+ */
+async function withoutFilterPrograms(git, workspace) {
+    const keys = (await git(workspace, ['config', '-z', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|process|required)$']).catch(() => '')).split('\0').filter(Boolean);
+    const drivers = [...new Set(keys.map(key => key.slice('filter.'.length, key.lastIndexOf('.'))))];
+    if (drivers.some(driver => /[=\n]/.test(driver)))
+        throw new Error('A filter driver cannot be switched off.');
+    return drivers.flatMap(driver => ['-c', `filter.${driver}.clean=`, '-c', `filter.${driver}.process=`, '-c', `filter.${driver}.required=false`]);
 }
 /** Reads the actual provider workspace; never stages, commits, or changes its index.
  * `deadline` ends every Git command of this comparison at once; without it each has GIT_TIMEOUT_MS. */
@@ -58,9 +100,10 @@ export async function captureWorkspaceChanges(workspace, startingRevision, settl
             .then(value => value.trim(), error => { if (startingRevision)
             throw error; return null; });
         const diffArgs = ['--no-ext-diff', '--no-textconv', '--no-color', '-M'];
+        const diff = [...(settledTree || !base ? [] : await withoutFilterPrograms(git, workspace)), 'diff', ...diffArgs];
         const [names, stats, untracked] = await Promise.all([
-            base ? git(workspace, ['diff', ...diffArgs, '--name-status', '-z', base, ...(settledTree ? [settledTree] : []), '--']) : Promise.resolve(''),
-            base ? git(workspace, ['diff', ...diffArgs, '--numstat', '-z', base, ...(settledTree ? [settledTree] : []), '--']) : Promise.resolve(''),
+            base ? git(workspace, [...diff, '--name-status', '-z', base, ...(settledTree ? [settledTree] : []), '--']) : Promise.resolve(''),
+            base ? git(workspace, [...diff, '--numstat', '-z', base, ...(settledTree ? [settledTree] : []), '--']) : Promise.resolve(''),
             settledTree ? Promise.resolve('') : git(workspace, ['ls-files', '--others', '--exclude-standard', ...(base ? [] : ['--cached']), '-z']),
         ]);
         const files = new Map();
@@ -94,7 +137,7 @@ export async function captureWorkspaceChanges(workspace, startingRevision, settl
         let truncated = false;
         if (base) {
             try {
-                patch = await git(workspace, ['diff', ...diffArgs, '--unified=3', base, ...(settledTree ? [settledTree] : []), '--'], patchLimit);
+                patch = await git(workspace, [...diff, '--unified=3', base, ...(settledTree ? [settledTree] : []), '--'], patchLimit);
             }
             catch (error) {
                 const failure = error;
