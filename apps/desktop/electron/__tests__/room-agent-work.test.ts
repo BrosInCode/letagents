@@ -96,6 +96,22 @@ test("strict mapper rejects partial salvage, room drift, duplicate identity, and
   assert.equal(mapDesktopRoomAgentWorkPollPayload(privateShape, ROOM), null);
 });
 
+test("strict mapper accepts a v4 contribution with its edits and start", () => {
+  const snapshot = { captured_at: "2026-11-13T10:00:00.000Z", branch: null, base_revision: null, state: "ready",
+    files: [{ path: "app.ts", previous_path: null, status: "modified", additions: 1, deletions: 0, binary: false }],
+    additions: 1, deletions: 0, hidden_files: 0, patch: "", patch_truncated: true };
+  const payload = changedPayload() as { snapshot: { work: Array<Record<string, unknown>> } };
+  payload.snapshot.work[0]!.summary = { ...summary(), version: 4, workspace: snapshot, contribution: { changes: snapshot, summary: null,
+    edits: { files: [{ path: "app.ts", additions: 1, deletions: 0, patch: "@@ -1,1 +1,2 @@\n a\n+b", patch_truncated: false }], hidden_files: 0 },
+    start: { committed_at: "2026-09-20T06:00:00.000Z", in_history: false } } };
+  const mapped = mapDesktopRoomAgentWorkPollPayload(payload, ROOM);
+  assert.ok(mapped?.changed);
+  const parsed = mapped.snapshot.work[0]!.summary;
+  assert.ok("contribution" in parsed && parsed.version === 4);
+  assert.deepEqual(parsed.contribution?.start, { committed_at: "2026-09-20T06:00:00.000Z", in_history: false });
+  assert.equal(parsed.contribution?.edits?.files[0]?.path, "app.ts");
+});
+
 test("cloud poll uses the opaque cursor and maps access or payload invalidation explicitly", async () => {
   const previous = globalThis.fetch;
   const calls: string[] = [];
@@ -110,7 +126,7 @@ test("cloud poll uses the opaque cursor and maps access or payload invalidation 
   try {
     const ready = await pollDesktopRoomAgentWork(ROOM, CURSOR);
     assert.equal(ready.status, "ready");
-    assert.match(calls[0] || "", new RegExp(`/rooms/${ROOM}/agent-work/poll\\?after=${CURSOR}&timeout=0&include_workspace=1&include_contribution=1$`));
+    assert.match(calls[0] || "", new RegExp(`/rooms/${ROOM}/agent-work/poll\\?after=${CURSOR}&timeout=0&include_workspace=1&include_contribution=1&include_edits=1$`), "a current client asks for edit evidence; an old one gets v3");
 
     response = new Response(JSON.stringify({ error: "forbidden" }), {
       status: 403,

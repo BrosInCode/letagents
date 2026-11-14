@@ -38,7 +38,7 @@
         :view="liveView" :presence="shared.signal.state" @reveal-request="emit('reveal-live-request', $event)" />
     </div>
     <AgentInspectorWorkspace v-if="selectedTab === 'workspace'" id="participant-workspace-panel" class="agent-inspector-scroll-region" role="tabpanel" aria-labelledby="participant-workspace-tab"
-      :work="roomAgentWork ?? []" :agent-key="workspaceAgentKey ?? null" :status="roomAgentWorkStatus ?? 'idle'" :source-message-id="workspaceSourceMessageId" :request-version="requestVersion" />
+      :work="roomAgentWork ?? []" :agent-key="workspaceAgentKey ?? null" :status="roomAgentWorkStatus ?? 'idle'" :source-message-id="workspaceSourceMessageId" :file-path="workspaceFilePath" :request-version="requestVersion" />
     <div v-show="selectedTab === 'overview'" id="participant-overview-panel" role="tabpanel" aria-labelledby="participant-overview-tab" class="agent-inspector-participant-overview">
       <div class="agent-inspector-scroll-region agent-inspector-participant-scroll">
         <template v-if="!shared.owner">
@@ -83,6 +83,7 @@ const props = defineProps<{
   roomAgentWork?: import("../../../../../../electron/ipc-types").DesktopRoomAgentWork[];
   roomAgentWorkStatus?: string;
   workspaceSourceMessageId?: string | null;
+  workspaceFilePath?: string | null;
   workspaceAgentKey?: string | null;
   shared: ReturnType<typeof sharedAgentInspectorPresentation>;
   roomDisplayName?: string;

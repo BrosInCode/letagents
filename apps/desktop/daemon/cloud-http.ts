@@ -105,6 +105,9 @@ export class SupervisorGrantRequestError extends Error {
   }
 }
 
+/** The room server refused a room work summary as invalid (HTTP 400, `invalid_summary`): a server older than its version, or a bad summary. */
+export class RoomWorkSummaryRejectedError extends SupervisorGrantRequestError {}
+
 /** The room server answered a native-activity publication and refused it. */
 export class NativeActivityRejectedError extends Error {
   /** null when the server accepted the request but refused the observation itself. */
@@ -429,6 +432,7 @@ export async function publishRoomWork(input: RoomWorkPublishInput): Promise<Room
   const body = await response.json() as Record<string, unknown>;
   if (response.status === 409 && body.code === "payload_cleared") return "cleared";
   if (response.status === 409 && ["publisher_conflict", "revision_conflict"].includes(String(body.code))) return "conflict";
+  if (response.status === 400 && body.code === "invalid_summary") throw new RoomWorkSummaryRejectedError(response.status, "Room work publication");
   if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Room work publication");
   const work = body.work as Record<string, unknown> | undefined;
   if (!["created", "updated", "replayed"].includes(String(body.status)) || !work

@@ -5,10 +5,10 @@ import { resolveOwnerAttribution } from '../components/desktop/content/desktop-c
 export function contributionChanges(work: DesktopRoomAgentWork) {
   return 'contribution' in work.summary && hasReviewableRoomContribution(work.summary) ? work.summary.contribution?.changes : undefined;
 }
-export function workspaceAgentTarget(work: DesktopRoomAgentWork, participants: readonly DesktopParticipantSummary[]): AgentModalTarget {
+export function workspaceAgentTarget(work: DesktopRoomAgentWork, participants: readonly DesktopParticipantSummary[], filePath?: string): AgentModalTarget {
   const participant = participants.find(item => item.agentKey === work.agentKey);
   const name = participant?.displayName || work.agentKey.split('/').at(-1) || 'Agent';
   return { workspaceSourceMessageId: work.sourceMessageId, messageId: null, clientMessageId: null, messageSource: 'agent', actorLabel: participant?.actorLabel ?? null,
     displayName: name, ownerAttribution: resolveOwnerAttribution(participant ?? {}), ideLabel: participant?.ideLabel ?? null,
-    sender: participant?.actorLabel || name, agentKey: work.agentKey, agentSessionId: null };
+    sender: participant?.actorLabel || name, agentKey: work.agentKey, agentSessionId: null, ...(filePath ? { workspaceFilePath: filePath } : {}) };
 }

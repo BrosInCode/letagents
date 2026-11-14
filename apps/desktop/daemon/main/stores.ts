@@ -25,6 +25,7 @@ import { DaemonActivityWrites } from "../activity-write-batcher.js";
 import { ManifestTransitionCoordinator } from "../manifest-transition-coordinator.js";
 import { NativeActivityPublicationCoordinator } from "../native-activity-publication-coordinator.js";
 import { LiveRoomSharePublisher } from "../live-room-share-publisher.js";
+import { TurnEditLedger } from "../turn-edit-ledger.js";
 import { ConvergencePacer } from "../convergence-pacer.js";
 import { DaemonSingleton } from "../singleton.js";
 import { deriveProviderConfigurationSnapshot } from "../provider-configuration.js";
@@ -67,6 +68,8 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
   protected readonly deliveryCutovers: DeliveryCutoverCoordinator;
   protected readonly agentStreamRegistry: AgentStreamRegistry;
   protected readonly liveRoomShare: LiveRoomSharePublisher;
+  /** The files each agent's current turn changed with its own edit tools; read when the turn's workspace settles. */
+  protected readonly turnEdits = new TurnEditLedger();
 
   constructor(...args: SupervisorDaemonArgs) {
     super(...args);
@@ -215,7 +218,7 @@ export abstract class SupervisorDaemonStores extends SupervisorDaemonLifecycle {
       hasLiveHandle: (entryId) => this.liveHandles.has(entryId),
       ...(providerPort ? { provider: providerPort } : {}),
       runtimeCustody: this.workerRuntimeCustody,
-      deleteAgentStream: (entryId) => { this.agentStreamRegistry.delete(entryId); this.liveRoomShare.forget(entryId); },
+      deleteAgentStream: (entryId) => { this.agentStreamRegistry.delete(entryId); this.liveRoomShare.forget(entryId); this.turnEdits.forget(entryId); },
       ephemeralProvisioner: this.ephemeralProvisioner,
       nowMs: () => this.nowMs(),
     });

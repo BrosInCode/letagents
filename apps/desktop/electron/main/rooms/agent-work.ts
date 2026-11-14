@@ -150,7 +150,7 @@ export async function pollDesktopRoomAgentWork(
     return response ? { status: "ready", response } : { status: "invalid", response: null };
   }
   const cloudRoomIdentifier = cloudRoomIdentifierForStorage(storage, trimmedRoomIdentifier);
-  const query = cursor ? `?after=${encodeURIComponent(cursor)}&timeout=0&include_workspace=1&include_contribution=1` : "?timeout=0&include_workspace=1&include_contribution=1";
+  const query = cursor ? `?after=${encodeURIComponent(cursor)}&timeout=0&include_workspace=1&include_contribution=1&include_edits=1` : "?timeout=0&include_workspace=1&include_contribution=1&include_edits=1";
   try {
     const payload = await apiFetch<unknown>(
       `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-work/poll${query}`,

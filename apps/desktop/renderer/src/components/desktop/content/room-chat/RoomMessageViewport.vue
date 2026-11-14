@@ -40,7 +40,7 @@
           :data-kind="entry.line.kind"
           data-testid="room-presence-line"
         ><span aria-hidden="true"></span>{{ entry.line.text }}</p>
-        <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="emit('open-workspace', $event)" />
+        <RoomContribution v-else-if="entry.type === 'contribution'" :work="entry.work" :participants="participants ?? []" :status="roomAgentWorkStatus ?? 'idle'" @open-workspace="(work, filePath) => emit('open-workspace', work, filePath)" />
         <component :is="entry.type === 'github-group' ? RoomGitHubUpdates : PlainTimelineRow" v-else lazy-history :row-limit="githubGroupRowLimit" :anchor-id="entry.type === 'github-group' ? entry.anchorId : undefined" :messages="entry.type === 'github-group' ? entry.messages : singleMessageList(entry.message)" :grouped="entry.type === 'github-group'" :parse-event="parseGitHubEvent" @layout-start="preserveScrollAnchorOnNextLayout(260)" @layout-settled="updateScrollState">
         <template #default="{ message, history }">
         <div v-if="message.id === unreadTimeline.dividerId.value && !hiddenPinnedIds.has(message.id)" class="room-explicit-unread" role="separator">New messages</div>
@@ -296,7 +296,7 @@ const props = defineProps<{
 const attentionResponseAgentNames = inject(attentionResponseAgentNamesKey, null);
 const emit = defineEmits<{
   "load-older": [];
-  "open-workspace": [work: DesktopRoomAgentWork];
+  "open-workspace": [work: DesktopRoomAgentWork, filePath?: string];
   "open-agent": [target: AgentModalTarget];
   "open-person": [target: PersonTarget, position: PersonMenuPosition];
   "post-agent-answer-now": [agentId: string, sourceMessageId: string | null];
