@@ -27,9 +27,11 @@ function git(cwd, args, signal, index, input, extra) {
 /** The same hardened Git, for a command whose answer is its exit code: resolves the code (null when Git failed to run or was stopped) and stdout. */
 function gitExit(cwd, args, signal, input) {
     return new Promise((resolve) => {
-        const child = execFile(gitSpawnFile(), ['-c', HOOKS_OFF, '--no-optional-locks', ...args], {
+        // No file-system monitor program and no lazy fetch: both are programs that the repository's
+        // configuration names (core.fsmonitor; a promisor remote's url, upload-pack or ssh command).
+        const child = execFile(gitSpawnFile(), ['-c', HOOKS_OFF, '-c', 'core.fsmonitor=false', '--no-optional-locks', ...args], {
             cwd, signal, timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 8 * 1024 * 1024, encoding: 'utf8',
-            env: { ...environment(), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1' },
+            env: { ...environment(), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', GIT_NO_LAZY_FETCH: '1' },
         }, (error, stdout) => resolve({ code: !error ? 0 : typeof error.code === 'number' && !error.killed ? error.code : null, stdout: String(stdout ?? '') }));
         child.stdin?.on('error', () => { });
         child.stdin?.end(input);
@@ -518,7 +520,9 @@ async function settleEditEvidence(workspace, candidates, startingHead, deadline)
     }
     let start = null;
     if (objectId.test(startingHead ?? '')) {
-        const date = await gitExit(root, ['show', '-s', '--format=%cI', startingHead], signal);
+        // No signature check: with log.showSignature in the repository's configuration, Git would
+        // give gpg.program (a program that configuration names) a start commit that carries a signature.
+        const date = await gitExit(root, ['show', '-s', '--no-show-signature', '--format=%cI', startingHead], signal);
         const committed = date.code === 0 ? Date.parse(date.stdout.trim()) : NaN;
         const ancestor = await gitExit(root, ['merge-base', '--is-ancestor', startingHead, 'HEAD'], signal);
         start = { committed_at: Number.isFinite(committed) ? new Date(committed).toISOString() : null,
