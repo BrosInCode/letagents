@@ -4,21 +4,18 @@ import { lstat, mkdtemp, open, readlink, realpath, rm } from 'node:fs/promises';
 import { devNull, tmpdir } from 'node:os';
 import nodePath, { dirname, join } from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
-import { captureWorkspaceChanges, GIT_TIMEOUT_MS, WORKSPACE_CAPTURE_TIMEOUT_MS, WORKSPACE_SETTLE_TIMEOUT_MS } from './workspace-change-capture.mjs';
+import { captureGitEnvironment, captureProgramGuards, captureWorkspaceChanges, CAPTURE_GIT_OPTIONS, GIT_TIMEOUT_MS, WORKSPACE_CAPTURE_TIMEOUT_MS, WORKSPACE_SETTLE_TIMEOUT_MS } from './workspace-change-capture.mjs';
 import { gitSpawnFile } from './git-executable.mjs';
 import { signalTree, spawnTree } from './process-tree.mjs';
-const environment = () => Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith('GIT_')));
-// Hooks off: os.devNull is /dev/null on POSIX and \\.\nul on Windows. A bare
-// "/dev/null" there is \dev\null on the current drive, a folder any local user
-// may create, so a hook placed in it would run.
-const HOOKS_OFF = `core.hooksPath=${devNull}`;
-// Replace refs are off: with them the workspace could put any object in the place of
-// the one a capture reads (a base's tree, the start snapshot itself).
+// Every command starts with CAPTURE_GIT_OPTIONS in captureGitEnvironment: no hook file, no
+// file-system monitor program, no signature program, no replace refs, no lazy fetch. A
+// command that writes an index or a ref, or that stores working files, also gets
+// captureProgramGuards: no configured hook and no filter program.
 function git(cwd, args, signal, index, input, extra) {
     return new Promise((resolve, reject) => {
-        const child = execFile(gitSpawnFile(), ['-c', HOOKS_OFF, '--no-optional-locks', ...args], {
+        const child = execFile(gitSpawnFile(), [...CAPTURE_GIT_OPTIONS, ...args], {
             cwd, signal, timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 8 * 1024 * 1024, encoding: 'utf8',
-            env: { ...environment(), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', ...(index ? { GIT_INDEX_FILE: index } : {}), ...extra },
+            env: captureGitEnvironment({ ...(index ? { GIT_INDEX_FILE: index } : {}), ...extra }),
         }, (error, stdout) => error ? reject(error) : resolve(stdout));
         child.stdin?.on('error', () => { });
         child.stdin?.end(input);
@@ -32,9 +29,9 @@ function git(cwd, args, signal, index, input, extra) {
  */
 function remoteGit(cwd, args, signal, extra) {
     return new Promise((resolve, reject) => {
-        const child = spawnTree(gitSpawnFile(), ['-c', HOOKS_OFF, '--no-optional-locks', ...args], {
+        const child = spawnTree(gitSpawnFile(), [...CAPTURE_GIT_OPTIONS, ...args], {
             cwd, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'ignore'],
-            env: { ...environment(), GIT_TERMINAL_PROMPT: '0', GIT_NO_REPLACE_OBJECTS: '1', ...extra },
+            env: captureGitEnvironment(extra),
         });
         let output = '';
         const stop = () => {
@@ -81,8 +78,11 @@ async function storageSettings(root, signal) {
 }
 const ATTRIBUTES = ['filter', 'text', 'crlf', 'eol', 'ident', 'working-tree-encoding'];
 /** The conversion attributes of every path, in one Git call: path -> { attribute: value }. */
-async function conversionAttributes(root, paths, signal) {
-    const output = await git(root, ['check-attr', '-z', '--stdin', ...ATTRIBUTES], signal, undefined, paths.map(path => `${path}\0`).join(''));
+async function conversionAttributes(root, paths, signal, index) {
+    // The private index, as `update-index --add` below: where a .gitattributes file is not
+    // in the working files, both read it from the same place (HEAD), not one from the
+    // user's index and one from HEAD.
+    const output = await git(root, ['check-attr', '-z', '--stdin', ...ATTRIBUTES], signal, index, paths.map(path => `${path}\0`).join(''));
     const parts = output.split('\0');
     const attributes = new Map();
     for (let i = 0; i + 2 < parts.length; i += 3) {
@@ -147,8 +147,9 @@ export async function captureWorkspaceTree(workspace, identity, deadline = undef
     const index = join(scratch, 'index');
     try {
         const root = await realpath(workspace);
+        const guards = await captureProgramGuards(args => git(root, args, signal));
         const head = (await git(root, ['rev-parse', '--verify', 'HEAD^{tree}'], signal)).trim();
-        await git(root, ['read-tree', head], signal, index);
+        await git(root, [...guards, 'read-tree', head], signal, index);
         const original = new Map((await git(root, ['ls-tree', '-r', '-z', head], signal)).split('\0').filter(Boolean).map(entry => {
             const split = entry.indexOf('\t');
             return [entry.slice(split + 1), entry.slice(0, split).split(' ')];
@@ -157,7 +158,7 @@ export async function captureWorkspaceTree(workspace, identity, deadline = undef
         if (paths.length > 10_000)
             return null;
         const settings = await storageSettings(root, signal);
-        const attributes = await conversionAttributes(root, paths, signal);
+        const attributes = await conversionAttributes(root, paths, signal, index);
         /** The mode `git add` would record: the link or exec bit on disk where the checkout can hold one, else HEAD's. */
         const modeOf = (path, stat) => {
             const committed = original.get(path)?.[0];
@@ -241,12 +242,12 @@ export async function captureWorkspaceTree(workspace, identity, deadline = undef
         // Converted files first, raw entries after: --replace lets a file take a directory's place
         // and the reverse, and a removal of an entry that is already gone is not an error.
         if (converted.length)
-            await git(root, ['-c', 'core.safecrlf=false', 'update-index', '--add', '--replace', '-z', '--stdin'], signal, index, converted.map(path => `${path}\0`).join(''));
+            await git(root, [...guards, '-c', 'core.safecrlf=false', 'update-index', '--add', '--replace', '-z', '--stdin'], signal, index, converted.map(path => `${path}\0`).join(''));
         const entries = results.filter(value => value !== undefined);
         if (entries.length)
-            await git(root, ['update-index', '-z', '--index-info'], signal, index, entries.join(''));
-        const tree = (await git(root, ['write-tree'], signal, index)).trim();
-        await git(root, ['update-ref', reviewRef(identity), tree], signal);
+            await git(root, [...guards, 'update-index', '-z', '--index-info'], signal, index, entries.join(''));
+        const tree = (await git(root, [...guards, 'write-tree'], signal, index)).trim();
+        await git(root, [...guards, 'update-ref', reviewRef(identity), tree], signal);
         return tree;
     }
     catch {
@@ -259,7 +260,8 @@ export async function captureWorkspaceTree(workspace, identity, deadline = undef
 /** A ref deletion is a tiny command; the settled turn's release gets `timeout` so that it cannot extend the settle budget. */
 export async function releaseWorkspaceTree(workspace, identity, timeout = GIT_TIMEOUT_MS) {
     try {
-        await git(workspace, ['update-ref', '-d', reviewRef(identity)], AbortSignal.timeout(timeout));
+        const signal = AbortSignal.timeout(timeout);
+        await git(workspace, [...await captureProgramGuards(args => git(workspace, args, signal)), 'update-ref', '-d', reviewRef(identity)], signal);
     }
     catch { /* Retain on failure, never jeopardize provider work. */ }
 }
@@ -426,9 +428,10 @@ async function ownStartingTree(workspace, start, startingHead, remoteTips, deadl
             return start;
         scratch = await mkdtemp(join(tmpdir(), 'letagents-workspace-'));
         const index = join(scratch, 'index');
-        await git(root, ['read-tree', `${start}^{tree}`], signal, index);
-        await git(root, ['update-index', '-z', '--index-info'], signal, index, entries.join(''));
-        return (await git(root, ['write-tree'], signal, index)).trim();
+        const guards = await captureProgramGuards(args => git(root, args, signal));
+        await git(root, [...guards, 'read-tree', `${start}^{tree}`], signal, index);
+        await git(root, [...guards, 'update-index', '-z', '--index-info'], signal, index, entries.join(''));
+        return (await git(root, [...guards, 'write-tree'], signal, index)).trim();
     }
     catch {
         return start;
