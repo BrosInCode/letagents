@@ -8,6 +8,7 @@ import {
   getRoomBridge,
 } from "./bridge";
 import { roomSupportsGitHubIntegration } from "../../../../domain/git-rooms";
+import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
 
 export function useDesktopRoomGitHub(options: {
   room: Readonly<Ref<DesktopRoomInfo>>;
@@ -89,7 +90,7 @@ export function useDesktopRoomGitHub(options: {
       const result = await roomBridge.openGitHubInstall(options.room.value.identifier);
       if (!result.opened) githubError.value = result.message;
     } catch (error) {
-      githubError.value = error instanceof Error ? error.message : "GitHub could not be opened.";
+      githubError.value = safeUserVisibleErrorDetail(error, "GitHub could not be opened.");
     } finally {
       githubBusy.value = false;
     }

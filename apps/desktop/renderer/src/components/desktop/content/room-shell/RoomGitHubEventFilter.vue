@@ -44,9 +44,9 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import type { GitHubRoomChatEventFilter, GitHubRoomChatEventKind } from "../../../../../../../../shared/room-settings.mjs";
 import { desktopIpc } from "../../../../ipc/index";
 import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
-import { GITHUB_EVENT_KIND_LABELS } from "./room-settings-presentation";
+import { GITHUB_EVENT_KIND_LABELS, githubRoomAdminsHint } from "./room-settings-presentation";
 
-const props = defineProps<{ roomIdentifier: string }>();
+const props = defineProps<{ roomIdentifier: string; repositoryName?: string | null }>();
 const filter = ref<GitHubRoomChatEventFilter | null>(null);
 // What the person has chosen, shown at once; the server's answer replaces it.
 const enabled = ref(new Set<GitHubRoomChatEventKind>());
@@ -66,7 +66,7 @@ const description = computed(() => {
     : count === 0 ? "No GitHub events are posted as messages."
     : `${count} of ${total} kinds are posted as messages.`;
   const scope = "This applies to everyone in the room, including agents. The Events tab keeps all of them.";
-  if (!filter.value.can_manage) return `${posted} Only room admins can change this.`;
+  if (!filter.value.can_manage) return `${posted} Only room admins can change this.${githubRoomAdminsHint(props.repositoryName ?? null)}`;
   if (filter.value.inherited_from_room_id) {
     return `${posted} Following ${filter.value.inherited_from_room_id} until you change a kind here.`;
   }

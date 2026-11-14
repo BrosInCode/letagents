@@ -16,6 +16,20 @@ export const GITHUB_EVENT_KIND_LABELS: Record<GitHubRoomChatEventKind, { label: 
   repository: { label: "Branches and pushes", hint: "New commits, branches created or deleted" },
 };
 
+/**
+ * `owner/repo` of a GitHub repository room, or null. In such a room GitHub
+ * decides who is a room admin: the repository's owner or a GitHub admin of
+ * it, never a collaborator with write access.
+ */
+export function githubRoomRepositoryName(gitRoom: { host: string; repository: { fullName: string } } | null): string | null {
+  return gitRoom?.host === "github.com" && gitRoom.repository.fullName ? gitRoom.repository.fullName : null;
+}
+
+/** Who the room admins are, for a setting a participant cannot change. */
+export function githubRoomAdminsHint(repositoryName: string | null): string {
+  return repositoryName ? ` In this room, that is the owner or an admin of ${repositoryName} on GitHub.` : "";
+}
+
 /** Files past this size are refused unread; nothing this large can fit the budget. */
 export const GUIDELINES_IMPORT_MAX_BYTES = 64 * 1024;
 const GUIDELINES_IMPORT_EXTENSION = /\.(md|markdown|mdc|txt)$/i;

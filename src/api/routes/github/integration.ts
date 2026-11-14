@@ -13,7 +13,7 @@ import {
   resolveGitHubAppRoomIntegrationStatus,
 } from "../../github/app-installation.js";
 import { createGitHubAppSetupState } from "../../github/app-setup-state.js";
-import type { ProjectRepoAccessDecision } from "../../rooms/access.js";
+import type { ProjectRepoAccessDecision, RoomRole } from "../../rooms/access.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 import type { AuthenticatedRequest } from "../../http/helpers.js";
 
@@ -30,6 +30,10 @@ export interface GitHubIntegrationRouteDeps {
     res: Response,
     project: Project
   ): Promise<boolean>;
+  resolveProjectRole(
+    project: Project,
+    sessionAccount: NonNullable<AuthenticatedRequest["sessionAccount"]>
+  ): Promise<RoomRole>;
   getProjectAccessRoomId(project: Project): string;
   resolveProjectRepoRoomAccessDecision(input: {
     project: Project;
@@ -73,6 +77,45 @@ async function getGitHubRoomIntegrationProject(
     accessRoomId: accessDecision.roomName ?? deps.getProjectAccessRoomId(project),
     repoRoomId: accessDecision.repoRoomName,
   };
+}
+
+/** `owner/repo` of a `github.com/owner/repo` room, or null for any other room. */
+function githubRepositoryFullName(repoRoomId: string): string | null {
+  const [host, owner, repo, ...rest] = repoRoomId.split("/");
+  return host === "github.com" && owner && repo && rest.length === 0 ? `${owner}/${repo}` : null;
+}
+
+export function githubAppInstallAdminRequiredMessage(repoRoomId: string): string {
+  const fullName = githubRepositoryFullName(repoRoomId);
+  return fullName
+    ? `Only the owner or an admin of ${fullName} on GitHub can install the GitHub app for this room. Write access is not enough. Ask the owner or an admin to install it from the room settings.`
+    : "Only a room admin can install the GitHub app for this room.";
+}
+
+/**
+ * Installing the app needs a room admin, as before. A signed-in person who is
+ * not one is told who is: in a repository room that is the repository's owner
+ * or a GitHub admin, never a write collaborator.
+ */
+async function requireGitHubAppInstallAdmin(
+  deps: GitHubIntegrationRouteDeps,
+  req: AuthenticatedRequest,
+  res: Response,
+  context: GitHubRoomIntegrationProject,
+): Promise<boolean> {
+  if (req.authKind === "agent_session" || !req.sessionAccount) {
+    return deps.requireAdmin(req, res, context.project);
+  }
+  if ((await deps.resolveProjectRole(context.project, req.sessionAccount)) === "admin") {
+    return true;
+  }
+  res.status(403).json({
+    error: "Admin privileges required",
+    code: "GITHUB_APP_INSTALL_ADMIN_REQUIRED",
+    message: githubAppInstallAdminRequiredMessage(context.repoRoomId),
+    repository: githubRepositoryFullName(context.repoRoomId),
+  });
+  return false;
 }
 
 function isPlatformAdmin(req: AuthenticatedRequest): boolean {
@@ -212,7 +255,7 @@ export function registerGitHubIntegrationRoutes(
     }
     const { project } = context;
 
-    if (!(await deps.requireAdmin(req, res, project))) {
+    if (!(await requireGitHubAppInstallAdmin(deps, req, res, context))) {
       return;
     }
 
@@ -244,7 +287,7 @@ export function registerGitHubIntegrationRoutes(
     }
     const { project } = context;
 
-    if (!(await deps.requireAdmin(req, res, project))) {
+    if (!(await requireGitHubAppInstallAdmin(deps, req, res, context))) {
       return;
     }
 
