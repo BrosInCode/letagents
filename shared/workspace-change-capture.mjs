@@ -35,10 +35,12 @@ export const WORKSPACE_SETTLE_TIMEOUT_MS = 100_000;
  *    Git's own file-system monitor daemon from being started for a capture.
  *  - log.showSignature: with it `git show` and `git log` give gpg.program every commit
  *    that carries a signature, and anyone can write a commit with a signature header.
+ *  - hook.enabled: a `[hook]` section with no name is a configured hook too (Git 2.54 and
+ *    later; see captureProgramGuards for the named ones).
  * The command line wins over every configuration file, and Git hands these options to
  * the Git it starts in a submodule.
  */
-export const CAPTURE_GIT_OPTIONS = Object.freeze(['-c', `core.hooksPath=${devNull}`, '-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false', '--no-optional-locks']);
+export const CAPTURE_GIT_OPTIONS = Object.freeze(['-c', `core.hooksPath=${devNull}`, '-c', 'core.fsmonitor=false', '-c', 'log.showSignature=false', '-c', 'hook.enabled=false', '--no-optional-locks']);
 /**
  * The environment of every Git command of a capture: nothing of the caller's GIT_*, no
  * prompt, and
@@ -77,7 +79,8 @@ export async function captureProgramGuards(config) {
     const listed = await config(['config', '-z', '--name-only', '--get-regexp', '^(filter\\..*\\.(clean|process|required)|hook\\..*\\.(command|event|enabled))$'])
         .catch(error => { if (error?.code === 1) return ''; throw error; });
     const keys = listed.split('\0').filter(Boolean);
-    const names = (kind) => [...new Set(keys.filter(key => key.startsWith(`${kind}.`)).map(key => key.slice(kind.length + 1, key.lastIndexOf('.'))))];
+    // `kind.<name>.<variable>`: the name is everything between the first and the last dot, and may be empty.
+    const names = (kind) => [...new Set(keys.filter(key => key.startsWith(`${kind}.`) && key.lastIndexOf('.') > kind.length).map(key => key.slice(kind.length + 1, key.lastIndexOf('.'))))];
     const filters = names('filter');
     const hooks = names('hook');
     if ([...filters, ...hooks].some(name => /[=\n]/.test(name)))
