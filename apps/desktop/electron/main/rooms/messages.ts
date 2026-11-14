@@ -68,7 +68,7 @@ import {
   getStoredAgentSession,
   type StoredAgentSessionState,
 } from "../agents/state.js";
-import { activeGitHubRoomIdentifier, resolveRoomIdentifierFromPath } from "../../repo-status.js";
+import { activeGitHubRoomIdentifier, describeLocalGitRoomReason, resolveRoomIdentifierFromPath } from "../../repo-status.js";
 import { canonicalProjectRoomIdentifier, findProjectBinding } from "../../project-bindings.js";
 import { bindProjectRoot, listProjectBindings } from "../project-bindings-store.js";
 import { getJoinedRoomInfo, mapDesktopRoomInfoPayload, roomInfoCacheKey } from "./room-info.js";
@@ -873,6 +873,24 @@ export async function syncDesktopLocalChatRoom(
   };
 }
 
+/**
+ * Why a local Git room cannot be published to a GitHub room, naming the
+ * folder that was checked. The folder is often not the one the person thinks
+ * (a parent folder with its own `git init`), so the path matters.
+ */
+function localRoomPublishRefusal(
+  rootPath: string,
+  resolved: Awaited<ReturnType<typeof resolveRoomIdentifierFromPath>>,
+  repositoryRoom: string | null,
+): string {
+  const reason = resolved.localReason
+    ? describeLocalGitRoomReason(resolved.localReason)
+    : resolved.source === "git_remote"
+      ? `Its origin remote is not a GitHub repository (${repositoryRoom || resolved.roomIdentifier}).`
+      : "It is not a Git repository.";
+  return `LetAgents checked ${rootPath}. ${reason} Add the project's GitHub remote as origin there, then publish again. Your history is still local.`;
+}
+
 async function ensureLocalRoomPublishTarget(
   roomIdentifier: string,
 ): Promise<string> {
@@ -893,7 +911,7 @@ async function ensureLocalRoomPublishTarget(
     const resolved = await resolveRoomIdentifierFromPath(binding.rootPath, { ignoreConfiguredRoom: true });
     const repositoryRoom = canonicalProjectRoomIdentifier(resolved.roomIdentifier);
     if (resolved.source !== "git_remote" || !/^github\.com\/[^/]+\/[^/]+$/.test(repositoryRoom || "")) {
-      throw new Error("Add this project's GitHub origin remote, then publish again. Your history is still local.");
+      throw new Error(localRoomPublishRefusal(binding.rootPath, resolved, repositoryRoom));
     }
     const repository = mapDesktopRoomInfoPayload(repositoryRoom!, await getJoinedRoomInfo(repositoryRoom!));
     if (!repository.authenticated || repository.gitRoom?.host !== "github.com" || !repository.gitRoom.repository.id

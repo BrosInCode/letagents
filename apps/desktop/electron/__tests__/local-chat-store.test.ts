@@ -1714,7 +1714,13 @@ test("local Git Publish without origin or with a replaced project never writes c
   let networkCalls = 0;
   globalThis.fetch = async () => { networkCalls++; throw new Error("Unexpected network"); };
   try {
-    await assert.rejects(syncDesktopLocalChatRoom(fixture.room.roomIdentifier), /Add this project's GitHub origin/);
+    const checkedRoot = await realpath(fixture.root);
+    await assert.rejects(syncDesktopLocalChatRoom(fixture.room.roomIdentifier), (error: Error) => {
+      // The refusal names the folder it checked and why, not only "add origin".
+      assert.ok(error.message.includes(`LetAgents checked ${checkedRoot}.`), error.message);
+      assert.match(error.message, /has no remote, so it is not linked to a GitHub repository\. Add the project's GitHub remote as origin there/);
+      return true;
+    });
     await fixture.addOrigin();
     await rename(join(fixture.root, ".git"), join(fixture.root, ".original-git"));
     await fixture.git("init", "-b", "main");
@@ -1749,7 +1755,7 @@ test("a project created as a plain folder publishes to its new repository rather
   await setRoomStorageMode(room.roomIdentifier, "local");
   await bindProjectRoot({ context: { roomIdentifier: room.roomIdentifier }, rootPath: root, source: "local_folder" });
   await execFileAsync("git", ["-C", root, "init", "-b", "main"]);
-  await assert.rejects(syncDesktopLocalChatRoom(room.roomIdentifier), /Add this project's GitHub origin/);
+  await assert.rejects(syncDesktopLocalChatRoom(room.roomIdentifier), /Add the project's GitHub remote as origin there/);
   const repository = `github.com/example/${basename(root).toLowerCase()}`;
   await execFileAsync("git", ["-C", root, "remote", "add", "origin", `https://${repository}.git`]);
   const gitRoom: DesktopGitRoomInfo = { provider: "github", host: "github.com", repository: { id: "new-folder", fullName: repository.slice(11), owner: "example", name: "new-folder" },
