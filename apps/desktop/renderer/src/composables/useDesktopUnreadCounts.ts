@@ -2,6 +2,7 @@ import { computed, onScopeDispose, ref, watch, type Ref } from "vue";
 import type { DesktopAuthAccount, DesktopRoomLatestMessage } from "../../../electron/ipc-types";
 import type { DesktopServerRoomUnread } from "../../../electron/ipc-types/unread";
 import { countUnreadRoomMessages, roomReadKey, type RoomReadMarkers, type RoomUnreadSnapshot } from "../domain/desktop-room-read-state";
+import { sharedRoomMessagePages } from "../domain/shared-room-message-pages";
 import { desktopIpc } from "../ipc";
 import { githubEventsVisibilityRevision, readGitHubEventsVisible } from "../components/desktop/content/room-shell/preferences";
 
@@ -17,6 +18,19 @@ export const UNREAD_REFRESH_DEBOUNCE_MS = 300;
 export const UNREAD_REFRESH_MAX_WAIT_MS = 2_000;
 /** An own report not echoed back within this long is forgotten (a report that wrote no new range sends no frame). */
 const OWN_REPORT_ECHO_MS = 60_000;
+
+/**
+ * The key the counts reset on: the storage settings, and the rooms whose
+ * history is kept on this device, in a fixed order. The order of the sidebar
+ * and the cloud rooms in it are not part of the key, so a room that moves, is
+ * opened or is added does not clear every count.
+ */
+export function unreadStorageModeKey(
+  settings: unknown,
+  rooms: ReadonlyArray<readonly [roomIdentifier: string, mode: "cloud" | "local"]>,
+): string {
+  return JSON.stringify([settings, rooms.filter(([, mode]) => mode === "local").map(([identifier]) => identifier).sort()]);
+}
 
 /**
  * Unread counts for the sidebar and the dock badge.
@@ -243,7 +257,10 @@ export function useDesktopUnreadCounts(options: {
                 previous,
                 ownSenderNames: [account.login, account.displayName || ""],
                 githubEventsVisible: readGitHubEventsVisible(room.roomIdentifier),
-                loadPage: (after) => loadPage(room.roomIdentifier, after),
+                loadPage: (after) => sharedRoomMessagePages.load({
+                  accountId: account.id, reader: "unread", roomIdentifier: room.roomIdentifier, afterMessageId: after,
+                  latestMessageId: room.latestMessageId, loadPage,
+                }),
                 isCurrent,
               });
               if (snapshot && isCurrent()) snapshots.value = { ...snapshots.value, [key]: snapshot };

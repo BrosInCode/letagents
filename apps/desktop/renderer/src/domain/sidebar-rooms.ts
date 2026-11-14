@@ -165,11 +165,16 @@ export function buildSidebarProjectGroups(input: {
 }): ProjectGroup[] {
   const groups: ProjectGroup[] = [];
   const groupsByRoom = new Map<string, ProjectGroup>();
+  /** When the account first opened a room of each group; the list is ordered by it. */
+  const firstOpenedAt = new Map<ProjectGroup, number>();
   const currentRoomIdentifier = normalizeRoomIdentifier(input.currentParentRoom.roomIdentifier);
 
-  function upsertGroup(group: ProjectGroup): void {
+  function upsertGroup(group: ProjectGroup, accountRooms: readonly DesktopAccountRoomEntry[] = []): void {
     const identifiers = projectGroupLookupKeys(group);
     const existing = identifiers.map((identifier) => groupsByRoom.get(identifier)).find(Boolean);
+    const target = existing || group;
+    const opened = earliestFirstOpenedAt(accountRooms, firstOpenedAt.get(target));
+    if (opened !== undefined) firstOpenedAt.set(target, opened);
     if (!existing) {
       for (const identifier of identifiers) {
         groupsByRoom.set(identifier, group);
@@ -211,7 +216,7 @@ export function buildSidebarProjectGroups(input: {
       repositoryKey,
       rooms,
       currentRoomIdentifier,
-    }));
+    }), rooms);
     for (const room of rooms) {
       groupedRoomIdentifiers.add(room.roomIdentifier);
     }
@@ -219,10 +224,10 @@ export function buildSidebarProjectGroups(input: {
 
   for (const accountRoom of input.accountRooms) {
     if (groupedRoomIdentifiers.has(accountRoom.roomIdentifier)) continue;
-    upsertGroup(accountRoomToGroup(accountRoom));
+    upsertGroup(accountRoomToGroup(accountRoom), [accountRoom]);
   }
 
-  return sortSidebarProjectGroups(groups);
+  return sortSidebarProjectGroups(groups, firstOpenedAt);
 }
 
 export function findSidebarRoomEntryByIdentifier(
@@ -595,16 +600,44 @@ function compareGitAccountRooms(left: DesktopAccountRoomEntry, right: DesktopAcc
   return compareText(gitRoomRefLabel(left.gitRoom), gitRoomRefLabel(right.gitRoom));
 }
 
-function sortSidebarProjectGroups(groups: ProjectGroup[]): ProjectGroup[] {
+/**
+ * Pinned groups first. Inside each section a group keeps one place: the group
+ * whose first room the account opened last is at the top. The order does not
+ * follow the open room or the room opened most recently, so a row does not
+ * move when a room is opened. A group with no such time (the open room before
+ * the account list has it) stays in front, in list order.
+ */
+function sortSidebarProjectGroups(
+  groups: ProjectGroup[],
+  firstOpenedAt: ReadonlyMap<ProjectGroup, number>,
+): ProjectGroup[] {
   return groups
-    .map((group, index) => ({ group, index }))
+    .map((group, index) => ({ group, index, opened: firstOpenedAt.get(group) }))
     .sort((left, right) => {
       if (left.group.parent.pinned !== right.group.parent.pinned) {
         return left.group.parent.pinned ? -1 : 1;
       }
+      if (left.opened !== right.opened) {
+        if (left.opened === undefined) return -1;
+        if (right.opened === undefined) return 1;
+        return right.opened - left.opened;
+      }
       return left.index - right.index;
     })
     .map(({ group }) => group);
+}
+
+/** The earliest first-opened time among a group's account rooms and the time it already has. */
+function earliestFirstOpenedAt(
+  rooms: readonly DesktopAccountRoomEntry[],
+  known: number | undefined,
+): number | undefined {
+  let earliest = known;
+  for (const room of rooms) {
+    const opened = room.firstOpenedAt ? Date.parse(room.firstOpenedAt) : Number.NaN;
+    if (Number.isFinite(opened) && (earliest === undefined || opened < earliest)) earliest = opened;
+  }
+  return earliest;
 }
 
 function accountRoomMeta(room: DesktopAccountRoomEntry): string {
