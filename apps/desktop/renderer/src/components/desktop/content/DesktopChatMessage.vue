@@ -455,6 +455,7 @@ import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCar
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
 import ChatAvatar from "../../../../../../../shared/ui/ChatAvatar.vue";
 import { chatSenderRole } from "../../../../../../../shared/chat-appearance";
+import { supervisorEntriesKey } from "./add-agent/supervisor-entries-context";
 import "../../../../../../../shared/ui/chat-palette.css";
 import { useChatStyling } from "../../../../../../../shared/ui/chat-styling";
 const chatStyling = useChatStyling();
@@ -707,8 +708,13 @@ const isAmbientSystem = computed(() =>
 );
 const githubEvent = computed(() => props.message.source === "browser" ? null : parseGitHubEvent(props.message));
 const viewer = useMessageViewer();
+const supervisorEntries = inject(supervisorEntriesKey, null);
+const ownedLocalAgent = computed(() => isLocalRoomIdentifier(props.roomIdentifier)
+  && Boolean(props.message.agentIdentity?.agentKey && supervisorEntries?.entries.value.some(entry =>
+    entry.localRoomId === props.roomIdentifier && entry.agentKey === props.message.agentIdentity?.agentKey)));
 const senderRole = computed(() => chatSenderRole({ human: ownerKind.value === 'human', agent: ownerKind.value === 'agent',
-  viewerLogin: viewer.value?.login, login: props.message.senderProfile?.login, agentKey: props.message.agentIdentity?.agentKey, outgoing: Boolean(props.message.outgoing) }));
+  viewerLogin: viewer.value?.login, login: props.message.senderProfile?.login, agentKey: props.message.agentIdentity?.agentKey,
+  ownedLocalAgent: ownedLocalAgent.value, outgoing: Boolean(props.message.outgoing) }));
 const avatarUrl = computed(() => props.message.senderProfile?.avatarUrl || (props.message.outgoing ? viewer.value?.avatar_url : null));
 const readerSender = computed(() => ({
   name: displayName.value,

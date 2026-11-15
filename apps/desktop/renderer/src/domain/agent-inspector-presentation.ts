@@ -3,6 +3,8 @@ import type { AgentInspectorSelection } from '../components/desktop/content/desk
 import type { AgentInspectorActionIntent, AgentInspectorProjection } from './agent-inspector';
 import { agentCompactionProgress } from './managed-agents';
 import { agentScheduledRetry, scheduledRetryDetail } from './scheduled-retry';
+import { latestFailedAgentMessage } from './room-message-receipts';
+import { safeUserVisibleErrorDetail } from './user-visible-error';
 
 export interface InspectorSignal {
   state: string;
@@ -49,6 +51,12 @@ export function agentInspectorSignal(projection: AgentInspectorProjection, nowMs
   const retry = state === 'online' ? agentScheduledRetry(projection.entry.deliveryReceipts) : null;
   if (retry) return {
     state: 'retry_scheduled', label: 'Waiting to try again', detail: scheduledRetryDetail(retry, nowMs), tone: 'amber', moving: false,
+  };
+  const failedAsk = state === 'online' ? latestFailedAgentMessage(projection.entry) : null;
+  if (failedAsk) return {
+    state: 'message_failed', label: 'Last ask did not finish',
+    detail: `Still connected. ${safeUserVisibleErrorDetail(failedAsk.error, 'Open Work to inspect the recorded outcome.')}`,
+    tone: 'amber', moving: false,
   };
   const tone = state === 'online' ? 'green' : state === 'responding' ? 'blue'
     : ['starting', 'recovering', 'reconnecting', 'restoring_conversation'].includes(state) ? 'amber'

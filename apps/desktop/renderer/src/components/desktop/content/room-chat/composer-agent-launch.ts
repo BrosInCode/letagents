@@ -29,6 +29,8 @@ export interface ComposerAgentLaunchHost {
   agentSaved?: (entry: DesktopSupervisorManifestEntry, source?: AgentAvatarFlightSource | null) => void;
   /** Opens the existing agent inspector, including its current launch/recovery state. */
   openAgent?: (entryId: string) => void;
+  /** Opens the recorded outcome of this agent's private first message. */
+  openFirstMessageWork?: (entryId: string) => void;
 }
 
 export const composerAgentLaunchKey: InjectionKey<ComposerAgentLaunchHost> = Symbol("composer-agent-launch");

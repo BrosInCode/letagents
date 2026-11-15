@@ -2,10 +2,13 @@
 export function chatSenderRole(input: {
   human: boolean; agent: boolean; login?: string | null; agentKey?: string | null;
   viewerLogin?: string | null; outgoing?: boolean;
+  /** Confirmed by this desktop's supervisor manifest in the current local room. */
+  ownedLocalAgent?: boolean;
 }): 'self' | 'human' | 'own-agent' | 'other-agent' | null {
   const viewer = input.viewerLogin?.trim().toLowerCase();
   if (input.agent) {
     const key = input.agentKey?.split('/');
+    if (input.ownedLocalAgent && key?.length === 3 && key[0] === 'local' && key[1] === 'supervised' && key[2]) return 'own-agent';
     const owner = key?.length === 2 ? key[0] : key?.length === 4 && key[0] === 'local' ? key[1] : null;
     return viewer && owner?.toLowerCase() === viewer ? 'own-agent' : 'other-agent';
   }

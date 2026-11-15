@@ -13,6 +13,8 @@ import {
 
 let vite: ViteDevServer;
 let DesktopChatMessage: unknown;
+let supervisorEntriesKey: symbol;
+let setMessageReactionViewer: (account: { login: string } | null) => void;
 
 before(async () => {
   vite = await createServer({
@@ -24,6 +26,8 @@ before(async () => {
   DesktopChatMessage = (await vite.ssrLoadModule(
     "/renderer/src/components/desktop/content/DesktopChatMessage.vue",
   )).default;
+  ({ supervisorEntriesKey } = await vite.ssrLoadModule("/renderer/src/components/desktop/content/add-agent/supervisor-entries-context.ts"));
+  ({ setMessageReactionViewer } = await vite.ssrLoadModule("/renderer/src/composables/useRoomMessageReactions.ts"));
 });
 
 after(async () => {
@@ -773,4 +777,33 @@ test("a browser publisher with a legacy agent-looking name stays human with its 
   assert.match(html, /data-chat-role="human"/);
   assert.match(html, /https:\/\/avatars.githubusercontent.com\/u\/1/);
   assert.doesNotMatch(html, /chat-avatar is-agent/);
+});
+
+test("local agent bubbles use the current room's supervisor ownership, never the author label", async t => {
+  const roomIdentifier = 'local-agent-refresh-qa';
+  const agentKey = 'local/supervised/supervised_scout';
+  const entry = { id: 'supervised_scout', roomId: roomIdentifier, localRoomId: roomIdentifier, agentKey };
+  const cases = [
+    { name: 'own local agent', viewer: 'EmmyMay', entries: [entry], roomIdentifier, agentKey, role: 'own-agent' },
+    { name: 'own local agent without a signed-in viewer', viewer: null, entries: [entry], roomIdentifier, agentKey, role: 'own-agent' },
+    { name: 'unconfirmed local key and misleading label', viewer: 'EmmyMay', entries: [], roomIdentifier, agentKey, role: 'other-agent' },
+    { name: 'a different local room', viewer: 'EmmyMay', entries: [entry], roomIdentifier: 'local-another-room', agentKey, role: 'other-agent' },
+    { name: 'foreign remote agent', viewer: 'EmmyMay', entries: [entry], roomIdentifier: 'github.com/team/repo', agentKey: 'Willow/scout', role: 'other-agent' },
+    { name: 'own remote agent', viewer: 'EmmyMay', entries: [], roomIdentifier: 'github.com/team/repo', agentKey: 'EmmyMay/scout', role: 'own-agent' },
+    { name: 'remote agent without a viewer', viewer: null, entries: [entry], roomIdentifier: 'github.com/team/repo', agentKey: 'EmmyMay/scout', role: 'other-agent' },
+  ];
+  t.after(() => setMessageReactionViewer(null));
+  for (const item of cases) await t.test(item.name, async () => {
+    setMessageReactionViewer(item.viewer ? { login: item.viewer } : null);
+    const html = await renderToString(createSSRApp({ setup() {
+      provide(supervisorEntriesKey, { entries: ref(item.entries) });
+      return () => h(DesktopChatMessage as object, {
+        roomIdentifier: item.roomIdentifier,
+        message: { id: 'msg_agent', sender: 'Scout | Your agent | Codex', text: 'Done', source: 'agent', timestamp: '2026-11-15T20:06:19Z', attachments: [],
+          agentIdentity: { agentKey: item.agentKey, displayName: 'Scout', ownerLabel: 'You', ownerAttribution: 'Your agent', ideLabel: 'Codex' } },
+        highlightQuery: '', searchActive: false, context: 'timeline', threadSummary: { count: 0, unreadCount: 0, participants: [] },
+      });
+    } }));
+    assert.match(html, new RegExp(`data-chat-role="${item.role}"`));
+  });
 });

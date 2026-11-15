@@ -2,6 +2,20 @@ import type { DesktopRoomAgentDeliveryAttention, DesktopRoomAgentFollowUpReason,
 import { supervisedAgentDisplayLabel } from "./codenames";
 import { agentScheduledRetry, waitsBehindScheduledRetry, type AgentScheduledRetry } from "./scheduled-retry";
 
+/** The private first ask keeps its own outcome even after the agent handles later messages. */
+export function failedFirstAgentMessage(entry: Pick<DesktopSupervisorManifestEntry, "id" | "deliveryReceipts">) {
+  return entry.deliveryReceipts?.find(receipt => receipt.sourceMessageId === `desktop-initial-message:${entry.id}`
+    && receipt.state === "acknowledged_failed" && receipt.terminalReason !== "upgrade_authority_unavailable") ?? null;
+}
+
+/** A failed latest ask is separate from a healthy runtime. A later receipt supersedes this summary, not the saved outcome. */
+export function latestFailedAgentMessage(entry: Pick<DesktopSupervisorManifestEntry, "deliveryReceipts">) {
+  const latest = entry.deliveryReceipts?.reduce((current, receipt) =>
+    !current || receipt.fifoSequence > current.fifoSequence ? receipt : current,
+  undefined as NonNullable<DesktopSupervisorManifestEntry["deliveryReceipts"]>[number] | undefined);
+  return latest?.state === "acknowledged_failed" && latest.terminalReason !== "upgrade_authority_unavailable" ? latest : null;
+}
+
 /**
  * What became of the agent's follow-up of this message's failed work, when
  * it does not wait for its time. `waiting_for_owner`: it is blocked, and

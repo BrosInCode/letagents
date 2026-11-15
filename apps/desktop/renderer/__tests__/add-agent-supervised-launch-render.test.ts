@@ -459,6 +459,42 @@ async function attachClientRender(component: object, modulePath: string): Promis
   (component as { render?: unknown }).render = Function("vue", `${transformed.code}\nreturn render;`)(Vue);
 }
 
+test("the private first message shows its exact failure and opens recorded Work without retrying", async () => {
+  const modulePath = 'components/desktop/content/room-chat/RoomFirstMessage.vue';
+  const FirstMessage = (await vite.ssrLoadModule(`/renderer/src/${modulePath}`)).default;
+  const { composerAgentLaunchKey } = await vite.ssrLoadModule('/renderer/src/components/desktop/content/room-chat/composer-agent-launch.ts');
+  const agent = ref({ id: 'first-agent', displayName: 'Endpoint QA', charter: 'Read the README.', createdAt: '2026-11-15T20:00:00Z',
+    deliveryReceipts: [{ sourceMessageId: 'desktop-initial-message:first-agent', state: 'acknowledged_failed',
+      error: 'Cannot connect to API. Authorization: Bearer secret-canary' }] });
+  const host = { context: () => ({}), openAddAgent() {}, chooseWorktree() {}, openFirstMessageWork: (entryId: string) => { opened.push(entryId); } };
+  const opened: string[] = [];
+  const ssr = createSSRApp({ render: () => h(FirstMessage, { agent: agent.value }) });
+  ssr.provide(composerAgentLaunchKey, host);
+  const html = await renderToString(ssr);
+  assert.match(html, /First message did not finish/);
+  assert.match(html, /Cannot connect to API/);
+  assert.match(html, /First message · Only you/);
+  assert.doesNotMatch(html, /secret-canary|Retry|Try again/);
+  await attachClientRender(FirstMessage, modulePath);
+  const root = hostNode('root');
+  const app = testRenderer.createApp({ setup: () => () => h(FirstMessage, { agent: agent.value }) });
+  app.provide(ssrContextKey, { modules: new Set<string>() });
+  app.provide(composerAgentLaunchKey, host);
+  app.mount(root);
+  const details = findByTestId(root, 'room-first-message-details');
+  assert.ok(details);
+  (details.props.onClick as () => void)();
+  assert.deepEqual(opened, ['first-agent']);
+  assert.equal(agent.value.deliveryReceipts[0]!.state, 'acknowledged_failed');
+  agent.value = { ...agent.value, deliveryReceipts: [{ ...agent.value.deliveryReceipts[0]!, sourceMessageId: 'unrelated-message' }] };
+  await nextTick();
+  assert.equal(findByTestId(root, 'room-first-message-failure'), null, 'another ask cannot be attributed to this first message');
+  agent.value = { ...agent.value, deliveryReceipts: [{ ...agent.value.deliveryReceipts[0]!, sourceMessageId: 'desktop-initial-message:first-agent', state: 'acknowledged' }] };
+  await nextTick();
+  assert.equal(findByTestId(root, 'room-first-message-failure'), null);
+  app.unmount();
+});
+
 test("a first task set with only a change event survives choosing another access level", async () => {
   // Accessibility automation can set a textarea's value without an input
   // event. The access choice re-renders the form; it must not write the old

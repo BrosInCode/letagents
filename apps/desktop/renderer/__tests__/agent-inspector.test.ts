@@ -154,6 +154,30 @@ function task(id: string, status: string, overrides: Partial<DesktopTaskSummary>
   };
 }
 
+test("a failed latest ask is visible without declaring its connected agent offline or offering replay", () => {
+  const agent = entry({ observedState: "idle", deliveryReceipts: [
+    receipt("desktop-initial-message:supervised_1", "acknowledged_failed", {
+      error: "Cannot connect to API. Authorization: Bearer secret-canary", fifoSequence: 4,
+    }),
+    receipt("older", "acknowledged", { fifoSequence: 3, updatedAt: "2026-07-24T00:00:00Z" }),
+  ] });
+  const project = () => projectAgentInspector(agent, { roomId: agent.roomId, deliveryRetryAvailable: true })!;
+  const initial = project();
+  assert.equal(initial.overallState, "online");
+  const signal = agentInspectorSignal(initial);
+  assert.equal(signal.state, "message_failed");
+  assert.equal(signal.label, "Last ask did not finish");
+  assert.match(signal.detail, /Still connected.*Cannot connect to API/);
+  assert.doesNotMatch(signal.detail, /secret-canary/);
+  assert.equal(signal.moving, false);
+  assert.equal(initial.actions.find(action => action.kind === "retry_delivery")?.available, false);
+  assert.equal(agentInspectorSignal({ ...initial, resourceFreshness: "stale" }).state, "stale");
+  assert.equal(agentInspectorSignal({ ...initial, overallState: "responding" }).state, "responding");
+  agent.deliveryReceipts!.push(receipt("new-ask", "acknowledged", { fifoSequence: 5 }));
+  assert.equal(agentInspectorSignal(project()).state, "online");
+  assert.equal(agent.deliveryReceipts![0]!.state, "acknowledged_failed", "the historical failure is never rewritten");
+});
+
 test("stopped runtime evidence gives Overview the same confirmed recovery path as Diagnostics", () => {
   const stopped = entry({ observedState: "idle", runtimeGenerationId: "runtime_1" });
   stopped.roomAgentState!.inbox.state = "waiting_for_desktop_credentials";

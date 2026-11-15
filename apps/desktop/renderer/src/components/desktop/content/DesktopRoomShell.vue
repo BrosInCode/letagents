@@ -615,6 +615,7 @@ provide(composerAgentLaunchKey, {
   chooseWorktree: openAgentWorktree,
   agentSaved: (entry, source) => { void presentSavedAgent(entry, source); },
   openAgent: openSavedAgent,
+  openFirstMessageWork: (entryId) => { void revealRoomMessage(`desktop-initial-message:${entryId}`); },
 });
 async function loadReleasePlanning() {
   if (!desktopIpc.room?.getBoardPlanning) throw new Error('Board unavailable');

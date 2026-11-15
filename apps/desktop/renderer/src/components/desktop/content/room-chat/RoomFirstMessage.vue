@@ -15,16 +15,24 @@
       </button>
     </div>
     <span class="room-first-message-private" title="Sent directly to this agent. Other people in the room cannot see this message."><LockKeyhole :size="11" aria-hidden="true" />First message · Only you</span>
+    <div v-if="failedReceipt" class="room-first-message-outcome" role="status" data-testid="room-first-message-failure">
+      <CircleAlert :size="14" aria-hidden="true" />
+      <div><strong>First message did not finish</strong><p>{{ failureDetail }}</p>
+        <button v-if="launchHost?.openFirstMessageWork" type="button" data-testid="room-first-message-details" @click="launchHost.openFirstMessageWork(agent.id)">View details<ArrowRight :size="12" aria-hidden="true" /></button>
+      </div>
+    </div>
   </article>
 </template>
 <script setup lang="ts">
 import { useChatStyling } from '../../../../../../../../shared/ui/chat-styling';
 import { computed, inject, ref } from 'vue';
-import { ArrowRight, ChevronDown, LockKeyhole } from '@lucide/vue';
+import { ArrowRight, ChevronDown, CircleAlert, LockKeyhole } from '@lucide/vue';
 import AgentAvatar from '../../../../../../../../shared/ui/agent-identity/AgentAvatar.vue';
 import type { DesktopSupervisorManifestEntry } from '../../../../../../electron/ipc-types';
 import { formatDate } from '../../../../domain/formatters';
 import { composerAgentLaunchKey } from './composer-agent-launch';
+import { safeUserVisibleErrorDetail } from '../../../../domain/user-visible-error';
+import { failedFirstAgentMessage } from '../../../../domain/room-message-receipts';
 const props = defineProps<{ agent: DesktopSupervisorManifestEntry }>();
 const styling = useChatStyling();
 const launchHost = inject(composerAgentLaunchKey, null);
@@ -33,6 +41,8 @@ const name = computed(() => props.agent.displayName?.trim() || 'the new agent');
 const time = computed(() => formatDate('hourMinute', props.agent.createdAt));
 const textId = computed(() => `first-message-text-${props.agent.id}`);
 const longMessage = computed(() => props.agent.charter.trim().length > 420 || props.agent.charter.trim().split('\n').length > 6);
+const failedReceipt = computed(() => failedFirstAgentMessage(props.agent));
+const failureDetail = computed(() => safeUserVisibleErrorDetail(failedReceipt.value?.error, 'The agent did not complete this ask. Open its recorded outcome for details.'));
 </script>
 <style scoped>
 .room-first-message{display:grid;gap:7px;width:fit-content;max-width:min(100%,66ch);margin:12px 0 12px auto;padding:0;border:0;border-radius:0;background:transparent}
@@ -47,6 +57,11 @@ button.room-first-message-agent:hover strong{text-decoration:underline;text-unde
 .room-first-message-more{display:flex;align-items:center;gap:7px;margin-top:11px;padding:0;border:0;background:transparent;color:inherit;font:inherit;font-size:12px;font-weight:550;cursor:pointer}
 .room-first-message-more svg{transition:transform 180ms ease}.room-first-message-more svg.expanded{transform:rotate(180deg)}
 .room-first-message-private{display:flex;align-items:center;justify-content:flex-end;gap:5px;color:var(--text-tertiary);font-size:10px;line-height:1.4}.room-first-message-private::before{content:none}
+.room-first-message-outcome{display:flex;align-items:flex-start;gap:8px;justify-self:end;max-width:100%;padding:5px 2px;color:var(--text-secondary);font-size:12px;line-height:1.5}
+.room-first-message-outcome>svg{flex:none;margin-top:2px;color:var(--orange,#d9a66b)}
+.room-first-message-outcome strong{font-weight:550;color:var(--text-primary)}
+.room-first-message-outcome p{margin:3px 0 0;overflow-wrap:anywhere}
+.room-first-message-outcome button{display:inline-flex;align-items:center;gap:5px;margin-top:5px;padding:0;border:0;background:none;color:var(--text-primary);font:inherit;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
 .room-first-message button:focus-visible{outline:2px solid var(--blue);outline-offset:4px;border-radius:4px}
 @media(prefers-reduced-motion:reduce){.room-first-message-more svg{transition:none}}
 </style>
