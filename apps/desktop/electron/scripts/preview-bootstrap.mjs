@@ -7,8 +7,10 @@ import isolation from "./preview-isolation.cjs";
 
 const { app } = electron;
 const { letagentsPreview } = createRequire(import.meta.url)("./package.json");
-isolation.configureIsolatedPreview({ app, profile: letagentsPreview });
 try {
+  // configureIsolatedPreview captures the OS account home before changing HOME.
+  const { realHome } = isolation.configureIsolatedPreview({ app, profile: letagentsPreview });
+  isolation.configurePreviewSafeStorage({ app, safeStorage: electron.safeStorage, realHome });
   await import("./dist-electron/main.js");
 } catch (error) {
   console.error("LetAgents Preview could not start:", error);

@@ -8,7 +8,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import isolation from "./preview-isolation.cjs";
 
-const { PREVIEW_PROFILE, PREVIEW_MARKER, configureIsolatedPreview, desktopArtifactProfile } = isolation;
+const { PREVIEW_PROFILE, PREVIEW_MARKER, configureIsolatedPreview, configurePreviewSafeStorage, desktopArtifactProfile } = isolation;
 const scripts = dirname(fileURLToPath(import.meta.url));
 const desktop = resolve(scripts, "../..");
 const require = createRequire(import.meta.url);
@@ -80,7 +80,43 @@ test("preview isolates Electron paths and child environment without accepting in
   } finally { await rm(temporary, { recursive: true, force: true }); }
 });
 
-test("actual preview bootstrap precedes imported storage modules and keeps SQLite, daemon endpoint and child HOME isolated", { skip: process.platform === "win32" }, async () => {
+test("preview native encryption scope preserves identity, results and errors and always restores HOME", async () => {
+  const realHome = await realpath(scratchBase);
+  const env = { HOME: "/isolated-preview", CODEX_HOME: "/isolated-preview/.codex" };
+  const app = { isPackaged: true, getName: () => PREVIEW_PROFILE.productName };
+  const globalObject = { [PREVIEW_MARKER]: PREVIEW_PROFILE.id };
+  const failure = new Error("native encryption refused");
+  const encrypted = Buffer.from("test ciphertext");
+  const calls = [];
+  const safeStorage = {
+    isEncryptionAvailable() { calls.push("available"); assert.equal(this, safeStorage); assert.equal(env.HOME, realHome); return true; },
+    encryptString(value) {
+      calls.push("encrypt"); assert.equal(this, safeStorage); assert.equal(env.HOME, realHome);
+      assert.equal(env.CODEX_HOME, "/isolated-preview/.codex");
+      if (value === "refused") throw failure;
+      assert.equal(value, "test plaintext");
+      assert.equal(this.decryptString(encrypted), "test plaintext");
+      assert.equal(env.HOME, realHome, "nested calls restore the outer native scope");
+      return encrypted;
+    },
+    decryptString(value) { calls.push("decrypt"); assert.equal(this, safeStorage); assert.equal(env.HOME, realHome); assert.equal(value, encrypted); return "test plaintext"; },
+  };
+  configurePreviewSafeStorage({ app, safeStorage, realHome, env, globalObject });
+  assert.deepEqual(calls, [], "installing wrappers must not initiate any Keychain operation");
+  assert.equal(safeStorage.isEncryptionAvailable(), true); assert.equal(env.HOME, "/isolated-preview");
+  assert.equal(safeStorage.encryptString("test plaintext"), encrypted); assert.equal(env.HOME, "/isolated-preview");
+  assert.equal(safeStorage.decryptString(encrypted), "test plaintext"); assert.equal(env.HOME, "/isolated-preview");
+  assert.throws(() => safeStorage.encryptString("refused"), error => error === failure);
+  assert.equal(env.HOME, "/isolated-preview");
+  delete env.HOME;
+  assert.equal(safeStorage.isEncryptionAvailable(), true); assert.equal(Object.hasOwn(env, "HOME"), false);
+  assert.equal(app.getName(), PREVIEW_PROFILE.productName);
+  assert.throws(() => configurePreviewSafeStorage({ app: { ...app, getName: () => "LetAgents" }, safeStorage, realHome, env, globalObject }), /isolated preview identity/);
+  assert.throws(() => configurePreviewSafeStorage({ app, safeStorage: {}, realHome, env, globalObject }), /unavailable/);
+  assert.throws(() => configurePreviewSafeStorage({ app, safeStorage: Object.freeze({ ...safeStorage }), realHome, env, globalObject }), TypeError);
+});
+
+test("actual preview bootstrap keeps imported storage and child HOME isolated after native encryption succeeds or fails", { skip: process.platform === "win32" }, async () => {
   const temporary = await realpath(await mkdtemp(join(scratchBase, "pv-")));
   try {
     const home = join(temporary, "owner");
@@ -91,7 +127,14 @@ test("actual preview bootstrap precedes imported storage modules and keeps SQLit
     await mkdir(join(app, "node_modules", "electron"), { recursive: true });
     await writeFile(join(app, "package.json"), JSON.stringify({ type: "module", letagentsPreview: PREVIEW_PROFILE }));
     for (const name of ["preview-bootstrap.mjs", "preview-isolation.cjs"]) await cp(join(scripts, name), join(app, name));
-    await writeFile(join(app, "node_modules", "electron", "index.js"), `module.exports = { app: { isPackaged: true, setPath() {}, setName() {}, exit: process.exit } };`);
+    await writeFile(join(app, "node_modules", "electron", "index.js"), `
+      let name; const paths = {}; const calls = [];
+      const app = { isPackaged: true, setPath(key, value) { paths[key] = value; }, setName(value) { name = value; }, getName() { return name; }, exit: process.exit };
+      const safeStorage = {
+        isEncryptionAvailable() { calls.push({home:process.env.HOME, name, appHome:paths.home, method:'available'}); return true; },
+        encryptString(value) { calls.push({home:process.env.HOME, name, appHome:paths.home, method:'encrypt'}); if(value === 'refused') throw new Error('native refused'); return Buffer.from(value); },
+        decryptString(value) { calls.push({home:process.env.HOME, name, appHome:paths.home, method:'decrypt'}); return value.toString(); }
+      }; module.exports = { app, safeStorage, calls };`);
     // Only the OS home lookup is replaced, so this test never visits the real
     // account's preview directory. The production bootstrap runs unchanged.
     await writeFile(join(app, "run.mjs"), `import os from 'node:os'; os.userInfo = () => ({homedir:${JSON.stringify(home)}}); await import('./preview-bootstrap.mjs'); if (!globalThis.previewImportCompleted) throw new Error('bootstrap did not await main');`);
@@ -99,15 +142,24 @@ test("actual preview bootstrap precedes imported storage modules and keeps SQLit
     await writeFile(join(app, "dist-electron", "main.js"), `
       import { homedir } from 'node:os';
       import { spawnSync } from 'node:child_process';
+      import electron from 'electron';
       import { localChatDatabasePath } from ${url("electron/main/chat-storage/settings.ts")};
       import { getLocalChatDatabase } from ${url("electron/main/rooms/local-db.ts")};
       import { defaultDaemonPaths } from ${url("daemon/singleton.ts")};
       await new Promise(resolve => setTimeout(resolve, 20));
       globalThis.previewImportCompleted = true;
+      if (electron.calls.length) throw new Error('bootstrap initiated an unexpected crypto operation');
       const db = await getLocalChatDatabase(); db.exec('CREATE TABLE preview_proof (value TEXT)');
       db.exec("INSERT INTO preview_proof VALUES ('isolated')"); db.close();
-      const child = spawnSync(process.execPath, ['-e', 'console.log(require("node:os").homedir())'], {encoding:'utf8'});
-      console.log(JSON.stringify({home:homedir(), cwd:process.cwd(), db:localChatDatabasePath, daemon:defaultDaemonPaths(), child:child.stdout.trim(), credential:process.env.LETAGENTS_TOKEN ?? null}));
+      const childHome = () => spawnSync(process.execPath, ['-e', 'console.log(require("node:os").homedir())'], {encoding:'utf8'}).stdout.trim();
+      const children = [childHome()];
+      if (!electron.safeStorage.isEncryptionAvailable()) throw new Error('fake storage unavailable');
+      if (electron.safeStorage.decryptString(electron.safeStorage.encryptString('roundtrip')) !== 'roundtrip') throw new Error('roundtrip changed');
+      children.push(childHome());
+      try { electron.safeStorage.encryptString('refused'); throw new Error('missing refusal'); }
+      catch(error) { if(error.message !== 'native refused') throw error; }
+      children.push(childHome());
+      console.log(JSON.stringify({home:homedir(), cwd:process.cwd(), db:localChatDatabasePath, daemon:defaultDaemonPaths(), children, crypto:electron.calls, credential:process.env.LETAGENTS_TOKEN ?? null}));
     `);
     const child = spawnSync(process.execPath, ["--import", pathToFileURL(require.resolve("tsx")).href, join(app, "run.mjs")], {
       cwd: desktop, encoding: "utf8", timeout: 30_000,
@@ -118,7 +170,9 @@ test("actual preview bootstrap precedes imported storage modules and keeps SQLit
     const previewHome = join(home, ".letagents-preview", "home");
     assert.equal(result.home, previewHome);
     assert.equal(result.cwd, previewHome);
-    assert.equal(result.child, previewHome);
+    assert.deepEqual(result.children, [previewHome, previewHome, previewHome]);
+    assert.deepEqual(result.crypto.map(call => call.method), ["available", "encrypt", "decrypt", "encrypt"]);
+    assert.ok(result.crypto.every(call => call.home === home && call.name === PREVIEW_PROFILE.productName && call.appHome === previewHome));
     assert.equal(result.credential, null);
     assert.equal(result.db, join(previewHome, ".letagents", "local-chat.sqlite"));
     assert.equal(result.daemon.socketPath, join(previewHome, ".letagents", "daemon.sock"));

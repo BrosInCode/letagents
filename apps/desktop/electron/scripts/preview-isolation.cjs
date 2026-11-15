@@ -44,7 +44,8 @@ function configureIsolatedPreview({ app, profile, env = process.env, realHome = 
     || profile?.bundleIdentifier !== PREVIEW_PROFILE.bundleIdentifier) {
     throw new Error("The preview bootstrap requires an explicitly packaged preview profile.");
   }
-  const root = join(realpathSync(realHome), ".letagents-preview");
+  const ownerHome = realpathSync(realHome);
+  const root = join(ownerHome, ".letagents-preview");
   const home = join(root, "home");
   if (Buffer.byteLength(join(home, ".letagents", "daemon.sock")) >= 104) {
     throw new Error("The preview home path is too long for the macOS daemon socket.");
@@ -93,7 +94,41 @@ function configureIsolatedPreview({ app, profile, env = process.env, realHome = 
   app.setName(PREVIEW_PROFILE.productName);
   changeDirectory(home);
   Object.defineProperty(globalObject, PREVIEW_MARKER, { value: PREVIEW_PROFILE.id, writable: false, configurable: false });
-  return { root, ...paths };
+  return { root, ...paths, realHome: ownerHome };
 }
 
-module.exports = { PREVIEW_PROFILE, PREVIEW_MARKER, desktopArtifactProfile, configureIsolatedPreview };
+/**
+ * macOS resolves its login Keychain relative to HOME. Only native synchronous
+ * encryption calls see the OS home; app storage and provider processes retain
+ * the preview home. Native Keychain prompts and encryption remain unchanged.
+ * Never use this scope for asynchronous work or change Keychain preferences.
+ */
+function configurePreviewSafeStorage({ app, safeStorage, realHome, env = process.env, globalObject = globalThis }) {
+  if (!app.isPackaged || globalObject[PREVIEW_MARKER] !== PREVIEW_PROFILE.id
+    || app.getName() !== PREVIEW_PROFILE.productName) {
+    throw new Error("Preview secure storage requires the isolated preview identity.");
+  }
+  const ownerHome = realpathSync(realHome);
+  const names = ["isEncryptionAvailable", "encryptString", "decryptString"];
+  if (names.some(name => typeof safeStorage?.[name] !== "function")) {
+    throw new Error("Preview OS-backed secure storage is unavailable.");
+  }
+  for (const name of names) {
+    const original = safeStorage[name];
+    const wrapped = function (...args) {
+      const hadHome = Object.hasOwn(env, "HOME"), priorHome = env.HOME;
+      try {
+        env.HOME = ownerHome;
+        return Reflect.apply(original, this, args);
+      } finally {
+        if (hadHome) env.HOME = priorHome;
+        else delete env.HOME;
+      }
+    };
+    // Defining an own method also covers native methods on the prototype. A
+    // non-wrappable object throws before the normal application is imported.
+    Object.defineProperty(safeStorage, name, { value: wrapped, writable: true, configurable: true });
+  }
+}
+
+module.exports = { PREVIEW_PROFILE, PREVIEW_MARKER, desktopArtifactProfile, configureIsolatedPreview, configurePreviewSafeStorage };
