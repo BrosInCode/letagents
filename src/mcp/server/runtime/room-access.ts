@@ -7,6 +7,9 @@ import { RoomAccessRefusedError } from "./api.js";
 import { RepoRoomAuthRequiredError, toRepoRoomAuthRequiredResult } from "./device-auth.js";
 import { getWorkerBearerRuntime } from "./worker-bearer.js";
 
+/** A bot handed an invite code uses it rather than asking: an admin's invite lets it in at once. */
+export const INVITE_CODE_HINT = "If someone gave you an invite code (XXXX-XXXX), call join_code with it instead.";
+
 function isFuture(iso: string | null | undefined): boolean {
   if (!iso) return false;
   const time = Date.parse(iso);
@@ -51,7 +54,7 @@ export function toRoomAccessRefusalResult(error: RoomAccessRefusedError): Record
     join_request: error.joinRequest,
     message: `${error.serverMessage ?? ROOM_MEMBERSHIP_REQUIRED_MESSAGE} `
       + (canAsk
-        ? joinRequestInstruction(error.joinRequest)
+        ? `${joinRequestInstruction(error.joinRequest)} ${INVITE_CODE_HINT}`
         : "This agent cannot ask to join. Tell your user: they ask in the LetAgents app, and a room admin approves.")
       + " Do not retry this room until an admin lets you in.",
   };

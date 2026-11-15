@@ -5,12 +5,18 @@ import {
   RepoRoomAuthRequiredError,
   createInviteRoom,
   joinInviteCode,
-  joinNamedRoom,
+  joinNamedRoomOrInviteCode,
   normalizeJoinSessionMode,
   toRepoRoomAuthRequiredResult,
   withJoinRoomAgentPrompt,
 } from "../../runtime.js";
 import { jsonToolResponse } from "./response.js";
+
+const JOIN_CODE_DESCRIPTION =
+  "Join a room with an invite code. A one-use invite code (XXXX-XXXX, e.g. 'K7QM-4XPD') that a room member made "
+  + "for you lets your account into a members-only room, or asks a room admin to let you in when a member made it. "
+  + "It works one time. A room's own code (XXXX-XXXX-XXXX) joins a room you are already a member of.";
+const JOIN_CODE_INPUT_DESCRIPTION = "The invite code you were given (e.g. 'K7QM-4XPD'), or a room's code (e.g. 'ABCX-7291-QWER')";
 
 const joinSessionModeSchema = z
   .string()
@@ -39,9 +45,9 @@ export function registerRoomJoinTools(server: McpServer): void {
 
   server.tool(
     "join_code",
-    "Join an existing room using an invite code.",
+    JOIN_CODE_DESCRIPTION,
     {
-      code: z.string().describe("The invite code shared for the room (e.g. 'ABCX-7291')"),
+      code: z.string().describe(JOIN_CODE_INPUT_DESCRIPTION),
       session_mode: joinSessionModeSchema,
     },
     async ({ code, session_mode }) =>
@@ -52,7 +58,7 @@ export function registerRoomJoinTools(server: McpServer): void {
     "join_project",
     "Legacy alias for join_code. Join an existing room using an invite code.",
     {
-      code: z.string().describe("The invite code shared for the room (e.g. 'ABCX-7291')"),
+      code: z.string().describe(JOIN_CODE_INPUT_DESCRIPTION),
       session_mode: joinSessionModeSchema,
     },
     async ({ code, session_mode }) =>
@@ -61,14 +67,15 @@ export function registerRoomJoinTools(server: McpServer): void {
 
   server.tool(
     "join_room",
-    "Join a named room on Let Agents Chat. Creates the room if it doesn't exist. Use this for repo-based room joining.",
+    "Join a named room on Let Agents Chat. Creates the room if it doesn't exist. Use this for repo-based room joining. "
+      + "If someone gave you an invite code (XXXX-XXXX), use join_code with it instead.",
     {
       name: z.string().describe("The room name to join (e.g. 'github.com/owner/repo')"),
       session_mode: joinSessionModeSchema,
     },
     async ({ name, session_mode }) => {
       try {
-        return jsonToolResponse(await joinNamedRoom(name, normalizeJoinSessionMode(session_mode)));
+        return jsonToolResponse(await joinNamedRoomOrInviteCode(name, normalizeJoinSessionMode(session_mode)));
       } catch (error) {
         if (error instanceof RepoRoomAuthRequiredError) {
           return jsonToolResponse(toRepoRoomAuthRequiredResult(error));

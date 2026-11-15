@@ -115,6 +115,11 @@ export function getLastRefusedRoomId(): string | null {
   return lastRefusedRoom.get();
 }
 
+/** A room this runtime asked to join without being let in yet (an invite that filed a request). */
+export function rememberRefusedRoomId(roomId: string): void {
+  if (roomId) lastRefusedRoom.set(roomId);
+}
+
 function apiErrorFor(status: number, body: string): ApiError {
   if (status !== 403) return new ApiError(status, body);
   let payload: unknown;

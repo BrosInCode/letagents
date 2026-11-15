@@ -10,7 +10,7 @@ export declare const REPO_COLLABORATOR_REQUIRED_MESSAGE: string;
 export declare const REPO_ROOM_USES_GITHUB_ROLES_MESSAGE: string;
 
 export type RoomMemberRole = 'admin' | 'member';
-export type RoomMemberSource = 'creator' | 'seed' | 'approved_request';
+export type RoomMemberSource = 'creator' | 'seed' | 'approved_request' | 'invite';
 export type RoomJoinRequestState = 'pending' | 'approved' | 'declined' | 'cancelled';
 export declare const ROOM_MEMBER_ROLES: readonly RoomMemberRole[];
 export declare const ROOM_MEMBER_SOURCES: readonly RoomMemberSource[];

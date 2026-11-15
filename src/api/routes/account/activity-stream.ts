@@ -2,6 +2,7 @@ import type { EventEmitter } from "node:events";
 
 import type { Express } from "express";
 
+import { ROOM_INVITE_EVENT } from "../../../../shared/room-invites.mjs";
 import { ROOM_JOIN_REQUEST_EVENT } from "../../../../shared/room-join-requests.mjs";
 import { ROOM_MENTION_EVENT } from "../../../../shared/room-mention-events.mjs";
 import type { AccountActivityHub, AccountRoomActivity } from "../../account-activity/hub.js";
@@ -19,6 +20,12 @@ import {
   onRequestCredentialRetired,
   type LiveRoomAuthorizationLease,
 } from "../../rooms/live-authorization.js";
+import {
+  ROOM_INVITE_CHANGED,
+  readRoomInviteChangedEvent,
+  roomInviteEvents,
+  roomInviteStreamPayload,
+} from "../../rooms/invite-events.js";
 import {
   ROOM_JOIN_REQUEST_CHANGED,
   readRoomJoinRequestChangedEvent,
@@ -42,6 +49,8 @@ export interface AccountActivityStreamDeps {
   joinRequestEvents?: EventEmitter;
   /** Someone was @mentioned in a room, including unopened or archived rooms. Defaults to the server's emitter. */
   mentionEvents?: EventEmitter;
+  /** An invite this account made was made, cancelled or used. Defaults to the server's emitter. */
+  inviteEvents?: EventEmitter;
   /** Whether the account is an admin of the room right now. Defaults to the members store. */
   isRoomAdmin?(accountId: string, roomId: string): Promise<boolean>;
   /**
@@ -292,6 +301,18 @@ export function registerAccountActivityStreamRoute(app: Express, deps: AccountAc
       };
       mentionEvents.on(ROOM_MENTION_CREATED, onRoomMention);
       connection.addCleanup(() => { mentionEvents.off(ROOM_MENTION_CREATED, onRoomMention); });
+
+      // The maker's own invites, so the pill above the composer follows a
+      // bot that joins and a cancel made on another device. The invite's room
+      // is checked live like any target room: a maker who left hears nothing.
+      const inviteEvents = deps.inviteEvents ?? roomInviteEvents;
+      const onRoomInvite = (payload: unknown) => {
+        const event = readRoomInviteChangedEvent(payload);
+        if (!event || connection.closed || event.makerAccountId !== accountId) return;
+        writeAboutTargetRoom(event.invite.room_id, () => frame(ROOM_INVITE_EVENT, roomInviteStreamPayload(event)));
+      };
+      inviteEvents.on(ROOM_INVITE_CHANGED, onRoomInvite);
+      connection.addCleanup(() => { inviteEvents.off(ROOM_INVITE_CHANGED, onRoomInvite); });
     }
     try {
       const watch = await deps.hub.watch(roomIds, send);

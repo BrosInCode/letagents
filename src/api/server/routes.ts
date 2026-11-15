@@ -9,6 +9,7 @@ import { registerRoomNotificationPreferenceRoutes } from "../routes/rooms/notifi
 import { registerAgentAskRoutes } from "../routes/agent-asks.js";
 import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
 import { registerWakeRuleRoutes } from "../routes/rooms/wake-rules.js";
+import { registerRoomInviteRoutes } from "../routes/rooms/invites.js";
 import { registerRoomMemberRoutes } from "../routes/rooms/members.js";
 import { registerDemoMarkRoutes } from "../routes/rooms/demo-marks.js";
 import { resolveParticipantRoom } from "../routes/rooms/messages/helpers.js";
@@ -626,6 +627,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomHistorySummaryRoutes(app, { ...roomMetadataRouteDeps, requireParticipant });
   registerRoomNotificationPreferenceRoutes(app, roomMessageRouteDeps);
   registerRoomMemberRoutes(app, roomMessageRouteDeps);
+  registerRoomInviteRoutes(app, roomMessageRouteDeps);
   registerAgentAskRoutes(app, roomMessageRouteDeps);
   registerRoomMetadataRoutes(app, roomMetadataRouteDeps);
   registerRentalProviderRoutes(app, {
