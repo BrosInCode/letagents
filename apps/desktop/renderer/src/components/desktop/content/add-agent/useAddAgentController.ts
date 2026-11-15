@@ -226,6 +226,7 @@ const {
   clearOpenModelApiKey,
   handleModelChoiceValue,
   handleEffortValue,
+  restoreModelSelection,
   syncPermissionProfileSelection,
   selectPermissionProfile,
   invalidateRequests: invalidateConfigurationRequests,
@@ -275,6 +276,7 @@ const supervisedLaunch = useSupervisedAgentLaunch({
     // discovering an older agent must not close a newly opened form.
     if (requestedLaunches.has(entry.id)) presentSavedLaunch(entry);
   },
+  onRestoredEntry: (entry) => restoreModelSelection(entry.model),
 });
 const launchStarted = supervisedLaunch.launchStarted;
 const supervisedConflict = supervisedLaunch.conflict;

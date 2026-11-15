@@ -62,8 +62,10 @@ export function useAddAgentConfiguration() {
   let modelRequestId = 0;
   let configurationVersion = 0;
   let openModelWrite: Promise<void> | null = null;
+  let restoredModelId: string | null = null;
 
   function resetModelSelection(): void {
+    restoredModelId = null;
     modelRequestId += 1;
     providerModels.value = null;
     loadingProviderModels.value = false;
@@ -188,9 +190,26 @@ export function useAddAgentConfiguration() {
     function syncSelectedProviderModelSelection(
       result: DesktopAgentProviderModelsResult | null = providerModels.value,
     ): void {
+      if (restoredModelId && bindings.selectedModel.value === restoredModelId) {
+        const option = result?.models.find((candidate) => candidate.id === restoredModelId);
+        // Keep a saved ID even if today's catalog omits it. Default would imply
+        // a different configuration from the durable agent being recovered.
+        if (option) selectProviderModel(option);
+        else { selectedModelMode.value = "custom"; customModelId.value = restoredModelId; }
+        return;
+      }
       if (selectedModelMode.value !== "option" || !selectedProviderModelId.value) return;
       if (result?.status !== "ready") return;
       if (!result.models.some((option) => option.id === selectedProviderModelId.value)) selectDefaultModel();
+    }
+
+    function restoreModelSelection(model: string | null): void {
+      const id = model?.trim() ?? "";
+      restoredModelId = id || null;
+      selectedProviderModelId.value = "";
+      customModelId.value = id;
+      selectedModelMode.value = id ? "custom" : "default";
+      syncSelectedProviderModelSelection();
     }
 
     async function applyOpenModelSettings(input: {
@@ -267,6 +286,7 @@ export function useAddAgentConfiguration() {
       selectedProviderModelId.value = option.id;
     }
     function handleModelChoiceValue(value: string): void {
+      restoredModelId = null;
       if (value === "default") return selectDefaultModel();
       if (value === "custom") {
         selectedModelMode.value = "custom";
@@ -381,6 +401,7 @@ export function useAddAgentConfiguration() {
       clearOpenModelApiKey,
       handleModelChoiceValue,
       handleEffortValue,
+      restoreModelSelection,
       syncPermissionProfileSelection,
       selectPermissionProfile,
       invalidateRequests,

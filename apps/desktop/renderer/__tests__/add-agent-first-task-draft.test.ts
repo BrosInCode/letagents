@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createApp, reactive, ref, shallowRef } from "vue";
 
-import type { DesktopAgentProvider, DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
+import type { DesktopAgentProvider, DesktopAgentProviderModelsResult, DesktopSupervisorManifestEntry } from "../../electron/ipc-types";
 import type { SupervisorEntriesResource } from "../src/domain/agent-inspector-identity";
 import { supervisorEntriesKey } from "../src/components/desktop/content/add-agent/supervisor-entries-context";
 import {
@@ -171,6 +171,7 @@ async function settle(): Promise<void> {
 async function openAddAgentDialog(
   supervisor: Record<string, unknown>,
   pushed = shallowRef<readonly DesktopSupervisorManifestEntry[]>([]),
+  listModels?: (providerId: string) => Promise<DesktopAgentProviderModelsResult>,
 ) {
   const quiet = async () => null;
   addAgentForm(supervisor);
@@ -180,7 +181,7 @@ async function openAddAgentDialog(
     workers: {
       listAgentProviders: async () => [provider("claude-code", "Claude Code"), provider("codex", "Codex")],
       runAgentProviderPreflight: async () => ({ providerId: "claude-code", status: "ready", canStart: true, checks: [], nextAction: null }),
-      listAgentProviderModels: async (providerId: string) => ({ providerId, status: "ready", models: [], defaultModel: null, error: null }),
+      listAgentProviderModels: listModels ?? (async (providerId: string) => ({ providerId, status: "ready", models: [], defaultModel: null, error: null })),
     },
     supervisorGrant: { getStorageStatus: async () => ({ available: true, detail: "", canOpenCredentialStorage: false }) },
     openModel: { getSettingsStatus: quiet },
@@ -215,6 +216,70 @@ async function openAddAgentDialog(
   assert.equal(controller.selectedProviderId.value, "claude-code");
   return { controller, props, events, presentations };
 }
+
+test("reopening a failed saved launch restores its exact model as the catalog arrives and retries only that agent", async () => {
+  let saved: DesktopSupervisorManifestEntry | null = null;
+  let createCount = 0;
+  const retries: unknown[][] = [];
+  let delayCatalog = false;
+  let includeModel = true;
+  const pendingCatalogs: Array<() => void> = [];
+  const { controller, props } = await openAddAgentDialog({
+    listAgents: async () => saved ? [saved] : [],
+    createAgent: async (input: Record<string, unknown>) => {
+      createCount++;
+      saved = entry({ provider: "codex", model: input.model as string,
+        observedState: "failed", condition: "coordination_blocked",
+        lastError: "The project is not a Git repository.", permissionProfileId: "read_only" });
+      return saved;
+    },
+    setDesiredState: async (...args: unknown[]) => { retries.push(args); return saved!; },
+  }, undefined, async providerId => {
+    if (delayCatalog) await new Promise<void>(resolve => pendingCatalogs.push(resolve));
+    return { providerId: providerId as "codex", status: "ready", models: includeModel
+      ? [{ id: "gpt-6-luna", label: "GPT-6-Luna", source: "provider" }] : [], defaultModel: null, error: null };
+  });
+  try {
+    controller.selectProvider("codex");
+    await settle();
+    controller.handleModelChoiceValue("option:gpt-6-luna");
+    await settle();
+    await controller.startManagedAgent();
+    assert.equal(saved?.model, "gpt-6-luna");
+    props.open = false;
+    await settle();
+    assert.equal(controller.selectedModelChoice.value, "default");
+    delayCatalog = true;
+    props.open = true;
+    await settle();
+    assert.equal(controller.supervisedUi.launch.conflict.value?.id, saved?.id);
+    assert.equal(controller.selectedModelChoice.value, "custom", "a loading catalog cannot discard the durable model ID");
+    assert.equal(controller.customModelId.value, "gpt-6-luna");
+    delayCatalog = false;
+    pendingCatalogs.splice(0).forEach(resolve => resolve());
+    await settle();
+    assert.equal(controller.selectedModelChoice.value, "option:gpt-6-luna", "the picker and brain regain the actual model");
+    assert.equal(controller.modelSelectOptions.value.find(option => option.value === controller.selectedModelChoice.value)?.label, "GPT-6-Luna");
+    assert.equal(controller.selectedPermissionProfile.value?.id, "read_only");
+    await controller.supervisedUi.launch.handleRecover("retry");
+    assert.deepEqual(retries, [[saved!.id, "running"]], "retry sends no draft model or replacement creation");
+    assert.equal(createCount, 1);
+    assert.equal(saved?.model, "gpt-6-luna");
+    includeModel = false;
+    controller.refreshProviderModels();
+    await settle();
+    assert.equal(controller.selectedModelChoice.value, "custom", "a removed catalog option remains the saved exact ID");
+    assert.equal(controller.customModelId.value, "gpt-6-luna");
+    controller.handleModelChoiceValue("default");
+    controller.refreshProviderModels();
+    await settle();
+    assert.equal(controller.selectedModelChoice.value, "default", "a later explicit draft choice is not overwritten");
+  } finally {
+    pendingCatalogs.splice(0).forEach(resolve => resolve());
+    props.open = false;
+    await settle();
+  }
+});
 
 test("a blank custom model blocks both Start and direct launch; provider default remains a valid null model", async () => {
   const createCalls: Array<Record<string, unknown>> = [];
