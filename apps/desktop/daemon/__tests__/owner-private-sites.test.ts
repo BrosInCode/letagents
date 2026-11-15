@@ -302,27 +302,36 @@ test("Windows: a link at the lifecycle log path is never followed", { skip: posi
 
 // ---------------------------------------------------------------- daemon entry point
 
-test("the daemon entry check keeps the POSIX comparison and resolves a Windows path to its URL", () => {
-  assert.equal(isDaemonEntryPoint("file:///Applications/L.app/dist-daemon/main.js", "/Applications/L.app/dist-daemon/main.js", "darwin"), true);
-  assert.equal(isDaemonEntryPoint("file:///a/main.js", "/b/main.js", "darwin"), false);
-  assert.equal(isDaemonEntryPoint("file:///a/main.js", undefined, "darwin"), false);
-  // Windows: argv[1] is resolved and real-path-ed, then compared as a file URL.
-  const real = join(tmpdir(), "dist-daemon", "main.js");
-  const url = pathToFileURL(real).href;
-  assert.equal(isDaemonEntryPoint(url, "dist-daemon/main.js", "win32", () => real), true);
-  assert.equal(isDaemonEntryPoint(url, real, "win32", () => join(tmpdir(), "other.js")), false);
-  assert.equal(isDaemonEntryPoint(url, real, "win32", () => { throw new Error("ENOENT"); }), false);
-  // The old POSIX comparison is never true for a Windows path.
-  assert.notEqual(`file://C:\\app\\main.js`, pathToFileURL("C:\\app\\main.js").href);
+test("the daemon entry check normalizes real paths and URL escapes on every platform", () => {
+  for (const platform of ["darwin", "linux", "win32"] as const) {
+    for (const folder of ["LetAgents.app", "LetAgents Preview.app", "LetAgents#preview.app", "LetAgents%preview.app"]) {
+      const real = join(tmpdir(), folder, "dist-daemon", "main.js");
+      const url = pathToFileURL(real).href;
+      assert.equal(isDaemonEntryPoint(url, real, platform, () => real), true, `${platform}: ${folder}`);
+      assert.equal(isDaemonEntryPoint(url, "dist-daemon/main.js", platform, () => real), true);
+      assert.equal(isDaemonEntryPoint(url, real, platform, () => join(tmpdir(), "other.js")), false);
+      assert.equal(isDaemonEntryPoint(url, real, platform, () => { throw new Error("ENOENT"); }), false);
+      assert.equal(isDaemonEntryPoint(url, undefined, platform), false);
+    }
+  }
 });
 
-test("real Windows: the daemon entry check matches this process's own entry module", { skip: windowsOnly }, async (t) => {
+test("the daemon entry check recognizes an escaped entry path without starting imported modules", async (t) => {
   const root = await scratch(t);
-  const entry = join(root, "entry.mjs");
+  const directory = join(root, "LetAgents Preview #100%.app");
+  await mkdir(directory);
+  const entry = join(directory, "entry.mjs");
+  const imported = join(directory, "imported.mjs");
   const check = pathToFileURL(join(process.cwd(), "daemon", "entry-point.ts")).href;
-  await writeFile(entry, `import { isDaemonEntryPoint } from ${JSON.stringify(check)};\nprocess.stdout.write(String(isDaemonEntryPoint(import.meta.url, process.argv[1])));\n`);
+  await writeFile(imported, `import { isDaemonEntryPoint } from ${JSON.stringify(check)};\nexport default isDaemonEntryPoint(import.meta.url, process.argv[1]);\n`);
+  await writeFile(entry, `import { isDaemonEntryPoint } from ${JSON.stringify(check)};\nimport imported from './imported.mjs';\nprocess.stdout.write(JSON.stringify({ entry: isDaemonEntryPoint(import.meta.url, process.argv[1]), imported }));\n`);
   const { execFileSync } = await import("node:child_process");
   const output = execFileSync(process.execPath, ["--import", "tsx", entry], { encoding: "utf8" });
-  assert.equal(output, "true");
-  assert.equal(await readFile(entry, "utf8").then(() => true), true);
+  assert.deepEqual(JSON.parse(output), { entry: true, imported: false });
+  if (process.platform !== "win32") {
+    const linked = join(root, "Preview launcher.mjs");
+    symlinkSync(entry, linked);
+    const linkedOutput = execFileSync(process.execPath, ["--import", "tsx", linked], { encoding: "utf8" });
+    assert.deepEqual(JSON.parse(linkedOutput), { entry: true, imported: false });
+  }
 });
