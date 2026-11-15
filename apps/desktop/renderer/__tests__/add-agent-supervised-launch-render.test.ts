@@ -329,10 +329,12 @@ test("pre-durable failures are compact, actionable, and explicit that nothing ch
   assert.match(html, /Background service didn’t start/);
   assert.match(html, /No agent was created\. Your room and project are unchanged\./);
   assert.match(html, /supervised-launch-recovery/);
-  assert.match(html, /Try again<\/button>/);
+  assert.match(html, /Try again[\s\S]*?<\/button>/);
   assert.match(html, /desktop-add-agent-dismiss-launch/);
   assert.doesNotMatch(html, /Saving your agent/, "unreachable future steps should not remain in a terminal card");
-  assert.match(html, /<summary[^>]*>Details<\/summary>/);
+  assert.match(html, /<summary[^>]*>Technical details<\/summary>/);
+  assert.match(html, /<p tabindex="0" aria-label="Technical diagnostic"[^>]*>The local supervisor socket did not answer\./);
+  assert.doesNotMatch(html.match(/<details[^>]*>/)?.[0] ?? "", /\bopen\b/, "raw diagnostics stay available without dominating recovery");
 });
 
 test("Keychain failures render self-service recovery and a separate retry", async () => {
@@ -348,9 +350,9 @@ test("Keychain failures render self-service recovery and a separate retry", asyn
   }));
 
   assert.match(html, /Unlock Keychain to finish setup/);
-  assert.match(html, /Open Keychain Access<\/button>/);
+  assert.match(html, /Open Keychain Access[\s\S]*?<\/button>/);
   assert.match(html, /supervised-launch-keychain-retry/);
-  assert.match(html, /Try again<\/button>/);
+  assert.match(html, /Try again[\s\S]*?<\/button>/);
   assert.match(html, /desktop-add-agent-dismiss-launch/);
 });
 
@@ -603,4 +605,73 @@ test("custom model validation is visible and associated with its input only in c
   assert.doesNotMatch(valid, /desktop-add-agent-model-custom-error/);
   const defaultMode = await render({ custom: false, modelChoice: "default", customModelError: null });
   assert.doesNotMatch(defaultMode, /desktop-add-agent-model-custom-(?:input|error)/);
+});
+
+test("failed launch keeps its cause and current step visible while phase history is optional and actions retain their owners", async () => {
+  const failed = failedController();
+  const progress = failed.controller.launch.view;
+  progress.value.phases.unshift({ id: "checking_setup", label: "Checking setup", detail: "The provider is installed and signed in.", state: "done" });
+  progress.value.durable = true;
+  failed.controller.launch.conflict.value = { id: "saved-launch" } as never;
+  let stopCalls = 0;
+  failed.controller.launch.stop = () => { stopCalls += 1; };
+  const progressModulePath = "components/desktop/content/SupervisedLaunchProgress.vue";
+  const Progress = (await vite.ssrLoadModule(`/renderer/src/${progressModulePath}`)).default;
+  await attachClientRender(Progress, progressModulePath);
+  await attachClientRender(AddAgentSupervisedLaunch, "components/desktop/content/add-agent/AddAgentSupervisedLaunch.vue");
+
+  const root = hostNode("root");
+  const app = testRenderer.createApp({ render: () => h(AddAgentSupervisedLaunch, { controller: failed.controller }) });
+  app.provide(ssrContextKey, { modules: new Set<string>() });
+  app.mount(root);
+  const failure = findByTestId(root, "supervised-launch-failure");
+  assert.equal(failure?.props.role, "alert");
+  assert.ok(findByTestId(root, "supervised-launch-phase-connecting_supervisor"));
+  assert.equal(findByTestId(root, "supervised-launch-phase-checking_setup"), null);
+  assert.equal(findByTestId(root, "supervised-launch-phase-saving_agent"), null);
+  const toggle = findByTestId(root, "supervised-launch-progress-toggle");
+  assert.ok(toggle);
+  assert.equal(toggle.props["aria-expanded"], false);
+  assert.ok(toggle.props["aria-controls"]);
+  (toggle.props.onClick as () => void)();
+  await nextTick();
+  assert.equal(toggle.props["aria-expanded"], true);
+  assert.ok(findByTestId(root, "supervised-launch-phase-checking_setup"));
+  assert.ok(findByTestId(root, "supervised-launch-phase-connecting_supervisor"));
+  assert.equal(findByTestId(root, "supervised-launch-phase-saving_agent"), null, "history must not imply an unreachable phase ran");
+  progress.value = { ...progress.value, phases: progress.value.phases.map((phase) => ({ ...phase })) };
+  await nextTick();
+  assert.equal(toggle.props["aria-expanded"], true, "a fresh same-phase supervisor snapshot must preserve the user's open history");
+  assert.ok(findByTestId(root, "supervised-launch-phase-checking_setup"));
+  (toggle.props.onClick as () => void)();
+  await nextTick();
+  assert.equal(findByTestId(root, "supervised-launch-phase-checking_setup"), null);
+  assert.ok(findByTestId(root, "supervised-launch-phase-connecting_supervisor"));
+  (toggle.props.onClick as () => void)();
+  await nextTick();
+  progress.value = { ...progress.value, currentPhaseId: "saving_agent", phases: progress.value.phases.map((phase) => ({
+    ...phase, state: phase.id === "saving_agent" ? "failed" : "done",
+  })) };
+  await nextTick();
+  assert.equal(toggle.props["aria-expanded"], false, "a different failed phase resets history to its current step");
+  assert.equal(findByTestId(root, "supervised-launch-phase-checking_setup"), null);
+  assert.equal(findByTestId(root, "supervised-launch-phase-connecting_supervisor"), null);
+  assert.ok(findByTestId(root, "supervised-launch-phase-saving_agent"));
+
+  const recover = findByTestId(root, "supervised-launch-recovery");
+  const cancel = findByTestId(root, "desktop-add-agent-stop-supervised-runtime");
+  assert.ok(recover);
+  assert.ok(cancel);
+  assert.equal(cancel.parent?.parent, recover.parent, "Cancel and recovery share one action row without moving controller ownership");
+  assert.equal(findByTestId(root, "desktop-add-agent-dismiss-launch"), null, "a saved launch retains stop, not pre-durable dismiss");
+  (recover.props.onClick as () => void)();
+  assert.deepEqual(failed.counts().recoverCalls, ["reconnect"]);
+  assert.equal(stopCalls, 0);
+  (cancel.props.onClick as () => void)();
+  assert.equal(stopCalls, 1);
+  assert.equal(progress.value.failed, true, "presentation does not manufacture a successful recovery");
+  failed.controller.launch.recoveryPending.value = true;
+  await nextTick();
+  assert.equal(findByTestId(root, "supervised-launch-recovery")?.props.disabled, true);
+  app.unmount();
 });

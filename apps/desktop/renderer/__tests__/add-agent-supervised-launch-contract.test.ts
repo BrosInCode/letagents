@@ -277,11 +277,12 @@ test("supervised providers expose their supervised permission presentation inste
 test("the supervised action island owns complete responsive interaction styles", () => {
   assert.match(launchActionsSource, /import styles from "\.\/AddAgentSupervisedLaunchActions\.module\.css"/);
   assert.match(launchActionsSource, /class: \[styles\.button, styles\.danger\]/);
-  assert.match(launchActionStyles, /\.button\s*\{[\s\S]*?min-height: 34px/);
+  assert.match(launchActionStyles, /\.button\s*\{[\s\S]*?min-height: 40px/);
   assert.match(launchActionStyles, /\.button:hover:not\(:disabled\)/);
   assert.match(launchActionStyles, /\.button:disabled/);
   assert.match(launchActionStyles, /prefers-reduced-motion: reduce/);
-  assert.match(launchActionStyles, /@media \(max-width: 680px\)[\s\S]*?\.actions/);
+  assert.match(launchActionStyles, /\.actions\s*\{[\s\S]*?flex-wrap: wrap/);
+  assert.match(launchActionStyles, /\.button:focus-visible/);
 });
 
 test("new launches cannot call the desktop-owned execution path", () => {

@@ -18,18 +18,21 @@
         :inline-dismiss="inlineFailureActions"
         @recover="controller.launch.handleRecover($event)"
         @dismiss="controller.launch.dismiss"
-      />
-      <AddAgentSupervisedLaunchActions
-        v-if="!inlineFailureActions"
-        :progress="progress"
-        :can-add-another-supervised-agent="canAddAnotherSupervisedAgent"
-        :provider-name="progress.providerLabel"
-        :has-stop-action="hasStopAction"
-        :stopping="stopping"
-        @add-another="controller.launch.dismissReadyLaunchForAnother"
-        @stop="controller.launch.stop"
-        @dismiss="controller.launch.dismiss"
-      />
+      >
+        <template #actions>
+          <AddAgentSupervisedLaunchActions
+            v-if="!inlineFailureActions"
+            :progress="progress"
+            :can-add-another-supervised-agent="canAddAnotherSupervisedAgent"
+            :provider-name="progress.providerLabel"
+            :has-stop-action="hasStopAction"
+            :stopping="stopping"
+            @add-another="controller.launch.dismissReadyLaunchForAnother"
+            @stop="controller.launch.stop"
+            @dismiss="controller.launch.dismiss"
+          />
+        </template>
+      </SupervisedLaunchProgress>
     </article>
   </section>
   <AddAgentFeedback
