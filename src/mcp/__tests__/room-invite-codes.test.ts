@@ -144,6 +144,15 @@ test("a member's invite asks the admins and says to wait, then request_room_acce
   assert.equal(access.state, "pending");
 });
 
+test("join_room with a room name shaped like a code joins that room when no invite has it", async () => {
+  const seen = server(() => json({ error: "This invite code is not valid.", code: "INVITE_NOT_FOUND" }, 404));
+  const result = await call("join_room", { name: "test-team" });
+  assert.equal(result.room_id, "test-team", JSON.stringify(result));
+  assert.equal(result.joined_via, "join_room");
+  assert.ok(seen.some((request) => request.method === "POST" && request.path === "/rooms/test-team/join"),
+    "the name joins as it did before invites");
+});
+
 test("a used, cancelled, ended or Git Room invite is refused with one clear next step", async () => {
   const cases = [
     ["INVITE_USED", 410, "invite_used"],
@@ -169,7 +178,7 @@ test("a code no invite has falls back to a room's own old code, and says invalid
   let seen = server(notFound);
   const legacy = await call("join_code", { code: "ABCD-EFGH" });
   assert.equal(legacy.room_id, "ABCD-EFGH", "an old two-part room code still joins");
-  assert.ok(seen.some((request) => request.path === "/rooms/ABCD-EFGH/join?create=false"));
+  assert.ok(seen.some((request) => request.path === "/rooms/ABCD-EFGH/join"), "the join it made before invites");
 
   seen = [];
   globalThis.fetch = async (url, init) => {

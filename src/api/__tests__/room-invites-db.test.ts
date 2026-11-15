@@ -197,6 +197,30 @@ test('an admin\'s invite lets a bot in once, tells the room who let it in, and u
   assert.equal((await call('POST', '/invites/redeem', bob.token, {})).body.code, 'INVITE_NOT_FOUND');
   assert.equal((await call('POST', '/invites/redeem', null, { code })).status, 401);
   assert.deepEqual(await memberRows(roomId), ['alice:invite:owner', 'owner:creator:-'], 'none of that let anyone in');
+
+  // An admin's invite answers the account's own waiting request, so it does not sit in Requests.
+  const carol = await person('carol');
+  assert.equal((await call('POST', `/rooms/${roomId}/join-requests`, carol.token)).status, 201);
+  const forCarol = await call('POST', `/rooms/${roomId}/invites`, owner.token, { platform: 'other' });
+  assert.equal((await call('POST', '/invites/redeem', carol.token, { code: forCarol.body.code })).body.joined, true);
+  assert.deepEqual((await call('GET', '/account/room-join-requests', owner.token)).body.join_requests, []);
+  const carolRequest = await pool!.query<{ state: string; decided_by: string }>(
+    'SELECT state, decided_by FROM room_join_requests WHERE room_id = $1 AND account_id = $2', [roomId, carol.id]);
+  assert.deepEqual(carolRequest.rows, [{ state: 'approved', decided_by: owner.id }]);
+  // Removed since: the old code does not answer "admitted" again.
+  assert.equal((await call('DELETE', `/rooms/${roomId}/members/${carol.id}`, owner.token)).status, 200);
+  assert.equal((await call('POST', '/invites/redeem', carol.token, { code: forCarol.body.code })).body.code, 'INVITE_USED');
+
+  // A person inviting their own bot (the same account) is in already: the invite is used and the room sees the bot arrive.
+  const own = await call('POST', `/rooms/${roomId}/invites`, owner.token, { platform: 'chatgpt' });
+  const ownUse = await call('POST', '/invites/redeem', 'owner_owner_token', { code: own.body.code });
+  assert.equal(ownUse.body.outcome, 'admitted');
+  assert.equal(ownUse.body.joined, false);
+  assert.deepEqual(await systemLines(roomId), [
+    'Grok Bot joined with owner\'s invite',
+    'A bot joined with owner\'s invite',
+    'ChatGPT joined with owner\'s invite',
+  ]);
   assert.ok(await aliceAccount.waitFor((frame) => frame.event === 'snapshot'));
   assert.equal(aliceAccount.frames.some((frame) => frame.event === 'room_invite'), false, 'only the maker hears invite events');
 });

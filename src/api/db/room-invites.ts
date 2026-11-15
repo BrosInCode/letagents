@@ -11,6 +11,7 @@ import {
   type RoomInviteState,
 } from '../../../shared/room-invites.mjs';
 import type { RoomJoinRequestSummary } from '../../../shared/room-membership.mjs';
+import { retireJoinRequestPushes } from '../notifications/join-request-pushes.js';
 import { pool } from './client.js';
 import { isUniqueViolationOf } from './pg-errors.js';
 import {
@@ -211,8 +212,19 @@ export async function findRoomInviteByCode(code: string): Promise<{ id: string; 
 }
 
 export type RoomInviteRedemption =
-  /** The account is a member now (or was already); `joined` when this use added it. */
-  | { kind: 'admitted'; invite: RoomInvite; maker_login: string | null; joined: boolean; repeated: boolean }
+  /**
+   * The account is a member now (or was already); `joined` when this use
+   * added it. `approved_request_id`: the account's own pending request to
+   * join, which this admission answered.
+   */
+  | {
+    kind: 'admitted';
+    invite: RoomInvite;
+    maker_login: string | null;
+    joined: boolean;
+    repeated: boolean;
+    approved_request_id: string | null;
+  }
   /** A member's invite asked the admins; `created` when this use filed a new request. */
   | { kind: 'requested'; invite: RoomInvite; join_request: RoomJoinRequestSummary; created: boolean; repeated: boolean }
   | { kind: 'cooldown'; join_request: RoomJoinRequestSummary }
@@ -221,7 +233,9 @@ export type RoomInviteRedemption =
   | { kind: 'cancelled' }
   | { kind: 'expired' }
   /** The maker is no longer in the room, so the invite speaks for nobody. */
-  | { kind: 'maker_left' };
+  | { kind: 'maker_left' }
+  /** The room is tied to a repository now; its GitHub roles decide who is in. */
+  | { kind: 'repo_room' };
 
 async function makerLogin(client: Queryable, accountId: string | null): Promise<string | null> {
   if (!accountId) return null;
@@ -249,32 +263,49 @@ export async function redeemRoomInvite(inviteId: string, accountId: string): Pro
     if (state === 'used') {
       if (row.used_by !== accountId) return { kind: 'used' };
       const invite = toRoomInvite(row);
-      if (row.outcome === 'requested' && row.join_request_id) {
-        const request = await client.query<{ id: string; state: RoomJoinRequestSummary['state']; created_at: Date; decided_at: Date | null }>(
-          'SELECT id, state, created_at, decided_at FROM room_join_requests WHERE id = $1', [row.join_request_id]);
-        const found = request.rows[0];
-        if (found) {
-          return {
-            kind: 'requested',
-            invite,
-            join_request: {
-              id: found.id,
-              state: found.state,
-              created_at: found.created_at.toISOString(),
-              decided_at: found.decided_at?.toISOString() ?? null,
-              retry_after: null,
-            },
-            created: false,
-            repeated: true,
-          };
-        }
+      if (row.outcome === 'requested') {
+        const request = row.join_request_id
+          ? (await client.query<{ id: string; state: RoomJoinRequestSummary['state']; created_at: Date; decided_at: Date | null }>(
+            'SELECT id, state, created_at, decided_at FROM room_join_requests WHERE id = $1', [row.join_request_id])).rows[0]
+          : undefined;
+        if (!request) return { kind: 'used' };
+        return {
+          kind: 'requested',
+          invite,
+          join_request: {
+            id: request.id,
+            state: request.state,
+            created_at: request.created_at.toISOString(),
+            decided_at: request.decided_at?.toISOString() ?? null,
+            retry_after: null,
+          },
+          created: false,
+          repeated: true,
+        };
       }
-      return { kind: 'admitted', invite, maker_login: await makerLogin(client, row.created_by), joined: false, repeated: true };
+      // Answered again only while the account is still in the room: an admin
+      // who removed it since is not overruled by an old code.
+      if (!(await getRoomMemberRole(row.room_id, accountId, client))) return { kind: 'used' };
+      return {
+        kind: 'admitted',
+        invite,
+        maker_login: await makerLogin(client, row.created_by),
+        joined: false,
+        repeated: true,
+        approved_request_id: null,
+      };
     }
     if (state === 'cancelled') return { kind: 'cancelled' };
     if (state === 'expired') return { kind: 'expired' };
 
     await lockRoomAdmins(client, row.room_id);
+    // The route checked the room's repository before; a binding made since is
+    // caught here, under the lock. Stricter than the access rule on purpose:
+    // any binding refuses.
+    const repo = await client.query<{ repo: boolean }>(`SELECT room.origin = 'repo'
+        OR EXISTS (SELECT 1 FROM room_git_bindings WHERE room_id = room.id) AS repo
+      FROM rooms AS room WHERE room.id = $1`, [row.room_id]);
+    if (repo.rows[0]?.repo) return { kind: 'repo_room' };
     const makerRole = row.created_by ? await getRoomMemberRole(row.room_id, row.created_by, client) : null;
     if (!makerRole) return { kind: 'maker_left' };
 
@@ -284,6 +315,13 @@ export async function redeemRoomInvite(inviteId: string, accountId: string): Pro
         await addRoomMember({ roomId: row.room_id, accountId, addedVia: 'invite', addedBy: row.created_by }, client);
         await client.query('DELETE FROM room_member_removals WHERE room_id = $1 AND account_id = $2', [row.room_id, accountId]);
       }
+      // A request to join that the account sent before is answered by this
+      // admission, so it does not wait in the admins' Requests.
+      const answered = await client.query<{ id: string }>(`UPDATE room_join_requests
+        SET state = 'approved', decided_by = $3, decided_at = now()
+        WHERE room_id = $1 AND account_id = $2 AND state = 'pending' RETURNING id`, [row.room_id, accountId, row.created_by]);
+      const approvedRequestId = answered.rows[0]?.id ?? null;
+      if (approvedRequestId) await retireJoinRequestPushes(client, approvedRequestId, 'Join request approved by an invite');
       await client.query(`UPDATE invites SET used_at = now(), used_by = $2, outcome = 'admitted' WHERE id = $1`, [inviteId, accountId]);
       return {
         kind: 'admitted',
@@ -291,6 +329,7 @@ export async function redeemRoomInvite(inviteId: string, accountId: string): Pro
         maker_login: await makerLogin(client, row.created_by),
         joined,
         repeated: false,
+        approved_request_id: approvedRequestId,
       };
     }
 
@@ -305,6 +344,7 @@ export async function redeemRoomInvite(inviteId: string, accountId: string): Pro
         maker_login: await makerLogin(client, row.created_by),
         joined: false,
         repeated: false,
+        approved_request_id: null,
       };
     }
     wakePushes = creation.kind === 'created';

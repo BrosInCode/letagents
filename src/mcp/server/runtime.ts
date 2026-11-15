@@ -126,6 +126,7 @@ export {
   createInviteRoom,
   joinInviteCode,
   joinNamedRoom,
+  joinNamedRoomOrInviteCode,
   joinRoomIdentifier,
   joinRoomIdentifierWithoutImplicitGitRefCreate,
   normalizeJoinSessionMode,

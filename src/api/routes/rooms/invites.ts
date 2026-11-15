@@ -289,6 +289,9 @@ export function registerRoomInviteRoutes(app: Express, deps: RoomInviteRouteDeps
       }
       const outcome = await invites.redeemRoomInvite(found.id, account.account_id);
       switch (outcome.kind) {
+        case 'repo_room':
+          res.status(409).json(REPO_ROOM_REFUSAL);
+          return;
         case 'not_found':
         case 'used':
         case 'cancelled':
@@ -308,13 +311,16 @@ export function registerRoomInviteRoutes(app: Express, deps: RoomInviteRouteDeps
           });
           return;
         case 'admitted': {
-          if (!outcome.repeated) {
-            // Making the link was the approval, so the room sees who let the bot in.
-            const text = roomInviteJoinedText(outcome.invite.platform, outcome.maker_login);
-            await postRoomLine(project.id, text, `room_invite:${outcome.invite.id}:joined`)
-              .catch((error) => console.error('[room invites] room line failed', outcome.invite.id, error));
-            announce(await invites.getRoomInviteMaker(outcome.invite.id), outcome.invite);
-          }
+          // Making the link was the approval, so the room sees who let the bot
+          // in. The line is posted also when the account was in the room
+          // already (a person inviting their own bot): the bot arrived with the
+          // invite. A retry posts it again only if the first try failed; the
+          // client message id makes the second post a no-op otherwise.
+          const text = roomInviteJoinedText(outcome.invite.platform, outcome.maker_login);
+          await postRoomLine(project.id, text, `room_invite:${outcome.invite.id}:joined`)
+            .catch((error) => console.error('[room invites] room line failed', outcome.invite.id, error));
+          if (!outcome.repeated) announce(await invites.getRoomInviteMaker(outcome.invite.id), outcome.invite);
+          if (outcome.approved_request_id) await announceJoinRequest(project, outcome.approved_request_id);
           res.json({
             outcome: 'admitted',
             room_id: project.id,

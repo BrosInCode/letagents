@@ -28,8 +28,9 @@ function refusal(error: string, message: string, extra: Record<string, unknown> 
  */
 export async function redeemRoomInviteCode(code: string): Promise<RoomInviteRedemption> {
   if (getWorkerBearerRuntime().mode !== "owner") {
+    // Not used here; an old room's own code that looks like this still joins.
     return {
-      kind: "answered",
+      kind: "not_found",
       result: {
         success: false,
         error: "person_required",

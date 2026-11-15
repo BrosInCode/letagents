@@ -5,13 +5,12 @@ import {
   RepoRoomAuthRequiredError,
   createInviteRoom,
   joinInviteCode,
-  joinNamedRoom,
+  joinNamedRoomOrInviteCode,
   normalizeJoinSessionMode,
   toRepoRoomAuthRequiredResult,
   withJoinRoomAgentPrompt,
 } from "../../runtime.js";
 import { jsonToolResponse } from "./response.js";
-import { isRoomInviteCodeShape } from "../../../../../shared/room-invites.mjs";
 
 const JOIN_CODE_DESCRIPTION =
   "Join a room with an invite code. A one-use invite code (XXXX-XXXX, e.g. 'K7QM-4XPD') that a room member made "
@@ -76,11 +75,7 @@ export function registerRoomJoinTools(server: McpServer): void {
     },
     async ({ name, session_mode }) => {
       try {
-        // A bot handed "join with the invite code K7QM-4XPD" may pick this tool; the code is not a room name.
-        if (isRoomInviteCodeShape(name)) {
-          return jsonToolResponse(await joinInviteCode(name, normalizeJoinSessionMode(session_mode)));
-        }
-        return jsonToolResponse(await joinNamedRoom(name, normalizeJoinSessionMode(session_mode)));
+        return jsonToolResponse(await joinNamedRoomOrInviteCode(name, normalizeJoinSessionMode(session_mode)));
       } catch (error) {
         if (error instanceof RepoRoomAuthRequiredError) {
           return jsonToolResponse(toRepoRoomAuthRequiredResult(error));

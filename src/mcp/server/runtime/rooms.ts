@@ -441,26 +441,44 @@ export async function joinInviteCode(
   code: string,
   sessionMode: JoinSessionMode
 ): Promise<Record<string, unknown>> {
-  const inviteCode = normalizeRoomInviteCode(code);
-  if (inviteCode) return joinWithRoomInviteCode(inviteCode, sessionMode);
-  const joined = await joinRoomIdentifier(code, "join_code");
-  return buildJoinResponse({
-    joined,
+  const joinByRoomCode = async () => buildJoinResponse({
+    joined: await joinRoomIdentifier(code, "join_code"),
     room_identifier: normalizeInviteCode(code),
     joined_via: "join_code",
     session_mode: sessionMode,
   });
+  const inviteCode = normalizeRoomInviteCode(code);
+  if (!inviteCode) return joinByRoomCode();
+  // No invite has the code: an old room's own two-part code still joins; a
+  // missing room then reads as the invalid invite it most likely is.
+  return joinWithRoomInviteCode(inviteCode, sessionMode, joinByRoomCode, true);
+}
+
+/**
+ * `join_room`: a bot handed "join LetAgents with the invite code K7QM-4XPD"
+ * may pick this tool. A name shaped like a code is tried as an invite first;
+ * when no invite has it, the name joins as it always did.
+ */
+export async function joinNamedRoomOrInviteCode(
+  name: string,
+  sessionMode: JoinSessionMode
+): Promise<Record<string, unknown>> {
+  const inviteCode = normalizeRoomInviteCode(name);
+  if (!inviteCode) return joinNamedRoom(name, sessionMode);
+  return joinWithRoomInviteCode(inviteCode, sessionMode, () => joinNamedRoom(name, sessionMode), false);
 }
 
 /**
  * A one-use invite code (`XXXX-XXXX`): the server uses it for this account,
  * then this chat joins the room it let the account into. A member's invite
- * files a request to join instead and answers where it stands. A code no
- * invite has may still be an old room's own code, so that join is tried last.
+ * files a request to join instead and answers where it stands. When no invite
+ * has the code, `fallback` joins the way the tool did before invites.
  */
 async function joinWithRoomInviteCode(
   code: string,
-  sessionMode: JoinSessionMode
+  sessionMode: JoinSessionMode,
+  fallback: () => Promise<Record<string, unknown>>,
+  missingRoomIsInvalidInvite: boolean,
 ): Promise<Record<string, unknown>> {
   if (hasSupervisedWorkerAuthority()) {
     throw new Error("Room joins and creation are disabled during a daemon-supervised bounded turn.");
@@ -469,10 +487,9 @@ async function joinWithRoomInviteCode(
   if (redeemed.kind === "answered") return redeemed.result;
   if (redeemed.kind === "not_found") {
     try {
-      const joined = await joinRoomIdentifier(code, "join_code", { allowCreate: false });
-      return buildJoinResponse({ joined, room_identifier: code, joined_via: "join_code", session_mode: sessionMode });
+      return await fallback();
     } catch (error) {
-      if (isNotFoundApiError(error)) return redeemed.result;
+      if (missingRoomIsInvalidInvite && isNotFoundApiError(error)) return redeemed.result;
       throw error;
     }
   }
