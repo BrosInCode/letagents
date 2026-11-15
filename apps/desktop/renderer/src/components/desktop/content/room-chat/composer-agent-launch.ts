@@ -1,10 +1,12 @@
 import type { InjectionKey } from "vue";
+import type { AgentAvatarFlightSource } from "./agent-avatar-flight";
 import type {
   DesktopAgentProvider,
   DesktopAgentProviderId,
   DesktopAgentProviderPreflight,
   DesktopGitRoomInfo,
   RepoStatus,
+  DesktopSupervisorManifestEntry,
 } from "../../../../../../electron/ipc-types";
 
 /** What the room shell knows that an agent started from the composer needs. */
@@ -23,6 +25,10 @@ export interface ComposerAgentLaunchHost {
   openAddAgent: (options?: { providerId?: DesktopAgentProviderId; section?: "open-model" }) => void;
   /** Switches the room to a checkout, as the Add agent window's worktree picker does. */
   chooseWorktree: (rootPath: string) => void;
+  /** Presentation only, after an exact saved entry exists. Never means ready. */
+  agentSaved?: (entry: DesktopSupervisorManifestEntry, source?: AgentAvatarFlightSource | null) => void;
+  /** Opens the existing agent inspector, including its current launch/recovery state. */
+  openAgent?: (entryId: string) => void;
 }
 
 export const composerAgentLaunchKey: InjectionKey<ComposerAgentLaunchHost> = Symbol("composer-agent-launch");

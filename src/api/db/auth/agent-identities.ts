@@ -1,4 +1,5 @@
-import { asc, eq, sql } from "drizzle-orm";
+import { normalizeAgentAvatar, type AgentAvatar } from "../../../shared/agent-avatar.js";
+import { asc, eq, inArray, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
 import { agents } from "../schema.js";
@@ -12,7 +13,10 @@ export async function registerAgentIdentity(input: {
   owner_label: string;
   name: string;
   display_name?: string;
+  avatar?: AgentAvatar | null;
 }): Promise<AgentIdentity> {
+  if (input.avatar != null && !normalizeAgentAvatar(input.avatar)) throw new RequestValidationError("Invalid agent avatar.");
+  const presentation = input.avatar === undefined ? {} : { avatar: normalizeAgentAvatar(input.avatar) };
   const canonicalKey = `${input.owner_login}/${input.name}`;
   const [existing] = await db
     .select()
@@ -35,6 +39,7 @@ export async function registerAgentIdentity(input: {
       .update(agents)
       .set({
         display_name: displayName,
+        ...presentation,
         owner_label: input.owner_label,
         updated_at: now,
       })
@@ -42,6 +47,7 @@ export async function registerAgentIdentity(input: {
 
     return {
       ...existing,
+      ...presentation,
       display_name: displayName,
       owner_label: input.owner_label,
       updated_at: now,
@@ -49,6 +55,7 @@ export async function registerAgentIdentity(input: {
   }
 
   const agent: AgentIdentity = {
+    ...presentation,
     id: await nextPrefixedId("agents", "agent"),
     canonical_key: canonicalKey,
     name: input.name,
@@ -84,10 +91,11 @@ export async function registerAgentIdentity(input: {
   }
   await db
     .update(agents)
-    .set({ display_name: displayName, owner_label: input.owner_label, updated_at: now })
+    .set({ ...presentation, display_name: displayName, owner_label: input.owner_label, updated_at: now })
     .where(eq(agents.id, winner.id));
   return {
     ...winner,
+    ...presentation,
     display_name: displayName,
     owner_label: input.owner_label,
     updated_at: now,
@@ -112,4 +120,14 @@ export async function getAgentIdentitiesForOwner(ownerAccountId: string): Promis
     .from(agents)
     .where(eq(agents.owner_account_id, ownerAccountId))
     .orderBy(asc(agents.name));
+}
+
+/** Batch presentation lookup; the authenticated publisher key remains the only join. */
+export async function getAgentAvatars(keys: readonly (string | null | undefined)[], executor: Pick<typeof db, "select"> = db): Promise<Map<string, AgentAvatar>> {
+  const unique = [...new Set(keys.filter((key): key is string => Boolean(key)))];
+  if (!unique.length) return new Map();
+  const rows = await executor.select({ key: agents.canonical_key, avatar: agents.avatar }).from(agents).where(inArray(agents.canonical_key, unique));
+  const result = new Map<string, AgentAvatar>();
+  for (const row of rows) { const avatar = normalizeAgentAvatar(row.avatar); if (avatar) result.set(row.key, avatar); }
+  return result;
 }

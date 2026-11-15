@@ -1,3 +1,4 @@
+import type { AgentAvatar } from "../../../../shared/agent-avatar.mjs";
 import type { RoomGif } from "../../../../shared/room-expressions.mjs";
 import type { DesktopActivityEntry, DesktopAgentPresence, DesktopParticipantSummary, DesktopReasoningSession } from "./activity.js";
 import type { RepoStatus } from "./core.js";
@@ -295,6 +296,7 @@ export interface DesktopRoomMessageReply {
   source: string | null;
   timestamp: string;
   agentIdentity?: {
+    avatar?: AgentAvatar | null;
     name: string | null;
     displayName: string | null;
     ownerLabel: string | null;
@@ -411,6 +413,7 @@ export interface DesktopRoomMessage {
   timestamp: string;
   actorLabel: string | null;
   agentIdentity: {
+    avatar?: AgentAvatar | null;
     name: string | null;
     displayName: string | null;
     ownerLabel: string | null;

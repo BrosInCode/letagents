@@ -151,7 +151,7 @@ export function run(statement: StatementSync, ...values: unknown[]): void {
 export const MANIFEST_ENTRY_SELECT = `
       SELECT
         i.agent_id, i.created_by, i.created_at,
-        p.display_name, m.room_id, m.local_room_id,
+        p.display_name, p.avatar_json, m.room_id, m.local_room_id,
         c.provider, c.model, c.reasoning_effort, c.charter, c.permission_profile_id, c.config_revision, c.runtime_configuration_revision, c.delivery_mode, c.delivery_cutover_json,
         c.provider_launch_policy_present, c.provider_launch_policy_undefined, c.provider_launch_policy_json,
         l.desired_state, l.source_repo_path_present, l.source_repo_path,

@@ -1,3 +1,4 @@
+import type { AgentAvatar } from "../../../shared/agent-avatar.js";
 import type { RoomGif } from "../../../../shared/room-expressions.mjs";
 import type { MessageReaction } from "../../../../shared/message-reactions.mjs";
 import type { AgentPromptKind } from "../../../shared/room-agent-prompts.js";
@@ -95,6 +96,7 @@ export type MessageAccountAgentRouting =
     };
 
 export interface MessageAgentIdentity {
+  avatar?: AgentAvatar | null;
   actor_label: string;
   agent_key: string;
   agent_session_id: string | null;

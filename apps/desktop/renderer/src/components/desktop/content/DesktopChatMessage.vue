@@ -20,7 +20,7 @@
       'is-thread-root-context': context === 'thread-root',
       'is-thread-reply-context': context === 'thread-reply',
     }"
-    :style="{ '--message-accent': senderColor }"
+    :style="{ '--message-accent': senderColor, ...chatStyling.styleFor(senderRole) }"
     :data-owner-kind="ownerKind"
     :data-chat-role="senderRole"
     :data-message-id="message.id"
@@ -30,7 +30,7 @@
     @pointerup.stop="handleSelectionPointerUp"
   >
     <WakeGlyph v-if="isWakeNotice" class="room-chat-wake-glyph" state="woke" :still="!animateArrival" />
-    <ChatAvatar v-else-if="senderRole" :name="displayName" :avatar-url="avatarUrl" :agent="ownerKind === 'agent'" :provider="ideLabel" :agent-key="message.agentIdentity?.agentKey" />
+    <ChatAvatar v-else-if="senderRole" :name="displayName" :avatar-url="avatarUrl" :agent="ownerKind === 'agent'" :provider="ideLabel" :agent-key="message.agentIdentity?.agentKey" :avatar="message.agentIdentity?.avatar" />
     <div v-else class="room-chat-avatar" :style="{ '--avatar-color': senderColor }" aria-hidden="true" />
 
     <div class="room-chat-message-content">
@@ -456,6 +456,8 @@ import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAtta
 import ChatAvatar from "../../../../../../../shared/ui/ChatAvatar.vue";
 import { chatSenderRole } from "../../../../../../../shared/chat-appearance";
 import "../../../../../../../shared/ui/chat-palette.css";
+import { useChatStyling } from "../../../../../../../shared/ui/chat-styling";
+const chatStyling = useChatStyling();
 import {
   getSenderColor,
   parseSenderIdentity,

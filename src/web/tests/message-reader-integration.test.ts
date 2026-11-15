@@ -58,8 +58,9 @@ test('web long messages use the shared reader with sender and room context while
   assert.equal(vm.expanded.value, false)
   const contentClasses = html.match(/id="message-content-msg_1" class="([^"]*)"/)?.[1].split(/\s+/) || []
   assert.ok(contentClasses.includes('collapsed'))
-  assert.match(html, /Show full message/)
+  assert.match(html, /Read more/)
   assert.match(html, /Open reader/)
+  assert.doesNotMatch(html, /lines \/|chars|long-message-fade/)
   assert.match(reader, /QuartzPeak/)
   assert.match(reader, /Your agent/)
   assert.match(reader, /BrosInCode\/letagents/)
@@ -138,11 +139,15 @@ test('web chat passes real avatar and viewer-relative identity into the reader, 
     },
   ]
   for (const { expected, ...message } of cases) {
-    await renderToString(createSSRApp({ render: () => h(ChatMessage, {
+    const html = await renderToString(createSSRApp({ render: () => h(ChatMessage, {
       message: { id: 'msg_1', text: longText, timestamp, thread_root_id: 'msg_0', ...message },
       roomIdentifier,
       inlineReply: true,
     }) }))
+    const role = expected.context === 'You' ? 'self' : expected.context === 'Your agent' ? 'own-agent' : expected.agent ? 'other-agent' : 'human'
+    const color = { self: '#0A0A0A', 'own-agent': '#1B1B1B', human: '#303030', 'other-agent': '#282D34' }[role]
+    assert.ok(html.includes(`data-chat-role="${role}"`))
+    assert.ok(html.includes(`--chat-bubble:${color}`))
     assert.equal(readerProps.roomIdentifier, roomIdentifier)
     assert.equal(readerProps.sender.timestamp, timestamp)
     for (const [key, value] of Object.entries(expected)) assert.equal(readerProps.sender[key], value, key)

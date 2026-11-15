@@ -44,6 +44,7 @@ export interface AgentStartupStage {
 export interface AgentStartupView {
   entryId: string;
   name: string;
+  avatar?: DesktopSupervisorManifestEntry["avatar"];
   initials: string;
   providerLabel: string;
   status: AgentStartupStatus;
@@ -70,7 +71,7 @@ export interface AgentStartupContext {
 }
 
 type Entry = Pick<DesktopSupervisorManifestEntry,
-  | "id" | "displayName" | "provider" | "model" | "permissionProfileId" | "createdAt" | "readyReachedAt"
+  | "id" | "displayName" | "avatar" | "provider" | "model" | "permissionProfileId" | "createdAt" | "readyReachedAt"
   | "desiredState" | "observedState" | "condition" | "lastError" | "launchProgress" | "providerProgress"
   | "workspacePath" | "providerPid" | "providerContinuationId" | "executionGenerationId" | "agentSessionId"
   | "agentSessionBindingState" | "workplaceLiveness">;
@@ -362,6 +363,7 @@ export function agentStartupView(entry: Entry, context: AgentStartupContext, now
   return {
     entryId: entry.id,
     name,
+    avatar: entry.avatar,
     initials: avatarInitials(name),
     providerLabel: agentRuntimeLabel(entry.provider),
     status,

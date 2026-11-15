@@ -1,3 +1,4 @@
+import { normalizeAgentAvatar } from "../../../../../shared/agent-avatar.mjs";
 import { randomUUID } from "node:crypto";
 import type {
   DesktopSupervisorAttemptDetail,
@@ -227,6 +228,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
     input: DesktopSupervisorCreateInput,
     options: { desiredState?: "running" | "paused" } = {},
   ): Promise<DesktopSupervisorManifestEntry> {
+    if (input.avatar != null && !normalizeAgentAvatar(input.avatar)) throw new Error("Invalid agent avatar.");
     if (!input.charter.trim()) throw new Error("A supervised agent initial message is required.");
     const creationRequestId = input.creationRequestId?.trim() || randomUUID();
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(creationRequestId)) {
@@ -238,6 +240,7 @@ export class SupervisorDaemonClient extends SupervisorDaemonHostApprovalClient {
       room_id: input.roomIdentifier,
       ...(input.localRoomId ? { local_room_id: input.localRoomId } : {}),
       display_name: input.displayName.trim() || "Supervised agent",
+      ...(input.avatar ? { avatar: normalizeAgentAvatar(input.avatar) } : {}),
       provider: input.providerId,
       model: input.model?.trim() || null,
       // The daemon refuses an effort the provider does not take.

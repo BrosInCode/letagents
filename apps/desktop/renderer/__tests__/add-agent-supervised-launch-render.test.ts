@@ -468,6 +468,9 @@ test("a first task set with only a change event survives choosing another access
   const charter = ref("You are part of this room's team. Work on the tasks assigned to you, answer when you are addressed, and coordinate with the team in the room.");
   const selected = ref(sandboxed);
   await attachClientRender(AddAgentRuntimeSettings, "components/desktop/content/add-agent/AddAgentRuntimeSettings.vue");
+  const FirstMessage = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/add-agent/AddAgentFirstMessage.vue')).default;
+  await attachClientRender(FirstMessage, 'components/desktop/content/add-agent/AddAgentFirstMessage.vue');
+
   const root = hostNode("root");
   const app = testRenderer.createApp(defineComponent({
     setup: () => () => h(AddAgentRuntimeSettings, {
@@ -499,19 +502,20 @@ test("Cursor access cards distinguish restricted profiles from Full access", asy
     { id: "sandboxed_write", label: "Workspace writes", risk: "medium", status: "available", description: "Edits a copy." },
     { id: "full_access", label: "Full access", risk: "high", status: "available", description: "Host files and network." },
   ];
-  const html = await renderToString(createSSRApp({
-    render: () => h(AddAgentRuntimeSettings, {
-      provider: { id: "cursor", capabilities: ["supervised_runtime"] },
-      executionDescription: "Runs on this Mac.",
-      charter: "Inspect this project.",
-      permissionProfiles: profiles,
-      selectedPermissionProfile: profiles[2],
-    }),
-  }));
-  const limits = [...html.matchAll(/data-testid="desktop-add-agent-permission-limits"[^>]*>([^<]*)</g)].map((match) => match[1]);
-  assert.equal(limits.length, 3);
-  for (const line of limits.slice(0, 2)) assert.match(line, /No network access: can(?:&#39;|')t push or open PRs\./);
-  assert.match(limits[2], /can reach the network and files outside the project/);
+  for (const [index, selected] of profiles.entries()) {
+    const html = await renderToString(createSSRApp({
+      render: () => h(AddAgentRuntimeSettings, {
+        provider: { id: "cursor", capabilities: ["supervised_runtime"] },
+        executionDescription: "Runs on this Mac.", charter: "Inspect this project.",
+        permissionProfiles: profiles, selectedPermissionProfile: selected,
+      }),
+    }));
+    assert.equal((html.match(/role="radio"/g) ?? []).length, 3);
+    const limits = [...html.matchAll(/data-testid="desktop-add-agent-permission-limits"[^>]*>([^<]*)</g)].map(match => match[1]);
+    assert.equal(limits.length, 1, 'the selected access level has its provider-specific limit');
+    if (index < 2) assert.match(limits[0], /No network access: can(?:&#39;|')t push or open PRs\./);
+    else assert.match(limits[0], /can reach the network and files outside the project/);
+  }
 });
 
 test("the model field says which Claude models need a newer CLI, and refreshes from the note", async () => {
@@ -540,4 +544,27 @@ test("the model field says which Claude models need a newer CLI, and refreshes f
   assert.doesNotMatch(failed, /need a newer Claude Code/);
   const current = await renderToString(createSSRApp({ render: () => h(AddAgentModelSettings, { ...props, cliUpdate: null }) }));
   assert.doesNotMatch(current, /desktop-add-agent-model-cli-update/);
+});
+
+test("custom model validation is visible and associated with its input only in custom mode", async () => {
+  const AddAgentModelSettings = (await vite.ssrLoadModule(
+    "/renderer/src/components/desktop/content/add-agent/AddAgentModelSettings.vue",
+  )).default;
+  const props = {
+    loading: false, modelChoice: "custom", modelOptions: [{ value: "custom", label: "Custom model id" }],
+    custom: true, customModelId: "", customModelError: "Enter a model ID or choose provider default.",
+    modelDescription: "", showEffort: false, effort: "", effortOptions: [], effortDescription: "",
+    catalogLabel: "", catalogError: false,
+  };
+  const render = (overrides = {}) => renderToString(createSSRApp({
+    render: () => h(AddAgentModelSettings, { ...props, ...overrides }),
+  }));
+  const invalid = await render();
+  assert.match(invalid, /<input[^>]*aria-invalid="true"[^>]*aria-describedby="desktop-add-agent-model-custom-error"/);
+  assert.match(invalid, /<span[^>]*id="desktop-add-agent-model-custom-error"[^>]*role="alert"[^>]*>Enter a model ID or choose provider default\.<\/span>/);
+  const valid = await render({ customModelId: "my-model", customModelError: null });
+  assert.match(valid, /aria-invalid="false"/);
+  assert.doesNotMatch(valid, /desktop-add-agent-model-custom-error/);
+  const defaultMode = await render({ custom: false, modelChoice: "default", customModelError: null });
+  assert.doesNotMatch(defaultMode, /desktop-add-agent-model-custom-(?:input|error)/);
 });

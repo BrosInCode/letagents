@@ -1,9 +1,10 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { resolve } from 'path'
+import { readFileSync } from 'node:fs'
 
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), { name: 'agent-identity-notices', generateBundle() { this.emitFile({ type: 'asset', fileName: 'agent-identity-notices.txt', source: readFileSync(resolve(__dirname, '../../shared/ui/agent-identity/scene/assets/brain/ATTRIBUTION.txt'), 'utf8') }) } }],
   root: resolve(__dirname),
   publicDir: resolve(__dirname, 'public'),
   build: {
@@ -11,7 +12,7 @@ export default defineConfig({
     emptyOutDir: true,
   },
   resolve: {
-    dedupe: ["vue"],
+    dedupe: ["vue", "three"],
     alias: {
       '@': resolve(__dirname, 'src'),
     },

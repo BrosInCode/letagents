@@ -1,4 +1,4 @@
-import { Activity, ArchiveRestore, Bot, CircleUser, Cloud, CloudUpload, Database, GitBranch, Handshake, KeyRound, Plug, ServerCog, SlidersHorizontal, Sparkles, Ticket, Trash2, Wrench } from "@lucide/vue";
+import { Activity, ArchiveRestore, Bot, CircleUser, Cloud, CloudUpload, Database, GitBranch, Handshake, KeyRound, Palette, Plug, ServerCog, SlidersHorizontal, Sparkles, Ticket, Trash2, Wrench } from "@lucide/vue";
 import type { LegacySettingsPaneId, SettingsNavGroup, SettingsNavItem, SettingsPaneId } from "./types";
 
 export const settingsNavGroups: SettingsNavGroup[] = [
@@ -13,6 +13,7 @@ export const settingsNavGroups: SettingsNavGroup[] = [
     { id: "system:agents", title: "Agents", description: "Your agents, their work, and what you can control across your rooms", icon: Bot },
   ] },
   { label: "Application", items: [
+    { id: "system:styling", title: "Styling", description: "Personalize chat colors and message appearance", icon: Palette },
     { id: "system:app-agent", title: "Assistant", description: "Choose how the app assistant helps you", icon: Sparkles },
     { id: "system:updates", title: "Updates", description: "Version and available updates", icon: CloudUpload },
     { id: "system:diagnostics", title: "Troubleshooting", description: "Health, technical details, and recovery", icon: Activity },

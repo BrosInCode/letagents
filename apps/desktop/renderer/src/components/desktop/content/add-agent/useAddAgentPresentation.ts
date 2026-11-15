@@ -82,12 +82,18 @@ export function useAddAgentPresentation(
     selectedPermissionProfiles.value[0] ??
     null
   );
+  const customModelError = computed(() =>
+    selectedModelMode.value === "custom" && !customModelId.value.trim()
+      ? "Enter a model ID or choose provider default."
+      : null
+  );
   const canStartManagedAgent = computed(() =>
     Boolean(
       preflight.value?.canStart &&
       (props.roomStorageMode === "local" || secureStorageStatus.value?.available === true) &&
       (!loadingPreflight.value || Boolean(preflight.value)) &&
       (selectedModelMode.value !== "option" || !loadingProviderModels.value) &&
+      !customModelError.value &&
       (
         !selectedPermissionProfiles.value.length ||
         selectedPermissionProfile.value?.status === "available"
@@ -358,6 +364,7 @@ export function useAddAgentPresentation(
     selectedPermissionProfiles,
     selectedPermissionProfile,
     canStartManagedAgent,
+    customModelError,
     authCommand,
     authCommandForProvider,
     installCommand,

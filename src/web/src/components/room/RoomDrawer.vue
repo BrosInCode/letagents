@@ -9,6 +9,11 @@
 
       <ThemeToggle :is-dark="isDark" @toggle="toggleTheme" />
 
+      <details class="drawer-styling">
+        <summary>Styling</summary>
+        <ChatStylingSettings />
+      </details>
+
       <SharePanel
         :copied="codeCopied"
         :room-name="room?.displayName || ''"
@@ -74,6 +79,7 @@ import { computed, onBeforeUnmount, ref, toRef, watch } from 'vue'
 import { RouterLink, useRouter } from 'vue-router'
 import { apiFetch, roomPath } from '@/composables/room/api'
 import { type RoomInfo, type RoomMessage, useRoom } from '@/composables/useRoom'
+import ChatStylingSettings from '../../../../../shared/ui/ChatStylingSettings.vue'
 import DrawerBrand from './room-drawer/DrawerBrand.vue'
 import { messageDisplayText } from './chat-message/formatting'
 import GitHubIntegrationPanel from './room-drawer/GitHubIntegrationPanel.vue'
@@ -214,6 +220,10 @@ watch(() => props.open, (isOpen) => {
 <style src="./room-drawer/RoomDrawer.css"></style>
 
 <style scoped>
+.drawer-styling { padding: 18px 0; border-bottom: 1px solid var(--line); }
+.drawer-styling summary { cursor: pointer; color: var(--text); font-size: 14px; font-weight: 600; }
+.drawer-styling[open] summary { margin-bottom: 22px; }
+.drawer-styling summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 4px; }
 .drawer-work-link { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; margin: 12px 0; border: 1px solid var(--border-strong); border-radius: 8px; color: var(--text); font-size: 13px; text-decoration: none; }
 .drawer-work-link:hover { background: var(--accent-hover); }
 </style>

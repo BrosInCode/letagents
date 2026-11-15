@@ -2325,7 +2325,7 @@ test("every provider offers Add another for a ready agent and only once it is re
   }), false);
 });
 
-test("creation persists the complete Start-click snapshot and leaves naming to the background service", async () => {
+test("creation persists the complete Start-click identity and authority while the daemon owns final naming", async () => {
   let createdInput: Record<string, unknown> | null = null;
   const client = {
     createAgent: async (input: Record<string, unknown>) => {
@@ -2343,6 +2343,8 @@ test("creation persists the complete Start-click snapshot and leaves naming to t
     roomIdentifier: "room-before",
     repoRootPath: "/repo-before",
     charter: "Investigate the failure.",
+    displayName: " Atlas ",
+    avatar: { kind: "character" as const, character: "orbit" as const, color: "sage" as const },
     permissionProfileId: "read-only",
     launchPolicy: { profile: "read-only" },
     model: "gpt-5.6",
@@ -2359,6 +2361,8 @@ test("creation persists the complete Start-click snapshot and leaves naming to t
   form.roomIdentifier = "room-after";
   form.repoRootPath = "/repo-after";
   form.charter = "Do something else.";
+  form.displayName = "Another name";
+  form.avatar.color = "rose" as never;
   form.permissionProfileId = "full-access";
   form.launchPolicy = { profile: "full-access" };
   form.model = "other-model";
@@ -2368,7 +2372,8 @@ test("creation persists the complete Start-click snapshot and leaves naming to t
   assert.equal(createdInput?.creationRequestId, "request-snapshot");
   assert.equal(createdInput?.providerId, "codex");
   assert.equal(createdInput?.roomIdentifier, "room-before");
-  assert.equal(createdInput?.displayName, "", "the renderer never chooses the name");
+  assert.equal(createdInput?.displayName, "Atlas", "the chosen name is captured and trimmed");
+  assert.deepEqual(createdInput?.avatar, { kind: "character", character: "orbit", color: "sage" }, "later changes cannot change saved identity");
   assert.equal(createdInput?.repoRootPath, "/repo-before");
   assert.equal(createdInput?.charter, "Investigate the failure.");
   assert.equal(createdInput?.permissionProfileId, "read-only");
@@ -2378,7 +2383,7 @@ test("creation persists the complete Start-click snapshot and leaves naming to t
   assert.equal(created?.displayName, "CedarPeak", "the saved entry carries the assigned name");
 });
 
-test("every provider leaves naming to the background service", async () => {
+test("a blank identity keeps automatic daemon naming for every provider", async () => {
   for (const provider of [
     { id: "codex", name: "Codex", model: "gpt-5.6", permissionProfileId: "read_only" },
     { id: "claude-code", name: "Claude Code", model: "claude-sonnet", permissionProfileId: "read_only" },

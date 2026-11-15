@@ -1,5 +1,6 @@
+import type { AgentAvatar } from "../../../shared/agent-avatar.js";
 import { sql } from "drizzle-orm";
-import { index, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { jsonb, index, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 import { accounts } from "./core.js";
 
@@ -53,6 +54,7 @@ export const owner_tokens = pgTable(
 );
 
 export const agents = pgTable("agents", {
+  avatar: jsonb("avatar").$type<AgentAvatar | null>(),
   id: text("id").primaryKey(),
   canonical_key: text("canonical_key").notNull().unique(),
   name: text("name").notNull(),

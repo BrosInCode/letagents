@@ -6,11 +6,9 @@
       :class="{ collapsed: isLong && !expanded }"
     >
       <div class="md-content" v-html="html" @click="handleInlineReferenceClick" />
-      <span v-if="isLong && !expanded" class="long-message-fade" aria-hidden="true" />
     </div>
 
     <div v-if="isLong" class="long-message-actions">
-      <span class="long-message-stats">{{ statsLabel }}</span>
       <button
         class="long-message-button"
         type="button"
@@ -18,7 +16,7 @@
         :aria-controls="contentId"
         @click="expanded = !expanded"
       >
-        {{ expanded ? 'Collapse' : 'Show full message' }}
+        {{ expanded ? 'Show less' : 'Read more' }}
       </button>
       <button class="long-message-button" type="button" @click="openReader">
         Open reader
@@ -82,11 +80,6 @@ const safeMessageId = computed(() => {
 
 const contentId = computed(() => `message-content-${safeMessageId.value}`)
 
-const statsLabel = computed(() => {
-  const lines = lineCount.value
-  const chars = new Intl.NumberFormat().format(characterCount.value)
-  return `${lines} ${lines === 1 ? 'line' : 'lines'} / ${chars} chars`
-})
 
 function openReader() {
   readerOpen.value = true
@@ -124,50 +117,13 @@ function handleInlineReferenceClick(event: MouseEvent) {
   overflow: hidden;
 }
 
-.long-message-fade {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  left: 0;
-  height: 56px;
-  pointer-events: none;
-  background: linear-gradient(to bottom, transparent, var(--message-surface, var(--chat-bubble, var(--bg-1, #111113))) 85%);
-}
-
-.long-message-actions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.long-message-stats {
-  color: var(--muted, #a1a1aa);
-  font-size: 0.72rem;
-  line-height: 1.3;
-}
-
-.long-message-button {
-  border: 1px solid var(--line, #27272a);
-  border-radius: 8px;
-  background: var(--surface, #18181b);
-  color: var(--text, #fafafa);
-  cursor: pointer;
-  font: inherit;
-  font-size: 0.76rem;
-  font-weight: 700;
-  line-height: 1;
-  padding: 8px 10px;
-  transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
-}
-
-.long-message-button:hover,
-.long-message-button:focus-visible {
-  background: color-mix(in srgb, var(--surface, #18181b) 84%, var(--text, #fafafa) 8%);
-  border-color: var(--muted, #71717a);
-  outline: none;
-}
+.long-message-content.collapsed { mask-image: linear-gradient(#000 calc(100% - 28px), transparent); }
+.long-message-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 18px; margin-top: 12px; }
+.long-message-button { display: inline-flex; align-items: center; gap: 6px; min-height: 30px; padding: 0; border: 0; background: transparent; color: var(--chat-foreground, var(--text)); cursor: pointer; font: inherit; font-size: 12px; font-weight: 500; }
+.long-message-button:first-child::after { content: '⌄'; font-size: 15px; }
+.long-message-button[aria-expanded="true"]::after { transform: rotate(180deg); }
+.long-message-button:hover { text-decoration: underline; text-underline-offset: 3px; }
+.long-message-button:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; border-radius: 3px; }
 
 .long-message-content :deep(.md-content) {
   line-height: 1.68;

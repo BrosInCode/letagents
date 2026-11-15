@@ -1,6 +1,11 @@
 <template>
   <span ref="root" class="desktop-composer-agent-chip-wrap" data-testid="desktop-composer-agent-chip">
     <span ref="chipElement" class="desktop-composer-agent-chip" :data-launching="launching || undefined">
+      <button ref="identityTrigger" type="button" class="desktop-composer-agent-identity-trigger" :disabled="launching"
+        aria-label="Choose agent name and avatar" aria-haspopup="dialog" :aria-expanded="identityOpen"
+        data-testid="desktop-composer-agent-identity-button" @click="showIdentity">
+        <AgentAvatar :avatar="chip.avatar" :name="chip.displayName || providerName" :size="32" />
+      </button>
       <button
         ref="trigger"
         class="desktop-composer-agent-chip-open"
@@ -17,7 +22,7 @@
           <img v-if="chipIcon" :src="chipIcon" alt="" draggable="false" />
           <Bot v-else :size="13" />
         </span>
-        <span class="desktop-composer-agent-chip-who">New {{ providerName }} agent<template v-if="launching"> · starting…</template></span>
+        <span class="desktop-composer-agent-chip-who">{{ chip.displayName || `New ${providerName} agent` }}<template v-if="launching"> · starting…</template></span>
         <span class="desktop-composer-agent-chip-spec">{{ spec }}</span>
         <ChevronUp class="desktop-composer-agent-chip-caret" :size="12" aria-hidden="true" />
       </button>
@@ -33,8 +38,18 @@
       </button>
     </span>
 
+    <Teleport to="body">
+    <div v-if="identityOpen" ref="identityPanel" class="desktop-composer-agent-identity" :style="identityPosition" role="dialog" aria-label="Agent identity"
+      data-testid="desktop-composer-agent-identity" @keydown.esc.stop.prevent="closeIdentity" @keydown.tab="trapIdentityFocus">
+      <header><strong>Make it yours</strong><button type="button" aria-label="Close agent identity" @click="closeIdentity"><X :size="17" /></button></header>
+      <AgentIdentityPicker :model-value="identityAvatar" :name="identityName" compact
+        @update:model-value="chooseAvatar" @update:name="updateIdentityName" />
+      <footer><button type="button" @click="applyIdentity">Done <Check :size="15" /></button></footer>
+    </div>
+    </Teleport>
+
     <div
-      v-if="coachVisible && !open"
+      v-if="coachVisible && !open && !identityOpen"
       class="desktop-composer-agent-coach"
       role="dialog"
       :aria-labelledby="`${menuId}-coach-title`"
@@ -44,7 +59,7 @@
       <p :id="`${menuId}-coach-title`" class="desktop-composer-agent-coach-title">Two steps to start this agent</p>
       <ol :id="`${menuId}-coach-steps`">
         <li>Click the chip to choose the model{{ efforts.length ? ", effort" : "" }} and access.</li>
-        <li>Type its first task, then press Enter.</li>
+        <li>Type its first message, then press Enter.</li>
       </ol>
       <p v-if="fellBackLine" class="desktop-composer-agent-coach-note">{{ fellBackLine }}</p>
       <div class="desktop-composer-agent-coach-foot">
@@ -173,6 +188,11 @@ import type {
 import ComposerStepSlider from "./ComposerStepSlider.vue";
 import type { ComposerAgentReadiness } from "./composer-agent-launch";
 import { providerIconSrc } from "./provider-icon";
+import AgentAvatar from "../../../../../../../../shared/ui/agent-identity/AgentAvatar.vue";
+import AgentIdentityPicker from "../../../../../../../../shared/ui/agent-identity/AgentIdentityPicker.vue";
+import type { AgentAvatar as AgentAvatarDescriptor } from "../../../../../../../../src/shared/agent-avatar";
+import { captureAgentAvatarSource, flyAgentAvatar } from "./agent-avatar-flight";
+import { composerIdentityPosition } from "./composer-identity-position";
 import type { ComposerAgentChip } from "./useComposerAgentDraft";
 
 export interface ComposerAgentWorktreeOption {
@@ -200,6 +220,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
+  "set-identity": [identity: { displayName: string; avatar: AgentAvatarDescriptor | null }];
   "set-model": [model: string | null];
   "set-effort": [effort: DesktopManagedAgentEffort | ""];
   "set-access": [access: DesktopManagedAgentPermissionProfileId];
@@ -218,10 +239,16 @@ const chipElement = ref<HTMLElement | null>(null);
 const trigger = ref<HTMLButtonElement | null>(null);
 const menu = ref<HTMLElement | null>(null);
 const open = ref(false);
+const identityOpen = ref(false);
+const identityName = ref("");
+const identityTrigger = ref<HTMLButtonElement | null>(null);
+const identityPanel = ref<HTMLElement | null>(null);
+const identityPosition = ref<Record<string, string>>({ visibility: "hidden" });
 const animate = ref(false);
 const view = ref<"main" | "where">("main");
 const coachOff = ref(false);
 
+const identityAvatar = computed<AgentAvatarDescriptor>(() => props.chip.avatar || { kind: "character", character: "orbit", color: "sage" });
 const chipIcon = computed(() => providerIconSrc(props.chip.providerId));
 
 const spec = computed(() => {
@@ -247,6 +274,63 @@ const fellBackLine = computed(() => {
   return access ? `${props.providerName} has no ${props.wantedAccessLabel}, so it starts with ${access.label}.` : null;
 });
 
+function showIdentity(): void {
+  if (props.launching) return;
+  if (identityOpen.value) { closeIdentity(); return; }
+  closeMenu();
+  dismissCoach();
+  identityName.value = props.chip.displayName || "";
+  identityOpen.value = true;
+  void nextTick(() => {
+    fitIdentity();
+    identityPanel.value?.querySelector<HTMLInputElement>(".identity-name")?.focus({ preventScroll: true });
+  });
+}
+function fitIdentity(): void {
+  if (!identityOpen.value || !identityTrigger.value || typeof window === "undefined") return;
+  const visual = window.visualViewport;
+  const placement = composerIdentityPosition(identityTrigger.value.getBoundingClientRect(), {
+    left: visual?.offsetLeft || 0, top: visual?.offsetTop || 0,
+    width: visual?.width || window.innerWidth, height: visual?.height || window.innerHeight,
+  });
+  identityPosition.value = {
+    left: `${placement.left}px`, width: `${placement.width}px`, maxHeight: `${placement.height}px`,
+    top: placement.opensAbove ? "auto" : `${placement.top}px`,
+    bottom: placement.opensAbove ? `${window.innerHeight - placement.top - placement.height}px` : "auto",
+    visibility: "visible",
+  };
+}
+function fitPopovers(): void { fitMenu(); fitIdentity(); }
+function closeIdentity(): void {
+  identityOpen.value = false;
+  identityTrigger.value?.focus({ preventScroll: true });
+}
+function updateIdentityName(name: string): void {
+  identityName.value = name;
+  emit("set-identity", { displayName: name, avatar: identityAvatar.value });
+}
+function applyIdentity(): void {
+  emit("set-identity", { displayName: identityName.value, avatar: identityAvatar.value });
+  closeIdentity();
+}
+function chooseAvatar(avatar: AgentAvatarDescriptor | null): void {
+  emit("set-identity", { displayName: identityName.value, avatar });
+  void nextTick(() => {
+    const selector = avatar?.kind === "character"
+      ? `.identity-character-rail [data-character="${avatar.character}"] .agent-identity-avatar`
+      : "[data-agent-avatar-source] .agent-identity-avatar";
+    const source = captureAgentAvatarSource(identityPanel.value?.querySelector<HTMLElement>(selector) ?? null);
+    flyAgentAvatar(source, identityTrigger.value);
+  });
+}
+function trapIdentityFocus(event: KeyboardEvent): void {
+  const controls = Array.from(identityPanel.value?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), [tabindex="0"]') ?? [])
+    .filter(element => element.getClientRects().length > 0);
+  const first = controls[0], last = controls.at(-1);
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+}
+
 /** A click with detail 0 came from the keyboard. */
 function toggle(event: MouseEvent): void {
   if (open.value) {
@@ -254,6 +338,7 @@ function toggle(event: MouseEvent): void {
     return;
   }
   dismissCoach();
+  identityOpen.value = false;
   view.value = "main";
   animate.value = event.detail !== 0 && !prefersReducedMotion();
   open.value = true;
@@ -265,6 +350,7 @@ function toggle(event: MouseEvent): void {
 }
 
 function closeMenu(): void {
+  identityOpen.value = false;
   open.value = false;
   animate.value = false;
   view.value = "main";
@@ -371,10 +457,10 @@ function handleMenuKey(event: KeyboardEvent): void {
 }
 
 function closeOnOutsidePointer(event: PointerEvent): void {
-  if (root.value && !root.value.contains(event.target as Node)) closeMenu();
+  if (root.value && !root.value.contains(event.target as Node) && !identityPanel.value?.contains(event.target as Node)) closeMenu();
 }
 function closeOnEscape(event: KeyboardEvent): void {
-  if (event.key !== "Escape" || menu.value?.contains(event.target as Node)) return;
+  if (event.key !== "Escape" || (menu.value?.contains(event.target as Node) || identityPanel.value?.contains(event.target as Node))) return;
   event.preventDefault();
   closeMenu();
 }
@@ -383,9 +469,14 @@ function setDocumentListeners(listening: boolean): void {
   const method = listening ? "addEventListener" : "removeEventListener";
   document[method]("pointerdown", closeOnOutsidePointer as EventListener, true);
   document[method]("keydown", closeOnEscape as EventListener, true);
-  if (typeof window !== "undefined") window[method]("resize", fitMenu);
+  if (typeof window !== "undefined") {
+    window[method]("resize", fitPopovers);
+    window[method]("scroll", fitIdentity, true);
+    window.visualViewport?.[method]("resize", fitIdentity);
+    window.visualViewport?.[method]("scroll", fitIdentity);
+  }
 }
-watch(open, setDocumentListeners);
+watch(() => open.value || identityOpen.value, setDocumentListeners);
 watch(() => props.launching, (launching) => { if (launching) closeMenu(); });
 // Models arrive late (a CLI cache read); refit when the list changes under an open menu.
 watch(() => props.models, () => { if (open.value) void nextTick(fitMenu); });
@@ -410,6 +501,7 @@ function prefersReducedMotion(): boolean {
 
 /** Opens the settings from the composer's notice, at the main list or straight at "Works in". */
 function openAt(at: "main" | "where"): void {
+  identityOpen.value = false;
   dismissCoach();
   animate.value = false;
   open.value = true;
@@ -424,5 +516,19 @@ function openAt(at: "main" | "where"): void {
   }
 }
 
-defineExpose({ close: closeMenu, open: openAt, isOpen: () => open.value, focus: () => trigger.value?.focus({ preventScroll: true }) });
+defineExpose({ avatarElement: () => identityTrigger.value, close: closeMenu, open: openAt, isOpen: () => open.value || identityOpen.value, focus: () => trigger.value?.focus({ preventScroll: true }) });
 </script>
+
+<style scoped>
+.desktop-composer-agent-identity-trigger{display:grid;place-items:center;width:42px;padding:2px;flex:none;border:0;border-radius:12px;background:transparent;color:var(--text);cursor:pointer}
+.desktop-composer-agent-identity-trigger:hover{background:var(--hover)}
+.desktop-composer-agent-identity-trigger:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.desktop-composer-agent-identity{position:fixed;box-sizing:border-box;z-index:1000;overflow:auto;padding:18px;border:1px solid var(--border-strong);border-radius:24px;background:var(--bg-secondary,#111);color:var(--text);box-shadow:0 20px 70px #0005;overscroll-behavior:contain;animation:identity-arrive 220ms cubic-bezier(.2,.75,.2,1)}
+.desktop-composer-agent-identity header,.desktop-composer-agent-identity footer{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.desktop-composer-agent-identity header{margin-bottom:16px;font-size:14px}
+.desktop-composer-agent-identity header button{border:0;background:transparent;color:var(--text-secondary);padding:7px;cursor:pointer}
+.desktop-composer-agent-identity footer{justify-content:flex-end;margin-top:14px}
+.desktop-composer-agent-identity footer button{display:flex;align-items:center;gap:10px;border:0;border-radius:10px;padding:9px 14px;background:var(--text);color:var(--bg);font:inherit;cursor:pointer}
+@keyframes identity-arrive{from{opacity:0;transform:translateY(8px) scale(.98)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){.desktop-composer-agent-identity{animation:none}}
+</style>

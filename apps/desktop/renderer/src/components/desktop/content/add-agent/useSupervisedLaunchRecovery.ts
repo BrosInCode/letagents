@@ -232,19 +232,22 @@ export function useSupervisedLaunchRecovery(options: {
     }
   }
 
-  async function offerAmbiguousCreation(creationRequestId: string, roomIdentifier: string): Promise<void> {
+  async function offerAmbiguousCreation(creationRequestId: string, roomIdentifier: string): Promise<DesktopSupervisorManifestEntry | null> {
     const generation = ambiguousGeneration;
     const refreshed = await refreshSupervisedRuntimeEntry(
       desktopIpc.supervisor,
       roomIdentifier,
       `supervised_${creationRequestId}`,
     );
-    if (generation !== ambiguousGeneration || options.roomIdentifier() !== roomIdentifier) return;
+    if (generation !== ambiguousGeneration || options.roomIdentifier() !== roomIdentifier) return null;
     if (!refreshed.entry) {
       if (!refreshed.error) options.forgetLaunch(roomIdentifier, `supervised_${creationRequestId}`);
-      return;
+      return null;
     }
     if (options.open()) offer(refreshed.entry);
+    // The room may display this confirmed save even when the create surface
+    // has closed. No recovery is activated and no new create is attempted.
+    return refreshed.entry;
   }
 
   function invalidateAmbiguousLookups(): void {

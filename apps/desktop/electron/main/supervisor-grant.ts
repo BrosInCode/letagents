@@ -1,3 +1,4 @@
+import { normalizeAgentAvatar, type AgentAvatar } from "../../../../shared/agent-avatar.mjs";
 import { Buffer } from "node:buffer";
 import { letagentsHomePath } from "../../../../shared/letagents-home.mjs";
 import { createHash, randomUUID } from "node:crypto";
@@ -1352,10 +1353,12 @@ export async function revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(
  * agents.
  */
 export async function getOrCreateDesktopSupervisorAgentIdentity(input: {
+  avatar?: AgentAvatar | null;
   entryId: string;
   displayName?: string | null;
   providerId?: string | null;
 }, options: { apiFetch?: typeof apiFetch } = {}): Promise<string> {
+  if (input.avatar != null && !normalizeAgentAvatar(input.avatar)) throw new Error("Invalid agent avatar.");
   const entryId = input.entryId.trim();
   if (!entryId) throw new Error("A durable supervised entry identity is required.");
   // Missing provider ids belong to the historical Codex call shape. Preserve
@@ -1372,7 +1375,8 @@ export async function getOrCreateDesktopSupervisorAgentIdentity(input: {
   // local data alone.
   const created = await request<{ canonical_key?: unknown }>("/agents", {
     method: "POST",
-    body: JSON.stringify({ name, display_name: input.displayName?.trim() || "Supervised agent" }),
+    body: JSON.stringify({ name, display_name: input.displayName?.trim() || "Supervised agent",
+      ...(input.avatar === undefined ? {} : { avatar: normalizeAgentAvatar(input.avatar) }) }),
   });
   if (typeof created.canonical_key !== "string" || !created.canonical_key.trim()) {
     throw new Error("LetAgents did not return a canonical supervised agent identity.");

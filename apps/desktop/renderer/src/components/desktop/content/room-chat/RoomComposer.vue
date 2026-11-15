@@ -114,6 +114,7 @@
         :coach-visible="agentCoachVisible"
         :wanted-access-label="personalAccessLevel(agentPersonalAccess).label"
         :from-rect="agentChipFromRect"
+        @set-identity="agentDraft.setIdentity"
         @set-model="agentDraft.setModel"
         @set-effort="agentDraft.setEffort"
         @set-access="agentDraft.setAccess"
@@ -274,6 +275,7 @@ import RoomComposerAgentChip from "./RoomComposerAgentChip.vue";
 import RoomComposerAccessDefault from "./RoomComposerAccessDefault.vue";
 import { personalAccessLevel, readCoachHintDismissed, rememberCoachHintDismissed } from "./composer-agent-access";
 import { composerAgentLaunchKey, composerAgentName } from "./composer-agent-launch";
+import { captureAgentAvatarSource } from "./agent-avatar-flight";
 import { useComposerAgentDraft } from "./useComposerAgentDraft";
 import { supervisorEntriesKey } from "../add-agent/supervisor-entries-context";
 import { composerSuggestedReplyKey, settleSuggestion, suggestionSettled } from "./composer-suggested-reply";
@@ -787,12 +789,15 @@ async function startAgentFromDraft(): Promise<void> {
   }
   agentCoachVisible.value = false;
   const text = draft.value.trim();
+  const source = captureAgentAvatarSource(agentChipElement.value?.avatarElement() ?? null);
+  const roomAtStart = props.roomIdentifier;
   const clearSubmittedText = captureSubmittedDraft();
   const result = await agentDraft.launch(text);
   if (result.outcome !== "started") {
     if (result.outcome === "blocked" && agentNotice.value) focusInput();
     return;
   }
+  if (roomAtStart === props.roomIdentifier) agentHost?.agentSaved?.(result.entry, source);
   typing.stop();
   clearSubmittedText();
   focusInput();

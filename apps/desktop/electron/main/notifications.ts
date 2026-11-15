@@ -5,6 +5,7 @@ import type {
   DesktopNotificationStatus,
   DesktopNotificationTarget,
 } from "../ipc-types.js";
+import { isIsolatedDesktopPreview } from "./preview-mode.js";
 import { apiFetch } from "./auth.js";
 import {
   parseDesktopNotificationLaunchInfo,
@@ -39,7 +40,7 @@ function getStateStore(): DesktopNotificationStateStore {
 }
 
 function isNativeSupported(): boolean {
-  return process.platform === "darwin" && app.isPackaged;
+  return !isIsolatedDesktopPreview() && process.platform === "darwin" && app.isPackaged;
 }
 
 async function readState(): Promise<PersistedNotificationState> {
@@ -118,7 +119,7 @@ function handleApnsNotification(_event: Electron.Event, userInfo: Record<string,
 }
 
 export function prepareDesktopNotifications(): void {
-  if (process.platform !== "darwin") return;
+  if (isIsolatedDesktopPreview() || process.platform !== "darwin") return;
   pushNotifications.on("received-apns-notification", handleApnsNotification);
 }
 
@@ -154,8 +155,8 @@ export async function unregisterDesktopNotificationAccount(): Promise<void> {
   setDesktopNotificationBadgeCount(0);
   await initializeDesktopNotifications();
   const current = await readState();
-  if (current.deviceToken) await deleteDevice().catch(() => undefined);
-  if (process.platform === "darwin") pushNotifications.unregisterForAPNSNotifications();
+  if (!isIsolatedDesktopPreview() && current.deviceToken) await deleteDevice().catch(() => undefined);
+  if (!isIsolatedDesktopPreview() && process.platform === "darwin") pushNotifications.unregisterForAPNSNotifications();
   current.deviceToken = null;
   await persistState();
 }
@@ -166,7 +167,7 @@ export async function getDesktopNotificationStatus(): Promise<DesktopNotificatio
   return {
     enabled: current.enabled,
     nativeSupported: isNativeSupported(),
-    nativeRegistered: Boolean(current.enabled && current.deviceToken && !current.lastError),
+    nativeRegistered: !isIsolatedDesktopPreview() && Boolean(current.enabled && current.deviceToken && !current.lastError),
     lastError: current.lastError,
   };
 }
@@ -181,8 +182,8 @@ export async function setDesktopNotificationsEnabled(enabled: boolean): Promise<
     await registerNativeDevice();
     setDesktopNotificationBadgeCount(badgeCount);
   } else {
-    await deleteDevice().catch(() => undefined);
-    if (process.platform === "darwin") pushNotifications.unregisterForAPNSNotifications();
+    if (!isIsolatedDesktopPreview()) await deleteDevice().catch(() => undefined);
+    if (!isIsolatedDesktopPreview() && process.platform === "darwin") pushNotifications.unregisterForAPNSNotifications();
     current.deviceToken = null;
     await persistState();
   }

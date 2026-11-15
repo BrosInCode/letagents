@@ -14,6 +14,7 @@
           <p>{{ activePaneDescription }}</p>
         </div>
         <button
+          v-if="activePane !== 'system:styling'"
           class="ghost-button settings-header-button"
           type="button"
           :disabled="busy || diagnosticsPane?.busy || agentsPane?.busy"
@@ -60,6 +61,8 @@
       >
         <SupervisedAgentsUnavailableNotice />
       </section>
+
+      <ChatStylingSettings v-else-if="activePane === 'system:styling'" />
 
       <SettingsRentingPane
         v-else-if="activePane === 'account:renting'"
@@ -218,6 +221,7 @@ import SettingsSupervisorGrantPane from "../settings/panes/SettingsSupervisorGra
 import SupervisedAgentsUnavailableNotice from "./SupervisedAgentsUnavailableNotice.vue";
 import { supervisedAgentsSupported } from "../../../domain/supervised-agents-support";
 import SettingsSidebar from "../settings/SettingsSidebar.vue";
+import ChatStylingSettings from "../../../../../../../shared/ui/ChatStylingSettings.vue";
 import ConnectorsPage from "../../../../../../../shared/ui/connectors/ConnectorsPage.vue";
 import { remoteConnectorUrl } from "../settings/connectors";
 import type {

@@ -7,6 +7,10 @@ const modalSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/AddAgentModal.vue",
   import.meta.url,
 )), "utf8");
+const setupPresentationSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/add-agent/useAgentSetupPresentation.ts",
+  import.meta.url,
+)), "utf8");
 
 const progressSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/SupervisedLaunchProgress.vue",
@@ -34,6 +38,10 @@ const launchActionsSource = readFileSync(fileURLToPath(new URL(
 )), "utf8");
 const launchActionStyles = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/AddAgentSupervisedLaunchActions.module.css",
+  import.meta.url,
+)), "utf8");
+const firstMessageSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/add-agent/AddAgentFirstMessage.vue",
   import.meta.url,
 )), "utf8");
 const actionBarSource = readFileSync(fileURLToPath(new URL(
@@ -229,10 +237,10 @@ test("a ready supervised launch can start another without stopping the completed
   );
   assert.match(releaseBody, /dismiss\(\);/);
   assert.doesNotMatch(releaseBody, /stop\(/);
-  // The renderer sends no name: the background service assigns one from the
-  // names already taken in the room.
+  // The renderer supplies a name choice; uniqueness is still owned by the
+  // background service, without a racy renderer lookup.
   assert.doesNotMatch(controllerSource, /suggestSupervisedAgentCodename|lookupExistingDisplayNames/);
-  assert.match(controllerSource, /providerId: snapshot\.providerId,[\s\S]*?displayName: "",/);
+  assert.match(controllerSource, /providerId: snapshot\.providerId,[\s\S]*?displayName: snapshot\.displayName\?\.trim\(\) \?\? "",/);
 });
 
 test("bounded supervised defaults never tell providers to own polling and Claude shows the effort it passes", () => {
@@ -247,10 +255,11 @@ test("bounded supervised defaults never tell providers to own polling and Claude
 });
 
 test("supervised creation presents the first message as a one-time message, not a task", () => {
-  assert.match(runtimeSettingsSource, /<small>First message<\/small>/);
-  assert.doesNotMatch(runtimeSettingsSource, /<small>First task<\/small>/);
-  assert.match(runtimeSettingsSource, /It is sent once/);
-  assert.doesNotMatch(runtimeSettingsSource, /<small>Charter<\/small>/);
+  assert.match(firstMessageSource, /<small>First message<\/small>/);
+  assert.match(modalSource, /<AddAgentFirstMessage v-model="supervisedCharter"/);
+  assert.doesNotMatch(firstMessageSource, /<small>First task<\/small>/);
+  assert.match(firstMessageSource, /It is sent once/);
+  assert.doesNotMatch(firstMessageSource, /<small>Charter<\/small>/);
   assert.match(actionBarSource, /Add a first message to start the agent/);
 });
 
@@ -344,7 +353,8 @@ test("the launch progress component exposes phased, accessible, honest UI hooks"
   assert.match(launchComponentSource, /desktop-add-agent-supervised-lookup-error"[\s\S]*?tabindex="-1"/);
   assert.match(feedbackSource, /:role="tone === 'error' \? 'alert' : 'status'"/);
   assert.match(feedbackSource, /:aria-live="tone === 'error' \? 'assertive' : 'polite'"/);
-  assert.match(modalSource, /querySelector<HTMLElement>[\s\S]*?desktop-add-agent-supervised-runtime[\s\S]*?\.focus\(\)/);
+  assert.match(modalSource, /useAgentSetupPresentation\(props, configuredName, configuredAvatar, supervisedUi\)/);
+  assert.match(setupPresentationSource, /querySelector<HTMLElement>[\s\S]*?desktop-add-agent-supervised-runtime[\s\S]*?\.focus\(\)/);
   assert.match(progressSource, /if \(p\.failed\) return "";/);
   assert.match(progressSource, /if \(p\.status === "stopping"\) return p\.headline;[\s\S]*?if \(p\.failed\) return "";/);
   assert.match(progressSource, /case "stopping": return "Cancelling";/);

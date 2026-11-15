@@ -183,6 +183,7 @@ export function buildAgentParticipant(input: {
   return {
     key,
     kind: 'agent',
+    avatar: presenceEntry?.avatar ?? participant?.avatar,
     label,
     actorLabel,
     agentKey: presenceEntry?.agent_key || participant?.agent_key || null,

@@ -1,33 +1,11 @@
 <template>
   <section
-    v-if="hasSupervisedRuntime(provider)"
+    v-if="showFirstMessage && hasSupervisedRuntime(provider)"
     class="desktop-add-agent-delivery"
     aria-label="Where the agent works"
     data-testid="desktop-add-agent-execution"
   >
-    <label class="desktop-add-agent-model-custom-input">
-      <small>First message</small>
-      <!-- An edit can arrive with only a change event, e.g. a value set through
-           accessibility automation. Without this the form kept the old task, and
-           the next re-render (choosing an access level re-runs setup) wrote it
-           back over the typed text. -->
-      <textarea
-        :value="charter"
-        rows="3"
-        placeholder="What should this agent work on?"
-        required
-        :aria-invalid="!charter.trim()"
-        :aria-describedby="!charter.trim() ? 'desktop-add-agent-supervised-charter-error' : undefined"
-        data-testid="desktop-add-agent-supervised-charter"
-        @input="emit('update:charter', ($event.target as HTMLTextAreaElement).value)"
-        @change="emit('update:charter', ($event.target as HTMLTextAreaElement).value)"
-      />
-      <small
-        v-if="!charter.trim()"
-        id="desktop-add-agent-supervised-charter-error"
-        class="desktop-add-agent-field-error"
-      >Add the first message the agent should handle after it joins. It is sent once.</small>
-    </label>
+    <AddAgentFirstMessage :model-value="charter" @update:model-value="emit('update:charter', $event)" />
     <p>{{ executionDescription }}</p>
   </section>
 
@@ -44,61 +22,41 @@
         <em v-if="selectedPermissionProfile?.risk === 'high'">High risk</em>
       </span>
     </summary>
-    <div class="desktop-add-agent-permission-options">
-      <button
-        v-for="profile in permissionProfiles"
-        :key="profile.id"
-        type="button"
-        :data-selected="profile.id === selectedPermissionProfile?.id"
-        :aria-pressed="profile.id === selectedPermissionProfile?.id"
-        :data-state="profile.status"
-        :disabled="profile.status !== 'available'"
-        @click="emit('select-permission', profile)"
-      >
-        <span class="desktop-add-agent-permission-option-title">
-          <strong>{{ profile.label }}</strong><em :data-risk="profile.risk">{{ profile.risk }}</em>
-        </span>
-        <small>{{ permissionOptionSummary(profile) }}</small>
-        <small
-          v-if="supervisedPermissionProfileLimits(provider?.id, profile)"
-          class="desktop-add-agent-permission-limits"
-          data-testid="desktop-add-agent-permission-limits"
-        >{{ supervisedPermissionProfileLimits(provider?.id, profile) }}</small>
-      </button>
-    </div>
-    <p v-if="selectedPermissionProfile">{{ managedAgentPermissionProfileSummary(selectedPermissionProfile) }}</p>
+    <AgentAccessControl :model-value="selectedPermissionProfile?.id || ''" :options="permissionProfiles" @update:model-value="selectAccess" />
+    <p v-if="selectedPermissionProfile && supervisedPermissionProfileLimits(provider?.id, selectedPermissionProfile)" class="desktop-add-agent-permission-limits" data-testid="desktop-add-agent-permission-limits">{{ supervisedPermissionProfileLimits(provider?.id, selectedPermissionProfile) }}</p>
+
   </details>
 
 </template>
 
 <script setup lang="ts">
+import AddAgentFirstMessage from "./AddAgentFirstMessage.vue";
+import AgentAccessControl from "../../../../../../../../shared/ui/agent-identity/AgentAccessControl.vue";
 import type {
   DesktopAgentProvider,
   DesktopManagedAgentPermissionProfile,
 } from "../../../../../../electron/ipc-types";
 import {
   hasSupervisedRuntime,
-  managedAgentPermissionProfileStatusLabel,
-  managedAgentPermissionProfileSummary,
   supervisedPermissionProfileLimits,
 } from "../../../../domain/managed-agents";
 
-defineProps<{
+const props = withDefaults(defineProps<{
+  showFirstMessage?: boolean;
   provider: DesktopAgentProvider | null;
   executionDescription: string;
   charter: string;
   permissionProfiles: DesktopManagedAgentPermissionProfile[];
   selectedPermissionProfile: DesktopManagedAgentPermissionProfile | null;
-}>();
+}>(), { showFirstMessage: true });
 const emit = defineEmits<{
   "update:charter": [value: string];
   "select-permission": [profile: DesktopManagedAgentPermissionProfile];
 }>();
 
-function permissionOptionSummary(profile: DesktopManagedAgentPermissionProfile): string {
-  return profile.status === "available"
-    ? profile.description
-    : `${managedAgentPermissionProfileStatusLabel(profile.status)} - ${profile.detail || profile.description}`;
+function selectAccess(id: string): void {
+  const profile = props.permissionProfiles.find(option => option.id === id);
+  if (profile?.status === 'available') emit('select-permission', profile);
 }
 </script>
 <style scoped src="./AddAgentFormField.css"></style>

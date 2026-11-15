@@ -13,6 +13,7 @@ export type ParticipantKind = "agent" | "human";
 export type ActivityIcon = "radio" | "pulse" | "power" | "user" | "brain" | "clock" | "task";
 
 export interface ActivityParticipant {
+  avatar?: DesktopAgentPresence["avatar"];
   key: string;
   kind: ParticipantKind;
   label: string;

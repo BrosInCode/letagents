@@ -9,7 +9,7 @@
       >
         <section
           ref="dialogElement"
-          class="desktop-add-agent-modal"
+          class="desktop-add-agent-modal agent-refresh-modal"
           role="dialog"
           aria-modal="true"
           aria-labelledby="desktop-add-agent-title"
@@ -19,11 +19,10 @@
         >
           <header class="desktop-add-agent-header">
             <div>
-              <h3 id="desktop-add-agent-title">Add agent</h3>
-              <p>
-                Start an agent in <strong data-testid="desktop-add-agent-room-label">{{ roomLabel }}</strong>.
-              </p>
+              <h3 id="desktop-add-agent-title">Add an agent</h3>
+              <span class="agent-refresh-room" data-testid="desktop-add-agent-room-label">{{ roomLabel }}</span>
             </div>
+            <button type="button" class="agent-motion-toggle" :aria-label="motionPaused ? 'Resume animations' : 'Pause animations'" :aria-pressed="motionPaused" @click="motionPaused = !motionPaused"><span aria-hidden="true">{{ motionPaused ? '▷' : 'Ⅱ' }}</span></button>
             <button
               class="desktop-modal-close"
               type="button"
@@ -33,7 +32,19 @@
               <X aria-hidden="true" />
             </button>
           </header>
-          <div class="desktop-add-agent-body">
+          <nav class="agent-refresh-steps" aria-label="Agent setup steps">
+            <button type="button" :aria-current="step === 'identity' ? 'step' : undefined" :disabled="Boolean(supervisedUi.launch.view.value)" @click="showStep('identity', $event)"><span>01</span> Identity</button>
+            <button type="button" :aria-current="step === 'brain' ? 'step' : undefined" @click="showStep('brain', $event)"><span>02</span> Brain</button>
+          </nav>
+          <div ref="turnBody" class="desktop-add-agent-body agent-refresh-body" :data-turning="turning">
+            <div ref="turnStage" class="agent-refresh-stage">
+            <section class="agent-refresh-panel agent-refresh-identity" :inert="step !== 'identity'" :aria-hidden="step !== 'identity'">
+              <h4>Make it yours.</h4>
+              <AgentIdentityPicker v-model="identityAvatar" v-model:name="configuredName" :active="open && (step === 'identity' || turning)" :animate="!motionPaused" :error="identityError" />
+              <div v-if="hasSupervisedRuntime(selectedProvider)" class="agent-refresh-first-message"><AddAgentFirstMessage v-model="supervisedCharter" /></div>
+            </section>
+            <section class="agent-refresh-panel agent-refresh-brain" :inert="step !== 'brain'" :aria-hidden="step !== 'brain'">
+            <AgentBrain :provider="selectedProviderId" :provider-name="selectedProvider?.name || 'Agent'" :model="selectedModelChoice" :effort="selectedEffort" :active="open && step === 'brain'" :animate="!motionPaused" />
             <AddAgentProviderRail
               :providers="providers"
               :selected-provider-id="selectedProviderId"
@@ -82,6 +93,7 @@
               :model-options="modelSelectOptions"
               :custom="selectedModelMode === 'custom'"
               :custom-model-id="customModelId"
+              :custom-model-error="customModelError"
               :model-description="modelSelectorDescription"
               :show-effort="showEffortSelector"
               :effort="selectedEffort"
@@ -96,6 +108,7 @@
               @update:effort="handleEffortValue"
             />
             <AddAgentRuntimeSettings
+              :show-first-message="false"
               :provider="selectedProvider"
               :execution-description="lifecycleDescription"
               :charter="supervisedCharter"
@@ -110,7 +123,18 @@
 
             <AddAgentFeedback v-if="setupMessage" :message="setupMessage" :tone="setupMessageTone" />
 
-            <template #actions>
+
+
+            </AddAgentSetupStatus>
+            </section>
+            </div>
+          </div>
+          <footer class="agent-refresh-footer">
+            <button type="button" class="agent-refresh-back" @click="step === 'brain' ? showStep('identity', $event) : emit('close')" :disabled="step === 'brain' && Boolean(supervisedUi.launch.view.value)">{{ step === 'brain' ? '← Back to identity' : 'Cancel' }}</button>
+            <button v-if="step === 'identity'" type="button" class="agent-refresh-continue" @click="showStep('brain', $event)">Continue to brain <span aria-hidden="true">→</span></button>
+            <template v-else>
+              <span class="agent-refresh-selected" data-agent-avatar-source><AgentAvatar :avatar="identityAvatar" :name="configuredName" :size="32" /><span>{{ configuredName }}</span></span>
+
               <AddAgentActionBar
                 :provider-id="selectedProviderId"
                 :provider="selectedProvider"
@@ -144,10 +168,9 @@
                 @start="startManagedAgent"
                 @recover-launch="handleRecoverSupervisedLaunch"
               />
-            </template>
 
-            </AddAgentSetupStatus>
-          </div>
+            </template>
+          </footer>
         </section>
       </div>
     </Transition>
@@ -156,12 +179,16 @@
 
 <script setup lang="ts">
 import { X } from "@lucide/vue";
-import { nextTick, ref, watch } from "vue";
+import { useAgentSetupPresentation } from "./add-agent/useAgentSetupPresentation";
+import AgentIdentityPicker from "../../../../../../../shared/ui/agent-identity/AgentIdentityPicker.vue";
+import AgentAvatar from "../../../../../../../shared/ui/agent-identity/AgentAvatar.vue";
+import AgentBrain from "../../../../../../../shared/ui/agent-identity/AgentBrain.vue";
 import AddAgentActionBar from "./add-agent/AddAgentActionBar.vue";
 import AddAgentProviderRail from "./add-agent/AddAgentProviderRail.vue";
 import AddAgentSetupStatus from "./add-agent/AddAgentSetupStatus.vue";
 import AddAgentOpenModelSettings from "./add-agent/AddAgentOpenModelSettings.vue";
 import AddAgentModelSettings from "./add-agent/AddAgentModelSettings.vue";
+import AddAgentFirstMessage from "./add-agent/AddAgentFirstMessage.vue";
 import AddAgentRuntimeSettings from "./add-agent/AddAgentRuntimeSettings.vue";
 import AddAgentSupervisedLaunch from "./add-agent/AddAgentSupervisedLaunch.vue";
 import AddAgentFeedback from "./add-agent/AddAgentFeedback.vue";
@@ -172,54 +199,17 @@ import {
   type AddAgentModalProps,
 } from "./add-agent/useAddAgentController";
 import {
+  hasSupervisedRuntime,
   externalMcpProviderInstruction,
   isExternalMcpProviderReady,
 } from "../../../domain/managed-agents";
-import {
-  currentFocusableElement,
-  restoreFocus,
-  trapFocusInDialog,
-} from "./modal-focus";
+
 
 const props = defineProps<AddAgentModalProps>();
 const emit = defineEmits<AddAgentModalEvents>();
-const dialogElement = ref<HTMLElement | null>(null);
-const openModelSettings = ref<InstanceType<typeof AddAgentOpenModelSettings> | null>(null);
-let previousFocusElement: HTMLElement | null = null;
+const { configuredName, configuredAvatar, roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelContextWindow, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, customModelError, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, providerModelCliUpdate, refreshProviderModels, handleModelChoiceValue, handleEffortValue, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, selectPermissionProfile, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent } = useAddAgentController(props, emit as AddAgentModalEmit);
 
-watch(() => props.open, (open) => {
-  if (open) {
-    previousFocusElement = currentFocusableElement();
-    void nextTick(() => dialogElement.value?.focus());
-  }
-}, { immediate: true });
+const { dialogElement, openModelSettings, handleAfterLeave, handleDialogTab, handleRecoverSupervisedLaunch, step, identityError, identityAvatar, motionPaused, turnBody, turnStage, turning, showStep } = useAgentSetupPresentation(props, configuredName, configuredAvatar, supervisedUi);
 
-// Opened from a chip's "Configure Open Model…": bring the Open Model settings into view once they render.
-watch(() => props.open && props.initialSection === "open-model" && Boolean(openModelSettings.value), (show) => {
-  if (!show) return;
-  void nextTick(() => {
-    const element = openModelSettings.value?.$el as HTMLElement | undefined;
-    element?.scrollIntoView?.({ block: "start", behavior: "smooth" });
-    element?.querySelector<HTMLElement>("input")?.focus({ preventScroll: true });
-  });
-});
-
-function handleAfterLeave(): void {
-  if (props.open) return;
-  restoreFocus(previousFocusElement);
-  previousFocusElement = null;
-}
-
-function handleDialogTab(event: KeyboardEvent): void {
-  trapFocusInDialog(event, dialogElement.value);
-}
-
-async function handleRecoverSupervisedLaunch(): Promise<void> {
-  await supervisedUi.launch.recoverDetectedLaunch();
-  if (supervisedUi.launch.recoveryCandidate.value) return;
-  await nextTick();
-  dialogElement.value?.querySelector<HTMLElement>('[data-testid="desktop-add-agent-supervised-runtime"], [data-testid="desktop-add-agent-supervised-lookup-error"]')?.focus();
-}
-
-const { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelContextWindow, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, providerModelCliUpdate, refreshProviderModels, handleModelChoiceValue, handleEffortValue, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, selectPermissionProfile, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent } = useAddAgentController(props, emit as AddAgentModalEmit);
 </script>
+<style scoped src="./add-agent/AddAgentRefresh.css"></style>

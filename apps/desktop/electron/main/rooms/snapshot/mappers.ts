@@ -1,3 +1,4 @@
+import { normalizeAgentAvatar } from "../../../../../../shared/agent-avatar.mjs";
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
@@ -167,6 +168,7 @@ function mapTasks(
 export function mapParticipants(data: ParticipantsResponse): DesktopParticipantSummary[] {
   return (data.participants || []).map((participant) => ({
     participantKey: participant.participant_key,
+    ...(normalizeAgentAvatar(participant.avatar) ? { avatar: normalizeAgentAvatar(participant.avatar) } : {}),
     kind: participant.kind,
     displayName: participant.display_name,
     actorLabel: participant.actor_label || null,
@@ -185,6 +187,7 @@ export function mapParticipants(data: ParticipantsResponse): DesktopParticipantS
 
 export function mapPresence(data: PresenceResponse): DesktopAgentPresence[] {
   return (data.presence || []).map((entry) => ({
+    ...(entry.avatar ? { avatar: normalizeAgentAvatar(entry.avatar) } : {}),
     roomId: entry.room_id,
     actorLabel: entry.actor_label,
     agentKey: entry.agent_key || null,

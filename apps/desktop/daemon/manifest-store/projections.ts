@@ -1,3 +1,4 @@
+import { normalizeAgentAvatar } from "../../../../shared/agent-avatar.mjs";
 /**
  * Entry rows to and from the decomposed domain projection tables.
  *
@@ -84,7 +85,7 @@ export const projections = storeMethods({
       assertNoPollingActivation(database, identity.agent_id);
     }
     run(database.prepare("INSERT INTO agent_identities VALUES (?, ?, ?, ?)"), identity.agent_id, identity.created_by, identity.created_at, sortOrder);
-    run(database.prepare("INSERT INTO agent_profiles VALUES (?, ?)"), identity.agent_id, profile.display_name);
+    run(database.prepare("INSERT INTO agent_profiles(agent_id, display_name, avatar_json) VALUES (?, ?, ?)"), identity.agent_id, profile.display_name, profile.avatar ? json(profile.avatar) : null);
     run(database.prepare("INSERT INTO agent_room_memberships(agent_id, room_id, local_room_id) VALUES (?, ?, ?)"), identity.agent_id, membership.room_id, membership.local_room_id ?? null);
     const policyPresent = Object.hasOwn(configuration, "provider_launch_policy");
     const policyUndefined = policyPresent && configuration.provider_launch_policy === undefined;
@@ -315,7 +316,7 @@ export const projections = storeMethods({
     };
     return {
       identity: { agent_id: agentId, created_by: String(row.created_by), created_at: String(row.created_at) },
-      profile: { agent_id: agentId, display_name: String(row.display_name) },
+      profile: { agent_id: agentId, display_name: String(row.display_name), ...(row.avatar_json ? { avatar: normalizeAgentAvatar(parseJson(row.avatar_json)) } : {}) },
       membership: { agent_id: agentId, room_id: String(row.room_id), ...(row.local_room_id == null ? {} : { local_room_id: String(row.local_room_id) }) },
       configuration: { agent_id: agentId, provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), ...(row.delivery_mode !== "mcp_polling" ? { delivery_mode: String(row.delivery_mode) as DaemonManifestEntry["delivery_mode"] } : {}), ...(row.delivery_cutover_json === null ? {} : { delivery_cutover: parseJson(row.delivery_cutover_json) }), ...(bool(row.provider_launch_policy_present) ? { provider_launch_policy: bool(row.provider_launch_policy_undefined) ? undefined : parseJson(row.provider_launch_policy_json) } : {}) },
       launch_intent: { agent_id: agentId, desired_state: String(row.desired_state) as DaemonManifestEntry["desired_state"], ...(bool(row.source_repo_path_present) ? { source_repo_path: nullableString(row.source_repo_path) } : {}) },

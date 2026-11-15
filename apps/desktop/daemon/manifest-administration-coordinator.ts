@@ -1,3 +1,4 @@
+import { normalizeAgentAvatar } from "../../../shared/agent-avatar.mjs";
 import { isDeepStrictEqual } from "node:util";
 
 import {
@@ -188,6 +189,7 @@ export class ManifestAdministrationCoordinator {
   constructor(private readonly options: ManifestAdministrationCoordinatorOptions) {}
 
   validateEntry(entry: DaemonManifestEntry): void {
+    if (entry.avatar != null && !normalizeAgentAvatar(entry.avatar)) throw new Error("Invalid agent avatar.");
     for (const field of ["id", "room_id", "display_name", "provider", "charter", "created_by", "created_at"] as const) {
       if (typeof entry[field] !== "string" || !entry[field].trim()) {
         throw new Error(`Manifest entry ${field} is required.`);

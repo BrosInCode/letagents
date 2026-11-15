@@ -1,3 +1,4 @@
+import type { AgentAvatar } from "../../../../../../shared/agent-avatar.mjs";
 import type {
   DesktopReasoningSession,
   DesktopRoomSharedArtifactDetail,
@@ -56,6 +57,7 @@ export interface FocusRoomsResponse {
 
 export interface ParticipantsResponse {
   participants?: Array<{
+    avatar?: AgentAvatar | null;
     participant_key: string;
     kind: "human" | "agent";
     display_name: string;
@@ -76,6 +78,7 @@ export interface ParticipantsResponse {
 
 export interface PresenceResponse {
   presence?: Array<{
+    avatar?: AgentAvatar | null;
     room_id: string;
     actor_label: string;
     agent_key: string | null;

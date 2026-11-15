@@ -1,19 +1,23 @@
 <template>
-  <span class="chat-avatar" :class="{ 'is-agent': agent }" :aria-label="agent ? `${name} · ${provider || 'Agent'}` : name" role="img">
-    <img v-if="source && !failed" :key="source" :src="source" alt="" draggable="false" referrerpolicy="no-referrer" @error="failed = true" />
+  <span class="chat-avatar" :class="{ 'is-agent': agent, 'has-identity': identityAvatar }" :aria-label="agent ? `${name} · ${provider || 'Agent'}` : name" role="img">
+    <AgentIdentityAvatar v-if="identityAvatar" :avatar="identityAvatar" :name="name" :size="32" />
+    <img v-else-if="source && !failed" :key="source" :src="source" alt="" draggable="false" referrerpolicy="no-referrer" @error="failed = true" />
     <span v-else aria-hidden="true">{{ initials }}</span>
   </span>
 </template>
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
+import AgentIdentityAvatar from './agent-identity/AgentAvatar.vue';
+import { normalizeAgentAvatar, type AgentAvatar } from '../../src/shared/agent-avatar';
 import { avatarInitials } from '../chat-appearance';
 import codex from '../../apps/desktop/renderer/src/assets/harness-icons/codex.png';
 import claude from '../../apps/desktop/renderer/src/assets/harness-icons/claude-code.png';
 import cursor from '../../apps/desktop/renderer/src/assets/harness-icons/cursor.png';
 import antigravity from '../../apps/desktop/renderer/src/assets/harness-icons/antigravity.png';
 import opencode from '../../apps/desktop/renderer/src/assets/harness-icons/opencode.svg';
-const props = defineProps<{ name: string; avatarUrl?: string | null; agent?: boolean; provider?: string | null; agentKey?: string | null }>();
+const props = defineProps<{ name: string; avatar?: AgentAvatar | null; avatarUrl?: string | null; agent?: boolean; provider?: string | null; agentKey?: string | null }>();
 const failed = ref(false);
+const identityAvatar = computed(() => props.agent ? normalizeAgentAvatar(props.avatar) : null);
 const initials = computed(() => avatarInitials(props.name));
 const source = computed(() => {
   if (!props.agent) {
@@ -34,4 +38,5 @@ watch(source, () => { failed.value = false; });
 .chat-avatar.is-agent { border-radius: 10px; background: light-dark(#ededed, #242629); }
 .chat-avatar img { width: 100%; height: 100%; object-fit: cover; }
 .chat-avatar.is-agent img { width: 24px; height: 24px; object-fit: contain; border-radius: 6px; }
+.chat-avatar.has-identity { background: transparent; border-color: transparent; overflow: visible; }
 </style>

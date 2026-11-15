@@ -15,10 +15,11 @@
     }"
     :data-msg-id="message.id"
     :data-chat-role="senderRole"
+    :style="chatStyling.styleFor(senderRole)"
     @contextmenu.stop="openContextMenu"
   >
     <WakeGlyph v-if="isWakeNotice" class="wake-notice-glyph" state="woke" :still="!arriving" />
-    <ChatAvatar v-else-if="senderRole" :name="displayName" :avatar-url="message.sender_profile?.avatar_url" :agent="senderRole.endsWith('agent')" :provider="ideLabel" :agent-key="message.agent_identity?.agent_key" />
+    <ChatAvatar v-else-if="senderRole" :name="displayName" :avatar-url="message.sender_profile?.avatar_url" :agent="senderRole.endsWith('agent')" :provider="ideLabel" :agent-key="message.agent_identity?.agent_key" :avatar="message.agent_identity?.avatar" />
     <div v-else class="message-avatar" :style="{ '--sender-color': senderColor }" />
     <div v-if="isWakeNotice" class="message-body wake-notice-body">
       <p class="wake-notice-line">
@@ -202,6 +203,8 @@ import { injectPersonWork, personWorkTarget } from './personWork'
 import type { MessageReaderSender } from '../../../../../shared/ui/message-reader'
 import { chatSenderRole } from '../../../../../shared/chat-appearance'
 import '../../../../../shared/ui/chat-palette.css'
+import { useChatStyling } from '../../../../../shared/ui/chat-styling'
+const chatStyling = useChatStyling()
 import { useAuth } from '@/composables/useAuth'
 
 import { inject, computed, nextTick, onUnmounted, ref, watch } from 'vue'
@@ -1007,17 +1010,33 @@ watch(() => [props.message.id, previewUrls.value, previewContext?.contextKey.val
 
 <style scoped>
 .message[data-chat-role] { gap: 12px; }
-.message[data-chat-role] > .message-body { flex: initial; width: fit-content; max-width: min(78%, 68ch); }
-.message[data-chat-role] > .message-body > .message-bubble { background: var(--chat-bubble); border-color: var(--chat-border); color: light-dark(#252524, #e9e9e7); box-shadow: none; padding: 12px 16px; border-radius: 4px 13px 13px 13px; }
-.message[data-chat-role="self"] { flex-direction: row-reverse; }
-.message[data-chat-role="self"] > .message-body > .message-bubble { margin-left: auto; border-radius: 13px 4px 13px 13px; }
-.message[data-chat-role="self"] :deep(.message-meta) { justify-content: flex-end; }
-.message[data-chat-role]:is(.has-thread, .is-thread-open) > .message-body { width: min(78%, 68ch); }
-.message[data-chat-role].is-inline-reply > .message-body { max-width: calc(100% - 56px); }
+.message[data-chat-role] > .message-body { position: relative; flex: initial; width: fit-content; max-width: min(74%, 480px); }
+.message[data-chat-role] > .message-body > .message-bubble {
+  background: linear-gradient(125deg, var(--chat-bubble-start), var(--chat-bubble) 48%, var(--chat-bubble-end));
+  border: 0; color: var(--chat-foreground); box-shadow: none; padding: 11px 16px; border-radius: 22px;
+}
+.message:is([data-chat-role="self"], [data-chat-role="own-agent"]) { flex-direction: row-reverse; }
+.message:is([data-chat-role="self"], [data-chat-role="own-agent"]) > .message-body > .message-bubble { margin-left: auto; }
+.message:is([data-chat-role="self"], [data-chat-role="own-agent"]) :deep(.message-meta) { justify-content: flex-end; }
+.message[data-chat-role]:is(.has-thread, .is-thread-open) > .message-body { width: min(74%, 480px); }
+.message[data-chat-role].is-inline-reply > .message-body { max-width: calc(100% - 44px); }
+.message[data-chat-role] .message-bubble :deep(.md-content) { font-size: 14px; line-height: 1.65; color: inherit; }
+.message[data-chat-role] .message-bubble :deep(.md-content :is(h1,h2,h3,h4,h5,h6,blockquote,del,code)) { color: inherit; }
+.message[data-chat-role] .message-bubble :deep(.md-content code) { font-size: .95em; background: var(--chat-code); }
+.message[data-chat-role] .message-bubble :deep(.md-content pre) { color: var(--text); }
+.message[data-chat-role] .message-bubble :deep(.md-content pre code) { background: transparent; }
+.message[data-chat-role] .message-bubble :deep(.md-content :is(a,.task-reference-link,.mention-token)) { color: inherit; text-decoration-color: currentColor; }
+.message[data-chat-role] .message-bubble :deep(.md-content a) { text-decoration: underline; text-underline-offset: 3px; }
+.message[data-chat-role] .message-bubble :deep(.md-content .mention-token) { background: var(--chat-code); }
+@media (hover: hover) and (pointer: fine) {
+  .message[data-chat-role] > .message-body > .message-bubble:hover {
+    background: linear-gradient(var(--chat-hover),var(--chat-hover)), linear-gradient(125deg,var(--chat-bubble-start),var(--chat-bubble) 48%,var(--chat-bubble-end));
+  }
+}
 @media (max-width: 760px) {
   .message[data-chat-role] { gap: 8px; }
   .message[data-chat-role] > .message-body { max-width: calc(100% - 40px); }
-  .message[data-chat-role] > .message-body > .message-bubble { padding: 10px 12px; }
+  .message[data-chat-role] > .message-body > .message-bubble { padding: 10px 14px; }
   .message[data-chat-role]:is(.has-thread, .is-thread-open) > .message-body { width: calc(100% - 40px); }
   .message[data-chat-role].is-inline-reply > .message-body { max-width: calc(100% - 40px); }
 }

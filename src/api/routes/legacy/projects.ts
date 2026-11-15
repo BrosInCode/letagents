@@ -1,3 +1,4 @@
+import { normalizeAgentAvatar } from "../../../shared/agent-avatar.js";
 import type { Express, Response } from "express";
 
 import {
@@ -390,12 +391,17 @@ export function registerLegacyProjectRoutes(
       return;
     }
 
-    const { name, display_name, owner_label } = req.body as {
+    const { name, display_name, owner_label, avatar } = req.body as {
+      avatar?: unknown;
       name?: string;
       display_name?: string;
       owner_label?: string;
     };
 
+    if (avatar != null && !normalizeAgentAvatar(avatar)) {
+      res.status(400).json({ error: "Invalid agent avatar." });
+      return;
+    }
     if (!name?.trim()) {
       res.status(400).json({ error: "name is required" });
       return;
@@ -423,6 +429,7 @@ export function registerLegacyProjectRoutes(
       owner_label: normalizedOwnerLabel,
       name: normalizedName,
       display_name: normalizedDisplayName,
+      ...(avatar === undefined ? {} : { avatar: normalizeAgentAvatar(avatar) }),
     });
 
     res.status(201).json(identity);

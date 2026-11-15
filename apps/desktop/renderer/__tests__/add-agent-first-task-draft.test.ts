@@ -179,7 +179,7 @@ async function openAddAgentDialog(
     ...bridge.letagentsDesktop,
     workers: {
       listAgentProviders: async () => [provider("claude-code", "Claude Code"), provider("codex", "Codex")],
-      runAgentProviderPreflight: async () => ({ providerId: "claude-code", status: "ready", checks: [], nextAction: null }),
+      runAgentProviderPreflight: async () => ({ providerId: "claude-code", status: "ready", canStart: true, checks: [], nextAction: null }),
       listAgentProviderModels: async (providerId: string) => ({ providerId, status: "ready", models: [], defaultModel: null, error: null }),
     },
     supervisorGrant: { getStorageStatus: async () => ({ available: true, detail: "", canOpenCredentialStorage: false }) },
@@ -202,14 +202,83 @@ async function openAddAgentDialog(
     repoRootPath: "/repo",
     repoStatus: null,
   });
-  const controller = app.runWithContext(() => useAddAgentController(props, () => undefined));
+  const events: Array<[string, unknown]> = [];
+  const presentations: Array<{ fromActiveForm: boolean }> = [];
+  const controller = app.runWithContext(() => useAddAgentController(props, ((type: string, value: unknown, presentation: { fromActiveForm: boolean }) => {
+    events.push([type, value]);
+    if (type === "launch-saved") presentations.push(presentation);
+  }) as never));
   props.open = true;
   await settle();
   controller.selectProvider("claude-code");
   await settle();
   assert.equal(controller.selectedProviderId.value, "claude-code");
-  return { controller, props };
+  return { controller, props, events, presentations };
 }
+
+test("a blank custom model blocks both Start and direct launch; provider default remains a valid null model", async () => {
+  const createCalls: Array<Record<string, unknown>> = [];
+  const { controller, props } = await openAddAgentDialog({
+    listAgents: async () => [],
+    createAgent: async (input: Record<string, unknown>) => {
+      createCalls.push(input);
+      return entry({ model: input.model as string | null });
+    },
+  });
+  try {
+    assert.equal(controller.canStartManagedAgent.value, true);
+    assert.equal(controller.customModelError.value, null);
+    controller.handleModelChoiceValue("custom");
+    for (const blank of ["", " \n\t "]) {
+      controller.customModelId.value = blank;
+      await settle();
+      assert.equal(controller.canStartManagedAgent.value, false);
+      assert.equal(controller.customModelError.value, "Enter a model ID or choose provider default.");
+      await controller.startManagedAgent();
+      assert.equal(createCalls.length, 0, "programmatic launch must not silently choose provider default");
+      assert.equal(controller.startingAgent.value, false);
+    }
+    controller.handleModelChoiceValue("default");
+    await settle();
+    assert.equal(controller.customModelError.value, null, "switching away clears the inline error");
+    assert.equal(controller.canStartManagedAgent.value, true);
+    await controller.startManagedAgent();
+    assert.equal(createCalls.length, 1);
+    assert.equal(createCalls[0]?.model, null, "explicit provider default retains its existing null mapping");
+  } finally {
+    props.open = false;
+    await settle();
+  }
+});
+
+test("a filled custom model clears validation and sends the exact trimmed ID", async () => {
+  const createCalls: Array<Record<string, unknown>> = [];
+  const { controller, props } = await openAddAgentDialog({
+    listAgents: async () => [],
+    createAgent: async (input: Record<string, unknown>) => {
+      createCalls.push(input);
+      return entry({ model: input.model as string | null });
+    },
+  });
+  try {
+    controller.handleModelChoiceValue("custom");
+    assert.ok(controller.customModelError.value);
+    controller.customModelId.value = "  claude-custom-model  ";
+    await settle();
+    // This fixture does not run debounce timers; complete the same preflight
+    // through Check again before asserting that Start becomes available.
+    await controller.retryProviderSetup();
+    await settle();
+    assert.equal(controller.customModelError.value, null);
+    assert.equal(controller.canStartManagedAgent.value, true);
+    await controller.startManagedAgent();
+    assert.equal(createCalls.length, 1);
+    assert.equal(createCalls[0]?.model, "claude-custom-model");
+  } finally {
+    props.open = false;
+    await settle();
+  }
+});
 
 test("the Add agent dialog consumes a first task whose agent was saved after the user switched provider", async () => {
   let resolveCreate!: (entry: DesktopSupervisorManifestEntry) => void;
@@ -259,6 +328,99 @@ test("the Add agent dialog consumes a first task when a failed create turns out 
   await settle();
 
   assert.equal(controller.supervisedCharter.value, defaultSupervisedCharter);
+  props.open = false;
+  await settle();
+});
+
+
+test("closing after durable creation still hands the exact saved identity to the room without marking it ready", async () => {
+  let resolveCreate!: (entry: DesktopSupervisorManifestEntry) => void;
+  let request: Record<string, unknown> | undefined;
+  const { controller, props, events } = await openAddAgentDialog({
+    listAgents: async () => [],
+    createAgent: (input: Record<string, unknown>) => {
+      request = input;
+      return new Promise<DesktopSupervisorManifestEntry>(resolve => { resolveCreate = resolve; });
+    },
+  });
+  controller.configuredName.value = "Atlas";
+  controller.configuredAvatar.value = { kind: "character", character: "orbit", color: "sage" };
+  controller.supervisedCharter.value = managerCharter;
+  const started = controller.startManagedAgent();
+  await settle();
+  assert.equal(request?.displayName, "Atlas");
+  assert.deepEqual(request?.avatar, { kind: "character", character: "orbit", color: "sage" });
+  props.open = false;
+  await settle();
+  const saved = entry({ displayName: "Atlas", avatar: { kind: "character", character: "orbit", color: "sage" } });
+  resolveCreate(saved);
+  await started;
+  assert.deepEqual(events.filter(([type]) => type === "launch-saved"), [["launch-saved", saved]]);
+  assert.equal(saved.observedState, "starting");
+  assert.equal(controller.supervisedCharter.value, defaultSupervisedCharter);
+});
+
+test("a saved create result from a room left behind never presents progress in the new room", async () => {
+  let resolveCreate!: (entry: DesktopSupervisorManifestEntry) => void;
+  const { controller, props, events } = await openAddAgentDialog({
+    listAgents: async () => [],
+    createAgent: () => new Promise<DesktopSupervisorManifestEntry>(resolve => { resolveCreate = resolve; }),
+  });
+  controller.supervisedCharter.value = managerCharter;
+  const started = controller.startManagedAgent();
+  await settle();
+  props.roomIdentifier = "room-2";
+  await settle();
+  resolveCreate(entry());
+  await started;
+  assert.equal(events.some(([type]) => type === "launch-saved"), false);
+  props.open = false;
+  await settle();
+});
+
+
+test("a lost create response after closing still points to the durable agent, without creating again", async () => {
+  let rejectCreate!: (reason: Error) => void;
+  let saved = false;
+  let createCount = 0;
+  const confirmed = entry();
+  const { controller, props, events } = await openAddAgentDialog({
+    listAgents: async () => saved ? [confirmed] : [],
+    createAgent: () => { createCount++; return new Promise<DesktopSupervisorManifestEntry>((_, reject) => { rejectCreate = reject; }); },
+  });
+  controller.supervisedCharter.value = managerCharter;
+  const started = controller.startManagedAgent();
+  await settle();
+  props.open = false;
+  await settle();
+  saved = true;
+  rejectCreate(new Error("Response lost after save"));
+  await started;
+  await settle();
+  assert.equal(createCount, 1);
+  assert.deepEqual(events.filter(([type]) => type === "launch-saved"), [["launch-saved", confirmed]]);
+  assert.equal(controller.supervisedCharter.value, defaultSupervisedCharter);
+});
+
+
+test("a previous form's save does not animate or close a new form opened in the same room", async () => {
+  let resolveCreate!: (entry: DesktopSupervisorManifestEntry) => void;
+  const { controller, props, presentations } = await openAddAgentDialog({
+    listAgents: async () => [],
+    createAgent: () => new Promise<DesktopSupervisorManifestEntry>(resolve => { resolveCreate = resolve; }),
+  });
+  controller.supervisedCharter.value = managerCharter;
+  const started = controller.startManagedAgent();
+  await settle();
+  props.open = false;
+  await settle();
+  props.open = true;
+  await settle();
+  controller.supervisedCharter.value = "A separate new draft";
+  resolveCreate(entry());
+  await started;
+  assert.deepEqual(presentations, [{ fromActiveForm: false }]);
+  assert.equal(controller.supervisedCharter.value, "A separate new draft");
   props.open = false;
   await settle();
 });

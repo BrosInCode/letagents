@@ -59,6 +59,16 @@
   font-size: 0.8rem;
 }
 
+.desktop-add-agent-model-custom-input input[aria-invalid="true"] {
+  border-color: #f2a1a1;
+}
+
+.desktop-add-agent-model-custom-error {
+  color: #f2a1a1;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
 .desktop-add-agent-model .desktop-add-agent-model-catalog {
   margin: 0;
   /* A footer under both fields: its divider spans the section, unlike the status paragraphs. */

@@ -59,6 +59,7 @@ export interface StoredAgentIdentityState {
 }
 
 export interface StoredAgentSessionState {
+  avatar?: import("../../../../../shared/agent-avatar.mjs").AgentAvatar | null;
   session_id: string;
   session_token?: string;
   room_id: string;

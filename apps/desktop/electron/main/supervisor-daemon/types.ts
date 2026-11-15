@@ -1,3 +1,4 @@
+import type { AgentAvatar } from "../../../../../shared/agent-avatar.mjs";
 import type { ChildProcess } from "node:child_process";
 import type {
   DesktopSupervisorActivityEvent,
@@ -18,6 +19,7 @@ export type WireEntry = {
   id: string;
   room_id: string;
   display_name: string;
+  avatar?: AgentAvatar | null;
   provider: string;
   model: string | null;
   reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
