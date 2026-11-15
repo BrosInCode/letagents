@@ -130,32 +130,39 @@ test('access selection follows restriction order and skips disabled choices with
 });
 
 test('unknown and unavailable saved access retain a keyboard entry point without selecting a fallback permission', async () => {
-  const options = listManagedAgentPermissionProfiles('codex')
-    .map(option => supervisedPermissionProfilePresentation('codex', option, { hasProject: true }));
-  for (const saved of ['', 'unknown', 'sandboxed_write']) {
-    const { vm, props, events, html } = await setupComponent(Access, { modelValue: saved, options });
-    const tabStops = radios(html).filter(button => button.includes('tabindex="0"'));
-    assert.equal(tabStops.length, 1);
-    assert.doesNotMatch(tabStops[0]!, /disabled/);
-    assert.match(tabStops[0]!, /Read-only/);
-    assert.equal(props.modelValue, saved);
-    assert.deepEqual(events, [], 'focus availability must not change the saved permission');
-    if (saved === 'sandboxed_write') {
-      const checked = radios(html).filter(button => button.includes('aria-checked="true"'));
-      assert.equal(checked.length, 1);
-      assert.match(checked[0]!, /disabled/);
-      assert.equal(vm.selected.value.id, saved);
-    } else {
-      assert.equal(radios(html).filter(button => button.includes('aria-checked="true"')).length, 0);
-      assert.doesNotMatch(html, /class="agent-access-description"/);
+  for (const [platform, entryLabel, nextAccess] of [
+    ['darwin', 'Read-only', 'ask_before_write'],
+    ['linux', 'Read-only', 'ask_before_write'],
+    ['win32', 'Ask before writes', 'auto_review'],
+  ] as const) {
+    const options = listManagedAgentPermissionProfiles('codex')
+      .map(option => supervisedPermissionProfilePresentation('codex', option, { hasProject: true, platform }));
+    const savedChoices = ['', 'unknown', 'sandboxed_write', ...(platform === 'win32' ? ['read_only'] : [])];
+    for (const saved of savedChoices) {
+      const { vm, props, events, html } = await setupComponent(Access, { modelValue: saved, options });
+      const tabStops = radios(html).filter(button => button.includes('tabindex="0"'));
+      assert.equal(tabStops.length, 1, platform);
+      assert.doesNotMatch(tabStops[0]!, /disabled/);
+      assert.match(tabStops[0]!, new RegExp(entryLabel));
+      assert.equal(props.modelValue, saved);
+      assert.deepEqual(events, [], 'focus availability must not change the saved permission');
+      if (saved === 'sandboxed_write' || saved === 'read_only') {
+        const checked = radios(html).filter(button => button.includes('aria-checked="true"'));
+        assert.equal(checked.length, 1);
+        assert.match(checked[0]!, /disabled/);
+        assert.equal(vm.selected.value.id, saved);
+      } else {
+        assert.equal(radios(html).filter(button => button.includes('aria-checked="true"')).length, 0);
+        assert.doesNotMatch(html, /class="agent-access-description"/);
+      }
+      vm.onKey(key('ArrowRight').event); await nextTick();
+      assert.equal(props.modelValue, nextAccess, `${platform}: navigation starts from the first available option`);
     }
-    vm.onKey(key('ArrowRight').event); await nextTick();
-    assert.equal(props.modelValue, 'ask_before_write', 'navigation starts from the reachable Read-only option');
+    const blocked = await setupComponent(Access, { modelValue: '', options: options.map(option => ({ ...option, status: 'gated' })) });
+    assert.equal(radios(blocked.html).filter(button => button.includes('tabindex="0"')).length, 0);
+    blocked.vm.onKey(key('ArrowRight').event);
+    assert.deepEqual(blocked.events, []);
   }
-  const blocked = await setupComponent(Access, { modelValue: '', options: options.map(option => ({ ...option, status: 'gated' })) });
-  assert.equal(radios(blocked.html).filter(button => button.includes('tabindex="0"')).length, 0);
-  blocked.vm.onKey(key('ArrowRight').event);
-  assert.deepEqual(blocked.events, []);
 });
 
 test('quick identity picker remains anchored and inside desktop, narrow and shifted visual viewports', () => {
