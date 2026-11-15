@@ -3648,7 +3648,7 @@ test("application update proceeds when no supervisor daemon owns the socket", as
   }
 });
 
-test("desktop replaces the prior implementation and accepts only the new exact implementation", async () => {
+test("desktop replaces the pre-avatar implementation and accepts only the new exact implementation", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
   process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -3667,11 +3667,10 @@ test("desktop replaces the prior implementation and accepts only the new exact i
       retiredAlive = false;
       void closeServer(oldServer, env.socketPath);
     },
-    "2.0.52",
+    "2.0.281",
   );
   oldServer = old.server;
   try {
-    assert.notEqual("2.0.52", SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
     const client = new SupervisorDaemonClient({
       stateDir: env.root, socketPath: env.socketPath, peerProofPath: env.peerProofPath,
       daemonScriptPath,
@@ -3689,7 +3688,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.281");
+    assert.equal(status.implementationVersion, "2.0.282");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
