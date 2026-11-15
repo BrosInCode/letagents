@@ -737,6 +737,9 @@ test("agentProviderNeedsDesktopRepo only requires a repo for desktop-supervised 
 
 test("agentAuthCommand exposes provider sign-in commands for managed runtimes", () => {
   assert.equal(agentAuthCommand(provider()), "codex login --device-auth");
+  const scopedCommand = "env -i HOME='/private/preview' CODEX_HOME='/private/preview/.codex' codex login --device-auth";
+  assert.equal(agentAuthCommand(provider({ authCommand: scopedCommand })), scopedCommand,
+    "the host's isolated sign-in command reaches the clipboard without being rebuilt by the renderer");
   assert.equal(agentAuthCommand(provider({
     runtimeCommand: "/usr/local/bin/codex",
   })), "/usr/local/bin/codex login --device-auth");

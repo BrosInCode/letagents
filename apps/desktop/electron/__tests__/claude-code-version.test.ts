@@ -118,6 +118,39 @@ test("Claude Code preflight truthfully includes the managed LetAgents connection
   }
 });
 
+test("Claude auth status JSON becomes readable setup guidance instead of a raw brace", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-claude-auth-status-"));
+  const priorBin = process.env.LETAGENTS_CLAUDE_CODE_BIN;
+  try {
+    for (const [index, [stdout, stderr, expected]] of [
+      [JSON.stringify({ loggedIn: false, authMethod: "none", apiProvider: "firstParty" }, null, 2), "", "Sign in with Claude Code before starting a local room agent."],
+      [JSON.stringify({ loggedIn: false, email: "not-for-display@example.test", apiKey: "not-for-display" }), "Session expired. Sign in again.", "Session expired. Sign in again."],
+      [JSON.stringify({ error: { message: "The saved sign-in has expired." } }), "", "The saved sign-in has expired."],
+      ["{\n  \"loggedIn\":", "", "Sign in with Claude Code before starting a local room agent."],
+      ["Not logged in. Run claude auth login.", "", "Not logged in. Run claude auth login."],
+    ].entries()) {
+      clearProbeCache();
+      process.env.LETAGENTS_CLAUDE_CODE_BIN = writeFakeProvider(join(root, `claude-${index}`), [
+        "if (process.argv[2] === '--version') { console.log('2.1.321 (Claude Code)'); process.exit(0); }",
+        `process.stdout.write(${JSON.stringify(stdout)});`,
+        `process.stderr.write(${JSON.stringify(stderr)});`,
+        "process.exit(1);",
+      ].join("\n"));
+      const result = await runDesktopAgentProviderPreflight("claude-code", { roomOnly: true }, { commandTimeoutMs: 0 });
+      assert.equal(result.status, "auth_required");
+      assert.equal(result.canStart, false);
+      assert.equal(result.nextAction, "authenticate");
+      assert.equal(result.detail, expected);
+      assert.doesNotMatch(result.detail ?? "", /not-for-display/);
+    }
+  } finally {
+    if (priorBin === undefined) delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
+    else process.env.LETAGENTS_CLAUDE_CODE_BIN = priorBin;
+    clearProbeCache();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("tool approvals require the verified native version without raising existing Claude profile minimums", () => {
   assert.equal(inspectClaudeCodeVersion("2.1.220 (Claude Code)").supported, true);
   assert.equal(inspectClaudeCodeVersion("2.1.220 (Claude Code)", "Ask before writes").supported, false);

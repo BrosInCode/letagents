@@ -140,6 +140,32 @@ function firstOutputLine(result: ExecResult): string | null {
   );
 }
 
+function authFailureDetail(result: ExecResult): string | null {
+  for (const output of [result.stdout, result.stderr]) {
+    const trimmed = output.trim();
+    if (!trimmed) continue;
+    let detail: string | null = trimmed;
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      const record = parsed !== null && typeof parsed === "object" ? parsed as Record<string, unknown> : null;
+      const error = record?.error;
+      detail = typeof parsed === "string" ? parsed
+        : typeof record?.message === "string" ? record.message
+          : typeof error === "string" ? error
+            : error !== null && typeof error === "object" && "message" in error && typeof error.message === "string"
+              ? error.message : null;
+    } catch {
+      // An incomplete structured status is not useful prose either.
+      if (/^[{[]/.test(trimmed)) detail = null;
+    }
+    if (detail) {
+      const line = firstRedactedCodexAppServerOutputLine(detail, "", result.redactions);
+      if (line) return line;
+    }
+  }
+  return null;
+}
+
 async function getProviderMcpStatus(
   provider: DesktopAgentProvider,
 ): Promise<DesktopMcpInstallTarget["status"] | null> {
@@ -212,7 +238,7 @@ async function codexPreflight(
       status: "auth_required",
       canStart: false,
       message: "Codex needs sign-in.",
-      detail: firstOutputLine(authResult) || "Sign in with Codex before starting a local room agent.",
+      detail: authFailureDetail(authResult) || "Sign in with Codex before starting a local room agent.",
       nextAction: "authenticate",
       version,
       mcpStatus,
@@ -294,7 +320,7 @@ async function claudeCodePreflight(
       status: "auth_required",
       canStart: false,
       message: "Claude Code needs sign-in.",
-      detail: firstOutputLine(authResult) || "Sign in with Claude Code before starting a local room agent.",
+      detail: authFailureDetail(authResult) || "Sign in with Claude Code before starting a local room agent.",
       nextAction: "authenticate",
       version,
       mcpStatus,

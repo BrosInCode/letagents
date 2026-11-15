@@ -175,9 +175,10 @@ function presentation(t: TestContext, initial = { name: 'Atlas', open: true, red
   });
   const props = reactive({ open: initial.open, initialSection: initial.initialSection });
   const name = ref(initial.name), avatar = ref<any>({ kind: 'character', character: 'orbit', color: 'sage' });
+  const launchView = ref<object | null>(null);
   let vm: ReturnType<typeof useAgentSetupPresentation>;
   const app = renderer.createApp({ setup() {
-    vm = useAgentSetupPresentation(props as never, name, avatar, { launch: {} } as never);
+    vm = useAgentSetupPresentation(props as never, name, avatar, { launch: { view: launchView } } as never);
     vm.dialogElement.value = markRaw({ focus() { dialogFocus++; } }) as unknown as HTMLElement;
     vm.turnStage.value = markRaw({ style: { setProperty: (key: string, value: string) => { styles.set(key, value); } } }) as unknown as HTMLElement;
     return () => h('div');
@@ -187,7 +188,7 @@ function presentation(t: TestContext, initial = { name: 'Atlas', open: true, red
   const unmount = () => { if (mounted) { app.unmount(); mounted = false; } };
   t.after(() => { unmount(); Object.assign(globalThis, globals); });
   const advance = (count = 1) => { for (let index = 0; index < count; index++) { time += 16; const callbacks = [...frames.entries()]; frames.clear(); for (const [, callback] of callbacks) callback(time); } };
-  return { vm: vm!, props, name, avatar, styles, frames, advance, unmount,
+  return { vm: vm!, props, name, avatar, launchView, styles, frames, advance, unmount,
     reduce: () => { media.matches = true; mediaListener?.(); },
     counts: () => ({ focusReturns, dialogFocus, disconnects, mediaListener }) };
 }
@@ -223,6 +224,39 @@ test('reversing the scene preserves the edited name and avatar without restartin
   props.open = true; await nextTick();
   assert.equal(name.value, 'Reviewer'); assert.equal(vm.step.value, 'identity');
   assert.deepEqual(avatar.value, { kind: 'character', character: 'spark', color: 'rose' });
+});
+
+test('reopening a saved launch shows Brain recovery directly instead of editable Identity', async t => {
+  const { vm, props, name, avatar, launchView, styles, frames } = presentation(t);
+  name.value = 'EndpointFailureQA';
+  avatar.value = { kind: 'character', character: 'spark', color: 'rose' };
+  props.open = false; await nextTick();
+  launchView.value = { failed: true, durable: true }; await nextTick();
+  props.open = true; await nextTick();
+  assert.equal(vm.step.value, 'brain');
+  assert.equal(styles.get('--turn-angle'), '-90deg');
+  assert.equal(frames.size, 0, 'restoring progress does not replay the setup transition');
+  assert.equal(name.value, 'EndpointFailureQA');
+  assert.deepEqual(avatar.value, { kind: 'character', character: 'spark', color: 'rose' });
+
+  props.open = false; launchView.value = null; await nextTick();
+  props.open = true; await nextTick();
+  assert.equal(vm.step.value, 'identity', 'a new agent still opens on Identity');
+});
+
+test('a launch restored asynchronously reveals recovery without validating the new-agent draft', async t => {
+  const { vm, name, launchView, styles, frames, counts } = presentation(t);
+  await nextTick();
+  name.value = '---';
+  vm.showStep('brain');
+  assert.equal(vm.step.value, 'identity');
+  const focusBeforeRecovery = counts().dialogFocus;
+  launchView.value = { failed: true, durable: true }; await nextTick();
+  assert.equal(vm.step.value, 'brain', 'recovery must not require a valid new-agent name');
+  assert.equal(counts().dialogFocus, focusBeforeRecovery + 1, 'focus leaves Identity before it becomes inert');
+  assert.equal(styles.get('--turn-angle'), '-90deg');
+  assert.equal(frames.size, 0);
+  assert.equal(name.value, '---', 'showing existing progress does not rewrite the draft');
 });
 
 test('keyboard navigation, pause and reduced motion settle the selected face and clean up pending frames', async t => {

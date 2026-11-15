@@ -31,7 +31,7 @@ function provider(id: "codex" | "cursor"): DesktopAgentProvider {
   };
 }
 
-test("provider switching invalidates an in-flight setup preflight", async () => {
+test("provider switching invalidates an in-flight setup preflight", async (t) => {
   const oldPreflight = deferred<DesktopAgentProviderPreflight>();
   let preflightCalls = 0;
   const preflightInputs: DesktopAgentProviderPreflightInput[] = [];
@@ -105,7 +105,22 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   open = true;
 
   const pending = actions.runPreflight();
+  const copied: string[] = [];
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { clipboard: {
+    writeText: async (text: string) => { copied.push(text); },
+  } } });
+  t.after(() => {
+    if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);
+    else Reflect.deleteProperty(globalThis, "navigator");
+  });
+  const signInCommand = "env -i HOME='/private/preview' codex login --device-auth";
+  await actions.copyAgentAuthCommand(signInCommand);
+  assert.deepEqual(copied, [signInCommand]);
+  assert.equal(setup.setupMessage.value, "Command copied. Run it in Terminal, then choose Check again.");
+  assert.doesNotMatch(setup.setupMessage.value!, /HOME=|private\/preview/);
   actions.selectProvider("cursor");
+  assert.equal(setup.setupMessage.value, null, "copy confirmation belongs to the provider that produced it");
   oldPreflight.resolve({
     providerId: "codex",
     status: "ready",

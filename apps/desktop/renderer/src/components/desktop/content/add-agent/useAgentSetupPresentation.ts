@@ -82,6 +82,13 @@ watch(() => props.open, open => {
   if (open) { if (!configuredName.value) configuredName.value = 'Atlas'; configuredAvatar.value ??= identityAvatar.value; step.value = props.initialSection ? 'brain' : 'identity'; target = step.value === 'brain' ? 1 : 0; }
   settleTurn();
 }, { immediate: true });
+// A remembered launch may be restored after the modal opens. Its progress and
+// recovery controls live on Brain; Identity is only for configuring a new agent.
+watch(() => props.open && Boolean(supervisedUi.launch.view.value), active => {
+  if (!active) return;
+  if (step.value !== 'brain') dialogElement.value?.focus({ preventScroll: true });
+  step.value = 'brain'; target = 1; settleTurn();
+}, { immediate: true });
 watch(motionPaused, () => { if (motionPaused.value) settleTurn(); });
 function reduceTurn() { if (reducedMotion?.matches) settleTurn(); }
 onMounted(() => {

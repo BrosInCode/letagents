@@ -392,7 +392,7 @@ export function useAddAgentSetup() {
       try {
         const copied = await copyTextToClipboard(command);
         if (isCurrentRequest(version)) setSetupMessage(
-          copied ? `Copied: ${command}` : `Clipboard unavailable. Run: ${command}`,
+          copied ? "Command copied. Run it in Terminal, then choose Check again." : `Clipboard unavailable. Run: ${command}`,
           copied ? "status" : "warning",
         );
       } finally {

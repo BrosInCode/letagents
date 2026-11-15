@@ -46,6 +46,8 @@ export interface DesktopAgentProvider {
    */
   supervisedDeliveryMode?: DesktopManagedAgentDeliveryMode | null;
   runtimeCommand: string | null;
+  /** Optional host-scoped sign-in command, such as an isolated Preview profile. */
+  authCommand?: string;
   /** Official user-run install command for an external provider runtime. */
   runtimeInstallCommand?: string | null;
   /** Official provider documentation for installing an external runtime. */
