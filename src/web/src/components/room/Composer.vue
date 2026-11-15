@@ -106,6 +106,11 @@
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v3M7 6h10a3 3 0 0 1 3 3v9H4V9a3 3 0 0 1 3-3ZM8 11h.01M16 11h.01M9 15h6" /></svg>
               <span class="composer-menu-copy">Ask someone for an agent</span>
             </button>
+            <button v-if="!inlineThread && isSignedIn" class="composer-menu-item" type="button" role="menuitem" tabindex="-1"
+              data-testid="composer-menu-invite-bot" @click="closeAddMenu(true); emit('inviteBot')">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg>
+              <span class="composer-menu-copy">Invite a bot</span>
+            </button>
             <template v-if="!inlineThread">
               <div class="composer-menu-separator" role="separator"></div>
               <div class="composer-menu-heading">Agent prompts</div>
@@ -222,6 +227,8 @@ const emit = defineEmits<{
   clearReply: []
   signIn: []
   askAgent: []
+  /** Invite a bot: the room drawer opens at its invite. */
+  inviteBot: []
 }>()
 
 const composerId = computed(() => props.inlineThread ? `thread-${props.threadRootId}` : 'composer')

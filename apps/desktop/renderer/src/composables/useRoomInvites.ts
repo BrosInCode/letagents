@@ -64,7 +64,16 @@ export function inviteBotName(platform: RoomInvitePlatform): string {
   return platform === "other" ? "your bot" : roomInvitePlatformLabel(platform);
 }
 
-export type RoomInvitePillState = "waiting" | "joined" | "asked";
+/**
+ * waiting: the code is out. joined / asked: a bot invited from a Git Room
+ * joined, or a member's invite asked the admins (stays until Done).
+ * arrived / cancelled: an answer in place, shown for a moment, then the pill
+ * folds away (the room shows its own join line).
+ */
+export type RoomInvitePillState = "waiting" | "joined" | "asked" | "arrived" | "cancelled";
+
+/** How long an answer in place shows before the pill folds away. */
+export const ROOM_INVITE_ANSWER_MS = { arrived: 1600, cancelled: 1200 } as const;
 
 export interface RoomInvitePill {
   invite: RoomInvite;
@@ -80,6 +89,8 @@ export function roomInvitePillText(pill: RoomInvitePill): { main: string; muted:
   const bot = inviteBotName(pill.invite.platform);
   const room = pill.invite.room_display_name || pill.invite.room_id;
   const Bot = bot.charAt(0).toUpperCase() + bot.slice(1);
+  if (pill.state === "arrived") return { main: `${Bot} joined`, muted: "" };
+  if (pill.state === "cancelled") return { main: "Invite cancelled", muted: "" };
   if (pill.state === "joined") return { main: `${Bot} joined ${room}`, muted: "" };
   if (pill.state === "asked") {
     return { main: pill.elsewhere ? `${Bot} asked to join ${room}` : `${Bot} asked to join`, muted: " · an admin decides" };
@@ -106,6 +117,21 @@ export function createRoomInvites() {
    * panel closes ("Copied" shows first, then the pill takes over).
    */
   const held = new Map<string, RoomInvite>();
+  /** Answers in place that show for a moment: invite id → state. */
+  const answers = shallowRef<ReadonlyMap<string, "arrived" | "cancelled">>(new Map());
+
+  function answerInPlace(inviteId: string, state: "arrived" | "cancelled"): void {
+    if (answers.value.get(inviteId) === state) return;
+    const next = new Map(answers.value);
+    next.set(inviteId, state);
+    answers.value = next;
+    setTimeout(() => {
+      if (answers.value.get(inviteId) !== state) return;
+      const after = new Map(answers.value);
+      after.delete(inviteId);
+      answers.value = after;
+    }, ROOM_INVITE_ANSWER_MS[state]);
+  }
 
   function put(invite: RoomInvite): void {
     changes += 1;
@@ -174,6 +200,7 @@ export function createRoomInvites() {
   async function cancel(invite: RoomInvite): Promise<string | null> {
     const result = await desktopIpc.roomInvites?.cancel(invite.room_id, invite.id).catch(() => null);
     if (result?.ok) {
+      answerInPlace(invite.id, "cancelled");
       put(result.invite);
       return null;
     }
@@ -188,6 +215,11 @@ export function createRoomInvites() {
   function receive(event: RoomInviteEvent): void {
     const invite = parseRoomInvite(event.invite);
     if (!invite) return;
+    // A pill that was showing answers in place before it folds away.
+    const wasWaiting = invites.value.get(invite.id)?.state === "open";
+    const elsewhere = invite.origin_room_id !== null && invite.origin_room_id !== invite.room_id;
+    if (wasWaiting && invite.state === "used" && invite.outcome === "admitted" && !elsewhere) answerInPlace(invite.id, "arrived");
+    if (wasWaiting && invite.state === "cancelled") answerInPlace(invite.id, "cancelled");
     if (invite.state === "used") {
       const next = new Set(seenUsed.value);
       next.add(invite.id);
@@ -217,6 +249,8 @@ export function createRoomInvites() {
 
   function pillFor(invite: RoomInvite, now: number): RoomInvitePill | null {
     const elsewhere = invite.origin_room_id !== null && invite.origin_room_id !== invite.room_id;
+    const answer = answers.value.get(invite.id);
+    if (answer) return { invite, state: answer, elsewhere, code: null };
     if (invite.state === "open") {
       if (Date.parse(invite.expires_at) <= now) return null;
       return { invite, state: "waiting", elsewhere, code: codes.value[invite.id]?.code ?? null };
@@ -247,6 +281,7 @@ export function createRoomInvites() {
 
   function reset(): void {
     held.clear();
+    answers.value = new Map();
     changes += 1;
     invites.value = new Map();
     closed.value = new Set();

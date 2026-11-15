@@ -28,21 +28,48 @@
 .desktop-room-invite-pills { width: min(calc(100% - 48px), 960px); margin: 0 auto; }
 .room-invite-pills { display: flex; flex-direction: column; gap: 6px; }
 .room-invite-pills:not(:empty) { padding: 0 0 8px; }
+.room-invite-pill { min-height: 38px; }
+.room-invite-pills-more { align-self: flex-start; margin: -2px 0 0 2px; padding: 2px 6px; border: 0; border-radius: 6px; background: transparent; color: var(--text-tertiary); font: inherit; font-size: 12px; cursor: pointer; transition: transform 140ms var(--ease-out); }
+.room-invite-pills-more:active { transform: scale(0.97); }
+.room-invite-pills-more:focus-visible { outline: 2px solid var(--blue); outline-offset: 1px; }
+@media (hover: hover) and (pointer: fine) { .room-invite-pills-more:hover { color: var(--text-secondary); } }
 .room-invite-pill-text { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.room-invite-pill-icon { flex: none; color: var(--text-tertiary); }
-.room-invite-pill-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
 .room-invite-pill-words { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .room-invite-pill-muted { color: var(--text-tertiary); }
-.room-invite-pill .agent-ask-pill-actions button { transition: transform 140ms var(--ease-out); }
+/* One mark, four looks: link (waiting), check (arrived), dot (joined elsewhere, asked), x (cancelled). */
+.room-invite-pill-mark { display: inline-grid; flex: none; width: 14px; height: 14px; place-items: center; }
+.room-invite-pill-mark > * { grid-area: 1 / 1; opacity: 0; transform: scale(0.6); transition: opacity 160ms var(--ease-out), transform 220ms var(--ease-out); }
+.room-invite-pill-link, .room-invite-pill-x { color: var(--text-tertiary); }
+.room-invite-pill-check { width: 14px; height: 14px; fill: none; stroke: var(--green); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
+.room-invite-pill-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+.room-invite-pill[data-state="waiting"] .room-invite-pill-link,
+.room-invite-pill[data-state="arrived"] .room-invite-pill-check,
+.room-invite-pill[data-state="joined"] .room-invite-pill-dot,
+.room-invite-pill[data-state="asked"] .room-invite-pill-dot,
+.room-invite-pill[data-state="cancelled"] .room-invite-pill-x { opacity: 1; transform: none; }
+.room-invite-pill[data-state="asked"] .room-invite-pill-dot { background: var(--text-tertiary); }
+.room-invite-pill[data-state="cancelled"] .room-invite-pill-words { color: var(--text-secondary); }
+.room-invite-pill .agent-ask-pill-actions button { display: inline-flex; align-items: center; transition: transform 140ms var(--ease-out); }
+.room-invite-pill .agent-ask-pill-actions button[aria-disabled="true"] { cursor: default; opacity: 0.6; }
 .room-invite-pill .agent-ask-pill-actions button:active:not([aria-disabled="true"]) { transform: scale(0.97); }
-.room-invite-pill-enter-active { transition: opacity 180ms var(--ease-out), transform 220ms var(--ease-out); }
-.room-invite-pill-leave-active { transition: opacity 120ms ease-out, transform 120ms ease-out; }
-.room-invite-pill-enter-from, .room-invite-pill-leave-to { opacity: 0; transform: translateY(4px); }
+.room-invite-pill .copy-state-icon, .room-invite-pill .copy-state-icon > * { width: 12px; height: 12px; }
+/* Words and buttons change in place: out fast, in a beat later. */
+.room-invite-pill-swap-enter-active { transition: opacity 180ms var(--ease-out), transform 200ms var(--ease-out); }
+.room-invite-pill-swap-leave-active { transition: opacity 100ms ease-out, transform 100ms ease-out; }
+.room-invite-pill-swap-enter-from { opacity: 0; transform: translateY(3px); }
+.room-invite-pill-swap-leave-to { opacity: 0; transform: translateY(-2px); }
+/* The pill rises in when the panel closes, and sinks away faster than it came. */
+.room-invite-pill-enter-active { transition: opacity 200ms var(--ease-out), transform 240ms var(--ease-out); }
+.room-invite-pill-leave-active { transition: opacity 140ms ease-out, transform 140ms ease-out; }
+.room-invite-pill-enter-from { opacity: 0; transform: translateY(6px) scale(0.985); }
+.room-invite-pill-leave-to { opacity: 0; transform: translateY(4px) scale(0.985); }
 @media (hover: hover) and (pointer: fine) {
   .room-invite-pill .agent-ask-pill-actions button:hover:not([aria-disabled="true"]) { background: var(--accent-hover); }
 }
 @media (prefers-reduced-motion: reduce) {
-  .room-invite-pill-enter-active, .room-invite-pill-leave-active { transition: opacity 150ms ease; }
+  .room-invite-pill-mark > *, .room-invite-pill-swap-enter-active, .room-invite-pill-swap-leave-active,
+  .room-invite-pill-enter-active, .room-invite-pill-leave-active { transition-property: opacity; transition-duration: 150ms; }
+  .room-invite-pill-mark > *, .room-invite-pill-swap-enter-from, .room-invite-pill-swap-leave-to,
   .room-invite-pill-enter-from, .room-invite-pill-leave-to { transform: none; }
   .room-invite-pill .agent-ask-pill-actions button:active:not([aria-disabled="true"]) { transform: none; }
 }

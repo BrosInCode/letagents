@@ -1,6 +1,9 @@
 /*
- * "Invite a bot" reads like the webhook wake-up block: one quiet primary
- * action, then a picker and the message to copy.
+ * "Invite a bot" in Room settings (desktop) and the room drawer (web): one
+ * quiet primary action, then what the invite does, the bot picker, the
+ * message with its one-use code, and Copy. The picker, the message and the
+ * Copy label are shared with the desktop composer panel
+ * (invite-bot-parts.css). Theme tokens only; transform and opacity only.
  */
 .invite-bot {
   display: grid;
@@ -10,6 +13,18 @@
 .invite-bot p {
   margin: 0;
 }
+.invite-bot-open {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  animation: invite-bot-open-in 200ms var(--ease-out) both;
+}
+@keyframes invite-bot-open-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
 .invite-bot-hint {
   color: var(--text-secondary);
   font-size: 0.78rem;
@@ -17,43 +32,46 @@
 }
 .invite-bot-button {
   appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   padding: 6px 12px;
-  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border: 1px solid var(--border-strong);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--text) 4%, transparent);
+  background: var(--accent-hover);
   color: var(--text);
   font: inherit;
   font-size: 0.8rem;
   font-weight: 600;
   line-height: 1.3;
   cursor: pointer;
-  transition: background 160ms var(--ease-out, ease-out), border-color 160ms var(--ease-out, ease-out);
+  transition: transform 160ms var(--ease-out);
+}
+.invite-bot-button:active:not([aria-disabled="true"]) {
+  transform: scale(0.97);
 }
 .invite-bot-button[aria-disabled="true"] {
   cursor: default;
 }
-.invite-bot-button:hover:not(:disabled, [aria-disabled="true"]) {
-  background: color-mix(in srgb, var(--text) 9%, transparent);
-}
+/* The house primary: text on the page colour. */
 .invite-bot-button[data-variant="primary"] {
-  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
-  background: color-mix(in srgb, var(--blue) 16%, transparent);
+  border-color: transparent;
+  background: var(--text);
+  color: var(--bg);
 }
-.invite-bot-button[data-variant="primary"]:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--blue) 26%, transparent);
+.invite-bot-button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
-.invite-bot-button[aria-pressed="true"] {
-  border-color: color-mix(in srgb, var(--blue) 70%, transparent);
-  background: color-mix(in srgb, var(--blue) 22%, transparent);
-}
-.invite-bot-button[data-copied="true"] {
-  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
-  background: color-mix(in srgb, var(--blue) 16%, transparent);
-}
-.invite-bot-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+@media (hover: hover) and (pointer: fine) {
+  .invite-bot-button:hover:not([aria-disabled="true"]) {
+    background: var(--accent-active);
+  }
+  .invite-bot-button[data-variant="primary"]:hover:not([aria-disabled="true"]) {
+    background: var(--text);
+    opacity: 0.9;
+  }
 }
 .invite-bot-message {
   display: grid;
@@ -61,49 +79,98 @@
   min-width: 0;
 }
 .invite-bot-text {
-  display: grid;
-  gap: 4px;
-  margin: 0;
+  position: relative;
   padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: color-mix(in srgb, var(--text) 3%, transparent);
+  background: var(--bg-subtle);
   color: var(--text);
   font-size: 0.8rem;
   line-height: 1.55;
 }
-.invite-bot-lead {
-  color: var(--text-secondary);
+/* Copy confirms on the message too: a soft ring that fades in and out once. */
+.invite-bot-text::after {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border: 1px solid var(--green);
+  border-radius: inherit;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 600ms ease-out;
 }
-.invite-bot-body {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  user-select: text;
-}
-.invite-bot-address,
-.invite-bot-code {
-  padding: 1px 5px;
-  border-radius: 5px;
-  background: color-mix(in srgb, var(--text) 8%, transparent);
-  font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: 0.74rem;
-}
-.invite-bot-code {
-  white-space: nowrap;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-.invite-bot-code[data-placeholder] {
-  color: var(--text-secondary);
-  font-weight: 500;
+.invite-bot-text[data-copied]::after {
+  opacity: 0.45;
+  transition: opacity 160ms var(--ease-out);
 }
 .invite-bot-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
 }
+.invite-bot-done {
+  margin-left: auto;
+}
+.invite-bot-status {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+}
+/* A small live dot while the invite waits for the bot. */
+.invite-bot-live {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  transform: translateY(-1px);
+  animation: invite-bot-live 1600ms ease-in-out infinite alternate;
+}
+@keyframes invite-bot-live {
+  from {
+    opacity: 0.45;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.invite-bot-fade-enter-active {
+  transition: opacity 180ms var(--ease-out), transform 200ms var(--ease-out);
+}
+.invite-bot-fade-leave-active {
+  transition: opacity 100ms ease-out, transform 100ms ease-out;
+}
+.invite-bot-fade-enter-from,
+.invite-bot-fade-leave-to {
+  opacity: 0;
+  transform: translateY(2px);
+}
 .invite-bot-error {
-  color: var(--red-text, #c0392b);
+  color: var(--red-text);
   font-size: 0.78rem;
   line-height: 1.5;
+}
+@media (prefers-reduced-motion: reduce) {
+  .invite-bot-open {
+    animation: invite-bot-open-fade 150ms ease both;
+  }
+  .invite-bot-button:active:not([aria-disabled="true"]) {
+    transform: none;
+  }
+  .invite-bot-fade-enter-active,
+  .invite-bot-fade-leave-active {
+    transition: opacity 150ms ease;
+  }
+  .invite-bot-fade-enter-from,
+  .invite-bot-fade-leave-to {
+    transform: none;
+  }
+  .invite-bot-live {
+    animation: none;
+  }
+}
+@keyframes invite-bot-open-fade {
+  from {
+    opacity: 0;
+  }
 }

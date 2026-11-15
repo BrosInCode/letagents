@@ -70,16 +70,22 @@ test("the section shows one button until opened; open, it says what the invite d
   assert.doesNotMatch(open, /data-testid="invite-bot-open"/);
   // Vue's SSR writes quotes and apostrophes as entities.
   assert.match(open, /data-testid="invite-bot-summary"[^>]*>The bot joins (&quot;|")sky-owl(&quot;|") at once, with no approval\. The invite works one time\.</);
-  const buttons = [...open.matchAll(/data-platform="([a-z]+)"[^>]*aria-pressed="(true|false)"/g)].map((match) => [match[1], match[2]]);
-  assert.deepEqual(buttons, [["grok", "true"], ["chatgpt", "false"], ["claude", "false"], ["other", "false"]], "Grok Bot is picked first");
+  // A radio group: the picked bot is the one stop for Tab, arrow keys move it.
+  assert.match(open, /role="radiogroup" aria-label="Which bot"/);
+  const radios = [...open.matchAll(/data-platform="([a-z]+)"[^>]*aria-checked="(true|false)"[^>]*tabindex="(-?\d)"/g)].map((match) => [match[1], match[2], match[3]]);
+  assert.deepEqual(radios, [["grok", "true", "0"], ["chatgpt", "false", "-1"], ["claude", "false", "-1"], ["other", "false", "-1"]], "Grok Bot is picked first");
+  // Every bot's message sits in one cell (the box never changes height); only the picked one is shown and read.
+  const layers = [...open.matchAll(/class="invite-bot-msg-layer"([^>]*)data-platform="([a-z]+)"/g)].map((match) => [match[2], /data-active/.test(match[1]), /aria-hidden="true"/.test(match[1])]);
+  assert.deepEqual(layers, [["grok", true, false], ["chatgpt", false, true], ["claude", false, true], ["other", false, true]]);
   assert.match(open, /Paste this to your Grok Bot:/);
-  assert.match(open, /class="invite-bot-address"[^>]*>https:\/\/letagents\.chat\/mcp</);
-  assert.match(open, /class="invite-bot-code" data-placeholder[^>]*>····-····</, "the code is made when Copy is pressed");
-  assert.doesNotMatch(open, /sky-owl[^<]*<\/span><\/p>|For the room/, "the message names no room");
-  assert.match(open, /data-testid="invite-bot-copy"[^>]*>\s*Copy\s*</);
+  assert.match(open, /class="invite-bot-msg-address"[^>]*>https:\/\/letagents\.chat\/mcp</);
+  assert.match(open, /class="invite-bot-msg-code" data-placeholder/, "the code is made when Copy is pressed");
+  assert.doesNotMatch(open, /For the room/, "the message names no room");
+  // Copy keeps one width: both words share one cell, the icon turns into a check.
+  assert.match(open, /data-testid="invite-bot-copy"[\s\S]*?class="copy-state" data-state="idle"[\s\S]*?data-for="idle"[^>]*>Copy<[\s\S]*?data-for="done"[^>]*>Copied</);
   assert.match(open, /Send this to the bot(&#39;|')s owner\./);
   assert.doesNotMatch(open, />\s*Done\s*</, "a host that opens it closes it too");
-  assert.match(await render({ initialPlatform: "claude", collapsible: false }), /In Claude, add this connector/);
+  assert.match(await render({ initialPlatform: "claude", collapsible: false }), /data-active[^>]*data-platform="claude"[\s\S]*?In Claude, add this connector/);
 
   const member = await render({ collapsible: false, admin: false });
   assert.match(member, /An admin of (&quot;|")sky-owl(&quot;|") lets the bot in\. The invite works one time\./);

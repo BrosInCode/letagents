@@ -1,5 +1,5 @@
 <template>
-  <div class="invite-bot" data-testid="invite-bot-section">
+  <div ref="root" class="invite-bot" data-testid="invite-bot-section">
     <!-- A Git Room's GitHub roles decide who is in it: no invites here. -->
     <p v-if="gitRoom" class="invite-bot-hint" data-testid="invite-bot-git-room">{{ INVITE_BOT_GIT_ROOM_LINE }} {{ gitRoomHint }}</p>
 
@@ -14,34 +14,13 @@
       Invite a bot
     </button>
 
-    <template v-else>
+    <div v-else class="invite-bot-open" data-testid="invite-bot-open-section">
       <p class="invite-bot-hint" data-testid="invite-bot-summary">{{ summary }}</p>
-      <div class="invite-bot-picker" role="group" aria-label="Which bot" data-testid="invite-bot-picker">
-        <button
-          v-for="choice in INVITE_BOT_PLATFORMS"
-          :key="choice.id"
-          type="button"
-          class="invite-bot-button"
-          :data-platform="choice.id"
-          :aria-pressed="invite.platform.value === choice.id ? 'true' : 'false'"
-          @click="invite.pick(choice.id)"
-        >
-          {{ choice.label }}
-        </button>
-      </div>
+      <InviteBotPicker :model-value="invite.platform.value" @update:model-value="pick" />
 
       <div class="invite-bot-message" data-testid="invite-bot-message">
-        <div class="invite-bot-text" data-testid="invite-bot-text">
-          <p class="invite-bot-lead">{{ invite.message.value.lead }}</p>
-          <p class="invite-bot-body"><template v-for="(part, index) in invite.message.value.parts" :key="index"><span
-            v-if="part.kind === 'connector'"
-            class="invite-bot-address"
-          >{{ part.text }}</span><span
-            v-else-if="part.kind === 'code'"
-            class="invite-bot-code"
-            :data-placeholder="part.placeholder || undefined"
-            :title="part.placeholder ? 'Copy makes a one-time code' : undefined"
-          >{{ part.text }}</span><template v-else>{{ part.text }}</template></template></p>
+        <div class="invite-bot-text" :data-copied="invite.copied.value || undefined" data-testid="invite-bot-text">
+          <InviteBotMessage :platform="invite.platform.value" :code="invite.created.value?.code ?? null" :connector-url="room.connectorUrl" />
         </div>
         <div class="invite-bot-actions">
           <button
@@ -53,34 +32,42 @@
             :aria-disabled="invite.busy.value || undefined"
             @click="invite.copy()"
           >
-            {{ invite.busy.value ? "Making…" : invite.copied.value ? "Copied" : "Copy" }}
+            <CopyStateLabel :state="invite.busy.value ? 'busy' : invite.copied.value ? 'done' : 'idle'" />
           </button>
-          <button
-            v-if="invite.created.value && cancelInvite"
-            type="button"
-            class="invite-bot-button"
-            data-testid="invite-bot-cancel"
-            :aria-disabled="cancelling || undefined"
-            @click="cancel"
-          >
-            Cancel invite
-          </button>
-          <button v-if="collapsible" type="button" class="invite-bot-button" @click="done">Done</button>
+          <Transition name="invite-bot-fade">
+            <button
+              v-if="invite.created.value && cancelInvite"
+              type="button"
+              class="invite-bot-button"
+              data-testid="invite-bot-cancel"
+              :aria-disabled="cancelling || undefined"
+              @click="cancel"
+            >
+              Cancel invite
+            </button>
+          </Transition>
+          <button v-if="collapsible" type="button" class="invite-bot-button invite-bot-done" @click="done">Done</button>
         </div>
         <p v-if="invite.error.value || cancelError" class="invite-bot-error" role="alert">{{ invite.error.value || cancelError }}</p>
-        <p v-if="invite.created.value" class="invite-bot-hint" data-testid="invite-bot-waiting">
-          Waiting for {{ botName }} to join. The invite works one time and ends in 7 days.
-        </p>
-        <p v-else-if="cancelled" class="invite-bot-hint" data-testid="invite-bot-cancelled">The invite was cancelled. Copy makes a new one.</p>
-        <p v-else class="invite-bot-hint">{{ INVITE_BOT_HINT }}</p>
+        <!-- One status line that answers in place: the hint, then waiting, or cancelled. -->
+        <Transition name="invite-bot-fade" mode="out-in">
+          <p v-if="invite.created.value" key="waiting" class="invite-bot-hint invite-bot-status" data-testid="invite-bot-waiting">
+            <span class="invite-bot-live" aria-hidden="true"></span>Waiting for {{ botName }} to join. The invite works one time and ends in 7 days.
+          </p>
+          <p v-else-if="cancelled" key="cancelled" class="invite-bot-hint" data-testid="invite-bot-cancelled">The invite was cancelled. Copy makes a new one.</p>
+          <p v-else key="hint" class="invite-bot-hint">{{ INVITE_BOT_HINT }}</p>
+        </Transition>
       </div>
-    </template>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 
+import CopyStateLabel from "./CopyStateLabel.vue";
+import InviteBotMessage from "./InviteBotMessage.vue";
+import InviteBotPicker from "./InviteBotPicker.vue";
 import {
   INVITE_BOT_GIT_ROOM_LINE,
   INVITE_BOT_HINT,
@@ -111,6 +98,7 @@ const props = withDefaults(defineProps<{
 }>(), { admin: false, gitRoom: false, gitRoomHint: "", cancelInvite: null, collapsible: true, initialPlatform: null });
 
 const open = ref(false);
+const root = ref<HTMLElement | null>(null);
 const cancelling = ref(false);
 const cancelled = ref(false);
 const cancelError = ref<string | null>(null);
@@ -141,6 +129,18 @@ async function cancel(): Promise<void> {
     cancelled.value = true;
   }
 }
+
+function pick(platform: InviteBotPlatform): void {
+  cancelled.value = false;
+  invite.pick(platform);
+}
+
+/** Opens the invite and puts focus on the picked bot (a host's "+" menu). */
+function openSection(): void {
+  open.value = true;
+  void nextTick(() => root.value?.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]')?.focus({ preventScroll: true }));
+}
+defineExpose({ openSection });
 
 function done(): void {
   open.value = false;

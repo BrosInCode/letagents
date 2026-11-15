@@ -46,7 +46,7 @@ Object.defineProperty(globalThis, "window", {
   },
 });
 
-const { createRoomInvites, roomInvitePillText } = await import("../src/composables/useRoomInvites");
+const { ROOM_INVITE_ANSWER_MS, createRoomInvites, roomInvitePillText } = await import("../src/composables/useRoomInvites");
 
 function invite(overrides: Partial<RoomInvite> = {}): RoomInvite {
   return {
@@ -163,11 +163,12 @@ test("a new invite's pill waits for its panel to close, keeps its code on this c
   const again = restarted.pills(() => "PTGA-21RN-W0QP");
   assert.equal(again.value[0]?.code, "K7QM-4XPD");
   assert.equal(await restarted.cancel(again.value[0]!.invite), null);
-  assert.deepEqual(again.value, [], "a cancelled invite has no pill");
+  assert.equal(again.value[0]?.state, "cancelled", "Cancel answers in place for a moment");
+  assert.deepEqual(roomInvitePillText(again.value[0]!), { main: "Invite cancelled", muted: "" });
   assert.equal(storage.get("letagents.roomInviteCodes.v1")?.includes("K7QM-4XPD"), false, "and its code is forgotten");
 });
 
-test("a bot that joins clears the pill in its room; from a Git Room the pill says it joined, until Done", () => {
+test("a bot that joins answers in place, then the pill folds away; from a Git Room the pill says it joined, until Done", async () => {
   const store = createRoomInvites();
   const here = invite({ id: "inv_here" });
   const fromGit = invite({ id: "inv_git", origin_room_id: "github.com/acme/app" });
@@ -182,11 +183,14 @@ test("a bot that joins clears the pill in its room; from a Git Room the pill say
   const used = { state: "used" as const, outcome: "admitted" as const, used_at: "2026-11-15T10:05:00.000Z", used_by_login: "botowner" };
   store.receive({ invite: { ...here, ...used } });
   store.receive({ invite: { ...fromGit, ...used } });
-  assert.deepEqual(inRoom.value, [], "the room shows its own join line instead");
+  assert.deepEqual(inRoom.value.map((pill) => pill.state), ["arrived"], "the pill answers in place for a moment");
+  assert.deepEqual(roomInvitePillText(inRoom.value[0]!), { main: "Grok Bot joined", muted: "" });
   assert.equal(inGit.value[0]?.state, "joined");
   assert.deepEqual(roomInvitePillText(inGit.value[0]!), { main: "Grok Bot joined sky-owl", muted: "" });
   store.close("inv_git");
   assert.deepEqual(inGit.value, []);
+  await new Promise((resolve) => setTimeout(resolve, ROOM_INVITE_ANSWER_MS.arrived + 50));
+  assert.deepEqual(inRoom.value, [], "then it folds away; the room shows its own join line");
 });
 
 test("a member's invite that was used says an admin decides; an ended or expired invite has no pill", () => {
