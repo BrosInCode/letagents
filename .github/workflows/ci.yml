@@ -763,9 +763,9 @@ jobs:
         if: matrix.group == 2
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-connections-db.test.ts src/api/__tests__/tracker-sync-db.test.ts src/api/__tests__/workflow-effect-db-integration.test.ts src/api/__tests__/tracker-rules-db.test.ts src/api/__tests__/tracker-jev-db.test.ts
 
-      - name: Test room members and join requests
+      - name: Test room members, join requests and invites
         if: matrix.group == 2
-        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-members-routes.test.ts src/api/__tests__/room-members-db.test.ts src/api/__tests__/room-members-enforcement-db.test.ts
+        run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-members-routes.test.ts src/api/__tests__/room-members-db.test.ts src/api/__tests__/room-members-enforcement-db.test.ts src/api/__tests__/room-invites-db.test.ts
 
       - name: Test live demos (hub, sockets, saved marks)
         if: matrix.group == 2

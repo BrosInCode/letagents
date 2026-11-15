@@ -143,6 +143,11 @@ export const accounts = pgTable(
   })
 );
 
+/**
+ * One-use invite codes for members-only rooms ("Invite a bot"), migration
+ * 0150. `code` is the SHA-256 of the code (see db/room-invites.ts), never the
+ * code. A row without `kind` predates 0150 and never matches a code.
+ */
 export const invites = pgTable(
   "invites",
   {
@@ -154,8 +159,26 @@ export const invites = pgTable(
     created_by: text("created_by"),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     revoked_at: timestamp("revoked_at", { mode: "string", withTimezone: true }),
+    /** 'admit' (an admin made it) or 'request' (a member made it). */
+    kind: text("kind"),
+    /** The bot the maker picked: 'grok' | 'chatgpt' | 'claude' | 'other'. */
+    platform: text("platform"),
+    /** The room where the maker made it, for the pill there. */
+    origin_room_id: text("origin_room_id")
+      .references(() => rooms.id, { onDelete: "set null", onUpdate: "cascade" }),
+    expires_at: timestamp("expires_at", { mode: "string", withTimezone: true }),
+    used_at: timestamp("used_at", { mode: "string", withTimezone: true }),
+    used_by: text("used_by").references(() => accounts.id, { onDelete: "set null" }),
+    /** 'admitted' or 'requested', once used. */
+    outcome: text("outcome"),
+    /** The join request a member's invite filed. The FK to room_join_requests is in the migration. */
+    join_request_id: text("join_request_id"),
   },
   (table) => ({
     room_idx: index("invites_room_id_idx").on(table.room_id),
+    created_by_idx: index("invites_created_by_idx").on(table.created_by, table.created_at),
+    kind_check: check("invites_kind_check", sql`${table.kind} IS NULL OR ${table.kind} IN ('admit', 'request')`),
+    platform_check: check("invites_platform_check", sql`${table.platform} IS NULL OR ${table.platform} IN ('grok', 'chatgpt', 'claude', 'other')`),
+    outcome_check: check("invites_outcome_check", sql`${table.outcome} IS NULL OR ${table.outcome} IN ('admitted', 'requested')`),
   })
 );

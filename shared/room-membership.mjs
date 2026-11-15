@@ -49,7 +49,7 @@ export const REPO_ROOM_USES_GITHUB_ROLES_MESSAGE =
   'Repo rooms use GitHub roles. Ask a repository admin to add the person on GitHub.';
 
 export const ROOM_MEMBER_ROLES = Object.freeze(['admin', 'member']);
-export const ROOM_MEMBER_SOURCES = Object.freeze(['creator', 'seed', 'approved_request']);
+export const ROOM_MEMBER_SOURCES = Object.freeze(['creator', 'seed', 'approved_request', 'invite']);
 export const ROOM_JOIN_REQUEST_STATES = Object.freeze(['pending', 'approved', 'declined', 'cancelled']);
 
 /** After a decline, the same person can ask the same room again after this wait. */

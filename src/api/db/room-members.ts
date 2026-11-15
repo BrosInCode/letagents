@@ -22,7 +22,7 @@ import { wakeJobQueue } from '../server/job-queue-wakes.js';
 // focus room. Rows exist only on top-level rooms. A room admin
 // (`project_admins` on the access room) is always a member.
 
-type Queryable = Pick<PoolClient, 'query'>;
+export type Queryable = Pick<PoolClient, 'query'>;
 
 interface StoredJoinRequest {
   id: string;
@@ -70,7 +70,7 @@ function toAdminJoinRequest(row: StoredAdminJoinRequest): RoomJoinRequest {
   };
 }
 
-async function inTransaction<T>(run: (client: PoolClient) => Promise<T>): Promise<T> {
+export async function inTransaction<T>(run: (client: PoolClient) => Promise<T>): Promise<T> {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
@@ -88,7 +88,7 @@ async function inTransaction<T>(run: (client: PoolClient) => Promise<T>): Promis
 
 // The same lock as assignProjectAdminIfRoomHasNoAdmins: every change to the
 // admins of a room runs one at a time, so the last admin can never be removed.
-async function lockRoomAdmins(client: Queryable, roomId: string): Promise<void> {
+export async function lockRoomAdmins(client: Queryable, roomId: string): Promise<void> {
   await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [`project_admin:${roomId}`]);
 }
 
@@ -360,23 +360,34 @@ export type RoomJoinRequestCreation =
   | { kind: 'cooldown'; join_request: RoomJoinRequestSummary }
   | { kind: 'member' };
 
+/**
+ * Files a request to join inside the caller's transaction (an invite files one
+ * this way). After a 'created' answer the caller wakes the push worker once
+ * the transaction commits.
+ */
+export async function createRoomJoinRequestInTransaction(
+  client: Queryable,
+  roomId: string,
+  accountId: string,
+): Promise<RoomJoinRequestCreation> {
+  await lockJoinRequests(client, roomId, accountId);
+  if (await getRoomMemberRole(roomId, accountId, client)) return { kind: 'member' };
+  const latest = await latestJoinRequestRow(client, roomId, accountId);
+  if (latest?.state === 'pending') return { kind: 'pending', join_request: toJoinRequestSummary(latest) };
+  const summary = latest ? toJoinRequestSummary(latest) : null;
+  if (summary?.retry_after && Date.parse(summary.retry_after) > Date.now()) {
+    return { kind: 'cooldown', join_request: summary };
+  }
+  const id = `rjr_${crypto.randomUUID().replace(/-/g, '')}`;
+  const inserted = await client.query<StoredJoinRequest>(`INSERT INTO room_join_requests (id, room_id, account_id)
+    VALUES ($1, $2, $3) RETURNING ${JOIN_REQUEST_COLUMNS}`, [id, roomId, accountId]);
+  // The admins' desktops learn of it even while the app is quit.
+  await enqueueJoinRequestPushes(client, { roomId, requestId: id, requesterAccountId: accountId });
+  return { kind: 'created', join_request: toJoinRequestSummary(inserted.rows[0]!) };
+}
+
 export async function createRoomJoinRequest(roomId: string, accountId: string): Promise<RoomJoinRequestCreation> {
-  const creation = await inTransaction(async (client): Promise<RoomJoinRequestCreation> => {
-    await lockJoinRequests(client, roomId, accountId);
-    if (await getRoomMemberRole(roomId, accountId, client)) return { kind: 'member' };
-    const latest = await latestJoinRequestRow(client, roomId, accountId);
-    if (latest?.state === 'pending') return { kind: 'pending', join_request: toJoinRequestSummary(latest) };
-    const summary = latest ? toJoinRequestSummary(latest) : null;
-    if (summary?.retry_after && Date.parse(summary.retry_after) > Date.now()) {
-      return { kind: 'cooldown', join_request: summary };
-    }
-    const id = `rjr_${crypto.randomUUID().replace(/-/g, '')}`;
-    const inserted = await client.query<StoredJoinRequest>(`INSERT INTO room_join_requests (id, room_id, account_id)
-      VALUES ($1, $2, $3) RETURNING ${JOIN_REQUEST_COLUMNS}`, [id, roomId, accountId]);
-    // The admins' desktops learn of it even while the app is quit.
-    await enqueueJoinRequestPushes(client, { roomId, requestId: id, requesterAccountId: accountId });
-    return { kind: 'created', join_request: toJoinRequestSummary(inserted.rows[0]!) };
-  });
+  const creation = await inTransaction((client) => createRoomJoinRequestInTransaction(client, roomId, accountId));
   // The push worker sleeps until its next due row; the admins' pushes are due now.
   if (creation.kind === 'created') wakeJobQueue('desktop_push');
   return creation;

@@ -17,12 +17,13 @@ export const room_members = pgTable('room_members', {
 }, (table) => ({
   pk: primaryKey({ name: 'room_members_pk', columns: [table.room_id, table.account_id] }),
   account_idx: index('room_members_account_idx').on(table.account_id),
-  added_via_check: check('room_members_added_via_check', sql`${table.added_via} IN ('creator', 'seed', 'approved_request')`),
+  added_via_check: check('room_members_added_via_check', sql`${table.added_via} IN ('creator', 'seed', 'approved_request', 'invite')`),
 }));
 
 /**
  * A person an admin removed from a room, or who left it. A seed never adds
- * them back; only an approved join request does, and it clears this row.
+ * them back; only an approved join request or an admin's invite does, and
+ * either clears this row.
  */
 export const room_member_removals = pgTable('room_member_removals', {
   room_id: text('room_id').notNull().references(() => rooms.id, { onDelete: 'cascade', onUpdate: 'cascade' }),

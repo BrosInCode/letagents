@@ -39,8 +39,10 @@ import {
   toPublicAgentIdentity,
   withAgentIdentity,
 } from "./identity.js";
+import { normalizeRoomInviteCode } from "../../../../shared/room-invites.mjs";
 import { withJoinRoomAgentPrompt } from "./messages.js";
 import { syncRoomPresence } from "./presence.js";
+import { redeemRoomInviteCode } from "./room-invites.js";
 import { JOIN_NEXT_STEP } from "./wake-up.js";
 import {
   rememberRoom,
@@ -439,6 +441,8 @@ export async function joinInviteCode(
   code: string,
   sessionMode: JoinSessionMode
 ): Promise<Record<string, unknown>> {
+  const inviteCode = normalizeRoomInviteCode(code);
+  if (inviteCode) return joinWithRoomInviteCode(inviteCode, sessionMode);
   const joined = await joinRoomIdentifier(code, "join_code");
   return buildJoinResponse({
     joined,
@@ -446,6 +450,44 @@ export async function joinInviteCode(
     joined_via: "join_code",
     session_mode: sessionMode,
   });
+}
+
+/**
+ * A one-use invite code (`XXXX-XXXX`): the server uses it for this account,
+ * then this chat joins the room it let the account into. A member's invite
+ * files a request to join instead and answers where it stands. A code no
+ * invite has may still be an old room's own code, so that join is tried last.
+ */
+async function joinWithRoomInviteCode(
+  code: string,
+  sessionMode: JoinSessionMode
+): Promise<Record<string, unknown>> {
+  if (hasSupervisedWorkerAuthority()) {
+    throw new Error("Room joins and creation are disabled during a daemon-supervised bounded turn.");
+  }
+  const redeemed = await redeemRoomInviteCode(code);
+  if (redeemed.kind === "answered") return redeemed.result;
+  if (redeemed.kind === "not_found") {
+    try {
+      const joined = await joinRoomIdentifier(code, "join_code", { allowCreate: false });
+      return buildJoinResponse({ joined, room_identifier: code, joined_via: "join_code", session_mode: sessionMode });
+    } catch (error) {
+      if (isNotFoundApiError(error)) return redeemed.result;
+      throw error;
+    }
+  }
+  const joined = await joinRoomIdentifier(redeemed.roomId, "join_room", { allowCreate: false });
+  const response = await buildJoinResponse({
+    joined,
+    room_identifier: redeemed.roomId,
+    joined_via: "join_code",
+    session_mode: sessionMode,
+  });
+  return {
+    ...response,
+    invite: { outcome: "admitted", joined_now: redeemed.joinedNow },
+    invite_message: "The invite let your account into this room. It was a one-use code; do not use it again.",
+  };
 }
 
 export async function joinNamedRoom(
