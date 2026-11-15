@@ -33,7 +33,7 @@
 .room-invite-pill-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
 .room-invite-pill-words { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .room-invite-pill-muted { color: var(--text-tertiary); }
-.room-invite-pill .agent-ask-pill-actions button { transition: background-color 140ms ease, transform 140ms var(--ease-out); }
+.room-invite-pill .agent-ask-pill-actions button { transition: transform 140ms var(--ease-out); }
 .room-invite-pill .agent-ask-pill-actions button:active:not([aria-disabled="true"]) { transform: scale(0.97); }
 .room-invite-pill-enter-active { transition: opacity 180ms var(--ease-out), transform 220ms var(--ease-out); }
 .room-invite-pill-leave-active { transition: opacity 120ms ease-out, transform 120ms ease-out; }

@@ -205,3 +205,79 @@ test("a used invite seen only in a list after a restart shows no pill", async ()
   await store.load("github.com/acme/app");
   assert.deepEqual(store.pills(() => "github.com/acme/app").value, []);
 });
+
+test("Copy copies the code for the bot picked at the press, even when another bot is picked while it is made", async () => {
+  const copied: string[] = [];
+  let finish!: () => void;
+  const controller = useInviteBotCode({
+    room: ref({ roomId: "focus_7", roomName: "Launch focus" }),
+    // The server names the parent room: a focus room's invite is for its parent.
+    createInvite: (platform) => new Promise<InviteBotCreated>((resolve) => {
+      finish = () => resolve({ invite: { id: "inv_9", platform, kind: "admit", room_id: "PTGA-21RN-W0QP" }, code: "QQQQ-RRRR" });
+    }),
+    writeClipboard: async (text) => { copied.push(text); },
+  });
+  const pressed = controller.copy();
+  controller.pick("chatgpt");
+  finish();
+  assert.ok(await pressed);
+  assert.equal(copied.length, 1);
+  assert.match(copied[0]!, /^Paste this to your Grok Bot:/);
+  assert.match(copied[0]!, /invite code QQQQ-RRRR /, "never the placeholder");
+  controller.pick("grok");
+  assert.ok(controller.message.value.text.includes("QQQQ-RRRR"), "the made code shows for the room the panel asked for");
+});
+
+test("an invite made after its panel closed shows its pill at once", async () => {
+  const store = createRoomInvites();
+  created = invite({ id: "inv_late" });
+  const pills = store.pills(() => "PTGA-21RN-W0QP");
+  const made = await store.create("PTGA-21RN-W0QP", "grok", null);
+  store.reveal([made.invite.id]);
+  assert.deepEqual(pills.value.map((pill) => pill.invite.id), ["inv_late"]);
+});
+
+test("an invite that ends while nothing else changes leaves at the next clock tick", () => {
+  const store = createRoomInvites();
+  const soon = invite({ id: "inv_soon", expires_at: new Date(Date.now() + 50).toISOString() });
+  store.receive({ invite: soon });
+  const pills = store.pills(() => "PTGA-21RN-W0QP");
+  assert.equal(pills.value.length, 1);
+  const until = Date.now() + 80;
+  while (Date.now() < until) { /* let it end */ }
+  store.tick();
+  assert.deepEqual(pills.value, []);
+});
+
+test("a list read that started before a change neither drops a new invite nor brings back an ended one", async () => {
+  const store = createRoomInvites();
+  const old = invite({ id: "inv_old_open" });
+  store.receive({ invite: old });
+  let answer!: (value: unknown) => void;
+  const api = (globalThis as any).window.letagentsDesktop.roomInvites;
+  const realList = api.list;
+  api.list = () => new Promise((resolve) => { answer = resolve; });
+  try {
+    const reading = store.load("PTGA-21RN-W0QP");
+    store.receive({ invite: invite({ id: "inv_new" }) });
+    store.receive({ invite: { ...old, state: "used", outcome: "admitted" } });
+    answer({ ok: true, invites: [old] });
+    await reading;
+  } finally {
+    api.list = realList;
+  }
+  const kept = store.invites.value;
+  assert.ok(kept.has("inv_new"), "the invite made during the read stays");
+  assert.equal(kept.get("inv_old_open")?.state, "used", "the list's stale open copy does not undo the join");
+});
+
+test("sign-out forgets the codes kept on this computer", async () => {
+  storage.clear();
+  const store = createRoomInvites();
+  created = invite({ id: "inv_forget" });
+  await store.create("PTGA-21RN-W0QP", "grok", null);
+  assert.ok(storage.get("letagents.roomInviteCodes.v1"));
+  store.forgetCodes();
+  assert.equal(storage.get("letagents.roomInviteCodes.v1"), undefined);
+  assert.equal(store.codeFor("inv_forget"), null);
+});

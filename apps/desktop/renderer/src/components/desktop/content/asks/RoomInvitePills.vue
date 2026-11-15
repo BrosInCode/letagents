@@ -35,7 +35,7 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from "vue";
+import { onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Link2 } from "@lucide/vue";
 import { buildInviteBotCodeMessage } from "../../../../../../../../shared/ui/invite-bot";
 import { roomInvitePillText, roomInvites, type RoomInvitePill } from "../../../../composables/useRoomInvites";
@@ -88,5 +88,14 @@ watch(() => props.roomIdentifier, (room) => {
   error.value = null;
   if (room) void roomInvites.load(room);
 }, { immediate: true });
-onBeforeUnmount(() => clearTimeout(copiedTimer));
+// A change missed while the stream was down (the computer slept) is read again when the window comes back.
+function reloadOnFocus(): void {
+  roomInvites.tick();
+  if (props.roomIdentifier) void roomInvites.load(props.roomIdentifier);
+}
+onMounted(() => window.addEventListener("focus", reloadOnFocus));
+onBeforeUnmount(() => {
+  clearTimeout(copiedTimer);
+  window.removeEventListener("focus", reloadOnFocus);
+});
 </script>

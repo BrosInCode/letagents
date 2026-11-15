@@ -1,4 +1,4 @@
-import { computed, shallowRef, type ComputedRef } from "vue";
+import { computed, ref, shallowRef, type ComputedRef } from "vue";
 import {
   parseRoomInvite,
   roomInvitePlatformLabel,
@@ -87,8 +87,15 @@ export function roomInvitePillText(pill: RoomInvitePill): { main: string; muted:
   return { main: `Invite for ${bot}${pill.elsewhere ? ` to ${room}` : ""}`, muted: " · waiting for it to join" };
 }
 
+/** Read once a minute while a pill shows, so an invite that ends leaves without another change. */
+const PILL_CLOCK_MS = 60_000;
+
 export function createRoomInvites() {
   const invites = shallowRef<ReadonlyMap<string, RoomInvite>>(new Map());
+  const now = ref(Date.now());
+  let clock: ReturnType<typeof setInterval> | null = null;
+  /** Counts changes, so a list read that started before one does not undo it. */
+  let changes = 0;
   const codes = shallowRef<Record<string, StoredCode>>(readCodes());
   /** Used invites the person closed with Done or Open. */
   const closed = shallowRef<ReadonlySet<string>>(new Set());
@@ -101,6 +108,7 @@ export function createRoomInvites() {
   const held = new Map<string, RoomInvite>();
 
   function put(invite: RoomInvite): void {
+    changes += 1;
     const next = new Map(invites.value);
     next.set(invite.id, invite);
     invites.value = next;
@@ -120,15 +128,24 @@ export function createRoomInvites() {
   /** Reads this account's open invites that show in the room. */
   async function load(roomIdentifier: string): Promise<void> {
     if (!roomIdentifier) return;
+    const changesAtStart = changes;
     const result = await desktopIpc.roomInvites?.list(roomIdentifier).catch(() => null);
     if (!result?.ok) return;
     const listed = new Set(result.invites.map((invite) => invite.id));
     const next = new Map(invites.value);
-    // An open invite for this room that the server no longer lists ended while the app was not looking.
-    for (const [id, invite] of next) {
-      if (invite.state === "open" && pillRoomOf(invite) === roomIdentifier && !listed.has(id)) next.delete(id);
+    // An open invite for this room that the server no longer lists ended while
+    // the app was not looking. Only when nothing changed during the read: an
+    // invite made meanwhile is not in the list yet.
+    if (changes === changesAtStart) {
+      for (const [id, invite] of next) {
+        if (invite.state === "open" && pillRoomOf(invite) === roomIdentifier && !listed.has(id)) next.delete(id);
+      }
     }
-    for (const invite of result.invites) if (!held.has(invite.id)) next.set(invite.id, invite);
+    // A listed invite is open; it never brings back one this app already saw end.
+    for (const invite of result.invites) {
+      const known = next.get(invite.id);
+      if (!held.has(invite.id) && (!known || known.state === "open")) next.set(invite.id, invite);
+    }
     invites.value = next;
   }
 
@@ -194,6 +211,10 @@ export function createRoomInvites() {
     closed.value = next;
   }
 
+  function tick(): void {
+    now.value = Date.now();
+  }
+
   function pillFor(invite: RoomInvite, now: number): RoomInvitePill | null {
     const elsewhere = invite.origin_room_id !== null && invite.origin_room_id !== invite.room_id;
     if (invite.state === "open") {
@@ -208,26 +229,44 @@ export function createRoomInvites() {
 
   /** The pills above one room's composer, newest first. */
   function pills(roomIdentifier: () => string | null): ComputedRef<RoomInvitePill[]> {
+    if (!clock && typeof setInterval === "function") {
+      clock = setInterval(tick, PILL_CLOCK_MS);
+      (clock as { unref?: () => void }).unref?.();
+    }
     return computed(() => {
       const room = roomIdentifier();
       if (!room) return [];
-      const now = Date.now();
+      const at = now.value;
       return [...invites.value.values()]
         .filter((invite) => pillRoomOf(invite) === room)
         .sort((a, b) => b.created_at.localeCompare(a.created_at))
-        .map((invite) => pillFor(invite, now))
+        .map((invite) => pillFor(invite, at))
         .filter((pill): pill is RoomInvitePill => pill !== null);
     });
   }
 
   function reset(): void {
     held.clear();
+    changes += 1;
     invites.value = new Map();
     closed.value = new Set();
     seenUsed.value = new Set();
   }
 
-  return { invites, load, create, reveal, cancel, receive, close, pills, reset, codeFor: (id: string) => codes.value[id]?.code ?? null };
+  /** Sign-out: the codes this computer kept go too. */
+  function forgetCodes(): void {
+    codes.value = {};
+    try {
+      globalThis.localStorage?.removeItem(CODES_KEY);
+    } catch {
+      // Nothing kept.
+    }
+  }
+
+  return {
+    invites, load, create, reveal, cancel, receive, close, pills, reset, forgetCodes, tick,
+    codeFor: (id: string) => codes.value[id]?.code ?? null,
+  };
 }
 
 export type RoomInvites = ReturnType<typeof createRoomInvites>;

@@ -158,6 +158,7 @@ const newRoomError = ref("");
 let sentTimer: ReturnType<typeof setTimeout> | undefined;
 /** Invites made here; their pills show when the panel closes. */
 const madeHere: string[] = [];
+let unmounted = false;
 
 const invite = useInviteBotCode({
   room: computed(() => target.value
@@ -170,7 +171,9 @@ const invite = useInviteBotCode({
       // From a Git Room, the pill shows in the Git Room.
       target.value!.id === props.context.roomId ? null : props.context.roomId,
     );
-    madeHere.push(made.invite.id);
+    // The panel closed while the code was being made: its pill shows at once.
+    if (unmounted) roomInvites.reveal([made.invite.id]);
+    else madeHere.push(made.invite.id);
     return made;
   },
 });
@@ -223,7 +226,10 @@ async function newRoom(): Promise<void> {
     const created = await desktopIpc.room.createInviteRoom();
     const name = created.snapshot.room?.displayName || created.snapshot.room?.name || created.code;
     emit("room-created", created.roomIdentifier);
-    pickRoom({ id: created.roomIdentifier, displayName: name, role: "admin", memberCount: 1 });
+    const room: DesktopBotInviteRoom = { id: created.roomIdentifier, displayName: name, role: "admin", memberCount: 1 };
+    // Back to Rooms lists it, so a second press does not make another room.
+    rooms.value = [room, ...rooms.value.filter((listed) => listed.id !== room.id)];
+    pickRoom(room);
   } catch (error) {
     newRoomError.value = error instanceof Error && error.message ? error.message : "The room could not be made. Try again.";
   } finally {
@@ -241,6 +247,7 @@ async function copy(): Promise<void> {
 
 onMounted(() => { if (view.value === "rooms") void loadRooms(); });
 onBeforeUnmount(() => {
+  unmounted = true;
   clearTimeout(sentTimer);
   roomInvites.reveal(madeHere);
 });

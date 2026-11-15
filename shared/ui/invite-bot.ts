@@ -281,10 +281,16 @@ export interface InviteBotCodeOptions {
  * a placeholder, and Copy, which makes the code once for this room and bot and
  * copies the message. Copying again copies the same code. Another bot or room
  * starts over: the next Copy makes a new code.
+ *
+ * Copy copies the message for the bot and room picked when it was pressed,
+ * with the code the server returned, even when the person picks another bot
+ * while the code is being made. The made code is matched to the room the
+ * panel asked for, not to the room the server names (a focus room's invite is
+ * for its parent room).
  */
 export function useInviteBotCode(options: InviteBotCodeOptions) {
   const platform = ref<InviteBotPlatform>(options.initialPlatform ?? "grok");
-  const created = ref<InviteBotCreated | null>(null);
+  const made = ref<{ forRoomId: string; platform: InviteBotPlatform; created: InviteBotCreated } | null>(null);
   const busy = ref(false);
   const copied = ref(false);
   const error = ref<string | null>(null);
@@ -292,9 +298,10 @@ export function useInviteBotCode(options: InviteBotCodeOptions) {
   const writeClipboard = options.writeClipboard ?? ((text: string) => globalThis.navigator.clipboard.writeText(text));
 
   const current = computed(() => {
-    const made = created.value;
     const room = options.room.value;
-    return made && room && made.invite.room_id === room.roomId && made.invite.platform === platform.value ? made : null;
+    return made.value && room && made.value.forRoomId === room.roomId && made.value.platform === platform.value
+      ? made.value.created
+      : null;
   });
   const message = computed(() => buildInviteBotCodeMessage(platform.value, {
     code: current.value?.code ?? null,
@@ -308,7 +315,7 @@ export function useInviteBotCode(options: InviteBotCodeOptions) {
   }
 
   function reset(): void {
-    created.value = null;
+    made.value = null;
     copied.value = false;
     error.value = null;
     busy.value = false;
@@ -317,14 +324,18 @@ export function useInviteBotCode(options: InviteBotCodeOptions) {
 
   /** Makes the code when there is none yet, then copies. Resolves the invite, or null on failure. */
   async function copy(): Promise<InviteBotCreated | null> {
-    if (busy.value || !options.room.value) return null;
+    const room = options.room.value;
+    if (busy.value || !room) return null;
     error.value = null;
-    let made = current.value;
-    if (!made) {
+    // What the person asked for when they pressed Copy.
+    const pickedPlatform = platform.value;
+    const connectorUrl = room.connectorUrl;
+    let created = current.value;
+    if (!created) {
       busy.value = true;
       try {
-        made = await options.createInvite(platform.value);
-        created.value = made;
+        created = await options.createInvite(pickedPlatform);
+        made.value = { forRoomId: room.roomId, platform: pickedPlatform, created };
       } catch (failure) {
         error.value = failure instanceof Error && failure.message ? failure.message : "The invite could not be made. Try again.";
         return null;
@@ -333,15 +344,15 @@ export function useInviteBotCode(options: InviteBotCodeOptions) {
       }
     }
     try {
-      await writeClipboard(message.value.text);
+      await writeClipboard(buildInviteBotCodeMessage(pickedPlatform, { code: created.code, connectorUrl }).text);
     } catch {
       error.value = "The message could not be copied. Select it and copy it by hand.";
-      return made;
+      return created;
     }
-    copied.value = true;
+    copied.value = platform.value === pickedPlatform;
     clearTimeout(copiedTimer);
     copiedTimer = setTimeout(() => { copied.value = false; }, options.copiedMs ?? 1600);
-    return made;
+    return created;
   }
 
   return { platform, created: current, message, busy, copied, error, pick, reset, copy };

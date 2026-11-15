@@ -106,7 +106,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
-  transition: color 160ms ease;
 }
 
 .desktop-invite-bot-picker button[aria-pressed="true"] {

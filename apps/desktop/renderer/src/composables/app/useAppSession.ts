@@ -198,6 +198,7 @@ export function useAppSessionActions(context: unknown) {
 
   function clearDesktopSessionState(): void {
     invalidateRentalProviderDashboard();
+    roomInvites.forgetCodes();
     attentionIntent.value = null;
     inboxRentals.value = []; inboxRentalError.value = ''; app.inboxRooms.value = []; inboxSection.value = 'needs-you';
     app.resetNeedsYou();
