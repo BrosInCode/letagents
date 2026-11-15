@@ -276,7 +276,15 @@ const supervisedLaunch = useSupervisedAgentLaunch({
     // discovering an older agent must not close a newly opened form.
     if (requestedLaunches.has(entry.id)) presentSavedLaunch(entry);
   },
-  onRestoredEntry: (entry) => restoreModelSelection(entry.model),
+  onRestoredEntry: (entry) => {
+    configuredName.value = entry.displayName;
+    configuredAvatar.value = entry.avatar ? { ...entry.avatar } : null;
+    configuration.restoredPermissionProfileId.value = entry.permissionProfileId;
+    syncPermissionProfileSelection();
+    restoreModelSelection(entry.model);
+    // The consumed private ask is not a draft for another agent. Effort is
+    // absent from the manifest; the recovery view must not infer it either.
+  },
 });
 const launchStarted = supervisedLaunch.launchStarted;
 const supervisedConflict = supervisedLaunch.conflict;

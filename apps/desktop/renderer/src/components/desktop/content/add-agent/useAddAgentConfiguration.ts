@@ -55,6 +55,8 @@ export function useAddAgentConfiguration() {
   const customModelId = ref("");
   const selectedEffort = ref<DesktopManagedAgentEffort | "">("");
   const selectedPermissionProfileId = ref<DesktopManagedAgentPermissionProfileId | null>(null);
+  // Undefined means a new-agent draft; null is a saved entry with no recorded profile.
+  const restoredPermissionProfileId = ref<string | null | undefined>(undefined);
   const selectedPermissionProfileIdsByProvider = ref<
     Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>
   >({});
@@ -66,6 +68,7 @@ export function useAddAgentConfiguration() {
 
   function resetModelSelection(): void {
     restoredModelId = null;
+    restoredPermissionProfileId.value = undefined;
     modelRequestId += 1;
     providerModels.value = null;
     loadingProviderModels.value = false;
@@ -303,6 +306,10 @@ export function useAddAgentConfiguration() {
     }
     function syncPermissionProfileSelection(): void {
       const permissionProfiles = bindings.selectedPermissionProfiles.value;
+      if (restoredPermissionProfileId.value !== undefined) {
+        selectedPermissionProfileId.value = permissionProfiles.find(profile => profile.id === restoredPermissionProfileId.value)?.id ?? null;
+        return;
+      }
       const repoLess = bindings.roomGitRoom() == null && !bindings.repoRootPath()?.trim();
       const repoLessSelectionKey = repoLess && bindings.selectedProviderId.value
         ? `${bindings.roomIdentifier()}\u0000${bindings.selectedProviderId.value}`
@@ -338,6 +345,7 @@ export function useAddAgentConfiguration() {
     }
     function selectPermissionProfile(profile: DesktopManagedAgentPermissionProfile): void {
       if (profile.status !== "available") return;
+      restoredPermissionProfileId.value = undefined;
       selectedPermissionProfileId.value = profile.id;
       if (bindings.selectedProviderId.value) {
         if (bindings.roomGitRoom() == null && !bindings.repoRootPath()?.trim()) {
@@ -360,10 +368,10 @@ export function useAddAgentConfiguration() {
     function resetTransientState(): void {
       invalidateRequests();
       repoLessSupervisedSelections.clear();
+      resetModelSelection();
       syncPermissionProfileSelection();
       openModelApiKey.value = "";
       openModelError.value = null;
-      resetModelSelection();
     }
 
     watch(selectedPermissionProfileId, () => {
@@ -426,6 +434,7 @@ export function useAddAgentConfiguration() {
     customModelId,
     selectedEffort,
     selectedPermissionProfileId,
+    restoredPermissionProfileId,
     resetModelSelection,
     consumeSupervisedCharter,
     bind,

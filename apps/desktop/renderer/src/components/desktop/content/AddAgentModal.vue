@@ -44,7 +44,7 @@
               <div v-if="hasSupervisedRuntime(selectedProvider)" class="agent-refresh-first-message"><AddAgentFirstMessage v-model="supervisedCharter" /></div>
             </section>
             <section class="agent-refresh-panel agent-refresh-brain" :inert="step !== 'brain'" :aria-hidden="step !== 'brain'">
-            <AgentBrain :provider="selectedProviderId" :provider-name="selectedProvider?.name || 'Agent'" :model="selectedModelChoice" :effort="selectedEffort" :active="open && step === 'brain'" :animate="!motionPaused" />
+            <AgentBrain :provider="selectedProviderId" :provider-name="selectedProvider?.name || 'Agent'" :model="selectedModelChoice" :effort="supervisedUi.launch.conflict.value ? '' : selectedEffort" :active="open && step === 'brain'" :animate="!motionPaused" />
             <AddAgentProviderRail
               :providers="providers"
               :selected-provider-id="selectedProviderId"
@@ -95,7 +95,7 @@
               :custom-model-id="customModelId"
               :custom-model-error="customModelError"
               :model-description="modelSelectorDescription"
-              :show-effort="showEffortSelector"
+              :show-effort="showEffortSelector && !supervisedUi.launch.conflict.value"
               :effort="selectedEffort"
               :effort-options="effortSelectOptions"
               :effort-description="effortSelectorDescription"
@@ -133,7 +133,7 @@
             <button type="button" class="agent-refresh-back" @click="step === 'brain' ? showStep('identity', $event) : emit('close')" :disabled="step === 'brain' && Boolean(supervisedUi.launch.view.value)">{{ step === 'brain' ? '← Back to identity' : 'Cancel' }}</button>
             <button v-if="step === 'identity'" type="button" class="agent-refresh-continue" @click="showStep('brain', $event)">Continue to brain <span aria-hidden="true">→</span></button>
             <template v-else>
-              <span class="agent-refresh-selected" data-agent-avatar-source><AgentAvatar :avatar="identityAvatar" :name="configuredName" :size="32" /><span>{{ configuredName }}</span></span>
+              <span class="agent-refresh-selected" data-agent-avatar-source><AgentAvatar :avatar="configuredAvatar" :name="configuredName" :size="32" /><span>{{ configuredName }}</span></span>
 
               <AddAgentActionBar
                 :provider-id="selectedProviderId"

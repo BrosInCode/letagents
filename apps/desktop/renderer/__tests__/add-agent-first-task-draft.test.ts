@@ -172,6 +172,7 @@ async function openAddAgentDialog(
   supervisor: Record<string, unknown>,
   pushed = shallowRef<readonly DesktopSupervisorManifestEntry[]>([]),
   listModels?: (providerId: string) => Promise<DesktopAgentProviderModelsResult>,
+  availableProviders = [provider("claude-code", "Claude Code"), provider("codex", "Codex")],
 ) {
   const quiet = async () => null;
   addAgentForm(supervisor);
@@ -179,7 +180,7 @@ async function openAddAgentDialog(
   bridge.letagentsDesktop = {
     ...bridge.letagentsDesktop,
     workers: {
-      listAgentProviders: async () => [provider("claude-code", "Claude Code"), provider("codex", "Codex")],
+      listAgentProviders: async () => availableProviders,
       runAgentProviderPreflight: async () => ({ providerId: "claude-code", status: "ready", canStart: true, checks: [], nextAction: null }),
       listAgentProviderModels: listModels ?? (async (providerId: string) => ({ providerId, status: "ready", models: [], defaultModel: null, error: null })),
     },
@@ -279,6 +280,63 @@ test("reopening a failed saved launch restores its exact model as the catalog ar
     props.open = false;
     await settle();
   }
+});
+
+test("explicit recovery in a fresh dialog restores saved identity and access without granting the fresh draft's authority", async t => {
+  for (const permissionProfileId of ["read_only", null, "unavailable_saved_profile"]) await t.test(String(permissionProfileId), async () => {
+    const codex = provider("codex", "Codex");
+    codex.permissionProfiles.push({ id: "full_access", label: "Full access", description: "Full access.", status: "available", risk: "high", detail: null });
+    codex.defaultPermissionProfileId = "full_access";
+    const saved = entry({ provider: "codex", displayName: "Recovery Codex QA",
+      avatar: permissionProfileId ? { kind: "character", character: "prism", color: "blue" } : null,
+      permissionProfileId, model: "gpt-6-luna", observedState: "failed", condition: "coordination_blocked",
+      lastError: "The project is not a Git repository." });
+    let createCount = 0;
+    const retries: unknown[][] = [];
+    const { controller, props } = await openAddAgentDialog({
+      listAgents: async () => [saved],
+      createAgent: async () => { createCount++; return saved; },
+      setDesiredState: async (...args: unknown[]) => { retries.push(args); return saved; },
+    }, undefined, undefined, [provider("claude-code", "Claude Code"), codex]);
+    try {
+      controller.configuredName.value = "Atlas";
+      controller.configuredAvatar.value = { kind: "character", character: "orbit", color: "sage" };
+      controller.selectProvider("codex");
+      await settle();
+      assert.equal(controller.selectedPermissionProfile.value?.id, "full_access");
+      assert.equal(controller.supervisedUi.launch.recoveryCandidate.value?.id, saved.id);
+      assert.equal(controller.configuredName.value, "Atlas", "merely offering recovery must preserve the new draft");
+      await controller.supervisedUi.launch.recoverDetectedLaunch();
+      await settle();
+      assert.equal(controller.configuredName.value, saved.displayName);
+      assert.deepEqual(controller.configuredAvatar.value, saved.avatar);
+      assert.equal(controller.selectedPermissionProfile.value?.id ?? null, permissionProfileId === "read_only" ? "read_only" : null,
+        "unknown saved access cannot fall back to the fresh form's Full access");
+      assert.equal(controller.customModelId.value, saved.model);
+      assert.equal(controller.supervisedCharter.value, defaultSupervisedCharter, "the saved private ask must not become a new-agent draft");
+      // A project/readiness refresh is allowed during recovery; it cannot
+      // replace recorded access with a provider or remembered draft default.
+      props.repoRootPath = "/repo/now-ready";
+      await controller.retryProviderSetup();
+      await settle();
+      assert.equal(controller.selectedPermissionProfile.value?.id ?? null, permissionProfileId === "read_only" ? "read_only" : null);
+      await controller.supervisedUi.launch.handleRecover("retry");
+      assert.deepEqual(retries, [[saved.id, "running"]]);
+      assert.equal(createCount, 0);
+      assert.equal(saved.permissionProfileId, permissionProfileId);
+      // The saved profile is presentation for this attachment, not a new
+      // provider preference or a grant for the next agent.
+      controller.supervisedUi.launch.dismiss();
+      props.open = false;
+      await settle();
+      props.open = true;
+      await settle();
+      assert.equal(controller.selectedPermissionProfile.value?.id, "full_access");
+    } finally {
+      props.open = false;
+      await settle();
+    }
+  });
 });
 
 test("a blank custom model blocks both Start and direct launch; provider default remains a valid null model", async () => {

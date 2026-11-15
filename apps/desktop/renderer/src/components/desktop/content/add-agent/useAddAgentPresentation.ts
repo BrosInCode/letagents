@@ -62,6 +62,7 @@ export function useAddAgentPresentation(
     customModelId,
     selectedEffort,
     selectedPermissionProfileId,
+    restoredPermissionProfileId,
   } = configuration;
 
   const selectedProvider = computed(() =>
@@ -76,6 +77,9 @@ export function useAddAgentPresentation(
     return profiles.map((profile) => supervisedPermissionProfilePresentation(selectedProviderId.value, profile, { hasProject: Boolean(props.repoRootPath?.trim()) }));
   });
   const selectedPermissionProfile = computed(() =>
+    restoredPermissionProfileId.value !== undefined
+      ? selectedPermissionProfiles.value.find(profile => profile.id === restoredPermissionProfileId.value) ?? null
+      :
     selectedPermissionProfiles.value.find((profile) => profile.id === selectedPermissionProfileId.value) ??
     selectedPermissionProfiles.value.find((profile) => profile.id === selectedProvider.value?.defaultPermissionProfileId) ??
     selectedPermissionProfiles.value.find((profile) => profile.status === "available") ??
