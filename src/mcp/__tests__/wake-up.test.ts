@@ -116,7 +116,7 @@ test("without a delivery rule the bot polls, and the text is written for its pla
     + "Wake a bot by webhook in the room settings, or pastes them to you; then call add_wake_rule with webhook "
     + "{url, secret: 32 random chars, bearer: the key}. Email (Connect apps > Email) can wake you too, but Grok "
     + "may refuse an email trigger. Your name is mentioned as @GrokBot.");
-  assert.ok(grok.how.indexOf("webhook") < grok.how.indexOf("Email"), "the webhook way comes first");
+  assert.ok(grok.how.indexOf("add_wake_rule with webhook") < grok.how.indexOf("Email (Connect apps"), "the webhook way comes first");
 
   const chatgpt = describeWakeUp({ ...base, clientName: "openai-mcp", rules: [] });
   assert.equal(chatgpt.status, "polling_only");
