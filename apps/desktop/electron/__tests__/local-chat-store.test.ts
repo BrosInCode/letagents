@@ -1969,3 +1969,21 @@ test("sent local attachment deletion preserves the message and repository files"
   retained = (await getLocalChatMessages(room.roomIdentifier)).messages[0];
   assert.equal(retained.attachments?.length, 0);
 });
+
+test("agent avatars survive cloud cache refresh and reply projection without changing publisher identity", async () => {
+  const avatar = { kind: "character", character: "orbit", color: "sage" } as const;
+  const room = "room_agent_avatar";
+  const message = { id: "msg_100", sender: "Atlas", text: "Hello", source: "agent", timestamp: new Date().toISOString(), agent_identity: { actor_label: "Atlas", agent_key: "owner/stable", agent_session_id: "session_stable", avatar } };
+  await importLocalChatMessages(room, [message]);
+  let page = await getLocalChatMessages(room);
+  assert.deepEqual(page.messages[0]?.agent_identity, message.agent_identity);
+  const updated = { kind: "initials", color: "rose" } as const;
+  await importLocalChatMessages(room, [{ ...message, agent_identity: { ...message.agent_identity, avatar: updated } }]);
+  page = await getLocalChatMessages(room);
+  assert.deepEqual(page.messages[0]?.agent_identity?.avatar, updated);
+  const reply = await addLocalChatMessage(room, { sender: "Human", text: "reply", source: "browser", reply_to: page.messages[0]!.id });
+  assert.deepEqual(reply.reply_to?.agent_identity?.avatar, updated);
+  assert.equal(reply.reply_to?.agent_identity?.agent_key, "owner/stable");
+  await importLocalChatMessages(room, [{ ...message, agent_identity: { ...message.agent_identity, avatar: null } }]);
+  assert.equal((await getLocalChatMessages(room)).messages.find(row => row.text === "Hello")?.agent_identity?.avatar, undefined);
+});

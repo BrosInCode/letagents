@@ -1,6 +1,7 @@
 import electron from "electron";
 import { mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
+import { normalizeDesktopPreviewLink } from "./preview-mode.js";
 import { parseCompanyLink } from "./company-link.js";
 import { createWindow, emitToMainWindow, focusMainWindow, hasOpenWindows } from "./window.js";
 
@@ -27,7 +28,7 @@ export function acknowledgeCompanyLink(id: unknown): void {
 }
 
 export function acceptCompanyLink(value: string): void {
-  const id = parseCompanyLink(value);
+  const id = parseCompanyLink(normalizeDesktopPreviewLink(value));
   if (!id) return;
   loaded = true;
   pending = id;

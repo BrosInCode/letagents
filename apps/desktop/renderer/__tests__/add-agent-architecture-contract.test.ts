@@ -99,7 +99,7 @@ test("extracted islands preserve compact responsive providers and sticky actions
   assert.match(providerStyles, /\.desktop-add-agent-providers\s*\{[\s\S]*?display: grid;[\s\S]*?align-content: start;/);
   assert.match(providerStyles, /@media \(max-width: 520px\)[\s\S]*?\.desktop-add-agent-providers\s*\{[\s\S]*?grid-template-columns: repeat\(2, minmax\(0, 1fr\)\);/);
   assert.match(actionStyles, /\.desktop-add-agent-actions\s*\{[\s\S]*?bottom: 0;[\s\S]*?background: var\(--bg\);/);
-  assert.match(managedSessionStyles, /\.desktop-add-agent-managed-session\s*\{[\s\S]*?grid-template-columns: minmax\(0, 1fr\) auto;[\s\S]*?background: #13151b/);
+  assert.match(managedSessionStyles, /\.desktop-add-agent-managed-session\s*\{[^}]*min-width: 0;[^}]*background: var\(--bg\);/);
   assert.doesNotMatch(styles, /^\.desktop-add-agent-(?:providers|managed-session|actions)\s*\{/m);
 });
 

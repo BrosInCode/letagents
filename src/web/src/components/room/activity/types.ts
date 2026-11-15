@@ -38,6 +38,7 @@ export interface ParticipantWorkSignal {
 }
 
 export interface ActivityParticipant {
+  avatar?: RoomAgentPresence["avatar"]
   key: string
   kind: ParticipantKind
   label: string

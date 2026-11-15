@@ -1,7 +1,9 @@
+import type { AgentAvatar } from "../../../shared/agent-avatar.js";
 import type { AgentPresenceFreshness, AgentPresenceStatus, RoomAgentDeliveryTransport, RoomAgentSessionKind } from "../../../shared/agent-presence.js";
 import type { RoomActivitySourceFlag, RoomAgentActivityState } from "../../../shared/room-agent-activity.js";
 
 export interface AgentIdentity {
+  avatar?: AgentAvatar | null;
   id: string;
   canonical_key: string;
   name: string;
@@ -14,6 +16,7 @@ export interface AgentIdentity {
 }
 
 export interface RoomAgentPresence {
+  avatar?: AgentAvatar | null;
   room_id: string;
   actor_label: string;
   agent_key: string | null;
@@ -148,6 +151,7 @@ export interface SupervisorHostGrant {
 }
 
 export interface RoomParticipant {
+  avatar?: AgentAvatar | null;
   room_id: string;
   participant_key: string;
   kind: "human" | "agent";

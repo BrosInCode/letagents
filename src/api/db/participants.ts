@@ -1,5 +1,6 @@
 import { and, asc, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 
+import { getAgentAvatars } from "./auth/agent-identities.js";
 import { db } from "./client.js";
 import { messages, room_participants } from "./schema.js";
 import { clampLimit } from "./utils.js";
@@ -138,7 +139,8 @@ export async function getRoomParticipants(
     .orderBy(desc(room_participants.last_seen_at), asc(room_participants.display_name))
     .limit(limit);
 
-  return (rows as RoomParticipantRow[]).map(toRoomParticipant);
+  const avatars = await getAgentAvatars(rows.map(row => row.agent_key));
+  return (rows as RoomParticipantRow[]).map(row => ({ ...toRoomParticipant(row), ...(row.agent_key && avatars.has(row.agent_key) ? { avatar: avatars.get(row.agent_key) } : {}) }));
 }
 
 export async function getRoomParticipantsForRooms(
@@ -160,7 +162,8 @@ export async function getRoomParticipantsForRooms(
     .where(and(...conditions))
     .orderBy(desc(room_participants.last_seen_at), asc(room_participants.display_name));
 
-  return (rows as RoomParticipantRow[]).map(toRoomParticipant);
+  const avatars = await getAgentAvatars(rows.map(row => row.agent_key));
+  return (rows as RoomParticipantRow[]).map(row => ({ ...toRoomParticipant(row), ...(row.agent_key && avatars.has(row.agent_key) ? { avatar: avatars.get(row.agent_key) } : {}) }));
 }
 
 export async function setRoomParticipantsHidden(input: {

@@ -1,4 +1,5 @@
 import { computed, ref, watch, type ComputedRef } from "vue";
+import type { AgentAvatar } from "../../../../../../../../src/shared/agent-avatar";
 import type {
   DesktopAgentProviderId,
   DesktopGitRoomInfo,
@@ -42,6 +43,8 @@ export interface AddAgentModalProps {
 export interface AddAgentModalEvents {
   close: [];
   "choose-worktree": [rootPath: string];
+  /** A saved agent exists. This is a presentation handoff, not a readiness claim. */
+  "launch-saved": [entry: DesktopSupervisorManifestEntry, presentation: { fromActiveForm: boolean }];
 }
 
 export type AddAgentModalEmit = <Event extends keyof AddAgentModalEvents>(
@@ -58,6 +61,8 @@ export interface SupervisedLaunchCreateSnapshot {
   creationRequestId: string;
   providerId: DesktopAgentProviderId;
   providerName: string;
+  displayName?: string;
+  avatar?: AgentAvatar | null;
   roomIdentifier: string;
   /** Null launches an isolated, non-Git room-only agent (private scratch workspace). */
   repoRootPath: string | null;
@@ -76,9 +81,8 @@ type SupervisedCreateClient = Pick<typeof desktopIpc.supervisor, "createAgent">;
  * after the click, but they must not change the authority of the durable
  * agent that click already requested.
  *
- * The request carries no name. Naming needs the names already taken in the
- * room, and only the background service that saves the agent can read those
- * and claim one in the same step. A name chosen here would be a guess.
+ * The requested name is a suggestion. The background service still claims a
+ * unique name atomically; the returned entry owns the actual display name.
  */
 export async function createSupervisedAgentFromSnapshot(
   client: SupervisedCreateClient,
@@ -92,7 +96,8 @@ export async function createSupervisedAgentFromSnapshot(
     creationRequestId: snapshot.creationRequestId,
     providerId: snapshot.providerId,
     roomIdentifier: snapshot.roomIdentifier,
-    displayName: "",
+    displayName: snapshot.displayName?.trim() ?? "",
+    ...(snapshot.avatar ? { avatar: { ...snapshot.avatar } } : {}),
     repoRootPath: snapshot.repoRootPath,
     charter: snapshot.charter,
     permissionProfileId: snapshot.permissionProfileId,
@@ -110,7 +115,16 @@ export function useAddAgentController(
 
 const supervisorEntries = useSupervisorEntriesContext();
 
+const configuredName = ref("");
+const configuredAvatar = ref<AgentAvatar | null>(null);
 const startingAgent = ref(false);
+const presentedLaunches = new Set<string>();
+const requestedLaunches = new Map<string, number>();
+function presentSavedLaunch(entry: DesktopSupervisorManifestEntry): void {
+  if (entry.roomId !== props.roomIdentifier || presentedLaunches.has(entry.id)) return;
+  presentedLaunches.add(entry.id);
+  emit("launch-saved", entry, { fromActiveForm: Boolean(props.open && requestedLaunches.get(entry.id) === setup.currentVersion()) });
+}
 let startOperationInFlight = false;
 const setup = useAddAgentSetup();
 const {
@@ -154,6 +168,7 @@ const {
   selectedPermissionProfiles,
   selectedPermissionProfile,
   canStartManagedAgent,
+  customModelError,
   authCommand,
   authCommandForProvider,
   installCommand,
@@ -211,6 +226,7 @@ const {
   clearOpenModelApiKey,
   handleModelChoiceValue,
   handleEffortValue,
+  restoreModelSelection,
   syncPermissionProfileSelection,
   selectPermissionProfile,
   invalidateRequests: invalidateConfigurationRequests,
@@ -253,7 +269,22 @@ const supervisedLaunch = useSupervisedAgentLaunch({
   onCopyAuthCommand: (command) => void setupActions.copyAgentAuthCommand(command),
   onRetry: () => retrySupervisedLaunch(),
   onMessage: setSetupMessage,
-  onSavedEntry: (entry) => configuration.consumeSupervisedCharter(entry.charter),
+  onSavedEntry: (entry) => {
+    configuration.consumeSupervisedCharter(entry.charter);
+    // A push or confirming read may beat the create response, including after
+    // the window closed. Only a launch requested here initiates a handoff;
+    // discovering an older agent must not close a newly opened form.
+    if (requestedLaunches.has(entry.id)) presentSavedLaunch(entry);
+  },
+  onRestoredEntry: (entry) => {
+    configuredName.value = entry.displayName;
+    configuredAvatar.value = entry.avatar ? { ...entry.avatar } : null;
+    configuration.restoredPermissionProfileId.value = entry.permissionProfileId;
+    syncPermissionProfileSelection();
+    restoreModelSelection(entry.model);
+    // The consumed private ask is not a draft for another agent. Effort is
+    // absent from the manifest; the recovery view must not infer it either.
+  },
 });
 const launchStarted = supervisedLaunch.launchStarted;
 const supervisedConflict = supervisedLaunch.conflict;
@@ -391,12 +422,17 @@ async function startManagedAgent(
   const roomOnlyLaunch = props.roomGitRoom == null && !props.repoRootPath?.trim();
   if (!selectedProviderId.value || (!props.repoRootPath?.trim() && !roomOnlyLaunch) || startOperationInFlight) return;
   if (!hasSupervisedRuntime(selectedProvider.value)) return;
+  // A blank custom ID is not the provider-default choice. Keep direct/retry
+  // calls behind the same validation as the Start button, before any IPC.
+  if (customModelError.value) return;
   const requestVersion = setup.currentVersion();
   const requestRoomIdentifier = props.roomIdentifier;
   const requestProviderId = selectedProviderId.value;
   const requestProviderName = selectedProvider.value?.name ?? "Agent";
   const requestRepoRootPath = props.repoRootPath;
   const requestCharter = supervisedCharter.value.trim();
+  const requestDisplayName = configuredName.value.trim();
+  const requestAvatar = configuredAvatar.value ? { ...configuredAvatar.value } : null;
   const requestPermissionProfileId = selectedPermissionProfile.value?.id ?? null;
   const requestLaunchPolicy = supervisedProviderLaunchPolicy(
     requestProviderId,
@@ -445,11 +481,14 @@ async function startManagedAgent(
     // stream Electron emits for this exact launch id (connect → save →
     // activate). Subscribe first so no early fact is missed.
     const creationRequestId = supervisedLaunch.begin();
+    requestedLaunches.set(`supervised_${creationRequestId}`, requestVersion);
     supervisedCreationRequestId = creationRequestId;
     const creationSnapshot: SupervisedLaunchCreateSnapshot = {
       creationRequestId,
       providerId: requestProviderId,
       providerName: requestProviderName,
+      displayName: requestDisplayName,
+      avatar: requestAvatar,
       roomIdentifier: requestRoomIdentifier,
       repoRootPath: requestRepoRootPath,
       charter: requestCharter,
@@ -458,8 +497,8 @@ async function startManagedAgent(
       model: requestModel,
       reasoningEffort: requestReasoningEffort,
     };
-    // A name is presentation, never identity, and is assigned where the
-    // agent is saved. The helper sends every click-time launch input above.
+    // The daemon claims the name; the helper sends the complete click-time
+    // identity and authority without being changed by later form edits.
     const entry = await createSupervisedAgentFromSnapshot(
       desktopIpc.supervisor,
       creationSnapshot,
@@ -473,6 +512,7 @@ async function startManagedAgent(
     // stale meanwhile (provider switch, dialog closed, room change), so the
     // task must not pre-fill the next launch.
     configuration.consumeSupervisedCharter(entry.charter);
+    if (props.roomIdentifier === requestRoomIdentifier) presentSavedLaunch(entry);
     if (!setupActions.isCurrentRequest(requestVersion)) {
       if (props.open && props.roomIdentifier === requestRoomIdentifier) {
         supervisedLaunch.offerRecoveryCandidate(entry);
@@ -486,15 +526,20 @@ async function startManagedAgent(
   } catch (error) {
     if (!setupActions.isCurrentRequest(requestVersion)) {
       if (supervisedCreationRequestId && props.roomIdentifier === requestRoomIdentifier) {
-        await supervisedLaunch.offerAmbiguousCreationCandidate(
+        const saved = await supervisedLaunch.offerAmbiguousCreationCandidate(
           supervisedCreationRequestId,
           requestRoomIdentifier,
         );
+        if (saved && props.roomIdentifier === requestRoomIdentifier) {
+          configuration.consumeSupervisedCharter(saved.charter);
+          presentSavedLaunch(saved);
+        }
       }
       return;
     }
     await supervisedLaunch.recoverFailedCreation(error);
     if (!setupActions.isCurrentRequest(requestVersion)) return;
+    if (supervisedLaunch.conflict.value) presentSavedLaunch(supervisedLaunch.conflict.value);
     // The event-backed launch card owns failure display with safe product
     // copy; keep the raw supervised error out of the primary UI. A pre-launch
     // guard that fails before the card appears still surfaces its own message.
@@ -511,5 +556,5 @@ async function startManagedAgent(
   }
 }
 
-  return { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, secureStorageStatus, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, preflightStatusLabel, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelContextWindow, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, providerModelCliUpdate, refreshProviderModels, handleModelChoiceValue, handleEffortValue, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, externalJoinPrompt, copyingExternalPrompt, selectPermissionProfile, copyExternalJoinPrompt, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent };
+  return { configuredName, configuredAvatar, roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, secureStorageStatus, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, preflightStatusLabel, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelContextWindow, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, providerModelCliUpdate, refreshProviderModels, handleModelChoiceValue, handleEffortValue, lifecycleDescription, supervisedCharter, selectedPermissionProfiles, selectedPermissionProfile, externalJoinPrompt, copyingExternalPrompt, selectPermissionProfile, copyExternalJoinPrompt, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, customModelError, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent };
 }

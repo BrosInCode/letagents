@@ -284,10 +284,14 @@ test("entry validation and create replay preserve exact validation and convergen
   assert.deepEqual(invalid.events, []);
 
   const state = harness();
+  await assert.rejects(invalid.subject.putManifestEntry(entry({ avatar: { kind: "image", dataUrl: "https://example.com/avatar.svg" } })), /avatar/);
+  assert.deepEqual(invalid.events, []);
   const withHistory = entry({
+    avatar: { kind: "character", character: "orbit", color: "sage" },
     activity: Array.from({ length: 205 }, (_, index) => activity({ sequence: index })),
   });
   const created = await state.subject.putManifestEntry(withHistory);
+  assert.deepEqual(created.avatar, withHistory.avatar);
   assert.equal(created.activity?.length, 200);
   assert.deepEqual(created.workplace_liveness, { state: "unknown", observed_at: null, detail: null });
   assert.deepEqual(created.native_liveness, { state: "unknown", observed_at: null, detail: null });
@@ -311,6 +315,8 @@ test("entry validation and create replay preserve exact validation and convergen
   assert.equal(replay, created);
   assert.equal(state.events.includes("store:write:5"), false);
   assert.equal(state.events.at(-1), "convergence:agent-1");
+  await assert.rejects(state.subject.putManifestEntry({ ...withHistory, avatar: { kind: "initials", color: "rose" } }), /already bound to different agent parameters/);
+
 
   await assert.rejects(
     state.subject.putManifestEntry({ ...withHistory, room_id: "different-room" }),

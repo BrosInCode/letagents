@@ -2,6 +2,7 @@ import type { DesktopSupervisorDaemonStatus } from "../../../electron/ipc-types"
 import type { AgentInspectorActionAvailability, AgentInspectorProjection } from "./agent-inspector";
 import { sanitizeAgentInspectorDiagnosticsValue } from "./agent-inspector-diagnostics";
 import { agentInspectorRuntimeControlMatchesFence, describeAgentInspectorRuntimeControl, type AgentInspectorWorkResource } from "./agent-inspector-work";
+import { latestFailedAgentMessage } from "./room-message-receipts";
 
 export type DiagnosticCheckId = "service" | "provider" | "room" | "delivery";
 export type DiagnosticCheckState = "passed" | "attention" | "pending" | "unknown" | "paused";
@@ -171,6 +172,7 @@ export function projectAgentTroubleshooting(
     const uncertain = projection.turnControl?.status === "uncertain" || Boolean(detail?.uncertain_effects.length);
     const active = ["dispatching", "responding", "publishing", "retrying"].includes(room.turn.state);
     const queued = room.inbox.pendingCount > 0;
+    const failedAsk = !active && !queued ? latestFailedAgentMessage(entry) : null;
     // The supervisor's account of the blocked message, when it has one.
     const attention = entry.deliveryAttention ?? null;
     const rereads = blocked && attention?.retry === "reread_saved_turn";
@@ -178,15 +180,17 @@ export function projectAgentTroubleshooting(
     const skipNote = !attention ? ""
       : attention.canSkip ? " You can also skip the message so the messages behind it can continue."
       : attention.skipUnavailableReason ? ` Skip isn’t available: ${safeDiagnosticText(attention.skipUnavailableReason)}` : "";
-    delivery = check("delivery", "Message delivery", held ? "paused" : uncertain || blocked ? "attention" : repairing || active || queued ? "pending" : "passed",
+    delivery = check("delivery", "Message delivery", held ? "paused" : uncertain || blocked || failedAsk ? "attention" : repairing || active || queued ? "pending" : "passed",
       held ? "Waiting for the agent to resume" : uncertain ? "An outcome needs verification" : repairing ? "Restoring the conversation"
       : blocked ? missing ? "Saved conversation is missing" : "A message needs attention"
       : room.turn.state === "publishing" ? "Publishing the reply" : room.turn.state === "retrying" ? "Retrying message delivery"
-      : active ? "The agent is working" : queued ? `${room.inbox.pendingCount} ${room.inbox.pendingCount === 1 ? "message" : "messages"} waiting` : "No messages waiting",
+      : active ? "The agent is working" : queued ? `${room.inbox.pendingCount} ${room.inbox.pendingCount === 1 ? "message" : "messages"} waiting`
+      : failedAsk ? "Last ask did not finish" : "No messages waiting",
       held ? "New room work is held. Retained receipts remain available in Work."
       : uncertain ? "An operation may have taken effect before its outcome was saved. Verify the recorded work before repeating it."
       : repairing ? "LetAgents is creating a replacement private conversation for the message that could not start."
       : blocked && missing ? "The saved private conversation is unavailable. The blocked message could not start; later messages may be waiting behind it."
+      : failedAsk && !blocked ? safeDiagnosticText(failedAsk.error) || "The provider recorded an unsuccessful outcome for the last ask. The agent can still be connected."
       : safeDiagnosticText(room.inbox.detail || room.turn.detail) || (active ? "The message is moving through the provider and reply pipeline. Activity alone does not prove it finished."
         : queued ? "Messages are waiting in this agent’s inbox." : "The current inbox has no pending messages. This does not mean every earlier request succeeded."),
       uncertain ? "Open the recorded work and verify the affected operation before retrying."
@@ -194,9 +198,10 @@ export function projectAgentTroubleshooting(
         : rereads ? `The agent already worked on this message. Read the reply again to re-check its saved answer; the turn is not rerun.${skipNote}`
         : posts ? `The agent’s reply is saved but wasn’t posted. Post the saved reply; the provider is not asked again.${skipNote}`
         : `Inspect the blocked message in Work. Retry delivery when the exact message is eligible.${skipNote}`
+      : failedAsk ? "Open Work to inspect the failed ask and resolve the reported cause. Its saved outcome is unchanged; refreshing checks does not run it again."
       : repairing || active || queued ? "Open Work for the message timeline, or refresh checks for the latest delivery state."
       : "If a reply is missing, open Work to see whether the message was received, completed, or published.",
-      null, held || uncertain || repairing ? null : blocked ? action(missing ? "restore_conversation" : "retry_delivery") : null,
+      failedAsk?.updatedAt ?? null, held || uncertain || repairing ? null : blocked ? action(missing ? "restore_conversation" : "retry_delivery") : null,
       projection.turnControl?.status === "uncertain" ? "overview" : "work");
     if (delivery.action?.kind === "retry_delivery" && (rereads || posts)) {
       delivery.actionImpact = rereads

@@ -1,3 +1,4 @@
+import type { AgentAvatar } from "../../../../shared/agent-avatar.mjs";
 import type { DesktopGitRoomInfo } from "./room.js";
 import type { DesktopMcpInstallTargetId } from "./setup.js";
 import type { RetainedExecutionDetail } from "../../shared/execution-protocol.js";
@@ -45,6 +46,8 @@ export interface DesktopAgentProvider {
    */
   supervisedDeliveryMode?: DesktopManagedAgentDeliveryMode | null;
   runtimeCommand: string | null;
+  /** Optional host-scoped sign-in command, such as an isolated Preview profile. */
+  authCommand?: string;
   /** Official user-run install command for an external provider runtime. */
   runtimeInstallCommand?: string | null;
   /** Official provider documentation for installing an external runtime. */
@@ -688,6 +691,7 @@ export interface DesktopSupervisorLaunchProgress {
 }
 
 export interface DesktopSupervisorManifestEntry {
+  avatar?: AgentAvatar | null;
   /** Opaque exact native process birth, used only to fence cached read evidence. */
   runtimeGenerationId?: string | null;
   runtimeRecovery?: {
@@ -786,6 +790,7 @@ export interface DesktopSupervisorManifestEntry {
 }
 
 export interface DesktopSupervisorCreateInput {
+  avatar?: AgentAvatar | null;
   /** Main-process resolved storage identity. Renderer values are ignored. */
   localRoomId?: string;
   /** Stable across retries of one Start action; a new intentional agent gets a new id. */

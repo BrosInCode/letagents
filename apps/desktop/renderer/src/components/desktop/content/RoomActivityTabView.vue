@@ -224,14 +224,14 @@ const legacyAgents = computed(() => [...legacyReachableAgents.value, ...legacyWo
 const rosterRows = computed<AgentRosterRow[]>(() => [
   ...inspectorTruthfulAgents.value.map(agent => {
     const signal = agentInspectorSignal(agent);
-    return { id: agent.entryId, name: agent.displayName, provider: agentInspectorProviderLabel(agent.provider), model: agent.model, owner: nativeOwner(agent), state: signal.label, detail: signal.detail, tone: signal.tone, working: ['responding', 'publishing', 'compacting'].includes(signal.state), attention: signal.state === 'needs_attention', moving: signal.moving };
+    return { id: agent.entryId, avatar: agent.entry.avatar, name: agent.displayName, provider: agentInspectorProviderLabel(agent.provider), model: agent.model, owner: nativeOwner(agent), state: signal.label, detail: signal.detail, tone: signal.tone, working: ['responding', 'publishing', 'compacting'].includes(signal.state), attention: signal.state === 'needs_attention', moving: signal.moving };
   }),
   ...legacyAgents.value.map(agent => {
     const stale = agent.freshness === 'stale';
     const reachable = !stale && (agent.activityState === 'active' || agent.activityState === 'away');
     const working = reachable && (agent.status === 'working' || agent.status === 'reviewing');
     const attention = reachable && agent.status === 'blocked';
-    return { id: agent.key, name: agent.label, provider: agent.ideLabel || agent.runtime || 'Agent', owner: agent.ownerLabel || '', state: stale ? 'Updates delayed' : attention ? 'Needs attention' : working ? 'Working' : reachable ? 'Online' : 'Offline', detail: stale ? 'Waiting for a fresh update from the host.' : agent.statusText || branchLabel(agent) || (reachable ? 'Ready for room work.' : 'Last shared update'), tone: stale || attention ? 'amber' as const : working ? 'blue' as const : reachable ? 'green' as const : 'neutral' as const, working, attention, moving: working };
+    return { id: agent.key, avatar: agent.avatar, name: agent.label, provider: agent.ideLabel || agent.runtime || 'Agent', owner: agent.ownerLabel || '', state: stale ? 'Updates delayed' : attention ? 'Needs attention' : working ? 'Working' : reachable ? 'Online' : 'Offline', detail: stale ? 'Waiting for a fresh update from the host.' : agent.statusText || branchLabel(agent) || (reachable ? 'Ready for room work.' : 'Last shared update'), tone: stale || attention ? 'amber' as const : working ? 'blue' as const : reachable ? 'green' as const : 'neutral' as const, working, attention, moving: working };
   }),
 ]);
 function rosterAgentKey(id: string) { return nativeById.value.get(id)?.agentKey || legacyAgents.value.find(agent => agent.key === id)?.agentKey; }

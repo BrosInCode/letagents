@@ -45,6 +45,8 @@ export function useSupervisedAgentLaunch(options: {
   onMessage: (message: string | null, tone?: AddAgentFeedbackTone) => void;
   /** Once per saved agent this launch learns about, however it learns it. */
   onSavedEntry?: (entry: DesktopSupervisorManifestEntry) => void;
+  /** Reattaching a saved launch restores its configuration, not a new-agent draft. */
+  onRestoredEntry?: (entry: DesktopSupervisorManifestEntry) => void;
   recoveryScanTimeoutMs?: number;
 }) {
   const attachments = createSupervisedLaunchAttachments();
@@ -269,6 +271,7 @@ export function useSupervisedAgentLaunch(options: {
     launchStarted.value = true;
     subscribe(entry.id.startsWith("supervised_") ? entry.id.slice(11) : entry.id);
     complete(entry);
+    options.onRestoredEntry?.(entry);
   }
 
   function clearActiveLaunch(): void {

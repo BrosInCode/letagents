@@ -520,8 +520,9 @@ export function shouldShowManagedModelSelector(
 }
 
 export function agentAuthCommand(
-  provider: Pick<DesktopAgentProvider, "id" | "runtimeCommand"> | null | undefined,
+  provider: Pick<DesktopAgentProvider, "id" | "runtimeCommand" | "authCommand"> | null | undefined,
 ): string | null {
+  if (provider?.authCommand) return provider.authCommand;
   if (provider?.id === "claude-code") {
     return `${provider.runtimeCommand?.trim() || "claude"} auth login`;
   }

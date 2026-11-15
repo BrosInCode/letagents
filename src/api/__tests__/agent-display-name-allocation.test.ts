@@ -339,3 +339,19 @@ test("a name passes on only from a session of the same owner whose process is go
     ["gone", "keyed", "offline-durable", "own-other-process", "respelled"],
   );
 });
+
+test("avatar presentation accepts the catalog and bounded PNGs, never remote or active content", async () => {
+  const { normalizeAgentAvatar, AGENT_AVATAR_CHARACTERS, AGENT_AVATAR_COLORS } = await import("../../shared/agent-avatar.js");
+  for (const character of AGENT_AVATAR_CHARACTERS) for (const color of AGENT_AVATAR_COLORS) {
+    const avatar = { kind: "character", character, color };
+    assert.deepEqual(normalizeAgentAvatar({ ...avatar, agent_key: "forged" }), avatar);
+  }
+  assert.deepEqual(normalizeAgentAvatar({ kind: "initials", color: "sage" }), { kind: "initials", color: "sage" });
+  const png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6qxkAAAAASUVORK5CYII=";
+  assert.deepEqual(normalizeAgentAvatar({ kind: "image", dataUrl: png }), { kind: "image", dataUrl: png });
+  const large = Buffer.from(png.slice(22), "base64"); large.writeUInt32BE(97, 16);
+  for (const value of [null, {}, { kind: "character", character: "invented", color: "sage" }, { kind: "initials", color: "url(evil)" },
+    { kind: "image", dataUrl: "https://example.com/a.png" }, { kind: "image", dataUrl: "data:image/svg+xml;base64,PHN2Zy8+" },
+    { kind: "image", dataUrl: `data:image/png;base64,${large.toString("base64")}` }, { kind: "image", dataUrl: png + "AAAA" },
+    { kind: "image", dataUrl: `data:image/png;base64,${"A".repeat(44000)}` }]) assert.equal(normalizeAgentAvatar(value), null);
+});

@@ -132,6 +132,8 @@
     >
       <!-- Requests to join, for room admins: a pill above the composer, where the room asks things of you. -->
       <template #above-composer>
+        <RoomAgentLaunchNotice v-if="launchNoticeView && latestRoomLaunch" :entry="latestRoomLaunch" :view="launchNoticeView"
+          @open="openSavedAgentInAgents" @dismiss="savedRoomLaunch = null" />
         <div class="desktop-join-request-banner" data-testid="desktop-join-request-banner">
           <JoinRequestBanner
             v-if="joinRequestBannerAvailable"
@@ -323,6 +325,7 @@
       :initial-provider-id="addAgentInitialProviderId"
       :initial-section="addAgentInitialSection"
       @close="closeAddAgentModal"
+      @launch-saved="handleFullAgentSaved"
       @choose-worktree="openAgentWorktree"
     />
     <AddAgentUnavailableModal v-else :open="addAgentModalOpen" @close="closeAddAgentModal" />
@@ -330,9 +333,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, provide, ref } from "vue";
-import type { DesktopAgentProviderId } from "../../../../../electron/ipc-types";
+import { computed, nextTick, provide, ref, watch } from "vue";
+import type { DesktopAgentProviderId, DesktopSupervisorManifestEntry } from "../../../../../electron/ipc-types";
 import { composerAgentLaunchKey } from "./room-chat/composer-agent-launch";
+import RoomAgentLaunchNotice from "./room-chat/RoomAgentLaunchNotice.vue";
+import { captureAgentAvatarSource, flyAgentAvatar, type AgentAvatarFlightSource } from "./room-chat/agent-avatar-flight";
+import { agentStartupView } from "../../../domain/agent-startup";
+import { useNow } from "../../../composables/useNow";
 import AddAgentModal from "./AddAgentModal.vue";
 import AddAgentUnavailableModal from "./AddAgentUnavailableModal.vue";
 import { supervisedAgentsSupported } from "../../../domain/supervised-agents-support";
@@ -410,7 +417,7 @@ const {
   selectedAgentDetailTarget,
 } = Object.assign(app, useRoomShellState(app));
 const {
-  retryAgentInspectorState, refreshRoomAgents,
+  retryAgentInspectorState, refreshRoomAgents, refreshSupervisorEntries,
 } = Object.assign(app, useRoomShellSupervisorActions(app));
 const {
   retryRoomAgentDelivery, restoreAgentConversation, skipRoomDelivery, stopAgentTurnForApproval,
@@ -528,6 +535,69 @@ function closeAddAgentModal(): void {
   addAgentInitialProviderId.value = null;
   addAgentInitialSection.value = null;
 }
+// The daemon remains authoritative after the create surface closes. This small
+// pointer leads back to the existing Agents inspector for progress and recovery.
+const savedRoomLaunch = ref<DesktopSupervisorManifestEntry | null>(null);
+let savedLaunchSeenInRoster = false;
+const latestRoomLaunch = computed(() => {
+  const saved = savedRoomLaunch.value;
+  return saved && saved.roomId === props.room.identifier
+    ? supervisorEntries.value.find(entry => entry.id === saved.id) ?? saved : null;
+});
+const launchClock = useNow(1_000, () => launchNoticeView.value?.status === "running");
+const launchNoticeView = computed(() => {
+  const entry = latestRoomLaunch.value;
+  if (!entry) return null;
+  const view = agentStartupView(entry, { roomLabel: props.room.displayName || props.room.name }, launchClock.value);
+  return view.status === "joined" || view.status === "cancelled" ? null : view;
+});
+watch(() => props.room.identifier, () => { savedRoomLaunch.value = null; savedLaunchSeenInRoster = false; });
+watch(supervisorEntries, entries => {
+  if (!savedRoomLaunch.value) return;
+  const entry = entries.find(candidate => candidate.id === savedRoomLaunch.value!.id);
+  if (entry) { savedLaunchSeenInRoster = true; savedRoomLaunch.value = entry; }
+  else if (savedLaunchSeenInRoster) savedRoomLaunch.value = null;
+});
+
+function openSavedAgent(entryId: string, inAgents = false): void {
+  const entry = supervisorEntries.value.find(candidate => candidate.id === entryId)
+    ?? (savedRoomLaunch.value?.id === entryId ? savedRoomLaunch.value : null);
+  if (!entry || entry.roomId !== props.room.identifier) return;
+  if (inAgents) {
+    selectTab("activity");
+    // The chat notice becomes hidden; give the inspector a visible return target.
+    document.querySelector<HTMLElement>('[data-testid="desktop-room-tab-activity"]')?.focus({ preventScroll: true });
+  }
+  openAgentDetailRequest(supervisedAgentInspectorRequest(entry, { ownerAttribution: backgroundCommandOwner(entry.createdBy) }));
+}
+function openSavedAgentInAgents(): void {
+  if (savedRoomLaunch.value) openSavedAgent(savedRoomLaunch.value.id, true);
+}
+async function presentSavedAgent(entry: DesktopSupervisorManifestEntry, source?: AgentAvatarFlightSource | null): Promise<void> {
+  if (entry.roomId !== props.room.identifier) return;
+  const roomAtSave = props.room.identifier;
+  savedLaunchSeenInRoster = supervisorEntries.value.some(candidate => candidate.id === entry.id);
+  savedRoomLaunch.value = entry;
+  void refreshSupervisorEntries();
+  await nextTick();
+  if (props.room.identifier !== roomAtSave || activeTab.value !== "chat" || typeof document.querySelector !== "function") return;
+  const startup = Array.from(document.querySelectorAll<HTMLElement>("[data-testid^='room-agent-startup-']"))
+    .find(element => element.dataset.testid === `room-agent-startup-${entry.id}`);
+  const slot = startup?.querySelector<HTMLElement>(".room-agent-startup-slot");
+  const rect = slot?.getBoundingClientRect();
+  const target = rect && rect.top >= 0 && rect.bottom <= window.innerHeight ? slot!
+    : document.querySelector<HTMLElement>("[data-agent-launch-destination]");
+  flyAgentAvatar(source ?? null, target);
+}
+function handleFullAgentSaved(entry: DesktopSupervisorManifestEntry, presentation: { fromActiveForm: boolean }): void {
+  if (entry.roomId !== props.room.identifier) return;
+  const fromChat = presentation.fromActiveForm && activeTab.value === "chat" && addAgentModalOpen.value;
+  const source = fromChat && typeof document.querySelector === "function"
+    ? captureAgentAvatarSource(document.querySelector<HTMLElement>(".agent-refresh-footer [data-agent-avatar-source] .agent-identity-avatar")) : null;
+  if (fromChat) closeAddAgentModal();
+  void presentSavedAgent(entry, source);
+}
+
 provide(composerAgentLaunchKey, {
   context: () => ({
     roomStorageMode: props.storage.effectiveMode,
@@ -543,6 +613,9 @@ provide(composerAgentLaunchKey, {
     openAddAgentModal();
   },
   chooseWorktree: openAgentWorktree,
+  agentSaved: (entry, source) => { void presentSavedAgent(entry, source); },
+  openAgent: openSavedAgent,
+  openFirstMessageWork: (entryId) => { void revealRoomMessage(`desktop-initial-message:${entryId}`); },
 });
 async function loadReleasePlanning() {
   if (!desktopIpc.room?.getBoardPlanning) throw new Error('Board unavailable');

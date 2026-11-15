@@ -55,6 +55,8 @@ export function useAddAgentConfiguration() {
   const customModelId = ref("");
   const selectedEffort = ref<DesktopManagedAgentEffort | "">("");
   const selectedPermissionProfileId = ref<DesktopManagedAgentPermissionProfileId | null>(null);
+  // Undefined means a new-agent draft; null is a saved entry with no recorded profile.
+  const restoredPermissionProfileId = ref<string | null | undefined>(undefined);
   const selectedPermissionProfileIdsByProvider = ref<
     Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>
   >({});
@@ -62,8 +64,11 @@ export function useAddAgentConfiguration() {
   let modelRequestId = 0;
   let configurationVersion = 0;
   let openModelWrite: Promise<void> | null = null;
+  let restoredModelId: string | null = null;
 
   function resetModelSelection(): void {
+    restoredModelId = null;
+    restoredPermissionProfileId.value = undefined;
     modelRequestId += 1;
     providerModels.value = null;
     loadingProviderModels.value = false;
@@ -188,9 +193,26 @@ export function useAddAgentConfiguration() {
     function syncSelectedProviderModelSelection(
       result: DesktopAgentProviderModelsResult | null = providerModels.value,
     ): void {
+      if (restoredModelId && bindings.selectedModel.value === restoredModelId) {
+        const option = result?.models.find((candidate) => candidate.id === restoredModelId);
+        // Keep a saved ID even if today's catalog omits it. Default would imply
+        // a different configuration from the durable agent being recovered.
+        if (option) selectProviderModel(option);
+        else { selectedModelMode.value = "custom"; customModelId.value = restoredModelId; }
+        return;
+      }
       if (selectedModelMode.value !== "option" || !selectedProviderModelId.value) return;
       if (result?.status !== "ready") return;
       if (!result.models.some((option) => option.id === selectedProviderModelId.value)) selectDefaultModel();
+    }
+
+    function restoreModelSelection(model: string | null): void {
+      const id = model?.trim() ?? "";
+      restoredModelId = id || null;
+      selectedProviderModelId.value = "";
+      customModelId.value = id;
+      selectedModelMode.value = id ? "custom" : "default";
+      syncSelectedProviderModelSelection();
     }
 
     async function applyOpenModelSettings(input: {
@@ -267,6 +289,7 @@ export function useAddAgentConfiguration() {
       selectedProviderModelId.value = option.id;
     }
     function handleModelChoiceValue(value: string): void {
+      restoredModelId = null;
       if (value === "default") return selectDefaultModel();
       if (value === "custom") {
         selectedModelMode.value = "custom";
@@ -283,6 +306,10 @@ export function useAddAgentConfiguration() {
     }
     function syncPermissionProfileSelection(): void {
       const permissionProfiles = bindings.selectedPermissionProfiles.value;
+      if (restoredPermissionProfileId.value !== undefined) {
+        selectedPermissionProfileId.value = permissionProfiles.find(profile => profile.id === restoredPermissionProfileId.value)?.id ?? null;
+        return;
+      }
       const repoLess = bindings.roomGitRoom() == null && !bindings.repoRootPath()?.trim();
       const repoLessSelectionKey = repoLess && bindings.selectedProviderId.value
         ? `${bindings.roomIdentifier()}\u0000${bindings.selectedProviderId.value}`
@@ -318,6 +345,7 @@ export function useAddAgentConfiguration() {
     }
     function selectPermissionProfile(profile: DesktopManagedAgentPermissionProfile): void {
       if (profile.status !== "available") return;
+      restoredPermissionProfileId.value = undefined;
       selectedPermissionProfileId.value = profile.id;
       if (bindings.selectedProviderId.value) {
         if (bindings.roomGitRoom() == null && !bindings.repoRootPath()?.trim()) {
@@ -340,10 +368,10 @@ export function useAddAgentConfiguration() {
     function resetTransientState(): void {
       invalidateRequests();
       repoLessSupervisedSelections.clear();
+      resetModelSelection();
       syncPermissionProfileSelection();
       openModelApiKey.value = "";
       openModelError.value = null;
-      resetModelSelection();
     }
 
     watch(selectedPermissionProfileId, () => {
@@ -381,6 +409,7 @@ export function useAddAgentConfiguration() {
       clearOpenModelApiKey,
       handleModelChoiceValue,
       handleEffortValue,
+      restoreModelSelection,
       syncPermissionProfileSelection,
       selectPermissionProfile,
       invalidateRequests,
@@ -405,6 +434,7 @@ export function useAddAgentConfiguration() {
     customModelId,
     selectedEffort,
     selectedPermissionProfileId,
+    restoredPermissionProfileId,
     resetModelSelection,
     consumeSupervisedCharter,
     bind,

@@ -11,11 +11,13 @@
         <circle class="arc" cx="18" cy="18" r="16" :style="{ strokeDashoffset: ringOffset }" />
         <circle v-if="view.status === 'running'" class="spin" cx="18" cy="18" r="16" />
       </svg>
-      <span class="room-agent-startup-avatar">{{ view.initials }}</span>
+      <AgentAvatar v-if="view.avatar" class="room-agent-startup-portrait" :avatar="view.avatar" :name="view.name" :size="32" />
+      <span v-else class="room-agent-startup-avatar">{{ view.initials }}</span>
     </span>
     <div class="room-agent-startup-body">
       <div class="room-agent-startup-meta">
-        <strong>{{ view.name }}</strong>
+        <button v-if="inspectable" type="button" class="room-agent-startup-name" @click="emit('inspect', view.entryId)">{{ view.name }}</button>
+        <strong v-else>{{ view.name }}</strong>
         <span class="room-agent-startup-tag">{{ view.providerLabel }} agent</span>
         <time v-if="elapsedLabel" class="room-agent-startup-elapsed">{{ elapsedLabel }}</time>
       </div>
@@ -57,12 +59,14 @@
 </template>
 
 <script setup lang="ts">
+import AgentAvatar from "../../../../../../../../shared/ui/agent-identity/AgentAvatar.vue";
 import { Check, ChevronRight, X } from "@lucide/vue";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { formatStartupElapsed, type AgentStartupStageState, type AgentStartupView } from "../../../../domain/agent-startup";
 
-const props = defineProps<{ view: AgentStartupView }>();
+const props = defineProps<{ view: AgentStartupView; inspectable?: boolean }>();
 const emit = defineEmits<{
+  inspect: [entryId: string];
   retry: [entryId: string];
   cancel: [entryId: string];
   /** Sign in or install the agent's runtime. */
@@ -179,6 +183,11 @@ function run(action: () => void): void {
 }
 .room-agent-startup[data-state="failed"] .arc { stroke: var(--red-text); }
 .room-agent-startup[data-state="cancelled"] .arc { stroke: var(--text-muted); }
+
+.room-agent-startup-portrait { position: relative; z-index: 1; }
+.room-agent-startup-name { border: 0; padding: 0; background: transparent; color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
+.room-agent-startup-name:hover { text-decoration: underline; text-underline-offset: 3px; }
+.room-agent-startup-name:focus-visible { outline: 2px solid var(--blue); outline-offset: 4px; border-radius: 3px; }
 
 .room-agent-startup-body { min-width: 0; }
 

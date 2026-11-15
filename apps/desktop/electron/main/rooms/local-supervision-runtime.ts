@@ -148,7 +148,7 @@ export async function requestLocalSupervisor(rawUrl: string, init: RequestInit =
   if (operation[0] === "messages") {
     if (init.method === "POST") {
       const message = await addLocalChatMessage(roomId, { sender: session.actor_label,
-        text: required(body.text, "message text"), source: "agent", publisher_agent_key: session.agent_key,
+        text: required(body.text, "message text"), source: "agent", agent_avatar: session.avatar, publisher_agent_key: session.agent_key,
         publisher_agent_session_id: session.session_id, idempotency_key: `local-supervised:${session.agent_key}:${required(body.client_message_id, "client message id")}`,
         reply_to: optional(body.reply_to), thread_root_id: optional(body.thread_root_id) });
       return json({ ...message, room_id: roomId });
@@ -245,7 +245,7 @@ const localToolHandlers = defineLocalSupervisedToolHandlers<LocalToolContext>({
     const thread = optional(args.thread_parent_id ?? args.thread_root_id ?? args.root_message_id);
     if (input.toolName === "send_thread_message" && !thread) throw new Error("A thread parent is required.");
     const message = await addLocalChatMessage(input.roomId, { sender: worker.actor_label, text,
-      source: "agent", publisher_agent_key: worker.agent_key, publisher_agent_session_id: worker.session_id,
+      source: "agent", agent_avatar: worker.avatar, publisher_agent_key: worker.agent_key, publisher_agent_session_id: worker.session_id,
       idempotency_key: `local-supervised-tool:${worker.agent_key}:${input.requestId}`,
       reply_to: optional(args.reply_to ?? args.reply_to_id) ?? (thread ? thread : null), thread_root_id: thread });
     return { room_id: input.roomId, message };

@@ -356,6 +356,7 @@ export class SupervisorGrantCoordinator {
           entryId,
           displayName,
           providerId: input.providerId,
+          avatar: input.avatar,
         }, { apiFetch: this.request });
         // Failure here occurs before the durable claim, hence cannot activate a
         // daemon-inbox worker without its scoped authority.
@@ -374,6 +375,7 @@ export class SupervisorGrantCoordinator {
             entryId,
             displayName: entry.displayName,
             providerId: input.providerId,
+            avatar: entry.avatar,
           }, { apiFetch: this.request }).catch(() => undefined);
         }
         return { entry, agentKey, grant };
@@ -815,6 +817,7 @@ export class SupervisorGrantCoordinator {
         entryId: entry.id,
         displayName: entry.displayName,
         providerId: entry.provider,
+        avatar: entry.avatar,
       }, { apiFetch: this.request });
       await this.provisionAndInstall(entry, created, daemonGeneration, true, credentialOnly, recoveryOnly);
       return;
@@ -831,7 +834,7 @@ export class SupervisorGrantCoordinator {
       // mapping, so restart recovery converges on the exact canonical key.
       await this.assertSupervisionAvailable();
       const resolved = await this.operations.resolveIdentity(
-        { entryId: entry.id, displayName: entry.displayName, providerId: entry.provider },
+        { entryId: entry.id, displayName: entry.displayName, providerId: entry.provider, avatar: entry.avatar },
         { apiFetch: this.request },
       );
       await this.provisionAndInstall(entry, resolved, daemonGeneration, true, credentialOnly, recoveryOnly);
@@ -881,6 +884,7 @@ export class SupervisorGrantCoordinator {
         entryId: current.id,
         displayName,
         providerId: current.provider,
+        avatar: current.avatar,
       }, { apiFetch: this.request });
       if (previousAgentKey && previousAgentKey !== resolvedAgentKey) {
         throw new Error("Agent naming repair resolved a different durable server identity.");
@@ -1079,6 +1083,7 @@ export class SupervisorGrantCoordinator {
         entryId: entry.id,
         displayName: entry.displayName,
         providerId: entry.provider,
+        avatar: entry.avatar,
       }, { apiFetch: this.request });
     }
     const stored = await this.operations.readGrant(agentKey);
@@ -1178,7 +1183,7 @@ export class SupervisorGrantCoordinator {
     credentialOnly = false, recoveryOnly = false, initialMessage?: string): Promise<string> {
     if (!entry.localRoomId || entry.localRoomId !== entry.roomId) throw new Error("Invalid saved local room identity.");
     const grant = await prepareLocalSupervisorGrant({ entryId: entry.id, roomId: entry.localRoomId,
-      displayName: entry.displayName, provider: entry.provider });
+      displayName: entry.displayName, provider: entry.provider, avatar: entry.avatar });
     await this.install(entry, grant.agentKey, {
       metadata: { grantId: grant.grantId, hostId: grant.hostId, installationId: grant.installationId,
         allowedRoomIds: [grant.roomId], allowedAgentKeys: [grant.agentKey], generation: grant.grantGeneration, expiresAt: grant.expiresAt },

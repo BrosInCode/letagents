@@ -203,6 +203,7 @@ import RoomContribution from "./RoomContribution.vue";
 import { useAgentStartupRows } from "./useAgentStartupRows";
 import { useDesktopActionToasts } from "../../../../composables/useDesktopActionToasts";
 import { safeUserVisibleErrorDetail } from "../../../../domain/user-visible-error";
+import { failedFirstAgentMessage } from "../../../../domain/room-message-receipts";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { inlineThreadKey } from "../desktop-chat-message/inline-thread";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
@@ -461,14 +462,17 @@ const { pushActionToast } = useDesktopActionToasts();
 function startupAction(action: (entryId: string) => Promise<void>, entryId: string, failed: string): void {
   action(entryId).catch((error: unknown) => pushActionToast(`${failed} ${safeUserVisibleErrorDetail(error, "Try again.")}`, "error"));
 }
-// The same list while its rows show the same text, so a start-up progress
+// The same list while its rows show the same text and outcome, so a start-up progress
 // update of an entry does not rebuild the timeline.
 const firstMessages = computed<DesktopSupervisorManifestEntry[]>((previous) => {
   const next = firstMessageAgents(props.supervisorEntries ?? [], props.messages, props.hasOlderMessages);
   const same = previous?.length === next.length && next.every((agent, index) => {
     const before = previous[index]!;
+    const failure = failedFirstAgentMessage(agent);
+    const previousFailure = failedFirstAgentMessage(before);
     return agent.id === before.id && agent.createdAt === before.createdAt
-      && agent.charter === before.charter && agent.displayName === before.displayName;
+      && agent.charter === before.charter && agent.displayName === before.displayName
+      && Boolean(failure) === Boolean(previousFailure) && failure?.error === previousFailure?.error;
   });
   return same ? previous! : next;
 });

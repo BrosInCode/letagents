@@ -1,4 +1,6 @@
+import type { AgentAvatar } from "../../../src/shared/agent-avatar";
 export interface AgentRosterRow {
+  avatar?: AgentAvatar | null;
   id: string;
   name: string;
   provider: string;

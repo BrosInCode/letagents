@@ -1,3 +1,4 @@
+import { normalizeAgentAvatar } from "../../../../../shared/agent-avatar.mjs";
 import type { DesktopSupervisorActivityEvent, DesktopSupervisorManifestEntry } from "../../ipc-types.js";
 import { redactCredentialText, safeStreamPayload } from "../agents/provider-evidence.js";
 import type { WireActivityEvent, WireEntry } from "./types.js";
@@ -17,6 +18,7 @@ export function mapEntry(entry: WireEntry, activityLimit?: number): DesktopSuper
     roomId: entry.room_id,
     ...(entry.local_room_id ? { localRoomId: entry.local_room_id } : {}),
     displayName: entry.display_name,
+    ...(entry.avatar ? { avatar: normalizeAgentAvatar(entry.avatar) } : {}),
     provider: entry.provider,
     model: entry.model,
     charter: entry.charter,

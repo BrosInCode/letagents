@@ -79,6 +79,7 @@ export function buildAgentParticipant(input: BuildAgentParticipantInput): Activi
   return {
     key,
     kind: "agent",
+    avatar: presence?.avatar ?? participant?.avatar,
     label: participant?.displayName || presence?.displayName || displayNameFromActor(actorLabel),
     actorLabel,
     agentKey: presence?.agentKey || participant?.agentKey || null,

@@ -3,7 +3,7 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { compactSupervisedTerminalHistory } from "../supervised-agent-history-retention.js";
 import type { DaemonStateSchema } from "./schema.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 51;
+export const DAEMON_STATE_SCHEMA_VERSION = 52;
 export const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 export const workerExecutionBindingsSql = `CREATE TABLE worker_execution_bindings (
   entry_id TEXT NOT NULL, room_id TEXT NOT NULL, api_url TEXT NOT NULL,
@@ -368,3 +368,11 @@ export function validateTerminalResults(database: DatabaseSync, requiredVersion?
 
 /** Types an object of DaemonStateSchema methods; `this` is the composed schema instance. */
 export function schemaMethods<T>(methods: T & ThisType<DaemonStateSchema>): T { return methods; }
+
+/** Presentation metadata is optional; old identities acquire no invented portrait. */
+export function applyAgentAvatarColumn(database: DatabaseSync): void {
+  const columns = database.prepare("PRAGMA table_info(agent_profiles)").all();
+  if (!columns.some(column => column.name === "avatar_json")) {
+    database.exec("ALTER TABLE agent_profiles ADD COLUMN avatar_json TEXT CHECK(avatar_json IS NULL OR (json_valid(avatar_json) AND length(avatar_json) <= 44000))");
+  }
+}

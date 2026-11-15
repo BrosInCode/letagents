@@ -7,11 +7,9 @@
       :data-testid="`desktop-long-message-content-${safeMessageId}`"
     >
       <div class="desktop-long-message-html" v-html="html" @click="handleInlineReferenceClick" />
-      <span v-if="isLong && !expanded" class="desktop-long-message-fade" aria-hidden="true" />
     </div>
 
     <div v-if="isLong" class="desktop-long-message-actions">
-      <span>{{ statsLabel }}</span>
       <button
         type="button"
         :aria-expanded="expanded"
@@ -19,7 +17,7 @@
         data-testid="desktop-long-message-toggle"
         @click="expanded = !expanded"
       >
-        {{ expanded ? "Collapse" : "Read more" }}
+        {{ expanded ? "Show less" : "Read more" }}
       </button>
       <button type="button" data-testid="desktop-open-reader" @click="openReader">
         Open reader
@@ -33,7 +31,6 @@
 
 <script setup lang="ts">
 import { useTaskLinkPreview } from "../../../../../../../shared/ui/board/task-link-preview";
-import { formatDecimalNumber } from "../../../domain/formatters";
 import { computed, ref } from "vue";
 
 import MessageReader from "../../../../../../../shared/ui/MessageReader.vue";
@@ -73,11 +70,6 @@ const isLong = computed(() =>
 );
 const safeMessageId = computed(() => props.messageId.replace(/[^A-Za-z0-9_-]/g, "-") || "message");
 const contentId = computed(() => `desktop-message-content-${safeMessageId.value}`);
-const statsLabel = computed(() => {
-  const lines = lineCount.value;
-  const chars = formatDecimalNumber(characterCount.value);
-  return `${lines} ${lines === 1 ? "line" : "lines"} / ${chars} chars`;
-});
 
 function openReader(): void {
   readerOpen.value = true;

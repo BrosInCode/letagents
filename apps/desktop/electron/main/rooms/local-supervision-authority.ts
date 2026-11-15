@@ -1,3 +1,4 @@
+import { normalizeAgentAvatar, type AgentAvatar } from "../../../../../shared/agent-avatar.mjs";
 import { requestDesktopBoardMutation } from "./local-task-subscription.js";
 import { isLocalBoardOwner } from "../../../../../shared/local-board-owner.mjs";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
@@ -9,6 +10,10 @@ import { beginImmediate, rollback } from "./local-db.js";
 import { getLocalRoom, getLocalTaskDatabase } from "./local-store.js";
 import { endLocalWorkerLeases } from "../../../../../shared/local-work-leases.mjs";
 import { ownerPrivatePlatform, readOwnerPrivateFile, writePrivateFileAtomically } from "../../../../../shared/owner-private-fs.mjs";
+
+function parseLocalAvatar(value: unknown): AgentAvatar | null {
+  try { return typeof value === "string" ? normalizeAgentAvatar(JSON.parse(value)) : null; } catch { return null; }
+}
 
 // Local authority belongs to this user's local database, never a cloud account.
 // Only public identity and revocation state live in SQLite; bearers are derived
@@ -40,7 +45,10 @@ export async function localSupervisionDatabase() {
       attempt_id TEXT NOT NULL, page_index INTEGER NOT NULL, page_json TEXT NOT NULL,
       PRIMARY KEY(attempt_id, page_index)
     ) STRICT;
-  `)).catch((error) => { schema = undefined; throw error; });
+  `)).then(() => {
+    const columns = db.prepare("PRAGMA table_info(local_supervisor_grants)").all();
+    if (!columns.some((column) => column.name === "avatar_json")) db.exec("ALTER TABLE local_supervisor_grants ADD COLUMN avatar_json TEXT");
+  }).catch((error) => { schema = undefined; throw error; });
   await schema;
   return db;
 }
@@ -98,7 +106,8 @@ async function matches(kind: "grant" | "worker", id: string, supplied: string): 
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
-export async function prepareLocalSupervisorGrant(input: { entryId: string; roomId: string; displayName: string; provider: string }) {
+export async function prepareLocalSupervisorGrant(input: { entryId: string; roomId: string; displayName: string; provider: string; avatar?: AgentAvatar | null }) {
+  if (input.avatar != null && !normalizeAgentAvatar(input.avatar)) throw new Error("Invalid agent avatar.");
   if (!/^supervised_[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(input.entryId)
     || !input.roomId.trim() || !await getLocalRoom(input.roomId)) throw new Error("Choose an available local room for this agent.");
   const db = await localSupervisionDatabase();
@@ -111,12 +120,15 @@ export async function prepareLocalSupervisorGrant(input: { entryId: string; room
   const row = db.prepare("SELECT * FROM local_supervisor_grants WHERE entry_id=? AND revoked_at IS NULL").get(input.entryId)!;
   if (row.room_id !== input.roomId || row.provider !== input.provider || row.revoked_at
     || row.host_id !== hostId || row.installation_id !== installationId) throw new Error("Local agent authority does not match its saved room and installation.");
+  const avatar = input.avatar === undefined ? parseLocalAvatar(row.avatar_json) : normalizeAgentAvatar(input.avatar);
   // A profile rename changes presentation, never durable agent identity.
   db.prepare("UPDATE local_supervisor_grants SET display_name=? WHERE entry_id=? AND revoked_at IS NULL").run(input.displayName, input.entryId);
-  if (row.display_name !== input.displayName) {
+  db.prepare("UPDATE local_supervisor_grants SET avatar_json=? WHERE entry_id=? AND revoked_at IS NULL").run(avatar ? JSON.stringify(avatar) : null, input.entryId);
+  if (row.display_name !== input.displayName || JSON.stringify(parseLocalAvatar(row.avatar_json)) !== JSON.stringify(avatar)) {
     for (const active of db.prepare("SELECT session_id,public_json FROM local_supervisor_sessions WHERE grant_id=? AND ended_at IS NULL").all(row.grant_id)) {
       const session = JSON.parse(String(active.public_json)) as StoredAgentSessionState;
       session.display_name = input.displayName;
+      session.avatar = avatar;
       session.actor_label = `${input.displayName} | Your agent | ${session.ide_label}`;
       db.prepare("UPDATE local_supervisor_sessions SET public_json=? WHERE session_id=?").run(JSON.stringify(session), active.session_id);
       saveAgentSession(session);
@@ -146,6 +158,7 @@ export async function createLocalSupervisorSession(grant: Record<string, unknown
   const db = await localSupervisionDatabase();
   const now = new Date().toISOString();
   const identity = {
+    avatar: parseLocalAvatar(grant.avatar_json),
     session_id: `local_agent_session_${randomUUID()}`, session_token: "", room_id: input.room_id,
     session_kind: "worker" as const, runtime: input.runtime, agent_key: input.agent_key,
     agent_instance_id: input.agent_instance_id, display_name: String(grant.display_name), owner_label: "You",
@@ -239,12 +252,12 @@ export async function readLocalSupervisorPresence(roomId: string): Promise<Pick<
     seen.add(agentKey);
     const lastSeen = String(row.native_observed_at || identity.last_seen_at || identity.created_at);
     const activityState = row.ended_at || row.revoked_at ? "offline" : Date.now() - Date.parse(lastSeen) < 45_000 ? "active" : "away";
-    result.participants.push({ participantKey: `agent:${agentKey}`, kind: "agent", agentKey,
+    result.participants.push({ avatar: normalizeAgentAvatar(identity.avatar), participantKey: `agent:${agentKey}`, kind: "agent", agentKey,
       displayName: identity.display_name || "Agent", actorLabel: identity.actor_label || "Agent", ownerLabel: "You", ideLabel: identity.ide_label || null,
       githubLogin: null, hiddenAt: null, activityState, lastSeenAt: lastSeen,
       lastRoomActivityAt: null, lastLiveHeartbeatAt: row.native_observed_at ? lastSeen : null, sourceFlags: ["presence"] });
     if (row.ended_at || row.revoked_at) continue;
-    result.presence.push({ roomId, agentKey, agentInstanceId: identity.agent_instance_id || null,
+    result.presence.push({ avatar: normalizeAgentAvatar(identity.avatar), roomId, agentKey, agentInstanceId: identity.agent_instance_id || null,
       agentSessionId: identity.session_id, sessionKind: "worker", runtime: identity.runtime || "unknown",
       displayName: identity.display_name || "Agent", actorLabel: identity.actor_label || "Agent", ownerLabel: "You", ideLabel: identity.ide_label || null,
       repoBranch: null, status: row.native_status === "working" ? "working" : "idle", statusText: null,

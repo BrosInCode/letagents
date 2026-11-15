@@ -17,9 +17,22 @@ import { migrateExecutionStorageV21ToV22, migrateExecutionStorageV22ToV23, migra
 import { applyRoomWorkPublicationSchema, validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { applyExecutionApprovalPublicationSchema, validateExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
 import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
-import { SCHEMA_VERSION, applyWorkerExecutionBindings, applyAgentImageInputColumn, applyAgentLiveSharingColumn, applyDaemonEfficiencyMigration, run, schemaMethods } from "./shared.js";
+import { SCHEMA_VERSION, applyAgentAvatarColumn, applyWorkerExecutionBindings, applyAgentImageInputColumn, applyAgentLiveSharingColumn, applyDaemonEfficiencyMigration, run, schemaMethods } from "./shared.js";
 
 export const storageMigrations = schemaMethods({
+migrateAgentAvatarStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    applyAgentAvatarColumn(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+},
 /** Offers remain dormant. Old activations acquire no fabricated offer coverage. */
 migratePollingOfferStorage(database: DatabaseSync): void {
   this.repairAndValidateCurrentShape(database);

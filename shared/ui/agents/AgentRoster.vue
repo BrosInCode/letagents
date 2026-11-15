@@ -41,7 +41,7 @@
       >
         <span class="agents-identity"
           ><span class="agents-provider"
-            ><slot name="provider" :row="row">{{
+            ><AgentAvatar v-if="row.avatar" :avatar="row.avatar" :name="row.name" :size="36" /><slot v-else name="provider" :row="row">{{
               row.name.slice(0, 1)
             }}</slot></span
           ><span class="agents-copy"
@@ -118,6 +118,7 @@
   </div>
 </template>
 <script setup lang="ts">
+import AgentAvatar from "../agent-identity/AgentAvatar.vue";
 import { computed, ref } from "vue";
 import { agentProviderLabel, type AgentRosterRow } from "./types";
 const props = withDefaults(defineProps<{

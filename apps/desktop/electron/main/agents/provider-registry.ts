@@ -6,6 +6,22 @@ import {
   defaultManagedAgentPermissionProfileId,
   listManagedAgentPermissionProfiles,
 } from "./managed-agent-permission-profiles.js";
+import { isIsolatedDesktopPreview } from "../preview-mode.js";
+
+function previewAuthCommand(providerId: DesktopAgentProviderId): string | undefined {
+  if (!isIsolatedDesktopPreview() || (providerId !== "codex" && providerId !== "claude-code")) return undefined;
+  const env = process.env;
+  if (!env.HOME || !env.CODEX_HOME || !env.CLAUDE_CONFIG_DIR) {
+    throw new Error("The Preview sign-in environment is unavailable.");
+  }
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  // A command pasted into Terminal must use the same private provider homes
+  // as preflight, without inheriting the terminal's credentials or overrides.
+  const keys = ["HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "TMPDIR", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL"];
+  const environment = keys.flatMap((key) => env[key] ? [`${key}=${quote(env[key]!)}`] : []);
+  const command = providerId === "codex" ? "codex login" : "claude auth login";
+  return `env -i ${environment.join(" ")} ${command}`;
+}
 
 export function cursorRuntimeInstallCommand(
   platform: NodeJS.Platform = process.platform,
@@ -104,11 +120,15 @@ const agentProviders: DesktopAgentProvider[] = [
 export function listDesktopAgentProviders(): DesktopAgentProvider[] {
   return agentProviders
     .filter((provider) => provider.id !== "antigravity")
-    .map((provider) => ({
-      ...provider,
-      capabilities: [...provider.capabilities],
-      permissionProfiles: provider.permissionProfiles.map((profile) => ({ ...profile })),
-    }));
+    .map((provider) => {
+      const authCommand = previewAuthCommand(provider.id);
+      return {
+        ...provider,
+        ...(authCommand ? { authCommand } : {}),
+        capabilities: [...provider.capabilities],
+        permissionProfiles: provider.permissionProfiles.map((profile) => ({ ...profile })),
+      };
+    });
 }
 
 export function isDesktopAgentProviderId(providerId: string): providerId is DesktopAgentProviderId {

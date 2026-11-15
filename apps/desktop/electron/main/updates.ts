@@ -2,6 +2,7 @@ import electron from "electron";
 import electronUpdaterModule, { type ProgressInfo, type UpdateInfo } from "electron-updater";
 import { join } from "node:path";
 
+import { isIsolatedDesktopPreview } from "./preview-mode.js";
 import type { DesktopUpdateStatus } from "../ipc-types.js";
 import {
   DesktopUpdaterController,
@@ -26,12 +27,13 @@ function desktopAutoUpdater() {
 }
 
 function updatesSupported(): boolean {
-  return (process.platform === "darwin" || process.platform === "win32")
+  return !isIsolatedDesktopPreview() && (process.platform === "darwin" || process.platform === "win32")
     && app?.isPackaged === true
     && Boolean(desktopUpdateFeedBaseUrl(process.arch, process.platform));
 }
 
 function unsupportedReason(): string | null {
+  if (isIsolatedDesktopPreview()) return "Automatic updates are disabled in this isolated preview.";
   if (process.platform !== "darwin" && process.platform !== "win32") {
     return "Automatic updates currently require macOS or Windows.";
   }

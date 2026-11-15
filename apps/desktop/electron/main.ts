@@ -2,6 +2,7 @@ import { drainLocalAttachmentDeletions } from "./main/rooms/local-content-deleti
 import { app, autoUpdater, protocol } from "electron";
 import { join } from "node:path";
 
+import { desktopProductName } from "./main/preview-mode.js";
 import { claimDesktopInstance, registerAskLinks } from "./main/ask-links.js";
 import { handleAttachmentProtocolRequest } from "./main/attachments.js";
 import { registerDesktopIpcHandlers } from "./main/ipc.js";
@@ -103,7 +104,7 @@ function startDesktopApp(): void {
     }
     protocol.handle(attachmentProtocolScheme, handleAttachmentProtocolRequest);
     seedDesktopSmokeState();
-    app.setName("LetAgents");
+    app.setName(desktopProductName());
     if (process.platform === "darwin" && !app.isPackaged) {
       app.dock?.setIcon(join(workspaceRoot, "brand", "letagents-app-icon.png"));
     }

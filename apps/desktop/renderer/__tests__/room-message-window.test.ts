@@ -405,6 +405,10 @@ before(async () => {
   });
   const groupedUpdates = await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/RoomGitHubUpdates.vue", import.meta.url)));
   await attachClientRender(groupedUpdates.default, "../../../../shared/ui/RoomGitHubUpdates.vue");
+  const firstMessage = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomFirstMessage.vue")).default;
+  await attachClientRender(firstMessage, "../src/components/desktop/content/room-chat/RoomFirstMessage.vue");
+  const avatar = (await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/agent-identity/AgentAvatar.vue", import.meta.url)))).default;
+  await attachClientRender(avatar, "../../../../shared/ui/agent-identity/AgentAvatar.vue");
   await attachClientRender(RoomMessageViewport, "../src/components/desktop/content/room-chat/RoomMessageViewport.vue");
 });
 
@@ -498,6 +502,31 @@ async function mountViewport(count: number, options: { idle?: boolean; initialSc
   const visibleMounted = () => descendants(list).filter(node => node.type === "article" && !hiddenClass(node)).length;
   return { props, app, list, root, calls, mounted, scroll, firstVisible, atBottom, gap, article, visibleMounted, viewport: () => viewport! };
 }
+
+test("an already visible private first message updates when its exact delivery later fails", async () => {
+  const view = await mountViewport(0);
+  const agent = { id: "first-agent", displayName: "Endpoint QA", createdBy: "desktop", desiredState: "stopped",
+    createdAt: "2026-10-01T00:00:00Z", charter: "Read the README.", deliveryReceipts: [] as object[] };
+  const failure = () => descendants(view.root).find(node => node.props["data-testid"] === "room-first-message-failure");
+  const text = (node: HostNode) => descendants(node).map(child => child.text).join(" ");
+  try {
+    view.props.supervisorEntries = [agent];
+    await flush();
+    assert.ok(descendants(view.root).find(node => node.props["data-testid"] === "room-first-message-first-agent"));
+    assert.equal(failure(), undefined);
+    const failed = { sourceMessageId: "desktop-initial-message:first-agent", state: "acknowledged_failed", error: "Cannot connect to API" };
+    view.props.supervisorEntries = [{ ...agent, deliveryReceipts: [failed] }];
+    await flush();
+    assert.ok(failure(), "receipt updates must invalidate the first-message timeline memo");
+    assert.match(text(failure()!), /Cannot connect to API/);
+    view.props.supervisorEntries = [{ ...agent, deliveryReceipts: [{ ...failed, error: "Provider rejected this ask" }] }];
+    await flush();
+    assert.match(text(failure()!), /Provider rejected this ask/);
+    view.props.supervisorEntries = [{ ...agent, deliveryReceipts: [{ ...failed, sourceMessageId: "some-later-ask" }] }];
+    await flush();
+    assert.equal(failure(), undefined, "another ask's failure cannot replace this first message's outcome");
+  } finally { view.app.unmount(); }
+});
 
 test("a long room mounts a bounded window of the newest messages, at the bottom", async () => {
   articlesCreated.count = 0;

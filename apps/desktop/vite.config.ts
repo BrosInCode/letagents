@@ -11,6 +11,7 @@ export default defineConfig({
   }), {
     name: "workspace-reader-notices",
     generateBundle() {
+      this.emitFile({ type: "asset", fileName: "agent-identity-notices.txt", source: readFileSync(new URL("../../shared/ui/agent-identity/scene/assets/brain/ATTRIBUTION.txt", import.meta.url), "utf8") });
       const files = [
         "monaco-editor/LICENSE",
         "monaco-editor/ThirdPartyNotices.txt",
@@ -28,7 +29,7 @@ export default defineConfig({
     strictPort: true,
   },
   resolve: {
-    dedupe: ["vue"],
+    dedupe: ["vue", "three"],
     alias: {
       "@": fileURLToPath(new URL("./renderer/src", import.meta.url)),
     },

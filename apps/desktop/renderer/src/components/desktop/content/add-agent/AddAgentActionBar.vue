@@ -134,7 +134,7 @@
     </span>
     <span
       v-else-if="preflight?.status === 'ready' && supervisedProvider"
-      class="desktop-add-agent-confirmation"
+      class="desktop-add-agent-confirmation desktop-add-agent-ready-hint"
     >
       Starts a {{ provider?.name || "local" }} agent for this room.
     </span>

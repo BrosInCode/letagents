@@ -1,3 +1,4 @@
+import { normalizeAgentAvatar } from "../../../shared/agent-avatar.mjs";
 import type {
   DaemonAgentConfiguration,
   DaemonAgentIdentity,
@@ -72,6 +73,7 @@ export function projectDaemonManifestEntry(entry: DaemonManifestEntry): DaemonMa
     profile: {
       agent_id: entry.id,
       display_name: entry.display_name,
+      ...(entry.avatar ? { avatar: normalizeAgentAvatar(entry.avatar) } : {}),
     },
     membership: {
       agent_id: entry.id,
@@ -178,6 +180,7 @@ export function composeDaemonManifestEntry(projection: DaemonManifestDomainProje
     room_id: membership.room_id,
     ...(membership.local_room_id ? { local_room_id: membership.local_room_id } : {}),
     display_name: profile.display_name,
+    ...(profile.avatar ? { avatar: profile.avatar } : {}),
     provider: configuration.provider,
     model: configuration.model,
     charter: configuration.charter,
@@ -222,6 +225,7 @@ export function projectDaemonCreateRequestReplayParameters(entry: DaemonManifest
     room_id: projection.membership.room_id,
     local_room_id: projection.membership.local_room_id ?? null,
     display_name: projection.profile.display_name,
+    avatar: projection.profile.avatar ?? null,
     provider: projection.configuration.provider,
     model: projection.configuration.model,
     reasoning_effort: projection.configuration.reasoning_effort ?? null,

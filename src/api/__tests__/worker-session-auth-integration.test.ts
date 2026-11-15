@@ -3896,3 +3896,39 @@ test(
     assert.equal(concurrentActive.rows[0]?.count, "1");
   }
 );
+
+test("chosen avatar stays on durable identity and authenticated room projections, never routing labels", { skip: requiresDatabase }, async () => {
+  const { room, worker } = await seedHarness();
+  const { registerAgentIdentity, getMessages, getRoomAgentPresence, getRoomParticipants, upsertRoomAgentPresence, upsertRoomParticipant } = dbModule!;
+  // The additive migration preserves identities that predate avatars.
+  await pool!.query('ALTER TABLE agents DROP COLUMN avatar');
+  const { readFile } = await import("node:fs/promises");
+  await pool!.query(await readFile(path.join(migrationsFolder, "0149_agent_avatar.sql"), "utf8"));
+  const input = { owner_account_id: ownerAccount.id, owner_login: agentIdentity.owner_login, owner_label: agentIdentity.owner_label, name: agentIdentity.name, display_name: "Atlas" };
+  const avatar = { kind: "character", character: "orbit", color: "sage" } as const;
+  const chosen = await registerAgentIdentity({ ...input, avatar });
+  assert.equal(chosen.canonical_key, agentIdentity.canonical_key);
+  assert.equal(chosen.id, agentIdentity.id);
+  const preserved = await registerAgentIdentity(input);
+  assert.deepEqual(preserved.avatar, avatar, "old callers must not erase presentation");
+  await assert.rejects(registerAgentIdentity({ ...input, avatar: { kind: "image", dataUrl: "https://example.com/avatar.png" } }), /avatar/);
+  await assert.rejects(registerAgentIdentity({ ...input, owner_account_id: "another-owner", avatar: { kind: "initials", color: "rose" } }), /owner identity/);
+  await upsertRoomParticipant({ room_id: room.id, participant_key: "agent:avatar", kind: "agent", agent_key: worker.agent_key, display_name: worker.display_name, actor_label: worker.actor_label });
+  await upsertRoomAgentPresence({ room_id: room.id, actor_label: worker.actor_label, agent_key: worker.agent_key, agent_session_id: worker.session_id, session_kind: "worker", runtime: "codex", display_name: worker.display_name, status: "idle" });
+  await markRoomAgentDeliveryConnected!({ room_id: room.id, actor_label: worker.actor_label, agent_key: worker.agent_key,
+    agent_instance_id: worker.agent_instance_id, agent_session_id: worker.session_id, session_kind: "worker", runtime: "codex",
+    display_name: worker.display_name, owner_label: agentIdentity.owner_label, ide_label: "Codex", transport: "long_poll",
+    credential_fence: { kind: "session_token", token_hash: hashToken(worker.session_token) } });
+  assert.deepEqual((await getRoomAgentPresence(room.id)).find(row => row.agent_key === worker.agent_key)?.avatar, avatar);
+  assert.deepEqual((await getRoomParticipants(room.id)).find(row => row.agent_key === worker.agent_key)?.avatar, avatar);
+  const first = await addMessage!(room.id, worker.actor_label, "Hello", { source: "agent", publisher_agent_key: worker.agent_key, publisher_agent_session_id: worker.session_id, account_id: ownerAccount.id });
+  await addMessage!(room.id, "Human", "Reply", { source: "browser", reply_to_message_id: first.id, account_id: ownerAccount.id });
+  await addMessage!(room.id, worker.actor_label, "Same label, no authority", { source: "agent" });
+  const page = await getMessages(room.id);
+  assert.deepEqual(page.messages.find(message => message.id === first.id)?.agent_identity?.avatar, avatar);
+  assert.deepEqual(page.messages.find(message => message.text === "Reply")?.reply_to?.agent_identity?.avatar, avatar);
+  assert.equal(page.messages.find(message => message.text === "Same label, no authority")?.agent_identity, null);
+  const cleared = await registerAgentIdentity({ ...input, avatar: null });
+  assert.equal(cleared.avatar, null);
+  assert.equal(cleared.canonical_key, worker.agent_key);
+});

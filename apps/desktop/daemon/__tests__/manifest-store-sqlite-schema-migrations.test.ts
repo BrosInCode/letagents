@@ -1251,3 +1251,22 @@ test("a Cursor prepared turn leaves a claimed notice's batch queued until the tu
     await env.cleanup();
   }
 });
+
+test("v51 profile migration preserves identity and stores chosen avatar across reopen", async () => {
+  const env = await fixture();
+  let store = new ManifestStore(env.databasePath);
+  try {
+    const original = await store.write(0, [entry]); await store.close();
+    const old = new DatabaseSync(env.databasePath);
+    old.exec("ALTER TABLE agent_profiles DROP COLUMN avatar_json; UPDATE manifest_metadata SET schema_version=51; PRAGMA user_version=51");
+    old.close();
+    store = new ManifestStore(env.databasePath);
+    const previous = await store.load();
+    assert.deepEqual(previous, original);
+    const avatar = { kind: "character", character: "moss", color: "lilac" } as const;
+    const saved = await store.write(previous.generation, [{ ...previous.entries[0]!, avatar }]);
+    await store.close(); store = new ManifestStore(env.databasePath);
+    assert.deepEqual(await store.load(), saved);
+    assert.deepEqual((await store.load()).entries[0]!.avatar, avatar);
+  } finally { await store.close(); await env.cleanup(); }
+});

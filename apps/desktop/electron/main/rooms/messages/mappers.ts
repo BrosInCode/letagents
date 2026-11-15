@@ -1,3 +1,5 @@
+import { normalizeAgentAvatar } from "../../../../../../shared/agent-avatar.mjs";
+import type { AgentAvatar } from "../../../../../../shared/agent-avatar.mjs";
 import { normalizeRoomGif, type RoomGif } from "../../../../../../shared/room-expressions.mjs";
 import type { DesktopRoomMessage } from "../../../ipc-types.js";
 import { parseAccountAgentRoutingEnvelope } from "../../../../../../shared/message-contracts.mjs";
@@ -15,6 +17,7 @@ export type RoomMessageReplyPayload = {
   source?: string | null;
   timestamp: string;
   agent_identity?: {
+    avatar?: AgentAvatar | null;
     actor_label?: string | null;
     agent_key?: string | null;
     agent_session_id?: string | null;
@@ -39,6 +42,7 @@ export type RoomMessagePayload = {
   reply_to?: RoomMessageReplyPayload | null;
   reactions?: unknown;
   agent_identity?: {
+    avatar?: AgentAvatar | null;
     name?: string | null;
     display_name?: string | null;
     owner_label?: string | null;
@@ -195,6 +199,7 @@ function mapRoomMessageAgentIdentity(
 ): DesktopRoomMessage["agentIdentity"] {
   if (!identity) return null;
   return {
+    ...(identity.avatar ? { avatar: normalizeAgentAvatar(identity.avatar) } : {}),
     name: identity.name || null,
     displayName: identity.display_name || null,
     ownerLabel: identity.owner_label || null,

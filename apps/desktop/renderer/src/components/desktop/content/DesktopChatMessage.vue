@@ -20,7 +20,7 @@
       'is-thread-root-context': context === 'thread-root',
       'is-thread-reply-context': context === 'thread-reply',
     }"
-    :style="{ '--message-accent': senderColor }"
+    :style="{ '--message-accent': senderColor, ...chatStyling.styleFor(senderRole) }"
     :data-owner-kind="ownerKind"
     :data-chat-role="senderRole"
     :data-message-id="message.id"
@@ -30,7 +30,7 @@
     @pointerup.stop="handleSelectionPointerUp"
   >
     <WakeGlyph v-if="isWakeNotice" class="room-chat-wake-glyph" state="woke" :still="!animateArrival" />
-    <ChatAvatar v-else-if="senderRole" :name="displayName" :avatar-url="avatarUrl" :agent="ownerKind === 'agent'" :provider="ideLabel" :agent-key="message.agentIdentity?.agentKey" />
+    <ChatAvatar v-else-if="senderRole" :name="displayName" :avatar-url="avatarUrl" :agent="ownerKind === 'agent'" :provider="ideLabel" :agent-key="message.agentIdentity?.agentKey" :avatar="message.agentIdentity?.avatar" />
     <div v-else class="room-chat-avatar" :style="{ '--avatar-color': senderColor }" aria-hidden="true" />
 
     <div class="room-chat-message-content">
@@ -455,7 +455,10 @@ import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCar
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
 import ChatAvatar from "../../../../../../../shared/ui/ChatAvatar.vue";
 import { chatSenderRole } from "../../../../../../../shared/chat-appearance";
+import { supervisorEntriesKey } from "./add-agent/supervisor-entries-context";
 import "../../../../../../../shared/ui/chat-palette.css";
+import { useChatStyling } from "../../../../../../../shared/ui/chat-styling";
+const chatStyling = useChatStyling();
 import {
   getSenderColor,
   parseSenderIdentity,
@@ -705,8 +708,13 @@ const isAmbientSystem = computed(() =>
 );
 const githubEvent = computed(() => props.message.source === "browser" ? null : parseGitHubEvent(props.message));
 const viewer = useMessageViewer();
+const supervisorEntries = inject(supervisorEntriesKey, null);
+const ownedLocalAgent = computed(() => isLocalRoomIdentifier(props.roomIdentifier)
+  && Boolean(props.message.agentIdentity?.agentKey && supervisorEntries?.entries.value.some(entry =>
+    entry.localRoomId === props.roomIdentifier && entry.agentKey === props.message.agentIdentity?.agentKey)));
 const senderRole = computed(() => chatSenderRole({ human: ownerKind.value === 'human', agent: ownerKind.value === 'agent',
-  viewerLogin: viewer.value?.login, login: props.message.senderProfile?.login, agentKey: props.message.agentIdentity?.agentKey, outgoing: Boolean(props.message.outgoing) }));
+  viewerLogin: viewer.value?.login, login: props.message.senderProfile?.login, agentKey: props.message.agentIdentity?.agentKey,
+  ownedLocalAgent: ownedLocalAgent.value, outgoing: Boolean(props.message.outgoing) }));
 const avatarUrl = computed(() => props.message.senderProfile?.avatarUrl || (props.message.outgoing ? viewer.value?.avatar_url : null));
 const readerSender = computed(() => ({
   name: displayName.value,

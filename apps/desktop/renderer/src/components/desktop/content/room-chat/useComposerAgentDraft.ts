@@ -1,4 +1,5 @@
 import { computed, reactive, ref, watch } from "vue";
+import type { AgentAvatar } from "../../../../../../../../src/shared/agent-avatar";
 import type {
   DesktopAgentProvider,
   DesktopAgentProviderId,
@@ -48,6 +49,8 @@ export interface ComposerAgentChip {
   /** Stays the same while the chip's settings change. */
   id: number;
   providerId: DesktopAgentProviderId;
+  displayName?: string;
+  avatar?: AgentAvatar | null;
   /** Null uses the provider's default model. */
   model: string | null;
   effort: DesktopManagedAgentEffort | "";
@@ -374,6 +377,11 @@ export function useComposerAgentDraft(options: {
     }));
   });
 
+  function setIdentity(identity: { displayName: string; avatar: AgentAvatar | null }): void {
+    if (!chip.value || launching.value) return;
+    chip.value = { ...chip.value, displayName: identity.displayName.trim(), avatar: identity.avatar ? { ...identity.avatar } : null };
+  }
+
   function setModel(model: string | null): void {
     if (!chip.value) return;
     chip.value = { ...chip.value, model };
@@ -489,6 +497,8 @@ export function useComposerAgentDraft(options: {
         creationRequestId,
         providerId: current.providerId,
         providerName: provider.name,
+        displayName: current.displayName,
+        avatar: current.avatar ? { ...current.avatar } : null,
         roomIdentifier,
         repoRootPath: launchContext.repoRootPath,
         charter,
@@ -612,6 +622,7 @@ export function useComposerAgentDraft(options: {
     refreshOpenModelStatus: () => refreshOpenModelStatus(),
     pick,
     removeChip,
+    setIdentity,
     setModel,
     setEffort,
     setAccess,

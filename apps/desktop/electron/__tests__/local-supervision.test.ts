@@ -920,3 +920,22 @@ test("a local room's log file reaches the agent as a staged copy, read from its 
   for (const item of prepared.attachments) assert.deepEqual(await read(item.file.path), log);
   await prepared.release();
 });
+
+test("local chosen identity persists through grant repair, presence and authenticated publication", async () => {
+  const roomId = "local_avatar_identity";
+  await createLocalRoom({ roomIdentifier: roomId });
+  const oak = await worker(roomId, "Oak", "avatar_identity");
+  const avatar = { kind: "character", character: "moss", color: "lilac" } as const;
+  const repaired = await prepareLocalSupervisorGrant({ entryId: oak.grant.entryId, roomId, displayName: "Atlas", provider: "codex", avatar });
+  assert.equal(repaired.agentKey, oak.grant.agentKey);
+  assert.equal(repaired.grantId, oak.grant.grantId);
+  const { readLocalSupervisorPresence } = await import("../main/rooms/local-supervision-authority.js");
+  const presence = await readLocalSupervisorPresence(roomId);
+  assert.deepEqual(presence.presence[0]?.avatar, avatar);
+  assert.deepEqual(presence.participants[0]?.avatar, avatar);
+  assert.deepEqual(getStoredAgentSession(oak.session.session_id)?.avatar, avatar);
+  await oak.request("messages", { method: "POST", body: JSON.stringify({ text: "Hello", client_message_id: "avatar-message", avatar: { kind: "initials", color: "rose" } }) });
+  const page = await getLocalChatMessages(roomId);
+  assert.equal(page.messages[0]?.agent_identity?.agent_key, oak.grant.agentKey);
+  assert.deepEqual(page.messages[0]?.agent_identity?.avatar, avatar, "presentation comes from authenticated grant, never message body");
+});

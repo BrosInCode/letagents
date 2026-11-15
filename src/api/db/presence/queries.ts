@@ -1,3 +1,4 @@
+import { getAgentAvatars } from "../auth/agent-identities.js";
 import { and, asc, desc, eq, getTableColumns, sql } from "drizzle-orm";
 
 import { ACTIVE_AGENT_PRESENCE_WINDOW_MS } from "../../../shared/agent-presence.js";
@@ -154,12 +155,14 @@ export async function getMergedRoomAgentPresenceRecords(
     livenessQuery,
   ]);
 
-  return mergeRoomAgentPresenceRecords({
+  const merged = mergeRoomAgentPresenceRecords({
     roomId,
     statusEntries: (statusRows as RoomAgentPresenceRow[]).map(toRoomAgentPresence),
     deliverySessions: (deliveryRows as RoomAgentDeliverySessionRow[]).map(toRoomAgentDeliverySession),
     livenessObservations: (livenessRows as RoomAgentLivenessObservationRow[]).map(toRoomAgentLivenessObservation),
   });
+  const avatars = await getAgentAvatars(merged.map(entry => entry.agent_key));
+  return merged.map(entry => avatars.has(entry.agent_key || "") ? { ...entry, avatar: avatars.get(entry.agent_key!) } : entry);
 }
 
 export async function getRoomAgentPresence(

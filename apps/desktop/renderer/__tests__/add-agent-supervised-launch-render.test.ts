@@ -329,10 +329,12 @@ test("pre-durable failures are compact, actionable, and explicit that nothing ch
   assert.match(html, /Background service didn’t start/);
   assert.match(html, /No agent was created\. Your room and project are unchanged\./);
   assert.match(html, /supervised-launch-recovery/);
-  assert.match(html, /Try again<\/button>/);
+  assert.match(html, /Try again[\s\S]*?<\/button>/);
   assert.match(html, /desktop-add-agent-dismiss-launch/);
   assert.doesNotMatch(html, /Saving your agent/, "unreachable future steps should not remain in a terminal card");
-  assert.match(html, /<summary[^>]*>Details<\/summary>/);
+  assert.match(html, /<summary[^>]*>Technical details<\/summary>/);
+  assert.match(html, /<p tabindex="0" aria-label="Technical diagnostic"[^>]*>The local supervisor socket did not answer\./);
+  assert.doesNotMatch(html.match(/<details[^>]*>/)?.[0] ?? "", /\bopen\b/, "raw diagnostics stay available without dominating recovery");
 });
 
 test("Keychain failures render self-service recovery and a separate retry", async () => {
@@ -348,9 +350,9 @@ test("Keychain failures render self-service recovery and a separate retry", asyn
   }));
 
   assert.match(html, /Unlock Keychain to finish setup/);
-  assert.match(html, /Open Keychain Access<\/button>/);
+  assert.match(html, /Open Keychain Access[\s\S]*?<\/button>/);
   assert.match(html, /supervised-launch-keychain-retry/);
-  assert.match(html, /Try again<\/button>/);
+  assert.match(html, /Try again[\s\S]*?<\/button>/);
   assert.match(html, /desktop-add-agent-dismiss-launch/);
 });
 
@@ -459,6 +461,42 @@ async function attachClientRender(component: object, modulePath: string): Promis
   (component as { render?: unknown }).render = Function("vue", `${transformed.code}\nreturn render;`)(Vue);
 }
 
+test("the private first message shows its exact failure and opens recorded Work without retrying", async () => {
+  const modulePath = 'components/desktop/content/room-chat/RoomFirstMessage.vue';
+  const FirstMessage = (await vite.ssrLoadModule(`/renderer/src/${modulePath}`)).default;
+  const { composerAgentLaunchKey } = await vite.ssrLoadModule('/renderer/src/components/desktop/content/room-chat/composer-agent-launch.ts');
+  const agent = ref({ id: 'first-agent', displayName: 'Endpoint QA', charter: 'Read the README.', createdAt: '2026-11-15T20:00:00Z',
+    deliveryReceipts: [{ sourceMessageId: 'desktop-initial-message:first-agent', state: 'acknowledged_failed',
+      error: 'Cannot connect to API. Authorization: Bearer secret-canary' }] });
+  const host = { context: () => ({}), openAddAgent() {}, chooseWorktree() {}, openFirstMessageWork: (entryId: string) => { opened.push(entryId); } };
+  const opened: string[] = [];
+  const ssr = createSSRApp({ render: () => h(FirstMessage, { agent: agent.value }) });
+  ssr.provide(composerAgentLaunchKey, host);
+  const html = await renderToString(ssr);
+  assert.match(html, /First message did not finish/);
+  assert.match(html, /Cannot connect to API/);
+  assert.match(html, /First message · Only you/);
+  assert.doesNotMatch(html, /secret-canary|Retry|Try again/);
+  await attachClientRender(FirstMessage, modulePath);
+  const root = hostNode('root');
+  const app = testRenderer.createApp({ setup: () => () => h(FirstMessage, { agent: agent.value }) });
+  app.provide(ssrContextKey, { modules: new Set<string>() });
+  app.provide(composerAgentLaunchKey, host);
+  app.mount(root);
+  const details = findByTestId(root, 'room-first-message-details');
+  assert.ok(details);
+  (details.props.onClick as () => void)();
+  assert.deepEqual(opened, ['first-agent']);
+  assert.equal(agent.value.deliveryReceipts[0]!.state, 'acknowledged_failed');
+  agent.value = { ...agent.value, deliveryReceipts: [{ ...agent.value.deliveryReceipts[0]!, sourceMessageId: 'unrelated-message' }] };
+  await nextTick();
+  assert.equal(findByTestId(root, 'room-first-message-failure'), null, 'another ask cannot be attributed to this first message');
+  agent.value = { ...agent.value, deliveryReceipts: [{ ...agent.value.deliveryReceipts[0]!, sourceMessageId: 'desktop-initial-message:first-agent', state: 'acknowledged' }] };
+  await nextTick();
+  assert.equal(findByTestId(root, 'room-first-message-failure'), null);
+  app.unmount();
+});
+
 test("a first task set with only a change event survives choosing another access level", async () => {
   // Accessibility automation can set a textarea's value without an input
   // event. The access choice re-renders the form; it must not write the old
@@ -468,6 +506,9 @@ test("a first task set with only a change event survives choosing another access
   const charter = ref("You are part of this room's team. Work on the tasks assigned to you, answer when you are addressed, and coordinate with the team in the room.");
   const selected = ref(sandboxed);
   await attachClientRender(AddAgentRuntimeSettings, "components/desktop/content/add-agent/AddAgentRuntimeSettings.vue");
+  const FirstMessage = (await vite.ssrLoadModule('/renderer/src/components/desktop/content/add-agent/AddAgentFirstMessage.vue')).default;
+  await attachClientRender(FirstMessage, 'components/desktop/content/add-agent/AddAgentFirstMessage.vue');
+
   const root = hostNode("root");
   const app = testRenderer.createApp(defineComponent({
     setup: () => () => h(AddAgentRuntimeSettings, {
@@ -499,19 +540,20 @@ test("Cursor access cards distinguish restricted profiles from Full access", asy
     { id: "sandboxed_write", label: "Workspace writes", risk: "medium", status: "available", description: "Edits a copy." },
     { id: "full_access", label: "Full access", risk: "high", status: "available", description: "Host files and network." },
   ];
-  const html = await renderToString(createSSRApp({
-    render: () => h(AddAgentRuntimeSettings, {
-      provider: { id: "cursor", capabilities: ["supervised_runtime"] },
-      executionDescription: "Runs on this Mac.",
-      charter: "Inspect this project.",
-      permissionProfiles: profiles,
-      selectedPermissionProfile: profiles[2],
-    }),
-  }));
-  const limits = [...html.matchAll(/data-testid="desktop-add-agent-permission-limits"[^>]*>([^<]*)</g)].map((match) => match[1]);
-  assert.equal(limits.length, 3);
-  for (const line of limits.slice(0, 2)) assert.match(line, /No network access: can(?:&#39;|')t push or open PRs\./);
-  assert.match(limits[2], /can reach the network and files outside the project/);
+  for (const [index, selected] of profiles.entries()) {
+    const html = await renderToString(createSSRApp({
+      render: () => h(AddAgentRuntimeSettings, {
+        provider: { id: "cursor", capabilities: ["supervised_runtime"] },
+        executionDescription: "Runs on this Mac.", charter: "Inspect this project.",
+        permissionProfiles: profiles, selectedPermissionProfile: selected,
+      }),
+    }));
+    assert.equal((html.match(/role="radio"/g) ?? []).length, 3);
+    const limits = [...html.matchAll(/data-testid="desktop-add-agent-permission-limits"[^>]*>([^<]*)</g)].map(match => match[1]);
+    assert.equal(limits.length, 1, 'the selected access level has its provider-specific limit');
+    if (index < 2) assert.match(limits[0], /No network access: can(?:&#39;|')t push or open PRs\./);
+    else assert.match(limits[0], /can reach the network and files outside the project/);
+  }
 });
 
 test("the model field says which Claude models need a newer CLI, and refreshes from the note", async () => {
@@ -540,4 +582,96 @@ test("the model field says which Claude models need a newer CLI, and refreshes f
   assert.doesNotMatch(failed, /need a newer Claude Code/);
   const current = await renderToString(createSSRApp({ render: () => h(AddAgentModelSettings, { ...props, cliUpdate: null }) }));
   assert.doesNotMatch(current, /desktop-add-agent-model-cli-update/);
+});
+
+test("custom model validation is visible and associated with its input only in custom mode", async () => {
+  const AddAgentModelSettings = (await vite.ssrLoadModule(
+    "/renderer/src/components/desktop/content/add-agent/AddAgentModelSettings.vue",
+  )).default;
+  const props = {
+    loading: false, modelChoice: "custom", modelOptions: [{ value: "custom", label: "Custom model id" }],
+    custom: true, customModelId: "", customModelError: "Enter a model ID or choose provider default.",
+    modelDescription: "", showEffort: false, effort: "", effortOptions: [], effortDescription: "",
+    catalogLabel: "", catalogError: false,
+  };
+  const render = (overrides = {}) => renderToString(createSSRApp({
+    render: () => h(AddAgentModelSettings, { ...props, ...overrides }),
+  }));
+  const invalid = await render();
+  assert.match(invalid, /<input[^>]*aria-invalid="true"[^>]*aria-describedby="desktop-add-agent-model-custom-error"/);
+  assert.match(invalid, /<span[^>]*id="desktop-add-agent-model-custom-error"[^>]*role="alert"[^>]*>Enter a model ID or choose provider default\.<\/span>/);
+  const valid = await render({ customModelId: "my-model", customModelError: null });
+  assert.match(valid, /aria-invalid="false"/);
+  assert.doesNotMatch(valid, /desktop-add-agent-model-custom-error/);
+  const defaultMode = await render({ custom: false, modelChoice: "default", customModelError: null });
+  assert.doesNotMatch(defaultMode, /desktop-add-agent-model-custom-(?:input|error)/);
+});
+
+test("failed launch keeps its cause and current step visible while phase history is optional and actions retain their owners", async () => {
+  const failed = failedController();
+  const progress = failed.controller.launch.view;
+  progress.value.phases.unshift({ id: "checking_setup", label: "Checking setup", detail: "The provider is installed and signed in.", state: "done" });
+  progress.value.durable = true;
+  failed.controller.launch.conflict.value = { id: "saved-launch" } as never;
+  let stopCalls = 0;
+  failed.controller.launch.stop = () => { stopCalls += 1; };
+  const progressModulePath = "components/desktop/content/SupervisedLaunchProgress.vue";
+  const Progress = (await vite.ssrLoadModule(`/renderer/src/${progressModulePath}`)).default;
+  await attachClientRender(Progress, progressModulePath);
+  await attachClientRender(AddAgentSupervisedLaunch, "components/desktop/content/add-agent/AddAgentSupervisedLaunch.vue");
+
+  const root = hostNode("root");
+  const app = testRenderer.createApp({ render: () => h(AddAgentSupervisedLaunch, { controller: failed.controller }) });
+  app.provide(ssrContextKey, { modules: new Set<string>() });
+  app.mount(root);
+  const failure = findByTestId(root, "supervised-launch-failure");
+  assert.equal(failure?.props.role, "alert");
+  assert.ok(findByTestId(root, "supervised-launch-phase-connecting_supervisor"));
+  assert.equal(findByTestId(root, "supervised-launch-phase-checking_setup"), null);
+  assert.equal(findByTestId(root, "supervised-launch-phase-saving_agent"), null);
+  const toggle = findByTestId(root, "supervised-launch-progress-toggle");
+  assert.ok(toggle);
+  assert.equal(toggle.props["aria-expanded"], false);
+  assert.ok(toggle.props["aria-controls"]);
+  (toggle.props.onClick as () => void)();
+  await nextTick();
+  assert.equal(toggle.props["aria-expanded"], true);
+  assert.ok(findByTestId(root, "supervised-launch-phase-checking_setup"));
+  assert.ok(findByTestId(root, "supervised-launch-phase-connecting_supervisor"));
+  assert.equal(findByTestId(root, "supervised-launch-phase-saving_agent"), null, "history must not imply an unreachable phase ran");
+  progress.value = { ...progress.value, phases: progress.value.phases.map((phase) => ({ ...phase })) };
+  await nextTick();
+  assert.equal(toggle.props["aria-expanded"], true, "a fresh same-phase supervisor snapshot must preserve the user's open history");
+  assert.ok(findByTestId(root, "supervised-launch-phase-checking_setup"));
+  (toggle.props.onClick as () => void)();
+  await nextTick();
+  assert.equal(findByTestId(root, "supervised-launch-phase-checking_setup"), null);
+  assert.ok(findByTestId(root, "supervised-launch-phase-connecting_supervisor"));
+  (toggle.props.onClick as () => void)();
+  await nextTick();
+  progress.value = { ...progress.value, currentPhaseId: "saving_agent", phases: progress.value.phases.map((phase) => ({
+    ...phase, state: phase.id === "saving_agent" ? "failed" : "done",
+  })) };
+  await nextTick();
+  assert.equal(toggle.props["aria-expanded"], false, "a different failed phase resets history to its current step");
+  assert.equal(findByTestId(root, "supervised-launch-phase-checking_setup"), null);
+  assert.equal(findByTestId(root, "supervised-launch-phase-connecting_supervisor"), null);
+  assert.ok(findByTestId(root, "supervised-launch-phase-saving_agent"));
+
+  const recover = findByTestId(root, "supervised-launch-recovery");
+  const cancel = findByTestId(root, "desktop-add-agent-stop-supervised-runtime");
+  assert.ok(recover);
+  assert.ok(cancel);
+  assert.equal(cancel.parent?.parent, recover.parent, "Cancel and recovery share one action row without moving controller ownership");
+  assert.equal(findByTestId(root, "desktop-add-agent-dismiss-launch"), null, "a saved launch retains stop, not pre-durable dismiss");
+  (recover.props.onClick as () => void)();
+  assert.deepEqual(failed.counts().recoverCalls, ["reconnect"]);
+  assert.equal(stopCalls, 0);
+  (cancel.props.onClick as () => void)();
+  assert.equal(stopCalls, 1);
+  assert.equal(progress.value.failed, true, "presentation does not manufacture a successful recovery");
+  failed.controller.launch.recoveryPending.value = true;
+  await nextTick();
+  assert.equal(findByTestId(root, "supervised-launch-recovery")?.props.disabled, true);
+  app.unmount();
 });

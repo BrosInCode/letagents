@@ -22,7 +22,7 @@
       >
         <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="5" cy="12" r="1.8"/><circle cx="12" cy="12" r="1.8"/><circle cx="19" cy="12" r="1.8"/></svg>
       </button>
-      <div class="message-actions">
+      <div class="message-actions" :class="{ 'is-open': pickerOpen || actionsOpen }">
       <button
         v-if="canReact"
         class="reply-action react-action"
@@ -113,7 +113,24 @@ const emit = defineEmits<{
 </script>
 
 <style scoped>
-.message-actions { display: contents; }
+.message-actions {
+  position: absolute; top: -16px; left: 8px; z-index: 5; display: flex; align-items: center; gap: 3px;
+  padding: 5px; border: 1px solid light-dark(#ddd, #303030); border-radius: 999px;
+  background: light-dark(#fff, #171717); box-shadow: 0 5px 18px rgb(0 0 0 / .15);
+  opacity: 0; pointer-events: none; transform: translateY(3px); transition: opacity 120ms ease, transform 120ms ease;
+}
+.message-actions::after { content: ''; position: absolute; inset: 100% 0 -12px; }
+:global(.message:not([data-chat-role])) .message-actions { display: contents; position: static; opacity: 1; pointer-events: auto; transform: none; }
+:global(.message:not([data-chat-role])) .message-actions::after { display: none; }
+:global(.message[data-chat-role="self"]) .message-actions,
+:global(.message[data-chat-role="own-agent"]) .message-actions { left: auto; right: 8px; }
+.message-actions .reply-action { opacity: 1; pointer-events: inherit; transform: none; width: 30px; height: 30px; }
+.message-actions .reply-action svg { width: 16px; height: 16px; }
+.message-meta:focus-within .message-actions, .message-actions.is-open { opacity: 1; pointer-events: auto; transform: none; }
+@media (hover: hover) and (pointer: fine) {
+  :global(.message:hover) .message-actions { opacity: 1; pointer-events: auto; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) { .message-actions { transition: none; transform: none; } }
 .message-more-action { display: none; flex: 0 0 44px; align-items: center; justify-content: center; width: 44px; height: 44px; padding: 0; border: 0; border-radius: 10px; background: transparent; color: var(--muted); cursor: pointer; }
 .message-more-action svg { width: 20px; height: 20px; }
 .message-more-action:focus-visible { outline: 2px solid var(--blue-text, #60a5fa); outline-offset: -2px; }
@@ -140,7 +157,7 @@ const emit = defineEmits<{
 .message-person-action { padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
 .message-person-action:hover { text-decoration: underline; text-underline-offset: 3px; }
 .message-person-action:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 3px; }
-.message-meta strong, .message-person-action { font-size: 13px; font-weight: 600; letter-spacing: -0.01em; }
+.message-meta strong, .message-person-action { font-size: 12px; font-weight: 500; letter-spacing: -0.01em; }
 .message-sender-subtitle { font-size: 0.72rem; color: var(--muted, #71717a); }
 
 .message-meta-tail {

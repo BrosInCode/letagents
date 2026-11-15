@@ -62,6 +62,7 @@ export function useAddAgentPresentation(
     customModelId,
     selectedEffort,
     selectedPermissionProfileId,
+    restoredPermissionProfileId,
   } = configuration;
 
   const selectedProvider = computed(() =>
@@ -76,11 +77,19 @@ export function useAddAgentPresentation(
     return profiles.map((profile) => supervisedPermissionProfilePresentation(selectedProviderId.value, profile, { hasProject: Boolean(props.repoRootPath?.trim()) }));
   });
   const selectedPermissionProfile = computed(() =>
+    restoredPermissionProfileId.value !== undefined
+      ? selectedPermissionProfiles.value.find(profile => profile.id === restoredPermissionProfileId.value) ?? null
+      :
     selectedPermissionProfiles.value.find((profile) => profile.id === selectedPermissionProfileId.value) ??
     selectedPermissionProfiles.value.find((profile) => profile.id === selectedProvider.value?.defaultPermissionProfileId) ??
     selectedPermissionProfiles.value.find((profile) => profile.status === "available") ??
     selectedPermissionProfiles.value[0] ??
     null
+  );
+  const customModelError = computed(() =>
+    selectedModelMode.value === "custom" && !customModelId.value.trim()
+      ? "Enter a model ID or choose provider default."
+      : null
   );
   const canStartManagedAgent = computed(() =>
     Boolean(
@@ -88,6 +97,7 @@ export function useAddAgentPresentation(
       (props.roomStorageMode === "local" || secureStorageStatus.value?.available === true) &&
       (!loadingPreflight.value || Boolean(preflight.value)) &&
       (selectedModelMode.value !== "option" || !loadingProviderModels.value) &&
+      !customModelError.value &&
       (
         !selectedPermissionProfiles.value.length ||
         selectedPermissionProfile.value?.status === "available"
@@ -358,6 +368,7 @@ export function useAddAgentPresentation(
     selectedPermissionProfiles,
     selectedPermissionProfile,
     canStartManagedAgent,
+    customModelError,
     authCommand,
     authCommandForProvider,
     installCommand,

@@ -1,3 +1,4 @@
+import { isIsolatedDesktopPreview } from "./preview-mode.js";
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -121,6 +122,9 @@ async function readWindowsPath(runner: CommandRunner): Promise<string | null> {
 
 async function discoverDesktopPath(options: DesktopShellEnvironmentOptions): Promise<string> {
   const env = options.env ?? process.env;
+  // The preview bootstrap preserves executable PATH but deliberately isolates
+  // provider configuration. Never source the real account's startup files.
+  if (isIsolatedDesktopPreview()) return env.PATH || "";
   const platform = options.platform ?? process.platform;
   const homeDirectory = options.homeDirectory ?? homedir();
   const runner = options.runCommand ?? runCommand;

@@ -352,6 +352,27 @@ test('Enter starts the agent through the supervised create, with the draft as it
   assert.deepEqual([preflight[0], preflight[1].permissionProfileId, preflight[1].model], ['codex', 'auto_review', 'gpt-5'], 'checked again with the final choices');
 });
 
+test('quick identity is snapshotted before asynchronous launch and leaves the first message private', async t => {
+  let save: ((value: any) => void) | undefined;
+  const calls = fakeIpc({ createAgent: () => new Promise(resolve => { save = resolve; }) });
+  const { draft } = useDraft(t, fakeHost().host);
+  await draft.refreshProviders();
+  draft.pick('codex');
+  const avatar = { kind: 'character' as const, character: 'orbit' as const, color: 'sage' as const };
+  draft.setIdentity({ displayName: ' Atlas ', avatar });
+  avatar.color = 'rose' as never;
+  const starting = draft.launch('A private first ask');
+  await flush();
+  assert.equal(calls.create.length, 1);
+  draft.setIdentity({ displayName: 'Changed during launch', avatar: { kind: 'initials', color: 'blue' } });
+  assert.equal(calls.create[0].displayName, 'Atlas');
+  assert.deepEqual(calls.create[0].avatar, { kind: 'character', character: 'orbit', color: 'sage' });
+  assert.equal(calls.create[0].charter, 'A private first ask');
+  save!({ id: 'saved-atlas', displayName: 'Atlas', charter: 'A private first ask' });
+  assert.equal((await starting).outcome, 'started');
+  assert.equal(draft.chip.value, null);
+});
+
 test('Claude gets the same launch policy the Add agent window sends, and no effort', async t => {
   const calls = fakeIpc();
   const { draft } = useDraft(t, fakeHost().host);

@@ -1,4 +1,6 @@
+import type { AgentAvatar } from "../../../../shared/agent-avatar.mjs";
 export interface DesktopParticipantSummary {
+  avatar?: AgentAvatar | null;
   participantKey: string;
   kind: "human" | "agent";
   displayName: string;
@@ -16,6 +18,7 @@ export interface DesktopParticipantSummary {
 }
 
 export interface DesktopAgentPresence {
+  avatar?: AgentAvatar | null;
   roomId: string;
   actorLabel: string;
   agentKey: string | null;

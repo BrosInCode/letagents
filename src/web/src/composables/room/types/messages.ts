@@ -1,3 +1,4 @@
+import type { AgentAvatar } from "../../../../../shared/agent-avatar.js";
 import type { RoomGif } from "../../../../../../shared/room-expressions.mjs"
 export interface MessageReplyReference {
   id: string
@@ -71,6 +72,7 @@ export interface RoomMessage {
    */
   reactions?: unknown
   agent_identity?: {
+    avatar?: AgentAvatar | null;
     agent_key?: string | null
     agent_session_id?: string | null
     name: string

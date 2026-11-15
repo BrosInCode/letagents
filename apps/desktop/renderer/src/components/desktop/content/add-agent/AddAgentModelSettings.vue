@@ -22,20 +22,25 @@
             :value="customModelId"
             type="text"
             placeholder="provider/model-or-alias"
+            :aria-invalid="Boolean(customModelError)"
+            :aria-describedby="customModelError ? 'desktop-add-agent-model-custom-error' : undefined"
             data-testid="desktop-add-agent-model-custom-input"
             @input="emit('update:customModelId', ($event.target as HTMLInputElement).value)"
           />
+          <span
+            v-if="customModelError"
+            id="desktop-add-agent-model-custom-error"
+            class="desktop-add-agent-model-custom-error"
+            role="alert"
+          >{{ customModelError }}</span>
         </label>
         <p id="desktop-add-agent-model-description">{{ modelDescription }}</p>
       </div>
       <div v-if="showEffort" class="desktop-add-agent-setting">
-        <DesktopSelectField
+        <AgentEffortControl
           :model-value="effort"
           :options="effortOptions"
-          label="Reasoning effort"
-          id="desktop-add-agent-effort-select"
-          described-by="desktop-add-agent-effort-description"
-          test-id="desktop-add-agent-effort-select"
+          data-testid="desktop-add-agent-effort-select"
           @update:model-value="emit('update:effort', $event)"
         />
         <p id="desktop-add-agent-effort-description">{{ effortDescription }}</p>
@@ -63,7 +68,7 @@
 <script setup lang="ts">
 import { RefreshCw } from "@lucide/vue";
 import type { DesktopSelectOption } from "../../controls/DesktopSelectField.vue";
-import DesktopSelectField from "../../controls/DesktopSelectField.vue";
+import AgentEffortControl from "../../../../../../../../shared/ui/agent-identity/AgentEffortControl.vue";
 import DesktopModelPicker from "../../controls/DesktopModelPicker.vue";
 
 defineProps<{
@@ -72,6 +77,7 @@ defineProps<{
   modelOptions: DesktopSelectOption[];
   custom: boolean;
   customModelId: string;
+  customModelError?: string | null;
   modelDescription: string;
   showEffort: boolean;
   effort: string;

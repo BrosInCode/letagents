@@ -13,6 +13,7 @@ export type SettingsPaneId =
   | "storage:chat"
   | "storage:sync"
   | "storage:database"
+  | "system:styling"
   | "system:app-agent"
   | "system:supervisor"
   | "system:runtime"

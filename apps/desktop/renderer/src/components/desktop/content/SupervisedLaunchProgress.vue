@@ -5,7 +5,11 @@
     :data-state="progress.status === 'stopping' ? 'stopping' : progress.ready ? 'ready' : progress.failed ? 'failed' : progress.stopped ? 'stopped' : 'launching'"
   >
     <div class="supervised-launch-progress-header">
-      <span class="supervised-launch-progress-provider">{{ progress.providerLabel }}</span>
+      <span class="supervised-launch-progress-provider">
+        <CircleAlert v-if="progress.failed" :size="14" aria-hidden="true" />
+        {{ progress.failed ? 'Needs attention' : progress.providerLabel }}
+        <span v-if="progress.failed" class="supervised-launch-provider-name">· {{ progress.providerLabel }}</span>
+      </span>
       <strong data-testid="supervised-launch-headline">{{ progress.headline }}</strong>
       <small
         v-if="progress.ready && progress.agentName"
@@ -13,35 +17,61 @@
       >{{ progress.agentName }} joined the room.</small>
     </div>
 
-    <ol class="supervised-launch-phases" aria-label="Launch progress">
-      <li
-        v-for="phase in visiblePhases"
-        :key="phase.id"
-        class="supervised-launch-phase"
-        :data-state="phase.state"
-        :data-testid="`supervised-launch-phase-${phase.id}`"
-        :aria-current="phase.state === 'active' || phase.state === 'stopping' ? 'step' : undefined"
-      >
-        <span class="supervised-launch-phase-marker" aria-hidden="true">
-          <Check v-if="phase.state === 'done'" :size="12" />
-          <X v-else-if="phase.state === 'failed'" :size="12" />
-          <Minus v-else-if="phase.state === 'cancelled'" :size="12" />
-          <span v-else-if="phase.state === 'active' || phase.state === 'stopping'" class="supervised-launch-phase-spinner" />
-          <span v-else class="supervised-launch-phase-dot" />
-        </span>
-        <span class="supervised-launch-phase-text">
-          <span class="supervised-launch-phase-label">{{ phase.label }}</span>
-          <small
-            v-if="phase.state === 'active' || phase.state === 'stopping' || phase.state === 'failed'"
-            class="supervised-launch-phase-detail"
-          >{{ phase.detail }}</small>
-        </span>
-        <span class="supervised-launch-phase-status">{{ phaseStatusText(phase.state) }}</span>
-      </li>
-    </ol>
+    <div
+      v-if="progress.failed && progress.failureDetail"
+      class="supervised-launch-progress-failure"
+      data-testid="supervised-launch-failure"
+      role="alert"
+    >
+      <p>{{ progress.failureDetail }}</p>
+      <small
+        v-if="progress.failureImpact"
+        data-testid="supervised-launch-failure-impact"
+      >{{ progress.failureImpact }}</small>
+    </div>
 
-    <!-- One polite, card-level live region: announces the current step or the
-         terminal outcome without narrating every phase individually. -->
+    <div class="supervised-launch-progress-steps">
+      <button
+        v-if="hasProgressHistory"
+        type="button"
+        class="supervised-launch-progress-toggle"
+        data-testid="supervised-launch-progress-toggle"
+        :aria-expanded="showProgressHistory"
+        :aria-controls="phasesId"
+        @click="showProgressHistory = !showProgressHistory"
+      >
+        {{ showProgressHistory ? 'Hide progress' : 'Show progress' }}
+        <ChevronDown :size="14" :class="{ 'is-expanded': showProgressHistory }" aria-hidden="true" />
+      </button>
+      <ol :id="phasesId" class="supervised-launch-phases" aria-label="Launch progress">
+        <li
+          v-for="phase in visiblePhases"
+          :key="phase.id"
+          class="supervised-launch-phase"
+          :data-state="phase.state"
+          :data-testid="`supervised-launch-phase-${phase.id}`"
+          :aria-current="phase.state === 'active' || phase.state === 'stopping' ? 'step' : undefined"
+        >
+          <span class="supervised-launch-phase-marker" aria-hidden="true">
+            <Check v-if="phase.state === 'done'" :size="12" />
+            <X v-else-if="phase.state === 'failed'" :size="12" />
+            <Minus v-else-if="phase.state === 'cancelled'" :size="12" />
+            <span v-else-if="phase.state === 'active' || phase.state === 'stopping'" class="supervised-launch-phase-spinner" />
+            <span v-else class="supervised-launch-phase-dot" />
+          </span>
+          <span class="supervised-launch-phase-text">
+            <span class="supervised-launch-phase-label">{{ phase.label }}</span>
+            <small
+              v-if="phase.state === 'active' || phase.state === 'stopping' || phase.state === 'failed'"
+              class="supervised-launch-phase-detail"
+            >{{ phase.detail }}</small>
+          </span>
+          <span class="supervised-launch-phase-status">{{ phaseStatusText(phase.state) }}</span>
+        </li>
+      </ol>
+    </div>
+
+    <!-- Keep announcements independent of the optional phase history. -->
     <p class="supervised-launch-sr-live" aria-live="polite">{{ liveAnnouncement }}</p>
 
     <p
@@ -50,23 +80,16 @@
       data-testid="supervised-launch-join-hint"
     >{{ progress.joinHint }}</p>
 
-    <div
-      v-if="progress.failed && progress.failureDetail"
-      class="supervised-launch-progress-failure"
-      data-testid="supervised-launch-failure"
-      role="alert"
+    <details
+      v-if="progress.failed && progress.failureDiagnostic"
+      class="supervised-launch-failure-details"
     >
-      <span class="supervised-launch-failure-icon" aria-hidden="true">
-        <CircleAlert :size="17" :stroke-width="1.9" />
-      </span>
-      <div class="supervised-launch-failure-copy">
-        <p>{{ progress.failureDetail }}</p>
-        <small
-          v-if="progress.failureImpact"
-          data-testid="supervised-launch-failure-impact"
-        >{{ progress.failureImpact }}</small>
-      </div>
-      <div class="supervised-launch-failure-actions">
+      <summary>Technical details</summary>
+      <p tabindex="0" aria-label="Technical diagnostic">{{ progress.failureDiagnostic }}</p>
+    </details>
+
+    <div class="supervised-launch-failure-actions">
+      <template v-if="progress.failed && progress.failureDetail">
         <button
           v-if="progress.recovery"
           type="button"
@@ -77,6 +100,7 @@
         >
           <span v-if="recovering" class="supervised-launch-button-spinner" aria-hidden="true" />
           {{ recovering ? recoveryPendingLabel(progress.recovery) : recoveryLabel(progress.recovery, progress.durable) }}
+          <ArrowRight v-if="!recovering" :size="15" aria-hidden="true" />
         </button>
         <button
           v-if="progress.recovery === 'open_keychain'"
@@ -94,21 +118,15 @@
           :disabled="recovering"
           @click="emit('dismiss')"
         >Dismiss</button>
-      </div>
-      <details
-        v-if="progress.failureDiagnostic"
-        class="supervised-launch-failure-details"
-      >
-        <summary>Details</summary>
-        <p>{{ progress.failureDiagnostic }}</p>
-      </details>
+      </template>
+      <slot name="actions" />
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
-import { Check, CircleAlert, Minus, X } from "@lucide/vue";
+import { computed, ref, useId, watch } from "vue";
+import { ArrowRight, Check, ChevronDown, CircleAlert, Minus, X } from "@lucide/vue";
 import type { DesktopLaunchRecoveryAction } from "../../../../../electron/ipc-types";
 import type { LaunchJourneyPhaseState, LaunchJourneyView } from "../../../domain/launch-journey";
 
@@ -153,12 +171,16 @@ function recoveryPendingLabel(action: DesktopLaunchRecoveryAction): string {
   return action === "open_keychain" ? "Opening…" : "Trying again…";
 }
 
+const phasesId = useId();
+const showProgressHistory = ref(false);
+const failedPhaseIndex = computed(() => props.progress.phases.findIndex((phase) => phase.state === "failed"));
+const hasProgressHistory = computed(() => props.progress.failed && failedPhaseIndex.value > 0);
+watch([() => props.progress.failed, () => props.progress.currentPhaseId], () => {
+  showProgressHistory.value = false;
+});
 const visiblePhases = computed(() => {
-  if (!props.progress.failed) return props.progress.phases;
-  const boundary = props.progress.phases.findIndex((phase) => phase.state === "failed");
-  return boundary >= 0
-    ? props.progress.phases.slice(0, boundary + 1)
-    : props.progress.phases;
+  if (!props.progress.failed || failedPhaseIndex.value < 0) return props.progress.phases;
+  return props.progress.phases.slice(showProgressHistory.value ? 0 : failedPhaseIndex.value, failedPhaseIndex.value + 1);
 });
 
 const liveAnnouncement = computed(() => {

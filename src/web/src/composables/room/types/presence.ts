@@ -1,4 +1,6 @@
+import type { AgentAvatar } from "../../../../../shared/agent-avatar.js";
 export interface RoomAgentPresence {
+  avatar?: AgentAvatar | null;
   room_id: string
   actor_label: string
   agent_key: string | null
@@ -36,6 +38,7 @@ export interface RoomAgentPresence {
 }
 
 export interface RoomParticipant {
+  avatar?: AgentAvatar | null
   room_id: string
   participant_key: string
   kind: 'human' | 'agent'

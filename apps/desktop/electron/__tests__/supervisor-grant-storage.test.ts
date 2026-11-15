@@ -484,6 +484,7 @@ test("identity resolution preserves server casing and repairs a lowercased legac
     const resolved = await getOrCreateDesktopSupervisorAgentIdentity({
       entryId,
       displayName: "StoneRidge",
+      avatar: { kind: "character", character: "orbit", color: "sage" },
     }, {
       apiFetch: (async <T>(requestPath: string, init?: { body?: string }) => {
         requests.push({ path: requestPath, body: JSON.parse(init?.body ?? "{}") as Record<string, unknown> });
@@ -493,6 +494,7 @@ test("identity resolution preserves server casing and repairs a lowercased legac
     assert.equal(resolved, "EmmyMay/desktop-codex-canonical");
     assert.equal(requests.length, 1);
     assert.equal(requests[0]?.path, "/agents");
+    assert.deepEqual(requests[0]?.body.avatar, { kind: "character", character: "orbit", color: "sage" });
     assert.match(String(requests[0]?.body.name), /^desktop-codex-/);
     const registry = JSON.parse(await readFile(path, "utf8")) as { entryAgentKeys: Record<string, string> };
     assert.equal(registry.entryAgentKeys[entryId], "EmmyMay/desktop-codex-canonical");

@@ -11,7 +11,8 @@
   >
     <header class="agent-inspector-header">
       <div class="agent-inspector-identity">
-        <ProviderBadge :label="projection.provider" :agent-key="projection.entry.agentKey" />
+        <AgentAvatar v-if="projection.entry.avatar" :avatar="projection.entry.avatar" :name="projection.displayName" :size="38" />
+        <ProviderBadge v-else :label="projection.provider" :agent-key="projection.entry.agentKey" />
         <div class="agent-inspector-identity-copy">
           <div class="agent-inspector-name-line">
             <h2 id="agent-inspector-title">{{ projection.displayName }}</h2>
@@ -72,6 +73,7 @@
 
     <div class="agent-inspector-scroll-region">
       <div v-if="selectedTab === 'overview'" id="agent-inspector-overview-panel" role="tabpanel" aria-labelledby="agent-inspector-overview-tab">
+        <AgentInspectorLaunchProgress :entry="projection.entry" :room-label="roomDisplayName || projection.roomId" />
         <AgentInspectorOverview
           :room-name="roomDisplayName"
           :projection="projection"
@@ -126,6 +128,8 @@
 </template>
 
 <script setup lang="ts">
+import AgentAvatar from "../../../../../../../../shared/ui/agent-identity/AgentAvatar.vue";
+import AgentInspectorLaunchProgress from "./AgentInspectorLaunchProgress.vue";
 import { computed, defineAsyncComponent, nextTick, onMounted, ref, watch } from "vue";
 import type {
   AgentInspectorActionIntent,

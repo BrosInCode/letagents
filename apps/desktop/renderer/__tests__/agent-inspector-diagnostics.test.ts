@@ -234,6 +234,34 @@ test("healthy checks distinguish connectivity from message completion", () => {
   assert.equal(result.checks[3]!.destination, "work");
 });
 
+test("a settled failed ask is an actionable diagnostic even when runtime and room are healthy", () => {
+  const fixture = diagnosticFixture();
+  fixture.entry.deliveryReceipts = [{ sourceMessageId: `desktop-initial-message:${fixture.entry.id}`,
+    inboxItemId: "first-inbox", fifoSequence: 1, state: "acknowledged_failed", attemptCount: 1,
+    providerTurnId: "first-turn", timeline: [], updatedAt: "2026-09-14T10:01:00Z",
+    error: `Cannot connect to API. Authorization: Bearer ${CANARY}` }];
+  const result = fixture.assess();
+  assert.deepEqual(result.checks.slice(0, 3).map(check => check.state), ["passed", "passed", "passed"]);
+  assert.equal(result.passedCount, 3);
+  assert.equal(result.state, "attention");
+  assert.equal(result.primaryCheckId, "delivery");
+  assert.equal(result.headline, "Last ask did not finish");
+  assert.match(result.detail, /Cannot connect to API/);
+  assert.doesNotMatch(result.detail, new RegExp(CANARY));
+  assert.equal(result.checks[3]!.destination, "work");
+  assert.equal(result.checks[3]!.action, null, "terminal failure must not become an automatic or blocked-delivery retry");
+  assert.match(result.checks[3]!.nextStep, /does not run it again/);
+  assert.equal(fixture.assess("stale").checks[3]!.state, "unknown");
+
+  fixture.entry.deliveryReceipts.push({ ...fixture.entry.deliveryReceipts[0], sourceMessageId: "later",
+    fifoSequence: 2, state: "pending" });
+  fixture.entry.roomAgentState.inbox.pendingCount = 1;
+  assert.equal(fixture.assess().checks[3]!.state, "pending");
+  fixture.entry.deliveryReceipts[1].state = "acknowledged";
+  fixture.entry.roomAgentState.inbox.pendingCount = 0;
+  assert.equal(fixture.assess().checks[3]!.state, "passed");
+});
+
 test("stale snapshots never display cached checks as healthy or offer recovery", () => {
   const result = diagnosticFixture().assess("stale");
   assert.equal(result.primaryCheckId, "service");

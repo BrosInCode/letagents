@@ -1,5 +1,6 @@
+import type { AgentAvatar } from "../../../shared/agent-avatar.mjs";
 export const DAEMON_PROTOCOL_VERSION = 3;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.281";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.282";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -89,6 +90,7 @@ export type DaemonAgentIdentity = {
 /** Mutable presentation metadata for one stable agent identity. */
 export type DaemonAgentProfile = {
   agent_id: string;
+  avatar?: AgentAvatar | null;
   display_name: string;
 };
 
@@ -320,6 +322,7 @@ export type DaemonReconciliationRecord = {
  */
 export type DaemonManifestEntry = {
   id: string;
+  avatar?: AgentAvatar | null;
   room_id: string;
   local_room_id?: string;
   display_name: string;

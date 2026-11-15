@@ -1,4 +1,5 @@
 import { app, autoUpdater } from "electron";
+import { desktopLinkScheme, normalizeDesktopPreviewLink } from "./preview-mode.js";
 
 import { parseDesktopRoomLink, type DesktopRoomLink } from "../../../../shared/room-app-links.mjs";
 import {
@@ -20,6 +21,7 @@ export type DesktopLinkTarget =
 
 /** An ask link or a room link, from the app scheme or the web; null for anything else. */
 export function parseDesktopLink(url: string): DesktopLinkTarget | null {
+  url = normalizeDesktopPreviewLink(url);
   const token = parseAskLink(url);
   if (token) return { kind: "ask", token };
   const room = parseDesktopRoomLink(url);
@@ -92,7 +94,7 @@ function pauseGiftsOnQuit(): void {
 export function registerAskLinks(): void {
   pauseGiftsOnQuit();
   // Dev and smoke runs must not take the letagents:// scheme from the installed app.
-  if (app.isPackaged) app.setAsDefaultProtocolClient("letagents");
+  if (app.isPackaged) app.setAsDefaultProtocolClient(desktopLinkScheme());
   app.on("open-url", (event, url) => {
     event.preventDefault();
     const target = parseDesktopLink(url);

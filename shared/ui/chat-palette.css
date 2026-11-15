@@ -1,5 +1,12 @@
-/* Two related families: warm human surfaces and cool agent surfaces. */
-[data-chat-role] { --chat-bubble: light-dark(#f0eeeb, #242322); --chat-border: light-dark(rgb(0 0 0 / 7%), rgb(255 255 255 / 7%)); }
-[data-chat-role="self"] { --chat-bubble: light-dark(#dfdad4, #383532); }
-[data-chat-role="own-agent"] { --chat-bubble: light-dark(#dfe6ee, #2b333d); }
-[data-chat-role="other-agent"] { --chat-bubble: light-dark(#edf1f6, #1b232d); }
+/* Fallbacks until the device's styling preferences have loaded. */
+[data-chat-role] {
+  --chat-bubble: #303030;
+  --chat-bubble-start: #3c3c3c;
+  --chat-bubble-end: #292929;
+  --chat-foreground: #f1f1f3;
+  --chat-hover: rgb(255 255 255 / .045);
+  --chat-code: rgb(0 0 0 / .1);
+}
+[data-chat-role="self"] { --chat-bubble: #0a0a0a; --chat-bubble-start: #191919; --chat-bubble-end: #090909; }
+[data-chat-role="own-agent"] { --chat-bubble: #1b1b1b; --chat-bubble-start: #292929; --chat-bubble-end: #171717; }
+[data-chat-role="other-agent"] { --chat-bubble: #282d34; --chat-bubble-start: #353a40; --chat-bubble-end: #22272d; }
