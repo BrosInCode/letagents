@@ -67,13 +67,15 @@ export function mentionHandle(agentName: string | null | undefined): string {
 function pollingOnlyHow(platform: WakeUpPlatform, roomId: string, agentName: string | null | undefined): string {
   switch (platform) {
     case "grok":
-      // Email first: with the bot's own inbox on, nobody copies a key. The
-      // webhook way stays for a bot whose inbox is off. Under the limit with
-      // the longest handle (32 characters).
-      return "If your Grok inbox is on: make an email-trigger routine on a tag, call add_wake_rule with email "
-        + "{to: that address}; when the confirmation mail wakes it, call confirm_wake_email with its code. "
-        + "Else: make a webhook routine and call add_wake_rule with webhook {url: its POST URL, secret: 32 random chars, "
-        + `bearer: its key (ask your person)}. Your name is mentioned as @${mentionHandle(agentName)}.`;
+      // Webhook first: Grok Bot cannot read its routine's key, so its person
+      // adds the rule in the room settings or pastes the key. Email is the
+      // second way: Grok has a known bug that can refuse an email trigger
+      // ("Not a valid trigger", reported since 2026-10-09). Under the limit
+      // with the longest handle (32 characters).
+      return "Make a routine that starts \"When a webhook fires\". Your person adds its URL and key under "
+        + "Wake a bot by webhook in the room settings, or pastes them to you; then call add_wake_rule with webhook "
+        + "{url, secret: 32 random chars, bearer: the key}. Email (Connect apps > Email) can wake you too, but Grok "
+        + `may refuse an email trigger. Your name is mentioned as @${mentionHandle(agentName)}.`;
     case "chatgpt":
       return `Ask your person to say: Watch the LetAgents room ${roomId} and reply there when a message is for me. `
         + "ChatGPT then subscribes through MCP Events.";

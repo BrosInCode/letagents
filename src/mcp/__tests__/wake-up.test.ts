@@ -104,19 +104,19 @@ test("a mention has no spaces and at most 32 characters, and a bot with no name 
   const text = describeWakeUp({ ...base, agentName: long, clientName: "Cursor", rules: [] }).how;
   assert.ok(text.length < WAKE_UP_HOW_MAX_LENGTH, `${text.length} characters`);
   assert.match(text, /@Averylongdisplaynamethatgoesonan\.$/);
-  assert.match(text, /confirm_wake_email/, "the Grok text names the tool even with the longest handle");
+  assert.match(text, /add_wake_rule with webhook/, "the Grok text names the tool even with the longest handle");
 });
 
 test("without a delivery rule the bot polls, and the text is written for its platform", () => {
   const grok = describeWakeUp({ ...base, clientName: "Cursor", rules: [] });
   assert.equal(grok.status, "polling_only");
-  // Email first: the bot's own inbox needs nothing copied by a person; the webhook way needs its key.
+  // Webhook first: the bot cannot read its routine's key, and Grok can refuse an email trigger.
   assert.equal(grok.how,
-    "If your Grok inbox is on: make an email-trigger routine on a tag, call add_wake_rule with email "
-    + "{to: that address}; when the confirmation mail wakes it, call confirm_wake_email with its code. "
-    + "Else: make a webhook routine and call add_wake_rule with webhook {url: its POST URL, secret: 32 random chars, "
-    + "bearer: its key (ask your person)}. Your name is mentioned as @GrokBot.");
-  assert.ok(grok.how.indexOf("confirm_wake_email") < grok.how.indexOf("webhook"), "the email way comes first");
+    "Make a routine that starts \"When a webhook fires\". Your person adds its URL and key under "
+    + "Wake a bot by webhook in the room settings, or pastes them to you; then call add_wake_rule with webhook "
+    + "{url, secret: 32 random chars, bearer: the key}. Email (Connect apps > Email) can wake you too, but Grok "
+    + "may refuse an email trigger. Your name is mentioned as @GrokBot.");
+  assert.ok(grok.how.indexOf("add_wake_rule with webhook") < grok.how.indexOf("Email (Connect apps"), "the webhook way comes first");
 
   const chatgpt = describeWakeUp({ ...base, clientName: "openai-mcp", rules: [] });
   assert.equal(chatgpt.status, "polling_only");
@@ -230,7 +230,7 @@ test("the platform text follows the remote session's client name", async () => {
   });
   const ask = (clientName: string | null) => runInSessionScope(scope(clientName), () =>
     wakeUpForAgents({ roomId: "PTGA-21RN-W0QP", agentKeys: ["ada/grokbot"], agentName: "Grok Bot" }));
-  assert.match((await ask("Cursor"))!.how, /^If your Grok inbox is on[\s\S]*confirm_wake_email[\s\S]*@GrokBot\.$/);
+  assert.match((await ask("Cursor"))!.how, /^Make a routine that starts "When a webhook fires"[\s\S]*add_wake_rule with webhook[\s\S]*@GrokBot\.$/);
   assert.match((await ask("openai-mcp"))!.how, /^Ask your person to say: Watch the LetAgents room PTGA-21RN-W0QP/);
   assert.match((await ask("claude-ai"))!.how, /^Call wait_for_messages with after_message_id in a loop/);
 });
@@ -308,6 +308,6 @@ test("in a remote session the held worker is read from the session's state, and 
     assert.deepEqual(heldWorkersInRoom(roomId), [{ agent_key: "ada/grokbot", display_name: "Grok Bot" }]);
     const fields = await wakeUpFieldsForHeldWorkers(roomId);
     assert.equal(fields.wake_up?.status, "polling_only", "the other worker's webhook is not this chat's");
-    assert.match(fields.wake_up!.how, /^If your Grok inbox is on[\s\S]*confirm_wake_email[\s\S]*@GrokBot\.$/, "Grok's text, with the held worker's name");
+    assert.match(fields.wake_up!.how, /^Make a routine that starts "When a webhook fires"[\s\S]*add_wake_rule with webhook[\s\S]*@GrokBot\.$/, "Grok's text, with the held worker's name");
   });
 });
