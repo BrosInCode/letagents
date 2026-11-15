@@ -88,6 +88,8 @@ export type DesktopRoomShellEmits = {
   "retry-room-agent-delivery": [input: { agentId: string; sourceMessageId: string }];
   "message-reveal-unavailable": [messageId: string, reason?: "not_found" | "too_far_back" | "unavailable"];
   "open-inbox": []; "open-messages-with": [target: { login: string; displayName: string; avatarUrl: string | null }];
+  /** Open another room (an invite's pill: "Open sky-owl"). */
+  "open-room": [roomIdentifier: string];
 };
 
 type BooleanPropKeys<T, K extends keyof T = keyof T> = K extends unknown

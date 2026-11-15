@@ -79,6 +79,24 @@ export interface DesktopRoomMembershipFailure {
 
 export type DesktopRoomMembershipResult<T extends object> = ({ ok: true } & T) | DesktopRoomMembershipFailure;
 
+/** "Invite a bot": every call answers with a value or one sentence to show. */
+export type DesktopBotInviteResult<T extends object> = ({ ok: true } & T) | { ok: false; code: string | null; message: string };
+
+/** A new invite and its one-use code; the code is not returned again. */
+export interface DesktopBotInviteCreation {
+  invite: import("../../../../shared/room-invites.mjs").RoomInvite;
+  code: string;
+}
+
+/** A members-only room the account may invite a bot into. */
+export interface DesktopBotInviteRoom {
+  id: string;
+  displayName: string;
+  /** An admin's invite lets the bot in; a member's asks the admins. */
+  role: "admin" | "member";
+  memberCount: number | null;
+}
+
 export interface DesktopRoomMemberList {
   roomId: string;
   /** The room whose members decide: the parent of a focus room, else the room. */
@@ -887,6 +905,15 @@ export type DesktopRoomStreamEvent =
       type: "join_request";
       roomIdentifier: string;
       event: import("../../../../shared/room-join-requests.mjs").RoomJoinRequestEvent;
+    }
+  | {
+      /**
+       * An invite this account made was made, cancelled or used, from the
+       * account activity stream. `roomIdentifier` is the room the bot joins.
+       */
+      type: "room_invite";
+      roomIdentifier: string;
+      event: import("../../../../shared/room-invites.mjs").RoomInviteEvent;
     }
   | {
       /**

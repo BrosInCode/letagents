@@ -142,6 +142,7 @@
         :gif-available="gifAvailable"
         :gif-disabled="roomLoading || sending"
         :agent-rows="agentHost && supervisedAgentsSupported ? agentRows : null"
+        :invite-available="Boolean(inviteBot)"
         @select="handleAddMenuSelect"
         @dismiss="focusInput"
         @agent-menu-opened="agentDraft.refreshProviders()"
@@ -150,6 +151,9 @@
       >
         <template #gif="{ initialQuery, back }">
           <RoomGifPanel :room-identifier="roomIdentifier ?? ''" :initial-query="initialQuery" @select="pickGif" @back="back" />
+        </template>
+        <template #invite="{ close }">
+          <RoomInviteBotPanel v-if="inviteBot" :key="inviteBot.roomId" :context="inviteBot" @sent="close" />
         </template>
       </RoomComposerAddMenu>
       <div class="desktop-composer-field">
@@ -271,6 +275,7 @@ import RoomGifPanel from "./RoomGifPanel.vue";
 import { gifCommandQuery, gifPreviewSource, prefersReducedMotion, useRoomGifAvailability } from "./room-gif-search";
 import type { GiphyItem } from "../../../../../../../../shared/giphy-client.mjs";
 import RoomComposerAddMenu, { type RoomComposerAddMenuItemId } from "./RoomComposerAddMenu.vue";
+import RoomInviteBotPanel, { type RoomInviteBotContext } from "./RoomInviteBotPanel.vue";
 import RoomComposerAgentChip from "./RoomComposerAgentChip.vue";
 import RoomComposerAccessDefault from "./RoomComposerAccessDefault.vue";
 import { personalAccessLevel, readCoachHintDismissed, rememberCoachHintDismissed } from "./composer-agent-access";
@@ -316,6 +321,8 @@ const props = defineProps<{
   correctableAgents?: readonly AgentCorrectionTarget[];
   // False while the chat tab is hidden; the composer holds its cards again when it turns true.
   active?: boolean;
+  /** "Invite a bot" in the "+" menu; absent for a room kept on this computer. */
+  inviteBot?: RoomInviteBotContext | null;
 }>();
 
 const selectedGif = ref<RoomGif | null>(null);

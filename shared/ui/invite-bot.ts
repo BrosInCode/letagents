@@ -180,3 +180,171 @@ export function useInviteBot(options: InviteBotOptions) {
 }
 
 export type InviteBot = ReturnType<typeof useInviteBot>;
+
+// ── One-use invite codes ────────────────────────────────────────────────
+//
+// The message names the connector address and a one-use invite code. The
+// code is made when the person presses Copy (so a panel opened and closed
+// leaves no live code behind); until then the message shows a placeholder.
+// The room's name is not in the message at all: the code names the room, and
+// a name is text other people chose.
+
+/** Shown where the code goes until Copy makes one. */
+export const INVITE_CODE_PLACEHOLDER = "····-····";
+
+export interface InviteBotCodeMessageInput {
+  /** The one-use code, or null before Copy made one. */
+  code: string | null;
+  /** `https://<this server>/mcp`; the public server when not given. */
+  connectorUrl?: string | null;
+}
+
+/** One piece of the message: plain text, the connector address, or the code. */
+export type InviteBotMessagePart =
+  | { kind: "text"; text: string }
+  | { kind: "connector"; text: string }
+  | { kind: "code"; text: string; placeholder: boolean };
+
+export interface InviteBotCodeMessage {
+  /** The line for the person: "Paste this to your Grok Bot:". */
+  lead: string;
+  /** The rest, in parts, so a host can mark the address and the code. */
+  parts: InviteBotMessagePart[];
+  /** Everything, as the clipboard gets it. */
+  text: string;
+}
+
+const CODE_JOIN = "join LetAgents with the invite code";
+const SAY_HI = "and say hi in the room.";
+
+/**
+ * The message for one platform, as parts and as text. Grok Bot gets one
+ * paste; ChatGPT and Claude add a connector first; any other MCP client gets
+ * the address and the code on their own lines.
+ */
+export function buildInviteBotCodeMessage(platform: InviteBotPlatform, input: InviteBotCodeMessageInput): InviteBotCodeMessage {
+  const connector = input.connectorUrl?.trim() || DEFAULT_INVITE_BOT_CONNECTOR_URL;
+  const code = input.code?.trim() || null;
+  const t = (text: string): InviteBotMessagePart => ({ kind: "text", text });
+  const address: InviteBotMessagePart = { kind: "connector", text: connector };
+  const codePart: InviteBotMessagePart = { kind: "code", text: code ?? INVITE_CODE_PLACEHOLDER, placeholder: !code };
+  let lead: string;
+  let parts: InviteBotMessagePart[];
+  switch (platform) {
+    case "grok":
+      lead = "Paste this to your Grok Bot:";
+      parts = [t("Connect to LetAgents at "), address, t(` and sign me in. Then ${CODE_JOIN} `), codePart, t(` ${SAY_HI}`)];
+      break;
+    case "chatgpt":
+      lead = "In ChatGPT, add a custom connector with this URL (sign in with GitHub when it asks):";
+      parts = [address, t(`\nThen tell ChatGPT: Join LetAgents with the invite code `), codePart, t(` ${SAY_HI}`)];
+      break;
+    case "claude":
+      lead = "In Claude, add this connector (Settings → Connectors) and sign in:";
+      parts = [address, t(`\nThen tell Claude: Join LetAgents with the invite code `), codePart, t(` ${SAY_HI}`)];
+      break;
+    case "other":
+      lead = "Add this connector address to your bot (sign in with GitHub when it asks):";
+      parts = [address, t(`\nThen tell your bot to ${CODE_JOIN} `), codePart, t(` ${SAY_HI}`)];
+      break;
+  }
+  const text = `${lead}\n${parts.map((part) => part.text).join("")}`;
+  return { lead, parts, text };
+}
+
+/** What the invite does, in one line under the panel's title. */
+export function inviteBotCodeSummary(roomName: string, admin: boolean): string {
+  const name = roomName.replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/"/g, "'").trim().slice(0, 80) || "this room";
+  return admin
+    ? `The bot joins "${name}" at once, with no approval. The invite works one time.`
+    : `An admin of "${name}" lets the bot in. The invite works one time.`;
+}
+
+/** A made invite as the host's API returns it. */
+export interface InviteBotCreated {
+  invite: { id: string; platform: InviteBotPlatform; kind: "admit" | "request"; room_id: string };
+  code: string;
+}
+
+export interface InviteBotCodeOptions {
+  /** The room the bot joins, and the connector address. */
+  room: Ref<{ roomId: string; roomName?: string | null; connectorUrl?: string | null } | null>;
+  /** Makes the invite on the server. Throws an Error whose message is shown. */
+  createInvite: (platform: InviteBotPlatform) => Promise<InviteBotCreated>;
+  writeClipboard?: (text: string) => Promise<void>;
+  copiedMs?: number;
+  initialPlatform?: InviteBotPlatform | null;
+}
+
+/**
+ * The invite panel's state: a picked bot (Grok Bot first), the message with
+ * a placeholder, and Copy, which makes the code once for this room and bot and
+ * copies the message. Copying again copies the same code. Another bot or room
+ * starts over: the next Copy makes a new code.
+ */
+export function useInviteBotCode(options: InviteBotCodeOptions) {
+  const platform = ref<InviteBotPlatform>(options.initialPlatform ?? "grok");
+  const created = ref<InviteBotCreated | null>(null);
+  const busy = ref(false);
+  const copied = ref(false);
+  const error = ref<string | null>(null);
+  let copiedTimer: ReturnType<typeof setTimeout> | undefined;
+  const writeClipboard = options.writeClipboard ?? ((text: string) => globalThis.navigator.clipboard.writeText(text));
+
+  const current = computed(() => {
+    const made = created.value;
+    const room = options.room.value;
+    return made && room && made.invite.room_id === room.roomId && made.invite.platform === platform.value ? made : null;
+  });
+  const message = computed(() => buildInviteBotCodeMessage(platform.value, {
+    code: current.value?.code ?? null,
+    connectorUrl: options.room.value?.connectorUrl,
+  }));
+
+  function pick(next: InviteBotPlatform): void {
+    platform.value = next;
+    copied.value = false;
+    error.value = null;
+  }
+
+  function reset(): void {
+    created.value = null;
+    copied.value = false;
+    error.value = null;
+    busy.value = false;
+    clearTimeout(copiedTimer);
+  }
+
+  /** Makes the code when there is none yet, then copies. Resolves the invite, or null on failure. */
+  async function copy(): Promise<InviteBotCreated | null> {
+    if (busy.value || !options.room.value) return null;
+    error.value = null;
+    let made = current.value;
+    if (!made) {
+      busy.value = true;
+      try {
+        made = await options.createInvite(platform.value);
+        created.value = made;
+      } catch (failure) {
+        error.value = failure instanceof Error && failure.message ? failure.message : "The invite could not be made. Try again.";
+        return null;
+      } finally {
+        busy.value = false;
+      }
+    }
+    try {
+      await writeClipboard(message.value.text);
+    } catch {
+      error.value = "The message could not be copied. Select it and copy it by hand.";
+      return made;
+    }
+    copied.value = true;
+    clearTimeout(copiedTimer);
+    copiedTimer = setTimeout(() => { copied.value = false; }, options.copiedMs ?? 1600);
+    return made;
+  }
+
+  return { platform, created: current, message, busy, copied, error, pick, reset, copy };
+}
+
+export type InviteBotCode = ReturnType<typeof useInviteBotCode>;

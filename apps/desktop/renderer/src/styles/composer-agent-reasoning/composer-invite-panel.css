@@ -1,0 +1,253 @@
+/* Invite a bot, from the "+" menu: a panel beside the menu, in the GIF
+   panel's material (composer-gif-panel.css). A Git Room's panel lists the
+   invite rooms first; the invite view picks the bot and copies the message. */
+.desktop-invite-bot {
+  display: grid;
+  min-width: 0;
+}
+
+.desktop-invite-bot-view {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.desktop-invite-bot-view[data-swap] {
+  animation: desktop-invite-bot-view-in 180ms var(--ease-out) both;
+}
+
+@keyframes desktop-invite-bot-view-in {
+  from {
+    opacity: 0;
+    transform: translateX(6px);
+  }
+}
+
+.desktop-invite-bot-head {
+  display: grid;
+  gap: 2px;
+  padding: 4px 6px 0;
+}
+
+.desktop-invite-bot-head p,
+.desktop-invite-bot-body p {
+  margin: 0;
+}
+
+.desktop-invite-bot-title {
+  color: var(--text);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.desktop-invite-bot-sub,
+.desktop-invite-bot-note {
+  color: var(--text-tertiary);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.desktop-invite-bot-note {
+  padding: 6px 9px;
+}
+
+.desktop-invite-bot-list {
+  display: grid;
+  gap: 2px;
+}
+
+.desktop-invite-bot-back {
+  margin-bottom: -2px;
+}
+
+.desktop-invite-bot-body {
+  display: grid;
+  gap: 10px;
+  padding: 0 6px 4px;
+}
+
+/* The bot picker: the room settings' segmented control, four across. */
+.desktop-invite-bot-picker {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-subtle);
+}
+
+.desktop-invite-bot-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / 4);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--border-strong);
+  transform: translateX(calc(var(--invite-bot-index, 0) * 100%));
+  transition: transform 200ms var(--ease-out);
+}
+
+.desktop-invite-bot-picker button {
+  position: relative;
+  min-width: 0;
+  height: 26px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: color 160ms ease;
+}
+
+.desktop-invite-bot-picker button[aria-pressed="true"] {
+  color: var(--text);
+}
+
+.desktop-invite-bot-picker button:focus-visible,
+.desktop-invite-bot-copy:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.desktop-invite-bot-message {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-subtle);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.desktop-invite-bot-message-inner {
+  display: grid;
+  gap: 4px;
+}
+
+.desktop-invite-bot-lead {
+  color: var(--text-tertiary);
+}
+
+.desktop-invite-bot-text {
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: text;
+}
+
+.desktop-invite-bot-address,
+.desktop-invite-bot-code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--accent-hover);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.desktop-invite-bot-code {
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.desktop-invite-bot-code[data-placeholder] {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.desktop-invite-bot-swap-enter-active {
+  transition: opacity 160ms var(--ease-out);
+}
+
+.desktop-invite-bot-swap-leave-active {
+  transition: opacity 90ms ease-out;
+}
+
+.desktop-invite-bot-swap-enter-from,
+.desktop-invite-bot-swap-leave-to {
+  opacity: 0;
+}
+
+.desktop-invite-bot-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.desktop-invite-bot-hint {
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+/* The house primary button (room settings): text on the page colour. */
+.desktop-invite-bot-copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 76px;
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: var(--text);
+  color: var(--bg);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: transform 160ms var(--ease-out), opacity 160ms ease;
+}
+
+.desktop-invite-bot-copy:active:not([aria-disabled="true"]) {
+  transform: scale(0.97);
+}
+
+.desktop-invite-bot-copy[aria-disabled="true"] {
+  cursor: default;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .desktop-invite-bot-copy:hover:not([aria-disabled="true"]) {
+    opacity: 0.9;
+  }
+}
+
+.desktop-invite-bot-error {
+  margin: 0;
+  padding: 0 6px;
+  color: var(--red-text);
+  font-size: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-invite-bot-view[data-swap] {
+    animation: desktop-invite-bot-fade 150ms ease both;
+  }
+
+  .desktop-invite-bot-thumb,
+  .desktop-invite-bot-copy {
+    transition: none;
+  }
+
+  .desktop-invite-bot-copy:active:not([aria-disabled="true"]) {
+    transform: none;
+  }
+}
+
+@keyframes desktop-invite-bot-fade {
+  from {
+    opacity: 0;
+  }
+}

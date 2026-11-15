@@ -24,3 +24,25 @@
 .agent-review-state { color: var(--text-tertiary); font-size: 12px; flex-shrink: 0; }
 .agent-review-file pre { max-height: 240px; overflow: auto; margin: 4px 0 8px; padding: 8px; border-radius: 6px; background: var(--bg-card); font-family: var(--font-mono); font-size: 12px; white-space: pre; }
 .agent-review-seen { margin: 0; padding-left: 18px; font-size: 12px; color: var(--text-secondary); }
+/* Invites for a bot sit with the asks, in the composer's column, as the same pill. */
+.desktop-room-invite-pills { width: min(calc(100% - 48px), 960px); margin: 0 auto; }
+.room-invite-pills { display: flex; flex-direction: column; gap: 6px; }
+.room-invite-pills:not(:empty) { padding: 0 0 8px; }
+.room-invite-pill-text { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.room-invite-pill-icon { flex: none; color: var(--text-tertiary); }
+.room-invite-pill-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+.room-invite-pill-words { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-invite-pill-muted { color: var(--text-tertiary); }
+.room-invite-pill .agent-ask-pill-actions button { transition: background-color 140ms ease, transform 140ms var(--ease-out); }
+.room-invite-pill .agent-ask-pill-actions button:active:not([aria-disabled="true"]) { transform: scale(0.97); }
+.room-invite-pill-enter-active { transition: opacity 180ms var(--ease-out), transform 220ms var(--ease-out); }
+.room-invite-pill-leave-active { transition: opacity 120ms ease-out, transform 120ms ease-out; }
+.room-invite-pill-enter-from, .room-invite-pill-leave-to { opacity: 0; transform: translateY(4px); }
+@media (hover: hover) and (pointer: fine) {
+  .room-invite-pill .agent-ask-pill-actions button:hover:not([aria-disabled="true"]) { background: var(--accent-hover); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .room-invite-pill-enter-active, .room-invite-pill-leave-active { transition: opacity 150ms ease; }
+  .room-invite-pill-enter-from, .room-invite-pill-leave-to { transform: none; }
+  .room-invite-pill .agent-ask-pill-actions button:active:not([aria-disabled="true"]) { transform: none; }
+}

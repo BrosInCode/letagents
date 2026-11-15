@@ -37,7 +37,7 @@
           class="desktop-composer-add-menu-item"
           :disabled="item.disabled"
           :aria-haspopup="item.id === 'agent' && inlineAgents ? 'menu' : item.opensDialog ? 'dialog' : undefined"
-          :aria-expanded="item.id === 'agent' && inlineAgents ? agentMenuOpen : item.id === flyout ? true : item.id === 'gif' ? false : undefined"
+          :aria-expanded="item.id === 'agent' && inlineAgents ? agentMenuOpen : item.id === flyout ? true : item.id === 'gif' || item.id === 'invite' ? false : undefined"
           :data-open="(item.id === 'agent' && agentMenuOpen) || item.id === flyout || undefined"
           :aria-keyshortcuts="item.keyShortcuts"
           :data-item="item.id"
@@ -96,34 +96,38 @@
         <span class="desktop-composer-add-menu-label">Set up another agent…</span>
       </button>
     </div>
-    <!-- GIFs open beside the menu; where there is no room beside it, over it with a Back row. -->
+    <!-- GIFs and Invite a bot open beside the menu; where there is no room beside it, over it with a Back row. -->
     <div
-      v-if="open && flyout === 'gif'"
+      v-if="open && flyout"
       ref="flyoutElement"
       class="desktop-composer-add-flyout"
       :class="{ 'is-narrow': flyoutNarrow }"
+      :data-flyout="flyout"
       :data-animate="flyoutAnimate || undefined"
+      :role="flyout === 'invite' ? 'dialog' : undefined"
+      :aria-label="flyout === 'invite' ? 'Invite a bot' : undefined"
       @keydown="handleFlyoutKey"
     >
       <button v-if="flyoutNarrow" type="button" class="desktop-composer-add-menu-item desktop-composer-add-back" @click="backToMenu">
         <ChevronLeft class="desktop-composer-add-menu-icon" :size="16" aria-hidden="true" />
         <span class="desktop-composer-add-menu-label">Back</span>
       </button>
-      <slot name="gif" :initial-query="flyoutQuery" :back="backToMenu" />
+      <slot v-if="flyout === 'gif'" name="gif" :initial-query="flyoutQuery" :back="backToMenu" />
+      <slot v-else name="invite" :back="backToMenu" :close="closeMenu" />
     </div>
   </span>
 </template>
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref, watch, type Component } from "vue";
-import { Bot, ChevronLeft, ChevronRight, HandHelping, ImagePlay, ListTodo, Paperclip, Plus, Settings2 } from "@lucide/vue";
+import { Bot, ChevronLeft, ChevronRight, HandHelping, ImagePlay, ListTodo, Paperclip, Plus, Settings2, UserPlus } from "@lucide/vue";
 import type { DesktopAgentProviderId } from "../../../../../../electron/ipc-types";
 import { isMacPlatform } from "../../../../domain/room-switcher-shortcut";
 import { providerIconSrc } from "./provider-icon";
 import { prefersReducedMotion } from "./room-gif-search";
 import type { ComposerAgentRow } from "./useComposerAgentDraft";
 
-export type RoomComposerAddMenuItemId = "attach" | "gif" | "task" | "agent" | "ask";
+export type RoomComposerAddMenuItemId = "attach" | "gif" | "task" | "agent" | "ask" | "invite";
 
 interface MenuItem {
   id: RoomComposerAddMenuItemId;
@@ -144,6 +148,8 @@ const props = defineProps<{
   gifDisabled: boolean;
   /** Present when agents can start from the composer; Add agent then opens a submenu of these. */
   agentRows?: readonly ComposerAgentRow[] | null;
+  /** "Invite a bot" opens a panel beside the menu (the room is on the server). */
+  inviteAvailable?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -165,12 +171,12 @@ const trigger = ref<HTMLButtonElement | null>(null);
 const menu = ref<HTMLElement | null>(null);
 const open = ref(false);
 const flyoutElement = ref<HTMLElement | null>(null);
-/** The surface open beside the menu. Only GIF has one here. */
-const flyout = ref<"gif" | null>(null);
+/** The surface open beside the menu: GIFs, or Invite a bot. */
+const flyout = ref<"gif" | "invite" | null>(null);
 const flyoutQuery = ref("");
 const flyoutNarrow = ref(false);
 const flyoutAnimate = ref(false);
-// The menu is 268px wide; the GIF panel, 340px, sits 6px to its right.
+// The menu is 268px wide; a panel (GIFs, Invite a bot), 340px, sits 6px to its right.
 const FLYOUT_SPAN_PX = 268 + 6 + 340 + 8;
 // Only a pointer-opened menu grows out of "+"; a keyboard-opened one appears at once.
 const animate = ref(false);
@@ -187,6 +193,9 @@ const items = computed<MenuItem[]>(() => [
   { id: "task", label: "Create task…", icon: ListTodo, testid: "desktop-composer-menu-task", separatorBefore: true, hint: "/task" },
   { id: "agent", label: "Add agent", icon: Bot, testid: "desktop-composer-menu-add-agent", opensDialog: true },
   { id: "ask", label: "Ask someone for an agent…", icon: HandHelping, testid: "desktop-composer-menu-ask-agent", opensDialog: true },
+  ...(props.inviteAvailable
+    ? [{ id: "invite", label: "Invite a bot", icon: UserPlus, testid: "desktop-composer-menu-invite-bot", opensDialog: true } satisfies MenuItem]
+    : []),
 ]);
 
 /** A click with detail 0 came from the keyboard (Enter or Space on the button). */
@@ -236,8 +245,20 @@ function focusFlyout(): void {
 }
 
 function backToMenu(): void {
+  const from = flyout.value ?? "gif";
   flyout.value = null;
-  void nextTick(() => menu.value?.querySelector<HTMLElement>('[data-item="gif"]')?.focus({ preventScroll: true }));
+  void nextTick(() => menu.value?.querySelector<HTMLElement>(`[data-item="${from}"]`)?.focus({ preventScroll: true }));
+}
+
+/** Invite a bot opens beside the menu; a second click on its row closes it again. */
+function openInvite(byPointer: boolean): void {
+  if (flyout.value === "invite") return backToMenu();
+  agentMenuOpen.value = false;
+  flyoutAnimate.value = byPointer && !prefersReducedMotion();
+  measureFlyout();
+  flyout.value = "invite";
+  // The panel's first control takes focus, so Escape and Tab work at once.
+  void nextTick(() => flyoutElement.value?.querySelector<HTMLElement>("[data-invite-autofocus], button:not([disabled])")?.focus({ preventScroll: true }));
 }
 
 function choose(item: MenuItem, byPointer = false): void {
@@ -251,6 +272,10 @@ function choose(item: MenuItem, byPointer = false): void {
   if (item.id === "gif") {
     agentMenuOpen.value = false;
     openGif("", byPointer);
+    return;
+  }
+  if (item.id === "invite") {
+    openInvite(byPointer);
     return;
   }
   closeMenu();

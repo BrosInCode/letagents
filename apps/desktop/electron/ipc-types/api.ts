@@ -522,6 +522,19 @@ export interface DesktopApi {
     /** Pending requests in every room where the signed-in account is an admin. */
     listAccountJoinRequests: () => Promise<DesktopRoomMembershipResult<{ joinRequests: DesktopAccountRoomJoinRequest[] }>>;
   };
+  /**
+   * "Invite a bot": one-use invite codes for members-only rooms. An admin's
+   * invite lets the bot in; a member's asks the admins. Git Rooms take none.
+   */
+  roomInvites: {
+    create: (roomIdentifier: string, platform: import("../../../../shared/room-invites.mjs").RoomInvitePlatform, originRoomIdentifier?: string | null) =>
+      Promise<import("./room.js").DesktopBotInviteResult<import("./room.js").DesktopBotInviteCreation>>;
+    /** This account's open invites for the room, or made from it for another room. */
+    list: (roomIdentifier: string) => Promise<import("./room.js").DesktopBotInviteResult<{ invites: import("../../../../shared/room-invites.mjs").RoomInvite[] }>>;
+    cancel: (roomIdentifier: string, inviteId: string) => Promise<import("./room.js").DesktopBotInviteResult<{ invite: import("../../../../shared/room-invites.mjs").RoomInvite }>>;
+    /** The members-only rooms this account may invite a bot into. */
+    listRooms: () => Promise<import("./room.js").DesktopBotInviteResult<{ rooms: import("./room.js").DesktopBotInviteRoom[] }>>;
+  };
   /** Connectors: this account's tracker connections (Jira, Linear, GitHub Issues). */
   connectors: {
     /** `not_configured` when the server has no connector key; the app then shows that instead of an error. */
