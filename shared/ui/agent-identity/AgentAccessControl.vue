@@ -2,7 +2,7 @@
   <div class="agent-access-control" :data-level="modelValue" :style="{ '--access-index': index, '--access-count': visibleOptions.length, '--access-steps': Math.max(1, visibleOptions.length - 1), '--access-color': colors[modelValue] || colors.read_only }">
     <div class="agent-access-track" aria-hidden="true"><span /></div>
     <div ref="group" class="agent-access-levels" role="radiogroup" aria-label="Agent access" @keydown="onKey">
-      <button v-for="option in visibleOptions" :key="option.id" type="button" role="radio" :aria-checked="option.id === modelValue" :tabindex="option.id === modelValue ? 0 : -1" :disabled="option.status !== 'available'" :title="option.detail || option.description" @click="emit('update:modelValue', option.id)">
+      <button v-for="option in visibleOptions" :key="option.id" type="button" role="radio" :aria-checked="option.id === modelValue" :tabindex="option.id === tabStopId ? 0 : -1" :disabled="option.status !== 'available'" :title="option.detail || option.description" @click="emit('update:modelValue', option.id)">
         <span class="agent-access-emblem"><svg class="access-ring" viewBox="0 0 80 80" aria-hidden="true"><path d="M40 5a35 35 0 0 0 0 70M40 5a35 35 0 0 1 0 70"/></svg><svg class="access-symbol" viewBox="0 0 32 32" aria-hidden="true">
           <template v-if="option.id === 'read_only'"><path d="M10 14v-4a6 6 0 0 1 12 0v4"/><rect x="7" y="14" width="18" height="14" rx="4"/><path d="M16 20v3"/></template>
           <template v-else-if="option.id === 'ask_before_write'"><path d="M9 15v-4a5 5 0 0 1 10 0v4"/><rect x="6" y="15" width="17" height="13" rx="4"/><path d="M14 20v3M21 3h6a3 3 0 0 1 3 3v5l-5 4v-3h-4a3 3 0 0 1-3-3V6a3 3 0 0 1 3-3Z"/></template>
@@ -25,11 +25,13 @@ const visibleOptions = computed(() => props.options.filter(option => option.id !
   .sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id)));
 const group = ref<HTMLElement>();
 const index = computed(() => Math.max(0, visibleOptions.value.findIndex(option => option.id === props.modelValue)));
-const selected = computed(() => visibleOptions.value[index.value]);
+const selected = computed(() => visibleOptions.value.find(option => option.id === props.modelValue));
+const tabStopId = computed(() => selected.value?.status === 'available'
+  ? selected.value.id : visibleOptions.value.find(option => option.status === 'available')?.id);
 function onKey(event: KeyboardEvent) {
   if (!['ArrowRight','ArrowLeft','Home','End'].includes(event.key)) return;
   const available = visibleOptions.value.filter(option => option.status === 'available'); if (!available.length) return;
-  event.preventDefault(); const current = available.findIndex(option => option.id === props.modelValue);
+  event.preventDefault(); const current = available.findIndex(option => option.id === tabStopId.value);
   const next = event.key === 'Home' ? 0 : event.key === 'End' ? available.length - 1 : (current + (event.key === 'ArrowRight' ? 1 : -1) + available.length) % available.length;
   emit('update:modelValue', available[next].id); void nextTick(() => group.value?.querySelector<HTMLButtonElement>('[aria-checked=true]')?.focus());
 }

@@ -8,6 +8,7 @@ import { listManagedAgentPermissionProfiles, defaultManagedAgentPermissionProfil
 import { managedAgentEffortOptionsForProvider } from '../src/components/desktop/content/add-agent/useAddAgentPresentation';
 import { useAgentSetupPresentation } from '../src/components/desktop/content/add-agent/useAgentSetupPresentation';
 import { composerIdentityPosition } from '../src/components/desktop/content/room-chat/composer-identity-position';
+import { supervisedPermissionProfilePresentation } from '../src/domain/managed-agents';
 
 let vite: ViteDevServer;
 let Effort: any, Access: any, Identity: any;
@@ -124,6 +125,35 @@ test('access selection follows restriction order and skips disabled choices with
   }
   assert.ok(events.every(event => event.value !== 'ask_before_write'));
   const blocked = await setupComponent(Access, { modelValue: 'read_only', options: options.map(option => ({ ...option, status: 'gated' })) });
+  blocked.vm.onKey(key('ArrowRight').event);
+  assert.deepEqual(blocked.events, []);
+});
+
+test('unknown and unavailable saved access retain a keyboard entry point without selecting a fallback permission', async () => {
+  const options = listManagedAgentPermissionProfiles('codex')
+    .map(option => supervisedPermissionProfilePresentation('codex', option, { hasProject: true }));
+  for (const saved of ['', 'unknown', 'sandboxed_write']) {
+    const { vm, props, events, html } = await setupComponent(Access, { modelValue: saved, options });
+    const tabStops = radios(html).filter(button => button.includes('tabindex="0"'));
+    assert.equal(tabStops.length, 1);
+    assert.doesNotMatch(tabStops[0]!, /disabled/);
+    assert.match(tabStops[0]!, /Read-only/);
+    assert.equal(props.modelValue, saved);
+    assert.deepEqual(events, [], 'focus availability must not change the saved permission');
+    if (saved === 'sandboxed_write') {
+      const checked = radios(html).filter(button => button.includes('aria-checked="true"'));
+      assert.equal(checked.length, 1);
+      assert.match(checked[0]!, /disabled/);
+      assert.equal(vm.selected.value.id, saved);
+    } else {
+      assert.equal(radios(html).filter(button => button.includes('aria-checked="true"')).length, 0);
+      assert.doesNotMatch(html, /class="agent-access-description"/);
+    }
+    vm.onKey(key('ArrowRight').event); await nextTick();
+    assert.equal(props.modelValue, 'ask_before_write', 'navigation starts from the reachable Read-only option');
+  }
+  const blocked = await setupComponent(Access, { modelValue: '', options: options.map(option => ({ ...option, status: 'gated' })) });
+  assert.equal(radios(blocked.html).filter(button => button.includes('tabindex="0"')).length, 0);
   blocked.vm.onKey(key('ArrowRight').event);
   assert.deepEqual(blocked.events, []);
 });
