@@ -29,7 +29,10 @@
   cursor: pointer;
   transition: background 160ms var(--ease-out, ease-out), border-color 160ms var(--ease-out, ease-out);
 }
-.invite-bot-button:hover:not(:disabled) {
+.invite-bot-button[aria-disabled="true"] {
+  cursor: default;
+}
+.invite-bot-button:hover:not(:disabled, [aria-disabled="true"]) {
   background: color-mix(in srgb, var(--text) 9%, transparent);
 }
 .invite-bot-button[data-variant="primary"] {
@@ -58,18 +61,41 @@
   min-width: 0;
 }
 .invite-bot-text {
+  display: grid;
+  gap: 4px;
   margin: 0;
   padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--text) 12%, transparent);
   border-radius: 10px;
   background: color-mix(in srgb, var(--text) 3%, transparent);
   color: var(--text);
-  font: inherit;
   font-size: 0.8rem;
-  line-height: 1.5;
+  line-height: 1.55;
+}
+.invite-bot-lead {
+  color: var(--text-secondary);
+}
+.invite-bot-body {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   user-select: text;
+}
+.invite-bot-address,
+.invite-bot-code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.74rem;
+}
+.invite-bot-code {
+  white-space: nowrap;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.invite-bot-code[data-placeholder] {
+  color: var(--text-secondary);
+  font-weight: 500;
 }
 .invite-bot-actions {
   display: flex;

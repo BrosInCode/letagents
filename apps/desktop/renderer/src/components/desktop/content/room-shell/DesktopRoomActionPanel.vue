@@ -116,23 +116,27 @@
             <div class="room-settings-row" data-inline="true" data-testid="desktop-room-invite-bot">
               <div class="room-settings-row-copy">
                 <p class="room-settings-row-title">Invite a bot</p>
-                <p class="room-settings-row-description">One message for the bot's owner. Their bot connects, joins this room and is guided from there.</p>
+                <p class="room-settings-row-description">One message with a one-use invite code for the bot's owner. Their bot connects and joins this room.</p>
               </div>
               <div class="room-settings-row-action">
                 <button
                   class="room-settings-button"
                   type="button"
                   data-testid="desktop-room-invite-bot-toggle"
-                  :aria-expanded="inviteBot.open.value"
-                  @click="inviteBot.open.value ? inviteBot.close() : inviteBot.show()"
-                >{{ inviteBot.open.value ? "Close" : "Create invite" }}</button>
+                  :aria-expanded="inviteBotOpen"
+                  @click="inviteBotOpen = !inviteBotOpen"
+                >{{ inviteBotOpen ? "Close" : "Create invite" }}</button>
               </div>
               <InviteBotSection
-                v-if="inviteBot.open.value"
+                v-if="inviteBotOpen"
                 class="room-invite-bot-body"
-                :controller="inviteBot"
                 :room="inviteBotRoom"
                 :admin="room.role === 'admin'"
+                :git-room="room.gitRoom !== null"
+                git-room-hint="Press + in the composer and choose Invite a bot to pick an invite room."
+                :collapsible="false"
+                :create-invite="createInviteBot"
+                :cancel-invite="cancelInviteBot"
               />
             </div>
           </SmoothHeight>
@@ -412,7 +416,8 @@ import SmoothHeight from "./SmoothHeight.vue";
 import DesktopSwitch from "../../controls/DesktopSwitch.vue";
 import { usePinnedMessageVisibility } from "../../../../../../../../shared/ui/usePinnedMessageVisibility";
 import InviteBotSection from "../../../../../../../../shared/ui/InviteBotSection.vue";
-import { useInviteBot, type InviteBotRoom } from "../../../../../../../../shared/ui/invite-bot";
+import type { InviteBotPlatform } from "../../../../../../../../shared/ui/invite-bot";
+import { roomInvites } from "../../../../composables/useRoomInvites";
 import { remoteConnectorUrl } from "../../settings/connectors";
 import { useSectionScrollSpy } from "./useSectionScrollSpy";
 import type {
@@ -494,17 +499,25 @@ const cloudRoom = computed(() => props.storage.effectiveMode === "cloud");
 const { activeSection, indicatorReady, syncActiveSection, releaseSectionLock, goToSection } =
   useSectionScrollSpy<SectionId>(contentElement, "general");
 
-// The message a member hands to a friend for their bot: the room id (an ad-hoc
-// room's code, or github.com/owner/repo) and the connector of the server this
-// app talks to (the room link always names the public server, so it is not used).
-const inviteBotRoom = computed<InviteBotRoom>(() => ({
+// The message a member hands to a bot's owner: this server's connector (the
+// room link always names the public server, so it is not used) and a one-use
+// invite code that Copy makes for this room. The pill above the composer then
+// follows the invite, as it does for one made from the "+" menu.
+const inviteBotRoom = computed(() => ({
   roomId: props.room.identifier,
   roomName: props.room.displayName,
-  gitRoom: props.room.gitRoom !== null,
   connectorUrl: remoteConnectorUrl(props.apiUrl),
 }));
-// The row's own button opens and closes the invite under it.
-const inviteBot = useInviteBot({ room: inviteBotRoom });
+const inviteBotOpen = ref(false);
+async function createInviteBot(platform: InviteBotPlatform) {
+  const made = await roomInvites.create(props.room.identifier, platform, null);
+  roomInvites.reveal([made.invite.id]);
+  return made;
+}
+async function cancelInviteBot(inviteId: string): Promise<string | null> {
+  const invite = roomInvites.invites.value.get(inviteId);
+  return invite ? roomInvites.cancel(invite) : "The invite could not be found. Reload the room and try again.";
+}
 
 const shortRoomUrl = computed(() => {
   try {

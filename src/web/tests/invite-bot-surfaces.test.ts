@@ -7,7 +7,7 @@ function source(relative: string): string {
   return readFileSync(fileURLToPath(new URL(relative, import.meta.url)), 'utf8')
 }
 
-test('the room drawer lets a signed-in member invite a bot with one message through the shared section', () => {
+test('the room drawer lets a signed-in member invite a bot with a one-use code through the shared section', () => {
   const drawer = source('../src/components/room/RoomDrawer.vue')
   const panel = source('../src/components/room/room-drawer/InviteBotPanel.vue')
   const section = source('../../../shared/ui/InviteBotSection.vue')
@@ -15,18 +15,25 @@ test('the room drawer lets a signed-in member invite a bot with one message thro
   assert.match(drawer, /<InviteBotPanel v-if="room && room\.authenticated" :room="room" \/>/)
   // The panel sits right after the share block, so the code and the invitation are read together.
   assert.ok(drawer.indexOf('<SharePanel') < drawer.indexOf('<InviteBotPanel'), 'share first, then the invitation')
-  assert.ok(drawer.indexOf('<InviteBotPanel') < drawer.indexOf('<RoomMembersPanel'), 'the invitation before the member list that approves the bot')
-  // The panel builds the room facts from the web room and this server's origin.
+  assert.ok(drawer.indexOf('<InviteBotPanel') < drawer.indexOf('<RoomMembersPanel'), 'the invitation before the member list')
+  // The panel names this server's connector and makes the code on the server.
   assert.match(panel, /<h2>Invite a bot<\/h2>/)
-  assert.match(panel, /<InviteBotSection :room="inviteRoom" :admin="room\.role === 'admin'" \/>/)
-  assert.match(panel, /roomId: props\.room\.identifier,\s*roomName: props\.room\.displayName,\s*gitRoom: props\.room\.gitRoom !== null,\s*connectorUrl: inviteBotConnectorUrl\(typeof window !== 'undefined' \? window\.location\.origin : null\)/)
-  // The shared section: one open button, a picker of the four bots, the message, Copy, and the two hints.
-  assert.match(section, /data-testid="invite-bot-open"[^>]*>\s*Invite a bot/)
+  assert.match(panel, /:git-room="room\.gitRoom !== null"/)
+  assert.match(panel, /git-room-hint="Open an invite room and invite the bot there\."/)
+  assert.match(panel, /:create-invite="createInvite"\s+:cancel-invite="cancelInvite"/)
+  assert.match(panel, /connectorUrl: inviteBotConnectorUrl\(typeof window !== 'undefined' \? window\.location\.origin : null\)/)
+  assert.match(panel, /return createRoomInvite\(props\.room\.identifier, platform\)/)
+  // The shared section: what the invite does, the picker, the message with the code, Copy, and Cancel once made.
+  assert.match(section, /data-testid="invite-bot-summary"/)
   assert.match(section, /v-for="choice in INVITE_BOT_PLATFORMS"/)
-  assert.match(section, /<pre class="invite-bot-text" data-testid="invite-bot-text">\{\{ invite\.message\.value \}\}<\/pre>/)
-  assert.match(section, /data-testid="invite-bot-copy"[\s\S]*?\{\{ invite\.copied\.value \? "Copied" : "Copy" \}\}/)
-  assert.match(section, /\{\{ INVITE_BOT_HINT \}\}/)
-  // Only an admin approves a request, so only an admin is told where ("Requests" is the drawer panel's title).
-  assert.match(section, /v-if="admin && !room\.gitRoom"[^>]*>\{\{ INVITE_BOT_APPROVE_HINT \}\}/)
-  assert.match(source('../src/components/room/room-drawer/RoomMembersPanel.vue'), /<h2>Requests<\/h2>/)
+  assert.match(section, /class="invite-bot-code"/)
+  assert.match(section, /data-testid="invite-bot-copy"/)
+  assert.match(section, /v-if="invite\.created\.value && cancelInvite"/)
+})
+
+test('the web invite calls name the room in the path and the bot in the body, never the code', () => {
+  const api = source('../src/composables/room/invites.ts')
+  assert.match(api, /apiFetch\(`\$\{roomPath\(room\)\}\/invites`, \{\s*method: 'POST',\s*body: JSON\.stringify\(\{ platform \}\),/)
+  assert.match(api, /`\$\{roomPath\(room\)\}\/invites\/\$\{encodeURIComponent\(inviteId\)\}\/cancel`/)
+  assert.match(api, /reportRoomRefusal: false/)
 })
