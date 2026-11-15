@@ -37,12 +37,28 @@ function handleDialogTab(event: KeyboardEvent): void {
   trapFocusInDialog(event, dialogElement.value);
 }
 
+async function revealLaunchSurface(onlyWhileFailed = false): Promise<void> {
+  await nextTick();
+  if (!props.open || (onlyWhileFailed && !supervisedUi.launch.view.value?.failed)) return;
+  const surface = dialogElement.value?.querySelector<HTMLElement>('[data-testid="desktop-add-agent-supervised-runtime"], [data-testid="desktop-add-agent-supervised-lookup-error"]');
+  surface?.focus({ preventScroll: true });
+  // Recovery should be immediately reachable, including with reduced motion.
+  // Scroll the compact recovery section, not the Brain form above it.
+  surface?.scrollIntoView({ block: "nearest", behavior: "instant" });
+}
+
 async function handleRecoverSupervisedLaunch(): Promise<void> {
   await supervisedUi.launch.recoverDetectedLaunch();
   if (supervisedUi.launch.recoveryCandidate.value) return;
-  await nextTick();
-  dialogElement.value?.querySelector<HTMLElement>('[data-testid="desktop-add-agent-supervised-runtime"], [data-testid="desktop-add-agent-supervised-lookup-error"]')?.focus();
+  // Failed attachments are revealed by the terminal-state watcher below.
+  if (!supervisedUi.launch.view.value?.failed) await revealLaunchSurface();
 }
+
+// One transition into failure (or reopening it) reveals recovery after render.
+// A fresh snapshot with the same failure must not steal focus or scroll again.
+watch(() => props.open && Boolean(supervisedUi.launch.view.value?.failed), failed => {
+  if (failed) void revealLaunchSurface(true);
+}, { immediate: true, flush: "post" });
 
 const step = ref<'identity' | 'brain'>('identity');
 const identityError = ref('');

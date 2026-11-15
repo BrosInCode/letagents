@@ -355,7 +355,7 @@ test("the launch progress component exposes phased, accessible, honest UI hooks"
   assert.match(feedbackSource, /:role="tone === 'error' \? 'alert' : 'status'"/);
   assert.match(feedbackSource, /:aria-live="tone === 'error' \? 'assertive' : 'polite'"/);
   assert.match(modalSource, /useAgentSetupPresentation\(props, configuredName, configuredAvatar, supervisedUi\)/);
-  assert.match(setupPresentationSource, /querySelector<HTMLElement>[\s\S]*?desktop-add-agent-supervised-runtime[\s\S]*?\.focus\(\)/);
+  assert.match(setupPresentationSource, /querySelector<HTMLElement>[\s\S]*?desktop-add-agent-supervised-runtime[\s\S]*?\.focus\(\{ preventScroll: true \}\)/);
   assert.match(progressSource, /if \(p\.failed\) return "";/);
   assert.match(progressSource, /if \(p\.status === "stopping"\) return p\.headline;[\s\S]*?if \(p\.failed\) return "";/);
   assert.match(progressSource, /case "stopping": return "Cancelling";/);

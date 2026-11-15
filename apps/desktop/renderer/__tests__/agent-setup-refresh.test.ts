@@ -162,6 +162,8 @@ function presentation(t: TestContext, initial = { name: 'Atlas', open: true, red
   const frames = new Map<number, FrameRequestCallback>();
   const styles = new Map<string, string>();
   let sequence = 0, time = 0, focusReturns = 0, dialogFocus = 0, disconnects = 0;
+  const surfaceFocus: FocusOptions[] = [], surfaceScroll: ScrollIntoViewOptions[] = [];
+  const surface = markRaw({ focus(options: FocusOptions) { surfaceFocus.push(options); }, scrollIntoView(options: ScrollIntoViewOptions) { surfaceScroll.push(options); } });
   let mediaListener: (() => void) | undefined;
   class Element { focus() { focusReturns++; } }
   const previousFocus = new Element();
@@ -178,8 +180,8 @@ function presentation(t: TestContext, initial = { name: 'Atlas', open: true, red
   const launchView = ref<object | null>(null);
   let vm: ReturnType<typeof useAgentSetupPresentation>;
   const app = renderer.createApp({ setup() {
-    vm = useAgentSetupPresentation(props as never, name, avatar, { launch: { view: launchView } } as never);
-    vm.dialogElement.value = markRaw({ focus() { dialogFocus++; } }) as unknown as HTMLElement;
+    vm = useAgentSetupPresentation(props as never, name, avatar, { launch: { view: launchView, recoveryCandidate: ref(null), recoverDetectedLaunch: async () => { launchView.value = { failed: true, durable: true }; } } } as never);
+    vm.dialogElement.value = markRaw({ focus() { dialogFocus++; }, querySelector() { return surface; } }) as unknown as HTMLElement;
     vm.turnStage.value = markRaw({ style: { setProperty: (key: string, value: string) => { styles.set(key, value); } } }) as unknown as HTMLElement;
     return () => h('div');
   } });
@@ -190,7 +192,7 @@ function presentation(t: TestContext, initial = { name: 'Atlas', open: true, red
   const advance = (count = 1) => { for (let index = 0; index < count; index++) { time += 16; const callbacks = [...frames.entries()]; frames.clear(); for (const [, callback] of callbacks) callback(time); } };
   return { vm: vm!, props, name, avatar, launchView, styles, frames, advance, unmount,
     reduce: () => { media.matches = true; mediaListener?.(); },
-    counts: () => ({ focusReturns, dialogFocus, disconnects, mediaListener }) };
+    counts: () => ({ focusReturns, dialogFocus, disconnects, mediaListener, surfaceFocus, surfaceScroll }) };
 }
 
 test('identity validation keeps invalid names on identity and accepts Unicode names up to 32 code points', t => {
@@ -257,6 +259,49 @@ test('a launch restored asynchronously reveals recovery without validating the n
   assert.equal(styles.get('--turn-angle'), '-90deg');
   assert.equal(frames.size, 0);
   assert.equal(name.value, '---', 'showing existing progress does not rewrite the draft');
+});
+
+test('failed launches reveal recovery once, preserve focus on equivalent snapshots, and reveal it again when reopened', async t => {
+  const { vm, props, launchView, counts } = presentation(t);
+  const flush = async () => { await nextTick(); await nextTick(); };
+  await flush();
+  vm.showStep('brain');
+  launchView.value = { failed: false, durable: true, currentPhaseId: 'starting_provider' };
+  await flush();
+  assert.equal(counts().surfaceFocus.length, 0, 'ordinary launch progress does not move focus');
+  launchView.value = { failed: true, durable: true, currentPhaseId: 'starting_provider' };
+  await flush();
+  assert.equal(vm.step.value, 'brain');
+  assert.deepEqual(counts().surfaceFocus, [{ preventScroll: true }]);
+  assert.deepEqual(counts().surfaceScroll, [{ block: 'nearest', behavior: 'instant' }]);
+  launchView.value = { ...launchView.value, failureDetail: 'New diagnostic snapshot' };
+  await flush();
+  assert.equal(counts().surfaceFocus.length, 1, 'status polling must not steal focus from a recovery control');
+  assert.equal(counts().surfaceScroll.length, 1);
+  props.open = false; await flush();
+  props.open = true; await flush();
+  assert.equal(counts().surfaceFocus.length, 2, 'reopening a saved failure restores its recovery surface');
+  launchView.value = { failed: false }; await flush();
+  launchView.value = { failed: true }; await flush();
+  assert.equal(counts().surfaceFocus.length, 3, 'a new failed retry is a new recovery transition');
+});
+
+test('asynchronously attached failures reveal recovery with reduced motion and never focus a closed dialog', async t => {
+  const { vm, props, launchView, counts, frames } = presentation(t, { name: 'Atlas', open: true, reduced: true, initialSection: undefined });
+  const flush = async () => { await nextTick(); await nextTick(); };
+  await flush();
+  launchView.value = { failed: true, durable: true };
+  await flush();
+  assert.deepEqual(counts().surfaceFocus, [{ preventScroll: true }]);
+  assert.deepEqual(counts().surfaceScroll, [{ block: 'nearest', behavior: 'instant' }]);
+  assert.equal(frames.size, 0, 'revealing recovery does not animate the scene or scroll');
+  launchView.value = null; await flush();
+  await vm.handleRecoverSupervisedLaunch(); await flush();
+  assert.equal(counts().surfaceFocus.length, 2, 'explicit Recover attaches and reveals the failed entry exactly once');
+  launchView.value = null; await flush();
+  props.open = false; launchView.value = { failed: true, durable: true }; await flush();
+  assert.equal(counts().surfaceFocus.length, 2);
+  assert.equal(counts().surfaceScroll.length, 2);
 });
 
 test('keyboard navigation, pause and reduced motion settle the selected face and clean up pending frames', async t => {
