@@ -13,6 +13,15 @@
 .invite-bot p {
   margin: 0;
 }
+.invite-bot-closed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.invite-bot-closed .invite-bot-button {
+  flex: none;
+}
 .invite-bot-open {
   display: grid;
   gap: 10px;

@@ -62,8 +62,12 @@ async function render(props: Record<string, unknown>): Promise<string> {
 }
 
 test("the section shows one button until opened; open, it says what the invite does, then the picker, the message with a placeholder, and Copy", async () => {
-  const closed = await render({});
-  assert.match(closed, /data-testid="invite-bot-open"[^>]*>\s*Invite a bot\s*</);
+  // Closed: one line and one quiet button, like the drawer panels around it (not a second "Invite a bot").
+  const closed = await render({ admin: true });
+  assert.match(closed, /class="invite-bot-closed"><p class="invite-bot-hint">A one-use code that lets a bot into this room\.<\/p>/);
+  assert.match(closed, /data-testid="invite-bot-open"[^>]*>\s*Create\s*</);
+  assert.doesNotMatch(closed, /data-variant="primary"[^>]*data-testid="invite-bot-open"/);
+  assert.match(await render({}), /A one-use code that asks an admin to let a bot in\./);
   assert.doesNotMatch(closed, /data-testid="invite-bot-picker"/);
 
   const open = await render({ collapsible: false, admin: true });
@@ -82,10 +86,11 @@ test("the section shows one button until opened; open, it says what the invite d
   assert.match(open, /class="invite-bot-msg-code" data-placeholder/, "the code is made when Copy is pressed");
   assert.doesNotMatch(open, /For the room/, "the message names no room");
   // Copy keeps one width: both words share one cell, the icon turns into a check.
-  assert.match(open, /data-testid="invite-bot-copy"[\s\S]*?class="copy-state" data-state="idle"[\s\S]*?data-for="idle"[^>]*>Copy<[\s\S]*?data-for="done"[^>]*>Copied</);
+  // Icon and word are one unit each, centred in one cell: "⧉ Copy" and "✓ Copied".
+  assert.match(open, /data-testid="invite-bot-copy"[\s\S]*?class="copy-state" data-state="idle"[\s\S]*?data-for="idle"[\s\S]*?class="copy-state-copy"[\s\S]*?<span>Copy<\/span>[\s\S]*?data-for="done"[\s\S]*?class="copy-state-check"[\s\S]*?<span>Copied<\/span>/);
   assert.match(open, /Send this to the bot(&#39;|')s owner\./);
   assert.doesNotMatch(open, />\s*Done\s*</, "a host that opens it closes it too");
-  assert.match(await render({ initialPlatform: "claude", collapsible: false }), /data-active[^>]*data-platform="claude"[\s\S]*?In Claude, add this connector/);
+  assert.match(await render({ initialPlatform: "claude", collapsible: false }), /data-active[^>]*data-platform="claude"[\s\S]*?In Claude(&#39;|')s Settings → Connectors, add:/);
 
   const member = await render({ collapsible: false, admin: false });
   assert.match(member, /An admin of (&quot;|")sky-owl(&quot;|") lets the bot in\. The invite works one time\./);

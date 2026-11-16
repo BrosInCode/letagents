@@ -93,17 +93,19 @@ export function buildInviteBotCodeMessage(platform: InviteBotPlatform, input: In
       lead = "Paste this to your Grok Bot:";
       parts = [t("Connect to LetAgents at "), address, t(` and sign me in. Then ${CODE_JOIN} `), codePart, t(` ${SAY_HI}`)];
       break;
+    // One-line leads and bodies of about the Grok Bot's length: the box keeps
+    // one height for every bot without a blank line under the shorter ones.
     case "chatgpt":
-      lead = "In ChatGPT, add a custom connector with this URL (sign in with GitHub when it asks):";
-      parts = [address, t(`\nThen tell ChatGPT: Join LetAgents with the invite code `), codePart, t(` ${SAY_HI}`)];
+      lead = "In ChatGPT, add this connector:";
+      parts = [address, t(`\nSign in with GitHub, then tell ChatGPT: Join LetAgents with the invite code `), codePart, t(` ${SAY_HI}`)];
       break;
     case "claude":
-      lead = "In Claude, add this connector (Settings → Connectors) and sign in:";
-      parts = [address, t(`\nThen tell Claude: Join LetAgents with the invite code `), codePart, t(` ${SAY_HI}`)];
+      lead = "In Claude's Settings → Connectors, add:";
+      parts = [address, t(`\nSign in, then tell Claude: Join LetAgents with the invite code `), codePart, t(` ${SAY_HI}`)];
       break;
     case "other":
-      lead = "Add this connector address to your bot (sign in with GitHub when it asks):";
-      parts = [address, t(`\nThen tell your bot to ${CODE_JOIN} `), codePart, t(` ${SAY_HI}`)];
+      lead = "Add this connector to your bot:";
+      parts = [address, t(`\nSign in with GitHub, then tell your bot: Join LetAgents with the invite code `), codePart, t(` ${SAY_HI}`)];
       break;
   }
   const text = `${lead}\n${parts.map((part) => part.text).join("")}`;

@@ -3,17 +3,19 @@
     <!-- A Git Room's GitHub roles decide who is in it: no invites here. -->
     <p v-if="gitRoom" class="invite-bot-hint" data-testid="invite-bot-git-room">{{ INVITE_BOT_GIT_ROOM_LINE }} {{ gitRoomHint }}</p>
 
-    <button
-      v-else-if="collapsible && !open"
-      ref="openButton"
-      type="button"
-      class="invite-bot-button"
-      data-variant="primary"
-      data-testid="invite-bot-open"
-      @click="openSection"
-    >
-      Invite a bot
-    </button>
+    <!-- Closed: one line and one quiet button, like the panels around it. -->
+    <div v-else-if="collapsible && !open" class="invite-bot-closed">
+      <p class="invite-bot-hint">{{ closedLine }}</p>
+      <button
+        ref="openButton"
+        type="button"
+        class="invite-bot-button"
+        data-testid="invite-bot-open"
+        @click="openSection"
+      >
+        Create
+      </button>
+    </div>
 
     <div v-else class="invite-bot-open" data-testid="invite-bot-open-section">
       <p class="invite-bot-hint" data-testid="invite-bot-summary">{{ summary }}</p>
@@ -130,6 +132,9 @@ const invite = useInviteBotCode({
   initialPlatform: props.initialPlatform,
 });
 
+const closedLine = computed(() => props.admin
+  ? "A one-use code that lets a bot into this room."
+  : "A one-use code that asks an admin to let a bot in.");
 const summary = computed(() => inviteBotCodeSummary(props.room.roomName || props.room.roomId, props.admin));
 const botName = computed(() => {
   const label = INVITE_BOT_PLATFORMS.find((choice) => choice.id === invite.platform.value)?.label ?? "the bot";

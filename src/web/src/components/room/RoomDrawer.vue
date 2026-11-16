@@ -25,7 +25,7 @@
 
       <InviteBotPanel v-if="room && room.authenticated" ref="inviteBotPanel" :room="room" />
 
-      <div v-if="room" ref="requestsSection" tabindex="-1" aria-label="Requests and members">
+      <div v-if="room" ref="requestsSection" class="drawer-section-group" tabindex="-1" aria-label="Requests and members">
         <RoomMembersPanel :open="open" :room="room" @left="emit('left', $event)" />
       </div>
 
