@@ -101,6 +101,24 @@ test("valid join requests are forwarded to the room stream boundary; malformed f
   assert.deepEqual(roomEvents, [{ type: "join_request", roomIdentifier: "design-lounge", event: payload }]);
 });
 
+test("the maker's room_invite frames are forwarded to the room stream boundary; malformed frames are ignored", async () => {
+  let send!: (event: string, data: unknown) => void;
+  responders.push((res) => { send = sse(res); });
+  stream.restartAccountActivityStream();
+  await until(() => Boolean(send), "the stream to open");
+  roomEvents.length = 0;
+  const invite = {
+    id: "inv_1", room_id: "sky-owl-id", room_display_name: "sky-owl", origin_room_id: "github.com/acme/app",
+    platform: "grok", kind: "admit", state: "used", outcome: "admitted",
+    created_at: "2026-11-15T10:00:00.000Z", expires_at: "2026-11-22T10:00:00.000Z",
+    used_at: "2026-11-15T10:05:00.000Z", used_by_login: "botowner",
+  };
+  send("room_invite", { invite: { ...invite, platform: "robot" } });
+  send("room_invite", { invite });
+  await until(() => roomEvents.length > 0, "the forwarded invite");
+  assert.deepEqual(roomEvents, [{ type: "room_invite", roomIdentifier: "sky-owl-id", event: { invite } }]);
+});
+
 test("valid room_mention frames are forwarded to the room stream boundary; malformed frames are ignored", async () => {
   let send!: (event: string, data: unknown) => void;
   responders.push((res) => { send = sse(res); });

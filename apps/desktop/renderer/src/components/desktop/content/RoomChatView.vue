@@ -169,6 +169,7 @@
           :send-error="sendError"
           :sending="sending"
           :correctable-agents="correctableAgents"
+          :invite-bot="inviteBot"
           @clear-reply="clearReplyTarget"
           @open-add-agent="emit('open-add-agent')"
           @open-ask-agent="emit('open-ask-agent')"
@@ -249,6 +250,7 @@ import { useDesktopMessageDraft } from "../../../domain/desktop-message-drafts";
 import { useRoomActivity } from "../../../composables/useRoomActivity";
 import RoomComposer from "./room-chat/RoomComposer.vue";
 import RoomAskBar from "./asks/RoomAskBar.vue";
+import type { RoomInviteBotContext } from "./room-chat/RoomInviteBotPanel.vue";
 import type { ComposerEventPreview } from "./room-chat/composer-event-preview";
 import { stableSteerOffer, type ActivitySteerOffer } from "./room-chat/room-activity";
 import { supervisorEntriesIgnoringActivity } from "../../../domain/supervisor-entries-resource";
@@ -312,6 +314,8 @@ const props = defineProps<{
   searchQuery: string;
   activeSearchMessageId: string | null;
   initialScrollPosition?: ChatScrollPosition | null;
+  /** "Invite a bot" in the composer's "+" menu; absent for a room kept on this computer. */
+  inviteBot?: RoomInviteBotContext | null;
 }>();
 
 const { pushActionToast } = useDesktopActionToasts();

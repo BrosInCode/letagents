@@ -23,9 +23,9 @@
         @copy="copyShareValue"
       />
 
-      <InviteBotPanel v-if="room && room.authenticated" :room="room" />
+      <InviteBotPanel v-if="room && room.authenticated" ref="inviteBotPanel" :room="room" />
 
-      <div v-if="room" ref="requestsSection" tabindex="-1" aria-label="Requests and members">
+      <div v-if="room" ref="requestsSection" class="drawer-section-group" tabindex="-1" aria-label="Requests and members">
         <RoomMembersPanel :open="open" :room="room" @left="emit('left', $event)" />
       </div>
 
@@ -111,7 +111,11 @@ function focusRequests() {
   requestsSection.value?.scrollIntoView({ block: 'start' })
   requestsSection.value?.focus({ preventScroll: true })
 }
-defineExpose({ focusRequests })
+const inviteBotPanel = ref<InstanceType<typeof InviteBotPanel> | null>(null)
+function focusInviteBot() {
+  inviteBotPanel.value?.openAndFocus()
+}
+defineExpose({ focusRequests, focusInviteBot })
 
 function handleBackdropClick(event: MouseEvent) {
   const dialog = drawerElement.value

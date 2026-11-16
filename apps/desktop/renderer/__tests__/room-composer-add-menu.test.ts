@@ -166,6 +166,28 @@ test('the menu lists Attach files, GIF, Create task, Add agent and Ask someone f
   assert.deepEqual(vm.items.value.map((item: any) => item.label), ['Attach files…', 'GIF', 'Create task…', 'Add agent', 'Ask someone for an agent…']);
   props.gifAvailable = false;
   assert.deepEqual(vm.items.value.map((item: any) => item.id), ['attach', 'task', 'agent', 'ask']);
+  props.inviteAvailable = true;
+  assert.deepEqual(vm.items.value.map((item: any) => item.label).at(-1), 'Invite a bot', 'Invite a bot is last, for a room on the server');
+});
+
+test('Invite a bot opens its panel beside the menu, and a second click on its row closes it', async t => {
+  const { vm } = mountMenu(t, { inviteAvailable: true });
+  vm.openMenu(true);
+  await flush();
+  const invite = vm.items.value.find((item: any) => item.id === 'invite');
+  assert.equal(invite.opensDialog, true);
+  vm.choose(invite, true);
+  await flush();
+  assert.equal(vm.flyout.value, 'invite');
+  assert.equal(vm.open.value, true, 'the menu stays open under its panel');
+  vm.choose(invite, true);
+  await flush();
+  assert.equal(vm.flyout.value, null);
+  vm.choose(invite, false);
+  await flush();
+  assert.equal(vm.flyout.value, 'invite');
+  vm.closeMenu();
+  assert.equal(vm.flyout.value, null);
 });
 
 test('disabling "+" closes an open menu and keeps it closed', async t => {

@@ -23,6 +23,12 @@ import {
   requestDesktopRoomJoin,
   setDesktopRoomMemberRole,
 } from "../rooms/members.js";
+import {
+  cancelDesktopRoomInvite,
+  createDesktopRoomInvite,
+  listDesktopBotInviteRooms,
+  listDesktopRoomInvites,
+} from "../rooms/invites.js";
 import { getAccountActivityState, restartAccountActivityStream, stopAccountActivityStream } from "../account-activity-stream.js";
 import { takePendingRoomLink } from "../ask-link-inbox.js";
 import { getDesktopGitHubEventFilter, getDesktopRoomAgentGuidelines, setDesktopGitHubEventFilter, setDesktopRoomAgentGuidelines } from "../rooms/room-settings.js";
@@ -642,6 +648,11 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
   targetIpcMain.handle("desktop:room-members:decide-join-request", (_event, roomIdentifier: string, requestId: string, decision) =>
     decideDesktopRoomJoinRequest(roomIdentifier, requestId, decision));
   targetIpcMain.handle("desktop:room-members:list-account-join-requests", () => listDesktopAccountRoomJoinRequests());
+  targetIpcMain.handle("desktop:room-invites:create", (_event, roomIdentifier: string, platform: unknown, originRoomIdentifier: unknown) =>
+    createDesktopRoomInvite(roomIdentifier, platform, typeof originRoomIdentifier === "string" ? originRoomIdentifier : null));
+  targetIpcMain.handle("desktop:room-invites:list", (_event, roomIdentifier: string) => listDesktopRoomInvites(roomIdentifier));
+  targetIpcMain.handle("desktop:room-invites:cancel", (_event, roomIdentifier: string, inviteId: string) => cancelDesktopRoomInvite(roomIdentifier, inviteId));
+  targetIpcMain.handle("desktop:room-invites:list-rooms", () => listDesktopBotInviteRooms());
   // A `letagents://in/<room>` link that arrived before this window's renderer loaded.
   targetIpcMain.handle("desktop:room:take-pending-link", () => takePendingRoomLink());
   targetIpcMain.handle("desktop:room:get-account-activity", () => getAccountActivityState());

@@ -108,6 +108,7 @@
       :search-query="searchQuery"
       :active-search-message-id="activeSearchMessageId"
       :initial-scroll-position="initialChatScrollPosition ?? null"
+      :invite-bot="inviteBotContext"
       @send-message="sendRoomMessage"
       @discard-attachment="discardAttachment"
       @load-older="loadOlderMessages"
@@ -147,6 +148,10 @@
             @dismiss="dismissJoinRequests"
             @open-requests="openJoinRequests"
           />
+        </div>
+        <!-- Invites this account made for a bot: waiting, or (from a Git Room) joined elsewhere. -->
+        <div v-if="inviteBotContext" class="desktop-room-invite-pills">
+          <RoomInvitePills :room-identifier="room.identifier" :connector-url="inviteBotContext.connectorUrl" @open-room="emit('open-room', $event)" />
         </div>
       </template>
     </RoomChatView>
@@ -364,6 +369,9 @@ import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
 import ReleaseQueueWidget from "../../../../../../../shared/ui/board/ReleaseQueueWidget.vue";
 import { desktopIpc } from "../../../ipc";
 import JoinRequestBanner from "../../../../../../../shared/ui/JoinRequestBanner.vue";
+import RoomInvitePills from "./asks/RoomInvitePills.vue";
+import type { RoomInviteBotContext } from "./room-chat/RoomInviteBotPanel.vue";
+import { remoteConnectorUrl } from "../settings/connectors";
 import type { DesktopRoomShellEmits, DesktopRoomShellProps } from "../../../composables/room-shell/props";
 import type { RoomShellContext } from "../../../composables/room-shell/context";
 import { useRoomShellState } from "../../../composables/room-shell/useRoomShellState";
@@ -383,6 +391,18 @@ import { supervisedAgentInspectorRequest } from "../../../domain/agent-inspector
 import { ownerAttribution as backgroundCommandOwner } from "./room-activity/agentTarget";
 const props = defineProps<DesktopRoomShellProps>();
 const emit = defineEmits<DesktopRoomShellEmits>();
+// "Invite a bot" in the composer's "+" menu: for a room on the server. A Git
+// Room's panel lists invite rooms first; the server decides what an invite does.
+const inviteBotContext = computed<RoomInviteBotContext | null>(() => {
+  if (props.storage.effectiveMode === "local" || !props.room.identifier) return null;
+  return {
+    roomId: props.room.identifier,
+    roomName: props.room.displayName || props.room.name || props.room.identifier,
+    gitRoom: props.room.gitRoom !== null,
+    admin: props.room.role === "admin",
+    connectorUrl: remoteConnectorUrl(props.apiUrl),
+  };
+});
 const previewBoard = useRoomBoardController({
   get roomIdentifier() { return props.room.identifier; },
   get tasks() { return props.tasks; },

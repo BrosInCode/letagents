@@ -18,6 +18,8 @@
 }
 .drawer[open] { display: flex; flex-direction: column; gap: 14px; }
 .drawer > * { flex-shrink: 0; min-width: 0; }
+/* Panels grouped for one focus target (Requests + Members) keep the drawer's own spacing. */
+.drawer-section-group { display: flex; flex-direction: column; gap: 14px; outline: none; }
 .drawer::backdrop { background: rgb(0 0 0 / 55%); }
 .drawer :is(button, a):focus-visible { outline: 2px solid var(--blue-text); outline-offset: 3px; }
 

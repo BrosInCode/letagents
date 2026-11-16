@@ -1,0 +1,327 @@
+/*
+ * The parts of "Invite a bot" that the desktop panel, Room settings and the
+ * web drawer share: the bot picker, the message, and the Copy label. Theme
+ * tokens only (both apps define them). Motion: transform and opacity, under
+ * 300 ms, on the strong ease-out; reduced motion keeps the fades only.
+ */
+
+/* Read by screen readers only: a status line ("Invite copied"). */
+.invite-bot-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ── The bot picker: the room settings' segmented control, four across ── */
+.invite-bot-picker-seg {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg-subtle);
+}
+
+.invite-bot-picker-thumb {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  left: 3px;
+  width: calc((100% - 6px) / 4);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  box-shadow: var(--shadow-sm), inset 0 0 0 1px var(--border-strong);
+  transition: transform 200ms var(--ease-out);
+}
+
+.invite-bot-picker-option {
+  position: relative;
+  min-width: 0;
+  height: 26px;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: transform 140ms var(--ease-out);
+}
+
+.invite-bot-picker-option[aria-checked="true"] {
+  color: var(--text);
+}
+
+.invite-bot-picker-option:active {
+  transform: scale(0.96);
+}
+
+.invite-bot-picker-option:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 1px;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .invite-bot-picker-option:hover:not([aria-checked="true"]) {
+    color: var(--text);
+  }
+}
+
+/* ── The message: every bot's text in one cell, the picked one shown ── */
+.invite-bot-msg {
+  display: grid;
+}
+
+.invite-bot-msg-layer {
+  grid-area: 1 / 1;
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateY(-2px);
+  /* Leaving: quick, then out of the reading order. */
+  transition: opacity 80ms ease-out, transform 80ms ease-out, visibility 0s linear 80ms;
+}
+
+.invite-bot-msg-layer[data-active] {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  /* Arriving: only once the old text is gone, so two texts never sit on each other. */
+  transition: opacity 180ms var(--ease-out) 80ms, transform 200ms var(--ease-out) 80ms, visibility 0s;
+}
+
+.invite-bot-msg-layer p {
+  margin: 0;
+}
+
+.invite-bot-msg-lead {
+  color: var(--text-tertiary);
+}
+
+.invite-bot-msg-body {
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.invite-bot-msg-layer[data-active] .invite-bot-msg-body {
+  user-select: text;
+}
+
+.invite-bot-msg-address,
+.invite-bot-msg-code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--accent-hover);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.invite-bot-msg-code {
+  display: inline-block;
+  white-space: nowrap;
+  color: var(--text);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.invite-bot-msg-code[data-placeholder] {
+  color: var(--text-tertiary);
+  font-weight: 500;
+}
+
+.invite-bot-msg-char {
+  display: inline-block;
+  white-space: pre;
+}
+
+/* The code resolves out of the dots, left to right, in about a quarter second. */
+.invite-bot-msg-code-chars[data-reveal] .invite-bot-msg-char {
+  animation: invite-bot-char-in 180ms var(--ease-out) both;
+  animation-delay: calc(var(--invite-char, 0) * 14ms);
+}
+
+@keyframes invite-bot-char-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+}
+
+/* ── The Copy label: one width; "⧉ Copy" and "✓ Copied" swap as whole units ── */
+.copy-state {
+  display: inline-grid;
+  justify-items: center;
+  align-items: center;
+}
+
+.copy-state-unit {
+  grid-area: 1 / 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  opacity: 0;
+}
+
+.copy-state[data-state="idle"] .copy-state-unit[data-for="idle"],
+.copy-state[data-state="busy"] .copy-state-unit[data-for="idle"],
+.copy-state[data-state="done"] .copy-state-unit[data-for="done"] {
+  opacity: 1;
+}
+
+.copy-state-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+}
+
+.copy-state-icon > * {
+  grid-area: 1 / 1;
+  transition: opacity 140ms var(--ease-out), transform 180ms var(--ease-out);
+}
+
+.copy-state-copy,
+.copy-state-check {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.copy-state-check {
+  stroke-width: 2.4;
+}
+
+.copy-state-spinner {
+  box-sizing: border-box;
+  width: 12px;
+  height: 12px;
+  border: 1.75px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  opacity: 0;
+  transform: scale(0.6);
+}
+
+.copy-state[data-state="busy"] .copy-state-copy {
+  opacity: 0;
+  transform: scale(0.6);
+}
+
+.copy-state[data-state="busy"] .copy-state-spinner {
+  opacity: 1;
+  transform: none;
+  animation: copy-state-spin 640ms linear infinite;
+}
+
+@keyframes copy-state-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* After the first change: the old unit leaves fast and upward, the new one rises in once it is gone. */
+.copy-state[data-changed] .copy-state-unit {
+  animation: copy-state-out 90ms ease-out both;
+}
+
+.copy-state[data-changed][data-state="idle"] .copy-state-unit[data-for="idle"],
+.copy-state[data-changed][data-state="busy"] .copy-state-unit[data-for="idle"],
+.copy-state[data-changed][data-state="done"] .copy-state-unit[data-for="done"] {
+  animation: copy-state-in 200ms var(--ease-out) 70ms both;
+}
+
+/* The check pops a beat after its word. */
+.copy-state[data-changed][data-state="done"] .copy-state-check {
+  animation: copy-state-pop 240ms var(--ease-out) 90ms both;
+}
+
+@keyframes copy-state-out {
+  from {
+    opacity: 1;
+    transform: none;
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
+@keyframes copy-state-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes copy-state-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .invite-bot-picker-thumb,
+  .invite-bot-picker-option {
+    transition: none;
+  }
+
+  .invite-bot-picker-option:active {
+    transform: none;
+  }
+
+  .invite-bot-msg-layer,
+  .invite-bot-msg-layer[data-active],
+  .copy-state-icon > :not(.copy-state-spinner) {
+    transform: none !important;
+  }
+
+  .copy-state[data-changed] .copy-state-unit,
+  .copy-state[data-changed][data-state] .copy-state-unit,
+  .copy-state[data-changed][data-state="done"] .copy-state-check {
+    animation: none;
+    transition: opacity 150ms ease;
+  }
+
+  .invite-bot-msg-code-chars[data-reveal] .invite-bot-msg-char {
+    animation: invite-bot-char-fade 160ms ease both;
+    animation-delay: 0ms;
+  }
+
+  .copy-state[data-state="busy"] .copy-state-spinner {
+    animation-duration: 1600ms;
+  }
+}
+
+@keyframes invite-bot-char-fade {
+  from {
+    opacity: 0;
+  }
+}

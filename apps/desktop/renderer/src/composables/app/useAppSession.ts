@@ -15,6 +15,7 @@ import { invalidateRentalProviderDashboard } from "../useRentalProviderEvents";
 import { setReminderAccount, refreshMessageReminders } from "../useMessageReminders";
 import { resetHostApprovals } from "../../components/desktop/content/room-chat/host-approvals";
 import { roomNotificationPreferences } from "../useRoomNotificationPreferences";
+import { roomInvites } from "../useRoomInvites";
 import { roomJoinRequests } from "../useRoomJoinRequests";
 import { isMembershipRefusal } from "../../components/desktop/content/auth-onboarding";
 import { ROOM_ACCESS_RECHECK_MIN_GAP_MS, shouldRecheckAfterStreamRefusal } from "../../domain/room-access-recheck";
@@ -169,6 +170,11 @@ export function useAppSessionActions(context: unknown) {
       roomJoinRequests.receive(event.event);
       return;
     }
+    if (event.type === "room_invite") {
+      // An invite this account made changed: the pill above the composer reads the store.
+      roomInvites.receive(event.event);
+      return;
+    }
     if (event.type === "room_mention") {
       void app.receiveRoomMention?.(event.event);
       return;
@@ -192,10 +198,12 @@ export function useAppSessionActions(context: unknown) {
 
   function clearDesktopSessionState(): void {
     invalidateRentalProviderDashboard();
+    roomInvites.forgetCodes();
     attentionIntent.value = null;
     inboxRentals.value = []; inboxRentalError.value = ''; app.inboxRooms.value = []; inboxSection.value = 'needs-you';
     app.resetNeedsYou();
     roomJoinRequests.reset();
+    roomInvites.reset();
     resetHostApprovals();
     clearDesktopMessageOutbox();
     clearDesktopMessageDrafts();
@@ -334,7 +342,7 @@ export function useAppAccountSwitch(context: unknown) {
     reloadInboxRooms, rentalRequestCount, resetNeedsYou,
   } = app;
   watch(() => authStatus.value?.account?.id ?? null, (next, previous) => {
-    if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; reloadInboxRooms(); inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); resetNeedsYou(); roomJoinRequests.reset(); resetHostApprovals(); if (next) { void refreshNeedsYou(); void roomJoinRequests.refresh(); } }
+    if (next !== previous) { invalidateRentalProviderDashboard(); inboxRentals.value = []; inboxRentalError.value = ''; rentalRequestCount.value = 0; reloadInboxRooms(); inboxSection.value = 'needs-you'; clearDesktopMessageOutbox(); resetNeedsYou(); roomJoinRequests.reset(); roomInvites.reset(); resetHostApprovals(); if (next) { void refreshNeedsYou(); void roomJoinRequests.refresh(); } }
   }, { flush: "sync" });
 
   const showSignedOutGate = computed(() => (

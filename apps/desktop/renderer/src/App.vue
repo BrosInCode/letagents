@@ -255,6 +255,7 @@
           @open-inbox="openNeedsYou(selectedRoomInfo.identifier)"
           @open-messages-with="openMessagesWithPerson"
           @open-focus-room="openFocusRoomFromRoomsTab"
+          @open-room="(roomIdentifier: string) => openRoomFromAppAgent(roomIdentifier, { create: false })"
           @request-focus-room-conclusion="openRoomDetailsFocusRoomConclusion"
           @cycle-sidebar="cycleSidebar"
           @connect-project="connectActiveRoomProject"
@@ -588,7 +589,7 @@ const {
   openAppAgentSettings, runAppAgent, setChatStorageMode, syncLocalChat,
 } = Object.assign(app, useAppSettingsActions(app));
 const {
-  openServiceAgent,
+  openServiceAgent, openRoomFromAppAgent,
 } = Object.assign(app, useAppArchivedRooms(app));
 const {
   handleOwnMessageSent, handleRoomShellRefresh, handleRoomMessageRevealUnavailable,

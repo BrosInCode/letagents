@@ -448,6 +448,13 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room-members:decide-join-request", roomIdentifier, requestId, decision),
     listAccountJoinRequests: () => ipcRenderer.invoke("desktop:room-members:list-account-join-requests"),
   },
+  roomInvites: {
+    create: (roomIdentifier: string, platform, originRoomIdentifier?: string | null) =>
+      ipcRenderer.invoke("desktop:room-invites:create", roomIdentifier, platform, originRoomIdentifier ?? null),
+    list: (roomIdentifier: string) => ipcRenderer.invoke("desktop:room-invites:list", roomIdentifier),
+    cancel: (roomIdentifier: string, inviteId: string) => ipcRenderer.invoke("desktop:room-invites:cancel", roomIdentifier, inviteId),
+    listRooms: () => ipcRenderer.invoke("desktop:room-invites:list-rooms"),
+  },
   connectors: {
     list: () => ipcRenderer.invoke("desktop:connectors:list"),
     connectOAuth: (provider) => ipcRenderer.invoke("desktop:connectors:connect-oauth", provider),

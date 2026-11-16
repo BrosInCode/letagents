@@ -215,6 +215,7 @@
       @clearReply="selectedReply = null"
       @signIn="handleSignIn"
       @askAgent="askAgentOpen = true"
+      @inviteBot="openInviteBot"
     />
 
     <PersonWorkHost v-if="isConnected && room && auth.isSignedIn.value" ref="personWorkHost"
@@ -406,6 +407,12 @@ async function openJoinRequests() {
   drawerOpen.value = true
   await nextTick()
   roomDrawer.value?.focusRequests()
+}
+// "+" → Invite a bot: the drawer opens at its invite, already open on the bot picker.
+async function openInviteBot() {
+  drawerOpen.value = true
+  await nextTick()
+  roomDrawer.value?.focusInviteBot()
 }
 // The banner follows the open room; an admin's page reads the requests already waiting.
 const joinRequestBanner = joinRequestAlerts.visible
