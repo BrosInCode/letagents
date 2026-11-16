@@ -258,7 +258,7 @@ function openInvite(byPointer: boolean): void {
   measureFlyout();
   flyout.value = "invite";
   // The panel's first control takes focus, so Escape and Tab work at once.
-  void nextTick(() => flyoutElement.value?.querySelector<HTMLElement>("[data-invite-autofocus], button:not([disabled])")?.focus({ preventScroll: true }));
+  void nextTick(() => flyoutElement.value?.querySelector<HTMLElement>("[data-invite-autofocus]")?.focus({ preventScroll: true }));
 }
 
 function choose(item: MenuItem, byPointer = false): void {

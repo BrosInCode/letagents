@@ -137,6 +137,8 @@
                 :collapsible="false"
                 :create-invite="createInviteBot"
                 :cancel-invite="cancelInviteBot"
+                :invite-state="madeInviteState"
+                @made="madeInviteId = $event"
               />
             </div>
           </SmoothHeight>
@@ -509,6 +511,12 @@ const inviteBotRoom = computed(() => ({
   connectorUrl: remoteConnectorUrl(props.apiUrl),
 }));
 const inviteBotOpen = ref(false);
+// The invite made here, followed through the invite store (the account activity stream updates it).
+const madeInviteId = ref<string | null>(null);
+const madeInviteState = computed(() => {
+  const invite = madeInviteId.value ? roomInvites.invites.value.get(madeInviteId.value) : null;
+  return invite ? { state: invite.state, outcome: invite.outcome } : null;
+});
 async function createInviteBot(platform: InviteBotPlatform) {
   const made = await roomInvites.create(props.room.identifier, platform, null);
   roomInvites.reveal([made.invite.id]);

@@ -102,7 +102,9 @@ test("Room settings → Bot makes invites through the desktop store, so its pill
   assert.match(panel, /import InviteBotSection from "(\.\.\/)+shared\/ui\/InviteBotSection\.vue";/);
   assert.match(panel, /<section v-if="cloudRoom" class="room-settings-section" data-section="bot" aria-labelledby="room-settings-heading-bot">\s*<h3 id="room-settings-heading-bot">Bot<\/h3>/);
   assert.match(panel, /data-testid="desktop-room-invite-bot-toggle"\s+:aria-expanded="inviteBotOpen"[\s\S]*?>\{\{ inviteBotOpen \? "Close" : "Create invite" \}\}<\/button>/);
-  assert.match(panel, /<InviteBotSection\s+v-if="inviteBotOpen"\s+class="room-invite-bot-body"[\s\S]*?:git-room="room\.gitRoom !== null"[\s\S]*?:collapsible="false"\s+:create-invite="createInviteBot"\s+:cancel-invite="cancelInviteBot"\s*\/>/);
+  assert.match(panel, /<InviteBotSection\s+v-if="inviteBotOpen"\s+class="room-invite-bot-body"[\s\S]*?:git-room="room\.gitRoom !== null"[\s\S]*?:collapsible="false"\s+:create-invite="createInviteBot"\s+:cancel-invite="cancelInviteBot"\s+:invite-state="madeInviteState"\s+@made="madeInviteId = \$event"\s*\/>/);
+  // The section follows the invite it made through the store: "joined" once the bot is in.
+  assert.match(panel, /const invite = madeInviteId\.value \? roomInvites\.invites\.value\.get\(madeInviteId\.value\) : null;/);
   assert.match(panel, /const made = await roomInvites\.create\(props\.room\.identifier, platform, null\);\s*roomInvites\.reveal\(\[made\.invite\.id\]\);/);
   // The connector is the API this app talks to, not the room link's public origin.
   assert.match(panel, /connectorUrl: remoteConnectorUrl\(props\.apiUrl\)/);

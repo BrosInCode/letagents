@@ -1,17 +1,25 @@
 <template>
-  <div class="desktop-invite-bot" data-testid="desktop-invite-bot-panel">
+  <div ref="root" class="desktop-invite-bot" data-testid="desktop-invite-bot-panel">
+    <!-- Always present, so a screen reader hears each change of it. -->
+    <span class="desktop-invite-bot-sr" role="status">{{ spoken }}</span>
     <!-- A Git Room takes no bots: pick the invite room the bot joins first. -->
     <div v-if="view === 'rooms'" key="rooms" class="desktop-invite-bot-view" :data-swap="swap || undefined" data-testid="desktop-invite-bot-rooms">
       <div class="desktop-invite-bot-head">
         <p class="desktop-invite-bot-title">Invite a bot</p>
         <p class="desktop-invite-bot-sub">Bots join invite rooms, not Git Rooms. Pick the room the bot joins.</p>
       </div>
-      <div class="desktop-invite-bot-list" :aria-busy="roomsState === 'loading' || undefined">
+      <!-- While the rooms load the list itself holds focus, so Escape and Tab act on the panel. -->
+      <div
+        class="desktop-invite-bot-list"
+        :aria-busy="roomsState === 'loading' || undefined"
+        :tabindex="roomsState === 'loading' ? -1 : undefined"
+        :data-invite-autofocus="roomsState === 'loading' || undefined"
+        aria-label="Invite rooms"
+      >
         <!-- Two quiet rows hold the place while the rooms load, so the list does not jump. -->
         <template v-if="roomsState === 'loading'">
           <span class="desktop-invite-bot-skeleton" aria-hidden="true"></span>
           <span class="desktop-invite-bot-skeleton" aria-hidden="true"></span>
-          <span class="desktop-invite-bot-sr" role="status">Checking your rooms…</span>
         </template>
         <p v-else-if="roomsState === 'error'" class="desktop-invite-bot-error" role="alert">{{ roomsError }}</p>
         <p v-else-if="roomsState === 'ready' && !rooms.length" class="desktop-invite-bot-note">You are in no invite room yet.</p>
@@ -169,6 +177,11 @@ const invite = useInviteBotCode({
 
 const summary = computed(() => inviteBotCodeSummary(target.value?.name ?? "", target.value?.admin ?? false));
 const copyState = computed(() => invite.busy.value ? "busy" : invite.copied.value ? "done" : "idle");
+const root = ref<HTMLElement | null>(null);
+/** What a screen reader hears: the rooms loading, then the copy. */
+const spoken = computed(() => roomsState.value === "loading"
+  ? "Checking your rooms…"
+  : invite.copied.value ? "Invite copied. The code works one time." : "");
 
 /** "3 people", and what an invite there does when the viewer is not its admin. */
 function roomMeta(room: DesktopBotInviteRoom): string {
@@ -179,7 +192,7 @@ function roomMeta(room: DesktopBotInviteRoom): string {
 function swapTo(next: "rooms" | "invite"): void {
   swap.value = prefersReducedMotion() ? null : next === "invite" ? "forward" : "back";
   view.value = next;
-  void nextTick(() => document.querySelector<HTMLElement>(".desktop-invite-bot [data-invite-autofocus]")?.focus({ preventScroll: true }));
+  void nextTick(() => root.value?.querySelector<HTMLElement>("[data-invite-autofocus]")?.focus({ preventScroll: true }));
 }
 
 async function loadRooms(): Promise<void> {
@@ -192,7 +205,12 @@ async function loadRooms(): Promise<void> {
   }
   rooms.value = result.rooms;
   roomsState.value = "ready";
-  void nextTick(() => document.querySelector<HTMLElement>(".desktop-invite-bot [data-invite-autofocus]")?.focus({ preventScroll: true }));
+  // Focus moves to the first room only if it is still in the panel (the person did not leave meanwhile).
+  void nextTick(() => {
+    const active = document.activeElement;
+    if (active && active !== document.body && !root.value?.contains(active)) return;
+    root.value?.querySelector<HTMLElement>("[data-invite-autofocus]")?.focus({ preventScroll: true });
+  });
 }
 
 function pickRoom(room: DesktopBotInviteRoom): void {

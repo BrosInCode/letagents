@@ -285,3 +285,16 @@ test("sign-out forgets the codes kept on this computer", async () => {
   assert.equal(storage.get("letagents.roomInviteCodes.v1"), undefined);
   assert.equal(store.codeFor("inv_forget"), null);
 });
+
+test("cancelling an invite the bot already used says so, instead of claiming it was cancelled", async () => {
+  const store = createRoomInvites();
+  const api = (globalThis as any).window.letagentsDesktop.roomInvites;
+  const realCancel = api.cancel;
+  api.cancel = async () => ({ ok: false, code: "INVITE_NOT_OPEN", message: "This invite is already used." });
+  try {
+    listed = [];
+    assert.equal(await store.cancel(invite({ id: "inv_used_meanwhile" })), "This invite is already used.");
+  } finally {
+    api.cancel = realCancel;
+  }
+});

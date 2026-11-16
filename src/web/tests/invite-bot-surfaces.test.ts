@@ -28,7 +28,10 @@ test('the room drawer lets a signed-in member invite a bot with a one-use code t
   assert.match(section, /<InviteBotPicker :model-value="invite\.platform\.value" @update:model-value="pick" \/>/)
   assert.match(section, /<InviteBotMessage :platform="invite\.platform\.value" :code="invite\.created\.value\?\.code \?\? null"/)
   assert.match(section, /data-testid="invite-bot-copy"[\s\S]*?<CopyStateLabel/)
-  assert.match(section, /v-if="invite\.created\.value && cancelInvite"/)
+  assert.match(section, /v-if="invite\.created\.value && cancelInvite && !joined"/)
+  // Copy is spoken once for screen readers; the message itself is not a live region.
+  assert.match(section, /<span class="invite-bot-sr" role="status">\{\{ spoken \}\}<\/span>/)
+  assert.doesNotMatch(source('../../../shared/ui/InviteBotMessage.vue'), /aria-live/)
 })
 
 test('the composer "+" menu opens the drawer at the invite, already open on the bot picker', () => {

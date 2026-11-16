@@ -38,6 +38,8 @@ const index = computed(() => Math.max(0, INVITE_BOT_PLATFORMS.findIndex((choice)
 
 /** A radio group: Left/Right (and Up/Down) move the choice, Home/End jump; focus follows. */
 function onKey(event: KeyboardEvent): void {
+  // Alt+Left (back), Cmd+arrows and Shift+arrows belong to the system.
+  if (event.altKey || event.metaKey || event.ctrlKey || event.shiftKey) return;
   const last = INVITE_BOT_PLATFORMS.length - 1;
   let next: number | null = null;
   if (event.key === "ArrowRight" || event.key === "ArrowDown") next = index.value === last ? 0 : index.value + 1;

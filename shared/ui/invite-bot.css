@@ -116,6 +116,17 @@
   align-items: baseline;
   gap: 7px;
 }
+.invite-bot-joined-check {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  align-self: center;
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
 /* A small live dot while the invite waits for the bot. */
 .invite-bot-live {
   flex: none;

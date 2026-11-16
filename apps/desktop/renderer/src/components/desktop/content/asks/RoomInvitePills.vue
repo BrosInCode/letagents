@@ -1,5 +1,5 @@
 <template>
-  <TransitionGroup v-if="roomIdentifier" tag="div" name="room-invite-pill" class="room-invite-pills" data-testid="room-invite-pills">
+  <TransitionGroup v-if="roomIdentifier" ref="list" tag="div" name="room-invite-pill" class="room-invite-pills" data-testid="room-invite-pills">
     <div
       v-for="pill in visible"
       :key="pill.invite.id"
@@ -49,14 +49,14 @@
       type="button"
       class="room-invite-pills-more"
       data-testid="room-invite-pills-more"
-      @click="expanded = true"
+      @click="showAll"
     >Show {{ hiddenCount }} more {{ hiddenCount === 1 ? "invite" : "invites" }}</button>
     <p v-if="error" key="error" class="agent-ask-bar-error" role="alert">{{ error }}</p>
   </TransitionGroup>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { Link2, X } from "@lucide/vue";
 import CopyStateLabel from "../../../../../../../../shared/ui/CopyStateLabel.vue";
 import { buildInviteBotCodeMessage } from "../../../../../../../../shared/ui/invite-bot";
@@ -75,6 +75,17 @@ const MAX_PILLS = 2;
 const expanded = ref(false);
 const visible = computed(() => expanded.value ? pills.value : pills.value.slice(0, MAX_PILLS));
 const hiddenCount = computed(() => pills.value.length - visible.value.length);
+const list = ref<{ $el?: HTMLElement } | null>(null);
+
+/** The rest unfold; focus goes to the first one that was hidden, so a keyboard user is not dropped. */
+function showAll(): void {
+  const firstHidden = pills.value[MAX_PILLS]?.invite.id;
+  expanded.value = true;
+  void nextTick(() => {
+    const host = list.value?.$el;
+    host?.querySelector<HTMLElement>(`[data-testid="room-invite-pill-${firstHidden}"] button`)?.focus({ preventScroll: true });
+  });
+}
 const copiedId = ref<string | null>(null);
 const cancelling = ref<string | null>(null);
 const error = ref<string | null>(null);

@@ -205,8 +205,9 @@ export function createRoomInvites() {
       return null;
     }
     if (result && !result.ok && result.code === "INVITE_NOT_OPEN") {
+      // It ended meanwhile (used, or cancelled elsewhere): read it again and say so.
       await load(pillRoomOf(invite));
-      return null;
+      return result.message;
     }
     return result && !result.ok ? result.message : "The invite could not be cancelled. Try again.";
   }

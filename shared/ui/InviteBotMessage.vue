@@ -4,7 +4,7 @@
     height of the longest one: picking another bot cross-fades the text and
     never moves the panel. Only the picked one is read by screen readers.
   -->
-  <div class="invite-bot-msg" data-testid="invite-bot-message-text" aria-live="polite">
+  <div class="invite-bot-msg" data-testid="invite-bot-message-text">
     <div
       v-for="choice in INVITE_BOT_PLATFORMS"
       :key="choice.id"
@@ -25,7 +25,7 @@
       ><!-- A new code resolves out of the dots, one letter after another. --><span
         :key="part.text"
         class="invite-bot-msg-code-chars"
-        :data-reveal="(!part.placeholder && choice.id === platform) || undefined"
+        :data-reveal="(!part.placeholder && choice.id === platform && part.text === revealing) || undefined"
       ><span
         v-for="(char, at) in part.text"
         :key="at"
@@ -37,7 +37,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 
 import {
   INVITE_BOT_PLATFORMS,
@@ -53,6 +53,22 @@ const props = defineProps<{
   code: string | null;
   connectorUrl?: string | null;
 }>();
+
+/**
+ * The code that resolves now. A code resolves once, when it is made; coming
+ * back to its bot later shows it at once.
+ */
+const revealing = ref<string | null>(null);
+const shown = new Set<string>();
+let revealTimer: ReturnType<typeof setTimeout> | undefined;
+watch(() => props.code, (code) => {
+  if (!code || shown.has(code)) return;
+  shown.add(code);
+  revealing.value = code;
+  clearTimeout(revealTimer);
+  revealTimer = setTimeout(() => { revealing.value = null; }, 600);
+});
+onBeforeUnmount(() => clearTimeout(revealTimer));
 
 const messages = computed(() => Object.fromEntries(INVITE_BOT_PLATFORMS.map((choice) => [
   choice.id,

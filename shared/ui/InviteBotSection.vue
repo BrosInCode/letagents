@@ -5,11 +5,12 @@
 
     <button
       v-else-if="collapsible && !open"
+      ref="openButton"
       type="button"
       class="invite-bot-button"
       data-variant="primary"
       data-testid="invite-bot-open"
-      @click="open = true"
+      @click="openSection"
     >
       Invite a bot
     </button>
@@ -30,13 +31,14 @@
             data-testid="invite-bot-copy"
             :data-copied="invite.copied.value"
             :aria-disabled="invite.busy.value || undefined"
-            @click="invite.copy()"
+            @click="copy"
           >
-            <CopyStateLabel :state="invite.busy.value ? 'busy' : invite.copied.value ? 'done' : 'idle'" />
+            <!-- Once the bot is in, the used code is history: the button makes a new one. -->
+            <CopyStateLabel :state="invite.busy.value ? 'busy' : invite.copied.value ? 'done' : 'idle'" :idle="joined ? 'New invite' : 'Copy'" />
           </button>
           <Transition name="invite-bot-fade">
             <button
-              v-if="invite.created.value && cancelInvite"
+              v-if="invite.created.value && cancelInvite && !joined"
               type="button"
               class="invite-bot-button"
               data-testid="invite-bot-cancel"
@@ -49,14 +51,19 @@
           <button v-if="collapsible" type="button" class="invite-bot-button invite-bot-done" @click="done">Done</button>
         </div>
         <p v-if="invite.error.value || cancelError" class="invite-bot-error" role="alert">{{ invite.error.value || cancelError }}</p>
-        <!-- One status line that answers in place: the hint, then waiting, or cancelled. -->
+        <!-- One status line that answers in place: the hint, then waiting, joined, or cancelled. -->
         <Transition name="invite-bot-fade" mode="out-in">
-          <p v-if="invite.created.value" key="waiting" class="invite-bot-hint invite-bot-status" data-testid="invite-bot-waiting">
+          <p v-if="invite.created.value && joined" key="joined" class="invite-bot-hint invite-bot-status" data-testid="invite-bot-joined">
+            <svg class="invite-bot-joined-check" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5 10 17 19 7" /></svg>{{ joinedText }}
+          </p>
+          <p v-else-if="invite.created.value" key="waiting" class="invite-bot-hint invite-bot-status" data-testid="invite-bot-waiting">
             <span class="invite-bot-live" aria-hidden="true"></span>Waiting for {{ botName }} to join. The invite works one time and ends in 7 days.
           </p>
           <p v-else-if="cancelled" key="cancelled" class="invite-bot-hint" data-testid="invite-bot-cancelled">The invite was cancelled. Copy makes a new one.</p>
           <p v-else key="hint" class="invite-bot-hint">{{ INVITE_BOT_HINT }}</p>
         </Transition>
+        <!-- Spoken once, for screen readers: the visible words change inside the button. -->
+        <span class="invite-bot-sr" role="status">{{ spoken }}</span>
       </div>
     </div>
   </div>
@@ -93,9 +100,18 @@ const props = withDefaults(defineProps<{
   cancelInvite?: ((inviteId: string) => Promise<string | null>) | null;
   /** Show an "Invite a bot" button first, and Done to close (the web drawer). */
   collapsible?: boolean;
+  /**
+   * What became of the invite Copy made, when the host hears it (the desktop
+   * reads its invite store): "used" shows that the bot joined, or asked.
+   */
+  inviteState?: { state: "open" | "used" | "cancelled" | "expired"; outcome: "admitted" | "requested" | null } | null;
   /** Start with this bot picked (tests). */
   initialPlatform?: InviteBotPlatform | null;
-}>(), { admin: false, gitRoom: false, gitRoomHint: "", cancelInvite: null, collapsible: true, initialPlatform: null });
+}>(), { admin: false, gitRoom: false, gitRoomHint: "", cancelInvite: null, collapsible: true, initialPlatform: null, inviteState: null });
+const emit = defineEmits<{
+  /** Copy made an invite; the host may follow it. */
+  made: [inviteId: string];
+}>();
 
 const open = ref(false);
 const root = ref<HTMLElement | null>(null);
@@ -107,7 +123,9 @@ const invite = useInviteBotCode({
   createInvite: async (platform) => {
     cancelled.value = false;
     cancelError.value = null;
-    return props.createInvite(platform);
+    const made = await props.createInvite(platform);
+    emit("made", made.invite.id);
+    return made;
   },
   initialPlatform: props.initialPlatform,
 });
@@ -117,6 +135,21 @@ const botName = computed(() => {
   const label = INVITE_BOT_PLATFORMS.find((choice) => choice.id === invite.platform.value)?.label ?? "the bot";
   return label === "Other" ? "your bot" : label;
 });
+
+const joined = computed(() => props.inviteState?.state === "used");
+const joinedText = computed(() => props.inviteState?.outcome === "requested"
+  ? `${capital(botName.value)} asked to join. A room admin decides.`
+  : `${capital(botName.value)} joined.`);
+const spoken = computed(() => joined.value ? joinedText.value : invite.copied.value ? "Invite copied. The code works one time." : "");
+
+function capital(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+async function copy(): Promise<void> {
+  if (joined.value) invite.reset();
+  await invite.copy();
+}
 
 async function cancel(): Promise<void> {
   const made = invite.created.value;
@@ -135,15 +168,19 @@ function pick(platform: InviteBotPlatform): void {
   invite.pick(platform);
 }
 
-/** Opens the invite and puts focus on the picked bot (a host's "+" menu). */
+/** Opens the invite and puts focus on the picked bot (its own button, or a host's "+" menu). */
 function openSection(): void {
   open.value = true;
   void nextTick(() => root.value?.querySelector<HTMLElement>('[role="radio"][aria-checked="true"]')?.focus({ preventScroll: true }));
 }
 defineExpose({ openSection });
 
+const openButton = ref<HTMLButtonElement | null>(null);
+
 function done(): void {
   open.value = false;
+  // Focus goes back to the button that opened it.
+  void nextTick(() => openButton.value?.focus({ preventScroll: true }));
   cancelled.value = false;
   cancelError.value = null;
   invite.reset();

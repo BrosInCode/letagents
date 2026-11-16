@@ -5,6 +5,16 @@
  * 300 ms, on the strong ease-out; reduced motion keeps the fades only.
  */
 
+/* Read by screen readers only: a status line ("Invite copied"). */
+.invite-bot-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* ── The bot picker: the room settings' segmented control, four across ── */
 .invite-bot-picker-seg {
   position: relative;
@@ -281,7 +291,7 @@
 
   .invite-bot-msg-layer,
   .invite-bot-msg-layer[data-active],
-  .copy-state-icon > * {
+  .copy-state-icon > :not(.copy-state-spinner) {
     transform: none !important;
   }
 
