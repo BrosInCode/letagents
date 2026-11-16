@@ -2,7 +2,7 @@
   <div ref="panel" class="drawer-section drawer-panel invite-bot-panel" :data-attention="attention || undefined" data-testid="invite-bot-panel">
     <div class="drawer-section-title">
       <h2>Invite a bot</h2>
-      <span>One message for the bot's owner</span>
+      <span>For the bot's owner</span>
     </div>
     <InviteBotSection
       ref="section"
