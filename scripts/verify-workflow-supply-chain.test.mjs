@@ -722,9 +722,10 @@ test("desktop-tests and desktop-tests-windows run every desktop suite, with elec
 
   const shardTotals = [];
   // Only the Windows job splits the daemon suite; desktop-tests runs it whole.
-  for (const [jobName, otherSuites, daemonSharded] of [
-    ["desktop-tests", ["daemon", "renderer"], false],
-    ["desktop-tests-windows", ["build", "renderer"], true],
+  // Each job fills its electron shards from run times measured on its own OS.
+  for (const [jobName, otherSuites, daemonSharded, electronWeights] of [
+    ["desktop-tests", ["daemon", "renderer"], false, "electron-test-weights.json"],
+    ["desktop-tests-windows", ["build", "renderer"], true, "electron-test-weights-windows.json"],
   ]) {
     const suites = [...workflowJobText(workflow, jobName).matchAll(/^ {10}- (.+)$/gm)].map((match) => match[1].trim());
     const shardsOf = (suite) => suites.flatMap((entry) => {
@@ -764,7 +765,7 @@ test("desktop-tests and desktop-tests-windows run every desktop suite, with elec
       );
     }
     assert.ok(
-      testStep.run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" --weights ../../scripts/electron-test-weights.json ${electronFiles} > `),
+      testStep.run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" --weights ../../scripts/${electronWeights} ${electronFiles} > `),
       `the ${jobName} electron shards must select from ${electronFiles}, as test:electron does`,
     );
     assert.ok(shards.length > 0, `${jobName} must run the electron suite`);

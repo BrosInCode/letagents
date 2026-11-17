@@ -536,9 +536,10 @@ jobs:
       fail-fast: false
       matrix:
         # The electron entries name the same shard total as desktop-tests.
-        # Only this job splits the daemon suite: it is the slowest entry here,
-        # and its shards are filled by Windows run times
-        # (scripts/daemon-test-weights.json). Every daemon entry names the
+        # Only this job splits the daemon suite: it is the slowest entry here.
+        # Both suites' shards are filled by Windows run times
+        # (scripts/daemon-test-weights.json and
+        # scripts/electron-test-weights-windows.json). Every daemon entry names the
         # same shard total; change them together.
         suite:
           - build
@@ -663,7 +664,9 @@ jobs:
                 status=1
               fi
               cd apps/desktop
-              node ../../scripts/select-test-shard.mjs --shard "${shard}" --weights ../../scripts/electron-test-weights.json electron/__tests__/*.test.ts > "${RUNNER_TEMP}/electron-shard.txt" || exit 1
+              # Windows run times differ from Linux ones, so this job fills
+              # its shards from its own weights file.
+              node ../../scripts/select-test-shard.mjs --shard "${shard}" --weights ../../scripts/electron-test-weights-windows.json electron/__tests__/*.test.ts > "${RUNNER_TEMP}/electron-shard.txt" || exit 1
               mapfile -t files < <(tr -d '\r' < "${RUNNER_TEMP}/electron-shard.txt")
               if [ "${#files[@]}" -eq 0 ]; then
                 echo "Electron shard ${shard} has no test files." >&2
