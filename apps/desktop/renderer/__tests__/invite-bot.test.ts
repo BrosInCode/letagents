@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { createSSRApp, h } from "vue";
+import { createSSRApp, effectScope, h, nextTick, ref } from "vue";
 import { renderToString } from "@vue/server-renderer";
 import { createServer, type ViteDevServer } from "vite";
 
@@ -13,6 +13,8 @@ import {
   INVITE_BOT_PLATFORMS,
   inviteBotConnectorUrl,
   nextCopyStateLook,
+  useInviteBotSection,
+  type InviteBotInviteState,
 } from "../../../../shared/ui/invite-bot";
 import { remoteConnectorUrl } from "../src/components/desktop/settings/connectors";
 
@@ -60,24 +62,127 @@ test("the Copy label animates its words only when Copy and Copied swap, so the f
   const css = source("../../../../shared/ui/invite-bot-parts.css");
   assert.match(css, /\.copy-state\[data-changed\] \.copy-state-unit \{\s*animation: copy-state-out/);
   assert.match(css, /@keyframes copy-state-out \{\s*from \{\s*opacity: 1;/);
+  // Reduced motion: as specific as the "in" rules (five parts) and later in the file, so the words only cross-fade.
+  assert.match(css, /\.copy-state\[data-changed\]\[data-state="idle"\] \.copy-state-unit\[data-for="idle"\]/);
+  const reduced = css.slice(css.indexOf("@media (prefers-reduced-motion: reduce)"));
+  assert.match(reduced, /\.copy-state\[data-changed\]\[data-state\] \.copy-state-unit\[data-for\],[\s\S]*?animation: none;\s*transition: opacity 150ms ease;/);
   const label = source("../../../../shared/ui/CopyStateLabel.vue");
   assert.match(label, /nextCopyStateLook\(\{ shown: shown\.value, changed: changed\.value \}, next\)/);
   assert.doesNotMatch(label, /changed\.value = true/, "the label never marks a change by itself");
 });
 
-test("the section shows the newest error, follows the host's invite state only for the invite on screen, and drops a code cancelled elsewhere", () => {
+/** The section's state, run for real: a fake server and clipboard, the host's invite state in a ref. */
+function sectionHarness(options: { clipboardWorks?: boolean } = {}) {
+  const made: string[] = [];
+  const cancels: string[] = [];
+  const done: number[] = [];
+  let next = 0;
+  let clipboardWorks = options.clipboardWorks ?? true;
+  let cancelAnswer: string | null = null;
+  const hostState = ref<InviteBotInviteState | null>(null);
+  const scope = effectScope();
+  const section = scope.run(() => useInviteBotSection({
+    room: ref({ roomId: "PTGA-21RN-W0QP", roomName: "sky-owl", connectorUrl: "https://letagents.chat/mcp" }),
+    createInvite: async (platform) => {
+      next += 1;
+      return { invite: { id: `inv_${next}`, platform, kind: "admit", room_id: "PTGA-21RN-W0QP" }, code: `CODE-000${next}` };
+    },
+    cancelInvite: () => async (inviteId) => {
+      cancels.push(inviteId);
+      return cancelAnswer;
+    },
+    inviteState: () => hostState.value,
+    writeClipboard: async () => {
+      if (!clipboardWorks) throw new Error("blocked");
+    },
+    onMade: (inviteId) => { made.push(inviteId); },
+    onDone: () => { done.push(1); },
+  }))!;
+  return {
+    section, made, cancels, done, hostState, scope,
+    setClipboard(works: boolean) { clipboardWorks = works; },
+    answerCancel(sentence: string | null) { cancelAnswer = sentence; },
+  };
+}
+
+test("the section shows one error, the newest: a cancel refusal is not hidden behind an old copy error", async () => {
+  const h = sectionHarness({ clipboardWorks: false });
+  await h.section.copy();
+  assert.equal(h.section.invite.created.value?.code, "CODE-0001", "the code is made even when the clipboard refuses");
+  assert.equal(h.section.error.value, "The message could not be copied. Select it and copy it by hand.");
+
+  // The bot used the code meanwhile; Cancel is refused. The refusal shows, not the old copy error.
+  h.answerCancel("This invite is already used.");
+  await h.section.cancel();
+  assert.deepEqual(h.cancels, ["inv_1"]);
+  assert.equal(h.section.error.value, "This invite is already used.");
+  assert.equal(h.section.invite.created.value?.code, "CODE-0001", "a refused cancel keeps the code on screen");
+
+  // Copy again: the cancel refusal goes; a copy that works shows no error.
+  h.setClipboard(true);
+  await h.section.copy();
+  assert.equal(h.section.error.value, null);
+  h.scope.stop();
+});
+
+test("joined is about the invite on screen; New invite makes a fresh code; Done tells the host", async () => {
+  const h = sectionHarness();
+  h.hostState.value = { state: "used", outcome: "admitted" };
+  assert.equal(h.section.joined.value, false, "no invite on screen, so nothing joined");
+
+  await h.section.copy();
+  h.hostState.value = { state: "used", outcome: "admitted" };
+  assert.equal(h.section.joined.value, true);
+
+  // "New invite": Copy on a joined invite starts over with a new code.
+  await h.section.copy();
+  assert.deepEqual(h.made, ["inv_1", "inv_2"]);
+  assert.equal(h.section.invite.created.value?.code, "CODE-0002");
+
+  h.section.close();
+  assert.equal(h.section.invite.created.value, null);
+  assert.equal(h.section.joined.value, false, "a closed section shows nothing old");
+  assert.deepEqual(h.done, [1]);
+  h.scope.stop();
+});
+
+test("a code cancelled elsewhere goes, also while another bot is picked, so it never comes back", async () => {
+  const h = sectionHarness();
+  await h.section.copy();
+  h.hostState.value = { state: "open", outcome: null };
+  h.section.pick("chatgpt");
+  assert.equal(h.section.invite.created.value, null, "another bot shows no code");
+
+  h.hostState.value = { state: "cancelled", outcome: null };
+  await nextTick();
+  h.section.pick("grok");
+  assert.equal(h.section.invite.created.value, null, "the cancelled code does not come back with Grok Bot");
+  assert.equal(h.section.invite.lastMade.value, null);
+
+  // On screen when it is cancelled elsewhere: the code goes and the section says so.
+  await h.section.copy();
+  h.hostState.value = { state: "open", outcome: null };
+  await nextTick();
+  h.hostState.value = { state: "cancelled", outcome: null };
+  await nextTick();
+  assert.equal(h.section.invite.created.value, null);
+  assert.equal(h.section.cancelled.value, true);
+
+  // Its own cancel: the code goes too.
+  await h.section.copy();
+  h.answerCancel(null);
+  await h.section.cancel();
+  assert.equal(h.section.invite.created.value, null);
+  assert.equal(h.section.cancelled.value, true);
+  assert.equal(h.section.error.value, null);
+  h.scope.stop();
+});
+
+test("the section component uses the shared state and shows its one error line", () => {
   const section = source("../../../../shared/ui/InviteBotSection.vue");
-  // One error line: a cancel refusal ("This invite is already used.") is not hidden behind an old copy error.
-  assert.match(section, /const error = computed\(\(\) => cancelError\.value \?\? invite\.error\.value\);/);
+  assert.match(section, /const section = useInviteBotSection\(\{/);
   assert.match(section, /<p v-if="error" class="invite-bot-error" role="alert" data-testid="invite-bot-error">\{\{ error \}\}<\/p>/);
-  assert.match(section, /async function copy\(\): Promise<void> \{\s*cancelError\.value = null;/);
-  assert.match(section, /if \(!made \|\| !props\.cancelInvite \|\| cancelling\.value\) return;\s*invite\.error\.value = null;/);
-  // "Joined" is about the invite on screen; a closed or fresh section says nothing old.
-  assert.match(section, /const joined = computed\(\(\) => invite\.created\.value !== null && props\.inviteState\?\.state === "used"\);/);
-  // Cancelled on another device: the code goes and the section says so.
-  assert.match(section, /watch\(\(\) => props\.inviteState\?\.state, \(state\) => \{\s*if \(state !== "cancelled" \|\| !invite\.created\.value\) return;\s*invite\.reset\(\);\s*cancelled\.value = true;/);
-  // Done tells the host, so it stops following.
-  assert.match(section, /invite\.reset\(\);\s*emit\("done"\);\s*\}/);
+  assert.match(section, /onDone: \(\) => emit\("done"\)/);
 });
 
 let vite: ViteDevServer;

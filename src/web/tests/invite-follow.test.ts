@@ -10,6 +10,8 @@ type Listener = (event: { data?: string }) => void
 class FakeStream {
   listeners = new Map<string, Listener[]>()
   closed = false
+  /** 0 connecting, 1 open, 2 closed (the browser gave up). */
+  readyState = 0
   addEventListener(type: string, listener: Listener) {
     this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener])
   }
@@ -57,6 +59,7 @@ function harness(read: (room: string, id: string) => Promise<unknown> = async ()
   const streams: FakeStream[] = []
   const reads: string[] = []
   const win = new FakeWindow()
+  const timers: Array<{ run: () => void; ms: number; cleared: boolean }> = []
   const scope = effectScope()
   const followed = scope.run(() => useFollowedRoomInvite(() => 'PTGA-21RN-W0QP', {
     openStream: () => {
@@ -69,8 +72,14 @@ function harness(read: (room: string, id: string) => Promise<unknown> = async ()
       return (await read(room, id)) as never
     },
     focusTarget: win,
+    setTimer: (run, ms) => {
+      const timer = { run, ms, cleared: false }
+      timers.push(timer)
+      return timer
+    },
+    clearTimer: (timer) => { (timer as { cleared: boolean }).cleared = true },
   }))!
-  return { followed, streams, reads, win, scope }
+  return { followed, streams, reads, win, timers, scope }
 }
 
 test('a waiting invite hears the join from the account stream, then stops listening', async () => {
@@ -160,4 +169,63 @@ test('a refused cancel names the invite, so the drawer learns it was used', () =
   assert.equal(inviteFromRefusal(refusal)?.state, 'used')
   assert.equal(inviteFromRefusal(new Error('offline')), null)
   assert.equal(inviteFromRefusal(null), null)
+})
+
+test('a late read cannot undo a join the stream already brought', async () => {
+  let answer!: (value: unknown) => void
+  const { followed, streams, win } = harness(() => new Promise((resolve) => { answer = resolve }))
+  followed.follow(invite('inv_9', 'open') as never)
+  win.focus()
+  streams[0]!.fire('room_invite', { invite: invite('inv_9', 'used', 'admitted') })
+  assert.equal(followed.invite.value?.state, 'used')
+  // The read started before the join was saved, and lands after the frame.
+  answer(invite('inv_9', 'open'))
+  await settle()
+  assert.equal(followed.invite.value?.state, 'used', 'an ended invite never opens again')
+})
+
+test('an invite made after the drawer closed starts nothing', () => {
+  const { followed, streams, win, scope } = harness()
+  scope.stop()
+  followed.follow(invite('inv_10', 'open') as never)
+  assert.equal(streams.length, 0)
+  assert.equal(win.listeners.size, 0)
+  assert.equal(followed.invite.value, null)
+})
+
+test('a stream the browser gave up on opens again after a growing wait, or at once when the window comes back', async () => {
+  const { followed, streams, reads, win, timers } = harness(async () => invite('inv_11', 'open'))
+  followed.follow(invite('inv_11', 'open') as never)
+
+  // Reconnecting by itself (still connecting): nothing to do, the next "open" reads.
+  streams[0]!.fire('error')
+  assert.equal(timers.length, 0)
+
+  // A 502 during a deploy: the browser closes the stream for good.
+  streams[0]!.readyState = 2
+  streams[0]!.fire('error')
+  assert.equal(streams[0]!.closed, true)
+  assert.deepEqual(timers.map((timer) => timer.ms), [2_000])
+  timers[0]!.run()
+  assert.equal(streams.length, 2, 'opened again after the wait')
+
+  streams[1]!.readyState = 2
+  streams[1]!.fire('error')
+  assert.deepEqual(timers.map((timer) => timer.ms), [2_000, 5_000], 'the next wait is longer')
+
+  // The person comes back to the window: the stream opens now, and its "open" reads the invite.
+  win.focus()
+  assert.equal(streams.length, 3)
+  assert.equal(timers[1]!.cleared, true)
+  streams[2]!.fire('open')
+  await settle()
+  assert.equal(reads.length, 1)
+
+  // A good open resets the waits; an ended invite clears any pending one.
+  streams[2]!.readyState = 2
+  streams[2]!.fire('error')
+  assert.equal(timers.at(-1)!.ms, 2_000)
+  followed.update(invite('inv_11', 'used', 'admitted') as never)
+  assert.equal(timers.at(-1)!.cleared, true)
+  assert.equal(win.listeners.size, 0)
 })

@@ -73,7 +73,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, ref } from "vue";
 
 import CopyStateLabel from "./CopyStateLabel.vue";
 import InviteBotMessage from "./InviteBotMessage.vue";
@@ -83,8 +83,9 @@ import {
   INVITE_BOT_HINT,
   INVITE_BOT_PLATFORMS,
   inviteBotCodeSummary,
-  useInviteBotCode,
+  useInviteBotSection,
   type InviteBotCreated,
+  type InviteBotInviteState,
   type InviteBotPlatform,
 } from "./invite-bot";
 
@@ -109,7 +110,7 @@ const props = withDefaults(defineProps<{
    * "used" shows that the bot joined, or asked; "cancelled" (on another
    * device) drops the code.
    */
-  inviteState?: { state: "open" | "used" | "cancelled" | "expired"; outcome: "admitted" | "requested" | null } | null;
+  inviteState?: InviteBotInviteState | null;
   /** Start with this bot picked (tests). */
   initialPlatform?: InviteBotPlatform | null;
 }>(), { admin: false, gitRoom: false, gitRoomHint: "", cancelInvite: null, collapsible: true, initialPlatform: null, inviteState: null });
@@ -122,20 +123,16 @@ const emit = defineEmits<{
 
 const open = ref(false);
 const root = ref<HTMLElement | null>(null);
-const cancelling = ref(false);
-const cancelled = ref(false);
-const cancelError = ref<string | null>(null);
-const invite = useInviteBotCode({
+const section = useInviteBotSection({
   room: computed(() => props.room),
-  createInvite: async (platform) => {
-    cancelled.value = false;
-    cancelError.value = null;
-    const made = await props.createInvite(platform);
-    emit("made", made.invite.id);
-    return made;
-  },
+  createInvite: (platform) => props.createInvite(platform),
+  cancelInvite: () => props.cancelInvite,
+  inviteState: () => props.inviteState,
   initialPlatform: props.initialPlatform,
+  onMade: (inviteId) => emit("made", inviteId),
+  onDone: () => emit("done"),
 });
+const { invite, cancelling, cancelled, joined, error, copy, cancel, pick } = section;
 
 const closedLine = computed(() => props.admin
   ? "A one-use code that lets a bot into this room."
@@ -146,16 +143,6 @@ const botName = computed(() => {
   return label === "Other" ? "your bot" : label;
 });
 
-// The host's state is about the invite on screen; a closed or new section shows none.
-const joined = computed(() => invite.created.value !== null && props.inviteState?.state === "used");
-const error = computed(() => cancelError.value ?? invite.error.value);
-
-// Cancelled on another device: the code no longer works, so it goes.
-watch(() => props.inviteState?.state, (state) => {
-  if (state !== "cancelled" || !invite.created.value) return;
-  invite.reset();
-  cancelled.value = true;
-});
 const joinedText = computed(() => props.inviteState?.outcome === "requested"
   ? `${capital(botName.value)} asked to join. A room admin decides.`
   : `${capital(botName.value)} joined.`);
@@ -163,30 +150,6 @@ const spoken = computed(() => joined.value ? joinedText.value : invite.copied.va
 
 function capital(text: string): string {
   return text.charAt(0).toUpperCase() + text.slice(1);
-}
-
-async function copy(): Promise<void> {
-  cancelError.value = null;
-  if (joined.value) invite.reset();
-  await invite.copy();
-}
-
-async function cancel(): Promise<void> {
-  const made = invite.created.value;
-  if (!made || !props.cancelInvite || cancelling.value) return;
-  invite.error.value = null;
-  cancelling.value = true;
-  cancelError.value = await props.cancelInvite(made.invite.id);
-  cancelling.value = false;
-  if (!cancelError.value) {
-    invite.reset();
-    cancelled.value = true;
-  }
-}
-
-function pick(platform: InviteBotPlatform): void {
-  cancelled.value = false;
-  invite.pick(platform);
 }
 
 /** Opens the invite and puts focus on the picked bot (its own button, or a host's "+" menu). */
@@ -202,10 +165,7 @@ function done(): void {
   open.value = false;
   // Focus goes back to the button that opened it.
   void nextTick(() => openButton.value?.focus({ preventScroll: true }));
-  cancelled.value = false;
-  cancelError.value = null;
-  invite.reset();
-  emit("done");
+  section.close();
 }
 </script>
 
