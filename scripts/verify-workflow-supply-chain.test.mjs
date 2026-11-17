@@ -745,9 +745,9 @@ test("desktop-tests and desktop-tests-windows run every desktop suite, with elec
     for (const name of suiteScripts) {
       const run = `${testStep.run}\n`;
       const ran = name === "test:electron"
-        ? run.includes("npm run test:electron:files -- ")
+        ? run.includes('npm run test:electron:files -- "${files[@]}"')
         : name === "test:daemon" && daemonSharded
-          ? run.includes("npm run test:daemon:files -- ")
+          ? run.includes('npm run test:daemon:files -- "${files[@]}"')
           : [`npm --prefix apps/desktop run ${name}\n`, `npm --prefix apps/desktop run ${name} ||`].some((command) => run.includes(command));
       assert.ok(ran, `${jobName} must run ${name}`);
     }
@@ -762,6 +762,12 @@ test("desktop-tests and desktop-tests-windows run every desktop suite, with elec
       assert.ok(
         testStep.run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" --weights ../../scripts/daemon-test-weights.json ${daemonFiles} > `),
         `the ${jobName} daemon shards must select from ${daemonFiles}, as test:daemon does`,
+      );
+      // The sealed pipe addon's own tests run in exactly one daemon shard.
+      assert.match(
+        testStep.run,
+        /\n\s*if \[ "\$\{shard%%\/\*\}" = "1" \]; then\n\s*node --test [^\n]*seal\.test\.mjs [^\n]*daemon-pipe\.windows\.test\.mjs/,
+        `the first ${jobName} daemon shard must run the sealed pipe tests`,
       );
     }
     assert.ok(
