@@ -779,15 +779,15 @@ jobs:
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/ticket-key-detectors.test.ts src/api/__tests__/repo-event-task-resolution.test.ts src/api/__tests__/ticket-connectors-db.test.ts
 
       - name: Test room history summaries
-        if: matrix.group == 3
+        if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-history-summary.test.ts src/api/__tests__/room-history-summary-routes.test.ts src/api/__tests__/room-history-summary-db.test.ts
 
       - name: Test tracker connections, rules and the workflow effect journal
-        if: matrix.group == 2
+        if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-connections-db.test.ts src/api/__tests__/tracker-sync-db.test.ts src/api/__tests__/workflow-effect-db-integration.test.ts src/api/__tests__/tracker-rules-db.test.ts src/api/__tests__/tracker-jev-db.test.ts
 
       - name: Test room members, join requests and invites
-        if: matrix.group == 2
+        if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-members-routes.test.ts src/api/__tests__/room-members-db.test.ts src/api/__tests__/room-members-enforcement-db.test.ts src/api/__tests__/room-invites-db.test.ts
 
       - name: Test live demos (hub, sockets, saved marks)

@@ -113,7 +113,8 @@ export function codexMcpWorkplaceConfigOverrides(cwd: string): string[] {
   return [`mcp_servers.letagents.cwd=${JSON.stringify(cwd)}`];
 }
 
-export function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Promise<unknown> {
+/** `deadlineMs` exists for tests; the app always uses the platform deadline. */
+export function readMcpRuntimeContract(entryPath: string, apiUrl?: string, deadlineMs = MCP_RUNTIME_CONTRACT_DEADLINE_MS): Promise<unknown> {
   const startedAt = Date.now();
   return new Promise((resolve, reject) => {
     let deadlineExpired = false;
@@ -141,7 +142,7 @@ export function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Prom
       if (deadlineExpired) {
         // Timeout cleanup can discard unread stdout from a child that already
         // exited successfully while this process's event loop was delayed.
-        return reject(Object.assign(new Error(`The verified LetAgents MCP runtime contract exceeded its ${process.platform === "win32" ? "thirty" : "eight"}-second deadline. Elapsed: ${Date.now() - startedAt}ms.`), { transientProviderStart: true }));
+        return reject(Object.assign(new Error(`The verified LetAgents MCP runtime contract exceeded its ${deadlineMs / 1000}-second deadline. Elapsed: ${Date.now() - startedAt}ms.`), { transientProviderStart: true }));
       }
       try { resolve(JSON.parse(stdout)); }
       catch { reject(new Error("The verified LetAgents MCP runtime contract is malformed.")); }
@@ -155,7 +156,7 @@ export function readMcpRuntimeContract(entryPath: string, apiUrl?: string): Prom
       child.stdout?.destroy();
       child.stderr?.destroy();
       if (child.exitCode === null && child.signalCode === null) killedAtDeadline = child.kill("SIGKILL");
-    }, MCP_RUNTIME_CONTRACT_DEADLINE_MS);
+    }, deadlineMs);
     deadline.unref();
     child.stdin?.end();
   });

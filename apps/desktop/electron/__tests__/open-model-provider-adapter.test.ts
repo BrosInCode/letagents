@@ -4978,7 +4978,35 @@ const OPEN_MODEL_SESSION_AFTER_EXIT = {
       { info: { id: `assistant-${ordinal}-next`, role: "assistant", parentID: turnId, time: { created: 12 } }, parts: [] }] },
 } as const;
 
-for (const [left, session] of Object.entries(OPEN_MODEL_SESSION_AFTER_EXIT)) {
+test("an earlier process's session is read to the same answer or reason for every kind of turn it kept", async () => {
+  const { adapter, handle, harness, runtimeRoot } = await spawnAdapter();
+  try {
+    for (const [left, session] of Object.entries(OPEN_MODEL_SESSION_AFTER_EXIT)) {
+      harness.setTranscriptFactories([(turnId) => [userMessage(turnId), ...session.assistants(turnId, 1)]]);
+      const result = await adapter.recoverRoomTurn(handle, { inboxItemId: `inbox-${left}`, providerTurnId: "turn-recovery",
+        originProcessEnded: true, providerContinuationId: "session-open-model-earlier" });
+      if (session.settles === "acknowledged") {
+        assert.deepEqual([result.outcome, result.text], ["reply", "Recovered 1."], `${left}: the kept answer is the answer`);
+        continue;
+      }
+      assert.equal((result as { providerContinuationId?: string }).providerContinuationId, "session-open-model-earlier", `${left}: the failure names the session that ran the turn`);
+      assert.equal(result.text, null, left);
+      assert.equal(result.outcome, session.reason === PROCESS_ENDED_DURING_TURN ? "interrupted" : "failed", left);
+      if (typeof session.reason === "string") assert.equal(result.error, session.reason, left);
+      else assert.match(result.error ?? "", session.reason, left);
+    }
+    assert.equal(harness.promptBodies.length, 0, "reading an earlier session never prompts the model");
+  } finally {
+    await rm(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+// The full daemon run is slow (about 18 s a case on Windows), so it covers one
+// case for each way a message settles: answered, failed with the provider's
+// reason, and cut off by the exit. The test above checks every kind of turn.
+const OPEN_MODEL_SESSION_AFTER_EXIT_DAEMON_CASES = ["its answer", "the provider's error", "nothing but the prompt"] as const;
+for (const left of OPEN_MODEL_SESSION_AFTER_EXIT_DAEMON_CASES) {
+  const session = OPEN_MODEL_SESSION_AFTER_EXIT[left];
   test(`an Open Model agent whose process ends during two turns in a row, leaving ${left} in the session, settles both without a person and answers its next message`, async () => {
     const { ACTIVITY_RECORD_CONTINUED_NOTICE } = await import(new URL("../../daemon/runtime-recovery-journal.ts", import.meta.url).href);
     const agent = await openModelDaemonFixture();
