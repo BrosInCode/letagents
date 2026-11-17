@@ -219,3 +219,21 @@ export function useInviteBotCode(options: InviteBotCodeOptions) {
 }
 
 export type InviteBotCode = ReturnType<typeof useInviteBotCode>;
+
+/** What the Copy label shows: "⧉ Copy", the same unit with a spinner, or "✓ Copied". */
+export type CopyStateLook = "idle" | "busy" | "done";
+
+/**
+ * The Copy label's next look. The words animate only from the first time the
+ * shown unit swaps ("⧉ Copy" and "✓ Copied"). A spinner coming or going keeps
+ * the "Copy" unit, so it starts nothing: if it did, the hidden "✓ Copied"
+ * would play its leave animation from full view, a false "Copied" while the
+ * code is still being made.
+ */
+export function nextCopyStateLook(
+  current: { shown: CopyStateLook; changed: boolean },
+  next: CopyStateLook,
+): { shown: CopyStateLook; changed: boolean } {
+  const unit = (look: CopyStateLook) => look === "done" ? "done" : "copy";
+  return { shown: next, changed: current.changed || unit(current.shown) !== unit(next) };
+}

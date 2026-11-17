@@ -184,6 +184,19 @@ export async function listOpenRoomInvites(makerAccountId: string, roomId: string
   return result.rows.map(toRoomInvite);
 }
 
+/**
+ * One of the maker's own invites, in any state, that shows in this room (its
+ * room, or the room it was made from). The maker's app reads it after a gap
+ * in the account stream, to learn whether the bot came in meanwhile.
+ */
+export async function getOwnRoomInvite(makerAccountId: string, roomId: string, inviteId: string): Promise<RoomInvite | null> {
+  const result = await pool.query<StoredInvite>(`${INVITE_SELECT}
+    WHERE invite.id = $1 AND invite.created_by = $2 AND (invite.room_id = $3 OR invite.origin_room_id = $3)
+      AND invite.kind IS NOT NULL`, [inviteId, makerAccountId, roomId]);
+  const row = result.rows[0];
+  return row ? toRoomInvite(row) : null;
+}
+
 export type RoomInviteCancellation =
   | { kind: 'cancelled'; invite: RoomInvite }
   | { kind: 'not_open'; invite: RoomInvite }

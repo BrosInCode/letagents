@@ -2,10 +2,11 @@
   <!--
     "⧉ Copy" and "✓ Copied" are two units in one grid cell, each centred, so
     the button keeps one width and neither word sits off to the side. After
-    the first change the old unit leaves upward and the new one rises in once
+    the first swap the old unit leaves upward and the new one rises in once
     it is gone; the check pops in. While the server makes the code only the
     copy mark turns into a spinner, and only when that takes longer than a
-    blink, so a fast answer goes straight from Copy to Copied.
+    blink, so a fast answer goes straight from Copy to Copied. A spinner
+    alone swaps no unit, so it starts no word animation.
   -->
   <span class="copy-state" :data-state="shown" :data-changed="changed || undefined">
     <span class="copy-state-unit" data-for="idle" :aria-hidden="shown === 'done' || undefined">
@@ -24,6 +25,7 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from "vue";
+import { nextCopyStateLook, type CopyStateLook } from "./invite-bot";
 import "./invite-bot-parts.css";
 
 const props = withDefaults(defineProps<{
@@ -34,16 +36,21 @@ const props = withDefaults(defineProps<{
   busyDelayMs?: number;
 }>(), { idle: "Copy", done: "Copied", busyDelayMs: 160 });
 
-const shown = ref(props.state);
-/** The words animate only after the first change, never on first paint. */
+const shown = ref<CopyStateLook>(props.state);
+/** The words animate only once "Copy" and "Copied" have swapped, never on first paint. */
 const changed = ref(false);
 let timer: ReturnType<typeof setTimeout> | undefined;
 
+function show(next: CopyStateLook): void {
+  const look = nextCopyStateLook({ shown: shown.value, changed: changed.value }, next);
+  shown.value = look.shown;
+  changed.value = look.changed;
+}
+
 watch(() => props.state, (state) => {
   clearTimeout(timer);
-  changed.value = true;
-  if (state === "busy") timer = setTimeout(() => { shown.value = "busy"; }, props.busyDelayMs);
-  else shown.value = state;
+  if (state === "busy") timer = setTimeout(() => show("busy"), props.busyDelayMs);
+  else show(state);
 });
 onBeforeUnmount(() => clearTimeout(timer));
 </script>

@@ -52,7 +52,8 @@
           </Transition>
           <button v-if="collapsible" type="button" class="invite-bot-button invite-bot-done" @click="done">Done</button>
         </div>
-        <p v-if="invite.error.value || cancelError" class="invite-bot-error" role="alert">{{ invite.error.value || cancelError }}</p>
+        <!-- One error at a time, the newest: Copy clears Cancel's, and Cancel clears Copy's. -->
+        <p v-if="error" class="invite-bot-error" role="alert" data-testid="invite-bot-error">{{ error }}</p>
         <!-- One status line that answers in place: the hint, then waiting, joined, or cancelled. -->
         <Transition name="invite-bot-fade" mode="out-in">
           <p v-if="invite.created.value && joined" key="joined" class="invite-bot-hint invite-bot-status" data-testid="invite-bot-joined">
@@ -72,7 +73,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 
 import CopyStateLabel from "./CopyStateLabel.vue";
 import InviteBotMessage from "./InviteBotMessage.vue";
@@ -104,7 +105,9 @@ const props = withDefaults(defineProps<{
   collapsible?: boolean;
   /**
    * What became of the invite Copy made, when the host hears it (the desktop
-   * reads its invite store): "used" shows that the bot joined, or asked.
+   * reads its invite store; the web drawer follows the account stream):
+   * "used" shows that the bot joined, or asked; "cancelled" (on another
+   * device) drops the code.
    */
   inviteState?: { state: "open" | "used" | "cancelled" | "expired"; outcome: "admitted" | "requested" | null } | null;
   /** Start with this bot picked (tests). */
@@ -113,6 +116,8 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   /** Copy made an invite; the host may follow it. */
   made: [inviteId: string];
+  /** Done closed the section; the host may stop following the invite. */
+  done: [];
 }>();
 
 const open = ref(false);
@@ -141,7 +146,16 @@ const botName = computed(() => {
   return label === "Other" ? "your bot" : label;
 });
 
-const joined = computed(() => props.inviteState?.state === "used");
+// The host's state is about the invite on screen; a closed or new section shows none.
+const joined = computed(() => invite.created.value !== null && props.inviteState?.state === "used");
+const error = computed(() => cancelError.value ?? invite.error.value);
+
+// Cancelled on another device: the code no longer works, so it goes.
+watch(() => props.inviteState?.state, (state) => {
+  if (state !== "cancelled" || !invite.created.value) return;
+  invite.reset();
+  cancelled.value = true;
+});
 const joinedText = computed(() => props.inviteState?.outcome === "requested"
   ? `${capital(botName.value)} asked to join. A room admin decides.`
   : `${capital(botName.value)} joined.`);
@@ -152,6 +166,7 @@ function capital(text: string): string {
 }
 
 async function copy(): Promise<void> {
+  cancelError.value = null;
   if (joined.value) invite.reset();
   await invite.copy();
 }
@@ -159,6 +174,7 @@ async function copy(): Promise<void> {
 async function cancel(): Promise<void> {
   const made = invite.created.value;
   if (!made || !props.cancelInvite || cancelling.value) return;
+  invite.error.value = null;
   cancelling.value = true;
   cancelError.value = await props.cancelInvite(made.invite.id);
   cancelling.value = false;
@@ -189,6 +205,7 @@ function done(): void {
   cancelled.value = false;
   cancelError.value = null;
   invite.reset();
+  emit("done");
 }
 </script>
 

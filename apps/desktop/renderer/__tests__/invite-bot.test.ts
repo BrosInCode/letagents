@@ -12,6 +12,7 @@ import {
   INVITE_BOT_HINT,
   INVITE_BOT_PLATFORMS,
   inviteBotConnectorUrl,
+  nextCopyStateLook,
 } from "../../../../shared/ui/invite-bot";
 import { remoteConnectorUrl } from "../src/components/desktop/settings/connectors";
 
@@ -40,6 +41,43 @@ test("the connector address is this server's /mcp, and the public server when th
   assert.equal(inviteBotConnectorUrl("not a url"), DEFAULT_INVITE_BOT_CONNECTOR_URL);
   assert.equal(remoteConnectorUrl("https://chat.herotel.example"), "https://chat.herotel.example/mcp");
   assert.equal(remoteConnectorUrl(null), "https://letagents.chat/mcp");
+});
+
+test("the Copy label animates its words only when Copy and Copied swap, so the first press shows no false Copied", () => {
+  // The first press: the spinner comes while the code is made. The "Copy" unit stays; nothing animates.
+  let look = nextCopyStateLook({ shown: "idle", changed: false }, "busy");
+  assert.deepEqual(look, { shown: "busy", changed: false });
+  // A failed make goes back to Copy: still the same unit.
+  assert.deepEqual(nextCopyStateLook(look, "idle"), { shown: "idle", changed: false });
+  // The code is copied: the units swap, and from now on the swaps animate.
+  look = nextCopyStateLook(look, "done");
+  assert.deepEqual(look, { shown: "done", changed: true });
+  assert.deepEqual(nextCopyStateLook(look, "idle"), { shown: "idle", changed: true });
+  assert.deepEqual(nextCopyStateLook({ shown: "idle", changed: false }, "done"), { shown: "done", changed: true }, "a fast answer swaps at once");
+
+  // Why it matters: under data-changed every unit runs an animation, and the leave
+  // animation starts from full view. Only a swap may add it, never the spinner.
+  const css = source("../../../../shared/ui/invite-bot-parts.css");
+  assert.match(css, /\.copy-state\[data-changed\] \.copy-state-unit \{\s*animation: copy-state-out/);
+  assert.match(css, /@keyframes copy-state-out \{\s*from \{\s*opacity: 1;/);
+  const label = source("../../../../shared/ui/CopyStateLabel.vue");
+  assert.match(label, /nextCopyStateLook\(\{ shown: shown\.value, changed: changed\.value \}, next\)/);
+  assert.doesNotMatch(label, /changed\.value = true/, "the label never marks a change by itself");
+});
+
+test("the section shows the newest error, follows the host's invite state only for the invite on screen, and drops a code cancelled elsewhere", () => {
+  const section = source("../../../../shared/ui/InviteBotSection.vue");
+  // One error line: a cancel refusal ("This invite is already used.") is not hidden behind an old copy error.
+  assert.match(section, /const error = computed\(\(\) => cancelError\.value \?\? invite\.error\.value\);/);
+  assert.match(section, /<p v-if="error" class="invite-bot-error" role="alert" data-testid="invite-bot-error">\{\{ error \}\}<\/p>/);
+  assert.match(section, /async function copy\(\): Promise<void> \{\s*cancelError\.value = null;/);
+  assert.match(section, /if \(!made \|\| !props\.cancelInvite \|\| cancelling\.value\) return;\s*invite\.error\.value = null;/);
+  // "Joined" is about the invite on screen; a closed or fresh section says nothing old.
+  assert.match(section, /const joined = computed\(\(\) => invite\.created\.value !== null && props\.inviteState\?\.state === "used"\);/);
+  // Cancelled on another device: the code goes and the section says so.
+  assert.match(section, /watch\(\(\) => props\.inviteState\?\.state, \(state\) => \{\s*if \(state !== "cancelled" \|\| !invite\.created\.value\) return;\s*invite\.reset\(\);\s*cancelled\.value = true;/);
+  // Done tells the host, so it stops following.
+  assert.match(section, /invite\.reset\(\);\s*emit\("done"\);\s*\}/);
 });
 
 let vite: ViteDevServer;
