@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
+
+import { evaluateAdvisoryExceptions } from "./dependency-advisory-exceptions.mjs";
 
 const EXPECTED_NPM_VERSION = "11.6.2";
 const MAX_ATTEMPTS = 3;
@@ -134,6 +136,17 @@ async function auditTarget(npmCommand, target, { timeoutMs, retryDelayMs }) {
 
     const auditJson = parseAuditJson(result.stdout);
     const hasVulnerabilities = reportedVulnerabilityCount(auditJson) > 0;
+    if (hasVulnerabilities && !result.timedOut) {
+      // Only a narrow, dated exception lets advisories pass (dependency-advisory-exceptions.mjs).
+      const lockfile = JSON.parse(await readFile(path.join(targetDirectory, "package-lock.json"), "utf8"));
+      const decision = evaluateAdvisoryExceptions(auditJson, lockfile, { now: new Date() });
+      if (decision.allowed) {
+        for (const note of decision.notes) console.warn(`${target}: ${note}`);
+        return;
+      }
+      for (const reason of decision.blocking) console.error(`${target}: ${reason}`);
+      throw new Error(`Dependency advisory audit for ${target} found advisories without an exception.`);
+    }
     const retryable =
       !hasVulnerabilities &&
       (result.timedOut || transientFailurePattern.test(transientDiagnosticText(result, auditJson)));
