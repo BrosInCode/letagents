@@ -1,6 +1,8 @@
 import { sql } from "drizzle-orm";
 import { db } from "./client.js";
 import { parseScopedId } from "./utils.js";
+import { endRoomAgentSession } from "./auth/room-agent-sessions.js";
+import { getSessionConnections } from "./messages/session-connections.js";
 
 export async function isRoomDeleted(roomId: string): Promise<boolean> {
   return Boolean((await db.execute(sql`SELECT 1 FROM deleted_rooms WHERE room_id=${roomId}`)).rows.length);
@@ -142,7 +144,54 @@ export async function getRoomDeletionPreview(roomId: string): Promise<{
   return { children: preview.children, counts: { messages: preview.messages, threads: preview.threads, tasks: preview.tasks, files: preview.files } };
 }
 
+type OpenWorkerSession = {
+  session_id: string; room_id: string; display_name: string; supervisor_grant_id: string | null; process_live: boolean;
+};
+/** A running agent process refreshes its connection every 30 seconds. */
+const PROCESS_LIVE_SQL = sql`(process_seen_at >= now() - interval '90 seconds'
+  AND (process_disconnected_at IS NULL OR process_disconnected_at < process_seen_at)) AS process_live`;
+
+/**
+ * The open worker sessions that keep a room from being deleted: agents that
+ * are there. One that waits for messages now, or whose process holds its
+ * connection, is there; one run by the desktop is there until the desktop
+ * retires it, and the desktop lists it while it is offline. Any other agent
+ * is offline, and the room no longer waits for it.
+ */
+async function splitOpenWorkerSessions(executor: Transaction | typeof db, sessions: readonly OpenWorkerSession[]) {
+  const present: OpenWorkerSession[] = [];
+  const offline: OpenWorkerSession[] = [];
+  const byRoom = new Map<string, OpenWorkerSession[]>();
+  for (const session of sessions) byRoom.set(session.room_id, [...(byRoom.get(session.room_id) ?? []), session]);
+  for (const [roomId, roomSessions] of byRoom) {
+    const { reachable } = await getSessionConnections(executor, roomId, roomSessions.map(session => session.session_id));
+    for (const session of roomSessions) {
+      (session.supervisor_grant_id || session.process_live || reachable.has(session.session_id) ? present : offline).push(session);
+    }
+  }
+  return { present, offline };
+}
+
+function presentAgentsMessage(present: readonly OpenWorkerSession[]): string {
+  const names = [...new Set(present.map(session => session.display_name))];
+  const shown = names.length > 3 ? `${names.slice(0, 3).join(", ")} and ${names.length - 3} more` : names.join(" and ");
+  return `${shown} ${names.length === 1 ? "is" : "are"} still in this room. Disconnect or retire ${names.length === 1 ? "it" : "them"} before deleting the room.`;
+}
+
+const OPEN_WORKER_SESSIONS_OF_ROOM_TREE = (roomId: string) => sql`WITH RECURSIVE affected AS (
+    SELECT id FROM rooms WHERE id=${roomId}
+    UNION
+    SELECT r.id FROM rooms r JOIN affected a ON r.parent_room_id=a.id
+  ) SELECT session_id,room_id,display_name,supervisor_grant_id,${PROCESS_LIVE_SQL} FROM room_agent_sessions
+    WHERE room_id IN (SELECT id FROM affected) AND ended_at IS NULL AND session_kind='worker'`;
+
 export async function deleteRoomData(roomId: string): Promise<{ deleted_room_ids: string[]; parent_room_id: string | null }> {
+  // Offline agents are ended the way they would end if they left by
+  // themselves, so their credentials and open work close cleanly first.
+  const { rows: open } = await db.execute<OpenWorkerSession>(OPEN_WORKER_SESSIONS_OF_ROOM_TREE(roomId));
+  for (const session of (await splitOpenWorkerSessions(db, open)).offline) {
+    await endRoomAgentSession({ session_id: session.session_id, room_id: session.room_id });
+  }
   return db.transaction(async tx => {
     // Lock each parent before discovering its children. FK checks prevent new
     // children, sessions and uploads from arriving after their parent is fenced.
@@ -159,8 +208,10 @@ export async function deleteRoomData(roomId: string): Promise<{ deleted_room_ids
     }
     if (!rooms.length) throw new ContentDeletionError(404, "Room not found.");
     const ids = sql.join(rooms.map(room => sql`${room.id}`), sql`, `);
-    const active = await tx.execute(sql`SELECT 1 FROM room_agent_sessions WHERE room_id IN (${ids}) AND ended_at IS NULL AND session_kind='worker' LIMIT 1`);
-    if (active.rows.length) throw new ContentDeletionError(409, "Disconnect or retire the room's agents before deleting this room.");
+    const active = await tx.execute<OpenWorkerSession>(sql`SELECT session_id,room_id,display_name,supervisor_grant_id,${PROCESS_LIVE_SQL} FROM room_agent_sessions
+      WHERE room_id IN (${ids}) AND ended_at IS NULL AND session_kind='worker' ORDER BY session_id FOR UPDATE`);
+    const { present } = await splitOpenWorkerSessions(tx, active.rows);
+    if (present.length) throw new ContentDeletionError(409, presentAgentsMessage(present));
     const asks = await tx.execute(sql`SELECT 1 FROM agent_asks WHERE room_id IN (${ids}) AND state IN ('open','claimed','on_hold','active','paused') LIMIT 1`);
     if (asks.rows.length) throw new ContentDeletionError(409, "Cancel or end this room's agent requests before deleting it.");
     const deliveries = await tx.execute<{ state: string }>(sql`SELECT state FROM wake_webhook_deliveries WHERE room_id IN (${ids}) FOR UPDATE`);

@@ -36,6 +36,7 @@ import {
   type RoomAgentDeliveryCredentialFence,
   isAgentProcessGone,
   AGENT_PROCESS_EXITED,
+  AGENT_PROCESS_GONE_AFTER_MS,
 } from "../../../shared/agent-presence.js";
 import {
   DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES,
@@ -1366,6 +1367,11 @@ export async function endRoomAgentSession(input: {
    * room. Its shared live activity stays for the next session to replace.
    */
   restarting?: boolean;
+  /**
+   * End the session only if its agent is gone, read again under the row
+   * lock. See endGoneWorkerSessions.
+   */
+  only_if_gone?: { now_ms: number };
 }): Promise<RoomAgentSession | null> {
   const unavailableReceiptTargets: number[] = [];
   const releasedReplyTurns: ReleasedReplyTurn[] = [];
@@ -1394,8 +1400,12 @@ export async function endRoomAgentSession(input: {
     // the same exact current grant fence and session coordinates.
     if (session.ended_at) return toRoomAgentSession(session as RoomAgentSessionRow);
   }
+  if (input.only_if_gone && !(await isWorkerSessionGoneTx(tx, input.session_id, input.only_if_gone.now_ms))) {
+    return null;
+  }
   const now = new Date().toISOString();
   const conditions = [eq(room_agent_sessions.session_id, input.session_id)];
+  if (input.only_if_gone) conditions.push(isNull(room_agent_sessions.ended_at));
   if (input.room_id) {
     conditions.push(eq(room_agent_sessions.room_id, input.room_id));
   }
@@ -1483,6 +1493,81 @@ export async function endRoomAgentSession(input: {
     // concealed from some participants.
     const { queueMessageInfoInvalidation } = await import("../../server/message-info-events.js");
     queueMessageInfoInvalidation(unavailableReceiptRoom, null);
+  }
+  return ended;
+}
+
+/**
+ * Worker sessions that the sweep may end: open, not run by a supervisor
+ * (the desktop retires its own agents), and holding no wake rule that waits
+ * to wake the agent while it is away.
+ */
+const sweepableWorkerSession = (sessionId: ReturnType<typeof sql>) => sql`
+  ${room_agent_sessions.ended_at} IS NULL
+  AND ${room_agent_sessions.session_kind} = 'worker'
+  AND ${room_agent_sessions.supervisor_grant_id} IS NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM agent_wake_rules AS wake_rule
+     WHERE wake_rule.credential_kind = 'agent_session'
+       AND wake_rule.credential_ref = ${sessionId}
+       AND wake_rule.status IN ('active', 'paused', 'pending_confirmation')
+  )`;
+
+async function isWorkerSessionGoneTx(tx: any, sessionId: string, nowMs: number): Promise<boolean> {
+  const [current] = await tx.select().from(room_agent_sessions)
+    .where(and(
+      eq(room_agent_sessions.session_id, sessionId),
+      sweepableWorkerSession(sql`${sessionId}`),
+    ))
+    .for("update")
+    .limit(1);
+  if (!current) return false;
+  const { connected } = await getSessionConnections(tx, current.room_id, [current.session_id], nowMs);
+  return isAgentProcessGone(
+    { ...current, delivery_connected: connected.has(current.session_id) },
+    { now_ms: nowMs },
+  );
+}
+
+/**
+ * Ends the worker sessions whose agent is gone, by the same evidence that
+ * lets another agent take a gone agent's name.
+ *
+ * An agent that is not driven by a supervisor (an MCP client in Claude Code,
+ * Codex or Cursor) rarely says goodbye: its chat is closed, and its session
+ * would stay open for good. Every check that asks "is this agent in the
+ * room?" would then count it, though the room shows it as offline.
+ *
+ * The end is the one an agent makes when it leaves by itself: its task
+ * leases pass to its next session, and an MCP client that comes back
+ * registers again under the same name.
+ *
+ * Returns the ended session ids; the caller closes their process connections.
+ */
+export async function endGoneWorkerSessions(options: { now_ms?: number; limit?: number } = {}): Promise<string[]> {
+  const nowMs = options.now_ms ?? Date.now();
+  // Only rows silent for the shortest window that evidence allows can be
+  // gone; the rest is read again, row by row, under its lock.
+  const silentSince = new Date(nowMs - AGENT_PROCESS_GONE_AFTER_MS).toISOString();
+  const candidates = await db.select({ session_id: room_agent_sessions.session_id })
+    .from(room_agent_sessions)
+    .where(and(
+      sweepableWorkerSession(sql`${room_agent_sessions.session_id}`),
+      sql`GREATEST(
+        ${room_agent_sessions.last_seen_at},
+        COALESCE(${room_agent_sessions.process_seen_at}, ${room_agent_sessions.last_seen_at}),
+        COALESCE(${room_agent_sessions.agent_heard_at}, ${room_agent_sessions.last_seen_at})
+      ) <= ${silentSince}`,
+    ))
+    .orderBy(asc(room_agent_sessions.session_id))
+    .limit(options.limit ?? 100);
+  const ended: string[] = [];
+  for (const candidate of candidates) {
+    const session = await endRoomAgentSession({
+      session_id: candidate.session_id,
+      only_if_gone: { now_ms: nowMs },
+    });
+    if (session) ended.push(session.session_id);
   }
   return ended;
 }
