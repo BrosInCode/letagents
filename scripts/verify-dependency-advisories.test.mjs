@@ -12,7 +12,7 @@ import {
 
 const runnerPath = path.resolve("scripts/verify-dependency-advisories.mjs");
 
-async function createAuditFixture(mode, { lockfile = {}, report = null } = {}) {
+async function createAuditFixture(mode, { lockfile = {}, report = null, lsOutput = "", lsExit = 0, shrinkwrap = false } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "letagents-audit-test-"));
   const packageDirectory = path.join(directory, "package");
   const fakeNpmPath = path.join(directory, "fake-npm.mjs");
@@ -21,6 +21,9 @@ async function createAuditFixture(mode, { lockfile = {}, report = null } = {}) {
   const reportPath = path.join(directory, "audit-report.json");
   await writeFile(path.join(packageDirectory, "package-lock.json"), `${JSON.stringify(lockfile)}\n`);
   if (report) await writeFile(reportPath, JSON.stringify(report));
+  if (shrinkwrap) await writeFile(path.join(packageDirectory, "npm-shrinkwrap.json"), `${JSON.stringify(lockfile)}\n`);
+  // npm ls prints absolute paths; "@DIR@" stands for the package directory.
+  const lsText = lsOutput.replaceAll("@DIR@", packageDirectory);
   await writeFile(
     fakeNpmPath,
     `#!/usr/bin/env node
@@ -29,6 +32,14 @@ const args = process.argv.slice(2);
 if (args.length === 1 && args[0] === "--version") {
   console.log("11.6.2");
   process.exit(0);
+}
+if (args[0] === "ls") {
+  if (JSON.stringify(args.slice(2)) !== JSON.stringify(["--omit=dev", "--package-lock-only", "--all", "--parseable"])) {
+    console.error("unexpected ls arguments: " + JSON.stringify(args));
+    process.exit(9);
+  }
+  if (${JSON.stringify(lsText)}) console.log(${JSON.stringify(lsText)});
+  process.exit(${JSON.stringify(lsExit)});
 }
 if (JSON.stringify(args) !== JSON.stringify([
   "audit",
@@ -65,9 +76,15 @@ if (["vulnerability", "vulnerability-with-transient-text"].includes(${JSON.strin
   }
   process.exit(1);
 }
-if (${JSON.stringify(mode)} === "report") {
+if (${JSON.stringify(mode)}.startsWith("report")) {
   console.log(readFileSync(${JSON.stringify(reportPath)}, "utf8"));
-  process.exit(1);
+  if (${JSON.stringify(mode)} === "report-exit-7") process.exit(7);
+  if (${JSON.stringify(mode)} === "report-hang") {
+    process.on("SIGTERM", () => process.exit(0));
+    setInterval(() => {}, 1000);
+  } else {
+    process.exit(1);
+  }
 }
 if (${JSON.stringify(mode)}.startsWith("http-")) {
   const status = ${JSON.stringify(mode)}.slice(5);
@@ -167,9 +184,11 @@ for (const status of [400, 401, 403]) {
 // ── The narrow, dated exception (dependency-advisory-exceptions.mjs) ──
 
 const PICOMATCH = "GHSA-fc5q-39xc-vjpf";
-const picomatchException = ADVISORY_EXCEPTIONS.find((exception) => exception.advisory === PICOMATCH);
-const endsAt = Date.parse(`${picomatchException.endsOn}T00:00:00Z`);
-const beforeEnd = new Date(endsAt - 60_000);
+// The rule tests use their own copy, so they hold after the real entry is removed or ends.
+const TEST_EXCEPTIONS = [{ advisory: PICOMATCH, packageName: "picomatch", endsOn: "2026-12-18" }];
+const testEndsAt = Date.parse("2026-12-18T00:00:00Z");
+const beforeEnd = new Date(testEndsAt - 60_000);
+const evaluate = (report, lockfile, now = beforeEnd) => evaluateAdvisoryExceptions(report, lockfile, { now, exceptions: TEST_EXCEPTIONS });
 
 function advisory(id, name, range = "<=4.0.7") {
   return { source: 1247710, name, dependency: name, title: "ReDoS", url: `https://github.com/advisories/${id}`, severity: "high", range };
@@ -201,85 +220,115 @@ function devLockfile(extraPackages = {}) {
   };
 }
 
+test("the real list holds exactly the owner's exception: picomatch's GHSA-fc5q-39xc-vjpf until 2026-12-18", () => {
+  assert.deepEqual(
+    ADVISORY_EXCEPTIONS.map(({ advisory: id, packageName, endsOn }) => ({ id, packageName, endsOn })),
+    [{ id: PICOMATCH, packageName: "picomatch", endsOn: "2026-12-18" }],
+  );
+  assert.ok(Object.isFrozen(ADVISORY_EXCEPTIONS) && ADVISORY_EXCEPTIONS.every(Object.isFrozen), "nothing can move the date at run time");
+});
+
 test("the exception lets the picomatch advisory pass only while every picomatch is dev, and says when it ends", () => {
-  const decision = evaluateAdvisoryExceptions(picomatchReport(), devLockfile(), { now: beforeEnd });
+  const decision = evaluate(picomatchReport(), devLockfile());
   assert.equal(decision.allowed, true, decision.blocking.join("\n"));
   assert.deepEqual(decision.blocking, []);
+  assert.deepEqual(decision.used, [{ advisory: PICOMATCH, packageName: "picomatch", paths: ["node_modules/picomatch"] }]);
   assert.equal(decision.notes.length, 1);
   assert.match(decision.notes[0], /Allowing GHSA-fc5q-39xc-vjpf in picomatch \(dev only: node_modules\/picomatch\) until 2026-12-18 00:00 UTC\. This exception ends on that date/);
 });
 
 test("rule 1: only GHSA-fc5q-39xc-vjpf is excepted; any other advisory still fails, also next to it", () => {
-  const other = evaluateAdvisoryExceptions(picomatchReport({ advisoryId: "GHSA-aaaa-bbbb-cccc" }), devLockfile(), { now: beforeEnd });
+  const other = evaluate(picomatchReport({ advisoryId: "GHSA-aaaa-bbbb-cccc" }), devLockfile());
   assert.equal(other.allowed, false);
   assert.match(other.blocking.join("\n"), /picomatch: GHSA-aaaa-bbbb-cccc has no exception\./);
 
   const alongside = picomatchReport({
     extra: { esbuild: { name: "esbuild", severity: "moderate", isDirect: false, via: [advisory("GHSA-67mh-4wv8-2f99", "esbuild", "<=0.24.2")], effects: [], range: "<=0.24.2", nodes: ["node_modules/esbuild"] } },
   });
-  const decision = evaluateAdvisoryExceptions(alongside, devLockfile({ "node_modules/esbuild": { version: "0.24.0", dev: true } }), { now: beforeEnd });
+  const decision = evaluate(alongside, devLockfile({ "node_modules/esbuild": { version: "0.24.0", dev: true } }));
   assert.equal(decision.allowed, false);
   assert.match(decision.blocking.join("\n"), /esbuild: GHSA-67mh-4wv8-2f99 has no exception\./);
 
   const noId = picomatchReport();
   noId.vulnerabilities.picomatch.via = [{ ...advisory(PICOMATCH, "picomatch"), url: "https://example.com/not-an-advisory" }];
-  assert.equal(evaluateAdvisoryExceptions(noId, devLockfile(), { now: beforeEnd }).allowed, false, "an advisory without a GHSA id fails");
+  assert.equal(evaluate(noId, devLockfile()).allowed, false, "an advisory without a GHSA id fails");
+  const unreadable = picomatchReport();
+  unreadable.vulnerabilities.picomatch.via = [advisory(PICOMATCH, "picomatch"), null];
+  assert.match(evaluate(unreadable, devLockfile()).blocking.join("\n"), /picomatch: the report gives an advisory it cannot read\./);
 });
 
-test("rule 2: the advisory is excepted only for picomatch", () => {
-  const decision = evaluateAdvisoryExceptions(picomatchReport({ advisoryPackage: "micromatch" }), devLockfile(), { now: beforeEnd });
+test("rule 2: the advisory is excepted only for picomatch, and only on picomatch's own entry", () => {
+  const decision = evaluate(picomatchReport({ advisoryPackage: "micromatch" }), devLockfile());
   assert.equal(decision.allowed, false);
   assert.match(decision.blocking.join("\n"), /GHSA-fc5q-39xc-vjpf is excepted only for picomatch, not for micromatch\./);
+
+  // The same advisory object, listed on vite's entry, with nodes the lockfile knows: still refused.
+  const misplaced = picomatchReport();
+  misplaced.vulnerabilities.vite.via = [...misplaced.vulnerabilities.vite.via, advisory(PICOMATCH, "picomatch")];
+  misplaced.vulnerabilities.vite.nodes = ["node_modules/picomatch"];
+  assert.match(evaluate(misplaced, devLockfile()).blocking.join("\n"), /GHSA-fc5q-39xc-vjpf is excepted only on picomatch's own entry, not on vite's\./);
+  assert.equal(evaluate(misplaced, devLockfile()).allowed, false);
 });
 
 test("rule 3: a picomatch that is not dev (at any depth), or one the lockfile does not show, fails the audit", () => {
   const nested = devLockfile({ "node_modules/some-runtime-lib/node_modules/picomatch": { version: "4.0.7" } });
-  const runtime = evaluateAdvisoryExceptions(picomatchReport(), nested, { now: beforeEnd });
+  const runtime = evaluate(picomatchReport(), nested);
   assert.equal(runtime.allowed, false);
   assert.match(runtime.blocking.join("\n"), /only while every picomatch in the lockfile is a dev dependency\. Not dev: node_modules\/some-runtime-lib\/node_modules\/picomatch\./);
 
   const devOptional = devLockfile({ "node_modules/picomatch": { version: "4.0.4", devOptional: true } });
-  assert.equal(evaluateAdvisoryExceptions(picomatchReport(), devOptional, { now: beforeEnd }).allowed, false, "devOptional can install in production");
+  assert.equal(evaluate(picomatchReport(), devOptional).allowed, false, "devOptional can install in production");
 
-  assert.equal(evaluateAdvisoryExceptions(picomatchReport(), { packages: {} }, { now: beforeEnd }).allowed, false, "not in the lockfile");
+  assert.equal(evaluate(picomatchReport(), { packages: {} }).allowed, false, "not in the lockfile");
+  assert.equal(evaluate(picomatchReport({ nodes: [] }), { lockfileVersion: 1, dependencies: {} }).allowed, false, "no packages map and no reported nodes");
   assert.equal(
-    evaluateAdvisoryExceptions(picomatchReport({ nodes: ["node_modules/other/node_modules/picomatch"] }), devLockfile(), { now: beforeEnd }).allowed,
+    evaluate(picomatchReport({ nodes: ["node_modules/other/node_modules/picomatch"] }), devLockfile()).allowed,
     false,
     "a reported copy the lockfile does not list",
   );
 });
 
-test("rule 4: the exception ends at 00:00 UTC on its end date, and the reason says so", () => {
-  assert.equal(picomatchException.endsOn, "2026-12-18");
-  assert.equal(evaluateAdvisoryExceptions(picomatchReport(), devLockfile(), { now: new Date(endsAt - 1) }).allowed, true);
-  for (const now of [new Date(endsAt), new Date(endsAt + 30 * 24 * 3600 * 1000)]) {
-    const decision = evaluateAdvisoryExceptions(picomatchReport(), devLockfile(), { now });
+test("rule 4: the exception ends at 00:00 UTC on its end date, after the dev check, and says so", () => {
+  assert.equal(evaluate(picomatchReport(), devLockfile(), new Date(testEndsAt - 1)).allowed, true);
+  for (const now of [new Date(testEndsAt), new Date(testEndsAt + 30 * 24 * 3600 * 1000)]) {
+    const decision = evaluate(picomatchReport(), devLockfile(), now);
     assert.equal(decision.allowed, false);
     assert.match(decision.blocking.join("\n"), /The exception for GHSA-fc5q-39xc-vjpf in picomatch ended on 2026-12-18\. Upgrade picomatch/);
   }
+  const bad = evaluateAdvisoryExceptions(picomatchReport(), devLockfile(), { now: beforeEnd, exceptions: [{ ...TEST_EXCEPTIONS[0], endsOn: "not a date" }] });
+  assert.equal(bad.allowed, false, "an unreadable end date fails closed");
 });
 
-test("a report the exception cannot read fails closed", () => {
-  const now = beforeEnd;
-  assert.equal(evaluateAdvisoryExceptions(null, devLockfile(), { now }).allowed, false);
-  assert.equal(evaluateAdvisoryExceptions({ metadata: { vulnerabilities: { total: 1 } } }, devLockfile(), { now }).allowed, false);
+test("a report the exception cannot trust fails closed", () => {
+  assert.equal(evaluate(null, devLockfile()).allowed, false);
+  assert.equal(evaluate({ metadata: { vulnerabilities: { total: 1 } } }, devLockfile()).allowed, false);
   const dangling = picomatchReport();
   dangling.vulnerabilities.vite.via = ["fdir", "picomatch", "rollup"];
-  assert.match(evaluateAdvisoryExceptions(dangling, devLockfile(), { now }).blocking.join("\n"), /vite: it depends on rollup, which the report does not list\./);
+  assert.match(evaluate(dangling, devLockfile()).blocking.join("\n"), /vite: it depends on rollup, which the report does not list\./);
   const empty = picomatchReport();
   empty.vulnerabilities.fdir.via = [];
-  assert.equal(evaluateAdvisoryExceptions(empty, devLockfile(), { now }).allowed, false);
+  assert.equal(evaluate(empty, devLockfile()).allowed, false);
+  const miscount = picomatchReport();
+  miscount.metadata.vulnerabilities.total = 999;
+  assert.match(evaluate(miscount, devLockfile()).blocking.join("\n"), /counts 999 vulnerabilities but lists 4/);
+  const loop = picomatchReport();
+  loop.vulnerabilities.vite.via = ["vite"];
+  assert.match(evaluate(loop, devLockfile()).blocking.join("\n"), /vite: no advisory explains it/);
 });
+
+// The runner uses the real list and the real clock.
+const realEndsAt = Date.parse(`${ADVISORY_EXCEPTIONS.find((exception) => exception.advisory === PICOMATCH)?.endsOn}T00:00:00Z`);
+const realExceptionOpen = Number.isFinite(realEndsAt) && Date.now() < realEndsAt;
 
 test("the audit runner passes the excepted picomatch report and logs the end date, until that date", async () => {
   const fixture = await createAuditFixture("report", { lockfile: devLockfile(), report: picomatchReport() });
   const result = runFixture(fixture);
-  if (Date.now() < endsAt) {
+  if (realExceptionOpen) {
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stderr, /Allowing GHSA-fc5q-39xc-vjpf in picomatch \(dev only: node_modules\/picomatch\) until 2026-12-18 00:00 UTC/);
   } else {
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /ended on 2026-12-18/);
+    assert.doesNotMatch(result.stderr, /Allowing GHSA-fc5q-39xc-vjpf/);
   }
   assert.equal(await readFile(fixture.countPath, "utf8"), "1", "an advisory report is never retried");
 });
@@ -298,4 +347,43 @@ test("the audit runner still fails the picomatch advisory on a non-dev path, and
   const otherResult = runFixture(other);
   assert.equal(otherResult.status, 1);
   assert.match(otherResult.stderr, /GHSA-aaaa-bbbb-cccc has no exception/);
+});
+
+test("a stale or edited dev flag fails: npm itself must not install picomatch in production", { skip: !realExceptionOpen && "the real exception has ended" }, async () => {
+  const stale = await createAuditFixture("report", {
+    lockfile: devLockfile(),
+    report: picomatchReport(),
+    lsOutput: "@DIR@/node_modules/picomatch",
+  });
+  const staleResult = runFixture(stale);
+  assert.equal(staleResult.status, 1);
+  assert.match(staleResult.stderr, /GHSA-fc5q-39xc-vjpf is excepted only for dev copies, but npm installs picomatch in production: node_modules\/picomatch\./);
+  assert.doesNotMatch(staleResult.stderr, /Allowing GHSA-fc5q-39xc-vjpf/);
+
+  const unlisted = await createAuditFixture("report", { lockfile: devLockfile(), report: picomatchReport(), lsExit: 1 });
+  const unlistedResult = runFixture(unlisted);
+  assert.equal(unlistedResult.status, 1);
+  assert.match(unlistedResult.stderr, /npm could not list where picomatch is installed in production/);
+
+  // The root path alone (no node_modules) is not a production copy.
+  const rootOnly = await createAuditFixture("report", { lockfile: devLockfile(), report: picomatchReport(), lsOutput: "@DIR@" });
+  assert.equal(runFixture(rootOnly).status, 0);
+});
+
+test("only npm's normal advisory answer can meet the exception: other exits, timeouts and a shrinkwrap fail", async () => {
+  const exit7 = await createAuditFixture("report-exit-7", { lockfile: devLockfile(), report: picomatchReport() });
+  const exit7Result = runFixture(exit7);
+  assert.equal(exit7Result.status, 1);
+  assert.match(exit7Result.stderr, /exited with code 7/);
+
+  const hang = await createAuditFixture("report-hang", { lockfile: devLockfile(), report: picomatchReport() });
+  const hangResult = runFixture(hang, { timeoutMs: 1500 });
+  assert.equal(hangResult.status, 1);
+  assert.match(hangResult.stderr, /timed out/);
+  assert.doesNotMatch(hangResult.stderr, /Allowing GHSA-fc5q-39xc-vjpf/);
+
+  const shrinkwrap = await createAuditFixture("report", { lockfile: devLockfile(), report: picomatchReport(), shrinkwrap: true });
+  const shrinkwrapResult = runFixture(shrinkwrap);
+  assert.equal(shrinkwrapResult.status, 1);
+  assert.match(shrinkwrapResult.stderr, /npm-shrinkwrap\.json is present/);
 });

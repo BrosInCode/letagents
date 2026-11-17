@@ -3,10 +3,11 @@
  * (scripts/verify-dependency-advisories.mjs).
  *
  * An exception names one advisory and one package. It holds only while every
- * copy of that package in the audited lockfile is a dev dependency, and only
- * until its end date; after that date the audit fails again. Any advisory
- * without an exception still fails the audit. Add one only with the
- * repository owner's yes, and remove it once a fixed version ships.
+ * copy of that package in the audited lockfile is a dev dependency (the
+ * lockfile's flags here, and npm's own view in the runner), and only until
+ * its end date; after that date the audit fails again. Any advisory without
+ * an exception still fails the audit. Add one only with the repository
+ * owner's yes, and remove it once a fixed version ships.
  */
 
 export const ADVISORY_EXCEPTIONS = Object.freeze([
@@ -43,20 +44,36 @@ function endOf(exception) {
   return Date.parse(`${exception.endsOn}T00:00:00Z`);
 }
 
+/** Whether a listed package reaches an advisory through its `via` chain. */
+function reachesAdvisory(vulnerabilities, name, seen = new Set()) {
+  if (seen.has(name)) return false;
+  seen.add(name);
+  const via = Array.isArray(vulnerabilities[name]?.via) ? vulnerabilities[name].via : [];
+  return via.some((item) => (typeof item === "string"
+    ? Object.hasOwn(vulnerabilities, item) && reachesAdvisory(vulnerabilities, item, seen)
+    : item !== null && typeof item === "object"));
+}
+
 /**
  * Decides whether an `npm audit --json` report that found advisories may
  * pass. It passes only when every advisory in it has an exception that still
- * applies; anything it cannot read fails closed.
+ * applies; anything it cannot read fails closed. The runner then also asks
+ * npm whether it installs the package in production (see `used`).
  *
- * Returns `{ allowed, notes, blocking }`: `notes` say which exceptions were
- * used and when they end, `blocking` says why the audit must fail.
+ * Returns `{ allowed, notes, blocking, used }`: `notes` say which exceptions
+ * were used and when they end, `blocking` says why the audit must fail, and
+ * `used` lists the exceptions the report needed.
  */
 export function evaluateAdvisoryExceptions(auditJson, lockfile, { now, exceptions = ADVISORY_EXCEPTIONS }) {
   const blocking = [];
   const used = new Map();
   const vulnerabilities = auditJson && typeof auditJson === "object" ? auditJson.vulnerabilities : null;
   if (!vulnerabilities || typeof vulnerabilities !== "object" || Object.keys(vulnerabilities).length === 0) {
-    return { allowed: false, notes: [], blocking: ["The audit report lists no vulnerabilities to check, so it fails closed."] };
+    return { allowed: false, notes: [], blocking: ["The audit report lists no vulnerabilities to check, so it fails closed."], used: [] };
+  }
+  const total = auditJson?.metadata?.vulnerabilities?.total;
+  if (total !== Object.keys(vulnerabilities).length) {
+    blocking.push(`The report counts ${total} vulnerabilities but lists ${Object.keys(vulnerabilities).length}, so it fails closed.`);
   }
 
   const advisories = [];
@@ -69,10 +86,17 @@ export function evaluateAdvisoryExceptions(auditJson, lockfile, { now, exception
         if (!Object.hasOwn(vulnerabilities, item)) blocking.push(`${name}: it depends on ${item}, which the report does not list.`);
         continue;
       }
+      if (item === null || typeof item !== "object") {
+        blocking.push(`${name}: the report gives an advisory it cannot read.`);
+        continue;
+      }
       advisories.push({ id: advisoryIdOf(item), packageName: item?.name ?? null, entryName: name, nodes: entry?.nodes });
     }
   }
   if (advisories.length === 0) blocking.push("The report names no advisory, so it fails closed.");
+  for (const name of Object.keys(vulnerabilities)) {
+    if (!reachesAdvisory(vulnerabilities, name)) blocking.push(`${name}: no advisory explains it, so it fails closed.`);
+  }
 
   for (const advisory of advisories) {
     const exception = advisory.id
@@ -82,15 +106,12 @@ export function evaluateAdvisoryExceptions(auditJson, lockfile, { now, exception
       blocking.push(`${advisory.packageName ?? advisory.entryName}: ${advisory.id ?? "an advisory without a GHSA id"} has no exception.`);
       continue;
     }
-    if (advisory.packageName !== exception.packageName || advisory.entryName !== exception.packageName) {
+    if (advisory.packageName !== exception.packageName) {
       blocking.push(`${exception.advisory} is excepted only for ${exception.packageName}, not for ${advisory.packageName ?? advisory.entryName}.`);
       continue;
     }
-    if (!(now.getTime() < endOf(exception))) {
-      blocking.push(
-        `The exception for ${exception.advisory} in ${exception.packageName} ended on ${exception.endsOn}. ` +
-          `Upgrade ${exception.packageName}, or ask the repository owner to decide again.`,
-      );
+    if (advisory.entryName !== exception.packageName) {
+      blocking.push(`${exception.advisory} is excepted only on ${exception.packageName}'s own entry, not on ${advisory.entryName}'s.`);
       continue;
     }
     const paths = lockfilePackagePaths(lockfile, exception.packageName);
@@ -108,11 +129,23 @@ export function evaluateAdvisoryExceptions(auditJson, lockfile, { now, exception
       );
       continue;
     }
+    if (!(now.getTime() < endOf(exception))) {
+      blocking.push(
+        `The exception for ${exception.advisory} in ${exception.packageName} ended on ${exception.endsOn}. ` +
+          `Upgrade ${exception.packageName}, or ask the repository owner to decide again.`,
+      );
+      continue;
+    }
     used.set(exception.advisory, { exception, paths });
   }
 
   const notes = [...used.values()].map(({ exception, paths }) =>
     `Allowing ${exception.advisory} in ${exception.packageName} (dev only: ${paths.join(", ")}) until ${exception.endsOn} 00:00 UTC. ` +
       `This exception ends on that date; remove it once a fixed ${exception.packageName} ships.`);
-  return { allowed: blocking.length === 0 && used.size > 0, notes, blocking };
+  return {
+    allowed: blocking.length === 0 && used.size > 0,
+    notes,
+    blocking,
+    used: [...used.values()].map(({ exception, paths }) => ({ advisory: exception.advisory, packageName: exception.packageName, paths })),
+  };
 }

@@ -111,6 +111,49 @@ async function requirePinnedNpm(npmCommand, timeoutMs) {
   }
 }
 
+/**
+ * Why the advisories in this report may not pass; empty when every one has an
+ * exception that applies. Logs the exceptions it used and their end dates.
+ */
+async function exceptionBlocking(npmCommand, target, targetDirectory, auditJson, timeoutMs) {
+  // npm audits a shrinkwrap file instead of the lockfile; the exception reads only the lockfile.
+  if (await access(path.join(targetDirectory, "npm-shrinkwrap.json")).then(() => true, () => false)) {
+    return ["npm-shrinkwrap.json is present, and the exceptions read only package-lock.json, so it fails closed."];
+  }
+  const lockfile = JSON.parse(await readFile(path.join(targetDirectory, "package-lock.json"), "utf8"));
+  const decision = evaluateAdvisoryExceptions(auditJson, lockfile, { now: new Date() });
+  if (!decision.allowed) return decision.blocking;
+
+  // The lockfile's dev flags can be stale or edited: npm's own view must agree
+  // that no copy is installed in production.
+  const blocking = [];
+  for (const { advisory, packageName } of decision.used) {
+    const listed = await runCommand(
+      npmCommand,
+      ["ls", packageName, "--omit=dev", "--package-lock-only", "--all", "--parseable"],
+      { cwd: targetDirectory, timeoutMs },
+    );
+    if (listed.code !== 0 || listed.signal || listed.timedOut) {
+      blocking.push(`${advisory}: npm could not list where ${packageName} is installed in production, so it fails closed.`);
+      continue;
+    }
+    const production = listed.stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => line.includes("node_modules"));
+    if (production.length > 0) {
+      blocking.push(
+        `${advisory} is excepted only for dev copies, but npm installs ${packageName} in production: ` +
+          `${production.map((line) => path.relative(targetDirectory, line) || line).join(", ")}.`,
+      );
+    }
+  }
+  if (blocking.length === 0) {
+    for (const note of decision.notes) console.warn(`${target}: ${note}`);
+  }
+  return blocking;
+}
+
 async function auditTarget(npmCommand, target, { timeoutMs, retryDelayMs }) {
   const targetDirectory = path.resolve(process.cwd(), target);
   await access(path.join(targetDirectory, "package-lock.json"));
@@ -136,15 +179,12 @@ async function auditTarget(npmCommand, target, { timeoutMs, retryDelayMs }) {
 
     const auditJson = parseAuditJson(result.stdout);
     const hasVulnerabilities = reportedVulnerabilityCount(auditJson) > 0;
-    if (hasVulnerabilities && !result.timedOut) {
-      // Only a narrow, dated exception lets advisories pass (dependency-advisory-exceptions.mjs).
-      const lockfile = JSON.parse(await readFile(path.join(targetDirectory, "package-lock.json"), "utf8"));
-      const decision = evaluateAdvisoryExceptions(auditJson, lockfile, { now: new Date() });
-      if (decision.allowed) {
-        for (const note of decision.notes) console.warn(`${target}: ${note}`);
-        return;
-      }
-      for (const reason of decision.blocking) console.error(`${target}: ${reason}`);
+    // npm audit exits with 1 when it finds advisories. Only that answer, in
+    // full, may meet a narrow, dated exception (dependency-advisory-exceptions.mjs).
+    if (hasVulnerabilities && !result.timedOut && result.code === 1 && !result.signal) {
+      const blocking = await exceptionBlocking(npmCommand, target, targetDirectory, auditJson, timeoutMs);
+      if (blocking.length === 0) return;
+      for (const reason of blocking) console.error(`${target}: ${reason}`);
       throw new Error(`Dependency advisory audit for ${target} found advisories without an exception.`);
     }
     const retryable =
