@@ -11,7 +11,12 @@ import { ProviderContinuationMissingError } from "../main/agents/provider-adapte
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import { assertOwnerPrivateFile } from "./harness.js";
 import { assertProviderHandle, custodialRuntimeContract, createHarness, spawnRequest, flush } from "./codex-provider-adapter.fixture.js";
-import { MCP_RUNTIME_CONTRACT_DEADLINE_MS } from "../main/agents/codex/launch-contract.js";
+import { MCP_RUNTIME_CONTRACT_DEADLINE_MS, readMcpRuntimeContract } from "../main/agents/codex/launch-contract.js";
+
+// The probes below are small scripts, not the real runtime, so they start well
+// inside this deadline. The platform deadline (30 s on Windows) made one test
+// wait for it three times.
+const PROBE_DEADLINE_MS = Math.min(MCP_RUNTIME_CONTRACT_DEADLINE_MS, 5_000);
 
 test("a hard runtime failure prevents bounded room-turn dispatch across the durable callback", async () => {
   for (const failureTiming of ["before", "during-callback"] as const) {
@@ -759,7 +764,10 @@ test("Codex custodial polling reads the selected built executable contract witho
     });
     const harness = createHarness();
     const { resolveMcpRuntime: _resolve, readMcpRuntimeContract: _read, ...nativeDependencies } = harness.dependencies;
-    const adapter = new CodexProviderAdapter({ dependencies: nativeDependencies });
+    const adapter = new CodexProviderAdapter({ dependencies: {
+      ...nativeDependencies,
+      readMcpRuntimeContract: (entryPath, apiUrl) => readMcpRuntimeContract(entryPath, apiUrl, PROBE_DEADLINE_MS),
+    } });
     await writeFile(entry, `process.stdout.write(${JSON.stringify(JSON.stringify({ format: 1, profiles: {} }))});`);
     await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), /does not support custodial_polling_v1/);
     await assert.rejects(adapter.spawn(request), /does not support custodial_polling_v1/, "a matching package version cannot replace contract proof");
@@ -804,7 +812,7 @@ test("Codex custodial polling reads the selected built executable contract witho
         await new Promise((resolve) => setTimeout(resolve, 5));
       }
       writeFileSync(probeReleaseFile, "release");
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, MCP_RUNTIME_CONTRACT_DEADLINE_MS + 200);
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, PROBE_DEADLINE_MS + 200);
       await delayedProbeAssertion;
     }
 
@@ -819,7 +827,7 @@ test("Codex custodial polling reads the selected built executable contract witho
       await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) =>
         error instanceof Error && (error as Error & { transientProviderStart?: boolean }).transientProviderStart === true
         && /signal: SIGKILL/.test(error.message) && !error.message.includes(entry));
-      assert.ok(Date.now() - probeStartedAt < MCP_RUNTIME_CONTRACT_DEADLINE_MS + 7_000, "inherited output pipes must not extend the probe deadline to the descendant's lifetime");
+      assert.ok(Date.now() - probeStartedAt < PROBE_DEADLINE_MS + 7_000, "inherited output pipes must not extend the probe deadline to the descendant's lifetime");
     } finally {
       const descendantPid = Number(await readFile(descendantPidFile, "utf8").catch(() => "0"));
       if (Number.isSafeInteger(descendantPid) && descendantPid > 1) {

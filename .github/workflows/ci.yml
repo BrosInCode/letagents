@@ -527,7 +527,8 @@ jobs:
     needs: dependency-audit
     if: inputs.purpose != 'room-ack-evaluation'
     runs-on: windows-latest
-    # The daemon entry takes about 35 minutes on a Windows runner.
+    # The daemon suite took about 16 minutes as one entry on a Windows runner;
+    # its shards now split that time.
     timeout-minutes: 60
     permissions:
       contents: read
@@ -535,10 +536,17 @@ jobs:
       fail-fast: false
       matrix:
         # The electron entries name the same shard total as desktop-tests.
+        # Only this job splits the daemon suite: it is the slowest entry here.
+        # Both suites' shards are filled by Windows run times
+        # (scripts/daemon-test-weights.json and
+        # scripts/electron-test-weights-windows.json). Every daemon entry names the
+        # same shard total; change them together.
         suite:
           - build
           - renderer
-          - daemon
+          - daemon 1/3
+          - daemon 2/3
+          - daemon 3/3
           - electron 1/3
           - electron 2/3
           - electron 3/3
@@ -609,13 +617,17 @@ jobs:
               npm --prefix apps/desktop run test:renderer || status=1
               npm --prefix apps/desktop run test:packaging || status=1
               ;;
-            daemon)
+            "daemon "*)
+              shard="${SUITE#daemon }"
               # Every daemon pipe client opens the pipe through the sealed
-              # addon (shared/daemon-pipe-native.mjs finds the local build).
-              # Its own tests run here, where Electron is installed, with a
-              # squatter that takes the pipe name first.
+              # addon (shared/daemon-pipe-native.mjs finds the local build),
+              # so every shard builds it. Its own tests run once, in the
+              # first shard, where Electron is installed, with a squatter
+              # that takes the pipe name first.
               node apps/desktop/native/win-daemon-pipe/build.mjs --check || status=1
-              node --test --test-timeout=300000 apps/desktop/native/win-daemon-pipe/seal.test.mjs apps/desktop/native/win-daemon-pipe/daemon-pipe.windows.test.mjs || status=1
+              if [ "${shard%%/*}" = "1" ]; then
+                node --test --test-timeout=300000 apps/desktop/native/win-daemon-pipe/seal.test.mjs apps/desktop/native/win-daemon-pipe/daemon-pipe.windows.test.mjs || status=1
+              fi
               # Daemon tests that read a process birth name the helper
               # (LETAGENTS_TEST_PROCESS_TREE_HELPER); see the electron entries.
               helper_dir="${RUNNER_TEMP//\\//}/process-tree"
@@ -626,7 +638,16 @@ jobs:
               else
                 status=1
               fi
-              npm --prefix apps/desktop run test:daemon || status=1
+              cd apps/desktop
+              node ../../scripts/select-test-shard.mjs --shard "${shard}" --weights ../../scripts/daemon-test-weights.json daemon/__tests__/*.test.ts > "${RUNNER_TEMP}/daemon-shard.txt" || exit 1
+              mapfile -t files < <(tr -d '\r' < "${RUNNER_TEMP}/daemon-shard.txt")
+              if [ "${#files[@]}" -eq 0 ]; then
+                echo "Daemon shard ${shard} has no test files." >&2
+                exit 1
+              fi
+              echo "Daemon shard ${shard} runs ${#files[@]} files:"
+              printf '  %s\n' "${files[@]}"
+              npm run test:daemon:files -- "${files[@]}" || status=1
               ;;
             "electron "*)
               shard="${SUITE#electron }"
@@ -643,7 +664,9 @@ jobs:
                 status=1
               fi
               cd apps/desktop
-              node ../../scripts/select-test-shard.mjs --shard "${shard}" --weights ../../scripts/electron-test-weights.json electron/__tests__/*.test.ts > "${RUNNER_TEMP}/electron-shard.txt" || exit 1
+              # Windows run times differ from Linux ones, so this job fills
+              # its shards from its own weights file.
+              node ../../scripts/select-test-shard.mjs --shard "${shard}" --weights ../../scripts/electron-test-weights-windows.json electron/__tests__/*.test.ts > "${RUNNER_TEMP}/electron-shard.txt" || exit 1
               mapfile -t files < <(tr -d '\r' < "${RUNNER_TEMP}/electron-shard.txt")
               if [ "${#files[@]}" -eq 0 ]; then
                 echo "Electron shard ${shard} has no test files." >&2
@@ -756,15 +779,15 @@ jobs:
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/ticket-key-detectors.test.ts src/api/__tests__/repo-event-task-resolution.test.ts src/api/__tests__/ticket-connectors-db.test.ts
 
       - name: Test room history summaries
-        if: matrix.group == 3
+        if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-history-summary.test.ts src/api/__tests__/room-history-summary-routes.test.ts src/api/__tests__/room-history-summary-db.test.ts
 
       - name: Test tracker connections, rules and the workflow effect journal
-        if: matrix.group == 2
+        if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/tracker-connections-db.test.ts src/api/__tests__/tracker-sync-db.test.ts src/api/__tests__/workflow-effect-db-integration.test.ts src/api/__tests__/tracker-rules-db.test.ts src/api/__tests__/tracker-jev-db.test.ts
 
       - name: Test room members, join requests and invites
-        if: matrix.group == 2
+        if: matrix.group == 4
         run: node --import tsx --test --test-concurrency=1 src/api/__tests__/room-members-routes.test.ts src/api/__tests__/room-members-db.test.ts src/api/__tests__/room-members-enforcement-db.test.ts src/api/__tests__/room-invites-db.test.ts
 
       - name: Test live demos (hub, sockets, saved marks)

@@ -708,7 +708,7 @@ test("every integration test step runs in exactly one existing group", () => {
   assert.deepEqual([...used].sort(), [...groups].sort(), "every group must run at least one test step");
 });
 
-test("desktop-tests and desktop-tests-windows run every desktop suite, with electron shards of one total", () => {
+test("desktop-tests and desktop-tests-windows run every desktop suite, with electron and daemon shards of one total", () => {
   const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
   const desktopScripts = JSON.parse(readFileSync("apps/desktop/package.json", "utf8")).scripts;
   const suiteScripts = [...desktopScripts.test.matchAll(/npm run (test:[\w:-]+)/g)].map((match) => match[1]);
@@ -717,15 +717,27 @@ test("desktop-tests and desktop-tests-windows run every desktop suite, with elec
   // The shards must choose from the same files `npm test` runs locally.
   const electronFiles = desktopScripts["test:electron"].match(/^npm run test:electron:files -- (\S+)$/)?.[1];
   assert.ok(electronFiles, "test:electron must pass one file pattern to test:electron:files");
+  const daemonFiles = desktopScripts["test:daemon"].match(/^npm run test:daemon:files -- (\S+)$/)?.[1];
+  assert.ok(daemonFiles, "test:daemon must pass one file pattern to test:daemon:files");
 
   const shardTotals = [];
-  for (const [jobName, otherSuites] of [["desktop-tests", ["daemon", "renderer"]], ["desktop-tests-windows", ["build", "daemon", "renderer"]]]) {
+  // Only the Windows job splits the daemon suite; desktop-tests runs it whole.
+  // Each job fills its electron shards from run times measured on its own OS.
+  for (const [jobName, otherSuites, daemonSharded, electronWeights] of [
+    ["desktop-tests", ["daemon", "renderer"], false, "electron-test-weights.json"],
+    ["desktop-tests-windows", ["build", "renderer"], true, "electron-test-weights-windows.json"],
+  ]) {
     const suites = [...workflowJobText(workflow, jobName).matchAll(/^ {10}- (.+)$/gm)].map((match) => match[1].trim());
-    const shards = suites.flatMap((suite) => {
-      const match = suite.match(/^electron (\d+)\/(\d+)$/);
+    const shardsOf = (suite) => suites.flatMap((entry) => {
+      const match = entry.match(new RegExp(`^${suite} (\\d+)\\/(\\d+)$`));
       return match ? [{ index: Number(match[1]), total: Number(match[2]) }] : [];
     });
-    assert.deepEqual(suites.filter((suite) => !suite.startsWith("electron ")).sort(), otherSuites, jobName);
+    const shards = shardsOf("electron");
+    assert.deepEqual(
+      suites.filter((suite) => !suite.startsWith("electron ") && !(daemonSharded && suite.startsWith("daemon "))).sort(),
+      otherSuites,
+      jobName,
+    );
 
     const desktopJob = workflowJobs(".github/workflows/ci.yml").find((job) => job.name === jobName);
     const testStep = desktopJob.steps.find((step) => step.name === "Test desktop (${{ matrix.suite }})");
@@ -733,12 +745,33 @@ test("desktop-tests and desktop-tests-windows run every desktop suite, with elec
     for (const name of suiteScripts) {
       const run = `${testStep.run}\n`;
       const ran = name === "test:electron"
-        ? run.includes("npm run test:electron:files -- ")
-        : [`npm --prefix apps/desktop run ${name}\n`, `npm --prefix apps/desktop run ${name} ||`].some((command) => run.includes(command));
+        ? run.includes('npm run test:electron:files -- "${files[@]}"')
+        : name === "test:daemon" && daemonSharded
+          ? run.includes('npm run test:daemon:files -- "${files[@]}"')
+          : [`npm --prefix apps/desktop run ${name}\n`, `npm --prefix apps/desktop run ${name} ||`].some((command) => run.includes(command));
       assert.ok(ran, `${jobName} must run ${name}`);
     }
+    if (daemonSharded) {
+      const daemonShards = shardsOf("daemon");
+      assert.ok(daemonShards.length > 0, `${jobName} must run the daemon suite`);
+      assert.deepEqual(
+        daemonShards.map(({ index, total }) => `${index}/${total}`).sort(),
+        Array.from({ length: daemonShards[0].total }, (_, index) => `${index + 1}/${daemonShards[0].total}`).sort(),
+        `${jobName} daemon shards`,
+      );
+      assert.ok(
+        testStep.run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" --weights ../../scripts/daemon-test-weights.json ${daemonFiles} > `),
+        `the ${jobName} daemon shards must select from ${daemonFiles}, as test:daemon does`,
+      );
+      // The sealed pipe addon's own tests run in exactly one daemon shard.
+      assert.match(
+        testStep.run,
+        /\n\s*if \[ "\$\{shard%%\/\*\}" = "1" \]; then\n\s*node --test [^\n]*seal\.test\.mjs [^\n]*daemon-pipe\.windows\.test\.mjs/,
+        `the first ${jobName} daemon shard must run the sealed pipe tests`,
+      );
+    }
     assert.ok(
-      testStep.run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" --weights ../../scripts/electron-test-weights.json ${electronFiles} > `),
+      testStep.run.includes(`node ../../scripts/select-test-shard.mjs --shard "\${shard}" --weights ../../scripts/${electronWeights} ${electronFiles} > `),
       `the ${jobName} electron shards must select from ${electronFiles}, as test:electron does`,
     );
     assert.ok(shards.length > 0, `${jobName} must run the electron suite`);
