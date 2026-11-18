@@ -48,22 +48,28 @@ export function buildAllowedOrigins(): Set<string> {
   ]);
 }
 
+/** POST /api/v1/rooms/:room/pages and /api/v1/rooms/:room/pages/:pageId/versions. */
+const PAGE_HTML_BODY_PATH = /^\/api\/v1\/rooms\/[^/]+\/pages(?:\/[^/]+\/versions)?\/?$/;
+
 export function registerHttpMiddleware(
   app: Express,
   deps: HttpMiddlewareDeps
 ): void {
-  app.use(
-    express.json({
-      limit: "1mb",
-      verify(req, _res, buf) {
-        const request = req as AuthenticatedRequest & { originalUrl?: string };
-        // Signed webhooks (GitHub, ticket trackers) verify the exact bytes.
-        if (request.originalUrl?.startsWith("/webhooks/")) {
-          request.rawBody = Buffer.from(buf);
-        }
-      },
-    })
-  );
+  const json = express.json({
+    limit: "1mb",
+    verify(req, _res, buf) {
+      const request = req as AuthenticatedRequest & { originalUrl?: string };
+      // Signed webhooks (GitHub, ticket trackers) verify the exact bytes.
+      if (request.originalUrl?.startsWith("/webhooks/")) {
+        request.rawBody = Buffer.from(buf);
+      }
+    },
+  });
+  // A room page's HTML is up to 2 MB as a JSON string, which escaping can
+  // grow. Only the page create and version routes take the larger body.
+  const pageHtmlJson = express.json({ limit: "4mb" });
+  app.use((req, res, next) =>
+    (req.method === "POST" && PAGE_HTML_BODY_PATH.test(req.path) ? pageHtmlJson : json)(req, res, next));
 
   app.use(async (req: AuthenticatedRequest, _res, next) => {
     try {

@@ -1,1 +1,3137 @@
-{}
+{
+  "pages.approve": {
+    "kind": "write",
+    "capability": "rooms.read",
+    "httpMethod": "POST",
+    "path": "/rooms/:room/pages/:pageId/approve",
+    "response": "json",
+    "rateClass": "write",
+    "errors": [
+      "conflict",
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "pattern": "^page_[A-Za-z0-9]{1,64}$"
+        },
+        "version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "rooms.read",
+              "people.read",
+              "agents.read",
+              "messages.read",
+              "tasks.read",
+              "planning.read",
+              "work_items.read",
+              "git.read",
+              "memory.read",
+              "data.viewer",
+              "data.page",
+              "data.room",
+              "tasks.propose",
+              "tickets.propose",
+              "jobs.start",
+              "messages.post"
+            ]
+          }
+        }
+      },
+      "required": [
+        "pageId",
+        "version",
+        "capabilities"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "room",
+                "org"
+              ]
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "currentVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updatedBy": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "person",
+                    "agent"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "ownerAccountId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id",
+                "ownerAccountId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "placements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "surface": {
+                "type": "string",
+                "enum": [
+                  "room.tab",
+                  "task.panel",
+                  "message",
+                  "room.widget"
+                ]
+              },
+              "position": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "pinnedBy": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "surface",
+              "position",
+              "pinnedBy",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "grant": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "approvedBy": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "approvedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "version",
+                "capabilities",
+                "approvedBy",
+                "approvedAt"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "surfaces": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "collections": {
+                  "type": "object",
+                  "properties": {
+                    "viewer": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "page": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "room": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "workItemFields": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "capabilities",
+                "surfaces",
+                "collections",
+                "workItemFields"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "versions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "live",
+                  "draft",
+                  "pending_approval",
+                  "superseded"
+                ]
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "byteSize": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "author": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "person",
+                      "agent"
+                    ]
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "ownerAccountId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "ownerAccountId"
+                ],
+                "additionalProperties": false
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "messageId": {
+                        "type": "string",
+                        "pattern": "^msg_\\d+$"
+                      },
+                      "attachmentId": {
+                        "type": "string",
+                        "pattern": "^att_\\d+$"
+                      }
+                    },
+                    "required": [
+                      "messageId",
+                      "attachmentId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "capabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "surfaces": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "status",
+              "sha256",
+              "byteSize",
+              "author",
+              "source",
+              "capabilities",
+              "surfaces",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "slug",
+        "owner",
+        "currentVersion",
+        "updatedBy",
+        "placements",
+        "grant",
+        "manifest",
+        "versions",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pages.create": {
+    "kind": "write",
+    "capability": "rooms.read",
+    "httpMethod": "POST",
+    "path": "/rooms/:room/pages",
+    "response": "json",
+    "rateClass": "write",
+    "errors": [
+      "conflict",
+      "not_found",
+      "too_large"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "html": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "messageId": {
+              "type": "string",
+              "pattern": "^msg_\\d+$"
+            },
+            "attachmentId": {
+              "type": "string",
+              "pattern": "^att_\\d+$"
+            }
+          },
+          "required": [
+            "messageId",
+            "attachmentId"
+          ],
+          "additionalProperties": false
+        },
+        "slug": {
+          "type": "string",
+          "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$"
+        },
+        "draft": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "room",
+                "org"
+              ]
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "currentVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updatedBy": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "person",
+                    "agent"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "ownerAccountId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id",
+                "ownerAccountId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "placements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "surface": {
+                "type": "string",
+                "enum": [
+                  "room.tab",
+                  "task.panel",
+                  "message",
+                  "room.widget"
+                ]
+              },
+              "position": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "pinnedBy": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "surface",
+              "position",
+              "pinnedBy",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "grant": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "approvedBy": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "approvedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "version",
+                "capabilities",
+                "approvedBy",
+                "approvedAt"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "surfaces": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "collections": {
+                  "type": "object",
+                  "properties": {
+                    "viewer": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "page": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "room": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "workItemFields": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "capabilities",
+                "surfaces",
+                "collections",
+                "workItemFields"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "versions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "live",
+                  "draft",
+                  "pending_approval",
+                  "superseded"
+                ]
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "byteSize": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "author": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "person",
+                      "agent"
+                    ]
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "ownerAccountId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "ownerAccountId"
+                ],
+                "additionalProperties": false
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "messageId": {
+                        "type": "string",
+                        "pattern": "^msg_\\d+$"
+                      },
+                      "attachmentId": {
+                        "type": "string",
+                        "pattern": "^att_\\d+$"
+                      }
+                    },
+                    "required": [
+                      "messageId",
+                      "attachmentId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "capabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "surfaces": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "status",
+              "sha256",
+              "byteSize",
+              "author",
+              "source",
+              "capabilities",
+              "surfaces",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "slug",
+        "owner",
+        "currentVersion",
+        "updatedBy",
+        "placements",
+        "grant",
+        "manifest",
+        "versions",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pages.delete": {
+    "kind": "write",
+    "capability": "rooms.read",
+    "httpMethod": "DELETE",
+    "path": "/rooms/:room/pages/:pageId",
+    "response": "json",
+    "rateClass": "write",
+    "errors": [
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "pattern": "^page_[A-Za-z0-9]{1,64}$"
+        }
+      },
+      "required": [
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "deleted": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "required": [
+        "id",
+        "deleted"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pages.diagnostics": {
+    "kind": "read",
+    "capability": "rooms.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/pages/:pageId/diagnostics",
+    "response": "json",
+    "rateClass": "read",
+    "errors": [
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "pattern": "^page_[A-Za-z0-9]{1,64}$"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
+        }
+      },
+      "required": [
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "console_error",
+                  "exception",
+                  "failed_call"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              },
+              "version": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "kind",
+              "message",
+              "at",
+              "version"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "entries"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pages.document": {
+    "kind": "read",
+    "capability": "rooms.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/pages/:pageId/document",
+    "response": "json",
+    "rateClass": "read",
+    "errors": [
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "pattern": "^page_[A-Za-z0-9]{1,64}$"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
+        }
+      },
+      "required": [
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "page": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "version"
+          ],
+          "additionalProperties": false
+        },
+        "html": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "page",
+        "html"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pages.get": {
+    "kind": "read",
+    "capability": "rooms.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/pages/:pageId",
+    "response": "json",
+    "rateClass": "read",
+    "errors": [
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "pattern": "^page_[A-Za-z0-9]{1,64}$"
+        }
+      },
+      "required": [
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "room",
+                "org"
+              ]
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "currentVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updatedBy": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "person",
+                    "agent"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "ownerAccountId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id",
+                "ownerAccountId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "placements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "surface": {
+                "type": "string",
+                "enum": [
+                  "room.tab",
+                  "task.panel",
+                  "message",
+                  "room.widget"
+                ]
+              },
+              "position": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "pinnedBy": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "surface",
+              "position",
+              "pinnedBy",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "grant": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "approvedBy": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "approvedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "version",
+                "capabilities",
+                "approvedBy",
+                "approvedAt"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "surfaces": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "collections": {
+                  "type": "object",
+                  "properties": {
+                    "viewer": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "page": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "room": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "workItemFields": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "capabilities",
+                "surfaces",
+                "collections",
+                "workItemFields"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "versions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "live",
+                  "draft",
+                  "pending_approval",
+                  "superseded"
+                ]
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "byteSize": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "author": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "person",
+                      "agent"
+                    ]
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "ownerAccountId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "ownerAccountId"
+                ],
+                "additionalProperties": false
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "messageId": {
+                        "type": "string",
+                        "pattern": "^msg_\\d+$"
+                      },
+                      "attachmentId": {
+                        "type": "string",
+                        "pattern": "^att_\\d+$"
+                      }
+                    },
+                    "required": [
+                      "messageId",
+                      "attachmentId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "capabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "surfaces": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "status",
+              "sha256",
+              "byteSize",
+              "author",
+              "source",
+              "capabilities",
+              "surfaces",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "slug",
+        "owner",
+        "currentVersion",
+        "updatedBy",
+        "placements",
+        "grant",
+        "manifest",
+        "versions",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pages.grant": {
+    "kind": "write",
+    "capability": "rooms.read",
+    "httpMethod": "POST",
+    "path": "/rooms/:room/pages/:pageId/grant",
+    "response": "json",
+    "rateClass": "write",
+    "errors": [
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "pattern": "^page_[A-Za-z0-9]{1,64}$"
+        }
+      },
+      "required": [
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string"
+        },
+        "grantId": {
+          "type": "string"
+        },
+        "expiresAt": {
+          "type": "string"
+        },
+        "page": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "version": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "id",
+            "title",
+            "version"
+          ],
+          "additionalProperties": false
+        },
+        "capabilities": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "token",
+        "grantId",
+        "expiresAt",
+        "page",
+        "capabilities"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pages.list": {
+    "kind": "read",
+    "capability": "rooms.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/pages",
+    "response": "json",
+    "rateClass": "read",
+    "errors": [],
+    "input": {
+      "type": "object",
+      "properties": {
+        "surface": {
+          "type": "string",
+          "enum": [
+            "room.tab",
+            "task.panel",
+            "message",
+            "room.widget"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "pages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "version": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "version"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "pages"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pages.pin": {
+    "kind": "write",
+    "capability": "rooms.read",
+    "httpMethod": "POST",
+    "path": "/rooms/:room/pages/:pageId/placements",
+    "response": "json",
+    "rateClass": "write",
+    "errors": [
+      "conflict",
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "pattern": "^page_[A-Za-z0-9]{1,64}$"
+        },
+        "surface": {
+          "default": "room.tab",
+          "type": "string",
+          "enum": [
+            "room.tab"
+          ]
+        },
+        "position": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9
+        }
+      },
+      "required": [
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "room",
+                "org"
+              ]
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "currentVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updatedBy": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "person",
+                    "agent"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "ownerAccountId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id",
+                "ownerAccountId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "placements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "surface": {
+                "type": "string",
+                "enum": [
+                  "room.tab",
+                  "task.panel",
+                  "message",
+                  "room.widget"
+                ]
+              },
+              "position": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "pinnedBy": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "surface",
+              "position",
+              "pinnedBy",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "grant": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "approvedBy": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "approvedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "version",
+                "capabilities",
+                "approvedBy",
+                "approvedAt"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "surfaces": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "collections": {
+                  "type": "object",
+                  "properties": {
+                    "viewer": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "page": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "room": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "workItemFields": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "capabilities",
+                "surfaces",
+                "collections",
+                "workItemFields"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "versions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "live",
+                  "draft",
+                  "pending_approval",
+                  "superseded"
+                ]
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "byteSize": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "author": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "person",
+                      "agent"
+                    ]
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "ownerAccountId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "ownerAccountId"
+                ],
+                "additionalProperties": false
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "messageId": {
+                        "type": "string",
+                        "pattern": "^msg_\\d+$"
+                      },
+                      "attachmentId": {
+                        "type": "string",
+                        "pattern": "^att_\\d+$"
+                      }
+                    },
+                    "required": [
+                      "messageId",
+                      "attachmentId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "capabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "surfaces": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "status",
+              "sha256",
+              "byteSize",
+              "author",
+              "source",
+              "capabilities",
+              "surfaces",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "slug",
+        "owner",
+        "currentVersion",
+        "updatedBy",
+        "placements",
+        "grant",
+        "manifest",
+        "versions",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pages.publishVersion": {
+    "kind": "write",
+    "capability": "rooms.read",
+    "httpMethod": "POST",
+    "path": "/rooms/:room/pages/:pageId/versions",
+    "response": "json",
+    "rateClass": "write",
+    "errors": [
+      "conflict",
+      "not_found",
+      "too_large"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "pattern": "^page_[A-Za-z0-9]{1,64}$"
+        },
+        "html": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source": {
+          "type": "object",
+          "properties": {
+            "messageId": {
+              "type": "string",
+              "pattern": "^msg_\\d+$"
+            },
+            "attachmentId": {
+              "type": "string",
+              "pattern": "^att_\\d+$"
+            }
+          },
+          "required": [
+            "messageId",
+            "attachmentId"
+          ],
+          "additionalProperties": false
+        },
+        "draft": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "room",
+                "org"
+              ]
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "currentVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updatedBy": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "person",
+                    "agent"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "ownerAccountId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id",
+                "ownerAccountId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "placements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "surface": {
+                "type": "string",
+                "enum": [
+                  "room.tab",
+                  "task.panel",
+                  "message",
+                  "room.widget"
+                ]
+              },
+              "position": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "pinnedBy": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "surface",
+              "position",
+              "pinnedBy",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "grant": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "approvedBy": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "approvedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "version",
+                "capabilities",
+                "approvedBy",
+                "approvedAt"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "surfaces": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "collections": {
+                  "type": "object",
+                  "properties": {
+                    "viewer": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "page": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "room": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "workItemFields": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "capabilities",
+                "surfaces",
+                "collections",
+                "workItemFields"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "versions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "live",
+                  "draft",
+                  "pending_approval",
+                  "superseded"
+                ]
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "byteSize": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "author": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "person",
+                      "agent"
+                    ]
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "ownerAccountId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "ownerAccountId"
+                ],
+                "additionalProperties": false
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "messageId": {
+                        "type": "string",
+                        "pattern": "^msg_\\d+$"
+                      },
+                      "attachmentId": {
+                        "type": "string",
+                        "pattern": "^att_\\d+$"
+                      }
+                    },
+                    "required": [
+                      "messageId",
+                      "attachmentId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "capabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "surfaces": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "status",
+              "sha256",
+              "byteSize",
+              "author",
+              "source",
+              "capabilities",
+              "surfaces",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "slug",
+        "owner",
+        "currentVersion",
+        "updatedBy",
+        "placements",
+        "grant",
+        "manifest",
+        "versions",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pages.reportDiagnostics": {
+    "kind": "write",
+    "capability": "rooms.read",
+    "httpMethod": "POST",
+    "path": "/rooms/:room/pages/:pageId/diagnostics",
+    "response": "json",
+    "rateClass": "write",
+    "errors": [
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "pattern": "^page_[A-Za-z0-9]{1,64}$"
+        },
+        "version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "entries": {
+          "minItems": 1,
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "console_error",
+                  "exception",
+                  "failed_call"
+                ]
+              },
+              "message": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 2000
+              },
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              }
+            },
+            "required": [
+              "kind",
+              "message"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "pageId",
+        "version",
+        "entries"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "accepted"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pages.setCurrent": {
+    "kind": "write",
+    "capability": "rooms.read",
+    "httpMethod": "POST",
+    "path": "/rooms/:room/pages/:pageId/current",
+    "response": "json",
+    "rateClass": "write",
+    "errors": [
+      "conflict",
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "pattern": "^page_[A-Za-z0-9]{1,64}$"
+        },
+        "version": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "pageId",
+        "version"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "room",
+                "org"
+              ]
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "currentVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updatedBy": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "person",
+                    "agent"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "ownerAccountId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id",
+                "ownerAccountId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "placements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "surface": {
+                "type": "string",
+                "enum": [
+                  "room.tab",
+                  "task.panel",
+                  "message",
+                  "room.widget"
+                ]
+              },
+              "position": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "pinnedBy": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "surface",
+              "position",
+              "pinnedBy",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "grant": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "approvedBy": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "approvedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "version",
+                "capabilities",
+                "approvedBy",
+                "approvedAt"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "surfaces": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "collections": {
+                  "type": "object",
+                  "properties": {
+                    "viewer": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "page": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "room": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "workItemFields": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "capabilities",
+                "surfaces",
+                "collections",
+                "workItemFields"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "versions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "live",
+                  "draft",
+                  "pending_approval",
+                  "superseded"
+                ]
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "byteSize": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "author": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "person",
+                      "agent"
+                    ]
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "ownerAccountId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "ownerAccountId"
+                ],
+                "additionalProperties": false
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "messageId": {
+                        "type": "string",
+                        "pattern": "^msg_\\d+$"
+                      },
+                      "attachmentId": {
+                        "type": "string",
+                        "pattern": "^att_\\d+$"
+                      }
+                    },
+                    "required": [
+                      "messageId",
+                      "attachmentId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "capabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "surfaces": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "status",
+              "sha256",
+              "byteSize",
+              "author",
+              "source",
+              "capabilities",
+              "surfaces",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "slug",
+        "owner",
+        "currentVersion",
+        "updatedBy",
+        "placements",
+        "grant",
+        "manifest",
+        "versions",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "pages.unpin": {
+    "kind": "write",
+    "capability": "rooms.read",
+    "httpMethod": "DELETE",
+    "path": "/rooms/:room/pages/:pageId/placements",
+    "response": "json",
+    "rateClass": "write",
+    "errors": [
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "pageId": {
+          "type": "string",
+          "pattern": "^page_[A-Za-z0-9]{1,64}$"
+        },
+        "surface": {
+          "default": "room.tab",
+          "type": "string",
+          "enum": [
+            "room.tab",
+            "task.panel",
+            "message",
+            "room.widget"
+          ]
+        }
+      },
+      "required": [
+        "pageId"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "slug": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "room",
+                "org"
+              ]
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "currentVersion": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "updatedBy": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "person",
+                    "agent"
+                  ]
+                },
+                "id": {
+                  "type": "string"
+                },
+                "ownerAccountId": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id",
+                "ownerAccountId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "placements": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "surface": {
+                "type": "string",
+                "enum": [
+                  "room.tab",
+                  "task.panel",
+                  "message",
+                  "room.widget"
+                ]
+              },
+              "position": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "pinnedBy": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "surface",
+              "position",
+              "pinnedBy",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "grant": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "version": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "approvedBy": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "approvedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "version",
+                "capabilities",
+                "approvedBy",
+                "approvedAt"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifest": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "capabilities": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "surfaces": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "collections": {
+                  "type": "object",
+                  "properties": {
+                    "viewer": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "page": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "room": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "additionalProperties": false
+                },
+                "workItemFields": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "capabilities",
+                "surfaces",
+                "collections",
+                "workItemFields"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "versions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "live",
+                  "draft",
+                  "pending_approval",
+                  "superseded"
+                ]
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "byteSize": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "author": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "person",
+                      "agent"
+                    ]
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "ownerAccountId": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "ownerAccountId"
+                ],
+                "additionalProperties": false
+              },
+              "source": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "messageId": {
+                        "type": "string",
+                        "pattern": "^msg_\\d+$"
+                      },
+                      "attachmentId": {
+                        "type": "string",
+                        "pattern": "^att_\\d+$"
+                      }
+                    },
+                    "required": [
+                      "messageId",
+                      "attachmentId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "capabilities": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "surfaces": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "createdAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "version",
+              "status",
+              "sha256",
+              "byteSize",
+              "author",
+              "source",
+              "capabilities",
+              "surfaces",
+              "createdAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "createdAt": {
+          "type": "string"
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "slug",
+        "owner",
+        "currentVersion",
+        "updatedBy",
+        "placements",
+        "grant",
+        "manifest",
+        "versions",
+        "createdAt",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
