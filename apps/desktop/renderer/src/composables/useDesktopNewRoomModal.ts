@@ -1,6 +1,6 @@
 import { computed, ref } from "vue";
 import type { DesktopRepoRoomSelection, DesktopRoomSnapshot, RepoStatus } from "../../../electron/ipc-types";
-import { copyTextToClipboard } from "../domain/clipboard";
+import { copyTextToClipboard } from "../../../../../shared/ui/clipboard";
 import { companyLinkIdFromInput, normalizeJoinRoomInput, validateJoinRoomInput } from "../domain/join-room-input";
 import { projectRoomName } from "../domain/project-room-name";
 import { repoPickerErrorMessage } from "../domain/repo-picker-error";
