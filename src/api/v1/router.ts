@@ -4,6 +4,7 @@ import { actorKey } from "../../../shared/api/actor.mjs";
 import { ApiError, describeIssues, methodMayReturn, type AnyApiMethod } from "../../../shared/api/core.mjs";
 import { GitHubAccessUnavailableError } from "../github/repo-access.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
+import { apiActionTarget, recordApiAction, type ApiActionRecord } from "./actions.js";
 import { resolveApiActor } from "./actor.js";
 import { API_V1_ROUTES } from "./areas.js";
 import { checkCapability } from "./capability.js";
@@ -18,6 +19,8 @@ export interface ApiV1RouterDeps {
   resolveActor?: ApiActorResolver;
   checkCapability?: ApiCapabilityCheck;
   rateLimiter?: ApiRateLimiter;
+  /** Appends a write, intent or job to `api_actions`. */
+  recordAction?: (record: ApiActionRecord) => Promise<void>;
   /** Check each output against its schema. On by default outside production, where a mismatch is a bug to see early. */
   checkOutput?: boolean;
 }
@@ -29,8 +32,18 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
   const resolveActor = deps.resolveActor ?? resolveApiActor;
   const capabilityCheck = deps.checkCapability ?? checkCapability;
   const rateLimiter = deps.rateLimiter ?? createApiRateLimiter();
+  const recordAction = deps.recordAction ?? recordApiAction;
   const checkOutput = deps.checkOutput ?? process.env.NODE_ENV !== "production";
   const router = express.Router();
+
+  // A lost audit row must not turn a done write into a reported failure.
+  const record = async (entry: ApiActionRecord) => {
+    try {
+      await recordAction(entry);
+    } catch (error) {
+      console.error(`[api v1 ${entry.method}] could not record the action`, error);
+    }
+  };
 
   for (const route of routes) {
     const verb = route.method.httpMethod.toLowerCase() as "get" | "post" | "put" | "patch" | "delete";
@@ -39,14 +52,18 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
       // Only the handler's own refusals must be listed in the contract; the
       // pipeline's (room, capability, limit, input) are common to every method.
       let inHandler = false;
+      // Set once a write, intent or job passed the capability check and the
+      // rate limit: from then on its outcome is recorded, success or not.
+      let recordable: Omit<ApiActionRecord, "outcome" | "target"> | null = null;
+      const { room: roomParam, ...pathParams } = req.params as Record<string, string>;
       try {
-        const { room: roomParam, ...pathParams } = req.params as Record<string, string>;
         const call = { ...(await resolveActor(req, roomParam ?? "")), req };
         await capabilityCheck(call.actor, method.capability, call);
         const rate = rateLimiter.take(actorKey(call.actor), method.rateClass);
         if (!rate.allowed) {
           throw new ApiError("rate_limited", "Too many calls. Wait and try again.", { retryAfterMs: rate.retryAfterMs });
         }
+        if (method.kind !== "read") recordable = { actor: call.actor, method: method.name, capability: method.capability };
         const parsed = method.input.safeParse({ ...readInput(method, req), ...pathParams });
         if (!parsed.success) {
           throw new ApiError("invalid_input", describeIssues(parsed.error).map(({ path, message }) => (path ? `${path}: ${message}` : message)).join("; "));
@@ -59,9 +76,12 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
             throw new Error(`${method.name} returned output that does not match its contract: ${JSON.stringify(describeIssues(checked.error))}`);
           }
         }
+        if (recordable) await record({ ...recordable, target: actionTarget(req, pathParams), outcome: "ok" });
         res.status(200).json(output);
       } catch (error) {
-        replyApiError(res, toApiError(error, method, checkOutput && inHandler));
+        const apiError = toApiError(error, method, checkOutput && inHandler);
+        if (recordable) await record({ ...recordable, target: actionTarget(req, pathParams), outcome: apiError.code });
+        replyApiError(res, apiError);
       }
     });
   }
@@ -87,6 +107,14 @@ export function registerApiV1Routes(app: Express, deps: ApiV1RouterDeps = {}): v
     console.error("[api v1]", error);
     replyApiError(res, new ApiError("internal", "The server could not complete this call. Please retry."));
   });
+}
+
+/** The handler's own target, else the path parameters after the room (`taskId=task_7`). */
+function actionTarget(req: Request, pathParams: Record<string, string>): string | null {
+  const own = apiActionTarget(req);
+  if (own) return own;
+  const params = Object.entries(pathParams).map(([key, value]) => `${key}=${value}`);
+  return params.length ? params.join("&").slice(0, 500) : null;
 }
 
 function readInput(method: AnyApiMethod, req: Request): Record<string, unknown> {

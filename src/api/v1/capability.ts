@@ -1,13 +1,70 @@
+import type { ApiActor } from "../../../shared/api/actor.mjs";
+import { getCapability, type CapabilityName } from "../../../shared/api/capabilities.mjs";
 import { ApiError } from "../../../shared/api/core.mjs";
-import type { ApiCapabilityCheck } from "./context.js";
+import type { PageGrantRequestGrant } from "../http/helpers.js";
+import type { ApiCallContext, ApiCapabilityCheck } from "./context.js";
+import { resolvePolicy, type ResolvedApiPolicy } from "./policy.js";
 
 /**
- * Every /api/v1 route calls this before its handler. Today only a person
- * acting for themselves reaches it, and a person holds every capability in a
- * room they may read. The grant and room policy checks (a page version's
- * grant, confirm, approve) replace this body.
+ * Every /api/v1 route calls this before its handler, after the room access
+ * check. Rights are the person's (or agent's) room rights, which the access
+ * check already proved, intersected with the grant of what they act through:
+ * 1. Through a page: the page grant must hold the capability, for this page
+ *    version in this room (`not_granted` otherwise).
+ *    Through a job or the remote MCP integration: the principal's own rights;
+ *    a job carries no permission and adds none.
+ * 2. A write (any method that is not a GET) or a write-like capability then
+ *    consults the room policy. `deny` refuses with `not_granted`. `confirm`
+ *    and `approve` pass: the intent or job handler acts on them with
+ *    `resolveCallPolicy`, since only it can make a pending intent or a
+ *    confirm request.
  */
-export const checkCapability: ApiCapabilityCheck = async (actor, capability) => {
-  if (actor.principal.kind === "person" && !actor.via) return;
-  throw new ApiError("not_granted", `This caller does not hold the "${capability}" capability.`);
-};
+export function createCapabilityCheck(deps: { resolvePolicy?: typeof resolvePolicy } = {}): ApiCapabilityCheck {
+  const policyOf = deps.resolvePolicy ?? resolvePolicy;
+  return async (actor, capability, call) => {
+    if (actor.via?.kind === "page" && !pageGrantHolds(call.req.pageGrant ?? null, actor, capability)) {
+      throw new ApiError("not_granted", `This caller does not hold the "${capability}" capability.`);
+    }
+    if (call.req.method === "GET" && !getCapability(capability).writeLike) return;
+    const policy = await resolveCallPolicy(call, capability, policyOf);
+    if (policy.mode === "deny") {
+      throw new ApiError("not_granted", `This room does not allow "${capability}" through the LetAgents API.`);
+    }
+  };
+}
+
+export const checkCapability: ApiCapabilityCheck = createCapabilityCheck();
+
+function pageGrantHolds(grant: PageGrantRequestGrant | null, actor: ApiActor, capability: CapabilityName): boolean {
+  return Boolean(
+    grant
+    && grant.page_id === actor.via?.id
+    && grant.page_version === actor.via?.version
+    && grant.room_id === actor.roomId
+    && grant.capabilities.includes(capability),
+  );
+}
+
+const callPolicies = new WeakMap<object, Map<CapabilityName, Promise<ResolvedApiPolicy>>>();
+
+/**
+ * The room policy for this call's actor, read once per request: the
+ * capability check and the handler (intents, jobs) share one answer.
+ */
+export function resolveCallPolicy(
+  call: Pick<ApiCallContext, "actor" | "req">,
+  capability: CapabilityName,
+  policyOf: typeof resolvePolicy = resolvePolicy,
+): Promise<ResolvedApiPolicy> {
+  let byCapability = callPolicies.get(call.req);
+  if (!byCapability) {
+    byCapability = new Map();
+    callPolicies.set(call.req, byCapability);
+  }
+  let policy = byCapability.get(capability);
+  if (!policy) {
+    policy = policyOf(call.actor.roomId, capability, call.actor);
+    byCapability.set(capability, policy);
+  }
+  return policy;
+}

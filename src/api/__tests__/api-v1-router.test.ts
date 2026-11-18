@@ -16,6 +16,8 @@ const { registerApiV1Routes } = await import("../v1/router.js");
 const { defineRoute } = await import("../v1/route.js");
 const { createApiRateLimiter } = await import("../v1/rate-limit.js");
 const { API_V1_ROUTES } = await import("../v1/areas.js");
+const { createCapabilityCheck } = await import("../v1/capability.js");
+type ApiActionRecord = import("../v1/actions.js").ApiActionRecord;
 
 const echo = defineMethod({
   name: "tasks.echo",
@@ -69,6 +71,15 @@ const resolveActor: ApiActorResolver = async (req, roomParam) => {
   };
 };
 
+// The room policy without a database: "proposals" is denied in room "closed".
+const recorded: ApiActionRecord[] = [];
+const checkCapability = createCapabilityCheck({
+  resolvePolicy: async (roomId, capability) => {
+    const mode = roomId === "closed" ? "deny" as const : "approve" as const;
+    return { capability, mode, configured: mode, source: "room", rule: null };
+  },
+});
+
 let server: Server;
 let base = "";
 let now = 0;
@@ -78,6 +89,8 @@ test.before(async () => {
   registerApiV1Routes(app, {
     routes,
     resolveActor,
+    checkCapability,
+    recordAction: async (record) => { recorded.push(record); },
     rateLimiter: createApiRateLimiter({ now: () => now, classes: { read: { limit: 3, windowMs: 10_000 }, search: { limit: 1, windowMs: 1 }, write: { limit: 1, windowMs: 1 }, post: { limit: 1, windowMs: 1 }, intent: { limit: 100, windowMs: 1 }, job: { limit: 1, windowMs: 1 } } }),
     checkOutput: true,
   });
@@ -136,6 +149,27 @@ test("every route checks the capability: today a person passes and a delegated c
   assert.deepEqual(await call("/rooms/r1/echo/t", { via: "page_1" }), {
     status: 403, body: { code: "not_granted", message: 'This caller does not hold the "tasks.read" capability.' }, retryAfter: null,
   });
+});
+
+test("a write consults the room policy: deny refuses it, approve passes to the handler", async () => {
+  const post = (room: string) => call(`/rooms/${room}/proposals`, { user: "acct_policy", method: "POST", body: '{"title":"a"}', headers: { "content-type": "application/json" } });
+  assert.equal((await post("r1")).status, 200);
+  assert.deepEqual((await post("closed")).body, {
+    code: "not_granted", message: 'This room does not allow "tasks.propose" through the LetAgents API.',
+  });
+});
+
+test("writes are recorded with their actor and outcome; reads and refusals before the rate limit are not", async () => {
+  recorded.length = 0;
+  await call("/rooms/r1/echo/t", { user: "acct_audit" });
+  const post = (room: string, body: string) => call(`/rooms/${room}/proposals`, { user: "acct_audit", method: "POST", body, headers: { "content-type": "application/json" } });
+  await post("r1", '{"title":"a"}');
+  await post("r1", '{"title":""}');
+  await post("closed", '{"title":"a"}');
+  assert.deepEqual(recorded.map(({ actor, method, capability, target, outcome }) => ({ principal: actor.principal.id, method, capability, target, outcome })), [
+    { principal: "acct_audit", method: "tasks.proposeExample", capability: "tasks.propose", target: null, outcome: "ok" },
+    { principal: "acct_audit", method: "tasks.proposeExample", capability: "tasks.propose", target: null, outcome: "invalid_input" },
+  ]);
 });
 
 test("the rate limit counts per actor and per class, and says when to retry", async () => {
