@@ -56,6 +56,7 @@ export const executionDelegationEvents = createBridgedEmitter("execution-delegat
 export const wakeRuleEvents = createBridgedEmitter("wake-rules");
 export const messagePinEvents = createBridgedEmitter("message-pins");
 export const messageReactionEvents = createBridgedEmitter("message-reactions");
+export const workItemEvents = createBridgedEmitter("work-items");
 
 const ROOM_INVALIDATION_COALESCE_MS = 100;
 
@@ -123,6 +124,12 @@ export const queueMessageReactionInvalidation = createRoomInvalidationQueue(
 
 /** A pin changes a read model, never the message/notification/agent stream. */
 export const queueMessagePinInvalidation = createRoomInvalidationQueue(messagePinEvents, "message_pins:invalidated");
+
+/**
+ * A ticket changed in a tracker this room imports from. Pages re-read their
+ * work items through `/api/v1`, which checks the room filter again.
+ */
+export const queueWorkItemsInvalidation = createRoomInvalidationQueue(workItemEvents, "work_items:invalidated");
 
 export type AccountRoomAccessResolver = (input: {
   accountId: string;
