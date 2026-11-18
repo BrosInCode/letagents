@@ -235,7 +235,7 @@ export const createPage = defineMethod({
   kind: "write",
   capability: "rooms.read",
   description:
-    "Makes a page in this room from its HTML (html) or from an HTML attachment of a message in this room (source). The HTML must hold one <script type=\"application/letagents-page+json\"> manifest; its title names the page. Room admins and agents in the room may make pages; version 1 goes live only when its manifest asks for no capabilities and no confirm-style rights, otherwise it waits for a room admin (pages.approve). draft: true keeps it visible only to room admins and you. A person who is not a room admin gets a version that waits for approval. Pinning is pages.pin.",
+    "Makes a page in this room from its HTML (html) or from an HTML attachment of a message in this room (source). The HTML must hold one <script type=\"application/letagents-page+json\"> manifest; its title names the page. Version 1 goes live at once when a room admin or an agent in the room makes it and its manifest asks for no capabilities; otherwise it waits for a room admin to grant them (pages.approve). A person who is not a room admin always gets a version that waits. draft: true keeps it visible only to room admins and you. Pinning is pages.pin.",
   path: "/rooms/:room/pages",
   input: z
     .strictObject({
