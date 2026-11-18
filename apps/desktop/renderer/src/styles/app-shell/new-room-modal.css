@@ -237,6 +237,16 @@
 .desktop-new-room-flow .desktop-room-picker .work-filter-menu { width: 224px; padding: 5px; background: var(--bg-subtle); border-color: var(--border-strong); }
 .desktop-room-picker .work-filter-menu:not([data-placement]) { visibility: hidden; }
 .desktop-room-picker .work-menu-option { gap: 9px; min-height: 38px; padding: 6px 8px; }
+.desktop-room-picker .work-option-label { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.desktop-room-picker .desktop-room-personal-avatar { border-radius: 50%; }
+.desktop-room-organization-picker .work-menu-option:first-child { position: relative; margin-bottom: 9px; }
+.desktop-room-organization-picker .work-menu-option:first-child::after {
+  content: "";
+  position: absolute;
+  inset: auto 3px -5px;
+  height: 1px;
+  background: var(--border-strong);
+}
 .desktop-new-room-flow .desktop-room-picker .work-menu-option[aria-selected="true"] { background: var(--nr-hover); }
 .desktop-new-room-flow .desktop-room-picker .work-menu-option:focus-visible { outline-offset: -2px; }
 .desktop-new-room-flow .desktop-room-picker .work-menu-option:hover:not(:disabled) { background: var(--nr-hover); }

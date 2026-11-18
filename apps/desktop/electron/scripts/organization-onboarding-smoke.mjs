@@ -78,6 +78,7 @@ ipcMain.handle('fixture:call', async (_event, method, args) => {
     case 'room.getSnapshot': return snapshot(args[0] || undefined);
     case 'room.listAccountRooms': return [];
     case 'room.getSourceStates': return {};
+    case 'room.getMyWork': return { cards: [], next_cursor: null };
     case 'room.getLatestMessages': return [];
     case 'conversations.list': return { conversations: [], version: '0' };
     case 'conversations.changes': return { version: '0' };

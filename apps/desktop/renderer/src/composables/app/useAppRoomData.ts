@@ -189,7 +189,7 @@ export function useAppRoomManagement(context: unknown) {
       const selected = app.company.selected.value;
       return selected?.joined ? { id: selected.github_org_id, login: selected.login, avatarUrl: selected.avatar_url } : null;
     },
-    onNamingWarning: (message) => pushActionToast(message, "info", 8000),
+    onCreationWarning: (message) => pushActionToast(message, "info", 15000),
     onCompanyRoomCreated: (room) => {
       if (app.company.activeId.value !== room.organizationId) void app.company.choose(room.organizationId);
       app.company.rememberCreatedRoom(room);

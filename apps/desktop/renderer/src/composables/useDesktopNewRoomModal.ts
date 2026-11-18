@@ -46,7 +46,7 @@ interface DesktopNewRoomModalOptions {
   getDefaultStorageMode?: () => NewRoomStorageChoice;
   /** The company selected in the sidebar; a new shared room is created in it by default. */
   getCompany?: () => NewRoomCompany | null;
-  onNamingWarning?: (message: string) => void;
+  onCreationWarning?: (message: string) => void;
   /** A pasted company link opens the company dialog instead of joining a room. */
   onCompanyLink?: (organizationId: string) => void;
   /** Called before the new company room opens, so the company lists it at once. */
@@ -370,7 +370,11 @@ export function useDesktopNewRoomModal(options: DesktopNewRoomModalOptions) {
           rootPath: null,
           meta: result.code || "Shared room",
         });
-        if (namingWarning) options.onNamingWarning?.(namingWarning);
+        if (snapshot.access.status !== "ready") {
+          options.onCreationWarning?.(`Room created, but it couldn’t open. Invite code: ${result.code}.`);
+        } else if (namingWarning) {
+          options.onCreationWarning?.(namingWarning);
+        }
       }
     } catch (error) {
       newRoomFeedback.value =

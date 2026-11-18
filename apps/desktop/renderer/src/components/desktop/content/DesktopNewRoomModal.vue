@@ -64,14 +64,14 @@
               <Laptop v-else aria-hidden="true" />
               {{ projectOwner || projectLocation }}
             </template>
-            <FilterDropdown v-else-if="organizationOptions.length > 1" class="desktop-room-picker" data-testid="new-room-organization"
+            <FilterDropdown v-else-if="organizationOptions.length > 1" class="desktop-room-picker desktop-room-organization-picker" data-testid="new-room-organization"
               :model-value="organizationId" label="Organization" :options="organizationOptions" :disabled="busy" @update:model-value="selectOrganization">
               <template #trigger="{ option }">
-                <CompanyAvatar v-if="option" :login="option.label" :avatar-url="companyFor(option.id)?.avatarUrl ?? null" size="s" />
+                <CompanyAvatar v-if="option" :class="{ 'desktop-room-personal-avatar': option.id === 'personal' }" :login="option.label" :avatar-url="companyFor(option.id)?.avatarUrl ?? null" size="s" />
                 <span>{{ option?.label }}</span>
               </template>
               <template #option="{ option }">
-                <CompanyAvatar :login="option.label" :avatar-url="companyFor(option.id)?.avatarUrl ?? null" size="s" />
+                <CompanyAvatar :class="{ 'desktop-room-personal-avatar': option.id === 'personal' }" :login="option.label" :avatar-url="companyFor(option.id)?.avatarUrl ?? null" size="s" />
                 <span class="work-option-label">{{ option.label }}</span>
               </template>
             </FilterDropdown>

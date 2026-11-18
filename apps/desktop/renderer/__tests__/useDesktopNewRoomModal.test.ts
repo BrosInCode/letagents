@@ -139,7 +139,7 @@ test("shared create keeps invite code when rename fails and surfaces warning", a
   const warnings: string[] = [];
   const modal = useDesktopNewRoomModal({
     openRoomSnapshot: snapshot => opened.push(snapshot),
-    onNamingWarning: message => warnings.push(message),
+    onCreationWarning: message => warnings.push(message),
     setRepoStatus: () => undefined,
   });
 
@@ -155,6 +155,31 @@ test("shared create keeps invite code when rename fails and surfaces warning", a
   assert.equal(opened[0]?.room?.displayName, "Generated Room");
   assert.match(warnings[0] || "", /renaming failed/i);
   assert.equal(modal.newRoomBusy.value, false);
+});
+
+test("a created shared room keeps its invite available if opening fails", async () => {
+  const snapshot = snapshotFixture("room_2", "Generated Room", "WXYZ-1111");
+  snapshot.access.status = "unavailable";
+  snapshot.room = null;
+  let createCalls = 0;
+  const warnings: string[] = [];
+  stubDesktopBridge({
+    createInviteRoom: async () => {
+      createCalls += 1;
+      return { roomIdentifier: "room_2", code: "WXYZ-1111", snapshot };
+    },
+  });
+  const modal = useDesktopNewRoomModal({
+    openRoomSnapshot: opened => assert.equal(opened.roomIdentifier, "room_2"),
+    setRepoStatus: () => undefined,
+    onCreationWarning: message => warnings.push(message),
+  });
+  modal.selectNewRoomEntry();
+  await modal.createStandaloneRoom();
+
+  assert.equal(createCalls, 1);
+  assert.equal(modal.newRoomModalOpen.value, false);
+  assert.match(warnings[0] || "", /WXYZ-1111/);
 });
 
 test("create local standalone room opens it directly without invite code", async () => {
