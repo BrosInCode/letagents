@@ -265,9 +265,6 @@ export function defineMethod(spec) {
   if (!isCapabilityName(spec.capability)) {
     throw new TypeError(`${where}: unknown capability ${JSON.stringify(spec.capability)}; add it to shared/api/capabilities.mjs first.`);
   }
-  if (spec.capabilityFromInput !== undefined && typeof spec.capabilityFromInput !== "function") {
-    throw new TypeError(`${where}: capabilityFromInput must be a function of the parsed input.`);
-  }
   if (typeof spec.description !== "string" || !spec.description.trim()) {
     throw new TypeError(`${where}: a description is required; MCP tools and the page reference are made from it.`);
   }
