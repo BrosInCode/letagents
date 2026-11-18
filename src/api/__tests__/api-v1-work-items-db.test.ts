@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import { once } from "node:events";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -59,6 +59,8 @@ function fakeJiraFetch(input: string | URL | Request, init?: RequestInit): Promi
   jiraRequests.push(url);
   const json = (value: unknown) => Promise.resolve(new Response(JSON.stringify(value), { status: 200 }));
   if (url.endsWith("/rest/api/3/field")) return json([]);
+  const read = /\/rest\/api\/3\/issue\/([A-Z]+-\d+)\?/.exec(url);
+  if (read) return tickets.has(read[1]!) ? json(jiraIssue(read[1]!)) : Promise.resolve(new Response("{}", { status: 404 }));
   if (url.endsWith("/rest/api/3/search/jql")) {
     const jql = String((JSON.parse(String(init?.body)) as { jql: string }).jql);
     const project = /project = (\w+)/.exec(jql)?.[1];
@@ -124,6 +126,53 @@ if (testDatabaseUrl) {
   });
 }
 
+/** One room stream, as the desktop opens it, collecting its frames. */
+function openStream(url: string, cookie: string) {
+  const frames: Array<{ event: string; data: { room_id?: string; resource?: string } }> = [];
+  const abort = new AbortController();
+  let opened = false;
+  const done = (async () => {
+    const response = await realFetch(url, { headers: { accept: "text/event-stream", cookie }, signal: abort.signal });
+    assert.equal(response.status, 200, `${url} opens`);
+    opened = true;
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    try {
+      for (;;) {
+        const { value, done: ended } = await reader.read();
+        if (ended) break;
+        buffer += decoder.decode(value, { stream: true });
+        let end: number;
+        while ((end = buffer.indexOf("\n\n")) >= 0) {
+          const frame = buffer.slice(0, end);
+          buffer = buffer.slice(end + 2);
+          const data = /^data: (.+)$/m.exec(frame)?.[1];
+          if (data) frames.push({ event: /^event: (.+)$/m.exec(frame)?.[1] ?? "message", data: JSON.parse(data) });
+        }
+      }
+    } catch { /* closed */ }
+  })();
+  return {
+    frames,
+    async waitFor(predicate: (frame: (typeof frames)[number]) => boolean, timeoutMs = 3_000) {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        const hit = frames.find(predicate);
+        if (hit) return hit;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return null;
+    },
+    async ready() {
+      const deadline = Date.now() + 5_000;
+      while (!opened && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.ok(opened, `${url} opened`);
+    },
+    close() { abort.abort(); return done.catch(() => undefined); },
+  };
+}
+
 async function get(route: string, headers: Record<string, string> = {}) {
   const res = await realFetch(`${base}${route}`, { headers });
   return { status: res.status, body: await res.json() };
@@ -171,13 +220,14 @@ test("a search right after a ticket change returns the new state, and the room h
   assert.equal((await get(route, { cookie: ada.cookie })).body.items[1].status, "To Do");
 
   // Sync applies the change: the generation moves, the next search is live.
-  const invalidated = new Promise<string>((resolve) => {
-    const listener = (event: { projectId: string }) => {
-      if (event.projectId !== room.id) return;
-      events!.workItemEvents.off("work_items:invalidated", listener);
+  const invalidated = new Promise<string | null>((resolve) => {
+    setTimeout(() => resolve(null), 3_000).unref();
+    const listener = (event: { projectId: string; resource: string }) => {
+      if (event.projectId !== room.id || event.resource !== "work_items") return;
+      events!.roomResourceEvents.off("room_resource:invalidated", listener);
       resolve(event.projectId);
     };
-    events!.workItemEvents.on("work_items:invalidated", listener);
+    events!.roomResourceEvents.on("room_resource:invalidated", listener);
   });
   const trackerSync = sync!.getDefaultTrackerSync()!;
   const applied = await trackerSync.applyItem(connection, {
@@ -194,4 +244,49 @@ test("a search right after a ticket change returns the new state, and the room h
   assert.equal(ticket.statusCategory, "done");
   // The card sync created links back to the ticket.
   assert.deepEqual(ticket.linkedTask, { taskId: applied.created[0]!.id });
+});
+
+test("a signed Jira webhook that changes a ticket reaches the room stream as a work_items invalidation", { skip }, async (t) => {
+  const { room, connection } = await trackerRoom();
+  tickets.set("HT-3", { status: "To Do", category: "new", updated: "2026-11-17T10:00:00.000+0000" });
+  // The ticket is known to LetAgents (a webhook only reads tickets it holds).
+  await sync!.getDefaultTrackerSync()!.applyItem(connection, {
+    provider: "jira", key: "HT-3", title: "Ticket HT-3", ticket_state: "todo", raw_status: "To Do", unmapped: false,
+    assignee_id: null, assignee_label: null, url: "https://acme.atlassian.net/browse/HT-3",
+    tracker_updated_at: "2026-11-17T10:00:00.000Z", payload: {},
+  }, { roomIds: [room.id] });
+  // Let the import's own invalidation pass before the stream opens.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+
+  const appBase = base.replace(/\/api\/v1$/, "");
+  const stream = openStream(`${appBase}/rooms/${encodeURIComponent(room.id)}/messages/stream?stream_capability=resource_invalidation_v1`, ada.cookie);
+  t.after(() => stream.close());
+  await stream.ready();
+  assert.ok(await stream.waitFor((frame) => frame.event === "room_sync"), "the stream handshake landed");
+
+  tickets.set("HT-3", { status: "Done", category: "done", updated: "2026-11-17T12:00:00.000+0000" });
+  const body = JSON.stringify({ timestamp: Date.now(), webhookEvent: "jira:issue_updated", issue: { key: "HT-3" } });
+  const secret = crypto!.createConnectorCipher(CONNECTOR_KEY).webhookSecret(connection.id);
+  const delivered = await realFetch(`${appBase}/webhooks/trackers/jira/${connection.id}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-hub-signature": `sha256=${createHmac("sha256", secret).update(body).digest("hex")}` },
+    body,
+  });
+  assert.equal(delivered.status, 202, await delivered.clone().text());
+
+  const isWorkItems = (frame: { event: string; data: { resource?: string } }) => frame.event === "resource_invalidation_v1" && frame.data.resource === "work_items";
+  const pointer = await stream.waitFor(isWorkItems);
+  assert.deepEqual(pointer?.data, { room_id: room.id, resource: "work_items" });
+
+  // A ticket with no card in the room changes too: the room still hears it,
+  // since the change may move the ticket into its filter.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const seen = stream.frames.filter(isWorkItems).length;
+  const applied = await sync!.getDefaultTrackerSync()!.applyItem(connection, {
+    provider: "jira", key: "HT-4", title: "Ticket HT-4", ticket_state: "todo", raw_status: "To Do", unmapped: false,
+    assignee_id: null, assignee_label: null, url: "https://acme.atlassian.net/browse/HT-4",
+    tracker_updated_at: "2026-11-17T12:30:00.000Z", payload: {},
+  });
+  assert.deepEqual([applied.changed, applied.created.length, applied.updated.length], [true, 0, 0]);
+  assert.ok(await stream.waitFor(() => stream.frames.filter(isWorkItems).length > seen), "a second work_items pointer");
 });

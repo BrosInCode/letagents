@@ -182,11 +182,13 @@ test("a query cannot break out of the room filter", async () => {
     'summary ~ \\"a ) OR key is not EMPTY OR ( summary ~ "b\\"c"',
     // An escaped backslash ends the quoted string; the ) after it is outside.
     "summary ~ 'a\\\\' ) OR (key is not EMPTY",
+    // A trailing backslash escapes nothing.
+    "project = HT\\",
   ]) {
     await rejectsWith(ctx.reader.search(ROOM, { query, limit: 10 }), "invalid_input", /unbalanced/);
   }
   // Any backslash outside a quoted string is refused in a caller's query.
-  for (const query of ["project = HT\\", "summary ~ \\\\'a ) OR (b'", "labels = a\\ b"]) {
+  for (const query of ["summary ~ \\\\'a ) OR (b'", "labels = a\\ b"]) {
     await rejectsWith(ctx.reader.search(ROOM, { query, limit: 10 }), "invalid_input", /backslash/);
   }
   assert.equal(ctx.jira.calls.length, 0, "no tracker request for a rejected query");

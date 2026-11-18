@@ -18,6 +18,7 @@ import {
   trackerImportCreator,
   type TrackerProvider,
 } from "../../../shared/ticket-connectors.mjs";
+import { ROOM_RESOURCE_WORK_ITEMS } from "../../../shared/room-resource-invalidation.mjs";
 import { db } from "../db/client.js";
 import { toTask } from "../db/mappers.js";
 import { external_items, tasks, room_board_planning } from "../db/schema.js";
@@ -782,9 +783,11 @@ export function getDefaultTrackerSync(): TrackerSync | null {
         taskEvents.emit("task:updated", { projectId: roomId, task });
       }).catch(() => undefined);
     },
+    // Pages and apps re-read their work items through /api/v1, which checks
+    // the room filter again; the pointer says only "work_items changed".
     onWorkItemsChanged: (roomId) => {
-      void import("../server/events.js").then(({ queueWorkItemsInvalidation }) => {
-        queueWorkItemsInvalidation(roomId);
+      void import("../server/events.js").then(({ queueRoomResourceInvalidation }) => {
+        queueRoomResourceInvalidation(roomId, ROOM_RESOURCE_WORK_ITEMS);
       }).catch(() => undefined);
     },
   });
