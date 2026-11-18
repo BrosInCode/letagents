@@ -1,39 +1,19 @@
 <template>
-  <div class="desktop-long-message" data-testid="desktop-long-message">
-    <div
-      :id="contentId"
-      class="desktop-long-message-content"
-      :class="{ collapsed: isLong && !expanded }"
-      :data-testid="`desktop-long-message-content-${safeMessageId}`"
-    >
-      <div class="desktop-long-message-html" v-html="html" @click="handleInlineReferenceClick" />
-    </div>
-
-    <div v-if="isLong" class="desktop-long-message-actions">
-      <button
-        type="button"
-        :aria-expanded="expanded"
-        :aria-controls="contentId"
-        data-testid="desktop-long-message-toggle"
-        @click="expanded = !expanded"
-      >
-        {{ expanded ? "Show less" : "Read more" }}
-      </button>
-      <button type="button" data-testid="desktop-open-reader" @click="openReader">
-        Open reader
-      </button>
-    </div>
-
-    <MessageReader v-if="readerOpen" :text="text" :html="html" :sender="sender" :room-identifier="roomIdentifier"
-      @close="closeReader" @content-click="handleInlineReferenceClick" />
-  </div>
+  <LongMessageContent
+    :text="text"
+    :html="html"
+    :message-id="messageId"
+    :sender="sender"
+    :room-identifier="roomIdentifier"
+    content-class="desktop-long-message-html"
+    :intercept-click="interceptDesktopClick"
+    @message-reference-click="emit('message-reference-click', $event)"
+    @task-reference-click="emit('task-reference-click', $event)"
+  />
 </template>
 
 <script setup lang="ts">
-import { useTaskLinkPreview } from "../../../../../../../shared/ui/board/task-link-preview";
-import { computed, ref } from "vue";
-
-import MessageReader from "../../../../../../../shared/ui/MessageReader.vue";
+import LongMessageContent from "../../../../../../../shared/ui/LongMessageContent.vue";
 import type { MessageReaderSender } from "../../../../../../../shared/ui/message-reader";
 import type { PersonMenuPosition } from "../../../domain/person-context-menu";
 import { mentionKeyForClick, mentionMenuPosition } from "../../../domain/room-mention-links";
@@ -45,12 +25,8 @@ const props = withDefaults(defineProps<{
   messageId: string;
   roomIdentifier?: string | null;
   sender?: MessageReaderSender;
-  collapseAfterChars?: number;
-  collapseAfterLines?: number;
 }>(), {
   roomIdentifier: null,
-  collapseAfterChars: 1400,
-  collapseAfterLines: 18,
 });
 
 const emit = defineEmits<{
@@ -59,78 +35,22 @@ const emit = defineEmits<{
   "mention-click": [mentionKey: string, position: PersonMenuPosition];
 }>();
 
-const previewTask = useTaskLinkPreview();
-const expanded = ref(false);
-const readerOpen = ref(false);
-
-const lineCount = computed(() => props.text ? props.text.split(/\r\n|\r|\n/).length : 0);
-const characterCount = computed(() => props.text.length);
-const isLong = computed(() =>
-  characterCount.value > props.collapseAfterChars || lineCount.value > props.collapseAfterLines
-);
-const safeMessageId = computed(() => props.messageId.replace(/[^A-Za-z0-9_-]/g, "-") || "message");
-const contentId = computed(() => `desktop-message-content-${safeMessageId.value}`);
-
-function openReader(): void {
-  readerOpen.value = true;
-}
-
-function closeReader(): void {
-  readerOpen.value = false;
-}
-
-function handleInlineReferenceClick(event: MouseEvent): void {
+/** Mentions open the person menu; links to this room scroll to the message. */
+function interceptDesktopClick(event: MouseEvent): (() => void) | null {
   const mentionKey = mentionKeyForClick(event, window.getSelection?.()?.toString() ?? "");
   if (mentionKey) {
-    event.preventDefault();
-    event.stopPropagation();
     const element = (event.target as Element).closest("[data-mention-key]");
     const position = mentionMenuPosition(event, element);
-    readerOpen.value = false;
-    emit("mention-click", mentionKey, position);
-    return;
+    return () => emit("mention-click", mentionKey, position);
   }
 
-  const anchorTarget = event.target instanceof Element
+  const anchor = event.target instanceof Element
     ? event.target.closest<HTMLAnchorElement>("a[href]")
     : null;
-  if (anchorTarget) {
-    const href = anchorTarget.getAttribute("href") || "";
-    const targetMessageId = resolveSameRoomMessageReference(
-      href,
-      props.roomIdentifier,
-      LETAGENTS_ROOM_ORIGIN,
-    );
-    if (targetMessageId) {
-      event.preventDefault();
-      event.stopPropagation();
-      readerOpen.value = false;
-      emit("message-reference-click", targetMessageId);
-      return;
-    }
-  }
-
-  const messageTarget = event.target instanceof Element
-    ? event.target.closest<HTMLElement>("[data-message-reference-id]")
+  const targetMessageId = anchor
+    ? resolveSameRoomMessageReference(anchor.getAttribute("href") || "", props.roomIdentifier, LETAGENTS_ROOM_ORIGIN)
     : null;
-  const taskTarget = event.target instanceof Element
-    ? event.target.closest<HTMLElement>("[data-task-reference-id]")
-    : null;
-  const messageId = messageTarget?.dataset.messageReferenceId || "";
-  const taskId = taskTarget?.dataset.taskReferenceId || "";
-  if (!messageId && !taskId) return;
-  event.preventDefault();
-  event.stopPropagation();
-  if (!messageId && taskId && taskTarget && previewTask) {
-    void previewTask(taskId, taskTarget, event.detail === 0, closeReader);
-    return;
-  }
-  readerOpen.value = false;
-  if (messageId) {
-    emit("message-reference-click", messageId);
-    return;
-  }
-  emit("task-reference-click", taskId);
+  if (!targetMessageId) return null;
+  return () => emit("message-reference-click", targetMessageId);
 }
-
 </script>

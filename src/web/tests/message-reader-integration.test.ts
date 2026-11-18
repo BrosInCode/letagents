@@ -22,7 +22,8 @@ before(async () => {
     logLevel: 'silent',
     server: { middlewareMode: true },
   })
-  LongMessage = (await vite.ssrLoadModule('/src/components/room/LongMessageContent.vue')).default
+  // The web wrapper renders the shared component, which owns collapse, reader and click state.
+  LongMessage = (await vite.ssrLoadModule(fileURLToPath(new URL('../../../shared/ui/LongMessageContent.vue', import.meta.url)))).default
   ChatMessage = (await vite.ssrLoadModule('/src/components/room/ChatMessage.vue')).default
   auth = (await vite.ssrLoadModule('/src/composables/useAuth.ts')).useAuth()
 })
