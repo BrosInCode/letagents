@@ -59,6 +59,7 @@ export const messagePinEvents = createBridgedEmitter("message-pins");
 export const messageReactionEvents = createBridgedEmitter("message-reactions");
 /** One lane for the LetAgents API resources (documents, jobs, intents, pages, work items). */
 export const roomResourceEvents = createBridgedEmitter("room-resources");
+export const workItemEvents = createBridgedEmitter("work-items");
 
 const ROOM_INVALIDATION_COALESCE_MS = 100;
 
@@ -145,6 +146,11 @@ export function queueRoomResourceInvalidation(projectId: string, resource: RoomR
   timer.unref?.();
   pendingRoomResourceInvalidations.set(key, timer);
 }
+/**
+ * A ticket changed in a tracker this room imports from. Pages re-read their
+ * work items through `/api/v1`, which checks the room filter again.
+ */
+export const queueWorkItemsInvalidation = createRoomInvalidationQueue(workItemEvents, "work_items:invalidated");
 
 export type AccountRoomAccessResolver = (input: {
   accountId: string;

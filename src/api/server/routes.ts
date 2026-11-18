@@ -226,6 +226,7 @@ import {
   roomResourceEvents,
   taskEvents,
   wakeRuleEvents,
+  workItemEvents,
   emitProjectMessage,
 } from "./events.js";
 import {
@@ -280,6 +281,7 @@ function getRoomEventBroker(): RoomEventBroker {
     messageReactionEvents,
     messagePinEvents,
     roomResourceEvents,
+    workItemEvents,
     joinRequestEvents: roomJoinRequestEvents,
     rentalActivityEvents,
     messageInfoEvents,
