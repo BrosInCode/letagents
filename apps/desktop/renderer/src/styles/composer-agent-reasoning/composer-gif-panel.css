@@ -15,6 +15,29 @@
   backdrop-filter: blur(24px) saturate(170%);
   box-shadow: 0 0 0 0.5px rgba(0, 0, 0, 0.6), 0 16px 40px rgba(0, 0, 0, 0.5);
   transform-origin: 0 100%;
+  /* Never taller than the space above the composer (measured on open and on
+     resize); what does not fit scrolls inside the panel. */
+  max-height: var(--desktop-composer-flyout-max, none);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+}
+
+.desktop-composer-add-flyout::-webkit-scrollbar {
+  display: none;
+}
+
+/* Invite a bot is a column: under the cap its room list shrinks first, so the
+   title and "New invite room" stay in sight. */
+.desktop-composer-add-flyout[data-flyout="invite"] {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The narrow panel's Back row keeps its height; only the panel's content gives way. */
+.desktop-composer-add-flyout[data-flyout="invite"] > :not(.desktop-invite-bot) {
+  flex: none;
 }
 
 /* No room beside the menu: the panel takes the menu's place, with a Back row. */
