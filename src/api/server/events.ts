@@ -1,4 +1,5 @@
 import type { RoomGif } from "../../../shared/room-expressions.mjs";
+import type { RoomResourceInvalidationResource } from "../../../shared/room-resource-invalidation.mjs";
 import {
   addMessageWithCreateStatus,
   type AddMessageOptions,
@@ -56,6 +57,8 @@ export const executionDelegationEvents = createBridgedEmitter("execution-delegat
 export const wakeRuleEvents = createBridgedEmitter("wake-rules");
 export const messagePinEvents = createBridgedEmitter("message-pins");
 export const messageReactionEvents = createBridgedEmitter("message-reactions");
+/** One lane for the LetAgents API resources (documents, jobs, intents, pages, work items). */
+export const roomResourceEvents = createBridgedEmitter("room-resources");
 
 const ROOM_INVALIDATION_COALESCE_MS = 100;
 
@@ -123,6 +126,25 @@ export const queueMessageReactionInvalidation = createRoomInvalidationQueue(
 
 /** A pin changes a read model, never the message/notification/agent stream. */
 export const queueMessagePinInvalidation = createRoomInvalidationQueue(messagePinEvents, "message_pins:invalidated");
+
+const pendingRoomResourceInvalidations = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * Coalesce changes to one LetAgents API resource in one room into a
+ * pointer-only invalidation. Every API area uses this one helper, so a new
+ * resource needs no new lane: only its name in
+ * ROOM_RESOURCE_INVALIDATION_RESOURCES.
+ */
+export function queueRoomResourceInvalidation(projectId: string, resource: RoomResourceInvalidationResource): void {
+  const key = `${resource}\u0000${projectId}`;
+  if (pendingRoomResourceInvalidations.has(key)) return;
+  const timer = setTimeout(() => {
+    pendingRoomResourceInvalidations.delete(key);
+    roomResourceEvents.emit("room_resource:invalidated", { projectId, resource });
+  }, ROOM_INVALIDATION_COALESCE_MS);
+  timer.unref?.();
+  pendingRoomResourceInvalidations.set(key, timer);
+}
 
 export type AccountRoomAccessResolver = (input: {
   accountId: string;
