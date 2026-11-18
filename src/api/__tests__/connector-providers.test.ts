@@ -341,7 +341,7 @@ test("Jira transition to the current status makes no write; an unknown status is
   assert.equal(same.externalId, "HT-1234:status:In Progress");
   await assert.rejects(
     jira.transition(jiraConnection(), "HT-1234", "Shipped", "lae_x"),
-    (error: unknown) => error instanceof TrackerProviderError && error.outcome === "definite",
+    (error: unknown) => error instanceof TrackerProviderError && error.outcome === "definite" && error.permanent,
   );
   assert.ok(calls.every((call) => call.method === "GET"));
 });

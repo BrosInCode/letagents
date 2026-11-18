@@ -428,6 +428,9 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
         throw new TrackerProviderError(
           "definite",
           `Jira issue ${key} has no transition from "${current.raw_status}" to "${toStatus}".`,
+          null,
+          null,
+          true,
         );
       }
       await api(conn, `/issue/${encodeURIComponent(key)}/transitions`, {

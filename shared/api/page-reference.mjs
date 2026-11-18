@@ -6,6 +6,7 @@ import { CAPABILITIES, CAPABILITY_NAMES, getCapability } from "./capabilities.mj
 import { API_ERROR_CODES, API_VERSION, toJsonSchema } from "./core.mjs";
 import { capabilitiesByInput } from "./agent-tools.mjs";
 import { API_METHODS } from "./index.mjs";
+import { DATA_SCOPE_CAPABILITIES } from "./data.mjs";
 import { DATA_SCOPES, PAGE_MANIFEST_SCRIPT_TYPE, PAGE_SURFACES, PAGE_TITLE_MAX } from "./manifest.mjs";
 import { PAGE_LIMITS } from "./pages.mjs";
 
@@ -26,6 +27,54 @@ export const PAGE_THEME_TOKEN_NAMES = Object.freeze([
   "--la-green", "--la-amber", "--la-red",
   "--la-font-sans", "--la-font-mono", "--la-radius",
 ]);
+
+/**
+ * The helpers the desktop bridge puts on `letagents.use(area)`: each local
+ * name and the contract method it calls. The preload runs sandboxed and
+ * cannot import this, so a test compares it with the preload's own tables.
+ * @type {Readonly<Record<string, Readonly<Record<string, string>>>>}
+ */
+export const PAGE_AREA_HELPERS = Object.freeze({
+  rooms: { get: "rooms.get" },
+  people: { list: "people.list", viewer: "people.viewer" },
+  agents: { list: "agents.list" },
+  messages: { recent: "messages.recent", thread: "messages.thread" },
+  board: { tasks: "tasks.list", get: "tasks.get", planning: "planning.get" },
+  work_items: { search: "work_items.search", get: "work_items.get", history: "work_items.history" },
+  git: { pullRequests: "git.pullRequests" },
+  memory: { list: "memory.list" },
+  jobs: { start: "jobs.start", get: "jobs.get", list: "jobs.list", cancel: "jobs.cancel" },
+  intents: { propose: "intents.propose", get: "intents.get", list: "intents.list" },
+});
+
+/**
+ * The watch helper an area offers: its local name and the read it keeps
+ * running. `watch(input, cb)` takes the input first; `onChange(cb, input?)`
+ * the callback first.
+ * @type {Readonly<Record<string, readonly [string, string]>>}
+ */
+export const PAGE_AREA_WATCHES = Object.freeze({
+  work_items: ["watch", "work_items.search"],
+  board: ["onChange", "tasks.list"],
+  jobs: ["onChange", "jobs.list"],
+  intents: ["onChange", "intents.list"],
+});
+
+/** The reads a page may watch; the desktop's watch table must name the same ones (a test compares them). */
+export const PAGE_WATCHABLE_READS = Object.freeze([
+  "work_items.search", "work_items.get", "work_items.history",
+  "data.list", "data.get", "jobs.list", "jobs.get", "intents.list", "intents.get",
+  "tasks.list", "tasks.get", "planning.get",
+]);
+
+/** The room changes the desktop relays to `letagents.events.onChange`. */
+export const PAGE_CHANGE_RESOURCES = Object.freeze(["work_items", "documents", "jobs", "intents", "pages", "tasks"]);
+
+/** How the desktop runs watches; a test compares these with its constants. */
+export const PAGE_WATCH_LIMITS = Object.freeze({ debounceMs: 250, workItemPollMs: 120_000, maxWatches: 16 });
+
+/** Calls the desktop asks the viewer about first, in an app-drawn sheet. */
+export const PAGE_CONFIRMED_METHODS = Object.freeze(["jobs.start", "intents.propose"]);
 
 /**
  * Page management is for people and agents; a page knows itself through
@@ -88,6 +137,14 @@ export function pageReference(methods = API_METHODS) {
     byPolicy.set(words, [...(byPolicy.get(words) ?? []), `${name}${rule}`]);
   }
   const capabilities = [...byPolicy].map(([words, names]) => `${words}: ${names.join(", ")}`).join("; ");
+  const helpers = Object.entries(PAGE_AREA_HELPERS).map(([area, local]) => {
+    const calls = Object.entries(local).map(([name, method]) => (name === method.split(".")[1] ? `\`${name}\`` : `\`${name}\` (${method})`));
+    const watch = PAGE_AREA_WATCHES[area];
+    const watchText = watch
+      ? `; \`${watch[0]}(${watch[0] === "watch" ? "input, cb" : "cb, input?"})\` watches ${watch[1]}`
+      : "";
+    return `- \`use("${area}")\`: ${calls.join(", ")}${watchText}.`;
+  });
 
   return `# LetAgents room page reference (api ${API_VERSION})
 
@@ -107,7 +164,7 @@ A room page is one HTML file that a team pins as a tab in a LetAgents room. It r
 \`\`\`
 - \`api\`: ${API_VERSION}. \`title\`: 1 to ${PAGE_TITLE_MAX} characters. \`surfaces\`: ${PAGE_SURFACES.map((s) => `"${s}"`).join(", ")}; this version shows "room.tab" only. \`owner\`: "room".
 - \`capabilities\`: what the page may call; ask for the fewest. A room admin grants them when pinning; a call without one is \`not_granted\`. A new version that asks for more waits for a room admin.
-- \`collections\`: \`{ ${DATA_SCOPES.map((scope) => `"${scope}": ["name"]`).join(", ")} }\`, the data the page keeps per scope (needs \`data.<scope>\`). Names: a-z, 0-9, _.
+- \`collections\`: \`{ ${DATA_SCOPES.map((scope) => `"${scope}": ["name"]`).join(", ")} }\`, the data the page keeps per scope (needs \`data.<scope>\`). A name is a-z, 0-9 and _, starts with a letter, at most 40 characters. A document id is 1 to 128 letters, digits, _ . : or -.
 - \`workItemFields\`: tracker custom fields the page reads, such as "customfield_10027" (needs \`work_items.read\`).
 
 Capabilities by what happens when the page uses one: ${capabilities}.
@@ -115,10 +172,22 @@ Capabilities by what happens when the page uses one: ${capabilities}.
 ## window.letagents
 Every call returns a Promise. A refusal rejects with \`{ code, message, retryAfterMs? }\`. Codes: ${API_ERROR_CODES.join(", ")}. \`declined\`: the viewer said no in the confirm sheet. After \`rate_limited\`, wait \`retryAfterMs\`.
 - \`letagents.api.call(method, input?)\` or \`letagents.use(area).call(verb, input?)\`: a method below.
-- \`letagents.page.get()\` → \`{ id, title, version }\`; \`letagents.viewer.get()\` → \`{ id, login, displayName }\`; \`letagents.ui.context()\` → \`{ surface, room: { id }, page, viewer }\`.
+- Built in, no capability needed: \`letagents.page.get()\` → \`{ id, title, version }\`, \`letagents.viewer.get()\` → \`{ id, login, displayName }\`, and every \`letagents.ui\` call: \`ui.context()\` → \`{ surface, room: { id }, page, viewer }\`.
 - \`letagents.ui.open(url)\`: https only, in the system browser; the first link to a new domain asks the viewer. \`letagents.ui.copy(text)\`: plain text. Both only within 5 s of a click or key press in the page.
 - \`letagents.ui.theme.get()\` → \`{ mode: "light"|"dark", tokens }\`; \`letagents.ui.theme.onChange(fn)\` returns an unsubscribe function.
-- At most a burst of 40 calls, then 10 a second. Nothing is pushed to the page but the theme: read again to see changes.
+- ${PAGE_CONFIRMED_METHODS.map((m) => `\`${m}\``).join(" and ")} first show the viewer an app-drawn sheet with everything they send; a no rejects with \`declined\` and sends nothing. Only the page in the open tab may ask, one sheet at a time.
+- At most a burst of 40 calls, then 10 a second.
+
+## Helpers: letagents.use(area)
+Each name calls the method in brackets (the same name when none), with that method's input: \`use("board").tasks({ status: "in_progress" })\`. \`use(area).call(verb, input?)\` calls the method \`<area>.<verb>\`.
+${helpers.join("\n")}
+- \`use("data").collection(scope, name)\` (${DATA_SCOPES.map((scope) => `${scope}: ${DATA_SCOPE_CAPABILITIES[scope]}`).join(", ")}): \`list(input?)\`, \`get(docId)\`, \`set(docId, data, options?)\`, \`update(docId, data, options?)\`, \`delete(docId, options?)\`, \`onSnapshot(cb, input?)\` watches data.list. \`options\`: \`{ ifRevision? }\`.
+
+## Live updates
+- A watch runs its read now, then again about ${PAGE_WATCH_LIMITS.debounceMs} ms after each change in the room; work item reads also run at least every ${PAGE_WATCH_LIMITS.workItemPollMs / 60_000} minutes. Each answer calls \`cb(result, error)\`: one of the two is null. A watch returns a function that stops it.
+- \`letagents.watch(method, input, cb)\` watches any of: ${PAGE_WATCHABLE_READS.join(", ")}. It needs the method's capability.
+- At most ${PAGE_WATCH_LIMITS.maxWatches} watches run per page; one more calls back with \`too_large\`.
+- \`letagents.events.onChange(cb)\` gets \`{ resource }\` (${PAGE_CHANGE_RESOURCES.join(", ")}) when something changes, or \`{ resource: "*" }\` after a gap; returns an unsubscribe function.
 
 ## Methods
 A field without a type is a string. \`?\` optional, \`= x\` default, \`<n>\` a number. Path fields are required.

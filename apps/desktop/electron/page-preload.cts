@@ -98,7 +98,11 @@ ipcRenderer.on(CHANNEL, (_event, message: { event?: unknown; value?: unknown; id
   notify(themeListeners as Set<Listener>, { mode: theme.mode, tokens: { ...theme.tokens } });
 });
 
-/** Each area's methods by the names a page uses, and the contract method each one calls. */
+/**
+ * Each area's methods by the names a page uses, and the contract method each
+ * one calls. The page reference documents them from shared/api/page-reference.mjs;
+ * a test keeps that copy and these tables the same.
+ */
 const AREAS: Record<string, Record<string, string>> = {
   rooms: { get: "rooms.get" },
   people: { list: "people.list", viewer: "people.viewer" },
