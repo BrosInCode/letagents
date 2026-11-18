@@ -190,6 +190,9 @@ before(async () => {
   // timeline's transparent grouping wrapper too so ordinary message slots run.
   const groupedUpdates = await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/RoomGitHubUpdates.vue", import.meta.url)));
   await attachClientRender(groupedUpdates.default, "../../../../shared/ui/RoomGitHubUpdates.vue");
+  // DesktopLongMessageContent wraps the shared long-message component, which renders the message HTML.
+  const sharedLongMessage = await vite.ssrLoadModule(fileURLToPath(new URL("../../../../shared/ui/LongMessageContent.vue", import.meta.url)));
+  await attachClientRender(sharedLongMessage.default, "../../../../shared/ui/LongMessageContent.vue");
   await Promise.all([
     attachClientRender(DesktopChatMessage, "components/desktop/content/DesktopChatMessage.vue"),
     attachClientRender(RoomMessageViewport, "components/desktop/content/room-chat/RoomMessageViewport.vue"),
