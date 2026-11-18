@@ -18,6 +18,7 @@ import { claimRoomAsCreator } from "../db/room-members.js";
 import { registerWakeRuleLinkRoutes } from "../routes/wake-rule-links.js";
 import { registerContentDeletionRoutes } from "../routes/rooms/content-deletion.js";
 import { drainAttachmentDeletions } from "../messages/attachment-deletion.js";
+import { registerApiV1Routes } from "../v1/router.js";
 import type { Express } from "express";
 
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
@@ -659,5 +660,6 @@ export function registerApiRoutes(app: Express): void {
     },
   });
   registerContentDeletionRoutes(app, { resolveCanonicalRoomRequestId, resolveRoomOrReply, requireParticipant, requireAdmin, resolveProjectRole });
-
+  // The LetAgents API (shared/api contract); its routes are listed in v1/areas.ts.
+  registerApiV1Routes(app);
 }
