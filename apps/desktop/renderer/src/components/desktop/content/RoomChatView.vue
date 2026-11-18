@@ -214,7 +214,7 @@ import type { RoomGif } from "../../../../../../../shared/room-expressions.mjs";
 import type { ChatScrollPosition } from "../../../domain/chat-scroll";
 import { provideRoomMessageMotion } from "../../../../../../../shared/ui/useRoomMessageMotion";
 import { workspaceAgentTarget } from "../../../domain/room-contributions";
-import { computed, nextTick, onBeforeUnmount, provide, ref, toRef, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onDeactivated, provide, ref, toRef, watch } from "vue";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import { useStableIdSet } from "../../../composables/useStableIdSet";
 import PinnedMessages from "../../../../../../../shared/ui/PinnedMessages.vue";
@@ -494,6 +494,9 @@ const {
   showNextImage,
   showPreviousImage,
 } = useRoomImages(threadImageMessages);
+// The room view stays alive behind Settings and Inbox; an open viewer would
+// keep the page scroll locked there.
+onDeactivated(closeImageViewer);
 
 const {
   attaching,
