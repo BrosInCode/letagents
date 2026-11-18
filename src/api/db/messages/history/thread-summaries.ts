@@ -16,7 +16,7 @@ import type {
 } from "../../types.js";
 import { formatMessageId } from "../../utils.js";
 import { messageRowSelection } from "../selections.js";
-import { visibleMessageCondition } from "../visibility.js";
+import { sharedMessageCondition, visibleMessageCondition } from "../visibility.js";
 
 export const materializedThreadKeySelection = {
   summary_thread_root_number: message_thread_summaries.thread_root_number,
@@ -48,13 +48,34 @@ export async function getVisibleMessageRow(
   roomId: string,
   messageNumber: number,
   includePromptOnly: boolean,
+  sharedOnly = false,
 ): Promise<MessageRow | null> {
   const [row] = await db
     .select(messageRowSelection)
     .from(messages)
-    .where(and(eq(messages.room_id, roomId), eq(messages.number, messageNumber), visibleMessageCondition(includePromptOnly)))
+    .where(and(eq(messages.room_id, roomId), eq(messages.number, messageNumber), visibleMessageCondition(includePromptOnly), sharedMessageCondition(sharedOnly)))
     .limit(1);
   return row ?? null;
+}
+
+/**
+ * Replies of each thread that every reader may see (see
+ * sharedMessageCondition). The stored summaries count every reply, a rental's
+ * renter-only ones too, so a reader that filters them counts here instead.
+ */
+export async function countSharedThreadReplies(roomId: string, rootNumbers: readonly number[]): Promise<Map<number, number>> {
+  if (!rootNumbers.length) return new Map();
+  const rows = await db
+    .select({ root: messages.thread_root_number, count: sql<number>`count(*)::int` })
+    .from(messages)
+    .where(and(
+      eq(messages.room_id, roomId),
+      inArray(messages.thread_root_number, [...rootNumbers]),
+      visibleMessageCondition(false),
+      sharedMessageCondition(true),
+    ))
+    .groupBy(messages.thread_root_number);
+  return new Map(rows.map((row) => [row.root!, row.count]));
 }
 
 export async function buildThreadSummariesForRoots(

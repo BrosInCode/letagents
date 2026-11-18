@@ -6,7 +6,7 @@ import { message_thread_reads, message_thread_summaries, messages } from "../../
 import type { Message, MessageRow, MessageThreadSummary } from "../../types.js";
 import { clampLimit, parseScopedId } from "../../utils.js";
 import { messageRowSelection } from "../selections.js";
-import { visibleMessageCondition } from "../visibility.js";
+import { sharedMessageCondition, visibleMessageCondition } from "../visibility.js";
 import { hydrateMessageReplies } from "./message-history.js";
 import {
   type MaterializedThreadKeySelection,
@@ -52,6 +52,8 @@ export async function getMessageThread(
     include_prompt_only?: boolean;
     account_id?: string | null;
     account_agent_routing?: boolean;
+    /** Only messages every reader may see (see sharedMessageCondition). */
+    shared_only?: boolean;
   },
 ): Promise<MessageThreadPage | null> {
   const requestedRootNumber = parseScopedId(rootMessageId, "msg");
@@ -59,7 +61,10 @@ export async function getMessageThread(
     throw new RequestValidationError("thread root must be a valid message id");
   }
 
-  const visibilityCondition = visibleMessageCondition(options?.include_prompt_only);
+  const visibilityCondition = and(
+    visibleMessageCondition(options?.include_prompt_only),
+    sharedMessageCondition(options?.shared_only),
+  );
   const [requestedRoot] = await db
     .select(messageRowSelection)
     .from(messages)
@@ -70,7 +75,7 @@ export async function getMessageThread(
   const rootNumber = requestedRoot.thread_root_number ?? requestedRoot.number;
   const rootRow = requestedRoot.number === rootNumber
     ? requestedRoot
-    : await getVisibleMessageRow(roomId, rootNumber, Boolean(options?.include_prompt_only));
+    : await getVisibleMessageRow(roomId, rootNumber, Boolean(options?.include_prompt_only), Boolean(options?.shared_only));
   if (!rootRow) return null;
 
   const beforeNumber = options?.before ? parseScopedId(options.before, "msg") : null;
