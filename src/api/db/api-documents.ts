@@ -9,6 +9,12 @@ import { inTransaction } from './room-members.js';
 // The store behind the data.* API methods (shared/api/data.mjs). It knows
 // rows, caps and revisions; who may name which scope id is decided before it
 // is called (src/api/v1/documents.ts). room_id is part of every statement.
+//
+// A delete keeps the row as a tombstone (deleted, empty data, size 0) and
+// adds one to its revision, so a doc id's revisions never repeat: a client
+// that read revision 3 before a delete and a re-create cannot write over the
+// new document with ifRevision 3. Reads never show tombstones and the caps
+// never count them.
 
 export interface ApiDocumentScope {
   roomId: string;
@@ -31,6 +37,7 @@ export interface ApiDocumentRow {
   data: Record<string, unknown>;
   size_bytes: number;
   revision: number;
+  deleted: boolean;
   updated_by_kind: ActorPrincipal['kind'];
   updated_by_id: string;
   updated_at: Date;
@@ -38,7 +45,11 @@ export interface ApiDocumentRow {
 
 export type ApiDocumentWriter = Pick<ActorPrincipal, 'kind' | 'id'>;
 
-const COLUMNS = `room_id, scope, scope_id, collection, doc_id, data, size_bytes, revision, updated_by_kind, updated_by_id, updated_at`;
+/** A tombstone older than this may go: a client holding a revision that old reads again anyway. */
+const TOMBSTONE_KEEP = '30 days';
+const TOMBSTONE_PURGE_BATCH = 100;
+
+const COLUMNS = `room_id, scope, scope_id, collection, doc_id, data, size_bytes, revision, deleted, updated_by_kind, updated_by_id, updated_at`;
 const KEY_MATCH = `room_id = $1 AND scope = $2 AND scope_id = $3 AND collection = $4 AND doc_id = $5`;
 
 const keyParams = (key: ApiDocumentKey) => [key.roomId, key.scope, key.scopeId, key.collection, key.docId];
@@ -49,7 +60,10 @@ export function documentBytes(data: unknown): number {
 }
 
 export async function getApiDocument(key: ApiDocumentKey): Promise<ApiDocumentRow | null> {
-  const { rows } = await pool.query<ApiDocumentRow>(`SELECT ${COLUMNS} FROM api_documents WHERE ${KEY_MATCH}`, keyParams(key));
+  const { rows } = await pool.query<ApiDocumentRow>(
+    `SELECT ${COLUMNS} FROM api_documents WHERE ${KEY_MATCH} AND NOT deleted`,
+    keyParams(key),
+  );
   return rows[0] ?? null;
 }
 
@@ -62,7 +76,7 @@ export async function listApiDocuments(
 ): Promise<{ rows: ApiDocumentRow[]; nextAfter: string | null }> {
   const { rows } = await pool.query<ApiDocumentRow>(
     `SELECT ${COLUMNS} FROM api_documents
-      WHERE room_id = $1 AND scope = $2 AND scope_id = $3 AND collection = $4 AND ($5::text IS NULL OR doc_id > $5)
+      WHERE room_id = $1 AND scope = $2 AND scope_id = $3 AND collection = $4 AND NOT deleted AND ($5::text IS NULL OR doc_id > $5)
       ORDER BY doc_id
       LIMIT $6`,
     [input.roomId, input.scope, input.scopeId, input.collection, input.after ?? null, input.limit + 1],
@@ -78,43 +92,56 @@ export async function listApiDocuments(
   return { rows: page, nextAfter: more ? page[page.length - 1]!.doc_id : null };
 }
 
-export type ApiDocumentWrite =
-  | { mode: 'set'; data: Record<string, unknown>; ifRevision?: number; writer: ApiDocumentWriter }
-  | { mode: 'update'; data: Record<string, unknown>; ifRevision?: number; writer: ApiDocumentWriter };
+export interface ApiDocumentWrite {
+  /** `set` replaces the document; `update` merges top-level fields into an existing one. */
+  mode: 'set' | 'update';
+  data: Record<string, unknown>;
+  ifRevision?: number;
+  writer: ApiDocumentWriter;
+}
 
 /**
- * Creates, replaces or merges one document. Writes in one scope id run one at
- * a time (a transaction lock on the scope), so the revision check, the
- * document count and the viewer total are exact under concurrent writers.
+ * Creates, replaces or merges one document. Every write in a room locks the
+ * room's usage row first, so the revision check and all the caps (scope,
+ * viewer, room) are exact under concurrent writers.
  * Throws ApiError `conflict`, `too_large` or (update only) `not_found`.
  */
 export async function writeApiDocument(key: ApiDocumentKey, write: ApiDocumentWrite): Promise<ApiDocumentRow> {
   return inTransaction(async (client) => {
-    await lockScope(client, key);
-    const existing = await selectForWrite(client, key);
-    checkRevision(existing, write.ifRevision);
-    if (write.mode === 'update' && !existing) throw new ApiError('not_found', 'No document with this id in this collection.');
+    const usage = await lockRoomUsage(client, key.roomId);
+    const stored = await selectForWrite(client, key);
+    const live = stored && !stored.deleted ? stored : null;
+    checkRevision(live, write.ifRevision);
+    if (write.mode === 'update' && !live) throw new ApiError('not_found', 'No document with this id in this collection.');
 
-    const data = write.mode === 'update' ? mergeTopLevel(existing!.data, write.data) : write.data;
+    const data = write.mode === 'update' ? mergeTopLevel(live!.data, write.data) : write.data;
     const size = documentBytes(data);
     if (size > DATA_LIMITS.docBytes) {
       throw new ApiError('too_large', `A document holds at most ${DATA_LIMITS.docBytes} bytes of JSON; this one is ${size}.`);
     }
-    if (!existing) {
+    if (!live) {
       const { rows } = await client.query<{ count: number }>(
-        `SELECT count(*)::int AS count FROM api_documents WHERE room_id = $1 AND scope = $2 AND scope_id = $3`,
+        `SELECT count(*)::int AS count FROM api_documents WHERE room_id = $1 AND scope = $2 AND scope_id = $3 AND NOT deleted`,
         [key.roomId, key.scope, key.scopeId],
       );
       if ((rows[0]?.count ?? 0) >= DATA_LIMITS.docsPerScope) {
         throw new ApiError('too_large', `This scope already holds ${DATA_LIMITS.docsPerScope} documents. Delete some first.`);
       }
+      if (usage.docs >= DATA_LIMITS.docsPerRoom) {
+        throw new ApiError('too_large', `This room already holds ${DATA_LIMITS.docsPerRoom} documents. Delete some first.`);
+      }
+    }
+    const growth = size - (live?.size_bytes ?? 0);
+    if (usage.bytes + growth > DATA_LIMITS.bytesPerRoom) {
+      throw new ApiError('too_large', `The documents in one room hold at most ${DATA_LIMITS.bytesPerRoom} bytes in all. Delete some first.`);
     }
     if (key.scope === 'viewer') {
       const { rows } = await client.query<{ total: number }>(
-        `SELECT COALESCE(sum(size_bytes), 0)::int AS total FROM api_documents WHERE room_id = $1 AND scope = $2 AND scope_id = $3`,
+        `SELECT COALESCE(sum(size_bytes), 0)::int AS total FROM api_documents
+          WHERE room_id = $1 AND scope = $2 AND scope_id = $3 AND NOT deleted`,
         [key.roomId, key.scope, key.scopeId],
       );
-      const total = (rows[0]?.total ?? 0) - (existing?.size_bytes ?? 0) + size;
+      const total = (rows[0]?.total ?? 0) + growth;
       if (total > DATA_LIMITS.viewerBytesPerPage) {
         throw new ApiError(
           'too_large',
@@ -123,36 +150,71 @@ export async function writeApiDocument(key: ApiDocumentKey, write: ApiDocumentWr
       }
     }
 
+    // A tombstone comes back to life with the next revision, never with 1.
     const { rows } = await client.query<ApiDocumentRow>(
-      `INSERT INTO api_documents (room_id, scope, scope_id, collection, doc_id, data, size_bytes, revision, updated_by_kind, updated_by_id, updated_at)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 1, $8, $9, now())
+      `INSERT INTO api_documents (room_id, scope, scope_id, collection, doc_id, data, size_bytes, revision, deleted, updated_by_kind, updated_by_id, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, 1, false, $8, $9, now())
        ON CONFLICT (room_id, scope, scope_id, collection, doc_id) DO UPDATE
-         SET data = EXCLUDED.data, size_bytes = EXCLUDED.size_bytes, revision = api_documents.revision + 1,
+         SET data = EXCLUDED.data, size_bytes = EXCLUDED.size_bytes, revision = api_documents.revision + 1, deleted = false,
              updated_by_kind = EXCLUDED.updated_by_kind, updated_by_id = EXCLUDED.updated_by_id, updated_at = now()
        RETURNING ${COLUMNS}`,
       [...keyParams(key), JSON.stringify(data), size, write.writer.kind, write.writer.id],
     );
+    await client.query(`UPDATE api_document_usage SET docs = docs + $2, bytes = bytes + $3 WHERE room_id = $1`, [
+      key.roomId,
+      live ? 0 : 1,
+      growth,
+    ]);
     return rows[0]!;
   });
 }
 
-/** Returns false when there was no such document. Throws ApiError `conflict` on a revision mismatch. */
-export async function deleteApiDocument(key: ApiDocumentKey, options: { ifRevision?: number } = {}): Promise<boolean> {
+/**
+ * Leaves a tombstone with the next revision. Returns false when there was no
+ * such document. Throws ApiError `conflict` on a revision mismatch.
+ */
+export async function deleteApiDocument(
+  key: ApiDocumentKey,
+  options: { ifRevision?: number; writer: ApiDocumentWriter },
+): Promise<boolean> {
   return inTransaction(async (client) => {
-    await lockScope(client, key);
-    const existing = await selectForWrite(client, key);
-    checkRevision(existing, options.ifRevision);
-    if (!existing) return false;
-    await client.query(`DELETE FROM api_documents WHERE ${KEY_MATCH}`, keyParams(key));
+    await lockRoomUsage(client, key.roomId);
+    const stored = await selectForWrite(client, key);
+    const live = stored && !stored.deleted ? stored : null;
+    checkRevision(live, options.ifRevision);
+    if (!live) return false;
+    await client.query(
+      `UPDATE api_documents
+          SET data = '{}'::jsonb, size_bytes = 0, revision = revision + 1, deleted = true,
+              updated_by_kind = $6, updated_by_id = $7, updated_at = now()
+        WHERE ${KEY_MATCH}`,
+      [...keyParams(key), options.writer.kind, options.writer.id],
+    );
+    await client.query(`UPDATE api_document_usage SET docs = docs - 1, bytes = bytes - $2 WHERE room_id = $1`, [
+      key.roomId,
+      live.size_bytes,
+    ]);
+    // Old tombstones go a few at a time, so a room that churns ids keeps no growing pile.
+    await client.query(
+      `DELETE FROM api_documents
+        WHERE (room_id, scope, scope_id, collection, doc_id) IN (
+          SELECT room_id, scope, scope_id, collection, doc_id FROM api_documents
+           WHERE room_id = $1 AND deleted AND updated_at < now() - $2::interval
+           LIMIT $3)`,
+      [key.roomId, TOMBSTONE_KEEP, TOMBSTONE_PURGE_BATCH],
+    );
     return true;
   });
 }
 
-async function lockScope(client: PoolClient, key: ApiDocumentScope): Promise<void> {
-  // Room ids hold no control characters, so "\n" cannot be part of one.
-  await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
-    `api_documents:${key.roomId}\n${key.scope}\n${key.scopeId}`,
-  ]);
+/** The room's usage row, locked until the transaction ends; made on the room's first write. */
+async function lockRoomUsage(client: PoolClient, roomId: string): Promise<{ docs: number; bytes: number }> {
+  await client.query(`INSERT INTO api_document_usage (room_id) VALUES ($1) ON CONFLICT (room_id) DO NOTHING`, [roomId]);
+  const { rows } = await client.query<{ docs: number; bytes: number }>(
+    `SELECT docs, bytes::float8 AS bytes FROM api_document_usage WHERE room_id = $1 FOR UPDATE`,
+    [roomId],
+  );
+  return rows[0] ?? { docs: 0, bytes: 0 };
 }
 
 async function selectForWrite(client: PoolClient, key: ApiDocumentKey): Promise<ApiDocumentRow | null> {
@@ -160,10 +222,10 @@ async function selectForWrite(client: PoolClient, key: ApiDocumentKey): Promise<
   return rows[0] ?? null;
 }
 
-/** `ifRevision` 0 means "only if it does not exist yet". */
-function checkRevision(existing: ApiDocumentRow | null, ifRevision: number | undefined): void {
+/** `ifRevision` 0 means "only if it does not exist", which a tombstone does not. */
+function checkRevision(live: ApiDocumentRow | null, ifRevision: number | undefined): void {
   if (ifRevision === undefined) return;
-  const current = existing?.revision ?? 0;
+  const current = live?.revision ?? 0;
   if (current !== ifRevision) {
     throw new ApiError(
       'conflict',
@@ -176,7 +238,8 @@ function checkRevision(existing: ApiDocumentRow | null, ifRevision: number | und
 
 /**
  * A field in the patch replaces that field; a field set to null is removed.
- * Built with fromEntries so a "__proto__" field stays a plain field.
+ * The input schema already refused "__proto__", "constructor" and
+ * "prototype" keys; fromEntries keeps every key a plain own field anyway.
  */
 function mergeTopLevel(current: Record<string, unknown>, patch: Record<string, unknown>): Record<string, unknown> {
   const fields = new Map(Object.entries(current));

@@ -214,6 +214,7 @@ export type MethodSpec<Name extends string = string, Input extends z.ZodType = z
     area: ApiArea;
     kind: MethodKind;
     capability: CapabilityName;
+    capabilityFromInput?(input: z.output<Input>): CapabilityName;
     description: string;
     path: string;
     httpMethod?: HttpVerb;
@@ -228,6 +229,7 @@ export type ApiMethod<Name extends string = string, Input extends z.ZodType = z.
     readonly area: ApiArea;
     readonly kind: MethodKind;
     readonly capability: CapabilityName;
+    capabilityFromInput?(input: z.output<Input>): CapabilityName;
     readonly description: string;
     readonly path: string;
     readonly httpMethod: HttpVerb;

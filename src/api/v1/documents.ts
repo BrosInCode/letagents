@@ -12,6 +12,8 @@ import {
   type ApiDocumentRow,
   type ApiDocumentScope,
 } from "../db/api-documents.js";
+import type { OwnerTokenAccount, Project, SessionAccount } from "../db.js";
+import { decideRoomRead, roomAccessPrincipal } from "../rooms/access-decision.js";
 import { queueRoomResourceInvalidation } from "../server/events.js";
 
 // The data.* methods for any transport: the /api/v1 routes call these, and
@@ -21,12 +23,18 @@ import { queueRoomResourceInvalidation } from "../server/events.js";
 
 export interface DocumentCall {
   actor: ApiActor;
-  /** The room in the URL, already checked for the actor. */
-  roomId: string;
+  /** The room in the URL; the actor may read it (checked before the call). */
+  room: Project;
+  /** The signed-in account behind a person; the write check asks with it. */
+  account: SessionAccount | OwnerTokenAccount | null;
 }
 
 export interface DocumentDeps {
   invalidate?: (roomId: string) => void;
+  /** Whether a page with this id is placed in this room. */
+  pageExists?: (roomId: string, pageId: string) => Promise<boolean>;
+  /** Throws when the actor may read the room but not change it. */
+  assertMayWrite?: (call: DocumentCall) => Promise<void>;
 }
 
 interface ScopeInput {
@@ -51,7 +59,7 @@ const invalidateDocuments = (roomId: string) => queueRoomResourceInvalidation(ro
  * - viewer: `<page id>:<account id>` of the caller. It is only ever the
  *   caller's own account, so it needs a person.
  */
-export function resolveDocumentScope(call: DocumentCall, input: ScopeInput): ResolvedDocumentScope {
+export function resolveDocumentScope(call: Pick<DocumentCall, "actor"> & { roomId: string }, input: ScopeInput): ResolvedDocumentScope {
   const { actor, roomId } = call;
   if (input.scope === "room") {
     if (input.pageId !== undefined) throw new ApiError("invalid_input", "pageId: the room scope belongs to no page; leave pageId out.");
@@ -85,6 +93,35 @@ export async function allowedCollectionsFor(actor: ApiActor): Promise<PageManife
   return null;
 }
 
+/**
+ * Whether a page with this id is placed in this room. True for every id
+ * today: the pages registry (PR7) fills this from page placements, so page
+ * and viewer data can only be made for a page the room has. Until then a
+ * page id opens a new scope, bounded by the room caps.
+ */
+export async function pageExistsInRoom(_roomId: string, _pageId: string): Promise<boolean> {
+  return true;
+}
+
+/**
+ * Who may change documents: the rule the room's message-create route uses
+ * for who may post (requireGitRoomParticipant: decideRoomRead with the
+ * cached collaborator check). Today that is the same rule the API's room
+ * access applied for reading, so the answer is the same; it is asked again
+ * here so writes keep the posting rule if API reads ever widen.
+ * Agents are scoped to the room by their session (PR1), so only a person is
+ * asked here.
+ */
+export async function assertMayWriteDocuments(call: DocumentCall): Promise<void> {
+  if (call.actor.principal.kind !== "person") return;
+  const decision = await decideRoomRead({ project: call.room, principal: roomAccessPrincipal(call.account) });
+  if (decision.kind === "allow") return;
+  if (decision.kind === "indeterminate") {
+    throw new ApiError("source_unavailable", "GitHub did not answer the room access check. Try again shortly.", { retryAfterMs: 30_000 });
+  }
+  throw new ApiError("not_participant", "Only participants in this room may change its documents.");
+}
+
 async function checkCollection(actor: ApiActor, scope: DataScope, collection: string): Promise<void> {
   const allowed = await allowedCollectionsFor(actor);
   if (allowed && !allowed[scope]?.includes(collection)) {
@@ -92,10 +129,32 @@ async function checkCollection(actor: ApiActor, scope: DataScope, collection: st
   }
 }
 
-async function documentKey(call: DocumentCall, input: DocumentInput): Promise<{ key: ApiDocumentKey; pageId: string | null }> {
-  const { pageId, ...scope } = resolveDocumentScope(call, input);
+async function resolveScope(call: DocumentCall, input: ScopeInput & { collection: string }, deps: DocumentDeps): Promise<ResolvedDocumentScope> {
+  const resolved = resolveDocumentScope({ actor: call.actor, roomId: call.room.id }, input);
+  if (resolved.pageId !== null && !(await (deps.pageExists ?? pageExistsInRoom)(call.room.id, resolved.pageId))) {
+    throw new ApiError("not_found", "No page with this id in this room.");
+  }
   await checkCollection(call.actor, input.scope, input.collection);
+  return resolved;
+}
+
+async function documentKey(call: DocumentCall, input: DocumentInput, deps: DocumentDeps): Promise<{ key: ApiDocumentKey; pageId: string | null }> {
+  const { pageId, ...scope } = await resolveScope(call, input, deps);
   return { key: { ...scope, collection: input.collection, docId: input.docId }, pageId };
+}
+
+async function documentWriteKey(call: DocumentCall, input: DocumentInput, deps: DocumentDeps) {
+  await (deps.assertMayWrite ?? assertMayWriteDocuments)(call);
+  return documentKey(call, input, deps);
+}
+
+/**
+ * A viewer's own data is not room news: nobody else may read it, so a write
+ * there sends no room-wide invalidation. Other scopes tell the room.
+ */
+function invalidate(call: DocumentCall, scope: DataScope, deps: DocumentDeps): void {
+  if (scope === "viewer") return;
+  (deps.invalidate ?? invalidateDocuments)(call.room.id);
 }
 
 export function toDataDocument(row: ApiDocumentRow, pageId: string | null): DataDocument {
@@ -114,15 +173,15 @@ export function toDataDocument(row: ApiDocumentRow, pageId: string | null): Data
 export async function listDocuments(
   call: DocumentCall,
   input: ScopeInput & { collection: string; after?: string; limit: number },
+  deps: DocumentDeps = {},
 ): Promise<DataDocumentPage> {
-  const { pageId, ...scope } = resolveDocumentScope(call, input);
-  await checkCollection(call.actor, input.scope, input.collection);
+  const { pageId, ...scope } = await resolveScope(call, input, deps);
   const { rows, nextAfter } = await listApiDocuments({ ...scope, collection: input.collection, after: input.after, limit: input.limit });
   return { documents: rows.map((row) => toDataDocument(row, pageId)), nextAfter };
 }
 
-export async function getDocument(call: DocumentCall, input: DocumentInput): Promise<DataDocument> {
-  const { key, pageId } = await documentKey(call, input);
+export async function getDocument(call: DocumentCall, input: DocumentInput, deps: DocumentDeps = {}): Promise<DataDocument> {
+  const { key, pageId } = await documentKey(call, input, deps);
   const row = await getApiDocument(key);
   if (!row) throw new ApiError("not_found", "No document with this id in this collection.");
   return toDataDocument(row, pageId);
@@ -133,9 +192,9 @@ export async function setDocument(
   input: DocumentInput & { data: Record<string, unknown>; ifRevision?: number },
   deps: DocumentDeps = {},
 ): Promise<DataDocument> {
-  const { key, pageId } = await documentKey(call, input);
+  const { key, pageId } = await documentWriteKey(call, input, deps);
   const row = await writeApiDocument(key, { mode: "set", data: input.data, ifRevision: input.ifRevision, writer: call.actor.principal });
-  (deps.invalidate ?? invalidateDocuments)(call.roomId);
+  invalidate(call, input.scope, deps);
   return toDataDocument(row, pageId);
 }
 
@@ -144,9 +203,9 @@ export async function updateDocument(
   input: DocumentInput & { data: Record<string, unknown>; ifRevision?: number },
   deps: DocumentDeps = {},
 ): Promise<DataDocument> {
-  const { key, pageId } = await documentKey(call, input);
+  const { key, pageId } = await documentWriteKey(call, input, deps);
   const row = await writeApiDocument(key, { mode: "update", data: input.data, ifRevision: input.ifRevision, writer: call.actor.principal });
-  (deps.invalidate ?? invalidateDocuments)(call.roomId);
+  invalidate(call, input.scope, deps);
   return toDataDocument(row, pageId);
 }
 
@@ -155,8 +214,8 @@ export async function deleteDocument(
   input: DocumentInput & { ifRevision?: number },
   deps: DocumentDeps = {},
 ): Promise<{ deleted: boolean }> {
-  const { key } = await documentKey(call, input);
-  const deleted = await deleteApiDocument(key, { ifRevision: input.ifRevision });
-  if (deleted) (deps.invalidate ?? invalidateDocuments)(call.roomId);
+  const { key } = await documentWriteKey(call, input, deps);
+  const deleted = await deleteApiDocument(key, { ifRevision: input.ifRevision, writer: call.actor.principal });
+  if (deleted) invalidate(call, input.scope, deps);
   return { deleted };
 }
