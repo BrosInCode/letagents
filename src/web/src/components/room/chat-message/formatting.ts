@@ -3,6 +3,7 @@ import {
   attentionResponseHandle,
 } from '../../../../../../shared/room-knowledge.mjs'
 import { renderMarkdown } from '../../../../../../shared/ui/markdown/markdown'
+import { linkRenderedMessageReferences } from '../../../../../../shared/ui/markdown/references'
 
 export { isAmbientSystemMessage, stripStatusPrefix } from '../../../../../../shared/ui/room-messages'
 
@@ -77,42 +78,5 @@ export function renderTaskMarkdown(text: string, editing = false): string {
 }
 
 export function renderMessageContent(text: string, taskReferenceIds?: ReadonlySet<string>, onLink?: (url: string) => void): string {
-  return linkTaskReferences(renderMarkdown(text, { block: true, onLink }), taskReferenceIds)
-}
-
-function linkTaskReferences(html: string, taskReferenceIds?: ReadonlySet<string>): string {
-  if (!taskReferenceIds?.size) return html
-  const chunks = html.split(/(<[^>]+>)/g)
-  const skipStack: string[] = []
-  return chunks.map((chunk) => {
-    if (!chunk) return ''
-    if (chunk.startsWith('<') && chunk.endsWith('>')) {
-      updateReferenceSkipStack(skipStack, chunk)
-      return chunk
-    }
-    if (skipStack.length) return chunk
-    return chunk.replace(/\btask_\d+\b/g, (taskId) => {
-      if (!taskReferenceIds.has(taskId)) return taskId
-      return [
-        '<button class="task-reference-link" type="button"',
-        ` data-task-reference-id="${taskId}"`,
-        ` title="Preview ${taskId}">`,
-        taskId,
-        '</button>',
-      ].join('')
-    })
-  }).join('')
-}
-
-function updateReferenceSkipStack(skipStack: string[], tag: string): void {
-  const tagMatch = /^<\/?\s*([A-Za-z0-9-]+)/.exec(tag)
-  if (!tagMatch) return
-  const tagName = tagMatch[1]!.toLowerCase()
-  if (!['a', 'button', 'code'].includes(tagName)) return
-  if (/^<\//.test(tag)) {
-    const index = skipStack.lastIndexOf(tagName)
-    if (index >= 0) skipStack.splice(index, 1)
-    return
-  }
-  if (!/\/\s*>$/.test(tag)) skipStack.push(tagName)
+  return linkRenderedMessageReferences(renderMarkdown(text, { block: true, onLink }), undefined, taskReferenceIds)
 }
