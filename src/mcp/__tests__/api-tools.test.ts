@@ -268,3 +268,18 @@ test("publish_page reads the page with the attachment file guard: in the workspa
     else process.env.LETAGENTS_EXECUTION_PROFILE = prior;
   }
 });
+
+test("an agent refused a board intent is told which board tools to use instead", async () => {
+  const client = await connected((server) => registerApiTools(server));
+  const { tools } = await client.listTools();
+  assert.match(tools.find((tool) => tool.name === "api_intents_propose")!.description!, /refused\s+for agents and tokens: change the board with add_task/);
+  const message = "Board changes through the API need the person in the LetAgents app or a page they opened; agents and tokens use board intents.";
+  fakeApi(() => ({ status: 403, body: { code: "not_granted", message } }));
+  const refused = await callTool(client, "api_intents_propose", { room_id: "r", kind: "task.create", payload: { title: "Ship" } });
+  assert.equal(refused.error, "not_granted");
+  assert.equal(refused.message, message);
+  assert.match(refused.next_step, /add_task or update_task/);
+  fakeApi(() => ({ status: 403, body: { code: "not_granted", message: "This room does not allow \"tickets.propose\" through the LetAgents API." } }));
+  const ticket = await callTool(client, "api_intents_propose", { room_id: "r", kind: "ticket.comment", payload: { key: "HT-1", body: "Done" } });
+  assert.equal(ticket.next_step, undefined, "a ticket refusal is the room's own rule");
+});

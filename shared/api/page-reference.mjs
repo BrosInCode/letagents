@@ -133,14 +133,14 @@ function withoutSchemaUri({ input, output }) {
 }
 
 /**
- * The first sentence, and the second when the first is short: enough to use
+ * The first sentence, and the second when the first is very short: enough to use
  * the method; the full text is in the agent tool's description.
  * @param {string} text
  */
 function firstSentences(text) {
   const sentences = text.split(/(?<=\.)\s+(?=[A-Z`])/);
   const first = sentences[0] ?? text;
-  return first.length < 60 && sentences[1] ? `${first} ${sentences[1]}` : first;
+  return first.length < 40 && sentences[1] ? `${first} ${sentences[1]}` : first;
 }
 
 const SAFE_INT = Number.MAX_SAFE_INTEGER;
@@ -172,6 +172,12 @@ class TypeNamer {
    */
   count(schema, key, area, item = false) {
     if (!schema || typeof schema !== "object") return;
+    if (isNamedEnum(schema)) {
+      const values = enumKey(schema);
+      this.uses.set(values, (this.uses.get(values) ?? 0) + 1);
+      if (!this.proposed.has(values) && key) this.proposed.set(values, { name: pascal(`${singular(area)}_${key}`), area });
+      return;
+    }
     if (isObjectShape(schema)) {
       const shape = JSON.stringify(schema);
       this.uses.set(shape, (this.uses.get(shape) ?? 0) + 1);
@@ -210,7 +216,15 @@ class TypeNamer {
       return [...new Set(shown.map((/** @type {any} */ alt) => this.type(alt, io)))].join("|");
     }
     if (schema.const !== undefined) return JSON.stringify(schema.const);
-    if (Array.isArray(schema.enum)) return schema.enum.map((/** @type {unknown} */ value) => JSON.stringify(value)).join("|");
+    if (Array.isArray(schema.enum)) {
+      const text = schema.enum.map((/** @type {unknown} */ value) => JSON.stringify(value)).join("|");
+      // A long set of values used more than once (a task status) is written once, by name.
+      const values = enumKey(schema);
+      if (!isNamedEnum(schema) || (this.uses.get(values) ?? 0) < 2 || !this.proposed.has(values)) return text;
+      const name = this.nameOf(values);
+      if (!this.defined.has(name)) this.defined.set(name, text);
+      return name;
+    }
     const types = Array.isArray(schema.type) ? schema.type : [schema.type];
     return types.map((/** @type {string} */ type) => {
       switch (type) {
@@ -291,6 +305,17 @@ class TypeNamer {
 /** @param {unknown} value @returns {value is Record<string, any>} */
 function isSchema(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** @param {any} schema */
+function isNamedEnum(schema) {
+  // A short set ("person"|"agent"|"system") reads better inline than as a name to look up.
+  return isSchema(schema) && Array.isArray(schema.enum) && schema.enum.length > 2 && JSON.stringify(schema.enum).length > 40;
+}
+
+/** @param {any} schema */
+function enumKey(schema) {
+  return `enum:${JSON.stringify(schema.enum)}`;
 }
 
 /** @param {any} schema */

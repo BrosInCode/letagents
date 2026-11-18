@@ -32,6 +32,28 @@ const STATUS_CODES: Readonly<Record<number, string>> = {
 
 const LOCAL_ROOM_MESSAGE ="The LetAgents API needs a room shared online; this room is stored on this device.";
 
+/**
+ * What an agent should do instead, for methods where agents are refused what
+ * people may do. Appended to the tool's description, and given as `next_step`
+ * with the refusal.
+ */
+const AGENT_NOTES: Readonly<Record<string, { description: string; refusal: (code: string, input: Record<string, unknown>) => string | null }>> = {
+  "intents.propose": {
+    description: "As an agent: propose ticket.transition and ticket.comment here; they usually wait for a room admin "
+      + "(state pending_approval, read it again with api_intents_get). The board kinds (task.create, task.update) are refused "
+      + "for agents and tokens: change the board with add_task, update_task, or register_task_create_intent when the room "
+      + "needs board intents.",
+    refusal: (code, input) => code === "not_granted" && typeof input.kind === "string" && input.kind.startsWith("task.")
+      ? "Agents change the board with add_task or update_task (register_task_create_intent or register_board_intent when the room needs board intents), not through intents.propose."
+      : null,
+  },
+};
+
+export function apiToolDescription(method: AnyApiMethod): string {
+  const note = AGENT_NOTES[method.name]?.description;
+  return note ? `${agentToolDescription(method)} ${note}` : agentToolDescription(method);
+}
+
 /** One tool's input: the method's own fields, and the room like every room tool. */
 export function apiToolInputShape(method: AnyApiMethod): z.ZodRawShape {
   if (!(method.input instanceof z.ZodObject)) {
@@ -99,7 +121,7 @@ export async function callApiMethod<T = unknown>(
 }
 
 /** A refusal as `{ success: false, error: <API error code>, message }`; sign-in and membership refusals keep their own result. */
-export function apiToolError(error: unknown) {
+export function apiToolError(error: unknown, method?: AnyApiMethod, input: Record<string, unknown> = {}) {
   const access = roomAccessToolResponse(error);
   if (access) return access;
   if (error instanceof ApiError) {
@@ -112,7 +134,12 @@ export function apiToolError(error: unknown) {
     const parsed = ApiErrorBody.safeParse(body);
     if (parsed.success) {
       const { code, message, retryAfterMs } = parsed.data;
-      return jsonToolResponse({ success: false, error: code, message, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) });
+      const nextStep = method ? AGENT_NOTES[method.name]?.refusal(code, input) ?? null : null;
+      return jsonToolResponse({
+        success: false, error: code, message,
+        ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
+        ...(nextStep ? { next_step: nextStep } : {}),
+      });
     }
     // Refused before the API's own pipeline (the credential's route check) or by a server without /api/v1.
     const said = body && typeof body === "object" ? (body as Record<string, unknown>).error ?? (body as Record<string, unknown>).message : null;
@@ -138,13 +165,13 @@ export function registerApiTools(server: McpServer, methods: readonly AnyApiMeth
   for (const method of methods) {
     server.tool(
       agentToolName(method),
-      agentToolDescription(method),
+      apiToolDescription(method),
       apiToolInputShape(method),
       async ({ room_id, ...input }: Record<string, unknown>) => {
         try {
           return jsonToolResponse(await callApiMethod(method, input, room_id as string | undefined));
         } catch (error) {
-          return apiToolError(error);
+          return apiToolError(error, method, input);
         }
       },
     );
