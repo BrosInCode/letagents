@@ -33,8 +33,10 @@ export const MAX_PAGE_OPEN_URL_CHARS = 2_048;
 const PAGE_HOST = /^[0-9a-f]{32}$/;
 const PAGE_METHOD = /^[a-z][a-z0-9_]{0,31}(\.[a-z][A-Za-z0-9_]{0,63}){1,2}$/;
 
-/** The plan's one error shape, as the page receives it. */
+/** The contract's one error shape (`shared/api/core.mjs` API_ERROR_CODES), as the page receives it. */
 export type PageErrorCode =
+  | "invalid_input"
+  | "unauthenticated"
   | "not_granted"
   | "not_participant"
   | "not_found"
@@ -44,7 +46,8 @@ export type PageErrorCode =
   | "conflict"
   | "too_large"
   | "declined"
-  | "pending_approval";
+  | "pending_approval"
+  | "internal";
 
 export interface PageCallError {
   code: PageErrorCode;

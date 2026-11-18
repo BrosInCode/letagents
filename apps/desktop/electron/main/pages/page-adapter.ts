@@ -27,9 +27,11 @@ export interface RoomPageSource {
 export type PageApiHttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
 
 /**
- * One contract method on its `/api/v1/rooms/<room>` route. `:name` segments
- * are filled from the input's string fields of that name; the rest of the
- * input is the query (GET, DELETE) or the JSON body.
+ * One contract method's route under `/api/v1`, copied from its `httpMethod`
+ * and `path` in `shared/api`. `:room` is the page's room; other `:name`
+ * segments are filled from the input's string fields of that name, and the
+ * rest of the input is the query (GET, DELETE) or the JSON body, as the
+ * server's router reads it.
  */
 export interface PageApiRoute {
   method: PageApiHttpMethod;
@@ -38,11 +40,13 @@ export interface PageApiRoute {
 
 /**
  * The contract methods a page can call, by name. Each server PR that adds a
- * `/api/v1` route adds its methods here; a name not in this table is
- * `not_found` before anything is sent.
+ * method a page may use adds it here with the contract's route (a test checks
+ * they agree); a name not in this table is `not_found` before anything is
+ * sent. Main does not import `shared/api` at run time: it needs zod, which
+ * the packaged app's shared folder cannot resolve.
  */
 export const PAGE_API_ROUTES: Readonly<Record<string, PageApiRoute>> = {
-  "rooms.get": { method: "GET", path: "" },
+  "rooms.get": { method: "GET", path: "/rooms/:room" },
 };
 
 export function pageApiMethodNames(routes: Readonly<Record<string, PageApiRoute>> = PAGE_API_ROUTES): ReadonlySet<string> {
@@ -50,11 +54,22 @@ export function pageApiMethodNames(routes: Readonly<Record<string, PageApiRoute>
 }
 
 const ERROR_CODES = new Set<PageErrorCode>([
-  "not_granted", "not_participant", "not_found", "no_source", "source_unavailable",
-  "rate_limited", "conflict", "too_large", "declined", "pending_approval",
+  "invalid_input", "unauthenticated", "not_granted", "not_participant", "not_found", "no_source",
+  "source_unavailable", "rate_limited", "conflict", "too_large", "declined", "pending_approval", "internal",
 ]);
 
-/** The request one call makes: its path under `/api/v1/rooms/<room>` and its body. */
+/** For a server answer without the contract's error body (a proxy's page, say). */
+const STATUS_CODES: Readonly<Record<number, PageErrorCode>> = {
+  400: "invalid_input",
+  401: "unauthenticated",
+  403: "not_granted",
+  404: "not_found",
+  409: "conflict",
+  413: "too_large",
+  429: "rate_limited",
+};
+
+/** The request one call makes: its `/api/v1` path, with the page's room, and its body. */
 export function pageApiRequest(
   route: PageApiRoute,
   roomId: string,
@@ -63,13 +78,16 @@ export function pageApiRequest(
   const fields: Record<string, unknown> = input && typeof input === "object" && !Array.isArray(input)
     ? { ...(input as Record<string, unknown>) }
     : {};
+  // The room is always the page's own; a page cannot name another room.
+  delete fields.room;
   const routePath = route.path.replace(/:([A-Za-z][A-Za-z0-9_]*)/g, (_match, name: string) => {
+    if (name === "room") return encodeURIComponent(roomId);
     const value = fields[name];
-    if (typeof value !== "string" || !value) throw new PageCallFailure("not_found", `The call needs "${name}".`);
+    if (typeof value !== "string" || !value) throw new PageCallFailure("invalid_input", `The call needs "${name}".`);
     delete fields[name];
     return encodeURIComponent(value);
   });
-  const base = `/api/v1/rooms/${encodeURIComponent(roomId)}${routePath}`;
+  const base = `/api/v1${routePath}`;
   if (route.method === "GET" || route.method === "DELETE") {
     const query = new URLSearchParams();
     for (const [name, value] of Object.entries(fields)) {
@@ -89,12 +107,7 @@ export function pageCallFailureFromApi(error: unknown): PageCallFailure {
     const payload = error.payload as { code?: unknown; message?: unknown; retryAfterMs?: unknown } | null;
     const code = typeof payload?.code === "string" && ERROR_CODES.has(payload.code as PageErrorCode)
       ? payload.code as PageErrorCode
-      : error.status === 404 ? "not_found"
-        : error.status === 403 ? "not_granted"
-          : error.status === 409 ? "conflict"
-            : error.status === 413 ? "too_large"
-              : error.status === 429 ? "rate_limited"
-                : "source_unavailable";
+      : STATUS_CODES[error.status] ?? "source_unavailable";
     const retryAfterMs = typeof payload?.retryAfterMs === "number" && Number.isFinite(payload.retryAfterMs)
       ? payload.retryAfterMs
       : undefined;

@@ -365,7 +365,7 @@ test("ui.copy works only right after the person's own input in that page", async
     clock = Date.now();
     assert.deepEqual(await callFrom(guest, "ui.copy", { text: "hello" }), { ok: true, value: null });
     const notText = await callFrom(guest, "ui.copy", { text: { html: "<b>x</b>" } });
-    assert.equal(!notText.ok && notText.error.code, "not_granted", "plain text only");
+    assert.equal(!notText.ok && notText.error.code, "invalid_input", "plain text only");
     clock = Date.now() + 5_001;
     assert.equal((await callFrom(guest, "ui.copy", { text: "late" })).ok, false, "the window is 5 seconds");
     assert.deepEqual(clipboardWrites, ["hello"]);
@@ -499,28 +499,41 @@ test("http adapter: routes from the mapping table, the app sign-in, and the serv
     return { ok: path };
   }) as never;
   const adapter = createHttpPageApiAdapter({
-    "rooms.get": { method: "GET", path: "" },
-    "tasks.get": { method: "GET", path: "/tasks/:taskId" },
-    "tasks.propose": { method: "POST", path: "/intents" },
-    "docs.missing": { method: "GET", path: "/missing" },
+    "rooms.get": { method: "GET", path: "/rooms/:room" },
+    "tasks.get": { method: "GET", path: "/rooms/:room/tasks/:taskId" },
+    "tasks.propose": { method: "POST", path: "/rooms/:room/intents" },
+    "docs.missing": { method: "GET", path: "/rooms/:room/missing" },
   }, fetchApi);
   const lease = { roomId: "github.com/a/b", pageId: "p1", version: 2 };
   assert.deepEqual(await adapter.call(lease, "rooms.get", null), { ok: "/api/v1/rooms/github.com%2Fa%2Fb" });
-  await adapter.call(lease, "tasks.get", { taskId: "task 1", include: ["prs"] });
+  await adapter.call(lease, "tasks.get", { taskId: "task 1", include: ["prs"], room: "github.com/other/room" });
   assert.equal(requests.at(-1)?.path, "/api/v1/rooms/github.com%2Fa%2Fb/tasks/task%201?include=%5B%22prs%22%5D");
   assert.deepEqual(requests.at(-1)?.options, { credential: "app" });
   assert.equal(new Headers(requests.at(-1)?.init?.headers).get("X-LetAgents-Page"), "p1@2");
   await adapter.call(lease, "tasks.propose", { kind: "task.update", payload: { status: "done" } });
   assert.equal(requests.at(-1)?.init?.method, "POST");
   assert.equal(requests.at(-1)?.init?.body, JSON.stringify({ kind: "task.update", payload: { status: "done" } }));
-  await assert.rejects(adapter.call(lease, "tasks.get", {}), (error: unknown) => error instanceof PageCallFailure && error.code === "not_found");
+  await assert.rejects(adapter.call(lease, "tasks.get", {}), (error: unknown) => error instanceof PageCallFailure && error.code === "invalid_input");
   await assert.rejects(adapter.call(lease, "docs.missing", {}), (error: unknown) => error instanceof PageCallFailure && error.code === "not_granted" && error.message === "No.");
   await assert.rejects(adapter.call(lease, "toString", {}), (error: unknown) => error instanceof PageCallFailure && error.code === "not_found");
 
   assert.equal(pageCallFailureFromApi(new FakeApiError(429, { retryAfterMs: 2000 })).retryAfterMs, 2000);
   assert.equal(pageCallFailureFromApi(new FakeApiError(429, null)).code, "rate_limited");
+  assert.equal(pageCallFailureFromApi(new FakeApiError(400, { code: "invalid_input", message: "taskId: Required" })).message, "taskId: Required");
+  assert.equal(pageCallFailureFromApi(new FakeApiError(502, null)).code, "source_unavailable");
   assert.equal(pageCallFailureFromApi(new Error("ECONNRESET")).code, "source_unavailable");
-  assert.deepEqual(pageApiRequest({ method: "DELETE", path: "/docs/:id" }, "r", { id: "d" }).path, "/api/v1/rooms/r/docs/d");
+  assert.deepEqual(pageApiRequest({ method: "DELETE", path: "/rooms/:room/docs/:id" }, "r", { id: "d" }).path, "/api/v1/rooms/r/docs/d");
+});
+
+test("every page route is the contract's own route for that method", async () => {
+  const { getApiMethod } = await import("../../../../shared/api/index.mjs");
+  const { PAGE_API_ROUTES } = await import("../main/pages/page-adapter.js");
+  assert.ok(Object.keys(PAGE_API_ROUTES).length > 0);
+  for (const [name, route] of Object.entries(PAGE_API_ROUTES)) {
+    const method = getApiMethod(name);
+    assert.ok(method, `${name} is a contract method`);
+    assert.deepEqual(route, { method: method.httpMethod, path: method.path }, name);
+  }
 });
 
 test("http page source: a server without page routes is a room with no pages", async () => {

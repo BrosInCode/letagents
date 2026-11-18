@@ -98,7 +98,7 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
 
   function copyText(lease: RoomPageLease, input: unknown): null {
     const text = field(input, "text");
-    if (typeof text !== "string") throw new PageCallFailure("not_granted", "ui.copy takes plain text.");
+    if (typeof text !== "string") throw new PageCallFailure("invalid_input", "ui.copy takes plain text.");
     if (text.length > MAX_PAGE_COPY_CHARS) throw new PageCallFailure("too_large", `ui.copy takes at most ${MAX_PAGE_COPY_CHARS} characters.`);
     // Main saw the input itself; a page cannot fake a click to fill the clipboard on its own.
     if (now() - lease.lastInputAt > PAGE_COPY_WINDOW_MS) {
@@ -158,7 +158,7 @@ function scopeOf(lease: RoomPageLease, viewer: PageViewer) {
 }
 
 function requireViewer(viewer: PageViewer | null): PageViewer {
-  if (!viewer) throw new PageCallFailure("not_participant", "Sign in to LetAgents to use this page.");
+  if (!viewer) throw new PageCallFailure("unauthenticated", "Sign in to LetAgents to use this page.");
   return viewer;
 }
 
