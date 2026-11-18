@@ -243,7 +243,7 @@ export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[
       return { id: pageId, deleted: true as const };
     }),
 
-    defineRoute(grantPage, async ({ pageId }, call) => {
+    defineRoute(grantPage, async ({ pageId, version }, call) => {
       // A grant acts for the person, so only their own app sign-in makes one:
       // no agent, no page or job, no owner token.
       if (call.actor.principal.kind !== "person" || call.actor.via) {
@@ -251,6 +251,9 @@ export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[
       }
       const minter = requirePageGrantMinter(call.req);
       let before = await openablePage(call, pageId);
+      // The app shows one version's HTML; a grant for another version would mix them.
+      const notShown = () => new ApiError("conflict", `Version ${version} of this page is no longer live. Open it again.`);
+      if (version !== undefined && before.version !== version) throw notShown();
       for (let attempt = 0; attempt < 2; attempt += 1) {
         const minted = await mintPageGrant({
           minter, roomId: call.room.id, pageId, pageVersion: before.version, capabilities: before.capabilities,
@@ -263,6 +266,7 @@ export function createPagesRoutes(deps: PagesRouteDeps = {}): readonly ApiRoute[
         }
         await revokePageGrants({ grantId: minted.grantId });
         before = after;
+        if (version !== undefined && before.version !== version) throw notShown();
       }
       throw new ApiError("conflict", "The page changed while it was opening. Open it again.");
     }),

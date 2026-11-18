@@ -14,6 +14,13 @@ export interface PageGrant {
   capabilities: string[];
 }
 
+/**
+ * The server would grant another version than the one this lease shows (an
+ * update or a roll back landed). The lease must load the live version; a
+ * token for the other version would mix its permissions with this HTML.
+ */
+export class PageGrantOutdated extends Error {}
+
 /** Main mints a new token this long before the old one runs out. */
 export const PAGE_GRANT_REFRESH_BEFORE_MS = 60_000;
 /** After a failed mint, calls fail `not_granted` this long before main asks again. */
@@ -22,16 +29,23 @@ export const PAGE_GRANT_RETRY_MS = 30_000;
 type GrantState = {
   roomId: string;
   pageId: string;
+  version: number;
+  /** The server no longer grants this version: the lease gets no token again. */
+  outdated: boolean;
   grant: PageGrant | null;
   minting: Promise<PageGrant | null> | null;
   failedAt: number;
 };
 
+type Mint = (roomId: string, pageId: string, version: number) => Promise<PageGrant>;
+
 export function createPageGrantKeeper(options: {
-  mint?: (roomId: string, pageId: string) => Promise<PageGrant>;
+  mint?: Mint;
+  onOutdated?: (leaseId: string) => void;
   now?: () => number;
 } = {}) {
   let mint = options.mint ?? null;
+  let onOutdated = options.onOutdated ?? null;
   const now = options.now ?? Date.now;
   const leases = new Map<string, GrantState>();
 
@@ -40,13 +54,19 @@ export function createPageGrantKeeper(options: {
     const minting = (async () => {
       try {
         if (!mint) throw new Error("No page grant source.");
-        const grant = await mint(state.roomId, state.pageId);
+        const grant = await mint(state.roomId, state.pageId, state.version);
         // A lease released (or a sign-out) while the mint ran keeps no token.
         if (leases.get(leaseId) !== state) return null;
         state.grant = grant;
         return grant;
-      } catch {
-        if (leases.get(leaseId) === state) state.failedAt = now();
+      } catch (error) {
+        if (leases.get(leaseId) !== state) return null;
+        state.failedAt = now();
+        if (error instanceof PageGrantOutdated && !state.outdated) {
+          state.outdated = true;
+          state.grant = null;
+          onOutdated?.(leaseId);
+        }
         return null;
       } finally {
         state.minting = null;
@@ -57,12 +77,13 @@ export function createPageGrantKeeper(options: {
   }
 
   return {
-    configure(next: (roomId: string, pageId: string) => Promise<PageGrant>): void {
+    configure(next: Mint, outdated?: (leaseId: string) => void): void {
       mint = next;
+      if (outdated) onOutdated = outdated;
     },
-    /** A new lease mints its grant at once, so the first call does not wait for it. */
-    start(leaseId: string, roomId: string, pageId: string): void {
-      const state: GrantState = { roomId, pageId, grant: null, minting: null, failedAt: Number.NEGATIVE_INFINITY };
+    /** A new lease mints its grant, for the version it shows, at once, so the first call does not wait for it. */
+    start(leaseId: string, roomId: string, pageId: string, version: number): void {
+      const state: GrantState = { roomId, pageId, version, outdated: false, grant: null, minting: null, failedAt: Number.NEGATIVE_INFINITY };
       leases.set(leaseId, state);
       void mintFor(leaseId, state);
     },
@@ -73,7 +94,7 @@ export function createPageGrantKeeper(options: {
      */
     async token(leaseId: string): Promise<string | null> {
       const state = leases.get(leaseId);
-      if (!state) return null;
+      if (!state || state.outdated) return null;
       const time = now();
       if (state.grant && time < state.grant.expiresAt - PAGE_GRANT_REFRESH_BEFORE_MS) return state.grant.token;
       if (!state.minting && time - state.failedAt < PAGE_GRANT_RETRY_MS) {
@@ -83,6 +104,15 @@ export function createPageGrantKeeper(options: {
       if (grant && now() < grant.expiresAt) return grant.token;
       // A failed refresh may still leave the old token a little time.
       return state.grant && now() < state.grant.expiresAt && leases.get(leaseId) === state ? state.grant.token : null;
+    },
+    /** The server refused the token (revoked, or the page changed): the next call mints a new one. */
+    invalidate(leaseId: string): void {
+      const state = leases.get(leaseId);
+      if (state) state.grant = null;
+    },
+    /** A page was approved, rolled back or re-pinned: every open lease of it mints again. */
+    invalidatePage(pageId: string): void {
+      for (const state of leases.values()) if (state.pageId === pageId) state.grant = null;
     },
     capabilities(leaseId: string): string[] {
       return [...(leases.get(leaseId)?.grant?.capabilities ?? [])];

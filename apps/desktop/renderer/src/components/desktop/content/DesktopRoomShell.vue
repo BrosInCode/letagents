@@ -254,16 +254,20 @@
 
     </Transition>
 
-    <!-- Pinned pages stay alive, hidden, once opened, so switching tabs keeps their state. -->
+    <!-- Pinned pages stay alive once opened, so switching tabs keeps their state. They are
+         hidden with visibility, not display: none, inside RoomPageView: Electron does not
+         repaint a <webview> that attached or sat in a display: none parent. -->
     <RoomPageView
       v-for="page in keptPages"
-      v-show="activeTab === roomPageTabId(page.id)"
       :key="`page:${room.identifier}:${page.id}`"
       :room-identifier="room.identifier"
       :page="page"
       :active="activeTab === roomPageTabId(page.id)"
+      :can-manage="canManagePages"
+      @review="pagePinFlow.review"
     />
     <PageConfirmSheet />
+    <PageGrantSheet :sheet="pageGrantSheet" :busy="pageGrantBusy" :error="pageGrantError" @approve="pagePinFlow.approve" @cancel="pagePinFlow.cancel" />
 
     <DesktopRoomRulesModal
       :open="rulesOpen"
@@ -378,6 +382,8 @@ import RoomDetailsView from "./RoomDetailsView.vue";
 import RoomMemoryView from "./RoomMemoryView.vue";
 import RoomPageView from "./room-pages/RoomPageView.vue";
 import PageConfirmSheet from "./room-pages/PageConfirmSheet.vue";
+import PageGrantSheet from "./room-pages/PageGrantSheet.vue";
+import { roomPageActionsKey, useRoomPagePinFlow } from "./room-pages/room-page-admin";
 import { roomPageTabId } from "./room-shell/types";
 import DesktopRoomControlRail from "./room-shell/DesktopRoomControlRail.vue";
 import DesktopRoomHeader from "./room-shell/DesktopRoomHeader.vue";
@@ -554,6 +560,17 @@ function openThreadFromBoard(threadRootId: string): void {
 const {
   tabs, pagesMenu, keptPages,
 } = Object.assign(app, useRoomShellNotifications(app));
+
+// Room pages: a room admin pins an HTML attachment as a tab, grants what it asks for, and rolls updates back.
+const canManagePages = computed(() => props.room.role === "admin" && props.storage.effectiveMode !== "local");
+const pagePinFlow = useRoomPagePinFlow({
+  roomId: () => props.room.identifier,
+  canPin: () => canManagePages.value,
+  opened: (pageId) => selectTab(roomPageTabId(pageId)),
+  toast: (message, state) => app.pushActionToast(message, state),
+});
+const { sheet: pageGrantSheet, busy: pageGrantBusy, error: pageGrantError } = pagePinFlow;
+provide(roomPageActionsKey, pagePinFlow.actions);
 
 Object.assign(app, useRoomShellInspectorWatchers(app));
 

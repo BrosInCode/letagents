@@ -11,7 +11,9 @@ import {
   type PageApiAdapter,
   type RoomPageSource,
 } from "../pages/page-adapter.js";
-import { createPageCallHandler } from "../pages/page-bridge.js";
+import { contextOf, createPageCallHandler } from "../pages/page-bridge.js";
+import { createPageWatches } from "../pages/page-watch.js";
+import { createRoomPageAdmin, type RoomPageAdmin } from "../pages/page-admin.js";
 import { createFilePageChoiceStore, createPageConfirmBroker, type PageChoiceStore } from "../pages/page-confirm.js";
 import { recordPageDiagnostic } from "../pages/page-diagnostics.js";
 import { roomPageGrants } from "../pages/page-grants.js";
@@ -21,8 +23,11 @@ import {
   listRoomPages,
   prepareRoomPage,
   releaseRoomPage,
+  markRoomPageOutdated,
   roomPageLeaseForSender,
+  sendToRoomPage,
   setRoomPageTheme,
+  type RoomPageLease,
   setRoomPageVisible,
 } from "../pages/page-host.js";
 import { PAGE_CALL_CHANNEL } from "../pages/page-policy.js";
@@ -40,7 +45,7 @@ export const PAGE_CONFIRM_CHANNEL = "desktop:pages:confirm";
  */
 export function registerDesktopPageIpcHandlers(
   targetIpcMain: IpcMain,
-  backend: { adapter?: PageApiAdapter; source?: RoomPageSource; choices?: PageChoiceStore; methods?: ReadonlySet<string> } = {},
+  backend: { adapter?: PageApiAdapter; source?: RoomPageSource; choices?: PageChoiceStore; methods?: ReadonlySet<string>; admin?: RoomPageAdmin } = {},
 ): void {
   const send = (message: DesktopPageConfirmMessage): boolean => {
     const window = getMainWindow();
@@ -55,17 +60,29 @@ export function registerDesktopPageIpcHandlers(
   });
   const source = backend.source ?? createHttpRoomPageSource();
   // Each lease mints its own page_grant with the app session; page calls carry only that token.
-  roomPageGrants.configure((roomId, pageId) => source.grant(roomId, pageId));
+  roomPageGrants.configure((roomId, pageId, version) => source.grant(roomId, pageId, version), markRoomPageOutdated);
+  const adapter = backend.adapter ?? createHttpPageApiAdapter({ grants: roomPageGrants });
+  const methods = backend.methods ?? pageApiMethodNames();
+  const watches = createPageWatches<RoomPageLease>({
+    run: (lease, method, input) => adapter.call(contextOf(lease), method, input),
+    push: (lease, message) => { sendToRoomPage(lease, message); },
+    methods,
+  });
   configureRoomPages({
     source,
     grants: roomPageGrants,
-    onLeaseEnd: (lease) => confirm.declineFor(lease),
+    onLeaseEnd: (lease) => {
+      confirm.declineFor(lease);
+      watches.stopAll(lease);
+    },
     onLeaseHidden: (lease) => confirm.declineFor(lease),
+    onLeasePointer: (lease, resource) => watches.notify(lease, resource),
   });
   const handlePageCall = createPageCallHandler({
     leaseFor: roomPageLeaseForSender,
-    adapter: backend.adapter ?? createHttpPageApiAdapter({ grants: roomPageGrants }),
-    methods: backend.methods ?? pageApiMethodNames(),
+    adapter,
+    methods,
+    watches,
     confirm,
     viewer: async () => {
       const account = (await readStoredAuth()).account;
@@ -90,6 +107,33 @@ export function registerDesktopPageIpcHandlers(
   targetIpcMain.handle("desktop:pages:release", (event, url: unknown) => {
     assertAppWindowSender(event);
     releaseRoomPage(url);
+  });
+  // The registry, with the person's own app session: what the tab, the grant sheet and the banner show and do.
+  const admin = backend.admin ?? createRoomPageAdmin();
+  // Approve, roll back and pin end the page's open grants on the server; open pages mint new ones.
+  const changed = <T>(pageId: unknown, result: Promise<T>) => result.then((value) => {
+    if (typeof pageId === "string") roomPageGrants.invalidatePage(pageId);
+    return value;
+  });
+  targetIpcMain.handle("desktop:pages:info", (event, roomId: unknown, pageId: unknown) => {
+    assertAppWindowSender(event);
+    return admin.info(roomId, pageId);
+  });
+  targetIpcMain.handle("desktop:pages:create-from-attachment", (event, roomId: unknown, messageId: unknown, attachmentId: unknown) => {
+    assertAppWindowSender(event);
+    return admin.createFromAttachment(roomId, messageId, attachmentId);
+  });
+  targetIpcMain.handle("desktop:pages:approve", (event, roomId: unknown, pageId: unknown, version: unknown, capabilities: unknown) => {
+    assertAppWindowSender(event);
+    return changed(pageId, admin.approve(roomId, pageId, version, capabilities));
+  });
+  targetIpcMain.handle("desktop:pages:pin", (event, roomId: unknown, pageId: unknown) => {
+    assertAppWindowSender(event);
+    return changed(pageId, admin.pin(roomId, pageId));
+  });
+  targetIpcMain.handle("desktop:pages:set-current", (event, roomId: unknown, pageId: unknown, version: unknown) => {
+    assertAppWindowSender(event);
+    return changed(pageId, admin.setCurrent(roomId, pageId, version));
   });
   targetIpcMain.handle("desktop:pages:set-visible", (event, url: unknown, visible: unknown) => {
     assertAppWindowSender(event);

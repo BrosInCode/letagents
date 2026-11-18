@@ -1,3 +1,5 @@
+import type { PageDetail } from "../../../../shared/api/pages.mjs";
+
 /** A page pinned in a room's tab bar, in the order the room shows its pages. */
 export interface DesktopRoomPage {
   id: string;
@@ -16,13 +18,14 @@ export interface DesktopRoomPageLease {
 export type DesktopRoomPageEvent = {
   type: "stopped";
   url: string;
-  reason: "unresponsive" | "crashed" | "overloaded";
+  /** `outdated`: another version of the page went live; the view loads it. */
+  reason: "unresponsive" | "crashed" | "overloaded" | "outdated";
 };
 
 export type DesktopPageThemeMode = "light" | "dark";
 
 /** What a confirm sheet asks the person to allow on a page's behalf. */
-export type DesktopPageConfirmKind = "open" | "job" | "post";
+export type DesktopPageConfirmKind = "open" | "job" | "post" | "intent";
 
 /**
  * A confirm sheet the app draws for a page, never the page itself. `text` and
@@ -35,6 +38,8 @@ export interface DesktopPageConfirmRequest {
   pageVersion: number;
   text: string;
   target: string;
+  /** Data sent with the text (a job's input and result schema), as formatted JSON; null when none. */
+  details: string | null;
   /** Offer "Don't ask again for this page version". */
   rememberable: boolean;
 }
@@ -45,3 +50,12 @@ export type DesktopPageConfirmAnswer = "confirmed" | "declined";
 export type DesktopPageConfirmMessage =
   | { type: "ask"; request: DesktopPageConfirmRequest }
   | { type: "dismiss"; id: string };
+
+/** One page as the registry knows it: versions, grant, placements and who made the live version. */
+export type DesktopRoomPageDetail = PageDetail;
+
+export interface DesktopRoomPageInfo {
+  detail: DesktopRoomPageDetail;
+  /** Who made the live version, for the "Updated by" line; null when nobody is recorded. */
+  updatedByLabel: string | null;
+}

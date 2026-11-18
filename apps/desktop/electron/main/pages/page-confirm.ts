@@ -11,8 +11,10 @@ import type {
 
 /** The most remembered choices kept per file; the oldest go first. */
 export const MAX_PAGE_CHOICES = 2_000;
-export const MAX_PAGE_CONFIRM_TEXT = 4_000;
-export const MAX_PAGE_CONFIRM_TARGET = 300;
+/** The most the sheet shows, scrolling; a call with more is refused, never cut. */
+export const MAX_PAGE_CONFIRM_TEXT = 20_000;
+export const MAX_PAGE_CONFIRM_TARGET = 400;
+export const MAX_PAGE_CONFIRM_DETAILS = 100_000;
 
 /**
  * Choices a viewer made in confirm sheets that hold for one page version:
@@ -85,6 +87,7 @@ export interface PageConfirmAsk {
   pageTitle: string;
   text: string;
   target: string;
+  details?: string | null;
   /** Offer "Don't ask again for this page version"; a remembered yes skips the sheet. */
   rememberable: boolean;
   /** A yes is remembered without the box: `ui.open` asks once per new domain. */
@@ -109,6 +112,8 @@ export function createPageConfirmBroker(deps: {
   const pending = new Map<string, { owner: object; resolve: (answer: DesktopPageConfirmAnswer) => void; remember: (yes: boolean) => Promise<void> }>();
 
   async function ask(owner: object, scope: PageChoiceScope, input: PageConfirmAsk): Promise<DesktopPageConfirmAnswer> {
+    // The person must see everything the call sends: text the sheet would cut is a no, never a partial yes.
+    if (!fitsPageConfirmSheet(input)) return "declined";
     const key = pageChoiceKey(scope, input.choice);
     if ((input.rememberable || input.rememberOnConfirm) && await deps.choices.has(key)) return "confirmed";
     const request: DesktopPageConfirmRequest = {
@@ -116,8 +121,9 @@ export function createPageConfirmBroker(deps: {
       kind: input.kind,
       pageTitle: input.pageTitle.slice(0, 80),
       pageVersion: scope.version,
-      text: input.text.slice(0, MAX_PAGE_CONFIRM_TEXT),
-      target: input.target.slice(0, MAX_PAGE_CONFIRM_TARGET),
+      text: input.text,
+      target: input.target,
+      details: input.details ?? null,
       rememberable: input.rememberable,
     };
     return new Promise<DesktopPageConfirmAnswer>((resolve) => {
@@ -167,3 +173,10 @@ export function createPageConfirmBroker(deps: {
 }
 
 export type PageConfirmBroker = ReturnType<typeof createPageConfirmBroker>;
+
+/** Whether the sheet can show all of it. */
+export function fitsPageConfirmSheet(input: { text: string; target: string; details?: string | null }): boolean {
+  return input.text.length <= MAX_PAGE_CONFIRM_TEXT
+    && input.target.length <= MAX_PAGE_CONFIRM_TARGET
+    && (input.details ?? "").length <= MAX_PAGE_CONFIRM_DETAILS;
+}

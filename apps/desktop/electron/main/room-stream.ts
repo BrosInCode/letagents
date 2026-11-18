@@ -12,6 +12,7 @@ import { mapApiActivityEvent } from "../rental/api-mapper.js";
 import { apiUrl, roomMessageHistoryPageSize } from "./paths.js";
 import { readStoredAuth } from "./auth.js";
 import { isDesktopSmokeCheck } from "./smoke.js";
+import { publishRoomStreamPointer } from "./room-stream-pointers.js";
 import {
   localRoomIdentifierForStorage,
   resolveLocalAwareRoomStorageMode,
@@ -252,9 +253,23 @@ function refuseRoomStream(
   });
 }
 
+/** The ids a pointer from this stream may name its room by: the stream's own and the server's canonical one. */
+function pointerRoomIds(...roomIds: string[]): string[] {
+  const ids = new Set(roomIds);
+  const stream = activeRoomStream;
+  if (stream && (ids.has(stream.roomIdentifier) || (stream.canonicalRoomIdentifier && ids.has(stream.canonicalRoomIdentifier)))) {
+    ids.add(stream.roomIdentifier);
+    if (stream.canonicalRoomIdentifier) ids.add(stream.canonicalRoomIdentifier);
+  }
+  return [...ids];
+}
+
 export function emitRoomStreamEvent(event: DesktopRoomStreamEvent): void {
   invalidateInFlightRoomReads(event);
   emitToMainWindow("desktop:room:stream-event", event);
+  // Every way the stream may have missed events (a room_sync gap, a malformed
+  // or overflowing frame, a failed transport) ends here: room pages read again.
+  if (event.type === "open" && event.gap) publishRoomStreamPointer({ roomIds: pointerRoomIds(event.roomIdentifier), gap: true });
 }
 
 type ExecutionDelegationInvalidationHandler = (roomId: string) => void | Promise<void>;
@@ -443,6 +458,7 @@ function handleRoomStreamFrame(
         roomIdentifier: eventRoomIdentifier,
         task,
       });
+      publishRoomStreamPointer({ roomIds: pointerRoomIds(roomIdentifier, eventRoomIdentifier), resource: "tasks" });
     } else repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
     return;
   }
@@ -452,6 +468,7 @@ function handleRoomStreamFrame(
     if (typeof payload.task_id === "string" && payload.task_id) {
       stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
       emitRoomStreamEvent({ type: "task_remove", roomIdentifier: eventRoomIdentifier, taskId: payload.task_id });
+      publishRoomStreamPointer({ roomIds: pointerRoomIds(roomIdentifier, eventRoomIdentifier), resource: "tasks" });
     } else repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
     return;
   }
@@ -693,7 +710,8 @@ function handleRoomStreamFrame(
       return;
     }
     stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
-    if (resource === "agent_work" || resource === "wake_rules" || resource === "message_reactions" || resource === "message_pins") {
+    publishRoomStreamPointer({ roomIds: pointerRoomIds(roomIdentifier, payloadRoomIdentifier), resource });
+    if (resource === "agent_work" || resource === "wake_rules" || resource === "message_reactions" || resource === "message_pins" || resource === "pages") {
       emitRoomStreamEvent({
         type: "resource_invalidation",
         roomIdentifier: payloadRoomIdentifier,

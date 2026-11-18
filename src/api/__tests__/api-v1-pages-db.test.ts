@@ -295,6 +295,11 @@ test("who can do what: view, make, version, pin, approve, roll back, delete and 
     [opened.body.token],
   );
   assert.deepEqual(rows, [{ account_id: bob.id, page_id: id, page_version: 2, capabilities: ["rooms.read"] }]);
+  // The desktop names the version it shows: a grant for another version would mix them.
+  assert.equal((await call("POST", `${pageRoute}/grant`, bob, { version: 2 })).status, 201);
+  const otherVersion = await call("POST", `${pageRoute}/grant`, bob, { version: 4 });
+  assert.equal(otherVersion.body.code, "conflict");
+  assert.match(otherVersion.body.message, /Version 4 of this page is no longer live/);
   pageToken = await open(ada, id);
   for (const who of [{ agent: "agent-ada" }, { token: OWNER_TOKEN }, { token: pageToken }, { job: "job_4", as: ada }] as As[]) {
     assert.equal((await call("POST", `${pageRoute}/grant`, who)).body.code, "not_granted", JSON.stringify(who));

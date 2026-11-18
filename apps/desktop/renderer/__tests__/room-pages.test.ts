@@ -103,7 +103,11 @@ describe("room page presentation", () => {
 
   it("are hosted by the room shell with keep-alive and one confirm sheet", () => {
     const shell = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)), "utf8");
-    assert.match(shell, /<RoomPageView\s+v-for="page in keptPages"\s+v-show="activeTab === roomPageTabId\(page\.id\)"/);
+    assert.match(shell, /<RoomPageView\s+v-for="page in keptPages"/);
+    assert.doesNotMatch(shell, /<RoomPageView[^>]*v-show/, "never display: none: Electron does not repaint such a webview");
+    const pageView = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-pages/RoomPageView.vue", import.meta.url)), "utf8");
+    assert.match(pageView, /\.room-page-view\.is-hidden \{\s*visibility: hidden;\s*pointer-events: none;\s*\}/);
+    assert.match(pageView, /:class="\{ 'is-hidden': !active \}"/);
     assert.equal(shell.match(/<PageConfirmSheet \/>/g)?.length, 1);
     assert.match(shell, /:pages-menu="pagesMenu"/);
     assert.match(shell, /:active="activeTab === roomPageTabId\(page\.id\)"/, "main hears which page is in the active tab");
@@ -116,5 +120,73 @@ describe("room page presentation", () => {
     assert.match(sheet, /if \(!current \|\| \(value === "confirmed" && !armed\.value\)\) return;/);
     const view = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-pages/RoomPageView.vue", import.meta.url)), "utf8");
     assert.match(view, /props\.active && document\.visibilityState === "visible"/);
+  });
+});
+
+describe("room page administration", async () => {
+  const { pageGrantRows, pendingPageVersion, previousLiveVersion, pageUpdateChanges, rolledBackFrom } = await import("../src/components/desktop/content/room-pages/room-page-admin");
+  const { revealHiddenCharacters } = await import("../src/components/desktop/content/room-pages/room-pages");
+  const version = (number: number, status: string, capabilities: string[] = [], byteSize = 1000) => ({
+    version: number, status, sha256: "x", byteSize, capabilities, surfaces: ["room.tab"], source: null,
+    author: { kind: "agent", id: "agent:codex-1", ownerAccountId: "acct_1" }, createdAt: "2026-11-18T10:00:00Z",
+  });
+  const detail = (currentVersion: number | null, versions: ReturnType<typeof version>[]) => ({
+    id: "page_1", title: "Sprint", slug: "sprint", owner: { kind: "room", id: "r" }, currentVersion, updatedBy: null,
+    placements: [], grant: null, manifest: null, versions, createdAt: "", updatedAt: "",
+  }) as never;
+
+  it("names each capability in the registry's plain words, and marks what a page cannot hold", () => {
+    assert.deepEqual(pageGrantRows(["tasks.read", "jobs.start", "rooms.admin", "made.up"]).map(({ label, grantable, note }) => ({ label, grantable, note })), [
+      { label: "See the board tasks in this room", grantable: true, note: null },
+      { label: "Ask an agent in this room to do work for you", grantable: true, note: "Asks the person each time" },
+      { label: "Manage this room's API settings", grantable: false, note: null },
+      { label: "made.up", grantable: false, note: "Unknown to this version of the app" },
+    ]);
+  });
+
+  it("finds the version waiting for approval and the version an Undo goes back to", () => {
+    const pages = detail(3, [version(4, "pending_approval", ["jobs.start"]), version(3, "live"), version(2, "superseded"), version(1, "superseded")]);
+    assert.equal(pendingPageVersion(pages)?.version, 4);
+    assert.equal(previousLiveVersion(pages)?.version, 2);
+    assert.equal(pendingPageVersion(detail(3, [version(3, "live"), version(2, "pending_approval")])), null, "an older waiting version is not news");
+    assert.equal(previousLiveVersion(detail(1, [version(1, "live")])), null, "a first version has nothing to undo");
+    assert.equal(rolledBackFrom(pages), null);
+  });
+
+  it("after a roll back offers Redo to the next newer version, never an Undo further back", () => {
+    const rolledBack = detail(2, [version(4, "superseded"), version(3, "superseded"), version(2, "live"), version(1, "superseded")]);
+    assert.equal(rolledBackFrom(rolledBack)?.version, 3);
+    assert.equal(previousLiveVersion(rolledBack), null);
+  });
+
+  it("shows hidden and reordering characters in a confirm sheet as visible tags", () => {
+    assert.equal(revealHiddenCharacters("Move DS-7 to \u202Eesaeler\u202C now\u200B"), "Move DS-7 to ⟨U+202E⟩esaeler⟨U+202C⟩ now⟨U+200B⟩");
+    assert.equal(revealHiddenCharacters("\uFEFFa\u2066b\u2069"), "⟨U+FEFF⟩a⟨U+2066⟩b⟨U+2069⟩");
+    assert.equal(revealHiddenCharacters("plain text"), "plain text");
+    const sheet = readFileSync(fileURLToPath(new URL("../src/components/desktop/content/room-pages/PageConfirmSheet.vue", import.meta.url)), "utf8");
+    assert.match(sheet, /\{\{ shown\(request\.text\) \}\}/);
+    assert.match(sheet, /\{\{ shown\(request\.target\) \}\}/);
+    assert.match(sheet, /\{\{ shown\(request\.details\) \}\}/);
+    assert.equal(sheet.match(/unicode-bidi: isolate;/g)?.length, 2);
+  });
+
+  it("says what an update changed", () => {
+    const lines = pageUpdateChanges(detail(2, [version(2, "live", ["tasks.read", "jobs.start"], 1500), version(1, "superseded", ["tasks.read"], 1000)]));
+    assert.match(lines[0], /^Version 2 replaced version 1 on /);
+    assert.deepEqual(lines.slice(1), ["Now asks to: Ask an agent in this room to do work for you", "The file is 500 bytes larger."]);
+  });
+
+  it("are wired: pin from an inline demo, one grant sheet in the shell, the banner in the page view", () => {
+    const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
+    const demo = read("../src/components/desktop/content/desktop-chat-message/DesktopInlineHtmlDemo.vue");
+    assert.match(demo, /inject\(roomPageActionsKey, null\)/);
+    assert.match(demo, /v-if="canPinAsPage"[\s\S]*?aria-label="Pin to room as a page"/);
+    const shell = read("../src/components/desktop/content/DesktopRoomShell.vue");
+    assert.equal(shell.match(/<PageGrantSheet /g)?.length, 1);
+    assert.match(shell, /props\.room\.role === "admin" && props\.storage\.effectiveMode !== "local"/);
+    assert.match(shell, /provide\(roomPageActionsKey, pagePinFlow\.actions\)/);
+    const view = read("../src/components/desktop/content/room-pages/RoomPageView.vue");
+    assert.match(view, /Updated by \{\{ banner\.label \}\}/);
+    assert.match(view, /v-if="canManage && banner\.undoVersion"/, "Undo is for room admins");
   });
 });

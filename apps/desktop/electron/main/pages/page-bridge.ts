@@ -2,9 +2,10 @@ import type { WebContents, WebFrameMain } from "electron";
 
 import { takeInlineHtmlDemoTokens } from "../attachments/html-demo-policy.js";
 import type { PageApiAdapter, PageCallContext } from "./page-adapter.js";
-import type { PageConfirmBroker } from "./page-confirm.js";
+import { fitsPageConfirmSheet, type PageConfirmBroker } from "./page-confirm.js";
 import type { PageDiagnostic, PageDiagnosticsKey } from "./page-diagnostics.js";
 import type { RoomPageLease } from "./page-host.js";
+import type { PageWatches } from "./page-watch.js";
 import {
   isPageMethodName,
   MAX_PAGE_CALL_INPUT_CHARS,
@@ -36,6 +37,8 @@ export interface PageBridgeDeps {
   theme(): PageTheme;
   openExternal(url: string): Promise<void>;
   writeClipboard(text: string): void;
+  /** The page's watches; without them `events.watch` is `not_found`. */
+  watches?: PageWatches<RoomPageLease>;
   /** Keep a failed call in the page's diagnostics. */
   record(key: PageDiagnosticsKey, entry: Omit<Extract<PageDiagnostic, { kind: "call" }>, "at">): void;
   now?: () => number;
@@ -73,6 +76,13 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
         return openLink(lease, input);
       case "ui.copy":
         return copyText(lease, input);
+      case "events.watch":
+        if (!deps.watches) throw new PageCallFailure("not_found", "Watches are not available in this app yet.");
+        deps.watches.start(lease, field(input, "id"), field(input, "method"), field(input, "input") ?? null);
+        return null;
+      case "events.unwatch":
+        deps.watches?.stop(lease, field(input, "id"));
+        return null;
       default:
         throw new PageCallFailure("not_found", `There is no method "${method}".`);
     }
@@ -125,6 +135,30 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
     return null;
   }
 
+  /**
+   * A call that acts as the person (an agent job now; posts and intents when
+   * their routes land) first shows the app-drawn sheet with the exact text and
+   * target. A no sends nothing. Only the page in the open tab may ask.
+   */
+  async function confirmCall(lease: RoomPageLease, method: string, input: unknown): Promise<void> {
+    const describe = CONFIRMED_METHODS[method];
+    if (!describe) return;
+    const sheet = describe(input);
+    if (!sheet) throw new PageCallFailure("invalid_input", `${method} needs its text before it can be confirmed.`);
+    // The sheet scrolls but never cuts: a call it cannot show in full is refused, so nothing unseen is sent.
+    if (!fitsPageConfirmSheet(sheet)) throw new PageCallFailure("too_large", `${method} sends more than the confirm sheet can show.`);
+    if (!lease.visible) throw new PageCallFailure("not_granted", `${method} works only from the page in the open tab.`);
+    if (confirming.has(lease)) throw new PageCallFailure("rate_limited", "Answer the open question first.", 1_000);
+    confirming.add(lease);
+    try {
+      const viewer = requireViewer(await deps.viewer());
+      const answer = await deps.confirm.ask(lease, scopeOf(lease, viewer), { ...sheet, pageTitle: lease.page.title });
+      if (answer !== "confirmed") throw new PageCallFailure("declined", "The person said no, so nothing was sent.");
+    } finally {
+      confirming.delete(lease);
+    }
+  }
+
   function copyText(lease: RoomPageLease, input: unknown): null {
     const text = field(input, "text");
     if (typeof text !== "string") throw new PageCallFailure("invalid_input", "ui.copy takes plain text.");
@@ -158,9 +192,13 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
       if (inputChars(input) > MAX_PAGE_CALL_INPUT_CHARS) {
         throw new PageCallFailure("too_large", `A call's input may be at most ${MAX_PAGE_CALL_INPUT_CHARS} characters of JSON.`);
       }
-      const value = PAGE_BUILTIN_METHODS.has(method)
-        ? await builtin(lease, method, input)
-        : await deps.adapter.call(contextOf(lease), method, input);
+      let value: unknown;
+      if (PAGE_BUILTIN_METHODS.has(method)) {
+        value = await builtin(lease, method, input);
+      } else {
+        await confirmCall(lease, method, input);
+        value = await deps.adapter.call(contextOf(lease), method, input);
+      }
       return { ok: true, value: value === undefined ? null : value };
     } catch (error) {
       const failure = error instanceof PageCallFailure
@@ -177,7 +215,120 @@ export function createPageCallHandler(deps: PageBridgeDeps) {
   };
 }
 
-function contextOf(lease: RoomPageLease): PageCallContext {
+/** What a confirmed call shows in its sheet: every value it sends, and whether "Don't ask again" may skip it later. */
+export interface ConfirmedSheet {
+  kind: "job" | "post" | "intent";
+  text: string;
+  target: string;
+  details: string | null;
+  /** Free text (a comment, a description) is new every time: a yes never covers the next one. */
+  rememberable: boolean;
+  /** What "Don't ask again" covers: the method, and for an intent its kind. */
+  choice: string;
+}
+
+const CONFIRMED_METHODS: Readonly<Record<string, (input: unknown) => ConfirmedSheet | null>> = {
+  "jobs.start": describeJob,
+  // A page viewer cannot read the room's policy (rooms.listPolicies is admin
+  // only), so every proposal asks: the sheet is required under `confirm` and
+  // only one more yes under `allow` or `approve`.
+  "intents.propose": (input) => describeIntent(field(input, "kind"), field(input, "payload")),
+};
+
+/** Formatted JSON of what a job sends besides its instruction, so the sheet shows it all. */
+function jsonDetails(parts: Array<[string, unknown]>): string | null {
+  const shown = parts.filter(([, value]) => value !== undefined);
+  if (shown.length === 0) return null;
+  return shown.map(([label, value]) => `${label}:\n${JSON.stringify(value, null, 2) ?? String(value)}`).join("\n\n");
+}
+
+export function describeJob(input: unknown): ConfirmedSheet | null {
+  const instruction = field(input, "instruction");
+  if (typeof instruction !== "string" || !instruction.trim()) return null;
+  const agent = field(input, "agent");
+  const named = typeof agent === "string" && agent.trim() ? agent.trim() : null;
+  return {
+    kind: "job",
+    text: instruction,
+    // The server picks another online agent when the named one is offline.
+    target: named ? `${named}, or another online agent if ${named} is offline` : "An online agent in the room",
+    details: jsonDetails([["Input", field(input, "input")], ["Result schema", field(input, "resultSchema")]]),
+    rememberable: true,
+    choice: "jobs.start",
+  };
+}
+
+const TASK_STATUS_WORDS: Readonly<Record<string, string>> = {
+  proposed: "Proposed", accepted: "Accepted", assigned: "Assigned", in_progress: "In progress", blocked: "Blocked",
+  in_review: "In review", merged: "Merged", done: "Done", cancelled: "Cancelled",
+};
+
+/** One payload value as the sheet shows it: text in quotes, `null` as "(cleared)". */
+function shownValue(value: unknown): string {
+  if (value === null) return "(cleared)";
+  if (typeof value === "string") return `"${value}"`;
+  return JSON.stringify(value) ?? String(value);
+}
+
+/**
+ * An intent in plain words, from its kind and payload, such as "Move DS-7 to
+ * Released". Every field the payload sends is shown with its own value; null
+ * for a payload the server would refuse anyway.
+ */
+export function describeIntent(kind: unknown, payload: unknown): ConfirmedSheet | null {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const fields = payload as Record<string, unknown>;
+  const text = (name: string): string | null => {
+    const value = fields[name];
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  };
+  const sheet = (lines: string[], target: string, rememberable: boolean): ConfirmedSheet => ({
+    kind: "intent", text: lines.join("\n"), target, details: null, rememberable, choice: `intents.propose:${kind as string}`,
+  });
+  const board = "This room's board";
+  switch (kind) {
+    case "task.create": {
+      const title = text("title");
+      if (!title) return null;
+      const lines = [`Create the task "${title}"`];
+      const hasDescription = typeof fields.description === "string";
+      if (hasDescription) lines.push("", "Description:", fields.description as string);
+      return sheet(lines, board, !hasDescription);
+    }
+    case "task.update": {
+      const taskId = text("taskId");
+      if (!taskId) return null;
+      const lines = [`Change task ${taskId}:`];
+      if ("status" in fields) {
+        const status = fields.status;
+        lines.push(`• Status → ${typeof status === "string" ? TASK_STATUS_WORDS[status] ?? status : shownValue(status)}`);
+      }
+      if ("assignee" in fields) lines.push(`• Assignee → ${shownValue(fields.assignee)}`);
+      if ("assigneeAgentKey" in fields) lines.push(`• Assignee agent → ${shownValue(fields.assigneeAgentKey)}`);
+      if ("title" in fields) lines.push(`• Title → ${shownValue(fields.title)}`);
+      const hasDescription = "description" in fields;
+      if (hasDescription) lines.push("• Description → (below)", "", typeof fields.description === "string" ? fields.description : shownValue(fields.description));
+      const known = new Set(["taskId", "status", "assignee", "assigneeAgentKey", "title", "description"]);
+      for (const [name, value] of Object.entries(fields)) if (!known.has(name)) lines.push(`• ${name} → ${shownValue(value)}`);
+      if (lines.length === 1) return null;
+      return sheet(lines, board, !hasDescription);
+    }
+    case "ticket.transition": {
+      const key = text("key");
+      const toStatus = text("toStatus");
+      return key && toStatus ? sheet([`Move ${key} to ${toStatus}`], `${key} in this room's tracker`, true) : null;
+    }
+    case "ticket.comment": {
+      const key = text("key");
+      const body = typeof fields.body === "string" && fields.body.trim() ? fields.body : null;
+      return key && body ? sheet([`Comment on ${key}:`, "", body], `${key} in this room's tracker`, false) : null;
+    }
+    default:
+      return null;
+  }
+}
+
+export function contextOf(lease: RoomPageLease): PageCallContext {
   return { leaseId: lease.host, roomId: lease.roomId, pageId: lease.page.id, version: lease.page.version };
 }
 

@@ -15,6 +15,8 @@ import { addWebviewRoute } from "../attachments/webview-router.js";
 import { electronMainDir } from "../paths.js";
 import type { RoomPageSource } from "./page-adapter.js";
 import type { PageGrantKeeper } from "./page-grants.js";
+import { PAGE_RELAY_RESOURCES } from "./page-watch.js";
+import { subscribeRoomStreamPointers, type RoomStreamPointer } from "../room-stream-pointers.js";
 import { recordPageDiagnostic } from "./page-diagnostics.js";
 import {
   lockRoomPageWebPreferences,
@@ -66,6 +68,8 @@ export interface RoomPageLease {
   lastOpenAt: number;
   /** Domains the person let this lease open; a new lease of the same page asks again. */
   openDomains: Set<string>;
+  /** Another version went live before the webview attached: it closes as soon as it does. */
+  outdated: boolean;
 }
 
 const leases = new Map<string, RoomPageLease>();
@@ -79,11 +83,38 @@ let configured: {
   onLeaseEnd?: (lease: RoomPageLease) => void;
   /** Called when a page leaves the active tab, so its open sheets go away. */
   onLeaseHidden?: (lease: RoomPageLease) => void;
+  /** Called for each room stream pointer (or `gap`) in a running page's room, after the page heard it. */
+  onLeasePointer?: (lease: RoomPageLease, resource: string | "gap") => void;
 } | null = null;
+let stopPointerRelay: (() => void) | null = null;
 
 /** Where pages come from, and what else must end with a lease. Set once by the IPC registrar. */
 export function configureRoomPages(input: NonNullable<typeof configured>): void {
   configured = input;
+  // Pages ride the room stream the app already runs for the open room; they never open one.
+  stopPointerRelay ??= subscribeRoomStreamPointers(relayRoomStreamPointer);
+}
+
+/**
+ * Hand one room stream pointer to the running pages of that room, and only
+ * them: `changed` names the resource, `reread` follows a gap in the stream.
+ */
+export function relayRoomStreamPointer(pointer: RoomStreamPointer): void {
+  const resource = "gap" in pointer ? "gap" : pointer.resource;
+  if (resource !== "gap" && !PAGE_RELAY_RESOURCES.has(resource)) return;
+  for (const lease of leases.values()) {
+    if (!lease.guest || lease.stopped || !pointer.roomIds.includes(lease.roomId)) continue;
+    sendToRoomPage(lease, resource === "gap" ? { event: "reread" } : { event: "changed", resource });
+    configured?.onLeasePointer?.(lease, resource);
+  }
+}
+
+/** Push one message to a running page over its one channel; false when it is not running. */
+export function sendToRoomPage(lease: RoomPageLease, message: unknown): boolean {
+  const guest = lease.guest;
+  if (!guest || guest.isDestroyed() || lease.stopped || !isLive(lease)) return false;
+  guest.send(PAGE_CALL_CHANNEL, message);
+  return true;
 }
 
 function cleanId(value: unknown, label: string): string {
@@ -132,13 +163,14 @@ export async function prepareRoomPage(rawRoomId: unknown, rawPageId: unknown): P
     visible: false,
     lastOpenAt: Number.NEGATIVE_INFINITY,
     openDomains: new Set(),
+    outdated: false,
   };
   lease.attachTimer = setTimeout(() => {
     if (!lease.guest) endLease(lease);
   }, ROOM_PAGE_LEASE_MS);
   roomPageDocuments.set(host, html);
   leases.set(host, lease);
-  configured.grants?.start(host, roomId, page.id);
+  configured.grants?.start(host, roomId, page.id, page.version);
   return { url: lease.url, partition: PAGE_PARTITION, page };
 }
 
@@ -177,6 +209,8 @@ export function setRoomPageVisible(rawUrl: unknown, visible: unknown): void {
       if (other !== lease && other.visible && other.embedder === lease.embedder) hideLease(other);
     }
     lease.visible = true;
+    // A guest that sat hidden may keep an old frame; ask it to paint again now that it shows.
+    if (lease.guest && !lease.guest.isDestroyed() && !lease.stopped) lease.guest.invalidate();
     return;
   }
   hideLease(lease);
@@ -186,6 +220,14 @@ function hideLease(lease: RoomPageLease): void {
   if (!lease.visible) return;
   lease.visible = false;
   configured?.onLeaseHidden?.(lease);
+}
+
+/** The server will not grant the version this lease shows: close it, and the view loads the live one. */
+export function markRoomPageOutdated(leaseId: string): void {
+  const lease = leases.get(leaseId);
+  if (!lease) return;
+  lease.outdated = true;
+  stopGuest(lease, "outdated");
 }
 
 export function currentRoomPageTheme(): PageTheme {
@@ -242,6 +284,7 @@ function bindGuest(guest: WebContents, lease: RoomPageLease, embedder: WebConten
     }
   });
   watchGuestEventFlood(guest, () => lease.stopped, () => stopGuest(lease, "overloaded"));
+  if (lease.outdated) setImmediate(() => stopGuest(lease, "outdated"));
   guest.on("input-event", (_event: Event, input: InputEvent) => {
     if (PERSON_INPUT_TYPES.has(input.type)) lease.lastInputAt = Date.now();
   });
@@ -290,7 +333,8 @@ function stopGuest(lease: RoomPageLease, reason: StopReason): void {
   // Not inside the guest's own event: closing a guest deletes it at once.
   setImmediate(() => {
     if (guest.isDestroyed()) return;
-    if (!guest.isCrashed()) guest.forcefullyCrashRenderer();
+    // A hung or flooding page's process is ended first, so the close does not wait on it.
+    if (reason !== "outdated" && !guest.isCrashed()) guest.forcefullyCrashRenderer();
     guest.close();
   });
 }

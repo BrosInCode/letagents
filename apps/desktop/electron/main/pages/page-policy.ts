@@ -79,6 +79,9 @@ export const PAGE_BUILTIN_METHODS: ReadonlySet<string> = new Set([
   "ui.copy",
   "ui.theme",
   "ui.context",
+  // Keep a read running: main re-runs it on room stream pointers and pushes each answer.
+  "events.watch",
+  "events.unwatch",
 ]);
 
 export function isPageMethodName(value: unknown): value is string {

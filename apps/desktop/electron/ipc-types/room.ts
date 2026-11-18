@@ -894,7 +894,8 @@ export type DesktopRoomStreamEvent =
   | {
       type: "resource_invalidation";
       roomIdentifier: string;
-      resource: "agent_work" | "wake_rules" | "message_reactions" | "message_pins" | "message_info";
+      /** `pages`: a page was pinned, unpinned or got a new live version; the room's page tabs read again. */
+      resource: "agent_work" | "wake_rules" | "message_reactions" | "message_pins" | "message_info" | "pages";
     }
   | {
       /**

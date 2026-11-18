@@ -1,6 +1,13 @@
-import { ref, watch } from "vue";
+import { onBeforeUnmount, ref, watch } from "vue";
 import type { DesktopRoomPage } from "../../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../../ipc";
+
+const refreshRequests = new Set<() => void>();
+
+/** The app itself pinned, approved or rolled back a page: the open room's tabs read again now. */
+export function requestRoomPagesRefresh(): void {
+  for (const refresh of refreshRequests) refresh();
+}
 
 /**
  * The room's pinned pages, the source of its page tabs. It stays empty for a
@@ -38,6 +45,21 @@ export function useRoomPages(roomIdentifier: () => string, enabled: () => boolea
     roomPagesLoaded.value = false;
     void refreshRoomPages();
   }, { immediate: true });
+
+  // Someone pinned, unpinned or updated a page, or the stream may have missed that: read the list again.
+  const refresh = () => {
+    // Until the new list arrives, a tab just opened for a new page is not sent back to chat.
+    roomPagesLoaded.value = false;
+    void refreshRoomPages();
+  };
+  refreshRequests.add(refresh);
+  const stopStream = desktopIpc.room?.onStreamEvent?.((event) => {
+    if ((event.type === "resource_invalidation" && event.resource === "pages") || (event.type === "open" && event.gap)) refresh();
+  }) ?? null;
+  onBeforeUnmount(() => {
+    refreshRequests.delete(refresh);
+    stopStream?.();
+  });
 
   return { roomPages, roomPagesLoaded, refreshRoomPages };
 }

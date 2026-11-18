@@ -1,6 +1,6 @@
 import type { DesktopRoomPage } from "../../ipc-types.js";
 import { apiFetch, DesktopApiError } from "../auth.js";
-import { parsePageGrant, type PageGrant, type PageGrantKeeper } from "./page-grants.js";
+import { PageGrantOutdated, parsePageGrant, type PageGrant, type PageGrantKeeper } from "./page-grants.js";
 import { MAX_ROOM_PAGE_BYTES, PageCallFailure, type PageErrorCode } from "./page-policy.js";
 
 /** The page version a call comes from, as main knows it from the page's lease. */
@@ -29,7 +29,8 @@ export interface PageApiAdapter {
 export interface RoomPageSource {
   list(roomId: string): Promise<DesktopRoomPage[]>;
   load(roomId: string, pageId: string): Promise<{ page: DesktopRoomPage; html: string }>;
-  grant(roomId: string, pageId: string): Promise<PageGrant>;
+  /** A grant for exactly `version`; `PageGrantOutdated` when another version is live. */
+  grant(roomId: string, pageId: string, version: number): Promise<PageGrant>;
 }
 
 export type PageApiHttpMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -50,11 +51,37 @@ export interface PageApiRoute {
  * The contract methods a page can call, by name. Each server PR that adds a
  * method a page may use adds it here with the contract's route (a test checks
  * they agree); a name not in this table is `not_found` before anything is
- * sent. Main does not import `shared/api` at run time: it needs zod, which
- * the packaged app's shared folder cannot resolve.
+ * sent. Room administration (`rooms.admin`) is never here: a page cannot hold
+ * it. Main does not import `shared/api` at run time: it needs zod, which the
+ * packaged app's shared folder cannot resolve.
  */
 export const PAGE_API_ROUTES: Readonly<Record<string, PageApiRoute>> = {
   "rooms.get": { method: "GET", path: "/rooms/:room" },
+  "people.list": { method: "GET", path: "/rooms/:room/people" },
+  "people.viewer": { method: "GET", path: "/rooms/:room/people/me" },
+  "agents.list": { method: "GET", path: "/rooms/:room/agents" },
+  "messages.recent": { method: "GET", path: "/rooms/:room/messages" },
+  "messages.thread": { method: "GET", path: "/rooms/:room/messages/:messageId/thread" },
+  "tasks.list": { method: "GET", path: "/rooms/:room/tasks" },
+  "tasks.get": { method: "GET", path: "/rooms/:room/tasks/:taskId" },
+  "planning.get": { method: "GET", path: "/rooms/:room/planning" },
+  "work_items.search": { method: "GET", path: "/rooms/:room/work-items" },
+  "work_items.get": { method: "GET", path: "/rooms/:room/work-items/:key" },
+  "work_items.history": { method: "GET", path: "/rooms/:room/work-items/:key/history" },
+  "git.pullRequests": { method: "GET", path: "/rooms/:room/git/pull-requests" },
+  "memory.list": { method: "GET", path: "/rooms/:room/memory" },
+  "data.list": { method: "GET", path: "/rooms/:room/data/:scope/:collection" },
+  "data.get": { method: "GET", path: "/rooms/:room/data/:scope/:collection/:docId" },
+  "data.set": { method: "PUT", path: "/rooms/:room/data/:scope/:collection/:docId" },
+  "data.update": { method: "PATCH", path: "/rooms/:room/data/:scope/:collection/:docId" },
+  "data.delete": { method: "DELETE", path: "/rooms/:room/data/:scope/:collection/:docId" },
+  "jobs.start": { method: "POST", path: "/rooms/:room/jobs" },
+  "jobs.get": { method: "GET", path: "/rooms/:room/jobs/:id" },
+  "jobs.list": { method: "GET", path: "/rooms/:room/jobs" },
+  "jobs.cancel": { method: "POST", path: "/rooms/:room/jobs/:id/cancel" },
+  "intents.propose": { method: "POST", path: "/rooms/:room/intents" },
+  "intents.get": { method: "GET", path: "/rooms/:room/intents/:intentId" },
+  "intents.list": { method: "GET", path: "/rooms/:room/intents" },
 };
 
 export function pageApiMethodNames(routes: Readonly<Record<string, PageApiRoute>> = PAGE_API_ROUTES): ReadonlySet<string> {
@@ -103,7 +130,10 @@ export function pageApiRequest(
     const query = new URLSearchParams();
     for (const [name, value] of Object.entries(fields)) {
       if (value === undefined || value === null) continue;
-      query.set(name, typeof value === "string" ? value : JSON.stringify(value));
+      // A list repeats its key (`fields=a&fields=b`), as the server's query parser reads it.
+      for (const item of Array.isArray(value) ? value : [value]) {
+        query.append(name, typeof item === "string" || typeof item === "number" || typeof item === "boolean" ? String(item) : JSON.stringify(item));
+      }
     }
     const search = query.toString();
     return { path: search ? `${base}?${search}` : base, init: { method: route.method } };
@@ -133,7 +163,7 @@ export function pageCallFailureFromApi(error: unknown): PageCallFailure {
  * lease without a token gets `not_granted`.
  */
 export function createHttpPageApiAdapter(options: {
-  grants: Pick<PageGrantKeeper, "token">;
+  grants: Pick<PageGrantKeeper, "token"> & Partial<Pick<PageGrantKeeper, "invalidate">>;
   routes?: Readonly<Record<string, PageApiRoute>>;
   fetchApi?: typeof apiFetch;
 }): PageApiAdapter {
@@ -144,13 +174,25 @@ export function createHttpPageApiAdapter(options: {
       const route = Object.hasOwn(routes, method) ? routes[method] : undefined;
       if (!route) throw new PageCallFailure("not_found", `There is no method "${method}".`);
       const request = pageApiRequest(route, lease.roomId, input);
-      const token = await options.grants.token(lease.leaseId);
-      if (!token) throw new PageCallFailure("not_granted", "This page has no grant in this room.");
-      const headers = new Headers(request.init.headers);
-      headers.set("Authorization", `Bearer ${token}`);
+      const send = async () => {
+        const token = await options.grants.token(lease.leaseId);
+        if (!token) throw new PageCallFailure("not_granted", "This page has no grant in this room.");
+        const headers = new Headers(request.init.headers);
+        headers.set("Authorization", `Bearer ${token}`);
+        return fetchApi<unknown>(request.path, { ...request.init, headers }, { credential: "none" });
+      };
       try {
-        return await fetchApi<unknown>(request.path, { ...request.init, headers }, { credential: "none" });
+        return await send();
       } catch (error) {
+        // A grant ends when an admin approves, rolls back or unpins the page: mint once more and retry.
+        if (error instanceof DesktopApiError && error.status === 401 && options.grants.invalidate) {
+          options.grants.invalidate(lease.leaseId);
+          try {
+            return await send();
+          } catch (retryError) {
+            throw pageCallFailureFromApi(retryError);
+          }
+        }
         throw pageCallFailureFromApi(error);
       }
     },
@@ -192,12 +234,18 @@ export function createHttpRoomPageSource(fetchApi: typeof apiFetch = apiFetch): 
       if (Buffer.byteLength(body.html, "utf8") > MAX_ROOM_PAGE_BYTES) throw new Error("This page is larger than 2 MB, so it does not open.");
       return { page, html: body.html };
     },
-    async grant(roomId, pageId) {
-      const body = await fetchApi<unknown>(
-        `${roomBase(roomId)}/${encodeURIComponent(pageId)}/grant`,
-        { method: "POST", body: "{}" },
-        { credential: "app" },
-      );
+    async grant(roomId, pageId, version) {
+      let body: unknown;
+      try {
+        body = await fetchApi<unknown>(
+          `${roomBase(roomId)}/${encodeURIComponent(pageId)}/grant`,
+          { method: "POST", body: JSON.stringify({ version }) },
+          { credential: "app" },
+        );
+      } catch (error) {
+        if (error instanceof DesktopApiError && error.status === 409) throw new PageGrantOutdated(error.message);
+        throw error;
+      }
       const grant = parsePageGrant(body);
       if (!grant) throw new Error("The server sent no page grant.");
       return grant;
@@ -244,9 +292,11 @@ export function createMemoryPageBackend(input: {
         const { html, ...page } = found;
         return { page, html };
       },
-      async grant(roomId, pageId) {
+      async grant(roomId, pageId, version) {
         mints.push({ roomId, pageId });
         if (input.grantFails?.()) throw new Error("The grant was refused.");
+        const live = input.pages?.[roomId]?.find((page) => page.id === pageId);
+        if (live && live.version !== version) throw new PageGrantOutdated(`Version ${version} is no longer live.`);
         return { token: `grant-${mints.length}`, expiresAt: Date.now() + (input.grantTtlMs ?? 15 * 60_000), capabilities: ["rooms.read"] };
       },
     },
