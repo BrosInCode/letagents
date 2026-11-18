@@ -2,12 +2,12 @@ import { ApiError } from "../../../shared/api/core.mjs";
 import type { ApiCapabilityCheck } from "./context.js";
 
 /**
- * Every /api/v1 route calls this before its handler. Today only a person
- * acting for themselves reaches it, and a person holds every capability in a
- * room they may read. The grant and room policy checks (a page version's
- * grant, confirm, approve) replace this body.
+ * Every /api/v1 route calls this after the input is parsed and before its
+ * handler. Today only people reach it: a person holds every capability in a
+ * room they may read, also through a remote MCP session (their owner token).
+ * The grant and room policy checks replace this body.
  */
-export const checkCapability: ApiCapabilityCheck = async (actor, capability) => {
-  if (actor.principal.kind === "person" && !actor.via) return;
-  throw new ApiError("not_granted", `This caller does not hold the "${capability}" capability.`);
+export const checkCapability: ApiCapabilityCheck = async (actor, method) => {
+  if (actor.principal.kind === "person" && (!actor.via || actor.via.kind === "integration")) return;
+  throw new ApiError("not_granted", `This caller does not hold the "${method.capability}" capability.`);
 };

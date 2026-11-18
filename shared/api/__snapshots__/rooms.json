@@ -4,6 +4,7 @@
     "capability": "rooms.read",
     "httpMethod": "GET",
     "path": "/rooms/:room",
+    "response": "json",
     "rateClass": "read",
     "errors": [
       "not_found"
