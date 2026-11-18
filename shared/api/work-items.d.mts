@@ -74,7 +74,6 @@ export const WorkItem: z.ZodObject<{
     }, z.core.$strip>>;
     parent: z.ZodNullable<z.ZodObject<{
         key: z.ZodString;
-        title: z.ZodNullable<z.ZodString>;
     }, z.core.$strip>>;
     fixVersions: z.ZodArray<z.ZodObject<{
         id: z.ZodString;
@@ -136,7 +135,6 @@ export const WorkItemSearchResult: z.ZodObject<{
         }, z.core.$strip>>;
         parent: z.ZodNullable<z.ZodObject<{
             key: z.ZodString;
-            title: z.ZodNullable<z.ZodString>;
         }, z.core.$strip>>;
         fixVersions: z.ZodArray<z.ZodObject<{
             id: z.ZodString;
@@ -182,7 +180,7 @@ export const searchWorkItems: import("./core.mjs").ApiMethod<"work_items.search"
         jira: "jira";
         linear: "linear";
     }>>;
-    limit: z.ZodDefault<z.ZodCoercedNumber<unknown>>;
+    limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
     fields: z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodString>]>>;
 }, z.core.$strict>, z.ZodObject<{
     provider: z.ZodEnum<{
@@ -229,7 +227,6 @@ export const searchWorkItems: import("./core.mjs").ApiMethod<"work_items.search"
         }, z.core.$strip>>;
         parent: z.ZodNullable<z.ZodObject<{
             key: z.ZodString;
-            title: z.ZodNullable<z.ZodString>;
         }, z.core.$strip>>;
         fixVersions: z.ZodArray<z.ZodObject<{
             id: z.ZodString;
@@ -294,7 +291,6 @@ export const getWorkItem: import("./core.mjs").ApiMethod<"work_items.get", z.Zod
     }, z.core.$strip>>;
     parent: z.ZodNullable<z.ZodObject<{
         key: z.ZodString;
-        title: z.ZodNullable<z.ZodString>;
     }, z.core.$strip>>;
     fixVersions: z.ZodArray<z.ZodObject<{
         id: z.ZodString;
@@ -338,7 +334,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"work_items.searc
         jira: "jira";
         linear: "linear";
     }>>;
-    limit: z.ZodDefault<z.ZodCoercedNumber<unknown>>;
+    limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
     fields: z.ZodOptional<z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodString>]>>;
 }, z.core.$strict>, z.ZodObject<{
     provider: z.ZodEnum<{
@@ -385,7 +381,6 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"work_items.searc
         }, z.core.$strip>>;
         parent: z.ZodNullable<z.ZodObject<{
             key: z.ZodString;
-            title: z.ZodNullable<z.ZodString>;
         }, z.core.$strip>>;
         fixVersions: z.ZodArray<z.ZodObject<{
             id: z.ZodString;
@@ -449,7 +444,6 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"work_items.searc
     }, z.core.$strip>>;
     parent: z.ZodNullable<z.ZodObject<{
         key: z.ZodString;
-        title: z.ZodNullable<z.ZodString>;
     }, z.core.$strip>>;
     fixVersions: z.ZodArray<z.ZodObject<{
         id: z.ZodString;

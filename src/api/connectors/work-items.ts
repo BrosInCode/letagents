@@ -32,7 +32,7 @@ import { ConnectorDecryptError, loadConnectorCipher } from "./crypto.js";
 import { formatExternalRef } from "./key-detectors.js";
 import { asRecord } from "./providers/http.js";
 import { createWorkItemProviders } from "./providers/index.js";
-import { assertJiraKey, jiraFilterClause } from "./providers/jira.js";
+import { assertJiraKey, jiraFilterClause, jiraQueryClause } from "./providers/jira.js";
 import { jiraIteration } from "./providers/planning.js";
 import {
   type ExternalItem,
@@ -223,9 +223,9 @@ export function createWorkItemsReader(deps: WorkItemsReaderDeps): WorkItemsReade
       const picked = await source(roomId, input.provider);
       const query = input.query.trim();
       try {
-        jiraFilterClause(query);
-      } catch {
-        throw new ApiError("invalid_input", "query: the JQL has unbalanced parentheses or quotes.");
+        jiraQueryClause(query);
+      } catch (error) {
+        throw new ApiError("invalid_input", `query: ${error instanceof Error ? error.message : "the JQL is not valid."}`);
       }
       const fields = fieldList(input.fields);
       const cacheKey = JSON.stringify(["search", roomId, picked.source.filter_id, picked.source.connection_id, picked.filter, query, fields, input.limit]);
@@ -241,7 +241,9 @@ export function createWorkItemsReader(deps: WorkItemsReaderDeps): WorkItemsReade
           return { items, fetchedAt: new Date(now()).toISOString() };
         } catch (error) {
           if (error instanceof TrackerProviderError && error.outcome === "definite" && error.status === 400) {
-            throw new ApiError("invalid_input", `query: Jira refused it: ${error.message.slice(0, 300)}`);
+            // Jira's own text names projects, fields and values the room filter
+            // may hide; the caller learns only that the query was refused.
+            throw new ApiError("invalid_input", "query: Jira refused the query.");
           }
           throw sourceError(error);
         }

@@ -15,11 +15,14 @@ import {
 import { DEFAULT_STATUS_MAPS, TICKET_STATES, TRACKER_PROVIDERS } from "../../../shared/ticket-connectors.mjs";
 import type { JiraCredentials, ProviderConnection } from "../connectors/providers/types.js";
 import type { RoomTrackerSource } from "../connectors/room-filters.js";
+import type { ApiCallContext } from "../v1/context.js";
 
 // The work-item read model with the real Jira provider over a fake Jira: no database.
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { createJiraProvider } = await import("../connectors/providers/jira.js");
 const { createWorkItemsReader, WORK_ITEMS_CACHE_TTL_MS } = await import("../connectors/work-items.js");
+const { createWorkItemRoutes } = await import("../v1/areas/work-items.js");
+const { allowedWorkItemFields } = await import("../v1/work-item-fields.js");
 
 const fixtureDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "connectors");
 const fixture = (name: string): unknown => JSON.parse(readFileSync(path.join(fixtureDir, `${name}.json`), "utf8"));
@@ -124,10 +127,12 @@ test("a search runs (room filter) AND (query) and returns normalised tickets", a
     customfield_10016: 5,
     customfield_10020: [{ id: 42, name: "Sprint 42", state: "active", startDate: "2026-11-10T00:00:00.000Z", endDate: "2026-11-24T00:00:00.000Z" }],
     customfield_10050: { value: "Team Rocket" },
+    customfield_10060: [{ accountId: "acc-2", displayName: "Bo", emailAddress: "bo@example.com", avatarUrls: { "48x48": "https://x" }, self: "https://acme.atlassian.net/rest/api/3/user?accountId=acc-2" }],
+    customfield_10070: { key: "HR-5", fields: { summary: "Secret parent" }, self: "https://acme.atlassian.net/rest/api/3/issue/HR-5" },
   }));
   ctx.state.links.set("jira:HT-1", "task_7");
 
-  const result = await ctx.reader.search(ROOM, { query: 'status = "Code Review"', limit: 20, fields: ["customfield_10050", "customfield_99999"] });
+  const result = await ctx.reader.search(ROOM, { query: 'status = "Code Review"', limit: 20, fields: ["customfield_10050", "customfield_10060", "customfield_10070", "customfield_99999"] });
 
   const [call] = ctx.searches();
   assert.equal(call!.body!.jql, '(project = HT) AND (status = "Code Review") ORDER BY updated DESC');
@@ -146,24 +151,92 @@ test("a search runs (room filter) AND (query) and returns normalised tickets", a
     assignee: { id: "acc-1", name: "Emmy May" },
     storyPoints: 5,
     sprints: [{ id: "42", name: "Sprint 42", state: "active", startDate: "2026-11-10", endDate: "2026-11-24" }],
-    parent: { key: "HT-100", title: "Billing epic" },
+    // The key only: the parent may be outside the room filter.
+    parent: { key: "HT-100" },
     fixVersions: [{ id: "10200", name: "2.4", released: false, releaseDate: "2026-12-01" }],
     labels: ["billing"],
     statusChangedAt: "2026-11-16T08:30:00.000Z",
     updatedAt: "2026-11-17T10:00:00.000Z",
     linkedTask: { taskId: "task_7" },
-    // Only fields the caller named; one the ticket lacks is absent.
-    fields: { customfield_10050: { value: "Team Rocket" } },
+    // Only fields the caller named; one the ticket lacks is absent. Objects
+    // keep id, key, name, value and displayName: no e-mail, links or nested fields.
+    fields: {
+      customfield_10050: { value: "Team Rocket" },
+      customfield_10060: [{ displayName: "Bo" }],
+      customfield_10070: { key: "HR-5" },
+    },
   }]);
   assert.ok(WorkItem.safeParse(result.items[0]).success);
 });
 
 test("a query cannot break out of the room filter", async () => {
   const ctx = setup();
-  for (const query of [") OR (project = HR", "project = HR) OR (project = HT", 'summary ~ "open', "x) OR (y"]) {
+  for (const query of [
+    ") OR (project = HR",
+    "project = HR) OR (project = HT",
+    'summary ~ "open',
+    "x) OR (y",
+    // Jira reads \' and \" in an unquoted word as a literal quote, so these
+    // close the group early in Jira while a quote-only scanner sees a string.
+    "summary ~ \\'a ) OR key is not EMPTY OR ( summary ~ 'b\\'c'",
+    'summary ~ \\"a ) OR key is not EMPTY OR ( summary ~ "b\\"c"',
+    // An escaped backslash ends the quoted string; the ) after it is outside.
+    "summary ~ 'a\\\\' ) OR (key is not EMPTY",
+  ]) {
     await rejectsWith(ctx.reader.search(ROOM, { query, limit: 10 }), "invalid_input", /unbalanced/);
   }
+  // Any backslash outside a quoted string is refused in a caller's query.
+  for (const query of ["project = HT\\", "summary ~ \\\\'a ) OR (b'", "labels = a\\ b"]) {
+    await rejectsWith(ctx.reader.search(ROOM, { query, limit: 10 }), "invalid_input", /backslash/);
+  }
   assert.equal(ctx.jira.calls.length, 0, "no tracker request for a rejected query");
+  // Escapes inside quoted strings and mixed quotes stay usable.
+  await ctx.reader.search(ROOM, { query: `summary ~ "it's \\"quoted\\"" AND labels = 'say "hi"'`, limit: 10 });
+  assert.equal(ctx.searches()[0]!.body!.jql, `(project = HT) AND (summary ~ "it's \\"quoted\\"" AND labels = 'say "hi"') ORDER BY updated DESC`);
+});
+
+test("a query Jira refuses is invalid_input without Jira's own text", async () => {
+  const ctx = setup();
+  const provider = createJiraProvider({
+    fetchImpl: (async () => new Response(JSON.stringify({ errorMessages: ["The value 'SECRET' does not exist for the field 'project'."] }), { status: 400 })) as typeof fetch,
+    env: {},
+  });
+  const reader = createWorkItemsReader({
+    providers: { jira: provider, linear: provider, github: provider },
+    sources: async () => [{ filter_id: "rtf_1", connection_id: "tcon_jira", provider: "jira", filter: "project = HT" }],
+    openConnection: async () => connection(),
+    linkedTasks: async () => new Map(),
+    generation: () => ctx.state.generation,
+  });
+  await assert.rejects(reader.search(ROOM, { query: "project = SECRET", limit: 10 }), (error: unknown) => {
+    assert.ok(error instanceof ApiError);
+    assert.deepEqual(error.toBody(), { code: "invalid_input", message: "query: Jira refused the query." });
+    return true;
+  });
+});
+
+test("a page reads only the custom fields its allowance names", async () => {
+  const calls: Array<string[] | undefined> = [];
+  const stub = {
+    async search(_room: string, input: { fields?: string | string[] }) { calls.push(input.fields as string[] | undefined); return { provider: "jira" as const, items: [], fetchedAt: "2026-11-18T00:00:00.000Z" }; },
+    async get() { throw new Error("unused"); },
+    async history() { throw new Error("unused"); },
+  };
+  const person = { principal: { kind: "person" as const, id: "acct-1" }, roomId: ROOM };
+  const page = { ...person, via: { kind: "page" as const, id: "page-1" } };
+  const call = (actor: typeof person) => ({ room: { id: ROOM }, actor }) as unknown as ApiCallContext;
+  const input = { query: "", limit: 10, fields: ["customfield_1", "customfield_2"] };
+
+  const [search] = createWorkItemRoutes({ getReader: () => stub, allowedFields: (actor) => (actor.via ? ["customfield_1"] : null) });
+  await search!.handler(input, call(person));
+  await search!.handler({ ...input, fields: "customfield_1" }, call(page));
+  await rejectsWith(Promise.resolve().then(() => search!.handler(input, call(page))), "not_granted", /customfield_2/);
+  assert.deepEqual(calls, [["customfield_1", "customfield_2"], ["customfield_1"]]);
+
+  // Until the pages registry answers, a page or a job reads no custom field; a person reads any.
+  assert.equal(allowedWorkItemFields(person), null);
+  assert.deepEqual(allowedWorkItemFields(page), []);
+  assert.equal(allowedWorkItemFields({ ...person, via: { kind: "integration", id: "remote-mcp" } }), null);
 });
 
 test("no enabled, non-empty room filter on an active connection is no_source", async () => {

@@ -75,12 +75,17 @@ export interface ExternalItem {
 export interface ExternalItemDetail {
   /** The provider's status category: `new`, `indeterminate`, `done` (Jira). */
   status_category: string | null;
-  parent: { key: string; title: string | null } | null;
+  /** The key only: the parent may be outside the room filter. */
+  parent: { key: string } | null;
   fix_versions: Array<{ id: string; name: string; released: boolean | null; release_date: string | null }>;
   labels: string[];
   /** When the ticket last moved to another status category (Jira). */
   status_changed_at: string | null;
-  /** Raw values of the fields the caller named, by field id; a field the tracker did not return is absent. */
+  /**
+   * Values of the fields the caller named, by field id, reduced to plain
+   * values and `id`/`key`/`name`/`value`/`displayName`; a field the tracker
+   * did not return is absent.
+   */
   fields: Record<string, unknown>;
 }
 

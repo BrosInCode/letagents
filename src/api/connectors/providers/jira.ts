@@ -80,20 +80,23 @@ export interface JiraProviderOptions {
 }
 
 /**
- * A room filter's JQL, without a trailing ORDER BY. Parentheses must balance
- * outside quoted strings, so the filter cannot close the group this provider
- * wraps it in and widen the query past the clauses added after it.
+ * Reads JQL the way Jira's lexer splits it: a backslash escapes the next
+ * character inside a quoted string and in an unquoted word alike (`\'` in a
+ * word is a literal quote, not the start of a string). Returns whether the
+ * parentheses and quotes balance and whether a backslash appears outside a
+ * quoted string.
  */
-export function jiraFilterClause(filter: string | null): string | null {
-  const base = filter?.replace(/\border\s+by\b[\s\S]*$/i, "").trim();
-  if (!base) return null;
+function scanJql(text: string): { balanced: boolean; bareBackslash: boolean } {
   let depth = 0;
   let quote: string | null = null;
-  for (let index = 0; index < base.length; index += 1) {
-    const char = base[index];
-    if (quote) {
-      if (char === "\\") index += 1;
-      else if (char === quote) quote = null;
+  let bareBackslash = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "\\") {
+      if (!quote) bareBackslash = true;
+      index += 1;
+    } else if (quote) {
+      if (char === quote) quote = null;
     } else if (char === "\"" || char === "'") {
       quote = char;
     } else if (char === "(") {
@@ -102,8 +105,33 @@ export function jiraFilterClause(filter: string | null): string | null {
       break;
     }
   }
-  if (depth !== 0 || quote) throw new TrackerProviderError("definite", "The Jira filter has unbalanced parentheses or quotes.");
+  return { balanced: depth === 0 && !quote, bareBackslash };
+}
+
+/**
+ * A room filter's JQL, without a trailing ORDER BY. Parentheses must balance
+ * outside quoted strings, so the filter cannot close the group this provider
+ * wraps it in and widen the query past the clauses added after it.
+ */
+export function jiraFilterClause(filter: string | null): string | null {
+  const base = filter?.replace(/\border\s+by\b[\s\S]*$/i, "").trim();
+  if (!base) return null;
+  if (!scanJql(base).balanced) throw new TrackerProviderError("definite", "The Jira filter has unbalanced parentheses or quotes.");
   return base;
+}
+
+/**
+ * A caller's query (never a room admin's filter): as `jiraFilterClause`, and
+ * no backslash outside a quoted string. An escape in an unquoted word is legal
+ * JQL but has no use in a page query, and refusing it leaves no room for a
+ * difference between this scanner and Jira's lexer to open a way out.
+ */
+export function jiraQueryClause(query: string): string | null {
+  const clause = jiraFilterClause(query);
+  if (clause && scanJql(clause).bareBackslash) {
+    throw new TrackerProviderError("definite", "The Jira query has a backslash outside a quoted string.");
+  }
+  return clause;
 }
 
 export function assertJiraKey(key: string): string {
@@ -137,15 +165,38 @@ export function toAdf(text: string): Record<string, unknown> {
   };
 }
 
+/** Keys a custom field value keeps: what identifies an option, a user or a version. */
+const RAW_FIELD_KEYS = ["id", "key", "name", "value", "displayName"] as const;
+
+/**
+ * A custom field's value without what a page has no need for: e-mail
+ * addresses, avatar and self links, and anything nested deeper (a parent
+ * issue's own fields, rich text). Objects keep only RAW_FIELD_KEYS with
+ * plain values; a list keeps such objects and plain values.
+ */
+export function sanitizeRawFieldValue(value: unknown): unknown {
+  const plain = (entry: unknown) => entry === null || ["string", "number", "boolean"].includes(typeof entry);
+  const pick = (entry: Record<string, unknown>) => {
+    const kept: Record<string, unknown> = {};
+    for (const key of RAW_FIELD_KEYS) if (Object.hasOwn(entry, key) && plain(entry[key])) kept[key] = entry[key];
+    return kept;
+  };
+  if (plain(value)) return value;
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => plain(entry) ? [entry] : entry && typeof entry === "object" && !Array.isArray(entry) ? [pick(entry as Record<string, unknown>)] : []);
+  }
+  return value && typeof value === "object" ? pick(value as Record<string, unknown>) : null;
+}
+
 function issueDetail(fields: Record<string, unknown>, statusCategory: string | null, rawFields: readonly string[]): ExternalItemDetail {
-  const parent = asRecord(fields.parent);
-  const parentKey = asString(parent.key);
+  const parentKey = asString(asRecord(fields.parent).key);
   const versions = Array.isArray(fields.fixVersions) ? fields.fixVersions.map(asRecord) : [];
   const raw: Record<string, unknown> = {};
-  for (const id of rawFields) if (Object.hasOwn(fields, id)) raw[id] = fields[id];
+  for (const id of rawFields) if (Object.hasOwn(fields, id)) raw[id] = sanitizeRawFieldValue(fields[id]);
   return {
     status_category: statusCategory,
-    parent: parentKey ? { key: parentKey, title: asString(asRecord(parent.fields).summary) } : null,
+    // The key only: the parent may be outside the room filter, so its title is not ours to show.
+    parent: parentKey ? { key: parentKey } : null,
     fix_versions: versions.flatMap((version) => {
       const id = asString(version.id);
       const name = asString(version.name);
@@ -313,7 +364,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
         // Each filter is checked and grouped on its own, so neither can close
         // the other's group: the result is always (room filter) AND (query).
         if (!base) throw new TrackerProviderError("definite", "A query needs a room filter to scope it.");
-        const extra = jiraFilterClause(opts.extraFilter);
+        const extra = jiraQueryClause(opts.extraFilter);
         if (extra) clauses.push(`(${extra})`);
       }
       if (opts.assigneeMe) clauses.push("assignee = currentUser()");

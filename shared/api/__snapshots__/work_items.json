@@ -4,6 +4,7 @@
     "capability": "work_items.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/work-items/:key",
+    "response": "json",
     "rateClass": "read",
     "errors": [
       "no_source",
@@ -170,17 +171,10 @@
               "properties": {
                 "key": {
                   "type": "string"
-                },
-                "title": {
-                  "type": [
-                    "string",
-                    "null"
-                  ]
                 }
               },
               "required": [
-                "key",
-                "title"
+                "key"
               ],
               "additionalProperties": false
             },
@@ -294,6 +288,7 @@
     "capability": "work_items.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/work-items/:key/history",
+    "response": "json",
     "rateClass": "read",
     "errors": [
       "no_source",
@@ -381,6 +376,7 @@
     "capability": "work_items.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/work-items",
+    "response": "json",
     "rateClass": "search",
     "errors": [
       "no_source"
@@ -404,10 +400,17 @@
           ]
         },
         "limit": {
-          "default": 50,
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 200
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
         },
         "fields": {
           "anyOf": [
@@ -562,17 +565,10 @@
                     "properties": {
                       "key": {
                         "type": "string"
-                      },
-                      "title": {
-                        "type": [
-                          "string",
-                          "null"
-                        ]
                       }
                     },
                     "required": [
-                      "key",
-                      "title"
+                      "key"
                     ],
                     "additionalProperties": false
                   },

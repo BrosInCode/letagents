@@ -2,7 +2,7 @@
 // Methods are added here with defineMethod from ./core.mjs; see docs/api/README.md.
 import { z } from "zod";
 
-import { defineMethod } from "./core.mjs";
+import { defineMethod, queryInt } from "./core.mjs";
 
 /** The tracker kinds a room can import from (same list as shared/ticket-connectors.mjs). */
 export const WORK_ITEM_PROVIDERS = /** @type {const} */ (["jira", "linear", "github"]);
@@ -55,7 +55,8 @@ export const WorkItem = z.object({
   /** Null when the ticket has no estimate or the site has no single story points field. */
   storyPoints: z.number().nullable(),
   sprints: z.array(WorkItemSprint),
-  parent: z.object({ key: z.string(), title: z.string().nullable() }).nullable(),
+  /** The parent's key only: the parent may be outside the room filter. Read it with work_items.get. */
+  parent: z.object({ key: z.string() }).nullable(),
   fixVersions: z.array(WorkItemFixVersion),
   labels: z.array(z.string()),
   /** When the ticket last moved to another status category. */
@@ -63,7 +64,11 @@ export const WorkItem = z.object({
   updatedAt: z.string().nullable(),
   /** The board task in this room linked to this ticket. */
   linkedTask: z.object({ taskId: z.string() }).nullable(),
-  /** Raw values of the custom fields the call named; a field the ticket does not have is absent. */
+  /**
+   * Values of the custom fields the call named: plain values as they are;
+   * objects and lists of objects keep only id, key, name, value and
+   * displayName. A field the ticket does not have is absent.
+   */
   fields: z.record(z.string(), z.unknown()),
 });
 
@@ -106,7 +111,8 @@ const keyInput = z.string().min(1).max(64).describe("The ticket key, for example
 const SCOPE_NOTE =
   "Only tickets inside the room's tracker filter are visible: the tracker runs (<room filter>) AND (<query>), " +
   "with the credentials of the room admin who set the filter. Jira only in this version; a room without an " +
-  "enabled Jira filter gets no_source.";
+  "enabled Jira filter gets no_source. A room has one source per tracker; should it have more, this version reads " +
+  "the oldest Jira source only.";
 
 export const searchWorkItems = defineMethod({
   name: "work_items.search",
@@ -115,15 +121,16 @@ export const searchWorkItems = defineMethod({
   capability: "work_items.read",
   description:
     `Search the room's tickets with a Jira JQL query, for example status = "In Progress" AND fixVersion = "2.4". ${SCOPE_NOTE} ` +
-    "currentUser() in a query means the filter owner, not the person or page calling. ORDER BY is ignored; results " +
+    "currentUser() in a query means the filter owner, not the person or page calling. A backslash outside a quoted " +
+    "string is refused. ORDER BY is ignored; results " +
     "come newest update first. Each ticket has normalised fields (status, statusCategory, assignee, storyPoints, " +
     "sprints, parent, fixVersions, labels, linkedTask) and, in `fields`, the raw values of the custom fields named " +
-    "in `fields`. Results may come from a read up to 60 s old, but never from before a ticket change LetAgents has seen.",
+    "in `fields` (custom fields a page may read are the ones its manifest names). Results may come from a read up to 60 s old, but never from before a ticket change LetAgents has seen.",
   path: "/rooms/:room/work-items",
   input: z.strictObject({
     query: z.string().max(WORK_ITEM_QUERY_MAX_LENGTH).default("").describe("JQL ANDed with the room filter; empty for every ticket in the filter."),
     provider: providerInput,
-    limit: z.coerce.number().int().min(1).max(WORK_ITEM_SEARCH_MAX_LIMIT).default(WORK_ITEM_SEARCH_DEFAULT_LIMIT),
+    limit: queryInt({ min: 1, max: WORK_ITEM_SEARCH_MAX_LIMIT, default: WORK_ITEM_SEARCH_DEFAULT_LIMIT }),
     fields: WorkItemFieldsInput.optional(),
   }),
   output: WorkItemSearchResult,
