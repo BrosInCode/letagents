@@ -100,7 +100,7 @@ export const getRoom: import("./core.mjs").ApiMethod<"rooms.get", z.ZodObject<{}
  * Capabilities with a room policy: everything a page may be granted but
  * reads, which every room participant may use in `api: 1`.
  */
-export const POLICY_CAPABILITY_NAMES: ("agents.read" | "rooms.read" | "people.read" | "messages.read" | "tasks.read" | "planning.read" | "work_items.read" | "git.read" | "memory.read" | "jobs.read" | "data.viewer" | "data.page" | "data.room" | "tasks.propose" | "tickets.propose" | "jobs.start" | "messages.post" | "rooms.admin")[];
+export const POLICY_CAPABILITY_NAMES: ("agents.read" | "rooms.read" | "people.read" | "messages.read" | "tasks.read" | "planning.read" | "work_items.read" | "git.read" | "memory.read" | "intents.read" | "jobs.read" | "data.viewer" | "data.page" | "data.room" | "tasks.propose" | "tickets.propose" | "jobs.start" | "messages.post" | "rooms.admin")[];
 export type RoomApiPolicy = z.infer<typeof RoomApiPolicy>;
 export const RoomApiPolicy: z.ZodObject<{
     capability: z.ZodString;
@@ -171,6 +171,7 @@ export const setRoomPolicy: import("./core.mjs").ApiMethod<"rooms.setPolicy", z.
         "work_items.read": "work_items.read";
         "git.read": "git.read";
         "memory.read": "memory.read";
+        "intents.read": "intents.read";
         "jobs.read": "jobs.read";
         "data.viewer": "data.viewer";
         "data.page": "data.page";
@@ -268,6 +269,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"rooms.get", z.Zo
         "work_items.read": "work_items.read";
         "git.read": "git.read";
         "memory.read": "memory.read";
+        "intents.read": "intents.read";
         "jobs.read": "jobs.read";
         "data.viewer": "data.viewer";
         "data.page": "data.page";

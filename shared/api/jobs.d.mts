@@ -119,12 +119,12 @@ export const Job: z.ZodObject<{
     roomId: z.ZodString;
     state: z.ZodEnum<{
         done: "done";
-        queued: "queued";
-        no_agent: "no_agent";
         running: "running";
-        needs_input: "needs_input";
         failed: "failed";
         cancelled: "cancelled";
+        queued: "queued";
+        no_agent: "no_agent";
+        needs_input: "needs_input";
     }>;
     agent: z.ZodNullable<z.ZodString>;
     instruction: z.ZodString;
@@ -200,12 +200,12 @@ export const startJob: import("./core.mjs").ApiMethod<"jobs.start", z.ZodObject<
     roomId: z.ZodString;
     state: z.ZodEnum<{
         done: "done";
-        queued: "queued";
-        no_agent: "no_agent";
         running: "running";
-        needs_input: "needs_input";
         failed: "failed";
         cancelled: "cancelled";
+        queued: "queued";
+        no_agent: "no_agent";
+        needs_input: "needs_input";
     }>;
     agent: z.ZodNullable<z.ZodString>;
     instruction: z.ZodString;
@@ -260,12 +260,12 @@ export const getJob: import("./core.mjs").ApiMethod<"jobs.get", z.ZodObject<{
     roomId: z.ZodString;
     state: z.ZodEnum<{
         done: "done";
-        queued: "queued";
-        no_agent: "no_agent";
         running: "running";
-        needs_input: "needs_input";
         failed: "failed";
         cancelled: "cancelled";
+        queued: "queued";
+        no_agent: "no_agent";
+        needs_input: "needs_input";
     }>;
     agent: z.ZodNullable<z.ZodString>;
     instruction: z.ZodString;
@@ -316,12 +316,12 @@ export const getJob: import("./core.mjs").ApiMethod<"jobs.get", z.ZodObject<{
 export const listJobs: import("./core.mjs").ApiMethod<"jobs.list", z.ZodObject<{
     state: z.ZodOptional<z.ZodEnum<{
         done: "done";
-        queued: "queued";
-        no_agent: "no_agent";
         running: "running";
-        needs_input: "needs_input";
         failed: "failed";
         cancelled: "cancelled";
+        queued: "queued";
+        no_agent: "no_agent";
+        needs_input: "needs_input";
     }>>;
     limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
 }, z.core.$strict>, z.ZodObject<{
@@ -330,12 +330,12 @@ export const listJobs: import("./core.mjs").ApiMethod<"jobs.list", z.ZodObject<{
         roomId: z.ZodString;
         state: z.ZodEnum<{
             done: "done";
-            queued: "queued";
-            no_agent: "no_agent";
             running: "running";
-            needs_input: "needs_input";
             failed: "failed";
             cancelled: "cancelled";
+            queued: "queued";
+            no_agent: "no_agent";
+            needs_input: "needs_input";
         }>;
         agent: z.ZodNullable<z.ZodString>;
         instruction: z.ZodString;
@@ -391,12 +391,12 @@ export const cancelJob: import("./core.mjs").ApiMethod<"jobs.cancel", z.ZodObjec
     roomId: z.ZodString;
     state: z.ZodEnum<{
         done: "done";
-        queued: "queued";
-        no_agent: "no_agent";
         running: "running";
-        needs_input: "needs_input";
         failed: "failed";
         cancelled: "cancelled";
+        queued: "queued";
+        no_agent: "no_agent";
+        needs_input: "needs_input";
     }>;
     agent: z.ZodNullable<z.ZodString>;
     instruction: z.ZodString;
@@ -470,12 +470,12 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"jobs.start", z.Z
     roomId: z.ZodString;
     state: z.ZodEnum<{
         done: "done";
-        queued: "queued";
-        no_agent: "no_agent";
         running: "running";
-        needs_input: "needs_input";
         failed: "failed";
         cancelled: "cancelled";
+        queued: "queued";
+        no_agent: "no_agent";
+        needs_input: "needs_input";
     }>;
     agent: z.ZodNullable<z.ZodString>;
     instruction: z.ZodString;
@@ -529,12 +529,12 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"jobs.start", z.Z
     roomId: z.ZodString;
     state: z.ZodEnum<{
         done: "done";
-        queued: "queued";
-        no_agent: "no_agent";
         running: "running";
-        needs_input: "needs_input";
         failed: "failed";
         cancelled: "cancelled";
+        queued: "queued";
+        no_agent: "no_agent";
+        needs_input: "needs_input";
     }>;
     agent: z.ZodNullable<z.ZodString>;
     instruction: z.ZodString;
@@ -584,12 +584,12 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"jobs.start", z.Z
 }, z.core.$strip>>, import("./core.mjs").ApiMethod<"jobs.list", z.ZodObject<{
     state: z.ZodOptional<z.ZodEnum<{
         done: "done";
-        queued: "queued";
-        no_agent: "no_agent";
         running: "running";
-        needs_input: "needs_input";
         failed: "failed";
         cancelled: "cancelled";
+        queued: "queued";
+        no_agent: "no_agent";
+        needs_input: "needs_input";
     }>>;
     limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
 }, z.core.$strict>, z.ZodObject<{
@@ -598,12 +598,12 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"jobs.start", z.Z
         roomId: z.ZodString;
         state: z.ZodEnum<{
             done: "done";
-            queued: "queued";
-            no_agent: "no_agent";
             running: "running";
-            needs_input: "needs_input";
             failed: "failed";
             cancelled: "cancelled";
+            queued: "queued";
+            no_agent: "no_agent";
+            needs_input: "needs_input";
         }>;
         agent: z.ZodNullable<z.ZodString>;
         instruction: z.ZodString;
@@ -658,12 +658,12 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"jobs.start", z.Z
     roomId: z.ZodString;
     state: z.ZodEnum<{
         done: "done";
-        queued: "queued";
-        no_agent: "no_agent";
         running: "running";
-        needs_input: "needs_input";
         failed: "failed";
         cancelled: "cancelled";
+        queued: "queued";
+        no_agent: "no_agent";
+        needs_input: "needs_input";
     }>;
     agent: z.ZodNullable<z.ZodString>;
     instruction: z.ZodString;

@@ -136,7 +136,7 @@ function mentionAgentKey(key: string | null | undefined): string | null {
     && !["agents", "everyone", "room"].includes(key.toLowerCase()) ? `@agent:${key}` : null;
 }
 
-function safeNotificationFragment(value: string | null | undefined, fallback: string): string {
+export function safeNotificationFragment(value: string | null | undefined, fallback: string): string {
   const normalized = String(value ?? "")
     .replace(/\s+/g, " ")
     .replace(/@+/g, "at ")
