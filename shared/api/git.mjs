@@ -5,12 +5,18 @@ import { z } from "zod";
 
 import { defineMethod } from "./core.mjs";
 
-/** Check runs by outcome; a run still going or with an unknown outcome is `pending`. */
+/**
+ * Completed check runs by outcome. LetAgents stores a check run only when it
+ * completes, so it cannot count runs still going: `pending` is null.
+ */
 export const CheckSummary = z.object({
+  /** Completed runs. */
   total: z.number().int().nonnegative(),
+  /** `success`, `neutral` or `skipped`. */
   success: z.number().int().nonnegative(),
+  /** `failure`, `timed_out`, `cancelled` or `action_required`. */
   failure: z.number().int().nonnegative(),
-  pending: z.number().int().nonnegative(),
+  pending: z.number().int().nonnegative().nullable(),
 });
 
 /** Reviewers by their latest decisive review. */
@@ -35,11 +41,10 @@ export const PullRequestLink = z.object({
   reviews: ReviewSummary.nullable(),
 });
 
+/** A completed check run. */
 export const CheckRun = z.object({
   name: z.string(),
-  /** `queued`, `in_progress` or `completed`. */
-  status: z.string().nullable(),
-  /** `success`, `failure`, `neutral`, `skipped`, `cancelled`, `timed_out`, `action_required`; null while running. */
+  /** `success`, `failure`, `neutral`, `skipped`, `cancelled`, `timed_out`, `action_required` or `stale`. */
   conclusion: z.string().nullable(),
   url: z.string().nullable(),
 });
@@ -61,7 +66,7 @@ export const OpenPullRequest = z.object({
   /** When GitHub last changed it, as far as LetAgents has heard. */
   updatedAt: z.string(),
   checks: CheckSummary,
-  /** The latest run of each check on the pull request's head commit. */
+  /** The latest completed run of each check on the pull request's head commit, by name. */
   checkRuns: z.array(CheckRun),
   reviews: ReviewSummary,
   reviewers: z.array(Review),
@@ -94,7 +99,7 @@ export const listPullRequests = defineMethod({
   kind: "read",
   capability: "git.read",
   description:
-    "Open pull requests of the room's repository, most recently updated first (up to 100), with their check runs, reviews, requested reviewers and linked board tasks. Built from the GitHub events LetAgents has received, not a live GitHub read. A room without a repository gets an empty list.",
+    "Open pull requests of the room's repository, most recently updated first (up to 100), with their completed check runs, reviews, requested reviewers and linked board tasks. Built from the GitHub events LetAgents has received, not a live GitHub read. A room without a repository gets an empty list.",
   path: "/rooms/:room/git/pull-requests",
   input: z.strictObject({}),
   output: PullRequestList,

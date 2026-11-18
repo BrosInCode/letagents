@@ -26,7 +26,7 @@ import {
   messageRowSelection,
 } from "../selections.js";
 import { loadMessageReactions } from "../reactions.js";
-import { visibleMessageCondition } from "../visibility.js";
+import { sharedMessageCondition, visibleMessageCondition } from "../visibility.js";
 import {
   buildEmptyThreadSummariesForRoots,
   buildThreadSummariesForRoots,
@@ -48,6 +48,8 @@ type MessageHistoryOptions = {
   wait_for_routing?: boolean;
   /** A worker's durable agent key: hide its held reply turns and everything after. */
   hold_agent_key?: string | null;
+  /** Only messages every reader may see (see sharedMessageCondition). */
+  shared_only?: boolean;
 };
 
 export async function getMessages(
@@ -58,6 +60,7 @@ export async function getMessages(
   const afterNumber = options?.after ? parseScopedId(options.after, "msg") : null;
   const visibilityCondition = and(
     visibleMessageCondition(options?.include_prompt_only),
+    sharedMessageCondition(options?.shared_only),
     settledRoutingCondition(options?.wait_for_routing),
     replyTurnHoldCondition(roomId, options?.hold_agent_key),
   );
@@ -93,6 +96,7 @@ export async function getLatestMessages(
   const limit = clampLimit(options?.limit);
   const visibilityCondition = and(
     visibleMessageCondition(options?.include_prompt_only),
+    sharedMessageCondition(options?.shared_only),
     settledRoutingCondition(options?.wait_for_routing),
     replyTurnHoldCondition(roomId, options?.hold_agent_key),
   );
@@ -130,6 +134,7 @@ export async function getMessagesBefore(
   const limit = clampLimit(options?.limit);
   const visibilityCondition = and(
     visibleMessageCondition(options?.include_prompt_only),
+    sharedMessageCondition(options?.shared_only),
     settledRoutingCondition(options?.wait_for_routing),
     replyTurnHoldCondition(roomId, options?.hold_agent_key),
   );

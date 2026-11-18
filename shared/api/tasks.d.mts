@@ -44,7 +44,7 @@ export const Task: z.ZodObject<{
             total: z.ZodNumber;
             success: z.ZodNumber;
             failure: z.ZodNumber;
-            pending: z.ZodNumber;
+            pending: z.ZodNullable<z.ZodNumber>;
         }, z.core.$strip>>;
         reviews: z.ZodNullable<z.ZodObject<{
             total: z.ZodNumber;
@@ -94,7 +94,7 @@ export const TaskPage: z.ZodObject<{
                 total: z.ZodNumber;
                 success: z.ZodNumber;
                 failure: z.ZodNumber;
-                pending: z.ZodNumber;
+                pending: z.ZodNullable<z.ZodNumber>;
             }, z.core.$strip>>;
             reviews: z.ZodNullable<z.ZodObject<{
                 total: z.ZodNumber;
@@ -162,7 +162,7 @@ export const listTasks: import("./core.mjs").ApiMethod<"tasks.list", z.ZodObject
                 total: z.ZodNumber;
                 success: z.ZodNumber;
                 failure: z.ZodNumber;
-                pending: z.ZodNumber;
+                pending: z.ZodNullable<z.ZodNumber>;
             }, z.core.$strip>>;
             reviews: z.ZodNullable<z.ZodObject<{
                 total: z.ZodNumber;
@@ -214,7 +214,7 @@ export const getTask: import("./core.mjs").ApiMethod<"tasks.get", z.ZodObject<{
             total: z.ZodNumber;
             success: z.ZodNumber;
             failure: z.ZodNumber;
-            pending: z.ZodNumber;
+            pending: z.ZodNullable<z.ZodNumber>;
         }, z.core.$strip>>;
         reviews: z.ZodNullable<z.ZodObject<{
             total: z.ZodNumber;
@@ -277,7 +277,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"tasks.list", z.Z
                 total: z.ZodNumber;
                 success: z.ZodNumber;
                 failure: z.ZodNumber;
-                pending: z.ZodNumber;
+                pending: z.ZodNullable<z.ZodNumber>;
             }, z.core.$strip>>;
             reviews: z.ZodNullable<z.ZodObject<{
                 total: z.ZodNumber;
@@ -328,7 +328,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"tasks.list", z.Z
             total: z.ZodNumber;
             success: z.ZodNumber;
             failure: z.ZodNumber;
-            pending: z.ZodNumber;
+            pending: z.ZodNullable<z.ZodNumber>;
         }, z.core.$strip>>;
         reviews: z.ZodNullable<z.ZodObject<{
             total: z.ZodNumber;

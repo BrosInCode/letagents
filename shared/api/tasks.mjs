@@ -1,10 +1,13 @@
 // Tasks: board tasks with status, assignees, external refs and PR links.
 import { z } from "zod";
 
+import { parsePositivePgIntegerScopedId } from "../message-contracts.mjs";
 import { defineMethod, queryInt } from "./core.mjs";
 import { PullRequestLink } from "./git.mjs";
 
-const TaskId = z.string().regex(/^task_[1-9]\d*$/, "Expected a task id such as task_42.");
+// The number must fit a Postgres integer: a larger one names no task.
+const TaskId = z.string().regex(/^task_[1-9]\d*$/, "Expected a task id such as task_42.")
+  .refine((value) => parsePositivePgIntegerScopedId(value, "task") !== null, "No task has an id this large.");
 
 export const TASK_STATUSES = /** @type {const} */ ([
   "proposed",

@@ -14,7 +14,8 @@ export type PeopleList = z.infer<typeof PeopleList>;
 /**
  * `letagents`: the room's member list decides who may open it, and `people`
  * is that list. `github`: the repository decides, so nobody can list every
- * person who may open the room; `people` holds the people the room has seen.
+ * person who may open the room; `people` holds the people the room has seen,
+ * each as `participant`.
  */
 export const PeopleList: z.ZodObject<{
     managedBy: z.ZodEnum<{

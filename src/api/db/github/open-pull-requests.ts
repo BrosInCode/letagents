@@ -3,7 +3,6 @@ import { sql } from "drizzle-orm";
 import { PARTICIPANT_PULL_REQUEST_ACTION_LIST } from "../../github/room-events/pull-request.js";
 import { db } from "../client.js";
 import type { GitHubRoomEventMetadata } from "../schema.js";
-import { repositoryRoomIds } from "./repository-rooms.js";
 
 export interface StoredOpenPullRequest {
   number: number;
@@ -13,86 +12,143 @@ export interface StoredOpenPullRequest {
   draft: boolean;
   head_ref: string | null;
   base_ref: string | null;
-  head_sha: string | null;
   updated_at: string;
-  check_runs: Array<{ name: string; status: string | null; conclusion: string | null; url: string | null }>;
+  check_runs: Array<{ name: string; conclusion: string | null; url: string | null }>;
   reviews: Array<{ login: string; state: string }>;
   requested_reviewers: string[];
   task_ids: string[];
 }
 
-const DECISIVE_REVIEW_STATES = new Set(["approved", "changes_requested", "dismissed"]);
+/** The repository a room follows, as its binding (or its repo-shaped id) names it. */
+export interface OpenPullRequestRepository {
+  /** `github.com/owner/repo`: the repository room, which may have no binding. */
+  repoRoomId: string;
+  host: string;
+  fullName: string;
+  /** GitHub's id of the repository, when the binding recorded it. */
+  repositoryId: string | null;
+}
+
 const participantActions = sql.join(PARTICIPANT_PULL_REQUEST_ACTION_LIST.map((action) => sql`${action}`), sql`, `);
+const list = (values: readonly string[]) => sql.join(values.map((value) => sql`${value}`), sql`, `);
+
+/**
+ * Rooms whose GitHub events concern the repository: the room and its parent,
+ * the repository room, every room bound to the same repository, and their
+ * focus rooms. Bindings that both carry GitHub's repository id are matched by
+ * it, so a renamed or recreated repository is told apart; others by host and
+ * name, ignoring case, as task-git-room.ts compares them.
+ */
+function repositoryFamily(roomId: string, repo: OpenPullRequestRepository) {
+  return sql`
+    anchor AS (
+      SELECT ${roomId}::text AS room_id
+      UNION SELECT parent_room_id FROM rooms WHERE id = ${roomId} AND parent_room_id IS NOT NULL
+      UNION SELECT ${repo.repoRoomId}::text
+      UNION SELECT binding.room_id FROM room_git_bindings AS binding
+       WHERE binding.provider = 'github'
+         AND CASE WHEN ${repo.repositoryId}::text IS NOT NULL AND binding.repository_id IS NOT NULL
+               THEN binding.repository_id = ${repo.repositoryId}::text
+               ELSE lower(binding.host) = lower(${repo.host}) AND lower(binding.repository_full_name) = lower(${repo.fullName})
+             END
+    ), family AS (
+      SELECT room_id FROM anchor
+      UNION SELECT id FROM rooms WHERE parent_room_id IN (SELECT room_id FROM anchor)
+    )`;
+}
 
 /**
  * The repository's open pull requests as the stored GitHub events tell them:
- * the newest pull_request event of each decides its state. Events of one
- * repository land in its repo room, branch rooms or focus rooms, so all of
- * them are read. Nothing here asks GitHub.
+ * the newest pull_request event of each decides its state. Nothing here asks
+ * GitHub. The newest-event pass reads narrow columns only; the payload
+ * excerpt is read for the pull requests kept.
  */
 export async function listOpenPullRequestsFromEvents(
   roomId: string,
+  repo: OpenPullRequestRepository,
   options: { limit: number },
 ): Promise<{ pullRequests: StoredOpenPullRequest[]; truncated: boolean }> {
-  const family = repositoryRoomIds(roomId);
+  const family = repositoryFamily(roomId, repo);
+  const inFamily = sql`room_id IN (SELECT room_id FROM family)`;
   const latest = await db.execute<{
-    github_object_id: string; github_object_url: string | null; title: string | null; state: string | null;
-    event_order_at: string; head_ref: string | null; base_ref: string | null; head_sha: string | null;
-    metadata: GitHubRoomEventMetadata | null;
+    github_object_id: string; github_object_url: string | null; title: string | null; event_order_at: string;
+    head_ref: string | null; base_ref: string | null; head_sha: string | null; metadata: GitHubRoomEventMetadata | null;
   }>(sql`
-    SELECT * FROM (
-      SELECT DISTINCT ON (github_object_id) github_object_id, github_object_url, title, state, event_order_at,
-        head_ref, base_ref, head_sha, metadata
+    WITH ${family}, newest AS (
+      SELECT DISTINCT ON (github_object_id) id, state, event_order_at
         FROM github_room_events
        WHERE event_type = 'pull_request' AND github_object_id IS NOT NULL
-         AND action NOT IN (${participantActions})
-         AND room_id IN ${family}
+         AND action NOT IN (${participantActions}) AND ${inFamily}
        ORDER BY github_object_id, event_order_at DESC, created_at DESC, id DESC
-    ) AS latest
-     WHERE state = 'open'
-     ORDER BY event_order_at DESC
-     LIMIT ${options.limit + 1}
+    ), kept AS (
+      SELECT id, event_order_at FROM newest WHERE state = 'open' ORDER BY event_order_at DESC, id DESC LIMIT ${options.limit + 1}
+    )
+    SELECT event.github_object_id, event.github_object_url, event.title, event.event_order_at,
+      event.head_ref, event.base_ref, event.head_sha, event.metadata
+      FROM kept JOIN github_room_events AS event ON event.id = kept.id
+     ORDER BY kept.event_order_at DESC, kept.id DESC
   `);
   const truncated = latest.rows.length > options.limit;
   const rows = latest.rows.slice(0, options.limit).filter((row) => /^\d+$/.test(row.github_object_id) && row.github_object_url);
   if (!rows.length) return { pullRequests: [], truncated };
 
-  const numbers = sql.join(rows.map((row) => sql`${row.github_object_id}`), sql`, `);
-  const heads = rows.map((row) => row.head_sha).filter((sha): sha is string => Boolean(sha));
-  const urls = rows.map((row) => row.github_object_url!.toLowerCase());
+  const numbers = list(rows.map((row) => row.github_object_id));
+  const heads = [...new Set(rows.map((row) => row.head_sha).filter((sha): sha is string => Boolean(sha)))];
+  const urls = list(rows.map((row) => row.github_object_url!.toLowerCase()));
   const [reviewRows, requestRows, checkRows, taskRows] = await Promise.all([
-    db.execute<{ github_object_id: string; actor_login: string | null; state: string | null; action: string; event_order_at: string }>(sql`
-      SELECT github_object_id, actor_login, state, action, event_order_at FROM github_room_events
-       WHERE event_type = 'pull_request_review' AND github_object_id IN (${numbers}) AND room_id IN ${family}
-       ORDER BY event_order_at DESC, created_at DESC, id DESC
-       LIMIT 2000
+    // Each reviewer's newest decisive review (approved, changes requested,
+    // dismissed), else their newest; a later comment does not undo an
+    // approval, as the board's PR status counts it.
+    db.execute<{ github_object_id: string; actor_login: string; state: string; reviewed_at: string }>(sql`
+      WITH ${family}
+      SELECT DISTINCT ON (github_object_id, actor_login) github_object_id, actor_login,
+        lower(COALESCE(state, action)) AS state,
+        max(event_order_at) OVER (PARTITION BY github_object_id, actor_login) AS reviewed_at
+        FROM github_room_events
+       WHERE event_type = 'pull_request_review' AND actor_login IS NOT NULL
+         AND github_object_id IN (${numbers}) AND ${inFamily}
+       ORDER BY github_object_id, actor_login,
+         lower(COALESCE(state, action)) IN ('approved', 'changes_requested', 'dismissed') DESC,
+         event_order_at DESC, created_at DESC, id DESC
     `),
-    db.execute<{ github_object_id: string; action: string; metadata: GitHubRoomEventMetadata | null; event_order_at: string }>(sql`
-      SELECT github_object_id, action, metadata, event_order_at FROM github_room_events
-       WHERE event_type = 'pull_request' AND action IN ('review_requested', 'review_request_removed')
-         AND github_object_id IN (${numbers}) AND room_id IN ${family}
-       ORDER BY event_order_at DESC, created_at DESC, id DESC
-       LIMIT 2000
+    // The newest request or removal of each reviewer decides.
+    db.execute<{ github_object_id: string; subject: string; action: string; event_order_at: string }>(sql`
+      WITH ${family}, requests AS (
+        SELECT github_object_id, action, event_order_at, created_at, id,
+          COALESCE(metadata->'participant'->>'login', 'team:' || (metadata->'participant'->>'team_slug')) AS subject
+          FROM github_room_events
+         WHERE event_type = 'pull_request' AND action IN ('review_requested', 'review_request_removed')
+           AND COALESCE(metadata->'participant'->>'role', 'reviewer') = 'reviewer'
+           AND github_object_id IN (${numbers}) AND ${inFamily}
+      )
+      SELECT DISTINCT ON (github_object_id, subject) github_object_id, subject, action, event_order_at
+        FROM requests WHERE subject IS NOT NULL
+       ORDER BY github_object_id, subject, event_order_at DESC, created_at DESC, id DESC
     `),
+    // The newest run of each check on each head commit.
     heads.length
-      ? db.execute<{ head_sha: string; title: string | null; github_object_id: string | null; github_object_url: string | null; metadata: GitHubRoomEventMetadata | null; state: string | null }>(sql`
-          SELECT head_sha, title, github_object_id, github_object_url, metadata, state FROM github_room_events
-           WHERE event_type = 'check_run' AND head_sha IN (${sql.join(heads.map((sha) => sql`${sha}`), sql`, `)})
-             AND room_id IN ${family}
-           ORDER BY event_order_at DESC, created_at DESC, id DESC
-           LIMIT 2000
+      ? db.execute<{ head_sha: string; name: string; conclusion: string | null; url: string | null }>(sql`
+          WITH ${family}
+          SELECT DISTINCT ON (head_sha, COALESCE(title, github_object_id)) head_sha,
+            COALESCE(title, github_object_id, 'unknown') AS name,
+            COALESCE(metadata->>'conclusion', state) AS conclusion, github_object_url AS url
+            FROM github_room_events
+           WHERE event_type = 'check_run' AND head_sha IN (${list(heads)}) AND ${inFamily}
+           ORDER BY head_sha, COALESCE(title, github_object_id), event_order_at DESC, created_at DESC, id DESC
         `)
-      : Promise.resolve({ rows: [] }),
+      : Promise.resolve({ rows: [] as Array<{ head_sha: string; name: string; conclusion: string | null; url: string | null }> }),
+    // Board tasks in this room that link a kept pull request; a link Jev only
+    // suggested does not count until a person confirms it.
     db.execute<{ number: number; pr_url: string | null; urls: string[] | null }>(sql`
-      SELECT task.number, task.pr_url,
+      SELECT task.number, lower(task.pr_url) AS pr_url,
         ARRAY(SELECT lower(artifact->>'url') FROM jsonb_array_elements(task.workflow_artifacts) AS artifact
                WHERE artifact->>'kind' = 'pull_request' AND artifact->>'url' IS NOT NULL
                  AND COALESCE(artifact->>'linked_by', '') <> 'jev_suggested') AS urls
         FROM tasks AS task
        WHERE task.room_id = ${roomId}
-         AND (lower(task.pr_url) IN (${sql.join(urls.map((url) => sql`${url}`), sql`, `)})
+         AND (lower(task.pr_url) IN (${urls})
            OR EXISTS (SELECT 1 FROM jsonb_array_elements(task.workflow_artifacts) AS artifact
-                       WHERE lower(artifact->>'url') IN (${sql.join(urls.map((url) => sql`${url}`), sql`, `)})))
+                       WHERE lower(artifact->>'url') IN (${urls})))
        ORDER BY task.number
     `),
   ]);
@@ -102,7 +158,7 @@ export async function listOpenPullRequestsFromEvents(
     pullRequests: rows.map((row) => {
       const metadata = record(row.metadata);
       const url = row.github_object_url!;
-      const reviews = foldReviews(reviewRows.rows.filter((review) => review.github_object_id === row.github_object_id));
+      const reviews = reviewRows.rows.filter((review) => review.github_object_id === row.github_object_id);
       return {
         number: Number(row.github_object_id),
         title: row.title ?? `#${row.github_object_id}`,
@@ -111,73 +167,24 @@ export async function listOpenPullRequestsFromEvents(
         draft: metadata.draft === true,
         head_ref: row.head_ref,
         base_ref: row.base_ref,
-        head_sha: row.head_sha,
         updated_at: new Date(row.event_order_at).toISOString(),
-        check_runs: row.head_sha ? foldChecks(checkRows.rows.filter((check) => check.head_sha === row.head_sha)) : [],
-        reviews: reviews.map(({ login, state }) => ({ login, state })),
-        requested_reviewers: foldRequests(requestRows.rows.filter((request) => request.github_object_id === row.github_object_id), reviews),
+        check_runs: checkRows.rows
+          .filter((check) => row.head_sha && check.head_sha === row.head_sha)
+          .map(({ name, conclusion, url: checkUrl }) => ({ name, conclusion, url: checkUrl }))
+          .sort((a, b) => a.name.localeCompare(b.name)),
+        reviews: reviews.map(({ actor_login, state }) => ({ login: actor_login, state })),
+        // A review after the request answers it: GitHub sends no removal then.
+        requested_reviewers: requestRows.rows
+          .filter((request) => request.github_object_id === row.github_object_id && request.action === "review_requested")
+          .filter((request) => !reviews.some((review) => review.actor_login === request.subject
+            && new Date(review.reviewed_at).getTime() >= new Date(request.event_order_at).getTime()))
+          .map((request) => request.subject),
         task_ids: taskRows.rows
-          .filter((task) => task.pr_url?.toLowerCase() === url.toLowerCase() || task.urls?.includes(url.toLowerCase()))
+          .filter((task) => task.pr_url === url.toLowerCase() || task.urls?.includes(url.toLowerCase()))
           .map((task) => `task_${task.number}`),
       };
     }),
   };
-}
-
-/**
- * One review per reviewer: the newest decisive one (approved, changes
- * requested, dismissed), else the newest. A later comment does not undo an
- * approval; GitHub counts it the same way. Rows come newest first.
- */
-function foldReviews(rows: ReadonlyArray<{ actor_login: string | null; state: string | null; action: string; event_order_at: string }>) {
-  const byLogin = new Map<string, { login: string; state: string; at: number }>();
-  for (const row of rows) {
-    if (!row.actor_login) continue;
-    const state = (row.state ?? row.action).toLowerCase();
-    const existing = byLogin.get(row.actor_login);
-    if (!existing) byLogin.set(row.actor_login, { login: row.actor_login, state, at: new Date(row.event_order_at).getTime() });
-    else if (!DECISIVE_REVIEW_STATES.has(existing.state) && DECISIVE_REVIEW_STATES.has(state)) existing.state = state;
-  }
-  return [...byLogin.values()];
-}
-
-/**
- * Reviewers still asked for: the newest request or removal of each decides,
- * and a review submitted after the request answers it (GitHub sends no
- * removal then).
- */
-function foldRequests(
-  rows: ReadonlyArray<{ action: string; metadata: GitHubRoomEventMetadata | null; event_order_at: string }>,
-  reviews: ReadonlyArray<{ login: string; at: number }>,
-): string[] {
-  const latest = new Map<string, { requested: boolean; at: number }>();
-  for (const row of rows) {
-    const participant = record(record(row.metadata).participant);
-    if (participant.role !== undefined && participant.role !== "reviewer") continue;
-    const subject = text(participant.login) ?? (text(participant.team_slug) ? `team:${text(participant.team_slug)}` : null);
-    if (!subject || latest.has(subject)) continue;
-    latest.set(subject, { requested: row.action === "review_requested", at: new Date(row.event_order_at).getTime() });
-  }
-  return [...latest.entries()]
-    .filter(([subject, entry]) => entry.requested && !reviews.some((review) => review.login === subject && review.at >= entry.at))
-    .map(([subject]) => subject);
-}
-
-/** The newest run of each check name on the head commit, by name. Rows come newest first. */
-function foldChecks(rows: ReadonlyArray<{ title: string | null; github_object_id: string | null; github_object_url: string | null; metadata: GitHubRoomEventMetadata | null; state: string | null }>) {
-  const byName = new Map<string, { name: string; status: string | null; conclusion: string | null; url: string | null }>();
-  for (const row of rows) {
-    const name = row.title ?? row.github_object_id ?? "unknown";
-    if (byName.has(name)) continue;
-    const metadata = record(row.metadata);
-    byName.set(name, {
-      name,
-      status: text(metadata.status),
-      conclusion: text(metadata.conclusion) ?? (text(metadata.status) === "completed" ? row.state : null),
-      url: row.github_object_url,
-    });
-  }
-  return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function record(value: unknown): Record<string, unknown> {

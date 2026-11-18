@@ -1,9 +1,13 @@
 // Messages: threads, recent messages and job threads.
 import { z } from "zod";
 
+import { parsePositivePgIntegerScopedId } from "../message-contracts.mjs";
 import { defineMethod, queryInt } from "./core.mjs";
 
-const MessageId = z.string().regex(/^msg_[1-9]\d*$/, "Expected a message id such as msg_42.");
+// The number must fit a Postgres integer: a larger one names no message, and
+// is refused here rather than read as some other page.
+const MessageId = z.string().regex(/^msg_[1-9]\d*$/, "Expected a message id such as msg_42.")
+  .refine((value) => parsePositivePgIntegerScopedId(value, "msg") !== null, "No message has an id this large.");
 const PageLimit = queryInt({ min: 1, max: 100, default: 50 });
 
 /** `system`: LetAgents itself, GitHub and other integrations. */

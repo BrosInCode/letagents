@@ -16,7 +16,8 @@ export const Person = z.object({
 /**
  * `letagents`: the room's member list decides who may open it, and `people`
  * is that list. `github`: the repository decides, so nobody can list every
- * person who may open the room; `people` holds the people the room has seen.
+ * person who may open the room; `people` holds the people the room has seen,
+ * each as `participant`.
  */
 export const PeopleList = z.object({
   managedBy: z.enum(["letagents", "github"]),
@@ -32,7 +33,7 @@ export const listPeople = defineMethod({
   kind: "read",
   capability: "people.read",
   description:
-    "The people in the room with their role (admin or participant), admins first. In a repository room GitHub decides who may open it, so the list holds the people the room has seen, and `managedBy` is `github`.",
+    "The people in the room with their role (admin or participant), admins first. In a repository room GitHub decides who may open it, so the list holds the people the room has seen, all as participants, and `managedBy` is `github`.",
   path: "/rooms/:room/people",
   input: z.strictObject({}),
   output: PeopleList,

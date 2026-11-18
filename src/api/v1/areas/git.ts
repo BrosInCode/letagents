@@ -1,10 +1,13 @@
-import { listPullRequests, type CheckSummary, type PullRequestLink } from "../../../../shared/api/git.mjs";
+import { listPullRequests, type CheckSummary, type PullRequestLink, type PullRequestList } from "../../../../shared/api/git.mjs";
 import type { MyWorkPullRequest } from "../../../../shared/ticket-connectors.mjs";
 import { listOpenPullRequestsFromEvents } from "../../db/github/open-pull-requests.js";
 import { defineRoute, type ApiRoute } from "../route.js";
 import { repoBinding, toRoomSummary } from "./rooms.js";
 
 const PULL_REQUEST_LIMIT = 100;
+const CACHE_TTL_MS = 30_000;
+const CACHE_MAX_ROOMS = 500;
+const cache = new Map<string, { at: number; value: PullRequestList }>();
 const SUCCESSFUL_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
 const FAILED_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action_required"]);
 
@@ -12,10 +15,21 @@ const FAILED_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action
 export const routes: readonly ApiRoute[] = [
   defineRoute(listPullRequests, async (_input, { room, access }) => {
     if (access.kind !== "repo") return { repo: null, pullRequests: [], truncated: false };
-    const repo = toRoomSummary(room, access, await repoBinding(room, access)).repo;
-    const { pullRequests, truncated } = await listOpenPullRequestsFromEvents(room.id, { limit: PULL_REQUEST_LIMIT });
-    return {
-      repo: repo?.fullName ?? null,
+    // Room access is checked before this runs, so one room's answer may serve
+    // every reader of that room for a short while.
+    const cached = cache.get(room.id);
+    if (cached && Date.now() - cached.at < CACHE_TTL_MS) return cached.value;
+    const binding = await repoBinding(room, access);
+    const repo = toRoomSummary(room, access, binding).repo;
+    if (!repo) return { repo: null, pullRequests: [], truncated: false };
+    const { pullRequests, truncated } = await listOpenPullRequestsFromEvents(room.id, {
+      repoRoomId: access.repoRoomName,
+      host: repo.host,
+      fullName: repo.fullName,
+      repositoryId: binding?.repository_id ?? null,
+    }, { limit: PULL_REQUEST_LIMIT });
+    const value: PullRequestList = {
+      repo: repo.fullName,
       truncated,
       pullRequests: pullRequests.map((pr) => ({
         number: pr.number,
@@ -38,17 +52,28 @@ export const routes: readonly ApiRoute[] = [
         taskIds: pr.task_ids,
       })),
     };
+    remember(room.id, value);
+    return value;
   }),
 ];
 
-/** The same counting the board's PR badges use (`getTasksGitHubArtifactStatus`). */
+function remember(roomId: string, value: PullRequestList): void {
+  if (cache.size >= CACHE_MAX_ROOMS) {
+    const now = Date.now();
+    for (const [key, entry] of cache) if (now - entry.at >= CACHE_TTL_MS) cache.delete(key);
+    // Still full of fresh entries: drop the oldest (Map keeps insertion order).
+    if (cache.size >= CACHE_MAX_ROOMS) cache.delete(cache.keys().next().value!);
+  }
+  cache.set(roomId, { at: Date.now(), value });
+}
+
+/** The same outcome sets the board's PR badges use (`getTasksGitHubArtifactStatus`). */
 function summarizeChecks(runs: ReadonlyArray<{ conclusion: string | null }>): CheckSummary {
-  const summary = { total: runs.length, success: 0, failure: 0, pending: 0 };
+  const summary: CheckSummary = { total: runs.length, success: 0, failure: 0, pending: null };
   for (const run of runs) {
     const conclusion = run.conclusion?.toLowerCase();
     if (conclusion && SUCCESSFUL_CONCLUSIONS.has(conclusion)) summary.success++;
     else if (conclusion && FAILED_CONCLUSIONS.has(conclusion)) summary.failure++;
-    else summary.pending++;
   }
   return summary;
 }
@@ -62,7 +87,8 @@ export function toPullRequestLink(pr: MyWorkPullRequest): PullRequestLink {
     title: pr.title,
     state: pr.merged ? "merged" : pr.state,
     draft: pr.draft,
-    checks: pr.check_summary,
+    // Only completed runs are stored, so nothing is known to be pending.
+    checks: pr.check_summary ? { ...pr.check_summary, pending: null } : null,
     reviews: pr.review_summary
       ? { total: pr.review_summary.total, approved: pr.review_summary.approved, changesRequested: pr.review_summary.changes_requested }
       : null,

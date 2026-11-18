@@ -1,7 +1,8 @@
 import { ApiError } from "../../../../shared/api/core.mjs";
 import { getTask, listTasks, type Task as ApiTask, type TaskWorker } from "../../../../shared/api/tasks.mjs";
 import { pullRequestsFor, pullRequestUrl } from "../../connectors/my-work.js";
-import { getActiveTaskLeases, getTaskById, getTasks, getTasksGitHubArtifactStatus, type Task, type TaskLease } from "../../db.js";
+import { getTaskById, getTasks, getTasksGitHubArtifactStatus, type Task, type TaskLease } from "../../db.js";
+import { readActiveTaskLeases } from "../../db/github/merge-event-repair.js";
 import { defineRoute, type ApiRoute } from "../route.js";
 import { toPullRequestLink } from "./git.js";
 
@@ -24,7 +25,12 @@ export const routes: readonly ApiRoute[] = [
 async function toApiTasks(roomId: string, tasks: readonly Task[]): Promise<ApiTask[]> {
   if (!tasks.length) return [];
   const [leases, prStatus] = await Promise.all([
-    getActiveTaskLeases(roomId),
+    // A read stays a read: the board's lease reader also marks expired
+    // leases expired, so read the rows and drop expired ones here.
+    readActiveTaskLeases(roomId, tasks.length === 1 ? tasks[0]!.id : undefined).then((leases) => {
+      const now = Date.now();
+      return leases.filter((lease) => !lease.expires_at || Date.parse(lease.expires_at) > now);
+    }),
     getTasksGitHubArtifactStatus(roomId, tasks.map((task) => Number(task.id.slice("task_".length)))),
   ]);
   return tasks.map((task) => toApiTask(task, leases, prStatus.get(task.id)));

@@ -162,16 +162,14 @@ test("people.list gives members with roles; people.viewer gives the caller", { s
   assert.equal(me.body.role, "admin");
 });
 
-test("people.list in a repository room gives stored admins and the people the room has seen", { skip }, async () => {
+test("people.list in a repository room gives only the people the room has seen, as participants", { skip }, async () => {
   await api!.assignProjectAdmin(REPO_ROOM, ada.id);
   await api!.upsertRoomParticipant({ room_id: REPO_ROOM, participant_key: "human:dee", kind: "human", github_login: "dee", display_name: "dee" });
   await api!.upsertRoomParticipant({ room_id: REPO_ROOM, participant_key: "agent:x", kind: "agent", actor_label: "X | dee's agent", display_name: "X" });
+  // The stored admin row is not listed: GitHub, not the room, decides who is in it.
   assert.deepEqual((await get(repoRoom("/people"), ada)).body, {
     managedBy: "github",
-    people: [
-      { login: "ada", name: "ADA", avatarUrl: null, role: "admin" },
-      { login: "dee", name: null, avatarUrl: null, role: "participant" },
-    ],
+    people: [{ login: "dee", name: null, avatarUrl: null, role: "participant" }],
   });
 });
 
@@ -216,21 +214,28 @@ test("messages.recent pages newest first; messages.thread pages a thread's repli
   for (let i = 1; i <= 3; i++) {
     await api!.addMessage(messageRoom.id, "bob", `reply ${i}`, { source: "browser", thread_root_message_id: ids[0] });
   }
+  // A rental's renter-only message is not for every reader of the room.
+  const hidden = await api!.addMessage(messageRoom.id, "bob", "renter only", { source: "browser" });
+  const hiddenReply = await api!.addMessage(messageRoom.id, "bob", "renter only reply", { source: "browser", thread_root_message_id: ids[0] });
+  const shared = await api!.addMessage(messageRoom.id, "bob", "rental shared", { source: "browser" });
+  await dbClient!.pool.query("UPDATE messages SET visibility = 'renter_only' WHERE room_id = $1 AND number = ANY($2::int[])",
+    [messageRoom.id, [hidden.id, hiddenReply.id].map((id) => Number(id.slice(4)))]);
+  await dbClient!.pool.query("UPDATE messages SET visibility = 'rental_visible' WHERE room_id = $1 AND number = $2", [messageRoom.id, Number(shared.id.slice(4))]);
   const at$ = (rest: string) => `/rooms/${encodeURIComponent(messageRoom.id)}${rest}`;
 
   const first = await get(at$("/messages?limit=25"), bob);
   assert.equal(first.status, 200);
   assert.ok(RecentMessages.safeParse(first.body).success);
   assert.equal(first.body.messages.length, 25);
-  assert.deepEqual(first.body.messages.slice(0, 5).map((message: { text: string }) => message.text),
-    ["reply 3", "reply 2", "reply 1", "see file", "GitHub: PR #1 opened"]);
-  const [reply3, , , file, system] = first.body.messages;
+  assert.deepEqual(first.body.messages.slice(0, 6).map((message: { text: string }) => message.text),
+    ["rental shared", "reply 3", "reply 2", "reply 1", "see file", "GitHub: PR #1 opened"]);
+  const [, reply3, , , file, system] = first.body.messages;
   assert.equal(reply3.threadRootId, ids[0]);
   assert.equal(file.id, withFile.id);
   assert.deepEqual(file.attachments, [{ id: file.attachments[0].id, name: "notes.txt", contentType: "text/plain", byteSize: 12 }]);
   assert.equal(JSON.stringify(file).includes("download"), false);
   assert.deepEqual(system.sender, { name: "letagents", kind: "system", login: null, agentKey: null });
-  assert.deepEqual(first.body.messages[5].sender, { name: "Ana | ada's agent | Claude Code", kind: "agent", login: null, agentKey: "ada/ana" });
+  assert.deepEqual(first.body.messages[6].sender, { name: "Ana | ada's agent | Claude Code", kind: "agent", login: null, agentKey: "ada/ana" });
 
   // Page back to the oldest message.
   const seen = [...first.body.messages];
@@ -240,7 +245,8 @@ test("messages.recent pages newest first; messages.thread pages a thread's repli
     seen.push(...page.body.messages);
     before = page.body.nextBefore;
   }
-  assert.equal(seen.length, 65);
+  assert.equal(seen.length, 66);
+  assert.equal(seen.some((message: { text: string }) => message.text.startsWith("renter only")), false);
   assert.equal(seen.at(-1).id, ids[0]);
   assert.equal(seen.at(-1).replyCount, 3);
   assert.equal(seen.at(-1).threadRootId, null);
@@ -259,6 +265,10 @@ test("messages.recent pages newest first; messages.thread pages a thread's repli
     status: 404, body: { code: "not_found", message: "No message with this id in this room." },
   });
   assert.equal((await get(at$("/messages?before=42"), bob)).body.code, "invalid_input");
+  // Above the Postgres integer range: no such message, refused before any read.
+  assert.equal((await get(at$("/messages?before=msg_2147483648"), bob)).body.code, "invalid_input");
+  assert.equal((await get(at$("/messages/msg_99999999999/thread"), bob)).body.code, "invalid_input");
+  assert.equal((await get(at$(`/messages/${hidden.id}/thread`), bob)).status, 404);
   assert.equal((await get(at$("/messages?limit=500"), bob)).body.code, "invalid_input");
 });
 
@@ -298,6 +308,13 @@ test("tasks.list pages the board with assignees, reviewers, tickets and pull req
   assert.ok(Task.safeParse(one.body).success);
   assert.equal(one.body.title, "Task 2");
   assert.deepEqual(await get(at$("/tasks/task_99"), bob), { status: 404, body: { code: "not_found", message: "No task with this id in this room." } });
+  assert.equal((await get(at$("/tasks/task_2147483648"), bob)).body.code, "invalid_input");
+  assert.equal((await get(at$("/tasks?after=task_99999999999"), bob)).body.code, "invalid_input");
+  // An expired review lease is not a reviewer, and the read leaves the lease row as it was.
+  await api!.createTaskLease({ room_id: taskRoom.id, task_id: "task_2", kind: "review", agent_key: "bob/old", actor_label: "Old", created_by: "bob", expires_at: at(1) });
+  assert.deepEqual((await get(at$("/tasks/task_2"), bob)).body.reviewers, []);
+  const { rows: [lease] } = await dbClient!.pool.query("SELECT status FROM task_leases WHERE room_id = $1 AND task_id = 'task_2'", [taskRoom.id]);
+  assert.equal(lease.status, "active");
 });
 
 test("planning.get gives columns, sprints with their tasks, task plans and the release queue", { skip }, async () => {
@@ -350,6 +367,17 @@ test("git.pullRequests lists open pull requests from stored events with checks, 
   await prEvent({ number: 2, action: "opened", state: "open", head: "sha2", minutesAgo: 30, metadata: { draft: true, author_login: "bob" } });
   await prEvent({ number: 3, action: "opened", state: "open", head: "sha3", minutesAgo: 60 });
   await prEvent({ number: 3, action: "closed", state: "merged", head: "sha3", minutesAgo: 20 });
+  // A branch room bound to the same repository, its name in other case: its events count.
+  await dbClient!.pool.query("INSERT INTO rooms (id, display_name, created_at) VALUES ('acme-branch-room', 'acme branch', now())");
+  await dbClient!.pool.query(`INSERT INTO room_git_bindings (room_id, provider, host, repository_full_name, repository_owner,
+    repository_name, ref_type, ref_name, default_branch, visibility, is_default, source, created_at, updated_at)
+    VALUES ('acme-branch-room', 'github', 'GitHub.com', 'Acme/Widgets', 'Acme', 'Widgets', 'branch', 'feature-4', 'main',
+    'public', false, 'manual', now(), now())`);
+  await api!.insertGitHubRoomEvent({
+    room_id: "acme-branch-room", event_type: "pull_request", action: "opened", idempotency_key: "acme/widgets:pr:4:opened",
+    github_object_id: "4", github_object_url: "https://github.com/Acme/Widgets/pull/4", title: "PR 4", state: "open",
+    provider_event_at: at(55), head_sha: "sha4", metadata: { author_login: "dee" },
+  });
   // Checks: one on the old head (ignored), a rerun on the new head (the newest counts).
   await prEvent({ eventType: "check_run", number: 1, objectId: "901", action: "completed", state: "failure", head: "sha1a", minutesAgo: 45, title: "test", metadata: { status: "completed", conclusion: "failure" } });
   await prEvent({ eventType: "check_run", number: 1, objectId: "902", action: "completed", state: "failure", head: "sha1b", minutesAgo: 39, title: "test", metadata: { status: "completed", conclusion: "failure" } });
@@ -371,20 +399,20 @@ test("git.pullRequests lists open pull requests from stored events with checks, 
   assert.ok(PullRequestList.safeParse(body).success);
   assert.equal(body.repo, "acme/widgets");
   assert.equal(body.truncated, false);
-  assert.deepEqual(body.pullRequests.map((pr: { number: number }) => pr.number), [2, 1]);
+  assert.deepEqual(body.pullRequests.map((pr: { number: number }) => pr.number), [2, 1, 4]);
   const [draft, pr1] = body.pullRequests;
   assert.equal(draft.draft, true);
   assert.equal(draft.author, "bob");
   assert.deepEqual({ ...pr1, updatedAt: undefined }, {
     number: 1, title: "Add the API", url: "https://github.com/acme/widgets/pull/1", author: "ada", draft: false,
     headRef: "feature-1", baseRef: "main", updatedAt: undefined,
-    checks: { total: 2, success: 2, failure: 0, pending: 0 },
+    checks: { total: 2, success: 2, failure: 0, pending: null },
     checkRuns: [
-      { name: "lint", status: "completed", conclusion: "success", url: "https://github.com/acme/widgets/pull/1" },
-      { name: "test", status: "completed", conclusion: "success", url: "https://github.com/acme/widgets/pull/1" },
+      { name: "lint", conclusion: "success", url: "https://github.com/acme/widgets/pull/1" },
+      { name: "test", conclusion: "success", url: "https://github.com/acme/widgets/pull/1" },
     ],
     reviews: { total: 2, approved: 1, changesRequested: 1 },
-    reviewers: [{ login: "dee", state: "changes_requested" }, { login: "cy", state: "approved" }],
+    reviewers: [{ login: "cy", state: "approved" }, { login: "dee", state: "changes_requested" }],
     requestedReviewers: ["eve"],
     taskIds: ["task_1"],
   });

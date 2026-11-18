@@ -60,7 +60,7 @@ export const ReleaseItem: z.ZodObject<{
             total: z.ZodNumber;
             success: z.ZodNumber;
             failure: z.ZodNumber;
-            pending: z.ZodNumber;
+            pending: z.ZodNullable<z.ZodNumber>;
         }, z.core.$strip>>;
         reviews: z.ZodNullable<z.ZodObject<{
             total: z.ZodNumber;
@@ -92,7 +92,7 @@ export const ReleaseQueue: z.ZodObject<{
                 total: z.ZodNumber;
                 success: z.ZodNumber;
                 failure: z.ZodNumber;
-                pending: z.ZodNumber;
+                pending: z.ZodNullable<z.ZodNumber>;
             }, z.core.$strip>>;
             reviews: z.ZodNullable<z.ZodObject<{
                 total: z.ZodNumber;
@@ -168,7 +168,7 @@ export const Planning: z.ZodObject<{
                     total: z.ZodNumber;
                     success: z.ZodNumber;
                     failure: z.ZodNumber;
-                    pending: z.ZodNumber;
+                    pending: z.ZodNullable<z.ZodNumber>;
                 }, z.core.$strip>>;
                 reviews: z.ZodNullable<z.ZodObject<{
                     total: z.ZodNumber;
@@ -250,7 +250,7 @@ export const getPlanning: import("./core.mjs").ApiMethod<"planning.get", z.ZodOb
                     total: z.ZodNumber;
                     success: z.ZodNumber;
                     failure: z.ZodNumber;
-                    pending: z.ZodNumber;
+                    pending: z.ZodNullable<z.ZodNumber>;
                 }, z.core.$strip>>;
                 reviews: z.ZodNullable<z.ZodObject<{
                     total: z.ZodNumber;
@@ -326,7 +326,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"planning.get", z
                     total: z.ZodNumber;
                     success: z.ZodNumber;
                     failure: z.ZodNumber;
-                    pending: z.ZodNumber;
+                    pending: z.ZodNullable<z.ZodNumber>;
                 }, z.core.$strip>>;
                 reviews: z.ZodNullable<z.ZodObject<{
                     total: z.ZodNumber;
