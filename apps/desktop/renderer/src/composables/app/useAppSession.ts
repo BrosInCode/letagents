@@ -129,8 +129,6 @@ export function useAppSessionActions(context: unknown) {
   // is rare and costs one check. A check already running may predate the
   // decision, so the check waits for it to end and then runs.
   let decisionWaiting = false;
-  // The first connection is the app starting, which checks its rooms anyway.
-  let hadAccountStream = false;
 
   function handleJoinRequestDecision(): void {
     if (app.activeEntry.value.type !== "room" || !isMembershipRefusal(app.selectedAccess.value.status)) return;
@@ -144,16 +142,14 @@ export function useAppSessionActions(context: unknown) {
     handleJoinRequestDecision();
   });
 
-  // A decision sent while the account stream was down is not replayed. When the
-  // stream comes back, a join card checks the room once (at most once per
-  // re-check gap), so an approval in that window still opens the room.
-  const accountActivity = (app as { accountActivity?: { connected: { value: boolean } } }).accountActivity;
-  if (accountActivity) {
-    watch(() => accountActivity.connected.value, (connected, wasConnected) => {
-      if (!connected || wasConnected !== false || !hadAccountStream) { if (connected) hadAccountStream = true; return; }
-      if (Date.now() - lastAccessRecheckAt < ROOM_ACCESS_RECHECK_MIN_GAP_MS) return;
-      handleJoinRequestDecision();
-    });
+  /**
+   * The account stream came back after a drop. A decision sent while it was
+   * down is not replayed, so a join card checks its room once, within the
+   * re-check gap, and an approval in that window still opens the room.
+   */
+  function recheckJoinCardAfterAccountStreamReconnect(): void {
+    if (Date.now() - lastAccessRecheckAt < ROOM_ACCESS_RECHECK_MIN_GAP_MS) return;
+    handleJoinRequestDecision();
   }
 
   watch(loading, (busy) => {
@@ -310,6 +306,7 @@ export function useAppSessionActions(context: unknown) {
     refreshForegroundData, handleVisibilityChange, handleWindowFocus, handleWindowBlur,
     handleDesktopRoomStreamEvent, startSignedOutAuthFlow, clearDesktopSessionState,
     openAccountAuthFlow, startFirstRunRoomAuth, handleNotificationActivation, handleRoomLink,
+    recheckJoinCardAfterAccountStreamReconnect,
   };
 }
 

@@ -449,7 +449,6 @@ test("an Inbox join request is approved in place and leaves Needs you", async ()
  */
 function mountSession(status: DesktopRoomAccess["status"] = "ready", duringCheck: () => void = () => undefined) {
   const loading = Vue.ref(false);
-  const streamConnected = Vue.ref(false);
   const access = Vue.ref({ ...membershipAccess(null), status });
   const refreshes: number[] = [];
   const syncs: Array<string | null> = [];
@@ -462,7 +461,6 @@ function mountSession(status: DesktopRoomAccess["status"] = "ready", duringCheck
     workers: Vue.ref([]),
     activeEntry: Vue.ref({ type: "room" }),
     selectedAccess: access,
-    accountActivity: { connected: streamConnected },
     selectedRoomIdentifier: Vue.computed(() => access.value.status === "ready" ? "design-room" : null),
     syncSelectedRoomStream: async (room: string | null) => { syncs.push(room); },
     handleRoomStreamEvent: () => undefined,
@@ -491,7 +489,7 @@ function mountSession(status: DesktopRoomAccess["status"] = "ready", duringCheck
     type: "join_request_decision", roomIdentifier: "design-room",
     event: { room_id: "design-room", request: { id: "rjr_1", state, created_at: "2026-11-18T09:00:00.000Z", decided_at: "2026-11-18T09:01:00.000Z", retry_after: null } },
   });
-  return { loading, access, streamConnected, refreshes, syncs, refuse, decide, accessChanged: () => accessChanged(), unmount: () => mounted.unmount() };
+  return { loading, access, reconnect: () => session.recheckJoinCardAfterAccountStreamReconnect(), refreshes, syncs, refuse, decide, accessChanged: () => accessChanged(), unmount: () => mounted.unmount() };
 }
 
 test("a refusal checks an open room once, and the check's own refusal starts no loop", async () => {
@@ -594,18 +592,44 @@ test("a decision does not reload a room that is already open", async () => {
 test("a join card checks the room once when the account stream comes back, since a missed decision is not replayed", async () => {
   const session = mountSession("membership_required");
   try {
-    session.streamConnected.value = true;
-    await flush();
-    assert.equal(session.refreshes.length, 0, "the first connection is the app starting, which checks anyway");
-    session.streamConnected.value = false;
-    await flush();
-    session.streamConnected.value = true;
+    session.reconnect();
     await flush();
     assert.equal(session.refreshes.length, 1, "a reconnect checks the card's room once");
-    session.streamConnected.value = false;
-    await flush();
-    session.streamConnected.value = true;
+    session.reconnect();
     await flush();
     assert.equal(session.refreshes.length, 1, "a quick second reconnect waits for the re-check gap");
   } finally { session.unmount(); }
+});
+
+test("a reconnect does not reload a room that is already open", async () => {
+  const session = mountSession("ready");
+  try {
+    session.reconnect();
+    await flush();
+    assert.equal(session.refreshes.length, 0);
+  } finally { session.unmount(); }
+});
+
+test("the account activity feed asks a join card to check on a reconnect, not on the first connection", async () => {
+  const feedModule = await vite.ssrLoadModule("/renderer/src/composables/app/useAppSidebarMessages.ts") as {
+    useAppAccountActivityFeed(app: unknown): { accountActivity: { state: Vue.Ref<{ connected: boolean; rooms: Record<string, unknown> }> } };
+  };
+  const reconnects: number[] = [];
+  const app = {
+    accountRooms: Vue.ref([]), authStatus: Vue.ref(authStatus), refreshSidebarRoomMetadata: async () => undefined,
+    recheckJoinCardAfterAccountStreamReconnect: () => { reconnects.push(1); },
+  };
+  const scope = Vue.effectScope();
+  const feed = scope.run(() => feedModule.useAppAccountActivityFeed(app))!;
+  const connect = async (connected: boolean) => {
+    feed.accountActivity.state.value = { connected, rooms: {} };
+    await flush();
+  };
+  try {
+    await connect(true);
+    assert.equal(reconnects.length, 0, "the first connection is the app starting, which checks its rooms anyway");
+    await connect(false);
+    await connect(true);
+    assert.equal(reconnects.length, 1, "a reconnect asks once");
+  } finally { scope.stop(); }
 });
