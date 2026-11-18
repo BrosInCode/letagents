@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import { check, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
+import { auth_sessions } from "./auth.js";
 import { accounts, rooms } from "./core.js";
 
 /**
@@ -16,6 +17,8 @@ export const api_page_tokens = pgTable(
     token_id: text("token_id").primaryKey(),
     token_hash: text("token_hash").notNull(),
     account_id: text("account_id").notNull().references(() => accounts.id, { onDelete: "cascade" }),
+    /** The app session that minted it; signing out of that session ends it. */
+    session_id: text("session_id").notNull().references(() => auth_sessions.id, { onDelete: "cascade" }),
     room_id: text("room_id").notNull().references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
     page_id: text("page_id").notNull(),
     page_version: integer("page_version").notNull(),
@@ -28,6 +31,7 @@ export const api_page_tokens = pgTable(
     uniqueIndex("api_page_tokens_token_hash_idx").on(table.token_hash),
     index("api_page_tokens_account_idx").on(table.account_id, table.expires_at),
     index("api_page_tokens_room_page_idx").on(table.room_id, table.page_id),
+    index("api_page_tokens_session_idx").on(table.session_id),
     check("api_page_tokens_page_version_check", sql`${table.page_version} > 0`),
     check("api_page_tokens_capabilities_check", sql`jsonb_typeof(${table.capabilities}) = 'array'`),
   ],

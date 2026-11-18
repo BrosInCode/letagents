@@ -23,7 +23,7 @@ export function parseIntentPayload(kind: IntentKind, payload: unknown): z.ZodSaf
     description?: string | undefined;
 }> | z.ZodSafeParseResult<{
     taskId: string;
-    status?: "done" | "proposed" | "accepted" | "assigned" | "in_progress" | "blocked" | "in_review" | "merged" | "cancelled" | undefined;
+    status?: "blocked" | "done" | "proposed" | "accepted" | "assigned" | "in_progress" | "in_review" | "merged" | "cancelled" | undefined;
     assignee?: string | null | undefined;
     assigneeAgentKey?: string | null | undefined;
     title?: string | undefined;
@@ -71,12 +71,12 @@ export type TaskUpdatePayload = z.infer<typeof TaskUpdatePayload>;
 export const TaskUpdatePayload: z.ZodObject<{
     taskId: z.ZodString;
     status: z.ZodOptional<z.ZodEnum<{
+        blocked: "blocked";
         done: "done";
         proposed: "proposed";
         accepted: "accepted";
         assigned: "assigned";
         in_progress: "in_progress";
-        blocked: "blocked";
         in_review: "in_review";
         merged: "merged";
         cancelled: "cancelled";
@@ -109,12 +109,12 @@ export const INTENT_PAYLOADS: Readonly<{
     "task.update": z.ZodObject<{
         taskId: z.ZodString;
         status: z.ZodOptional<z.ZodEnum<{
+            blocked: "blocked";
             done: "done";
             proposed: "proposed";
             accepted: "accepted";
             assigned: "assigned";
             in_progress: "in_progress";
-            blocked: "blocked";
             in_review: "in_review";
             merged: "merged";
             cancelled: "cancelled";
@@ -146,12 +146,12 @@ export const ProposeIntentInput: z.ZodObject<{
     }, z.core.$strict>, z.ZodObject<{
         taskId: z.ZodString;
         status: z.ZodOptional<z.ZodEnum<{
+            blocked: "blocked";
             done: "done";
             proposed: "proposed";
             accepted: "accepted";
             assigned: "assigned";
             in_progress: "in_progress";
-            blocked: "blocked";
             in_review: "in_review";
             merged: "merged";
             cancelled: "cancelled";
@@ -291,12 +291,12 @@ export const proposeIntent: import("./core.mjs").ApiMethod<"intents.propose", z.
     }, z.core.$strict>, z.ZodObject<{
         taskId: z.ZodString;
         status: z.ZodOptional<z.ZodEnum<{
+            blocked: "blocked";
             done: "done";
             proposed: "proposed";
             accepted: "accepted";
             assigned: "assigned";
             in_progress: "in_progress";
-            blocked: "blocked";
             in_review: "in_review";
             merged: "merged";
             cancelled: "cancelled";
@@ -559,12 +559,12 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"intents.propose"
     }, z.core.$strict>, z.ZodObject<{
         taskId: z.ZodString;
         status: z.ZodOptional<z.ZodEnum<{
+            blocked: "blocked";
             done: "done";
             proposed: "proposed";
             accepted: "accepted";
             assigned: "assigned";
             in_progress: "in_progress";
-            blocked: "blocked";
             in_review: "in_review";
             merged: "merged";
             cancelled: "cancelled";

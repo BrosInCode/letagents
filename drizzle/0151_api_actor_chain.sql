@@ -2,6 +2,8 @@
 -- `api_page_tokens`: short-lived `page_grant` bearer tokens. The desktop main
 -- process mints one with the person's session for one page version in one
 -- room; the page never sees it. Only the SHA-256 hex of the token is stored.
+-- `session_id` is the app session that minted it: signing out of that
+-- session (or its expiry) ends the token, and only that session's tokens.
 -- `page_id` and `page_version` have no foreign key yet: the pages tables
 -- arrive with the pages registry (PR7), which may add one.
 -- `room_api_policies`: a room admin's choice per capability; no row means the
@@ -14,6 +16,7 @@ CREATE TABLE IF NOT EXISTS "api_page_tokens" (
 	"token_id" text PRIMARY KEY NOT NULL,
 	"token_hash" text NOT NULL,
 	"account_id" text NOT NULL REFERENCES "accounts"("id") ON DELETE CASCADE,
+	"session_id" text NOT NULL REFERENCES "auth_sessions"("id") ON DELETE CASCADE,
 	"room_id" text NOT NULL REFERENCES "rooms"("id") ON DELETE CASCADE ON UPDATE CASCADE,
 	"page_id" text NOT NULL,
 	"page_version" integer NOT NULL,
@@ -30,6 +33,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS "api_page_tokens_token_hash_idx" ON "api_page_
 CREATE INDEX IF NOT EXISTS "api_page_tokens_account_idx" ON "api_page_tokens" USING btree ("account_id", "expires_at");
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "api_page_tokens_room_page_idx" ON "api_page_tokens" USING btree ("room_id", "page_id");
+--> statement-breakpoint
+CREATE INDEX IF NOT EXISTS "api_page_tokens_session_idx" ON "api_page_tokens" USING btree ("session_id");
 --> statement-breakpoint
 CREATE TABLE IF NOT EXISTS "room_api_policies" (
 	"room_id" text NOT NULL REFERENCES "rooms"("id") ON DELETE CASCADE ON UPDATE CASCADE,

@@ -134,7 +134,7 @@
   },
   "rooms.listPolicies": {
     "kind": "read",
-    "capability": "rooms.read",
+    "capability": "rooms.admin",
     "httpMethod": "GET",
     "path": "/rooms/:room/policies",
     "response": "json",
@@ -205,7 +205,7 @@
   },
   "rooms.setPolicy": {
     "kind": "write",
-    "capability": "rooms.read",
+    "capability": "rooms.admin",
     "httpMethod": "PUT",
     "path": "/rooms/:room/policies",
     "response": "json",

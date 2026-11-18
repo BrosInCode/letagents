@@ -400,7 +400,7 @@ test("application registers startup preparation before rental recovery without d
     mock.module("../main/ask-links.js", { namedExports: { claimDesktopInstance: () => true, registerAskLinks() {} } }),
     mock.module("../main/company-links.js", { namedExports: { prepareCompanyLinks() {} } }),
     mock.module("../main/menu.js", { namedExports: { configureApplicationMenu() {} } }),
-    mock.module("../main/paths.js", { namedExports: { attachmentProtocolScheme: "fixture", htmlDemoProtocolScheme: "fixture-demo", workspaceRoot: "/fixture" } }),
+    mock.module("../main/paths.js", { namedExports: { attachmentProtocolScheme: "fixture", htmlDemoProtocolScheme: "fixture-demo", pageProtocolScheme: "fixture-page", workspaceRoot: "/fixture" } }),
     mock.module("../main/room-stream.js", { namedExports: {
       setExecutionDelegationInvalidationHandler() {}, stopDesktopRoomStream: async () => {},
     } }),
@@ -485,6 +485,7 @@ test("host approval sender accepts only the live trusted main frame", async () =
     setWindowOpenHandler: () => {}, on: () => {}, openDevTools: () => {} };
   const windowOptions: Array<{ webPreferences?: Record<string, unknown> }> = [];
   const inlineDemoHosts: unknown[] = [];
+  const roomPageHosts: unknown[] = [];
   const mocks = [
     mock.module("electron", { defaultExport: { app: {}, BrowserWindow: class {
       webContents = contents;
@@ -502,6 +503,9 @@ test("host approval sender accepts only the live trusted main frame", async () =
     mock.module("../main/attachments/html-demo-inline.js", { namedExports: {
       installInlineHtmlDemoHost: (window: unknown) => { inlineDemoHosts.push(window); },
     } }),
+    mock.module("../main/pages/page-host.js", { namedExports: {
+      installRoomPageHost: (window: unknown) => { roomPageHosts.push(window); },
+    } }),
   ];
   try {
     const { assertHostApprovalSender, createWindow, allowMainWindowQuit, focusMainWindow } = await import("../main/window.js");
@@ -512,6 +516,7 @@ test("host approval sender accepts only the live trusted main frame", async () =
     assert.equal(windowOptions[0]?.webPreferences?.webviewTag, true);
     assert.equal(inlineDemoHosts.length, 1);
     assert.equal((inlineDemoHosts[0] as { webContents?: unknown }).webContents, contents);
+    assert.equal(roomPageHosts.length, 1, "room pages share the same webview router");
     let prevented = false;
     closeWindow?.({ preventDefault: () => { prevented = true; } });
     assert.equal(hidden, process.platform === "darwin");

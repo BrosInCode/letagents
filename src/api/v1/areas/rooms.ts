@@ -59,7 +59,7 @@ async function roomPolicies(roomId: string): Promise<RoomApiPolicies> {
  * name, so the access check reads no binding; the binding still holds the
  * visibility and the ref. The room's own binding (a branch room's) comes first.
  */
-async function repoBinding(room: Project, access: RoomAccessTarget): Promise<GitRoomBinding | null> {
+export async function repoBinding(room: Project, access: RoomAccessTarget): Promise<GitRoomBinding | null> {
   if (access.kind !== "repo") return null;
   if (access.binding) return access.binding;
   for (const roomId of new Set([room.id, access.accessRoomId])) {

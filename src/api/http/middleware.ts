@@ -11,7 +11,7 @@ import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-
 import { parseBearerAuthorization } from "../request/bearer-authorization.js";
 import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
 import { isRemoteMcpRequestPath, mcpBearerChallenge } from "../mcp-oauth/config.js";
-import { isApiV1RequestPath } from "../v1/page-grant-token.js";
+import { isApiV1RequestPath, requestPathname } from "../v1/page-grant-token.js";
 
 export const INVALID_BEARER_MESSAGE = "The bearer credential is invalid or expired. Reconnect with a current credential.";
 
@@ -91,7 +91,7 @@ export function registerHttpMiddleware(
       // Page grants likewise work only on /api/v1, where every route checks
       // the grant's capabilities; older routes would give a page the
       // person's full rights.
-      if (req.authKind === "page_grant" && !isApiV1RequestPath(req.path)) {
+      if (req.authKind === "page_grant" && !isApiV1RequestPath(requestPathname(req))) {
         replyInvalidBearer(req, _res);
         return;
       }

@@ -211,7 +211,7 @@ export const approveIntent = defineMethod({
   name: "intents.approve",
   area: "intents",
   kind: "write",
-  capability: "intents.read",
+  capability: "rooms.admin",
   description:
     "Approves a pending intent, which then runs at once with the proposer's rights. Approving again returns the intent "
     + "and runs nothing twice. A denied intent gives conflict. Room admins only, signed in to the LetAgents app; pages, "
@@ -227,7 +227,7 @@ export const denyIntent = defineMethod({
   name: "intents.deny",
   area: "intents",
   kind: "write",
-  capability: "intents.read",
+  capability: "rooms.admin",
   description:
     "Denies a pending intent; nothing is written. Denying again returns the intent. An intent that was approved gives "
     + "conflict. Room admins only, signed in to the LetAgents app; pages, agents and owner tokens get not_granted.",

@@ -1,7 +1,7 @@
 {
   "intents.approve": {
     "kind": "write",
-    "capability": "intents.read",
+    "capability": "rooms.admin",
     "httpMethod": "POST",
     "path": "/rooms/:room/intents/:intentId/approve",
     "response": "json",
@@ -175,7 +175,7 @@
   },
   "intents.deny": {
     "kind": "write",
-    "capability": "intents.read",
+    "capability": "rooms.admin",
     "httpMethod": "POST",
     "path": "/rooms/:room/intents/:intentId/deny",
     "response": "json",

@@ -60,28 +60,57 @@ export function htmlDemoSession(): Promise<Session> {
   return demoSession;
 }
 
-async function prepareHtmlDemoSession(): Promise<Session> {
-  const ses = session.fromPartition(HTML_DEMO_PARTITION);
+function prepareHtmlDemoSession(): Promise<Session> {
+  return prepareLockedHtmlSession({
+    partition: HTML_DEMO_PARTITION,
+    scheme: htmlDemoProtocolScheme,
+    documents: htmlDemoDocuments,
+    contents: htmlDemoContents,
+    closedText: "This demo is closed.",
+    networkBlockError: "Demos cannot open because their network block could not be set up.",
+  });
+}
+
+/** What one locked HTML session serves, and to whom. */
+export interface LockedHtmlSessionOptions {
+  /** An in-memory partition (no `persist:`), so its storage never reaches disk. */
+  partition: string;
+  scheme: string;
+  /** The documents it serves at `/`, by host. */
+  documents: ReadonlyMap<string, string>;
+  /** Its own pages' web contents and the host each one shows. */
+  contents: ReadonlyMap<number, string>;
+  closedText: string;
+  networkBlockError: string;
+}
+
+/**
+ * The locks of every session that runs HTML someone attached or pinned: a dead
+ * proxy, a request filter that lets a page load only its own document, no
+ * permissions and no downloads. Demos and room pages each get their own.
+ */
+export async function prepareLockedHtmlSession(options: LockedHtmlSessionOptions): Promise<Session> {
+  const ses = session.fromPartition(options.partition);
   // Connections that skip the request filter (WebRTC over TCP, preconnect) meet a
-  // closed port. Set first: without it no demo opens, and nothing below is
+  // closed port. Set first: without it nothing opens, and nothing below is
   // registered yet, so the next open can set the session up again.
   try {
     await ses.setProxy({ proxyRules: "http://127.0.0.1:9", proxyBypassRules: "<-loopback>" });
   } catch {
-    throw new Error("Demos cannot open because their network block could not be set up.");
+    throw new Error(options.networkBlockError);
   }
-  ses.protocol.handle(htmlDemoProtocolScheme, (request) => {
+  ses.protocol.handle(options.scheme, (request) => {
     const url = new URL(request.url);
-    const html = url.pathname === "/" ? htmlDemoDocuments.get(url.hostname) : undefined;
+    const html = url.pathname === "/" ? options.documents.get(url.hostname) : undefined;
     return html === undefined
-      ? new Response("This demo is closed.", { status: 404, headers: HTML_DEMO_RESPONSE_HEADERS })
+      ? new Response(options.closedText, { status: 404, headers: HTML_DEMO_RESPONSE_HEADERS })
       : new Response(html, { headers: HTML_DEMO_RESPONSE_HEADERS });
   });
   ses.webRequest.onBeforeRequest((details, callback) => {
-    // A request without a known non-demo sender counts as the demo's own.
-    const host = details.webContentsId === undefined ? undefined : htmlDemoContents.get(details.webContentsId);
+    // A request without a known non-demo sender counts as the page's own.
+    const host = details.webContentsId === undefined ? undefined : options.contents.get(details.webContentsId);
     const fromDemo = details.webContentsId === undefined || host !== undefined;
-    callback({ cancel: !isAllowedHtmlDemoRequest(details.url, { fromDemo, host }) });
+    callback({ cancel: !isAllowedHtmlDemoRequest(details.url, { fromDemo, host }, options.scheme) });
   });
   ses.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   ses.setPermissionCheckHandler(() => false);

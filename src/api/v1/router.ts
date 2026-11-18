@@ -1,13 +1,13 @@
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
 
 import { actorKey } from "../../../shared/api/actor.mjs";
-import { ApiError, describeIssues, methodMayReturn, type AnyApiMethod } from "../../../shared/api/core.mjs";
+import { ApiError, capabilityForCall, describeIssues, methodMayReturn, type AnyApiMethod } from "../../../shared/api/core.mjs";
 import { GitHubAccessUnavailableError } from "../github/repo-access.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
 import { apiActionTarget, recordApiAction, type ApiActionRecord } from "./actions.js";
 import { identifyCaller, resolveRoomAccess } from "./actor.js";
 import { API_V1_ROUTES } from "./areas.js";
-import { checkCapability, methodCapability } from "./capability.js";
+import { checkCapability } from "./capability.js";
 import type { ApiCallContext, ApiCallerIdentifier, ApiCapabilityCheck, ApiRoomAccessResolver } from "./context.js";
 import { createApiRateLimiter, type ApiRateLimiter } from "./rate-limit.js";
 import { ApiStatusResponse, type ApiRoute } from "./route.js";
@@ -79,8 +79,8 @@ export function createApiV1Router(deps: ApiV1RouterDeps = {}): express.Router {
         if (!parsed.success) {
           throw new ApiError("invalid_input", describeIssues(parsed.error).map(({ path, message }) => (path ? `${path}: ${message}` : message)).join("; "));
         }
-        // The input may pick the capability (an intent kind, a data scope); record that one.
-        if (recordable) recordable = { ...recordable, capability: methodCapability(method, parsed.data) };
+        // The capability this input needs (a document's scope, an intent's kind) is what the record names.
+        if (recordable) recordable.capability = capabilityForCall(method, parsed.data);
         await capabilityCheck(call.actor, method, parsed.data, call);
 
         inHandler = true;

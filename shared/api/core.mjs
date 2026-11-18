@@ -197,7 +197,7 @@ function formatIssuePath(path) {
  *   area: ApiArea,
  *   kind: MethodKind,
  *   capability: CapabilityName,
- *   capabilityFromInput?(input: z.output<Input>): CapabilityName,
+ *   capabilityFromInput?(input: z.output<Input>): CapabilityName | undefined,
  *   description: string,
  *   path: string,
  *   httpMethod?: HttpVerb,
@@ -218,7 +218,7 @@ function formatIssuePath(path) {
  *   readonly area: ApiArea,
  *   readonly kind: MethodKind,
  *   readonly capability: CapabilityName,
- *   capabilityFromInput?(input: z.output<Input>): CapabilityName,
+ *   capabilityFromInput?(input: z.output<Input>): CapabilityName | undefined,
  *   readonly description: string,
  *   readonly path: string,
  *   readonly httpMethod: HttpVerb,
@@ -239,6 +239,15 @@ const PATH_PARAM = /:([A-Za-z_][A-Za-z0-9_]*)/g;
  * Describes one API method. Every route is room-scoped: the path starts with
  * `/rooms/:room`, so access always resolves through the room in the URL.
  * Other `:params` in the path are input fields; the route fills them in.
+ *
+ * `capability` is the method's capability. When the capability depends on
+ * the input (a document's scope: `data.viewer`, `data.page` or `data.room`;
+ * an intent's kind: `tasks.propose` or `tickets.propose`), add
+ * `capabilityFromInput(input)`: it gets the parsed input and returns the
+ * capability that this call needs, or undefined for `capability`. The server
+ * checks the returned capability, for the page grant and the room policy
+ * alike. It must return a name from capabilities.mjs; anything else is a
+ * server error, never a pass. The snapshot keeps only `capability`.
  * @template {string} Name
  * @template {z.ZodType} Input
  * @template {z.ZodType} Output
@@ -255,9 +264,6 @@ export function defineMethod(spec) {
   if (!METHOD_KINDS.includes(spec.kind)) throw new TypeError(`${where}: unknown kind ${JSON.stringify(spec.kind)}.`);
   if (!isCapabilityName(spec.capability)) {
     throw new TypeError(`${where}: unknown capability ${JSON.stringify(spec.capability)}; add it to shared/api/capabilities.mjs first.`);
-  }
-  if (spec.capabilityFromInput !== undefined && typeof spec.capabilityFromInput !== "function") {
-    throw new TypeError(`${where}: capabilityFromInput must be a function of the parsed input.`);
   }
   if (typeof spec.description !== "string" || !spec.description.trim()) {
     throw new TypeError(`${where}: a description is required; MCP tools and the page reference are made from it.`);
@@ -281,6 +287,9 @@ export function defineMethod(spec) {
     if (param === "room") continue;
     if (!inputKeys?.includes(param)) throw new TypeError(`${where}: the path parameter ":${param}" must be a field of the input object.`);
   }
+  if (spec.capabilityFromInput !== undefined && typeof spec.capabilityFromInput !== "function") {
+    throw new TypeError(`${where}: capabilityFromInput must be a function of the parsed input.`);
+  }
   const errors = [...(spec.errors ?? [])];
   for (const code of errors) {
     if (!API_ERROR_CODES.includes(code)) throw new TypeError(`${where}: unknown error code ${JSON.stringify(code)}.`);
@@ -300,6 +309,22 @@ export function defineMethod(spec) {
     errors: Object.freeze(errors),
     rateClass: spec.rateClass,
   });
+}
+
+/**
+ * The capability one call of this method needs: `capabilityFromInput` of the
+ * parsed input when the method has it, else `capability`.
+ * @param {AnyApiMethod} method
+ * @param {unknown} input
+ * @returns {CapabilityName}
+ */
+export function capabilityForCall(method, input) {
+  const derived = method.capabilityFromInput?.(input);
+  if (derived === undefined) return method.capability;
+  if (!isCapabilityName(derived)) {
+    throw new TypeError(`API method ${JSON.stringify(method.name)}: capabilityFromInput returned unknown capability ${JSON.stringify(derived)}.`);
+  }
+  return derived;
 }
 
 /**
