@@ -18,6 +18,7 @@ import {
   ROOM_RESOURCE_MESSAGE_REACTIONS,
   ROOM_RESOURCE_MESSAGE_PINS,
   ROOM_RESOURCE_WAKE_RULES,
+  ROOM_RESOURCE_INVALIDATION_RESOURCES,
   type RoomResourceInvalidationResource,
 } from "../../../shared/room-resource-invalidation.mjs";
 import type { ActivityEvent } from "../rental/activity-emitter.js";
@@ -148,6 +149,8 @@ interface EventSourceDeps {
   wakeRuleEvents?: EventEmitter;
   messageReactionEvents?: EventEmitter;
   messagePinEvents?: EventEmitter;
+  /** `room_resource:invalidated` with `{ projectId, resource }`: the LetAgents API resources. */
+  roomResourceEvents?: EventEmitter;
   workItemEvents?: EventEmitter;
   joinRequestEvents?: EventEmitter;
   bridgeLossEvents?: EventEmitter;
@@ -336,6 +339,14 @@ export class RoomEventBroker {
       if (!emitter) continue;
       this.addSource(emitter, eventName, (payload) => {
         const event = payload as { projectId: string };
+        return { kind: "resource_invalidated", roomId: event.projectId, resource };
+      });
+    }
+    if (deps.roomResourceEvents) {
+      this.addSource(deps.roomResourceEvents, "room_resource:invalidated", (payload) => {
+        const event = payload as { projectId: string; resource: unknown };
+        const resource = ROOM_RESOURCE_INVALIDATION_RESOURCES.find((known) => known === event.resource);
+        if (!resource) throw new Error("unknown room resource");
         return { kind: "resource_invalidated", roomId: event.projectId, resource };
       });
     }
