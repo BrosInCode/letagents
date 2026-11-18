@@ -59,13 +59,17 @@ the page bridge and MCP tool schemas all come from it. The plan is
    - Use `z.strictObject` for inputs, so a misspelled field is an error, not ignored.
    - Use camelCase field names. Export each schema and a same-named type:
      `/** @typedef {z.infer<typeof Task>} Task */`.
-   - The description is what agents read in the MCP tool. Write it for them.
-   - `agents: "read"` (a read) or `agents: "write"` (any other kind) gives agents the MCP tool
-     `api_<area>_<verb>` (`git.pullRequests` → `api_git_pull_requests`), made from the method:
-     its description, capability and error codes, and its input plus `room_id`. A read tool is
-     read-only for supervised and Read-only Codex agents. `agents: "write"` also opens the method
-     to worker bearers on `/api/v1`; without it an agent may only read. Removing or changing the
-     flag later breaks the contract. A method whose tool is written by hand is listed in
+   - The description is what agents read through the MCP tools. Write it for them.
+   - `agents: "read"` (a read) or `agents: "write"` (any other kind) lets agents call the method
+     through the MCP tool `letagents_api_read` or `letagents_api_write`:
+     `{ method: "tasks.get", input: { taskId: "task_42" }, room_id? }`. Each tool's description
+     lists its methods, one line each (the fields, then the description's first sentence, cut
+     short), so start the description with what the method returns or does. `describe: true`
+     answers the full description, capability, error codes and input JSON Schema; the tool checks
+     the input against the contract before it calls. `letagents_api_read` is read-only for
+     supervised and Read-only Codex agents. `agents: "write"` also opens the method to worker
+     bearers on `/api/v1`; without it an agent may only read. Removing or changing the flag later
+     breaks the contract. A method whose tool is written by hand is listed in
      `HAND_WRITTEN_AGENT_TOOLS` (`shared/api/agent-tools.mjs`).
    - Common codes need no listing: `invalid_input`, `unauthenticated`, `not_found` (the room),
      `not_participant`, `not_granted`, `rate_limited`, `source_unavailable`, `internal`. List
@@ -145,10 +149,10 @@ the page bridge and MCP tool schemas all come from it. The plan is
 
 ## Generated files
 
-`node scripts/build-api-contracts.mjs` also writes `shared/api-agent-tools.mjs` (the agent
-tools by name, for code that cannot load zod) and `docs/api/page-reference.md` (the room page
-reference, which is also the description of the MCP tool `publish_page`). The contract test
-fails when either is stale.
+`node scripts/build-api-contracts.mjs` also writes `shared/api-agent-tools.mjs` (the two API
+tools by name with their methods, for code that cannot load zod) and
+`docs/api/page-reference.md` (the room page reference, which the MCP tool `get_page_reference`
+returns). The contract test fails when either is stale.
 
 ## Wire format
 

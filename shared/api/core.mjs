@@ -43,11 +43,11 @@ export const HTTP_VERBS = /** @type {const} */ (["GET", "POST", "PUT", "PATCH", 
 export const RESPONSE_KINDS = /** @type {const} */ (["json", "stream"]);
 
 /**
- * Whether agents get the method as an MCP tool (`api_<area>_<verb>`), and how:
- * - `read`: a read tool; supervised agents run it without journaling it.
- * - `write`: a tool that changes something (a document, an intent, a page);
- *   the server must also let agent callers use the method.
- * Without the flag, agents have no tool for the method.
+ * Whether agents may call the method through MCP, and how:
+ * - `read`: through `letagents_api_read`; supervised agents run it without journaling it.
+ * - `write`: through `letagents_api_write`, as it changes something (a document,
+ *   an intent, a page); the server must also let agent callers use the method.
+ * Without the flag, agents cannot call the method through MCP.
  */
 export const AGENT_ACCESS = /** @type {const} */ (["read", "write"]);
 
