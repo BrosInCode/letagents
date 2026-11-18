@@ -3,7 +3,7 @@
 import { z } from "zod";
 
 import { ActorPrincipal, ActorVia } from "./actor.mjs";
-import { defineMethod } from "./core.mjs";
+import { defineMethod, queryInt } from "./core.mjs";
 
 /**
  * - `queued`: posted to the agent; it has not said it started.
@@ -157,7 +157,7 @@ export const listJobs = defineMethod({
   path: "/rooms/:room/jobs",
   input: z.strictObject({
     state: z.enum(JOB_STATES).optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(20),
+    limit: queryInt({ min: 1, max: 100, default: 20 }),
   }),
   output: z.object({ jobs: z.array(Job) }),
   rateClass: "read",

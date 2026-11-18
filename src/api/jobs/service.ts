@@ -22,7 +22,8 @@ import {
   type ApiJobRow,
 } from "../db/api-jobs.js";
 import { formatMessageId } from "../db/utils.js";
-import { emitProjectMessage, queueJobInvalidation } from "../server/events.js";
+import { ROOM_RESOURCE_JOBS } from "../../../shared/room-resource-invalidation.mjs";
+import { emitProjectMessage, queueRoomResourceInvalidation } from "../server/events.js";
 import { requireJobStartAllowed } from "./policy.js";
 import { assertJobResultSchemaBounds, jobResultProblems, jsonBytes } from "./result-schema.js";
 
@@ -38,7 +39,7 @@ const defaultDeps: JobServiceDeps = {
   listOnlineAgentKeys: listOnlineRoomAgentKeys,
   recentAgentPartnerKey,
   emitMessage: emitProjectMessage,
-  invalidate: queueJobInvalidation,
+  invalidate: (roomId) => queueRoomResourceInvalidation(roomId, ROOM_RESOURCE_JOBS),
   now: () => new Date().toISOString(),
 };
 

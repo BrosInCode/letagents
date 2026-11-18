@@ -288,7 +288,7 @@ export const listJobs: import("./core.mjs").ApiMethod<"jobs.list", z.ZodObject<{
         failed: "failed";
         cancelled: "cancelled";
     }>>;
-    limit: z.ZodDefault<z.ZodCoercedNumber<unknown>>;
+    limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
 }, z.core.$strict>, z.ZodObject<{
     jobs: z.ZodArray<z.ZodObject<{
         id: z.ZodString;
@@ -556,7 +556,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"jobs.start", z.Z
         failed: "failed";
         cancelled: "cancelled";
     }>>;
-    limit: z.ZodDefault<z.ZodCoercedNumber<unknown>>;
+    limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
 }, z.core.$strict>, z.ZodObject<{
     jobs: z.ZodArray<z.ZodObject<{
         id: z.ZodString;

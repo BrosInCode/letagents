@@ -4,6 +4,7 @@
     "capability": "jobs.start",
     "httpMethod": "POST",
     "path": "/rooms/:room/jobs/:id/cancel",
+    "response": "json",
     "rateClass": "write",
     "errors": [
       "conflict",
@@ -241,6 +242,7 @@
     "capability": "jobs.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/jobs/:id",
+    "response": "json",
     "rateClass": "read",
     "errors": [
       "not_found"
@@ -477,6 +479,7 @@
     "capability": "jobs.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/jobs",
+    "response": "json",
     "rateClass": "read",
     "errors": [],
     "input": {
@@ -495,10 +498,17 @@
           ]
         },
         "limit": {
-          "default": 20,
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 100
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -733,6 +743,7 @@
     "capability": "jobs.start",
     "httpMethod": "POST",
     "path": "/rooms/:room/jobs",
+    "response": "json",
     "rateClass": "job",
     "errors": [
       "too_large"

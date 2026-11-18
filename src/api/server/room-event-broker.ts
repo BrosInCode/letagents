@@ -15,10 +15,10 @@ import {
   ROOM_RESOURCE_AGENT_APPROVAL,
   ROOM_RESOURCE_AGENT_WORK,
   ROOM_RESOURCE_EXECUTION_DELEGATION,
-  ROOM_RESOURCE_JOBS,
   ROOM_RESOURCE_MESSAGE_REACTIONS,
   ROOM_RESOURCE_MESSAGE_PINS,
   ROOM_RESOURCE_WAKE_RULES,
+  ROOM_RESOURCE_INVALIDATION_RESOURCES,
   type RoomResourceInvalidationResource,
 } from "../../../shared/room-resource-invalidation.mjs";
 import type { ActivityEvent } from "../rental/activity-emitter.js";
@@ -149,7 +149,8 @@ interface EventSourceDeps {
   wakeRuleEvents?: EventEmitter;
   messageReactionEvents?: EventEmitter;
   messagePinEvents?: EventEmitter;
-  jobEvents?: EventEmitter;
+  /** `room_resource:invalidated` with `{ projectId, resource }`: the LetAgents API resources. */
+  roomResourceEvents?: EventEmitter;
   joinRequestEvents?: EventEmitter;
   bridgeLossEvents?: EventEmitter;
   contentDeletionEvents?: EventEmitter;
@@ -329,12 +330,19 @@ export class RoomEventBroker {
       [deps.wakeRuleEvents, "wake_rules:invalidated", ROOM_RESOURCE_WAKE_RULES],
       [deps.messagePinEvents, "message_pins:invalidated", ROOM_RESOURCE_MESSAGE_PINS],
       [deps.messageReactionEvents, "message_reactions:invalidated", ROOM_RESOURCE_MESSAGE_REACTIONS],
-      [deps.jobEvents, "jobs:invalidated", ROOM_RESOURCE_JOBS],
     ];
     for (const [emitter, eventName, resource] of invalidationSources) {
       if (!emitter) continue;
       this.addSource(emitter, eventName, (payload) => {
         const event = payload as { projectId: string };
+        return { kind: "resource_invalidated", roomId: event.projectId, resource };
+      });
+    }
+    if (deps.roomResourceEvents) {
+      this.addSource(deps.roomResourceEvents, "room_resource:invalidated", (payload) => {
+        const event = payload as { projectId: string; resource: unknown };
+        const resource = ROOM_RESOURCE_INVALIDATION_RESOURCES.find((known) => known === event.resource);
+        if (!resource) throw new Error("unknown room resource");
         return { kind: "resource_invalidated", roomId: event.projectId, resource };
       });
     }
