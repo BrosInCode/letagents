@@ -31,7 +31,8 @@ export const SUPERVISED_READ_ONLY_TOOLS = new Set([
   "list_pages",
   "read_page",
   "read_page_diagnostics",
-  // Tools made from LetAgents API methods flagged agents: "read" (GET routes only).
+  "get_page_reference",
+  // letagents_api_read, which calls only LetAgents API methods flagged agents: "read" (GET routes).
   ...API_AGENT_READ_TOOLS,
   // Removed in letagents 0.12.46; kept so a daemon and an older pinned MCP runtime classify it alike.
   "status_local_codex_session",

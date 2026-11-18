@@ -82,13 +82,30 @@ export async function readPageFile(path: string): Promise<string> {
   }
 }
 
+/** read_page hands the HTML over in parts: a page may be 2 MB, far more than an agent should read at once. */
+export const READ_PAGE_MAX_CHARS = 100_000;
+
+/** One part of a page's HTML from `offset`, never splitting a character that takes two UTF-16 units. */
+export function pageHtmlPart(html: string, offset = 0): { page_html: string; offset: number; total_chars: number; next_offset: number | null } {
+  const start = Math.min(offset, html.length);
+  let end = Math.min(start + READ_PAGE_MAX_CHARS, html.length);
+  if (end < html.length && end > start && /[\uD800-\uDBFF]/.test(html[end - 1]!)) end -= 1;
+  return { page_html: html.slice(start, end), offset: start, total_chars: html.length, next_offset: end < html.length ? end : null };
+}
+
+// The reference is about 17 KB. In publish_page's description it was sent on
+// every turn; get_page_reference sends it when an agent writes a page.
 export const PUBLISH_PAGE_DESCRIPTION = "Publish a room page from an HTML file in your workspace: a new page, or with page_id a new version "
-  + "of that page. The file is read with the checks message attachments use (inside your workspace, never a credential file) and must be "
-  + `one .html file of at most ${PAGE_HTML_MAX_BYTES / (1024 * 1024)} MB. Whether it goes live at once or waits for a room admin follows `
-  + "the room's rules; the answer says which. draft: true shows it only to room admins and you. A room admin pins it as a tab. "
-  + `After people use it, read its errors with read_page_diagnostics. ${PAGE_DATA_DESCRIPTION} `
-  + "Everything a page needs is in the reference below.\n\n"
-  + pageReference();
+  + "of that page. Call get_page_reference before you write or change a page: it has the manifest, the window.letagents API, "
+  + `the capabilities and every method a page can call. The page is one self-contained .html file of at most ${PAGE_HTML_MAX_BYTES / (1024 * 1024)} MB `
+  + "with a manifest script, inline CSS and JavaScript, no network. The file is read with the checks message attachments use (inside your "
+  + "workspace, never a credential file). Whether it goes live at once or waits for a room admin follows the room's rules; the answer says "
+  + "which. draft: true shows it only to room admins and you. A room admin pins it as a tab. "
+  + `After people use it, read its errors with read_page_diagnostics. ${PAGE_DATA_DESCRIPTION}`;
+
+export const GET_PAGE_REFERENCE_DESCRIPTION = "The room page reference, as Markdown: the rules, the manifest, window.letagents, "
+  + "the capabilities and every API method a page can call with its input and output. Read it before you write or change a page "
+  + "for publish_page. Reads only.";
 
 export function registerPageTools(server: McpServer, options: { publish: boolean }): void {
   server.tool(
@@ -102,10 +119,17 @@ export function registerPageTools(server: McpServer, options: { publish: boolean
   server.tool(
     "read_page",
     "Read a room page's HTML and the version it is, to change it and publish a new version with publish_page. "
-      + `A draft or a version waiting for approval is readable by room admins and its author. The HTML is in page_html. ${PAGE_DATA_DESCRIPTION}`,
-    { page_id: pageId, version, room_id: roomId },
-    ({ page_id, version: pageVersion, room_id }) => call("pages.document", { pageId: page_id, version: pageVersion }, room_id,
-      (output: { page: unknown; html: unknown }) => ({ page: output.page, page_html: output.html })),
+      + "A draft or a version waiting for approval is readable by room admins and its author. The HTML is in page_html, "
+      + `at most ${READ_PAGE_MAX_CHARS.toLocaleString("en-US")} characters per call from offset (default 0); total_chars is its full length, and `
+      + `next_offset, when not null, is the offset of the next part. ${PAGE_DATA_DESCRIPTION}`,
+    {
+      page_id: pageId,
+      version,
+      offset: z.number().int().min(0).optional().describe("The first character of page_html to return; next_offset from the previous part."),
+      room_id: roomId,
+    },
+    ({ page_id, version: pageVersion, offset, room_id }) => call("pages.document", { pageId: page_id, version: pageVersion }, room_id,
+      (output: { page: unknown; html: string }) => ({ page: output.page, ...pageHtmlPart(output.html, offset) })),
   );
 
   server.tool(
@@ -118,6 +142,11 @@ export function registerPageTools(server: McpServer, options: { publish: boolean
   );
 
   if (!options.publish) return;
+  // Only an agent that can publish needs the reference.
+  server.tool("get_page_reference", GET_PAGE_REFERENCE_DESCRIPTION, {}, () => ({
+    content: [{ type: "text" as const, text: pageReference() }],
+  }));
+
   server.tool(
     "publish_page",
     PUBLISH_PAGE_DESCRIPTION,

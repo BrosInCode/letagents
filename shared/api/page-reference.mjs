@@ -1,6 +1,6 @@
 // The room page reference: what an agent needs to write a working page, made
-// from the contract. The MCP tool `publish_page` carries it as its
-// description, and `docs/api/page-reference.md` holds the same text. An agent
+// from the contract. The MCP tool `get_page_reference` returns it, and
+// `docs/api/page-reference.md` holds the same text. An agent
 // must be able to build a page from it alone, so it stays complete but short.
 import { CAPABILITIES, CAPABILITY_NAMES, getCapability } from "./capabilities.mjs";
 import { API_ERROR_CODES, API_VERSION, toJsonSchema } from "./core.mjs";

@@ -12,6 +12,8 @@
     "dist/api/board-intent-payloads.js",
     "dist/shared/**",
     "shared/**",
+    "!shared/api/__snapshots__/**",
+    "!shared/**/*.test.mjs",
     "README.md"
   ],
   "scripts": {
