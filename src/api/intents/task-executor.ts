@@ -16,6 +16,8 @@ export const ADMIN_ONLY_TASK_STATUSES: ReadonlySet<TaskStatus> = new Set(["accep
 /** The board as the person's routes use it; tests pass their own. */
 export interface TaskIntentBoard {
   getTask(roomId: string, taskId: string): Promise<Task | null>;
+  /** The board's status rule (VALID_TRANSITIONS): the statuses a task may move to from `from`. */
+  allowedStatuses(from: TaskStatus): readonly TaskStatus[];
   /** True when a review lease separate from the work holder would let `merged` through. */
   hasBoardReviewLease(roomId: string, taskId: string): Promise<boolean>;
   updateTask(roomId: string, taskId: string, updates: TaskIntentUpdates): Promise<Task | null>;
@@ -57,7 +59,7 @@ function toUpdates(payload: TaskUpdatePayload): TaskIntentUpdates {
  * no pending intent) and again when it runs.
  */
 export async function checkTaskUpdate(
-  board: Pick<TaskIntentBoard, "getTask" | "hasBoardReviewLease">,
+  board: Pick<TaskIntentBoard, "getTask" | "allowedStatuses" | "hasBoardReviewLease">,
   input: { roomId: string; payload: TaskUpdatePayload; isAdmin: boolean },
 ): Promise<Task> {
   const task = await board.getTask(input.roomId, input.payload.taskId);
@@ -68,6 +70,11 @@ export async function checkTaskUpdate(
   }
   if (!input.isAdmin && payload.status && ADMIN_ONLY_TASK_STATUSES.has(payload.status)) {
     throw new TaskIntentRefusal("not_granted", `Only a room admin can move a task to ${payload.status}.`);
+  }
+  if (payload.status && !board.allowedStatuses(task.status).includes(payload.status)) {
+    const allowed = board.allowedStatuses(task.status);
+    throw new TaskIntentRefusal("conflict",
+      `${task.id} is ${task.status}; it can move to ${allowed.length ? allowed.join(", ") : "no other status"}, not ${payload.status}.`);
   }
   if (payload.status === "blocked" && task.status === "in_review") {
     // The person's route keeps this for a registered review worker session.
@@ -120,8 +127,9 @@ export async function runTaskCreate(
 
 /** The production board: the same db functions and announcements as the person's task routes. */
 export async function createDefaultTaskIntentBoard(): Promise<TaskIntentBoard> {
-  const [dbModule, policy, details, events, services] = await Promise.all([
+  const [dbModule, tasksModule, policy, details, events, services] = await Promise.all([
     import("../db.js"),
+    import("../db/tasks.js"),
     import("../coordination-policy.js"),
     import("../routes/rooms/tasks/task-details.js"),
     import("../server/events.js"),
@@ -129,6 +137,7 @@ export async function createDefaultTaskIntentBoard(): Promise<TaskIntentBoard> {
   ]);
   return {
     getTask: async (roomId, taskId) => (await dbModule.getTaskById(roomId, taskId)) ?? null,
+    allowedStatuses: (from) => tasksModule.VALID_TRANSITIONS[from] ?? [],
     hasBoardReviewLease: async (roomId, taskId) => Boolean(policy.findBoardReviewLeaseForMerge({
       taskId,
       leases: await dbModule.getActiveTaskLeases(roomId, taskId),

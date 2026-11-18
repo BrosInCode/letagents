@@ -110,12 +110,17 @@ export function toIntent(row: ApiIntentRow): Intent {
       } : {}),
     },
     decidedBy: row.decided_by,
-    decidedAt: row.decided_at,
+    decidedAt: isoTime(row.decided_at),
     result: row.result ?? null,
     error: row.error,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
+    createdAt: isoTime(row.created_at)!,
+    updatedAt: isoTime(row.updated_at)!,
   };
+}
+
+/** Postgres answers timestamps in its own text form; the API sends ISO 8601. */
+function isoTime(value: string | null): string | null {
+  return value === null ? null : new Date(value).toISOString();
 }
 
 /** What a run needs that the room can change while an intent waits: decided again at each run. */

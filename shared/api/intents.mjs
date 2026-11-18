@@ -117,11 +117,10 @@ export const ProposeIntentInput = z.strictObject({
   payload: z.union([TaskCreatePayload, TaskUpdatePayload, TicketTransitionPayload, TicketCommentPayload]),
 }).superRefine((value, ctx) => {
   const parsed = parseIntentPayload(value.kind, value.payload);
-  if (parsed.success) return;
-  for (const issue of parsed.error.issues) {
+  for (const issue of parsed.success ? [] : parsed.error.issues) {
     ctx.addIssue({ code: "custom", path: ["payload", ...issue.path], message: issue.message });
   }
-  if (value.kind === "task.update" && Object.keys(value.payload).every((key) => key === "taskId")) {
+  if (parsed.success && value.kind === "task.update" && Object.keys(value.payload).every((key) => key === "taskId")) {
     ctx.addIssue({ code: "custom", path: ["payload"], message: "Name at least one field to change." });
   }
 });
