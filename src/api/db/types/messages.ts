@@ -6,7 +6,7 @@ import type { AgentPromptKind } from "../../../shared/room-agent-prompts.js";
 export interface Message {
   /** Public profile of the authenticated human publisher, never inferred from sender text. */
   sender_profile?: { login: string; avatar_url: string | null } | null;
-  /** Random desktop submission identity; internal publisher keys stay private. */
+  /** Random desktop submission identity, or a job thread root's `internal:job:<id>`; other internal keys stay private. */
   client_message_id?: string;
   id: string;
   agent_identity: MessageAgentIdentity | null;

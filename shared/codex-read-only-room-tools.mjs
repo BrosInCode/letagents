@@ -20,6 +20,9 @@ export const CODEX_READ_ONLY_ROOM_TOOLS = new Set([
   // What the room says.
   "read_messages", "read_demo_marks", "get_room_history_summary", "expand_room_history_summary", "get_current_room", "get_room_guidelines", "get_room_memory", "get_human_requests",
   "get_board", "get_board_settings", "list_board_intents", "list_wake_rules", "get_room_artifacts", "get_room_events",
-  // What the agent says in it.
+  "get_job",
+  // What the agent says in it. Reporting on a job it was given is saying
+  // something: the job changes nothing but its own record.
+  "update_job", "complete_job",
   "send_message", "send_thread_message", "post_status", "post_reasoning", "request_human_input", "set_reply_thread",
 ]);

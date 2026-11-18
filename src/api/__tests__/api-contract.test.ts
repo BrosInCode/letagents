@@ -128,7 +128,7 @@ test("capabilityFromInput picks the capability per call, falls back to the metho
 
 test("the capability registry has every capability the plan names, with a label and a default policy", () => {
   assert.deepEqual([...CAPABILITY_NAMES].sort(), [
-    "agents.read", "data.page", "data.room", "data.viewer", "git.read", "intents.read", "jobs.start", "memory.read", "messages.post",
+    "agents.read", "data.page", "data.room", "data.viewer", "git.read", "intents.read", "jobs.read", "jobs.start", "memory.read", "messages.post",
     "messages.read", "people.read", "planning.read", "rooms.admin", "rooms.read", "tasks.propose", "tasks.read", "tickets.propose", "work_items.read",
   ]);
   // Room administration is never a page's: no manifest asks for it, no grant holds it.
