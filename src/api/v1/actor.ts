@@ -1,12 +1,9 @@
-import type { ActorVia, ApiActor } from "../../../shared/api/actor.mjs";
 import { ApiError } from "../../../shared/api/core.mjs";
-import type { OwnerTokenAccount, SessionAccount } from "../db.js";
-import type { AuthenticatedRequest, PageGrantRequestGrant } from "../http/helpers.js";
 import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
 import { classifyRoomAccess, decideRoomRead, roomAccessPrincipal, type RoomAccessPrincipal } from "../rooms/access-decision.js";
 import { resolveExistingRoomRequest } from "../rooms/resolution.js";
 import { normalizeRoomId } from "../rooms/routing.js";
-import type { ApiActorResolver, ResolvedApiActor } from "./context.js";
+import type { ApiCallerIdentifier, ApiRoomAccessResolver } from "./context.js";
 
 // GitHub gave no answer to the repository access check; the same wait the
 // older room routes send in Retry-After.
@@ -16,91 +13,71 @@ const ACCESS_RETRY_AFTER_MS = 30_000;
 export const REMOTE_MCP_INTEGRATION_ID = "remote-mcp";
 
 /**
- * Who is calling, before any room is looked at.
- * - `person`: an app session or an owner token. A remote MCP session's
- *   in-process call is a person through the `remote-mcp` integration.
- * - `agent`: a worker bearer, bound to the one room of its session.
- * - `page`: a page grant, the person who opened the page, bound to the one
- *   room and page version it was minted for.
+ * Who sent the request:
+ * - an app session or an owner token: the person. A remote MCP session's
+ *   call arrives in process with the person's owner token; it is marked as
+ *   that integration.
+ * - a worker bearer: the agent, bound to its session's room.
+ * - a page grant: the person who opened the page, through that page
+ *   version, bound to the room it was minted for.
+ * Supervisor grants (and MCP OAuth tokens, which the middleware keeps on
+ * /mcp) are not API credentials: `not_granted`.
  */
-export type ApiCallerIdentity =
-  | { kind: "person"; account: SessionAccount | OwnerTokenAccount; via?: ActorVia }
-  | { kind: "agent"; agentKey: string; roomId: string }
-  | { kind: "page"; account: SessionAccount | OwnerTokenAccount; grant: PageGrantRequestGrant };
-
-/**
- * Step 1 of the pipeline: the caller from the request's credential. Throws
- * `unauthenticated` without one, `not_granted` for a credential the API does
- * not take (supervisor grants; MCP OAuth tokens never get here, the
- * middleware keeps them on /mcp).
- */
-export function identifyCaller(req: AuthenticatedRequest): ApiCallerIdentity {
+export const identifyCaller: ApiCallerIdentifier = async (req) => {
+  const account = req.sessionAccount ?? null;
   switch (req.authKind) {
     case "session":
-    case "owner_token": {
-      const account = req.sessionAccount;
-      if (!account) break;
-      return inProcessPrincipal(req)
-        ? { kind: "person", account, via: { kind: "integration", id: REMOTE_MCP_INTEGRATION_ID } }
-        : { kind: "person", account };
-    }
+    case "owner_token":
+      if (!account) return null;
+      return {
+        principal: { kind: "person", id: account.account_id, login: account.login },
+        ...(req.authKind === "owner_token" && inProcessPrincipal(req)
+          ? { via: { kind: "integration" as const, id: REMOTE_MCP_INTEGRATION_ID } }
+          : {}),
+        account,
+      };
     case "agent_session": {
       const session = req.agentSession;
-      if (!session) break;
-      return { kind: "agent", agentKey: session.agent_key, roomId: session.room_id };
+      if (!session) return null;
+      return { principal: { kind: "agent", id: session.agent_key }, account: null, roomId: session.room_id };
     }
     case "page_grant": {
-      if (!req.sessionAccount || !req.pageGrant) break;
-      return { kind: "page", account: req.sessionAccount, grant: req.pageGrant };
+      const grant = req.pageGrant;
+      if (!account || !grant) return null;
+      return {
+        principal: { kind: "person", id: account.account_id, login: account.login },
+        via: { kind: "page", id: grant.page_id, version: grant.page_version },
+        account,
+        roomId: grant.room_id,
+      };
     }
     case "supervisor_grant":
     case "mcp_oauth":
       throw new ApiError("not_granted", "This credential cannot use the LetAgents API.");
     default:
-      break;
+      return null;
   }
-  throw new ApiError("unauthenticated", "Sign in to LetAgents to use the API.");
-}
-
-/** The actor as far as it is known before the room: what the per-actor rate limit counts. */
-export function callerActor(identity: ApiCallerIdentity, roomId: string): ApiActor {
-  switch (identity.kind) {
-    case "person":
-      return {
-        principal: { kind: "person", id: identity.account.account_id, login: identity.account.login },
-        ...(identity.via ? { via: identity.via } : {}),
-        roomId,
-      };
-    case "agent":
-      return { principal: { kind: "agent", id: identity.agentKey }, roomId };
-    case "page":
-      return {
-        principal: { kind: "person", id: identity.account.account_id, login: identity.account.login },
-        via: { kind: "page", id: identity.grant.page_id, version: identity.grant.page_version },
-        roomId,
-      };
-  }
-}
+};
 
 /**
- * Step 2: the room in the URL, and whether the caller may read it. A page
- * grant opens only its own room (`not_granted` elsewhere, before any lookup
- * that could tell whether another room exists); a worker only its session's
+ * The room in the URL, and whether this caller may read it. A page grant
+ * opens only its own room: `not_granted` elsewhere, before any lookup that
+ * could tell whether another room exists. A worker opens only its session's
  * room. Room access then runs as the person behind the call, so a grant
- * never opens a room its person cannot: `not_participant`.
+ * never opens a room its person cannot: `not_participant`. Room ids with
+ * slashes (github.com/owner/repo) arrive as one encoded segment. Join codes
+ * are not room ids here: a code admits, it does not name.
  */
-export async function resolveRoomAccess(identity: ApiCallerIdentity, roomParam: string): Promise<ResolvedApiActor> {
-  // Room ids with slashes (github.com/owner/repo) arrive as one encoded
-  // segment. Join codes are not room ids here: a code admits, it does not name.
+export const resolveRoomAccess: ApiRoomAccessResolver = async (caller, roomParam) => {
   const room = roomParam ? await resolveExistingRoomRequest(normalizeRoomId(roomParam)) : undefined;
-  if (identity.kind === "page" && room?.id !== identity.grant.room_id) {
+  if (caller.via?.kind === "page" && (!caller.roomId || room?.id !== caller.roomId)) {
     throw new ApiError("not_granted", "This page may only use the room it is pinned in.");
   }
   if (!room) throw new ApiError("not_found", "Room not found.");
 
-  const principal: RoomAccessPrincipal = identity.kind === "agent"
-    ? { kind: "worker", roomId: identity.roomId }
-    : roomAccessPrincipal(identity.account);
+  const principal: RoomAccessPrincipal = caller.principal.kind === "agent"
+    ? { kind: "worker", roomId: caller.roomId ?? null }
+    : roomAccessPrincipal(caller.account);
   const decision = await decideRoomRead({ project: room, principal });
   switch (decision.kind) {
     case "allow":
@@ -116,12 +93,8 @@ export async function resolveRoomAccess(identity: ApiCallerIdentity, roomParam: 
   }
 
   return {
-    actor: callerActor(identity, room.id),
+    actor: { principal: caller.principal, ...(caller.via ? { via: caller.via } : {}), roomId: room.id },
     room,
     access: decision.target ?? (await classifyRoomAccess(room)),
-    account: identity.kind === "agent" ? null : identity.account,
   };
-}
-
-/** Both steps, for the router: the caller, then the room. */
-export const resolveApiActor: ApiActorResolver = async (req, roomParam) => resolveRoomAccess(identifyCaller(req), roomParam);
+};

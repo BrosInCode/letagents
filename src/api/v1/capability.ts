@@ -6,14 +6,15 @@ import type { ApiCallContext, ApiCapabilityCheck } from "./context.js";
 import { resolvePolicy, type ResolvedApiPolicy } from "./policy.js";
 
 /**
- * Every /api/v1 route calls this before its handler, after the room access
- * check. Rights are the person's (or agent's) room rights, which the access
- * check already proved, intersected with the grant of what they act through:
+ * Every /api/v1 route calls this after the room access check and the input
+ * parse, before its handler. Rights are the person's (or agent's) room
+ * rights, which the access check already proved, intersected with the grant
+ * of what they act through:
  * 1. Through a page: the page grant must hold the capability, for this page
  *    version in this room (`not_granted` otherwise).
  *    Through a job or the remote MCP integration: the principal's own rights;
  *    a job carries no permission and adds none.
- * 2. A write (any method that is not a GET) or a write-like capability then
+ * 2. A method that is not a read, or a write-like capability, then
  *    consults the room policy. `deny` refuses with `not_granted`. `confirm`
  *    and `approve` pass: the intent or job handler acts on them with
  *    `resolveCallPolicy`, since only it can make a pending intent or a
@@ -21,11 +22,12 @@ import { resolvePolicy, type ResolvedApiPolicy } from "./policy.js";
  */
 export function createCapabilityCheck(deps: { resolvePolicy?: typeof resolvePolicy } = {}): ApiCapabilityCheck {
   const policyOf = deps.resolvePolicy ?? resolvePolicy;
-  return async (actor, capability, call) => {
+  return async (actor, method, _input, call) => {
+    const { capability } = method;
     if (actor.via?.kind === "page" && !pageGrantHolds(call.req.pageGrant ?? null, actor, capability)) {
       throw new ApiError("not_granted", `This caller does not hold the "${capability}" capability.`);
     }
-    if (call.req.method === "GET" && !getCapability(capability).writeLike) return;
+    if (method.kind === "read" && !getCapability(capability).writeLike) return;
     const policy = await resolveCallPolicy(call, capability, policyOf);
     if (policy.mode === "deny") {
       throw new ApiError("not_granted", `This room does not allow "${capability}" through the LetAgents API.`);

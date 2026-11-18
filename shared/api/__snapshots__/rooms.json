@@ -4,6 +4,7 @@
     "capability": "rooms.read",
     "httpMethod": "GET",
     "path": "/rooms/:room",
+    "response": "json",
     "rateClass": "read",
     "errors": [
       "not_found"
@@ -136,6 +137,7 @@
     "capability": "rooms.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/policies",
+    "response": "json",
     "rateClass": "read",
     "errors": [],
     "input": {
@@ -206,6 +208,7 @@
     "capability": "rooms.read",
     "httpMethod": "PUT",
     "path": "/rooms/:room/policies",
+    "response": "json",
     "rateClass": "write",
     "errors": [],
     "input": {

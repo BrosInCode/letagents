@@ -208,15 +208,16 @@ test("signing out revokes the person's page grants", { skip }, async () => {
 });
 
 test("an agent's worker bearer resolves as the agent, in its own room only", { skip }, async () => {
-  const identity = actorModule!.identifyCaller({
+  const caller = await actorModule!.identifyCaller({
     authKind: "agent_session",
     agentSession: { agent_key: "agent_helper", room_id: roomA },
   } as AuthenticatedRequest);
-  const own = await actorModule!.resolveRoomAccess(identity, roomA);
+  assert.ok(caller);
+  assert.equal(caller.account, null);
+  const own = await actorModule!.resolveRoomAccess(caller, roomA);
   assert.deepEqual(own.actor, { principal: { kind: "agent", id: "agent_helper" }, roomId: roomA });
-  assert.equal(own.account, null);
-  await assert.rejects(actorModule!.resolveRoomAccess(identity, roomB), (error: unknown) => error instanceof ApiError && error.code === "not_participant");
-  assert.throws(() => actorModule!.identifyCaller({ authKind: "supervisor_grant" } as AuthenticatedRequest),
+  await assert.rejects(actorModule!.resolveRoomAccess(caller, roomB), (error: unknown) => error instanceof ApiError && error.code === "not_participant");
+  await assert.rejects(actorModule!.identifyCaller({ authKind: "supervisor_grant" } as AuthenticatedRequest),
     (error: unknown) => error instanceof ApiError && error.code === "not_granted");
 });
 
