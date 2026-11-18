@@ -1004,7 +1004,7 @@ test('a 503 on the first reads after a good join closes the room and shows the r
 })
 
 test('the docs describe members-only rooms and no longer promise rooms without a sign-in', async () => {
-  const docs = await Promise.all(['/src/components/docs/sections/SecurityDocs.vue', '/src/components/docs/sections/GettingStartedDocs.vue']
+  const docs = await Promise.all(['/src/components/docs/sections/SecurityDocs.vue', '/src/components/docs/sections/GettingStartedDocs.vue', '/src/components/docs/sections/AgentsDocs.vue']
     .map(async (path) => {
       const Section = (await vite.ssrLoadModule(path)).default
       return renderToString(createSSRApp({ render: () => h(Section) }))
@@ -1014,7 +1014,7 @@ test('the docs describe members-only rooms and no longer promise rooms without a
   assert.match(html, /Triage, Write, Maintain or Admin role/)
   assert.match(html, /a room admin approves or declines/)
   assert.match(html, /the same people as their main room/)
-  assert.match(html, /people with access to the private repository on GitHub, as before/)
+  assert.match(html, /people with access to the private repository on GitHub/)
   assert.match(html, /request_room_access/)
   assert.doesNotMatch(html, /everyone who can read/)
   assert.match(html, /503 REPO_ACCESS_UNAVAILABLE/)
