@@ -98,7 +98,7 @@ import type { RoomAgentPresence, RoomTask, TaskGitHubArtifactStatus } from '@/co
 import TaskDetailLayout from '../../../../../../shared/ui/board/TaskDetailLayout.vue'
 import GitPullRequestIcon from '@/components/icons/GitPullRequestIcon.vue'
 import CloseIcon from '@/components/icons/CloseIcon.vue'
-import { taskStatusAccent, taskStatusLabel } from '@/domain/taskStatus'
+import { taskStatusAccent, taskStatusLabel } from '../../../../../../shared/ui/task-status'
 import TaskLeaseAuthority from '../task-lease-authority/TaskLeaseAuthority.vue'
 import TaskReviewAuthority from '../task-review-authority/TaskReviewAuthority.vue'
 import TaskMergeReadiness from '../TaskMergeReadiness.vue'

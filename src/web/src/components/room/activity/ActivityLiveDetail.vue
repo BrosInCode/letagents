@@ -244,13 +244,13 @@ import ActivityTaskList from './ActivityTaskList.vue'
 import {
   connectionLabel,
   getActivityTaskLink,
-  livenessCapabilityLabel,
   participantMeta,
   participantNote,
   reasoningCardSummary,
   reasoningCardTitle,
   reasoningStatusLabel,
 } from './displayHelpers'
+import { livenessCapabilityLabel } from '../../../../../../shared/ui/liveness-labels'
 import { TASK_STATUS_LABELS } from './labels'
 import {
   formatLastSeen,

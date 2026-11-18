@@ -1,5 +1,5 @@
 import type { ParticipantActivityState } from './types'
-import { TASK_STATUS_LABELS } from '../../../domain/taskStatus'
+import { TASK_STATUS_LABELS } from '../../../../../../shared/ui/task-status'
 
 export const STATUS_ORDER = ['working', 'reviewing', 'blocked', 'idle'] as const
 

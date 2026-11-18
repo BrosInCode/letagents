@@ -4,7 +4,7 @@ import type { RoomTask } from '../../../composables/useRoom'
 import {
   TASK_STATUS_ORDER,
   taskStatusLabel,
-} from '../../../domain/taskStatus'
+} from '../../../../../../shared/ui/task-status'
 
 const LEASE_AUTHORITY_STATUSES = new Set(['assigned', 'in_progress', 'blocked', 'in_review'])
 

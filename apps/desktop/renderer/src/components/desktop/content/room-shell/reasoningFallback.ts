@@ -3,6 +3,7 @@ import type {
   DesktopRoomMessage,
 } from "../../../../../../electron/ipc-types";
 import { displayNameFromActor, normalizeAgentKey } from "../../../../domain/agents";
+import { stripStatusPrefix } from "../../../../../../../../shared/ui/room-messages";
 import {
   type ReasoningAgentTarget,
   reasoningAgentTargetKeys,
@@ -80,10 +81,6 @@ export function sanitizeFallbackId(value: string): string {
   return value.replace(/[^A-Za-z0-9_-]+/g, "-") || "agent";
 }
 
-export function stripStatusPrefix(value: string): string {
-  return value.replace(/^\[status\]\s*/i, "").trim();
-}
-
 function messageKeys(message: DesktopRoomMessage): string[] {
   return [
     message.sender,
@@ -95,3 +92,5 @@ function messageKeys(message: DesktopRoomMessage): string[] {
     displayNameFromActor(message.sender),
   ].map(normalizeAgentKey).filter(Boolean);
 }
+
+export { stripStatusPrefix };

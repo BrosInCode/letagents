@@ -4,53 +4,7 @@ import type {
   RoomMessage,
 } from './types'
 
-const OWNER_COLORS = [
-  '#a855f7',
-  '#3b82f6',
-  '#22c55e',
-  '#f59e0b',
-  '#ef4444',
-  '#06b6d4',
-  '#ec4899',
-  '#14b8a6',
-  '#f97316',
-  '#8b5cf6',
-  '#10b981',
-  '#6366f1',
-]
-const colorCache = new Map<string, string>()
-
-function hashString(str: string): number {
-  let hash = 5381
-  for (let i = 0; i < str.length; i++) {
-    hash = ((hash << 5) + hash + str.charCodeAt(i)) >>> 0
-  }
-  return hash
-}
-
-export function getSenderColor(sender: string, source: string | null): string {
-  const owner = getOwnerFromSender(sender, source)
-  if (!owner) return 'var(--sender-default, #71717a)'
-  const ownerKey = owner.toLowerCase()
-  if (colorCache.has(ownerKey)) return colorCache.get(ownerKey)!
-  const color = OWNER_COLORS[hashString(ownerKey) % OWNER_COLORS.length]
-  colorCache.set(ownerKey, color)
-  return color
-}
-
-function getOwnerFromSender(
-  sender: string,
-  source: string | null,
-): string | null {
-  const parsed = parseAgentIdentity(sender)
-  if (parsed.structured && parsed.ownerAttribution) {
-    // Extract owner name from "Owner's agent"
-    const match = parsed.ownerAttribution.match(/^(.+?)(?:'s?\s+agent)$/i)
-    return match ? match[1] : parsed.ownerAttribution
-  }
-  if (isHumanSender(sender, source)) return sender || null
-  return parsed.displayName || sender || null
-}
+export { getSenderColor } from '../../../../../shared/ui/sender-color'
 
 export interface ParsedIdentity {
   raw: string
