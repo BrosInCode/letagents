@@ -37,8 +37,12 @@ export const routes: readonly ApiRoute[] = [
  * A room admin acting for themselves: no page, no agent, no integration.
  * A write also needs an app session (not an owner token) and this app's origin.
  */
-async function requireRoomAdminInPerson(call: ApiCallContext, write: boolean): Promise<void> {
-  const refused = new ApiError("not_granted", "Only a room admin, signed in to LetAgents, can manage this room's API policy.");
+export async function requireRoomAdminInPerson(
+  call: ApiCallContext,
+  write: boolean,
+  message = "Only a room admin, signed in to LetAgents, can manage this room's API policy.",
+): Promise<void> {
+  const refused = new ApiError("not_granted", message);
   if (call.actor.principal.kind !== "person" || call.actor.via || !call.account) throw refused;
   if (write && (!isHumanAppWrite(call.req) || !isSameOriginCookieWrite(call.req))) throw refused;
   const decision = await decideRoomAdmin({ project: call.room, principal: roomAccessPrincipal(call.account), outage: "throw" });

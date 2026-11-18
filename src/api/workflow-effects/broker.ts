@@ -78,7 +78,8 @@ export interface SubmitGitHubReviewVerdictInput extends GitHubReviewEffectReques
 
 export interface SubmitTrackerEffectInput {
   room_id: string;
-  task_id: string;
+  /** The board card the write is for; null when it names only a ticket (an API intent). */
+  task_id: string | null;
   connection_id: string;
   /**
    * The account that owns the connection, as the caller resolved it from the
@@ -102,6 +103,12 @@ export interface WorkflowEffectBrokerDeps {
   provider: GitHubReviewProvider;
   /** Jira and Linear writes. Without it, tracker effects fail definitely. */
   tracker?: WorkflowEffectExecutor;
+  /**
+   * Told after every write or lookup the broker ran, with the stored row, so
+   * whoever waits on an effect (an API intent) finishes when it settles, from
+   * a request or from the sweep. A failure here never fails the effect.
+   */
+  onSettled?: (effect: WorkflowEffect) => Promise<void> | void;
   now?: () => Date;
 }
 
@@ -261,19 +268,28 @@ export function createWorkflowEffectBroker(deps: WorkflowEffectBrokerDeps) {
   };
   const executorFor = (effect: WorkflowEffect): WorkflowEffectExecutor =>
     effect.kind === "github_review_verdict" ? githubExecutor : deps.tracker ?? unconfiguredTrackerExecutor;
+  const settled = async (work: Promise<WorkflowEffect>): Promise<WorkflowEffect> => {
+    const effect = await work;
+    try {
+      await deps.onSettled?.(effect);
+    } catch (error) {
+      console.error(`[workflow effects] a settle listener failed for ${effect.id}`, error);
+    }
+    return effect;
+  };
 
   /** Run a freshly reserved, retried or ambiguous effect once. */
   async function drive(reserved: ReserveResult): Promise<WorkflowEffect> {
     if (reserved.claimed && reserved.processing_token) {
-      return performCreate({ effect: reserved.effect, token: reserved.processing_token, store, executor: executorFor(reserved.effect), now: nowFn() });
+      return settled(performCreate({ effect: reserved.effect, token: reserved.processing_token, store, executor: executorFor(reserved.effect), now: nowFn() }));
     }
     if (reserved.effect.state === "failed") {
       const claim = await store.claimFailed(reserved.effect.id, nowFn());
-      if (claim) return performCreate({ effect: claim.effect, token: claim.processing_token, store, executor: executorFor(claim.effect), now: nowFn() });
+      if (claim) return settled(performCreate({ effect: claim.effect, token: claim.processing_token, store, executor: executorFor(claim.effect), now: nowFn() }));
     }
     if (reserved.effect.state === "ambiguous") {
       const claim = await store.claimAmbiguous(reserved.effect.id, nowFn());
-      if (claim) return performLookup({ effect: claim.effect, token: claim.processing_token, store, executor: executorFor(claim.effect), now: nowFn() });
+      if (claim) return settled(performLookup({ effect: claim.effect, token: claim.processing_token, store, executor: executorFor(claim.effect), now: nowFn() }));
     }
     return reserved.effect;
   }
@@ -334,6 +350,7 @@ export function createWorkflowEffectBroker(deps: WorkflowEffectBrokerDeps) {
       const reserved = await store.reserveTracker({
         room_id: input.room_id,
         task_id: input.task_id,
+        subject: `${input.provider}:${key}`,
         connection_id: input.connection_id,
         connection_account_id: input.connection_account_id,
         kind: input.action.kind,
@@ -371,13 +388,13 @@ export function createWorkflowEffectBroker(deps: WorkflowEffectBrokerDeps) {
       if (current.state === "ambiguous") {
         const claim = await store.claimAmbiguous(current.id, now);
         return claim
-          ? performLookup({ effect: claim.effect, token: claim.processing_token, store, executor: executorFor(claim.effect), now })
+          ? settled(performLookup({ effect: claim.effect, token: claim.processing_token, store, executor: executorFor(claim.effect), now }))
           : await store.get(current.id) ?? current;
       }
       if (current.state === "failed") {
         const claim = await store.claimFailed(current.id, now);
         return claim
-          ? performCreate({ effect: claim.effect, token: claim.processing_token, store, executor: executorFor(claim.effect), now })
+          ? settled(performCreate({ effect: claim.effect, token: claim.processing_token, store, executor: executorFor(claim.effect), now }))
           : await store.get(current.id) ?? current;
       }
       return current;

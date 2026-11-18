@@ -11,7 +11,10 @@ export const workflow_effects = pgTable(
     room_id: text("room_id")
       .notNull()
       .references(() => rooms.id, { onDelete: "cascade", onUpdate: "cascade" }),
-    task_id: text("task_id").notNull(),
+    /** Null only for a tracker effect that names a ticket, not a card (`subject`). */
+    task_id: text("task_id"),
+    /** The ticket a tracker effect writes, as `<provider>:<key>` (`jira:HT-1234`). */
+    subject: text("subject"),
     /** Required for GitHub review verdicts; tracker effects run without a lease. */
     lease_id: text("lease_id")
       .references(() => task_leases.id, { onDelete: "restrict", onUpdate: "cascade" }),
@@ -57,6 +60,7 @@ export const workflow_effects = pgTable(
     kind_check: check("workflow_effects_kind_check", sql`${table.kind} IN ('github_review_verdict', 'tracker_transition', 'tracker_comment')`),
     provider_check: check("workflow_effects_provider_check", sql`${table.provider} IN ('github', 'jira', 'linear')`),
     kind_provider_check: check("workflow_effects_kind_provider_check", sql`(${table.kind} = 'github_review_verdict' AND ${table.provider} = 'github' AND ${table.lease_id} IS NOT NULL) OR (${table.kind} IN ('tracker_transition', 'tracker_comment') AND ${table.provider} IN ('jira', 'linear'))`),
+    target_check: check("workflow_effects_target_check", sql`${table.task_id} IS NOT NULL OR (${table.kind} IN ('tracker_transition', 'tracker_comment') AND ${table.subject} IS NOT NULL)`),
     attempt_count_check: check("workflow_effects_attempt_count_check", sql`${table.attempt_count} >= 0 AND ${table.attempt_count} <= ${table.max_attempts}`),
     max_attempts_check: check("workflow_effects_max_attempts_check", sql`${table.max_attempts} > 0`),
     processing_coupling_check: check("workflow_effects_processing_coupling_check", sql`(${table.processing_token} IS NULL) = (${table.processing_started_at} IS NULL)`),

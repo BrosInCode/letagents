@@ -24,6 +24,9 @@ export const API_AGENT_TOOLS = Object.freeze([
   Object.freeze({name: "api_data_set", method: "data.set", access: "write"}),
   Object.freeze({name: "api_data_update", method: "data.update", access: "write"}),
   Object.freeze({name: "api_data_delete", method: "data.delete", access: "write"}),
+  Object.freeze({name: "api_intents_propose", method: "intents.propose", access: "write"}),
+  Object.freeze({name: "api_intents_get", method: "intents.get", access: "read"}),
+  Object.freeze({name: "api_intents_list", method: "intents.list", access: "read"}),
   Object.freeze({name: "api_jobs_list", method: "jobs.list", access: "read"}),
   Object.freeze({name: "api_pages_get", method: "pages.get", access: "read"}),
 ]);
