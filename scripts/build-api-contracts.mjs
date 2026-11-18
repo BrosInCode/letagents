@@ -29,8 +29,12 @@ export const AGENT_TOOLS_MODULE = path.join(ROOT, "shared", "api-agent-tools.mjs
 export const AGENT_TOOLS_DECLARATION = path.join(ROOT, "shared", "api-agent-tools.d.mts");
 export const PAGE_REFERENCE_DOC = path.join(ROOT, "docs", "api", "page-reference.md");
 const REFRESH_COMMAND = "node scripts/build-api-contracts.mjs";
-/** The branch API PRs merge into; CI sets API_CONTRACT_BASE_REF to the pull request's base. */
-export const DEFAULT_BASE_REF = "origin/feat/letagents-api";
+/**
+ * The branch the API merges into; CI sets API_CONTRACT_BASE_REF to the pull
+ * request's base. Until the API lands there, the base has no snapshot and
+ * nothing is compared.
+ */
+export const DEFAULT_BASE_REF = "origin/staging";
 
 const COMPILER_OPTIONS = {
   allowJs: true,
@@ -150,12 +154,14 @@ export function readSnapshot() {
 /**
  * The snapshot as committed on the base branch, so a snapshot refreshed with
  * --allow-breaking on a feature branch still fails the check. An area file
- * missing on the base is an area with no methods yet.
+ * missing on the base is an area with no methods yet, and a base with no
+ * snapshot at all has nothing to break.
  * @param {string} [ref]
+ * @param {string} [root] the repository to read, for tests
  * @returns {{ ref: string, snapshot: Record<string, Record<string, unknown>> } | { ref: string, missing: string }}
  */
-export function readBaseSnapshot(ref = process.env.API_CONTRACT_BASE_REF || DEFAULT_BASE_REF) {
-  const git = (...args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+export function readBaseSnapshot(ref = process.env.API_CONTRACT_BASE_REF || DEFAULT_BASE_REF, root = ROOT) {
+  const git = (...args) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   try {
     git("rev-parse", "--verify", "--quiet", `${ref}^{commit}`);
   } catch {

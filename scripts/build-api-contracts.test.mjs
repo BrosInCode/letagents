@@ -3,7 +3,10 @@ import test from "node:test";
 
 import { z } from "zod";
 
-import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 
 import {
   buildContractSnapshot,
@@ -158,6 +161,21 @@ test("the base snapshot is read from git, and a missing ref is reported, not thr
   assert.ok("snapshot" in head && head.snapshot.rooms["rooms.get"]);
   const missing = readBaseSnapshot("refs/heads/no-such-branch-for-api-contracts");
   assert.match("missing" in missing ? missing.missing : "", /is not in this clone/);
+});
+
+test("a base branch without the API snapshot has nothing to compare, and the contract passes against it", async () => {
+  // A throwaway repository, so no object is written into this clone.
+  const repo = mkdtempSync(path.join(os.tmpdir(), "api-contract-base-"));
+  try {
+    const git = (...args) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.com", ...args], { cwd: repo, stdio: "ignore" });
+    git("init", "--quiet");
+    git("commit", "--quiet", "--allow-empty", "-m", "base without an API");
+    const base = readBaseSnapshot("HEAD", repo);
+    assert.deepEqual(base, { ref: "HEAD", snapshot: {} });
+    assert.deepEqual(findBreakingChanges(base.snapshot, await buildContractSnapshot()), []);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 // A one-method snapshot from zod schemas, the way the build script stores it.

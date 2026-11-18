@@ -112,7 +112,7 @@ the page bridge and MCP tool schemas all come from it. The plan is
    the change removes a method or a field, narrows a type, or changes the path, verb, capability,
    rate class or response kind: inside `api: 1` the contract only grows. Commit the generated
    files with the change. The test also compares with the snapshot on the base branch
-   (`API_CONTRACT_BASE_REF`, default `origin/feat/letagents-api`), so `--allow-breaking` on a
+   (`API_CONTRACT_BASE_REF`, default `origin/staging`), so `--allow-breaking` on a
    feature branch does not get a break past review.
 
 4. **Test.** Add a route test (see `src/api/__tests__/api-v1-rooms-db.test.ts`) and run:
