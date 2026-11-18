@@ -61,20 +61,34 @@ export function getApiMethod(name) {
 }
 
 /**
- * Two methods with one name, or one HTTP route, would make the contract and
- * the server disagree about which one a call means.
+ * Two methods with one name, or two routes that can match the same URL, would
+ * make the contract and the server disagree about which one a call means.
+ * `/tasks/:taskId` and `/tasks/search` overlap: "search" is also a task id.
  * @param {ReadonlyArray<{ name: string, httpMethod: string, path: string }>} methods
  */
 export function assertUniqueMethods(methods) {
   const names = new Set();
-  const routes = new Map();
   for (const method of methods) {
     if (names.has(method.name)) throw new Error(`Two API methods are named ${JSON.stringify(method.name)}.`);
     names.add(method.name);
-    // `/rooms/:room/tasks/:taskId` and `/rooms/:room/tasks/:id` are one route.
-    const route = `${method.httpMethod} ${method.path.replace(/:[A-Za-z0-9_]+/g, ":")}`;
-    const other = routes.get(route);
-    if (other) throw new Error(`API methods ${JSON.stringify(other)} and ${JSON.stringify(method.name)} share the route ${route}.`);
-    routes.set(route, method.name);
   }
+  for (let i = 0; i < methods.length; i += 1) {
+    for (let j = i + 1; j < methods.length; j += 1) {
+      const [a, b] = [methods[i], methods[j]];
+      if (a.httpMethod === b.httpMethod && pathsOverlap(a.path, b.path)) {
+        throw new Error(`API methods ${JSON.stringify(a.name)} and ${JSON.stringify(b.name)} overlap: ${a.httpMethod} ${a.path} and ${b.path} can match the same URL. Give one a different fixed segment.`);
+      }
+    }
+  }
+}
+
+/**
+ * @param {string} a
+ * @param {string} b
+ */
+function pathsOverlap(a, b) {
+  const left = a.split("/");
+  const right = b.split("/");
+  return left.length === right.length
+    && left.every((segment, index) => segment === right[index] || segment.startsWith(":") || right[index].startsWith(":"));
 }

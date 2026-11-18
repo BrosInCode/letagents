@@ -12,6 +12,9 @@ import {
   ApiError,
   defineMethod,
   methodMayReturn,
+  queryBool,
+  queryInputProblems,
+  queryInt,
   toJsonSchema,
 } from "../../../shared/api/core.mjs";
 import { API_METHODS, assertUniqueMethods, getApiMethod } from "../../../shared/api/index.mjs";
@@ -32,6 +35,8 @@ const spec = {
 test("defineMethod fills the HTTP verb from the kind and freezes the method", () => {
   const read = defineMethod(spec);
   assert.equal(read.httpMethod, "GET");
+  assert.equal(read.response, "json");
+  assert.equal(defineMethod({ ...spec, response: "stream" }).response, "stream");
   assert.deepEqual(read.errors, []);
   assert.ok(Object.isFrozen(read));
   const intent = defineMethod({ ...spec, name: "rooms.propose", kind: "intent", path: "/rooms/:room/examples/:exampleId/proposals" });
@@ -50,6 +55,7 @@ test("defineMethod refuses a method that the server could not route or check", (
     [{ path: "/rooms/:room/examples/:id" }, /":id" must be a field of the input object/],
     [{ httpMethod: "POST" }, /a read is a GET/],
     [{ errors: ["teapot"] }, /unknown error code "teapot"/],
+    [{ response: "html" }, /unknown response kind "html"/],
     [{ input: { parse() {} } }, /must be zod schemas/],
   ];
   for (const [change, message] of refused) {
@@ -70,8 +76,37 @@ test("every method in the contract is unique, described and has JSON Schema for 
   assert.throws(() => assertUniqueMethods([read, read]), /Two API methods are named "rooms\.example"/);
   assert.throws(
     () => assertUniqueMethods([read, defineMethod({ ...spec, name: "rooms.other", path: "/rooms/:room/examples/:exampleId" })]),
-    /share the route GET \/rooms\/:\/examples\/:/,
+    /"rooms\.example" and "rooms\.other" overlap/,
   );
+  // A fixed segment where another route has a parameter: "search" is also an example id.
+  const search = defineMethod({ ...spec, name: "rooms.search", path: "/rooms/:room/examples/search", input: z.strictObject({}) });
+  assert.throws(() => assertUniqueMethods([read, search]), /overlap: GET \/rooms\/:room\/examples\/:exampleId and \/rooms\/:room\/examples\/search/);
+  // Another verb, another length or another fixed segment does not overlap.
+  assertUniqueMethods([read, defineMethod({ ...search, name: "rooms.searchPost", kind: "intent", httpMethod: "POST" })]);
+  assertUniqueMethods([read, defineMethod({ ...search, name: "rooms.searchAll", path: "/rooms/:room/examples/search/all" })]);
+  assertUniqueMethods([read, defineMethod({ ...search, name: "rooms.searchOther", path: "/rooms/:room/searches/:exampleId", input: spec.input })]);
+});
+
+test("a GET or DELETE input takes numbers and booleans only through queryInt and queryBool", () => {
+  const withInput = (input: z.ZodType, httpMethod?: "DELETE" | "POST") =>
+    defineMethod({ ...spec, name: "rooms.query", path: "/rooms/:room/query", kind: httpMethod === "POST" ? "intent" : httpMethod ? "write" : "read", httpMethod, input });
+  assert.deepEqual(queryInputProblems(withInput(z.strictObject({
+    a: z.number(), b: z.coerce.number().optional(), c: z.boolean().default(false), d: z.array(z.number()), e: z.string(),
+  }))), [
+    'rooms.query: the query field "a" is a plain number; use queryInt() or queryBool().',
+    'rooms.query: the query field "b" is a plain number; use queryInt() or queryBool().',
+    'rooms.query: the query field "c" is a plain boolean; use queryInt() or queryBool().',
+    'rooms.query: the query field "d" is a plain number; use queryInt() or queryBool().',
+  ]);
+  assert.equal(queryInputProblems(withInput(z.strictObject({ n: z.number() }), "DELETE")).length, 1);
+  assert.deepEqual(queryInputProblems(withInput(z.strictObject({ n: z.number() }), "POST")), [], "a JSON body keeps its numbers");
+  const fine = z.strictObject({ limit: queryInt({ min: 1, max: 100, default: 20 }), open: queryBool().optional(), all: queryBool({ default: false }) });
+  assert.deepEqual(queryInputProblems(withInput(fine)), []);
+  assert.deepEqual(fine.parse({ limit: "5", open: "true" }), { limit: 5, open: true, all: false });
+  assert.deepEqual(fine.parse({ limit: 5, open: false, all: true }), { limit: 5, open: false, all: true });
+  assert.equal(fine.safeParse({ limit: "5.5" }).success, false);
+  assert.equal(fine.safeParse({ open: "1" }).success, false);
+  for (const method of API_METHODS) assert.deepEqual(queryInputProblems(method), [], method.name);
 });
 
 test("the capability registry has every capability the plan names, with a label and a default policy", () => {

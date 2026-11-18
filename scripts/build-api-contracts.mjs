@@ -9,7 +9,10 @@
 //
 // The snapshot is refused when the change removes a method or a field, or
 // narrows a type, because `api: 1` only grows. `--allow-breaking` overrides
-// that, for a change the owner agreed to.
+// that locally, for a change the owner agreed to; the check against the base
+// branch's snapshot (API_CONTRACT_BASE_REF) still fails until the owner
+// merges it on purpose.
+import { execFileSync } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -20,6 +23,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 export const CONTRACT_DIR = path.join(ROOT, "shared", "api");
 export const SNAPSHOT_DIR = path.join(CONTRACT_DIR, "__snapshots__");
 const REFRESH_COMMAND = "node scripts/build-api-contracts.mjs";
+/** The branch API PRs merge into; CI sets API_CONTRACT_BASE_REF to the pull request's base. */
+export const DEFAULT_BASE_REF = "origin/feat/letagents-api";
 
 const COMPILER_OPTIONS = {
   allowJs: true,
@@ -105,6 +110,7 @@ export async function buildContractSnapshot() {
       capability: method.capability,
       httpMethod: method.httpMethod,
       path: method.path,
+      response: method.response,
       rateClass: method.rateClass,
       errors: [...method.errors].sort(),
       input: withoutSchemaUri(input),
@@ -131,6 +137,34 @@ export function readSnapshot() {
     name.replace(/\.json$/, ""),
     JSON.parse(readFileSync(path.join(SNAPSHOT_DIR, name), "utf8")),
   ]));
+}
+
+/**
+ * The snapshot as committed on the base branch, so a snapshot refreshed with
+ * --allow-breaking on a feature branch still fails the check. An area file
+ * missing on the base is an area with no methods yet.
+ * @param {string} [ref]
+ * @returns {{ ref: string, snapshot: Record<string, Record<string, unknown>> } | { ref: string, missing: string }}
+ */
+export function readBaseSnapshot(ref = process.env.API_CONTRACT_BASE_REF || DEFAULT_BASE_REF) {
+  const git = (...args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  try {
+    git("rev-parse", "--verify", "--quiet", `${ref}^{commit}`);
+  } catch {
+    return { ref, missing: `the base ref ${ref} is not in this clone (fetch it to compare)` };
+  }
+  let listing = "";
+  try {
+    listing = git("ls-tree", "--name-only", `${ref}:shared/api/__snapshots__`).trim();
+  } catch {
+    // No snapshot directory on the base yet: nothing to break.
+  }
+  const snapshot = {};
+  for (const name of listing ? listing.split("\n") : []) {
+    if (!name.endsWith(".json")) continue;
+    snapshot[name.replace(/\.json$/, "")] = JSON.parse(git("show", `${ref}:shared/api/__snapshots__/${name}`));
+  }
+  return { ref, snapshot };
 }
 
 const snapshotText = (methods) => `${JSON.stringify(methods, null, 2)}\n`;
@@ -168,11 +202,14 @@ export function findBreakingChanges(before, after) {
       problems.push(`${name}: the method was removed.`);
       continue;
     }
-    for (const key of ["kind", "capability", "httpMethod", "path"]) {
-      if (old[key] !== now[key]) problems.push(`${name}: ${key} changed from ${JSON.stringify(old[key])} to ${JSON.stringify(now[key])}.`);
+    // A rate class change is breaking too: a client paced for the old limit
+    // can start to fail. Snapshots made before `response` existed mean "json".
+    for (const key of ["kind", "capability", "httpMethod", "path", "rateClass", "response"]) {
+      const [was, is] = key === "response" ? [old[key] ?? "json", now[key] ?? "json"] : [old[key], now[key]];
+      if (was !== is) problems.push(`${name}: ${key} changed from ${JSON.stringify(was)} to ${JSON.stringify(is)}.`);
     }
-    compareSchema(old.input, now.input, "input", `${name} input`, problems);
-    compareSchema(old.output, now.output, "output", `${name} output`, problems);
+    compareSchema(old.input, now.input, "input", `${name} input`, problems, { rootA: old.input, rootB: now.input, open: new Set() });
+    compareSchema(old.output, now.output, "output", `${name} output`, problems, { rootA: old.output, rootB: now.output, open: new Set() });
   }
   return problems;
 }
@@ -193,14 +230,39 @@ const isNullSchema = (schema) => (typesOf(schema)?.length === 1 && schema.type =
 const allowsNull = (schema) => alternatives(schema).some((alt) => typesOf(alt)?.includes("null") || alt.const === null);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
-function compareSchema(a, b, mode, at, problems) {
-  if (same(a, b)) return;
+/** `#`, `#/$defs/Task`: a JSON pointer into the schema's own root. */
+function resolveRef(root, ref) {
+  if (ref === "#") return root;
+  if (!ref.startsWith("#/")) return undefined;
+  let node = root;
+  for (const part of ref.slice(2).split("/")) node = node?.[part.replace(/~1/g, "/").replace(/~0/g, "~")];
+  return isSchema(node) ? node : undefined;
+}
+
+function compareSchema(a, b, mode, at, problems, ctx) {
+  if (a.$ref !== undefined || b.$ref !== undefined) {
+    // Follow references into $defs; a pair already being compared further up
+    // is a recursive schema, compared once.
+    const pair = `${mode}|${a.$ref ?? "-"}|${b.$ref ?? "-"}`;
+    if (ctx.open.has(pair)) return;
+    const resolvedA = a.$ref === undefined ? a : resolveRef(ctx.rootA, a.$ref);
+    const resolvedB = b.$ref === undefined ? b : resolveRef(ctx.rootB, b.$ref);
+    if (!resolvedA || !resolvedB) {
+      problems.push(`${at}: the reference ${(resolvedA ? b : a).$ref} does not resolve.`);
+      return;
+    }
+    ctx.open.add(pair);
+    compareSchema(withoutRef(resolvedA, a), withoutRef(resolvedB, b), mode, at, problems, ctx);
+    ctx.open.delete(pair);
+    return;
+  }
+  if (same(a, b) && same(ctx.rootA.$defs, ctx.rootB.$defs)) return;
   const altsA = alternatives(a);
   const altsB = alternatives(b);
   if (altsA.length > 1 || altsB.length > 1) {
     const fits = (from, to) => {
       const trial = [];
-      compareSchema(from, to, mode, at, trial);
+      compareSchema(from, to, mode, at, trial, ctx);
       return trial.length === 0;
     };
     if (mode === "input") {
@@ -218,8 +280,6 @@ function compareSchema(a, b, mode, at, problems) {
     if (!allowsNull(a) && allowsNull(b)) problems.push(`${at}: can now be null.`);
     return;
   }
-
-  if (a.$ref !== b.$ref) problems.push(`${at}: the reference changed from ${a.$ref} to ${b.$ref}.`);
 
   const typesA = typesOf(a);
   const typesB = typesOf(b);
@@ -270,7 +330,7 @@ function compareSchema(a, b, mode, at, problems) {
         problems.push(`${at}.${key}: the field was removed.`);
         continue;
       }
-      compareSchema(schema, propsB[key], mode, `${at}.${key}`, problems);
+      compareSchema(schema, propsB[key], mode, `${at}.${key}`, problems, ctx);
       if (mode === "input" && !requiredA.has(key) && requiredB.has(key)) problems.push(`${at}.${key}: is now required.`);
       if (mode === "output" && requiredA.has(key) && !requiredB.has(key)) problems.push(`${at}.${key}: is no longer always present.`);
     }
@@ -282,12 +342,18 @@ function compareSchema(a, b, mode, at, problems) {
     problems.push(`${at}: unknown fields are now refused.`);
   }
   if (isSchema(a.additionalProperties) && isSchema(b.additionalProperties)) {
-    compareSchema(a.additionalProperties, b.additionalProperties, mode, `${at}{*}`, problems);
+    compareSchema(a.additionalProperties, b.additionalProperties, mode, `${at}{*}`, problems, ctx);
   }
-  if (isSchema(a.items) && isSchema(b.items)) compareSchema(a.items, b.items, mode, `${at}[]`, problems);
+  if (isSchema(a.items) && isSchema(b.items)) compareSchema(a.items, b.items, mode, `${at}[]`, problems, ctx);
 }
 
 const isSchema = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** A `$ref` node's own keywords (a description, a default) laid over its target. */
+function withoutRef(target, node) {
+  const { $ref: _ref, ...rest } = node;
+  return { ...target, ...rest };
+}
 
 // ── CLI ──────────────────────────────────────────────────────────────────
 
@@ -316,10 +382,13 @@ async function main(argv) {
   const breaking = findBreakingChanges(readSnapshot(), snapshot);
 
   if (check) {
+    const base = readBaseSnapshot();
+    if ("missing" in base) console.warn(`Not compared with the base branch: ${base.missing}.`);
     const problems = [
       ...staleDeclarations(declarations).map((name) => `shared/api/${name} is stale.`),
       ...staleSnapshotAreas(snapshot).map((area) => `shared/api/__snapshots__/${area}.json is stale.`),
       ...breaking,
+      ...("snapshot" in base ? findBreakingChanges(base.snapshot, snapshot).map((problem) => `against ${base.ref}: ${problem}`) : []),
     ];
     if (problems.length) throw new Error(`The API contract check failed:\n- ${problems.join("\n- ")}\nRun ${REFRESH_COMMAND} for stale files.`);
     console.log("The API contract declarations and snapshot are current.");
