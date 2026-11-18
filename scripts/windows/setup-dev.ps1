@@ -67,7 +67,7 @@ $GhSha256 = @{
 }
 $CodexVersion = '0.166.0'
 # What shared/letagents-*.seal.json name; the native builds use the default toolset.
-$SealedVcTools = '14.51.36231'
+$SealedVcTools = '14.52.37025'
 $SealedWindowsSdk = '10.0.26100.0'
 $VsBootstrapper = 'https://aka.ms/vs/18/stable/vs_BuildTools.exe'
 $VsComponents = @(
