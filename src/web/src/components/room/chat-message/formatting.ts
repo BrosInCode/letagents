@@ -63,8 +63,6 @@ export function formatMessageTime(timestamp: string, now = new Date()): string {
   }
 }
 
-
-
 const MAX_BLOCKQUOTE_DEPTH = 8
 
 export function renderMessageContent(text: string, taskReferenceIds?: ReadonlySet<string>, onLink?: (url: string) => void): string {

@@ -105,7 +105,6 @@ export function reasoningStatusLabel(session: RoomReasoningSession): string {
     .replace(/\b\w/g, (char) => char.toUpperCase())
 }
 
-
 export function connectionLabel(participant: ActivityParticipant | HistoryParticipant | null): string {
   if (!participant || participant.kind !== 'agent') return 'Human'
   return participant.activityState ? ACTIVITY_STATE_LABELS[participant.activityState] : 'History'

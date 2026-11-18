@@ -206,7 +206,7 @@
             v-for="participant in threadSummary.participants"
             :key="participant.key"
             class="room-thread-participant-avatar"
-            :style="{ '--thread-participant-color': participant.color || getSenderColor(participant.displayName, null) }"
+            :style="{ '--thread-participant-color': participant.color || getSenderColor(participant.sender || participant.displayName, null) }"
             :title="participant.displayName"
           >
             {{ participantInitials(participant.displayName) }}

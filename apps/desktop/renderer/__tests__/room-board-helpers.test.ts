@@ -744,7 +744,7 @@ describe("room board helpers", () => {
       "Proposed",
       "Accepted",
       "Assigned",
-      "In Progress",
+      "In progress",
       "Review",
       "Closeout",
     ]);
