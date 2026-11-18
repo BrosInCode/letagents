@@ -15,13 +15,13 @@ theirs inline.
 | Node.js (with npm) | 22.23.4, **x64** | `%LOCALAPPDATA%\Programs\node-v22.23.4-win-x64` | no |
 | Git for Windows (portable, with Git Bash) | 2.56.0.4 | `%LOCALAPPDATA%\Programs\PortableGit-2.56.0.4` | no |
 | GitHub CLI | 2.103.3 | `%LOCALAPPDATA%\Programs\gh-2.103.3` | no |
-| Visual Studio Build Tools 2026 | 18.11.3, MSVC 14.51.36231, Windows SDK 10.0.26100.0 | `C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools` | **yes** |
+| Visual Studio Build Tools 2026 | current 2026 release, MSVC 14.52.37025, Windows SDK 10.0.26100.0 | `C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools` | **yes** |
 | `LongPathsEnabled` = 1 | | `HKLM\SYSTEM\CurrentControlSet\Control\FileSystem` | **yes** |
 
 - Node is x64 on every machine, also on Windows on ARM. The two sealed native pieces (the process-tree helper and the
   daemon pipe addon) have x64 seals only, the app ships x64 only, and CI runs x64 Node 22.23.4 (`actions/setup-node`
   with `22` on `windows-latest`). An arm64 Node looks for arm64 builds that have no seal, and the app refuses them.
-- MSVC 14.51.36231 with SDK 10.0.26100.0 is what the seals name (CI image `windows-2025-vs2026`). With it,
+- MSVC 14.52.37025 with SDK 10.0.26100.0 is what the seals name (CI image `windows-2025-vs2026`). With it,
   `build.mjs --check` makes the sealed bytes. Another MSVC builds other bytes: `--check` only warns, but the app and the
   tests refuse that helper and that addon. `-BuildTools` installs the current Build Tools 2026 release, so once
   Microsoft ships a newer MSVC (and CI's image moves to it), a fresh install has the newer one: the script then warns.
