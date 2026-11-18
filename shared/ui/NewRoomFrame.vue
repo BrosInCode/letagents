@@ -3,7 +3,7 @@
     <header class="new-room-header">
       <div>
         <h2 :id="headingId">{{ title }}</h2>
-        <p :id="`${headingId}-description`">{{ description }}</p>
+        <p v-if="description" :id="`${headingId}-description`">{{ description }}</p>
       </div>
       <div class="new-room-header-actions"><slot name="header-actions" /></div>
     </header>

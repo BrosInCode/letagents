@@ -47,7 +47,7 @@ test("validateJoinRoomInput rejects foreign absolute URLs", () => {
   assert.equal(validateJoinRoomInput("/in/focus_31").normalized, "focus_31");
 });
 
-test("new room modal starts with a new project and navigates tabs", () => {
+test("new room starts at the room draft and restores it when leaving a substep", () => {
   const modal = useDesktopNewRoomModal({
     openRoomSnapshot: () => undefined,
     setRepoStatus: () => undefined,
@@ -56,18 +56,22 @@ test("new room modal starts with a new project and navigates tabs", () => {
 
   modal.selectNewRoomEntry();
   assert.equal(modal.newRoomModalOpen.value, true);
-  assert.equal(modal.newRoomStep.value, "new_project");
-  assert.equal(modal.newRoomStorage.value, "cloud");
-  assert.ok(modal.newRoomName.value.length > 0);
-
-  modal.chooseStandaloneIntent();
   assert.equal(modal.newRoomStep.value, "standalone");
+  assert.equal(modal.newRoomStorage.value, "cloud");
+  assert.equal(modal.newRoomName.value, "");
+
+  modal.newRoomName.value = "Design";
+  modal.chooseProjectIntent();
+  assert.equal(modal.newRoomStep.value, "project");
 
   modal.backFromSubstep();
-  assert.equal(modal.newRoomStep.value, "new_project");
+  assert.equal(modal.newRoomStep.value, "standalone");
+  assert.equal(modal.newRoomName.value, "Design");
 
   modal.chooseJoinIntent();
   assert.equal(modal.newRoomStep.value, "join");
+  modal.backFromSubstep();
+  assert.equal(modal.newRoomName.value, "Design");
 });
 
 test("blank room storage choice survives tab changes even when the app defaults to local", () => {
@@ -113,13 +117,7 @@ test("shared create patches stale snapshot name after successful rename", async 
   modal.newRoomStorage.value = "cloud";
   await modal.createStandaloneRoom();
 
-  assert.equal(modal.newRoomStep.value, "success");
-  assert.equal(modal.newRoomSuccess.value?.roomName, "Team sync");
-  assert.equal(modal.newRoomSuccess.value?.snapshot.room?.displayName, "Team sync");
-  assert.notEqual(modal.newRoomSuccess.value?.snapshot.room?.displayName, "Generated Room");
-  assert.equal(modal.newRoomSuccess.value?.openOptions.displayName, "Team sync");
-
-  modal.openSuccessRoom();
+  assert.equal(modal.newRoomModalOpen.value, false);
   assert.equal(opened.length, 1);
   assert.equal(opened[0]?.options?.displayName, "Team sync");
   assert.equal(opened[0]?.snapshot.room?.displayName, "Team sync");
@@ -137,8 +135,11 @@ test("shared create keeps invite code when rename fails and surfaces warning", a
     },
   });
 
+  const opened: DesktopRoomSnapshot[] = [];
+  const warnings: string[] = [];
   const modal = useDesktopNewRoomModal({
-    openRoomSnapshot: () => undefined,
+    openRoomSnapshot: snapshot => opened.push(snapshot),
+    onNamingWarning: message => warnings.push(message),
     setRepoStatus: () => undefined,
   });
 
@@ -148,20 +149,15 @@ test("shared create keeps invite code when rename fails and surfaces warning", a
   modal.newRoomStorage.value = "cloud";
   await modal.createStandaloneRoom();
 
-  assert.equal(modal.newRoomStep.value, "success");
-  assert.equal(modal.newRoomSuccess.value?.inviteCode, "WXYZ-1111");
-  assert.equal(modal.newRoomSuccess.value?.roomName, "Generated Room");
-  assert.match(modal.newRoomFeedback.value || "", /renaming failed/i);
-  assert.equal(modal.newRoomFeedbackState.value, "info");
+  assert.equal(modal.newRoomModalOpen.value, false);
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0]?.room?.code, "WXYZ-1111");
+  assert.equal(opened[0]?.room?.displayName, "Generated Room");
+  assert.match(warnings[0] || "", /renaming failed/i);
   assert.equal(modal.newRoomBusy.value, false);
-
-  // Success with naming warning is not an error-step retry trap; Back returns to Project.
-  modal.backFromSubstep();
-  assert.equal(modal.newRoomStep.value, "new_project");
-  assert.equal(modal.newRoomSuccess.value, null);
 });
 
-test("create local standalone room lands on success without invite code", async () => {
+test("create local standalone room opens it directly without invite code", async () => {
   const snapshot = snapshotFixture("local_abc", "Private notes");
   stubDesktopBridge({
     createLocalRoom: async (input?: { displayName?: string | null }) => ({
@@ -176,8 +172,9 @@ test("create local standalone room lands on success without invite code", async 
     }),
   });
 
+  const opened: DesktopRoomSnapshot[] = [];
   const modal = useDesktopNewRoomModal({
-    openRoomSnapshot: () => undefined,
+    openRoomSnapshot: room => opened.push(room),
     setRepoStatus: () => undefined,
   });
 
@@ -187,10 +184,10 @@ test("create local standalone room lands on success without invite code", async 
   modal.newRoomStorage.value = "local";
   await modal.createStandaloneRoom();
 
-  assert.equal(modal.newRoomStep.value, "success");
-  assert.equal(modal.newRoomSuccess.value?.kind, "local");
-  assert.equal(modal.newRoomSuccess.value?.inviteCode, null);
-  assert.equal(modal.newRoomSuccess.value?.roomName, "Private notes");
+  assert.equal(modal.newRoomModalOpen.value, false);
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0]?.room?.code ?? null, null);
+  assert.equal(opened[0]?.room?.displayName, "Private notes");
 });
 
 test("join normalizes input and opens on ready access", async () => {
@@ -300,7 +297,7 @@ test("busy state blocks close and duplicate submit", async () => {
     snapshot: snapshotFixture("room_1", "Room", "ABCD-1111"),
   });
   await first;
-  assert.equal(modal.newRoomStep.value, "success");
+  assert.equal(modal.newRoomModalOpen.value, false);
 });
 
 test("project cancel returns to project step without losing modal", async () => {
@@ -444,7 +441,7 @@ test("a typed project path opens the same preview as the folder picker", async (
   assert.deepEqual(requested, ["~/code/project"]);
   // Only the creation flow refuses the home folder; reopening a bound room does not.
   assert.deepEqual(requestedOptions, [{ newProjectRoom: true }]);
-  assert.equal(modal.newRoomStep.value, "project");
+  assert.equal(modal.newRoomStep.value, "standalone");
   assert.equal(modal.newRoomProjectSelection.value?.folderLabel, "project");
   assert.equal(modal.newRoomProjectSelection.value?.sourceLabel, "Git remote");
 
@@ -469,6 +466,10 @@ test("a typed project path opens the same preview as the folder picker", async (
   await modal.openProjectRoomFromPath("/Users/test/code/other");
   assert.deepEqual(requested, ["~/code/project", "/Users/test/code/other"]);
   assert.equal(modal.newRoomProjectPath.value, "/Users/test/code/other");
+  modal.removeProject();
+  assert.equal(modal.newRoomProjectSelection.value, null);
+  assert.equal(modal.newRoomName.value, "Planning");
+  assert.equal(modal.newRoomStep.value, "standalone");
 });
 
 test("a bad project path is a field error that keeps the typed text on the project step", async () => {

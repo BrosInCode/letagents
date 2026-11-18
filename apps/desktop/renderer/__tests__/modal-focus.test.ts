@@ -159,7 +159,7 @@ test("room creation keeps focus trapped when its form is replaced or disabled wh
   document.activeElement = outside;
   const props = reactive({ step: "standalone", busy: false, canDismiss: true, activeAction: null,
     feedback: null, feedbackState: "info", projectSelection: null, projectPathError: null, projectCreationError: null,
-    recentProjectFolders: [], success: null, statusMessage: null, joinError: null, canSubmitJoin: true,
+    recentProjectFolders: [], companies: [], company: null, statusMessage: null, joinError: null, canSubmitJoin: true,
     canSubmitStandalone: true, joinCode: "", roomName: "Planning", storage: "cloud", projectPath: "", projectName: "", projectParent: "" });
   let vm: any;
   const Probe = { ...Modal, setup(input: any, context: any) { vm = Modal.setup(input, context); return vm; }, render: () => h("div") };

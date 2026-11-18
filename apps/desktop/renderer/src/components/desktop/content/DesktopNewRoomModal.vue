@@ -1,19 +1,17 @@
 <template>
   <div class="desktop-modal-backdrop" data-testid="new-room-modal" @click.self="requestClose">
-    <section ref="dialogElement" class="desktop-new-room-modal desktop-new-room-flow" :data-step="step" role="dialog" aria-modal="true"
-      aria-labelledby="new-room-title" aria-describedby="new-room-title-description"
-      :aria-busy="busy" tabindex="-1" @keydown.esc.prevent="requestClose" @keydown.tab="handleDialogTab">
-      <NewRoomFrame :tab="activeTab" :tabs="tabs" :busy="busy" :show-tabs="showTabs"
-        :title="step === 'success' ? 'Room ready' : 'New room'"
-        :description="step === 'success' ? 'Your next conversation starts here.' : 'Choose how you’d like to start.'"
-        @select-tab="selectTab">
+    <section ref="dialogElement" class="desktop-new-room-modal desktop-new-room-flow" :data-step="visibleStep" role="dialog" aria-modal="true"
+      aria-labelledby="new-room-title" :aria-busy="busy" :data-input="inputMode" tabindex="-1"
+      @pointerdown.capture="inputMode = 'pointer'" @keydown.capture="inputMode = 'keyboard'"
+      @keydown.esc.prevent="handleEscape" @keydown.tab="handleDialogTab">
+      <NewRoomFrame tab="" :tabs="[]" :show-tabs="false" :title="title" description="">
         <template #header-actions>
           <button class="new-room-icon-button" type="button" aria-label="Close new room dialog" :disabled="!canDismiss" @click="requestClose"><X aria-hidden="true" /></button>
         </template>
 
-        <div v-if="activeTab === 'project' && showTabs" class="desktop-new-room-modes" aria-label="Project source">
-          <button type="button" :aria-pressed="visibleStep === 'new_project'" :disabled="busy" data-testid="new-room-new-project" @click="emit('chooseNewProject')">New project</button>
+        <div v-if="projectPicker" class="desktop-new-room-modes" aria-label="Project source">
           <button type="button" :aria-pressed="visibleStep === 'project'" :disabled="busy" data-testid="new-room-existing-project" @click="emit('chooseProject')">Open existing</button>
+          <button type="button" :aria-pressed="visibleStep === 'new_project'" :disabled="busy" data-testid="new-room-new-project" @click="emit('chooseNewProject')">New project</button>
         </div>
 
         <form v-if="visibleStep === 'new_project'" id="new-room-create-form" data-testid="new-room-create-project-step" @submit.prevent="emit('createProject')">
@@ -25,14 +23,13 @@
           <div class="new-room-field-heading"><span>Location</span><button class="desktop-new-room-text-button" type="button" :disabled="busy" :aria-expanded="showParentPath" @click="showParentPath = !showParentPath">Enter path</button></div>
           <div class="new-room-folder">
             <FolderOpen aria-hidden="true" />
-            <div><strong>{{ parentLabel }}</strong><small :title="projectParent">{{ projectParent || 'Choose where your project belongs.' }}</small></div>
+            <div><strong>{{ parentLabel }}</strong><small :title="projectParent">{{ projectParent }}</small></div>
             <button class="new-room-button" type="button" :disabled="busy" data-testid="new-room-pick-project-parent" @click="emit('pickProjectParent')">{{ activeAction === 'pick_project_parent' ? 'Choosing…' : projectParent ? 'Change' : 'Browse' }}</button>
           </div>
           <label v-if="showParentPath" class="new-room-field desktop-new-room-path-field">
             <span>Location path</span><input v-model="projectParent" type="text" :placeholder="pathExamples.parent" autocomplete="off" autocapitalize="off" spellcheck="false" :disabled="busy" data-testid="new-room-project-parent" />
           </label>
           <p v-if="projectParent.trim()" class="new-room-hint desktop-new-room-destination" data-testid="new-room-project-destination">New folder <span>{{ joinLocalPath(projectParent, projectName.trim() || 'your-project') }}</span></p>
-          <p class="new-room-hint desktop-new-room-context">Creates an empty folder and a local room for it. You can connect Git and share the room later.</p>
           <p v-if="projectCreationError" id="new-room-create-error" class="new-room-error" role="alert">{{ projectCreationError }}</p>
         </form>
 
@@ -40,8 +37,8 @@
           <div class="new-room-field-heading"><span>Project folder</span><button type="button" class="desktop-new-room-text-button" :disabled="busy" :aria-expanded="showProjectPath" @click="showProjectPath = !showProjectPath">Enter path</button></div>
           <div class="new-room-folder">
             <FolderOpen aria-hidden="true" />
-            <div><strong>{{ projectSelection?.folderLabel || 'Choose a folder' }}</strong><small :title="projectSelection?.repoPath || ''">{{ projectSelection?.repoPath || `Open the room for a project on ${thisComputer}.` }}</small></div>
-            <button class="new-room-button" type="button" :disabled="busy" data-testid="new-room-open-project" @click="emit('openProject')">{{ activeAction === 'pick_project' ? 'Choosing…' : projectSelection ? 'Change' : 'Browse' }}</button>
+            <div><strong>{{ projectSelection?.folderLabel || 'On this device' }}</strong><small :title="projectSelection?.repoPath || ''">{{ projectSelection?.repoPath }}</small></div>
+            <button class="new-room-button" type="button" :disabled="busy" data-testid="new-room-open-project" @click="emit('openProject')">{{ activeAction === 'pick_project' ? 'Choosing…' : 'Browse' }}</button>
           </div>
           <form v-if="showProjectPath || projectPathError" class="new-room-field desktop-new-room-path-field" data-testid="new-room-project-path-form" @submit.prevent="emit('openProjectPath')">
             <label for="new-room-project-path-input">Folder path</label>
@@ -51,77 +48,123 @@
             </div>
             <small v-if="projectPathError" id="new-room-project-path-error" class="new-room-error" role="alert">{{ projectPathError }}</small>
           </form>
-          <section v-if="recentProjectFolders.length && !projectSelection" class="desktop-new-room-recent" aria-labelledby="new-room-recent-title" data-testid="new-room-recent-folders">
+          <section v-if="recentProjectFolders.length" class="desktop-new-room-recent" aria-labelledby="new-room-recent-title" data-testid="new-room-recent-folders">
             <h3 id="new-room-recent-title">Recent folders</h3>
             <button v-for="folder in recentProjectFolders" :key="folder.path" type="button" :disabled="busy" :title="folder.path" data-testid="new-room-recent-folder" @click="emit('openProjectPath', folder.path)">
               <FolderOpen aria-hidden="true" /><span><strong>{{ folder.label }}</strong><small>{{ folder.path }}</small></span><ChevronRight aria-hidden="true" />
             </button>
           </section>
-          <div v-if="projectSelection" data-testid="new-room-project-preview">
-            <dl class="new-room-details">
-              <div><dt>Room</dt><dd>{{ projectSelection.roomName }}</dd></div>
-              <div v-if="projectSelection.repoStatus?.branch"><dt>Branch</dt><dd>{{ projectSelection.repoStatus.branch }}</dd></div>
-              <div><dt>Connection</dt><dd>{{ projectSelection.sourceLabel }}</dd></div>
-            </dl>
-            <p v-if="projectSelection.warning" class="new-room-hint">{{ projectSelection.warning }}</p>
-          </div>
-          <p class="new-room-hint desktop-new-room-context">{{ projectSelection ? 'Open this project’s room and pick up where you left off.' : 'A Git folder opens its existing project room. Other folders start locally.' }}</p>
         </div>
 
-        <form v-else-if="step === 'standalone'" id="new-room-blank-form" data-testid="new-room-standalone-step" @submit.prevent="emit('createStandalone')">
-          <label class="new-room-field"><span>Room name</span><input v-model="roomName" type="text" maxlength="80" placeholder="e.g. Design conversations" autocomplete="off" spellcheck="false" :disabled="busy" data-testid="new-room-name-input" /></label>
-          <div class="new-room-field desktop-new-room-storage" data-testid="new-room-storage">
-            <span>Where it lives</span>
-            <FilterDropdown :model-value="storage" label="Where it lives" :options="storageOptions" :disabled="busy" match-trigger-width @update:model-value="setStorage">
+        <form v-else-if="visibleStep === 'standalone'" id="new-room-blank-form" class="desktop-room-draft" data-testid="new-room-standalone-step"
+          @submit.prevent="submitDraft">
+          <div class="desktop-room-draft-scope">
+            <template v-if="projectSelection">
+              <CompanyAvatar v-if="projectOwner" :login="projectOwner" :avatar-url="projectCompany?.avatarUrl ?? null" size="s" />
+              <Laptop v-else aria-hidden="true" />
+              {{ projectOwner || projectLocation }}
+            </template>
+            <FilterDropdown v-else-if="organizationOptions.length > 1" class="desktop-room-picker" data-testid="new-room-organization"
+              :model-value="organizationId" label="Organization" :options="organizationOptions" :disabled="busy" @update:model-value="selectOrganization">
               <template #trigger="{ option }">
-                <CompanyAvatar v-if="option?.id === 'company' && company" :login="company.login" :avatar-url="company.avatarUrl" size="s" />
-                <component :is="option?.id === 'local' ? Laptop : Cloud" v-else aria-hidden="true" />
-                <span class="desktop-new-room-storage-label">{{ option?.label }}</span>
+                <CompanyAvatar v-if="option" :login="option.label" :avatar-url="companyFor(option.id)?.avatarUrl ?? null" size="s" />
+                <span>{{ option?.label }}</span>
               </template>
               <template #option="{ option }">
-                <CompanyAvatar v-if="option.id === 'company' && company" :login="company.login" :avatar-url="company.avatarUrl" size="s" />
-                <component :is="option.id === 'local' ? Laptop : Cloud" v-else aria-hidden="true" />
-                <span class="desktop-new-room-storage-option"><strong>{{ option.label }}</strong><small>{{ storageDescription(option.id) }}</small></span>
+                <CompanyAvatar :login="option.label" :avatar-url="companyFor(option.id)?.avatarUrl ?? null" size="s" />
+                <span class="work-option-label">{{ option.label }}</span>
+              </template>
+            </FilterDropdown>
+            <template v-else><UserRound aria-hidden="true" /> Personal</template>
+            <span aria-hidden="true">/</span>
+            {{ projectSelection ? 'Project room' : 'Room' }}
+          </div>
+
+          <div v-if="projectSelection" :key="projectSelection.repoPath ?? projectSelection.roomIdentifier" class="desktop-room-project" :data-reveal="revealProject" data-testid="new-room-project-preview">
+            <div class="desktop-room-draft-identity">
+              <span class="desktop-room-draft-mark"><Folder aria-hidden="true" /></span>
+              <div class="desktop-room-draft-title">
+                <span>{{ projectSelection.roomName }}</span>
+                <small v-if="projectRepository">{{ projectRepository }}</small>
+              </div>
+            </div>
+            <div class="desktop-room-project-connection">
+              <div class="desktop-room-project-row">
+                <button type="button" class="desktop-room-project-pick" :disabled="busy" :title="projectSelection.repoPath ?? ''" aria-label="Change project" @click="emit('chooseProject')">
+                  <FolderOpen aria-hidden="true" /><span>{{ projectSelection.repoPath || projectSelection.folderLabel }}</span>
+                </button>
+                <button type="button" class="new-room-icon-button" aria-label="Remove project" :disabled="busy" @click="emit('removeProject')"><X aria-hidden="true" /></button>
+              </div>
+              <div v-if="projectSelection.repoStatus?.branch" class="desktop-room-project-branch">
+                <GitBranch aria-hidden="true" />{{ projectSelection.repoStatus.branch }}
+              </div>
+            </div>
+          </div>
+
+          <div v-else>
+            <label class="desktop-room-draft-identity">
+              <span class="desktop-room-draft-mark"><MessageSquare aria-hidden="true" /></span>
+              <span class="desktop-room-sr-only">Room name</span>
+              <input ref="nameElement" v-model="roomName" class="desktop-room-draft-name" type="text" maxlength="80" placeholder="Room name" autocomplete="off" spellcheck="false"
+                :disabled="busy" data-testid="new-room-name-input" />
+            </label>
+            <div class="desktop-room-project-connection">
+              <button type="button" class="desktop-room-project-pick" :disabled="busy" data-testid="new-room-add-project" @click="emit('chooseProject')">
+                <Folder aria-hidden="true" /><span>Add project</span><Plus aria-hidden="true" />
+              </button>
+            </div>
+          </div>
+
+          <div class="desktop-room-draft-access" data-testid="new-room-storage">
+            <template v-if="projectSelection">
+              <component :is="projectAccessIcon" aria-hidden="true" />{{ projectAccess }}
+            </template>
+            <template v-else-if="organizationId !== 'personal'">
+              <Lock aria-hidden="true" />Invite only
+            </template>
+            <FilterDropdown v-else class="desktop-room-picker desktop-room-access-picker" :model-value="storage" label="Room access"
+              :options="accessOptions" :disabled="busy" @update:model-value="selectPersonalStorage">
+              <template #trigger="{ option }">
+                <component :is="option?.id === 'local' ? Laptop : Lock" aria-hidden="true" /><span>{{ option?.label }}</span>
+              </template>
+              <template #option="{ option }">
+                <component :is="option.id === 'local' ? Laptop : Lock" aria-hidden="true" /><span class="work-option-label">{{ option.label }}</span>
               </template>
             </FilterDropdown>
           </div>
-          <p class="new-room-hint desktop-new-room-context" data-testid="new-room-storage-description">{{ storageDescription(storage) }}</p>
+          <p v-if="!projectSelection && companyUnavailable" class="new-room-error" role="status">
+            {{ company?.login }} is unavailable. Choose another organization.
+          </p>
         </form>
 
-        <form v-else-if="step === 'join'" id="new-room-join-form" data-testid="new-room-join-step" @submit.prevent="emit('join')">
-          <label class="new-room-field"><span>Invite code or room link</span><input ref="joinInputElement" v-model="joinCode" type="text" placeholder="ABCD-1234" autocomplete="off" autocapitalize="characters" spellcheck="false" :disabled="busy" :aria-invalid="Boolean(joinError)" :aria-describedby="joinError ? 'new-room-join-error' : 'new-room-join-hint'" data-testid="new-room-join-input" />
+        <form v-else-if="visibleStep === 'join'" id="new-room-join-form" data-testid="new-room-join-step" @submit.prevent="emit('join')">
+          <label class="new-room-field">
+            <span>Invite code or room link</span>
+            <input v-model="joinCode" type="text" placeholder="ABCD-1234" autocomplete="off" autocapitalize="characters" spellcheck="false"
+              :disabled="busy" :aria-invalid="Boolean(joinError)" :aria-describedby="joinError ? 'new-room-join-error' : undefined" data-testid="new-room-join-input" />
             <small v-if="joinError" id="new-room-join-error" class="new-room-error" role="alert">{{ joinError }}</small>
-            <small id="new-room-join-hint" class="new-room-hint">Paste an invite code, a LetAgents room link, or a company link.</small>
           </label>
-          <div class="desktop-new-room-join-note"><KeyRound aria-hidden="true" /><div><strong>A place for your team.</strong><p class="new-room-hint">Ask someone in the room for an invitation. You’ll join using your signed-in profile.</p></div></div>
         </form>
 
-        <div v-else-if="step === 'working'" class="desktop-new-room-working" data-testid="new-room-working-step" role="status" aria-live="polite"><span class="desktop-new-room-spinner" aria-hidden="true" /><p>{{ statusMessage || 'Working…' }}</p></div>
-        <div v-else-if="step === 'success' && success" data-testid="new-room-success-step">
-          <div class="desktop-new-room-success-mark"><Check aria-hidden="true" /></div>
-          <h3 class="desktop-new-room-success-title">Your room is ready.</h3>
-          <div class="new-room-folder"><Hash aria-hidden="true" /><div><strong>{{ success.roomName }}</strong><small>{{ success.storageLabel }}</small></div></div>
-          <div v-if="success.inviteCode" class="desktop-new-room-invite" data-testid="new-room-invite-code"><label>Invite code</label><div><code>{{ success.inviteCode }}</code><button type="button" class="new-room-icon-button" aria-label="Copy invite code" data-testid="new-room-copy-code" @click="emit('copyCode')"><Copy aria-hidden="true" /></button></div><p class="new-room-hint">Share this with anyone you’d like to join.</p></div>
-        </div>
-        <div v-else-if="step === 'error'" data-testid="new-room-error-step"><p ref="errorElement" class="new-room-error" role="alert" tabindex="-1">{{ feedback || 'Something went wrong.' }}</p><p class="new-room-hint">Your inputs are still here. Go back to make a change or try again.</p></div>
-        <p v-if="feedback && step !== 'error'" :class="feedbackState === 'error' ? 'new-room-error' : 'new-room-hint'" :role="feedbackState === 'error' ? 'alert' : 'status'">{{ feedback }}</p>
+        <p v-else-if="step === 'error'" ref="errorElement" class="new-room-error" role="alert" tabindex="-1">{{ feedback || 'Something went wrong.' }}</p>
+        <p v-if="feedback && step !== 'error' && !joinError" :class="feedbackState === 'error' ? 'new-room-error' : 'new-room-hint'"
+          :role="feedbackState === 'error' ? 'alert' : 'status'">{{ feedback }}</p>
+        <span v-if="busy" class="desktop-room-sr-only" role="status">{{ busyLabel }}</span>
 
         <template #footer>
-          <template v-if="step === 'success'">
-            <button class="new-room-cancel" type="button" data-testid="new-room-done" @click="emit('dismissSuccess')">Done</button>
-            <button class="new-room-primary" type="button" data-testid="new-room-open-success" @click="emit('openSuccess')">Open room <ChevronRight aria-hidden="true" /></button>
-          </template>
-          <template v-else-if="step === 'error'">
-            <button class="new-room-cancel" type="button" data-testid="new-room-error-back" @click="emit('back')">Back</button>
-            <button class="new-room-primary" type="button" data-testid="new-room-retry" :disabled="busy" @click="emit('retry')">Try again</button>
-          </template>
-          <template v-else>
-            <button class="new-room-cancel" type="button" :disabled="!canDismiss" data-testid="new-room-cancel" @click="requestClose">Cancel</button>
-            <button v-if="visibleStep === 'new_project'" class="new-room-primary" type="submit" form="new-room-create-form" :disabled="busy || !projectName.trim() || !projectParent.trim()" data-testid="new-room-create-project">{{ activeAction === 'create_project' ? 'Creating…' : 'Create project' }} <ChevronRight aria-hidden="true" /></button>
-            <button v-else-if="visibleStep === 'project'" ref="confirmProjectElement" class="new-room-primary" type="button" :disabled="busy || !projectSelection" data-testid="new-room-confirm-project" @click="emit('confirmProject')">Open project room <ChevronRight aria-hidden="true" /></button>
-            <button v-else-if="step === 'standalone'" class="new-room-primary" type="submit" form="new-room-blank-form" :disabled="busy || !canSubmitStandalone" data-testid="new-room-create-standalone">Create room <ChevronRight aria-hidden="true" /></button>
-            <button v-else-if="step === 'join'" class="new-room-primary" type="submit" form="new-room-join-form" :disabled="busy || !canSubmitJoin" data-testid="new-room-join-submit">Join room <ChevronRight aria-hidden="true" /></button>
-          </template>
+          <button v-if="step === 'error'" class="new-room-cancel" type="button" data-testid="new-room-error-back" @click="emit('back')">Back</button>
+          <button v-else-if="visibleStep === 'standalone'" class="new-room-cancel desktop-room-draft-secondary" type="button"
+            :disabled="busy" data-testid="new-room-join-entry" @click="emit('chooseJoin')"><KeyRound aria-hidden="true" />Join a room</button>
+          <button v-else class="new-room-cancel desktop-room-draft-secondary" type="button" :disabled="busy"
+            data-testid="new-room-back" @click="emit('back')"><ArrowLeft aria-hidden="true" />Back</button>
+
+          <button v-if="step === 'error'" class="new-room-primary" type="button" data-testid="new-room-retry" @click="emit('retry')">Try again</button>
+          <button v-else-if="visibleStep === 'new_project'" class="new-room-primary" type="submit" form="new-room-create-form"
+            :disabled="busy || !projectName.trim() || !projectParent.trim()" data-testid="new-room-create-project">{{ busy ? busyLabel : 'Create project' }}</button>
+          <button v-else-if="visibleStep === 'standalone'" ref="confirmProjectElement" class="new-room-primary" type="submit" form="new-room-blank-form"
+            :disabled="!canSubmitDraft" :data-testid="projectSelection ? 'new-room-confirm-project' : 'new-room-create-standalone'">{{ busy ? busyLabel : projectSelection ? 'Open room' : 'Create room' }}</button>
+          <button v-else-if="visibleStep === 'join'" class="new-room-primary" type="submit" form="new-room-join-form"
+            :disabled="busy || !canSubmitJoin" data-testid="new-room-join-submit">{{ busy ? busyLabel : 'Join room' }}</button>
         </template>
       </NewRoomFrame>
     </section>
@@ -130,109 +173,141 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { FolderOpen, Hash, KeyRound, X, ChevronRight, Cloud, Laptop, Check, Copy } from '@lucide/vue';
+import { ArrowLeft, ChevronRight, Cloud, Folder, FolderOpen, GitBranch, KeyRound, Laptop, Lock, MessageSquare, Plus, UserRound, X } from '@lucide/vue';
 import NewRoomFrame from '../../../../../../../shared/ui/NewRoomFrame.vue';
 import FilterDropdown from '../../../../../../../shared/ui/FilterDropdown.vue';
-import type { NewRoomActiveAction, NewRoomCompany, NewRoomRecentProjectFolder, NewRoomStep, NewRoomStorageChoice, NewRoomSuccessState, PendingProjectRoomSelection } from '../../../composables/useDesktopNewRoomModal';
+import type { NewRoomActiveAction, NewRoomCompany, NewRoomRecentProjectFolder, NewRoomStep, NewRoomStorageChoice, PendingProjectRoomSelection } from '../../../composables/useDesktopNewRoomModal';
 import CompanyAvatar from '../company/CompanyAvatar.vue';
 import { currentFocusableElement, restoreFocus, trapFocusInDialog } from './modal-focus';
 import { joinLocalPath, localPathBasename, localPathExamples } from '../../../domain/local-path';
-import { thisComputerLabel } from '../../../domain/supervised-agents-support';
 
 const props = defineProps<{
   step: NewRoomStep; busy: boolean; canDismiss: boolean; activeAction: NewRoomActiveAction;
   feedback: string | null; feedbackState: 'info' | 'error' | 'success';
   projectSelection: PendingProjectRoomSelection | null; projectPathError: string | null;
   projectCreationError: string | null; recentProjectFolders: readonly NewRoomRecentProjectFolder[];
-  success: NewRoomSuccessState | null; statusMessage: string | null; joinError: string | null;
+  companies: readonly NewRoomCompany[];
+  statusMessage: string | null; joinError: string | null;
   canSubmitJoin: boolean; canSubmitStandalone: boolean;
-  /** The company selected in the sidebar, offered as the first place a shared room can live. */
-  company?: NewRoomCompany | null;
 }>();
 const joinCode = defineModel<string>('joinCode', { required: true });
 const roomName = defineModel<string>('roomName', { required: true });
 const storage = defineModel<NewRoomStorageChoice>('storage', { required: true });
+const company = defineModel<NewRoomCompany | null>('company', { required: true });
 const projectPath = defineModel<string>('projectPath', { default: '' });
 const projectName = defineModel<string>('projectName', { default: '' });
 const projectParent = defineModel<string>('projectParent', { default: '' });
 const emit = defineEmits<{
-  back: []; chooseJoin: []; chooseProject: []; chooseNewProject: []; chooseStandalone: [];
-  close: []; confirmProject: []; copyCode: []; createStandalone: []; createProject: [];
-  dismissSuccess: []; join: []; openProject: []; openProjectPath: [path?: string];
-  pickProjectParent: []; openSuccess: []; retry: [];
+  back: []; chooseJoin: []; chooseProject: []; chooseNewProject: []; removeProject: [];
+  close: []; confirmProject: []; createStandalone: []; createProject: [];
+  join: []; openProject: []; openProjectPath: [path?: string]; pickProjectParent: []; retry: [];
 }>();
-const tabs = [{ id: 'project', label: 'Project' }, { id: 'standalone', label: 'Blank room' }, { id: 'join', label: 'Join room' }];
-const visibleStep = computed(() => props.step === 'chooser' ? 'new_project' : props.step);
-const activeTab = computed(() => ['project', 'new_project'].includes(visibleStep.value) ? 'project' : props.step);
-const showTabs = computed(() => !['working', 'success', 'error'].includes(props.step));
+
+const inputMode = ref<'pointer' | 'keyboard'>('keyboard');
+const revealProject = ref(false);
+const visibleStep = computed(() => props.step === 'working'
+  ? props.activeAction === 'join' ? 'join' : 'standalone'
+  : props.step);
+const projectPicker = computed(() => visibleStep.value === 'project' || visibleStep.value === 'new_project');
+const title = computed(() => projectPicker.value ? 'Choose project' : visibleStep.value === 'join' ? 'Join room' : 'New room');
+const busyLabel = computed(() => props.statusMessage || 'Creating…');
 const showProjectPath = ref(false);
 const showParentPath = ref(false);
-const projectMode = ref<'project' | 'new_project'>(props.step === 'project' ? 'project' : 'new_project');
 const parentLabel = computed(() => localPathBasename(projectParent.value.trim()) || 'Choose a location');
 const pathExamples = localPathExamples();
-const thisComputer = thisComputerLabel();
-const storageOptions = computed(() => [
-  ...(props.company ? [{ id: 'company', label: props.company.login }] : []),
-  { id: 'cloud', label: 'Shared online' },
-  { id: 'local', label: `Only on ${thisComputer}` },
+
+const organizationId = computed(() => storage.value === 'company' ? company.value?.id ?? 'personal' : 'personal');
+const companyFor = (id: string) => props.companies.find(item => item.id === id);
+const companyUnavailable = computed(() =>
+  storage.value === 'company' && (!company.value || !companyFor(company.value.id)));
+const organizationOptions = computed(() => [
+  { id: 'personal', label: 'Personal' },
+  ...props.companies.map(item => ({ id: item.id, label: item.login })),
+  ...(companyUnavailable.value && company.value
+    ? [{ id: company.value.id, label: company.value.login, disabled: true }]
+    : []),
 ]);
-function setStorage(value: string) {
-  if (!props.busy && storageOptions.value.some(option => option.id === value)) storage.value = value as NewRoomStorageChoice;
+const accessOptions = [{ id: 'cloud', label: 'Invite only' }, { id: 'local', label: 'Only on this device' }];
+const personalStorage = ref<'cloud' | 'local'>(storage.value === 'local' ? 'local' : 'cloud');
+const canSubmitDraft = computed(() =>
+  !props.busy && (Boolean(props.projectSelection) || (props.canSubmitStandalone && !companyUnavailable.value)));
+
+function submitDraft() {
+  if (!canSubmitDraft.value) return;
+  if (props.projectSelection) emit('confirmProject');
+  else emit('createStandalone');
 }
-function storageDescription(value: string): string {
-  if (value === 'company' && props.company) return `Listed under ${props.company.login}. Invite people with a room code.`;
-  if (value === 'local') return 'This room stays on this device until you choose to share it.';
-  return 'A shared room outside a company. Invite people with a room code.';
+function selectOrganization(id: string) {
+  if (props.busy) return;
+  const selected = companyFor(id);
+  if (selected) {
+    company.value = selected;
+    storage.value = 'company';
+  } else if (id === 'personal') {
+    company.value = null;
+    storage.value = personalStorage.value;
+  }
 }
+function selectPersonalStorage(value: string) {
+  if (props.busy || (value !== 'local' && value !== 'cloud')) return;
+  personalStorage.value = value;
+  storage.value = value;
+}
+
+const gitRoom = computed(() => props.projectSelection?.snapshot.room?.gitRoom);
+const localProject = computed(() => ['local_folder', 'local_git'].includes(props.projectSelection?.source ?? '') || gitRoom.value?.accessMode === 'local');
+const projectRepository = computed(() => {
+  if (localProject.value) return '';
+  return gitRoom.value?.repository.fullName || props.projectSelection?.roomIdentifier.match(/^github\.com\/([^/]+\/[^/]+)/i)?.[1] || '';
+});
+const projectOwner = computed(() => projectRepository.value.split('/')[0]);
+const projectCompany = computed(() => props.companies.find(item => item.login.toLowerCase() === projectOwner.value.toLowerCase()));
+const projectLocation = computed(() => localProject.value ? 'On this device' : 'Project');
+const projectAccess = computed(() => {
+  if (localProject.value) return 'Only on this device';
+  if (gitRoom.value?.accessMode === 'public') return 'Public repository';
+  if (gitRoom.value?.accessMode === 'private') return 'Private repository';
+  return props.projectSelection?.sourceLabel ?? '';
+});
+const projectAccessIcon = computed(() => localProject.value ? Laptop : gitRoom.value?.accessMode === 'private' ? Lock : Cloud);
+
 const dialogElement = ref<HTMLElement | null>(null);
-const joinInputElement = ref<HTMLInputElement | null>(null);
+const nameElement = ref<HTMLInputElement | null>(null);
 const projectPathInputElement = ref<HTMLInputElement | null>(null);
 const confirmProjectElement = ref<HTMLButtonElement | null>(null);
 const errorElement = ref<HTMLElement | null>(null);
 const previousFocusElement = ref<HTMLElement | null>(null);
-function selectTab(tab: string) {
-  if (props.busy || tab === activeTab.value) return;
-  if (tab === 'project') {
-    if (projectMode.value === 'project') emit('chooseProject');
-    else emit('chooseNewProject');
-  }
-  else if (tab === 'standalone') emit('chooseStandalone');
-  else if (tab === 'join') emit('chooseJoin');
-}
 function requestClose() { if (props.canDismiss) emit('close'); }
+function handleEscape() {
+  if (!props.busy && visibleStep.value !== 'standalone') emit('back');
+  else requestClose();
+}
 function handleDialogTab(event: KeyboardEvent) { trapFocusInDialog(event, dialogElement.value); }
 function focusInitialControl() {
   const dialog = dialogElement.value;
   if (!dialog) return;
-  const preferred = dialog.querySelector<HTMLElement>('[role="tabpanel"] input:not(:disabled), [data-testid="new-room-open-success"], [data-testid="new-room-retry"], [role="tabpanel"] button:not(:disabled)');
+  const preferred = props.step === 'error' ? errorElement.value
+    : visibleStep.value === 'standalone' ? (props.projectSelection ? confirmProjectElement.value : nameElement.value)
+    : dialog.querySelector<HTMLElement>('.new-room-panel input:not(:disabled), .new-room-panel button:not(:disabled)');
   (preferred || dialog).focus({ preventScroll: true });
 }
 onMounted(async () => { previousFocusElement.value = currentFocusableElement(); await nextTick(); focusInitialControl(); });
 onBeforeUnmount(() => restoreFocus(previousFocusElement.value));
-watch(() => props.step, async () => {
-  if (props.step === 'project' || props.step === 'new_project') projectMode.value = props.step;
-  const keepTabFocus = Boolean(dialogElement.value?.contains(document.activeElement) && document.activeElement?.closest('[role="tablist"], .desktop-new-room-modes'));
+watch(() => [visibleStep.value, props.projectSelection, props.busy] as const, async ([step, selection, busy], [previousStep, previousSelection, wasBusy]) => {
+  if (step !== 'standalone') revealProject.value = false;
+  else if (selection !== previousSelection) revealProject.value = Boolean(selection) && inputMode.value === 'pointer';
   await nextTick();
-  if (props.step === 'working') {
-    dialogElement.value?.focus({ preventScroll: true });
-    return;
-  }
-  if (keepTabFocus) return;
-  if (props.step === 'error') errorElement.value?.focus({ preventScroll: true });
-  else focusInitialControl();
-});
-watch(() => props.busy, async (busy) => {
-  if (!busy) return;
-  const hadDialogFocus = Boolean(dialogElement.value?.contains(document.activeElement));
-  await nextTick();
-  if (hadDialogFocus && (!dialogElement.value?.contains(document.activeElement) || document.activeElement?.matches(':disabled'))) {
-    dialogElement.value?.focus({ preventScroll: true });
+  if (busy) {
+    if (!dialogElement.value?.contains(document.activeElement) || document.activeElement?.matches(':disabled')) {
+      dialogElement.value?.focus({ preventScroll: true });
+    }
+  } else if (step !== previousStep || selection !== previousSelection || (wasBusy && document.activeElement === dialogElement.value)) {
+    focusInitialControl();
   }
 });
-watch(() => [props.projectPathError, props.projectSelection] as const, async ([error, selection], [oldError, oldSelection]) => {
-  if (props.step !== 'project') return;
+watch(() => props.projectPathError, async error => {
+  if (!error || visibleStep.value !== 'project') return;
   await nextTick();
-  if (error && error !== oldError) projectPathInputElement.value?.focus({ preventScroll: true });
-  else if (selection && selection !== oldSelection) confirmProjectElement.value?.focus({ preventScroll: true });
+  projectPathInputElement.value?.focus({ preventScroll: true });
 });
 </script>

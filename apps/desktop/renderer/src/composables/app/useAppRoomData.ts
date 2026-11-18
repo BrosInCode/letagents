@@ -117,6 +117,9 @@ export function useAppRoomManagement(context: unknown) {
     selectedRootRoomIdentifier, selectedSnapshot, settingsAccountRooms, sidebarMode,
     sidebarProjectEntries, sidebarRevealRequest, sidebarRoomOrder, sidebarRoomOrderStorageKey,
   } = app;
+  const newRoomCompanies = computed(() => app.company.organizations.value
+    .filter(company => company.joined)
+    .map(company => ({ id: company.github_org_id, login: company.login, avatarUrl: company.avatar_url })));
   const {
     backFromSubstep,
     canSubmitJoin,
@@ -124,13 +127,10 @@ export function useAppRoomManagement(context: unknown) {
     chooseJoinIntent,
     chooseProjectIntent,
     chooseNewProjectIntent,
-    chooseStandaloneIntent,
     closeNewRoomModal,
     confirmProjectRoomFromModal,
-    copyInviteCode,
     createStandaloneRoom,
     createProjectRoomFromModal,
-    dismissSuccess,
     joinRoomCodeFromModal,
     newRoomActiveAction,
     newRoomBusy,
@@ -151,11 +151,10 @@ export function useAppRoomManagement(context: unknown) {
     newRoomStep,
     newRoomStorage,
     newRoomCompany,
-    newRoomSuccess,
     openProjectRoomFromModal,
     openProjectRoomFromPath,
     pickNewProjectParent,
-    openSuccessRoom,
+    removeProject,
     retryLastAction,
     selectNewRoomEntry,
   } = useDesktopNewRoomModal({
@@ -190,7 +189,11 @@ export function useAppRoomManagement(context: unknown) {
       const selected = app.company.selected.value;
       return selected?.joined ? { id: selected.github_org_id, login: selected.login, avatarUrl: selected.avatar_url } : null;
     },
-    onCompanyRoomCreated: (room) => app.company.rememberCreatedRoom(room),
+    onNamingWarning: (message) => pushActionToast(message, "info", 8000),
+    onCompanyRoomCreated: (room) => {
+      if (app.company.activeId.value !== room.organizationId) void app.company.choose(room.organizationId);
+      app.company.rememberCreatedRoom(room);
+    },
     onCompanyLink: (organizationId) => app.receiveCompanyInvite(organizationId),
   });
   const {
@@ -242,14 +245,14 @@ export function useAppRoomManagement(context: unknown) {
   Object.assign(app, { batchConcludeSidebarFocusRooms, batchHideSidebarRooms, batchSetSidebarRoomsPinned, concludeSidebarFocusRoom, refreshSettings, settingsRoomActionBusyKey });
   return {
     backFromSubstep, canSubmitJoin, canSubmitStandalone, chooseJoinIntent, chooseProjectIntent,
-    chooseNewProjectIntent, chooseStandaloneIntent, closeNewRoomModal, confirmProjectRoomFromModal,
-    copyInviteCode, createStandaloneRoom, createProjectRoomFromModal, dismissSuccess,
+    chooseNewProjectIntent, closeNewRoomModal, confirmProjectRoomFromModal,
+    createStandaloneRoom, createProjectRoomFromModal,
     joinRoomCodeFromModal, newRoomActiveAction, newRoomBusy, newRoomCanDismiss, newRoomFeedback,
     newRoomFeedbackState, newRoomJoinCode, newRoomJoinError, newRoomModalOpen, newRoomName,
     newRoomProjectPath, newRoomProjectName, newRoomProjectParent, newRoomProjectCreationError,
     newRoomProjectPathError, newRoomProjectSelection, newRoomStatusMessage, newRoomStep,
-    newRoomStorage, newRoomCompany, newRoomSuccess, openProjectRoomFromModal, openProjectRoomFromPath,
-    pickNewProjectParent, openSuccessRoom, retryLastAction, selectNewRoomEntry,
+    newRoomStorage, newRoomCompany, newRoomCompanies, removeProject, openProjectRoomFromModal, openProjectRoomFromPath,
+    pickNewProjectParent, retryLastAction, selectNewRoomEntry,
     batchConcludeSidebarFocusRooms, batchHideSidebarRooms, batchSetSidebarRoomsPinned,
     archiveSidebarFocusRoom, archiveSidebarRoom, concludeSidebarFocusRoom, deleteAccountRoom, pendingRoomDeletion, confirmRoomDeletion, finishRoomArchive,
     leaveAccountRoom, openAccountRoomFromSettings, refreshSettings, renameSidebarRoom,
