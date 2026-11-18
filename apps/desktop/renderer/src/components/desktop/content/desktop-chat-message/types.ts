@@ -71,15 +71,4 @@ export type AgentInspectorSelection =
       unavailableReason: "missing" | "ambiguous" | "load_error";
     });
 
-export interface GitHubEventPresentation {
-  kind: "pull-request" | "issue" | "review" | "comment" | "check" | "repository" | "generic";
-  tone: "violet" | "amber" | "emerald" | "rose" | "sky" | "slate";
-  kindLabel: string;
-  statusLabel: string | null;
-  headline: string;
-  detail: string | null;
-  repository: string | null;
-  taskId: string | null;
-  url: string | null;
-  urlLabel: string;
-}
+export type { GitHubEventPresentation } from "../../../../../../../../shared/ui/github-event-message";
