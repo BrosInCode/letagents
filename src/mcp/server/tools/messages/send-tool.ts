@@ -22,7 +22,10 @@ import {
 } from "../../runtime.js";
 import {
   assertMessageFileAttachmentsAvailable,
+  assertMessageFileContentsAvailable,
   discardMessageAttachments,
+  readMessageFileContents,
+  type MessageFileContent,
   localRoomAttachmentError,
   readMessageAttachmentFiles,
   stageMessageAttachments,
@@ -40,6 +43,7 @@ type SendMessageInput = {
   thread_parent_id?: string;
   agent_session_id?: string;
   attachments?: string[];
+  files?: MessageFileContent[];
 };
 
 type AgentSessionCredentialPayload = Record<string, string>;
@@ -65,9 +69,14 @@ export function buildSendMessageRequestBody(input: {
 }
 
 /** Only a registration that offers the field passes it on; anything else never reaches the file reader. */
-function fileAttachmentsInput(options: { fileAttachments?: boolean }, rest: Record<string, unknown>): { attachments?: string[] } {
-  return options.fileAttachments && Array.isArray(rest.attachments) ? { attachments: rest.attachments as string[] } : {};
+function fileAttachmentsInput(options: SendToolOptions, rest: Record<string, unknown>): { attachments?: string[]; files?: MessageFileContent[] } {
+  return {
+    ...(options.fileAttachments && Array.isArray(rest.attachments) ? { attachments: rest.attachments as string[] } : {}),
+    ...(options.fileContents && Array.isArray(rest.files) ? { files: rest.files as MessageFileContent[] } : {}),
+  };
 }
+
+type SendToolOptions = { fileAttachments?: boolean; fileContents?: boolean };
 
 function normalizeMessageId(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
@@ -138,9 +147,11 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
     throw new Error("No room is currently selected. Join a room first or pass room_id.");
   }
   const localRoomId = targetRoomId ?? getCurrentRoom()?.room_id ?? targetProjectId;
-  if (input.attachments) {
-    assertMessageFileAttachmentsAvailable();
-    if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) throw localRoomAttachmentError();
+  if (input.attachments) assertMessageFileAttachmentsAvailable();
+  if (input.files) assertMessageFileContentsAvailable();
+  if ((input.attachments || input.files) && localRoomId && await isLocalRoomStorageEnabled(localRoomId)) throw localRoomAttachmentError();
+  if ((input.attachments?.length ?? 0) + (input.files?.length ?? 0) > MESSAGE_ATTACHMENT_LIMITS.maxFiles) {
+    throw new Error(`Attach at most ${MESSAGE_ATTACHMENT_LIMITS.maxFiles} files to one message (attachments and files together). Nothing was posted.`);
   }
 
   const { identity, agentSession } = await resolveWorkerToolIdentity({
@@ -181,11 +192,16 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
 
   // Every file is read and staged before the message is posted, with the same
   // credential, and a refused file posts nothing.
-  if (input.attachments && !targetRoomId) {
+  if ((input.attachments || input.files) && !targetRoomId) {
     throw new Error("Attachments need a room. Join one with join_room, or pass room_id. Nothing was posted.");
   }
-  const staged = input.attachments && targetRoomId
-    ? await stageMessageAttachments(targetRoomId, await readMessageAttachmentFiles(input.attachments))
+  // Files from the workspace and files given as content: all read and checked before any upload.
+  const fromWorkspace = input.attachments && targetRoomId ? await readMessageAttachmentFiles(input.attachments) : [];
+  const given = input.files && targetRoomId
+    ? readMessageFileContents(input.files, fromWorkspace.reduce((sum, file) => sum + file.bytes.byteLength, 0))
+    : [];
+  const staged = targetRoomId && (fromWorkspace.length || given.length)
+    ? await stageMessageAttachments(targetRoomId, [...fromWorkspace, ...given])
     : [];
   let message: Record<string, unknown>;
   try {
@@ -237,8 +253,22 @@ const attachmentsInput = z
   .optional()
   .describe("Optional files to attach: 1 to 4 paths inside your project folder, absolute or relative to this MCP server's working folder. Up to 25 MB each and 100 MB together. Files that may hold credentials (.env, keys, .git and similar) are refused. If any file is refused, nothing is posted. A single self-contained .html file runs inside the room message in the LetAgents desktop app as a locked demo with no network: put all CSS, JavaScript and images (as data: URLs) in the file, keep it under about 560 px tall, and support light and dark mode. Dialogs, pop-ups, forms and printing do not work there.");
 
-export function registerSendMessageTool(server: McpServer, options: { fileAttachments?: boolean } = {}): void {
-  const attachments: Record<string, typeof attachmentsInput> = options.fileAttachments ? { attachments: attachmentsInput } : {};
+const filesInput = z
+  .array(z.object({
+    name: z.string().min(1).max(255).describe("The file's name, with its extension, for example \"pricing-demo.html\" or \"chart.png\". The extension sets its type."),
+    content: z.string().min(1).describe("The file's content: its text, or its bytes in base64 when encoding is \"base64\"."),
+    encoding: z.enum(["utf8", "base64"]).optional().describe("\"utf8\" (default) for text such as HTML, Markdown, JSON or code; \"base64\" for an image or other binary file."),
+  }).strict())
+  .min(1)
+  .max(MESSAGE_ATTACHMENT_LIMITS.maxFiles)
+  .optional()
+  .describe("Optional files to attach, given as content (no folder needed): 1 to 4, together with any attachments. Over the remote LetAgents endpoint one tool call is at most 256 KB, so keep files there under about 180 KB together. Names that usually hold credentials (.env, keys) are refused. If any file is refused, nothing is posted. A single self-contained .html file runs inside the room message in the LetAgents desktop app as a locked demo with no network: put all CSS, JavaScript and images (as data: URLs) in the file, keep it under about 560 px tall, and support light and dark mode. People can pin notes and draw on it; read them with read_demo_marks.");
+
+export function registerSendMessageTool(server: McpServer, options: SendToolOptions = {}): void {
+  const attachments: Record<string, typeof attachmentsInput | typeof filesInput> = {
+    ...(options.fileAttachments ? { attachments: attachmentsInput } : {}),
+    ...(options.fileContents ? { files: filesInput } : {}),
+  };
   server.tool(
     "send_message",
     "Send a message to a Let Agents Chat room. For focused side discussion, prefer send_thread_message or pass thread_parent_id so the reply stays in that message thread instead of polluting the main room.",

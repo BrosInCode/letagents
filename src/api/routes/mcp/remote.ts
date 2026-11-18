@@ -100,7 +100,8 @@ export function registerRemoteMcpRoutes(app: Express, deps: RemoteMcpRouteDeps):
     const declaredLength = Number.parseInt(req.headers["content-length"] ?? "0", 10) || 0;
     const parsedLength = req.body === undefined ? 0 : Buffer.byteLength(JSON.stringify(req.body));
     if (Math.max(declaredLength, parsedLength) > remoteMcpMaxBodyBytes()) {
-      jsonRpcError(res, 413, "The MCP request body is too large.");
+      jsonRpcError(res, 413, `The MCP request body is too large (at most ${Math.floor(remoteMcpMaxBodyBytes() / 1024)} KB). `
+        + "Send long text in parts, and keep files given as content under about 180 KB together.");
       return;
     }
     // What the session binds to: the owner token itself, or the OAuth grant's

@@ -7,13 +7,15 @@ import {
   MESSAGE_ATTACHMENT_LIMITS,
   discardCloudMessageAttachment,
   formatMessageAttachmentLimit,
+  guessMessageAttachmentMimeType,
   stageCloudMessageAttachment,
   type MessageAttachmentTransport,
   type StagedCloudMessageAttachment,
 } from "../../../../shared/message-attachments.mjs";
-import { CREDENTIAL_FOLDER_NAMES } from "../../../../shared/credential-paths.mjs";
+import { CREDENTIAL_FOLDER_NAMES, workspacePathMayHoldCredentials } from "../../../../shared/credential-paths.mjs";
 import { isLocalRoomApi } from "../../../../shared/room-api-origin.mjs";
 import {
+  attachmentFileName,
   isFileSystemRoot,
   readWorkspaceAttachmentFile,
   workspaceAliases,
@@ -50,6 +52,58 @@ export function assertMessageFileAttachmentsAvailable(): void {
     throw new Error("Desktop room agents attach files to their reply with set_reply_attachments.");
   }
   if (isLocalRoomApi(getApiUrl())) throw localRoomAttachmentError();
+}
+
+/**
+ * Refuse files given as content where the room cannot take them. They need no
+ * folder, so the remote endpoint takes them; desktop room agents attach to
+ * their reply through set_reply_attachments instead.
+ */
+export function assertMessageFileContentsAvailable(): void {
+  const profile = process.env.LETAGENTS_EXECUTION_PROFILE?.trim();
+  if (getDaemonToolExecutionContext() || profile === "supervised_room_turn" || profile === "supervised_mcp_polling") {
+    throw new Error("Desktop room agents attach files to their reply with set_reply_attachments.");
+  }
+  if (!currentSessionScope() && isLocalRoomApi(getApiUrl())) throw localRoomAttachmentError();
+}
+
+/** A file an agent sends as content: its name, and its text or its bytes in base64. */
+export type MessageFileContent = { name: string; content: string; encoding?: "utf8" | "base64" };
+
+// Standard base64; line breaks and spaces are dropped first, as MIME and PEM wrap it. One flat
+// character class, so a file of many megabytes cannot exhaust the regex engine's stack.
+const BASE64_CHARACTERS = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/**
+ * Files given as content, as the room will store them: the name a room shows
+ * (its base name, no control characters), the type its name gives (an .html
+ * file runs as a live demo), and its bytes. Everything is checked before any
+ * upload, so a refused file stages nothing. `alreadyBytes` counts files of
+ * the same message read from the workspace.
+ */
+export function readMessageFileContents(files: readonly MessageFileContent[], alreadyBytes = 0): WorkspaceAttachmentFile[] {
+  let total = alreadyBytes;
+  return files.map((file) => {
+    const name = attachmentFileName(file.name);
+    if (workspacePathMayHoldCredentials([name])) throw new Error(`${name} is a name for files that hold credentials, so it is never attached. ${NOTHING_POSTED}`);
+    let bytes: Buffer;
+    if (file.encoding === "base64") {
+      const compact = file.content.replace(/\s+/g, "");
+      if (compact.length % 4 !== 0 || !BASE64_CHARACTERS.test(compact)) throw new Error(`The content of ${name} is not valid base64. ${NOTHING_POSTED}`);
+      bytes = Buffer.from(compact, "base64");
+    } else {
+      bytes = Buffer.from(file.content, "utf8");
+    }
+    if (!bytes.byteLength) throw new Error(`${name} is empty. ${NOTHING_POSTED}`);
+    if (bytes.byteLength > MESSAGE_ATTACHMENT_LIMITS.maxFileBytes) {
+      throw new Error(`${name} is larger than ${formatMessageAttachmentLimit(MESSAGE_ATTACHMENT_LIMITS.maxFileBytes)}. ${NOTHING_POSTED}`);
+    }
+    total += bytes.byteLength;
+    if (total > MESSAGE_ATTACHMENT_LIMITS.maxTotalBytes) {
+      throw new Error(`The attached files are larger than ${formatMessageAttachmentLimit(MESSAGE_ATTACHMENT_LIMITS.maxTotalBytes)} together. ${NOTHING_POSTED}`);
+    }
+    return { name, mimeType: guessMessageAttachmentMimeType(name), bytes };
+  });
 }
 
 export function localRoomAttachmentError(): Error {
