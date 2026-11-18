@@ -227,16 +227,18 @@ test("a page reads only the custom fields its allowance names", async () => {
   const call = (actor: typeof person) => ({ room: { id: ROOM }, actor }) as unknown as ApiCallContext;
   const input = { query: "", limit: 10, fields: ["customfield_1", "customfield_2"] };
 
-  const [search] = createWorkItemRoutes({ getReader: () => stub, allowedFields: (actor) => (actor.via ? ["customfield_1"] : null) });
+  const [search] = createWorkItemRoutes({ getReader: () => stub, allowedFields: async (actor) => (actor.via ? ["customfield_1"] : null) });
   await search!.handler(input, call(person));
   await search!.handler({ ...input, fields: "customfield_1" }, call(page));
   await rejectsWith(Promise.resolve().then(() => search!.handler(input, call(page))), "not_granted", /customfield_2/);
   assert.deepEqual(calls, [["customfield_1", "customfield_2"], ["customfield_1"]]);
 
-  // Until the pages registry answers, a page or a job reads no custom field; a person reads any.
-  assert.equal(allowedWorkItemFields(person), null);
-  assert.deepEqual(allowedWorkItemFields(page), []);
-  assert.equal(allowedWorkItemFields({ ...person, via: { kind: "integration", id: "remote-mcp" } }), null);
+  // A person reads any custom field; a job, or a page grant naming no version, reads none.
+  // A page version's own fields come from the pages registry (api-v1-pages-db.test.ts).
+  assert.equal(await allowedWorkItemFields(person), null);
+  assert.deepEqual(await allowedWorkItemFields(page), []);
+  assert.deepEqual(await allowedWorkItemFields({ ...person, via: { kind: "job", id: "job-1" } }), []);
+  assert.equal(await allowedWorkItemFields({ ...person, via: { kind: "integration", id: "remote-mcp" } }), null);
 });
 
 test("no enabled, non-empty room filter on an active connection is no_source", async () => {

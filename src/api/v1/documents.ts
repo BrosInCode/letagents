@@ -15,6 +15,7 @@ import {
 import type { OwnerTokenAccount, Project, SessionAccount } from "../db.js";
 import { decideRoomRead, roomAccessPrincipal } from "../rooms/access-decision.js";
 import { queueRoomResourceInvalidation } from "../server/events.js";
+import { pageExistsInRoom as registryPageExistsInRoom, pageManifestCollections } from "./pages.js";
 
 // The data.* methods for any transport: the /api/v1 routes call these, and
 // so can MCP tools. The caller passes the actor and the room in the URL;
@@ -85,22 +86,21 @@ export function resolveDocumentScope(call: Pick<DocumentCall, "actor"> & { roomI
 
 /**
  * The collections a page's manifest names, per scope, or null for no limit.
- * Only a page is limited, and only to its own manifest. Null for everyone
- * today: the pages registry (PR7) fills this from the granted page version.
+ * Only a page is limited, and only to the manifest of the version its grant
+ * names (an unknown version names none).
  */
 export async function allowedCollectionsFor(actor: ApiActor): Promise<PageManifest["collections"] | null> {
   if (actor.via?.kind !== "page") return null;
-  return null;
+  if (actor.via.version === undefined) return {};
+  return pageManifestCollections(actor.via.id, actor.via.version);
 }
 
 /**
- * Whether a page with this id is placed in this room. True for every id
- * today: the pages registry (PR7) fills this from page placements, so page
- * and viewer data can only be made for a page the room has. Until then a
- * page id opens a new scope, bounded by the room caps.
+ * Whether the room owns a page with this id or has it pinned, so page and
+ * viewer data can only be made for a page the room has.
  */
-export async function pageExistsInRoom(_roomId: string, _pageId: string): Promise<boolean> {
-  return true;
+export async function pageExistsInRoom(roomId: string, pageId: string): Promise<boolean> {
+  return registryPageExistsInRoom(roomId, pageId);
 }
 
 /**

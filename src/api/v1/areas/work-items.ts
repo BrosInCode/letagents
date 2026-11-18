@@ -18,10 +18,10 @@ export function createWorkItemRoutes(deps: {
     return value;
   };
   /** The named custom fields, each one the actor may read, or not_granted. */
-  const fields = (actor: ApiActor, named: string | string[] | undefined): string[] | undefined => {
+  const fields = async (actor: ApiActor, named: string | string[] | undefined): Promise<string[] | undefined> => {
     if (named === undefined) return undefined;
     const list = typeof named === "string" ? [named] : named;
-    const allowed = allowance(actor);
+    const allowed = await allowance(actor);
     const refused = allowed === null ? [] : list.filter((field) => !allowed.includes(field));
     if (refused.length) {
       throw new ApiError("not_granted", `This caller may not read the custom field ${refused[0]}; a page reads only the fields its manifest names.`);
@@ -29,8 +29,8 @@ export function createWorkItemRoutes(deps: {
     return list;
   };
   return [
-    defineRoute(searchWorkItems, (input, { room, actor }) => reader().search(room.id, { ...input, fields: fields(actor, input.fields) })),
-    defineRoute(getWorkItem, (input, { room, actor }) => reader().get(room.id, { ...input, fields: fields(actor, input.fields) })),
+    defineRoute(searchWorkItems, async (input, { room, actor }) => reader().search(room.id, { ...input, fields: await fields(actor, input.fields) })),
+    defineRoute(getWorkItem, async (input, { room, actor }) => reader().get(room.id, { ...input, fields: await fields(actor, input.fields) })),
     defineRoute(getWorkItemHistory, (input, { room }) => reader().history(room.id, input)),
   ];
 }

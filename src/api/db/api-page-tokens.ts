@@ -121,7 +121,10 @@ export async function insertApiPageToken(input: NewApiPageToken): Promise<ApiPag
 /**
  * A new token with the binding of a live one of the same account. Returns
  * null when the old token is not live (or another person's) once the locks
- * are held.
+ * are held, or when its page version is no longer the page's live version
+ * pinned in the room, or no longer granted every capability the token holds.
+ * The pages registry revokes such tokens after it commits a change; this
+ * closes the gap between its commit and that revoke.
  */
 export async function refreshApiPageToken(input: {
   oldTokenHash: string;
@@ -140,6 +143,13 @@ export async function refreshApiPageToken(input: {
       WHERE t.token_hash = $1 AND t.account_id = $2 AND ${LIVE}`, [input.oldTokenHash, input.accountId]);
     const old = current.rows[0];
     if (!old) return null;
+    const page = await client.query<{ capabilities: string[] }>(`SELECT g.capabilities FROM pages p
+      JOIN page_grants g ON g.page_id = p.id AND g.version = p.current_version AND g.room_id = $3
+      WHERE p.id = $1 AND p.current_version = $2
+        AND EXISTS (SELECT 1 FROM page_placements pl WHERE pl.page_id = p.id AND pl.room_id = $3)`,
+    [old.page_id, old.page_version, old.room_id]);
+    const granted = page.rows[0]?.capabilities;
+    if (!granted || !old.capabilities.every((name) => granted.includes(name))) return null;
     return insertLocked(client, {
       ...input.next,
       accountId: old.account_id,
