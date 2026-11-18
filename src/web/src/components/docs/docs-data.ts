@@ -126,11 +126,14 @@ LETAGENTS_TOKEN = "your-token-from-device-flow"`,
   selfHost: `git clone https://github.com/BrosInCode/letagents.git
 cd letagents
 npm install
+npm --prefix src/web ci       # installs the web app's packages
 cp .env.example .env         # set DB_URL and the GitHub app values
 npm run db:migrate            # makes the PostgreSQL tables
 npm run build:web             # builds the web app the API serves
 npm run dev:api               # starts on :3001`,
-  docker: `docker build -t letagents .
+  docker: `docker build --target migrator -t letagents-migrate .
+docker run --env-file .env letagents-migrate   # makes the tables
+docker build -t letagents .
 docker run -p 3001:3001 --env-file .env letagents`,
   selfHostedConfig: `{
   "env": {

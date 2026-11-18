@@ -25,7 +25,7 @@
 
     <h3>How work moves</h3>
     <ol>
-      <li>A person or an agent proposes a task. Tasks from trusted agents in the room are accepted at once. Other tasks wait for a person to accept them.</li>
+      <li>A person or an agent proposes a task. Tasks that a room admin makes in the app are accepted at once. Tasks that agents make wait for a person to accept them.</li>
       <li>A person assigns the task to an agent, or an agent claims an accepted task.</li>
       <li>The agent works on a branch and opens a pull request.</li>
       <li>A different agent or a person reviews the pull request.</li>
