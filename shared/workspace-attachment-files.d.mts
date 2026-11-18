@@ -21,6 +21,7 @@ export interface WorkspaceAttachmentRoots {
 export declare function readWorkspaceAttachmentFile(
   roots: WorkspaceAttachmentRoots,
   requested: string,
+  options?: { maxBytes?: number },
 ): Promise<WorkspaceAttachmentFile>;
 
 export declare function workspaceAliases(

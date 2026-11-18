@@ -325,3 +325,41 @@ test("the rate limiter drops the oldest window when it is full", () => {
   assert.equal(limiter.take("a", "read").allowed, true);
   assert.equal(limiter.take("c", "read").allowed, false, "c stays limited");
 });
+
+test("an agent writes only through a method the contract opens to agents; every other write is not_granted", async () => {
+  const { getApiMethod } = await import("../../../shared/api/index.mjs");
+  const allow = createCapabilityCheck({
+    resolvePolicy: async (_roomId, capability) => ({ capability, mode: "allow", configured: "allow", source: "default", rule: null }),
+  });
+  const agent = { principal: { kind: "agent" as const, id: "agent_helper" }, roomId: "r1" };
+  const request = { req: {} } as never;
+  await allow(agent, getApiMethod("data.set")!, { scope: "room" }, request);
+  await allow(agent, getApiMethod("pages.create")!, {}, request);
+  await allow(agent, getApiMethod("pages.diagnostics")!, {}, request);
+  await allow(agent, getApiMethod("jobs.list")!, {}, request);
+  for (const name of ["jobs.start", "jobs.cancel", "pages.grant", "pages.pin", "pages.approve", "pages.reportDiagnostics", "rooms.setPolicy"]) {
+    const method = getApiMethod(name);
+    assert.ok(method, name);
+    await assert.rejects(allow(agent, method, { scope: "room" }, request), (error: ApiError) => error.code === "not_granted", name);
+  }
+});
+
+test("a worker bearer reaches /api/v1 writes only on the routes of methods flagged agents: write", async () => {
+  const { requiredAgentSessionRouteCapability } = await import("../request/agent-session-route-capabilities.js");
+  const room = encodeURIComponent("github.com/acme/app");
+  assert.equal(requiredAgentSessionRouteCapability("PUT", `/api/v1/rooms/${room}/data/room/notes/n1`), "coordination.propose");
+  assert.equal(requiredAgentSessionRouteCapability("DELETE", `/api/v1/rooms/${room}/data/room/notes/n1`), "coordination.propose");
+  assert.equal(requiredAgentSessionRouteCapability("POST", `/api/v1/rooms/${room}/pages`), "coordination.propose");
+  assert.equal(requiredAgentSessionRouteCapability("POST", `/api/v1/rooms/${room}/pages/page_ab12/versions`), "coordination.propose");
+  assert.equal(requiredAgentSessionRouteCapability("GET", `/api/v1/rooms/${room}/pages/page_ab12/diagnostics`), "coordination.read");
+  for (const [verb, path] of [
+    ["POST", `/api/v1/rooms/${room}/pages/page_ab12/grant`],
+    ["POST", `/api/v1/rooms/${room}/pages/page_ab12/placements`],
+    ["POST", `/api/v1/rooms/${room}/pages/page_ab12/approve`],
+    ["PUT", `/api/v1/rooms/${room}/policies`],
+    ["POST", `/api/v1/rooms/${room}/jobs`],
+    ["POST", `/api/v1/rooms/${room}/data/room/notes/n1`],
+  ]) {
+    assert.equal(requiredAgentSessionRouteCapability(verb!, path!), null, `${verb} ${path}`);
+  }
+});

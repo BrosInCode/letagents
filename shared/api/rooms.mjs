@@ -53,6 +53,7 @@ export const getRoom = defineMethod({
   output: RoomSummary,
   errors: ["not_found"],
   rateClass: "read",
+  agents: "read",
 });
 
 /**

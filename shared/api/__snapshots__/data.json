@@ -6,6 +6,7 @@
     "path": "/rooms/:room/data/:scope/:collection/:docId",
     "response": "json",
     "rateClass": "write",
+    "agents": "write",
     "errors": [
       "conflict"
     ],
@@ -75,6 +76,7 @@
     "path": "/rooms/:room/data/:scope/:collection/:docId",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [
       "not_found"
     ],
@@ -189,6 +191,7 @@
     "path": "/rooms/:room/data/:scope/:collection",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [],
     "input": {
       "type": "object",
@@ -333,6 +336,7 @@
     "path": "/rooms/:room/data/:scope/:collection/:docId",
     "response": "json",
     "rateClass": "write",
+    "agents": "write",
     "errors": [
       "conflict",
       "too_large"
@@ -462,6 +466,7 @@
     "path": "/rooms/:room/data/:scope/:collection/:docId",
     "response": "json",
     "rateClass": "write",
+    "agents": "write",
     "errors": [
       "conflict",
       "not_found",

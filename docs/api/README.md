@@ -60,6 +60,13 @@ the page bridge and MCP tool schemas all come from it. The plan is
    - Use camelCase field names. Export each schema and a same-named type:
      `/** @typedef {z.infer<typeof Task>} Task */`.
    - The description is what agents read in the MCP tool. Write it for them.
+   - `agents: "read"` (a read) or `agents: "write"` (any other kind) gives agents the MCP tool
+     `api_<area>_<verb>` (`git.pullRequests` → `api_git_pull_requests`), made from the method:
+     its description, capability and error codes, and its input plus `room_id`. A read tool is
+     read-only for supervised and Read-only Codex agents. `agents: "write"` also opens the method
+     to worker bearers on `/api/v1`; without it an agent may only read. Removing or changing the
+     flag later breaks the contract. A method whose tool is written by hand is listed in
+     `HAND_WRITTEN_AGENT_TOOLS` (`shared/api/agent-tools.mjs`).
    - Common codes need no listing: `invalid_input`, `unauthenticated`, `not_found` (the room),
      `not_participant`, `not_granted`, `rate_limited`, `source_unavailable`, `internal`. List
      `not_found` anyway when the method can miss its own target, so the reference says so.
@@ -135,6 +142,13 @@ the page bridge and MCP tool schemas all come from it. The plan is
   the grants' streams. Signing out of an app session revokes the grants it minted.
 - The router appends every non-read call that passed the room check to `api_actions`. A handler
   names its target with `setApiActionTarget(call, target)`; otherwise the path parameters are used.
+
+## Generated files
+
+`node scripts/build-api-contracts.mjs` also writes `shared/api-agent-tools.mjs` (the agent
+tools by name, for code that cannot load zod) and `docs/api/page-reference.md` (the room page
+reference, which is also the description of the MCP tool `publish_page`). The contract test
+fails when either is stale.
 
 ## Wire format
 

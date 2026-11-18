@@ -77,9 +77,10 @@ function samePath(a, b) {
  * Read one file an agent named. `workspace` is the workspace's real path,
  * with no link in it; `aliases` are other names of that same folder (the
  * agent may name files through them); a relative name resolves against
- * `baseDirectory`, which defaults to the workspace.
+ * `baseDirectory`, which defaults to the workspace. `maxBytes` (a message
+ * attachment's limit by default) is checked before any byte is read.
  */
-export async function readWorkspaceAttachmentFile({ workspace, aliases = [], baseDirectory = workspace }, requested) {
+export async function readWorkspaceAttachmentFile({ workspace, aliases = [], baseDirectory = workspace }, requested, { maxBytes = MESSAGE_ATTACHMENT_LIMITS.maxFileBytes } = {}) {
   const candidate = resolve(baseDirectory, requested);
   const root = [workspace, ...aliases].find((folder) => isInside(folder, candidate));
   if (!root) throw outsideError(requested);
@@ -128,7 +129,7 @@ export async function readWorkspaceAttachmentFile({ workspace, aliases = [], bas
       const opened = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => null);
       if (opened !== real) throw changedError(requested);
     }
-    bytes = await readRegularFile(handle, requested, before);
+    bytes = await readRegularFile(handle, requested, before, maxBytes);
   } finally {
     await handle.close();
   }
@@ -149,15 +150,15 @@ async function stillTheOpenedFile(path, real, opened) {
  * Read exactly the size the open file had: a file that grows during the read is
  * refused instead of read without bound, and a named pipe never blocks.
  */
-async function readRegularFile(handle, requested, before) {
+async function readRegularFile(handle, requested, before, maxBytes) {
   const info = await handle.stat({ bigint: true });
   if (!info.isFile()) throw new Error(`${requested} is not a regular file.`);
   if (!sameFile(info, before)) throw changedError(requested);
   // A hard link can name a file from outside the workspace under an inside path.
   if (info.nlink > 1n) throw new Error(`${requested} is a hard link, so it is not attached.`);
   if (info.size === 0n) throw new Error(`${requested} is empty.`);
-  if (info.size > BigInt(MESSAGE_ATTACHMENT_LIMITS.maxFileBytes)) {
-    throw new Error(`${requested} is larger than ${formatMessageAttachmentLimit(MESSAGE_ATTACHMENT_LIMITS.maxFileBytes)}.`);
+  if (info.size > BigInt(maxBytes)) {
+    throw new Error(`${requested} is larger than ${formatMessageAttachmentLimit(maxBytes)}.`);
   }
   const size = Number(info.size);
   const bytes = Buffer.alloc(size);

@@ -38,6 +38,7 @@ export const listPeople = defineMethod({
   input: z.strictObject({}),
   output: PeopleList,
   rateClass: "read",
+  agents: "read",
 });
 
 export const getViewer = defineMethod({
@@ -50,6 +51,7 @@ export const getViewer = defineMethod({
   input: z.strictObject({}),
   output: Person,
   rateClass: "read",
+  // No agent tool: an agent is not a person in the room, so it has no "me" here.
 });
 
 export const methods = /** @type {const} */ ([listPeople, getViewer]);

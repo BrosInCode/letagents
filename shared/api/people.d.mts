@@ -19,8 +19,8 @@ export type PeopleList = z.infer<typeof PeopleList>;
  */
 export const PeopleList: z.ZodObject<{
     managedBy: z.ZodEnum<{
-        letagents: "letagents";
         github: "github";
+        letagents: "letagents";
     }>;
     people: z.ZodArray<z.ZodObject<{
         login: z.ZodString;
@@ -36,8 +36,8 @@ export const PeopleList: z.ZodObject<{
 /** @typedef {z.infer<typeof PeopleList>} PeopleList */
 export const listPeople: import("./core.mjs").ApiMethod<"people.list", z.ZodObject<{}, z.core.$strict>, z.ZodObject<{
     managedBy: z.ZodEnum<{
-        letagents: "letagents";
         github: "github";
+        letagents: "letagents";
     }>;
     people: z.ZodArray<z.ZodObject<{
         login: z.ZodString;
@@ -60,8 +60,8 @@ export const getViewer: import("./core.mjs").ApiMethod<"people.viewer", z.ZodObj
 }, z.core.$strip>>;
 export const methods: readonly [import("./core.mjs").ApiMethod<"people.list", z.ZodObject<{}, z.core.$strict>, z.ZodObject<{
     managedBy: z.ZodEnum<{
-        letagents: "letagents";
         github: "github";
+        letagents: "letagents";
     }>;
     people: z.ZodArray<z.ZodObject<{
         login: z.ZodString;

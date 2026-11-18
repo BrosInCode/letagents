@@ -6,6 +6,7 @@
     "path": "/rooms/:room/messages",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [],
     "input": {
       "type": "object",
@@ -170,6 +171,7 @@
     "path": "/rooms/:room/messages/:messageId/thread",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [
       "not_found"
     ],

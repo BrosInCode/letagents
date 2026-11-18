@@ -136,6 +136,7 @@ export const searchWorkItems = defineMethod({
   output: WorkItemSearchResult,
   errors: ["no_source"],
   rateClass: "search",
+  agents: "read",
 });
 
 export const getWorkItem = defineMethod({
@@ -149,6 +150,7 @@ export const getWorkItem = defineMethod({
   output: WorkItem,
   errors: ["not_found", "no_source"],
   rateClass: "read",
+  agents: "read",
 });
 
 export const getWorkItemHistory = defineMethod({
@@ -164,6 +166,7 @@ export const getWorkItemHistory = defineMethod({
   output: WorkItemHistory,
   errors: ["not_found", "no_source"],
   rateClass: "read",
+  agents: "read",
 });
 
 export const methods = /** @type {const} */ ([searchWorkItems, getWorkItem, getWorkItemHistory]);

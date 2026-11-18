@@ -393,6 +393,7 @@ const required = [
   })),
   ...[
     "shared/agent-branch.mjs",
+    "shared/api-agent-tools.mjs",
     "shared/agent-codenames.mjs",
     "shared/agent-live-trace.mjs",
     "shared/codex-owner-isolation.mjs",

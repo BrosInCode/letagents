@@ -6,6 +6,7 @@
     "path": "/rooms/:room/work-items/:key",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [
       "no_source",
       "not_found"
@@ -290,6 +291,7 @@
     "path": "/rooms/:room/work-items/:key/history",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [
       "no_source",
       "not_found"
@@ -378,6 +380,7 @@
     "path": "/rooms/:room/work-items",
     "response": "json",
     "rateClass": "search",
+    "agents": "read",
     "errors": [
       "no_source"
     ],

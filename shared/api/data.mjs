@@ -176,6 +176,7 @@ export const listDocuments = defineMethod({
   }),
   output: DataDocumentPage,
   rateClass: "read",
+  agents: "read",
 });
 
 export const getDocument = defineMethod({
@@ -190,6 +191,7 @@ export const getDocument = defineMethod({
   output: DataDocument,
   errors: ["not_found"],
   rateClass: "read",
+  agents: "read",
 });
 
 export const setDocument = defineMethod({
@@ -206,6 +208,7 @@ export const setDocument = defineMethod({
   output: DataDocument,
   errors: ["conflict", "too_large"],
   rateClass: "write",
+  agents: "write",
 });
 
 export const updateDocument = defineMethod({
@@ -222,6 +225,7 @@ export const updateDocument = defineMethod({
   output: DataDocument,
   errors: ["not_found", "conflict", "too_large"],
   rateClass: "write",
+  agents: "write",
 });
 
 export const deleteDocument = defineMethod({
@@ -237,6 +241,7 @@ export const deleteDocument = defineMethod({
   output: z.object({ deleted: z.boolean() }),
   errors: ["conflict"],
   rateClass: "write",
+  agents: "write",
 });
 
 export const methods = /** @type {const} */ ([listDocuments, getDocument, setDocument, updateDocument, deleteDocument]);

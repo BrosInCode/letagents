@@ -6,6 +6,7 @@
     "path": "/rooms/:room/agents",
     "response": "json",
     "rateClass": "read",
+    "agents": "read",
     "errors": [],
     "input": {
       "type": "object",
