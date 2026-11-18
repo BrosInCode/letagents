@@ -5,6 +5,9 @@ process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 
 const { registerAuthLogoutRoute } = await import("../routes/auth/index.js");
 
+// Page grants the sign-out revoked, by filter.
+const revokedPageGrants: unknown[] = [];
+
 function registerHandler(deps: {
   deleteOwnerTokenById: (tokenId: string) => Promise<void>;
   deleteSessionByToken: (token: string) => Promise<void>;
@@ -15,7 +18,7 @@ function registerHandler(deps: {
       assert.equal(path, "/auth/logout");
       handler = candidate;
     },
-  } as never, deps);
+  } as never, { ...deps, revokePageGrants: async (filter) => { revokedPageGrants.push(filter); return 0; } });
   assert.ok(handler);
   return handler;
 }
@@ -32,7 +35,7 @@ test("owner-token logout revokes exactly the authenticated bearer", async () => 
   await handler({
     authKind: "owner_token",
     headers: { cookie: "other=value" },
-    sessionAccount: { token_id: "owner-token-current" },
+    sessionAccount: { token_id: "owner-token-current", account_id: "acct_owner" },
   }, {
     setHeader(_name: string, value: unknown) { response.cookie = value; },
     json(body: unknown) { response.body = body; },
@@ -55,7 +58,7 @@ test("cookie logout deletes only the presented browser session", async () => {
   await handler({
     authKind: "session",
     headers: { cookie: "letagents_session=session-current; other=value" },
-    sessionAccount: { id: "session-row" },
+    sessionAccount: { id: "session-row", account_id: "acct_cookie" },
   }, {
     setHeader() {},
     json() {},
@@ -63,4 +66,30 @@ test("cookie logout deletes only the presented browser session", async () => {
 
   assert.deepEqual(deletedSessions, ["session-current"]);
   assert.deepEqual(revokedOwnerTokenIds, []);
+});
+
+test("logout revokes the page grants of the app session that signs out, and an owner token's logout revokes none", () => {
+  assert.deepEqual(revokedPageGrants, [{ sessionId: "session-row" }]);
+});
+
+test("a failed page grant revoke still signs the session out", async (t) => {
+  const deletedSessions: string[] = [];
+  const response: { body?: unknown } = {};
+  let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | null = null;
+  registerAuthLogoutRoute({ post(_path: string, candidate: typeof handler) { handler = candidate; } } as never, {
+    deleteOwnerTokenById: async () => {},
+    deleteSessionByToken: async (token) => { deletedSessions.push(token); },
+    revokePageGrants: async () => { throw new Error("database timeout"); },
+    retireCredentials: () => {},
+  });
+  const logged = t.mock.method(console, "error", () => {});
+  await handler!({
+    authKind: "session",
+    headers: { cookie: "letagents_session=session-failing" },
+    sessionAccount: { id: "session-failing-row", account_id: "acct_cookie" },
+  }, { setHeader() {}, json(body: unknown) { response.body = body; } });
+
+  assert.deepEqual(deletedSessions, ["session-failing"]);
+  assert.deepEqual(response.body, { success: true });
+  assert.equal(logged.mock.callCount(), 1);
 });

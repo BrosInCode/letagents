@@ -60,6 +60,14 @@
               stroke-linejoin="round"
             />
             <path
+              v-else-if="isRoomPageTabId(tab.id)"
+              :d="PAGE_ICON_PATH"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path
               v-else
               d="M4 2.5h8v11l-4-2.5-4 2.5z"
               stroke="currentColor"
@@ -71,6 +79,27 @@
           <span class="room-view-label" aria-hidden="true"><span>{{ tab.label }}</span></span>
           <RoomViewCount v-if="tab.id === 'events'" :count="tab.indicator?.count ?? 0" notification />
           <RoomViewCount v-else-if="tab.count !== null" :count="tab.count" />
+        </button>
+        <!-- More than three pinned pages share one tab that opens a menu of them. -->
+        <button
+          v-if="pagesMenu?.length"
+          ref="pagesMenuTrigger"
+          class="desktop-room-tab room-view-tab"
+          :data-active="activePageInMenu !== null"
+          data-testid="desktop-room-tab-pages"
+          :aria-current="activePageInMenu ? 'page' : undefined"
+          :aria-label="activePageInMenu ? `Pages, ${activePageInMenu.label}` : 'Pages'"
+          :title="activePageInMenu?.label ?? 'Pages'"
+          aria-haspopup="menu"
+          :aria-expanded="pagesMenuOpen"
+          type="button"
+          @click="togglePagesMenu"
+          @keydown.down.prevent="openPagesMenu"
+        >
+          <svg class="desktop-room-tab-icon" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path :d="PAGE_ICON_PATH" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+          <span class="room-view-label" aria-hidden="true"><span>{{ activePageInMenu?.label ?? "Pages" }}</span></span>
         </button>
         <span ref="indicatorElement" class="desktop-room-tab-underline room-view-underline" style="visibility: hidden" aria-hidden="true" />
       </nav>
@@ -85,17 +114,39 @@
           <svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><circle cx="3" cy="8" r="1" fill="currentColor"/><circle cx="8" cy="8" r="1" fill="currentColor"/><circle cx="13" cy="8" r="1" fill="currentColor"/></svg>
         </button>
       </div>
+    <Teleport to="body">
+      <div
+        v-if="pagesMenuOpen && pagesMenu?.length"
+        ref="pagesMenuElement"
+        class="room-message-context-menu desktop-room-pages-menu"
+        role="menu"
+        aria-label="Pages"
+        data-testid="desktop-room-pages-menu"
+        :style="pagesMenuPosition"
+        @keydown="pagesMenuKeydown"
+      >
+        <button
+          v-for="page in pagesMenu"
+          :key="page.id"
+          type="button"
+          role="menuitemradio"
+          :aria-checked="activeTab === page.id"
+          :data-testid="`desktop-room-pages-menu-${page.id}`"
+          @click="choosePage(page.id)"
+        >{{ page.label }}</button>
+      </div>
+    </Teleport>
   </header>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type { DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
 import RoomViewCount from "../../../../../../../../shared/ui/RoomViewCount.vue";
 import RoomAttentionButton from "../../../../../../../../shared/ui/RoomAttentionButton.vue";
 import "../../../../../../../../shared/ui/room-navigation.css";
 import type { SidebarMode } from "../../types";
-import type { RoomTab, RoomTabId } from "./types";
+import { isRoomPageTabId, type RoomTab, type RoomTabId } from "./types";
 import { useSlidingTabIndicator } from "../../../../../../../../shared/ui/useSlidingTabIndicator";
 
 const props = defineProps<{
@@ -103,6 +154,8 @@ const props = defineProps<{
   room: DesktopRoomInfo;
   storage: DesktopRoomStorageState;
   tabs: RoomTab[];
+  /** Pinned pages when there are more than fit as tabs; empty or absent otherwise. */
+  pagesMenu?: RoomTab[];
   activeTab: RoomTabId;
   searchOpen: boolean;
   actionPanelOpen: boolean;
@@ -121,6 +174,57 @@ const emit = defineEmits<{
 
 const { tabsElement, indicatorElement, prepareTabChange } = useSlidingTabIndicator(() => props.activeTab);
 const findShortcut = ref("Ctrl F");
+const PAGE_ICON_PATH = "M4 2.5h5l3 3v8H4zM9 2.5v3h3M6 8.5h4M6 11h4";
+const pagesMenuTrigger = ref<HTMLButtonElement | null>(null);
+const pagesMenuElement = ref<HTMLElement | null>(null);
+const pagesMenuOpen = ref(false);
+const pagesMenuPosition = ref({ left: "0px", top: "0px" });
+const activePageInMenu = computed(() => props.pagesMenu?.find((page) => page.id === props.activeTab) ?? null);
+
+function openPagesMenu(): void {
+  const rect = pagesMenuTrigger.value?.getBoundingClientRect();
+  if (!rect) return;
+  pagesMenuPosition.value = { left: `${Math.max(8, Math.min(rect.left, window.innerWidth - 220))}px`, top: `${rect.bottom + 4}px` };
+  pagesMenuOpen.value = true;
+  void nextTick(() => pagesMenuElement.value?.querySelector<HTMLElement>('[aria-checked="true"], button')?.focus());
+}
+
+function closePagesMenu(returnFocus = false): void {
+  if (!pagesMenuOpen.value) return;
+  pagesMenuOpen.value = false;
+  if (returnFocus) pagesMenuTrigger.value?.focus();
+}
+
+function togglePagesMenu(): void {
+  if (pagesMenuOpen.value) closePagesMenu();
+  else openPagesMenu();
+}
+
+function choosePage(tabId: RoomTabId): void {
+  closePagesMenu(true);
+  emit("selectTab", tabId);
+}
+
+function pagesMenuKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape" || event.key === "Tab") {
+    event.preventDefault();
+    closePagesMenu(true);
+    return;
+  }
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  event.preventDefault();
+  const items = Array.from(pagesMenuElement.value?.querySelectorAll<HTMLElement>("button") ?? []);
+  const index = items.findIndex((item) => item === document.activeElement);
+  items[(index + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length]?.focus();
+}
+
+function closePagesMenuOutside(event: PointerEvent): void {
+  const target = event.target as Node | null;
+  if (target && (pagesMenuElement.value?.contains(target) || pagesMenuTrigger.value?.contains(target))) return;
+  closePagesMenu();
+}
+
+watch(() => props.pagesMenu?.length ?? 0, (count) => { if (!count) closePagesMenu(); });
 const headerDisplayName = computed(() => compactRoomDisplayName(props.room.displayName));
 const attentionCount = computed(() => props.attention?.count ?? 0);
 
@@ -136,8 +240,12 @@ function handleFindShortcut(event: KeyboardEvent): void {
 onMounted(() => {
   findShortcut.value = /Mac|iPhone|iPad/.test(navigator.platform) ? "⌘ F" : "Ctrl F";
   window.addEventListener("keydown", handleFindShortcut);
+  window.addEventListener("pointerdown", closePagesMenuOutside, true);
 });
-onBeforeUnmount(() => window.removeEventListener("keydown", handleFindShortcut));
+onBeforeUnmount(() => {
+  window.removeEventListener("keydown", handleFindShortcut);
+  window.removeEventListener("pointerdown", closePagesMenuOutside, true);
+});
 
 function tabAriaLabel(tab: RoomTab): string {
   const parts = [tab.label];
@@ -180,3 +288,10 @@ function compactMiddle(value: string, maxLength: number): string {
 }
 
 </script>
+
+<style scoped>
+.desktop-room-pages-menu {
+  z-index: 130;
+  width: 212px;
+}
+</style>

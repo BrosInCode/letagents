@@ -7,6 +7,8 @@ import { parseJiraWebhook, verifyJiraWebhook } from "./webhooks.js";
 import { jiraIteration, planningEstimate, trackerAvatarUrl, type TrackerPlanning } from "./planning.js";
 import {
   type ExternalItem,
+  type ExternalItemDetail,
+  type ExternalStatusChange,
   type JiraCredentials,
   type ListItemsOptions,
   type ProviderConnection,
@@ -20,6 +22,10 @@ export const JIRA_EFFECT_PROPERTY_KEY = "letagents.effect";
 
 const ISSUE_KEY = /^[A-Z][A-Z0-9_]*-\d{1,12}$/;
 const ITEM_FIELDS = ["summary", "status", "assignee", "updated", "labels"];
+/** Fields only the API read model shows; sync does not ask for them. */
+const DETAIL_FIELDS = ["fixVersions", "parent", "statuscategorychangedate"];
+/** Changelog pages read for a status history (100 entries each). */
+const MAX_HISTORY_PAGES = 10;
 const PAGE_SIZE = 100;
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -74,20 +80,26 @@ export interface JiraProviderOptions {
 }
 
 /**
- * A room filter's JQL, without a trailing ORDER BY. Parentheses must balance
- * outside quoted strings, so the filter cannot close the group this provider
- * wraps it in and widen the query past the clauses added after it.
+ * Reads JQL the way Jira's lexer splits it: a backslash escapes the next
+ * character inside a quoted string and in an unquoted word alike (`\'` in a
+ * word is a literal quote, not the start of a string). Returns whether the
+ * parentheses and quotes balance, whether a backslash appears outside a
+ * quoted string, and whether the text ends in a backslash that escapes
+ * nothing. Such a backslash never balances: before the ) this provider adds
+ * it would turn that ) into a literal.
  */
-export function jiraFilterClause(filter: string | null): string | null {
-  const base = filter?.replace(/\border\s+by\b[\s\S]*$/i, "").trim();
-  if (!base) return null;
+function scanJql(text: string): { balanced: boolean; bareBackslash: boolean; danglingBackslash: boolean } {
   let depth = 0;
   let quote: string | null = null;
-  for (let index = 0; index < base.length; index += 1) {
-    const char = base[index];
-    if (quote) {
-      if (char === "\\") index += 1;
-      else if (char === quote) quote = null;
+  let bareBackslash = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index];
+    if (char === "\\") {
+      if (!quote) bareBackslash = true;
+      if (index === text.length - 1) return { balanced: false, bareBackslash, danglingBackslash: true };
+      index += 1;
+    } else if (quote) {
+      if (char === quote) quote = null;
     } else if (char === "\"" || char === "'") {
       quote = char;
     } else if (char === "(") {
@@ -96,8 +108,44 @@ export function jiraFilterClause(filter: string | null): string | null {
       break;
     }
   }
-  if (depth !== 0 || quote) throw new TrackerProviderError("definite", "The Jira filter has unbalanced parentheses or quotes.");
+  return { balanced: depth === 0 && !quote, bareBackslash, danglingBackslash: false };
+}
+
+const withoutOrderBy = (jql: string | null) => jql?.replace(/\border\s+by\b[\s\S]*$/i, "").trim() || null;
+const unbalanced = () => new TrackerProviderError("definite", "The Jira filter has unbalanced parentheses or quotes.");
+
+/**
+ * A room filter's JQL, without a trailing ORDER BY. Parentheses must balance
+ * outside quoted strings, so the filter cannot close the group this provider
+ * wraps it in and widen the query past the clauses added after it.
+ *
+ * A saved filter that ends in a backslash escaping nothing loses it: older
+ * servers accepted one, and refusing it now would stop that room's sync for
+ * good. Dropped, it can no longer touch the group's ). A caller's query
+ * (jiraQueryClause) is refused instead.
+ */
+export function jiraFilterClause(filter: string | null): string | null {
+  let base = withoutOrderBy(filter);
+  if (base && scanJql(base).danglingBackslash) base = base.slice(0, -1);
+  if (!base) return null;
+  if (!scanJql(base).balanced) throw unbalanced();
   return base;
+}
+
+/**
+ * A caller's query (never a room admin's filter): as `jiraFilterClause`, but
+ * nothing is dropped, and no backslash outside a quoted string. An escape in
+ * an unquoted word is legal JQL but has no use in a page query, and refusing
+ * it leaves no room for a difference between this scanner and Jira's lexer to
+ * open a way out.
+ */
+export function jiraQueryClause(query: string): string | null {
+  const clause = withoutOrderBy(query);
+  if (!clause) return null;
+  const scan = scanJql(clause);
+  if (!scan.balanced) throw unbalanced();
+  if (scan.bareBackslash) throw new TrackerProviderError("definite", "The Jira query has a backslash outside a quoted string.");
+  return clause;
 }
 
 export function assertJiraKey(key: string): string {
@@ -128,6 +176,54 @@ export function toAdf(text: string): Record<string, unknown> {
           ])
         : [],
     })),
+  };
+}
+
+/** Keys a custom field value keeps: what identifies an option, a user or a version. */
+const RAW_FIELD_KEYS = ["id", "key", "name", "value", "displayName"] as const;
+
+/**
+ * A custom field's value without what a page has no need for: e-mail
+ * addresses, avatar and self links, and anything nested deeper (a parent
+ * issue's own fields, rich text). Objects keep only RAW_FIELD_KEYS with
+ * plain values; a list keeps such objects and plain values.
+ */
+export function sanitizeRawFieldValue(value: unknown): unknown {
+  const plain = (entry: unknown) => entry === null || ["string", "number", "boolean"].includes(typeof entry);
+  const pick = (entry: Record<string, unknown>) => {
+    const kept: Record<string, unknown> = {};
+    for (const key of RAW_FIELD_KEYS) if (Object.hasOwn(entry, key) && plain(entry[key])) kept[key] = entry[key];
+    return kept;
+  };
+  if (plain(value)) return value;
+  if (Array.isArray(value)) {
+    return value.flatMap((entry) => plain(entry) ? [entry] : entry && typeof entry === "object" && !Array.isArray(entry) ? [pick(entry as Record<string, unknown>)] : []);
+  }
+  return value && typeof value === "object" ? pick(value as Record<string, unknown>) : null;
+}
+
+function issueDetail(fields: Record<string, unknown>, statusCategory: string | null, rawFields: readonly string[]): ExternalItemDetail {
+  const parentKey = asString(asRecord(fields.parent).key);
+  const versions = Array.isArray(fields.fixVersions) ? fields.fixVersions.map(asRecord) : [];
+  const raw: Record<string, unknown> = {};
+  for (const id of rawFields) if (Object.hasOwn(fields, id)) raw[id] = sanitizeRawFieldValue(fields[id]);
+  return {
+    status_category: statusCategory,
+    // The key only: the parent may be outside the room filter, so its title is not ours to show.
+    parent: parentKey ? { key: parentKey } : null,
+    fix_versions: versions.flatMap((version) => {
+      const id = asString(version.id);
+      const name = asString(version.name);
+      return id && name ? [{
+        id,
+        name,
+        released: typeof version.released === "boolean" ? version.released : null,
+        release_date: asString(version.releaseDate),
+      }] : [];
+    }),
+    labels: Array.isArray(fields.labels) ? fields.labels.filter((label): label is string => typeof label === "string") : [],
+    status_changed_at: jiraTime(fields.statuscategorychangedate),
+    fields: raw,
   };
 }
 
@@ -192,7 +288,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
     return [...ITEM_FIELDS, ...(mapping?.sprint ?? []), ...(mapping?.estimate ? [mapping.estimate] : []), ...(includeRelease ? mapping?.release.map(field => field.id) ?? [] : [])];
   }
 
-  function toItem(conn: ProviderConnection, issue: unknown, mapping?: JiraPlanningFields | null): ExternalItem | null {
+  function toItem(conn: ProviderConnection, issue: unknown, mapping?: JiraPlanningFields | null, rawFields?: readonly string[]): ExternalItem | null {
     const record = asRecord(issue);
     const key = asString(record.key);
     if (!key) return null;
@@ -222,6 +318,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
           ...(mapping?.release.map(field => ({ ...field, values: Object.hasOwn(fields, field.id) ? releaseOptions(fields[field.id]) : null })) ?? [])] satisfies ReleaseField[],
         ...(mapping !== undefined ? { planning: issuePlanning(fields, mapping) } : {}),
       },
+      ...(rawFields ? { detail: issueDetail(fields, statusCategory, rawFields) } : {}),
     };
   }
 
@@ -277,6 +374,13 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
       const clauses: string[] = [];
       const base = jiraFilterClause(filter);
       if (base) clauses.push(`(${base})`);
+      if (opts.extraFilter !== undefined) {
+        // Each filter is checked and grouped on its own, so neither can close
+        // the other's group: the result is always (room filter) AND (query).
+        if (!base) throw new TrackerProviderError("definite", "A query needs a room filter to scope it.");
+        const extra = jiraQueryClause(opts.extraFilter);
+        if (extra) clauses.push(`(${extra})`);
+      }
       if (opts.assigneeMe) clauses.push("assignee = currentUser()");
       if (opts.updatedSince) {
         const since = Date.parse(opts.updatedSince);
@@ -294,6 +398,8 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
       }
       const jql = `${clauses.join(" AND ")} ORDER BY updated DESC`.trim();
       const mapping = opts.includePlanning ? await readPlanningFields(conn) : undefined;
+      const rawFields = opts.detail ? [...new Set(opts.rawFields ?? [])] : undefined;
+      const fields = rawFields ? [...new Set([...fieldsWithPlanning(mapping), ...DETAIL_FIELDS, ...rawFields])] : fieldsWithPlanning(mapping);
       const items: ExternalItem[] = [];
       let nextPageToken: string | null = null;
       do {
@@ -301,7 +407,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
           method: "POST",
           body: {
             jql,
-            fields: fieldsWithPlanning(mapping),
+            fields,
             maxResults: Math.min(PAGE_SIZE, limit - items.length),
             ...(nextPageToken ? { nextPageToken } : {}),
           },
@@ -309,7 +415,7 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
         const page = asRecord(response.json);
         const issues = Array.isArray(page.issues) ? page.issues : [];
         for (const issue of issues) {
-          const item = toItem(conn, issue, mapping);
+          const item = toItem(conn, issue, mapping, rawFields);
           if (item) items.push(item);
           if (items.length >= limit) break;
         }
@@ -333,6 +439,9 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
         throw new TrackerProviderError(
           "definite",
           `Jira issue ${key} has no transition from "${current.raw_status}" to "${toStatus}".`,
+          null,
+          null,
+          true,
         );
       }
       await api(conn, `/issue/${encodeURIComponent(key)}/transitions`, {
@@ -402,6 +511,41 @@ export function createJiraProvider(options: JiraProviderOptions = {}): WorkItemP
         }
       }
       return null;
+    },
+
+    async listStatusHistory(conn, rawKey) {
+      const key = assertJiraKey(rawKey);
+      const changes: ExternalStatusChange[] = [];
+      let startAt = 0;
+      let complete = false;
+      for (let page = 0; page < MAX_HISTORY_PAGES; page += 1) {
+        let json: Record<string, unknown>;
+        try {
+          json = asRecord((await api(conn, `/issue/${encodeURIComponent(key)}/changelog?startAt=${startAt}&maxResults=${PAGE_SIZE}`)).json);
+        } catch (error) {
+          if (error instanceof TrackerProviderError && error.status === 404) return null;
+          throw error;
+        }
+        const values = Array.isArray(json.values) ? json.values : [];
+        for (const entry of values) {
+          const history = asRecord(entry);
+          const at = jiraTime(history.created);
+          if (!at) continue;
+          for (const item of Array.isArray(history.items) ? history.items : []) {
+            const change = asRecord(item);
+            const to = asString(change.toString);
+            if (change.field === "status" && to) changes.push({ from: asString(change.fromString), to, at });
+          }
+        }
+        startAt += values.length;
+        if (json.isLast === true || values.length === 0 || (Number.isFinite(Number(json.total)) && startAt >= Number(json.total))) {
+          complete = true;
+          break;
+        }
+      }
+      // Jira answers oldest first; a stable sort keeps two changes in one entry in order.
+      changes.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+      return { changes, complete };
     },
 
     verifyWebhook: verifyJiraWebhook,

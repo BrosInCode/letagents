@@ -18,6 +18,7 @@ import {
   trackerImportCreator,
   type TrackerProvider,
 } from "../../../shared/ticket-connectors.mjs";
+import { ROOM_RESOURCE_WORK_ITEMS } from "../../../shared/room-resource-invalidation.mjs";
 import { db } from "../db/client.js";
 import { toTask } from "../db/mappers.js";
 import { external_items, tasks, room_board_planning } from "../db/schema.js";
@@ -46,6 +47,7 @@ import { asRecord } from "./providers/http.js";
 import { jiraIteration } from "./providers/planning.js";
 import { trackerConnectionStore, type TrackerConnectionRow, type TrackerConnectionStore } from "./store.js";
 import { recordTrackerTicketEvent } from "./tracker-events.js";
+import { bumpWorkItemsGeneration } from "./work-items.js";
 
 export const TRACKER_POLL_MS_ENV = "LETAGENTS_TRACKER_POLL_MS";
 export const DEFAULT_TRACKER_POLL_MS = 2 * 60_000;
@@ -89,6 +91,8 @@ export interface TrackerSyncDeps {
   now?: () => Date;
   /** Called after commit for every card sync created or changed. */
   onTaskChanged?: (roomId: string, task: Task) => void;
+  /** Called after commit for every room that imports from a connection whose ticket changed. */
+  onWorkItemsChanged?: (roomId: string) => void;
 }
 
 export interface ApplyTrackerItemOptions {
@@ -373,12 +377,25 @@ export function createTrackerSync(deps: TrackerSyncDeps): TrackerSync {
           change_id: "import",
         });
       }
-      return { stale, changed: itemChanged || created.length > 0 || updated.length > 0 };
+      return { stale, changed: itemChanged || created.length > 0 || updated.length > 0, filterRooms };
     });
 
     for (const roomId of new Set(created.map((entry) => entry.room_id))) invalidateRoomExternalRefScope(roomId);
+    if (outcome.changed) {
+      // Every room importing from this connection, not only the matched ones:
+      // a change can move a ticket into or out of a room's filter.
+      for (const roomId of outcome.filterRooms) {
+        bumpWorkItemsGeneration(roomId);
+        try {
+          deps.onWorkItemsChanged?.(roomId);
+        } catch {
+          // The change is committed; the generation bump already keeps API reads fresh.
+        }
+      }
+    }
     const result: ApplyTrackerItemResult = {
-      ...outcome,
+      stale: outcome.stale,
+      changed: outcome.changed,
       created: created.map((entry) => toTask(entry.row)),
       updated: updated.map((entry) => toTask(entry.row)),
     };
@@ -764,6 +781,13 @@ export function getDefaultTrackerSync(): TrackerSync | null {
     onTaskChanged: (roomId, task) => {
       void import("../server/events.js").then(({ taskEvents }) => {
         taskEvents.emit("task:updated", { projectId: roomId, task });
+      }).catch(() => undefined);
+    },
+    // Pages and apps re-read their work items through /api/v1, which checks
+    // the room filter again; the pointer says only "work_items changed".
+    onWorkItemsChanged: (roomId) => {
+      void import("../server/events.js").then(({ queueRoomResourceInvalidation }) => {
+        queueRoomResourceInvalidation(roomId, ROOM_RESOURCE_WORK_ITEMS);
       }).catch(() => undefined);
     },
   });

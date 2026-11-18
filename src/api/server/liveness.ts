@@ -350,6 +350,12 @@ export function startLivenessSweep(): void {
       console.error("Workflow effect reconciliation sweep failed:", error);
       }
       try {
+      // API intents a stopped server left running finish from the board or the journal.
+      await (await import("../intents/service.js")).sweepStuckIntents();
+      } catch (error) {
+      console.error("API intent sweep failed:", error);
+      }
+      try {
       // Tracker rule runs continue once the sweep settled their last write.
       await (await getDefaultTrackerRuleEngine()).advancePendingRuns();
       } catch (error) {

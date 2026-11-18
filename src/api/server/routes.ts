@@ -9,6 +9,7 @@ import { registerRoomNotificationPreferenceRoutes } from "../routes/rooms/notifi
 import { registerAgentAskRoutes } from "../routes/agent-asks.js";
 import { registerRoomKnowledgeRoutes } from "../routes/rooms/knowledge.js";
 import { registerWakeRuleRoutes } from "../routes/rooms/wake-rules.js";
+import { registerJobAgentRoutes } from "../routes/rooms/jobs.js";
 import { registerRoomInviteRoutes } from "../routes/rooms/invites.js";
 import { registerRoomMemberRoutes } from "../routes/rooms/members.js";
 import { registerDemoMarkRoutes } from "../routes/rooms/demo-marks.js";
@@ -18,6 +19,7 @@ import { claimRoomAsCreator } from "../db/room-members.js";
 import { registerWakeRuleLinkRoutes } from "../routes/wake-rule-links.js";
 import { registerContentDeletionRoutes } from "../routes/rooms/content-deletion.js";
 import { drainAttachmentDeletions } from "../messages/attachment-deletion.js";
+import { registerApiV1Routes } from "../v1/router.js";
 import type { Express } from "express";
 
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
@@ -221,6 +223,7 @@ import {
   messageReactionEvents,
   messagePinEvents,
   reasoningEvents,
+  roomResourceEvents,
   taskEvents,
   wakeRuleEvents,
   emitProjectMessage,
@@ -276,6 +279,7 @@ function getRoomEventBroker(): RoomEventBroker {
     wakeRuleEvents,
     messageReactionEvents,
     messagePinEvents,
+    roomResourceEvents,
     joinRequestEvents: roomJoinRequestEvents,
     rentalActivityEvents,
     messageInfoEvents,
@@ -603,6 +607,7 @@ export function registerApiRoutes(app: Express): void {
   });
   registerRoomKnowledgeRoutes(app, roomMessageRouteDeps);
   registerWakeRuleRoutes(app, roomMessageRouteDeps);
+  registerJobAgentRoutes(app, roomMessageRouteDeps);
   registerWakeRuleLinkRoutes(app);
   registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
   registerSupervisorHostGrantRoutes(app, roomPresenceRouteDeps);
@@ -659,5 +664,6 @@ export function registerApiRoutes(app: Express): void {
     },
   });
   registerContentDeletionRoutes(app, { resolveCanonicalRoomRequestId, resolveRoomOrReply, requireParticipant, requireAdmin, resolveProjectRole });
-
+  // The LetAgents API (shared/api contract); its routes are listed in v1/areas.ts.
+  registerApiV1Routes(app);
 }

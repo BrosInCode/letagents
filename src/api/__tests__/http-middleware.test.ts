@@ -111,3 +111,85 @@ test("a given agent waiting for the asker may stay connected and do nothing else
   assert.equal((await run(grant("owner"), "POST", "/supervisor-host-grants/g/worker-sessions/s/agent-work")).continued, true, "other grants are never checked");
   delete process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED;
 });
+
+test("a page's large HTML body is read only after the caller is known", async () => {
+  process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
+  const [{ default: express }, { z }, { once }, http, core, router, route, rateLimit] = await Promise.all([
+    import("express"), import("zod"), import("node:events"), import("node:http"),
+    import("../../../shared/api/core.mjs"), import("../v1/router.js"), import("../v1/route.js"), import("../v1/rate-limit.js"),
+  ]);
+  const create = core.defineMethod({
+    name: "pages.createExample", area: "pages", kind: "write", capability: "rooms.read", description: "Takes HTML.",
+    path: "/rooms/:room/pages", input: z.object({ html: z.string() }), output: z.object({ length: z.number() }), rateClass: "write",
+  });
+  let handled = 0;
+  const app = express();
+  registerHttpMiddleware(app, {
+    resolveRequestAuth: async (req: { headers: Record<string, unknown> }) => req.headers.authorization === "Bearer good"
+      ? { account: { account_id: "acct_ada", login: "ada" }, authKind: "owner_token" }
+      : { account: null, authKind: null },
+  } as never);
+  router.registerApiV1Routes(app, {
+    routes: [route.defineRoute(create, (input) => { handled += 1; return { length: input.html.length }; })],
+    identifyCaller: async (req) => req.sessionAccount ? { principal: { kind: "person", id: req.sessionAccount.account_id }, account: null } : null,
+    resolveRoomAccess: async (caller, roomId) => ({ actor: { principal: caller.principal, roomId }, room: { id: roomId } as never, access: { kind: "membership", accessRoomId: roomId } }),
+    checkCapability: async () => {},
+    recordAction: async () => {},
+    rateLimiter: rateLimit.createApiRateLimiter(),
+  });
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const port = (server.address() as import("node:net").AddressInfo).port;
+  const path = "/api/v1/rooms/r1/pages";
+  try {
+    // No credential, streamed with no length: the 401 arrives while most of
+    // the 5 MB is still unsent, so the server never waited for (or parsed) it.
+    const streamed = await new Promise<{ status: number; sent: number }>((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port, path, method: "POST", headers: { "content-type": "application/json" } });
+      let sent = 0;
+      req.on("response", (res) => { res.resume(); resolve({ status: res.statusCode ?? 0, sent }); req.destroy(); });
+      req.on("error", reject);
+      req.write('{"html":"');
+      const chunk = "x".repeat(64 * 1024);
+      const pump = () => {
+        if (sent >= 5 * 1024 * 1024 || req.destroyed) return;
+        sent += chunk.length;
+        req.write(chunk);
+        setTimeout(pump, 20);
+      };
+      pump();
+    });
+    assert.equal(streamed.status, 401);
+    assert.ok(streamed.sent < 5 * 1024 * 1024, `answered after ${streamed.sent} bytes`);
+
+    // No credential and a declared length over 1 MB: refused from the header alone.
+    const declared = await new Promise<{ status: number; connection: string | undefined }>((resolve, reject) => {
+      const req = http.request({ host: "127.0.0.1", port, path, method: "POST", headers: { "content-type": "application/json", "content-length": String(5 * 1024 * 1024) } });
+      req.on("response", (res) => { res.resume(); resolve({ status: res.statusCode ?? 0, connection: res.headers.connection }); req.destroy(); });
+      req.on("error", reject);
+      req.write('{"html":"');
+    });
+    assert.deepEqual(declared, { status: 401, connection: "close" });
+    assert.equal(handled, 0);
+
+    // Signed in: a 3 MB body (a page's HTML, escaped) is read and handled.
+    const html = '"'.repeat(1.5 * 1024 * 1024);
+    const ok = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method: "POST", headers: { authorization: "Bearer good", "content-type": "application/json" }, body: JSON.stringify({ html }),
+    });
+    assert.deepEqual({ status: ok.status, body: await ok.json() }, { status: 200, body: { length: html.length } });
+    const tooBig = await fetch(`http://127.0.0.1:${port}${path}`, {
+      method: "POST", headers: { authorization: "Bearer good", "content-type": "application/json" }, body: JSON.stringify({ html: "x".repeat(6 * 1024 * 1024) }),
+    });
+    assert.equal((await tooBig.json()).code, "too_large");
+    // Every other route keeps the 1 MB limit.
+    const other = await fetch(`http://127.0.0.1:${port}/api/v1/rooms/r1/tasks`, {
+      method: "POST", headers: { authorization: "Bearer good", "content-type": "application/json" }, body: JSON.stringify({ html: "x".repeat(2 * 1024 * 1024) }),
+    });
+    assert.equal((await other.json()).code, "too_large");
+    assert.equal(handled, 1);
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});

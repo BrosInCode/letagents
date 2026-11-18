@@ -1,7 +1,9 @@
-import { computed, toRef } from "vue";
+import { computed, ref, toRef, watch } from "vue";
 import { isLocalGitRoom } from "../../domain/git-rooms";
 import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../domain/room-urls";
-import type { RoomTab } from "../../components/desktop/content/room-shell/types";
+import { roomPageIdOfTab, type RoomTab } from "../../components/desktop/content/room-shell/types";
+import { availableRoomTab, keptRoomPages, withRoomPageTabs } from "../../components/desktop/content/room-pages/room-pages";
+import { useRoomPages } from "../../components/desktop/content/room-pages/useRoomPages";
 import { useDesktopReasoningInspector } from "../../components/desktop/content/room-shell/useDesktopReasoningInspector";
 import { useDesktopRoomGitHub } from "../../components/desktop/content/room-shell/useDesktopRoomGitHub";
 import { useDesktopRoomGitHubEvents } from "../../components/desktop/content/room-shell/useDesktopRoomGitHubEvents";
@@ -180,7 +182,7 @@ export function useRoomShellIntegrations(context: unknown) {
   };
 }
 
-/** Room notifications and the tab list. */
+/** Room notifications, the tab list, and the room's pinned pages. */
 export function useRoomShellNotifications(context: unknown) {
   const {
     activeTab, eventsUnseenCount, eventsUnseenTone, isLocalRoom, ownMessageIds, playRoomSound,
@@ -200,7 +202,7 @@ export function useRoomShellNotifications(context: unknown) {
     showRoomNotification: (message) => showRoomNotification(message, props.room.displayName, roomAttentionResponseNames.value),
   });
 
-  const tabs = computed<RoomTab[]>(() => {
+  const baseTabs = computed<RoomTab[]>(() => {
     const nextTabs: RoomTab[] = [
       { id: "chat", label: "Chat", count: null },
     ];
@@ -230,7 +232,29 @@ export function useRoomShellNotifications(context: unknown) {
     }
     return nextTabs;
   });
+
+  // Pinned pages come after the room's own tabs; a room without pages keeps its tab list as it was.
+  const { roomPages, roomPagesLoaded } = useRoomPages(() => props.room.identifier, () => !isLocalRoom.value);
+  const pageTabs = computed(() => withRoomPageTabs(baseTabs.value, roomPages.value));
+  const tabs = computed(() => pageTabs.value.tabs);
+  const pagesMenu = computed(() => pageTabs.value.pagesMenu);
+  watch([activeTab, roomPages, roomPagesLoaded], () => {
+    const available = availableRoomTab(activeTab.value, roomPages.value, roomPagesLoaded.value);
+    if (available !== activeTab.value) activeTab.value = available;
+  });
+  // A page opened once stays alive, hidden, until the room closes or unpins it.
+  const openedPageIds = ref(new Set<string>());
+  watch(() => props.room.identifier, () => { openedPageIds.value = new Set(); });
+  function rememberOpenedPage(tab: string): void {
+    const pageId = roomPageIdOfTab(tab);
+    if (pageId !== null && !openedPageIds.value.has(pageId)) openedPageIds.value = new Set([...openedPageIds.value, pageId]);
+  }
+  watch(activeTab, rememberOpenedPage, { immediate: true });
+  const keptPages = computed(() => keptRoomPages(roomPages.value, openedPageIds.value));
   return {
     tabs,
+    pagesMenu,
+    roomPages,
+    keptPages,
   };
 }

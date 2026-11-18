@@ -1,0 +1,94 @@
+{
+  "agents.list": {
+    "kind": "read",
+    "capability": "agents.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/agents",
+    "response": "json",
+    "rateClass": "read",
+    "agents": "read",
+    "errors": [],
+    "input": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              },
+              "agentKey": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "ownerLogin": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "online": {
+                "type": "boolean"
+              },
+              "status": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "idle",
+                      "working",
+                      "reviewing",
+                      "blocked"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "statusText": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "lastSeenAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "label",
+              "agentKey",
+              "ownerLogin",
+              "online",
+              "status",
+              "statusText",
+              "lastSeenAt"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "agents"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

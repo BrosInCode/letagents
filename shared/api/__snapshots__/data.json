@@ -1,0 +1,593 @@
+{
+  "data.delete": {
+    "kind": "write",
+    "capability": "data.page",
+    "httpMethod": "DELETE",
+    "path": "/rooms/:room/data/:scope/:collection/:docId",
+    "response": "json",
+    "rateClass": "write",
+    "agents": "write",
+    "errors": [
+      "conflict"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "viewer",
+            "page",
+            "room"
+          ]
+        },
+        "collection": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,39}$"
+        },
+        "docId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        "pageId": {
+          "description": "The page whose data this is, for the viewer and page scopes. A page leaves it out (its own id is used); a person or agent calling directly must give it. Not used in the room scope.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        "ifRevision": {
+          "description": "Compare-and-set: delete only when the document's revision is this number. Otherwise the call fails with conflict.",
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 2147483647
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
+        }
+      },
+      "required": [
+        "scope",
+        "collection",
+        "docId"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "deleted"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "data.get": {
+    "kind": "read",
+    "capability": "data.page",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/data/:scope/:collection/:docId",
+    "response": "json",
+    "rateClass": "read",
+    "agents": "read",
+    "errors": [
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "viewer",
+            "page",
+            "room"
+          ]
+        },
+        "collection": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,39}$"
+        },
+        "docId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        "pageId": {
+          "description": "The page whose data this is, for the viewer and page scopes. A page leaves it out (its own id is used); a person or agent calling directly must give it. Not used in the room scope.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        }
+      },
+      "required": [
+        "scope",
+        "collection",
+        "docId"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "viewer",
+            "page",
+            "room"
+          ]
+        },
+        "pageId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "collection": {
+          "type": "string"
+        },
+        "docId": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        },
+        "revision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "updatedBy": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "person",
+                "agent"
+              ]
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "pageId",
+        "collection",
+        "docId",
+        "data",
+        "revision",
+        "updatedBy",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "data.list": {
+    "kind": "read",
+    "capability": "data.page",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/data/:scope/:collection",
+    "response": "json",
+    "rateClass": "read",
+    "agents": "read",
+    "errors": [],
+    "input": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "viewer",
+            "page",
+            "room"
+          ]
+        },
+        "collection": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,39}$"
+        },
+        "pageId": {
+          "description": "The page whose data this is, for the viewer and page scopes. A page leaves it out (its own id is used); a person or agent calling directly must give it. Not used in the room scope.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        "after": {
+          "description": "List documents whose id sorts after this one.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
+        }
+      },
+      "required": [
+        "scope",
+        "collection"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "documents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "viewer",
+                  "page",
+                  "room"
+                ]
+              },
+              "pageId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "collection": {
+                "type": "string"
+              },
+              "docId": {
+                "type": "string"
+              },
+              "data": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              },
+              "revision": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "updatedBy": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "person",
+                      "agent"
+                    ]
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ],
+                "additionalProperties": false
+              },
+              "updatedAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "scope",
+              "pageId",
+              "collection",
+              "docId",
+              "data",
+              "revision",
+              "updatedBy",
+              "updatedAt"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nextAfter": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "documents",
+        "nextAfter"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "data.set": {
+    "kind": "write",
+    "capability": "data.page",
+    "httpMethod": "PUT",
+    "path": "/rooms/:room/data/:scope/:collection/:docId",
+    "response": "json",
+    "rateClass": "write",
+    "agents": "write",
+    "errors": [
+      "conflict",
+      "too_large"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "viewer",
+            "page",
+            "room"
+          ]
+        },
+        "collection": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,39}$"
+        },
+        "docId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        "pageId": {
+          "description": "The page whose data this is, for the viewer and page scopes. A page leaves it out (its own id is used); a person or agent calling directly must give it. Not used in the room scope.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        "data": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        },
+        "ifRevision": {
+          "description": "Compare-and-set: write only when the document's revision is this number (0: only when the document does not exist yet). Otherwise the call fails with conflict.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "scope",
+        "collection",
+        "docId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "viewer",
+            "page",
+            "room"
+          ]
+        },
+        "pageId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "collection": {
+          "type": "string"
+        },
+        "docId": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        },
+        "revision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "updatedBy": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "person",
+                "agent"
+              ]
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "pageId",
+        "collection",
+        "docId",
+        "data",
+        "revision",
+        "updatedBy",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "data.update": {
+    "kind": "write",
+    "capability": "data.page",
+    "httpMethod": "PATCH",
+    "path": "/rooms/:room/data/:scope/:collection/:docId",
+    "response": "json",
+    "rateClass": "write",
+    "agents": "write",
+    "errors": [
+      "conflict",
+      "not_found",
+      "too_large"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "viewer",
+            "page",
+            "room"
+          ]
+        },
+        "collection": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]{0,39}$"
+        },
+        "docId": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        "pageId": {
+          "description": "The page whose data this is, for the viewer and page scopes. A page leaves it out (its own id is used); a person or agent calling directly must give it. Not used in the room scope.",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_.:-]{1,128}$"
+        },
+        "data": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        },
+        "ifRevision": {
+          "description": "Compare-and-set: write only when the document's revision is this number (0: only when the document does not exist yet). Otherwise the call fails with conflict.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "scope",
+        "collection",
+        "docId",
+        "data"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "scope": {
+          "type": "string",
+          "enum": [
+            "viewer",
+            "page",
+            "room"
+          ]
+        },
+        "pageId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "collection": {
+          "type": "string"
+        },
+        "docId": {
+          "type": "string"
+        },
+        "data": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        },
+        "revision": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "updatedBy": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "person",
+                "agent"
+              ]
+            },
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "id"
+          ],
+          "additionalProperties": false
+        },
+        "updatedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "scope",
+        "pageId",
+        "collection",
+        "docId",
+        "data",
+        "revision",
+        "updatedBy",
+        "updatedAt"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

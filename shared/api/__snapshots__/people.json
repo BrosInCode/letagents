@@ -1,0 +1,119 @@
+{
+  "people.list": {
+    "kind": "read",
+    "capability": "people.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/people",
+    "response": "json",
+    "rateClass": "read",
+    "agents": "read",
+    "errors": [],
+    "input": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "managedBy": {
+          "type": "string",
+          "enum": [
+            "letagents",
+            "github"
+          ]
+        },
+        "people": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "login": {
+                "type": "string"
+              },
+              "name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "avatarUrl": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "role": {
+                "type": "string",
+                "enum": [
+                  "admin",
+                  "participant"
+                ]
+              }
+            },
+            "required": [
+              "login",
+              "name",
+              "avatarUrl",
+              "role"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "managedBy",
+        "people"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "people.viewer": {
+    "kind": "read",
+    "capability": "people.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/people/me",
+    "response": "json",
+    "rateClass": "read",
+    "errors": [],
+    "input": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "login": {
+          "type": "string"
+        },
+        "name": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "avatarUrl": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "admin",
+            "participant"
+          ]
+        }
+      },
+      "required": [
+        "login",
+        "name",
+        "avatarUrl",
+        "role"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

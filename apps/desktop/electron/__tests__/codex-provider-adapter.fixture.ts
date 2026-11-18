@@ -10,6 +10,7 @@ import { CodexProviderAdapter, type CodexAdapterRpc, type CodexProviderAdapterDe
 import { type CodexBuiltInProfile, type CodexSignInProfile, codexSandboxedProfileId } from "../main/agents/codex-agent-home.js";
 import { type RpcNotification, type RpcServerRequest } from "../main/agents/codex-rpc-client.js";
 import { CODEX_OWNER_FEATURE_OVERRIDES } from "../../../../shared/codex-owner-isolation.mjs";
+import { API_AGENT_TOOLS } from "../../../../shared/api-agent-tools.mjs";
 import type { ProviderHandle, ProviderRoomTurnRequest, ProviderSpawnRequest } from "../main/agents/provider-adapter.js";
 import { OS_BIRTH } from "./platform.js";
 
@@ -764,6 +765,12 @@ export const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused
   list_wake_rules: "approved",        // what agents in the room are waiting for
   get_room_artifacts: "approved",     // branches, pull requests and checks shared with the room
   get_room_events: "approved",        // GitHub events the room already holds
+  get_job: "approved",                // a job a person gave the agent: its input and result schema
+  list_pages: "approved",             // the room's pages
+  read_page: "approved",              // a page's HTML
+  read_page_diagnostics: "approved",  // errors the app recorded for a page
+  // Tools made from the LetAgents API contract: its reads (GET only), not its writes (documents).
+  ...Object.fromEntries(API_AGENT_TOOLS.map((tool) => [tool.name, tool.access === "read" ? "approved" : "refused"] as const)),
   // Optional expression lookup, enabled by the Room's human-admin setting.
   search_gifs: "approved",           // provider metadata; no repository writes
   // Saying something in the room.
@@ -775,6 +782,8 @@ export const READ_ONLY_ROOM_TOOL_DECISIONS: Record<string, "approved" | "refused
   set_reply_thread: "approved",       // where the final answer goes; approved at every access level
   set_reply_gif: "approved",          // optional attachment to the same final answer
   react_to_message: "approved",       // room communication under the agent's identity
+  update_job: "approved",             // progress on a job it was given; changes only the job's own record
+  complete_job: "approved",           // the job's result or error, checked by the room server
   // Runs git in a folder the caller names, on this Mac and outside Codex's sandbox.
   check_repo: "refused",
   // The daemon reads the named files on this Mac, outside Codex's sandbox, and posts them to the room.

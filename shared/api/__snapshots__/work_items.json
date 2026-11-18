@@ -1,0 +1,695 @@
+{
+  "work_items.get": {
+    "kind": "read",
+    "capability": "work_items.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/work-items/:key",
+    "response": "json",
+    "rateClass": "read",
+    "agents": "read",
+    "errors": [
+      "no_source",
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "The ticket key, for example HT-1234."
+        },
+        "provider": {
+          "description": "The tracker to read. Without it: Jira when the room imports from Jira.",
+          "type": "string",
+          "enum": [
+            "jira",
+            "linear",
+            "github"
+          ]
+        },
+        "fields": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^customfield_\\d{1,12}$"
+            },
+            {
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^customfield_\\d{1,12}$"
+              }
+            }
+          ]
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "jira",
+            "linear",
+            "github"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "type": "string"
+        },
+        "statusCategory": {
+          "type": "string",
+          "enum": [
+            "todo",
+            "in_progress",
+            "done"
+          ]
+        },
+        "state": {
+          "type": "string",
+          "enum": [
+            "todo",
+            "in_progress",
+            "in_review",
+            "done"
+          ]
+        },
+        "assignee": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "storyPoints": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "sprints": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "future",
+                  "active",
+                  "closed"
+                ]
+              },
+              "startDate": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "endDate": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "state",
+              "startDate",
+              "endDate"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "key": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "key"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fixVersions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "released": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "releaseDate": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "released",
+              "releaseDate"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "labels": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "statusChangedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "updatedAt": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "linkedTask": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "taskId": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "taskId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fields": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {}
+        }
+      },
+      "required": [
+        "provider",
+        "key",
+        "title",
+        "url",
+        "status",
+        "statusCategory",
+        "state",
+        "assignee",
+        "storyPoints",
+        "sprints",
+        "parent",
+        "fixVersions",
+        "labels",
+        "statusChangedAt",
+        "updatedAt",
+        "linkedTask",
+        "fields"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "work_items.history": {
+    "kind": "read",
+    "capability": "work_items.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/work-items/:key/history",
+    "response": "json",
+    "rateClass": "read",
+    "agents": "read",
+    "errors": [
+      "no_source",
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "The ticket key, for example HT-1234."
+        },
+        "provider": {
+          "description": "The tracker to read. Without it: Jira when the room imports from Jira.",
+          "type": "string",
+          "enum": [
+            "jira",
+            "linear",
+            "github"
+          ]
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "jira",
+            "linear",
+            "github"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "transitions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "from": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "to": {
+                "type": "string"
+              },
+              "at": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "to",
+              "at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "provider",
+        "key",
+        "transitions",
+        "complete"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "work_items.search": {
+    "kind": "read",
+    "capability": "work_items.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/work-items",
+    "response": "json",
+    "rateClass": "search",
+    "agents": "read",
+    "errors": [
+      "no_source"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "default": "",
+          "description": "JQL ANDed with the room filter; empty for every ticket in the filter.",
+          "type": "string",
+          "maxLength": 2000
+        },
+        "provider": {
+          "description": "The tracker to read. Without it: Jira when the room imports from Jira.",
+          "type": "string",
+          "enum": [
+            "jira",
+            "linear",
+            "github"
+          ]
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
+        },
+        "fields": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^customfield_\\d{1,12}$"
+            },
+            {
+              "maxItems": 20,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^customfield_\\d{1,12}$"
+              }
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "provider": {
+          "type": "string",
+          "enum": [
+            "jira",
+            "linear",
+            "github"
+          ]
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "provider": {
+                "type": "string",
+                "enum": [
+                  "jira",
+                  "linear",
+                  "github"
+                ]
+              },
+              "key": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "url": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "status": {
+                "type": "string"
+              },
+              "statusCategory": {
+                "type": "string",
+                "enum": [
+                  "todo",
+                  "in_progress",
+                  "done"
+                ]
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "todo",
+                  "in_progress",
+                  "in_review",
+                  "done"
+                ]
+              },
+              "assignee": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "id": {
+                        "type": "string"
+                      },
+                      "name": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "name"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "storyPoints": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              },
+              "sprints": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string",
+                      "enum": [
+                        "future",
+                        "active",
+                        "closed"
+                      ]
+                    },
+                    "startDate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "endDate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "state",
+                    "startDate",
+                    "endDate"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "parent": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "key": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "key"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "fixVersions": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "released": {
+                      "type": [
+                        "boolean",
+                        "null"
+                      ]
+                    },
+                    "releaseDate": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "released",
+                    "releaseDate"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "labels": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "statusChangedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "updatedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "linkedTask": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "taskId": {
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "taskId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "fields": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "required": [
+              "provider",
+              "key",
+              "title",
+              "url",
+              "status",
+              "statusCategory",
+              "state",
+              "assignee",
+              "storyPoints",
+              "sprints",
+              "parent",
+              "fixVersions",
+              "labels",
+              "statusChangedAt",
+              "updatedAt",
+              "linkedTask",
+              "fields"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "fetchedAt": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider",
+        "items",
+        "fetchedAt"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

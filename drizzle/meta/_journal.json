@@ -1058,6 +1058,41 @@
       "when": 1795000700000,
       "tag": "0150_room_invites",
       "breakpoints": true
+    },
+    {
+      "idx": 151,
+      "version": "7",
+      "when": 1795015100000,
+      "tag": "0151_api_actor_chain",
+      "breakpoints": true
+    },
+    {
+      "idx": 152,
+      "version": "7",
+      "when": 1795015200000,
+      "tag": "0152_api_documents",
+      "breakpoints": true
+    },
+    {
+      "idx": 153,
+      "version": "7",
+      "when": 1795015300000,
+      "tag": "0153_api_jobs",
+      "breakpoints": true
+    },
+    {
+      "idx": 154,
+      "version": "7",
+      "when": 1795015400000,
+      "tag": "0154_pages_registry",
+      "breakpoints": true
+    },
+    {
+      "idx": 155,
+      "version": "7",
+      "when": 1795015500000,
+      "tag": "0155_api_intents",
+      "breakpoints": true
     }
   ]
 }

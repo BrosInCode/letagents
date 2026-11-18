@@ -182,13 +182,13 @@ function insideHomeConfiguration(folder: string, home: string): string | null {
  * tool's configuration folder in it is not a project: attaching from it
  * would reach the owner's other files and credentials.
  */
-export async function resolveAttachmentWorkspace(): Promise<Required<WorkspaceAttachmentRoots>> {
+export async function resolveAttachmentWorkspace(nothingDone = NOTHING_POSTED): Promise<Required<WorkspaceAttachmentRoots>> {
   const folder = startFolder;
   if (!folder) {
-    throw new Error(`This MCP server did not record a working folder when it started, so it cannot attach files. ${NOTHING_POSTED}`);
+    throw new Error(`This MCP server did not record a working folder when it started, so it cannot attach files. ${nothingDone}`);
   }
   if (!(await stillTheStartFolder(folder))) {
-    throw new Error(`The folder this MCP server started in (${folder.real}) has moved or changed. Restart the server in your project folder. ${NOTHING_POSTED}`);
+    throw new Error(`The folder this MCP server started in (${folder.real}) has moved or changed. Restart the server in your project folder. ${nothingDone}`);
   }
   const workingDirectory = folder.real;
   // An unknown home is compared by its name, never skipped.
@@ -201,17 +201,17 @@ export async function resolveAttachmentWorkspace(): Promise<Required<WorkspaceAt
   const workspace = checkout && project(checkout) ? checkout : workingDirectory;
   if (!project(workspace)) {
     const where = configuration(workspace);
-    throw new Error(`Attachments need a project folder, but this MCP server runs in ${workspace}${where ? `, inside the tool configuration folder ${where}` : ""}. Start it in your project folder (set "cwd" in its MCP configuration). ${NOTHING_POSTED}`);
+    throw new Error(`Attachments need a project folder, but this MCP server runs in ${workspace}${where ? `, inside the tool configuration folder ${where}` : ""}. Start it in your project folder (set "cwd" in its MCP configuration). ${nothingDone}`);
   }
   // The agent may name files through the shell's path, or a Windows short name, of the same folder.
   const aliases = await workspaceAliases(workspace, workingDirectory, [folder.logical, folder.pwd]);
   return { workspace, aliases, baseDirectory: workingDirectory };
 }
 
-async function withinReadDeadline<T>(work: Promise<T>): Promise<T> {
+async function withinReadDeadline<T>(work: Promise<T>, nothingDone = NOTHING_POSTED): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => reject(new Error(`Reading the files took too long. Attach smaller files, or files already on this disk. ${NOTHING_POSTED}`)), READ_DEADLINE_MS);
+    timer = setTimeout(() => reject(new Error(`Reading the files took too long. Use smaller files, or files already on this disk. ${nothingDone}`)), READ_DEADLINE_MS);
     timer.unref();
   });
   try {
@@ -221,27 +221,35 @@ async function withinReadDeadline<T>(work: Promise<T>): Promise<T> {
   }
 }
 
-/** Read every file, one at a time, before any upload, so a refused file stages nothing. */
-export async function readMessageAttachmentFiles(files: readonly string[]): Promise<WorkspaceAttachmentFile[]> {
+/**
+ * Read every file, one at a time, before any upload, so a refused file stages nothing.
+ * Another use of the same checks (a room page) passes its own size limit and
+ * the sentence that says what did not happen.
+ */
+export async function readMessageAttachmentFiles(
+  files: readonly string[],
+  options: { maxFileBytes?: number; nothingDone?: string } = {},
+): Promise<WorkspaceAttachmentFile[]> {
+  const nothingDone = options.nothingDone ?? NOTHING_POSTED;
   if (files.length < 1 || files.length > MESSAGE_ATTACHMENT_LIMITS.maxFiles) {
-    throw new Error(`Attach 1 to ${MESSAGE_ATTACHMENT_LIMITS.maxFiles} files. ${NOTHING_POSTED}`);
+    throw new Error(`Attach 1 to ${MESSAGE_ATTACHMENT_LIMITS.maxFiles} files. ${nothingDone}`);
   }
-  const roots = await resolveAttachmentWorkspace();
+  const roots = await resolveAttachmentWorkspace(nothingDone);
   return withinReadDeadline((async () => {
     const read: WorkspaceAttachmentFile[] = [];
     let total = 0;
     for (const requested of files) {
-      const file = await readWorkspaceAttachmentFile(roots, requested).catch((error: Error) => {
-        throw new Error(`${error.message} ${NOTHING_POSTED} The workspace is ${roots.workspace}.`);
+      const file = await readWorkspaceAttachmentFile(roots, requested, { maxBytes: options.maxFileBytes }).catch((error: Error) => {
+        throw new Error(`${error.message} ${nothingDone} The workspace is ${roots.workspace}.`);
       });
       total += file.bytes.byteLength;
       if (total > MESSAGE_ATTACHMENT_LIMITS.maxTotalBytes) {
-        throw new Error(`The attached files are larger than ${formatMessageAttachmentLimit(MESSAGE_ATTACHMENT_LIMITS.maxTotalBytes)} together. ${NOTHING_POSTED}`);
+        throw new Error(`The attached files are larger than ${formatMessageAttachmentLimit(MESSAGE_ATTACHMENT_LIMITS.maxTotalBytes)} together. ${nothingDone}`);
       }
       read.push(file);
     }
     return read;
-  })());
+  })(), nothingDone);
 }
 
 /**

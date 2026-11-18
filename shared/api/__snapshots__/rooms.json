@@ -1,0 +1,311 @@
+{
+  "rooms.get": {
+    "kind": "read",
+    "capability": "rooms.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room",
+    "response": "json",
+    "rateClass": "read",
+    "agents": "read",
+    "errors": [
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "main",
+            "focus"
+          ]
+        },
+        "parentRoomId": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "provider": {
+                  "type": "string",
+                  "enum": [
+                    "github"
+                  ]
+                },
+                "host": {
+                  "type": "string"
+                },
+                "owner": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "fullName": {
+                  "type": "string"
+                },
+                "url": {
+                  "type": "string"
+                },
+                "ref": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "default_branch",
+                            "branch",
+                            "tag",
+                            "pull_request"
+                          ]
+                        },
+                        "name": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "name"
+                      ],
+                      "additionalProperties": false
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "provider",
+                "host",
+                "owner",
+                "name",
+                "fullName",
+                "url",
+                "ref"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "visibility": {
+          "type": "string",
+          "enum": [
+            "members",
+            "public",
+            "private",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "kind",
+        "parentRoomId",
+        "repo",
+        "visibility"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "rooms.listPolicies": {
+    "kind": "read",
+    "capability": "rooms.admin",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/policies",
+    "response": "json",
+    "rateClass": "read",
+    "errors": [],
+    "input": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "policies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "capability": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "confirm",
+                  "approve",
+                  "deny"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "room",
+                  "default"
+                ]
+              },
+              "rule": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "board_manager_mode",
+                      "own_tracker_connection"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "capability",
+              "mode",
+              "source",
+              "rule"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "policies"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "rooms.setPolicy": {
+    "kind": "write",
+    "capability": "rooms.admin",
+    "httpMethod": "PUT",
+    "path": "/rooms/:room/policies",
+    "response": "json",
+    "rateClass": "write",
+    "errors": [],
+    "input": {
+      "type": "object",
+      "properties": {
+        "capability": {
+          "type": "string",
+          "enum": [
+            "data.viewer",
+            "data.page",
+            "data.room",
+            "tasks.propose",
+            "tickets.propose",
+            "jobs.start",
+            "messages.post"
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "allow",
+                "confirm",
+                "approve",
+                "deny"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "policies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "capability": {
+                "type": "string"
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "allow",
+                  "confirm",
+                  "approve",
+                  "deny"
+                ]
+              },
+              "source": {
+                "type": "string",
+                "enum": [
+                  "room",
+                  "default"
+                ]
+              },
+              "rule": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "enum": [
+                      "board_manager_mode",
+                      "own_tracker_connection"
+                    ]
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "capability",
+              "mode",
+              "source",
+              "rule"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "policies"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

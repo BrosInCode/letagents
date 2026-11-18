@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { API_AGENT_TOOLS } from "../../../shared/api-agent-tools.mjs";
 import { currentSessionScope } from "./runtime/session-scope.js";
 
 /**
@@ -19,6 +20,8 @@ export const REMOTE_EXCLUDED_TOOLS: Readonly<Record<string, string>> = {
   clear_saved_auth: "No saved local auth exists on the remote endpoint.",
   get_onboarding_status: "Reports local auth bootstrap, which the remote endpoint does not use.",
   resume_room_session: "Local room sessions do not survive a remote connection.",
+  publish_page: "Reads the page from a local HTML file.",
+  get_page_reference: "For writing a page for publish_page, which reads a local file.",
 };
 
 /**
@@ -28,9 +31,9 @@ export const REMOTE_EXCLUDED_TOOLS: Readonly<Record<string, string>> = {
  */
 export const REMOTE_ALLOWED_TOOLS: readonly string[] = [
   "add_task", "add_wake_rule", "approve_board_intent", "assign_board_manager", "cancel_wake_rule",
-  "claim_task", "claim_task_review", "complete_task", "confirm_wake_email", "create_project", "create_room", "deny_board_intent",
+  "claim_task", "claim_task_review", "complete_job", "complete_task", "confirm_wake_email", "create_project", "create_room", "deny_board_intent",
   "disconnect_agent_session", "expand_room_history_summary", "get_board", "get_board_settings",
-  "get_current_room", "get_human_requests", "get_room_artifacts", "get_room_events", "get_room_guidelines",
+  "get_current_room", "get_human_requests", "get_job", "get_room_artifacts", "get_room_events", "get_room_guidelines",
   "get_room_history_summary", "get_room_memory", "handoff_task_lease", "join_code", "join_project",
   "join_room", "list_board_intents", "list_wake_rules", "post_reasoning", "post_status",
   "publish_room_artifact", "react_to_message", "read_attachment", "read_demo_marks", "read_messages", "register_agent_session",
@@ -39,7 +42,10 @@ export const REMOTE_ALLOWED_TOOLS: readonly string[] = [
   "release_task_lease", "release_task_review", "remember_room_fact", "request_human_input",
   "request_room_access", "search_gifs",
   "send_message", "send_thread_message", "set_agent_name", "set_board_manager_mode",
-  "submit_review_verdict", "update_task", "wait_for_messages",
+  "submit_review_verdict", "update_job", "update_task", "wait_for_messages",
+  "list_pages", "read_page", "read_page_diagnostics",
+  // letagents_api_read and letagents_api_write call the server only.
+  ...API_AGENT_TOOLS.map((tool) => tool.name),
 ];
 const REMOTE_ALLOWED = new Set(REMOTE_ALLOWED_TOOLS);
 

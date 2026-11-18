@@ -17,6 +17,7 @@ import { loadConnectorCipher } from "../connectors/crypto.js";
 import { createTrackerEffectExecutor } from "../connectors/effects.js";
 import { createWorkItemProviders } from "../connectors/providers/index.js";
 import { trackerConnectionStore } from "../connectors/store.js";
+import { API_INTENT_EFFECT_KEY_PREFIX } from "../intents/ticket-executor.js";
 import { createWorkflowEffectBroker } from "./broker.js";
 import { createGitHubReviewProvider } from "./github-review-provider.js";
 
@@ -48,4 +49,10 @@ export const workflowEffectBroker = createWorkflowEffectBroker({
   },
   provider: createGitHubReviewProvider(),
   tracker: trackerExecutor(),
+  // An API intent's ticket write finishes the intent when it settles.
+  onSettled: async (effect) => {
+    if (!effect.idempotency_key.startsWith(API_INTENT_EFFECT_KEY_PREFIX)) return;
+    const { settleIntentFromEffect } = await import("../intents/service.js");
+    await settleIntentFromEffect(effect);
+  },
 });

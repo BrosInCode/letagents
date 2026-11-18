@@ -184,7 +184,8 @@ export function useAppSessionActions(context: unknown) {
       else if (event.resource === "message_pins") invalidateRoomMessagePins(event.roomIdentifier);
       else if (event.resource === "message_reactions") invalidateRoomMessageReactions(event.roomIdentifier);
       else if (event.resource === "message_info") invalidateRoomMessageReceipts(event.roomIdentifier);
-      else app.invalidateSelectedRoomAgentWork(event.roomIdentifier);
+      // The room's page tabs listen for their own pointer (useRoomPages).
+      else if (event.resource !== "pages") app.invalidateSelectedRoomAgentWork(event.roomIdentifier);
       return;
     }
     // A stream that just (re)connected may have missed a reaction or pin change.

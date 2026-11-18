@@ -48,6 +48,17 @@
       </template>
       <template v-else>
         <button
+          v-if="canPinAsPage"
+          class="room-inline-demo-action"
+          type="button"
+          aria-label="Pin to room as a page"
+          title="Pin to room as a page"
+          data-testid="room-inline-demo-pin-page"
+          @click="pinAsPage"
+        >
+          <AppWindow :size="14" aria-hidden="true" />
+        </button>
+        <button
           class="room-inline-demo-action"
           type="button"
           aria-label="Reload demo"
@@ -124,6 +135,10 @@
       <button type="button" role="menuitem" :disabled="expanding" @click="closePop(); expand()">
         <Maximize2 :size="14" aria-hidden="true" />
         <span>Open larger</span>
+      </button>
+      <button v-if="canPinAsPage" type="button" role="menuitem" @click="closePop(); pinAsPage()">
+        <AppWindow :size="14" aria-hidden="true" />
+        <span>Pin to room as a page</span>
       </button>
       <p class="live-demo-menu-info" title="Runs in a locked view on this computer. It cannot load web pages or reach your LetAgents data.">
         <Lock :size="14" aria-hidden="true" />
@@ -231,7 +246,8 @@
 
 <script setup lang="ts">
 import { computed, inject, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
-import { FileCode, Lock, Maximize2, RotateCw, Undo2 } from "@lucide/vue";
+import { roomPageActionsKey } from "../room-pages/room-page-admin";
+import { AppWindow, FileCode, Lock, Maximize2, RotateCw, Undo2 } from "@lucide/vue";
 import type {
   DesktopInlineHtmlDemoEvent,
   DesktopInlineHtmlDemoLease,
@@ -392,6 +408,13 @@ const capturing = ref(false);
 const flashing = ref(false);
 const sendError = ref("");
 const sendThreadReply = inject(roomThreadReplyKey, null);
+// Room admins can pin this file as a page in the room's tab bar; the room shell runs the flow.
+const roomPageActions = inject(roomPageActionsKey, null);
+const canPinAsPage = computed(() => Boolean(roomPageActions?.canPin() && props.messageId && props.attachmentId));
+function pinAsPage(): void {
+  if (!roomPageActions || !props.messageId || !props.attachmentId) return;
+  roomPageActions.pinAttachment({ messageId: props.messageId, attachmentId: props.attachmentId, fileName: props.fileName });
+}
 const openThread = inject(roomThreadOpenKey, null);
 const canSend = computed(() =>
   Boolean(sendThreadReply && props.threadRootId && liveRoom.value)

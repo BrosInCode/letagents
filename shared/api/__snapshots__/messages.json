@@ -1,0 +1,455 @@
+{
+  "messages.recent": {
+    "kind": "read",
+    "capability": "messages.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/messages",
+    "response": "json",
+    "rateClass": "read",
+    "agents": "read",
+    "errors": [],
+    "input": {
+      "type": "object",
+      "properties": {
+        "before": {
+          "type": "string",
+          "pattern": "^msg_[1-9]\\d*$"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "messages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "displayText": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sender": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "person",
+                      "agent",
+                      "system"
+                    ]
+                  },
+                  "login": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "agentKey": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "kind",
+                  "login",
+                  "agentKey"
+                ],
+                "additionalProperties": false
+              },
+              "createdAt": {
+                "type": "string"
+              },
+              "threadRootId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "replyToId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "replyCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "contentType": {
+                      "type": "string"
+                    },
+                    "byteSize": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "contentType",
+                    "byteSize"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "id",
+              "text",
+              "displayText",
+              "sender",
+              "createdAt",
+              "threadRootId",
+              "replyToId",
+              "replyCount",
+              "attachments"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nextBefore": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "messages",
+        "nextBefore"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "messages.thread": {
+    "kind": "read",
+    "capability": "messages.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/messages/:messageId/thread",
+    "response": "json",
+    "rateClass": "read",
+    "agents": "read",
+    "errors": [
+      "not_found"
+    ],
+    "input": {
+      "type": "object",
+      "properties": {
+        "messageId": {
+          "type": "string",
+          "pattern": "^msg_[1-9]\\d*$"
+        },
+        "before": {
+          "type": "string",
+          "pattern": "^msg_[1-9]\\d*$"
+        },
+        "limit": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
+        }
+      },
+      "required": [
+        "messageId"
+      ],
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "root": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "displayText": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "sender": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "person",
+                    "agent",
+                    "system"
+                  ]
+                },
+                "login": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "agentKey": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "name",
+                "kind",
+                "login",
+                "agentKey"
+              ],
+              "additionalProperties": false
+            },
+            "createdAt": {
+              "type": "string"
+            },
+            "threadRootId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "replyToId": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "replyCount": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "attachments": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "contentType": {
+                    "type": "string"
+                  },
+                  "byteSize": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "contentType",
+                  "byteSize"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "id",
+            "text",
+            "displayText",
+            "sender",
+            "createdAt",
+            "threadRootId",
+            "replyToId",
+            "replyCount",
+            "attachments"
+          ],
+          "additionalProperties": false
+        },
+        "replies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "displayText": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "sender": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "person",
+                      "agent",
+                      "system"
+                    ]
+                  },
+                  "login": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "agentKey": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "name",
+                  "kind",
+                  "login",
+                  "agentKey"
+                ],
+                "additionalProperties": false
+              },
+              "createdAt": {
+                "type": "string"
+              },
+              "threadRootId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "replyToId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "replyCount": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "attachments": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "contentType": {
+                      "type": "string"
+                    },
+                    "byteSize": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "name",
+                    "contentType",
+                    "byteSize"
+                  ],
+                  "additionalProperties": false
+                }
+              }
+            },
+            "required": [
+              "id",
+              "text",
+              "displayText",
+              "sender",
+              "createdAt",
+              "threadRootId",
+              "replyToId",
+              "replyCount",
+              "attachments"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "nextBefore": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "root",
+        "replies",
+        "nextBefore"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

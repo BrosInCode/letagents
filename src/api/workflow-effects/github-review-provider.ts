@@ -25,7 +25,8 @@ export type GitHubReviewCreateResult =
       external_url: string | null;
       response_payload: Record<string, unknown>;
     }
-  | { kind: "definite_failure"; error: string }
+  /** `final`: a retry cannot succeed, so the effect uses up its attempts now. */
+  | { kind: "definite_failure"; error: string; final?: boolean }
   | { kind: "ambiguous"; error: string };
 
 export type GitHubReviewLookupResult =

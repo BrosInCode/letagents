@@ -11,6 +11,9 @@ import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-
 import { parseBearerAuthorization } from "../request/bearer-authorization.js";
 import { inProcessPrincipal } from "../remote-mcp/in-process-dispatch.js";
 import { isRemoteMcpRequestPath, mcpBearerChallenge } from "../mcp-oauth/config.js";
+import { isApiV1RequestPath, requestPathname } from "../v1/page-grant-token.js";
+import { ApiError } from "../../../shared/api/core.mjs";
+import { DEFAULT_JSON_BODY_LIMIT_BYTES, deferPageHtmlBody, isOversizedAnonymousBody, isPageHtmlBodyRequest } from "./page-html-body.js";
 
 export const INVALID_BEARER_MESSAGE = "The bearer credential is invalid or expired. Reconnect with a current credential.";
 
@@ -52,18 +55,30 @@ export function registerHttpMiddleware(
   app: Express,
   deps: HttpMiddlewareDeps
 ): void {
-  app.use(
-    express.json({
-      limit: "1mb",
-      verify(req, _res, buf) {
-        const request = req as AuthenticatedRequest & { originalUrl?: string };
-        // Signed webhooks (GitHub, ticket trackers) verify the exact bytes.
-        if (request.originalUrl?.startsWith("/webhooks/")) {
-          request.rawBody = Buffer.from(buf);
-        }
-      },
-    })
-  );
+  const json = express.json({
+    limit: DEFAULT_JSON_BODY_LIMIT_BYTES,
+    verify(req, _res, buf) {
+      const request = req as AuthenticatedRequest & { originalUrl?: string };
+      // Signed webhooks (GitHub, ticket trackers) verify the exact bytes.
+      if (request.originalUrl?.startsWith("/webhooks/")) {
+        request.rawBody = Buffer.from(buf);
+      }
+    },
+  });
+  // A page's HTML body may pass the 1 MB limit, so it is read only once the
+  // /api/v1 pipeline knows the caller: nobody makes the server buffer a
+  // large body without signing in.
+  app.use((req, res, next) => {
+    if (!isPageHtmlBodyRequest(req)) return json(req, res, next);
+    if (isOversizedAnonymousBody(req)) {
+      const refused = new ApiError("unauthenticated", "Sign in to LetAgents to use the API.");
+      res.setHeader("Connection", "close");
+      res.status(refused.status).json(refused.toBody());
+      return;
+    }
+    deferPageHtmlBody(req);
+    next();
+  });
 
   app.use(async (req: AuthenticatedRequest, _res, next) => {
     try {
@@ -80,9 +95,17 @@ export function registerHttpMiddleware(
       req.agentSession = auth.agentSession ?? null;
       req.supervisorGrant = auth.supervisorGrant ?? null;
       req.mcpOAuth = auth.mcpOAuth ?? null;
+      req.pageGrant = auth.pageGrant ?? null;
       // MCP OAuth tokens are bound to the /mcp resource (resolveRequestAuth
       // already refuses them elsewhere; this keeps that true for any resolver).
       if (req.authKind === "mcp_oauth" && !isRemoteMcpRequestPath(req.path)) {
+        replyInvalidBearer(req, _res);
+        return;
+      }
+      // Page grants likewise work only on /api/v1, where every route checks
+      // the grant's capabilities; older routes would give a page the
+      // person's full rights.
+      if (req.authKind === "page_grant" && !isApiV1RequestPath(requestPathname(req))) {
         replyInvalidBearer(req, _res);
         return;
       }
