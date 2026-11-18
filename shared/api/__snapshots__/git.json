@@ -1,1 +1,220 @@
-{}
+{
+  "git.pullRequests": {
+    "kind": "read",
+    "capability": "git.read",
+    "httpMethod": "GET",
+    "path": "/rooms/:room/git/pull-requests",
+    "rateClass": "read",
+    "errors": [],
+    "input": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pullRequests": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "number": {
+                "type": "integer",
+                "minimum": -9007199254740991,
+                "maximum": 9007199254740991
+              },
+              "title": {
+                "type": "string"
+              },
+              "url": {
+                "type": "string"
+              },
+              "author": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "draft": {
+                "type": "boolean"
+              },
+              "headRef": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "baseRef": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "updatedAt": {
+                "type": "string"
+              },
+              "checks": {
+                "type": "object",
+                "properties": {
+                  "total": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "success": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "failure": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "pending": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "total",
+                  "success",
+                  "failure",
+                  "pending"
+                ],
+                "additionalProperties": false
+              },
+              "checkRuns": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "name": {
+                      "type": "string"
+                    },
+                    "status": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "conclusion": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "url": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "status",
+                    "conclusion",
+                    "url"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "reviews": {
+                "type": "object",
+                "properties": {
+                  "total": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "approved": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "changesRequested": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "total",
+                  "approved",
+                  "changesRequested"
+                ],
+                "additionalProperties": false
+              },
+              "reviewers": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "login": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "login",
+                    "state"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "requestedReviewers": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "taskIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "number",
+              "title",
+              "url",
+              "author",
+              "draft",
+              "headRef",
+              "baseRef",
+              "updatedAt",
+              "checks",
+              "checkRuns",
+              "reviews",
+              "reviewers",
+              "requestedReviewers",
+              "taskIds"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "repo",
+        "pullRequests",
+        "truncated"
+      ],
+      "additionalProperties": false
+    }
+  }
+}
