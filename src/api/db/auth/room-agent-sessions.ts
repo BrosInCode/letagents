@@ -1502,15 +1502,51 @@ export async function endRoomAgentSession(input: {
 
 /**
  * Worker sessions that the sweep may end: open, not run by a supervisor
- * (the desktop retires its own agents), and holding no wake rule that waits
+ * that may still act for it (the desktop retires its own agents, and one
+ * that starts again continues their sessions), and holding no wake rule
+ * that waits
  * to wake the agent while it is away. A rule made under the session's own
  * credential names it; one made with an owner token, such as an MCP event
  * subscription, records the session that made it.
  */
+/**
+ * The session is run by a supervisor whose grant is current: the desktop can
+ * act for it now.
+ */
+export const supervisorCanActSql = sql`(${room_agent_sessions.supervisor_grant_id} IS NOT NULL AND EXISTS (
+  SELECT 1 FROM supervisor_host_grants AS grant_row
+   WHERE grant_row.grant_id = ${room_agent_sessions.supervisor_grant_id}
+     AND grant_row.revoked_at IS NULL
+     AND grant_row.expires_at > now()
+))`;
+
+/**
+ * How long after its grant expired an owner's desktop may still come back
+ * for its sessions. Starting again, the desktop provisions the same scope,
+ * which brings back the expired grant under the same id, and its agents
+ * continue in their open sessions with their queued receipts and leases.
+ */
+const OWNER_GRANT_RETURN_WINDOW = "30 days";
+
+/**
+ * The session's supervisor may still act for it, now or when its desktop
+ * starts again: its grant is current, or it is an owner's grant that expired
+ * within the return window. A revoked grant is final, and a guest's grant
+ * (a rental or an agent ask) cannot be renewed by the desktop once it
+ * expires.
+ */
+const supervisorMayActSql = sql`(${room_agent_sessions.supervisor_grant_id} IS NOT NULL AND EXISTS (
+  SELECT 1 FROM supervisor_host_grants AS grant_row
+   WHERE grant_row.grant_id = ${room_agent_sessions.supervisor_grant_id}
+     AND grant_row.revoked_at IS NULL
+     AND (grant_row.expires_at > now()
+       OR (grant_row.scope_key = 'owner' AND grant_row.expires_at > now() - ${OWNER_GRANT_RETURN_WINDOW}::interval))
+))`;
+
 const sweepableWorkerSession = sql`
   ${room_agent_sessions.ended_at} IS NULL
   AND ${room_agent_sessions.session_kind} = 'worker'
-  AND ${room_agent_sessions.supervisor_grant_id} IS NULL
+  AND NOT ${supervisorMayActSql}
   AND NOT EXISTS (
     SELECT 1 FROM agent_wake_rules AS wake_rule
      WHERE wake_rule.room_id = ${room_agent_sessions.room_id}

@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { db } from "./client.js";
 import { parseScopedId } from "./utils.js";
-import { endRoomAgentSession } from "./auth/room-agent-sessions.js";
+import { endRoomAgentSession, supervisorCanActSql } from "./auth/room-agent-sessions.js";
 import { getSessionConnections } from "./messages/session-connections.js";
 
 export async function isRoomDeleted(roomId: string): Promise<boolean> {
@@ -145,7 +145,7 @@ export async function getRoomDeletionPreview(roomId: string): Promise<{
 }
 
 type OpenWorkerSession = {
-  session_id: string; room_id: string; display_name: string; supervisor_grant_id: string | null; process_live: boolean;
+  session_id: string; room_id: string; display_name: string; supervised: boolean; process_live: boolean;
 };
 /** A running agent process refreshes its connection every 30 seconds. */
 const PROCESS_LIVE_SQL = sql`(process_seen_at >= now() - interval '90 seconds'
@@ -155,7 +155,10 @@ const PROCESS_LIVE_SQL = sql`(process_seen_at >= now() - interval '90 seconds'
  * The open worker sessions that keep a room from being deleted: agents that
  * are there. One that waits for messages now, or whose process holds its
  * connection, is there; one run by the desktop is there until the desktop
- * retires it, and the desktop lists it while it is offline. Any other agent
+ * retires it, and the desktop lists it while it is offline. Once the
+ * desktop's grant has expired or was revoked, the desktop has been away for
+ * an hour or more (a running desktop renews its grant an hour before it
+ * expires), and its agent is offline like any other. Any other agent
  * is offline, and the room no longer waits for it.
  */
 async function splitOpenWorkerSessions(executor: Transaction | typeof db, sessions: readonly OpenWorkerSession[]) {
@@ -166,7 +169,7 @@ async function splitOpenWorkerSessions(executor: Transaction | typeof db, sessio
   for (const [roomId, roomSessions] of byRoom) {
     const { reachable } = await getSessionConnections(executor, roomId, roomSessions.map(session => session.session_id));
     for (const session of roomSessions) {
-      (session.supervisor_grant_id || session.process_live || reachable.has(session.session_id) ? present : offline).push(session);
+      (session.supervised || session.process_live || reachable.has(session.session_id) ? present : offline).push(session);
     }
   }
   return { present, offline };
@@ -201,7 +204,7 @@ async function lockDeletableRoomTree(tx: Transaction, roomId: string) {
   }
   if (!rooms.length) throw new ContentDeletionError(404, "Room not found.");
   const ids = sql.join(rooms.map(room => sql`${room.id}`), sql`, `);
-  const active = await tx.execute<OpenWorkerSession>(sql`SELECT session_id,room_id,display_name,supervisor_grant_id,${PROCESS_LIVE_SQL} FROM room_agent_sessions
+  const active = await tx.execute<OpenWorkerSession>(sql`SELECT session_id,room_id,display_name,${supervisorCanActSql} AS supervised,${PROCESS_LIVE_SQL} FROM room_agent_sessions
     WHERE room_id IN (${ids}) AND ended_at IS NULL AND session_kind='worker' ORDER BY session_id FOR UPDATE`);
   const { present, offline } = await splitOpenWorkerSessions(tx, active.rows);
   if (present.length) throw new ContentDeletionError(409, presentAgentsMessage(present));
