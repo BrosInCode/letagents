@@ -182,13 +182,13 @@
           @open-agent-correction="(handoff, opened) => emit('open-agent-correction', handoff, opened)"
         />
 
-        <DesktopImageViewerModal
+        <ImageViewer
           v-if="activeImageId && roomImages.length"
           :images="roomImages"
           :active-image-id="activeImageId"
-          @close="activeImageId = null"
-          @next="shiftImage(1)"
-          @previous="shiftImage(-1)"
+          @close="closeImageViewer"
+          @next="showNextImage"
+          @previous="showPreviousImage"
         />
       </div>
 
@@ -234,7 +234,7 @@ import type {
   DesktopSupervisorManifestEntry,
   DesktopTaskSummary,
 } from "../../../../../electron/ipc-types";
-import DesktopImageViewerModal from "./DesktopImageViewerModal.vue";
+import ImageViewer from "../../../../../../../shared/ui/image-viewer/ImageViewer.vue";
 import {
   normalizeManagedAgentRoomIdentifier,
   type ManagedAgentWorkIndicator,
@@ -490,7 +490,9 @@ const {
   activeImageId,
   roomImages,
   openImageViewer,
-  shiftImage,
+  closeImageViewer,
+  showNextImage,
+  showPreviousImage,
 } = useRoomImages(threadImageMessages);
 
 const {

@@ -224,7 +224,7 @@
 
     <AskAgentDialog v-if="askAgentOpen && auth.isSignedIn.value && room" :room-identifier="room.identifier" :room-label="roomTitle" @close="askAgentOpen = false" />
 
-    <ImageViewerModal
+    <ImageViewer
       v-if="activeImageId && roomImages.length"
       :images="roomImages"
       :activeImageId="activeImageId"
@@ -271,7 +271,7 @@ import { joinRequestAlerts } from '@/composables/roomJoinRequestAlerts'
 import RoomSidebar from '@/components/room/RoomSidebar.vue'
 import RoomDrawer from '@/components/room/RoomDrawer.vue'
 import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
-import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
+import ImageViewer from '../../../../shared/ui/image-viewer/ImageViewer.vue'
 import { messageThreadParentId } from '@/components/room/messageThreading'
 import RoomAccessRequest from './room/RoomAccessRequest.vue'
 import RoomConnectionError from './room/RoomConnectionError.vue'
