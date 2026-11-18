@@ -67,6 +67,15 @@ export function formatMessageTime(timestamp: string, now = new Date()): string {
  * Room message Markdown, rendered by the renderer the desktop app uses too,
  * then known task ids become Board links.
  */
+/**
+ * A task description: full file paths and link labels stay, and @names are
+ * plain text, as on the desktop Board. `editing` skips the render cache for a
+ * preview that changes on every keystroke.
+ */
+export function renderTaskMarkdown(text: string, editing = false): string {
+  return renderMarkdown(text, { block: true, mentions: false, preservePaths: true, noCache: editing })
+}
+
 export function renderMessageContent(text: string, taskReferenceIds?: ReadonlySet<string>, onLink?: (url: string) => void): string {
   return linkTaskReferences(renderMarkdown(text, { block: true, onLink }), taskReferenceIds)
 }

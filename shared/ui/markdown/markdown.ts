@@ -312,8 +312,13 @@ function markdownToken(tokens: string[], html: string): string {
   return `\u0000MD${index}\u0000`;
 }
 
+// A token can hold earlier tokens (inline code inside a link label), so restore
+// them too. A token only ever holds tokens made before it, so this ends.
 function restoreMarkdownTokens(value: string, tokens: string[], onToken: (index: number) => void): string {
-  return value.replace(/\u0000MD(\d+)\u0000/g, (_match, index: string) => { onToken(Number(index)); return tokens[Number(index)] || ""; });
+  return value.replace(/\u0000MD(\d+)\u0000/g, (_match, index: string) => {
+    onToken(Number(index));
+    return restoreMarkdownTokens(tokens[Number(index)] || "", tokens, onToken);
+  });
 }
 
 function escapeHtml(value: string): string {

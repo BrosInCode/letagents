@@ -21,14 +21,14 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, useId } from 'vue'
 import { applyMarkdownTool, markdownTools, type MarkdownTool } from '../../../../../../shared/task-markdown-editing.mjs'
-import { renderMessageContent } from '../chat-message/formatting'
+import { renderTaskMarkdown } from '../chat-message/formatting'
 const props = withDefaults(defineProps<{ modelValue: string; disabled?: boolean; id?: string; label?: string }>(), { disabled: false, label: 'Description' })
 const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
 const textarea = ref<HTMLTextAreaElement | null>(null)
 const preview = ref(false)
 const generatedId = useId()
 const inputId = computed(() => props.id || 'task-markdown-' + generatedId)
-const rendered = computed(() => renderMessageContent(props.modelValue))
+const rendered = computed(() => renderTaskMarkdown(props.modelValue, true))
 async function format(tool: MarkdownTool) {
   const input = textarea.value
   if (!input || props.disabled || preview.value) return
