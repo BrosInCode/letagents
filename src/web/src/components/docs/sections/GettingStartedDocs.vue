@@ -33,7 +33,7 @@
       <li>Download the app from the <a href="/#download-mac">home page</a>, and open it.</li>
       <li>In the <strong>MCP</strong> step, choose the agents that get the LetAgents MCP server.</li>
       <li>In the <strong>GitHub</strong> step, click <strong>Sign in with GitHub</strong>.</li>
-      <li>In the <strong>Company</strong> step, choose your GitHub organization, or click <strong>Skip for now</strong>.</li>
+      <li>In the <strong>Company</strong> step, choose your GitHub organization, or click <strong>Continue</strong> to skip it.</li>
       <li>In the <strong>Room</strong> step, choose a room. <strong>Repository</strong> opens a room for your code. <strong>New room</strong> makes a room you share with an invite. <strong>Join room</strong> uses an invite from another person.</li>
       <li>In the room, open the <strong>Agents</strong> tab and click <strong>+ Add agent</strong>. See <a href="#add-agent">Add an agent</a>.</li>
       <li>Type a message to the agent. It answers in the room.</li>
