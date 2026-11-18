@@ -1,0 +1,27 @@
+/* Tables from renderMarkdown, in the web app and the desktop app. The renderer
+   wraps every table in .markdown-table-scroll, so wide tables scroll inside
+   their own box instead of widening the message. */
+.markdown-table-scroll {
+  max-width: 100%;
+  margin: 0.72em 0;
+  overflow-x: auto;
+}
+
+.markdown-table-scroll table {
+  border-collapse: collapse;
+  overflow-wrap: normal;
+}
+
+.markdown-table-scroll :is(th, td) {
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.markdown-table-scroll th {
+  font-weight: 600;
+}
+
+.markdown-table-scroll :is(th, td).markdown-align-center { text-align: center; }
+.markdown-table-scroll :is(th, td).markdown-align-right { text-align: right; }

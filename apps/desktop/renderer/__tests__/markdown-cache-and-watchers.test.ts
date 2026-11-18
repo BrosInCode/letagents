@@ -8,8 +8,8 @@ import { createServer } from "vite";
 import {
   MarkdownRenderCache,
   markdownCache,
-  renderDesktopMarkdown,
-} from "../src/components/desktop/content/formatting/markdown";
+  renderMarkdown,
+} from "../../../../shared/ui/markdown/markdown";
 import { useRoomResponseParticipants } from "../src/composables/useRoomResponseParticipants";
 import { RoomResponseParticipants, roomResponseParticipantsKey } from "../src/domain/room-response-participants";
 import { appSource } from "./app-source";
@@ -20,9 +20,9 @@ function source(relative: string): string {
 
 test("markdown cache: a repeated render is a hit and returns the same HTML", () => {
   markdownCache.clear();
-  const first = renderDesktopMarkdown("**bold** note", { block: true, mentions: false });
+  const first = renderMarkdown("**bold** note", { block: true, mentions: false });
   assert.equal(markdownCache.misses, 1);
-  const second = renderDesktopMarkdown("**bold** note", { block: true, mentions: false });
+  const second = renderMarkdown("**bold** note", { block: true, mentions: false });
   assert.equal(markdownCache.hits, 1);
   assert.equal(second, first);
   assert.match(first, /<strong>bold<\/strong>/);
@@ -30,14 +30,14 @@ test("markdown cache: a repeated render is a hit and returns the same HTML", () 
 
 test("markdown cache: text and every option are part of the key", () => {
   markdownCache.clear();
-  const base = renderDesktopMarkdown("hello @agent", { block: true });
+  const base = renderMarkdown("hello @agent", { block: true });
   assert.match(base, /mention-token/);
-  assert.doesNotMatch(renderDesktopMarkdown("hello @agent", { block: true, mentions: false }), /mention-token/);
+  assert.doesNotMatch(renderMarkdown("hello @agent", { block: true, mentions: false }), /mention-token/);
   // Different block mode, different text and different preservePaths must not share a slot.
-  assert.notEqual(renderDesktopMarkdown("hello @agent", { mentions: true }), base);
-  assert.match(renderDesktopMarkdown("see `/a/b/file.ts`", { block: true }), /<code>file\.ts<\/code>/);
-  assert.match(renderDesktopMarkdown("see `/a/b/file.ts`", { block: true, preservePaths: true }), /<code>\/a\/b\/file\.ts<\/code>/);
-  assert.notEqual(renderDesktopMarkdown("changed text", { block: true }), base);
+  assert.notEqual(renderMarkdown("hello @agent", { mentions: true }), base);
+  assert.match(renderMarkdown("see `/a/b/file.ts`", { block: true }), /<code>file\.ts<\/code>/);
+  assert.match(renderMarkdown("see `/a/b/file.ts`", { block: true, preservePaths: true }), /<code>\/a\/b\/file\.ts<\/code>/);
+  assert.notEqual(renderMarkdown("changed text", { block: true }), base);
   assert.equal(markdownCache.hits, 0);
 });
 
@@ -45,11 +45,11 @@ test("markdown cache: onLink and highlightQuery calls are never cached", () => {
   markdownCache.clear();
   const seen: string[] = [];
   for (let run = 0; run < 3; run += 1) {
-    renderDesktopMarkdown("see https://example.com/a", { block: true, onLink: url => seen.push(url) });
+    renderMarkdown("see https://example.com/a", { block: true, onLink: url => seen.push(url) });
   }
   assert.deepEqual(seen, Array(3).fill("https://example.com/a"), "onLink is a side effect on every call");
-  const one = renderDesktopMarkdown("find needle here", { block: true, highlightQuery: "needle" });
-  const two = renderDesktopMarkdown("find needle here", { block: true, highlightQuery: "here" });
+  const one = renderMarkdown("find needle here", { block: true, highlightQuery: "needle" });
+  const two = renderMarkdown("find needle here", { block: true, highlightQuery: "here" });
   assert.match(one, /<mark class="message-search-hit">needle<\/mark>/);
   assert.match(two, /<mark class="message-search-hit">here<\/mark>/);
   assert.equal(markdownCache.size, 0);
@@ -86,7 +86,7 @@ test("markdown cache: bounded by size, and one oversized entry is not stored", (
 
 test("markdown cache: the global cache stays inside its bounds under a long stream of notes", () => {
   markdownCache.clear();
-  for (let n = 0; n < 2000; n += 1) renderDesktopMarkdown(`note ${n} ${"word ".repeat(40)}`, { block: true });
+  for (let n = 0; n < 2000; n += 1) renderMarkdown(`note ${n} ${"word ".repeat(40)}`, { block: true });
   assert.ok(markdownCache.size <= 500, `size ${markdownCache.size}`);
 });
 
@@ -112,7 +112,7 @@ test("the four inline v-html markdown renders now go through MarkdownBlock", () 
   ]) {
     const text = source(file);
     assert.match(text, /<MarkdownBlock\b/, file);
-    assert.doesNotMatch(text, /v-html="renderDesktopMarkdown/, file);
+    assert.doesNotMatch(text, /v-html="renderMarkdown/, file);
   }
 });
 
@@ -216,15 +216,15 @@ test("markdown cache: a note whose code fell back to plain text is not cached, s
   const highlighted = (html: string) => /hljs-/.test(html);
   try {
     clock(300); // one highlight reads as 300 ms, which spends the 250 ms budget
-    renderDesktopMarkdown(fence(100), { block: true });
+    renderMarkdown(fence(100), { block: true });
     markdownCache.clear();
     const note = `note\n\n${fence(1)}`;
-    const first = renderDesktopMarkdown(note, { block: true });
+    const first = renderMarkdown(note, { block: true });
     assert.equal(highlighted(first), false, "budget spent: plain fallback");
     assert.equal(markdownCache.size, 0, "a result with a fallback block is not cached");
     fake += 1500; // wait out the 1 s window
     clock(0);
-    const later = renderDesktopMarkdown(note, { block: true });
+    const later = renderMarkdown(note, { block: true });
     assert.equal(highlighted(later), true, "a later render colours it");
     assert.equal(markdownCache.size, 1, "a fully highlighted result is cached");
     assert.equal(markdownCache.hits, 0);
@@ -235,7 +235,7 @@ test("markdown cache: a note whose code fell back to plain text is not cached, s
 
 test("markdown cache: noCache skips the cache (editor preview)", () => {
   markdownCache.clear();
-  renderDesktopMarkdown("draft text", { block: true, noCache: true });
+  renderMarkdown("draft text", { block: true, noCache: true });
   assert.equal(markdownCache.size, 0);
   assert.match(source("../src/components/desktop/content/room-board/TaskMarkdownEditor.vue"), /noCache: true/);
 });

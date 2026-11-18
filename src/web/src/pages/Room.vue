@@ -83,7 +83,7 @@
       <ReleaseQueueWidget :key="room?.identifier" :room-id="room?.identifier || ''" :load="loadReleasePlanning" :open-external="openReleaseLink" @select="openBoardTask" />
     </div>
     <TaskLinkPreview v-if="isConnected" :room-id="room?.identifier || ''" :tasks="previewTasks" :active="activeTab === 'chat'" :accept="acceptPreviewTask" :open-external="openReleaseLink" @open-board="openBoardTask">
-    <template #description="{ text }"><div v-html="renderMessageContent(text)" /></template>
+    <template #description="{ text }"><div v-html="renderTaskMarkdown(text)" /></template>
     <RoomTabPanels
       ref="roomTabPanelsRef"
       :activeTab="activeTab"
@@ -250,7 +250,7 @@
 import TaskLinkPreview from '../../../../shared/ui/board/TaskLinkPreview.vue'
 import { webBoardTask } from '../components/room/task-board/workspace-tasks'
 import { getTaskActions } from '../components/room/task-board/model'
-import { renderMessageContent } from '../components/room/chat-message/formatting'
+import { renderTaskMarkdown } from '../components/room/chat-message/formatting'
 import ReleaseQueueWidget from '../../../../shared/ui/board/ReleaseQueueWidget.vue'
 import { fetchBoardPlanning } from '../composables/room/boardPlanning'
 import { activityUnread } from '../../../../shared/ui/activity/unread'

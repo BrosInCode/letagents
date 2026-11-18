@@ -14,7 +14,11 @@
     "skipLibCheck": true,
     "paths": {
       "@/*": ["./src/*"],
-      "vue": ["./node_modules/vue"]
+      "vue": ["./node_modules/vue"],
+      "dompurify": ["./node_modules/dompurify"],
+      "marked": ["./node_modules/marked"],
+      "highlight.js": ["./node_modules/highlight.js"],
+      "highlight.js/*": ["./node_modules/highlight.js/*"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.vue", "demos/board/**/*.ts", "demos/board/**/*.vue", "env.d.ts"],

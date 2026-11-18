@@ -4,7 +4,7 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import { renderDesktopMarkdown } from "./markdown";
+import { renderMarkdown } from "../../../../../../../../shared/ui/markdown/markdown";
 
 // Renders one markdown text. The computed only runs again when `text` or an option
 // changes, so a parent that re-renders on a stream batch or a clock tick does not
@@ -16,7 +16,7 @@ const props = withDefaults(defineProps<{
   preservePaths?: boolean;
 }>(), { block: true, mentions: true, preservePaths: false });
 
-const html = computed(() => renderDesktopMarkdown(props.text, {
+const html = computed(() => renderMarkdown(props.text, {
   block: props.block,
   mentions: props.mentions,
   preservePaths: props.preservePaths,
