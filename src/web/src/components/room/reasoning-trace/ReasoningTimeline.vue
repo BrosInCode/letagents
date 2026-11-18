@@ -22,7 +22,7 @@
         :data-updating="entry.current && recentlyUpdated"
       >
         <div class="reasoning-entry-meta">
-          <span>{{ entryLabel(entry) }}</span>
+          <span>{{ entry.label }}</span>
           <time>{{ formatTimestamp(entry.timestamp) }}</time>
         </div>
         <p>{{ entry.text }}</p>
@@ -33,7 +33,6 @@
 
 <script setup lang="ts">
 import {
-  entryLabel,
   formatTimestamp,
   type ReasoningTimelineEntry,
 } from './reasoningTrace'
