@@ -15,8 +15,8 @@ export const Task: z.ZodObject<{
         blocked: "blocked";
         done: "done";
         cancelled: "cancelled";
-        proposed: "proposed";
         accepted: "accepted";
+        proposed: "proposed";
         assigned: "assigned";
         in_progress: "in_progress";
         in_review: "in_review";
@@ -65,8 +65,8 @@ export const TaskPage: z.ZodObject<{
             blocked: "blocked";
             done: "done";
             cancelled: "cancelled";
-            proposed: "proposed";
             accepted: "accepted";
+            proposed: "proposed";
             assigned: "assigned";
             in_progress: "in_progress";
             in_review: "in_review";
@@ -115,8 +115,8 @@ export const listTasks: import("./core.mjs").ApiMethod<"tasks.list", z.ZodObject
         blocked: "blocked";
         done: "done";
         cancelled: "cancelled";
-        proposed: "proposed";
         accepted: "accepted";
+        proposed: "proposed";
         assigned: "assigned";
         in_progress: "in_progress";
         in_review: "in_review";
@@ -133,8 +133,8 @@ export const listTasks: import("./core.mjs").ApiMethod<"tasks.list", z.ZodObject
             blocked: "blocked";
             done: "done";
             cancelled: "cancelled";
-            proposed: "proposed";
             accepted: "accepted";
+            proposed: "proposed";
             assigned: "assigned";
             in_progress: "in_progress";
             in_review: "in_review";
@@ -185,8 +185,8 @@ export const getTask: import("./core.mjs").ApiMethod<"tasks.get", z.ZodObject<{
         blocked: "blocked";
         done: "done";
         cancelled: "cancelled";
-        proposed: "proposed";
         accepted: "accepted";
+        proposed: "proposed";
         assigned: "assigned";
         in_progress: "in_progress";
         in_review: "in_review";
@@ -230,8 +230,8 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"tasks.list", z.Z
         blocked: "blocked";
         done: "done";
         cancelled: "cancelled";
-        proposed: "proposed";
         accepted: "accepted";
+        proposed: "proposed";
         assigned: "assigned";
         in_progress: "in_progress";
         in_review: "in_review";
@@ -248,8 +248,8 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"tasks.list", z.Z
             blocked: "blocked";
             done: "done";
             cancelled: "cancelled";
-            proposed: "proposed";
             accepted: "accepted";
+            proposed: "proposed";
             assigned: "assigned";
             in_progress: "in_progress";
             in_review: "in_review";
@@ -299,8 +299,8 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"tasks.list", z.Z
         blocked: "blocked";
         done: "done";
         cancelled: "cancelled";
-        proposed: "proposed";
         accepted: "accepted";
+        proposed: "proposed";
         assigned: "assigned";
         in_progress: "in_progress";
         in_review: "in_review";

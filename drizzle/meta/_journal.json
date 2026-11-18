@@ -1079,6 +1079,13 @@
       "when": 1795015300000,
       "tag": "0153_api_jobs",
       "breakpoints": true
+    },
+    {
+      "idx": 154,
+      "version": "7",
+      "when": 1795015400000,
+      "tag": "0154_pages_registry",
+      "breakpoints": true
     }
   ]
 }
