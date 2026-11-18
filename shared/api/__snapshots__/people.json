@@ -4,6 +4,7 @@
     "capability": "people.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/people",
+    "response": "json",
     "rateClass": "read",
     "errors": [],
     "input": {
@@ -71,6 +72,7 @@
     "capability": "people.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/people/me",
+    "response": "json",
     "rateClass": "read",
     "errors": [],
     "input": {

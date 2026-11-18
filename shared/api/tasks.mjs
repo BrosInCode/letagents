@@ -1,7 +1,7 @@
 // Tasks: board tasks with status, assignees, external refs and PR links.
 import { z } from "zod";
 
-import { defineMethod } from "./core.mjs";
+import { defineMethod, queryInt } from "./core.mjs";
 import { PullRequestLink } from "./git.mjs";
 
 const TaskId = z.string().regex(/^task_[1-9]\d*$/, "Expected a task id such as task_42.");
@@ -67,7 +67,7 @@ export const listTasks = defineMethod({
   input: z.strictObject({
     status: z.enum(TASK_STATUSES).optional(),
     after: TaskId.optional(),
-    limit: z.coerce.number().int().min(1).max(100).default(50),
+    limit: queryInt({ min: 1, max: 100, default: 50 }),
   }),
   output: TaskPage,
   rateClass: "read",

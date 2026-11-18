@@ -1,10 +1,10 @@
 // Messages: threads, recent messages and job threads.
 import { z } from "zod";
 
-import { defineMethod } from "./core.mjs";
+import { defineMethod, queryInt } from "./core.mjs";
 
 const MessageId = z.string().regex(/^msg_[1-9]\d*$/, "Expected a message id such as msg_42.");
-const PageLimit = z.coerce.number().int().min(1).max(100).default(50);
+const PageLimit = queryInt({ min: 1, max: 100, default: 50 });
 
 /** `system`: LetAgents itself, GitHub and other integrations. */
 export const SENDER_KINDS = /** @type {const} */ (["person", "agent", "system"]);

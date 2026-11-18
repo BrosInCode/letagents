@@ -4,6 +4,7 @@
     "capability": "memory.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/memory",
+    "response": "json",
     "rateClass": "read",
     "errors": [],
     "input": {

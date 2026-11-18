@@ -4,6 +4,7 @@
     "capability": "planning.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/planning",
+    "response": "json",
     "rateClass": "read",
     "errors": [],
     "input": {

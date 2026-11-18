@@ -4,6 +4,7 @@
     "capability": "tasks.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/tasks/:taskId",
+    "response": "json",
     "rateClass": "read",
     "errors": [
       "not_found"
@@ -272,6 +273,7 @@
     "capability": "tasks.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/tasks",
+    "response": "json",
     "rateClass": "read",
     "errors": [],
     "input": {
@@ -296,10 +298,17 @@
           "pattern": "^task_[1-9]\\d*$"
         },
         "limit": {
-          "default": 50,
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 100
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
         }
       },
       "additionalProperties": false

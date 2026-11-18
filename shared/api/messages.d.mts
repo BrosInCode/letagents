@@ -136,7 +136,7 @@ export const MessageThread: z.ZodObject<{
 /** @typedef {z.infer<typeof MessageThread>} MessageThread */
 export const listRecentMessages: import("./core.mjs").ApiMethod<"messages.recent", z.ZodObject<{
     before: z.ZodOptional<z.ZodString>;
-    limit: z.ZodDefault<z.ZodCoercedNumber<unknown>>;
+    limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
 }, z.core.$strict>, z.ZodObject<{
     messages: z.ZodArray<z.ZodObject<{
         id: z.ZodString;
@@ -168,7 +168,7 @@ export const listRecentMessages: import("./core.mjs").ApiMethod<"messages.recent
 export const getMessageThread: import("./core.mjs").ApiMethod<"messages.thread", z.ZodObject<{
     messageId: z.ZodString;
     before: z.ZodOptional<z.ZodString>;
-    limit: z.ZodDefault<z.ZodCoercedNumber<unknown>>;
+    limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
 }, z.core.$strict>, z.ZodObject<{
     root: z.ZodObject<{
         id: z.ZodString;
@@ -224,7 +224,7 @@ export const getMessageThread: import("./core.mjs").ApiMethod<"messages.thread",
 }, z.core.$strip>>;
 export const methods: readonly [import("./core.mjs").ApiMethod<"messages.recent", z.ZodObject<{
     before: z.ZodOptional<z.ZodString>;
-    limit: z.ZodDefault<z.ZodCoercedNumber<unknown>>;
+    limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
 }, z.core.$strict>, z.ZodObject<{
     messages: z.ZodArray<z.ZodObject<{
         id: z.ZodString;
@@ -255,7 +255,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"messages.recent"
 }, z.core.$strip>>, import("./core.mjs").ApiMethod<"messages.thread", z.ZodObject<{
     messageId: z.ZodString;
     before: z.ZodOptional<z.ZodString>;
-    limit: z.ZodDefault<z.ZodCoercedNumber<unknown>>;
+    limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
 }, z.core.$strict>, z.ZodObject<{
     root: z.ZodObject<{
         id: z.ZodString;

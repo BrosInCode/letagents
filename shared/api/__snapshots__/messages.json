@@ -4,6 +4,7 @@
     "capability": "messages.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/messages",
+    "response": "json",
     "rateClass": "read",
     "errors": [],
     "input": {
@@ -14,10 +15,17 @@
           "pattern": "^msg_[1-9]\\d*$"
         },
         "limit": {
-          "default": 50,
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 100
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -160,6 +168,7 @@
     "capability": "messages.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/messages/:messageId/thread",
+    "response": "json",
     "rateClass": "read",
     "errors": [
       "not_found"
@@ -176,10 +185,17 @@
           "pattern": "^msg_[1-9]\\d*$"
         },
         "limit": {
-          "default": 50,
-          "type": "integer",
-          "minimum": 1,
-          "maximum": 100
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            {
+              "type": "string",
+              "pattern": "^-?\\d{1,15}$"
+            }
+          ]
         }
       },
       "required": [

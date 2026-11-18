@@ -4,6 +4,7 @@
     "capability": "git.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/git/pull-requests",
+    "response": "json",
     "rateClass": "read",
     "errors": [],
     "input": {

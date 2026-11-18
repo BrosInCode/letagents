@@ -123,7 +123,7 @@ export const listTasks: import("./core.mjs").ApiMethod<"tasks.list", z.ZodObject
         cancelled: "cancelled";
     }>>;
     after: z.ZodOptional<z.ZodString>;
-    limit: z.ZodDefault<z.ZodCoercedNumber<unknown>>;
+    limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
 }, z.core.$strict>, z.ZodObject<{
     tasks: z.ZodArray<z.ZodObject<{
         id: z.ZodString;
@@ -238,7 +238,7 @@ export const methods: readonly [import("./core.mjs").ApiMethod<"tasks.list", z.Z
         cancelled: "cancelled";
     }>>;
     after: z.ZodOptional<z.ZodString>;
-    limit: z.ZodDefault<z.ZodCoercedNumber<unknown>>;
+    limit: z.ZodDefault<z.ZodUnion<readonly [z.ZodNumber, z.ZodPipe<z.ZodPipe<z.ZodString, z.ZodTransform<number, string>>, z.ZodNumber>]>>;
 }, z.core.$strict>, z.ZodObject<{
     tasks: z.ZodArray<z.ZodObject<{
         id: z.ZodString;

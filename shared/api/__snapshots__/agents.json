@@ -4,6 +4,7 @@
     "capability": "agents.read",
     "httpMethod": "GET",
     "path": "/rooms/:room/agents",
+    "response": "json",
     "rateClass": "read",
     "errors": [],
     "input": {
