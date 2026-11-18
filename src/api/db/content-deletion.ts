@@ -157,7 +157,8 @@ const PROCESS_LIVE_SQL = sql`(process_seen_at >= now() - interval '90 seconds'
  * connection, is there; one run by the desktop is there until the desktop
  * retires it, and the desktop lists it while it is offline. Once the
  * desktop's grant has expired or was revoked, the desktop has been away for
- * a day or more, and its agent is offline like any other. Any other agent
+ * an hour or more (a running desktop renews its grant an hour before it
+ * expires), and its agent is offline like any other. Any other agent
  * is offline, and the room no longer waits for it.
  */
 async function splitOpenWorkerSessions(executor: Transaction | typeof db, sessions: readonly OpenWorkerSession[]) {
